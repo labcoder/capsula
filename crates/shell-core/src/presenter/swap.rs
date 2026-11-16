@@ -174,6 +174,10 @@ impl Presenter {
             epoch: None,
             pictures: std::array::from_fn(|_| None),
         };
+        // The shown screen scene's run keeps its watch for a successor that is its screen scene.
+        if self.watch.replaced(scenes, successor) {
+            super::screen::left();
+        }
         for (place, id) in retirement.pictures.iter_mut().zip(scenes) {
             self.remember(*id);
             let Some(mut scene) = self.scenes.remove(id) else {
@@ -184,6 +188,7 @@ impl Presenter {
             let mut usage = scene.state.view().usage();
             usage.scenes = 0;
             let work = scene.paint;
+            let screen = scene.screen;
             let Scene {
                 state, rest, view, ..
             } = scene;
@@ -192,7 +197,8 @@ impl Presenter {
             let sampled = slot.as_ref().is_some_and(|slot| {
                 slot.sampled.is_some() && !slot.failed.get() && !slot.frame.items().is_empty()
             });
-            if sampled {
+            // A screen scene's marks go with it: no picture of them outlives the scene.
+            if sampled && !screen {
                 *place = Some(FrozenPicture {
                     id: *id,
                     slot: slot.expect("the sampled slot was just read"),

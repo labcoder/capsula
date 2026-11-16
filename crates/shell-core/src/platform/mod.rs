@@ -5,6 +5,7 @@ pub mod credential;
 pub mod host;
 pub mod input;
 pub mod microphone;
+pub mod screen_watch;
 
 #[cfg(windows)]
 #[expect(
