@@ -603,14 +603,23 @@ that is under 100% or not a number counts as 100%.
   pointer was at recognition, so a resting hand draws nothing. The first sample that far starts
   the path with two points: where the pointer was at recognition, if that place is on the
   display, and then the sample. The line starts where the hand did.
-- After that a sample is kept when it is at least 2 logical pixels from the last kept point.
-- A path holds at most `MAX_PATH_POINTS` (2,048). The sample that would be the 2,049th is added
-  and then every second point is dropped, which keeps the first and the newest, and the spacing
-  doubles. So a hold of any length fits.
+- After that the kept points are an eased copy of the pointer: a first-order lag with a 12 ms
+  time constant (`EASE`), applied by the clock and not per sample, so every frame rate records
+  the same line. It is short because the line is evidence of where the user pointed: a circle
+  of 40 pixels drawn at three turns a second is recorded one pixel smaller.
+- An eased point is kept when it is at least 2 logical pixels from the last kept point.
+- `end` is the pointer's own last place on the display, which the shell draws the line on to.
+  `finish` ends the path at the pointer read with the release, never at an eased point.
+- A path holds at most `MAX_PATH_POINTS` (2,048), and sampling leaves room for the release's
+  point. A full path is thinned to three quarters, not stopped: each pass drops the points
+  within a tolerance (1 logical pixel) of the straight stretch between their neighbours, at
+  most every second one, and keeps the first and the newest. So straight runs lose points and
+  corners keep theirs. A path with too few such points, one that is nothing but turns, gets
+  twice the tolerance. So a hold of any length fits, and the line never stops.
 - Only samples inside the display given to `new` are kept. That is the display the line will be
   drawn on, so nothing reaches the picture that wasn't shown. A sample anywhere else changes
   nothing, and the path joins up in a straight line when the pointer comes back.
 
 `sample` returns true when the path changed. A pointer that never leaves the first 24 pixels
-finishes as an empty path. The shell's sampler feeds it every 16 ms while a screen hold's keys
+finishes as an empty path. The shell's sampler feeds it once a frame while a screen hold's keys
 are down ([presence](presence.md#a-screen-holds-pointer-line)).

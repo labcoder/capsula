@@ -80,6 +80,11 @@ shades nothing while the peek is hidden, so its frames can wait there. If the do
 fails closed and hides it (presence.md, "The line and hit testing"), drawing frames wait too
 until a position choice shows it again; nothing moves them to another window.
 
+A screen hold's line is the one thing here that isn't paced by the cap. While the keys are down
+the pointer is read on every refresh, from the dock's frames until the overlay shows and from
+the overlay's own after that (presence.md, "A screen hold's pointer line"). A frame that finds
+the pointer where it was changes nothing, so it invalidates nothing and GPUI doesn't draw.
+
 Each accepted drawing frame samples scene views at their own absolute clocks; the pacer's
 capped delta never becomes a drawing's lifetime clock. Only changed samples invalidate the
 overlay. Each loop idles when its client wants no motion. Unchanged frames do not refresh the
