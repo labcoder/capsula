@@ -370,7 +370,8 @@ reviewed head.
 
 - xtask copies only `kumochid.exe` into `target\live\<time>\bin` and runs
   `kumochid.exe --image-check` (`--image-diagnostic` for the diagnostic) itself, in its kill-on-close job, with stdin and stderr null and
-  stdout piped, for at most 6 minutes. No log, store, pipe, tap or scene thread starts.
+  stdout piped, for at most 6 minutes. A thread reads stdout while it waits, so the brain never
+  blocks on a full pipe. No log, store, pipe, tap or scene thread starts.
 - The mode is built into debug brains only. A brain without it still recognizes the flag and exits
   10 before logging. Its preflight is the catalog capture's: the dev names, the
   `...\live\<digits>\bin` folder, one vault open, and a settled session that outlives the request.

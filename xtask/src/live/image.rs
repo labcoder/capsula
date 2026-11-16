@@ -1,7 +1,6 @@
 //! `cargo xtask live image`: runs the copied dev brain once in its image check mode, bounded and
 //! in a kill-on-close job, and prints the brain's request lines and one line from its exit code.
 
-use std::io::Read as _;
 use std::path::Path;
 use std::process::{Command, ExitStatus, Stdio};
 use std::time::Duration;
@@ -9,7 +8,7 @@ use std::time::Duration;
 use anyhow::{Context as _, Result, ensure};
 use kumochi_protocol::constants::BRAIN_EXE;
 
-use super::{bounded, refuse_running};
+use super::{drained, refuse_running};
 use crate::platform;
 
 /// How long the check may run [guess: three requests, each under the stream's 10 s send and
@@ -23,18 +22,16 @@ pub(super) fn run(folder: &Path, flag: &str) -> Result<()> {
         .and_then(platform::Job::hold_self)
         .context("putting the run in a job")?;
     refuse_running(&platform::processes()?, std::process::id())?;
-    let mut child = Command::new(folder.join("bin").join(BRAIN_EXE))
+    let child = Command::new(folder.join("bin").join(BRAIN_EXE))
         .arg(flag)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()
         .context("starting the image check (requests: 0)")?;
-    let mut output = child.stdout.take().context("the check's output")?;
-    let status = bounded(child, LIMIT, "the image check");
-    let mut text = String::new();
-    let read = output.read_to_string(&mut text);
-    let lines = request_lines(&text);
+    let (status, text) = drained(child, LIMIT, "the image check")?;
+    let text = text.context("reading the check's lines");
+    let lines = text.as_deref().map(request_lines).unwrap_or_default();
     for line in &lines {
         println!("{line}");
     }
@@ -42,7 +39,7 @@ pub(super) fn run(folder: &Path, flag: &str) -> Result<()> {
         "{}",
         summary(status.as_ref().ok().and_then(ExitStatus::code), lines.len())
     );
-    read.context("reading the check's lines")?;
+    text?;
     ensure!(status?.success(), "the image check stopped");
     Ok(())
 }

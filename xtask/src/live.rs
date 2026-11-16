@@ -20,7 +20,7 @@ mod marks;
 mod signin;
 
 use std::fs;
-use std::io::{self, Write};
+use std::io::{self, Read as _, Write};
 
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::thread;
@@ -237,6 +237,25 @@ fn bounded(mut child: Child, limit: Duration, what: &str) -> Result<ExitStatus> 
     Err(joined(failure, end(&mut child)))
 }
 
+/// Waits for `child` as [`bounded`] does while a thread reads its stdout, so a full pipe never
+/// blocks it, and returns its status and everything it printed.
+fn drained(
+    mut child: Child,
+    limit: Duration,
+    what: &str,
+) -> Result<(Result<ExitStatus>, io::Result<String>)> {
+    let mut output = child.stdout.take().context("the check's output")?;
+    let reader = thread::spawn(move || {
+        let mut text = String::new();
+        output.read_to_string(&mut text).map(|_| text)
+    });
+    let status = bounded(child, limit, what);
+    let text = reader
+        .join()
+        .unwrap_or_else(|_| Err(io::Error::other("the reader panicked")));
+    Ok((status, text))
+}
+
 /// Waits for `child` at most `limit`; `None` while it still runs.
 fn wait_bounded(child: &mut Child, limit: Duration) -> io::Result<Option<ExitStatus>> {
     let end = Instant::now() + limit;
@@ -385,12 +404,37 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::{
-        Ask, Check, Entry, ProductIdentity, build, end, end_with, entry, refuse_running,
+        Ask, Check, Entry, ProductIdentity, build, drained, end, end_with, entry, refuse_running,
         run_bounded, wait_bounded, warn_cleanup, with_cleanup,
     };
     use crate::platform;
 
     const SHORT: Duration = Duration::from_millis(200);
+
+    #[test]
+    fn a_child_printing_far_more_than_a_pipe_holds_still_finishes() {
+        let child = Command::new("cmd")
+            .args([
+                "/C",
+                "for /L %i in (1,1,3000) do @echo request=%i status=2xx padding-padding-padding",
+            ])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("cmd starts");
+        let (status, text) =
+            drained(child, Duration::from_secs(30), "the test child").expect("drained");
+        assert!(status.expect("it exits within the bound").success());
+        let text = text.expect("its output is read");
+        assert!(text.len() > 64 * 1024, "{} bytes", text.len());
+        assert_eq!(
+            text.lines()
+                .filter(|line| line.starts_with("request="))
+                .count(),
+            3000
+        );
+    }
 
     /// A harmless child that waits on its stdin, which stays open while the command or child lives.
     fn held() -> Command {
