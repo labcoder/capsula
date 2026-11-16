@@ -271,7 +271,7 @@ enum Bound {
 pub(super) struct RunLedger {
     pub(super) run: RunId,
     calls: usize,
-    steps: usize,
+    pub(super) steps: usize,
     /// Committed steps a failed cut then dropped; `steps` keeps them, so no budget comes back.
     refused: usize,
     rejected: u8,
@@ -420,7 +420,8 @@ impl Drawing {
     }
 
     /// The open call `id`, started if it's new. `None` when a new call is refused for its run's
-    /// budget, which ends it at once.
+    /// budget, which ends it at once. A call whose arguments ended and whose result waits for
+    /// the shell takes no more of them.
     fn call_at(
         &mut self,
         thread: ThreadId,
@@ -436,7 +437,7 @@ impl Drawing {
             .iter()
             .position(|call| call.run == run && call.id == *id)
         {
-            return if self.calls[at].done {
+            return if self.calls[at].done || self.calls[at].awaits.is_some() {
                 Err(Stale)
             } else {
                 Ok(Some(at))

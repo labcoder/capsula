@@ -6,6 +6,7 @@ use super::{
     CallEnd, CallError, Drawing, Input, Output, Remaining, Store, THREAD, args, begin, call,
     closed, cut, numbered, step, streamed, text,
 };
+use crate::coordinator::Stale;
 use crate::engines::CallId;
 
 fn silent() -> Store {
@@ -324,4 +325,22 @@ fn a_call_waits_for_its_own_last_step_not_a_later_call_s() {
     store.run(&mut drawing, streamed("second", 2, r#"{"end":{}}"#));
     assert_eq!(store.run(&mut drawing, finished("second")).calls, []);
     assert_eq!(texts(&store.run(&mut drawing, ready(1, 1))), ["drawn: [b]"]);
+}
+
+#[test]
+fn a_held_call_takes_no_late_record_or_second_finish() {
+    let mut drawing = Drawing::default();
+    let mut store = silent();
+    store.run(&mut drawing, streamed("s", 0, &begin("live", "")));
+    store.run(&mut drawing, streamed("s", 1, &step(&text("a", "a"))));
+    store.run(&mut drawing, streamed("s", 2, r#"{"end":{}}"#));
+    assert_eq!(store.run(&mut drawing, finished("s")).calls, []);
+    assert!(matches!(
+        drawing.handle(streamed("s", 3, &step(&text("b", "b")))),
+        Err(Stale)
+    ));
+    assert!(matches!(drawing.handle(finished("s")), Err(Stale)));
+    assert!(drawing.holding());
+    assert_eq!(drawing.ledger(RunId(1)).steps, 1);
+    assert_eq!(texts(&store.run(&mut drawing, ready(1, 0))), ["drawn: [a]"]);
 }
