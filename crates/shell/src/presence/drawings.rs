@@ -162,7 +162,11 @@ impl Presence {
             let result = this.update(cx, |this, cx| {
                 this.place_drawings(cx.weak_entity(), cx);
                 let effects = this.presenter.completed(done, Instant::now());
-                this.scene_effects(effects, cx);
+                let ready = this.presenter.take_ready();
+                this.scene_effects(
+                    effects.map(|effects| ready.into_iter().chain(effects).collect()),
+                    cx,
+                );
                 this.runs_changed(cx)
             });
             if let Ok(Err(error)) = result {
