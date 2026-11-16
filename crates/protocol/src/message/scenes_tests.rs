@@ -4,8 +4,9 @@ use super::{
 };
 use crate::message::SceneId;
 use kumochi_scene::{
-    Begin, Handle, SceneEvent, Step, StopCut, Text, WireId,
-    record::{Start, Surface, Version},
+    Begin, Handle, Record, SceneEvent, Step, StopCut, Text, WireId, parse_screen_draw_record,
+    record::{ScreenDisplay, Start, Surface, Version},
+    screen,
     text::Bounded,
 };
 use serde::Serialize;
@@ -297,4 +298,46 @@ fn failures_round_trip_without_content() {
         assert_eq!(postcard::to_allocvec(&failure), Ok(vec![tag]));
         assert_eq!(decode::<SceneFailure>(&failure), Ok(failure));
     }
+}
+
+#[test]
+fn a_stamped_screen_header_and_box_targets_round_trip_through_a_chunk() {
+    let Ok(Record::Begin(mut begin)) =
+        parse_screen_draw_record(br#"{"begin":{"scene":"s","surface":"screen","alt":"a"}}"#)
+    else {
+        panic!("a screen header");
+    };
+    let display = ScreenDisplay {
+        origin: [-1920, 0],
+        size: [2560, 1440],
+        dpi: 144,
+    };
+    screen::stamp(&mut begin, [1280, 720], display).expect("stamped");
+    let Ok(Record::Step(step)) = parse_screen_draw_record(
+        br#"{"step":{"id":"t","put":[{"highlight":{"id":"h","target":{"box":[10.5,20,300,40]},"style":"box"}},{"callout":{"id":"c","target":{"box":[10.5,20,300,40]},"text":"here","side":"top"}}]}}"#,
+    ) else {
+        panic!("a screen step");
+    };
+    let chunk = SceneSnapshotChunk {
+        scene: SceneId(1),
+        revision: 1,
+        ordinal: 0,
+        header: Some(SceneHeader {
+            begin,
+            layout_version: 1,
+        }),
+        events: Bounded::new(vec![SceneEvent::Step {
+            revision: 1,
+            step: Arc::new(step),
+        }])
+        .expect("one event"),
+        last: true,
+    }
+    .checked()
+    .expect("a valid chunk");
+    let bytes = postcard::to_allocvec(&chunk).expect("encodes");
+    let decoded = postcard::from_bytes::<SceneSnapshotChunk>(&bytes).expect("decodes");
+    assert_eq!(decoded, chunk);
+    let header = decoded.header.expect("chunk zero has the header");
+    assert_eq!(header.begin.display, Some(display));
 }

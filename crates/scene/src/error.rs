@@ -144,6 +144,9 @@ pub enum ErrorCode {
         "scene.SizeNotPicture: leave size out; a screen scene's size is the picture's, stated beside it"
     )]
     SizeNotPicture,
+    /// No side outside the marked boxes and inside the screen has room for a label.
+    #[error("scene.NoRoom: no free side outside the marks has room for this label")]
+    NoRoom,
 }
 impl ErrorCode {
     pub(crate) fn from_decode(message: &str, path: &mut FieldPath) -> Self {

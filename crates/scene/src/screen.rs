@@ -3,20 +3,43 @@ use crate::{
     Begin, ErrorCode, FieldPath, Op, Step, StepError,
     geom::Affine,
     limits::{MAX_SCREEN_LABEL_CHARS, MAX_SCREEN_SCALE},
-    record::{Anchor, ScreenDisplay, Surface, Target},
+    record::{Anchor, HighlightStyle, ScreenDisplay, Surface, Target},
     text::{Bounded, Finite},
 };
 
 /// The box every stored screen mark carries in place of the model's: one the format accepts.
 pub const PLACEHOLDER_BOX: [f32; 4] = [0.0, 0.0, 1.0, 1.0];
 
+/// A mark's stroke width, in logical pixels [designer's number].
+pub const MARK_STROKE: f32 = 2.0;
+/// The contrasting edge on each side of a mark's stroke, in logical pixels [designer's number].
+pub const MARK_EDGE: f32 = 1.0;
+/// A mark's default colour [designer's number].
+pub const MARK_RGB: u32 = 0x006B_5CF0;
+/// The colour of a mark's edge [designer's number].
+pub const MARK_EDGE_RGB: u32 = 0x00FF_FFFF;
+/// Default space between the thing and its mark, in logical pixels [placeholder].
+pub const MARK_PAD: f32 = 4.0;
+/// Corner radius inside a box mark, in logical pixels [placeholder].
+pub const MARK_RADIUS: f32 = 6.0;
+/// Corner radius inside a ring around a large thing, in logical pixels [placeholder].
+pub const RING_RADIUS: f32 = 12.0;
+/// Longest padded side, in logical pixels, a ring still loops round [placeholder].
+pub const RING_LOOP_MAX: f32 = 96.0;
+/// Space between a mark's outside and its label, in logical pixels [placeholder].
+pub const LABEL_GAP: f32 = 6.0;
+/// A label's inner padding, in logical pixels [placeholder].
+pub const LABEL_PAD: [f32; 2] = [8.0, 5.0];
+
 /// Checks a step of a screen scene: only marks that never cover their target are admitted. A
 /// highlight or callout targets a box or a mark, and a label is one short line. Nothing else
 /// holds a position, so a box target is the only one.
+/// A scene holds at most one spotlight, so the screen is dimmed by at most `MAX_SPOTLIGHT_DIM`;
+/// `spotlights` counts those its earlier steps put.
 /// # Errors
-/// Returns `Unsupported` at the first other kind or field, `OutOfRange` for a box outside the
-/// canvas of `size`, and `LabelTooLong` for a long label.
-pub fn admit(step: &Step, size: [f32; 2]) -> Result<(), StepError> {
+/// Returns `Unsupported` at the first other kind or field and at a second spotlight's `style`,
+/// `OutOfRange` for a box outside the canvas of `size`, and `LabelTooLong` for a long label.
+pub fn admit(step: &Step, size: [f32; 2], mut spotlights: usize) -> Result<(), StepError> {
     let fail = |path, code| Err(StepError::in_step(&step.id, path, code));
     if !step.set.is_empty() {
         return fail(FieldPath::default().field("set"), ErrorCode::Unsupported);
@@ -36,6 +59,14 @@ pub fn admit(step: &Step, size: [f32; 2]) -> Result<(), StepError> {
                 || y.get() + height.get() > size[1])
         {
             return fail(at("target"), ErrorCode::OutOfRange);
+        }
+        if let Op::Highlight(mark) = op
+            && mark.style == HighlightStyle::Spotlight
+        {
+            if spotlights > 0 {
+                return fail(at("style"), ErrorCode::Unsupported);
+            }
+            spotlights += 1;
         }
         let refused = match op {
             Op::Highlight(mark) if mark.parent.is_some() => Some(at("in")),
@@ -132,6 +163,16 @@ pub fn without_boxes(step: &Step) -> Step {
         remove: step.remove.clone(),
         start: step.start.clone(),
     }
+}
+
+/// Canvas units per logical pixel of a stamped screen scene, which sizes its chrome; `None` for
+/// any other scene.
+pub(crate) fn unit(header: &Begin) -> Option<f32> {
+    let display = header
+        .display
+        .filter(|_| header.surface == Surface::Screen)?;
+    let [x, y] = logical_per_unit(display, header.size?.map(Finite::get))?;
+    Some(1.0 / x.min(y))
 }
 
 /// Puts a screen canvas of `size` picture pixels on an overlay covering `overlay`, in the
