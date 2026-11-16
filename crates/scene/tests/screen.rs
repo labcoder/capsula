@@ -1,12 +1,13 @@
 //! The screen surface: its stamp, what it admits, its dressing, its placement and its stored form.
 use kumochi_scene::{
-    Admission, Begin, ErrorCode, GlobalBudget, Op, Record, SceneState, Step, StepError, WireId,
+    Admission, Begin, ErrorCode, Frame, GlobalBudget, Op, Record, SceneState, SceneView, Step,
+    StepError, WireId,
     display::{Item, MeasureError, Paint, Prim, TextMeasure, TextStyle},
     geom::{Affine, Rect, Vec2},
     layout::{LayoutState, PrepareError, PrepareInput, PreparedStep, SurfaceGeometry, prepare},
     limits::{MAX_MARKER_OPACITY, MAX_SPOTLIGHT_DIM},
     parse_draw_record, parse_screen_draw_record,
-    record::ScreenDisplay,
+    record::{ScreenDisplay, Surface},
     screen::{self, MARK_RGB, PLACEHOLDER_BOX, SPOTLIGHT_RGB},
     theme::Theme,
 };
@@ -787,5 +788,57 @@ fn no_box_or_display_number_reaches_a_debug_output_or_the_stored_step() {
             bounds.map(|value| f32::from(value).to_bits()),
             PLACEHOLDER_BOX.map(f32::to_bits)
         );
+    }
+}
+
+#[test]
+fn a_screen_view_sits_on_its_own_display_keeps_off_the_stage_and_paints_nothing_unplaced() {
+    let marked = prepared(&[json!([
+        {"highlight":{"id":"h","target":{"box":[100,100,200,50]}}}
+    ])])
+    .expect("prepared");
+    let painted = |view: &SceneView| {
+        let mut frame = Frame::new();
+        view.frame(u64::MAX, &mut frame).expect("sampled");
+        frame
+            .items()
+            .iter()
+            .map(|item| item.transform)
+            .collect::<Vec<_>>()
+    };
+    let resting = painted(&SceneView::new(&marked.after, 1));
+    assert!(!resting.is_empty());
+    let twice = Affine([2.0, 0.0, 0.0, 2.0, 0.0, 0.0]);
+    let on_screen: Vec<Affine> = resting.iter().map(|at| twice.compose(*at)).collect();
+    let mut view = SceneView::new(&marked.after, 1);
+    let moved = ScreenDisplay {
+        origin: [2560, 0],
+        ..DISPLAY
+    };
+    for (header, overlay) in [
+        (header(), None),
+        (header(), Some(moved)),
+        (model_header(), Some(DISPLAY)),
+    ] {
+        assert!(!view.set_screen(&header, overlay));
+        assert_eq!(painted(&view), [], "{overlay:?}");
+    }
+    assert!(view.set_screen(&header(), Some(DISPLAY)));
+    assert_eq!(painted(&view), on_screen);
+    assert!(!view.set_stage(rect([0.0, 0.0, 300.0, 200.0])));
+    assert_eq!(painted(&view), on_screen, "the stage never moves it");
+    let card = Begin {
+        surface: Surface::Overlay,
+        ..header()
+    };
+    let mut ordinary = SceneView::new(&marked.after, 1);
+    assert!(!ordinary.set_screen(&card, Some(DISPLAY)));
+    assert_eq!(painted(&ordinary), resting);
+    assert!(ordinary.set_stage(rect([0.0, 0.0, 300.0, 200.0])));
+    let scene = SceneState::begin(header()).expect("scene");
+    let mut begun = SceneView::new(&LayoutState::new(&scene), scene.activated());
+    for overlay in [Some(DISPLAY), None] {
+        assert_eq!(begun.set_screen(&header(), overlay), overlay.is_some());
+        assert_eq!(painted(&begun), [], "a begun screen scene with no step");
     }
 }

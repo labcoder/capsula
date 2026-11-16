@@ -98,6 +98,9 @@ impl SceneView {
             });
             motion.sample(&self.tracks, now, self.deadline, slot);
         }
+        if !self.placed() {
+            return Ok(());
+        }
         for &index in &self.paint {
             let world = out.world[index];
             if !world.visible {
