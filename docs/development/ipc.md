@@ -38,7 +38,8 @@ page carries the same value on the turn's user event as the appended
 `PageEventKind::HeldTurn { screen }` (tag 6), read from the run's stored `screen`
 ([store](store.md#tables)). It says what the turn carried, not that a request left the machine:
 the value is stored with the turn, before any request exists. The shell shows a `HeldTurn`
-exactly as a plain user turn until the history line arrives. `HeldScreen::Withdrawn` (tag 2) is
+as a user turn with one line under it saying what the hold carried; the line names no model,
+because nothing records which model a held turn ran on. `HeldScreen::Withdrawn` (tag 2) is
 appended for history only: a turn whose image the user withdrew by turning screen holds off
 before any request carried it. No `HoldScreen` ever carries it, because that run fails first.
 
@@ -49,13 +50,29 @@ mixed binaries.
 
 The brain sends `ScreenHolds` for the default model once a connection opens, after `Welcome` and
 the voice view, and again only when a saved settings change, a catalog read or an account
-operation the shell sent (a sign-out clears the catalog at once) moves it. Nothing sends
-`HoldRecognized` yet, so no run carries a screen, and no `HoldScreen` or `HeldTurn` is ever
-produced. In the running phase the shell keeps a connection's last `ScreenHolds` until that
-connection ends, and a `HoldScreen` for the current hold replaces that hold's predicted line;
-either one from an older connection is dropped. Nothing reads or shows them yet. Before
-`Welcome` the shell rejects either one and ends the connection. All three are payload-redacted
-in the pipe tap.
+operation the shell sent (a sign-out clears the catalog at once) moves it. In the running phase
+the shell keeps a connection's last `ScreenHolds` until that connection ends, and a
+`HoldScreen` for the current hold replaces that hold's predicted line; either one from another
+connection is dropped. Before `Welcome` the shell rejects either one and ends the connection.
+All three are payload-redacted in the pipe tap.
+
+`ScreenHolds` speaks for the default model, but a turn's image goes to its run's model, which is
+the thread's own when it has one. So the shell sends `HoldRecognized` only when three things
+hold at recognition, and the standing icon reads the same check (`Presence::screen_notice`), so
+no notice names a model the image won't reach:
+
+1. the stored state is `On { model }`;
+2. the target is a new thread, or a thread whose stored choice is none or the default model at
+   any effort. A thread whose row was never read counts as on the default: a `shortcut:` that
+   is due before any view sends `SetModel`;
+3. `model` is the display name of the shell's own newest default, queued before saved. Between
+   a default change the shell sent and the brain's next `ScreenHolds`, the stored `On` still
+   names the old model and counts as not ready.
+
+Under that check the shell takes the [exclusion lease](screen.md#local-shell-exclusion), then
+starts the hold once, with the lease and the pointer if the lease was taken and as
+`VoiceHoldRecognized` if not. The brain checks its own gate again at admission, so an
+out-of-date `On` costs only the lease.
 
 ## Screen release
 
@@ -531,8 +548,8 @@ or above the primary display. `WindowRef(u64)` is an opaque HWND on Windows or C
 | Brain to shell | `CaptureFailed` | `capture_for`, `reason`: `ExclusionUnavailable`, `Cancelled` or `Unavailable` |
 
 These controls are staged: the brain ignores hold controls and logs only their operation
-names until B2a supplies admission and capture tickets; the shell ignores capture results
-until it owns exclusion leases. The tap records only these controls' operation and payload
+names until B2a supplies admission and capture tickets; the shell releases a matching
+exclusion lease on a capture result. The tap records only these controls' operation and payload
 length, never coordinates or native window references, even when dumping a forged payload.
 The largest of these is 52 payload bytes, below the 64 KiB control cap. `t_qpc` is the
 shell's performance-counter reading when the key moved, for latency checks only.

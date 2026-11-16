@@ -202,16 +202,25 @@ impl<R> Exclusion<R> {
     pub fn deadline(&self) -> Option<Instant> {
         self.lease.as_ref().map(|lease| lease.deadline)
     }
+
+    /// Whether `generation`'s lease still protects capture: in force and not revoked.
+    pub fn live(&self, generation: LeaseGeneration) -> bool {
+        self.lease
+            .as_ref()
+            .is_some_and(|lease| lease.key.generation == generation && !lease.revoked)
+    }
+}
+
+impl Key {
+    pub fn generation(self) -> LeaseGeneration {
+        self.generation
+    }
 }
 
 #[cfg(any(test, feature = "test-support"))]
 impl Key {
     pub fn input(self) -> CaptureFor {
         self.input
-    }
-
-    pub fn generation(self) -> LeaseGeneration {
-        self.generation
     }
 }
 

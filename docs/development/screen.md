@@ -78,11 +78,17 @@ it remains unimplemented and unverified.
 
 ## Local shell exclusion
 
-Presence owns a never-published local transaction in `presence/exclusion.rs`; the lease and
+Presence owns the exclusion transaction in `presence/exclusion.rs`; the lease and
 its cleanup rules are in `crates/shell-core/src/presence/exclusion/machine.rs`, with no GPUI.
-No production caller acquires it, and it cannot send HoldRecognized, Include, a ticket or a
-capture request.
-The one private acquisition path snapshots exact native affinity before changing the dock,
+Its one production caller is a recognized screen hold (`presence/voice.rs`): the lease is taken
+after every refusal has passed, and its generation goes to the brain in `HoldRecognized`. It
+sends no Include, ticket or capture request.
+The native callback's delivery (`presence/gesture.rs`) applies its effects inside the dock
+window's update and runs its intents when that update has ended. GPUI takes a window out of its
+table while updating it, so an acquisition made inside the dock's update can't reach the dock
+and is refused. A hold refused its lease goes on voice only, and its line says "Screen not
+included: the screen wasn't ready".
+The acquisition path snapshots exact native affinity before changing the dock,
 hit proxy, status panel, typing panel, threads panel, settings panel and drawing overlay.
 Absent lazy panels have no pixels; their create/re-show hooks exclude them after the existing
 owner stores the hidden window and before placement can show it. A failed hook leaves the
@@ -90,9 +96,9 @@ new window hidden. The zero-area taskbar host and Explorer-owned UI are outside 
 
 Drawing keeps the overlay's `Visibility` recovery lifecycle, paint scratch and paint notices.
 Its GPUI surface adapter attaches the drawing receipt before show, including a replacement
-window. New drawing windows start capture-allowed because production holds are dormant;
-a future activation must acquire the shared exclusion owner before announcing a hold and
-retain its receipts until authoritative native retirement, not restore them on key release.
+window. A drawing window made while no lease is in force starts capture-allowed; one made or
+shown under a lease is excluded before it shows. Receipts are restored when the lease ends,
+never on key release.
 
 The transaction reads all present prior values before mutation. A failed getter grants nothing;
 a failed setter rolls back every potentially changed slot, including that setter's slot.
@@ -103,21 +109,33 @@ HWND as identity. A recycled native number cannot inherit an old window's snapsh
 updates retain debt; they are not proof of destruction. Destruction is witnessed by WM_NCDESTROY
 or a successful native-owner DestroyWindow, not by pointer-capture loss or owner Drop.
 
-One weak-owner timer carries the full session/input/checked lease-generation key. Its three-second
-cleanup is safe only because this local transaction never authorized a native acquisition.
-CaptureDone/Failed travel with the actual reader's connection generation; Presence checks its live
-session and input before treating them as local cleanup hints. They do not establish native drain.
+One weak-owner timer carries the full session/input/checked lease-generation key and ends the
+lease after three seconds. CaptureDone/Failed travel with the actual reader's connection
+generation; Presence checks its live session and input before releasing the lease on one. An
+answer that matches no lease, such as one arriving after a lapse or for an older gesture,
+releases nothing, so it can't release a newer lease. They do not establish native drain.
 Connection loss and direct session replacement revoke before accepting another session, retaining
 failed cleanup debt; quit attempts bounded cleanup without waiting on a worker or pipe.
-No local cleanup sends ExclusionLapsed, so queue acceptance cannot be mistaken for retirement.
 
-Future published grants require both authoritative fencing of every pending/late stage and native
-source drain or confirmed worker exit before restoration. Expiry, cancellation, a queued lapse,
-link loss and the name of a terminal message prove neither. An already accepted frame keeps its
-normal capture lifetime. At most one published lifetime may use a session/CaptureFor pair; an
-exposed input cannot be re-leased, and no replacement is allowed over restoration debt. Input
-allocation and actual coordinator/worker retirement are later integration work, not implemented
-by this dormant transaction. Source regressions do not establish compositor timing or pixel privacy.
+The shell remembers the generation a sent `HoldRecognized` named until that capture answers.
+While it is remembered, the first time that lease stops protecting capture sends
+`ExclusionLapsed` with that generation, once: from its timer, from a surface that can't be
+covered, or from any other revoke, including one that leaves restoration debt and so keeps the
+lease. A lease the brain never saw tells nothing and is released at once: one whose acquisition
+failed, whose hold the runs model refused, or whose `HoldRecognized` couldn't be sent. The brain
+closes a hold whose lapse arrives before its frame was captured as NotReady, and ignores a lapse
+after `CaptureDone` or for another lease ([the hold client](#the-brains-hold-client)).
+
+Known limits. Restoration isn't tied to native source drain or worker exit: the timer restores
+at three seconds whatever the worker is doing, and only the lapse keeps a later frame out of a
+turn. A lapse is a queued message, so it bounds what the brain keeps, not when Windows stops
+compositing a restored surface. An already accepted frame keeps its normal capture lifetime, and
+no replacement lease is allowed over restoration debt. A revoke that runs inside a covered
+window's own update, such as a drawing frame on the dock or a button in a panel, can't restore
+that window; its receipt stays as debt until the timer's cleanup, at most three seconds later.
+Source regressions do not establish
+compositor timing or pixel privacy; the dock, bubble and proxy cases are checked in a capture
+session on Rez.
 
 ## Capture under a ticket
 
@@ -212,8 +230,7 @@ floating-point coordinates must be validated as finite by their first parser. Im
 output contains only dimensions, byte counts and mask generations,
 and encoding errors expose only a fixed numeric code, never pixels or foreign error text.
 
-Only a hold's seal calls them, with an empty mask set, and the shell doesn't send screen holds
-yet. Nothing here captures another frame.
+Only a hold's seal calls them, with an empty mask set. Nothing here captures another frame.
 
 ## Regional OCR
 
@@ -305,12 +322,12 @@ observe synthetic bytes immediately after scrubbing and before freeing; a plain-
 remains observationally equivalent in that seam, so optimizer resistance relies on `zeroize`.
 The brain's side is the hold client below. OCR and Supersede remain A6c.
 
-## Window under the pointer (dormant)
+## Window under the pointer
 
 A screen hold captures one window, not the display. `Capturer::pointer_window` resolves the
 window a click at the hold's point would land on, and `Capturer::capture_window` takes one frame
 of that window alone, so whatever is stacked above it stays out of the image. Only a hold's
-`Context` calls them, and the shell doesn't send screen holds yet.
+`Context` calls them.
 
 On Windows the walk reads the top-level z-order from the point. It skips windows whose
 rectangle or window region leaves out the point, before it opens any process, then Kumochi's own
@@ -395,7 +412,7 @@ Two ignored native checks keep pixels in memory and are run by hand on Rez:
 session's start, cold and warm, and is run on a still screen; `primary_display_cold_and_warm_samples`
 times the capture.
 
-## Sealing a hold's image (dormant)
+## Sealing a hold's image
 
 A hold's `Context` carries the hold's point. The
 capture thread resolves the window under it and captures that window alone. A refusal or a fault
@@ -469,13 +486,13 @@ among those the walk stored; otherwise the masks are `Partial`. A page first rea
 walk's element or byte cut has none stored, so it's `Partial` too. The threshold is a guess until
 a real page is measured.
 
-## The brain's hold client (dormant)
+## The brain's hold client
 
 `screen/client.rs` is the brain's side of the worker's loop, for one hold's frame. The brain
 starts its one screen worker with `HoldClient::start` and gives the client to screen holds. A
 worker that can't start doesn't stop the brain: screen holds get no client, so the gate reads
 `Unsupported` for the session, and voice holds go on as before. Only a screen hold's task calls
-the client, and the shell doesn't send screen holds yet. It speaks to the worker through the
+the client. It speaks to the worker through the
 shared supervisor as its own kind, `Holds`, with the screen worker's argument and caps, the
 actor's messages and the zeroing reply reader. The image gate takes the platform's
 `WINDOW_CAPTURE` as well as the client, so off Windows it reads `Unsupported` even though the

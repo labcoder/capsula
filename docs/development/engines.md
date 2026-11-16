@@ -317,7 +317,7 @@ help, the run ends as `failed(budget)` rather than send (shortcut: the shell sho
 failure until runs carry an actionable error). The same oversized body is never retried. The catalog doesn't report a model's
 context size yet, so the byte bound is the only one.
 
-**Images** (dormant until the screen hold activates). `ModelRequest::attach` adds one `Jpeg` right
+**Images.** `ModelRequest::attach` adds one `Jpeg` right
 after the newest user message, only when the request's model is on the `ChatGPT` connection;
 any other route refuses with `ImageRefused::Route`, so no adapter ever has an image to drop, and
 a request with no user message refuses with `NoTurn`. An image isn't charged against the

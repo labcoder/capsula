@@ -169,7 +169,7 @@ fn keyboard_voice_choice_sends_the_exact_policy_and_waits_for_its_ordered_answer
             window.draw(cx).clear(cx);
         });
     }
-    press(&mut frame, "tab tab tab tab space");
+    press(&mut frame, "tab tab tab tab tab space");
     frame.run_until_parked();
     assert!(matches!(
         control.try_recv(),
@@ -543,7 +543,7 @@ fn model_buttons_use_pointer_and_space_but_cancel_acceptance_does_not_mean_cance
         });
         assert!(frame.debug_bounds("speech-model-cancel-help").is_some());
         assert!(frame.debug_bounds("speech-model-pending").is_none());
-        press(&mut frame, "tab tab tab space");
+        press(&mut frame, "tab tab tab tab space");
         frame.run_until_parked();
         assert_eq!(
             controls.try_recv(),
@@ -584,7 +584,7 @@ fn model_buttons_use_pointer_and_space_but_cancel_acceptance_does_not_mean_cance
             );
             view.update(cx, |view, cx| view.focus(window, cx));
         });
-        press(&mut frame, "tab tab tab");
+        press(&mut frame, "tab tab tab tab");
         let unpressed = frame.update(|window, cx| {
             assert!(!view.read(cx).focus.is_focused(window));
             window.focused(cx).expect("unpressed model button focus")
@@ -620,7 +620,7 @@ fn model_buttons_use_pointer_and_space_but_cancel_acceptance_does_not_mean_cance
         press(&mut frame, "ctrl-shift-tab");
         frame.run_until_parked();
         if action_present {
-            press(&mut frame, "tab tab tab");
+            press(&mut frame, "tab tab tab tab");
             frame.update(|window, cx| assert!(!view.read(cx).focus.is_focused(window)));
         }
         deliver(&owner, vec![LinkEvent::State(LinkState::Reconnecting)], cx);
@@ -699,7 +699,7 @@ fn reload_enter_refusal_and_captured_intents_stay_fenced_before_the_recording_se
             .speech_input_intent()
             .expect("reload")
     });
-    press(&mut frame, "tab tab tab enter");
+    press(&mut frame, "tab tab tab tab enter");
     frame.run_until_parked();
     assert_eq!(
         controls.try_recv(),
@@ -828,4 +828,70 @@ fn reload_enter_refusal_and_captured_intents_stay_fenced_before_the_recording_se
     );
     assert_eq!(sent.try_recv(), Err(async_channel::TryRecvError::Empty));
     frame.update(|_, cx| assert!(view.read(cx).model.read(cx).speech_input_pending()));
+}
+
+#[gpui::test]
+fn the_screen_holds_toggle_sends_once_and_waits_for_the_saved_answer(cx: &mut TestAppContext) {
+    use crate::link::{Batch, LinkEvent, Session};
+    use kumochi_protocol::message::{ControlToBrain, Incarnation, SettingsOp};
+
+    let (window, view) = open(cx);
+    let owner = crate::presence::test_fixture::presence(cx);
+    let controls = view.update(cx, |view, cx| {
+        view.owner = owner.downgrade();
+        owner.update(cx, |owner, _| {
+            owner.settings = view.model.clone();
+            owner.session = Some(Session::detached(7, Incarnation(1)));
+            owner.link.record_controls()
+        })
+    });
+    let mut frame = gpui_kit::VisualTestContext::from_window(window, cx);
+    frame.update(|window, cx| {
+        assert_eq!(
+            view.read(cx).model.read(cx).screen_holds_choice(),
+            Some(true)
+        );
+        window.draw(cx).clear(cx);
+    });
+    let toggle = frame
+        .debug_bounds("screen-holds")
+        .expect("the toggle under Hold to talk")
+        .center();
+    frame.simulate_click(toggle, gpui_kit::Modifiers::default());
+    frame.run_until_parked();
+    assert_eq!(
+        controls.try_recv().unwrap(),
+        ControlToBrain::Settings(SettingsOp::SetScreenHolds(false))
+    );
+    frame.update(|_, cx| {
+        let state = view.read(cx).model.read(cx);
+        assert!(state.screen_holds_pending());
+        assert_eq!(state.screen_holds_choice(), Some(false));
+        assert!(state.view().unwrap().screen_holds);
+    });
+    // A second click while the first waits sends nothing.
+    frame.update(|window, cx| window.draw(cx).clear(cx));
+    frame.simulate_click(toggle, gpui_kit::Modifiers::default());
+    frame.run_until_parked();
+    assert!(controls.is_empty());
+    frame.update(|_, cx| {
+        let mut saved = view.read(cx).model.read(cx).view().unwrap().clone();
+        saved.screen_holds = false;
+        owner.update(cx, |owner, cx| {
+            owner
+                .link_events(
+                    Batch::Plain(vec![LinkEvent::Settings {
+                        generation: 7,
+                        view: saved,
+                        answer: true,
+                    }]),
+                    cx,
+                )
+                .unwrap();
+        });
+        let state = view.read(cx).model.read(cx);
+        assert!(!state.screen_holds_pending());
+        assert_eq!(state.screen_holds_choice(), Some(false));
+    });
+    assert!(controls.is_empty());
 }
