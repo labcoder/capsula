@@ -28,7 +28,7 @@ use super::clock::{Clock as _, SystemClock};
 use super::error::VaultError;
 use super::model::budget::Budget;
 use super::model::conn::{Connect, ModelClient, Tls};
-use super::model::error::Failure;
+use super::model::error::{Code, Failure, ProviderError};
 use super::model::sse::SseEvent;
 use super::model::{ResponsesBody, stream};
 use super::provenance::{Outcome, dev_names, output_path, usable};
@@ -45,6 +45,9 @@ const _: () = assert!(BUDGET <= 45, "the owner approved 45 requests");
 const UNBUILT: u8 = 18;
 /// Exit code when the session went stale or a line couldn't be written; later requests unspent.
 const STOPPED: u8 = 20;
+/// Exit code when the provider refused the account: a usage limit, the plan, the route or the
+/// sign-in. Later requests unspent.
+const REFUSED: u8 = 21;
 const EFFORT: Effort = Effort::Low;
 /// The display the pictures are drawn for, at 100%.
 const DISPLAY: ScreenDisplay = ScreenDisplay {
@@ -294,17 +297,10 @@ fn overlap(a: [f32; 4], b: [f32; 4]) -> f32 {
     if union > 0.0 { shared / union } else { 0.0 }
 }
 
-/// A mark's line: the named thing it overlaps most, and its signed edge errors in picture and
-/// display pixels, against that thing's box scaled into the picture.
-fn mark_line(
-    number: usize,
-    part: usize,
-    (style, mark): Mark,
-    named: &[&Thing],
-    size: [u32; 2],
-) -> String {
+/// The named things' boxes scaled into a picture of `size`, and that scale.
+fn truths(named: &[&Thing], size: [u32; 2]) -> (Vec<[f32; 4]>, f32) {
     let scale = f32::from(u16::try_from(size[0]).expect("a picture width")) / 2560.0;
-    let truths: Vec<[f32; 4]> = named
+    let truths = named
         .iter()
         .map(|thing| {
             thing
@@ -312,17 +308,51 @@ fn mark_line(
                 .map(|value| f32::from(u16::try_from(value).expect("on the display")) * scale)
         })
         .collect();
-    let best = truths
+    (truths, scale)
+}
+
+/// Pairs marks with named things one to one, the largest overlap first: for each mark, the
+/// place in the question of the thing it was paired with, if any; and how many named things got
+/// a mark overlapping them by at least a half.
+fn assign(marks: &[Mark], truths: &[[f32; 4]]) -> (Vec<Option<usize>>, usize) {
+    let mut pairs: Vec<(f32, usize, usize)> = marks
         .iter()
         .enumerate()
-        .map(|(at, truth)| (at, overlap(mark, *truth)))
-        .max_by(|a, b| a.1.total_cmp(&b.1))
-        .filter(|(_, overlap)| *overlap > 0.0);
+        .flat_map(|(at, (_, mark))| {
+            truths
+                .iter()
+                .enumerate()
+                .map(move |(place, truth)| (overlap(*mark, *truth), at, place))
+        })
+        .filter(|(shared, _, _)| *shared > 0.0)
+        .collect();
+    pairs.sort_by(|a, b| b.0.total_cmp(&a.0));
+    let mut paired = vec![None; marks.len()];
+    let mut taken = vec![false; truths.len()];
+    let mut found = 0;
+    for (shared, at, place) in pairs {
+        if paired[at].is_none() && !taken[place] {
+            paired[at] = Some(place);
+            taken[place] = true;
+            found += usize::from(shared >= 0.5);
+        }
+    }
+    (paired, found)
+}
+
+/// A mark's line: the named thing it was paired with, by its place in the question and its kind,
+/// and its signed edge errors against that thing's box in picture and display pixels.
+fn mark_line(
+    number: usize,
+    part: usize,
+    (style, mark): Mark,
+    paired: Option<(usize, &Thing, [f32; 4])>,
+    scale: f32,
+) -> String {
     let style = format!("{style:?}").to_lowercase();
-    let Some((at, shared)) = best else {
+    let Some((place, thing, truth)) = paired else {
         return format!("mark={number}.{part} thing=none style={style}");
     };
-    let truth = truths[at];
     let edges = [
         mark[0] - truth[0],
         mark[1] - truth[1],
@@ -331,10 +361,11 @@ fn mark_line(
     ];
     let display = edges.map(|edge| edge / scale);
     format!(
-        "mark={number}.{part} thing={} style={style} left={:+.1} top={:+.1} right={:+.1} \
-         bottom={:+.1} left_display={:+.1} top_display={:+.1} right_display={:+.1} \
-         bottom_display={:+.1} overlap={shared:.2}",
-        named[at].word(),
+        "mark={number}.{part} thing={} kind={} style={style} left={:+.1} top={:+.1} \
+         right={:+.1} bottom={:+.1} left_display={:+.1} top_display={:+.1} \
+         right_display={:+.1} bottom_display={:+.1} overlap={:.2}",
+        place + 1,
+        thing.word(),
         edges[0],
         edges[1],
         edges[2],
@@ -343,7 +374,25 @@ fn mark_line(
         display[1],
         display[2],
         display[3],
+        overlap(mark, truth),
     )
+}
+
+/// Whether a refusal is about the account rather than the request: a usage limit, the plan, the
+/// route or the sign-in. Those stop the run; any other refusal skips its picture's size.
+fn account_refusal(error: ProviderError) -> bool {
+    matches!(error.status, 401 | 403 | 429)
+        || matches!(
+            error.code,
+            Some(
+                Code::UsageLimit
+                    | Code::Unavailable
+                    | Code::NotEligible
+                    | Code::RouteRefused
+                    | Code::InvalidUser
+                    | Code::NotAuthorized
+            )
+        )
 }
 
 /// A request's status, provider code and parameter, and result word.
@@ -361,24 +410,25 @@ fn outcome(result: Result<(), Failure>) -> [String; 4] {
     }
 }
 
-/// Request `number`'s lines: its own, then one per box mark of an accepted call; and whether its
-/// call was accepted the first time.
+/// Request `number`'s lines: its own, then one per box mark of an accepted call; whether its call
+/// was accepted the first time; and how many named things a mark found.
 fn lines(
     number: usize,
     request: &Prepared,
     result: Result<(), Failure>,
     reply: &Reply,
     ms: u128,
-) -> (Vec<String>, bool) {
+) -> (Vec<String>, bool, usize) {
     let [status, code, param, word] = outcome(result);
     let head = format!(
         "{} status={status} code={code} param={param} result={word}",
         label(number, request)
     );
     if result.is_err() {
-        let line =
-            format!("{head} call=- accepted=- refusal=- path=- marks=- input_tokens=- ms={ms}");
-        return (vec![line], false);
+        let line = format!(
+            "{head} call=- accepted=- refusal=- path=- marks=- found=- input_tokens=- ms={ms}"
+        );
+        return (vec![line], false, 0);
     }
     let size = SIZES[request.planned.size];
     let call = match reply.calls {
@@ -391,33 +441,41 @@ fn lines(
         .as_ref()
         .and_then(|item| item["arguments"].as_str())
         .map_or(Verdict::Malformed, |arguments| check(arguments, size));
-    let none = || "-".to_owned();
-    let (accepted, refusal, path, count) = match &verdict {
-        Verdict::Accepted(marks) => ("true", none(), none(), marks.len().to_string()),
-        Verdict::Refused(code, path) => ("false", code.clone(), path.clone(), none()),
-        Verdict::Malformed => ("false", "malformed".to_owned(), none(), none()),
-    };
-    let tokens = reply
-        .input_tokens
-        .map_or_else(none, |tokens| tokens.to_string());
-    let mut lines = vec![format!(
-        "{head} call={call} accepted={accepted} refusal={refusal} path={path} marks={count} \
-         input_tokens={tokens} ms={ms}"
-    )];
-    let Verdict::Accepted(marks) = verdict else {
-        return (lines, false);
-    };
     let named: Vec<&Thing> = NAMED[request.planned.version]
         .iter()
         .map(|&at| &request.things[at])
         .collect();
+    let (truths, scale) = truths(&named, size);
+    let none = || "-".to_owned();
+    let tokens = reply
+        .input_tokens
+        .map_or_else(none, |tokens| tokens.to_string());
+    let (accepted, refusal, path, marks) = match verdict {
+        Verdict::Accepted(marks) => ("true", none(), none(), marks),
+        Verdict::Refused(code, path) => ("false", code, path, Vec::new()),
+        Verdict::Malformed => ("false", "malformed".to_owned(), none(), Vec::new()),
+    };
+    let (paired, found) = assign(&marks, &truths);
+    let (count, found_word) = if accepted == "true" {
+        (marks.len().to_string(), found.to_string())
+    } else {
+        (none(), none())
+    };
+    let mut lines = vec![format!(
+        "{head} call={call} accepted={accepted} refusal={refusal} path={path} marks={count} \
+         found={found_word} input_tokens={tokens} ms={ms}"
+    )];
     lines.extend(
         marks
             .into_iter()
+            .zip(paired)
             .enumerate()
-            .map(|(part, mark)| mark_line(number, part + 1, mark, &named, size)),
+            .map(|(part, (mark, place))| {
+                let paired = place.map(|place| (place, named[place], truths[place]));
+                mark_line(number, part + 1, mark, paired, scale)
+            }),
     );
-    (lines, reply.calls == 1)
+    (lines, accepted == "true" && reply.calls == 1, found)
 }
 
 /// The dry run's lines: every request built, none sent.
@@ -429,7 +487,7 @@ fn dry(out: &mut impl std::io::Write, prepared: &[Prepared], detail: &str) -> st
     writeln!(
         out,
         "{}",
-        summary(0, 0, 0, prepared.len(), "not-sent", detail)
+        summary([0, 0, 0, 0], prepared.len(), "not-sent", detail)
     )
 }
 
@@ -522,8 +580,9 @@ async fn send(
 }
 
 /// Runs the check and returns its exit code: 0 when the plan was worked through, 10–17 as the
-/// catalog capture's preflight (nothing sent), 18 when nothing could be built (nothing sent), and
-/// 20 once the session went stale or a line couldn't be written (later requests unspent).
+/// catalog capture's preflight (nothing sent), 18 when nothing could be built (nothing sent), 20
+/// once the session went stale or a line couldn't be written, and 21 once the provider refused
+/// the account (later requests unspent).
 #[expect(
     clippy::too_many_lines,
     reason = "the run's steps in the order they spend, as one reads the budget"
@@ -584,7 +643,7 @@ pub fn run() -> u8 {
                 SystemClock.unix_seconds(),
             )
         };
-        let (mut attempted, mut accepted, mut skipped) = (0, 0, 0);
+        let (mut attempted, mut accepted, mut skipped, mut found) = (0, 0, 0, 0);
         let mut refused_sizes = BTreeSet::new();
         let mut replay_of = None;
         for (number, request) in prepared.iter().enumerate() {
@@ -605,16 +664,21 @@ pub fn run() -> u8 {
             let (result, ms) =
                 send(&client, &request.built.body, &bearer, &budget, &mut reply).await;
             attempted += usize::from(!matches!(result, Err(Failure::Spent)));
-            if matches!(result, Err(Failure::Provider(_))) {
-                refused_sizes.insert(request.planned.size);
-            }
-            let (lines, first_call) = lines(number + 1, request, result, &reply, ms);
+            let (lines, first_call, marked) = lines(number + 1, request, result, &reply, ms);
             accepted += usize::from(first_call);
+            found += marked;
             if number == 0 && result.is_ok() {
                 replay_of = reply.item.take();
             }
             if lines.iter().any(|line| writeln!(out, "{line}").is_err()) {
                 return STOPPED;
+            }
+            match result {
+                Err(Failure::Provider(error)) if account_refusal(error) => return REFUSED,
+                Err(Failure::Provider(_)) => {
+                    refused_sizes.insert(request.planned.size);
+                }
+                _ => {}
             }
         }
         let replay = match replay_of.and_then(|item| replay(&prepared[0].question, &item)) {
@@ -653,9 +717,7 @@ pub fn run() -> u8 {
             }
         };
         let summary = summary(
-            attempted,
-            accepted,
-            skipped,
+            [attempted, accepted, skipped, found],
             prepared.len(),
             replay,
             &first.detail,
@@ -697,15 +759,15 @@ fn replay(question: &str, item: &Value) -> Option<Built> {
 }
 
 fn summary(
-    attempted: usize,
-    accepted: usize,
-    skipped: usize,
+    [attempted, accepted, skipped, found]: [usize; 4],
     planned: usize,
     replay: &str,
     detail: &str,
 ) -> String {
     format!(
-        "summary attempted={attempted} accepted_first_call={accepted}/{planned} skipped={skipped} \
-         replay={replay} note=the-full-size-picture-went-with-detail-{detail}-and-may-have-been-shrunk-by-the-provider"
+        "summary attempted={attempted} accepted_first_call={accepted}/{planned} \
+         instructions=short-fixed effort=low found={found}/{} skipped={skipped} replay={replay} \
+         note=the-full-size-picture-went-with-detail-{detail}-and-may-have-been-shrunk-by-the-provider",
+        planned * 5
     )
 }

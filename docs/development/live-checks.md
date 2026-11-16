@@ -429,7 +429,8 @@ through the screen surface, before `draw` offers it. `KUMOCHI_LIVE_BUDGET=0 carg
 is its dry run. Run the real one only in a live turn the Captain assigned, from the reviewed head.
 
 - xtask runs `kumochid.exe --marks-check` the way it runs the image check: only the copied brain,
-  in its kill-on-close job, stdout piped, for at most 30 minutes. The mode is built into debug
+  in its kill-on-close job, stdout piped, for at most 30 minutes. A thread reads stdout while it
+  waits, so the brain never blocks on a full pipe. The mode is built into debug
   brains only, and a brain without it exits 10. Its preflight is the image check's, and it never
   renews the session.
 - Before anything is sent, it draws six made-up layouts at 2560×1440 in memory: three buttons, a
@@ -441,8 +442,9 @@ is its dry run. Run the real one only in a live turn the Captain assigned, from 
   line giving its size, and the only tool is `draw` with `screen_draw_schema()`, its surface
   narrowed to overlay and screen, and the marking paragraph after the draw prompt. So the
   provider may shrink the full-size picture; the summary says so.
-- 36 requests, size-major: the first layout's first version at each size goes first, and a size
-  the provider refuses skips the rest at that size. Then the replay: request 1's call as the store
+- 36 requests, size-major: the first layout's first version at each size goes first. A refusal
+  of the request skips the rest at that size; a refusal of the account (a usage limit, the plan,
+  the route or the sign-in: 401, 403, 429 or one of those codes) stops the run. Then the replay: request 1's call as the store
   keeps it, every box replaced by `PLACEHOLDER_BOX`, a fixed result and a fixed follow-up, with no
   picture. Nothing is retried.
 
@@ -452,9 +454,14 @@ never opened: the brain prints its header, every request's line with `result=dry
 summary. The brain prints numbers and fixed words only: a header with the model, effort, detail,
 date, planned count and budget; one line per request with its layout, size, version, JPEG and body
 bytes, status, provider code and part, result, whether the call was accepted or the error code and
-field that refused it, the mark count, input tokens and milliseconds; one line per box mark with
-the closest named thing's kind, the mark's style, its signed edge errors in picture pixels and in
-display pixels, and the overlap; and a summary. Accepted means the call parses with
+field that refused it, the mark count, `found` (how many of the five named things a mark overlaps
+by at least a half), input tokens and network milliseconds; one line per box mark with the named
+thing it was paired with, by its place in the question and its kind, the mark's style, its signed
+edge errors in picture pixels and in display pixels, and the overlap; and a summary. Marks pair
+with named things one to one, the largest overlap first, so a second mark on a thing or a mark
+on no named thing prints `thing=none`. The summary gives the first-call count beside
+`instructions=short-fixed effort=low`, since the product's longer instructions may lower it, and
+`found` over the 180 named things. Accepted means the call parses with
 `parse_screen_draw_record`, stamps with `screen::stamp` and every step admits in a `SceneState`.
 The model's text, labels and boxes are never printed. xtask keeps the brain's lines that start
 with `marks-check`, `request=`, `mark=` and `summary`, then prints one line from the exit code,
@@ -467,8 +474,8 @@ marks check: stopped, exit 20 (requests: at most 12)
 ```
 
 Exits 10–17 mean the same as the catalog capture's and send nothing; 18 means a picture or body
-couldn't be built; 20 means the session went stale or a line couldn't be written, with the rest
-unspent.
+couldn't be built; 20 means the session went stale or a line couldn't be written, and 21 that
+the provider refused the account, each with the rest unspent.
 
 ## Bounds
 

@@ -2,9 +2,10 @@
 //! bounded and in a kill-on-close job, and prints the brain's lines and one line from its exit
 //! code. `KUMOCHI_LIVE_BUDGET` reaches the brain through the environment; 0 is the dry run.
 
-use std::io::Read as _;
+use std::io::{self, Read as _};
 use std::path::Path;
-use std::process::{Command, ExitStatus, Stdio};
+use std::process::{Child, Command, ExitStatus, Stdio};
+use std::thread;
 use std::time::Duration;
 
 use anyhow::{Context as _, Result, ensure};
@@ -23,18 +24,16 @@ pub(super) fn run(folder: &Path) -> Result<()> {
         .and_then(platform::Job::hold_self)
         .context("putting the run in a job")?;
     refuse_running(&platform::processes()?, std::process::id())?;
-    let mut child = Command::new(folder.join("bin").join(BRAIN_EXE))
+    let child = Command::new(folder.join("bin").join(BRAIN_EXE))
         .arg(MARKS_CHECK_ARG)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()
         .context("starting the marks check (requests: 0)")?;
-    let mut output = child.stdout.take().context("the check's output")?;
-    let status = bounded(child, LIMIT, "the marks check");
-    let mut text = String::new();
-    let read = output.read_to_string(&mut text);
-    let lines = kept(&text);
+    let (status, text) = drained(child, LIMIT, "the marks check")?;
+    let text = text.context("reading the check's lines");
+    let lines = text.as_deref().map(kept).unwrap_or_default();
     for line in &lines {
         println!("{line}");
     }
@@ -42,9 +41,28 @@ pub(super) fn run(folder: &Path) -> Result<()> {
         "{}",
         summary(status.as_ref().ok().and_then(ExitStatus::code), &lines)
     );
-    read.context("reading the check's lines")?;
+    text?;
     ensure!(status?.success(), "the marks check stopped");
     Ok(())
+}
+
+/// Waits for `child` as [`bounded`] does while a thread reads its stdout, so a full pipe never
+/// blocks it, and returns its status and everything it printed.
+fn drained(
+    mut child: Child,
+    limit: Duration,
+    what: &str,
+) -> Result<(Result<ExitStatus>, io::Result<String>)> {
+    let mut output = child.stdout.take().context("the check's output")?;
+    let reader = thread::spawn(move || {
+        let mut text = String::new();
+        output.read_to_string(&mut text).map(|_| text)
+    });
+    let status = bounded(child, limit, what);
+    let text = reader
+        .join()
+        .unwrap_or_else(|_| Err(io::Error::other("the reader panicked")));
+    Ok((status, text))
 }
 
 fn kept(text: &str) -> Vec<&str> {
@@ -73,7 +91,30 @@ fn summary(code: Option<i32>, lines: &[&str]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{kept, summary};
+    use std::process::{Command, Stdio};
+    use std::time::Duration;
+
+    use super::{drained, kept, summary};
+
+    #[test]
+    fn a_child_printing_far_more_than_a_pipe_holds_still_finishes() {
+        let child = Command::new("cmd")
+            .args([
+                "/C",
+                "for /L %i in (1,1,3000) do @echo request=%i status=2xx padding-padding-padding",
+            ])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("cmd starts");
+        let (status, text) =
+            drained(child, Duration::from_secs(30), "the test child").expect("drained");
+        assert!(status.expect("it exits within the bound").success());
+        let text = text.expect("its output is read");
+        assert!(text.len() > 64 * 1024, "{} bytes", text.len());
+        assert_eq!(kept(&text).len(), 3000);
+    }
 
     #[test]
     fn only_the_check_s_lines_are_kept() {

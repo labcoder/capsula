@@ -3,9 +3,10 @@ use kumochi_scene::screen::PLACEHOLDER_BOX;
 
 use super::picture::{Canvas, layout, shrink, text_width};
 use super::{
-    BUDGET, DISPLAY, LAYOUTS, NAMED, Verdict, build, check, draw_tool, limit, mark_line,
-    picture_line, placeholders, plan,
+    BUDGET, DISPLAY, LAYOUTS, NAMED, Verdict, account_refusal, assign, build, check, draw_tool,
+    limit, mark_line, picture_line, placeholders, plan, truths,
 };
+use crate::connections::model::error::{Code, ProviderError};
 use crate::context::{InputItem, Jpeg, Role};
 
 /// The marking paragraph's own example, as the model would send it.
@@ -161,19 +162,23 @@ fn the_replayed_call_keeps_no_box() {
 }
 
 #[test]
-fn a_mark_line_gives_signed_edges_against_the_closest_named_thing() {
+fn a_mark_line_gives_the_paired_thing_s_place_and_signed_edges() {
     let things = layout(0);
-    let named = [&things[0], &things[3]];
     assert_eq!(things[0].rect, [1500, 24, 180, 44]);
+    assert_eq!(
+        truths(&[&things[0]], [1280, 720]),
+        (vec![[750.0, 12.0, 90.0, 22.0]], 0.5)
+    );
+    let paired = Some((1, &things[0], [750.0, 12.0, 90.0, 22.0]));
     assert_eq!(
         mark_line(
             3,
             1,
             (HighlightStyle::Box, [748.0, 12.0, 92.0, 22.0]),
-            &named,
-            [1280, 720]
+            paired,
+            0.5
         ),
-        "mark=3.1 thing=button style=box left=-2.0 top=+0.0 right=+0.0 bottom=+0.0 \
+        "mark=3.1 thing=2 kind=button style=box left=-2.0 top=+0.0 right=+0.0 bottom=+0.0 \
          left_display=-4.0 top_display=+0.0 right_display=+0.0 bottom_display=+0.0 overlap=0.98"
     );
     assert_eq!(
@@ -181,11 +186,54 @@ fn a_mark_line_gives_signed_edges_against_the_closest_named_thing() {
             3,
             2,
             (HighlightStyle::Ring, [0.0, 0.0, 5.0, 5.0]),
-            &named,
-            [1280, 720]
+            None,
+            0.5
         ),
         "mark=3.2 thing=none style=ring"
     );
+}
+
+#[test]
+fn marks_pair_with_named_things_one_to_one_and_count_a_half_overlap_as_found() {
+    let truths = [[0.0, 0.0, 10.0, 10.0], [20.0, 0.0, 10.0, 10.0]];
+    let marks = [
+        (HighlightStyle::Box, [4.0, 0.0, 20.0, 10.0]),
+        (HighlightStyle::Ring, [0.0, 0.0, 10.0, 10.0]),
+        (HighlightStyle::Box, [50.0, 50.0, 5.0, 5.0]),
+    ];
+    assert_eq!(assign(&marks, &truths), (vec![Some(1), Some(0), None], 1));
+    let half = [(HighlightStyle::Box, [0.0, 0.0, 10.0, 20.0])];
+    assert_eq!(assign(&half, &truths[..1]), (vec![Some(0)], 1));
+    let under = [(HighlightStyle::Box, [0.0, 0.0, 10.0, 21.0])];
+    assert_eq!(assign(&under, &truths[..1]), (vec![Some(0)], 0));
+    assert_eq!(assign(&[], &truths), (vec![], 0));
+}
+
+#[test]
+fn only_a_refusal_of_the_account_stops_the_run() {
+    for (status, code, stops) in [
+        (429, None, true),
+        (401, None, true),
+        (403, None, true),
+        (400, Some(Code::UsageLimit), true),
+        (200, Some(Code::Unavailable), true),
+        (400, Some(Code::NotEligible), true),
+        (400, Some(Code::RouteRefused), true),
+        (400, Some(Code::InvalidUser), true),
+        (200, Some(Code::NotAuthorized), true),
+        (400, Some(Code::Unsupported), false),
+        (400, Some(Code::Other), false),
+        (400, None, false),
+        (413, None, false),
+        (500, None, false),
+    ] {
+        let error = ProviderError {
+            status,
+            code,
+            param: None,
+        };
+        assert_eq!(account_refusal(error), stops, "{status} {code:?}");
+    }
 }
 
 #[test]
