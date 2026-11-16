@@ -843,9 +843,9 @@ fn forgotten(effects: &[Effect]) -> Vec<RunId> {
         .collect()
 }
 
-/// Ends the current run R: the user's cancel, a Stop, or a failure. Before any request the
-/// failure is its turn's store write; once one has `started`, it's the engine's.
-fn ended(core: &mut Coordinator, how: usize, started: bool) -> Vec<Effect> {
+/// Ends the current run R: 0 the user's cancel, 1 a Stop, 2 its turn's failed store write, or
+/// 3 its engine failing once a request has started.
+fn ended(core: &mut Coordinator, how: usize) -> Vec<Effect> {
     use crate::engines::{EngineFailure, Finish};
     match how {
         0 => core.cancel_hold(KEY),
@@ -855,7 +855,7 @@ fn ended(core: &mut Coordinator, how: usize, started: bool) -> Vec<Effect> {
                 revealed: Vec::new(),
             })
             .expect("current"),
-        _ if started => core
+        3 => core
             .handle(engine(
                 engine_key(core, R),
                 TurnEvent::Finished(Finish::Failed(EngineFailure::Provider)),
@@ -881,7 +881,7 @@ fn a_run_that_ends_before_its_first_request_stores_no_picture() {
             if how != 2 {
                 core.handle(Input::TurnStored { run: R }).unwrap();
             }
-            let effects = ended(&mut core, how, false);
+            let effects = ended(&mut core, how);
             assert_eq!(core.current_run(), None, "{how}");
             assert_eq!(forgotten(&effects), cleared, "{how}");
         }
@@ -890,14 +890,14 @@ fn a_run_that_ends_before_its_first_request_stores_no_picture() {
 
 #[test]
 fn a_run_whose_first_request_started_keeps_its_picture_however_it_ends() {
-    for how in 0..3 {
+    for how in [0, 1, 3] {
         let mut core = ready_for("captured");
         core.submit_hold(prepared(&core, Some(T)), "words".into(), Some(image()))
             .unwrap();
         core.handle(Input::TurnStored { run: R }).unwrap();
         let first = engine_key(&core, R);
         assert_eq!(starts(&core.handle(screened(first, &[T])).unwrap()), 1);
-        let effects = ended(&mut core, how, true);
+        let effects = ended(&mut core, how);
         assert_eq!(core.current_run(), None, "{how}");
         assert_eq!(forgotten(&effects), [], "{how}");
     }
