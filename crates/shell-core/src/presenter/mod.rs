@@ -73,7 +73,7 @@ pub use paint::{Frames, Sample, SceneCache, Stage};
 pub use prepare::{AdmitJob, Completion, PrepareJob, RecoveryJob};
 use recovery::Phase;
 use scene::{Cut, Out, Ready, Running, Scene, Ticket};
-use screen::on_screen;
+use screen::{left, on_screen};
 use snapshot::Assembler;
 use watch::Watch;
 
@@ -259,7 +259,9 @@ impl Presenter {
         self.stopped_begins = [None; MAX_VISIBLE_SCENES];
         self.generation = None;
         self.assembler.disconnected();
-        self.watch = Watch::default();
+        if std::mem::take(&mut self.watch).shown().is_some() {
+            left();
+        }
         self.hush();
     }
 
@@ -307,7 +309,8 @@ impl Presenter {
         let mut out = Out::default();
         let current = self.generation == Some(generation) && self.dropper_running();
         if current {
-            self.heed(&mut out);
+            self.heed(now, &mut out)?;
+            self.expire_marks(now, &mut out)?;
         }
         let snapshot = frame
             .map(|frame| match frame {
@@ -321,7 +324,7 @@ impl Presenter {
                 self.assembled(effect, now, &mut out)?;
             }
             Err(frame) if current => {
-                self.judge(&frame, &mut out);
+                self.judge(&frame, now, &mut out)?;
                 let removed = matches!(
                     &*frame,
                     DataToShell::ScenesRemoved { .. } | DataToShell::ScenesReplaced { .. }
@@ -428,8 +431,8 @@ impl Presenter {
     pub fn tick(&mut self, now: Instant) -> Result<Vec<Effect>, Broken> {
         self.frames.borrow_mut().expire_retirement(now);
         let mut out = Out::default();
-        self.heed(&mut out);
-        self.expire_marks(now, &mut out);
+        self.heed(now, &mut out)?;
+        self.expire_marks(now, &mut out)?;
         let late: Vec<_> = self
             .scenes
             .iter()
@@ -598,9 +601,7 @@ impl Presenter {
             out.credit(self.assembler.clear().credit);
             self.clear_after_recovery = true;
         }
-        if let Some(lane) = self.lane.take() {
-            out.credit(lane.cancel());
-        }
+        self.cancel_admission(None, &mut out);
         if matches!(self.phase, Phase::Live) {
             self.discard_held(now, &mut out)?;
         }
@@ -759,6 +760,10 @@ impl Presenter {
                 if on_screen(header) {
                     let mirrored = self.scenes.get_mut(scene);
                     mirrored.expect("the scene was just installed").screen = true;
+                } else {
+                    // A replaced screen scene's successor that is no screen scene ends the watch.
+                    self.watch.gone(*scene);
+                    self.hush();
                 }
                 self.make_room(self.residency(), self.paint_work());
                 Ok(())
@@ -1164,7 +1169,9 @@ impl Presenter {
     }
 
     fn remember(&mut self, id: SceneId) {
-        self.watch.gone(id);
+        if self.watch.gone(id) {
+            left();
+        }
         self.hush();
         for pending in &mut self.stopped_begins {
             if *pending == Some(id) {

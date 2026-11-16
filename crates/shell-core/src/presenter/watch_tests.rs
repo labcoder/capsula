@@ -11,6 +11,7 @@ const HOLD: RunId = RunId(5);
 const OTHER: RunId = RunId(6);
 const FIRST: SceneId = SceneId(20);
 const SECOND: SceneId = SceneId(21);
+const THIRD: SceneId = SceneId(22);
 
 fn ms(now: Instant, millis: u64) -> Instant {
     now + Duration::from_millis(millis)
@@ -91,10 +92,10 @@ fn a_release_expects_the_first_mark_of_a_newer_run() {
 fn only_the_named_run_is_shown_and_only_the_first_newer_name_counts() {
     let now = Instant::now();
     let mut watch = released(now);
-    watch.named(AFTER);
+    watch.named(AFTER, now);
     assert_eq!(watch.state, expecting(now, None));
-    watch.named(HOLD);
-    watch.named(OTHER);
+    watch.named(HOLD, now);
+    watch.named(OTHER, now);
     assert_eq!(watch.state, expecting(now, Some(HOLD)));
     assert!(!watch.marked(FIRST, OTHER));
     assert_eq!(watch.state, expecting(now, Some(HOLD)));
@@ -113,7 +114,7 @@ fn a_change_before_the_first_mark_stays_and_names_the_skipped_run() {
     assert!(!watch.marked(FIRST, HOLD));
     assert_eq!(watch.skipped(), Some(HOLD));
     // Nothing later takes the change back.
-    watch.named(HOLD);
+    watch.named(HOLD, now);
     assert!(!watch.changed());
     assert_eq!(watch.state, changed(now, Some(HOLD)));
     assert!(!watch.marked(SECOND, HOLD));
@@ -188,7 +189,7 @@ fn an_unnamed_release_ends_thirty_seconds_later_and_stays_ended() {
     assert_eq!(watch.state, State::Idle);
     assert!(!watch.listening());
     assert_eq!(watch.deadline(), None);
-    watch.named(HOLD);
+    watch.named(HOLD, now);
     assert_eq!(watch.state, State::Idle);
     assert!(!watch.marked(FIRST, HOLD));
     assert_eq!(watch.skipped(), None);
@@ -198,7 +199,7 @@ fn an_unnamed_release_ends_thirty_seconds_later_and_stays_ended() {
 fn a_named_run_is_not_cut_off_thirty_seconds_after_the_release() {
     let now = Instant::now();
     let mut watch = released(now);
-    watch.named(HOLD);
+    watch.named(HOLD, now);
     assert_eq!(watch.deadline(), None);
     assert!(!watch.expired(ms(now, 30_000)));
     assert!(!watch.expired(ms(now, 3_600_000)));
@@ -211,9 +212,7 @@ fn a_named_run_is_not_cut_off_thirty_seconds_after_the_release() {
 fn the_named_run_ending_without_a_scene_ends_the_watch() {
     let now = Instant::now();
     let mut watch = released(now);
-    watch.ended(HOLD, now);
-    assert!(watch.listening());
-    watch.named(HOLD);
+    watch.named(HOLD, now);
     watch.ended(OTHER, now);
     assert!(watch.listening());
     watch.ended(HOLD, now);
@@ -236,11 +235,113 @@ fn a_dropped_hold_ends_an_expecting_watch_only() {
 #[test]
 fn the_shown_scene_leaving_ends_the_watch() {
     let mut watch = showing();
-    watch.gone(SECOND);
+    assert!(!watch.gone(SECOND));
     assert!(watch.shows(FIRST));
-    watch.gone(FIRST);
+    assert!(watch.gone(FIRST));
     assert_eq!(watch.state, State::Idle);
     let mut watch = released(Instant::now());
-    watch.gone(FIRST);
+    assert!(!watch.gone(FIRST));
     assert!(watch.listening());
+}
+
+#[test]
+fn a_newer_run_that_ends_before_any_name_ends_the_watch_and_a_late_name_names_nothing() {
+    let now = Instant::now();
+    let mut watch = released(now);
+    for old in [AFTER, RunId(3)] {
+        watch.ended(old, now);
+        assert_eq!(watch.state, expecting(now, None));
+    }
+    watch.ended(HOLD, now);
+    assert_eq!(watch.state, State::Idle);
+    // No second end comes: the late name must not bring the watch back.
+    watch.named(HOLD, now);
+    assert_eq!(watch.state, State::Idle);
+    assert!(!watch.listening());
+    assert_eq!(watch.deadline(), None);
+    assert!(!watch.marked(FIRST, HOLD));
+}
+
+#[test]
+fn a_name_at_the_unnamed_limit_ends_the_watch_instead_of_lifting_the_limit() {
+    let now = Instant::now();
+    let mut watch = released(now);
+    watch.named(HOLD, ms(now, 29_999));
+    assert_eq!(watch.state, expecting(now, Some(HOLD)));
+    assert_eq!(watch.deadline(), None);
+    let mut watch = released(now);
+    watch.named(HOLD, ms(now, 30_000));
+    assert_eq!(watch.state, State::Idle);
+    assert!(!watch.listening());
+    assert!(!watch.marked(FIRST, HOLD));
+}
+
+/// The shown scene replaced while its run goes on.
+fn passing() -> Watch {
+    let mut watch = showing();
+    assert!(watch.replaced(&[SECOND, FIRST], THIRD));
+    assert_eq!(
+        watch.state,
+        State::Passing {
+            successor: THIRD,
+            run: HOLD,
+        }
+    );
+    watch
+}
+
+#[test]
+fn a_replaced_scene_passes_its_place_to_its_run_s_successor() {
+    let mut watch = showing();
+    assert!(!watch.replaced(&[SECOND], THIRD));
+    assert!(watch.shows(FIRST));
+    let mut watch = passing();
+    assert!(watch.listening());
+    assert_eq!(watch.deadline(), None);
+    assert_eq!(watch.shown(), None);
+    // The replaced scene leaving the mirror ends nothing.
+    assert!(!watch.gone(FIRST));
+    // Another scene of the run, or the successor from another run, takes nothing.
+    assert!(!watch.marked(SECOND, HOLD));
+    assert!(!watch.marked(THIRD, OTHER));
+    assert!(watch.listening());
+    assert!(watch.marked(THIRD, HOLD));
+    assert_eq!(
+        watch.state,
+        State::Showing {
+            scene: THIRD,
+            run: HOLD,
+            ends: None,
+        }
+    );
+    assert_eq!(watch.skipped(), None);
+}
+
+#[test]
+fn a_successor_that_never_shows_a_mark_ends_the_watch() {
+    let now = Instant::now();
+    let mut watch = passing();
+    assert!(!watch.gone(THIRD));
+    assert_eq!(watch.state, State::Idle);
+    assert!(!watch.marked(THIRD, HOLD));
+
+    let mut watch = passing();
+    watch.ended(OTHER, now);
+    assert!(watch.listening());
+    watch.ended(HOLD, now);
+    assert_eq!(watch.state, State::Idle);
+
+    let mut watch = passing();
+    assert!(!watch.changed());
+    assert_eq!(watch.state, State::Idle);
+    assert!(!watch.marked(THIRD, HOLD));
+    assert_eq!(watch.skipped(), None);
+
+    // A scene whose run has ended has no successor: it leaves as any removed scene.
+    let mut watch = showing();
+    watch.ended(HOLD, now);
+    assert!(!watch.replaced(&[FIRST], THIRD));
+    assert!(watch.shows(FIRST));
+    assert!(watch.gone(FIRST));
+    assert_eq!(watch.state, State::Idle);
 }

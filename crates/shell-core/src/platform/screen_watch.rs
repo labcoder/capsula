@@ -35,7 +35,11 @@ impl Changed {
 /// - the display's resolution, scaling or arrangement changing.
 ///
 /// After setting the bit a source wakes the UI thread, which calls
-/// [`Presenter::screen_changed`](crate::presenter::Presenter::screen_changed).
+/// [`Presenter::source_woke`](crate::presenter::Presenter::source_woke). The wake carries
+/// nothing and only has the bit read, so a wake still queued when the next release clears the
+/// bit changes nothing. A source never calls
+/// [`Presenter::screen_changed`](crate::presenter::Presenter::screen_changed), which sets the
+/// bit for an event the shell itself knows of.
 pub trait Sources {
     /// Starts every source. False when one couldn't start; the implementation has then stopped
     /// the others, and the caller shows no marks.

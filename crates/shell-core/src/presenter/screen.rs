@@ -8,12 +8,18 @@ use std::time::Instant;
 use kumochi_protocol::message::{DataToShell, RunId, SceneHeader, SceneId};
 use kumochi_scene::record::Surface;
 
-use super::{Effect, Out, Presenter, watch::Watch};
+use super::{Broken, Effect, Out, Presenter, watch::Watch};
 use crate::platform::screen_watch::Sources;
 
 /// Whether `header` begins a screen scene.
 pub(super) fn on_screen(header: &SceneHeader) -> bool {
     header.begin.surface == Surface::Screen
+}
+
+/// The line for a shown screen scene that goes by a road with no word of its own: a successor
+/// takes its place, the user clears it, the brain removes it, it fails or the session is lost.
+pub(super) fn left() {
+    tracing::info!(reason = "left", "screen marks cleared");
 }
 
 impl Presenter {
@@ -25,12 +31,14 @@ impl Presenter {
     }
 
     /// The keys of a hold whose `ScreenRelease` was sent came up at `now`; `after` is the
-    /// newest run named so far. Any screen scene still up goes and the watch starts, from a clear bit. If
-    /// its sources can't start it has seen a change: nothing could say the screen stayed as it
-    /// was.
-    pub fn screen_released(&mut self, after: RunId, now: Instant) -> Vec<Effect> {
+    /// newest run named so far. Any screen scene still up goes and the watch starts, from a
+    /// clear bit. If its sources can't start it has seen a change: nothing could say the screen
+    /// stayed as it was.
+    /// # Errors
+    /// [`Broken`] when a frame held behind a cleared scene's admission can't be mirrored.
+    pub fn screen_released(&mut self, after: RunId, now: Instant) -> Result<Vec<Effect>, Broken> {
         let mut out = Out::default();
-        self.clear_screens("release", &mut out);
+        self.clear_screens("release", now, &mut out)?;
         self.watch.released(after, now);
         self.changed.take();
         if !self.listening {
@@ -43,13 +51,14 @@ impl Presenter {
         if !self.listening {
             self.watch.changed();
         }
-        out.finish()
+        Ok(out.finish())
     }
 
-    /// The released hold's run was named. Until it is, the watch ends 30 seconds after the
-    /// release.
-    pub fn screen_run(&mut self, run: RunId) {
-        self.watch.named(run);
+    /// The released hold's run was named, at `now`. Until it is, the watch ends 30 seconds
+    /// after the release, and a name that comes later than that names nothing.
+    pub fn screen_run(&mut self, run: RunId, now: Instant) {
+        self.watch.named(run, now);
+        self.hush();
     }
 
     /// The released hold's screenshot wasn't sent, or the hold ended with no run.
@@ -66,22 +75,35 @@ impl Presenter {
         self.hush();
     }
 
-    /// Something may have changed the screen: a source set the bit and woke the UI, or the next
-    /// hold was recognized.
-    pub fn screen_changed(&mut self) -> Vec<Effect> {
+    /// A source woke the UI after setting the bit. The wake itself says nothing: it only has
+    /// the bit read, so one that arrives after a newer release finds the bit clear and changes
+    /// nothing.
+    /// # Errors
+    /// [`Broken`] when a frame held behind a cleared scene's admission can't be mirrored.
+    pub fn source_woke(&mut self, now: Instant) -> Result<Vec<Effect>, Broken> {
         let mut out = Out::default();
+        self.heed(now, &mut out)?;
+        Ok(out.finish())
+    }
+
+    /// The shell itself knows the screen is about to change: the next hold was recognized.
+    /// Never a source's wake, which is [`Presenter::source_woke`].
+    /// # Errors
+    /// [`Broken`] when a frame held behind a cleared scene's admission can't be mirrored.
+    pub fn screen_changed(&mut self, now: Instant) -> Result<Vec<Effect>, Broken> {
         self.changed.set();
-        self.heed(&mut out);
-        out.finish()
+        self.source_woke(now)
     }
 
     /// The setting went off: every screen scene goes, and one that arrives later isn't shown.
-    pub fn screen_off(&mut self) -> Vec<Effect> {
+    /// # Errors
+    /// [`Broken`] when a frame held behind a cleared scene's admission can't be mirrored.
+    pub fn screen_off(&mut self, now: Instant) -> Result<Vec<Effect>, Broken> {
         let mut out = Out::default();
-        self.clear_screens("off", &mut out);
+        self.clear_screens("off", now, &mut out)?;
         self.watch = Watch::default();
         self.hush();
-        out.finish()
+        Ok(out.finish())
     }
 
     /// The run whose marks were skipped because the screen changed first, until the next
@@ -91,21 +113,24 @@ impl Presenter {
     }
 
     /// Applies the bit, if it is set.
-    pub(super) fn heed(&mut self, out: &mut Out) {
+    pub(super) fn heed(&mut self, now: Instant, out: &mut Out) -> Result<(), Broken> {
         if self.changed.take() {
             if self.watch.changed() {
-                self.clear_screens("changed", out);
+                self.clear_screens("changed", now, out)?;
             }
             self.hush();
         }
+        Ok(())
     }
 
-    /// The watch's two limits, checked by the watchdog.
-    pub(super) fn expire_marks(&mut self, now: Instant, out: &mut Out) {
+    /// The watch's two limits as of `now`. The watchdog checks them, and so does every data
+    /// frame before it is judged, so a first mark that arrives at a limit finds it applied.
+    pub(super) fn expire_marks(&mut self, now: Instant, out: &mut Out) -> Result<(), Broken> {
         if self.watch.expired(now) {
-            self.clear_screens("limit", out);
+            self.clear_screens("limit", now, out)?;
         }
         self.hush();
+        Ok(())
     }
 
     /// Stops the sources once the watch has no more use for them.
@@ -120,42 +145,69 @@ impl Presenter {
 
     /// Judges a screen scene's first mark as its frame arrives, in the pipe's order, so a
     /// change counts even while the scene's frames wait to be applied. A skipped scene is
-    /// refused whole and never installs.
-    pub(super) fn judge(&mut self, frame: &DataToShell, out: &mut Out) {
+    /// refused whole: it never installs a step or paints, and a begin still held never installs.
+    pub(super) fn judge(
+        &mut self,
+        frame: &DataToShell,
+        now: Instant,
+        out: &mut Out,
+    ) -> Result<(), Broken> {
         let DataToShell::SceneStepCommit { run, scene, .. } = *frame else {
-            return;
+            return Ok(());
         };
         let screen = match self.scenes.get(&scene) {
             Some(mirrored) => mirrored.screen,
             None => self.screens().contains(&scene),
         };
         if !screen || self.cleared.contains(&scene) || self.watch.shows(scene) {
-            return;
+            return Ok(());
         }
+        let displaced = self.watch.shown().is_some();
         if self.watch.marked(scene, run) {
+            if displaced {
+                left();
+            }
             for other in self.screens() {
                 if other != scene {
-                    self.release(other);
+                    self.retire(other, out);
                     self.forget(other, out);
                 }
             }
         } else {
             tracing::info!("screen marks skipped");
-            self.release(scene);
+            self.retire(scene, out);
             self.forget_failed(scene, out);
         }
+        self.drain(now, out)
     }
 
-    /// Clears every screen scene as the shell's own clear.
-    fn clear_screens(&mut self, reason: &'static str, out: &mut Out) {
+    /// Clears every screen scene as the shell's own clear, and lets the frames held behind one
+    /// go on.
+    fn clear_screens(
+        &mut self,
+        reason: &'static str,
+        now: Instant,
+        out: &mut Out,
+    ) -> Result<(), Broken> {
         let screens = self.screens();
-        if !screens.is_empty() {
-            tracing::info!(reason, "screen marks cleared");
+        if screens.is_empty() {
+            return Ok(());
         }
+        tracing::info!(reason, "screen marks cleared");
         for scene in screens {
-            self.release(scene);
+            // It goes under `reason`, not as a scene that left by another road.
+            self.watch.gone(scene);
+            self.retire(scene, out);
             self.forget(scene, out);
         }
+        self.drain(now, out)
+    }
+
+    /// Drops a whole screen scene, its own admission with it: the admission is cancelled, its
+    /// credit goes back once, and its late answer finds no lane and drops.
+    fn retire(&mut self, scene: SceneId, out: &mut Out) {
+        self.cancel_admission(Some(scene), out);
+        self.release(scene);
     }
 
     /// Every screen scene not cleared: mirrored, or begun by a frame still held.

@@ -174,6 +174,10 @@ impl Presenter {
             epoch: None,
             pictures: std::array::from_fn(|_| None),
         };
+        // The shown screen scene's run keeps its watch for a successor that is its screen scene.
+        if self.watch.replaced(scenes, successor) {
+            super::screen::left();
+        }
         for (place, id) in retirement.pictures.iter_mut().zip(scenes) {
             self.remember(*id);
             let Some(mut scene) = self.scenes.remove(id) else {
