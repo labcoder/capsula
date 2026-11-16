@@ -651,6 +651,7 @@ fn a_mixed_or_forbidden_screen_call_is_stored_with_no_records() {
         vec![screen.clone(), mark.clone(), WRITTEN.to_owned()],
         vec![screen.clone(), END.to_owned(), mark.clone(), END.to_owned()],
         vec![screen.clone(), mark],
+        vec![END.to_owned()],
     ];
     envelopes.extend(
         forbidden

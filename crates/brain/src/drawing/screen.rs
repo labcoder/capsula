@@ -149,7 +149,7 @@ fn kept(args: &[u8]) -> Option<Vec<serde_json::Value>> {
             {
                 serde_json::to_value(Record::Step(without_boxes(step)))
             }
-            Record::End(_) if index == last => serde_json::to_value(record),
+            Record::End(_) if index > 0 && index == last => serde_json::to_value(record),
             _ => return Some(Vec::new()),
         };
         let Ok(value) = value else {
