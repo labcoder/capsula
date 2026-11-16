@@ -1,7 +1,8 @@
-//! A complete draw call's result waits until the shell has prepared or refused its last step,
-//! so a refusal made while preparing reaches the model in the same run. A step refused when it
-//! activates (residency or validation), or a screen scene skipped after its steps were prepared,
-//! still isn't told to the model.
+//! A complete draw call's result waits until the shell has prepared or refused its last step, so
+//! a refusal made while preparing reaches the model in the same run when that step is within
+//! eight of the scene's activated bound, the shell answers within a tick, and no end path ended
+//! the call first. A step refused when it activates (residency or validation), or a screen scene
+//! skipped after its steps were prepared, still isn't told to the model.
 
 use std::mem;
 use std::time::Duration;

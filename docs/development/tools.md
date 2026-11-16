@@ -164,14 +164,20 @@ repair round. A malformed record inside the array, or an array that never closes
 the call. An empty array with text after it still fails as `scene.BeforeBegin`. A call
 interrupted before its records ran ends as interrupted, never as complete.
 
-A complete call's result waits until the shell answers for its scene's last step with
-`StepReady`, `StepShown` or `StepFailed`, so a step the shell refuses while preparing it
-returns the stopped result above, and its phrase, in the same run. Only a last step within the
-shell's ready window (`MAX_READY_STEPS`, eight steps past the scene's activated bound) is
-waited for. The scene leaving (a clear, an eviction, a skipped screen scene or a thread
-deletion) or its run closing gives the result the call already had, and so does a whole
-`READY_WAIT` tick of one second with no answer for the scene; the timer runs only while a
-result is held. A draw call's result waits until the shell has prepared or refused its last step, so the model hears a refusal made while preparing; a step refused when it activates (Residency or Validation), or a screen scene skipped after its steps were prepared, is not reported to the model, and the person sees the existing notice when nothing is left on screen.
+A complete call's result waits until the shell answers for the last step that call committed,
+with `StepReady`, `StepShown` or `StepFailed`. A step the shell refuses while preparing it
+returns the stopped result above, and its phrase, in the same run when three things hold: the
+step is within the shell's ready window (`MAX_READY_STEPS`, eight steps past the scene's
+activated bound), the shell answers within a `READY_WAIT` tick of one second, and no end path
+ended the call first. A refusal already received wins over every release. Otherwise a clear,
+an eviction, a thread deletion or the run closing gives the result the call already had
+(complete means its records committed, not that they were shown), and so does a whole tick
+with no answer for the scene; a skipped screen scene still ends it with `ScreenChanged`, and
+sharing turned off with `ScreenOff`. The timer runs only while a result is held. A held call
+takes no more arguments: a late record or a second finish is stale. A step refused when it
+activates (Residency or Validation), or a screen scene skipped after its steps were prepared,
+is not reported to the model, and the person sees the existing notice when nothing is left on
+screen.
 
 An offered provider `draw` instead admits closed records while arguments stream. The same
 dispatcher checks the caller, offered tool and current admitted build before every handoff;
