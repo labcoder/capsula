@@ -40,13 +40,15 @@ with one of seven fixed classes, the last of them, `ModelCantSee`, appended for 
 thread is pinned to a model that can't be sent images. Nothing in it names a window. A history
 page carries the same value on the turn's user event as the appended
 `PageEventKind::HeldTurn { screen }` (tag 6), read from the run's stored `screen`
-([store](store.md#tables)). It says what the turn carried, not that a request left the machine:
-the value is stored with the turn, before any request exists. The shell shows a `HeldTurn`
-as a user turn with one thing under it. A turn whose picture was taken (`Attached`, `Screen`)
-gets an icon whose tooltip and accessible label say which picture was sent and that no copy
-is kept. That over-reports for a turn whose run failed before its first request, since the
-value is stored before any request exists. Any other turn gets one line saying why no picture
-was included. Neither names a model, because nothing records which model a held turn
+([store](store.md#tables)). The value is stored with the turn, before any request exists, and
+the brain clears a picture when its run ends before a request carried it
+([engines](engines.md#the-bound)). The shell shows a `HeldTurn`
+as a user turn with one thing under it. A turn whose picture is recorded (`Attached`, `Screen`)
+gets an icon whose tooltip and accessible label say which picture was sent and that the app
+keeps no copy. The icon is never missing from a turn whose picture left the machine. It
+over-reports only where the store does: a request admitted but failed before its upload began,
+and a crash or a failed write before the clear. Any other turn gets one line saying why no
+picture was included. Neither names a model, because nothing records which model a held turn
 ran on. `HeldScreen::Withdrawn` (tag 2) is
 appended for history only: a turn whose image the user withdrew by turning screen holds off
 before any request carried it. No `HoldScreen` ever carries it, because that run fails first.

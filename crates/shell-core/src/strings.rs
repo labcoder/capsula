@@ -378,8 +378,9 @@ impl Strings {
     }
 
     /// What the icon under a held turn says: which picture was sent with the turn. None for a
-    /// turn with no picture. The turn is stored before its run's first request, so this
-    /// over-reports for a run that failed before it. The catalog may name the app.
+    /// turn with no picture. The brain clears a picture no request carried, so this over-reports
+    /// only for a request that failed before its upload began, or after a crash before the
+    /// clear. The catalog may name the app.
     pub fn pictured(&self, screen: HeldScreen) -> Option<String> {
         let text = match screen {
             HeldScreen::Attached => Text::ScreenHistoryAttached,
