@@ -836,11 +836,12 @@ fn episode(outer: &mut gpui_kit::TestAppContext, case: Case) {
     );
     // Bytes include each held LayoutState's empty behind-anchor and fit maps (24 bytes each, no
     // allocation): two in the kept Scene (rest and view) and four in the recovered-scenes buffer.
+    // They also include the screen unit each step's preparation carries (8 bytes, never retained).
     let bound = match case {
-        Case::A => [390, 131_249, 167, 65_694],
-        Case::B => [392, 130_113, 169, 64_558],
-        Case::C | Case::E => [149, 46_076, 65, 19_394],
-        Case::D => [395, 131_177, 172, 65_622],
+        Case::A => [390, 131_281, 167, 65_694],
+        Case::B => [392, 130_145, 169, 64_558],
+        Case::C | Case::E => [149, 46_108, 65, 19_394],
+        Case::D => [395, 131_209, 172, 65_622],
     };
     assert!(
         allocations <= bound[0]
