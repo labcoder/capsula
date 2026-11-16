@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use kumochi_protocol::message::{MAX_READY_STEPS, RunId, SceneId};
 
-use super::{Drawing, Output};
+use super::{CallError, Drawing, Output};
 
 /// How long a held call waits with no answer from the shell for its scene: four times the
 /// shell's 250 ms preparation deadline. A tick that finds no answer since the last one ends it.
@@ -60,6 +60,17 @@ impl Drawing {
         }
     }
 
+    /// The shell refused `scene`'s step `index`: a held call that committed it or a later step
+    /// ends with `error` however it's released, even before the queued cut reaches it.
+    pub(super) fn refused(&mut self, scene: SceneId, index: u32, error: &CallError) {
+        for at in self.open_in(scene) {
+            let call = &mut self.calls[at];
+            if call.awaits.is_some() && call.last.is_some_and(|last| last >= index) {
+                call.refusal.get_or_insert_with(|| error.clone());
+            }
+        }
+    }
+
     /// [`READY_WAIT`] passed: a held call that heard nothing since the last tick gets its result.
     pub(super) fn ready_wait(&mut self, out: &mut Output) {
         for at in 0..self.calls.len() {
@@ -86,8 +97,8 @@ impl Drawing {
         }
     }
 
-    /// Runs up to `closed` ended, so nobody can hear a refusal now: their held calls get their
-    /// results instead of being interrupted.
+    /// Runs up to `closed` ended, so no later refusal can be heard: their held calls get their
+    /// results instead of being interrupted, a refusal already received included.
     pub(super) fn release_closed(&mut self, closed: RunId, out: &mut Output) {
         for at in 0..self.calls.len() {
             let call = &self.calls[at];
@@ -105,6 +116,9 @@ impl Drawing {
     }
 
     fn release(&mut self, at: usize, out: &mut Output) {
+        if let Some(error) = self.calls[at].refusal.take() {
+            return self.end(at, Some(error), out);
+        }
         let after_records = self.calls[at].after_records;
         self.end(at, None, out);
         out.calls

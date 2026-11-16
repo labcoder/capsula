@@ -547,6 +547,7 @@ impl Drawing {
             } => {
                 if self.committed_by(run, scene, index, &mut out) {
                     self.replacement_failed(scene, &mut out);
+                    self.refused(scene, index, &scenes::failure(reason, &cut));
                     let job = Job::Cut {
                         scene,
                         cut,

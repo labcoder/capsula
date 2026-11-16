@@ -243,6 +243,8 @@ pub(super) struct Call {
     pub(super) heard: bool,
     /// Text after its records array was ignored, told with its result.
     pub(super) after_records: bool,
+    /// The shell refused one of its steps while it was held, before the cut reached it.
+    pub(super) refusal: Option<CallError>,
 }
 
 impl Call {
@@ -477,6 +479,7 @@ impl Drawing {
             answered: None,
             heard: false,
             after_records: false,
+            refusal: None,
         });
         let at = self.calls.len() - 1;
         if exhausted {

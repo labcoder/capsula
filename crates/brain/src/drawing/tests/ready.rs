@@ -248,6 +248,8 @@ fn a_ready_step_its_run_never_committed_breaks_the_session() {
     )));
 }
 
+const PAINT: &str = "drawn: [a, b]; stopped: drawing.TooMuchToPaint; nothing of this scene was shown, so it was removed; everything on screen can hold about 40 filled circles or ellipses, or a diagram of about 30 boxes with labelled arrows; begin a new scene with a new name and fewer or simpler shapes";
+
 fn finished(call: &str) -> Input {
     Input::CallFinished {
         thread: THREAD,
@@ -255,6 +257,55 @@ fn finished(call: &str) -> Input {
         call: CallId::new(call).expect("call id"),
         error: None,
     }
+}
+
+/// The held call's last step refused while another scene's lookup is still pending, so the
+/// refusal's cut waits in the queue. The pending work, to settle later.
+fn refused_behind_other_work(store: &mut Store, drawing: &mut Drawing) -> Output {
+    held(store, drawing);
+    assert_eq!(store.run(drawing, Input::ReadyWait).calls, []);
+    let other = drawing
+        .handle(streamed("other", 0, &begin("other", "")))
+        .expect("a fresh call");
+    assert_eq!(
+        drawing.handle(refused(1)).expect("a committed step").calls,
+        []
+    );
+    other
+}
+
+#[test]
+fn a_refusal_received_behind_other_work_wins_over_the_tick() {
+    let mut drawing = Drawing::default();
+    let mut store = silent();
+    let other = refused_behind_other_work(&mut store, &mut drawing);
+    let tick = drawing.handle(Input::ReadyWait).expect("a tick");
+    assert_eq!(texts(&tick), [PAINT]);
+    assert!(!drawing.holding());
+    assert_eq!(store.settle(&mut drawing, other).calls, []);
+}
+
+#[test]
+fn a_refusal_received_behind_other_work_wins_over_the_run_closing() {
+    let mut drawing = Drawing::default();
+    let mut store = silent();
+    let other = refused_behind_other_work(&mut store, &mut drawing);
+    let closing = drawing.handle(closed(1)).expect("a close");
+    let two = CallId::new("two").expect("call id");
+    let ended: Vec<_> = closing.calls.iter().filter(|end| end.call == two).collect();
+    assert_eq!(ended.len(), 1);
+    assert_eq!(
+        ended[0].error,
+        Some(CallError::TooMuchToPaint { cleared: true })
+    );
+    assert_eq!(ended[0].drawn.len(), 2);
+    assert!(
+        store
+            .settle(&mut drawing, other)
+            .calls
+            .iter()
+            .all(|end| end.call != two)
+    );
 }
 
 #[test]
