@@ -1474,12 +1474,15 @@ fn no_screen_number_reaches_a_stored_round_whatever_the_call_holds() {
     assert!(stored[0].contains(LABEL), "{}", stored[0]);
 }
 
-/// Applies `next` and every effect it leads to: drawing writes made durable, scene clears
-/// cleared and acknowledged. Every effect seen, in order.
 /// A complete call's result waits for the shell, so a refusal of its last step while the shell
-/// prepares it reaches the model as a redraw in the same run, and the wait's tick stops after.
+/// prepares it reaches the model, which draws again in the next round of the same run, and the
+/// wait's tick stops once nothing is held.
 #[test]
-fn a_held_result_carries_a_refusal_of_its_last_step_and_the_run_goes_on() {
+#[expect(
+    clippy::too_many_lines,
+    reason = "one run from the held refusal through the next round's redraw"
+)]
+fn a_held_refusal_of_its_last_step_is_redrawn_in_the_same_run() {
     use kumochi_protocol::message::SceneFailure;
     let scratch = Scratch::new("draw-tool-held");
     let mut store = store(&scratch);
@@ -1570,13 +1573,97 @@ fn a_held_result_carries_a_refusal_of_its_last_step_and_the_run_goes_on() {
             .iter()
             .any(|effect| matches!(effect, Effect::Store(StoreOp::EndRun { .. })))
     );
+    let result = failed
+        .iter()
+        .find_map(|effect| match effect {
+            Effect::Store(StoreOp::CommitCall(call)) => Some(call.clone()),
+            _ => None,
+        })
+        .expect("the refused call's result");
     assert_eq!(
-        answer(&mut core, &mut store, &failed),
+        result.output,
         ToolOutput::Text("drawn: [s1, s2]; stopped: drawing.TooMuchToPaint; nothing of this scene was shown, so it was removed; everything on screen can hold about 40 filled circles or ellipses, or a diagram of about 30 boxes with labelled arrows; begin a new scene with a new name and fewer or simpler shapes".into())
     );
+    let outcome = store.commit_call(&result).expect("durable result");
+    let settled = core
+        .handle(Input::CallCommitted {
+            key: result.key,
+            outcome,
+            then: None,
+        })
+        .expect("acknowledgement");
+    assert_eq!(core.handle(Input::ReadyWait), Ok(Vec::new()));
+    let round = settled
+        .iter()
+        .find_map(|effect| match effect {
+            Effect::Store(StoreOp::RoundItems(round)) => Some(round),
+            _ => None,
+        })
+        .expect("the refused round");
+    store
+        .append_round(
+            (round.thread, round.run),
+            round.connection,
+            round.text.as_deref(),
+            &round.items,
+            &round.calls,
+        )
+        .expect("durable round");
+    let building = core
+        .handle(Input::RoundStored {
+            run: R,
+            round: round.round,
+        })
+        .expect("the refusal starts the next round");
+    let (key, _) = admitted_request(&mut core, &building, vec![T]);
+    assert_eq!(key.run, R);
+    let fixed = serde_json::to_string(&json!({"records":[
+        {"begin":{"v":1,"scene":"smaller","surface":"overlay","alt":"smaller"}},
+        {"step":{"id":"t1","put":[{"shape":{"id":"c","kind":"rect","box":[0,0,10,10]}}]}},
+        {"end":{}}
+    ]}))
+    .expect("fixture");
+    core.handle(Input::Engine {
+        key,
+        event: TurnEvent::ToolCallStarted {
+            call: id("fixed"),
+            name: crate::engines::ToolName::Draw,
+        },
+    })
+    .expect("started");
+    let lookup = core
+        .handle(Input::Engine {
+            key,
+            event: TurnEvent::ToolArgsDelta {
+                call: id("fixed"),
+                delta: fixed.clone(),
+            },
+        })
+        .expect("intake");
+    core.handle(Input::Engine {
+        key,
+        event: TurnEvent::ToolCallReady {
+            call: id("fixed"),
+            args: fixed,
+        },
+    })
+    .expect("ready");
+    core.handle(Input::Engine {
+        key,
+        event: TurnEvent::Finished(Finish::Completed),
+    })
+    .expect("round done");
+    let drawn = settle(&mut core, &mut store, lookup);
+    assert_eq!(
+        answer(&mut core, &mut store, &drawn),
+        ToolOutput::Text("drawn: [t1]".into())
+    );
+    assert_eq!(core.current.as_ref().expect("the same run").id, R);
     assert_eq!(core.handle(Input::ReadyWait), Ok(Vec::new()));
 }
 
+/// Applies `next` and every effect it leads to: drawing writes made durable, scene clears
+/// cleared and acknowledged. Every effect seen, in order.
 fn settle(core: &mut Coordinator, store: &mut Store, mut next: Vec<Effect>) -> Vec<Effect> {
     let mut all = Vec::new();
     while !next.is_empty() {
