@@ -358,6 +358,42 @@ the answer text, and hands it the steps it lets through.
 
 [ipc](ipc.md#scenes-and-recovery) has the recovery states and the install rules.
 
+## A screen hold's pointer line
+
+Not called yet: the screen hold's activation is the first caller of everything in this section.
+
+While a screen hold's keys are down, the shell draws where the pointer goes, in the drawing
+overlay, as the picture will show it. `presence/ink.rs` holds the three pieces.
+
+- **The sampler.** `Sampler` owns one hold's [path recorder](input.md#a-holds-pointer-path), the
+  line as the overlay strokes it, and a timer. Every 16 ms the timer runs a tick on the UI
+  thread, in an update of the entity that started it. It ends when the tick answers false, when
+  that entity is gone, or when the sampler is dropped. The line is reserved once, for 2,049
+  points, and is copied from the recorder only on a tick that changed the path, so sampling
+  allocates nothing.
+- **The strokes.** `strokes` builds the line as two paths: a white edge, then a pink core to
+  paint over it. The brain paints the same path on the hold's image as one capsule per segment
+  (`crates/brain/src/screen/ink.rs`), so the strokes have round joins and round ends
+  (`Scratch::capsules`). The colours and half-widths are the painter's: pink `255, 20, 147`,
+  1.5 image pixels for the core and 2.5 with the edge. A width on screen is the picture's width
+  mapped back to the display: the brain shrinks a display to fit 1,280 by 720 and never enlarges
+  it, so on a 2,560 by 1,440 display the line is 6 physical pixels of pink inside 10 of white.
+  Neither crate sees the other's numbers; a test on each side pins the same literals.
+- **What a frame costs.** GPUI takes each path by value, so the line is two exactly sized
+  allocations per frame, handed to GPUI like every other stroke in the overlay. A line that
+  needs more vertices than the stroke scratch holds is refused, not grown.
+- **The stamp.** `Presence::acquire_stamped` takes the capture lease and then reads the
+  performance counter. Every surface was excluded before that reading, so the brain's capture
+  can refuse any frame drawn before it. A reading that isn't a positive number gives the lease
+  back and refuses.
+
+Points are physical desktop pixels, and the overlay covers the primary display from the
+desktop's origin, so a point needs only the display's scale to become the overlay's logical
+pixels. A point is drawn at its pixel's centre, where the painter puts it.
+
+`measure_the_hold_line`, an ignored test beside the code, times building both paths for lines
+of 2, 256 and 2,048 points, and a sampler's worst case of a new point on every tick.
+
 ## Perch hosts
 
 The perch (C2b) drops Kumo on another app's title bar. C2b-1 adds the reads and the geometry.
