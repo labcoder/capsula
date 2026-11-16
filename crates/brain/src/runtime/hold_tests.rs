@@ -3,8 +3,8 @@ use std::sync::atomic::Ordering;
 
 use kumochi_protocol::frame::{self, Pipe};
 use kumochi_protocol::message::{
-    ConnectionKind, ControlToBrain, ControlToShell, DataToBrain, DataToShell, Effort, GestureId,
-    HoldFailure, HoldStatus, MicPcm, ModelChoice, ModelSlug, RunOrigin, ThreadId,
+    CaptureFor, ConnectionKind, ControlToBrain, ControlToShell, DataToBrain, DataToShell, Effort,
+    GestureId, HoldFailure, HoldStatus, MicPcm, ModelChoice, ModelSlug, RunOrigin, ThreadId,
 };
 use tokio::io::AsyncWriteExt as _;
 use tokio::sync::mpsc;
@@ -432,6 +432,61 @@ async fn accepted_sparse_capture_pcm_reaches_transcription() {
     .unwrap();
     brain.close().await;
     assert_eq!(users(&scratch), ["sparse capture transcript"]);
+}
+
+#[tokio::test]
+async fn a_screen_holds_words_wait_for_its_picture_in_the_running_brain() {
+    use crate::runtime::hold::tests::screen_hold::{recognized, release as released, seeing};
+    type Request = <crate::screen::Holds as crate::supervise::Kind>::Request;
+    type Reply = <crate::screen::Holds as crate::supervise::Kind>::Reply;
+    let scratch = Scratch::new("hold-screen-words");
+    let (mut brain, release, mut decoded, _fetch) =
+        input(&scratch, vec![5, -5], "words before the picture").await;
+    let mut rig = seeing(&mut brain);
+    let ((control, data), mut shell) = duplex();
+    let mut tap = Tap::from_env();
+    let client = async {
+        opened(&mut shell).await;
+        shell.send(&recognized(G)).await;
+        status(&mut shell, HoldStatus::Admitted).await;
+        shell.send(&released(G, 100, 200, 2)).await;
+        let (id, display) = rig.next().await;
+        packet(&mut shell, 16_000, 0, true, vec![5, -5]).await;
+        release_source(&mut shell, 1).await;
+        status(&mut shell, HoldStatus::Transcribing).await;
+        crate::screen::hold_frame(&rig, id, display).await;
+        assert_eq!(
+            shell.control().await,
+            Some(ControlToShell::CaptureDone {
+                capture_for: CaptureFor::Gesture(G)
+            })
+        );
+        let (id, seal) = rig.next().await;
+        assert!(matches!(seal, Request::Seal(_)), "{seal:?}");
+        assert_eq!(decoded.recv().await, Some(()));
+        // The words come in while the seal is unanswered, within the ticket's 1.5 s, and wait in
+        // the brain's loop for the picture.
+        release.send(()).unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        let refused = Reply::Refused(crate::screen::Refusal::DisplayChanged);
+        rig.reply(id, &refused).await;
+        let (id, retire) = rig.next().await;
+        let Request::Retire(owner) = retire else {
+            panic!("not a retire: {retire:?}")
+        };
+        rig.reply(id, &Reply::Released(owner, None)).await;
+        let (run, _) = shell.state().await;
+        assert!(matches!(shell.data().await, DataToShell::Models { .. }));
+        shell.read_to_end(run).await;
+        drop(shell);
+    };
+    let (_, ()) = tokio::time::timeout(super::PATIENCE, async {
+        tokio::join!(brain.serve(control, data, &mut tap), client)
+    })
+    .await
+    .unwrap();
+    brain.close().await;
+    assert_eq!(users(&scratch), ["words before the picture"]);
 }
 
 #[tokio::test]

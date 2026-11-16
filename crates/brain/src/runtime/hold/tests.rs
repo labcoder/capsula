@@ -7,7 +7,7 @@ use crate::tap::Tap;
 use crate::test_support::{self, Scratch};
 use kumochi_protocol::message::GestureId;
 
-mod screen_hold;
+pub(in crate::runtime) mod screen_hold;
 
 const KEY: HoldKey = HoldKey {
     epoch: 0,

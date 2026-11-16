@@ -26,14 +26,22 @@ async fn desk(
 ) {
     let (mut brain, release, decoded, fetch) =
         crate::runtime::tests::holds::input(scratch, Vec::new(), "not submitted").await;
-    let (rig, _sol, _luna) = sees_on_sol(&mut brain);
-    brain.holds.window_capture = true;
-    brain.holds.stamp_age = AGE;
-    set(&mut brain, SettingsOp::SetShowScreen(true));
+    let rig = seeing(&mut brain);
     (brain, rig, Box::new((release, decoded, fetch)))
 }
 
-fn recognized(gesture: GestureId) -> ControlToBrain {
+/// Lets `brain`'s default model take images, with the screen shown, and gives it a worker rig.
+pub(in crate::runtime) fn seeing(
+    brain: &mut Brain,
+) -> crate::supervise::fixture::Rig<crate::screen::Holds> {
+    let (rig, _sol, _luna) = sees_on_sol(brain);
+    brain.holds.window_capture = true;
+    brain.holds.stamp_age = AGE;
+    set(brain, SettingsOp::SetShowScreen(true));
+    rig
+}
+
+pub(in crate::runtime) fn recognized(gesture: GestureId) -> ControlToBrain {
     ControlToBrain::ScreenHoldRecognized {
         gesture,
         thread: None,
@@ -42,7 +50,12 @@ fn recognized(gesture: GestureId) -> ControlToBrain {
     }
 }
 
-fn release(gesture: GestureId, t_qpc: u64, excluded_qpc: u64, points: usize) -> ControlToBrain {
+pub(in crate::runtime) fn release(
+    gesture: GestureId,
+    t_qpc: u64,
+    excluded_qpc: u64,
+    points: usize,
+) -> ControlToBrain {
     ControlToBrain::ScreenRelease {
         gesture,
         lease: LEASE,
