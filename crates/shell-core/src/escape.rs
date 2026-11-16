@@ -123,9 +123,58 @@ impl<H> EscapeHold<H> {
     }
 }
 
+/// Holds Esc with the talk keys down while a hold's keys are down, so that press cancels the
+/// hold and Windows doesn't act on it as well.
+#[derive(Debug)]
+pub struct TalkEscape<H> {
+    hotkey: Option<H>,
+    refused: bool,
+}
+
+impl<H> Default for TalkEscape<H> {
+    fn default() -> Self {
+        Self {
+            hotkey: None,
+            refused: false,
+        }
+    }
+}
+
+impl<H> TalkEscape<H> {
+    /// Holds the chord for the hold whose keys are down, asking Windows once. A refusal is
+    /// logged once for that hold, without key or text content, and isn't retried.
+    pub fn acquire<E: std::fmt::Display>(&mut self, register: impl FnOnce() -> Result<H, E>) {
+        if self.hotkey.is_some() || self.refused {
+            return;
+        }
+        match register() {
+            Ok(hotkey) => self.hotkey = Some(hotkey),
+            Err(error) => {
+                tracing::warn!(%error, "can't hold Esc with the talk keys down; Esc may not cancel this hold");
+                self.refused = true;
+            }
+        }
+    }
+
+    /// Gives the chord back once the hold's keys are up or it ended.
+    pub fn release(&mut self) {
+        self.hotkey = None;
+        self.refused = false;
+    }
+
+    /// Whether Windows refused the chord for the hold whose keys are down.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn refused(&self) -> bool {
+        self.refused
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{Activity, Escape, EscapeHold, Panel, decide};
+    use std::cell::Cell;
+    use std::rc::Rc;
+
+    use super::{Activity, Escape, EscapeHold, Panel, TalkEscape, decide};
 
     #[test]
     fn onboarding_cancels_an_edit_or_dismisses_only_after_pull_stop_and_clear() {
@@ -331,5 +380,52 @@ mod tests {
         hold.acquire(|| Err("taken"));
         hold.release();
         assert!(!hold.shows_stop());
+    }
+
+    struct Held(Rc<Cell<u32>>);
+
+    impl Drop for Held {
+        fn drop(&mut self) {
+            self.0.set(self.0.get() + 1);
+        }
+    }
+
+    #[test]
+    fn esc_with_the_talk_keys_is_held_once_a_hold_and_given_back_when_its_keys_are_up() {
+        let (asked, freed) = (Cell::new(0), Rc::new(Cell::new(0)));
+        let register = || {
+            asked.set(asked.get() + 1);
+            Ok::<_, &str>(Held(Rc::clone(&freed)))
+        };
+        let mut chord = TalkEscape::default();
+        chord.release();
+        assert_eq!((asked.get(), freed.get()), (0, 0), "no hold");
+        chord.acquire(register);
+        chord.acquire(register);
+        assert_eq!((asked.get(), freed.get()), (1, 0), "one hold");
+        assert!(!chord.refused());
+        chord.release();
+        assert_eq!((asked.get(), freed.get()), (1, 1), "its keys are up");
+        chord.acquire(register);
+        assert_eq!((asked.get(), freed.get()), (2, 1), "the next hold");
+    }
+
+    #[test]
+    fn a_refused_esc_with_the_talk_keys_is_not_asked_for_again_until_the_next_hold() {
+        let asked = Cell::new(0);
+        let register = || {
+            asked.set(asked.get() + 1);
+            Err::<(), _>("taken")
+        };
+        let mut chord = TalkEscape::default();
+        chord.acquire(register);
+        chord.acquire(register);
+        assert_eq!(asked.get(), 1);
+        assert!(chord.refused());
+        chord.release();
+        assert!(!chord.refused());
+        chord.acquire(register);
+        assert_eq!(asked.get(), 2);
+        assert!(chord.refused());
     }
 }

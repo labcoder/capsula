@@ -399,6 +399,18 @@ impl PresenceNative {
         EscapeHotkey::register(self.hwnd)
     }
 
+    /// Holds Esc with Ctrl and Alt down system-wide until the returned value drops.
+    ///
+    /// # Errors
+    /// Fails when another app, or this one, already holds that chord.
+    pub(crate) fn register_talk_escape(&self) -> Result<EscapeHotkey, PresenceError> {
+        #[cfg(test)]
+        if self.hwnd.is_invalid() {
+            return Err(PresenceError::NotWin32);
+        }
+        EscapeHotkey::register_with_talk_keys(self.hwnd)
+    }
+
     /// Keeps the proxy, which shows over the dock, out of capture like the GPUI surfaces.
     ///
     /// # Errors

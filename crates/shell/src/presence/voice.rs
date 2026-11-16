@@ -129,6 +129,14 @@ impl Presence {
             .is_some_and(|hold| hold.terminal.is_none())
     }
 
+    /// Whether a hold's keys are down: recognized, and neither released nor ended.
+    fn voice_held(&self) -> bool {
+        self.voice
+            .pending
+            .as_ref()
+            .is_some_and(|hold| hold.released.is_none() && hold.terminal.is_none())
+    }
+
     pub(super) fn voice_run(
         &mut self,
         run: RunId,
@@ -190,6 +198,13 @@ impl Presence {
     fn voice_notice(&mut self, text: Text, cx: &mut Context<'_, Self>) {
         tracing::debug!(stage = ?FailureStage::Notice, reason = ?text, "held speech input notice");
         self.voice.status = Some(text);
+        // Every change to the pending hold ends in a notice, so the chord follows its keys here.
+        if self.voice_held() {
+            let native = &self.native;
+            self.talk_escape.acquire(|| native.register_talk_escape());
+        } else {
+            self.talk_escape.release();
+        }
         self.refresh_dock(cx);
         if self
             .runs_changed(cx)
