@@ -323,7 +323,7 @@ pub(crate) async fn hold_frame(
     id: u64,
     request: Request,
 ) {
-    let Request::Context { key, .. } = request else {
+    let (Request::Context { key, .. } | Request::Display { key, .. }) = request else {
         panic!("not a capture: {request:?}")
     };
     let meta = super::wire::FrameMeta {
