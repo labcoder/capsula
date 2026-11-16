@@ -20,6 +20,9 @@ use crate::threads::Threads;
 
 gpui_kit::actions!(thread_messages, [EarlierMessages, LaterMessages]);
 
+/// The icon under a held turn whose picture was taken; another pick is this one line.
+const PICTURED: gpui_kit::assets::IconName = gpui_kit::assets::IconName::Monitor;
+
 pub(super) struct Messages {
     model: Entity<Threads>,
     owner: WeakEntity<Presence>,
@@ -56,8 +59,10 @@ struct Row {
     warning: Option<SharedString>,
     feedback: Option<SharedString>,
     cut: Option<SharedString>,
-    /// Under a held turn: what its screen hold carried.
+    /// Under a held turn: why its screen hold's picture wasn't included.
     screen: Option<SharedString>,
+    /// Under a held turn whose picture was taken: what its icon says.
+    pictured: Option<SharedString>,
 }
 
 impl Row {
@@ -497,6 +502,7 @@ fn row(
                 None
             },
             screen: None,
+            pictured: None,
         };
     }
     let label = match kind {
@@ -531,6 +537,10 @@ fn row(
             }
             _ => None,
         },
+        pictured: match kind {
+            PageEventKind::HeldTurn { screen } => strings.pictured(screen).map(Into::into),
+            _ => None,
+        },
     }
 }
 
@@ -543,6 +553,7 @@ fn message_text(row: &Row, field: &'static str, value: SharedString) -> gpui_kit
 }
 
 fn message(row: &Row, controls: Option<gpui_kit::AnyElement>, cx: &App) -> gpui_kit::AnyElement {
+    use gpui_kit::StatefulInteractiveElement as _;
     let id = row.id;
     div()
         .id(id)
@@ -573,6 +584,42 @@ fn message(row: &Row, controls: Option<gpui_kit::AnyElement>, cx: &App) -> gpui_
             div()
                 .text_sm()
                 .child(message_text(row, "issue-details", details))
+        }))
+        .children(row.pictured.clone().map(|tip| {
+            // The row around it keeps the icon, and so its tooltip, to the icon's own size.
+            div().flex().child(
+                div()
+                    .id("held-picture")
+                    .role(gpui_kit::Role::Image)
+                    .aria_label(tip.clone())
+                    .debug_selector({
+                        let tip = tip.clone();
+                        move || format!("held-picture-{} {tip}", id.1)
+                    })
+                    .child(
+                        // shortcut: today's theme has no text colour subtler than muted, so the icon
+                        // rests at muted and brightens to the text colour; use the design's subtle
+                        // and muted pair once the theme has both.
+                        gpui_kit::svg()
+                            .path(PICTURED.path())
+                            .size_4()
+                            .text_color(cx.theme().muted_foreground)
+                            .hover(|style| style.text_color(cx.theme().foreground)),
+                    )
+                    .tooltip(move |window, cx| {
+                        let tip = tip.clone();
+                        gpui_kit::component::tooltip::Tooltip::element(move |_, _| {
+                            div()
+                                .max_w(px(304.0))
+                                .debug_selector({
+                                    let tip = tip.clone();
+                                    move || format!("held-picture-tip {tip}")
+                                })
+                                .child(tip.clone())
+                        })
+                        .build(window, cx)
+                    }),
+            )
         }))
         .children(
             row.screen
@@ -724,12 +771,13 @@ mod tests {
     }
 
     #[gpui::test]
-    fn a_held_turn_is_a_user_turn_with_one_line_saying_what_its_screen_hold_carried(
+    fn a_held_turn_is_a_user_turn_with_an_icon_for_its_picture_or_a_line_saying_why_none(
         cx: &mut TestAppContext,
     ) {
         use kumochi_protocol::message::{HeldScreen, ScreenClass};
         cx.update(|cx| {
             cx.set_global(Strings::english());
+            let app = kumochi_protocol::constants::DISPLAY_NAME;
             let mut user = event(1);
             user.kind = PageEventKind::User;
             let mut state = Threads::chat_for_tests();
@@ -740,41 +788,107 @@ mod tests {
                 plain[0].label.as_deref(),
                 Some(cx.global::<Strings>().get(Text::ThreadUser).as_str())
             );
-            assert_eq!(plain[0].screen, None);
-            for (screen, line) in [
+            assert_eq!((&plain[0].screen, &plain[0].pictured), (&None, &None));
+            for (screen, line, icon) in [
                 (
                     HeldScreen::Attached,
-                    "Included the window under your pointer",
+                    None,
+                    Some(format!("A screenshot of the window under your pointer was sent in this message. {app} keeps no copy.")),
+                ),
+                (
+                    HeldScreen::Screen,
+                    None,
+                    Some(format!("A screenshot of your screen was sent in this message. {app} keeps no copy.")),
                 ),
                 (
                     HeldScreen::NotIncluded(ScreenClass::Changed),
-                    "Screen not included: the window changed",
+                    Some("Screen not included: the window changed"),
+                    None,
                 ),
                 (
                     HeldScreen::NotIncluded(ScreenClass::ModelCantSee),
-                    "Screen not included: screen sharing isn't available with this model",
+                    Some("Screen not included: screen sharing isn't available with this model"),
+                    None,
                 ),
                 (
                     HeldScreen::Withdrawn,
-                    "Screen not included: you turned screen sharing off",
+                    Some("Screen not included: you turned screen sharing off"),
+                    None,
                 ),
             ] {
                 user.kind = PageEventKind::HeldTurn { screen };
                 state.events = vec![user.clone()];
                 let held = stored_rows(&state, cx);
                 assert_eq!(held.len(), 1);
-                assert_eq!(held[0].screen.as_deref(), Some(line), "{screen:?}");
+                assert_eq!(held[0].screen.as_deref(), line, "{screen:?}");
+                assert_eq!(held[0].pictured.as_deref(), icon.as_deref(), "{screen:?}");
                 // Everything else is the plain user turn.
                 let mut same = held[0].clone();
                 same.screen = None;
+                same.pictured = None;
                 assert!(same == plain[0], "{screen:?}");
             }
-            // A turn that carried the screen's picture has no line of its own yet.
-            let screen = HeldScreen::Screen;
-            user.kind = PageEventKind::HeldTurn { screen };
-            state.events = vec![user];
-            assert!(stored_rows(&state, cx)[0] == plain[0], "{screen:?}");
         });
+    }
+
+    #[gpui::test]
+    fn only_a_pictured_turn_draws_the_icon_and_hovering_it_shows_its_sentence(
+        cx: &mut TestAppContext,
+    ) {
+        use kumochi_protocol::message::{HeldScreen, ScreenClass};
+        let app = kumochi_protocol::constants::DISPLAY_NAME;
+        let sentences = [
+            format!("A screenshot of your screen was sent in this message. {app} keeps no copy."),
+            format!(
+                "A screenshot of the window under your pointer was sent in this message. {app} keeps no copy."
+            ),
+        ];
+        let events = [
+            PageEventKind::HeldTurn {
+                screen: HeldScreen::Screen,
+            },
+            PageEventKind::HeldTurn {
+                screen: HeldScreen::Attached,
+            },
+            PageEventKind::HeldTurn {
+                screen: HeldScreen::NotIncluded(ScreenClass::Changed),
+            },
+            PageEventKind::User,
+        ]
+        .into_iter()
+        .zip(1..)
+        .map(|(kind, id)| PageEvent { kind, ..event(id) })
+        .collect();
+        let (_, _, window) = open_with_events(cx, events);
+        cx.run_until_parked();
+        let mut frame = gpui_kit::VisualTestContext::from_window(window, cx);
+        // Each turn against each sentence: the screen turn says the first and the window turn
+        // the second, and neither the refused turn nor the typed one draws an icon.
+        let drawn = (1..=4).map(|id| {
+            sentences
+                .each_ref()
+                .map(|tip| frame.debug_bounds(format!("held-picture-{id} {tip}").leak()))
+        });
+        let drawn: Vec<_> = drawn.collect();
+        assert_eq!(
+            drawn
+                .iter()
+                .map(|icons| icons.map(|icon| icon.is_some()))
+                .collect::<Vec<_>>(),
+            [[true, false], [false, true], [false, false], [false, false]]
+        );
+        let icon = drawn[0][0].expect("the screen turn's icon");
+        // The icon is 16 pixels square, not the row's width, so only it answers a hover.
+        assert_eq!(icon.size, size(px(16.0), px(16.0)));
+        let tip: &str = format!("held-picture-tip {}", sentences[0]).leak();
+        assert!(frame.debug_bounds(tip).is_none());
+        frame.simulate_mouse_move(icon.center(), None, gpui_kit::Modifiers::default());
+        frame
+            .executor()
+            .advance_clock(std::time::Duration::from_millis(500));
+        frame.run_until_parked();
+        frame.update(|window, cx| window.draw(cx).clear(cx));
+        assert!(frame.debug_bounds(tip).is_some());
     }
 
     #[gpui::test]
