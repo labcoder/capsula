@@ -181,9 +181,13 @@ pull request that activates it.
   corner radius `r`, so the corner arc clears the padded corner. A ring round a small thing
   and a box round a wide, short one get round ends. An underline is a bar a pad below the
   box. A marker is a wash at most `MAX_MARKER_OPACITY` (30%) opaque, and a spotlight dims
-  the rest by at most `MAX_SPOTLIGHT_DIM` (35%). A label sits outside its target's marked
-  box and every other object's: first on the named side, then on the others. With no side
-  inside the canvas it fails the step with `NoRoom`. The constants live in `screen` and
+  the rest by at most `MAX_SPOTLIGHT_DIM` (35%); a scene holds one spotlight, and a second is
+  `Unsupported` at its `style`. A label sits off every other object, every box a mark points
+  at, and its own target's marked box grown to cover any object around that target: first on
+  the named side, then on the others. Labels are laid out after the other marks of their
+  step, and every step lays the earlier labels out again: a label stays where it is until a
+  new mark lands on it, and then moves. With no side inside the canvas it fails the step with
+  `NoRoom`. The constants live in `screen` and
   `limits` for the designer to change.
 - **Placement.** `screen::placement` is a pure function from the stamped display, the canvas
   size and the overlay's display to the canvas-to-overlay transform, in logical pixels. It

@@ -515,19 +515,96 @@ fn a_label_sits_on_the_named_side_outside_its_mark_or_the_next_free_side() {
         item(&result, "c").bounds
     };
     let marks = |target: [u32; 4]| json!([{"highlight":{"id":"h","target":{"box":target}}}]);
-    // Label 40 by 15; 7 canvas units from the box: pad 4, stroke 2, edges 2 and gap 6, halved.
+    // Label 40 by 15, 3 canvas units (the 6 px gap, halved) off the ring, whose outline reaches
+    // 5.757 out: pad 2, the 6-unit corner's growth 1.757 and outline 2.
     let top = label([600, 300, 80, 40], "top", marks([600, 300, 80, 40]));
-    assert!(near(top, [620.0, 278.0, 40.0, 15.0]), "{top:?}");
+    assert!(near(top, [620.0, 276.243, 40.0, 15.0]), "{top:?}");
     let left = label([600, 300, 80, 40], "left", marks([600, 300, 80, 40]));
-    assert!(near(left, [553.0, 312.5, 40.0, 15.0]), "{left:?}");
+    assert!(near(left, [551.243, 312.5, 40.0, 15.0]), "{left:?}");
     let bottom = label([600, 2, 80, 40], "top", marks([600, 2, 80, 40]));
-    assert!(near(bottom, [620.0, 49.0, 40.0, 15.0]), "{bottom:?}");
+    assert!(near(bottom, [620.0, 50.757, 40.0, 15.0]), "{bottom:?}");
     let blocked = json!([
         {"highlight":{"id":"h","target":{"box":[600,2,80,40]}}},
         {"highlight":{"id":"k","target":{"box":[600,50,80,20]}}}
     ]);
     let right = label([600, 2, 80, 40], "top", blocked);
-    assert!(near(right, [687.0, 14.5, 40.0, 15.0]), "{right:?}");
+    assert!(near(right, [688.757, 14.5, 40.0, 15.0]), "{right:?}");
+}
+
+#[test]
+fn a_label_on_a_looped_mark_s_own_box_sits_beside_the_mark() {
+    let result = prepared(&[json!([
+        {"highlight":{"id":"h","target":{"box":[100,100,200,20]},"style":"box"}},
+        {"callout":{"id":"c","target":{"box":[100,100,200,20]},"text":"Save"}}
+    ])])
+    .expect("prepared");
+    // The round-ended outline reaches 6.97 units out (pad 2, the radius's growth 4.97, outline
+    // 2), past the label's fixed 7; the label keeps its 3-unit gap from the outline instead.
+    let top = item(&result, "c").bounds;
+    assert!(near(top, [180.0, 73.029, 40.0, 15.0]), "{top:?}");
+}
+
+#[test]
+fn a_label_keeps_off_every_mark_of_its_step_and_moves_off_a_later_one() {
+    let callout = json!({"callout":{"id":"c","target":{"box":[600,300,80,40]},"text":"Save"}});
+    // Its round-ended outline reaches 6.9 units out, onto the top label; the box itself doesn't.
+    let mark = json!({"highlight":{"id":"h","target":{"box":[610,262,60,10]},"style":"box"}});
+    let other = json!({"callout":{"id":"d","target":{"box":[610,270,60,10]},"text":"Here"}});
+    let far = json!({"highlight":{"id":"f","target":{"box":[10,10,20,20]}}});
+    let alone = item(&prepared(&[json!([callout])]).expect("prepared"), "c").bounds;
+    assert!(near(alone, [620.0, 278.0, 40.0, 15.0]), "{alone:?}");
+    let kept = item(
+        &prepared(&[json!([callout]), json!([far])]).expect("prepared"),
+        "c",
+    )
+    .bounds;
+    assert!(near(kept, [620.0, 278.0, 40.0, 15.0]), "{kept:?}");
+    for steps in [
+        vec![json!([callout, mark])],
+        vec![json!([callout, other])],
+        vec![json!([callout]), json!([mark])],
+    ] {
+        let label = item(&prepared(&steps).expect("prepared"), "c").bounds;
+        assert!(
+            near(label, [620.0, 347.0, 40.0, 15.0]),
+            "{steps:?}: {label:?}"
+        );
+    }
+}
+
+#[test]
+fn a_screen_scene_holds_one_spotlight() {
+    let spot = |id: &str, at: u32| json!({"highlight":{"id":id,"target":{"box":[at,10,20,20]},"style":"spotlight"}});
+    assert_eq!(
+        refusal(&json!([spot("a", 10), spot("b", 40)])),
+        ("put[1].style".to_owned(), ErrorCode::Unsupported)
+    );
+    let mut scene = SceneState::begin(header()).expect("scene");
+    let mut budget = GlobalBudget::default();
+    let Admission::New(first) = scene
+        .admit(&step(&json!([spot("a", 10)])), &budget)
+        .expect("one spotlight")
+    else {
+        panic!("new step");
+    };
+    scene.commit(first, &mut budget).expect("committed");
+    let later = |put: Value| {
+        let Ok(Record::Step(step)) = record(&json!({"step":{"id":"t","put":put}})) else {
+            panic!("screen step");
+        };
+        step
+    };
+    let error = scene
+        .admit(&later(json!([spot("b", 40)])), &budget)
+        .expect_err("a second spotlight");
+    assert_eq!(
+        (error.path.as_str(), error.code),
+        ("put[0].style", ErrorCode::Unsupported)
+    );
+    let boxed = json!([{"highlight":{"id":"b","target":{"box":[40,10,20,20]}}}]);
+    scene
+        .admit(&later(boxed), &budget)
+        .expect("a box after the spotlight");
 }
 
 #[test]

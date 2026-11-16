@@ -2,7 +2,7 @@
 //! beside them, with every chrome size in logical pixels.
 use super::{
     PrepareError,
-    primitives::{Build, Geometry, layout_error, target},
+    primitives::{Build, Geometry, layout_error, rect, target},
     state::{LayoutState, Placed},
 };
 use crate::{
@@ -10,7 +10,7 @@ use crate::{
     display::{Item, Paint, Prim, TextStyle},
     geom::{Affine, Rect, Vec2},
     limits::{MAX_MARKER_OPACITY, MAX_SPOTLIGHT_DIM},
-    record::{Align, Callout, Highlight, HighlightStyle, Rgb, Side},
+    record::{Align, Callout, Highlight, HighlightStyle, Rgb, Side, Target},
     screen::{
         LABEL_GAP, LABEL_PAD, MARK_EDGE, MARK_EDGE_RGB, MARK_PAD, MARK_RADIUS, MARK_RGB,
         MARK_STROKE, RING_LOOP_MAX, RING_RADIUS,
@@ -20,6 +20,30 @@ use std::{f32::consts::FRAC_1_SQRT_2, sync::Arc};
 
 fn paint(rgb: u32) -> Paint {
     Paint::from(Rgb::try_from(rgb).expect("screen mark colours are RGB"))
+}
+
+/// The screen surface's part of a step's build.
+pub(super) struct Screen {
+    /// Canvas units per logical pixel, which sizes the chrome.
+    pub unit: f32,
+    /// The boxes the step's marks point at, so a label laid out before a later mark of the same
+    /// step still keeps off its target.
+    pub marked: Vec<Rect>,
+}
+
+/// The box a screen mark points at, when it names one rather than a mark.
+pub(super) fn marked(op: &Op) -> Option<Rect> {
+    match op {
+        Op::Highlight(Highlight {
+            target: Target::Box(bounds),
+            ..
+        })
+        | Op::Callout(Callout {
+            target: Target::Box(bounds),
+            ..
+        }) => Some(rect(*bounds)),
+        _ => None,
+    }
 }
 
 fn grow(rect: Rect, by: f32) -> Rect {
@@ -132,8 +156,10 @@ pub(super) fn highlight(
     })
 }
 
-/// Lays out a label on the screen surface: one line, outside its target's marked box and every
-/// other object's, on the side named first and then the others.
+/// Lays out a label on the screen surface: one line, off every other object and every box a mark
+/// points at, on the side named first and then the others. It keeps clear of its target's marked
+/// box and of any object around that target. A laid-out label stays where it is until something
+/// new lands on it, and then moves.
 /// # Errors
 /// `NoRoom` when no side fits on the canvas.
 pub(super) fn callout(
@@ -151,32 +177,51 @@ pub(super) fn callout(
     };
     let pad = Vec2::new(LABEL_PAD[0] * unit, LABEL_PAD[1] * unit);
     let size = build.measure(&callout.text, style, None)? + pad * 2.0;
-    let center = if let Some(old) = cached {
-        old.anchors[1]
-    } else {
-        let reach = MARK_PAD + MARK_STROKE + MARK_EDGE * 2.0 + LABEL_GAP;
-        let keep_out = grow(target(state, &callout.target, None)?.1, reach * unit);
-        let taken = state
-            .objects
-            .values()
-            .map(|object| state.world_bounds(object))
-            .collect::<Result<Vec<_>, _>>()?;
-        let named = callout.side.filter(|side| *side != Side::Center);
-        named
-            .into_iter()
-            .chain(SIDES.into_iter().filter(|side| Some(*side) != named))
-            .map(|side| beside(keep_out, size, side))
-            .find(|rect| {
-                rect.origin.x >= build.viewport.origin.x
-                    && rect.origin.y >= build.viewport.origin.y
-                    && rect.max().x <= build.viewport.max().x
-                    && rect.max().y <= build.viewport.max().y
-                    && !rect.intersects(keep_out)
-                    && taken.iter().all(|other| !rect.intersects(*other))
-            })
-            .ok_or_else(|| layout_error(ErrorCode::NoRoom))?
-            .center()
+    let own = target(state, &callout.target, None)?.1;
+    let reach = MARK_PAD + MARK_STROKE + MARK_EDGE * 2.0 + LABEL_GAP;
+    let mut keep_out = grow(own, reach * unit);
+    let mut taken = build
+        .screen
+        .as_ref()
+        .map_or_else(Vec::new, |screen| screen.marked.clone());
+    for object in state
+        .objects
+        .values()
+        .filter(|object| object.item.handle != handle)
+    {
+        let bounds = state.world_bounds(object)?;
+        if bounds.origin.x <= own.origin.x
+            && bounds.origin.y <= own.origin.y
+            && bounds.max().x >= own.max().x
+            && bounds.max().y >= own.max().y
+        {
+            keep_out = keep_out.union(grow(bounds, LABEL_GAP * unit));
+        }
+        taken.push(bounds);
+        taken.extend(marked(&object.source));
+    }
+    let viewport = build.viewport;
+    let fits = |rect: &Rect| {
+        rect.origin.x >= viewport.origin.x
+            && rect.origin.y >= viewport.origin.y
+            && rect.max().x <= viewport.max().x
+            && rect.max().y <= viewport.max().y
+            && !rect.intersects(keep_out)
+            && taken.iter().all(|other| !rect.intersects(*other))
     };
+    let named = callout.side.filter(|side| *side != Side::Center);
+    let center = cached
+        .map(|old| Rect::centered(old.anchors[1], size))
+        .filter(fits)
+        .or_else(|| {
+            named
+                .into_iter()
+                .chain(SIDES.into_iter().filter(|side| Some(*side) != named))
+                .map(|side| beside(keep_out, size, side))
+                .find(fits)
+        })
+        .ok_or_else(|| layout_error(ErrorCode::NoRoom))?
+        .center();
     let rect = Rect::centered(center, size);
     let color = callout.color.as_ref().map_or_else(
         || paint(MARK_RGB),

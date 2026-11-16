@@ -55,7 +55,15 @@ pub fn prepare(
         measure,
         cancel,
         scales: &ticket.path_scales,
-        screen: ticket.screen,
+        screen: ticket.screen.map(|unit| super::screen::Screen {
+            unit,
+            marked: ticket
+                .run
+                .put
+                .iter()
+                .filter_map(super::screen::marked)
+                .collect(),
+        }),
     };
     build.check_cancel()?;
     let mut after = before.clone();
@@ -120,6 +128,15 @@ pub fn prepare(
             let object = &after.objects[id];
             sources.insert(id.clone(), (*handle, Arc::clone(&object.source)));
             order.push(id.clone());
+        }
+    }
+    // A screen step lays every earlier label out again, so one over a new mark moves off it.
+    if build.screen.is_some() {
+        for (id, object) in &after.objects {
+            if matches!(&*object.source, Op::Callout(_)) && !sources.contains_key(id) {
+                sources.insert(id.clone(), (object.item.handle, Arc::clone(&object.source)));
+                order.push(id.clone());
+            }
         }
     }
     let mut removed = Vec::new();
@@ -286,6 +303,10 @@ pub fn prepare(
         })
         .cloned()
         .collect();
+    // On the screen, labels go last, so each one sees every mark of its step.
+    if build.screen.is_some() {
+        pending.sort_by_key(|id| matches!(&*sources[id].1, Op::Callout(_)));
+    }
     while !pending.is_empty() {
         build.check_cancel()?;
         let Some(index) = pending

@@ -3,7 +3,7 @@ use crate::{
     Begin, ErrorCode, FieldPath, Op, Step, StepError,
     geom::Affine,
     limits::{MAX_SCREEN_LABEL_CHARS, MAX_SCREEN_SCALE},
-    record::{Anchor, ScreenDisplay, Surface, Target},
+    record::{Anchor, HighlightStyle, ScreenDisplay, Surface, Target},
     text::{Bounded, Finite},
 };
 
@@ -34,10 +34,12 @@ pub const LABEL_PAD: [f32; 2] = [8.0, 5.0];
 /// Checks a step of a screen scene: only marks that never cover their target are admitted. A
 /// highlight or callout targets a box or a mark, and a label is one short line. Nothing else
 /// holds a position, so a box target is the only one.
+/// A scene holds at most one spotlight, so the screen is dimmed by at most `MAX_SPOTLIGHT_DIM`;
+/// `spotlights` counts those its earlier steps put.
 /// # Errors
-/// Returns `Unsupported` at the first other kind or field, `OutOfRange` for a box outside the
-/// canvas of `size`, and `LabelTooLong` for a long label.
-pub fn admit(step: &Step, size: [f32; 2]) -> Result<(), StepError> {
+/// Returns `Unsupported` at the first other kind or field and at a second spotlight's `style`,
+/// `OutOfRange` for a box outside the canvas of `size`, and `LabelTooLong` for a long label.
+pub fn admit(step: &Step, size: [f32; 2], mut spotlights: usize) -> Result<(), StepError> {
     let fail = |path, code| Err(StepError::in_step(&step.id, path, code));
     if !step.set.is_empty() {
         return fail(FieldPath::default().field("set"), ErrorCode::Unsupported);
@@ -57,6 +59,14 @@ pub fn admit(step: &Step, size: [f32; 2]) -> Result<(), StepError> {
                 || y.get() + height.get() > size[1])
         {
             return fail(at("target"), ErrorCode::OutOfRange);
+        }
+        if let Op::Highlight(mark) = op
+            && mark.style == HighlightStyle::Spotlight
+        {
+            if spotlights > 0 {
+                return fail(at("style"), ErrorCode::Unsupported);
+            }
+            spotlights += 1;
         }
         let refused = match op {
             Op::Highlight(mark) if mark.parent.is_some() => Some(at("in")),

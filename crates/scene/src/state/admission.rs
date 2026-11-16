@@ -10,7 +10,7 @@ use crate::{
     layout::heap,
     limits::{MAX_LIVE_OBJECTS, MAX_STEP_OUTLINE_POINTS, MAX_STEPS},
     mermaid::{self, Expansion},
-    record::{SolidShape, Start, Surface, Track},
+    record::{HighlightStyle, SolidShape, Start, Surface, Track},
 };
 use std::{
     collections::{BTreeMap, HashSet},
@@ -82,7 +82,16 @@ impl SceneState {
             .size
             .filter(|_| self.header.surface == Surface::Screen)
         {
-            crate::screen::admit(step, size.map(crate::Finite::get))?;
+            let spotlights = self
+                .steps
+                .values()
+                .filter(|stored| stored.kept)
+                .flat_map(|stored| self.original(stored.event).put.iter())
+                .filter(|op| {
+                    matches!(op, crate::Op::Highlight(mark) if mark.style == HighlightStyle::Spotlight)
+                })
+                .count();
+            crate::screen::admit(step, size.map(crate::Finite::get), spotlights)?;
         }
         if self.steps.len() == MAX_STEPS {
             return Err(fail(
