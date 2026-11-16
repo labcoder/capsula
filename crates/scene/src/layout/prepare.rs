@@ -56,6 +56,7 @@ pub fn prepare(
         cancel,
         scales: &ticket.path_scales,
         screen: ticket.screen.map(|unit| super::screen::Screen {
+            step: ticket.run.id.clone(),
             unit,
             marked: ticket
                 .run

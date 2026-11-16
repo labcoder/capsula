@@ -13,6 +13,7 @@ mod digest;
 pub mod io;
 mod prepare;
 mod scenes;
+mod screen;
 mod snapshot;
 #[cfg(test)]
 mod tests;
@@ -35,6 +36,7 @@ pub use call::{CallEnd, CallError, Remaining};
 pub(crate) use digest::Digest;
 pub use io::{Reply, StoredScene, Target, Write};
 pub use prepare::{PrepareJob, Prepared, Shared};
+pub(crate) use screen::{SCREEN_MARKS, ScreenMarks, stored_item};
 pub(crate) use snapshot::CHUNK_TARGET;
 pub use snapshot::Snapshot;
 
@@ -148,6 +150,8 @@ pub enum Input {
     },
     /// Quit: every scene is cleared once the write in the store is answered.
     ClearVisible,
+    /// The user turned off sharing the screen: screen scenes leave and nothing new is drawn on it.
+    ScreenOff,
     /// The run ended: its later input, and any earlier run's, is stale. Its scenes stay.
     RunClosed {
         /// The run.
@@ -349,7 +353,9 @@ impl Drawing {
         stored.sort_by_key(|scene| scene.scene);
         let mut skipped = Vec::new();
         stored.retain(|scene| {
-            let known = scene.header.layout_version == LAYOUT_VERSION;
+            // A screen scene's boxes were never stored, so it can't be drawn again.
+            let known = scene.header.layout_version == LAYOUT_VERSION
+                && scene.header.begin.surface != kumochi_scene::record::Surface::Screen;
             if !known {
                 skipped.push(scene.scene);
             }
@@ -523,6 +529,7 @@ impl Drawing {
             }
             Input::Clear { scenes } => self.clear(&scenes, &mut out),
             Input::SceneFailed { scene } => self.scene_failed(scene, &mut out),
+            Input::ScreenOff => self.screen_off(&mut out),
             Input::ClearVisible => {
                 self.clear_visible(&mut out);
                 if !self.settled() {
@@ -776,6 +783,7 @@ impl fmt::Debug for Input {
             Self::Clear { .. } => "Clear",
             Self::SceneFailed { .. } => "SceneFailed",
             Self::ClearVisible => "ClearVisible",
+            Self::ScreenOff => "ScreenOff",
             Self::RunClosed { .. } => "RunClosed",
             Self::ThreadDeleted { .. } => "ThreadDeleted",
             Self::Written { .. } => "Written",

@@ -1670,6 +1670,45 @@ fn a_two_round_run_replays_natively_through_its_final_message() {
 }
 
 #[test]
+fn a_stored_screen_call_replays_with_the_placeholder_boxes_it_was_stored_with() {
+    let mut world = world("ctx-screen-call");
+    let (_, high) = world.store.high_water().expect("ids");
+    let at = (world.main, RunId(high.0 + 1));
+    world
+        .store
+        .begin_turn(world.main, None, at.1, "ask")
+        .expect("turn");
+    let args = r#"{"records":[{"begin":{"scene":"m","surface":"screen","alt":"a"}},{"step":{"id":"s1","put":[{"highlight":{"id":"d","target":{"box":[186,598,450,78]},"style":"box"}}]}},{"end":{}}]}"#;
+    let native = json!({ "type": "function_call", "id": "fc_c1", "call_id": "c1", "name": "draw", "arguments": args });
+    let native = Opaque::new(serde_json::to_vec(&native).expect("item")).expect("small");
+    let stored: Value =
+        serde_json::from_slice(crate::drawing::stored_item(native).bytes()).expect("item");
+    assert!(!stored.to_string().contains("598"), "{stored}");
+    round(
+        &mut world,
+        at,
+        "Marked.",
+        &[said("assistant", "Marked."), stored.clone()],
+        &["c1"],
+    );
+    world
+        .store
+        .end_run(at.0, at.1, &[], RunEnd::Done)
+        .expect("ended");
+    let (_, next) = world.run(Some(world.main), "next", None);
+    assert_eq!(
+        next_input(&world, next, 7),
+        [
+            said("user", "ask"),
+            said("assistant", "Marked."),
+            stored,
+            result_item("c1"),
+            next_ask(),
+        ]
+    );
+}
+
+#[test]
 fn a_run_stopped_in_its_second_round_replays_round_one_then_the_text_after_it() {
     let mut world = world("ctx-rounds-stop");
     let at = first_round(&mut world);
@@ -2247,7 +2286,7 @@ fn a_screen_picture_tells_the_model_what_it_is_and_where_the_line_lies() {
         input: vec![message(Role::User, "words")],
         tools: Vec::new(),
     };
-    let picture = "The image is a picture of the user's screen, taken when they let go of the talk keys, with their mouse pointer where it was then.";
+    let picture = "The image is a picture of the user's screen, 1280 by 720 pixels, taken when they let go of the talk keys, with their mouse pointer where it was then.";
     let ink = crate::screen::InkBounds {
         left: 9_871,
         top: 20,
@@ -2256,7 +2295,7 @@ fn a_screen_picture_tells_the_model_what_it_is_and_where_the_line_lies() {
     };
     let mut pointed = request();
     assert_eq!(
-        pointed.add_screen(&Screen::Picture(jpeg.clone(), Some(ink))),
+        pointed.add_screen(&Screen::Picture(jpeg.clone(), Some(ink), Geometry::FIXTURE)),
         Ok(())
     );
     assert_eq!(
@@ -2271,14 +2310,19 @@ fn a_screen_picture_tells_the_model_what_it_is_and_where_the_line_lies() {
             ),
         ]
     );
-    let screen = format!("{:?}", Screen::Picture(jpeg.clone(), Some(ink)));
+    let screen = format!(
+        "{:?}",
+        Screen::Picture(jpeg.clone(), Some(ink), Geometry::FIXTURE)
+    );
     assert!(
-        !screen.contains("9871") && !screen.contains("9890"),
+        ["9871", "9890", "1280", "720", "2560", "1440"]
+            .iter()
+            .all(|number| !screen.contains(number)),
         "{screen}"
     );
     let mut alone = request();
     assert_eq!(
-        alone.add_screen(&Screen::Picture(jpeg.clone(), None)),
+        alone.add_screen(&Screen::Picture(jpeg.clone(), None, Geometry::FIXTURE)),
         Ok(())
     );
     assert_eq!(

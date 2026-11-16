@@ -534,6 +534,10 @@ enum Notify {
 
 /// The run in flight, or one that ended and is waiting on the store.
 #[derive(Debug)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "each flag is its own fact about the run, not one state spread over flags"
+)]
 struct Run {
     control: crate::recall::control::CancelOnDrop,
     id: RunId,
@@ -562,6 +566,9 @@ struct Run {
     hold: Option<HoldSnapshot>,
     /// The hold's screen, which every request of the run carries.
     screen: Option<crate::context::Screen>,
+    /// The run took up a screen hold's picture, so while marks are on every round stores its
+    /// native items without boxes, even after the picture is withdrawn or can't be drawn on.
+    pictured: bool,
     /// The hold's gesture while its screen is still to be told to the shell, which happens once,
     /// at the run's first request.
     untold: Option<kumochi_protocol::message::GestureId>,
@@ -647,6 +654,8 @@ impl Run {
 pub struct Coordinator {
     drawing: crate::drawing::Drawing,
     drawing_held: Vec<(ThreadId, DataToShell)>,
+    /// Whether `draw` may mark the user's screen: [`crate::drawing::SCREEN_MARKS`].
+    screen_marks: crate::drawing::ScreenMarks,
     /// Never deleted or renamed.
     main_thread: ThreadId,
     last_thread: ThreadId,
@@ -732,6 +741,7 @@ impl Coordinator {
         Self {
             drawing: crate::drawing::Drawing::default(),
             drawing_held: Vec::new(),
+            screen_marks: crate::drawing::SCREEN_MARKS,
             main_thread,
             last_thread,
             last_run,
@@ -990,10 +1000,15 @@ impl Coordinator {
                 |screen| matches!(screen, crate::context::Screen::Image(_)),
                 &mut effects,
             ),
-            Input::ShowScreenOff => self.screen_holds_off(
-                |screen| matches!(screen, crate::context::Screen::Picture(..)),
-                &mut effects,
-            ),
+            Input::ShowScreenOff => {
+                self.screen_holds_off(
+                    |screen| matches!(screen, crate::context::Screen::Picture(..)),
+                    &mut effects,
+                );
+                if self.screen_marks == crate::drawing::ScreenMarks::On {
+                    self.drawing_input(crate::drawing::Input::ScreenOff, &mut effects)?;
+                }
+            }
             input @ (Input::AudioOutput { .. }
             | Input::SpokenReplies { .. }
             | Input::Tts { .. }
@@ -1186,6 +1201,7 @@ impl Coordinator {
             snapshot: hold.as_ref().map(|hold| hold.defaults.clone()),
             untold,
             hold,
+            pictured: matches!(screen, Some(crate::context::Screen::Picture(..))),
             screen,
             build: None,
             arrived,

@@ -623,7 +623,14 @@ fn a_held_turn_stores_its_screen_before_any_build_can_start() {
             Some(Screen::NotIncluded(ScreenClass::Changed)),
             Some(changed),
         ),
-        (Some(Screen::Picture(image, None)), Some(HeldScreen::Screen)),
+        (
+            Some(Screen::Picture(
+                image,
+                None,
+                crate::context::Geometry::FIXTURE,
+            )),
+            Some(HeldScreen::Screen),
+        ),
         (
             Some(Screen::PictureNotIncluded(ScreenClass::TooLarge)),
             Some(HeldScreen::NotIncluded(ScreenClass::TooLarge)),
@@ -868,7 +875,13 @@ fn ended(core: &mut Coordinator, how: usize) -> Vec<Effect> {
 #[test]
 fn a_run_that_ends_before_its_first_request_stores_no_picture() {
     use crate::context::{Jpeg, Screen, ScreenClass};
-    let picture = || Screen::Picture(Jpeg::new(vec![0xFF, 0xD8, 0xFF, 0xD9]).unwrap(), None);
+    let picture = || {
+        Screen::Picture(
+            Jpeg::new(vec![0xFF, 0xD8, 0xFF, 0xD9]).unwrap(),
+            None,
+            crate::context::Geometry::FIXTURE,
+        )
+    };
     for how in 0..3 {
         for (screen, cleared) in [
             (image(), vec![R]),
@@ -1088,7 +1101,13 @@ fn a_withdrawn_run_fails_with_screen_unavailable_before_any_request() {
 #[test]
 fn each_setting_withdraws_only_the_pictures_it_allowed() {
     use crate::context::{Jpeg, Screen};
-    let picture = || Screen::Picture(Jpeg::new(vec![0xFF, 0xD8, 0xFF, 0xD9]).unwrap(), None);
+    let picture = || {
+        Screen::Picture(
+            Jpeg::new(vec![0xFF, 0xD8, 0xFF, 0xD9]).unwrap(),
+            None,
+            crate::context::Geometry::FIXTURE,
+        )
+    };
     let mut core = ready_for("captured");
     core.submit_hold(prepared(&core, Some(T)), "words".into(), Some(picture()))
         .unwrap();
@@ -1114,4 +1133,32 @@ fn each_setting_withdraws_only_the_pictures_it_allowed() {
         withdrawals(&core.handle(Input::ScreenHoldsOff).unwrap()),
         [R]
     );
+}
+
+#[test]
+fn only_a_screen_hold_s_picture_makes_a_run_store_its_items_without_boxes() {
+    use crate::context::{Jpeg, Screen, ScreenClass};
+    let image = Jpeg::new(vec![0xFF, 0xD8, 0xFF, 0xD9]).unwrap();
+    for (screen, pictured) in [
+        (Some(Screen::Image(image.clone())), false),
+        (Some(Screen::NotIncluded(ScreenClass::Changed)), false),
+        (
+            Some(Screen::Picture(
+                image,
+                None,
+                crate::context::Geometry::FIXTURE,
+            )),
+            true,
+        ),
+        (
+            Some(Screen::PictureNotIncluded(ScreenClass::TooLarge)),
+            false,
+        ),
+        (None, false),
+    ] {
+        let mut core = ready_for("captured");
+        core.submit_hold(prepared(&core, Some(T)), "words".into(), screen)
+            .unwrap();
+        assert_eq!(core.current.as_ref().expect("run").pictured, pictured);
+    }
 }

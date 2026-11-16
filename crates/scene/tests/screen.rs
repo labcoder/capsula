@@ -7,7 +7,7 @@ use kumochi_scene::{
     limits::{MAX_MARKER_OPACITY, MAX_SPOTLIGHT_DIM},
     parse_draw_record, parse_screen_draw_record,
     record::ScreenDisplay,
-    screen::{self, MARK_RGB, PLACEHOLDER_BOX},
+    screen::{self, MARK_RGB, PLACEHOLDER_BOX, SPOTLIGHT_RGB},
     theme::Theme,
 };
 use serde_json::{Value, json};
@@ -468,7 +468,10 @@ fn rings_underlines_markers_and_spotlights_keep_their_numbers() {
     assert_eq!(dims.len(), 4);
     for dim in dims {
         let paint = dim.2.expect("dimming");
-        assert_eq!((paint.rgb.get(), paint.opacity), (0, MAX_SPOTLIGHT_DIM));
+        assert_eq!(
+            (paint.rgb.get(), paint.opacity),
+            (SPOTLIGHT_RGB, MAX_SPOTLIGHT_DIM)
+        );
     }
 }
 
@@ -604,6 +607,28 @@ fn an_earlier_label_with_no_side_left_sits_out_until_one_frees() {
 }
 
 #[test]
+fn a_label_that_sits_out_leaves_its_place_to_a_later_label() {
+    let callout = json!([{"callout":{"id":"c","target":{"box":[600,300,80,40]},"text":"Save"}}]);
+    let fence = json!([
+        {"highlight":{"id":"t","target":{"box":[550,270,180,10]}}},
+        {"highlight":{"id":"b","target":{"box":[550,355,180,10]}}},
+        {"highlight":{"id":"l","target":{"box":[560,315,10,10]}}},
+        {"highlight":{"id":"r","target":{"box":[700,315,10,10]}}}
+    ]);
+    // c sat out at its old centre (640, 285.5), which d's named side covers.
+    let later = json!({"remove":["t"],"put":[
+        {"callout":{"id":"d","target":{"box":[610,255,60,10]},"text":"Open","side":"bottom"}}
+    ]});
+    let result = prepared(&[callout, fence, later]).expect("prepared");
+    let label = item(&result, "d");
+    assert!(
+        near(label.bounds, [620.0, 272.0, 40.0, 15.0]),
+        "{:?}",
+        label.bounds
+    );
+}
+
+#[test]
 fn a_screen_scene_holds_one_spotlight() {
     let spot = |id: &str, at: u32| json!({"highlight":{"id":id,"target":{"box":[at,10,20,20]},"style":"spotlight"}});
     assert_eq!(
@@ -644,9 +669,16 @@ fn a_label_with_no_legal_side_is_refused() {
         {"callout":{"id":"c","target":{"box":[0,0,1280,720]},"text":"Everything"}}
     ])])
     .expect_err("no room");
-    assert!(
-        matches!(&error, PrepareError::Layout(step) if step.code == ErrorCode::NoRoom),
-        "{error:?}"
+    let PrepareError::Layout(refusal) = &error else {
+        panic!("{error:?}");
+    };
+    assert_eq!(
+        (
+            refusal.step.as_ref().map(WireId::as_str),
+            refusal.path.as_str(),
+            refusal.code
+        ),
+        (Some("s0"), "put[0].callout", ErrorCode::NoRoom)
     );
 }
 

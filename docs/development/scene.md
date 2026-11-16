@@ -181,14 +181,15 @@ pull request that activates it.
   corner radius `r`, so the corner arc clears the padded corner. A ring round a small thing
   and a box round a wide, short one get round ends. An underline is a bar a pad below the
   box. A marker is a wash at most `MAX_MARKER_OPACITY` (30%) opaque, and a spotlight dims
-  the rest by at most `MAX_SPOTLIGHT_DIM` (35%); a scene holds one spotlight, and a second is
+  the rest with `#0B0B10` at most `MAX_SPOTLIGHT_DIM` (35%) opaque; a scene holds one spotlight, and a second is
   `Unsupported` at its `style`. A label sits off every other object, every box a mark points
   at, and its own target's marked box grown to cover any object around that target: first on
   the named side, then on the others. Labels are laid out after the other marks of their
   step, and every step lays the earlier labels out again: a label stays where it is until a
   new mark lands on it, and then moves. A label of the step with no side inside the canvas
-  fails the step with `NoRoom`; an earlier label left with no side sits out of the frame for
-  that step and is tried again on each later one. Every object's bounds count as taken, so a
+  fails the step with `NoRoom` at `put[i].callout` in that step; an earlier label left with no
+  side sits out of the frame for that step and is tried again on each later one, and takes no
+  room while it sits out. Every drawn object's bounds count as taken, so a
   label never sits inside a larger mark's bounds: a label on a button inside a highlighted
   panel goes outside the panel. The constants live in `screen` and
   `limits` for the designer to change.
@@ -198,8 +199,8 @@ pull request that activates it.
   `MAX_SCREEN_SCALE` (4).
 - **Stored form.** `screen::without_boxes` returns a step with every box target replaced by
   `PLACEHOLDER_BOX` (`[0,0,1,1]`), keeping ids, labels and styles. No `Debug` prints a box
-  or the stamp. The step's uses in the brain come with the pull request that admits screen
-  scenes.
+  or the stamp. The brain stores both forms of a screen call through it
+  ([tools](tools.md), screen scenes).
 
 ### 3D records
 

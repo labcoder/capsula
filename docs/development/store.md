@@ -60,7 +60,8 @@ A typed `scene_begin` stores the immutable header and layout version in `body`; 
 Each clear uses its victim's own thread. Any failed insertion or commit rolls back all rows;
 a commit whose reply is lost is reconciled by recovery, never by retrying the call. The dying
 memory/shell need not match the committed set before disconnect. Later steps carry the scene id, lifetime revision,
-layout version and original typed step. An effective `scene_cut` stores the authoritative
+layout version and original typed step. A screen scene's steps are stored without their boxes,
+under its stamped header ([tools](tools.md), screen scenes). An effective `scene_cut` stores the authoritative
 activated bound and finished handles. Identical cut retries are idempotent. All these rows
 have NULL `text`: drawing content never enters FTS or a page's text, and pages omit cut metadata.
 Every drawing SQL or JSON failure becomes a fixed, source-free error, never a parser diagnostic.

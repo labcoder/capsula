@@ -369,6 +369,9 @@ impl Coordinator {
                 CallError::Store => b"store",
                 CallError::Failed => b"preparation",
                 CallError::TooMuchToPaint { .. } => b"paint",
+                CallError::NoScreenPicture | CallError::OtherDisplay | CallError::ScreenOff => {
+                    b"screen"
+                }
             };
             let hash: [u8; 32] = Sha256::new()
                 .chain_update(b"draw-prefix-failure\0")
