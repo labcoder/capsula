@@ -832,6 +832,77 @@ fn withdrawals(effects: &[Effect]) -> Vec<RunId> {
         .collect()
 }
 
+/// The runs whose stored screen `effects` clear because no request carried it.
+fn forgotten(effects: &[Effect]) -> Vec<RunId> {
+    effects
+        .iter()
+        .filter_map(|effect| match effect {
+            Effect::Store(StoreOp::ForgetScreen { run }) => Some(*run),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Ends the current run R: 0 the user's cancel, 1 a Stop, 2 its turn's failed store write, or
+/// 3 its engine failing once a request has started.
+fn ended(core: &mut Coordinator, how: usize) -> Vec<Effect> {
+    use crate::engines::{EngineFailure, Finish};
+    match how {
+        0 => core.cancel_hold(KEY),
+        1 => core
+            .handle(Input::Stop {
+                run: R,
+                revealed: Vec::new(),
+            })
+            .expect("current"),
+        3 => core
+            .handle(engine(
+                engine_key(core, R),
+                TurnEvent::Finished(Finish::Failed(EngineFailure::Provider)),
+            ))
+            .expect("current"),
+        _ => core.handle(Input::StoreFailed { run: R }).expect("current"),
+    }
+}
+
+#[test]
+fn a_run_that_ends_before_its_first_request_stores_no_picture() {
+    use crate::context::{Jpeg, Screen, ScreenClass};
+    let picture = || Screen::Picture(Jpeg::new(vec![0xFF, 0xD8, 0xFF, 0xD9]).unwrap(), None);
+    for how in 0..3 {
+        for (screen, cleared) in [
+            (image(), vec![R]),
+            (picture(), vec![R]),
+            (Screen::NotIncluded(ScreenClass::Changed), vec![]),
+        ] {
+            let mut core = ready_for("captured");
+            core.submit_hold(prepared(&core, Some(T)), "words".into(), Some(screen))
+                .unwrap();
+            if how != 2 {
+                core.handle(Input::TurnStored { run: R }).unwrap();
+            }
+            let effects = ended(&mut core, how);
+            assert_eq!(core.current_run(), None, "{how}");
+            assert_eq!(forgotten(&effects), cleared, "{how}");
+        }
+    }
+}
+
+#[test]
+fn a_run_whose_first_request_started_keeps_its_picture_however_it_ends() {
+    for how in [0, 1, 3] {
+        let mut core = ready_for("captured");
+        core.submit_hold(prepared(&core, Some(T)), "words".into(), Some(image()))
+            .unwrap();
+        core.handle(Input::TurnStored { run: R }).unwrap();
+        let first = engine_key(&core, R);
+        assert_eq!(starts(&core.handle(screened(first, &[T])).unwrap()), 1);
+        let effects = ended(&mut core, how);
+        assert_eq!(core.current_run(), None, "{how}");
+        assert_eq!(forgotten(&effects), [], "{how}");
+    }
+}
+
 #[test]
 fn turning_screen_holds_off_before_the_first_request_records_the_turn_withdrawn() {
     use crate::context::{Screen, ScreenClass};
@@ -893,6 +964,34 @@ fn a_turn_still_queued_behind_an_older_run_is_stored_withdrawn() {
             run: NEXT,
             text: "second".into(),
             screen: Some(HeldScreen::Withdrawn),
+        })),
+        "{effects:?}"
+    );
+}
+
+#[test]
+fn a_turn_still_queued_when_its_run_ends_is_stored_with_no_picture() {
+    const NEXT: RunId = RunId(R.0 + 1);
+    let mut core = ready_for("captured");
+    core.submit_hold(prepared(&core, Some(T)), "first".into(), None)
+        .unwrap();
+    core.submit_hold(prepared(&core, Some(T)), "second".into(), Some(image()))
+        .unwrap();
+    let stopped = core
+        .handle(Input::Stop {
+            run: NEXT,
+            revealed: Vec::new(),
+        })
+        .unwrap();
+    assert_eq!(forgotten(&stopped), []);
+    let effects = core.handle(Input::TurnStored { run: R }).unwrap();
+    assert!(
+        effects.contains(&Effect::Store(StoreOp::BeginTurn {
+            thread: T,
+            title: None,
+            run: NEXT,
+            text: "second".into(),
+            screen: None,
         })),
         "{effects:?}"
     );
