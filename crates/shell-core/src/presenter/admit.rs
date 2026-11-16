@@ -111,6 +111,18 @@ impl Presenter {
         )));
     }
 
+    /// Cancels the admission that is out, or only `scene`'s own, and returns its withheld credit
+    /// once. Its late answer then finds no lane and drops. Whoever retires a whole scene comes
+    /// through here first, so no answer arrives for a scene that is gone.
+    pub(super) fn cancel_admission(&mut self, scene: Option<SceneId>, out: &mut Out) {
+        let lane = self
+            .lane
+            .take_if(|lane| scene.is_none_or(|scene| lane.scene == scene));
+        if let Some(lane) = lane {
+            out.credit(lane.cancel());
+        }
+    }
+
     /// Policy A: a late admission clears its whole scene, releasing only what was mirrored.
     pub(super) fn expire(&mut self, lane: Lane, out: &mut Out) {
         tracing::warn!("a scene step's admission missed its deadline; clearing its scene");

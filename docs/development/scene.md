@@ -2028,6 +2028,90 @@ Clear intent made while scenes are mirrored survives brain restarts because scen
 durable event ids; membership
 that still names a locally cleared scene causes its idempotent clear to be sent again.
 
+### Screen scenes in the shell (dormant)
+
+A screen scene's marks point at the screen as it was when a hold was released, so the
+presenter shows one only while nothing may have changed the screen since, and clears every
+one as soon as something may have. Nothing follows a window. This is dormant: `draw` still
+refuses the surface, so no screen scene arrives, and the shell installs no sources and
+reports no release.
+
+- **The watch** (`presenter/watch.rs`) is plain state with no clock and no system call. The
+  presenter owns it, feeds it events and does the clearing it answers.
+- **The sources** (`platform/screen_watch.rs`) are the platform's. `Sources::start` receives
+  one bit, `Changed`, and between `start` and `stop` a source does nothing but set it: for a
+  key going down in another process's window, a mouse button going down, the wheel turning,
+  another process's window coming to the front, a lock, a desktop switch, a suspend, or a
+  display change. Never for a pointer move. Which key, where and which window never reach
+  the core, and the watch keeps nothing but the bit. The presenter reads the bit on every
+  data frame, on every `tick` and in `source_woke`, which the UI calls when a source wakes
+  it. A wake carries nothing and only has the bit read, so one still queued when the next
+  release clears the bit changes nothing. `screen_changed` is for an event the shell itself
+  knows of, the next hold's recognition, and is the only call that sets the bit. Sources run
+  only while a change still matters.
+
+```mermaid
+stateDiagram-v2
+    [*] --> Idle
+    Idle --> Expecting: screen_released
+    Expecting --> Expecting: a change (kept, the first mark will be skipped)
+    Expecting --> Showing: first mark, nothing changed
+    Expecting --> Idle: screen_dropped, the hold's run ended, 30 s with no run named, screen_off, session lost
+    Showing --> Idle: a change, 60 s after its run ended, screen_off, the scene left, session lost
+    Showing --> Expecting: screen_released
+    Showing --> Passing: the brain replaced it while its run goes on
+    Passing --> Showing: the successor's first mark, from the same run
+    Passing --> Idle: a change, the run ended, the successor left or is no screen scene, screen_off, session lost
+    Passing --> Expecting: screen_released
+```
+
+- **Release.** The shell calls `screen_released(after, now)` once a hold's `ScreenRelease`
+  is sent, with the newest run named so far. Any screen scene still up is cleared, the bit is
+  cleared and the sources start. Without sources, or when `start` says no, the watch counts
+  as changed at once: nothing could say the screen stayed as it was.
+- **The first mark** is a screen scene's first `SceneStepCommit`. It is judged as its frame
+  arrives, in the pipe's order, so a change counts even while the scene's frames wait behind
+  an admission. It is shown only while a release is waiting with nothing changed, from a
+  run newer than `after`, and from the run `screen_run` named once there is one. Anything
+  else is skipped: the scene never installs a step or paints, and the brain gets
+  `SceneFailed`. A begin that was still held never installs; one already applied left an
+  empty scene, which goes with the refusal. When a change was the reason, `marks_skipped` names the run until the
+  next release, for the dock's line. A change before the first mark stays: no later name or
+  event undoes it.
+- **One at a time.** A second screen scene from the shown run takes the first one's place
+  and the first is cleared. One from any other run is skipped. The brain's own replacement
+  says so first: `ScenesReplaced` names the successor before its begin and first commit.
+  While the shown scene's run goes on, the watch passes to that successor with the same
+  bit, and the shown scene's picture is not kept. The successor takes the place only by
+  showing that run's first mark. The watch ends if it is another run's, is no screen scene,
+  leaves first, or the run ends without it. A scene whose run has ended passes nothing on.
+- **Clears** use the shell's own `ClearDrawing`: a change while a scene is shown; the time
+  limit, `MARKS_KEPT` (60 seconds) from `run_ended` for the shown run, carried by
+  `deadline` and `tick`; `screen_off`, when the setting goes off; and the next release.
+  A cleared or skipped scene takes its own admission with it: the admission is cancelled,
+  its credit goes back once, its late answer is dropped, and the frames held behind it go
+  on.
+  A watch that expects a scene ends without one at `screen_dropped` (the screenshot wasn't
+  sent, or the hold ended with no run) and at `run_ended` for the named run. The shell
+  calls `run_ended` when the run's terminal `RunState` and its `RunEnd` are both in.
+- **The hard bound.** A release whose run `screen_run` hasn't named within `UNNAMED_KEPT`
+  (30 seconds) ends by itself, through `deadline` and `tick`: the sources stop and a screen
+  scene that arrives later is skipped. So no road the shell misses leaves a hook or a mouse
+  registration behind. Once the run is named no timer applies; `run_ended` bounds the watch.
+  Both limits are applied before a data frame is judged and when `screen_run` names the run,
+  not only by the watchdog: a first mark or a name that comes at 30 seconds is too late even
+  when it is handled before the due `tick`. A run newer than the release that ends before
+  any run was named ends the watch as well, and a name that comes after names nothing.
+- **Leaving any other way** (the user's clear, the brain's removal or replacement, a
+  failure) ends the watch too. A replaced screen scene leaves no frozen picture for the
+  [visual bridge](#bounded-visual-replacement).
+- **Session loss.** `disconnected` drops every scene and ends the watch. Recovery never
+  restores a screen scene: one in the batch is cleared, as a scene of another layout
+  version is.
+- **Logs** carry one fixed word per clear and one line per skip, with no ids: `release`,
+  `changed`, `limit`, `off`, and `left` for shown marks that go any other way (a successor,
+  the user's clear, the brain's removal, a failure, a lost session).
+
 ### Bounded visual replacement
 
 `ScenesReplaced` ends old semantic bindings and tombstones their ids immediately. The UI-owned

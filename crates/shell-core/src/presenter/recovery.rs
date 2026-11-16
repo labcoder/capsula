@@ -16,6 +16,7 @@ use kumochi_scene::{
 use super::{
     BOUND, Broken, Effect, LAYOUT_VERSION, MAX_WORKERS, Out, Presenter, RECOVERY_DEADLINE,
     RecoveryJob,
+    screen::on_screen,
     snapshot::{self, Source},
 };
 
@@ -64,18 +65,21 @@ impl Presenter {
         now: Instant,
         out: &mut Out,
     ) -> Result<(), Broken> {
+        // A scene of another layout version can't be restored, and a screen scene never is: its
+        // marks belong to the moment of its hold.
+        let restorable = |source: &Source| {
+            source.header.layout_version == LAYOUT_VERSION && !on_screen(&source.header)
+        };
         let other: Vec<_> = batch
             .iter()
-            .filter(|source| source.header.layout_version != LAYOUT_VERSION)
+            .filter(|source| !restorable(source))
             .map(|source| source.scene)
             .collect();
         for scene in other {
             self.forget(scene, out);
         }
         let sources = batch.map(|batch| {
-            let (sources, other): (Vec<_>, Vec<_>) = batch
-                .into_iter()
-                .partition(|source| source.header.layout_version == LAYOUT_VERSION);
+            let (sources, other): (Vec<_>, Vec<_>) = batch.into_iter().partition(restorable);
             let bytes = other
                 .iter()
                 .map(|source| source.log.len() * size_of::<SceneEvent>())
