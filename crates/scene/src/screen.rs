@@ -18,6 +18,8 @@ pub const MARK_EDGE: f32 = 1.0;
 pub const MARK_RGB: u32 = 0x006B_5CF0;
 /// The colour of a mark's edge [designer's number].
 pub const MARK_EDGE_RGB: u32 = 0x00FF_FFFF;
+/// The colour a spotlight dims the rest of the screen with [designer's number].
+pub const SPOTLIGHT_RGB: u32 = 0x000B_0B10;
 /// Default space between the thing and its mark, in logical pixels [placeholder].
 pub const MARK_PAD: f32 = 4.0;
 /// Corner radius inside a box mark, in logical pixels [placeholder].

@@ -2,18 +2,18 @@
 //! beside them, with every chrome size in logical pixels.
 use super::{
     PrepareError,
-    primitives::{Build, Geometry, layout_error, rect, target},
+    primitives::{Build, Geometry, rect, target},
     state::{LayoutState, Placed},
 };
 use crate::{
-    ErrorCode, Handle, Op,
+    ErrorCode, FieldPath, Handle, Op, StepError, WireId,
     display::{Item, Paint, Prim, TextStyle},
     geom::{Affine, Rect, Vec2},
     limits::{MAX_MARKER_OPACITY, MAX_SPOTLIGHT_DIM},
     record::{Align, Callout, Highlight, HighlightStyle, Rgb, Side, Target},
     screen::{
         LABEL_GAP, LABEL_PAD, MARK_EDGE, MARK_EDGE_RGB, MARK_PAD, MARK_RADIUS, MARK_RGB,
-        MARK_STROKE, RING_LOOP_MAX, RING_RADIUS,
+        MARK_STROKE, RING_LOOP_MAX, RING_RADIUS, SPOTLIGHT_RGB,
     },
 };
 use std::{f32::consts::FRAC_1_SQRT_2, sync::Arc};
@@ -24,6 +24,8 @@ fn paint(rgb: u32) -> Paint {
 
 /// The screen surface's part of a step's build.
 pub(super) struct Screen {
+    /// The step being laid out, which a label's refusal names.
+    pub step: WireId,
     /// Canvas units per logical pixel, which sizes the chrome.
     pub unit: f32,
     /// The boxes the step's marks point at, so a label laid out before a later mark of the same
@@ -133,7 +135,7 @@ pub(super) fn highlight(
             });
         }
         HighlightStyle::Spotlight => {
-            primitives = build.spotlight(outer, paint(0).faded(MAX_SPOTLIGHT_DIM));
+            primitives = build.spotlight(outer, paint(SPOTLIGHT_RGB).faded(MAX_SPOTLIGHT_DIM));
         }
         HighlightStyle::Box | HighlightStyle::Ring => {}
     }
@@ -161,7 +163,8 @@ pub(super) fn highlight(
 /// box and of any object around that target. A laid-out label stays where it is until something
 /// new lands on it, and then moves; with no side left, it sits out until one frees.
 /// # Errors
-/// `NoRoom` when no side fits on the canvas for a label of this step.
+/// `NoRoom` at the label's path in its step when no side fits on the canvas for a label of this
+/// step.
 pub(super) fn callout(
     build: &mut Build<'_>,
     op: &Arc<Op>,
@@ -189,6 +192,10 @@ pub(super) fn callout(
         .values()
         .filter(|object| object.item.handle != handle)
     {
+        taken.extend(marked(&object.source));
+        if object.item.primitives.is_empty() {
+            continue;
+        }
         let bounds = state.world_bounds(object)?;
         if bounds.origin.x <= own.origin.x
             && bounds.origin.y <= own.origin.y
@@ -198,7 +205,6 @@ pub(super) fn callout(
             keep_out = keep_out.union(grow(bounds, LABEL_GAP * unit));
         }
         taken.push(bounds);
-        taken.extend(marked(&object.source));
     }
     let viewport = build.viewport;
     let fits = |rect: &Rect| {
@@ -227,7 +233,17 @@ pub(super) fn callout(
             old.anchors[1],
             Rect::centered(old.anchors[1], Vec2::default()),
         ),
-        (None, None) => return Err(layout_error(ErrorCode::NoRoom)),
+        (None, None) => {
+            let step = build.screen.as_ref().map(|screen| &screen.step);
+            let path = FieldPath::default()
+                .field("put")
+                .index(handle.slot())
+                .field("callout");
+            return Err(PrepareError::Layout(match step {
+                Some(step) => StepError::in_step(step, path, ErrorCode::NoRoom),
+                None => StepError::new(ErrorCode::NoRoom),
+            }));
+        }
     };
     let color = callout.color.as_ref().map_or_else(
         || paint(MARK_RGB),
