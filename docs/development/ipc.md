@@ -39,9 +39,10 @@ page carries the same value on the turn's user event as the appended
 ([store](store.md#tables)). It says what the turn carried, not that a request left the machine:
 the value is stored with the turn, before any request exists. The shell shows a `HeldTurn`
 as a user turn with one thing under it. A turn whose picture was taken (`Attached`, `Screen`)
-gets an icon whose tooltip and accessible label say which picture, in words that claim only
-that it was taken to send and that no copy was kept; any other gets one line saying why no
-picture was included. Neither names a model, because nothing records which model a held turn
+gets an icon whose tooltip and accessible label say which picture was sent and that no copy
+is kept. That over-reports for a turn whose run failed before its first request, since the
+value is stored before any request exists. Any other turn gets one line saying why no picture
+was included. Neither names a model, because nothing records which model a held turn
 ran on. `HeldScreen::Withdrawn` (tag 2) is
 appended for history only: a turn whose image the user withdrew by turning screen holds off
 before any request carried it. No `HoldScreen` ever carries it, because that run fails first.

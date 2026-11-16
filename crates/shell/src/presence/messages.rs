@@ -793,16 +793,12 @@ mod tests {
                 (
                     HeldScreen::Attached,
                     None,
-                    Some(format!(
-                        "{app} took a picture of the window under your pointer to send with this message to the model you were using. It didn't keep a copy."
-                    )),
+                    Some(format!("A screenshot of the window under your pointer was sent in this message. {app} keeps no copy.")),
                 ),
                 (
                     HeldScreen::Screen,
                     None,
-                    Some(format!(
-                        "{app} took a picture of your screen to send with this message to the model you were using. It didn't keep a copy."
-                    )),
+                    Some(format!("A screenshot of your screen was sent in this message. {app} keeps no copy.")),
                 ),
                 (
                     HeldScreen::NotIncluded(ScreenClass::Changed),
@@ -842,11 +838,9 @@ mod tests {
         use kumochi_protocol::message::{HeldScreen, ScreenClass};
         let app = kumochi_protocol::constants::DISPLAY_NAME;
         let sentences = [
+            format!("A screenshot of your screen was sent in this message. {app} keeps no copy."),
             format!(
-                "{app} took a picture of your screen to send with this message to the model you were using. It didn't keep a copy."
-            ),
-            format!(
-                "{app} took a picture of the window under your pointer to send with this message to the model you were using. It didn't keep a copy."
+                "A screenshot of the window under your pointer was sent in this message. {app} keeps no copy."
             ),
         ];
         let events = [
