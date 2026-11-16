@@ -247,3 +247,30 @@ fn a_ready_step_its_run_never_committed_breaks_the_session() {
         crate::coordinator::Effect::Broken("a step its run never committed")
     )));
 }
+
+fn finished(call: &str) -> Input {
+    Input::CallFinished {
+        thread: THREAD,
+        run: RunId(1),
+        call: CallId::new(call).expect("call id"),
+        error: None,
+    }
+}
+
+#[test]
+fn a_call_waits_for_its_own_last_step_not_a_later_call_s() {
+    let mut drawing = Drawing::default();
+    let mut store = silent();
+    store.run(&mut drawing, streamed("first", 0, &begin("live", "")));
+    store.run(&mut drawing, streamed("first", 1, &step(&text("a", "a"))));
+    assert_eq!(store.run(&mut drawing, ready(1, 0)).calls, []);
+    store.run(&mut drawing, streamed("second", 0, &begin("live", "")));
+    store.run(&mut drawing, streamed("second", 1, &step(&text("b", "b"))));
+    store.run(&mut drawing, streamed("first", 2, r#"{"end":{}}"#));
+    let first = store.run(&mut drawing, finished("first"));
+    assert_eq!(texts(&first), ["drawn: [a]"]);
+    assert_eq!(first.calls[0].call, CallId::new("first").expect("call id"));
+    store.run(&mut drawing, streamed("second", 2, r#"{"end":{}}"#));
+    assert_eq!(store.run(&mut drawing, finished("second")).calls, []);
+    assert_eq!(texts(&store.run(&mut drawing, ready(1, 1))), ["drawn: [b]"]);
+}

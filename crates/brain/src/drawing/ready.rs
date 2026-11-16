@@ -15,8 +15,8 @@ use super::{Drawing, Output};
 pub const READY_WAIT: Duration = Duration::from_secs(1);
 
 impl Drawing {
-    /// A call that ended properly: its result goes now, or once the shell answers for its
-    /// scene's last committed step.
+    /// A call that ended properly: its result goes now, or once the shell answers for the last
+    /// step it committed.
     #[expect(
         clippy::fn_params_excessive_bools,
         reason = "the result tells ignored trailing text whenever it goes"
@@ -32,16 +32,17 @@ impl Drawing {
         call.heard = true;
     }
 
-    /// The step a finished call waits for: its scene's newest, unless the shell already answered
-    /// for it or it's past the shell's ready window.
+    /// The step a finished call waits for: the last it committed, unless the shell already
+    /// answered for it or it's past the shell's ready window.
     fn awaited(&self, at: usize) -> Option<u32> {
         let call = &self.calls[at];
+        let last = call.last?;
         let state = &self.scenes[self.live(call.drew_in()?)?].state;
-        let last = state.revision().checked_sub(1)?;
         // shortcut: a step past the window prepares only once speech activates an earlier one,
         // so its refusal stays unheard, and a cut's dropped steps count as ahead; give such calls
         // a speech-paced wait if late refusals show up there.
-        let ahead = usize::try_from(state.revision().saturating_sub(state.activated())).ok()?;
+        let ahead =
+            usize::try_from(last.saturating_add(1).saturating_sub(state.activated())).ok()?;
         (call.answered.is_none_or(|answered| answered < last) && ahead <= MAX_READY_STEPS)
             .then_some(last)
     }

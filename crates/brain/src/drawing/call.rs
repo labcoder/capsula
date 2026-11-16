@@ -233,6 +233,8 @@ pub(super) struct Call {
     pub(super) done: bool,
     /// The picture's size once its `begin` was a screen scene's: its scene is a screen scene.
     pub(super) picture: Option<[u32; 2]>,
+    /// The lifetime index of the newest step it committed in its scene.
+    pub(super) last: Option<u32>,
     /// It finished and waits for the shell to answer for this step of its scene.
     pub(super) awaits: Option<u32>,
     /// The newest step of its scene the shell prepared or showed while it was open.
@@ -470,6 +472,7 @@ impl Drawing {
             refused: false,
             done: false,
             picture: None,
+            last: None,
             awaits: None,
             answered: None,
             heard: false,
@@ -771,10 +774,14 @@ impl Drawing {
         if let Some(ledger) = self.runs.iter_mut().find(|ledger| ledger.run == run) {
             ledger.steps += 1;
         }
+        let last = self
+            .live(scene)
+            .and_then(|at| self.scenes[at].state.revision().checked_sub(1));
         if let Some(at) = self.open_call(run, id) {
             let call = &mut self.calls[at];
             call.drawn.push(step.id.clone());
             call.scene = Bound::Held(scene);
+            call.last = last.or(call.last);
         }
     }
 
