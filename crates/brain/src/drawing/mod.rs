@@ -533,7 +533,7 @@ impl Drawing {
                 }
             }
             Input::Clear { scenes } => self.clear(&scenes, &mut out),
-            Input::SceneFailed { scene } => self.scene_failed(scene, &CallError::Failed, &mut out),
+            Input::SceneFailed { scene } => self.scene_failed(scene, &mut out),
             Input::SceneSkipped { scene } => self.scene_skipped(scene, &mut out),
             Input::ScreenOff => self.screen_off(&mut out),
             Input::ClearVisible => {

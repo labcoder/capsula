@@ -24,9 +24,15 @@ pub(crate) const SCREEN_MARKS: ScreenMarks = ScreenMarks::Off;
 impl Drawing {
     /// What a screen scene of `run` may be drawn on, from the run's picture and route. A run
     /// that was never told parses its records without the screen surface.
+    /// A skip's `Changed` stays for the rest of the run: a later announcement of the same
+    /// picture never reopens it, and only another withdrawal replaces it.
     pub(crate) fn canvas(&mut self, run: RunId, canvas: Result<Geometry, NoCanvas>) {
-        if run > self.closed {
-            self.ledger(run).canvas = Some(canvas);
+        if run <= self.closed {
+            return;
+        }
+        let ledger = self.ledger(run);
+        if canvas.is_err() || ledger.canvas != Some(Err(NoCanvas::Changed)) {
+            ledger.canvas = Some(canvas);
         }
     }
 
@@ -91,25 +97,39 @@ impl Drawing {
     }
 
     /// The shell skipped screen scene `scene` because the screen may have changed since its
-    /// picture: its open calls end as `ScreenChanged`, it leaves, and the runs that drew it or
-    /// were drawing in it can't begin another screen scene, which the shell would skip too.
+    /// picture: its open calls end as `ScreenChanged` the way `screen_off` ends them, after a
+    /// step still being written settles, it leaves, and the runs that drew it or were drawing in
+    /// it can't begin another screen scene, which the shell would skip too. Any other scene is
+    /// left alone.
     pub(super) fn scene_skipped(&mut self, scene: SceneId, out: &mut Output) {
-        let Some(at) = self.live(scene) else {
+        let Some(at) = self
+            .live(scene)
+            .filter(|&at| self.scenes[at].state.header().surface == Surface::Screen)
+        else {
             return;
         };
-        let mut runs: Vec<RunId> = self.scenes[at]
+        let calls: Vec<_> = self
+            .open_in(scene)
+            .into_iter()
+            .map(|at| (self.calls[at].run, self.calls[at].id.clone()))
+            .collect();
+        let runs: Vec<RunId> = self.scenes[at]
             .committers
             .iter()
             .flatten()
             .copied()
+            .chain(calls.iter().map(|(run, _)| *run))
             .collect();
-        runs.extend(self.open_in(scene).into_iter().map(|at| self.calls[at].run));
         for ledger in &mut self.runs {
-            if runs.contains(&ledger.run) && ledger.canvas.is_some() {
+            if runs.contains(&ledger.run) && matches!(ledger.canvas, Some(Ok(_))) {
                 ledger.canvas = Some(Err(NoCanvas::Changed));
             }
         }
-        self.scene_failed(scene, &CallError::ScreenChanged, out);
+        self.replacement_failed(scene, out);
+        for (run, call) in calls {
+            self.end_early(run, &call, CallError::ScreenChanged, out);
+        }
+        self.clear_scenes(&[scene], out);
     }
 }
 

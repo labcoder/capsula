@@ -699,6 +699,137 @@ fn a_skip_closes_the_screen_for_a_later_run_continuing_the_scene_before_its_firs
     assert_eq!(texts(&[&again]), [format!("drawn: []; stopped: {CHANGED}")]);
 }
 
+#[test]
+fn a_skipped_scene_s_step_being_written_settles_into_its_one_result_and_shows_nothing() {
+    for cancel in ["none", "before", "after"] {
+        let mut drawing = told(Ok(Geometry::FIXTURE));
+        let mut store = Store::default();
+        let first = store.run(
+            &mut drawing,
+            screen_call(1, "b", &screen_begin("marks", ""), &[marked("s1", "x")]),
+        );
+        assert_eq!(shown(&first), 2);
+        let scene = screen_scene(&drawing);
+        let written = drawing
+            .handle(screen_call(
+                1,
+                "c",
+                &screen_begin("marks", ""),
+                &[marked("s2", "y")],
+            ))
+            .expect("a call");
+        assert_eq!(trace(&written), ["write step 2"]);
+        let cancelled = || Input::CallFinished {
+            thread: THREAD,
+            run: RunId(1),
+            call: CallId::new("c").expect("call id"),
+            error: Some(CallError::Interrupted),
+        };
+        let mut ending = Vec::new();
+        if cancel == "before" {
+            ending.push(drawing.handle(cancelled()).expect("the cancel"));
+        }
+        ending.push(
+            drawing
+                .handle(Input::SceneSkipped { scene })
+                .expect("the skip"),
+        );
+        if cancel == "after" {
+            ending.push(drawing.handle(cancelled()).expect("the cancel"));
+        }
+        let mut both = written;
+        for out in &ending {
+            merge(
+                &mut both,
+                Output {
+                    effects: out.effects.clone(),
+                    calls: Vec::new(),
+                },
+            );
+        }
+        let settled = store.settle(&mut drawing, both);
+        let mut outs: Vec<&Output> = ending.iter().collect();
+        outs.push(&settled);
+        let stopped = if cancel == "before" {
+            "drawing.Interrupted".to_owned()
+        } else {
+            CHANGED.to_owned()
+        };
+        assert_eq!(
+            texts(&outs),
+            [format!("drawn: [s2]; stopped: {stopped}{NOT_KEPT}")],
+            "{cancel}"
+        );
+        assert_eq!(
+            outs.iter().map(|out| shown(out)).sum::<usize>(),
+            0,
+            "{cancel}"
+        );
+        assert!(drawing.scenes.iter().all(|held| held.gone), "{cancel}");
+    }
+}
+
+#[test]
+fn a_skip_changes_nothing_for_a_card_and_never_replaces_an_earlier_reason() {
+    const NO_PICTURE: &str = "surface: drawing.NoScreenPicture; no picture of the user's screen was sent in this turn, so the screen can't be marked; explain in words or draw a card";
+    let mut drawing = told(Err(NoCanvas::NoPicture));
+    let mut store = Store::default();
+    let card = store.run(&mut drawing, call(1, "a", args("card", &[text("a", "x")])));
+    assert_eq!(texts(&[&card]), ["drawn: [a]"]);
+    let skipped = store.run(&mut drawing, Input::SceneSkipped { scene: SceneId(1) });
+    assert_eq!((skipped.effects.len(), skipped.calls.len()), (0, 0));
+    assert!(drawing.scenes.iter().any(|held| !held.gone));
+    let refused = store.run(
+        &mut drawing,
+        screen_call(1, "b", &screen_begin("marks", ""), &[marked("s1", "x")]),
+    );
+    assert_eq!(
+        texts(&[&refused]),
+        [format!("drawn: []; stopped: {NO_PICTURE}")]
+    );
+
+    let mut drawing = told(Ok(Geometry::FIXTURE));
+    store.run(
+        &mut drawing,
+        screen_call(1, "b", &screen_begin("marks", ""), &[marked("s1", "x")]),
+    );
+    let scene = screen_scene(&drawing);
+    drawing.canvas(RunId(1), Err(NoCanvas::NoPicture));
+    store.run(&mut drawing, Input::SceneSkipped { scene });
+    let refused = store.run(
+        &mut drawing,
+        screen_call(1, "c", &screen_begin("again", ""), &[marked("s2", "y")]),
+    );
+    assert_eq!(
+        texts(&[&refused]),
+        [format!("drawn: []; stopped: {NO_PICTURE}")]
+    );
+}
+
+#[test]
+fn a_skip_s_changed_screen_outlasts_the_picture_announced_again_but_not_sharing_turned_off() {
+    let mut drawing = told(Ok(Geometry::FIXTURE));
+    let mut store = Store::default();
+    store.run(
+        &mut drawing,
+        screen_call(1, "b", &screen_begin("marks", ""), &[marked("s1", "x")]),
+    );
+    let scene = screen_scene(&drawing);
+    store.run(&mut drawing, Input::SceneSkipped { scene });
+    drawing.canvas(RunId(1), Ok(Geometry::FIXTURE));
+    let again = store.run(
+        &mut drawing,
+        screen_call(1, "c", &screen_begin("again", ""), &[marked("s2", "y")]),
+    );
+    assert_eq!(texts(&[&again]), [format!("drawn: []; stopped: {CHANGED}")]);
+    drawing.canvas(RunId(1), Err(NoCanvas::Off));
+    let off = store.run(
+        &mut drawing,
+        screen_call(1, "d", &screen_begin("again", ""), &[marked("s3", "z")]),
+    );
+    assert_eq!(texts(&[&off]), [format!("drawn: []; stopped: {OFF}")]);
+}
+
 /// Arguments with a screen scene after an ordinary records array: a second envelope, and a second
 /// `records` member of the same object. The reducer never reads it.
 const SUFFIXED: [&str; 2] = [
