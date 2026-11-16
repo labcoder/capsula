@@ -518,6 +518,8 @@ fn a_label_sits_on_the_named_side_outside_its_mark_or_the_next_free_side() {
     // Label 40 by 15; 7 canvas units from the box: pad 4, stroke 2, edges 2 and gap 6, halved.
     let top = label([600, 300, 80, 40], "top", marks([600, 300, 80, 40]));
     assert!(near(top, [620.0, 278.0, 40.0, 15.0]), "{top:?}");
+    let left = label([600, 300, 80, 40], "left", marks([600, 300, 80, 40]));
+    assert!(near(left, [553.0, 312.5, 40.0, 15.0]), "{left:?}");
     let bottom = label([600, 2, 80, 40], "top", marks([600, 2, 80, 40]));
     assert!(near(bottom, [620.0, 49.0, 40.0, 15.0]), "{bottom:?}");
     let blocked = json!([
