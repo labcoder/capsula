@@ -303,9 +303,11 @@ impl SceneState {
             .map(|object| object.handle)
             .collect()
     }
-    /// Creates an empty scene from a typed header with positive canvas dimensions.
+    /// Creates an empty scene from a typed header with positive canvas dimensions. A screen
+    /// header must carry the brain's stamp, and only a screen header may.
     /// # Errors
-    /// Returns `OutOfRange` for a non-positive canvas dimension.
+    /// Returns `OutOfRange` for a non-positive canvas dimension, and `Unsupported` at
+    /// `display` for a missing, misplaced or unusable stamp.
     pub fn begin(header: Begin) -> Result<Self, StepError> {
         if let Some(size) = header.size {
             for (index, value) in size.into_iter().enumerate() {
@@ -317,6 +319,21 @@ impl SceneState {
                     });
                 }
             }
+        }
+        let stamped = header
+            .display
+            .zip(header.size)
+            .is_some_and(|(display, size)| {
+                crate::screen::logical_per_unit(display, size.map(crate::Finite::get)).is_some()
+            });
+        if (header.surface == crate::record::Surface::Screen) != stamped
+            || (!stamped && header.display.is_some())
+        {
+            return Err(StepError {
+                step: None,
+                path: FieldPath::default().field("display"),
+                code: ErrorCode::Unsupported,
+            });
         }
         Ok(Self {
             header,

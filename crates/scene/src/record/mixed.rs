@@ -228,6 +228,119 @@ impl<'de> Deserialize<'de> for Anchor {
     }
 }
 
+/// What a highlight or callout marks: a canvas point, an object, or a box in canvas units.
+#[derive(Clone, PartialEq)]
+pub enum Target {
+    /// A canvas point or a scene object.
+    Anchor(Anchor),
+    /// `[x, y, w, h]` with a positive width and height.
+    Box([Finite; 4]),
+}
+impl fmt::Debug for Target {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Anchor(anchor) => anchor.fmt(f),
+            Self::Box(_) => f.write_str("Box(..)"),
+        }
+    }
+}
+#[derive(Serialize, Deserialize)]
+enum TargetBinary {
+    Anchor(Anchor),
+    Box([Finite; 4]),
+}
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TargetMap {
+    #[serde(rename = "ref", default, skip_serializing_if = "Option::is_none")]
+    id: Option<WireId>,
+    #[serde(rename = "box", default, skip_serializing_if = "Option::is_none")]
+    bounds: Option<[Finite; 4]>,
+}
+impl Target {
+    /// The point or object targeted, or `None` for a box.
+    #[must_use]
+    pub fn anchor(&self) -> Option<&Anchor> {
+        match self {
+            Self::Anchor(anchor) => Some(anchor),
+            Self::Box(_) => None,
+        }
+    }
+    fn checked<E: de::Error>(value: TargetBinary) -> Result<Self, E> {
+        match value {
+            TargetBinary::Anchor(anchor) => Ok(Self::Anchor(anchor)),
+            TargetBinary::Box(bounds) if bounds[2].get() > 0.0 && bounds[3].get() > 0.0 => {
+                Ok(Self::Box(bounds))
+            }
+            TargetBinary::Box(_) => Err(E::custom(ErrorCode::OutOfRange)),
+        }
+    }
+}
+impl Serialize for Target {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        match (self, s.is_human_readable()) {
+            (Self::Anchor(anchor), true) => anchor.serialize(s),
+            (Self::Box(bounds), true) => TargetMap {
+                id: None,
+                bounds: Some(*bounds),
+            }
+            .serialize(s),
+            (Self::Anchor(anchor), false) => TargetBinary::Anchor(anchor.clone()).serialize(s),
+            (Self::Box(bounds), false) => TargetBinary::Box(*bounds).serialize(s),
+        }
+    }
+}
+impl<'de> Deserialize<'de> for Target {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        struct TargetVisitor;
+        impl<'de> Visitor<'de> for TargetVisitor {
+            type Value = Target;
+            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str("a canvas point, reference or box")
+            }
+            fn visit_seq<A: SeqAccess<'de>>(self, seq: A) -> Result<Target, A::Error> {
+                let point = <[Finite; 2]>::deserialize(de::value::SeqAccessDeserializer::new(seq))?;
+                Ok(Target::Anchor(Anchor::At(point)))
+            }
+            fn visit_map<A: MapAccess<'de>>(self, map: A) -> Result<Target, A::Error> {
+                match TargetMap::deserialize(MapAccessDeserializer::new(map))? {
+                    TargetMap {
+                        id: Some(id),
+                        bounds: None,
+                    } => Ok(Target::Anchor(Anchor::Ref(id))),
+                    TargetMap {
+                        id: None,
+                        bounds: Some(bounds),
+                    } => Target::checked(TargetBinary::Box(bounds)),
+                    _ => Err(de::Error::custom(ErrorCode::Malformed)),
+                }
+            }
+        }
+        if !d.is_human_readable() {
+            return Target::checked(TargetBinary::deserialize(d)?);
+        }
+        d.deserialize_any(TargetVisitor)
+    }
+}
+
+/// The display a screen scene's picture was taken of, in physical desktop pixels. Only the brain
+/// writes it, after the parse; a model-written one is refused.
+#[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ScreenDisplay {
+    /// Top-left corner on the desktop.
+    pub origin: [i32; 2],
+    /// Width and height.
+    pub size: [u32; 2],
+    /// Effective DPI; 96 is 100%.
+    pub dpi: u32,
+}
+impl fmt::Debug for ScreenDisplay {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("ScreenDisplay(..)")
+    }
+}
+
 /// A palette token or checked RGB colour.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Color {

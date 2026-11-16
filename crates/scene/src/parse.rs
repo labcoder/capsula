@@ -1,15 +1,27 @@
 //! Strict JSON decoding without propagating parser diagnostic text.
 
 use crate::{
-    ErrorCode, FieldPath, Record, StepError,
+    ErrorCode, FieldPath, Op, Record, StepError,
     limits::MAX_RECORD_BYTES,
-    record::{Surface, Version},
+    record::{Surface, Target, Version},
 };
 
 /// Parses the closed 2D draw-tool surface, excluding even null solid-only fields.
 /// # Errors
 /// Returns the first typed decoding failure or an unsupported surface or 3D field.
 pub fn parse_draw_record(bytes: &[u8]) -> Result<Record, StepError> {
+    parse_draw(bytes, None)
+}
+
+/// [`parse_draw_record`] with the screen surface and box targets admitted, as `draw` will parse
+/// once the screen surface is offered. A screen scene's steps are checked at admission.
+/// # Errors
+/// As [`parse_draw_record`]; a model-written display is `Unsupported`.
+pub fn parse_screen_draw_record(bytes: &[u8]) -> Result<Record, StepError> {
+    parse_draw(bytes, Some(Surface::Screen))
+}
+
+fn parse_draw(bytes: &[u8], extra: Option<Surface>) -> Result<Record, StepError> {
     let record = match parse_record(bytes) {
         Err(error)
             if error.code == ErrorCode::MissingField
@@ -19,17 +31,39 @@ pub fn parse_draw_record(bytes: &[u8]) -> Result<Record, StepError> {
         }
         record => record?,
     };
-    if let Record::Begin(begin) = &record
-        && begin.surface != Surface::Overlay
-    {
-        return Err(StepError {
-            step: None,
-            path: FieldPath::default().field("surface"),
-            code: ErrorCode::Unsupported,
-        });
+    if let Record::Begin(begin) = &record {
+        let field = if begin.display.is_some() {
+            Some("display")
+        } else if begin.surface == Surface::Overlay || extra == Some(begin.surface) {
+            None
+        } else {
+            Some("surface")
+        };
+        if let Some(field) = field {
+            return Err(StepError {
+                step: None,
+                path: FieldPath::default().field(field),
+                code: ErrorCode::Unsupported,
+            });
+        }
     }
     if let Record::Step(step) = &record {
         crate::refuse_three_dimensional(step)?;
+        let boxed = |op: &Op| match op {
+            Op::Highlight(mark) => matches!(mark.target, Target::Box(_)),
+            Op::Callout(label) => matches!(label.target, Target::Box(_)),
+            _ => false,
+        };
+        if let Some(index) = step.put.iter().position(boxed).filter(|_| extra.is_none()) {
+            return Err(StepError::in_step(
+                &step.id,
+                FieldPath::default()
+                    .field("put")
+                    .index(index)
+                    .field("target"),
+                ErrorCode::Unsupported,
+            ));
+        }
         if !step.set.is_empty() {
             let raw: serde_json::Value =
                 serde_json::from_slice(bytes).map_err(|_| StepError::new(ErrorCode::Malformed))?;

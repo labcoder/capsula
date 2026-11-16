@@ -10,7 +10,7 @@ use crate::{
     layout::heap,
     limits::{MAX_LIVE_OBJECTS, MAX_STEP_OUTLINE_POINTS, MAX_STEPS},
     mermaid::{self, Expansion},
-    record::{SolidShape, Start, Track},
+    record::{SolidShape, Start, Surface, Track},
 };
 use std::{
     collections::{BTreeMap, HashSet},
@@ -76,6 +76,13 @@ impl SceneState {
                     ErrorCode::DuplicateStepConflict,
                 ))
             };
+        }
+        if let Some(size) = self
+            .header
+            .size
+            .filter(|_| self.header.surface == Surface::Screen)
+        {
+            crate::screen::admit(step, size.map(crate::Finite::get))?;
         }
         if self.steps.len() == MAX_STEPS {
             return Err(fail(

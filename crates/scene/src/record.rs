@@ -9,7 +9,7 @@ use crate::{
     },
     text::{Bounded, Finite, Number, Source, Text},
 };
-pub use mixed::{Anchor, Cell, Color, KeyValue, Point, Rgb, Start, Token};
+pub use mixed::{Anchor, Cell, Color, KeyValue, Point, Rgb, ScreenDisplay, Start, Target, Token};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 pub use three::{
@@ -58,6 +58,8 @@ pub enum Surface {
     Overlay,
     /// Inline.
     Inline,
+    /// The picture of the user's screen the model was sent, one canvas unit per picture pixel.
+    Screen,
 }
 /// What a new drawing does with this thread's other visible drawings.
 #[derive(
@@ -90,6 +92,10 @@ pub struct Begin {
     /// Whether a new scene replaces or keeps this thread's other drawings.
     #[serde(default)]
     pub others: Others,
+    /// The display a screen scene's picture shows, stamped by the brain and never offered.
+    #[serde(default)]
+    #[schemars(skip)]
+    pub display: Option<ScreenDisplay>,
 }
 impl Begin {
     /// Whether this header continues a scene stored under `stored`. Title and alt describe the
@@ -105,12 +111,14 @@ impl Begin {
             title: _,
             alt: _,
             others,
+            display,
         } = self;
         *v == stored.v
             && *scene == stored.scene
             && *surface == stored.surface
             && *size == stored.size
             && *others == stored.others
+            && *display == stored.display
     }
 }
 /// A strict empty call terminator.
@@ -614,7 +622,7 @@ pub struct Callout {
     /// opacity.
     pub opacity: Option<Finite>,
     /// target.
-    pub target: Anchor,
+    pub target: Target,
     /// text.
     pub text: Text,
     /// side.
@@ -647,7 +655,7 @@ pub struct Highlight {
     /// opacity.
     pub opacity: Option<Finite>,
     /// target.
-    pub target: Anchor,
+    pub target: Target,
     /// style.
     #[serde(default)]
     pub style: HighlightStyle,

@@ -7,7 +7,7 @@ use crate::{
     display::{Item, Prim, TextMeasure, TextStyle},
     geom::{Affine, Rect, Vec2},
     path,
-    record::{Align, Anchor, Color, Head, ShapeKind},
+    record::{Align, Anchor, Color, Head, ShapeKind, Target},
     state::object,
     theme::Theme,
 };
@@ -437,7 +437,7 @@ impl Build<'_> {
                     },
                 )
             } else {
-                anchor(state, &highlight.target, parent)?
+                target(state, &highlight.target, parent)?
             };
             if target.size.x < 2.0 || target.size.y < 2.0 {
                 target = Rect::centered(target.center(), Vec2::new(24.0, 24.0));
@@ -653,6 +653,19 @@ pub(super) fn anchor(
         }
         Anchor::Ref(id) => {
             let bounds = reference(state, id, parent)?;
+            Ok((bounds.center(), bounds))
+        }
+    }
+}
+pub(super) fn target(
+    state: &LayoutState,
+    target: &Target,
+    parent: Option<Handle>,
+) -> Result<(Vec2, Rect), PrepareError> {
+    match target {
+        Target::Anchor(value) => anchor(state, value, parent),
+        Target::Box(bounds) => {
+            let bounds = rect(*bounds);
             Ok((bounds.center(), bounds))
         }
     }
