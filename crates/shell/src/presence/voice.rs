@@ -9,7 +9,10 @@ use kumochi_protocol::message::{
     RunOrigin, ThreadId,
 };
 
+use gpui_kit::Window;
+
 use super::ink::Sampler;
+use super::overlay_visibility::Visibility;
 use super::{Context, Presence, Session};
 use crate::input::hold::Intent;
 use crate::input::path::PathRecorder;
@@ -356,8 +359,8 @@ impl Presence {
         ))
     }
 
-    /// Starts a screen hold's line from where the pointer was at recognition: the recorder and
-    /// the timer that samples into it.
+    /// Starts a screen hold's line from where the pointer was at recognition: the recorder, and
+    /// the frames that sample into it.
     fn start_line(
         &mut self,
         gesture: GestureId,
@@ -368,36 +371,101 @@ impl Presence {
             return;
         };
         let recorder = PathRecorder::new(origin, scale, display);
-        let sampler = Sampler::start(gesture, recorder, cx, Self::sample_line);
-        *self.ink.borrow_mut() = Some(sampler);
+        *self.ink.borrow_mut() = Some(Sampler::new(gesture, recorder));
+        self.want_line_frame(gesture, None, cx);
     }
 
-    /// One tick of a screen hold's timer; false ends it. The line belongs to the pending hold
-    /// while its keys are down, and anything else that is left of it is cleared here.
-    fn sample_line(&mut self, cx: &mut Context<'_, Self>) -> bool {
-        let held = self.ink.borrow().as_ref().is_some_and(|ink| {
-            self.voice.pending.as_ref().is_some_and(|hold| {
-                hold.token.gesture() == ink.gesture()
-                    && hold.released.is_none()
-                    && hold.terminal.is_none()
-            })
+    /// Asks for the next frame of `gesture`'s line. Once the overlay shows, its own frames
+    /// carry the line, so the pointer a frame reads is in that frame's paint. Until then the
+    /// dock's do, because Windows paints no hidden window. `current` is the window whose
+    /// frame is running: GPUI holds it, so a handle can't reach it.
+    // shortcut: a dock that fails closed (presence.md) gets no frames, so a hold's line never starts while it is hidden; move these frames with the drawing's when that failure must keep drawing.
+    fn want_line_frame(
+        &mut self,
+        gesture: GestureId,
+        current: Option<&mut Window>,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let target = if let Visibility::Shown(overlay) = &self.overlay {
+            overlay.window
+        } else {
+            self.dock_window
+        };
+        let owner = cx.weak_entity();
+        let arm = move |window: &mut Window| {
+            window.on_next_frame(move |window, cx| {
+                let stepped = owner.update(cx, |this, cx| this.line_frame(gesture, window, cx));
+                if stepped.is_err() {
+                    tracing::debug!("the presence closed before a hold's next frame");
+                }
+            });
+        };
+        let armed = match current {
+            Some(window) if window.window_handle() == target => {
+                arm(window);
+                Ok(())
+            }
+            _ => target.update(cx, |_, window, _| arm(window)),
+        };
+        if let Err(error) = armed {
+            tracing::warn!(%error, "can't follow the pointer; the hold's line stays as it is");
+        }
+    }
+
+    /// One frame of `gesture`'s line. The line belongs to the pending hold while its keys are
+    /// down: a frame that finds that hold over clears what is left of its line, and one that
+    /// finds another hold's line, or none, only ends.
+    fn line_frame(&mut self, gesture: GestureId, window: &mut Window, cx: &mut Context<'_, Self>) {
+        let ours = move |this: &Self| {
+            this.ink
+                .borrow()
+                .as_ref()
+                .is_some_and(|ink| ink.gesture() == gesture)
+        };
+        if !ours(self) {
+            return;
+        }
+        let held = self.voice.pending.as_ref().is_some_and(|hold| {
+            hold.token.gesture() == gesture && hold.released.is_none() && hold.terminal.is_none()
         });
         if !held {
-            self.stop_line(cx);
-            return false;
+            Self::after_frame(cx, move |this, cx| {
+                if ours(this) {
+                    this.stop_line(cx);
+                }
+            });
+            return;
         }
         // The read takes no lock and doesn't block; a failed one is skipped.
         let point = crate::platform::cursor_position().ok().map(PhysicalPoint);
+        let now = cx.background_executor().now();
         let changed = point.is_some_and(|point| {
             self.ink
                 .borrow_mut()
                 .as_mut()
-                .is_some_and(|ink| ink.sample(point))
+                .is_some_and(|ink| ink.sample(point, now))
         });
-        if changed {
+        if changed && matches!(self.overlay, Visibility::Shown(_)) {
+            // A notify: this frame paints the line where the pointer is now.
             self.line_changed(cx);
+        } else if changed {
+            Self::after_frame(cx, Self::line_changed);
         }
-        true
+        self.want_line_frame(gesture, Some(window), cx);
+    }
+
+    /// Runs `step` once the running update is over. Showing and hiding the overlay reach
+    /// windows by their handles, and GPUI holds the window whose frame is running.
+    pub(super) fn after_frame(
+        cx: &mut Context<'_, Self>,
+        step: impl FnOnce(&mut Self, &mut Context<'_, Self>) + 'static,
+    ) {
+        let owner = cx.weak_entity();
+        cx.defer(move |cx| {
+            if owner.update(cx, step).is_err() {
+                tracing::debug!("the presence closed before a hold's frame ended");
+            }
+        });
     }
 
     /// Ends a screen hold's sampling and takes its line off the overlay.
@@ -459,7 +527,10 @@ impl Presence {
                     .into_iter()
                     .all(|axis| u32::try_from(pointer.0[axis]).is_ok_and(|at| at < size[axis]))
             })
-            .map_or_else(|| PointerPath(Vec::new()), Sampler::finish);
+            .map_or_else(
+                || PointerPath(Vec::new()),
+                |sampler| sampler.finish(pointer),
+            );
         let (own_model, default) = self.screen_inputs(cx);
         let release = HoldRelease {
             pointer,

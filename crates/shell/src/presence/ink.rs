@@ -1,14 +1,14 @@
-//! A screen hold's pointer line: where the pointer goes while the keys are down, read every
-//! 16 ms and stroked in the drawing overlay as the picture will show it. The brain paints the
+//! A screen hold's pointer line: where the pointer goes while the keys are down, read on every
+//! frame and stroked in the drawing overlay as the picture will show it. The brain paints the
 //! same path on the hold's image (`crates/brain/src/screen/ink.rs`) as one capsule per segment,
 //! pink inside a white edge. The colours and widths here are that painter's, the widths mapped
 //! back from image pixels to the display, and a test on each side pins the same numbers.
 // shortcut: the line shows on the primary display only, so a hold released on another display sends that display with no line, and a first line drawn before the overlay ever opened is sized with the dock's display scale; upgrade with the overlay's per-display windows
 use std::cell::RefCell;
 use std::rc::Rc;
-use std::time::Duration;
+use std::time::Instant;
 
-use gpui_kit::{Context, Path, Pixels, Rgba, Task, rgb};
+use gpui_kit::{Path, Pixels, Rgba, rgb};
 use kumochi_protocol::geometry::{MAX_PATH_POINTS, PhysicalPoint, PointerPath};
 use kumochi_protocol::message::GestureId;
 use kumochi_scene::geom::{Affine, Vec2};
@@ -25,8 +25,6 @@ const CORE: f32 = 1.5;
 const EDGE: f32 = 2.5;
 /// What the brain shrinks a display's picture to fit; it never enlarges one.
 const IMAGE_LIMIT: [u32; 2] = [1280, 720];
-/// How often a screen hold reads the pointer.
-const PERIOD: Duration = Duration::from_millis(16);
 
 /// The running screen hold's sampler, shared with the overlay's root, which paints its line.
 pub(super) type Held = Rc<RefCell<Option<Sampler>>>;
@@ -75,43 +73,23 @@ pub(super) fn strokes(
     Ok(Some([edge, core]))
 }
 
-/// One screen hold's sampling: its recorder, the line as the overlay strokes it, and the timer
-/// that asks for the pointer. Dropping it stops the timer. It has no `Debug`: where the user
-/// pointed is theirs.
+/// One screen hold's sampling: its recorder and the line as the overlay strokes it. The hold's
+/// frames feed it (`Presence::line_frame`). It has no `Debug`: where the user pointed is
+/// theirs.
 pub(super) struct Sampler {
     gesture: GestureId,
     recorder: PathRecorder,
-    /// The recorder's points as [`strokes`] takes them, copied only when the path changes.
+    /// The recorder's points and then the pointer's own place, as [`strokes`] takes them,
+    /// copied only when either changes.
     line: Vec<Vec2>,
-    _timer: Task<()>,
 }
 
 impl Sampler {
-    /// Starts sampling for `gesture`. Every 16 ms `tick` runs on the UI thread, in an update of
-    /// the entity that starts this, until it answers false, that entity is gone or the sampler
-    /// is dropped.
-    pub(super) fn start<T: 'static>(
-        gesture: GestureId,
-        recorder: PathRecorder,
-        cx: &mut Context<'_, T>,
-        mut tick: impl FnMut(&mut T, &mut Context<'_, T>) -> bool + 'static,
-    ) -> Self {
-        let timer = cx.spawn(async move |owner, cx| {
-            loop {
-                cx.background_executor().timer(PERIOD).await;
-                if !owner
-                    .update(cx, |owner, cx| tick(owner, cx))
-                    .unwrap_or(false)
-                {
-                    break;
-                }
-            }
-        });
+    pub(super) fn new(gesture: GestureId, recorder: PathRecorder) -> Self {
         Self {
             gesture,
             recorder,
-            line: Vec::with_capacity(MAX_PATH_POINTS + 1),
-            _timer: timer,
+            line: Vec::with_capacity(MAX_PATH_POINTS),
         }
     }
 
@@ -119,13 +97,18 @@ impl Sampler {
         self.gesture
     }
 
-    /// Records where the pointer is. True when the line changed and the overlay must repaint.
-    pub(super) fn sample(&mut self, point: PhysicalPoint) -> bool {
-        let changed = self.recorder.sample(point);
+    /// Records where the pointer is at `now`. True when the line changed and the overlay must
+    /// repaint: a point was kept, or the pointer the line ends at moved.
+    pub(super) fn sample(&mut self, point: PhysicalPoint, now: Instant) -> bool {
+        let end = self.recorder.end();
+        let changed = self.recorder.sample(point, now) || self.recorder.end() != end;
         if changed {
+            let points = self.recorder.points();
+            // The kept points trail the pointer by the easing; the line still reaches it.
+            let end = self.recorder.end().filter(|end| points.last() != Some(end));
             self.line.clear();
             self.line
-                .extend(self.recorder.points().iter().copied().map(centre));
+                .extend(points.iter().copied().chain(end).map(centre));
         }
         changed
     }
@@ -141,9 +124,10 @@ impl Sampler {
         self.recorder.display().size
     }
 
-    /// Stops sampling and gives the path a release carries.
-    pub(super) fn finish(self) -> PointerPath {
-        self.recorder.finish()
+    /// Stops sampling and gives the path a release carries, which ends at `pointer`: where
+    /// the pointer was when the keys came up.
+    pub(super) fn finish(self, pointer: PhysicalPoint) -> PointerPath {
+        self.recorder.finish(pointer)
     }
 }
 
