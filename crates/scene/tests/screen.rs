@@ -99,6 +99,14 @@ fn the_model_may_write_the_pictures_size_but_never_another_or_the_display() {
             ("display", ErrorCode::Unsupported)
         );
     }
+    let Ok(Record::Begin(mut overlay)) = record(&json!({"begin":{"scene":"o","alt":""}})) else {
+        panic!("overlay header");
+    };
+    let error = screen::stamp(&mut overlay, PICTURE, DISPLAY).expect_err("an overlay");
+    assert_eq!(
+        (error.path.as_str(), error.code),
+        ("surface", ErrorCode::Unsupported)
+    );
     let mut stamped = header();
     let error = screen::stamp(&mut stamped, PICTURE, DISPLAY).expect_err("stamped twice");
     assert_eq!(
