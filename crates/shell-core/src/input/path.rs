@@ -16,9 +16,9 @@ const SPACING: f64 = 2.0;
 /// is short because the line is evidence of where the user pointed: a circle of 40 pixels
 /// drawn at three turns a second comes out one pixel smaller.
 const EASE: Duration = Duration::from_millis(12);
-/// The least time between two kept points. A display that refreshes faster records what a
-/// 60 Hz one does, so a line has as many points, and costs as much to paint, on every
-/// display. The line's end still follows the pointer on every sample.
+/// The least time between two kept points, so a long line stays cheap to paint. By the clock
+/// it lands on the display's frames: every frame at 60 Hz (16.7 ms), every third at 144 Hz
+/// (20.8 ms, 48 points a second). The line's end still follows the pointer on every sample.
 const APART: Duration = Duration::from_millis(16);
 /// How close to the line a kept point must be to go when the path fills, in logical pixels,
 /// until a full path has too few points that close.
@@ -124,6 +124,9 @@ impl PathRecorder {
             let before = self.points.len();
             straighten(&mut self.points, self.tolerance);
             if before - self.points.len() < before / 8 {
+                // shortcut: the raised tolerance stays for the rest of the hold, so later fills
+                // thin at it and a long line of turns moves by several passes' sum; start each
+                // thin from the base tolerance instead (OSC-802).
                 self.tolerance *= 2.0;
             }
         }

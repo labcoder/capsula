@@ -378,7 +378,8 @@ overlay, as the picture will show it. `presence/ink.rs` holds the three pieces.
   the line as the overlay strokes it: the recorder's points and then the pointer's own place.
   The kept points trail the pointer by the recorder's easing, so the last stretch is what makes
   the stroke reach the pointer. The line is reserved once, for 2,048 points, and is copied from
-  the recorder only on a frame that changed it, so sampling allocates nothing.
+  the recorder only on a frame that changed it, so the sampler allocates nothing. Asking GPUI
+  for the next frame (`on_next_frame`) allocates twice a frame, pointer moving or not.
 - **The strokes.** `strokes` builds the line as two paths: a white edge, then a pink core to
   paint over it. The brain paints the same path on the hold's image as one capsule per segment
   (`crates/brain/src/screen/ink.rs`), so the strokes have round joins and round ends
@@ -410,7 +411,8 @@ frame reads is in that frame's paint. These frames come at the display's refresh
 the [Max frame rate](frame-rate.md): the line follows a hand, and a capped line trails it. A
 frame ends the line when the pending hold is no longer this one, was released or has ended. It
 reads the pointer without blocking and skips a failed read. It repaints only when the line
-changed, so a pointer that rests keeps no point and asks for no paint. The line also stops in
+changed. So once the eased line has caught up with a pointer that rests, about 45 ms and up
+to 3 more points, a frame keeps no point and asks for no paint. The line also stops in
 `end_voice`, which every cancel and failure reaches, and as soon
 as the standing notice stops being `On` (`screen_changed`, after every batch of link events).
 That last stop is the gesture's one ask about its release, so the release sends nothing even

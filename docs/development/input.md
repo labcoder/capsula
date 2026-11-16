@@ -608,8 +608,9 @@ that is under 100% or not a number counts as 100%.
   the same line. It is short because the line is evidence of where the user pointed: a circle
   of 40 pixels drawn at three turns a second is recorded one pixel smaller.
 - An eased point is kept when it is at least 2 logical pixels from the last kept point and at
-  least 16 ms after it (`APART`). So a display that refreshes faster records what a 60 Hz one
-  does: a line has as many points, and costs as much to paint, on every display.
+  least 16 ms after it (`APART`), so a long line stays cheap to paint. By the clock that lands
+  on the display's frames: a 60 Hz display keeps a point on every frame (16.7 ms) and a 144 Hz
+  display on every third (20.8 ms, 48 a second), so its recorded line is slightly coarser.
 - `end` is the pointer's own last place on the display, which the shell draws the line on to.
   `finish` ends the path at the pointer read with the release, never at an eased point.
 - A path holds at most `MAX_PATH_POINTS` (2,048), and sampling leaves room for the release's
@@ -617,7 +618,11 @@ that is under 100% or not a number counts as 100%.
   within a tolerance (1 logical pixel) of the straight stretch between their neighbours, at
   most every second one, and keeps the first and the newest. So straight runs lose points and
   corners keep theirs. A path with too few such points, one that is nothing but turns, gets
-  twice the tolerance. So a hold of any length fits, and the line never stops.
+  twice the tolerance. So a hold of any length fits, and the line never stops. The raised
+  tolerance stays for the rest of the hold: later fills thin at it and their passes add up, so
+  in a long hold that is nothing but turns the line can move by the sum of several passes'
+  tolerances, not by one pixel. A `shortcut:` in `thin` names the fix, starting each thin from
+  the base tolerance.
 - Only samples inside the display given to `new` are kept. That is the display the line will be
   drawn on, so nothing reaches the picture that wasn't shown. A sample anywhere else changes
   nothing, and the path joins up in a straight line when the pointer comes back.
