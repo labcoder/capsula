@@ -569,8 +569,8 @@ struct Run {
     /// The run took up a screen hold's picture, so while marks are on every round stores its
     /// native items without boxes, even after the picture is withdrawn or can't be drawn on.
     pictured: bool,
-    /// The hold's gesture while its screen is still to be told to the shell, which happens once,
-    /// at the run's first request.
+    /// The hold's gesture while its screen is still to be told to the shell, which happens once:
+    /// an image at the first granted send carrying it, anything else at the run's first request.
     untold: Option<kumochi_protocol::message::GestureId>,
     /// The round's current build; the engine starts once it's admitted.
     build: Option<admission::Build>,
@@ -1338,7 +1338,7 @@ impl Coordinator {
         effects: &mut Vec<Effect>,
     ) {
         run.control.0.cancel();
-        // No request carried the hold's picture, so its turn mustn't say it was sent.
+        // No send carrying the hold's picture was granted, so its turn mustn't say it was sent.
         if run.untold.is_some()
             && run.screen.as_ref().is_some_and(|screen| {
                 matches!(

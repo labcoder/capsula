@@ -318,7 +318,7 @@ impl Coordinator {
         }
         build.admit(made.sources);
         current.compacted = None;
-        current.tell_screen(effects);
+        current.tell_screen_unless_image(effects);
         effects.push(Effect::StartEngine {
             request: RunRequest {
                 key: SendKey::Build(key),

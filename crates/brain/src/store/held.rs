@@ -36,7 +36,7 @@ pub(super) fn column(screen: HeldScreen) -> &'static str {
 
 impl super::Store {
     /// Marks `run`'s screen `withdrawn` when it says `attached` or `screen`: the user withdrew
-    /// the image before any request carried it.
+    /// the image before any send carrying it was granted.
     ///
     /// # Errors
     /// When the run's id doesn't fit SQL, or the write fails.
@@ -44,8 +44,8 @@ impl super::Store {
         self.unsent_screen(run, Some(column(HeldScreen::Withdrawn)))
     }
 
-    /// Clears `run`'s screen when it says `attached` or `screen`: the run ended before any
-    /// request carried the image.
+    /// Clears `run`'s screen when it says `attached` or `screen`: the run ended before any send
+    /// carrying the image was granted.
     ///
     /// # Errors
     /// When the run's id doesn't fit SQL, or the write fails.

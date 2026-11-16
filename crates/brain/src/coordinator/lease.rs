@@ -131,6 +131,9 @@ impl Coordinator {
             return;
         }
         let sources = build.sources().to_vec();
+        if let Some(run) = self.current.as_mut() {
+            run.tell_screen(effects);
+        }
         self.grant(SendKey::Build(key), sources, hold, effects);
     }
 
