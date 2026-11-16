@@ -1472,81 +1472,88 @@ fn no_screen_number_reaches_a_stored_round_whatever_the_call_holds() {
     assert!(stored[0].contains(LABEL), "{}", stored[0]);
 }
 
+/// Applies `next` and every effect it leads to: drawing writes made durable, scene clears
+/// cleared and acknowledged. Every effect seen, in order.
+fn settle(core: &mut Coordinator, store: &mut Store, mut next: Vec<Effect>) -> Vec<Effect> {
+    let mut all = Vec::new();
+    while !next.is_empty() {
+        let mut more = Vec::new();
+        if pending(&next).is_some() {
+            more = write(core, store, &next);
+        }
+        for effect in &next {
+            if let Effect::Store(StoreOp::ClearScenes { scenes }) = effect {
+                store.clear_scenes(scenes).expect("clear");
+                more.extend(
+                    core.handle(Input::ScenesCleared {
+                        scenes: scenes.clone(),
+                        ok: true,
+                    })
+                    .expect("clear acknowledgement"),
+                );
+            }
+        }
+        all.append(&mut next);
+        next = more;
+    }
+    all
+}
+
+/// Commits the call result among `effects` and acknowledges it; the result's output.
+fn answer(core: &mut Coordinator, store: &mut Store, effects: &[Effect]) -> ToolOutput {
+    let result = effects
+        .iter()
+        .find_map(|effect| match effect {
+            Effect::Store(StoreOp::CommitCall(call)) => Some(call.clone()),
+            _ => None,
+        })
+        .expect("a result");
+    let outcome = store.commit_call(&result).expect("durable result");
+    core.handle(Input::CallCommitted {
+        key: result.key,
+        outcome,
+        then: None,
+    })
+    .expect("acknowledgement");
+    result.output
+}
+
+/// Streams the screen call `name` with `args` into the coordinator's draw step, which announces
+/// the canvas before every input. The dormant tool gate still refuses a screen begin before the
+/// drawing, so a screen call can't come in through `call`.
+fn screen(core: &mut Coordinator, name: &str, args: &str) -> Vec<Effect> {
+    let key = crate::dispatch::LedgerKey {
+        run: R,
+        route: crate::dispatch::Route::Model,
+        call: name.into(),
+    };
+    let records: Value = serde_json::from_str(args).expect("JSON");
+    let mut actions = vec![crate::dispatch::DrawAction::Start];
+    actions.extend(
+        (0..)
+            .zip(records["records"].as_array().expect("records"))
+            .map(|(index, record)| crate::dispatch::DrawAction::Record {
+                index,
+                bytes: serde_json::to_vec(record).expect("a record"),
+            }),
+    );
+    actions.push(crate::dispatch::DrawAction::Finish(None));
+    let mut effects = Vec::new();
+    for action in actions {
+        assert_eq!(
+            core.drawing_call(T, &key, action, &mut effects),
+            Dispatch::Committing
+        );
+    }
+    effects
+}
+
 /// A skipped screen scene's run refuses its next screen call through the real path, which
 /// announces the still-held picture before every draw input, with or without a card between:
 /// nothing is looked up, written or shown. The refusal's text is the reducer's, pinned there.
 #[test]
 fn a_skipped_screen_scene_s_run_refuses_its_next_screen_call_through_the_coordinator() {
     const AGAIN: &str = r#"{"records":[{"begin":{"scene":"again","surface":"screen","alt":"marks"}},{"step":{"id":"s2","put":[{"highlight":{"id":"e","target":{"box":[186,598,450,78]},"style":"box"}}]}},{"end":{}}]}"#;
-    let settle = |core: &mut Coordinator, store: &mut Store, mut next: Vec<Effect>| {
-        let mut all = Vec::new();
-        while !next.is_empty() {
-            let mut more = Vec::new();
-            if pending(&next).is_some() {
-                more = write(core, store, &next);
-            }
-            for effect in &next {
-                if let Effect::Store(StoreOp::ClearScenes { scenes }) = effect {
-                    store.clear_scenes(scenes).expect("clear");
-                    more.extend(
-                        core.handle(Input::ScenesCleared {
-                            scenes: scenes.clone(),
-                            ok: true,
-                        })
-                        .expect("clear acknowledgement"),
-                    );
-                }
-            }
-            all.append(&mut next);
-            next = more;
-        }
-        all
-    };
-    let answer = |core: &mut Coordinator, store: &mut Store, effects: &[Effect]| {
-        let result = effects
-            .iter()
-            .find_map(|effect| match effect {
-                Effect::Store(StoreOp::CommitCall(call)) => Some(call.clone()),
-                _ => None,
-            })
-            .expect("a result");
-        let outcome = store.commit_call(&result).expect("durable result");
-        core.handle(Input::CallCommitted {
-            key: result.key,
-            outcome,
-            then: None,
-        })
-        .expect("acknowledgement");
-        result.output
-    };
-    // The dormant tool gate still refuses a screen begin before the drawing, so a screen call
-    // streams in at the coordinator's draw step, which announces the canvas before every input.
-    let screen = |core: &mut Coordinator, name: &str, args: &str| {
-        let key = crate::dispatch::LedgerKey {
-            run: R,
-            route: crate::dispatch::Route::Model,
-            call: name.into(),
-        };
-        let records: Value = serde_json::from_str(args).expect("JSON");
-        let mut actions = vec![crate::dispatch::DrawAction::Start];
-        actions.extend(
-            (0..)
-                .zip(records["records"].as_array().expect("records"))
-                .map(|(index, record)| crate::dispatch::DrawAction::Record {
-                    index,
-                    bytes: serde_json::to_vec(record).expect("a record"),
-                }),
-        );
-        actions.push(crate::dispatch::DrawAction::Finish(None));
-        let mut effects = Vec::new();
-        for action in actions {
-            assert_eq!(
-                core.drawing_call(T, &key, action, &mut effects),
-                Dispatch::Committing
-            );
-        }
-        effects
-    };
     for card in [false, true] {
         let scratch = Scratch::new(&format!("draw-tool-skip-{card}"));
         let mut store = store(&scratch);
