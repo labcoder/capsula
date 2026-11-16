@@ -53,6 +53,13 @@ fn main() -> ExitCode {
         #[cfg(not(debug_assertions))]
         return ExitCode::from(10);
     }
+    if worker.as_deref() == Some(constants::MARKS_CHECK_ARG) {
+        #[cfg(debug_assertions)]
+        return ExitCode::from(kumochi_brain::connections::marks_check::run());
+        // Without the mode the flag still never reaches a normal start, which could refresh.
+        #[cfg(not(debug_assertions))]
+        return ExitCode::from(10);
+    }
     if worker.as_deref() == Some(constants::CATALOG_PROVENANCE_ARG) {
         #[cfg(debug_assertions)]
         return ExitCode::from(kumochi_brain::connections::provenance::run().code());

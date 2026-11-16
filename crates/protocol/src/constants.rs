@@ -310,6 +310,10 @@ pub const IMAGE_CHECK_ARG: &str = "--image-check";
 /// `cargo xtask live image --diagnostic` runs. A brain built without it exits 10.
 pub const IMAGE_DIAGNOSTIC_ARG: &str = "--image-diagnostic";
 
+/// Dev builds only: the screen marks live check, which `cargo xtask live marks` runs. A brain
+/// built without it exits 10.
+pub const MARKS_CHECK_ARG: &str = "--marks-check";
+
 /// The capture's one output file, in its `target\live\<time>` run folder.
 pub const CATALOG_PROVENANCE_FILE: &str = "catalog-provenance.json";
 

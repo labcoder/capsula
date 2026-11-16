@@ -422,6 +422,54 @@ other. Every request carries the same text, so counts that barely differ between
 and the large ones mean the images weren't counted. In one diagnostic run, the whole small noisy
 request came to 115 input tokens and the flat 1024×1024 one to 1,267.
 
+## `marks`
+
+`cargo xtask live marks` measures how closely the model marks things in a picture of a screen
+through the screen surface, before `draw` offers it. `KUMOCHI_LIVE_BUDGET=0 cargo xtask live marks`
+is its dry run. Run the real one only in a live turn the Captain assigned, from the reviewed head.
+
+- xtask runs `kumochid.exe --marks-check` the way it runs the image check: only the copied brain,
+  in its kill-on-close job, stdout piped, for at most 30 minutes. The mode is built into debug
+  brains only, and a brain without it exits 10. Its preflight is the image check's, and it never
+  renews the session.
+- Before anything is sent, it draws six made-up layouts at 2560×1440 in memory: three buttons, a
+  field, a panel, three rows and two lines of text 11 to 16 pixels tall, labelled in a built-in
+  5×7 capital font, light and dark in turn. Each is shrunk by area average, as the screen
+  worker does, to 1280×720, 1600×900 and the full size, and encoded as JPEG at quality 85.
+- Each request goes through the product's request path on the default model at low effort: the
+  user asks where five named things are, the picture follows with `detail: "high"` and a developer
+  line giving its size, and the only tool is `draw` with `screen_draw_schema()`, its surface
+  narrowed to overlay and screen, and the marking paragraph after the draw prompt. So the
+  provider may shrink the full-size picture; the summary says so.
+- 36 requests, size-major: the first layout's first version at each size goes first, and a size
+  the provider refuses skips the rest at that size. Then the replay: request 1's call as the store
+  keeps it, every box replaced by `PLACEHOLDER_BOX`, a fixed result and a fixed follow-up, with no
+  picture. Nothing is retried.
+
+**Requests.** The mode's `Budget` is 45, pinned by a compile-time assert, and
+`KUMOCHI_LIVE_BUDGET` can only lower it; a value that isn't a count allows none. At 0 the vault is
+never opened: the brain prints its header, every request's line with `result=dry` and the
+summary. The brain prints numbers and fixed words only: a header with the model, effort, detail,
+date, planned count and budget; one line per request with its layout, size, version, JPEG and body
+bytes, status, provider code and part, result, whether the call was accepted or the error code and
+field that refused it, the mark count, input tokens and milliseconds; one line per box mark with
+the closest named thing's kind, the mark's style, its signed edge errors in picture pixels and in
+display pixels, and the overlap; and a summary. Accepted means the call parses with
+`parse_screen_draw_record`, stamps with `screen::stamp` and every step admits in a `SceneState`.
+The model's text, labels and boxes are never printed. xtask keeps the brain's lines that start
+with `marks-check`, `request=`, `mark=` and `summary`, then prints one line from the exit code,
+counting the request lines that carry a status:
+
+```
+marks check: done (requests: 37)
+marks check: nothing sent, exit 16 (requests: 0)
+marks check: stopped, exit 20 (requests: at most 12)
+```
+
+Exits 10–17 mean the same as the catalog capture's and send nothing; 18 means a picture or body
+couldn't be built; 20 means the session went stale or a line couldn't be written, with the rest
+unspent.
+
 ## Bounds
 
 | Wait | Bound | Then |
