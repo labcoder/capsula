@@ -4,7 +4,7 @@ use kumochi_scene::screen::PLACEHOLDER_BOX;
 use super::picture::{Canvas, layout, shrink, text_width};
 use super::{
     BUDGET, DISPLAY, LAYOUTS, NAMED, Verdict, account_refusal, assign, build, check, draw_tool,
-    limit, mark_line, picture_line, placeholders, plan, truths,
+    limit, mark_line, picture_line, placeholders, plan, summary, truths,
 };
 use crate::connections::model::error::{Code, ProviderError};
 use crate::context::{InputItem, Jpeg, Role};
@@ -207,6 +207,16 @@ fn marks_pair_with_named_things_one_to_one_and_count_a_half_overlap_as_found() {
     let under = [(HighlightStyle::Box, [0.0, 0.0, 10.0, 21.0])];
     assert_eq!(assign(&under, &truths[..1]), (vec![Some(0)], 0));
     assert_eq!(assign(&[], &truths), (vec![], 0));
+}
+
+#[test]
+fn the_summary_names_the_short_low_effort_instructions_and_the_found_total() {
+    assert_eq!(
+        summary([37, 30, 2, 41], 36, "accepted", "high"),
+        "summary attempted=37 accepted_first_call=30/36 instructions=short-fixed effort=low \
+         found=41/180 skipped=2 replay=accepted \
+         note=the-full-size-picture-went-with-detail-high-and-may-have-been-shrunk-by-the-provider"
+    );
 }
 
 #[test]
