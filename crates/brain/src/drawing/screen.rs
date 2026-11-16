@@ -1,12 +1,14 @@
 //! Screen scenes: the gates a screen `begin` meets, its stamp, and the forms it is stored in.
 //! A screen scene's boxes stay in memory; neither stored form holds one.
 
-use kumochi_protocol::message::RunId;
+use kumochi_protocol::message::{RunId, SceneId};
 use kumochi_scene::record::Surface;
-use kumochi_scene::screen::{stamp, without_boxes};
-use kumochi_scene::{Begin, Record, TokenError, Tokenizer, parse_screen_draw_record};
+use kumochi_scene::screen::{admit, stamp, without_boxes};
+use kumochi_scene::{
+    Begin, Record, TokenError, Tokenizer, parse_draw_record, parse_screen_draw_record,
+};
 
-use super::{CallError, Drawing};
+use super::{CallError, Drawing, Output, Pend, Pending, Wait};
 use crate::context::{Geometry, NoCanvas};
 use crate::engines::{DRAW, Opaque};
 
@@ -50,12 +52,50 @@ impl Drawing {
         stamp(&mut begin, geometry.picture, geometry.display).map_err(CallError::Step)?;
         Ok(begin)
     }
+
+    /// Sharing the screen was turned off: every screen scene leaves, every call drawing one ends
+    /// as `ScreenOff`, and a later screen `begin` is refused the same way. A step of theirs still
+    /// being laid out or written settles without reaching the shell.
+    pub(super) fn screen_off(&mut self, out: &mut Output) {
+        for ledger in &mut self.runs {
+            if ledger.canvas.is_some() {
+                ledger.canvas = Some(Err(NoCanvas::Off));
+            }
+        }
+        let calls: Vec<_> = self
+            .calls
+            .iter()
+            .filter(|call| !call.done && call.picture.is_some())
+            .map(|call| (call.run, call.id.clone()))
+            .collect();
+        if let Some(Pending {
+            wait: Wait::Step(write),
+            ..
+        }) = &mut self.pending
+            && matches!(write.scene, Pend::New { .. })
+            && calls
+                .iter()
+                .any(|(run, call)| write.run == *run && write.call == *call)
+        {
+            write.clear_requested = true;
+        }
+        for (run, call) in calls {
+            self.end_early(run, &call, CallError::ScreenOff, out);
+        }
+        let screens: Vec<SceneId> = self
+            .scenes
+            .iter()
+            .filter(|held| !held.gone && held.state.header().surface == Surface::Screen)
+            .map(|held| held.scene)
+            .collect();
+        self.clear_scenes(&screens, out);
+    }
 }
 
-/// A round's native item as a run that can draw screen scenes stores it: a `draw` call in a
-/// screen scene keeps its records with every box target replaced, and one whose records can't
-/// be read far enough to tell its surface, or don't parse, keeps none. Any other item is stored
-/// as it came.
+/// A round's native item as a run that took up a screen hold's picture stores it: a `draw` call
+/// naming the screen surface keeps its records with every box target replaced when it is one
+/// screen scene the surface admits, and none otherwise; one whose records don't read or parse
+/// keeps none. Any other item is stored as it came.
 pub(crate) fn stored_item(item: Opaque) -> Opaque {
     let Ok(mut value) = serde_json::from_slice::<serde_json::Value>(item.bytes()) else {
         return item;
@@ -70,13 +110,16 @@ pub(crate) fn stored_item(item: Opaque) -> Opaque {
         value["arguments"] = serde_json::json!({ "records": records }).to_string().into();
         Opaque::new(serde_json::to_vec(&value).ok()?).ok()
     };
-    // Arguments too short to hold a box are all an item too large with none can have lost.
+    // shortcut: the last fallback keeps the item as it came, which holds no box only because the
+    // Responses parser serialises each item from a `serde_json::Value` before `Opaque::new`, whose
+    // only refusal is length, so emptying its arguments shrinks it; recheck for another producer.
     with(records).or_else(|| with(Vec::new())).unwrap_or(item)
 }
 
-/// The records a `draw` call's arguments are stored with; `None` when its scene isn't a screen
-/// scene. A screen scene's steps lose their boxes, and arguments that don't parse as one whole
-/// screen call, or never get as far as a `begin`, keep nothing.
+/// The records a `draw` call's arguments are stored with; `None` when no record names the screen
+/// surface. The whole envelope is read before anything is exempt: arguments that don't read or
+/// parse whole keep nothing, and so does an envelope naming the screen that isn't one screen
+/// scene whose steps the screen surface admits; those steps lose their boxes.
 fn kept(args: &[u8]) -> Option<Vec<serde_json::Value>> {
     let mut tokenizer = Tokenizer::new();
     let mut input = args;
@@ -85,24 +128,38 @@ fn kept(args: &[u8]) -> Option<Vec<serde_json::Value>> {
         let next = tokenizer
             .next(&mut input)
             .map(|record| record.map(|record| record.bytes.to_vec()));
-        let bytes = match next {
-            Ok(Some(bytes)) => bytes,
-            Ok(None) if tokenizer.finish().is_ok() => return Some(records),
-            Err(TokenError::AfterRecords) => return Some(records),
+        match next {
+            Ok(Some(bytes)) => records.push(bytes),
+            Ok(None) if tokenizer.finish().is_ok() => break,
+            Err(TokenError::AfterRecords) => break,
             Ok(None) | Err(_) => return Some(Vec::new()),
-        };
-        let record = match parse_screen_draw_record(&bytes) {
-            Ok(Record::Begin(begin)) if records.is_empty() && begin.surface != Surface::Screen => {
-                return None;
+        }
+    }
+    if records.iter().all(|bytes| parse_draw_record(bytes).is_ok()) {
+        return None;
+    }
+    let Ok(records) = records
+        .iter()
+        .map(|bytes| parse_screen_draw_record(bytes))
+        .collect::<Result<Vec<_>, _>>()
+    else {
+        return Some(Vec::new());
+    };
+    let screen = |record: &Record| matches!(record, Record::Begin(begin) if begin.surface == Surface::Screen);
+    let mut kept = Vec::new();
+    for (index, record) in records.iter().enumerate() {
+        let value = match record {
+            Record::Begin(_) if index == 0 && screen(record) => serde_json::to_value(record),
+            Record::Step(step) if index > 0 && admit(step, [f32::INFINITY; 2], 0).is_ok() => {
+                serde_json::to_value(Record::Step(without_boxes(step)))
             }
-            Ok(record @ Record::Begin(_)) if records.is_empty() => record,
-            Ok(Record::Step(step)) if !records.is_empty() => Record::Step(without_boxes(&step)),
-            Ok(record @ (Record::Begin(_) | Record::End(_))) if !records.is_empty() => record,
+            Record::End(_) if index > 0 => serde_json::to_value(record),
             _ => return Some(Vec::new()),
         };
-        let Ok(value) = serde_json::to_value(&record) else {
+        let Ok(value) = value else {
             return Some(Vec::new());
         };
-        records.push(value);
+        kept.push(value);
     }
+    Some(kept)
 }

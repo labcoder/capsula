@@ -1134,3 +1134,31 @@ fn each_setting_withdraws_only_the_pictures_it_allowed() {
         [R]
     );
 }
+
+#[test]
+fn only_a_screen_hold_s_picture_makes_a_run_store_its_items_without_boxes() {
+    use crate::context::{Jpeg, Screen, ScreenClass};
+    let image = Jpeg::new(vec![0xFF, 0xD8, 0xFF, 0xD9]).unwrap();
+    for (screen, pictured) in [
+        (Some(Screen::Image(image.clone())), false),
+        (Some(Screen::NotIncluded(ScreenClass::Changed)), false),
+        (
+            Some(Screen::Picture(
+                image,
+                None,
+                crate::context::Geometry::FIXTURE,
+            )),
+            true,
+        ),
+        (
+            Some(Screen::PictureNotIncluded(ScreenClass::TooLarge)),
+            false,
+        ),
+        (None, false),
+    ] {
+        let mut core = ready_for("captured");
+        core.submit_hold(prepared(&core, Some(T)), "words".into(), screen)
+            .unwrap();
+        assert_eq!(core.current.as_ref().expect("run").pictured, pictured);
+    }
+}

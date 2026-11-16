@@ -150,6 +150,8 @@ pub enum Input {
     },
     /// Quit: every scene is cleared once the write in the store is answered.
     ClearVisible,
+    /// The user turned off sharing the screen: screen scenes leave and nothing new is drawn on it.
+    ScreenOff,
     /// The run ended: its later input, and any earlier run's, is stale. Its scenes stay.
     RunClosed {
         /// The run.
@@ -527,6 +529,7 @@ impl Drawing {
             }
             Input::Clear { scenes } => self.clear(&scenes, &mut out),
             Input::SceneFailed { scene } => self.scene_failed(scene, &mut out),
+            Input::ScreenOff => self.screen_off(&mut out),
             Input::ClearVisible => {
                 self.clear_visible(&mut out);
                 if !self.settled() {
@@ -780,6 +783,7 @@ impl fmt::Debug for Input {
             Self::Clear { .. } => "Clear",
             Self::SceneFailed { .. } => "SceneFailed",
             Self::ClearVisible => "ClearVisible",
+            Self::ScreenOff => "ScreenOff",
             Self::RunClosed { .. } => "RunClosed",
             Self::ThreadDeleted { .. } => "ThreadDeleted",
             Self::Written { .. } => "Written",

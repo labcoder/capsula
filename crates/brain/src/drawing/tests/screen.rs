@@ -7,7 +7,7 @@ use super::*;
 use crate::context::{Geometry, NoCanvas};
 use crate::drawing::stored_item;
 use crate::engines::Opaque;
-use kumochi_scene::record::{ScreenDisplay, Target};
+use kumochi_scene::record::{ScreenDisplay, Surface, Target};
 use kumochi_scene::screen::PLACEHOLDER_BOX;
 use kumochi_scene::{Finite, Op};
 
@@ -423,4 +423,202 @@ fn no_mark_s_box_or_display_reaches_a_debug_a_result_or_a_stored_box() {
         DISPLAY.iter().all(|marker| header.contains(marker)),
         "{header}"
     );
+}
+
+#[test]
+fn a_label_with_no_room_after_a_mark_names_its_own_put_index() {
+    let mut drawing = told(Ok(Geometry::FIXTURE));
+    let mut store = Store::default();
+    let crowded = r#"{"id":"s1","put":[{"highlight":{"id":"m","target":{"box":[40,40,20,20]},"style":"box"}},{"callout":{"id":"l","target":{"box":[0,0,1280,720]},"text":"everything"}}]}"#;
+    let out = store.run(
+        &mut drawing,
+        screen_call(1, "c", &screen_begin("marks", ""), &[crowded.to_owned()]),
+    );
+    assert_eq!(
+        out.calls[0].tool_text(),
+        format!(
+            "drawn: []; stopped: step s1: put[1].callout: scene.NoRoom: no free side outside the marks has room for this label{RETRY}{NOT_KEPT}"
+        )
+    );
+    assert!(store.scenes.is_empty());
+}
+
+const OFF: &str = "surface: drawing.ScreenOff; the user turned off sharing the screen; explain in words or draw a card";
+
+/// The screen scene headers and steps `out` sends the shell.
+fn shown(out: &Output) -> usize {
+    out.effects
+        .iter()
+        .filter(|effect| {
+            matches!(
+                effect,
+                Effect::Data(DataToShell::SceneBegin { .. } | DataToShell::SceneStepCommit { .. })
+            )
+        })
+        .count()
+}
+
+fn texts(outs: &[&Output]) -> Vec<String> {
+    outs.iter()
+        .flat_map(|out| out.calls.iter().map(CallEnd::tool_text))
+        .collect()
+}
+
+#[test]
+fn turning_sharing_off_ends_an_open_screen_call_and_refuses_its_later_steps_and_continuations() {
+    const KEEP: &str = r#","others":"keep""#;
+    let mut drawing = told(Ok(Geometry::FIXTURE));
+    let mut store = Store::default();
+    store.run(
+        &mut drawing,
+        call(1, "card", args("card", &[text("a", "x")])),
+    );
+    store.run(
+        &mut drawing,
+        record_of(1, "c", 0, &screen_begin("marks", KEEP)),
+    );
+    let first = store.run(
+        &mut drawing,
+        record_of(1, "c", 1, &step(&marked("s1", "x"))),
+    );
+    assert_eq!(shown(&first), 2);
+    let off = store.run(&mut drawing, Input::ScreenOff);
+    assert_eq!(
+        texts(&[&off]),
+        [format!("drawn: [s1]; stopped: {OFF}{NOT_KEPT}")]
+    );
+    let later = drawing
+        .handle(record_of(1, "c", 2, &step(&marked("s2", "y"))))
+        .map(|out| out.effects.len());
+    assert_eq!(later, Err(crate::coordinator::Stale));
+    let again = store.run(
+        &mut drawing,
+        screen_call(1, "d", &screen_begin("marks", KEEP), &[marked("s3", "z")]),
+    );
+    assert_eq!(texts(&[&again]), [format!("drawn: []; stopped: {OFF}")]);
+    assert_eq!(shown(&again), 0);
+    let live: Vec<_> = drawing
+        .scenes
+        .iter()
+        .filter(|held| !held.gone)
+        .map(|held| held.state.header().surface)
+        .collect();
+    assert_eq!(live.len(), 1);
+    assert!(live.iter().all(|surface| *surface != Surface::Screen));
+    let card = store.run(&mut drawing, call(1, "e", args("card2", &[text("b", "y")])));
+    assert_eq!(texts(&[&card]), ["drawn: [b]"]);
+}
+
+#[test]
+fn a_screen_call_waiting_on_its_lookup_its_layout_or_its_write_when_sharing_goes_off_shows_nothing()
+{
+    for wait in ["lookup", "layout", "write"] {
+        let mut drawing = told(Ok(Geometry::FIXTURE));
+        drawing.defer_preparation = wait == "layout";
+        let mut store = Store::default();
+        let lookup = drawing
+            .handle(screen_call(
+                1,
+                "c",
+                &screen_begin("marks", ""),
+                &[marked("s1", "x")],
+            ))
+            .expect("a call");
+        assert_eq!(trace(&lookup), ["lookup"]);
+        let (off, settled) = match wait {
+            "lookup" => {
+                let off = drawing.handle(Input::ScreenOff).expect("the setting");
+                let found = reply(&mut drawing, &lookup, Ok(Reply::Lookup(None)));
+                (off, store.settle(&mut drawing, found))
+            }
+            "layout" => {
+                let laid = reply(&mut drawing, &lookup, Ok(Reply::Lookup(None)));
+                let job = laid
+                    .effects
+                    .iter()
+                    .find_map(|effect| match effect {
+                        Effect::PrepareDrawing(job) => Some(job.clone()),
+                        _ => None,
+                    })
+                    .expect("a step to lay out");
+                let off = drawing.handle(Input::ScreenOff).expect("the setting");
+                let prepared = drawing.handle(job.run()).expect("the pending preparation");
+                (off, store.settle(&mut drawing, prepared))
+            }
+            _ => {
+                let written = reply(&mut drawing, &lookup, Ok(Reply::Lookup(None)));
+                assert_eq!(trace(&written), ["write step 1"]);
+                let off = drawing.handle(Input::ScreenOff).expect("the setting");
+                let mut both = written;
+                merge(
+                    &mut both,
+                    Output {
+                        effects: off.effects.clone(),
+                        calls: Vec::new(),
+                    },
+                );
+                (off, store.settle(&mut drawing, both))
+            }
+        };
+        let drawn = if wait == "write" { "s1" } else { "" };
+        assert_eq!(
+            texts(&[&off, &settled]),
+            [format!("drawn: [{drawn}]; stopped: {OFF}{NOT_KEPT}")],
+            "{wait}"
+        );
+        assert_eq!(shown(&off) + shown(&settled), 0, "{wait}");
+        assert!(drawing.scenes.iter().all(|held| held.gone), "{wait}");
+    }
+}
+
+/// A screen call keeps no records when its envelope names the screen anywhere but isn't one screen
+/// scene the surface admits, so none of its numbers reach the stored item.
+#[test]
+fn a_mixed_or_forbidden_screen_call_is_stored_with_no_records() {
+    const OVERLAY: &str = r#"{"begin":{"scene":"card","surface":"overlay","alt":"a"}}"#;
+    const WRITTEN: &str = r#"{"begin":{"scene":"marks","surface":"screen","alt":"marks","display":{"origin":[0,0],"size":[2731,1537],"dpi":97}}}"#;
+    const END: &str = r#"{"end":{}}"#;
+    let one = |put: &str| format!(r#"{{"step":{{"id":"s1","put":[{put}]}}}}"#);
+    let screen = screen_begin("marks", "");
+    let mark =
+        one(r#"{"highlight":{"id":"m","target":{"box":[917.375,300,50,40]},"style":"box"}}"#);
+    let forbidden = [
+        one(r##"{"shape":{"id":"m","kind":"rect","box":[917.375,300,50,40],"fill":"#ffffff"}}"##),
+        one(r#"{"highlight":{"id":"m","target":[917.375,300],"style":"box"}}"#),
+        one(
+            r#"{"callout":{"id":"l","target":{"box":[10,10,20,20]},"text":"here","at":[917.375,300]}}"#,
+        ),
+    ];
+    for step in &forbidden {
+        assert!(
+            kumochi_scene::parse_screen_draw_record(step.as_bytes()).is_ok(),
+            "{step}"
+        );
+    }
+    let mut envelopes = vec![
+        vec![
+            OVERLAY.to_owned(),
+            screen.clone(),
+            mark.clone(),
+            END.to_owned(),
+        ],
+        vec![OVERLAY.to_owned(), mark.clone(), WRITTEN.to_owned()],
+        vec![screen.clone(), mark, WRITTEN.to_owned()],
+    ];
+    envelopes.extend(
+        forbidden
+            .iter()
+            .map(|step| vec![screen.clone(), step.clone(), END.to_owned()]),
+    );
+    for records in envelopes {
+        let args = format!(r#"{{"records":[{}]}}"#, records.join(","));
+        let stored = stored_item(draw_item(&args));
+        assert_eq!(arguments(&stored), json!({"records": []}), "{args}");
+        let text = String::from_utf8(stored.bytes().to_vec()).expect("UTF-8");
+        for marker in ["917.375", "2731"] {
+            let listed = format!("{:?}", marker.as_bytes());
+            assert!(!text.contains(marker), "{text}");
+            assert!(!text.contains(listed.trim_matches(['[', ']'])), "{text}");
+        }
+    }
 }

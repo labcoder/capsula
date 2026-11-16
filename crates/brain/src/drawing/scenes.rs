@@ -402,7 +402,7 @@ impl Drawing {
         self.clear_scenes(&[scene], out);
     }
 
-    fn clear_scenes(&mut self, scenes: &[SceneId], out: &mut Output) {
+    pub(super) fn clear_scenes(&mut self, scenes: &[SceneId], out: &mut Output) {
         let left = self.leave(|held| scenes.contains(&held.scene));
         if left.is_empty() {
             return;

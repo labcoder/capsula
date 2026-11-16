@@ -1160,6 +1160,7 @@ fn an_inline_begin_is_refused_before_scene_writes_on_model_and_mcp_routes() {
 /// The run's hold sent a picture of the screen on a `ChatGPT` model.
 fn sent_picture(core: &mut Coordinator) {
     let current = core.current.as_mut().expect("run");
+    current.pictured = true;
     current.screen = Some(crate::context::Screen::Picture(
         crate::context::Jpeg::new(vec![0xFF, 0xD8, 0xFF, 0xD9]).expect("a JPEG"),
         None,
@@ -1233,4 +1234,191 @@ fn a_screen_call_s_native_item_is_stored_without_its_box_only_while_marks_are_on
         );
         assert_eq!(stored["call_id"], "model");
     }
+}
+
+/// The native items of a screen call, whole and cut off inside a box.
+const MARKED: &str = r#"{"records":[{"begin":{"scene":"marks","surface":"screen","alt":"marks"}},{"step":{"id":"s1","put":[{"highlight":{"id":"d","target":{"box":[186,598,450,78]},"style":"box"}}]}},{"end":{}}]}"#;
+const CUT: &str = r#"{"records":[{"begin":{"scene":"marks","surface":"screen","alt":"marks"}},{"step":{"id":"s1","put":[{"highlight":{"id":"d","target":{"box":[186,598,"#;
+
+/// Permission to draw can go after the boxes exist; the duty to store them without boxes can't.
+#[test]
+fn a_run_that_took_up_a_screen_picture_stores_its_items_without_boxes_whatever_withdraws_it() {
+    let item = |args: &str| {
+        let native = json!({"type":"function_call","id":"fc1","call_id":"model","name":"draw","arguments":args});
+        crate::engines::Opaque::new(serde_json::to_vec(&native).expect("item")).expect("small")
+    };
+    let other = crate::context::Geometry {
+        display: kumochi_scene::record::ScreenDisplay {
+            origin: [2560, 0],
+            size: [2560, 1440],
+            dpi: 96,
+        },
+        picture: [1280, 720],
+    };
+    for (case, target, cut) in [
+        (
+            "sharing off",
+            json!({"box":[0.0, 0.0, 1.0, 1.0]}),
+            r#"{"records":[]}"#,
+        ),
+        (
+            "another display",
+            json!({"box":[0.0, 0.0, 1.0, 1.0]}),
+            r#"{"records":[]}"#,
+        ),
+        ("a typed turn", json!({"box":[186, 598, 450, 78]}), CUT),
+    ] {
+        let mut core = offered(vec![T]);
+        core.screen_marks = crate::drawing::ScreenMarks::On;
+        if case != "a typed turn" {
+            sent_picture(&mut core);
+        }
+        if case == "another display" {
+            let current = core.current.as_mut().expect("run");
+            let Some(crate::context::Screen::Picture(_, _, geometry)) = &mut current.screen else {
+                panic!("the picture");
+            };
+            *geometry = other;
+        }
+        let key = super::engine_key(&core, R);
+        for (index, args) in [(0, MARKED), (1, CUT)] {
+            core.handle(Input::Engine {
+                key,
+                event: TurnEvent::OutputItem {
+                    index,
+                    item: item(args),
+                },
+            })
+            .expect("engine event");
+        }
+        if case == "sharing off" {
+            core.handle(Input::ShowScreenOff).expect("the setting");
+            assert_eq!(core.canvas(), Some(Err(crate::context::NoCanvas::Off)));
+        }
+        let round = core
+            .handle(Input::Engine {
+                key,
+                event: TurnEvent::Finished(Finish::Completed),
+            })
+            .expect("engine event")
+            .into_iter()
+            .find_map(|effect| match effect {
+                Effect::Store(StoreOp::RoundItems(round)) => Some(round),
+                _ => None,
+            })
+            .expect("the round");
+        let stored =
+            |at: usize| -> Value { serde_json::from_slice(round.items[at].bytes()).expect("item") };
+        let records: Value =
+            serde_json::from_str(stored(0)["arguments"].as_str().expect("arguments"))
+                .expect("JSON");
+        assert_eq!(
+            records["records"][1]["step"]["put"][0]["highlight"]["target"], target,
+            "{case}"
+        );
+        assert_eq!(stored(1)["arguments"], cut, "{case}");
+    }
+}
+
+const OFF: &str = "drawn: []; stopped: surface: drawing.ScreenOff; the user turned off sharing the screen; explain in words or draw a card";
+
+#[test]
+fn turning_sharing_off_tells_the_drawing_only_while_marks_are_on() {
+    let begin = r#"{"begin":{"scene":"marks","surface":"screen","alt":"marks"}}"#;
+    for (marks, told) in [
+        (crate::drawing::ScreenMarks::On, vec![OFF.to_owned()]),
+        (crate::drawing::ScreenMarks::Off, Vec::new()),
+    ] {
+        let mut core = offered(vec![T]);
+        core.screen_marks = marks;
+        sent_picture(&mut core);
+        core.drawing
+            .canvas(R, Ok(crate::context::Geometry::FIXTURE));
+        core.handle(Input::ShowScreenOff).expect("the setting");
+        let out = core
+            .drawing
+            .handle(crate::drawing::Input::Record {
+                thread: T,
+                run: R,
+                call: CallId::new("c").expect("a short ASCII id"),
+                index: 0,
+                bytes: begin.as_bytes().to_vec(),
+            })
+            .expect("a record");
+        let texts: Vec<String> = out
+            .calls
+            .iter()
+            .map(crate::drawing::CallEnd::tool_text)
+            .collect();
+        assert_eq!(texts, told, "{marks:?}");
+    }
+}
+
+/// No mark's box or model-written display reaches a stored round, through the coordinator, after
+/// sharing goes off, whatever the call holds.
+#[test]
+fn no_screen_number_reaches_a_stored_round_whatever_the_call_holds() {
+    const BOX: &str = "917.375";
+    const DISPLAY: &str = "2731";
+    const LABEL: &str = "zq-label-7319";
+    let begin = r#"{"begin":{"scene":"marks","surface":"screen","alt":"a"}}"#;
+    let overlay = r#"{"begin":{"scene":"card","surface":"overlay","alt":"a"}}"#;
+    let written = format!(
+        r#"{{"begin":{{"scene":"marks","surface":"screen","alt":"a","display":{{"origin":[0,0],"size":[{DISPLAY},1537],"dpi":97}}}}}}"#
+    );
+    let marked = format!(
+        r#"{{"step":{{"id":"s1","put":[{{"highlight":{{"id":"m","target":{{"box":[{BOX},300,50,40]}},"style":"box"}}}},{{"callout":{{"id":"l","target":{{"box":[{BOX},300,50,40]}},"text":"{LABEL}","side":"top"}}}}]}}}}"#
+    );
+    let shaped = format!(
+        r##"{{"step":{{"id":"s1","put":[{{"shape":{{"id":"m","kind":"rect","box":[{BOX},300,50,40],"fill":"#ffffff"}}}}]}}}}"##
+    );
+    let end = r#"{"end":{}}"#;
+    let calls = [
+        vec![begin, marked.as_str(), end],
+        vec![overlay, begin, marked.as_str(), end],
+        vec![begin, shaped.as_str(), end],
+        vec![written.as_str(), marked.as_str()],
+    ];
+    let mut core = offered(vec![T]);
+    core.screen_marks = crate::drawing::ScreenMarks::On;
+    sent_picture(&mut core);
+    let key = super::engine_key(&core, R);
+    for (index, records) in (0..).zip(&calls) {
+        let args = format!(r#"{{"records":[{}]}}"#, records.join(","));
+        let native = json!({"type":"function_call","id":"fc1","call_id":"model","name":"draw","arguments":args});
+        let item =
+            crate::engines::Opaque::new(serde_json::to_vec(&native).expect("item")).expect("small");
+        core.handle(Input::Engine {
+            key,
+            event: TurnEvent::OutputItem { index, item },
+        })
+        .expect("engine event");
+    }
+    core.handle(Input::ShowScreenOff).expect("the setting");
+    let round = core
+        .handle(Input::Engine {
+            key,
+            event: TurnEvent::Finished(Finish::Completed),
+        })
+        .expect("engine event")
+        .into_iter()
+        .find_map(|effect| match effect {
+            Effect::Store(StoreOp::RoundItems(round)) => Some(round),
+            _ => None,
+        })
+        .expect("the round");
+    assert_eq!(round.items.len(), calls.len());
+    let absent = |text: &str, marker: &str| {
+        let listed = format!("{:?}", marker.as_bytes());
+        !text.contains(marker) && !text.contains(listed.trim_matches(['[', ']']))
+    };
+    let stored: Vec<String> = round
+        .items
+        .iter()
+        .map(|item| String::from_utf8(item.bytes().to_vec()).expect("UTF-8"))
+        .collect();
+    for text in stored.iter().chain([&format!("{round:?}")]) {
+        assert!(absent(text, BOX) && absent(text, DISPLAY), "{text}");
+    }
+    assert!(stored[0].contains(LABEL), "{}", stored[0]);
 }

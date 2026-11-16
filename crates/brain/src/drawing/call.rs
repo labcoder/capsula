@@ -205,7 +205,7 @@ impl CallEnd {
 /// One draw call of an open run.
 pub(super) struct Call {
     pub(super) run: RunId,
-    id: CallId,
+    pub(super) id: CallId,
     thread: ThreadId,
     guard: CallState,
     scene: Bound,
@@ -913,6 +913,18 @@ impl Drawing {
                 _ => None,
             })
             .unwrap_or(CallError::Interrupted);
+        self.end_early(run, id, error, out);
+    }
+
+    /// Ends an open call with `error`: its queued records go, and a step of it still being laid
+    /// out or written ends it when that settles.
+    pub(super) fn end_early(
+        &mut self,
+        run: RunId,
+        id: &CallId,
+        error: CallError,
+        out: &mut Output,
+    ) {
         self.queue.retain(|job| {
             !matches!(job,
                 Job::Record { run: owner, call, .. } | Job::Reject { run: owner, call, .. }
