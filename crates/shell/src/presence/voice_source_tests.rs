@@ -1715,12 +1715,17 @@ fn the_native_callback_reads_the_pointer_at_recognition_and_when_the_keys_come_u
         assert!(owner.voice.pending.is_some());
         owner.voice.status = Some(Text::HoldListening);
     });
-    // The line starts where the callback read the pointer at recognition.
+    // The line starts where the callback read the pointer at recognition, and a frame reads
+    // where it has gone.
     cursor_fixture::set(Some(MOVED));
-    cx.background_executor
-        .advance_clock(Duration::from_millis(16));
+    for window in cx.windows() {
+        window
+            .update(cx, |_, window, cx| window.simulate_next_frame(cx))
+            .expect("an open window");
+    }
     cx.run_until_parked();
-    // The release names where the callback read it when the keys came up.
+    // The release names where the callback read it when the keys came up, and the line ends
+    // there too.
     cursor_fixture::set(Some(RELEASED));
     chord(&deliver, Edge::Up, at + Duration::from_millis(400));
     cx.run_until_parked();
@@ -1733,7 +1738,11 @@ fn the_native_callback_reads_the_pointer_at_recognition_and_when_the_keys_come_u
         release,
         Some((
             ReleasePointer(PhysicalPoint(RELEASED)),
-            PointerPath(vec![PhysicalPoint(ORIGIN), PhysicalPoint(MOVED)])
+            PointerPath(vec![
+                PhysicalPoint(ORIGIN),
+                PhysicalPoint(MOVED),
+                PhysicalPoint(RELEASED)
+            ])
         ))
     );
     // Where the user pointed is theirs: no log line carries a place the pointer was.

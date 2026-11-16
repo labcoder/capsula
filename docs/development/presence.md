@@ -374,12 +374,12 @@ the answer text, and hands it the steps it lets through.
 While a screen hold's keys are down, the shell draws where the pointer goes, in the drawing
 overlay, as the picture will show it. `presence/ink.rs` holds the three pieces.
 
-- **The sampler.** `Sampler` owns one hold's [path recorder](input.md#a-holds-pointer-path), the
-  line as the overlay strokes it, and a timer. Every 16 ms the timer runs a tick on the UI
-  thread, in an update of the entity that started it. It ends when the tick answers false, when
-  that entity is gone, or when the sampler is dropped. The line is reserved once, for 2,049
-  points, and is copied from the recorder only on a tick that changed the path, so sampling
-  allocates nothing.
+- **The sampler.** `Sampler` owns one hold's [path recorder](input.md#a-holds-pointer-path) and
+  the line as the overlay strokes it: the recorder's points and then the pointer's own place.
+  The kept points trail the pointer by the recorder's easing, so the last stretch is what makes
+  the stroke reach the pointer. The line is reserved once, for 2,048 points, and is copied from
+  the recorder only on a frame that changed it, so the sampler allocates nothing. Asking GPUI
+  for the next frame (`on_next_frame`) allocates twice a frame, pointer moving or not.
 - **The strokes.** `strokes` builds the line as two paths: a white edge, then a pink core to
   paint over it. The brain paints the same path on the hold's image as one capsule per segment
   (`crates/brain/src/screen/ink.rs`), so the strokes have round joins and round ends
@@ -402,16 +402,30 @@ pixels. A point is drawn at its pixel's centre, where the painter puts it.
 
 **While the keys are down** (`presence/voice.rs`). A hold whose recognition went out as
 `ScreenHoldRecognized` starts a sampler from where the pointer was read at recognition. A hold
-whose pointer couldn't be read then still sends the screen, with no line. `sample_line` is the
-tick: it ends when the pending hold is no longer this one, was released or has ended; it reads
-the pointer without blocking and skips a failed read; and it repaints only when the path
-changed. The line also stops in `end_voice`, which every cancel and failure reaches, and as soon
+whose pointer couldn't be read then still sends the screen, with no line.
+
+The pointer is read once on every frame, with no timer (`line_frame`), and each frame asks for
+the next (`want_line_frame`). Until the overlay shows, the frames are the dock's, because
+Windows paints no hidden window. Once it shows they are the overlay's own, so the pointer a
+frame reads is in that frame's paint. These frames come at the display's refresh and not at
+the [Max frame rate](frame-rate.md): the line follows a hand, and a capped line trails it. A
+frame ends the line when the pending hold is no longer this one, was released or has ended. It
+reads the pointer without blocking and skips a failed read. It repaints only when the line
+changed. So once the eased line has caught up with a pointer that rests, about 45 ms and up
+to 3 more points, a frame keeps no point and asks for no paint. The line also stops in
+`end_voice`, which every cancel and failure reaches, and as soon
 as the standing notice stops being `On` (`screen_changed`, after every batch of link events).
 That last stop is the gesture's one ask about its release, so the release sends nothing even
 if the notice comes back, and the hold's line says why.
 
 The overlay shows while a drawing is visible or the line has points (`sync_overlay`), so a line
-alone shows it and a line's end hides it when no drawing is up. Both strokes are rebuilt on
+alone shows it and a line's end hides it when no drawing is up. Its hidden window is opened
+when the presence starts and again after every hide (`prepare_overlay`), so a line only shows
+it: opening a window takes about 20 ms on Rez, and about 230 ms in a build with debug
+assertions, where the window backend compiles its shaders at run time. A hide closes its
+window, and the next one opens once the update that hid it is over, so a release takes its
+lease and its stamp and sends before that open, not after it. If an open fails, the next show
+opens its own. Both strokes are rebuilt on
 every overlay paint, about 1.3 ms at the 2,048-point cap on Rez; a `shortcut:` at the build
 names keeping the triangles between paints as the upgrade.
 
@@ -421,14 +435,16 @@ sends nothing; `acquire_stamped` takes the lease and the stamp; `Runs::screen_re
 the one `ScreenRelease`, which is sent at once. `KeyUp` follows as before. Whatever stops this
 short leaves the hold voice-only, and its line says the screen wasn't ready. A lease whose
 release couldn't be built or sent is given back at once and tells no lapse. A release while the
-capture before it still holds its lease is refused the same way.
+capture before it still holds its lease is refused the same way. The overlay's next hidden
+window opens after the send, so the lease covers the surfaces that exist then; a window opened
+under a held lease joins it before it is shown, as every late surface does.
 
 The line is drawn on the primary display only, like every drawing. A release with the pointer
 on another display sends that display's picture with an empty path: what the model gets never
 shows a line the user didn't see on it.
 
 `measure_the_hold_line`, an ignored test beside the code, times building both paths for lines
-of 2, 256 and 2,048 points, and a sampler's worst case of a new point on every tick.
+of 2, 256 and 2,048 points, and a sampler's worst case of a new point on every frame.
 
 ## Perch hosts
 

@@ -74,6 +74,16 @@ impl PaintNotice {
 
 #[cfg(test)]
 impl Overlay {
+    /// Counts the repaints asked of this overlay's root into `count` while the subscription
+    /// lives.
+    pub(super) fn count_repaints(
+        &self,
+        count: Rc<Cell<usize>>,
+        cx: &mut App,
+    ) -> gpui_kit::Subscription {
+        cx.observe(&self.drawing, move |_, _| count.set(count.get() + 1))
+    }
+
     pub(super) fn detached(
         frames: Rc<RefCell<Frames>>,
         owner: WeakEntity<Presence>,
@@ -426,10 +436,40 @@ impl Presence {
             visible: sample.visible || ink::drawn(&self.ink),
             ..sample
         };
-        let frames = self.presenter.frames();
         if sample.visible && self.overlay.window().is_some() {
             self.protect_surface(super::exclusion::Slot::Drawing, cx)?;
         }
+        let open = self.overlay.window().is_some();
+        self.reach_overlay(cx, |overlay, surface, frames| {
+            overlay.sync(surface, frames, sample)
+        })?;
+        if open && matches!(self.overlay, Visibility::Closed) {
+            // A hide closed its window. The next one opens once this update is over, so a
+            // release takes its stamp and sends before the open, not after it.
+            Self::after_frame(cx, Self::prepare_overlay);
+        }
+        Ok(())
+    }
+
+    /// Opens the overlay's hidden window ahead of its next show. Opening a window takes far
+    /// longer than showing one, and a hold's first line is shown while the pointer moves.
+    pub(super) fn prepare_overlay(&mut self, cx: &mut Context<'_, Self>) {
+        if let Err(error) = self.reach_overlay(cx, |overlay, surface, _| overlay.prepare(surface)) {
+            tracing::warn!(%error, "the drawing overlay will open when it is next shown");
+        }
+    }
+
+    /// Runs `step` on the overlay's visibility, with its windows as GPUI opens and closes them.
+    fn reach_overlay(
+        &mut self,
+        cx: &mut Context<'_, Self>,
+        step: impl FnOnce(
+            &mut Visibility<Overlay>,
+            &mut Gpui<'_>,
+            &RefCell<Frames>,
+        ) -> Result<(), OpenError>,
+    ) -> Result<(), OpenError> {
+        let frames = self.presenter.frames();
         let handles = self.exclusion_handles();
         let mut surface = Gpui {
             input: &self.presenter.input,
@@ -449,7 +489,7 @@ impl Presence {
             notice: &self.paint_notice,
             ink: &self.ink,
         };
-        self.overlay.sync(&mut surface, &frames, sample)
+        step(&mut self.overlay, &mut surface, &frames)
     }
 }
 
