@@ -608,6 +608,97 @@ fn a_held_screen_scene_s_step_being_written_when_sharing_goes_off_shows_nothing(
     assert!(drawing.scenes.iter().all(|held| held.gone));
 }
 
+const CHANGED: &str = "surface: drawing.ScreenChanged; the user's screen may have changed after the picture was taken, so these marks weren't shown and the screen can't be marked again in this turn; explain in words or draw a card";
+
+/// The visible screen scene.
+fn screen_scene(drawing: &Drawing) -> SceneId {
+    drawing
+        .scenes
+        .iter()
+        .find(|held| !held.gone && held.state.header().surface == Surface::Screen)
+        .map(|held| held.scene)
+        .expect("a visible screen scene")
+}
+
+#[test]
+fn a_skipped_screen_scene_ends_its_open_call_as_changed_and_closes_its_run_s_screen() {
+    let mut drawing = told(Ok(Geometry::FIXTURE));
+    let mut store = Store::default();
+    store.run(
+        &mut drawing,
+        record_of(1, "c", 0, &screen_begin("marks", "")),
+    );
+    let first = store.run(
+        &mut drawing,
+        record_of(1, "c", 1, &step(&marked("s1", "x"))),
+    );
+    assert_eq!(shown(&first), 2);
+    let scene = screen_scene(&drawing);
+    assert_eq!(scene, SceneId(1));
+    let skipped = store.run(&mut drawing, Input::SceneSkipped { scene });
+    assert_eq!(
+        texts(&[&skipped]),
+        [format!("drawn: [s1]; stopped: {CHANGED}{NOT_KEPT}")]
+    );
+    assert_eq!(trace(&skipped), ["end 1 false", "revoke 1", "clear 1"]);
+    assert!(drawing.scenes.iter().all(|held| held.gone));
+    assert!(
+        !drawing.drew_nothing(RunId(1)),
+        "the skipped step stays drawn"
+    );
+    let late = store.run(&mut drawing, Input::SceneSkipped { scene });
+    assert_eq!((late.effects.len(), late.calls.len()), (0, 0));
+    let again = store.run(
+        &mut drawing,
+        screen_call(1, "d", &screen_begin("again", ""), &[marked("s2", "y")]),
+    );
+    assert_eq!(texts(&[&again]), [format!("drawn: []; stopped: {CHANGED}")]);
+    assert_eq!(shown(&again), 0);
+    let forward = r#"{"id":"a","start":{"after":"later","ms":0}}"#.to_owned();
+    let failed = store.run(&mut drawing, call(1, "e", args("card", &[forward])));
+    assert_eq!(error(&failed.calls[0]), ErrorCode::ForwardRef);
+    let repair = store.run(&mut drawing, call(1, "f", args("card2", &[text("b", "y")])));
+    assert_eq!(
+        texts(&[&repair]),
+        ["drawn: [b]"],
+        "neither screen ending opened the repair round"
+    );
+}
+
+#[test]
+fn a_skip_closes_the_screen_for_a_later_run_continuing_the_scene_before_its_first_step() {
+    let mut drawing = told(Ok(Geometry::FIXTURE));
+    let mut store = Store::default();
+    store.run(
+        &mut drawing,
+        screen_call(1, "b", &screen_begin("marks", ""), &[marked("s1", "x")]),
+    );
+    store.run(
+        &mut drawing,
+        Input::RunClosed {
+            run: RunId(1),
+            loss: Loss::Drop,
+        },
+    );
+    drawing.canvas(RunId(2), Ok(Geometry::FIXTURE));
+    let scene = screen_scene(&drawing);
+    let begun = store.run(
+        &mut drawing,
+        record_of(2, "c", 0, &screen_begin("marks", "")),
+    );
+    assert_eq!(begun.calls, []);
+    let skipped = store.run(&mut drawing, Input::SceneSkipped { scene });
+    assert_eq!(
+        texts(&[&skipped]),
+        [format!("drawn: []; stopped: {CHANGED}{NOT_KEPT}")]
+    );
+    let again = store.run(
+        &mut drawing,
+        screen_call(2, "d", &screen_begin("again", ""), &[marked("s2", "y")]),
+    );
+    assert_eq!(texts(&[&again]), [format!("drawn: []; stopped: {CHANGED}")]);
+}
+
 /// Arguments with a screen scene after an ordinary records array: a second envelope, and a second
 /// `records` member of the same object. The reducer never reads it.
 const SUFFIXED: [&str; 2] = [

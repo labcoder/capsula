@@ -51,6 +51,11 @@ pub(super) fn control_input(message: ControlToBrain) -> Result<Option<Input>, En
         ControlToBrain::SceneFailed { scene } => {
             Some(Input::Drawing(crate::drawing::Input::SceneFailed { scene }))
         }
+        ControlToBrain::SceneSkipped { scene } => {
+            Some(Input::Drawing(crate::drawing::Input::SceneSkipped {
+                scene,
+            }))
+        }
         ControlToBrain::DeleteThread {
             thread,
             after_turns,

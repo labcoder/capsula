@@ -148,6 +148,11 @@ pub enum Input {
         /// The committed scene.
         scene: SceneId,
     },
+    /// The shell skipped a screen scene because the screen may have changed since its picture.
+    SceneSkipped {
+        /// The committed scene.
+        scene: SceneId,
+    },
     /// Quit: every scene is cleared once the write in the store is answered.
     ClearVisible,
     /// The user turned off sharing the screen: screen scenes leave and nothing new is drawn on it.
@@ -528,7 +533,8 @@ impl Drawing {
                 }
             }
             Input::Clear { scenes } => self.clear(&scenes, &mut out),
-            Input::SceneFailed { scene } => self.scene_failed(scene, &mut out),
+            Input::SceneFailed { scene } => self.scene_failed(scene, &CallError::Failed, &mut out),
+            Input::SceneSkipped { scene } => self.scene_skipped(scene, &mut out),
             Input::ScreenOff => self.screen_off(&mut out),
             Input::ClearVisible => {
                 self.clear_visible(&mut out);
@@ -782,6 +788,7 @@ impl fmt::Debug for Input {
             Self::StepFailed { .. } => "StepFailed",
             Self::Clear { .. } => "Clear",
             Self::SceneFailed { .. } => "SceneFailed",
+            Self::SceneSkipped { .. } => "SceneSkipped",
             Self::ClearVisible => "ClearVisible",
             Self::ScreenOff => "ScreenOff",
             Self::RunClosed { .. } => "RunClosed",

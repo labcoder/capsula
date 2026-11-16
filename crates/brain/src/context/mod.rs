@@ -538,6 +538,9 @@ pub(crate) enum NoCanvas {
     OtherDisplay,
     /// The user turned off the setting that allowed the picture.
     Off,
+    /// The user's screen may have changed since the picture, so the shell skipped a screen scene
+    /// drawn on it.
+    Changed,
 }
 
 /// What a hold's screen part hands its run, which every request of the run carries.

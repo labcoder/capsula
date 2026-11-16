@@ -393,12 +393,17 @@ impl Drawing {
         self.clear_scenes(scenes, out);
     }
 
-    pub(super) fn scene_failed(&mut self, scene: SceneId, out: &mut Output) {
+    pub(super) fn scene_failed(
+        &mut self,
+        scene: SceneId,
+        error: &super::CallError,
+        out: &mut Output,
+    ) {
         if self.live(scene).is_none() {
             return;
         }
         self.replacement_failed(scene, out);
-        self.end_calls_in(scene, &super::CallError::Failed, out);
+        self.end_calls_in(scene, error, out);
         self.clear_scenes(&[scene], out);
     }
 

@@ -44,6 +44,7 @@ impl Drawing {
             Some(Ok(geometry)) => geometry,
             Some(Err(NoCanvas::OtherDisplay)) => return Err(CallError::OtherDisplay),
             Some(Err(NoCanvas::Off)) => return Err(CallError::ScreenOff),
+            Some(Err(NoCanvas::Changed)) => return Err(CallError::ScreenChanged),
             Some(Err(NoCanvas::NoPicture)) | None => return Err(CallError::NoScreenPicture),
         };
         self.calls[at].picture = Some(geometry.picture);
@@ -87,6 +88,28 @@ impl Drawing {
             .map(|held| held.scene)
             .collect();
         self.clear_scenes(&screens, out);
+    }
+
+    /// The shell skipped screen scene `scene` because the screen may have changed since its
+    /// picture: its open calls end as `ScreenChanged`, it leaves, and the runs that drew it or
+    /// were drawing in it can't begin another screen scene, which the shell would skip too.
+    pub(super) fn scene_skipped(&mut self, scene: SceneId, out: &mut Output) {
+        let Some(at) = self.live(scene) else {
+            return;
+        };
+        let mut runs: Vec<RunId> = self.scenes[at]
+            .committers
+            .iter()
+            .flatten()
+            .copied()
+            .collect();
+        runs.extend(self.open_in(scene).into_iter().map(|at| self.calls[at].run));
+        for ledger in &mut self.runs {
+            if runs.contains(&ledger.run) && ledger.canvas.is_some() {
+                ledger.canvas = Some(Err(NoCanvas::Changed));
+            }
+        }
+        self.scene_failed(scene, &CallError::ScreenChanged, out);
     }
 }
 

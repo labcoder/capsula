@@ -486,6 +486,12 @@ pub enum ControlToBrain {
         /// The pointer's path over the hold; empty when it never moved.
         path: PointerPath,
     },
+    /// The shell skipped a screen scene because the screen may have changed since its picture.
+    /// Nothing of it was shown. Appended.
+    SceneSkipped {
+        /// The committed screen scene.
+        scene: SceneId,
+    },
 }
 
 /// What a thread's delete came to.
