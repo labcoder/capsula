@@ -9,7 +9,8 @@ use kumochi_protocol::message::{DataToShell, RunId, SceneHeader, SceneId};
 use kumochi_scene::record::Surface;
 
 use super::{Broken, Effect, Out, Presenter, watch::Watch};
-use crate::platform::screen_watch::Sources;
+use crate::input::TalkHeld;
+use crate::platform::screen_watch::{Changed, Sources};
 
 /// Whether `header` begins a screen scene.
 pub(super) fn on_screen(header: &SceneHeader) -> bool {
@@ -31,23 +32,30 @@ impl Presenter {
     }
 
     /// The keys of a hold whose `ScreenRelease` was sent came up at `now`; `after` is the
-    /// newest run named so far. Any screen scene still up goes and the watch starts, from a
-    /// clear bit. If its sources can't start it has seen a change: nothing could say the screen
-    /// stayed as it was.
+    /// newest run named so far, and `held` the talk keys still down. Any screen scene still up
+    /// goes and the watch starts: the sources start again, on a bit of this watch's own, so
+    /// nothing left of the watch before can set it. If they can't start the watch has seen a
+    /// change: nothing could say the screen stayed as it was.
     /// # Errors
     /// [`Broken`] when a frame held behind a cleared scene's admission can't be mirrored.
-    pub fn screen_released(&mut self, after: RunId, now: Instant) -> Result<Vec<Effect>, Broken> {
+    pub fn screen_released(
+        &mut self,
+        after: RunId,
+        held: TalkHeld,
+        now: Instant,
+    ) -> Result<Vec<Effect>, Broken> {
         let mut out = Out::default();
         self.clear_screens("release", now, &mut out)?;
         self.watch.released(after, now);
-        self.changed.take();
-        if !self.listening {
-            let changed = self.changed.clone();
-            self.listening = self
-                .sources
-                .as_mut()
-                .is_some_and(|sources| sources.start(changed));
-        }
+        self.changed = Changed::default();
+        let changed = self.changed.clone();
+        let listening = std::mem::take(&mut self.listening);
+        self.listening = self.sources.as_mut().is_some_and(|sources| {
+            if listening {
+                sources.stop();
+            }
+            sources.start(changed, held)
+        });
         if !self.listening {
             self.watch.changed();
         }
@@ -110,6 +118,17 @@ impl Presenter {
     /// release.
     pub fn marks_skipped(&self) -> Option<RunId> {
         self.watch.skipped()
+    }
+
+    /// The bit and the limits, before a frame is activated or sampled and before a job's
+    /// answer is used, so neither shows marks that a change or a limit has already taken. One
+    /// read while no sources listen.
+    pub(super) fn check_marks(&mut self, now: Instant, out: &mut Out) -> Result<(), Broken> {
+        if self.listening {
+            self.heed(now, out)?;
+            self.expire_marks(now, out)?;
+        }
+        Ok(())
     }
 
     /// Applies the bit, if it is set.

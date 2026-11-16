@@ -2047,12 +2047,17 @@ reports no release.
   key going down in another process's window, a mouse button going down, the wheel turning,
   another process's window coming to the front, a lock, a desktop switch, a suspend, or a
   display change. Never for a pointer move. Which key, where and which window never reach
-  the core, and the watch keeps nothing but the bit. The presenter reads the bit on every
-  data frame, on every `tick` and in `source_woke`, which the UI calls when a source wakes
-  it. A wake carries nothing and only has the bit read, so one still queued when the next
-  release clears the bit changes nothing. `screen_changed` is for an event the shell itself
-  knows of, the next hold's recognition, and is the only call that sets the bit. Sources run
-  only while a change still matters.
+  the core, and the watch keeps nothing but the bit. `Changed::set` says whether it changed
+  the bit, so a source wakes the UI once for a change and not for each event after it. The
+  presenter reads the bit on every data frame, on every `tick` and in `source_woke`, which
+  the UI calls when a source wakes it. While the sources listen it also reads the bit, and
+  applies the limits, at the start of `advance`, `sample_at` and `completed`: a frame is
+  never activated or sampled, and a job's answer never used, with marks that a change or a
+  limit has already taken, even when the wake or the watchdog is still queued behind it.
+  With no sources listening that check is one read. A wake carries nothing and only has the
+  bit read. `screen_changed` is for an event the shell itself knows of, the next hold's
+  recognition, and is the only call of the presenter's that sets the bit. Sources run only
+  while a change still matters.
 
 ```mermaid
 stateDiagram-v2
@@ -2069,10 +2074,16 @@ stateDiagram-v2
     Passing --> Expecting: screen_released
 ```
 
-- **Release.** The shell calls `screen_released(after, now)` once a hold's `ScreenRelease`
-  is sent, with the newest run named so far. Any screen scene still up is cleared, the bit is
-  cleared and the sources start. Without sources, or when `start` says no, the watch counts
-  as changed at once: nothing could say the screen stayed as it was.
+- **Release.** The shell calls `screen_released(after, held, now)` once a hold's
+  `ScreenRelease` is sent, with the newest run named so far and the talk keys still down. Any
+  screen scene still up is cleared, and the sources are stopped if they were listening and
+  started again on a new bit. So each watch has a bit of its own: a wake still queued from
+  the watch before, or a handler of it still running, reads or sets a bit nothing uses.
+  `held` (`TalkHeld`, from `Gesture::talk_held`) is two bits and prints nothing: a hold ends
+  at its first key-up, so the other talk key can still be down and repeating, and the
+  sources leave that key's repeats out until it comes up. Without sources, or when `start`
+  says no, the watch counts as changed at once: nothing could say the screen stayed as it
+  was.
 - **The first mark** is a screen scene's first `SceneStepCommit`. It is judged as its frame
   arrives, in the pipe's order, so a change counts even while the scene's frames wait behind
   an admission. It is shown only while a release is waiting with nothing changed, from a
@@ -2102,9 +2113,10 @@ stateDiagram-v2
   (30 seconds) ends by itself, through `deadline` and `tick`: the sources stop and a screen
   scene that arrives later is skipped. So no road the shell misses leaves a hook or a mouse
   registration behind. Once the run is named no timer applies; `run_ended` bounds the watch.
-  Both limits are applied before a data frame is judged and when `screen_run` names the run,
-  not only by the watchdog: a first mark or a name that comes at 30 seconds is too late even
-  when it is handled before the due `tick`. A run newer than the release that ends before
+  Both limits are applied before a data frame is judged, and while the sources listen at the
+  start of `advance`, `sample_at` and `completed`, not only by the watchdog. Naming checks
+  the 30-second limit alone, in `screen_run`: a first mark or a name that comes at 30 seconds
+  is too late even when it is handled before the due `tick`. A run newer than the release that ends before
   any run was named ends the watch as well, and a name that comes after names nothing.
 - **Leaving any other way** (the user's clear, the brain's removal or replacement, a
   failure) ends the watch too. A replaced screen scene leaves no frozen picture for the

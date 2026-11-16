@@ -6,16 +6,19 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use crate::input::TalkHeld;
+
 /// The watch's one bit: something may have changed the screen. Which key went down, where the
 /// pointer was and which window came forward never reach it.
 #[derive(Clone, Debug, Default)]
 pub struct Changed(Arc<AtomicBool>);
 
 impl Changed {
-    /// A source saw one of its events. A fixed amount of work and no allocation, so an input
-    /// handler may call it.
-    pub fn set(&self) {
-        self.0.store(true, Ordering::Release);
+    /// A source saw one of its events. True when this set the bit, so a source wakes the UI
+    /// once for a change and not for every event after it. A fixed amount of work and no
+    /// allocation, so an input handler may call it.
+    pub fn set(&self) -> bool {
+        !self.0.swap(true, Ordering::AcqRel)
     }
 
     /// Reads the bit and clears it.
@@ -34,16 +37,19 @@ impl Changed {
 /// - the session locking, the desktop switching, or the computer suspending;
 /// - the display's resolution, scaling or arrangement changing.
 ///
-/// After setting the bit a source wakes the UI thread, which calls
+/// A source whose [`Changed::set`] set the bit wakes the UI thread, which calls
 /// [`Presenter::source_woke`](crate::presenter::Presenter::source_woke). The wake carries
-/// nothing and only has the bit read, so a wake still queued when the next release clears the
-/// bit changes nothing. A source never calls
+/// nothing and only has the bit read. Every release starts the sources again on a bit of its
+/// own, so a wake still queued from the watch before, or a handler of it still running,
+/// changes nothing. A source never calls
 /// [`Presenter::screen_changed`](crate::presenter::Presenter::screen_changed), which sets the
 /// bit for an event the shell itself knows of.
 pub trait Sources {
-    /// Starts every source. False when one couldn't start; the implementation has then stopped
-    /// the others, and the caller shows no marks.
-    fn start(&mut self, changed: Changed) -> bool;
+    /// Starts every source on `changed`, this watch's own bit. `held` names the talk keys
+    /// still down from the hold just released: until each comes up, its repeats are the
+    /// hold's and set nothing. False when one couldn't start; the implementation has then
+    /// stopped the others, and the caller shows no marks.
+    fn start(&mut self, changed: Changed, held: TalkHeld) -> bool;
 
     /// Stops every source, so nothing sets the bit afterwards.
     fn stop(&mut self);

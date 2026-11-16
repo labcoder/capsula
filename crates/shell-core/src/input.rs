@@ -51,6 +51,20 @@ pub enum Effect {
     OpenInput,
 }
 
+/// Which talk keys are still down when a hold ends. The screen watch's sources take it with
+/// the release, so a held key's repeats aren't read as typing. It prints neither.
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+pub struct TalkHeld {
+    pub control: bool,
+    pub alt: bool,
+}
+
+impl std::fmt::Debug for TalkHeld {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TalkHeld").finish_non_exhaustive()
+    }
+}
+
 #[derive(Debug, Default, Clone, Copy)]
 enum Phase {
     #[default]
@@ -78,6 +92,14 @@ impl Gesture {
     )]
     pub(crate) fn holding(&self) -> bool {
         matches!(self.phase, Phase::Active { holding: true, .. })
+    }
+
+    /// The talk keys still down. A hold ends at its first key-up, so the other may be.
+    pub fn talk_held(&self) -> TalkHeld {
+        TalkHeld {
+            control: self.down[0],
+            alt: self.down[1],
+        }
     }
 
     pub fn deadline(&self) -> Option<Instant> {
@@ -231,7 +253,7 @@ impl Gesture {
 
 #[cfg(test)]
 mod tests {
-    use super::{Edge, Effect, Event, Gesture, Key, WINDOW};
+    use super::{Edge, Effect, Event, Gesture, Key, TalkHeld, WINDOW};
     use std::time::{Duration, Instant};
 
     fn key(gesture: &mut Gesture, key: Key, edge: Edge, now: Instant) -> [Option<Effect>; 3] {
@@ -249,6 +271,58 @@ mod tests {
             [Some(Effect::Listening), None, None],
             "chord activates"
         );
+    }
+
+    #[test]
+    fn talk_held_names_the_key_still_down_when_a_hold_ends_and_prints_neither() {
+        let now = Instant::now();
+        for (released, other, held) in [
+            (
+                Key::LeftControl,
+                Key::LeftAlt,
+                TalkHeld {
+                    control: false,
+                    alt: true,
+                },
+            ),
+            (
+                Key::LeftAlt,
+                Key::LeftControl,
+                TalkHeld {
+                    control: true,
+                    alt: false,
+                },
+            ),
+        ] {
+            let mut gesture = Gesture::default();
+            assert!(gesture.talk_held() == TalkHeld::default());
+            chord(&mut gesture, now);
+            assert_eq!(
+                gesture.handle(Event::Deadline, now + WINDOW),
+                [Some(Effect::HoldStarted), None, None]
+            );
+            assert_eq!(
+                key(&mut gesture, released, Edge::Up, now + WINDOW),
+                [None, Some(Effect::HoldEnded), Some(Effect::Resting)]
+            );
+            assert!(gesture.talk_held() == held);
+            // The held key repeats, then comes up.
+            key(&mut gesture, other, Edge::Down, now + WINDOW);
+            assert!(gesture.talk_held() == held);
+            key(&mut gesture, other, Edge::Up, now + WINDOW);
+            assert!(gesture.talk_held() == TalkHeld::default());
+        }
+        let mut gesture = Gesture::default();
+        chord(&mut gesture, now);
+        let both = TalkHeld {
+            control: true,
+            alt: true,
+        };
+        assert!(gesture.talk_held() == both);
+        gesture.handle(Event::Reset, now);
+        assert!(gesture.talk_held() == TalkHeld::default());
+        assert_eq!(format!("{both:?}"), "TalkHeld { .. }");
+        assert_eq!(format!("{:?}", TalkHeld::default()), "TalkHeld { .. }");
     }
 
     #[test]

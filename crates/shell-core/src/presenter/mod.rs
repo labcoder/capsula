@@ -362,11 +362,13 @@ impl Presenter {
     }
 
     /// A job's answer. Answers for cancelled, timed-out or replaced work are dropped, but still
-    /// free their worker.
+    /// free their worker. The screen watch is applied first, so the answer of a screen scene
+    /// that a change or a limit takes here finds it gone.
     /// # Errors
     /// [`Broken`] when a held frame applied after recovery can't be mirrored.
     pub fn completed(&mut self, done: Completion, now: Instant) -> Result<Vec<Effect>, Broken> {
         let mut out = Out::default();
+        self.check_marks(now, &mut out)?;
         match done {
             Completion::Prepared {
                 id,

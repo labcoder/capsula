@@ -11,12 +11,13 @@ use kumochi_scene::{
     text::Bounded,
 };
 
-use super::super::AdmitJob;
+use super::super::{AdmitJob, Broken};
 use super::{
     Effect, FRAME, GENERATION, LIVE, Presenter, RUN, Shaper, arrive, begin, commit_as, controls,
     credit, data, described, jobs, live, ms, only_admission, only_job, presenter, recovery, rect,
     scene_ids, snapshot,
 };
+use crate::input::TalkHeld;
 use crate::platform::screen_watch::{Changed, Sources};
 
 /// The newest run named when the keys came up; [`RUN`] is the hold's.
@@ -30,6 +31,7 @@ struct Log {
     starts: u32,
     stops: u32,
     bit: Option<Changed>,
+    held: Option<TalkHeld>,
 }
 
 struct Scripted {
@@ -38,10 +40,11 @@ struct Scripted {
 }
 
 impl Sources for Scripted {
-    fn start(&mut self, changed: Changed) -> bool {
+    fn start(&mut self, changed: Changed, held: TalkHeld) -> bool {
         let mut log = self.log.borrow_mut();
         log.starts += 1;
         log.bit = Some(changed);
+        log.held = Some(held);
         self.starts
     }
 
@@ -355,7 +358,7 @@ fn a_release_clears_the_marks_of_the_hold_before_it() {
     // A bit set before the release doesn't count against the new hold.
     set(&log);
     release(&mut presenter, RUN, now);
-    assert_eq!(counts(&log), (2, 1));
+    assert_eq!(counts(&log), (3, 2));
     let effects = marked(&mut presenter, OTHER, SECOND, now);
     assert!(controls(&effects).is_empty());
     assert_eq!(scene_ids(&presenter), [SECOND]);
@@ -470,7 +473,7 @@ fn a_replaced_screen_scene_leaves_no_picture_for_the_bridge() {
         .completed(only_job(effects).run(&mut Shaper), now)
         .expect("prepared");
     presenter.advance(GENERATION, now).expect("activation");
-    assert!(presenter.sample_at(now).0.visible);
+    assert!(presenter.sample_at(now).expect("a sample").0.visible);
     presenter.frames.borrow_mut().shown = true;
     let frame = DataToShell::ScenesReplaced {
         scenes: vec![MARKS],
@@ -479,7 +482,13 @@ fn a_replaced_screen_scene_leaves_no_picture_for_the_bridge() {
     let effects = data(&mut presenter, frame, now).expect("replacement marker");
     assert!(controls(&effects).is_empty());
     assert_eq!(presenter.frames.borrow().retirement_bytes(), 0);
-    assert!(!presenter.sample_at(ms(now, 10)).0.visible);
+    assert!(
+        !presenter
+            .sample_at(ms(now, 10))
+            .expect("a sample")
+            .0
+            .visible
+    );
     // The run goes on, so its watch waits for the successor's first mark.
     assert_eq!(counts(&log), (1, 0));
 }
@@ -518,7 +527,9 @@ fn a_named_run_keeps_the_watch_past_thirty_seconds() {
 
 /// The keys of the next screen hold come up.
 fn release(presenter: &mut Presenter, after: RunId, now: Instant) -> Vec<Effect> {
-    presenter.screen_released(after, now).expect("a release")
+    presenter
+        .screen_released(after, TalkHeld::default(), now)
+        .expect("a release")
 }
 
 fn replaced_by(successor: SceneId) -> DataToShell {
@@ -892,4 +903,261 @@ fn every_road_that_takes_shown_marks_down_logs_one_fixed_word() {
     release(&mut presenter, AFTER, now);
     data(&mut presenter, begin_frame(MARKS), now).expect("a screen scene");
     presenter.disconnected();
+}
+
+#[test]
+fn set_says_whether_it_changed_the_bit() {
+    let bit = Changed::default();
+    assert!(bit.set());
+    assert!(
+        !bit.set(),
+        "a second event of the same change wakes nothing"
+    );
+    assert!(bit.take());
+    assert!(!bit.take());
+    assert!(bit.set());
+}
+
+#[test]
+fn every_release_starts_the_sources_again_on_a_bit_of_its_own() {
+    let (mut presenter, now, log) = watched();
+    release(&mut presenter, AFTER, now);
+    let old = log.borrow().bit.clone().expect("started sources");
+    release(&mut presenter, AFTER, now);
+    assert_eq!(counts(&log), (2, 1));
+    // A handler of the watch before is still running: the bit it sets is nobody's.
+    assert!(old.set());
+    assert!(presenter.source_woke(now).expect("its wake").is_empty());
+    let effects = marked(&mut presenter, RUN, MARKS, now);
+    assert!(controls(&effects).is_empty());
+    assert_eq!(scene_ids(&presenter), [MARKS]);
+    assert_eq!(presenter.marks_skipped(), None);
+    // This watch's own bit still counts.
+    set(&log);
+    let effects = presenter.source_woke(now).expect("a wake");
+    assert_eq!(controls(&effects), [&cleared(&[MARKS])]);
+    assert_eq!(counts(&log), (2, 2));
+}
+
+#[test]
+fn each_release_hands_the_sources_the_talk_keys_still_down() {
+    let (mut presenter, now, log) = watched();
+    for (after, held) in [
+        (
+            AFTER,
+            TalkHeld {
+                control: true,
+                alt: false,
+            },
+        ),
+        (
+            RUN,
+            TalkHeld {
+                control: false,
+                alt: true,
+            },
+        ),
+        (OTHER, TalkHeld::default()),
+    ] {
+        presenter
+            .screen_released(after, held, now)
+            .expect("a release");
+        assert!(log.borrow().held == Some(held));
+    }
+    assert_eq!(counts(&log), (3, 2));
+}
+
+/// A watch with its first mark shown and that mark prepared, ready to be activated.
+fn prepared() -> (Presenter, Instant, Rc<RefCell<Log>>) {
+    let (mut presenter, now, log, effects) = shown();
+    let effects = presenter
+        .completed(only_job(effects).run(&mut Shaper), now)
+        .expect("prepared");
+    assert!(effects.is_empty());
+    (presenter, now, log)
+}
+
+/// The frame after a clear: nothing is activated and nothing is visible.
+fn nothing_shows(presenter: &mut Presenter, now: Instant) {
+    assert!(
+        presenter
+            .advance(GENERATION, now)
+            .expect("a frame")
+            .is_empty()
+    );
+    let (sample, effects) = presenter.sample_at(now).expect("a sample");
+    assert!(!sample.visible);
+    assert!(effects.is_empty());
+    assert_eq!(scene_ids(presenter), []);
+}
+
+#[test]
+fn a_due_activation_finds_the_marks_cleared_by_a_pending_wake_or_a_due_limit() {
+    // Unchanged and inside the limit, the prepared mark is activated and seen.
+    let (mut presenter, now, log) = prepared();
+    presenter.run_ended(RUN, now);
+    let at = ms(now, 59_999);
+    assert!(
+        presenter
+            .advance(GENERATION, at)
+            .expect("a frame")
+            .is_empty()
+    );
+    assert!(presenter.sample_at(at).expect("a sample").0.visible);
+    assert_eq!(counts(&log), (1, 0));
+
+    // A source set the bit and its wake is still queued behind the frame.
+    let (mut presenter, now, log) = prepared();
+    set(&log);
+    let effects = presenter.advance(GENERATION, now).expect("a frame");
+    assert_eq!(controls(&effects), [&cleared(&[MARKS])]);
+    assert_eq!(effects.len(), 1);
+    assert_eq!(counts(&log), (1, 1));
+    nothing_shows(&mut presenter, now);
+    assert!(presenter.source_woke(now).expect("the wake").is_empty());
+
+    // The limit is due and the watchdog hasn't run.
+    let (mut presenter, now, log) = prepared();
+    presenter.run_ended(RUN, now);
+    let at = ms(now, 60_000);
+    let effects = presenter.advance(GENERATION, at).expect("a frame");
+    assert_eq!(controls(&effects), [&cleared(&[MARKS])]);
+    assert_eq!(effects.len(), 1);
+    assert_eq!(counts(&log), (1, 1));
+    nothing_shows(&mut presenter, at);
+    assert!(presenter.tick(at).expect("the watchdog").is_empty());
+}
+
+#[test]
+fn a_frame_is_not_sampled_with_marks_a_pending_wake_or_a_due_limit_takes() {
+    let (mut presenter, now, log) = prepared();
+    presenter.advance(GENERATION, now).expect("activation");
+    assert!(presenter.sample_at(now).expect("a sample").0.visible);
+    set(&log);
+    let (sample, effects) = presenter.sample_at(now).expect("a sample");
+    assert!(!sample.visible);
+    assert_eq!(controls(&effects), [&cleared(&[MARKS])]);
+    assert_eq!(effects.len(), 1);
+    assert_eq!(counts(&log), (1, 1));
+    nothing_shows(&mut presenter, now);
+
+    let (mut presenter, now, log) = prepared();
+    presenter.advance(GENERATION, now).expect("activation");
+    presenter.run_ended(RUN, now);
+    assert!(
+        presenter
+            .sample_at(ms(now, 59_999))
+            .expect("a sample")
+            .0
+            .visible
+    );
+    let at = ms(now, 60_000);
+    let (sample, effects) = presenter.sample_at(at).expect("a sample");
+    assert!(!sample.visible);
+    assert_eq!(controls(&effects), [&cleared(&[MARKS])]);
+    assert_eq!(effects.len(), 1);
+    assert_eq!(counts(&log), (1, 1));
+    nothing_shows(&mut presenter, at);
+}
+
+#[test]
+fn a_queued_answer_cannot_publish_marks_a_pending_wake_or_a_due_limit_takes() {
+    // The mark's preparation is out when a source sets the bit; its answer comes first.
+    let (mut presenter, now, log, effects) = shown();
+    let job = only_job(effects);
+    set(&log);
+    let effects = presenter
+        .completed(job.run(&mut Shaper), now)
+        .expect("a stale answer");
+    assert_eq!(controls(&effects), [&cleared(&[MARKS])]);
+    assert_eq!(effects.len(), 1);
+    assert_eq!(counts(&log), (1, 1));
+    nothing_shows(&mut presenter, now);
+    assert!(presenter.source_woke(now).expect("the wake").is_empty());
+
+    // The same answer at the due limit, before the watchdog.
+    let (mut presenter, now, log, effects) = shown();
+    let job = only_job(effects);
+    presenter.run_ended(RUN, now);
+    let at = ms(now, 60_000);
+    let effects = presenter
+        .completed(job.run(&mut Shaper), at)
+        .expect("a stale answer");
+    assert_eq!(controls(&effects), [&cleared(&[MARKS])]);
+    assert_eq!(effects.len(), 1);
+    assert_eq!(counts(&log), (1, 1));
+    nothing_shows(&mut presenter, at);
+
+    // The marks' own admission is out, with an ordinary step held behind it.
+    let (mut presenter, now, log, admission) = admitting();
+    set(&log);
+    let effects = presenter
+        .completed(admission.run(), now)
+        .expect("a stale answer");
+    assert_eq!(controls(&effects), [&cleared(&[MARKS])]);
+    assert_eq!(credit(&effects), FRAME, "the cancelled mark's credit, once");
+    assert_eq!(counts(&log), (1, 1));
+    // The held step goes on, and the marks' answer admitted nothing.
+    let live = only_admission(effects);
+    assert_eq!(scene_ids(&presenter), [LIVE]);
+    let effects = presenter.completed(live.run(), now).expect("admitted");
+    assert!(controls(&effects).is_empty());
+    assert_eq!(only_job(effects).scene(), LIVE);
+}
+
+#[test]
+fn a_newer_run_that_is_not_the_hold_s_ending_before_the_name_ends_the_watch() {
+    let (mut presenter, now, log) = watched();
+    release(&mut presenter, AFTER, now);
+    // Another run, newer than the release, ends before the hold's run is named.
+    presenter.run_ended(RUN, now);
+    assert_eq!(counts(&log), (1, 1));
+    assert_eq!(presenter.deadline(), None);
+    presenter.screen_run(OTHER, now);
+    let effects = marked(&mut presenter, OTHER, MARKS, now);
+    assert_eq!(controls(&effects), [&refused(MARKS)]);
+    assert_eq!(scene_ids(&presenter), []);
+    assert_eq!(counts(&log), (1, 1));
+    nothing_shows(&mut presenter, now);
+}
+
+#[test]
+fn a_begun_screen_scene_with_no_mark_shows_nothing() {
+    let (mut presenter, now, _) = watched();
+    release(&mut presenter, AFTER, now);
+    let effects = data(&mut presenter, begin_frame(MARKS), now).expect("a screen scene");
+    assert!(controls(&effects).is_empty());
+    assert_eq!(scene_ids(&presenter), [MARKS]);
+    assert!(
+        presenter
+            .advance(GENERATION, now)
+            .expect("a frame")
+            .is_empty()
+    );
+    let (sample, effects) = presenter.sample_at(ms(now, 500)).expect("a sample");
+    assert!(!sample.visible);
+    assert!(effects.is_empty());
+}
+
+#[test]
+fn a_sample_that_clears_the_marks_reports_a_held_frame_the_mirror_rejects() {
+    let (mut presenter, now, log) = watched();
+    release(&mut presenter, AFTER, now);
+    arrive(&mut presenter, begin_frame(MARKS), now).expect("a screen scene");
+    let effects = arrive(&mut presenter, mark_frame(RUN, MARKS), now).expect("a first mark");
+    let _admission = only_admission(effects);
+    // A step of a scene that never began waits behind the marks' admission.
+    let orphan = DataToShell::SceneStepCommit {
+        run: RUN,
+        scene: SECOND,
+        index: 0,
+        step: rect("a"),
+    };
+    assert!(
+        arrive(&mut presenter, orphan, now)
+            .expect("held")
+            .is_empty()
+    );
+    set(&log);
+    assert_eq!(presenter.sample_at(now).err(), Some(Broken::Order));
 }

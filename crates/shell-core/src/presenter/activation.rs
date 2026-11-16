@@ -121,6 +121,7 @@ impl Presenter {
             return Ok(Vec::new());
         }
         let mut out = Out::default();
+        self.check_marks(now, &mut out)?;
         let mut heads = [None; MAX_VISIBLE_SCENES];
         for (slot, (id, scene)) in heads.iter_mut().zip(&self.scenes) {
             if scene.cut == Cut::Open && !scene.skipping && scene.pending_consumption.is_none() {

@@ -1556,7 +1556,7 @@ fn provider_done_with_a_shown_rest_and_a_future_step_stops_then_clears(
         assert_eq!(this.presenter.next_wake(Instant::now()), None);
         let after_due = Instant::now() + Duration::from_secs(4);
         assert!(this.presenter.advance(1, after_due).expect("halted future").is_empty());
-        assert!(!this.presenter.sample_at(after_due).0.changed);
+        assert!(!this.presenter.sample_at(after_due).expect("a sample").0.changed);
         assert_eq!(this.presenter.take_shown(1), [None; 4]);
         this.text.as_mut().expect("typing panel").typing.open();
         this.escape(cx).expect("second Esc clears before cut acknowledgement");
