@@ -66,6 +66,7 @@ const OTHER_DISPLAY_NOTE: &str =
     "; the picture shows a display that can't be marked; explain in words or draw a card";
 const SCREEN_OFF_NOTE: &str =
     "; the user turned off sharing the screen; explain in words or draw a card";
+const SCREEN_CHANGED_NOTE: &str = "; the user's screen may have changed after the picture was taken, so these marks weren't shown and the screen can't be marked again in this turn; explain in words or draw a card";
 /// Ends every result of a call in a screen scene, whose boxes are never stored.
 const NOT_KEPT_NOTE: &str = "; the marks' positions are not kept after this turn";
 
@@ -105,6 +106,10 @@ pub enum CallError {
     /// A screen scene, but the user turned off sharing the screen.
     #[error("drawing.ScreenOff")]
     ScreenOff,
+    /// A screen scene the shell skipped, since the user's screen may have changed after the
+    /// picture.
+    #[error("drawing.ScreenChanged")]
+    ScreenChanged,
 }
 
 /// A call that ended: the steps it drew and, unless it completed, why the rest didn't.
@@ -159,7 +164,10 @@ impl CallEnd {
             text.push_str("; stopped: ");
             if matches!(
                 error,
-                CallError::NoScreenPicture | CallError::OtherDisplay | CallError::ScreenOff
+                CallError::NoScreenPicture
+                    | CallError::OtherDisplay
+                    | CallError::ScreenOff
+                    | CallError::ScreenChanged
             ) {
                 text.push_str("surface: ");
             }
@@ -171,6 +179,7 @@ impl CallEnd {
                 CallError::NoScreenPicture => NO_PICTURE_NOTE,
                 CallError::OtherDisplay => OTHER_DISPLAY_NOTE,
                 CallError::ScreenOff => SCREEN_OFF_NOTE,
+                CallError::ScreenChanged => SCREEN_CHANGED_NOTE,
                 _ => "",
             });
             if let (Some([width, height]), CallError::Step(step)) = (self.picture, error)
@@ -878,15 +887,19 @@ impl Drawing {
 
     /// Ends every open call drawing in `scene`, whose step the shell couldn't prepare.
     pub(super) fn end_calls_in(&mut self, scene: SceneId, error: &CallError, out: &mut Output) {
-        let failing: Vec<usize> = (0..self.calls.len())
+        for at in self.open_in(scene) {
+            self.end(at, Some(error.clone()), out);
+        }
+    }
+
+    /// The open calls drawing in visible scene `scene`.
+    pub(super) fn open_in(&self, scene: SceneId) -> Vec<usize> {
+        (0..self.calls.len())
             .filter(|&at| {
                 let call = &self.calls[at];
                 !call.done && matches!(call.scene, Bound::Held(bound) if bound == scene)
             })
-            .collect();
-        for at in failing {
-            self.end(at, Some(error.clone()), out);
-        }
+            .collect()
     }
 
     /// The run ended: its calls and queued records go; this and every earlier run is stale.
