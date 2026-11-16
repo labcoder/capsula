@@ -541,7 +541,7 @@ to a model that can see goes voice-only while the default can't: a known limit.
 `show_screen`, not `screen_holds`, in every gate. An open gate only arms the part (`Armed`):
 nothing is captured while the keys are down. A closed one leaves the hold voice-only. Its
 `ScreenRelease` starts the capture after these checks, in order: the path (`PointerPath::check`),
-the part still armed, the gate again, the release stamp's age against `LATEST_START` (the
+the part still armed and its hold's choice unchanged, the gate again, the release stamp's age against `LATEST_START` (the
 deadline, `MAX_TTL` from now, is read first, so the ticket can only end sooner than the check
 allows), and the exclusion stamp, which may be neither earlier than the release stamp nor later
 than now. A refusal closes the armed part as the thread gate would (`ModelCantSee`, no line for

@@ -334,18 +334,18 @@ class saying why there's none. Every build of that run adds it through `ModelReq
 after the newest user message: the image followed by the fixed developer line "The image is a
 snapshot from when the user spoke.", or one fixed line naming the class ("The screen was not
 included: it wasn't ready in time."). A screen hold's picture has its own lines: one saying it's
-a picture of the user's screen taken at release, then, when the pointer's path was painted inside
-the image, one saying where the pink line lies, in image pixels; its changed display and
-too-large picture have their own class lines. The lines live in `locales/en/brain.ftl` and carry no window
-details. If the image can't go (another route, or no user message left), the run fails with
+a picture of the user's screen taken at release, with their pointer where it was then, and, when
+the pointer's path was painted inside the image, one saying the pink line follows the pointer's
+movement and where it lies, in image pixels. Its changed display and too-large picture have their
+own class lines. The lines live in `locales/en/brain.ftl` and carry no window details. If the image can't go (another route, or no user message left), the run fails with
 `ScreenUnavailable` rather than sending without it. What the hold carried goes in the run's row
 with its turn (store.md, `runs.screen`), and the shell hears it once as `HoldScreen` when the
 run's first request starts. The row is written first on purpose: the first build starts only
 after `TurnStored`, so history can over-report a screen but never miss one that left the
 machine, and a failed turn write fails the run before anything is built. Turning screen holds off
 withdraws every run's window image, and turning show-screen off every run's screen picture,
-each only the pictures it allowed: the run's own copy drops at once, and the bytes are zeroed when the
-last copy drops. The run's next build fails with `ScreenUnavailable`, and a request that has
+each only the pictures it allowed: the run's own copy drops at once, and the bytes are zeroed
+when the last copy drops. The run's next build fails with `ScreenUnavailable`, and a request that has
 started keeps its copy until its round ends but is refused at the send, failing the run the same
 way. If no request has carried the image yet, the turn's `screen` becomes `withdrawn`; once one
 has, it stays `attached` or `screen`. Known limits:

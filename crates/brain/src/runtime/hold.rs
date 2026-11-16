@@ -57,7 +57,7 @@ enum NoScreen {
     NotStarted,
     /// A release whose path has more than `MAX_PATH_POINTS` points.
     PathTooLong,
-    /// A release for no screen hold, or for one that isn't armed.
+    /// A release for no screen hold, for one that isn't armed, or for one whose choice changed.
     NotArmed,
     /// A release whose exclusion stamp is earlier than its own stamp.
     ExcludedEarly,
@@ -141,7 +141,7 @@ pub(super) struct Holds {
     /// The gate's state last sent on this connection.
     screen_sent: Option<ScreenHolds>,
     /// How long ago a shell's input stamp was taken; tests replace the clock.
-    recognized_age: fn(u64) -> Option<Duration>,
+    stamp_age: fn(u64) -> Option<Duration>,
     /// Where each hold's screen task sends its answers.
     screen_events: mpsc::Sender<ScreenEvent>,
     screen_answers: mpsc::Receiver<ScreenEvent>,
@@ -208,7 +208,7 @@ impl Default for Holds {
             screen: None,
             window_capture: crate::platform::WINDOW_CAPTURE,
             screen_sent: None,
-            recognized_age: crate::platform::qpc_age,
+            stamp_age: crate::platform::qpc_age,
             screen_events,
             screen_answers,
         }
@@ -797,18 +797,18 @@ impl Brain {
                 .holds
                 .pending
                 .as_ref()
-                .is_some_and(|hold| Instant::now() >= hold.deadline)
+                .is_some_and(|hold| hold.cancel.load(Ordering::SeqCst))
         {
-            return self.hold_end(HoldStatus::Failed(HoldFailure::TimedOut), link);
+            return self.hold_end(HoldStatus::Failed(HoldFailure::ChoiceChanged), link);
         }
         if !screen
             && self
                 .holds
                 .pending
                 .as_ref()
-                .is_some_and(|hold| hold.cancel.load(Ordering::SeqCst))
+                .is_some_and(|hold| Instant::now() >= hold.deadline)
         {
-            return self.hold_end(HoldStatus::Failed(HoldFailure::ChoiceChanged), link);
+            return self.hold_end(HoldStatus::Failed(HoldFailure::TimedOut), link);
         }
         match event {
             Event::Deadline => self.hold_end(HoldStatus::Failed(HoldFailure::TimedOut), link),
@@ -956,7 +956,7 @@ impl Brain {
         }
         // Read before the age, so the ticket can only end sooner than the check allows.
         let until = Instant::now() + MAX_TTL;
-        if (self.holds.recognized_age)(t_qpc).is_none_or(|age| age > LATEST_START) {
+        if (self.holds.stamp_age)(t_qpc).is_none_or(|age| age > LATEST_START) {
             self.holds.refuse_screen(key);
             return Err(NoScreen::TooLate);
         }

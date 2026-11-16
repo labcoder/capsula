@@ -1722,7 +1722,7 @@ async fn a_screen_part_starts_only_while_its_ticket_ends_within_the_lease() {
     let (mut rig, _sol, _luna) = sees_on_sol(&mut brain);
     brain.holds.window_capture = true;
     // A stamp is its own age in milliseconds; the lease's 3 s less the ticket's 1.5 s is the limit.
-    brain.holds.recognized_age = |t_qpc| Some(Duration::from_millis(t_qpc));
+    brain.holds.stamp_age = |t_qpc| Some(Duration::from_millis(t_qpc));
     let recognized = |gesture, t_qpc| ControlToBrain::HoldRecognized {
         gesture,
         thread: None,
@@ -1737,7 +1737,7 @@ async fn a_screen_part_starts_only_while_its_ticket_ends_within_the_lease() {
         reason: CaptureFailure::Unavailable,
     };
 
-    brain.holds.recognized_age = |_| None;
+    brain.holds.stamp_age = |_| None;
     assert!(
         brain
             .hold_control(&recognized(unaged, 0), &mut link)
@@ -1749,7 +1749,7 @@ async fn a_screen_part_starts_only_while_its_ticket_ends_within_the_lease() {
         ScreenPart::Closed(ScreenClass::NotReady)
     ));
     brain.holds.lost();
-    brain.holds.recognized_age = |t_qpc| Some(Duration::from_millis(t_qpc));
+    brain.holds.stamp_age = |t_qpc| Some(Duration::from_millis(t_qpc));
 
     assert!(
         brain

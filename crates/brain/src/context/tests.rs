@@ -2214,8 +2214,7 @@ fn a_screen_picture_tells_the_model_what_it_is_and_where_the_line_lies() {
         input: vec![message(Role::User, "words")],
         tools: Vec::new(),
     };
-    let picture =
-        "The image is a picture of the user's screen, taken when they let go of the talk keys.";
+    let picture = "The image is a picture of the user's screen, taken when they let go of the talk keys, with their mouse pointer where it was then.";
     let ink = crate::screen::InkBounds {
         left: 9_871,
         top: 20,
@@ -2235,7 +2234,7 @@ fn a_screen_picture_tells_the_model_what_it_is_and_where_the_line_lies() {
             message(Role::Developer, picture),
             message(
                 Role::Developer,
-                "While speaking, the user moved the mouse pointer to show you something. The pink line on the image follows that movement. It was drawn on the image for you and is not on their screen. It lies inside the rectangle from (9871, 20) to (9890, 41), in image pixels."
+                "While speaking, the user moved the mouse pointer, perhaps to show you something. The pink line on the image follows that movement. It was drawn on the image for you and is not on their screen. It lies inside the rectangle from (9871, 20) to (9890, 41), in image pixels."
             ),
         ]
     );

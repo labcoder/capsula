@@ -28,7 +28,7 @@ async fn desk(
         crate::runtime::tests::holds::input(scratch, Vec::new(), "not submitted").await;
     let (rig, _sol, _luna) = sees_on_sol(&mut brain);
     brain.holds.window_capture = true;
-    brain.holds.recognized_age = AGE;
+    brain.holds.stamp_age = AGE;
     set(&mut brain, SettingsOp::SetShowScreen(true));
     (brain, rig, Box::new((release, decoded, fetch)))
 }
@@ -410,6 +410,27 @@ async fn a_cancel_or_a_lost_shell_during_the_wait_ends_the_hold_and_retires_the_
     assert!(brain.holds.pending.is_none());
     crate::screen::release_next(&mut rig, KEY).await;
     assert!(brain.coordinator.current_screen().is_none());
+
+    // A changed choice found at the words' deadline is reported as the change, not a timeout.
+    held(
+        &mut brain,
+        Kind::Screen,
+        capturing(generation, Instant::now()),
+    );
+    brain.hold_event(words(), &mut link).unwrap();
+    controls(&mut output);
+    let hold = brain.holds.pending.as_ref().unwrap();
+    hold.cancel.store(true, Ordering::SeqCst);
+    brain.hold_event(Event::Deadline, &mut link).unwrap();
+    assert!(brain.holds.pending.is_none());
+    assert!(
+        controls(&mut output).contains(&ControlToShell::VoiceHoldStatus {
+            gesture: KEY.gesture,
+            status: HoldStatus::Failed(HoldFailure::ChoiceChanged),
+        })
+    );
+    crate::screen::release_next(&mut rig, KEY).await;
+    assert!(brain.coordinator.current_screen().is_none());
     brain.close().await;
 }
 
@@ -479,6 +500,98 @@ async fn each_setting_closes_only_its_own_holds_pending_part() {
         assert!(matches!(part(&brain), ScreenPart::Ready(_)), "{kind:?}");
         switched(&mut brain, own);
         assert!(matches!(part(&brain), ScreenPart::Discarded), "{kind:?}");
+        brain.holds.lost();
+    }
+    brain.close().await;
+}
+
+#[tokio::test]
+async fn a_release_for_a_hold_whose_choice_changed_captures_nothing() {
+    let scratch = Scratch::new("screen-hold-release-cancelled");
+    let (mut brain, _rig, _keep) = desk(&scratch).await;
+    let (out, mut output) = mpsc::channel(64);
+    let queue = RefCell::new(DataQueue::new(crate::runtime::window()));
+    let ready_notify = Notify::new();
+    let mut tap = Tap::from_env();
+    let mut link = Link::new(&out, &queue, &ready_notify, &mut tap);
+    let g = KEY.gesture;
+    assert!(brain.hold_control(&recognized(g), &mut link).unwrap());
+    assert!(matches!(part(&brain), ScreenPart::Armed));
+    controls(&mut output);
+    let hold = brain.holds.pending.as_ref().unwrap();
+    hold.cancel.store(true, Ordering::SeqCst);
+    assert!(
+        brain
+            .hold_control(&release(g, 100, 200, 2), &mut link)
+            .unwrap()
+    );
+    assert_eq!(controls(&mut output), [failed(g)]);
+    assert!(matches!(
+        part(&brain),
+        ScreenPart::Closed(ScreenClass::NotReady)
+    ));
+    brain.holds.lost();
+    brain.close().await;
+}
+
+#[tokio::test]
+async fn a_screen_hold_reads_only_show_screen_at_recognition_release_and_the_run() {
+    let scratch = Scratch::new("screen-hold-key-rule");
+    let (mut brain, mut rig, _keep) = desk(&scratch).await;
+    let sol = brain.config.view().default_model.clone().unwrap();
+    let (out, mut output) = mpsc::channel(64);
+    let queue = RefCell::new(DataQueue::new(crate::runtime::window()));
+    let ready_notify = Notify::new();
+    let mut tap = Tap::from_env();
+    let mut link = Link::new(&out, &queue, &ready_notify, &mut tap);
+    link.recovery = Some(crate::runtime::Recovery::new(&[], 1024));
+    // (show_screen, screen_holds, gesture): only the first decides each step.
+    for (show, window, gesture) in [(false, true, 40), (true, false, 41)] {
+        brain.holds.debt = None;
+        brain.holds.high = 0;
+        set(&mut brain, SettingsOp::SetShowScreen(show));
+        set(&mut brain, SettingsOp::SetScreenHolds(window));
+        let g = GestureId(gesture);
+        assert!(brain.hold_control(&recognized(g), &mut link).unwrap());
+        assert_eq!(
+            matches!(part(&brain), ScreenPart::Armed),
+            show,
+            "{show}: {:?}",
+            part(&brain)
+        );
+        controls(&mut output);
+        assert!(
+            brain
+                .hold_control(&release(g, 100, 200, 2), &mut link)
+                .unwrap()
+        );
+        if show {
+            assert!(controls(&mut output).is_empty());
+            assert!(matches!(part(&brain), ScreenPart::Capturing { .. }));
+            let (_id, request) = rig.next().await;
+            assert!(matches!(request, Request::Display { .. }), "{request:?}");
+            brain.holds.lost();
+            crate::screen::release_next(&mut rig, key(gesture)).await;
+        } else {
+            assert_eq!(controls(&mut output), [failed(g)]);
+            assert!(matches!(part(&brain), ScreenPart::None));
+            brain.holds.lost();
+        }
+        // The run's own gate, on a thread pinned to a model that can see.
+        held(&mut brain, Kind::Screen, ready());
+        brain.holds.debt = None;
+        let hold = brain.holds.pending.as_mut().unwrap();
+        let mut snapshot = hold.snapshot.take().unwrap();
+        snapshot.defaults.choice = Some(sol.clone());
+        hold.audio = None;
+        hold.ask = None;
+        brain.hold_prepared(KEY, Ok(snapshot), &mut link).unwrap();
+        let screen = &brain.holds.pending.as_ref().unwrap().screen;
+        if show {
+            assert!(matches!(screen, ScreenPart::Ready(_)), "{screen:?}");
+        } else {
+            assert!(matches!(screen, ScreenPart::Discarded), "{screen:?}");
+        }
         brain.holds.lost();
     }
     brain.close().await;

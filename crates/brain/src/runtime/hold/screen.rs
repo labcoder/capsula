@@ -422,12 +422,11 @@ impl crate::runtime::Brain {
         point: PhysicalPoint,
         ink: PointerPath,
     ) -> Result<(), NoScreen> {
-        if self
-            .holds
-            .pending
-            .as_ref()
-            .is_none_or(|hold| hold.key != key || !matches!(hold.screen, ScreenPart::Armed))
-        {
+        if self.holds.pending.as_ref().is_none_or(|hold| {
+            hold.key != key
+                || hold.cancel.load(Ordering::SeqCst)
+                || !matches!(hold.screen, ScreenPart::Armed)
+        }) {
             return Err(NoScreen::NotArmed);
         }
         let choice = self.config.view().default_model.clone();
@@ -436,14 +435,14 @@ impl crate::runtime::Brain {
         }
         // Read before the age, so the ticket can only end sooner than the check allows.
         let until = Instant::now() + MAX_TTL;
-        if (self.holds.recognized_age)(t_qpc).is_none_or(|age| age > LATEST_START) {
+        if (self.holds.stamp_age)(t_qpc).is_none_or(|age| age > LATEST_START) {
             return Err(NoScreen::TooLate);
         }
         if excluded < t_qpc {
             return Err(NoScreen::ExcludedEarly);
         }
         // A stamp later than now would hold the worker to its deadline for a frame it can't take.
-        if (self.holds.recognized_age)(excluded).is_none() {
+        if (self.holds.stamp_age)(excluded).is_none() {
             return Err(NoScreen::ExcludedLate);
         }
         let aim = Aim::Display {
