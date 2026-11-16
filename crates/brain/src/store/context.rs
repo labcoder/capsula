@@ -482,17 +482,23 @@ impl Snapshot<'_> {
         choice.ok_or(StoreError::NoThread)
     }
 
-    /// The local date and time to the minute, from the system's time zone.
+    /// The local date and time to the minute when `run` started, from the system's time zone, so
+    /// every round of the run reads the same.
     ///
     /// # Errors
-    /// Fails when SQLite fails.
-    pub(crate) fn local_time(&self) -> Result<String, StoreError> {
-        let time = self.0.query_row(
-            "SELECT strftime('%Y-%m-%d %H:%M', 'now', 'localtime')",
-            [],
-            |row| row.get(0),
-        )?;
-        Ok(time)
+    /// `NoRun` when the run isn't stored; fails when SQLite fails.
+    pub(crate) fn local_time(&self, run: RunId) -> Result<String, StoreError> {
+        let run = sql_id(run.0, StoreError::NoRun)?;
+        let time = self
+            .0
+            .query_row(
+                "SELECT strftime('%Y-%m-%d %H:%M', started_ms / 1000, 'unixepoch', 'localtime')
+                 FROM runs WHERE id = ?1",
+                [run],
+                |row| row.get(0),
+            )
+            .optional()?;
+        time.ok_or(StoreError::NoRun)
     }
 
     /// Ends the transaction.

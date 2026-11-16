@@ -700,6 +700,17 @@ fn serve_op(store: &mut Store, purger: &mut Purger, acks: &UnboundedSender<Input
             }
             purger.op_arrived(store);
         }
+        StoreOp::ForgetScreen { run } => {
+            purger.op_arriving();
+            if store
+                .reconnect()
+                .and_then(|()| store.forget_screen(run))
+                .is_err()
+            {
+                tracing::warn!("an unsent screen wasn't cleared");
+            }
+            purger.op_arrived(store);
+        }
         StoreOp::BeginTurn {
             thread,
             title,
