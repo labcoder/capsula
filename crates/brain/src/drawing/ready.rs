@@ -34,9 +34,12 @@ impl Drawing {
     }
 
     /// The step a finished call waits for: the last it committed, unless the shell already
-    /// answered for it or it's past the shell's ready window.
+    /// answered for it, refused one of its steps, or it's past the shell's ready window.
     fn awaited(&self, at: usize) -> Option<u32> {
         let call = &self.calls[at];
+        if call.refusal.is_some() {
+            return None;
+        }
         let last = call.last?;
         let state = &self.scenes[self.live(call.drew_in()?)?].state;
         // shortcut: a step past the window prepares only once speech activates an earlier one,
@@ -61,12 +64,13 @@ impl Drawing {
         }
     }
 
-    /// The shell refused `scene`'s step `index`: a held call that committed it or a later step
-    /// ends with `error` however it's released, even before the queued cut reaches it.
+    /// The shell refused `scene`'s step `index`: an open or held call that committed it or a
+    /// later step ends with `error` when it finishes or is released, even before the queued cut
+    /// reaches it.
     pub(super) fn refused(&mut self, scene: SceneId, index: u32, error: &CallError) {
         for at in self.open_in(scene) {
             let call = &mut self.calls[at];
-            if call.awaits.is_some() && call.last.is_some_and(|last| last >= index) {
+            if call.last.is_some_and(|last| last >= index) {
                 call.refusal.get_or_insert_with(|| error.clone());
             }
         }

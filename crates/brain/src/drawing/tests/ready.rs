@@ -4,7 +4,7 @@ use kumochi_protocol::message::{RunId, SceneFailure, SceneId};
 
 use super::{
     CallEnd, CallError, Drawing, Input, Output, Remaining, Store, THREAD, args, begin, call,
-    closed, cut, numbered, step, streamed, text,
+    closed, cut, numbered, sent, step, streamed, text,
 };
 use crate::coordinator::Stale;
 use crate::engines::CallId;
@@ -343,4 +343,85 @@ fn a_held_call_takes_no_late_record_or_second_finish() {
     assert!(drawing.holding());
     assert_eq!(drawing.ledger(RunId(1)).steps, 1);
     assert_eq!(texts(&store.run(&mut drawing, ready(1, 0))), ["drawn: [a]"]);
+}
+
+/// `a` committed step 0 and its end and finish queue behind `b`'s pending lookup, which the
+/// returned output holds.
+fn finish_queued_behind_other_work(store: &mut Store, drawing: &mut Drawing) -> Output {
+    store.run(drawing, streamed("a", 0, &begin("live", "")));
+    store.run(drawing, streamed("a", 1, &step(&text("s", "a"))));
+    let other = drawing
+        .handle(streamed("b", 0, &begin("other", "")))
+        .expect("a fresh call");
+    for queued in [streamed("a", 2, r#"{"end":{}}"#), finished("a")] {
+        assert_eq!(drawing.handle(queued).expect("a queued input").calls, []);
+    }
+    other
+}
+
+fn ends_of_a(out: &Output) -> Vec<Option<CallError>> {
+    let a = CallId::new("a").expect("call id");
+    out.calls
+        .iter()
+        .filter(|end| end.call == a)
+        .map(|end| end.error.clone())
+        .collect()
+}
+
+#[test]
+fn a_refusal_received_before_the_finish_ends_the_call_at_its_finish() {
+    let mut drawing = Drawing::default();
+    let mut store = silent();
+    let other = finish_queued_behind_other_work(&mut store, &mut drawing);
+    let third = drawing
+        .handle(streamed("c", 0, &begin("third", "")))
+        .expect("a queued begin");
+    assert_eq!(third.calls, []);
+    assert_eq!(
+        drawing.handle(refused(0)).expect("a committed step").calls,
+        []
+    );
+    let (serial, write) = sent(&other).expect("the pending lookup");
+    let reply = Ok(store.answer(&write));
+    let looked_up = drawing
+        .handle(Input::Written { serial, reply })
+        .expect("the pending write");
+    assert_eq!(
+        ends_of_a(&looked_up),
+        [Some(CallError::TooMuchToPaint { cleared: true })]
+    );
+    assert!(sent(&looked_up).is_some());
+    assert!(!drawing.holding());
+    for _ in 0..2 {
+        assert_eq!(drawing.handle(Input::ReadyWait).expect("a tick").calls, []);
+    }
+    assert_eq!(ends_of_a(&store.settle(&mut drawing, looked_up)).len(), 1);
+}
+
+#[test]
+fn a_refusal_received_before_the_finish_wins_over_the_scene_leaving() {
+    let mut drawing = Drawing::default();
+    let mut store = silent();
+    store.run(&mut drawing, streamed("a", 0, &begin("live", "")));
+    store.run(&mut drawing, streamed("a", 1, &step(&text("s", "a"))));
+    store.run(&mut drawing, streamed("a", 2, r#"{"end":{}}"#));
+    let other = drawing
+        .handle(streamed("b", 0, &begin("other", "")))
+        .expect("a fresh call");
+    assert_eq!(
+        drawing.handle(refused(0)).expect("a committed step").calls,
+        []
+    );
+    let clear = Input::Clear {
+        scenes: vec![SceneId(1)],
+    };
+    assert_eq!(ends_of_a(&store.run(&mut drawing, clear)), []);
+    let finish = drawing.handle(finished("a")).expect("a finish");
+    let settled = store.settle(&mut drawing, other);
+    let ends: Vec<_> = ends_of_a(&finish)
+        .into_iter()
+        .chain(ends_of_a(&settled))
+        .collect();
+    assert_eq!(ends, [Some(CallError::TooMuchToPaint { cleared: true })]);
+    assert!(!drawing.holding());
 }
