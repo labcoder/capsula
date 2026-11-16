@@ -21,9 +21,10 @@ impl Changed {
         !self.0.swap(true, Ordering::AcqRel)
     }
 
-    /// Reads the bit and clears it.
+    /// Reads the bit and clears it. A clear bit is only read, so the frame that finds nothing
+    /// changed writes nothing.
     pub(crate) fn take(&self) -> bool {
-        self.0.swap(false, Ordering::AcqRel)
+        self.0.load(Ordering::Acquire) && self.0.swap(false, Ordering::AcqRel)
     }
 }
 
