@@ -7,6 +7,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use zeroize::{Zeroize as _, Zeroizing};
 
 use super::encode::{CaptureTransform, Encoded};
+use super::ink::InkBounds;
 
 #[cfg(test)]
 mod tests;
@@ -26,6 +27,8 @@ pub(crate) struct ScreenContext {
     jpeg: Zeroizing<Vec<u8>>,
     size: [u32; 2],
     transform: CaptureTransform,
+    /// Where the pointer's path was painted, when one was.
+    ink: Option<InkBounds>,
 }
 
 /// A [`ScreenContext`] as it arrives, before it's registered.
@@ -35,11 +38,12 @@ struct Received {
     jpeg: Zeroizing<Vec<u8>>,
     size: [u32; 2],
     transform: CaptureTransform,
+    ink: Option<InkBounds>,
 }
 
 impl From<Received> for ScreenContext {
     fn from(received: Received) -> Self {
-        Self::sealed(received.jpeg, received.size, received.transform)
+        Self::sealed(received.jpeg, received.size, received.transform).with_ink(received.ink)
     }
 }
 
@@ -82,6 +86,22 @@ impl ScreenContext {
         Self::sealed(jpeg, size, transform)
     }
 
+    pub(crate) fn with_ink(mut self, ink: Option<InkBounds>) -> Self {
+        self.ink = ink;
+        self
+    }
+
+    /// Where the pointer's path was painted on the image, in image pixels, when that lies inside
+    /// the image; the worker's answer is checked here, before a model line can carry it.
+    pub(crate) fn ink(&self) -> Option<InkBounds> {
+        self.ink.filter(|ink| {
+            ink.left < ink.right
+                && ink.top < ink.bottom
+                && ink.right <= self.size[0]
+                && ink.bottom <= self.size[1]
+        })
+    }
+
     /// The image for the run that takes it: its buffer and dump registration move, with no copy.
     pub(crate) fn into_jpeg(mut self) -> crate::context::Jpeg {
         crate::context::Jpeg::sealed(
@@ -114,6 +134,7 @@ impl ScreenContext {
             jpeg,
             size,
             transform,
+            ink: None,
         }
     }
 
@@ -136,7 +157,10 @@ impl Drop for ScreenContext {
 
 impl PartialEq for ScreenContext {
     fn eq(&self, other: &Self) -> bool {
-        self.jpeg == other.jpeg && self.size == other.size && self.transform == other.transform
+        self.jpeg == other.jpeg
+            && self.size == other.size
+            && self.transform == other.transform
+            && self.ink == other.ink
     }
 }
 

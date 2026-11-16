@@ -30,6 +30,31 @@ pub(crate) fn qpc_left(stamp: u64) -> Option<Duration> {
     left(now, frequency, stamp)
 }
 
+/// The counter now. None when it can't be read.
+pub(crate) fn qpc_now() -> Option<u64> {
+    counter().map(|(now, _)| now)
+}
+
+/// `span` in counter ticks, rounded up so a wait for it is never short. None when the counter
+/// can't be read.
+pub(crate) fn qpc_ticks(span: Duration) -> Option<u64> {
+    let (_, frequency) = counter()?;
+    ticks(span, frequency)
+}
+
+/// A counter stamp in the 100-ns units Windows gives a captured frame's draw time in. None when
+/// the counter can't be read.
+pub(crate) fn qpc_hns(stamp: u64) -> Option<u64> {
+    let (_, frequency) = counter()?;
+    hns(stamp, frequency)
+}
+
+/// [`qpc_hns`] rounded up, for a draw time a frame must reach.
+pub(crate) fn qpc_hns_up(stamp: u64) -> Option<u64> {
+    let (_, frequency) = counter()?;
+    hns_up(stamp, frequency)
+}
+
 fn counter() -> Option<(u64, u64)> {
     let (mut now, mut frequency) = (0_i64, 0_i64);
     // SAFETY: `now` is writable for the call.
@@ -61,6 +86,20 @@ fn left(now: u64, frequency: u64, stamp: u64) -> Option<Duration> {
 fn stamp(now: u64, frequency: u64, after: Duration) -> Option<u64> {
     let ticks = after.as_nanos() * u128::from(frequency) / 1_000_000_000;
     now.checked_add(u64::try_from(ticks).ok()?)
+}
+
+fn ticks(span: Duration, frequency: u64) -> Option<u64> {
+    let nanos = span.as_nanos().checked_mul(u128::from(frequency))?;
+    u64::try_from(nanos.div_ceil(1_000_000_000)).ok()
+}
+
+/// Rounds down, as Windows does for a frame's draw time.
+fn hns(stamp: u64, frequency: u64) -> Option<u64> {
+    u64::try_from(u128::from(stamp) * 10_000_000 / u128::from(frequency)).ok()
+}
+
+fn hns_up(stamp: u64, frequency: u64) -> Option<u64> {
+    u64::try_from((u128::from(stamp) * 10_000_000).div_ceil(u128::from(frequency))).ok()
 }
 
 /// Rounds down, so time left is never overstated.
@@ -107,5 +146,28 @@ mod tests {
         );
         assert_eq!(left(10_000_000, 10_000_000, 10_000_000), None);
         assert_eq!(left(10_000_001, 10_000_000, 10_000_000), None);
+    }
+
+    #[test]
+    fn a_span_in_ticks_rounds_up_and_a_stamp_in_frame_units_rounds_down() {
+        assert_eq!(
+            ticks(Duration::from_millis(100), 10_000_000),
+            Some(1_000_000)
+        );
+        assert_eq!(ticks(Duration::from_nanos(1), 3), Some(1));
+        assert_eq!(ticks(Duration::ZERO, 3), Some(0));
+        assert_eq!(ticks(Duration::MAX, u64::MAX), None);
+        assert_eq!(hns(25_000_000, 10_000_000), Some(25_000_000));
+        assert_eq!(hns(1, 3), Some(3_333_333));
+        assert_eq!(hns(3, 3), Some(10_000_000));
+        assert_eq!(hns(u64::MAX, 1), None);
+    }
+
+    #[test]
+    fn a_draw_time_a_frame_must_reach_rounds_up() {
+        assert_eq!(hns_up(1, 3), Some(3_333_334));
+        assert_eq!(hns_up(3, 3), Some(10_000_000));
+        assert_eq!(hns_up(25_000_000, 10_000_000), Some(25_000_000));
+        assert_eq!(hns_up(u64::MAX, 1), None);
     }
 }

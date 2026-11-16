@@ -312,6 +312,9 @@ fn no_carrier_prints_the_nonce_or_the_pixels() {
 #[path = "capture_elements_tests.rs"]
 mod elements;
 
+#[path = "display_tests.rs"]
+mod display;
+
 #[test]
 fn a_window_that_no_longer_exists_is_never_unchanged() {
     let gone = Target {

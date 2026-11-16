@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
 use super::capture::Failure;
+use super::ink::{InkBounds, paint};
 use super::mask::Completeness;
 use super::sanitize::{SanitizedFrame, intersection};
 use super::wire::{CaptureId, Refusal};
@@ -120,9 +121,19 @@ pub(crate) fn overview(frame: &SanitizedFrame<'_>) -> Result<Encoded, Failure> {
 
 /// [`overview`] under a cap of `cap` JPEG bytes.
 pub(crate) fn overview_within(frame: &SanitizedFrame<'_>, cap: usize) -> Result<Encoded, Failure> {
+    overview_inked(frame, cap, &[]).map(|(encoded, _)| encoded)
+}
+
+/// [`overview_within`] with `ink`, a pointer's path in physical pixels, painted on the scaled
+/// image before it's encoded, and the painted pixels' bounds.
+pub(crate) fn overview_inked(
+    frame: &SanitizedFrame<'_>,
+    cap: usize,
+    ink: &[PhysicalPoint],
+) -> Result<(Encoded, Option<InkBounds>), Failure> {
     let (meta, _) = frame.image();
     let size = overview_size(meta.display.size);
-    encode(frame, meta.display, size, None, cap)
+    encode(frame, meta.display, size, None, cap, ink)
 }
 
 /// Clips and centres a native-pixel window no larger than 1024×576, without scaling.
@@ -133,7 +144,7 @@ pub(crate) fn overview_within(frame: &SanitizedFrame<'_>, cap: usize) -> Result<
 pub(crate) fn crop(frame: &SanitizedFrame<'_>, region: PhysicalRect) -> Result<Encoded, Failure> {
     let (meta, _) = frame.image();
     let region = crop_rect(region, meta.display).ok_or(Refusal::Invalid)?;
-    encode(frame, region, region.size, Some(region), JPEG_CAP)
+    encode(frame, region, region.size, Some(region), JPEG_CAP, &[]).map(|(encoded, _)| encoded)
 }
 
 fn overview_size(size: [u32; 2]) -> [u32; 2] {
@@ -190,8 +201,10 @@ fn encode(
     size: [u32; 2],
     crop: Option<PhysicalRect>,
     cap: usize,
-) -> Result<Encoded, Failure> {
-    let rgb = Zeroizing::new(resample(frame, region, size));
+    ink: &[PhysicalPoint],
+) -> Result<(Encoded, Option<InkBounds>), Failure> {
+    let mut rgb = Zeroizing::new(resample(frame, region, size));
+    let inked = paint(&mut rgb, size, region, ink);
     let mut jpeg = Zeroizing::new(Vec::with_capacity(cap));
     let mut out = Capped {
         bytes: &mut jpeg,
@@ -209,7 +222,7 @@ fn encode(
     }
     encoded.map_err(|_| Failure::Fault(ENCODE_FAULT))?;
     let (meta, _) = frame.image();
-    Ok(Encoded {
+    let encoded = Encoded {
         jpeg,
         size,
         capture: meta.capture,
@@ -221,7 +234,8 @@ fn encode(
             overview_size: overview_size(meta.display.size),
             crop,
         },
-    })
+    };
+    Ok((encoded, inked))
 }
 
 fn resample(frame: &SanitizedFrame<'_>, region: PhysicalRect, size: [u32; 2]) -> Vec<u8> {

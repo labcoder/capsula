@@ -11,6 +11,7 @@ mod context;
 mod elements;
 mod encode;
 mod frame;
+mod ink;
 #[cfg_attr(
     not(test),
     expect(dead_code, reason = "masks wait for the study after P3 (OSC-775)")
@@ -45,6 +46,7 @@ pub(crate) use elements::{
 #[cfg(debug_assertions)]
 pub(crate) use encode::JPEG_CAP;
 pub(crate) use frame::RawFrame;
+pub(crate) use ink::InkBounds;
 #[cfg(all(windows, any(test, feature = "test-support")))]
 pub(crate) use mask::MaskSet;
 pub use mask::Unavailable;
