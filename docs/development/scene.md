@@ -68,7 +68,8 @@ Points are logical pixels of the drawing's canvas, not of the overlay display.
 Anchors are `[x,y]` or `{"ref":"object-id"}`. Coordinates must be finite and
 within ±20,000. Chart data uses finite f64 values instead of coordinate-bounded
 numbers. Composed transforms and domain-specific ranges are admission checks.
-Screen/capture anchors are absent, not ignored.
+Screen/capture anchors are absent, not ignored; a `highlight` or `callout` may also target a
+`{"box":[x,y,w,h]}`, which only the dormant screen surface below accepts.
 
 Line, arrow and path stroke widths must be above 0. A shape's `width` is its outline,
 2 by default; 0 draws the shape without an outline, and negative widths are refused. A
@@ -146,6 +147,41 @@ is not necessarily admissible. Optional fields and defaults remain optional.
 The brain advertises this schema through its draw tool. Its complete-call adapter
 enforces the same 2D restrictions before admitting any scene record; the drawing
 reducer remains authoritative for semantic and resource admission.
+
+### The screen surface (dormant)
+
+A scene with `"surface":"screen"` draws on the picture of the user's screen the model was
+sent: one canvas unit per picture pixel, origin top-left. `draw` still refuses the surface and
+`draw_schema()` doesn't offer it, as with 3D. `parse_screen_draw_record` and
+`screen_draw_schema()` are the same contract with it admitted, for the live check and the
+pull request that activates it.
+
+- **Box targets.** A `highlight`'s or `callout`'s `target` may be `{"box":[x,y,w,h]}` in
+  canvas units, with a positive width and height (`OutOfRange` otherwise). Only the screen
+  parser accepts one; `draw` refuses it at `put[i].target`.
+- **The stamp.** `begin.display` (the display's physical origin and size and its DPI) is
+  written only by the brain, after the parse: a model-written one is `Unsupported` in both
+  parsers. `screen::stamp` sets `size` to the picture's and refuses a written size that
+  differs (`SizeNotPicture`). `SceneState::begin` refuses a screen header without a usable
+  stamp and any other header with one. `Begin::continues` compares the stamp, so a
+  continuation is stamped before it is compared. The drawings digest the model reads leaves
+  `display` out. A header's JSON has no `display` key when it has no stamp, so every other
+  surface's stored header keeps its form; the binary frames always carry the field.
+- **What it admits** (`screen::admit`, at admission): `highlight` and `callout` with a box or
+  `ref` target. Everything else, `line` and `arrow` included, a point target, a callout `at`,
+  `in` and `set` are `Unsupported`, and `screen_draw_schema` doesn't offer lines or arrows: a
+  line between two marks would end at their centres, over both targets. A box outside the
+  picture is `OutOfRange`. A label is one line of at most `MAX_SCREEN_LABEL_CHARS` (24);
+  longer text is `LabelTooLong`, whose message states the cap, never cut. So a box target is
+  the only position a screen scene holds.
+- **Placement.** `screen::placement` is a pure function from the stamped display, the canvas
+  size and the overlay's display to the canvas-to-overlay transform, in logical pixels. It
+  returns `None` when the overlay's display isn't the stamped one, or the scale is over
+  `MAX_SCREEN_SCALE` (4).
+- **Stored form.** `screen::without_boxes` returns a step with every box target replaced by
+  `PLACEHOLDER_BOX` (`[0,0,1,1]`), keeping ids, labels and styles. No `Debug` prints a box
+  or the stamp. The step's uses in the brain come with the pull request that admits screen
+  scenes.
 
 ### 3D records
 
@@ -894,7 +930,7 @@ shell's guard. None of the counts depends on display, pose or reveal, and sums s
   The radius is the declared one, not the half-side clamp the painter draws with, so a rect
   that wider text squeezes never costs less; the painter's own count can only be lower.
   c is its object's charged scale: the composed-scale envelope of the object and its
-  ancestors, with a diagram's shrink-to-fit taken as 1, times the surface limit (2 on an overlay, 1 inline), times 1 + 2⁻¹⁶, then capped
+  ancestors, with a diagram's shrink-to-fit taken as 1, times the surface limit (2 on an overlay, 1 inline, 4 on the screen), times 1 + 2⁻¹⁶, then capped
   at 64. The 2⁻¹⁶ is a conservative allowance for f32 drift between that envelope and a
   frame's composed matrix along an admitted chain, not a proof. Preparation recomputes c for
   every retained object after the step's motion updates and keeps a count only when both its

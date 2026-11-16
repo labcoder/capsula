@@ -54,6 +54,7 @@ fn header() -> SceneHeader {
             title: Some(Text::try_from("private-title".to_owned()).expect("valid text")),
             alt: Text::try_from("private-alt".to_owned()).expect("valid text"),
             others: kumochi_scene::Others::Clear,
+            display: None,
         },
         layout_version: 1,
     }

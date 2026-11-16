@@ -132,6 +132,18 @@ pub enum ErrorCode {
     /// A `set` or `anim` targets an object the same step removes.
     #[error("scene.RemovedInStep")]
     RemovedInStep,
+    /// A label on the screen is longer than its cap, or more than one line.
+    #[error(
+        "scene.LabelTooLong: a label on the screen is one line of at most {} characters",
+        crate::limits::MAX_SCREEN_LABEL_CHARS
+    )]
+    LabelTooLong,
+    /// A screen scene's size differs from the picture's. Carries no numbers, so every error
+    /// stays as small as before; the picture's size is stated beside the picture.
+    #[error(
+        "scene.SizeNotPicture: leave size out; a screen scene's size is the picture's, stated beside it"
+    )]
+    SizeNotPicture,
 }
 impl ErrorCode {
     pub(crate) fn from_decode(message: &str, path: &mut FieldPath) -> Self {
@@ -381,6 +393,7 @@ fn known_field(key: &str) -> bool {
             | "segments"
             | "attach"
             | "info"
+            | "display"
     )
 }
 

@@ -11,7 +11,10 @@ use crate::{
     layout::heap,
     limits::{MAX_MOTION_MS, MAX_PATH_POINTS},
     path::{self, PathWork},
-    record::{Anchor, Anim, Axis, AxisScale, ChartKind, Ease, Enter, KeyValue, Op, Point, Track},
+    record::{
+        Anchor, Anim, Axis, AxisScale, Callout, ChartKind, Ease, Enter, Highlight, KeyValue, Op,
+        Point, Target, Track,
+    },
     three::{self, size::MeshError},
 };
 use std::{collections::BTreeMap, sync::Arc};
@@ -165,13 +168,12 @@ pub(super) fn make(op: &Op, index: usize, step: &Step) -> Result<Work, StepError
         }
         Op::Shape(r) => shape_geometry(&mut work, r).map_err(|code| fail("box", code))?,
         Op::Text(r) => work.offset = anchor_offset(&r.at),
-        Op::Callout(r) => {
-            work.offset = anchor_offset(&r.target);
-            if let Some(at) = &r.at {
+        Op::Callout(Callout { target, .. }) | Op::Highlight(Highlight { target, .. }) => {
+            work.offset = target_offset(target).map_err(|code| fail("target", code))?;
+            if let Op::Callout(Callout { at: Some(at), .. }) = op {
                 work.offset = work.offset.max(anchor_offset(at));
             }
         }
-        Op::Highlight(r) => work.offset = anchor_offset(&r.target),
         Op::Diagram(r) => {
             if let Some(b) = r.bounds {
                 work.extent = rect_extent(b).map_err(|code| fail("box", code))?;
@@ -280,6 +282,13 @@ fn anchor_offset(anchor: &Anchor) -> f32 {
     match anchor {
         Anchor::At(p) => p[0].get().abs().max(p[1].get().abs()),
         Anchor::Ref(_) => 0.0,
+    }
+}
+
+fn target_offset(target: &Target) -> Result<f32, ErrorCode> {
+    match target {
+        Target::Anchor(anchor) => Ok(anchor_offset(anchor)),
+        Target::Box(bounds) => rect_extent(*bounds),
     }
 }
 

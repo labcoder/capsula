@@ -671,8 +671,10 @@ fn ready(source: &Op, state: &LayoutState) -> bool {
             Op::Path(path) => path.at.as_ref().is_none_or(has),
             Op::Shape(shape) => shape.at.as_ref().is_none_or(has),
             Op::Text(text) => has(&text.at),
-            Op::Callout(callout) => has(&callout.target) && callout.at.as_ref().is_none_or(has),
-            Op::Highlight(highlight) => has(&highlight.target),
+            Op::Callout(callout) => {
+                callout.target.anchor().is_none_or(has) && callout.at.as_ref().is_none_or(has)
+            }
+            Op::Highlight(highlight) => highlight.target.anchor().is_none_or(has),
             Op::Edge(edge) => {
                 state.objects.contains_key(&edge.from) && state.objects.contains_key(&edge.to)
             }
