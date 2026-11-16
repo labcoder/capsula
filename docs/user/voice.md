@@ -71,9 +71,16 @@ task you're in uses its own model. A task with its own model is always voice onl
 During the hold the same panel says which model will see the window. If the picture couldn't be
 included it says why instead: nothing was under the pointer, the window can't be shared, it
 changed, something was drawn over it so Kumochi couldn't tell which window you meant, or its
-picture was too large. Chat history keeps one line under
-your message saying whether the window was included. Turning the setting off while a picture
-is waiting to be sent withdraws it.
+picture was too large. Turning the setting off while a picture is waiting to be sent withdraws
+it.
+
+In chat history, a small screen icon under your message means Kumochi took a picture to send
+with it. Point at the icon to read that. When no picture was included, a line under the message
+says why instead. The picture goes only to the model you chose, and Kumochi keeps no copy: it
+holds the picture in memory until the reply ends and never writes it to disk. Every request
+Kumochi makes for that reply carries the picture; later messages never do. The icon is recorded
+with your message, before anything is sent, so it also shows on a message whose reply failed
+before it started.
 
 Not checked yet: displays at different scales, and more than one monitor.
 

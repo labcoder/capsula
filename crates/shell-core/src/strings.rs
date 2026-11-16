@@ -213,6 +213,7 @@ texts! {
     ScreenNotIncludedChanged => "screen-not-included-changed",
     ScreenNotIncludedTurnedOff => "screen-not-included-turned-off",
     ScreenHistoryAttached => "screen-history-attached",
+    ShowScreenHistory => "show-screen-history",
     VoiceRestartRequired => "voice-restart-required",
     VoiceInstalledFailed => "voice-installed-failed",
     VoiceNotInstalledFailed => "voice-not-installed-failed",
@@ -341,16 +342,13 @@ impl Text {
         }
     }
 
-    /// The history line under a held turn: what its screen hold carried.
+    /// The history line under a held turn saying why its screen hold's picture wasn't included.
+    /// None for a turn whose picture was taken, which [`Strings::pictured`] speaks for.
     pub const fn held_screen(screen: HeldScreen) -> Option<Self> {
         Some(match screen {
-            HeldScreen::Attached => Self::ScreenHistoryAttached,
             HeldScreen::NotIncluded(class) => Self::screen_not_included(class),
             HeldScreen::Withdrawn => Self::ScreenNotIncludedTurnedOff,
-            // shortcut: a turn that carried the screen's picture shows no line, so it never
-            // reads as the window's; it gets its own string when the shell sends the screen at
-            // release.
-            HeldScreen::Screen => return None,
+            HeldScreen::Attached | HeldScreen::Screen => return None,
         })
     }
 }
@@ -371,6 +369,20 @@ impl Strings {
         let mut args = FluentArgs::new();
         args.set("app", kumochi_protocol::constants::DISPLAY_NAME);
         self.format(Text::SettingsTaskbar.id(), Some(&args))
+    }
+
+    /// What the icon under a held turn says: which picture was taken to go with the turn. None
+    /// for a turn with no picture. It says taken, not sent, because the turn is stored before
+    /// its run's first request.
+    pub fn pictured(&self, screen: HeldScreen) -> Option<String> {
+        let text = match screen {
+            HeldScreen::Attached => Text::ScreenHistoryAttached,
+            HeldScreen::Screen => Text::ShowScreenHistory,
+            HeldScreen::NotIncluded(_) | HeldScreen::Withdrawn => return None,
+        };
+        let mut args = FluentArgs::new();
+        args.set("app", kumochi_protocol::constants::DISPLAY_NAME);
+        Some(self.format(text.id(), Some(&args)))
     }
 
     /// Loads the English catalog compiled into the binary.
@@ -769,23 +781,38 @@ mod tests {
         ] {
             assert_eq!(strings.with_model(text, "GPT-5.5"), line);
         }
-        for (screen, line) in [
+        // A held turn's history says one thing: why no picture was included, as a line, or
+        // which picture was taken, on its icon.
+        let app = kumochi_protocol::constants::DISPLAY_NAME;
+        for (screen, line, icon) in [
             (
                 HeldScreen::Attached,
-                Some("Included the window under your pointer"),
+                None,
+                Some(format!(
+                    "{app} took a picture of the window under your pointer to send to the model with this message. It didn't keep a copy."
+                )),
+            ),
+            (
+                HeldScreen::Screen,
+                None,
+                Some(format!(
+                    "{app} took a picture of your screen to send to the model with this message. It didn't keep a copy."
+                )),
             ),
             (
                 HeldScreen::NotIncluded(ScreenClass::Changed),
                 Some("Screen not included: the window changed"),
+                None,
             ),
             (
                 HeldScreen::Withdrawn,
                 Some("Screen not included: you turned screen sharing off"),
+                None,
             ),
-            (HeldScreen::Screen, None),
         ] {
             let shown = Text::held_screen(screen).map(|text| strings.get(text));
-            assert_eq!(shown.as_deref(), line);
+            assert_eq!(shown.as_deref(), line, "{screen:?}");
+            assert_eq!(strings.pictured(screen), icon, "{screen:?}");
         }
     }
 
