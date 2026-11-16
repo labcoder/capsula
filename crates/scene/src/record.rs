@@ -9,8 +9,8 @@ use crate::{
     },
     text::{Bounded, Finite, Number, Source, Text},
 };
-pub use mixed::{Anchor, Cell, Color, KeyValue, Point, Rgb, Start, Token};
-use serde::{Deserialize, Serialize};
+pub use mixed::{Anchor, Cell, Color, KeyValue, Point, Rgb, ScreenDisplay, Start, Target, Token};
+use serde::{Deserialize, Serialize, Serializer, ser::SerializeStruct};
 use std::fmt;
 pub use three::{
     Camera, Fov, Geometry, Length, Light, LightDir, Pitch, Segments, ShapeError, Size, Solid,
@@ -58,6 +58,8 @@ pub enum Surface {
     Overlay,
     /// Inline.
     Inline,
+    /// The picture of the user's screen the model was sent, one canvas unit per picture pixel.
+    Screen,
 }
 /// What a new drawing does with this thread's other visible drawings.
 #[derive(
@@ -72,7 +74,7 @@ pub enum Others {
     Keep,
 }
 /// Begin record fields.
-#[derive(schemars::JsonSchema, Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(schemars::JsonSchema, Debug, Clone, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Begin {
     /// v.
@@ -90,6 +92,10 @@ pub struct Begin {
     /// Whether a new scene replaces or keeps this thread's other drawings.
     #[serde(default)]
     pub others: Others,
+    /// The display a screen scene's picture shows, stamped by the brain and never offered.
+    #[serde(default)]
+    #[schemars(skip)]
+    pub display: Option<ScreenDisplay>,
 }
 impl Begin {
     /// Whether this header continues a scene stored under `stored`. Title and alt describe the
@@ -105,12 +111,35 @@ impl Begin {
             title: _,
             alt: _,
             others,
+            display,
         } = self;
         *v == stored.v
             && *scene == stored.scene
             && *surface == stored.surface
             && *size == stored.size
             && *others == stored.others
+            && *display == stored.display
+    }
+}
+/// The JSON form leaves out an absent display, so every other surface's header keeps its form;
+/// the binary form has no field names, so it always carries the field.
+impl Serialize for Begin {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        let skip = s.is_human_readable() && self.display.is_none();
+        let mut out = s.serialize_struct("Begin", if skip { 7 } else { 8 })?;
+        out.serialize_field("v", &self.v)?;
+        out.serialize_field("scene", &self.scene)?;
+        out.serialize_field("surface", &self.surface)?;
+        out.serialize_field("size", &self.size)?;
+        out.serialize_field("title", &self.title)?;
+        out.serialize_field("alt", &self.alt)?;
+        out.serialize_field("others", &self.others)?;
+        if skip {
+            out.skip_field("display")?;
+        } else {
+            out.serialize_field("display", &self.display)?;
+        }
+        out.end()
     }
 }
 /// A strict empty call terminator.
@@ -614,7 +643,7 @@ pub struct Callout {
     /// opacity.
     pub opacity: Option<Finite>,
     /// target.
-    pub target: Anchor,
+    pub target: Target,
     /// text.
     pub text: Text,
     /// side.
@@ -647,7 +676,7 @@ pub struct Highlight {
     /// opacity.
     pub opacity: Option<Finite>,
     /// target.
-    pub target: Anchor,
+    pub target: Target,
     /// style.
     #[serde(default)]
     pub style: HighlightStyle,

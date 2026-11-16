@@ -165,12 +165,18 @@ fn references<'a>(op: &'a Op) -> Vec<Reference<'a>> {
         }
         Op::Text(r) => anchor(&r.at, "at"),
         Op::Callout(r) => {
-            anchor(&r.target, "target");
+            if let Some(target) = r.target.anchor() {
+                anchor(target, "target");
+            }
             if let Some(at) = &r.at {
                 anchor(at, "at");
             }
         }
-        Op::Highlight(r) => anchor(&r.target, "target"),
+        Op::Highlight(r) => {
+            if let Some(target) = r.target.anchor() {
+                anchor(target, "target");
+            }
+        }
         Op::Solid(r) => {
             if let Some(attach) = &r.attach {
                 refs.push(Reference {
