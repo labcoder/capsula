@@ -6,7 +6,7 @@
     reason = "fixed slot discriminants index the fixture's eight surfaces"
 )]
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::time::Duration;
 
@@ -521,6 +521,13 @@ fn a_notice_that_goes_off_while_the_keys_are_down_ends_the_line_and_the_release_
         change(&ready, cx);
         assert_eq!(sampled(&ready, cx), None, "{said:?}");
         assert_eq!(line(&ready, cx), Some((said, None)));
+        // The keys are still down, and the line's frames end with it all the same.
+        frame(cx);
+        frame(cx);
+        let waiting: usize = (cx.windows().into_iter())
+            .map(|window| frames_of(window, cx))
+            .sum();
+        assert_eq!(waiting, 0, "{said:?}");
         // Back on before the keys come up: the refusal was the gesture's one ask.
         default_model(&ready, &luna(), cx);
         read_row(&ready, None, cx);
@@ -984,17 +991,27 @@ fn the_pointer_is_read_on_frames_the_dock_s_until_the_overlay_shows_and_then_its
     // That frame asked the dock again before the overlay showed; the next one moves over.
     assert_eq!((frames_of(drawing, cx), frames_of(dock, cx)), (0, 1));
     // From here a frame of the overlay reads the pointer that the same frame paints.
+    let repaints = Rc::new(Cell::new(0));
+    let _counting = ready.owner.update(cx, |owner, cx| {
+        let Visibility::Shown(overlay) = &owner.overlay else {
+            panic!("the overlay shows");
+        };
+        overlay.count_repaints(Rc::clone(&repaints), cx)
+    });
     cursor_fixture::set(Some(DOWN.0));
     advance_ms(200, cx);
     assert_eq!((frames_of(dock, cx), frames_of(drawing, cx)), (0, 1));
-    assert_eq!(sampled(&ready, cx), Some(3));
+    assert_eq!((sampled(&ready, cx), repaints.get()), (Some(3), 1));
     assert_eq!(
         (frames_of(dock, cx), frames_of(drawing, cx)),
         (0, 1),
         "one frame asks for the next"
     );
-    // A pointer that rests keeps its frames and changes nothing.
-    assert_eq!(sampled(&ready, cx), Some(3));
+    // A pointer that rests keeps its frames and changes nothing: no point and no repaint.
+    assert_eq!((sampled(&ready, cx), repaints.get()), (Some(3), 1));
+    advance_ms(200, cx);
+    assert_eq!((frames_of(dock, cx), frames_of(drawing, cx)), (0, 1));
+    assert_eq!((sampled(&ready, cx), repaints.get()), (Some(3), 1));
 }
 
 #[gpui::test]

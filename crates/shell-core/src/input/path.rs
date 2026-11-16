@@ -397,6 +397,22 @@ mod tests {
     }
 
     #[test]
+    fn a_full_path_is_thinned_until_a_quarter_of_it_is_free() {
+        // A straight run of 300 points and then nothing but turns. Every second point of the
+        // run goes at one pixel and half of the rest of it at two, which is too few each
+        // time; at four the turns go too.
+        let place = |index: i32| at(24 + 3 * index, 3 * (index % 2) * i32::from(index >= 300));
+        let mut path = recorder(1.0);
+        for index in 0..2_047 {
+            assert!(path.sample(place(index)), "{index}");
+        }
+        assert_eq!(path.path.tolerance.to_bits(), 4.0_f64.to_bits());
+        assert_eq!(path.points().len(), 912);
+        assert_eq!(path.points().first(), Some(&ORIGIN));
+        assert_eq!(path.points().last(), Some(&place(2_046)));
+    }
+
+    #[test]
     fn the_kept_line_trails_the_pointer_by_the_time_constant() {
         // The pointer jumps 100 pixels and rests. A lag of 12 ms has covered 1 - e^-k of the
         // way after k times 12 ms: 63.2, 86.5, 95.0, 98.2, 99.3 and 99.8 pixels.

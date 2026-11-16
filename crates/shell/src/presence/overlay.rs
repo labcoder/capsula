@@ -74,6 +74,16 @@ impl PaintNotice {
 
 #[cfg(test)]
 impl Overlay {
+    /// Counts the repaints asked of this overlay's root into `count` while the subscription
+    /// lives.
+    pub(super) fn count_repaints(
+        &self,
+        count: Rc<Cell<usize>>,
+        cx: &mut App,
+    ) -> gpui_kit::Subscription {
+        cx.observe(&self.drawing, move |_, _| count.set(count.get() + 1))
+    }
+
     pub(super) fn detached(
         frames: Rc<RefCell<Frames>>,
         owner: WeakEntity<Presence>,
