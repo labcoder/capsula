@@ -215,10 +215,22 @@ fn held(ready: &Ready, id: u32, cx: &mut TestAppContext) {
     listening(&ready.owner, cx);
 }
 
-/// The pointer is at `at` when the hold's timer next reads it.
+/// The pointer is at `at` when the hold's next frame reads it.
 fn tick(at: PhysicalPoint, cx: &mut TestAppContext) {
     cursor_fixture::set(Some(at.0));
-    advance_ms(16, cx);
+    frame(cx);
+}
+
+/// The next frame of every window, a fifth of a second after the one before: long enough for
+/// the eased line to have caught the pointer up, so what a frame keeps is where the pointer is.
+fn frame(cx: &mut TestAppContext) {
+    advance_ms(200, cx);
+    for window in cx.windows() {
+        window
+            .update(cx, |_, window, cx| window.simulate_next_frame(cx))
+            .expect("an open window");
+    }
+    cx.run_until_parked();
 }
 
 /// The points of the hold's line so far; none while no hold is sampling.
@@ -448,12 +460,12 @@ fn the_line_follows_the_pointer_and_one_release_takes_the_lease_its_stamp_and_th
     tick(ACROSS, cx);
     assert_eq!(sampled(&ready, cx), Some(2));
     assert_eq!(sent(&ready), [], "first points");
-    // A tick that finds the pointer where it was adds nothing, and one that can't read it is
-    // skipped.
-    advance_ms(16, cx);
+    // A frame that finds the pointer where it was adds nothing, and one that can't read it
+    // is skipped.
+    frame(cx);
     assert_eq!(sent(&ready), [], "same place");
     cursor_fixture::set(None);
-    advance_ms(16, cx);
+    frame(cx);
     assert_eq!(sampled(&ready, cx), Some(2));
     assert_eq!(sent(&ready), [], "unread");
     tick(DOWN, cx);
@@ -923,20 +935,89 @@ fn a_capture_answer_releases_its_own_lease_without_a_lapse_and_never_a_newer_one
     );
 }
 
+/// An overlay window of the owner's, opened hidden as the real one is.
+fn detached(ready: &Ready, cx: &mut TestAppContext) -> super::overlay::Overlay {
+    ready.owner.update(cx, |owner, cx| {
+        super::overlay::Overlay::detached(
+            owner.presenter.frames(),
+            cx.weak_entity(),
+            Rc::clone(&owner.paint_scratch),
+            Rc::clone(&owner.paint_notice),
+            Rc::clone(&owner.ink),
+            cx,
+        )
+    })
+}
+
+/// Runs the frame callbacks `window` has waiting, and says how many there were.
+fn frames_of(window: gpui_kit::AnyWindowHandle, cx: &mut TestAppContext) -> usize {
+    let ran = window
+        .update(cx, |_, window, cx| window.simulate_next_frame(cx))
+        .expect("an open window");
+    cx.run_until_parked();
+    ran
+}
+
+#[gpui::test]
+fn the_pointer_is_read_on_frames_the_dock_s_until_the_overlay_shows_and_then_its_own(
+    cx: &mut TestAppContext,
+) {
+    let ready = screen_ready(Some(on(&luna())), cx);
+    let hidden = detached(&ready, cx);
+    let drawing = hidden.window;
+    ready.owner.update(cx, |owner, _| {
+        owner.overlay = Visibility::Hidden(hidden);
+    });
+    let dock = ready.owner.read_with(cx, |owner, _| owner.dock_window);
+    assert_eq!(frames_of(dock, cx), 0, "no hold asks for frames");
+    held(&ready, 1, cx);
+    // Nothing reads the pointer between frames, however long that is.
+    cursor_fixture::set(Some(ACROSS.0));
+    advance(1, cx);
+    assert_eq!(sampled(&ready, cx), Some(0));
+    // Windows paints no hidden window, so the dock's frames carry the line until it shows.
+    assert_eq!((frames_of(drawing, cx), frames_of(dock, cx)), (0, 1));
+    assert_eq!(sampled(&ready, cx), Some(2));
+    ready.owner.read_with(cx, |owner, _| {
+        assert!(matches!(owner.overlay, Visibility::Shown(_)));
+    });
+    // That frame asked the dock again before the overlay showed; the next one moves over.
+    assert_eq!((frames_of(drawing, cx), frames_of(dock, cx)), (0, 1));
+    // From here a frame of the overlay reads the pointer that the same frame paints.
+    cursor_fixture::set(Some(DOWN.0));
+    advance_ms(200, cx);
+    assert_eq!((frames_of(dock, cx), frames_of(drawing, cx)), (0, 1));
+    assert_eq!(sampled(&ready, cx), Some(3));
+    assert_eq!(
+        (frames_of(dock, cx), frames_of(drawing, cx)),
+        (0, 1),
+        "one frame asks for the next"
+    );
+    // A pointer that rests keeps its frames and changes nothing.
+    assert_eq!(sampled(&ready, cx), Some(3));
+}
+
+#[gpui::test]
+fn an_ended_hold_s_frames_end_with_it_and_leave_the_next_hold_s_line_alone(
+    cx: &mut TestAppContext,
+) {
+    let ready = screen_ready(Some(on(&luna())), cx);
+    let dock = ready.owner.read_with(cx, |owner, _| owner.dock_window);
+    held(&ready, 1, cx);
+    finish(&ready, 1, cx);
+    assert_eq!(sampled(&ready, cx), None);
+    // The first hold's frame is still waiting when the second hold asks for its own.
+    held(&ready, 2, cx);
+    cursor_fixture::set(Some(ACROSS.0));
+    assert_eq!(frames_of(dock, cx), 2);
+    assert_eq!(sampled(&ready, cx), Some(2), "the second hold's line");
+    assert_eq!(frames_of(dock, cx), 1, "only the second hold asked again");
+    assert_eq!(sampled(&ready, cx), Some(2));
+}
+
 #[gpui::test]
 fn the_overlay_shows_for_a_line_alone_and_hides_when_the_line_ends(cx: &mut TestAppContext) {
-    let overlay = |ready: &Ready, cx: &mut TestAppContext| {
-        ready.owner.update(cx, |owner, cx| {
-            super::overlay::Overlay::detached(
-                owner.presenter.frames(),
-                cx.weak_entity(),
-                Rc::clone(&owner.paint_scratch),
-                Rc::clone(&owner.paint_notice),
-                Rc::clone(&owner.ink),
-                cx,
-            )
-        })
-    };
+    let overlay = detached;
 
     // A hold whose pointer stays put shows nothing; the line's first points show the overlay.
     let ready = screen_ready(Some(on(&luna())), cx);

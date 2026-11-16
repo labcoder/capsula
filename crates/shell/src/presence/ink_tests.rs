@@ -1,9 +1,6 @@
-use std::cell::Cell;
 use std::hint::black_box;
-use std::rc::Rc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
-use gpui_kit::{AppContext as _, TestAppContext};
 use kumochi_protocol::geometry::PhysicalRect;
 
 use super::*;
@@ -183,56 +180,69 @@ fn the_longest_line_at_an_8k_display_s_width_fits_the_scratch_as_two_handoffs() 
     }
 }
 
-#[gpui::test]
-fn the_sampler_keeps_the_recorder_s_points_as_pixel_centres(cx: &mut TestAppContext) {
-    let owner = cx.new(|_| ());
-    let mut sampler = owner.update(cx, |(), cx| {
-        Sampler::start(GestureId(3), recorder(REZ), cx, |(), _| true)
-    });
+#[test]
+fn the_line_is_the_recorder_s_points_and_then_the_pointer_as_pixel_centres() {
+    let start = Instant::now();
+    let after = |millis: u64| start + Duration::from_millis(millis);
+    let mut sampler = Sampler::new(GestureId(3), recorder(REZ));
     assert_eq!(sampler.gesture(), GestureId(3));
     assert!(
-        !sampler.sample(PhysicalPoint([10, 0])),
+        !sampler.sample(PhysicalPoint([10, 0]), start),
         "inside the dead zone"
     );
     assert!(sampler.line().is_empty());
+    // One time constant on, the eased line has gone 63.2% of the way: 19 of 30 and 25 of 40.
     assert!(
-        sampler.sample(PhysicalPoint([30, 40])),
+        sampler.sample(PhysicalPoint([30, 40]), after(12)),
         "50 pixels from where it was"
     );
-    let start = [Vec2::new(0.5, 0.5), Vec2::new(30.5, 40.5)];
-    assert_eq!(sampler.line(), start);
-    assert!(
-        !sampler.sample(PhysicalPoint([31, 40])),
-        "closer than the spacing"
-    );
-    assert_eq!(sampler.line(), start);
-    assert!(sampler.sample(PhysicalPoint([30, 43])));
-    assert_eq!(sampler.line(), [start[0], start[1], Vec2::new(30.5, 43.5)]);
+    let kept = [Vec2::new(0.5, 0.5), Vec2::new(19.5, 25.5)];
     assert_eq!(
-        sampler.finish(),
+        sampler.line(),
+        [kept[0], kept[1], Vec2::new(30.5, 40.5)],
+        "the line reaches the pointer"
+    );
+    // In no time nothing more is kept, but the line's end goes where the pointer does.
+    assert!(sampler.sample(PhysicalPoint([31, 40]), after(12)));
+    assert_eq!(sampler.line(), [kept[0], kept[1], Vec2::new(31.5, 40.5)]);
+    assert!(
+        !sampler.sample(PhysicalPoint([31, 40]), after(12)),
+        "a still pointer changes nothing"
+    );
+    // A second later the eased line is at the pointer, which isn't drawn twice.
+    assert!(sampler.sample(PhysicalPoint([31, 40]), after(1_012)));
+    assert_eq!(sampler.line(), [kept[0], kept[1], Vec2::new(31.5, 40.5)]);
+    assert!(!sampler.sample(PhysicalPoint([31, 40]), after(2_012)));
+    assert_eq!(
+        sampler.finish(PhysicalPoint([33, 44])),
         PointerPath(vec![
             PhysicalPoint([0, 0]),
-            PhysicalPoint([30, 40]),
-            PhysicalPoint([30, 43])
+            PhysicalPoint([19, 25]),
+            PhysicalPoint([31, 40]),
+            PhysicalPoint([33, 44])
         ])
     );
 }
 
-#[gpui::test]
-fn sampling_past_a_full_path_halves_the_line_with_it_and_allocates_nothing(
-    cx: &mut TestAppContext,
-) {
-    let owner = cx.new(|_| ());
-    let mut sampler = owner.update(cx, |(), cx| {
-        Sampler::start(GestureId(3), recorder([8192, 100]), cx, |(), _| true)
-    });
+#[test]
+fn sampling_past_a_full_path_thins_the_line_with_it_and_allocates_nothing() {
+    let mut sampler = Sampler::new(GestureId(3), recorder([8192, 100]));
+    // A second apart, so the eased line is at every sample and the samples are what is kept.
+    let start = Instant::now();
+    let at = |step: i32| {
+        let now = start + Duration::from_secs(1) * step.unsigned_abs();
+        (PhysicalPoint([100 + 2 * step, 0]), now)
+    };
     let ((), counts) = crate::allocation::activity(|| {
-        // The first sample starts the path with where the pointer was, so 2,047 fill it.
-        for step in 0..2_047 {
-            assert!(sampler.sample(PhysicalPoint([100 + 2 * step, 0])));
+        // The first sample starts the path with where the pointer was, so 2,046 samples
+        // leave it one point short of full.
+        for step in 0..2_046 {
+            let (point, now) = at(step);
+            assert!(sampler.sample(point, now));
         }
-        assert_eq!(sampler.line().len(), MAX_PATH_POINTS);
-        assert!(sampler.sample(PhysicalPoint([100 + 2 * 2_047, 0])));
+        assert_eq!(sampler.line().len(), MAX_PATH_POINTS - 1);
+        let (point, now) = at(2_046);
+        assert!(sampler.sample(point, now));
     });
     assert_eq!(
         counts,
@@ -240,85 +250,21 @@ fn sampling_past_a_full_path_halves_the_line_with_it_and_allocates_nothing(
         "the line was reserved when sampling started"
     );
     let line = sampler.line();
-    assert_eq!(line.len(), 1_025, "every second point went");
+    assert_eq!(
+        line.len(),
+        1_025,
+        "every second point of a straight line went"
+    );
     assert_eq!(
         [line[0], line[1], line[2], line[1_024]],
         [
             Vec2::new(0.5, 0.5),
             Vec2::new(102.5, 0.5),
             Vec2::new(106.5, 0.5),
-            Vec2::new(4_194.5, 0.5)
+            Vec2::new(4_192.5, 0.5)
         ],
         "the first and the newest stay"
     );
-}
-
-#[gpui::test]
-fn the_timer_ticks_every_16_ms_until_told_to_stop_dropped_or_ownerless(cx: &mut TestAppContext) {
-    let owner = cx.new(|_| ());
-    let ticks = Rc::new(Cell::new(0_u32));
-    let start = |limit: u32, cx: &mut TestAppContext| {
-        let ticks = Rc::clone(&ticks);
-        let sampler = owner.update(cx, |(), cx| {
-            Sampler::start(GestureId(1), recorder(REZ), cx, move |(), _| {
-                ticks.set(ticks.get() + 1);
-                ticks.get() < limit
-            })
-        });
-        // The timer counts from its task's first poll.
-        cx.run_until_parked();
-        sampler
-    };
-    let advance = |millis: u64, cx: &mut TestAppContext| {
-        cx.dispatcher
-            .scheduler()
-            .clock()
-            .advance(Duration::from_millis(millis));
-        cx.run_until_parked();
-    };
-
-    let stopped = start(3, cx);
-    assert_eq!(
-        Rc::strong_count(&ticks),
-        2,
-        "a running timer holds its tick"
-    );
-    advance(15, cx);
-    assert_eq!(ticks.get(), 0, "nothing before the first 16 ms");
-    advance(1, cx);
-    assert_eq!(ticks.get(), 1);
-    advance(16, cx);
-    assert_eq!(ticks.get(), 2);
-    advance(16, cx);
-    assert_eq!(ticks.get(), 3, "the tick that answers false still ran");
-    advance(160, cx);
-    assert_eq!(ticks.get(), 3, "and was the last");
-    assert_eq!(
-        Rc::strong_count(&ticks),
-        1,
-        "the timer ended and let its tick go"
-    );
-    drop(stopped);
-
-    let dropped = start(u32::MAX, cx);
-    advance(16, cx);
-    advance(16, cx);
-    assert_eq!(ticks.get(), 5);
-    drop(dropped);
-    advance(160, cx);
-    assert_eq!(ticks.get(), 5, "a dropped sampler ticks no more");
-    assert_eq!(Rc::strong_count(&ticks), 1);
-
-    let ownerless = start(u32::MAX, cx);
-    drop(owner);
-    advance(160, cx);
-    assert_eq!(ticks.get(), 5, "no tick without the entity it updates");
-    assert_eq!(
-        Rc::strong_count(&ticks),
-        1,
-        "the timer ended, though its sampler is still held"
-    );
-    drop(ownerless);
 }
 
 /// p50, p95 and maximum.
@@ -382,8 +328,9 @@ fn measure_the_hold_line() {
         let mut path = recorder([8192, 100]);
         let mut line = Vec::with_capacity(MAX_PATH_POINTS + 1);
         let start = Instant::now();
-        for step in 0..2_047 {
-            if path.sample(PhysicalPoint([100 + 2 * step, 0])) {
+        for step in 0..2_047_u32 {
+            let now = start + Duration::from_secs(1) * step;
+            if path.sample(PhysicalPoint([100 + 2 * step.cast_signed(), 0]), now) {
                 line.clear();
                 line.extend(path.points().iter().copied().map(centre));
             }
