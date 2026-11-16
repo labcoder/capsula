@@ -607,7 +607,9 @@ that is under 100% or not a number counts as 100%.
   time constant (`EASE`), applied by the clock and not per sample, so every frame rate records
   the same line. It is short because the line is evidence of where the user pointed: a circle
   of 40 pixels drawn at three turns a second is recorded one pixel smaller.
-- An eased point is kept when it is at least 2 logical pixels from the last kept point.
+- An eased point is kept when it is at least 2 logical pixels from the last kept point and at
+  least 16 ms after it (`APART`). So a display that refreshes faster records what a 60 Hz one
+  does: a line has as many points, and costs as much to paint, on every display.
 - `end` is the pointer's own last place on the display, which the shell draws the line on to.
   `finish` ends the path at the pointer read with the release, never at an eased point.
 - A path holds at most `MAX_PATH_POINTS` (2,048), and sampling leaves room for the release's

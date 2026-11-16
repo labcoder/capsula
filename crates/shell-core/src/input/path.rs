@@ -16,6 +16,10 @@ const SPACING: f64 = 2.0;
 /// is short because the line is evidence of where the user pointed: a circle of 40 pixels
 /// drawn at three turns a second comes out one pixel smaller.
 const EASE: Duration = Duration::from_millis(12);
+/// The least time between two kept points. A display that refreshes faster records what a
+/// 60 Hz one does, so a line has as many points, and costs as much to paint, on every
+/// display. The line's end still follows the pointer on every sample.
+const APART: Duration = Duration::from_millis(16);
 /// How close to the line a kept point must be to go when the path fills, in logical pixels,
 /// until a full path has too few points that close.
 const TOLERANCE: f64 = 1.0;
@@ -40,6 +44,8 @@ pub struct PathRecorder {
     /// Where the eased pointer is, and when a sample last moved it.
     eased: [f64; 2],
     seen: Option<Instant>,
+    /// When the newest eased point was kept.
+    kept: Option<Instant>,
     /// The pointer's last place on the display since the path started: where the line ends.
     end: Option<PhysicalPoint>,
     points: Vec<PhysicalPoint>,
@@ -59,6 +65,7 @@ impl PathRecorder {
             tolerance: TOLERANCE * scale,
             eased: origin.0.map(f64::from),
             seen: None,
+            kept: None,
             end: None,
             points: Vec::with_capacity(MAX_PATH_POINTS),
         }
@@ -97,10 +104,12 @@ impl PathRecorder {
             *eased += (f64::from(real) - *eased) * follow;
         }
         let eased = PhysicalPoint(self.eased.map(pixel));
-        if distance_squared(last, eased) < self.spacing * self.spacing {
+        let soon = (self.kept).is_some_and(|kept| now.saturating_duration_since(kept) < APART);
+        if soon || distance_squared(last, eased) < self.spacing * self.spacing {
             return started;
         }
         self.points.push(eased);
+        self.kept = Some(now);
         if self.points.len() > FULL {
             self.thin();
         }
@@ -427,21 +436,27 @@ mod tests {
         let kept: Vec<bool> = (2..=8)
             .map(|steps| path.sample(at(100, 0), after(steps)))
             .collect();
-        // 99 is one pixel from 98, which is under the spacing; 100 is two from it. After
-        // that a resting pointer keeps nothing.
-        assert_eq!(kept, [true, true, true, false, true, false, false]);
-        assert_eq!(
-            path.points(),
-            [
-                ORIGIN,
-                at(63, 0),
-                at(86, 0),
-                at(95, 0),
-                at(98, 0),
-                at(100, 0)
-            ]
-        );
+        // A point is kept at most every 16 ms, so every second of these samples is too soon.
+        // The seventh is one pixel from 99, which is under the spacing, and after that a
+        // resting pointer keeps nothing.
+        assert_eq!(kept, [false, true, false, true, false, false, false]);
+        assert_eq!(path.points(), [ORIGIN, at(63, 0), at(95, 0), at(99, 0)]);
         assert_eq!(path.end(), Some(at(100, 0)));
+    }
+
+    #[test]
+    fn a_point_is_kept_at_most_every_16_ms_however_often_the_pointer_is_read() {
+        // The pointer goes ten pixels a millisecond and is read every millisecond.
+        let start = Instant::now();
+        let mut path = PathRecorder::new(ORIGIN, 1.0, DISPLAY);
+        let kept: Vec<u32> = (0..=48_u32)
+            .filter(|ms| {
+                let now = start + Duration::from_millis(u64::from(*ms));
+                path.sample(at(24 + 10 * ms.cast_signed(), 0), now)
+            })
+            .collect();
+        assert_eq!(kept, [0, 16, 32, 48]);
+        assert_eq!(path.end(), Some(at(504, 0)), "the end follows every sample");
     }
 
     #[test]
