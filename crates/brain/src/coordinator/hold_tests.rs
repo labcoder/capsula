@@ -615,10 +615,18 @@ fn a_held_turn_stores_its_screen_before_any_build_can_start() {
     let image = Jpeg::new(vec![0xFF, 0xD8, 0xFF, 0xD9]).unwrap();
     let changed = HeldScreen::NotIncluded(ScreenClass::Changed);
     for (screen, held) in [
-        (Some(Screen::Image(image)), Some(HeldScreen::Attached)),
+        (
+            Some(Screen::Image(image.clone())),
+            Some(HeldScreen::Attached),
+        ),
         (
             Some(Screen::NotIncluded(ScreenClass::Changed)),
             Some(changed),
+        ),
+        (Some(Screen::Picture(image, None)), Some(HeldScreen::Screen)),
+        (
+            Some(Screen::PictureNotIncluded(ScreenClass::TooLarge)),
+            Some(HeldScreen::NotIncluded(ScreenClass::TooLarge)),
         ),
         (None, None),
     ] {
@@ -976,4 +984,35 @@ fn a_withdrawn_run_fails_with_screen_unavailable_before_any_request() {
             if error.key() == kumochi_protocol::message::ErrorKey::ScreenUnavailable
     )));
     assert_eq!(core.current_run(), None);
+}
+
+#[test]
+fn each_setting_withdraws_only_the_pictures_it_allowed() {
+    use crate::context::{Jpeg, Screen};
+    let picture = || Screen::Picture(Jpeg::new(vec![0xFF, 0xD8, 0xFF, 0xD9]).unwrap(), None);
+    let mut core = ready_for("captured");
+    core.submit_hold(prepared(&core, Some(T)), "words".into(), Some(picture()))
+        .unwrap();
+    core.handle(Input::TurnStored { run: R }).unwrap();
+    assert_eq!(
+        withdrawals(&core.handle(Input::ScreenHoldsOff).unwrap()),
+        []
+    );
+    assert!(matches!(core.current_screen(), Some(Screen::Picture(..))));
+    assert_eq!(
+        withdrawals(&core.handle(Input::ShowScreenOff).unwrap()),
+        [R]
+    );
+    assert!(matches!(core.current_screen(), Some(Screen::Withdrawn)));
+
+    let mut core = ready_for("captured");
+    core.submit_hold(prepared(&core, Some(T)), "words".into(), Some(image()))
+        .unwrap();
+    core.handle(Input::TurnStored { run: R }).unwrap();
+    assert_eq!(withdrawals(&core.handle(Input::ShowScreenOff).unwrap()), []);
+    assert!(matches!(core.current_screen(), Some(Screen::Image(_))));
+    assert_eq!(
+        withdrawals(&core.handle(Input::ScreenHoldsOff).unwrap()),
+        [R]
+    );
 }

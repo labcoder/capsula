@@ -1,17 +1,22 @@
 //! A hold's screen part: its task, the events that bring the task's answers back, and the
-//! release a waiting part owes the worker when it closes.
+//! release a capturing part owes the worker when it closes.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use kumochi_protocol::geometry::PhysicalPoint;
-use kumochi_protocol::message::LeaseGeneration;
+use kumochi_protocol::geometry::{PhysicalPoint, PointerPath};
+use kumochi_protocol::message::{
+    CaptureFailure, CaptureFor, ControlToBrain, ControlToShell, LeaseGeneration, ModelChoice,
+    ScreenHolds,
+};
 use tokio::sync::mpsc;
 use tokio::time::Instant;
 
+use super::{Kind, NoScreen};
 use crate::context::{Screen, ScreenClass};
 use crate::coordinator::HoldKey;
+use crate::runtime::{Full, Link};
 use crate::screen::{Closed, Generation, HoldClient, MAX_TTL, Refusal, ScreenContext};
 
 /// How long the shell's exclusion lease keeps Kumochi's windows out of a capture.
@@ -24,10 +29,21 @@ const EXCLUSION_LEASE: Duration = Duration::from_secs(3);
 /// earlier than the recognition.
 pub(super) const LATEST_START: Duration = EXCLUSION_LEASE.saturating_sub(MAX_TTL);
 
-/// `None` is a voice hold. A screen hold starts at `Waiting`; its run takes what it ends with,
-/// and every other closer leaves `Closed` or `Discarded`.
+/// `None` is a voice hold. A window hold starts at `Waiting`, a screen hold at `Armed` and then
+/// `Capturing` from its release; its run takes what it ends with, and every other closer leaves
+/// `Closed` or `Discarded`.
 pub(super) enum ScreenPart {
     None,
+    /// A screen hold before its release: nothing captured, no lease and no ticket.
+    Armed,
+    /// A screen hold's capture from its release, as `Waiting`; `until` is its ticket's deadline,
+    /// which also bounds how long the hold's words wait for its picture.
+    Capturing {
+        generation: Option<Generation>,
+        lease: LeaseGeneration,
+        stop: Arc<AtomicBool>,
+        until: Instant,
+    },
     /// `generation` is the worker that captured, once one answered; `lease` is the shell's
     /// exclusion lease over the capture. `stop` tells the hold's task that the part closed.
     Waiting {
@@ -46,8 +62,13 @@ impl std::fmt::Debug for ScreenPart {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::None => f.write_str("None"),
+            Self::Armed => f.write_str("Armed"),
             Self::Waiting { generation, .. } => f
                 .debug_struct("Waiting")
+                .field("generation", generation)
+                .finish_non_exhaustive(),
+            Self::Capturing { generation, .. } => f
+                .debug_struct("Capturing")
                 .field("generation", generation)
                 .finish_non_exhaustive(),
             Self::Ready(_) => f.write_str("Ready"),
@@ -91,9 +112,20 @@ impl std::fmt::Debug for ScreenEvent {
     }
 }
 
+/// What a hold's task captures.
+pub(super) enum Aim {
+    /// The window under the point, for a window hold.
+    Window(PhysicalPoint),
+    /// The display under `point`, drawn after `excluded`, with `ink` to paint, for a screen hold.
+    Display {
+        point: PhysicalPoint,
+        excluded: u64,
+        ink: PointerPath,
+    },
+}
+
 impl super::Holds {
-    /// Starts the pending hold `key`'s screen part on the window under `point`; a hold that
-    /// isn't pending, already has a part, or has no worker client gets none.
+    /// Starts the pending hold `key`'s screen part on the window under `point`.
     pub(super) fn start_screen(
         &mut self,
         key: HoldKey,
@@ -101,27 +133,75 @@ impl super::Holds {
         lease: LeaseGeneration,
         until: Instant,
     ) -> bool {
+        self.start(key, Aim::Window(point), lease, until)
+    }
+
+    /// Starts the pending hold `key`'s screen part on `aim`: a window from no part, a display
+    /// from `Armed`. A hold that isn't pending, has another part, or has no worker client gets
+    /// none.
+    pub(super) fn start(
+        &mut self,
+        key: HoldKey,
+        aim: Aim,
+        lease: LeaseGeneration,
+        until: Instant,
+    ) -> bool {
         let (Some(client), Some(hold)) = (&self.screen, &mut self.pending) else {
             return false;
         };
-        if hold.key != key || !matches!(hold.screen, ScreenPart::None) {
+        let from = match aim {
+            Aim::Window(_) => matches!(hold.screen, ScreenPart::None),
+            Aim::Display { .. } => matches!(hold.screen, ScreenPart::Armed),
+        };
+        if hold.key != key || !from {
             return false;
         }
         let stop = Arc::<AtomicBool>::default();
-        hold.screen = ScreenPart::Waiting {
-            generation: None,
-            lease,
-            stop: Arc::clone(&stop),
+        hold.screen = match aim {
+            Aim::Window(_) => ScreenPart::Waiting {
+                generation: None,
+                lease,
+                stop: Arc::clone(&stop),
+            },
+            Aim::Display { .. } => ScreenPart::Capturing {
+                generation: None,
+                lease,
+                stop: Arc::clone(&stop),
+                until,
+            },
         };
         drop(tokio::spawn(work(
             Arc::clone(client),
             key,
-            point,
+            aim,
             until,
             stop,
             self.screen_events.clone(),
         )));
         true
+    }
+
+    /// Arms the pending hold `key`'s screen part; false when it isn't pending or has a part.
+    pub(super) fn arm_screen(&mut self, key: HoldKey) -> bool {
+        let Some(hold) = self.pending.as_mut().filter(|hold| hold.key == key) else {
+            return false;
+        };
+        if !matches!(hold.screen, ScreenPart::None) {
+            return false;
+        }
+        hold.screen = ScreenPart::Armed;
+        true
+    }
+
+    /// Closes the pending hold `key`'s armed part as `part`, after a release that started
+    /// nothing; any other part is left as it is.
+    pub(super) fn close_armed(&mut self, key: HoldKey, part: ScreenPart) {
+        if let Some(hold) = self.pending.as_mut().filter(|hold| hold.key == key)
+            && matches!(hold.screen, ScreenPart::Armed)
+        {
+            tracing::info!(closed = ?part, "hold screen part closed");
+            hold.screen = part;
+        }
     }
 
     /// Closes the pending hold `key`'s unstarted part as `NotReady`: it was recognized too long
@@ -135,7 +215,7 @@ impl super::Holds {
         }
     }
 
-    /// Takes a task's answer into the waiting part it belongs to and drops any other: a dropped
+    /// Takes a task's answer into the capturing part it belongs to and drops any other: a dropped
     /// image zeroes, and a dropped `Held` retires its frame.
     pub(super) fn screen_event(&mut self, event: ScreenEvent) {
         let ScreenEvent {
@@ -144,16 +224,18 @@ impl super::Holds {
             outcome,
         } = event;
         let waiting = self.pending.as_mut().filter(|hold| hold.key == key);
-        let Some(hold) = waiting.filter(|hold| matches!(hold.screen, ScreenPart::Waiting { .. }))
-        else {
+        let Some(hold) = waiting.filter(|hold| capturing(&hold.screen)) else {
             if matches!(outcome, Outcome::Held) {
                 retire(self.screen.as_ref(), key, generation);
             }
             return;
         };
-        let ScreenPart::Waiting {
+        let (ScreenPart::Waiting {
             generation: holder, ..
-        } = &mut hold.screen
+        }
+        | ScreenPart::Capturing {
+            generation: holder, ..
+        }) = &mut hold.screen
         else {
             return;
         };
@@ -208,7 +290,8 @@ impl super::Holds {
         let ours = self.pending.as_ref().is_some_and(|hold| {
             matches!(
                 hold.screen,
-                ScreenPart::Waiting { generation: None, lease, .. } if lease == lapsed
+                ScreenPart::Waiting { generation: None, lease, .. }
+                | ScreenPart::Capturing { generation: None, lease, .. } if lease == lapsed
             )
         });
         if ours {
@@ -217,26 +300,40 @@ impl super::Holds {
         ours
     }
 
-    /// What the pending hold's screen part hands its run. A part still waiting closes first.
+    /// What the pending hold's screen part hands its run, under a screen hold's own lines for a
+    /// screen hold. A part still capturing closes first, and an armed one is `NotReady`.
     pub(super) fn submit_screen(&mut self) -> Option<Screen> {
         self.retire_waiting();
         let hold = self.pending.as_mut()?;
+        let picture = hold.kind == super::Kind::Screen;
         match std::mem::replace(&mut hold.screen, ScreenPart::None) {
+            ScreenPart::Ready(context) if picture => {
+                let ink = context.ink();
+                Some(Screen::Picture(context.into_jpeg(), ink))
+            }
             ScreenPart::Ready(context) => Some(Screen::Image(context.into_jpeg())),
+            ScreenPart::Closed(class) if picture => Some(Screen::PictureNotIncluded(class)),
             ScreenPart::Closed(class) => Some(Screen::NotIncluded(class)),
-            ScreenPart::None | ScreenPart::Waiting { .. } | ScreenPart::Discarded => None,
+            ScreenPart::Armed => Some(Screen::PictureNotIncluded(ScreenClass::NotReady)),
+            ScreenPart::None
+            | ScreenPart::Waiting { .. }
+            | ScreenPart::Capturing { .. }
+            | ScreenPart::Discarded => None,
         }
     }
 
-    /// A waiting part may hold a frame in the worker, so it closes as `NotReady`, its task is
-    /// stopped, and the worker is told to release it.
+    /// A waiting or capturing part may hold a frame in the worker, so it closes as `NotReady`, its
+    /// task is stopped, and the worker is told to release it.
     fn retire_waiting(&mut self) {
         let Some(hold) = &mut self.pending else {
             return;
         };
-        let ScreenPart::Waiting {
+        let (ScreenPart::Waiting {
             generation, stop, ..
-        } = &hold.screen
+        }
+        | ScreenPart::Capturing {
+            generation, stop, ..
+        }) = &hold.screen
         else {
             return;
         };
@@ -248,12 +345,142 @@ impl super::Holds {
     }
 }
 
+impl crate::runtime::Brain {
+    /// Arms the admitted screen hold `key` when the gate is open for the default model now, since
+    /// the shell's state may lag. It captures nothing until its release.
+    pub(super) fn hold_arm(&mut self, key: HoldKey) -> Result<(), NoScreen> {
+        let choice = self.config.view().default_model.clone();
+        if let ScreenHolds::Off(off) = self.display_gate(choice.as_ref()) {
+            return Err(NoScreen::Gate(off));
+        }
+        if !self.holds.arm_screen(key) {
+            return Err(NoScreen::NotStarted);
+        }
+        Ok(())
+    }
+
+    /// Takes the shell's `ScreenRelease` for the gesture of `key`. A release for a hold whose
+    /// capture may still run is dropped unanswered: the answer would end that capture's lease, so
+    /// the release's own lease is left to lapse. Any other that starts nothing is answered
+    /// `CaptureFailed`, which ends its lease, and closes an armed part.
+    pub(super) fn screen_release(
+        &mut self,
+        key: HoldKey,
+        message: &ControlToBrain,
+        link: &mut Link<'_, '_>,
+    ) -> Result<(), Full> {
+        let ControlToBrain::ScreenRelease {
+            lease,
+            t_qpc,
+            excluded_qpc,
+            pointer,
+            path,
+            ..
+        } = message
+        else {
+            return Ok(());
+        };
+        if self.holds.pending.as_ref().is_some_and(|hold| {
+            hold.key == key
+                && (hold.kind == Kind::Window
+                    || matches!(hold.screen, ScreenPart::Capturing { .. }))
+        }) {
+            tracing::info!("hold screen release dropped");
+            return Ok(());
+        }
+        // The only bound on a path's length: about 6,500 points fit in a control frame.
+        let started = if path.check().is_err() {
+            Err(NoScreen::PathTooLong)
+        } else {
+            self.hold_release(
+                key,
+                (*lease, *t_qpc, *excluded_qpc),
+                pointer.0,
+                path.clone(),
+            )
+        };
+        tracing::info!(?started, "hold screen released");
+        let Err(refused) = started else {
+            return Ok(());
+        };
+        self.holds.close_armed(key, refused.part());
+        link.control(&ControlToShell::CaptureFailed {
+            capture_for: CaptureFor::Gesture(key.gesture),
+            reason: CaptureFailure::Unavailable,
+        })
+    }
+
+    /// Starts the armed screen hold `key`'s capture of the display under `point`: the gate again,
+    /// then the release stamp's age as for a window hold's recognition, then the exclusion stamp,
+    /// which can't be earlier than the release or later than now. The ticket's deadline bounds
+    /// the seal too, which the worker runs to its end with nothing else answered meanwhile: an
+    /// overrun closes the part `NotReady`, and its retire waits behind the seal.
+    fn hold_release(
+        &mut self,
+        key: HoldKey,
+        (lease, t_qpc, excluded): (LeaseGeneration, u64, u64),
+        point: PhysicalPoint,
+        ink: PointerPath,
+    ) -> Result<(), NoScreen> {
+        if self.holds.pending.as_ref().is_none_or(|hold| {
+            hold.key != key
+                || hold.cancel.load(Ordering::SeqCst)
+                || !matches!(hold.screen, ScreenPart::Armed)
+        }) {
+            return Err(NoScreen::NotArmed);
+        }
+        let choice = self.config.view().default_model.clone();
+        if let ScreenHolds::Off(off) = self.display_gate(choice.as_ref()) {
+            return Err(NoScreen::Gate(off));
+        }
+        // Read before the age, so the ticket can only end sooner than the check allows.
+        let until = Instant::now() + MAX_TTL;
+        if (self.holds.stamp_age)(t_qpc).is_none_or(|age| age > LATEST_START) {
+            return Err(NoScreen::TooLate);
+        }
+        if excluded < t_qpc {
+            return Err(NoScreen::ExcludedEarly);
+        }
+        // A stamp later than now would hold the worker to its deadline for a frame it can't take.
+        if (self.holds.stamp_age)(excluded).is_none() {
+            return Err(NoScreen::ExcludedLate);
+        }
+        let aim = Aim::Display {
+            point,
+            excluded,
+            ink,
+        };
+        if !self.holds.start(key, aim, lease, until) {
+            return Err(NoScreen::NotStarted);
+        }
+        Ok(())
+    }
+
+    /// Whether a screen hold on `choice` may show the model the screen now, or why not. The
+    /// display capture runs on the platforms that capture a window.
+    pub(super) fn display_gate(&self, choice: Option<&ModelChoice>) -> ScreenHolds {
+        self.account.screen_holds(
+            choice,
+            self.holds.window_capture && self.holds.screen.is_some(),
+            self.config.view().show_screen,
+        )
+    }
+}
+
+/// Whether `part` has a capture under way, whose answers it takes.
+pub(super) fn capturing(part: &ScreenPart) -> bool {
+    matches!(
+        part,
+        ScreenPart::Waiting { .. } | ScreenPart::Capturing { .. }
+    )
+}
+
 /// The hold's screen work by `until`: capture, then seal. Each answer goes
 /// back as an event, and a frame the task can't hand on is retired with the worker that holds it.
 async fn work(
     client: Arc<HoldClient>,
     key: HoldKey,
-    point: PhysicalPoint,
+    aim: Aim,
     until: Instant,
     stop: Arc<AtomicBool>,
     events: mpsc::Sender<ScreenEvent>,
@@ -265,7 +492,19 @@ async fn work(
             outcome,
         })
     };
-    let held = match client.context(key.into(), point, until).await {
+    let captured = match aim {
+        Aim::Window(point) => client.context(key.into(), point, until).await,
+        Aim::Display {
+            point,
+            excluded,
+            ink,
+        } => {
+            client
+                .display(key.into(), point, excluded, ink, until)
+                .await
+        }
+    };
+    let held = match captured {
         Ok(held) => held,
         Err(closed) => {
             if report(None, ending(closed)).await.is_err() {

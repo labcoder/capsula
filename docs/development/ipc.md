@@ -95,9 +95,11 @@ picks the display, and the pointer's path over the hold.
 - Where the user pointed is theirs. `PointerPath`'s `Debug` prints only its count and
   `ReleasePointer`'s prints no numbers. Neither message is on the tap's content-free list, so a
   recording holds only their op and length.
-- The brain refuses both for now. A `ScreenHoldRecognized` with a new gesture is answered
-  `VoiceHoldStatus` with `Failed(Unavailable)` and uses that gesture up; a stale one is dropped.
-  Every `ScreenRelease` is answered `CaptureFailed` with `Unavailable`, which ends its lease.
+- The brain admits a `ScreenHoldRecognized` as it would a voice hold and arms its screen part;
+  the `ScreenRelease` starts the capture ([screen](screen.md)). A release that starts nothing is
+  answered `CaptureFailed` with `Unavailable`, which ends its lease. One for a window hold, or for
+  a screen hold whose capture is running, is dropped unanswered instead, because that answer
+  would end the running capture's lease.
 
 `HeldScreen::Screen` (tag 3) is appended for a turn that carried the screen's picture. The store
 writes it as `screen` ([store](store.md#tables)), so a turn stored as `attached` still reads as
@@ -107,7 +109,7 @@ the window.
 the same handshake rule as `screen_holds`. It's a separate choice: `DEFAULT_SHOW_SCREEN` is off,
 a settings file without the key reads as that default whatever its `screen_holds` says, and it
 reads as off when the file can't be read ([settings](settings.md)). No interface sends the op
-and nothing reads the field yet.
+yet; the brain reads the field to gate a screen hold's picture.
 
 ## Anthropic paste metadata
 

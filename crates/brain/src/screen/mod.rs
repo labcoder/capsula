@@ -46,6 +46,7 @@ pub(crate) use elements::{
 #[cfg(debug_assertions)]
 pub(crate) use encode::JPEG_CAP;
 pub(crate) use frame::RawFrame;
+pub(crate) use ink::InkBounds;
 #[cfg(all(windows, any(test, feature = "test-support")))]
 pub(crate) use mask::MaskSet;
 pub use mask::Unavailable;

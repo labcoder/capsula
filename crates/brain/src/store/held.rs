@@ -35,19 +35,20 @@ pub(super) fn column(screen: HeldScreen) -> &'static str {
 }
 
 impl super::Store {
-    /// Marks `run`'s screen `withdrawn` when it says `attached`: the user withdrew the image
-    /// before any request carried it.
+    /// Marks `run`'s screen `withdrawn` when it says `attached` or `screen`: the user withdrew
+    /// the image before any request carried it.
     ///
     /// # Errors
     /// When the run's id doesn't fit SQL, or the write fails.
     pub(crate) fn withdraw_screen(&mut self, run: RunId) -> Result<(), StoreError> {
         let run = super::sql_id(run.0, StoreError::NoRun)?;
         self.conn.execute(
-            "UPDATE runs SET screen = ?2 WHERE id = ?1 AND screen = ?3",
+            "UPDATE runs SET screen = ?2 WHERE id = ?1 AND screen IN (?3, ?4)",
             rusqlite::params![
                 run,
                 column(HeldScreen::Withdrawn),
-                column(HeldScreen::Attached)
+                column(HeldScreen::Attached),
+                column(HeldScreen::Screen)
             ],
         )?;
         Ok(())

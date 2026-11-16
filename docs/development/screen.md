@@ -376,7 +376,7 @@ drawn. It reads the monitor's bounds and effective DPI, makes a capture item for
 refuses `DisplayChanged` unless the item's size equals the bounds, and returns the bounds with
 the frame. The worker's `Display { key, ticket, point, excluded, ink }` request runs it, beside
 `Context`, under the same ticket rules: an expired, reused or stale ticket refuses as it does for
-`Context`. The hold client's `display` sends it, and nothing calls that yet.
+`Context`. The hold client's `display` sends it for a screen hold's release (below).
 
 Only the shell's exclusion lease keeps Kumochi's windows out of a display frame, and exclusion
 takes effect when Windows next redraws. So the capture takes `excluded`, the performance-counter
@@ -404,7 +404,8 @@ image, in 64-bit floats, and colours only pixels inside it, so a segment that le
 is painted up to the edge. The line is 3 pixels of pink with a 1-pixel white edge on each side
 [guess]. A path of fewer than two points paints nothing. `ScreenContext` carries the painted
 pixels' bounding rectangle in image pixels, left out of its `Debug`, as `InkBounds`, whose
-`Debug` prints no numbers.
+`Debug` prints no numbers. The brain reads it through `ScreenContext::ink`, which returns it only
+when it is non-empty and lies inside the image, so a bad worker answer reaches no model line.
 
 Two ignored native checks keep pixels in memory and are run by hand on Rez:
 `first_display_frame_against_its_session_start` prints each first frame's draw time minus its
@@ -553,7 +554,26 @@ no choice, and no line at all (`Discarded`) when the user switched screen holds 
 retired and any image zeroed either way. The gate opens only on the default model, so a thread pinned
 to a model that can see goes voice-only while the default can't: a known limit.
 
-The task runs `context` and `seal` by the deadline that check set. It never
+**A screen hold** (`ScreenHoldRecognized`) is admitted the same way, but its part follows
+`show_screen`, not `screen_holds`, in every gate. An open gate only arms the part (`Armed`):
+nothing is captured while the keys are down. A closed one leaves the hold voice-only. Its
+`ScreenRelease` starts the capture after these checks, in order: the path (`PointerPath::check`),
+the part still armed and its hold's choice unchanged, the gate again, the release stamp's age against `LATEST_START` (the
+deadline, `MAX_TTL` from now, is read first, so the ticket can only end sooner than the check
+allows), and the exclusion stamp, which may be neither earlier than the release stamp nor later
+than now. A refusal closes the armed part as the thread gate would (`ModelCantSee`, no line for
+show-screen switched off, else `NotReady`) and answers `CaptureFailed`, which ends the release's
+lease. A release for a window hold, or for a screen hold already `Capturing`, is dropped
+unanswered, because that answer would end the running capture's lease; one for a stale or unknown
+gesture is answered `CaptureFailed`. The capture asks the worker for the display under the
+release's pointer, with the exclusion stamp and the path. The worker paints the path inside the
+seal, answering nothing else meanwhile, so the ticket's deadline bounds the seal too: an overrun
+closes the part `NotReady`, its retire waits behind the seal, and the frame is released either
+way. Words ready while the part is `Capturing` wait for it until that deadline, then go on
+without it. A part still `Armed` when the words are ready, because its release never came,
+closes `NotReady`.
+
+The task runs `context` (or `display`) and `seal` by the deadline that check set. It never
 touches the part. Each answer comes back as a `ScreenEvent` keyed by the hold and the worker
 generation, on a channel the brain's hold loop selects beside audio and decoding:
 - `Held` fills in the part's generation, and sends `CaptureDone`, which releases the lease. A
@@ -571,7 +591,7 @@ windows; after `CaptureDone`, or for any other lease, a lapse is ignored.
 
 | Class | Worker answers |
 |---|---|
-| `NotReady` | `Expired`, `Unsupported` (which also turns screen holds off until the brain restarts, below), `Busy`, a fault, a loss or the deadline, a lapsed lease, a recognition too old for its lease, or still `Waiting` when the words are; `Reused` too, with a `debug_assert`, because only a brain bug sends it |
+| `NotReady` | `Expired`, `Unsupported` (which also turns screen holds off until the brain restarts, below), `Busy`, a fault, a loss or the deadline, a lapsed lease, a recognition or release too old for its lease, a refused release, or still `Waiting` or `Armed` when the words are; `Reused` too, with a `debug_assert`, because only a brain bug sends it |
 | `NothingThere` | `NoWindow` |
 | `CantShare` | `Minimized`, `Cloaked`, `Elevated`, `Protected`, `Excluded` |
 | `Unreadable` | `Ambiguous`, and `Unmasked`, which no worker sends now |
@@ -581,7 +601,10 @@ windows; after `CaptureDone`, or for any other lease, a lapse is ignored.
 
 When the brain takes a hold it logs `hold taken` at info, once, with `hold = "voice"` or
 `"screen"`; a screen hold's line adds whether its part started (`Ok(())`) or why not: `Gate` with
-the gate's `ScreenOff` reason, `TooLate`, `NotStarted` (no worker), or `Repeated`.
+the gate's `ScreenOff` reason, `TooLate`, `NotStarted` (no worker), or `Repeated`; for a screen
+hold, whether its part armed. A release logs `hold screen released` with `Ok(())` or its refusal
+(`PathTooLong`, `NotArmed`, `Gate`, `TooLate`, `ExcludedEarly`, `ExcludedLate`, `NotStarted`),
+or `hold screen release dropped`.
 
 Each part then logs once how it ended. A worker answer the part accepts logs `hold screen part
 sealed`, or `hold screen part closed` with its `Closed` value: the refusal, `Busy`, the numeric

@@ -189,3 +189,18 @@ fn a_screen_picture_is_stored_as_screen_and_an_attached_row_still_reads_as_the_w
         }]
     );
 }
+
+#[test]
+fn a_screen_row_is_withdrawn_like_an_attached_one() {
+    let scratch = Scratch::new("held-screen-withdrawn");
+    let mut store = Store::open(&scratch.db()).expect("store");
+    let (thread, run) = held_run(&mut store, Some(HeldScreen::Screen));
+    store.withdraw_screen(run).expect("withdrawn");
+    assert_eq!(screen(&store, run).as_deref(), Some("withdrawn"));
+    assert_eq!(
+        kinds(&store, thread),
+        [PageEventKind::HeldTurn {
+            screen: HeldScreen::Withdrawn
+        }]
+    );
+}

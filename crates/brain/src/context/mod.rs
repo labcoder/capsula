@@ -409,35 +409,62 @@ impl ModelRequest {
         Ok(())
     }
 
-    /// Adds a hold's screen after the newest user message: the image and the line saying it's a
-    /// snapshot, or the line saying why it isn't there.
+    /// Adds a hold's screen after the newest user message: the image and the line saying what it
+    /// is, then for a screen hold's path the line saying where it was painted, or the line saying
+    /// why it isn't there. Each flow has its own lines.
     pub(crate) fn add_screen(&mut self, screen: &Screen) -> Result<(), ImageRefused> {
         let id = match screen {
             Screen::Image(_) => "screen-snapshot",
-            Screen::NotIncluded(ScreenClass::NotReady) => "screen-not-ready",
+            Screen::Picture(..) => "screen-picture",
+            Screen::PictureNotIncluded(ScreenClass::TooLarge) => "screen-picture-too-large",
+            Screen::PictureNotIncluded(ScreenClass::Changed) => "screen-display-changed",
+            // A screen hold never closes with the last three, which describe one window.
+            Screen::NotIncluded(ScreenClass::NotReady)
+            | Screen::PictureNotIncluded(
+                ScreenClass::NotReady
+                | ScreenClass::NothingThere
+                | ScreenClass::CantShare
+                | ScreenClass::Unreadable,
+            ) => "screen-not-ready",
             Screen::NotIncluded(ScreenClass::NothingThere) => "screen-nothing-there",
             Screen::NotIncluded(ScreenClass::CantShare) => "screen-cant-share",
             Screen::NotIncluded(ScreenClass::Unreadable) => "screen-unreadable",
             Screen::NotIncluded(ScreenClass::TooLarge) => "screen-too-large",
             Screen::NotIncluded(ScreenClass::Changed) => "screen-changed",
-            Screen::NotIncluded(ScreenClass::ModelCantSee) => "screen-model-cant-see",
+            Screen::NotIncluded(ScreenClass::ModelCantSee)
+            | Screen::PictureNotIncluded(ScreenClass::ModelCantSee) => "screen-model-cant-see",
             Screen::Withdrawn => return Err(ImageRefused::Withdrawn),
         };
-        let text = screen_line(id).ok_or(ImageRefused::Unbundled)?;
-        let after = if let Screen::Image(image) = screen {
-            self.attach(image.clone())?;
-            2
-        } else {
-            1
+        let mut lines = vec![screen_line(id, None).ok_or(ImageRefused::Unbundled)?];
+        if let Screen::Picture(_, Some(ink)) = screen {
+            let mut args = fluent_bundle::FluentArgs::new();
+            for (name, value) in [
+                ("left", ink.left),
+                ("top", ink.top),
+                ("right", ink.right),
+                ("bottom", ink.bottom),
+            ] {
+                args.set(name, value);
+            }
+            lines.push(screen_line("screen-pointed", Some(&args)).ok_or(ImageRefused::Unbundled)?);
+        }
+        let after = match screen {
+            Screen::Image(image) | Screen::Picture(image, _) => {
+                self.attach(image.clone())?;
+                2
+            }
+            _ => 1,
         };
         let at = self.turn()? + after;
-        self.input.insert(
-            at,
-            InputItem::Message {
-                role: Role::Developer,
-                text,
-            },
-        );
+        for (offset, text) in lines.into_iter().enumerate() {
+            self.input.insert(
+                at + offset,
+                InputItem::Message {
+                    role: Role::Developer,
+                    text,
+                },
+            );
+        }
         Ok(())
     }
 
@@ -466,7 +493,11 @@ pub(crate) use kumochi_protocol::message::ScreenClass;
 #[derive(Clone)]
 pub(crate) enum Screen {
     Image(Jpeg),
+    /// A screen hold's picture, and where its pointer's path was painted on it.
+    Picture(Jpeg, Option<crate::screen::InkBounds>),
     NotIncluded(ScreenClass),
+    /// Why a screen hold's picture isn't there.
+    PictureNotIncluded(ScreenClass),
     /// The image the user withdrew by turning screen holds off; no request may carry the run on.
     Withdrawn,
 }
@@ -476,7 +507,10 @@ impl Screen {
     pub(crate) fn held(&self) -> kumochi_protocol::message::HeldScreen {
         match self {
             Self::Image(_) => kumochi_protocol::message::HeldScreen::Attached,
-            Self::NotIncluded(class) => kumochi_protocol::message::HeldScreen::NotIncluded(*class),
+            Self::Picture(..) => kumochi_protocol::message::HeldScreen::Screen,
+            Self::NotIncluded(class) | Self::PictureNotIncluded(class) => {
+                kumochi_protocol::message::HeldScreen::NotIncluded(*class)
+            }
             Self::Withdrawn => kumochi_protocol::message::HeldScreen::Withdrawn,
         }
     }
@@ -486,7 +520,11 @@ impl fmt::Debug for Screen {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Image(image) => f.debug_tuple("Image").field(image).finish(),
+            Self::Picture(image, ink) => f.debug_tuple("Picture").field(image).field(ink).finish(),
             Self::NotIncluded(class) => f.debug_tuple("NotIncluded").field(class).finish(),
+            Self::PictureNotIncluded(class) => {
+                f.debug_tuple("PictureNotIncluded").field(class).finish()
+            }
             Self::Withdrawn => f.write_str("Withdrawn"),
         }
     }
@@ -494,7 +532,7 @@ impl fmt::Debug for Screen {
 
 /// A fixed developer line from `locales/en/brain.ftl`; `None` only if the bundled messages are
 /// broken.
-fn screen_line(id: &str) -> Option<String> {
+fn screen_line(id: &str, args: Option<&fluent_bundle::FluentArgs<'_>>) -> Option<String> {
     let resource = fluent_bundle::FluentResource::try_new(
         include_str!("../../../../locales/en/brain.ftl").to_owned(),
     )
@@ -506,7 +544,7 @@ fn screen_line(id: &str) -> Option<String> {
     let pattern = bundle.get_message(id)?.value()?;
     let mut errors = Vec::new();
     let line = bundle
-        .format_pattern(pattern, None, &mut errors)
+        .format_pattern(pattern, args, &mut errors)
         .into_owned();
     errors.is_empty().then_some(line)
 }

@@ -86,21 +86,20 @@ impl ScreenContext {
         Self::sealed(jpeg, size, transform)
     }
 
-    pub(super) fn with_ink(mut self, ink: Option<InkBounds>) -> Self {
+    pub(crate) fn with_ink(mut self, ink: Option<InkBounds>) -> Self {
         self.ink = ink;
         self
     }
 
-    /// Where the pointer's path was painted on the image, in image pixels.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the screen hold's model line reads it in the next change"
-        )
-    )]
+    /// Where the pointer's path was painted on the image, in image pixels, when that lies inside
+    /// the image; the worker's answer is checked here, before a model line can carry it.
     pub(crate) fn ink(&self) -> Option<InkBounds> {
-        self.ink
+        self.ink.filter(|ink| {
+            ink.left < ink.right
+                && ink.top < ink.bottom
+                && ink.right <= self.size[0]
+                && ink.bottom <= self.size[1]
+        })
     }
 
     /// The image for the run that takes it: its buffer and dump registration move, with no copy.
