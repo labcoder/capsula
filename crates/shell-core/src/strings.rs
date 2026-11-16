@@ -802,7 +802,7 @@ mod tests {
         assert_eq!(
             strings.show_screen_help(),
             format!(
-                "When you let go of the shortcut, {app} sends one picture of the screen your pointer is on, as it is, with your words to the model you're using. It sends it nowhere else and keeps no copy once the answer is done."
+                "When you let go of the shortcut, {app} sends one screenshot of the screen your pointer is on, as it is, with your words to the model you're using. It sends it nowhere else and keeps no copy once the answer is done."
             )
         );
         // A held turn's history says one thing: why no picture was included, as a line, or
@@ -821,12 +821,12 @@ mod tests {
             // A stored turn doesn't say which flow it came from, so these two read true of both.
             (
                 HeldScreen::NotIncluded(ScreenClass::Changed),
-                Some("Screen not included: it changed while the picture was being taken"),
+                Some("Screen not included: it changed while the screenshot was being taken"),
                 None,
             ),
             (
                 HeldScreen::NotIncluded(ScreenClass::TooLarge),
-                Some("Screen not included: the picture was too large"),
+                Some("Screen not included: the screenshot was too large"),
                 None,
             ),
             (

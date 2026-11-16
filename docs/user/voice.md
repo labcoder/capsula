@@ -57,43 +57,41 @@ saved.
 ## Showing your screen
 
 While **Kumo can see what you see** is on in **Settings → Privacy** (the checkbox carries your
-assistant's name), a hold to talk also sends your model one picture: the screen your pointer is
-on, as it is at the moment you let go of the shortcut, shrunk to fit 1280 by 720 before it
-goes. Everything visible on that screen is in
-the picture, including passwords, notifications and windows running as administrator. Kumochi
-doesn't look for or hide anything in it, so turn the setting off, or move what you don't want
-sent out of view, before you hold. The setting starts on, unless you had turned off the earlier
-setting that shared one window.
+assistant's name), a hold to talk also sends your model one screenshot: the screen your pointer
+is on, as it is at the moment you let go of the shortcut, shrunk to fit 1280 by 720 before it
+goes. Everything visible on that screen is in the screenshot, including passwords,
+notifications and windows running as administrator. Kumochi doesn't look for or hide anything
+in it, so turn the setting off, or move what you don't want sent out of view, before you hold.
+The setting starts on, unless you had turned off the earlier setting that shared one window.
 
 Three things are left out: Kumochi's own dock and panels; windows of apps that ask Windows to
-keep them out of screen pictures, which show blank; and some videos, which show black.
+keep them out of screenshots, which show blank; and some videos, which show black.
 
 If you move the pointer while you hold, Kumochi draws its path on your screen as a pink line,
-and the model gets the same line on its picture. A pointer that stays put draws nothing. The
+and the model gets the same line on its screenshot. A pointer that stays put draws nothing. The
 line is drawn on your main display only: if you draw there and let go with the pointer on
-another display, the picture is of that other display, without the line.
+another display, the screenshot is of that other display, without the line.
 
 Nothing is captured while you hold. A hold cancelled before you let go captures nothing, and
 one cancelled after you let go, before the answer starts, sends nothing.
 
-The dock never says anything about the picture: not while a hold will send it, not while the
-setting is off, and not when something else stops it. A hold is voice only, without a word,
-while screen sharing isn't ready yet, in a task that uses its own model (always, for now) and
-with a model that can't take pictures.
+Between holds the dock says nothing about the screenshot: not that a hold will send one, not
+that the setting is off, and not that something else will stop it. A hold is voice only,
+without a word, while screen sharing isn't ready yet, in a task that uses its own model
+(always, for now) and with a model that doesn't support screenshots.
 
-A hold says nothing more about the picture while you hold. If the picture couldn't be
-included, the dock's panel says why: the screen wasn't ready, the display changed, the picture
-was too large, the model can't take pictures, or you turned the setting off during the hold.
-Turning the setting off while a picture is waiting to be sent withdraws it.
+A hold says nothing more about the screenshot while you hold. If the screenshot couldn't be
+included, the dock's panel says why: the screen wasn't ready, the display changed, the
+screenshot was too large, the model doesn't support screenshots, or you turned the setting off
+during the hold. Turning the setting off while a screenshot is waiting to be sent withdraws it.
 
-In chat history, a small screen icon under your message means Kumochi took a picture to send
-with it. Point at the icon to read that. When no picture was included, a line under the message
-says why instead. The picture goes to the model service you connected, for the model you
-chose, and nowhere else. Kumochi keeps no copy: it
-holds the picture in memory until the reply ends and never saves it to a file. Every request
-Kumochi makes for that reply carries the picture; later messages never do. The icon is recorded
-with your message, before anything is sent, so it also shows on a message whose reply failed
-before it started.
+In chat history, a small screen icon under your message means Kumochi took a screenshot to send
+with it. Point at the icon to read that. When no screenshot was included, a line under the
+message says why instead. The screenshot goes to the model service you connected, for the
+model you chose, and nowhere else. Kumochi keeps no copy: it holds the screenshot in memory
+until the reply ends and never saves it to a file. Every request Kumochi makes for that reply
+carries the screenshot; later messages never do. The icon is recorded with your message,
+before anything is sent, so it also shows on a message whose reply failed before it started.
 
 Not checked yet: displays at different scales, and more than one monitor.
 
