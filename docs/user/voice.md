@@ -81,12 +81,6 @@ setting is off, and not when something else stops it. A hold is voice only, with
 while screen sharing isn't ready yet, in a task that uses its own model (always, for now) and
 with a model that can't take pictures.
 
-When you switch to a model that can't take pictures, the open conversation says so once, in a
-quiet line: "GPT-5.5 doesn't support screenshots, so messages will go without one." Switching
-back to one that can adds "… supports screenshots, so new messages will send one along." The
-line isn't saved with the conversation: it's gone after you restart Kumochi, and it doesn't
-appear in a conversation you haven't sent anything in yet.
-
 A hold says nothing more about the picture while you hold. If the picture couldn't be
 included, the dock's panel says why: the screen wasn't ready, the display changed, the picture
 was too large, the model can't take pictures, or you turned the setting off during the hold.

@@ -414,31 +414,6 @@ fn stored_rows(state: &Threads, cx: &App) -> Rc<[Row]> {
         }
         current_group = group;
     }
-    if let Some(note) = state
-        .screen_note
-        .as_ref()
-        .filter(|note| Some(note.thread) == state.open)
-    {
-        let after = note.after.map_or(0, |after| after.0);
-        let at = rows
-            .iter()
-            .rposition(|row| row.id.1 <= after)
-            .map_or(0, |ix| ix + 1);
-        let mut line = row(
-            ("note", after),
-            None,
-            PageEventKind::TaskDeleted,
-            "",
-            None,
-            state,
-            cx,
-        );
-        line.text = cx
-            .global::<Strings>()
-            .with_model(note.text, note.model.as_str())
-            .into();
-        rows.insert(at, line);
-    }
     rows.into()
 }
 
@@ -580,21 +555,6 @@ fn message_text(row: &Row, field: &'static str, value: SharedString) -> gpui_kit
 fn message(row: &Row, controls: Option<gpui_kit::AnyElement>, cx: &App) -> gpui_kit::AnyElement {
     use gpui_kit::StatefulInteractiveElement as _;
     let id = row.id;
-    if id.0 == "note" {
-        // A quiet line that isn't a message: centred and muted, with the picture's icon.
-        return div()
-            .w_full()
-            .p_2()
-            .flex()
-            .justify_center()
-            .items_center()
-            .gap_1()
-            .text_xs()
-            .text_color(cx.theme().muted_foreground)
-            .child(gpui_kit::svg().path(PICTURED.path()).size_4().flex_none())
-            .child(row.text.clone())
-            .into_any_element();
-    }
     div()
         .id(id)
         .debug_selector(move || format!("message-{}-{}", id.0, id.1))
@@ -867,50 +827,6 @@ mod tests {
                 same.pictured = None;
                 assert!(same == plain[0], "{screen:?}");
             }
-        });
-    }
-
-    #[gpui::test]
-    fn a_screen_note_is_a_line_after_the_message_it_followed_in_its_own_conversation_only(
-        cx: &mut TestAppContext,
-    ) {
-        use crate::threads::ScreenNote;
-        use kumochi_protocol::message::ModelName;
-        cx.update(|cx| {
-            cx.set_global(Strings::english());
-            let mut state = Threads::chat_for_tests();
-            state.open = Some(ThreadId(3));
-            let (mut older, mut newer) = (event(5), event(7));
-            older.kind = PageEventKind::User;
-            newer.kind = PageEventKind::User;
-            state.events = vec![newer, older];
-            let note = |after, text| ScreenNote {
-                thread: ThreadId(3),
-                after,
-                text,
-                model: ModelName::new("GPT-6 Sol").unwrap(),
-            };
-            let ids = |rows: &[Row]| rows.iter().map(|row| row.id).collect::<Vec<_>>();
-            assert_eq!(ids(&stored_rows(&state, cx)), [("event", 5), ("event", 7)]);
-            state.screen_note = Some(note(Some(EventId(5)), Text::ScreenNoteCant));
-            let rows = stored_rows(&state, cx);
-            assert_eq!(ids(&rows), [("event", 5), ("note", 5), ("event", 7)]);
-            assert_eq!(
-                rows[1].text.as_ref(),
-                "GPT-6 Sol doesn't support screenshots, so messages will go without one."
-            );
-            assert_eq!(rows[1].label, None);
-            // Said in an empty conversation, it stays above what came later.
-            state.screen_note = Some(note(None, Text::ScreenNoteCan));
-            let rows = stored_rows(&state, cx);
-            assert_eq!(ids(&rows), [("note", 0), ("event", 5), ("event", 7)]);
-            assert_eq!(
-                rows[0].text.as_ref(),
-                "GPT-6 Sol supports screenshots, so new messages will send one along."
-            );
-            // Another conversation is open: the line stays with its own.
-            state.open = Some(ThreadId(4));
-            assert_eq!(ids(&stored_rows(&state, cx)), [("event", 5), ("event", 7)]);
         });
     }
 

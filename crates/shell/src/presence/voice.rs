@@ -466,30 +466,14 @@ impl Presence {
         }
     }
 
-    /// Follows the current hold's line in the status panel, and says once in the conversation
-    /// when the default model starts or stops taking a hold's picture. A link event batch that
-    /// changes neither costs two comparisons and no allocation.
+    /// Follows the current hold's line in the status panel. A link event batch that doesn't
+    /// change it costs a comparison and no allocation.
     pub(super) fn refresh_screen(&self, cx: &mut Context<'_, Self>) {
         let notice = self.screen_notice(cx);
-        let sees = match notice {
-            ScreenNotice::On(model) => Some((Text::ScreenNoteCan, model)),
-            ScreenNotice::ModelCantSee(model) => Some((Text::ScreenNoteCant, model)),
-            _ => None,
-        }
-        .filter(|(sees, _)| self.chat.read(cx).sees != Some(*sees))
-        .map(|(sees, model)| (sees, model.clone()));
         let shown = self.runs.hold_screen_text(notice);
         let old = &self.panel.read(cx).screen_line;
         let line = (old.as_ref().map(|(text, model)| (*text, model.as_ref())) != shown)
             .then(|| shown.map(|(text, model)| (text, model.cloned())));
-        if let Some((sees, model)) = sees {
-            let thread = self.runs.thread();
-            self.chat.update(cx, |chat, cx| {
-                if chat.screen_sees(thread, sees, &model) {
-                    cx.notify();
-                }
-            });
-        }
         if let Some(screen_line) = line {
             self.panel.update(cx, |panel, cx| {
                 panel.screen_line = screen_line;
