@@ -404,6 +404,7 @@ impl Presence {
 
     /// Follows the input target and pushes its bounded live answer into the retained chat.
     pub(super) fn refresh_conversation(&mut self, cx: &mut Context<'_, Self>) {
+        self.refresh_screen(cx);
         self.voice
             .target
             .set((self.runs.thread(), self.runs.revision()));
@@ -444,6 +445,11 @@ impl Presence {
             self.voice
                 .status
                 .map(|status| cx.global::<Strings>().get(status).into())
+        })
+        // A hold's screen line outlives its voice status: the reason arrives with the run.
+        .or_else(|| {
+            let (text, model) = self.panel.read(cx).screen_line.as_ref()?;
+            Some(super::voice::screen_text(cx.global::<Strings>(), *text, model.as_ref()).into())
         });
         let retry = recovery.as_ref().is_some_and(
             |notice| matches!(notice.source, Source::Run(run) if self.runs.retry_ready(run)),

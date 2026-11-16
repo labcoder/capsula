@@ -3,7 +3,7 @@
 use kumochi_shell_core::presence::exclusion::machine;
 
 use gpui_kit::AnyWindowHandle;
-use kumochi_protocol::message::CaptureFor;
+use kumochi_protocol::message::{CaptureFor, ControlToBrain, LeaseGeneration};
 
 use super::{Context, Presence, platform};
 use machine::Surfaces;
@@ -169,7 +169,7 @@ impl Presence {
         apply: impl FnOnce(&mut Exclusion<Receipt>, &mut Windows<'_>) -> Result<T, Error>,
     ) -> Result<T, Error> {
         let handles = self.exclusion_handles();
-        apply(
+        let result = apply(
             &mut self.exclusion,
             &mut Windows {
                 native: &self.native,
@@ -178,7 +178,33 @@ impl Presence {
                 fixture: self.exclusion_fixture.clone(),
                 cx,
             },
-        )
+        );
+        self.exclusion_lapsed();
+        result
+    }
+
+    /// Tells the brain, once, that the lease a sent screen hold named stopped protecting capture
+    /// before that capture ended: its timer, a surface that couldn't be covered, or any other
+    /// revoke, even one that leaves restoration debt. A lease the brain never saw tells nothing,
+    /// and neither does one released by its capture's own answer.
+    fn exclusion_lapsed(&mut self) {
+        let Some(lease) = self
+            .screen_lease
+            .take_if(|lease| !self.exclusion.live(*lease))
+        else {
+            return;
+        };
+        if let Some(session) = self
+            .session
+            .as_ref()
+            .filter(|session| session.alive().load(std::sync::atomic::Ordering::Acquire))
+            && !self
+                .link
+                .send_control(session, ControlToBrain::ExclusionLapsed { lease })
+        {
+            tracing::warn!("can't tell the brain a capture exclusion lapsed");
+            self.link.end(session);
+        }
     }
 
     pub(super) fn exclusion_handles(&self) -> [Option<AnyWindowHandle>; 8] {
@@ -194,19 +220,13 @@ impl Presence {
         ]
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "never published: no production acquisition caller until coordinator and native retirement are integrated"
-        )
-    )]
-    fn acquire_exclusion(
+    /// Covers every presence surface for `input`'s capture and returns the lease's generation.
+    pub(super) fn acquire_exclusion(
         &mut self,
         session: &crate::link::Session,
         input: CaptureFor,
         cx: &mut Context<'_, Self>,
-    ) -> Result<(), Error> {
+    ) -> Result<LeaseGeneration, Error> {
         if self
             .session
             .as_ref()
@@ -233,7 +253,7 @@ impl Presence {
                 }
             });
         }));
-        Ok(())
+        Ok(key.generation())
     }
 
     pub(super) fn protect_surface(
@@ -260,6 +280,8 @@ impl Presence {
         cx: &mut Context<'_, Self>,
     ) {
         if self.exclusion.matches(session, input) {
+            // The capture ended, so releasing its lease is no lapse.
+            self.screen_lease = None;
             self.revoke_exclusion(cx);
         }
     }

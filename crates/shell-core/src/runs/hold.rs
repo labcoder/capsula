@@ -1,10 +1,11 @@
 use kumochi_protocol::geometry::PhysicalPoint;
 use kumochi_protocol::message::{
-    ControlToBrain, GestureId, HeldScreen, LeaseGeneration, RunId, RunOrigin, ScreenClass,
-    ScreenHolds, ThreadId,
+    ControlToBrain, GestureId, HeldScreen, LeaseGeneration, ModelName, RunId, RunOrigin,
+    ScreenClass, ScreenHolds, ScreenOff, ThreadId,
 };
 
 use super::{Applied, Refused, Runs, Target};
+use crate::strings::Text;
 
 /// What makes a hold a screen hold: the pointer sampled at recognition, the exclusion lease
 /// protecting the capture, and when the hold was recognized. It has no `Debug`, so the pointer
@@ -24,13 +25,44 @@ pub enum ScreenLine {
     NotIncluded(ScreenClass),
 }
 
+/// The standing notice: what a hold on the current target does with the window under the
+/// pointer, and the only model it may name. A hold is a screen hold only while this is `On`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ScreenNotice<'a> {
+    /// Nothing shows: this system can't capture a window.
+    Hidden,
+    /// A hold shows this model the window.
+    On(&'a ModelName),
+    /// The default model, named here, can't be sent images.
+    ModelCantSee(&'a ModelName),
+    NotReady,
+    TurnedOff,
+    /// The target thread runs on its own model, which no `ScreenHolds` state speaks for.
+    OwnModel,
+}
+
+impl<'a> ScreenNotice<'a> {
+    /// The standing icon's tooltip and the model it names; none when no icon shows.
+    pub fn text(self) -> Option<(Text, Option<&'a ModelName>)> {
+        Some(match self {
+            Self::Hidden => return None,
+            Self::On(model) => (Text::ScreenHoldsOn, Some(model)),
+            Self::ModelCantSee(model) => (Text::ScreenHoldsModelCantSee, Some(model)),
+            Self::NotReady => (Text::ScreenHoldsNotReady, None),
+            Self::TurnedOff => (Text::ScreenHoldsTurnedOff, None),
+            Self::OwnModel => (Text::ScreenHoldsOwnModel, None),
+        })
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 pub(super) struct Hold {
     pub(super) gesture: GestureId,
     pub(super) revision: u64,
     pub(super) thread: Option<ThreadId>,
     pub(super) run: Option<RunId>,
-    /// Set only for a screen hold. Never the pointer: `Runs` prints this.
+    /// Set for a screen hold, and for one refused its lease. Never the pointer: `Runs` prints
+    /// this.
     pub(super) screen: Option<ScreenLine>,
 }
 
@@ -43,6 +75,48 @@ impl Runs {
     /// This connection's last `ScreenHolds`: none before it arrives, and none once it ends.
     pub fn screen_holds(&self) -> Option<&ScreenHolds> {
         self.screen_holds.as_ref()
+    }
+
+    /// The notice for a hold on the current target. `own_model` says the target thread runs on
+    /// a model other than the default; `default` is the newest default model's name in the
+    /// shell's own catalog. A stored `On` naming any other model is out of date, because the
+    /// default just changed, and reads as not ready.
+    #[expect(
+        clippy::fn_params_excessive_bools,
+        reason = "the settings model's answer about the target thread, carried unchanged"
+    )]
+    pub fn screen_notice<'a>(
+        &'a self,
+        own_model: bool,
+        default: Option<&'a ModelName>,
+    ) -> ScreenNotice<'a> {
+        match &self.screen_holds {
+            Some(ScreenHolds::Off(ScreenOff::Unsupported)) => ScreenNotice::Hidden,
+            Some(ScreenHolds::Off(ScreenOff::TurnedOff)) => ScreenNotice::TurnedOff,
+            _ if own_model => ScreenNotice::OwnModel,
+            Some(ScreenHolds::On { model }) if Some(model) == default => ScreenNotice::On(model),
+            Some(ScreenHolds::Off(ScreenOff::ModelCantSee)) => {
+                default.map_or(ScreenNotice::NotReady, ScreenNotice::ModelCantSee)
+            }
+            Some(ScreenHolds::On { .. } | ScreenHolds::Off(ScreenOff::NotReady)) | None => {
+                ScreenNotice::NotReady
+            }
+        }
+    }
+
+    /// The current hold's line and the model it names. The prediction names `notice`'s model,
+    /// so it shows nothing once the notice has stopped being `On`.
+    pub fn hold_screen_text<'a>(
+        &self,
+        notice: ScreenNotice<'a>,
+    ) -> Option<(Text, Option<&'a ModelName>)> {
+        match (self.hold_screen_line()?, notice) {
+            (ScreenLine::WillSee, ScreenNotice::On(model)) => {
+                Some((Text::ScreenHoldWillSee, Some(model)))
+            }
+            (ScreenLine::WillSee, _) => None,
+            (ScreenLine::NotIncluded(class), _) => Some((Text::screen_not_included(class), None)),
+        }
     }
 
     /// The current hold's line about the screen; it goes when the hold does.
@@ -66,6 +140,15 @@ impl Runs {
             HeldScreen::Attached | HeldScreen::Withdrawn | HeldScreen::Screen => None,
         };
         true
+    }
+
+    /// The current hold was to be a screen hold and was refused its capture lease, so it went
+    /// on voice only: its line says the screen wasn't ready, as a lease that lapses before its
+    /// frame does.
+    pub fn hold_screen_refused(&mut self) {
+        if let Some(hold) = &mut self.hold {
+            hold.screen = Some(ScreenLine::NotIncluded(ScreenClass::NotReady));
+        }
     }
 
     /// Starts a hold: a screen hold when `screen` is given, else a voice-only one.

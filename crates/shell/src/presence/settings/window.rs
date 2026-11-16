@@ -86,6 +86,28 @@ impl Presence {
         }
         sent
     }
+
+    #[expect(
+        clippy::fn_params_excessive_bools,
+        reason = "the checkbox and wire setter carry this boolean unchanged"
+    )]
+    pub(in crate::presence) fn save_screen_holds(
+        &mut self,
+        on: bool,
+        cx: &mut Context<'_, Self>,
+    ) -> bool {
+        let (link, session) = (&self.link, &self.session);
+        self.settings.update(cx, |state, cx| {
+            let sent = state.send_screen_holds(on, |op| {
+                session
+                    .as_ref()
+                    .is_some_and(|session| link.send_control(session, ControlToBrain::Settings(op)))
+            });
+            cx.notify();
+            sent
+        })
+    }
+
     pub(in crate::presence) fn open_accounts(
         &mut self,
         cx: &mut Context<'_, Self>,
