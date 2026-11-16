@@ -4,6 +4,7 @@ pub(super) mod accounts;
 pub(super) mod claude;
 mod general;
 mod github;
+mod privacy;
 mod voice;
 mod window;
 
@@ -292,6 +293,38 @@ pub(in crate::presence) fn field_status(
     (saving, error)
 }
 
+impl SettingsView {
+    /// The four tabs. Choosing one drops the notices and dialogs of the tab it leaves.
+    fn tabs(&self, cx: &Context<'_, Self>) -> TabBar {
+        let strings = cx.global::<Strings>();
+        TabBar::new("settings-tabs")
+            .selected_index(self.tab)
+            .child(Tab::new().label(strings.get(Text::General)))
+            .child(Tab::new().label(strings.get(Text::Accounts)))
+            .child({
+                let tab = Tab::new().label(strings.get(Text::Voice));
+                #[cfg(test)]
+                let tab = tab.debug_selector(|| "settings-voice-tab".into());
+                tab
+            })
+            .child({
+                let tab = Tab::new().label(strings.get(Text::Privacy));
+                #[cfg(test)]
+                let tab = tab.debug_selector(|| "settings-privacy-tab".into());
+                tab
+            })
+            .on_click(cx.listener(|view, tab, window, cx| {
+                view.dock_notice = None;
+                view.taskbar_notice = None;
+                view.hold_notice = None;
+                view.confirmation = None;
+                window.close_all_dialogs(cx);
+                view.tab = *tab;
+                cx.notify();
+            }))
+    }
+}
+
 impl Render for SettingsView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
         let strings = cx.global::<Strings>();
@@ -315,10 +348,10 @@ impl Render for SettingsView {
             .track_focus(&self.focus)
             .on_action(move |_: &Escape, _, _| send(&events, PresenceEvent::Escape))
             .on_action(cx.listener(|view, _: &NextTab, window, cx| {
-                view.select_tab((view.tab + 1) % 3, window, cx);
+                view.select_tab((view.tab + 1) % 4, window, cx);
             }))
             .on_action(cx.listener(|view, _: &PreviousTab, window, cx| {
-                view.select_tab((view.tab + 2) % 3, window, cx);
+                view.select_tab((view.tab + 3) % 4, window, cx);
             }))
             .child(
                 div()
@@ -344,29 +377,7 @@ impl Render for SettingsView {
                             }),
                     ),
             )
-            .child(
-                div().px_4().child(
-                    TabBar::new("settings-tabs")
-                        .selected_index(self.tab)
-                        .child(Tab::new().label(strings.get(Text::General)))
-                        .child(Tab::new().label(strings.get(Text::Accounts)))
-                        .child({
-                            let tab = Tab::new().label(strings.get(Text::Voice));
-                            #[cfg(test)]
-                            let tab = tab.debug_selector(|| "settings-voice-tab".into());
-                            tab
-                        })
-                        .on_click(cx.listener(|view, tab, window, cx| {
-                            view.dock_notice = None;
-                            view.taskbar_notice = None;
-                            view.hold_notice = None;
-                            view.confirmation = None;
-                            window.close_all_dialogs(cx);
-                            view.tab = *tab;
-                            cx.notify();
-                        })),
-                ),
-            )
+            .child(div().px_4().child(self.tabs(cx)))
             .child(
                 div()
                     .id("settings-content")
@@ -383,7 +394,8 @@ impl Render for SettingsView {
                             .children((self.tab == 1).then(|| self.accounts(cx)))
                             .children((self.tab == 1).then(|| self.claude(cx)))
                             .children((self.tab == 1).then(|| self.github(cx)))
-                            .children((self.tab == 2).then(|| self.voice(cx))),
+                            .children((self.tab == 2).then(|| self.voice(cx)))
+                            .children((self.tab == 3).then(|| self.privacy(cx))),
                     ),
             )
             .children(self.stop.then(|| {

@@ -32,18 +32,21 @@ pub struct HoldRelease {
 /// What a screen hold's own line says.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ScreenLine {
-    /// The prediction, from recognition until the brain says what the turn carried.
+    /// The window flow's prediction, from recognition until the brain says what the turn
+    /// carried. A hold that shows the screen at release predicts nothing.
     WillSee,
     NotIncluded(ScreenClass),
+    /// The user turned the setting off while the keys were down.
+    TurnedOff,
 }
 
-/// The standing notice: what a hold on the current target does with the window under the
-/// pointer, and the only model it may name. A hold is a screen hold only while this is `On`.
+/// The standing notice: what a hold on the current target does with the screen, and the only
+/// model it may name. A hold shows the screen only while this is `On`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ScreenNotice<'a> {
-    /// Nothing shows: this system can't capture a window.
+    /// This system can't capture.
     Hidden,
-    /// A hold shows this model the window.
+    /// A hold sends this model the screen's picture.
     On(&'a ModelName),
     /// The default model, named here, can't be sent images.
     ModelCantSee(&'a ModelName),
@@ -53,17 +56,16 @@ pub enum ScreenNotice<'a> {
     OwnModel,
 }
 
-impl<'a> ScreenNotice<'a> {
-    /// The standing icon's tooltip and the model it names; none when no icon shows.
-    pub fn text(self) -> Option<(Text, Option<&'a ModelName>)> {
-        Some(match self {
-            Self::Hidden => return None,
-            Self::On(model) => (Text::ScreenHoldsOn, Some(model)),
-            Self::ModelCantSee(model) => (Text::ScreenHoldsModelCantSee, Some(model)),
-            Self::NotReady => (Text::ScreenHoldsNotReady, None),
-            Self::TurnedOff => (Text::ScreenHoldsTurnedOff, None),
-            Self::OwnModel => (Text::ScreenHoldsOwnModel, None),
-        })
+impl ScreenNotice<'_> {
+    /// What a hold's line says when this notice refuses its release; none while it is `On`,
+    /// and none where this system can't capture.
+    const fn refusal(self) -> Option<ScreenLine> {
+        match self {
+            Self::On(_) | Self::Hidden => None,
+            Self::TurnedOff => Some(ScreenLine::TurnedOff),
+            Self::ModelCantSee(_) => Some(ScreenLine::NotIncluded(ScreenClass::ModelCantSee)),
+            Self::NotReady | Self::OwnModel => Some(ScreenLine::NotIncluded(ScreenClass::NotReady)),
+        }
     }
 }
 
@@ -73,12 +75,16 @@ pub(super) struct Hold {
     pub(super) revision: u64,
     pub(super) thread: Option<ThreadId>,
     pub(super) run: Option<RunId>,
-    /// Set for a screen hold, and for one refused its lease. Never the pointer: `Runs` prints
-    /// this.
+    /// Set for a window hold, and for a hold whose screen was refused. Never the pointer:
+    /// `Runs` prints this.
     pub(super) screen: Option<ScreenLine>,
+    /// A hold that began as one that shows the screen at release. It keeps that kind for life.
+    pub(super) at_release: bool,
     /// A hold that shows the screen once it's released, until its `ScreenRelease` is built or
     /// refused.
     pub(super) release_due: bool,
+    /// The brain's word about this hold's screen has landed; a second one doesn't.
+    pub(super) told: bool,
 }
 
 impl Runs {
@@ -120,18 +126,28 @@ impl Runs {
     }
 
     /// The current hold's line and the model it names. The prediction names `notice`'s model,
-    /// so it shows nothing once the notice has stopped being `On`.
+    /// so it shows nothing once the notice has stopped being `On`. A hold that shows the screen
+    /// at release says "too large" and "changed" in that flow's own words.
     pub fn hold_screen_text<'a>(
         &self,
         notice: ScreenNotice<'a>,
     ) -> Option<(Text, Option<&'a ModelName>)> {
-        match (self.hold_screen_line()?, notice) {
+        let hold = self.hold?;
+        let text = match (hold.screen?, notice) {
             (ScreenLine::WillSee, ScreenNotice::On(model)) => {
-                Some((Text::ScreenHoldWillSee, Some(model)))
+                return Some((Text::ScreenHoldWillSee, Some(model)));
             }
-            (ScreenLine::WillSee, _) => None,
-            (ScreenLine::NotIncluded(class), _) => Some((Text::screen_not_included(class), None)),
-        }
+            (ScreenLine::WillSee, _) => return None,
+            (ScreenLine::TurnedOff, _) => Text::ScreenNotIncludedTurnedOff,
+            (ScreenLine::NotIncluded(ScreenClass::TooLarge), _) if hold.at_release => {
+                Text::ScreenNotIncludedPictureTooLarge
+            }
+            (ScreenLine::NotIncluded(ScreenClass::Changed), _) if hold.at_release => {
+                Text::ShowScreenChanged
+            }
+            (ScreenLine::NotIncluded(class), _) => Text::screen_not_included(class),
+        };
+        Some((text, None))
     }
 
     /// The current hold's line about the screen; it goes when the hold does.
@@ -139,16 +155,21 @@ impl Runs {
         self.hold.and_then(|hold| hold.screen)
     }
 
-    /// The brain said what `gesture`'s screen hold carried into its turn. False, and nothing
-    /// changes, unless that is the current hold and it still shows the prediction.
+    /// The brain said what `gesture`'s hold carried into its turn. False, and nothing changes,
+    /// unless that is the current hold and its line is still open: the window flow's prediction,
+    /// or no line yet on a hold that shows the screen at release.
     pub fn hold_screen(&mut self, gesture: GestureId, outcome: HeldScreen) -> bool {
-        let Some(hold) = self
-            .hold
-            .as_mut()
-            .filter(|hold| hold.gesture == gesture && hold.screen == Some(ScreenLine::WillSee))
-        else {
+        let Some(hold) = self.hold.as_mut().filter(|hold| {
+            hold.gesture == gesture
+                && match hold.screen {
+                    Some(ScreenLine::WillSee) => true,
+                    None => hold.at_release && !hold.told,
+                    Some(ScreenLine::NotIncluded(_) | ScreenLine::TurnedOff) => false,
+                }
+        }) else {
             return false;
         };
+        hold.told = true;
         hold.screen = match outcome {
             HeldScreen::NotIncluded(class) => Some(ScreenLine::NotIncluded(class)),
             // History carries these.
@@ -157,12 +178,20 @@ impl Runs {
         true
     }
 
-    /// The current hold was to be a screen hold and was refused its capture lease, so it went
-    /// on voice only: its line says the screen wasn't ready, as a lease that lapses before its
-    /// frame does.
+    /// The current hold was to show the screen and couldn't take what its capture needs (the
+    /// lease, or the pointer at release), so it went on voice only: its line says the screen
+    /// wasn't ready, as a lease that lapses before its frame does.
     pub fn hold_screen_refused(&mut self) {
         if let Some(hold) = &mut self.hold {
             hold.screen = Some(ScreenLine::NotIncluded(ScreenClass::NotReady));
+        }
+    }
+
+    /// The current hold was to show the screen and the user has switched that off, though the
+    /// brain hasn't answered yet: it goes on voice only, and its line says so.
+    pub fn hold_screen_turned_off(&mut self) {
+        if let Some(hold) = &mut self.hold {
+            hold.screen = Some(ScreenLine::TurnedOff);
         }
     }
 
@@ -191,7 +220,9 @@ impl Runs {
             thread,
             run: None,
             screen: None,
+            at_release: false,
             release_due: false,
+            told: false,
         }))
     }
 
@@ -242,6 +273,7 @@ impl Runs {
     ) -> Result<ControlToBrain, Refused> {
         let on = matches!(self.screen_notice(own_model, default), ScreenNotice::On(_));
         let hold = self.admit_hold(gesture)?;
+        hold.at_release = on;
         hold.release_due = on;
         let (thread, selection) = (hold.thread, hold.revision);
         Ok(if on {
@@ -264,8 +296,9 @@ impl Runs {
     /// that shows the screen at release, no `ScreenRelease` was built or refused for it, and the
     /// standing notice, read now as [`Self::screen_notice`] reads it, is still `On`. A no for
     /// the current hold is final: nothing builds its release later, whatever the notice says
-    /// then. A cancelled hold is no longer current, and a release before the hold is listening
-    /// cancels it. The shell asks before it takes the lease.
+    /// then, and the hold's line says why the notice refused it. A cancelled hold is no longer
+    /// current, and a release before the hold is listening cancels it. The shell asks before it
+    /// takes the lease.
     #[expect(
         clippy::fn_params_excessive_bools,
         reason = "the settings model's answer about the target thread, carried unchanged"
@@ -276,10 +309,14 @@ impl Runs {
         own_model: bool,
         default: Option<&ModelName>,
     ) -> bool {
-        let on = matches!(self.screen_notice(own_model, default), ScreenNotice::On(_));
+        let notice = self.screen_notice(own_model, default);
+        let (on, refusal) = (matches!(notice, ScreenNotice::On(_)), notice.refusal());
         let Some(hold) = self.hold.as_mut().filter(|hold| hold.gesture == gesture) else {
             return false;
         };
+        if hold.release_due && !on {
+            hold.screen = refusal;
+        }
         hold.release_due &= on;
         hold.release_due
     }

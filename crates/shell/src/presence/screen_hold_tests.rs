@@ -1,4 +1,5 @@
-//! A hold becomes a screen hold only under the standing notice and a live capture lease.
+//! A hold shows the screen only under the standing notice: nothing is taken at recognition, the
+//! pointer's line follows the keys, and the release takes the lease, its stamp and one send.
 
 #![expect(
     clippy::as_conversions,
@@ -10,7 +11,7 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use gpui_kit::{Entity, TestAppContext};
-use kumochi_protocol::geometry::PhysicalPoint;
+use kumochi_protocol::geometry::{PhysicalPoint, PointerPath, ReleasePointer};
 use kumochi_protocol::message::{
     CaptureFailure, CaptureFor, ConnectionKind, ControlToBrain, DataToBrain, DataToShell, Effort,
     GestureId, HeldScreen, HoldFailure, HoldStatus, LeaseGeneration, ModelChoice, ModelInfo,
@@ -20,14 +21,23 @@ use kumochi_protocol::message::{
 use kumochi_shell_core::presence::exclusion::machine::fixture::{EXCLUDED, Fake, PRIOR};
 
 use super::exclusion::{Error, Slot};
+use super::overlay_visibility::Visibility;
 use super::voice_wiring_tests::{ready, status};
 use super::{Presence, voice::Stamp};
 use crate::input::hold::Intent;
 use crate::link::{Batch, LinkEvent, LinkState};
+use crate::platform::cursor_fixture;
+use crate::runs::ScreenNotice;
 use crate::strings::Text;
 
-const POINTER: PhysicalPoint = PhysicalPoint([640, -32]);
+/// Where the pointer is when a hold is recognized, and two places it goes: each far past the
+/// dead zone and the spacing at any scale, and on the test display.
+const ORIGIN: PhysicalPoint = PhysicalPoint([640, 320]);
+const ACROSS: PhysicalPoint = PhysicalPoint([900, 320]);
+const DOWN: PhysicalPoint = PhysicalPoint([900, 600]);
 const QPC: u64 = 77;
+const RELEASED: u64 = 4_077;
+const STAMP: u64 = 4_242;
 /// The four surfaces the fixture owns, covered.
 const COVERED: [u32; 8] = [EXCLUDED, EXCLUDED, EXCLUDED, EXCLUDED, 8, 16, 32, 64];
 
@@ -38,7 +48,7 @@ fn model(slug: &str, name: &str) -> ModelInfo {
         display_name: ModelName::new(name).unwrap(),
     }
 }
-fn luna() -> ModelInfo {
+pub(super) fn luna() -> ModelInfo {
     model("gpt-6-luna", "GPT-6 Luna")
 }
 fn sol() -> ModelInfo {
@@ -51,16 +61,16 @@ fn choice(model: &ModelInfo, effort: Effort) -> ModelChoice {
         connection: ConnectionKind::ChatGpt,
     }
 }
-fn on(model: &ModelInfo) -> ScreenHolds {
+pub(super) fn on(model: &ModelInfo) -> ScreenHolds {
     ScreenHolds::On {
         model: model.display_name.clone(),
     }
 }
 
-struct Ready {
-    owner: Entity<Presence>,
+pub(super) struct Ready {
+    pub(super) owner: Entity<Presence>,
     fixture: Rc<RefCell<Fake>>,
-    controls: async_channel::Receiver<ControlToBrain>,
+    pub(super) controls: async_channel::Receiver<ControlToBrain>,
     _data: async_channel::Receiver<DataToBrain>,
 }
 
@@ -72,12 +82,34 @@ fn receive(owner: &Entity<Presence>, event: LinkEvent, cx: &mut TestAppContext) 
         .expect("link batch");
 }
 
-/// A connected presence whose default model is Luna, with the brain's state stored.
-fn screen_ready(state: Option<ScreenHolds>, cx: &mut TestAppContext) -> Ready {
+fn gate(ready: &Ready, state: ScreenHolds, cx: &mut TestAppContext) {
+    receive(
+        &ready.owner,
+        LinkEvent::ScreenHolds {
+            generation: 1,
+            state,
+        },
+        cx,
+    );
+}
+
+/// A connected presence whose default model is Luna, with the brain's state stored. Its stamp
+/// reads STAMP, and only once every surface the fixture owns is covered.
+pub(super) fn screen_ready(state: Option<ScreenHolds>, cx: &mut TestAppContext) -> Ready {
     let (owner, data, controls) = ready(cx);
+    cursor_fixture::set(Some(ORIGIN.0));
     let fixture = Rc::new(RefCell::new(Fake::new()));
+    let seen = Rc::clone(&fixture);
     owner.update(cx, |owner, cx| {
         owner.exclusion_fixture = Some(Rc::clone(&fixture));
+        owner.counter_fixture = Some(Rc::new(move || {
+            assert_eq!(
+                seen.borrow().affinities(),
+                COVERED,
+                "the stamp is read after the last surface is covered"
+            );
+            i64::try_from(STAMP).unwrap()
+        }));
         owner.settings.update(cx, |settings, _| {
             settings.set_models(ConnectionKind::ChatGpt, vec![sol(), luna()]);
             let mut view = settings.view().unwrap().clone();
@@ -86,54 +118,114 @@ fn screen_ready(state: Option<ScreenHolds>, cx: &mut TestAppContext) -> Ready {
         });
         owner.refresh_conversation(cx);
     });
-    if let Some(state) = state {
-        receive(
-            &owner,
-            LinkEvent::ScreenHolds {
-                generation: 1,
-                state,
-            },
-            cx,
-        );
-    }
-    Ready {
+    let ready = Ready {
         owner,
         fixture,
         controls,
         _data: data,
+    };
+    if let Some(state) = state {
+        gate(&ready, state, cx);
     }
+    ready
 }
 
-/// Recognizes a hold whose pointer was sampled at POINTER, delivered as the native callback
-/// delivers it: through the dock window's update.
-fn recognize(owner: &Entity<Presence>, id: u32, cx: &mut TestAppContext) {
+/// Delivers one intent as the native callback delivers it: through the dock window's update.
+fn deliver(
+    owner: &Entity<Presence>,
+    intent: Intent,
+    qpc: u64,
+    pointer: Option<PhysicalPoint>,
+    cx: &mut TestAppContext,
+) {
+    let (dock, stamp) = owner.read_with(cx, |owner, _| {
+        let stamp = Stamp {
+            target: owner.voice.target.get(),
+            session: 1,
+            choice: owner.link.choice_revision(),
+        };
+        (owner.dock_window, stamp)
+    });
+    assert!(super::gesture::deliver_intent(
+        &mut cx.to_async(),
+        dock,
+        &owner.downgrade(),
+        intent,
+        stamp,
+        qpc,
+        pointer,
+    ));
+}
+
+/// Recognizes a hold whose pointer was read at `pointer`.
+fn recognize_at(
+    owner: &Entity<Presence>,
+    id: u32,
+    pointer: Option<PhysicalPoint>,
+    cx: &mut TestAppContext,
+) {
     let gesture = GestureId(id);
-    let (dock, token, stamp) = owner.update(cx, |owner, _| {
+    let token = owner.update(cx, |owner, _| {
         let token = owner
             .link
             .microphone_gate()
             .arm(gesture)
             .expect("fresh hold");
         owner.link.track_input(gesture);
-        let stamp = Stamp {
-            target: owner.voice.target.get(),
-            session: 1,
-            choice: owner.link.choice_revision(),
-        };
-        (owner.dock_window, token, stamp)
+        token
     });
-    assert!(super::gesture::deliver_intent(
-        &mut cx.to_async(),
-        dock,
-        &owner.downgrade(),
-        Intent::Recognized {
-            gesture,
-            generation: Ok(token),
-        },
-        stamp,
-        QPC,
-        Some(POINTER),
-    ));
+    let intent = Intent::Recognized {
+        gesture,
+        generation: Ok(token),
+    };
+    deliver(owner, intent, QPC, pointer, cx);
+    // The line's timer counts from here.
+    cx.run_until_parked();
+}
+
+fn recognize(owner: &Entity<Presence>, id: u32, cx: &mut TestAppContext) {
+    recognize_at(owner, id, Some(ORIGIN), cx);
+}
+
+/// The hold hears the microphone open, as far as its release can tell.
+fn listening(owner: &Entity<Presence>, cx: &mut TestAppContext) {
+    owner.update(cx, |owner, _| {
+        owner.voice.status = Some(Text::HoldListening);
+    });
+}
+
+/// The keys of hold `id` come up with the pointer read at `pointer`.
+fn release(
+    owner: &Entity<Presence>,
+    id: u32,
+    pointer: Option<PhysicalPoint>,
+    cx: &mut TestAppContext,
+) {
+    let intent = Intent::End {
+        gesture: GestureId(id),
+        cancelled: false,
+    };
+    deliver(owner, intent, RELEASED, pointer, cx);
+}
+
+/// A recognized hold that is listening, its recognition message read.
+fn held(ready: &Ready, id: u32, cx: &mut TestAppContext) {
+    recognize(&ready.owner, id, cx);
+    assert_eq!(sent(ready), [screen_hold(id)]);
+    listening(&ready.owner, cx);
+}
+
+/// The pointer is at `at` when the hold's timer next reads it.
+fn tick(at: PhysicalPoint, cx: &mut TestAppContext) {
+    cursor_fixture::set(Some(at.0));
+    advance_ms(16, cx);
+}
+
+/// The points of the hold's line so far; none while no hold is sampling.
+fn sampled(ready: &Ready, cx: &mut TestAppContext) -> Option<usize> {
+    ready.owner.read_with(cx, |owner, _| {
+        owner.ink.borrow().as_ref().map(|ink| ink.line().len())
+    })
 }
 
 fn voice_only(id: u32) -> ControlToBrain {
@@ -144,15 +236,40 @@ fn voice_only(id: u32) -> ControlToBrain {
     }
 }
 
-fn screen_hold(id: u32, lease: u32) -> ControlToBrain {
-    ControlToBrain::HoldRecognized {
+fn screen_hold(id: u32) -> ControlToBrain {
+    ControlToBrain::ScreenHoldRecognized {
         gesture: GestureId(id),
         thread: Some(ThreadId(1)),
         selection: 1,
-        pointer: POINTER,
-        lease: LeaseGeneration(lease),
         t_qpc: QPC,
     }
+}
+
+fn screen_release(
+    id: u32,
+    lease: u32,
+    pointer: PhysicalPoint,
+    path: &[PhysicalPoint],
+) -> ControlToBrain {
+    ControlToBrain::ScreenRelease {
+        gesture: GestureId(id),
+        lease: LeaseGeneration(lease),
+        t_qpc: RELEASED,
+        excluded_qpc: STAMP,
+        pointer: ReleasePointer(pointer),
+        path: PointerPath(path.to_vec()),
+    }
+}
+
+fn stopped(id: u32) -> [ControlToBrain; 2] {
+    [
+        ControlToBrain::VoiceHoldStopped {
+            gesture: GestureId(id),
+        },
+        ControlToBrain::GestureCancel {
+            gesture: GestureId(id),
+        },
+    ]
 }
 
 fn sent(ready: &Ready) -> Vec<ControlToBrain> {
@@ -171,37 +288,66 @@ fn finish(ready: &Ready, id: u32, cx: &mut TestAppContext) {
     ready.owner.read_with(cx, |owner, _| {
         owner.link.accept_recorded_microphone_stop(1, GestureId(id));
     });
-    assert_eq!(
-        sent(ready),
-        [
-            ControlToBrain::VoiceHoldStopped {
-                gesture: GestureId(id)
-            },
-            ControlToBrain::GestureCancel {
-                gesture: GestureId(id)
-            }
-        ]
-    );
+    assert_eq!(sent(ready), stopped(id));
 }
 
-fn advance(seconds: u64, cx: &mut TestAppContext) {
+fn advance_ms(millis: u64, cx: &mut TestAppContext) {
     cx.dispatcher
         .scheduler()
         .clock()
-        .advance(Duration::from_secs(seconds));
+        .advance(Duration::from_millis(millis));
     cx.run_until_parked();
 }
 
-fn icon(ready: &Ready, cx: &mut TestAppContext) -> Option<(Text, Option<ModelName>)> {
+fn advance(seconds: u64, cx: &mut TestAppContext) {
+    advance_ms(seconds * 1_000, cx);
+}
+
+/// What a hold on the current target does with the screen now, by the notice's name.
+fn notice(ready: &Ready, cx: &mut TestAppContext) -> &'static str {
     ready
         .owner
-        .read_with(cx, |owner, cx| owner.panel.read(cx).screen.clone())
+        .read_with(cx, |owner, cx| match owner.screen_notice(cx) {
+            ScreenNotice::Hidden => "hidden",
+            ScreenNotice::On(_) => "on",
+            ScreenNotice::ModelCantSee(_) => "cant see",
+            ScreenNotice::NotReady => "not ready",
+            ScreenNotice::TurnedOff => "off",
+            ScreenNotice::OwnModel => "own model",
+        })
 }
 
 fn line(ready: &Ready, cx: &mut TestAppContext) -> Option<(Text, Option<ModelName>)> {
     ready
         .owner
         .read_with(cx, |owner, cx| owner.panel.read(cx).screen_line.clone())
+}
+
+/// The newest lease's generation, and whether it is still in force.
+fn lease(ready: &Ready, cx: &mut TestAppContext) -> (u32, bool) {
+    ready.owner.read_with(cx, |owner, _| {
+        (
+            owner.exclusion.generation(),
+            owner.exclusion.lease().is_some(),
+        )
+    })
+}
+
+/// Makes `model` the default, as the brain's settings say it.
+fn default_model(ready: &Ready, model: &ModelInfo, cx: &mut TestAppContext) {
+    let mut view = ready.owner.read_with(cx, |owner, cx| {
+        owner.settings.read(cx).view().unwrap().clone()
+    });
+    view.default_model = Some(choice(model, Effort::Low));
+    receive(
+        &ready.owner,
+        LinkEvent::Settings {
+            generation: 1,
+            view,
+            answer: false,
+        },
+        cx,
+    );
 }
 
 /// Reads the main thread's row, stored with this choice, the way a list page delivers it.
@@ -255,183 +401,394 @@ fn read_row(ready: &Ready, choice: Option<ModelChoice>, cx: &mut TestAppContext)
 }
 
 #[gpui::test]
-fn a_hold_shows_the_window_only_while_the_stored_state_is_on(cx: &mut TestAppContext) {
-    for (state, tooltip) in [
-        (None, Some((Text::ScreenHoldsNotReady, None))),
-        (Some(ScreenHolds::Off(ScreenOff::Unsupported)), None),
-        (
-            Some(ScreenHolds::Off(ScreenOff::ModelCantSee)),
-            Some((Text::ScreenHoldsModelCantSee, Some(luna().display_name))),
-        ),
-        (
-            Some(ScreenHolds::Off(ScreenOff::NotReady)),
-            Some((Text::ScreenHoldsNotReady, None)),
-        ),
-        (
-            Some(ScreenHolds::Off(ScreenOff::TurnedOff)),
-            Some((Text::ScreenHoldsTurnedOff, None)),
-        ),
+fn a_hold_shows_the_screen_only_while_the_stored_state_is_on(cx: &mut TestAppContext) {
+    for (state, said) in [
+        (None, "not ready"),
+        (Some(ScreenHolds::Off(ScreenOff::Unsupported)), "hidden"),
+        (Some(ScreenHolds::Off(ScreenOff::ModelCantSee)), "cant see"),
+        (Some(ScreenHolds::Off(ScreenOff::NotReady)), "not ready"),
+        (Some(ScreenHolds::Off(ScreenOff::TurnedOff)), "off"),
     ] {
         let ready = screen_ready(state, cx);
-        assert_eq!(icon(&ready, cx), tooltip);
+        assert_eq!(notice(&ready, cx), said);
         recognize(&ready.owner, 1, cx);
         assert_eq!(sent(&ready), [voice_only(1)]);
+        listening(&ready.owner, cx);
+        // A voice hold samples nothing, however the pointer moves, and releases nothing.
+        tick(ACROSS, cx);
+        assert_eq!(sampled(&ready, cx), None);
+        release(&ready.owner, 1, Some(DOWN), cx);
+        assert_eq!(sent(&ready), []);
         assert_eq!(line(&ready, cx), None);
-        // No lease was asked for, so nothing was covered.
-        ready.owner.read_with(cx, |owner, _| {
-            assert_eq!(owner.exclusion.generation(), 0);
-        });
+        assert_eq!(lease(&ready, cx), (0, false));
         assert_eq!(ready.fixture.borrow().affinities(), PRIOR);
     }
 
+    // The first run: the hold says nothing about the screen.
     let ready = screen_ready(Some(on(&luna())), cx);
-    assert_eq!(
-        icon(&ready, cx),
-        Some((Text::ScreenHoldsOn, Some(luna().display_name)))
-    );
+    assert_eq!(notice(&ready, cx), "on");
     recognize(&ready.owner, 1, cx);
-    assert_eq!(sent(&ready), [screen_hold(1, 1)]);
-    assert_eq!(ready.fixture.borrow().affinities(), COVERED);
+    assert_eq!(sent(&ready), [screen_hold(1)]);
+    assert_eq!(line(&ready, cx), None);
+    // Nothing of the screen is taken at recognition.
+    assert_eq!(lease(&ready, cx), (0, false));
+    assert_eq!(ready.fixture.borrow().affinities(), PRIOR);
+    assert_eq!(sampled(&ready, cx), Some(0));
+}
+
+#[gpui::test]
+fn the_line_follows_the_pointer_and_one_release_takes_the_lease_its_stamp_and_the_path(
+    cx: &mut TestAppContext,
+) {
+    let ready = screen_ready(Some(on(&luna())), cx);
+    held(&ready, 1, cx);
+    // Inside the dead zone nothing is drawn; past it the line starts where the pointer was.
+    tick(PhysicalPoint([650, 320]), cx);
+    assert_eq!(sampled(&ready, cx), Some(0));
+    tick(ACROSS, cx);
+    assert_eq!(sampled(&ready, cx), Some(2));
+    assert_eq!(sent(&ready), [], "first points");
+    // A tick that finds the pointer where it was adds nothing, and one that can't read it is
+    // skipped.
+    advance_ms(16, cx);
+    assert_eq!(sent(&ready), [], "same place");
+    cursor_fixture::set(None);
+    advance_ms(16, cx);
+    assert_eq!(sampled(&ready, cx), Some(2));
+    assert_eq!(sent(&ready), [], "unread");
+    tick(DOWN, cx);
+    assert_eq!(sampled(&ready, cx), Some(3));
+    assert_eq!(sent(&ready), []);
+    assert_eq!(lease(&ready, cx), (0, false));
+
+    release(&ready.owner, 1, Some(DOWN), cx);
     assert_eq!(
-        line(&ready, cx),
-        Some((Text::ScreenHoldWillSee, Some(luna().display_name)))
+        sent(&ready),
+        [screen_release(1, 1, DOWN, &[ORIGIN, ACROSS, DOWN])]
+    );
+    assert_eq!(sampled(&ready, cx), None, "the line stops at release");
+    assert_eq!(lease(&ready, cx), (1, true));
+    assert_eq!(ready.fixture.borrow().affinities(), COVERED);
+    assert_eq!(line(&ready, cx), None);
+
+    // The gesture asks once: a second delivery of the keys coming up ends the hold as a
+    // cancel, with no second lease and no second release.
+    release(&ready.owner, 1, Some(ACROSS), cx);
+    tick(ORIGIN, cx);
+    assert_eq!(sent(&ready), stopped(1));
+    assert_eq!(sampled(&ready, cx), None);
+    assert_eq!(lease(&ready, cx), (1, true));
+}
+
+#[gpui::test]
+fn a_notice_that_goes_off_while_the_keys_are_down_ends_the_line_and_the_release_for_good(
+    cx: &mut TestAppContext,
+) {
+    type Change = fn(&Ready, &mut TestAppContext);
+    let changes: [(Change, Text); 3] = [
+        (
+            |ready, cx| gate(ready, ScreenHolds::Off(ScreenOff::TurnedOff), cx),
+            Text::ScreenNotIncludedTurnedOff,
+        ),
+        // The default model changes, so the stored state names the one before it.
+        (
+            |ready, cx| default_model(ready, &sol(), cx),
+            Text::ScreenNotIncludedNotReady,
+        ),
+        // The thread gets its own model.
+        (
+            |ready, cx| read_row(ready, Some(choice(&sol(), Effort::Low)), cx),
+            Text::ScreenNotIncludedNotReady,
+        ),
+    ];
+    for (change, said) in changes {
+        let ready = screen_ready(Some(on(&luna())), cx);
+        held(&ready, 1, cx);
+        tick(ACROSS, cx);
+        assert_eq!(sampled(&ready, cx), Some(2));
+        change(&ready, cx);
+        assert_eq!(sampled(&ready, cx), None, "{said:?}");
+        assert_eq!(line(&ready, cx), Some((said, None)));
+        // Back on before the keys come up: the refusal was the gesture's one ask.
+        default_model(&ready, &luna(), cx);
+        read_row(&ready, None, cx);
+        gate(&ready, on(&luna()), cx);
+        assert_eq!(notice(&ready, cx), "on");
+        tick(DOWN, cx);
+        assert_eq!(sampled(&ready, cx), None, "{said:?}");
+        assert_eq!(sent(&ready), [], "{said:?}");
+        release(&ready.owner, 1, Some(DOWN), cx);
+        assert_eq!(sent(&ready), [], "{said:?}");
+        assert_eq!(lease(&ready, cx), (0, false), "{said:?}");
+        assert_eq!(line(&ready, cx), Some((said, None)));
+    }
+}
+
+#[gpui::test]
+fn a_release_that_cant_take_what_its_capture_needs_sends_nothing_and_says_so(
+    cx: &mut TestAppContext,
+) {
+    let not_ready = Some((Text::ScreenNotIncludedNotReady, None));
+
+    // A surface that can't be covered.
+    let ready = screen_ready(Some(on(&luna())), cx);
+    held(&ready, 1, cx);
+    ready.fixture.borrow_mut().set_failure = Some(Slot::Dock as usize);
+    release(&ready.owner, 1, Some(DOWN), cx);
+    assert_eq!(sent(&ready), []);
+    assert_eq!(line(&ready, cx), not_ready);
+    assert_eq!(lease(&ready, cx), (1, false));
+    assert_eq!(ready.fixture.borrow().affinities(), PRIOR);
+    advance(3, cx);
+    assert_eq!(
+        sent(&ready),
+        [],
+        "a lease the brain never saw tells no lapse"
+    );
+
+    // The pointer couldn't be read, so nothing picks the display and no lease is asked for.
+    let ready = screen_ready(Some(on(&luna())), cx);
+    held(&ready, 1, cx);
+    release(&ready.owner, 1, None, cx);
+    assert_eq!(sent(&ready), []);
+    assert_eq!(line(&ready, cx), not_ready);
+    assert_eq!(lease(&ready, cx), (0, false));
+
+    // The notice went off with no word from the brain, as when the shell has queued a new
+    // default: the release asks before it takes anything.
+    let ready = screen_ready(Some(on(&luna())), cx);
+    held(&ready, 1, cx);
+    ready.owner.update(cx, |owner, cx| {
+        owner.settings.update(cx, |settings, _| {
+            let mut view = settings.view().unwrap().clone();
+            view.default_model = Some(choice(&sol(), Effort::Low));
+            settings.set_view(view, crate::settings::Update::Unsolicited);
+        });
+    });
+    release(&ready.owner, 1, Some(DOWN), cx);
+    assert_eq!(sent(&ready), []);
+    assert_eq!(line(&ready, cx), not_ready);
+    assert_eq!(lease(&ready, cx), (0, false));
+
+    // The counter gave no stamp, so the lease is given back.
+    let ready = screen_ready(Some(on(&luna())), cx);
+    ready.owner.update(cx, |owner, _| {
+        owner.counter_fixture = Some(Rc::new(|| 0));
+    });
+    held(&ready, 1, cx);
+    release(&ready.owner, 1, Some(DOWN), cx);
+    assert_eq!(sent(&ready), []);
+    assert_eq!(line(&ready, cx), not_ready);
+    assert_eq!(lease(&ready, cx), (1, false));
+    assert_eq!(ready.fixture.borrow().affinities(), PRIOR);
+
+    // The capture before it still holds its lease.
+    let ready = screen_ready(Some(on(&luna())), cx);
+    held(&ready, 1, cx);
+    release(&ready.owner, 1, Some(DOWN), cx);
+    assert_eq!(sent(&ready), [screen_release(1, 1, DOWN, &[])]);
+    finish(&ready, 1, cx);
+    held(&ready, 2, cx);
+    release(&ready.owner, 2, Some(DOWN), cx);
+    assert_eq!(sent(&ready), []);
+    assert_eq!(line(&ready, cx), not_ready);
+    assert_eq!(lease(&ready, cx), (1, true), "the first lease is untouched");
+    // The first hold's lease is still the one the shell answers for.
+    advance(3, cx);
+    assert_eq!(
+        sent(&ready),
+        [ControlToBrain::ExclusionLapsed {
+            lease: LeaseGeneration(1)
+        }]
     );
 }
 
 #[gpui::test]
-fn a_refused_lease_leaves_the_hold_voice_only_and_tells_no_lapse(cx: &mut TestAppContext) {
+fn a_hold_or_a_release_the_brain_never_got_leaves_no_line_and_no_lease(cx: &mut TestAppContext) {
+    // The recognition can't be sent: no line starts for a hold the brain never heard of.
     let ready = screen_ready(Some(on(&luna())), cx);
-    ready.fixture.borrow_mut().set_failure = Some(Slot::Dock as usize);
+    assert!(ready.controls.close());
     recognize(&ready.owner, 1, cx);
-    assert_eq!(sent(&ready), [voice_only(1)]);
-    assert_eq!(
-        line(&ready, cx),
-        Some((Text::ScreenNotIncludedNotReady, None))
-    );
+    tick(ACROSS, cx);
+    assert_eq!(sampled(&ready, cx), None);
     ready.owner.read_with(cx, |owner, _| {
-        assert_eq!(owner.exclusion.generation(), 1);
-        assert!(owner.exclusion.lease().is_none());
+        assert_eq!(owner.voice.status, Some(Text::HoldFailed));
     });
+
+    // The release can't be sent: its lease is given back at once, and that is no lapse.
+    let ready = screen_ready(Some(on(&luna())), cx);
+    held(&ready, 1, cx);
+    assert!(ready.controls.close());
+    release(&ready.owner, 1, Some(DOWN), cx);
+    assert_eq!(lease(&ready, cx), (1, false));
     assert_eq!(ready.fixture.borrow().affinities(), PRIOR);
-    advance(3, cx);
-    assert_eq!(sent(&ready), []);
+    ready.owner.read_with(cx, |owner, _| {
+        assert_eq!(owner.screen_lease, None);
+    });
+}
+
+#[gpui::test]
+fn a_release_off_the_line_s_display_or_with_no_line_carries_an_empty_path(cx: &mut TestAppContext) {
+    // Released on a display left of the one the line was drawn on.
+    let ready = screen_ready(Some(on(&luna())), cx);
+    held(&ready, 1, cx);
+    tick(ACROSS, cx);
+    assert_eq!(sampled(&ready, cx), Some(2));
+    let elsewhere = PhysicalPoint([-200, 320]);
+    release(&ready.owner, 1, Some(elsewhere), cx);
+    assert_eq!(sent(&ready), [screen_release(1, 1, elsewhere, &[])]);
+
+    // The pointer never left the dead zone.
+    let ready = screen_ready(Some(on(&luna())), cx);
+    held(&ready, 1, cx);
+    tick(PhysicalPoint([650, 325]), cx);
+    release(&ready.owner, 1, Some(ORIGIN), cx);
+    assert_eq!(sent(&ready), [screen_release(1, 1, ORIGIN, &[])]);
+
+    // The pointer couldn't be read at recognition: no line, and the picture goes alone.
+    let ready = screen_ready(Some(on(&luna())), cx);
+    recognize_at(&ready.owner, 1, None, cx);
+    assert_eq!(sent(&ready), [screen_hold(1)]);
+    listening(&ready.owner, cx);
+    tick(ACROSS, cx);
+    assert_eq!(sampled(&ready, cx), None);
+    release(&ready.owner, 1, Some(DOWN), cx);
+    assert_eq!(sent(&ready), [screen_release(1, 1, DOWN, &[])]);
+}
+
+#[gpui::test]
+fn a_hold_that_ends_before_its_release_stops_the_line_and_takes_no_lease(cx: &mut TestAppContext) {
+    type End = fn(&Ready, &mut TestAppContext);
+    let ends: [End; 4] = [
+        // The keys come up cancelled.
+        |ready, cx| {
+            let intent = Intent::End {
+                gesture: GestureId(1),
+                cancelled: true,
+            };
+            deliver(&ready.owner, intent, RELEASED, Some(DOWN), cx);
+        },
+        // The keys come up before the hold is listening.
+        |ready, cx| {
+            ready.owner.update(cx, |owner, _| {
+                owner.voice.status = Some(Text::HoldPreparing);
+            });
+            release(&ready.owner, 1, Some(DOWN), cx);
+        },
+        // Esc.
+        |ready, cx| {
+            ready
+                .owner
+                .update(cx, |owner, cx| owner.native_escape(Some(GestureId(1)), cx))
+                .expect("escape");
+        },
+        // The brain fails the hold.
+        |ready, cx| {
+            status(
+                &ready.owner,
+                1,
+                1,
+                HoldStatus::Failed(HoldFailure::Busy),
+                cx,
+            );
+        },
+    ];
+    for (index, end) in ends.into_iter().enumerate() {
+        let ready = screen_ready(Some(on(&luna())), cx);
+        held(&ready, 1, cx);
+        tick(ACROSS, cx);
+        assert_eq!(sampled(&ready, cx), Some(2), "{index}");
+        end(&ready, cx);
+        assert_eq!(sampled(&ready, cx), None, "{index}");
+        while ready.controls.try_recv().is_ok() {}
+        tick(DOWN, cx);
+        assert_eq!(sampled(&ready, cx), None, "{index}");
+        assert_eq!(lease(&ready, cx), (0, false), "{index}");
+        assert_eq!(sent(&ready), [], "{index}");
+    }
+
+    // A hold dropped without its end: the next tick finds no pending hold and clears the line.
+    let ready = screen_ready(Some(on(&luna())), cx);
+    held(&ready, 1, cx);
+    tick(ACROSS, cx);
+    ready.owner.update(cx, |owner, _| {
+        owner.voice.pending = None;
+    });
+    assert_eq!(sampled(&ready, cx), Some(2));
+    tick(DOWN, cx);
+    assert_eq!(sampled(&ready, cx), None);
 }
 
 #[gpui::test]
 fn the_target_threads_stored_model_decides_once_its_row_is_read(cx: &mut TestAppContext) {
-    let shown = Some((Text::ScreenHoldsOn, Some(luna().display_name)));
+    let shown = "on";
     // Never read: counted as on the default model.
     let ready = screen_ready(Some(on(&luna())), cx);
     ready.owner.read_with(cx, |owner, cx| {
         assert!(owner.threads.read(cx).row(ThreadId(1)).is_none());
     });
-    assert_eq!(icon(&ready, cx), shown);
+    assert_eq!(notice(&ready, cx), shown);
     recognize(&ready.owner, 1, cx);
-    assert_eq!(sent(&ready), [screen_hold(1, 1)]);
+    assert_eq!(sent(&ready), [screen_hold(1)]);
 
     // Read, and on the default model: no stored choice, or the default at another effort.
     for stored in [None, Some(choice(&luna(), Effort::High))] {
         let ready = screen_ready(Some(on(&luna())), cx);
         read_row(&ready, stored, cx);
-        assert_eq!(icon(&ready, cx), shown);
+        assert_eq!(notice(&ready, cx), shown);
         recognize(&ready.owner, 1, cx);
-        assert_eq!(sent(&ready), [screen_hold(1, 1)]);
+        assert_eq!(sent(&ready), [screen_hold(1)]);
     }
 
-    // Read, and pinned to another model, one that could see the window too.
+    // Read, and pinned to another model, one that could see the screen too: a hold that is voice
+    // only.
     let ready = screen_ready(Some(on(&luna())), cx);
     read_row(&ready, Some(choice(&sol(), Effort::Low)), cx);
-    assert_eq!(icon(&ready, cx), Some((Text::ScreenHoldsOwnModel, None)));
+    assert_eq!(notice(&ready, cx), "own model");
     recognize(&ready.owner, 1, cx);
     assert_eq!(sent(&ready), [voice_only(1)]);
-    ready.owner.read_with(cx, |owner, _| {
-        assert_eq!(owner.exclusion.generation(), 0);
-    });
-    assert_eq!(ready.fixture.borrow().affinities(), PRIOR);
+    assert_eq!(sampled(&ready, cx), None);
 }
 
 #[gpui::test]
 fn an_on_state_naming_another_model_than_the_newest_default_is_not_ready(cx: &mut TestAppContext) {
     // The default is Luna; the brain's last word still names Sol.
     let ready = screen_ready(Some(on(&sol())), cx);
-    assert_eq!(icon(&ready, cx), Some((Text::ScreenHoldsNotReady, None)));
+    assert_eq!(notice(&ready, cx), "not ready");
     recognize(&ready.owner, 1, cx);
     assert_eq!(sent(&ready), [voice_only(1)]);
-    assert_eq!(ready.fixture.borrow().affinities(), PRIOR);
     finish(&ready, 1, cx);
 
-    // The brain catches up with the default, and the next hold shows Luna the window.
-    receive(
-        &ready.owner,
-        LinkEvent::ScreenHolds {
-            generation: 1,
-            state: on(&luna()),
-        },
-        cx,
-    );
-    assert_eq!(
-        icon(&ready, cx),
-        Some((Text::ScreenHoldsOn, Some(luna().display_name)))
-    );
+    // The brain catches up with the default, and the next hold shows Luna the screen.
+    gate(&ready, on(&luna()), cx);
+    assert_eq!(notice(&ready, cx), "on");
     recognize(&ready.owner, 2, cx);
-    assert_eq!(sent(&ready), [screen_hold(2, 1)]);
+    assert_eq!(sent(&ready), [screen_hold(2)]);
 }
 
 #[gpui::test]
-fn the_message_names_the_lease_just_taken_and_the_recognition_pointer(cx: &mut TestAppContext) {
-    let ready = screen_ready(Some(on(&luna())), cx);
-    recognize(&ready.owner, 1, cx);
-    assert_eq!(sent(&ready), [screen_hold(1, 1)]);
-    finish(&ready, 1, cx);
-    receive(
-        &ready.owner,
-        LinkEvent::CaptureFailed {
-            generation: 1,
-            capture_for: CaptureFor::Gesture(GestureId(1)),
-            reason: CaptureFailure::Cancelled,
-        },
-        cx,
-    );
-    assert_eq!(ready.fixture.borrow().affinities(), PRIOR);
-
-    // The second hold's lease is the second generation, never the one before it.
-    recognize(&ready.owner, 2, cx);
-    assert_eq!(
-        sent(&ready),
-        [ControlToBrain::HoldRecognized {
-            gesture: GestureId(2),
-            thread: Some(ThreadId(1)),
-            selection: 1,
-            pointer: PhysicalPoint([640, -32]),
-            lease: LeaseGeneration(2),
-            t_qpc: 77,
-        }]
-    );
-    ready.owner.read_with(cx, |owner, _| {
-        assert_eq!(
-            owner.exclusion.lease().unwrap().key().generation(),
-            LeaseGeneration(2)
-        );
-    });
-}
-
-#[gpui::test]
-fn the_holds_line_follows_the_brains_outcome_and_a_disconnect_clears_the_notice(
+fn the_holds_line_follows_the_brains_refusal_and_a_disconnect_clears_the_notice(
     cx: &mut TestAppContext,
 ) {
     for (outcome, shown) in [
         (
             HeldScreen::NotIncluded(ScreenClass::Changed),
-            Some((Text::ScreenNotIncludedChanged, None)),
+            Some((Text::ShowScreenChanged, None)),
+        ),
+        (
+            HeldScreen::NotIncluded(ScreenClass::TooLarge),
+            Some((Text::ScreenNotIncludedPictureTooLarge, None)),
         ),
         (
             HeldScreen::NotIncluded(ScreenClass::ModelCantSee),
             Some((Text::ScreenNotIncludedModel, None)),
         ),
-        (HeldScreen::Attached, None),
+        (HeldScreen::Screen, None),
     ] {
         let ready = screen_ready(Some(on(&luna())), cx);
-        recognize(&ready.owner, 1, cx);
+        held(&ready, 1, cx);
+        release(&ready.owner, 1, Some(DOWN), cx);
+        assert_eq!(line(&ready, cx), None);
         receive(
             &ready.owner,
             LinkEvent::HoldScreen {
@@ -443,21 +800,26 @@ fn the_holds_line_follows_the_brains_outcome_and_a_disconnect_clears_the_notice(
         );
         assert_eq!(line(&ready, cx), shown);
         receive(&ready.owner, LinkEvent::State(LinkState::Reconnecting), cx);
-        assert_eq!(icon(&ready, cx), Some((Text::ScreenHoldsNotReady, None)));
+        assert_eq!(notice(&ready, cx), "not ready");
         assert_eq!(line(&ready, cx), None);
     }
 }
 
 #[gpui::test]
-fn a_lease_that_stops_protecting_a_sent_hold_tells_the_brain_once(cx: &mut TestAppContext) {
+fn a_lease_that_stops_protecting_a_sent_release_tells_the_brain_once(cx: &mut TestAppContext) {
     let lapsed = [ControlToBrain::ExclusionLapsed {
         lease: LeaseGeneration(1),
     }];
+    let released = |cx: &mut TestAppContext| {
+        let ready = screen_ready(Some(on(&luna())), cx);
+        held(&ready, 1, cx);
+        release(&ready.owner, 1, Some(DOWN), cx);
+        assert_eq!(sent(&ready), [screen_release(1, 1, DOWN, &[])]);
+        ready
+    };
 
     // Its timer.
-    let ready = screen_ready(Some(on(&luna())), cx);
-    recognize(&ready.owner, 1, cx);
-    assert_eq!(sent(&ready), [screen_hold(1, 1)]);
+    let ready = released(cx);
     advance(3, cx);
     assert_eq!(sent(&ready), lapsed);
     assert_eq!(ready.fixture.borrow().affinities(), PRIOR);
@@ -465,9 +827,7 @@ fn a_lease_that_stops_protecting_a_sent_hold_tells_the_brain_once(cx: &mut TestA
     assert_eq!(sent(&ready), []);
 
     // A surface that can't be covered.
-    let ready = screen_ready(Some(on(&luna())), cx);
-    recognize(&ready.owner, 1, cx);
-    assert_eq!(sent(&ready), [screen_hold(1, 1)]);
+    let ready = released(cx);
     ready.owner.update(cx, |owner, cx| {
         assert_eq!(
             owner.protect_surface(Slot::Settings, cx),
@@ -479,9 +839,7 @@ fn a_lease_that_stops_protecting_a_sent_hold_tells_the_brain_once(cx: &mut TestA
     assert_eq!(sent(&ready), []);
 
     // A revoke that leaves restoration debt, and so keeps the lease.
-    let ready = screen_ready(Some(on(&luna())), cx);
-    recognize(&ready.owner, 1, cx);
-    assert_eq!(sent(&ready), [screen_hold(1, 1)]);
+    let ready = released(cx);
     ready.fixture.borrow_mut().restore_failure = 1 << Slot::Proxy as usize;
     ready.owner.update(cx, Presence::revoke_exclusion);
     ready.owner.read_with(cx, |owner, _| {
@@ -490,11 +848,15 @@ fn a_lease_that_stops_protecting_a_sent_hold_tells_the_brain_once(cx: &mut TestA
     assert_eq!(sent(&ready), lapsed);
     ready.fixture.borrow_mut().restore_failure = 0;
     ready.owner.update(cx, Presence::revoke_exclusion);
-    ready.owner.read_with(cx, |owner, _| {
-        assert!(owner.exclusion.lease().is_none());
-    });
+    assert_eq!(lease(&ready, cx), (1, false));
     advance(3, cx);
     assert_eq!(sent(&ready), []);
+
+    // A cancel after the release leaves the lease to its capture.
+    let ready = released(cx);
+    finish(&ready, 1, cx);
+    assert_eq!(lease(&ready, cx), (1, true));
+    assert_eq!(ready.fixture.borrow().affinities(), COVERED);
 }
 
 #[gpui::test]
@@ -512,29 +874,33 @@ fn a_capture_answer_releases_its_own_lease_without_a_lapse_and_never_a_newer_one
         );
     };
     let ready = screen_ready(Some(on(&luna())), cx);
-    recognize(&ready.owner, 1, cx);
-    assert_eq!(sent(&ready), [screen_hold(1, 1)]);
+    held(&ready, 1, cx);
+    release(&ready.owner, 1, Some(DOWN), cx);
+    assert_eq!(sent(&ready), [screen_release(1, 1, DOWN, &[])]);
     done(1, &ready, cx);
     assert_eq!(ready.fixture.borrow().affinities(), PRIOR);
     advance(3, cx);
     assert_eq!(sent(&ready), []);
 
-    // The first hold's lease lapses; its capture answers only after a second hold has a lease.
+    // The first hold's lease lapses; its capture answers only after a second release has one.
     let ready = screen_ready(Some(on(&luna())), cx);
-    recognize(&ready.owner, 1, cx);
+    held(&ready, 1, cx);
+    release(&ready.owner, 1, Some(DOWN), cx);
     advance(3, cx);
     assert_eq!(
         sent(&ready),
         [
-            screen_hold(1, 1),
+            screen_release(1, 1, DOWN, &[]),
             ControlToBrain::ExclusionLapsed {
                 lease: LeaseGeneration(1)
             }
         ]
     );
     finish(&ready, 1, cx);
-    recognize(&ready.owner, 2, cx);
-    assert_eq!(sent(&ready), [screen_hold(2, 2)]);
+    held(&ready, 2, cx);
+    release(&ready.owner, 2, Some(ACROSS), cx);
+    // The second release's lease is the second generation, never the one before it.
+    assert_eq!(sent(&ready), [screen_release(2, 2, ACROSS, &[])]);
     done(1, &ready, cx);
     receive(
         &ready.owner,
@@ -558,55 +924,64 @@ fn a_capture_answer_releases_its_own_lease_without_a_lapse_and_never_a_newer_one
 }
 
 #[gpui::test]
-fn a_lease_the_brain_never_saw_is_released_at_once_without_a_lapse(cx: &mut TestAppContext) {
-    // The runs model refuses the hold after the lease is taken.
-    let ready = screen_ready(Some(on(&luna())), cx);
-    ready.owner.update(cx, |owner, _| {
-        owner.runs.begin_hold(GestureId(1), None).unwrap();
-    });
-    recognize(&ready.owner, 2, cx);
-    ready.owner.read_with(cx, |owner, _| {
-        assert_eq!(owner.exclusion.generation(), 1);
-        assert!(owner.exclusion.lease().is_none());
-        assert_eq!(owner.voice.status, Some(Text::TurnBusy));
-    });
-    assert_eq!(ready.fixture.borrow().affinities(), PRIOR);
-    // The refused hold's microphone is stopped and the hold in its way is cancelled.
-    assert_eq!(
-        sent(&ready),
-        [
-            ControlToBrain::VoiceHoldStopped {
-                gesture: GestureId(2)
-            },
-            ControlToBrain::GestureCancel {
-                gesture: GestureId(1)
-            }
-        ]
-    );
-    advance(3, cx);
-    assert_eq!(sent(&ready), []);
+fn the_overlay_shows_for_a_line_alone_and_hides_when_the_line_ends(cx: &mut TestAppContext) {
+    let overlay = |ready: &Ready, cx: &mut TestAppContext| {
+        ready.owner.update(cx, |owner, cx| {
+            super::overlay::Overlay::detached(
+                owner.presenter.frames(),
+                cx.weak_entity(),
+                Rc::clone(&owner.paint_scratch),
+                Rc::clone(&owner.paint_notice),
+                Rc::clone(&owner.ink),
+                cx,
+            )
+        })
+    };
 
-    // The send fails after the lease is taken.
+    // A hold whose pointer stays put shows nothing; the line's first points show the overlay.
     let ready = screen_ready(Some(on(&luna())), cx);
-    assert!(ready.controls.close());
-    recognize(&ready.owner, 1, cx);
-    ready.owner.read_with(cx, |owner, _| {
-        assert_eq!(owner.exclusion.generation(), 1);
-        assert!(owner.exclusion.lease().is_none());
-        assert_eq!(owner.voice.status, Some(Text::HoldFailed));
+    let hidden = overlay(&ready, cx);
+    ready.owner.update(cx, |owner, _| {
+        owner.overlay = Visibility::Hidden(hidden);
     });
-    assert_eq!(ready.fixture.borrow().affinities(), PRIOR);
+    held(&ready, 1, cx);
+    tick(PhysicalPoint([650, 320]), cx);
+    ready.owner.read_with(cx, |owner, _| {
+        assert!(matches!(owner.overlay, Visibility::Hidden(_)));
+    });
+    tick(ACROSS, cx);
+    ready.owner.read_with(cx, |owner, _| {
+        assert!(matches!(owner.overlay, Visibility::Shown(_)));
+        assert!(owner.presenter.frames().borrow().shown);
+    });
+
+    // A line's end hides an overlay that no drawing needs. The hide retires the window it
+    // hid, and a test can't open the real one that replaces it.
+    let ready = screen_ready(Some(on(&luna())), cx);
+    let shown = overlay(&ready, cx);
+    ready.owner.update(cx, |owner, _| {
+        owner.presenter.frames().borrow_mut().shown = true;
+        owner.overlay = Visibility::Shown(shown);
+    });
+    held(&ready, 1, cx);
+    tick(ACROSS, cx);
+    tick(DOWN, cx);
+    ready.owner.read_with(cx, |owner, _| {
+        assert!(matches!(owner.overlay, Visibility::Shown(_)));
+    });
+    finish(&ready, 1, cx);
+    ready.owner.read_with(cx, |owner, _| {
+        assert!(matches!(owner.overlay, Visibility::Closed));
+        assert!(!owner.presenter.frames().borrow().shown);
+    });
 }
 
 #[gpui::test]
-fn the_peek_draws_the_standing_icon_with_its_tooltip_and_the_holds_line(cx: &mut TestAppContext) {
+fn the_peek_shows_a_holds_line_in_place_of_the_settings_notice_and_nothing_else_of_the_screen(
+    cx: &mut TestAppContext,
+) {
     use gpui_kit::AppContext as _;
-    use kumochi_protocol::message::ModelName;
-    const ON: &str =
-        "screen-holds on=true Hold to talk also shows GPT-6 Luna the window under your pointer";
-    const OWN: &str =
-        "screen-holds on=false Hold to talk is voice only in a thread with its own model";
-    const LINE: &str = "peek-line GPT-6 Luna will see this window";
+    const LINE: &str = "peek-line Screen not included: the display changed";
     const NOTICE: &str = "peek-line Settings not saved";
     let (window, panel) = cx.update(|cx| {
         gpui_kit::init(cx);
@@ -619,7 +994,6 @@ fn the_peek_draws_the_standing_icon_with_its_tooltip_and_the_holds_line(cx: &mut
                 state: super::LinkState::Connected,
                 voice: None,
                 notice: Some(Text::SettingsNotSaved),
-                screen: None,
                 screen_line: None,
                 stop: false,
                 events,
@@ -632,21 +1006,47 @@ fn the_peek_draws_the_standing_icon_with_its_tooltip_and_the_holds_line(cx: &mut
         cx.run_until_parked();
         let mut frame = gpui_kit::VisualTestContext::from_window(window, cx);
         frame.update(|window, cx| window.draw(cx).clear(cx));
-        [ON, OWN, LINE, NOTICE].map(|selector| frame.debug_bounds(selector).is_some())
+        [LINE, NOTICE].map(|selector| frame.debug_bounds(selector).is_some())
     };
-    assert_eq!(drawn(cx), [false, false, false, true]);
-    let luna = ModelName::new("GPT-6 Luna").unwrap();
+    assert_eq!(drawn(cx), [false, true]);
+    // A refusal's line takes the settings notice's place while it shows.
     panel.update(cx, |panel, cx| {
-        panel.screen = Some((Text::ScreenHoldsOn, Some(luna.clone())));
-        panel.screen_line = Some((Text::ScreenHoldWillSee, Some(luna)));
+        panel.screen_line = Some((Text::ShowScreenChanged, None));
         cx.notify();
     });
-    // The hold's line takes the settings notice's place while it shows.
-    assert_eq!(drawn(cx), [true, false, true, false]);
+    assert_eq!(drawn(cx), [true, false]);
     panel.update(cx, |panel, cx| {
-        panel.screen = Some((Text::ScreenHoldsOwnModel, None));
         panel.screen_line = None;
         cx.notify();
     });
-    assert_eq!(drawn(cx), [false, true, false, true]);
+    assert_eq!(drawn(cx), [false, true]);
+}
+
+#[gpui::test]
+fn a_release_while_the_box_is_unchecked_and_still_saving_sends_nothing_and_says_so(
+    cx: &mut TestAppContext,
+) {
+    let ready = screen_ready(Some(on(&luna())), cx);
+    held(&ready, 1, cx);
+    // The user unchecks the box. The brain hasn't answered, so its gate still says on.
+    assert!(
+        ready
+            .owner
+            .update(cx, |owner, cx| owner.save_show_screen(false, cx))
+    );
+    assert_eq!(
+        sent(&ready),
+        [ControlToBrain::Settings(
+            kumochi_protocol::message::SettingsOp::SetShowScreen(false)
+        )]
+    );
+    assert_eq!(notice(&ready, cx), "on");
+    release(&ready.owner, 1, Some(DOWN), cx);
+    assert_eq!(sent(&ready), []);
+    assert_eq!(
+        line(&ready, cx),
+        Some((Text::ScreenNotIncludedTurnedOff, None))
+    );
+    assert_eq!(lease(&ready, cx), (0, false));
+    assert_eq!(ready.fixture.borrow().affinities(), PRIOR);
 }

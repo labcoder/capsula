@@ -525,22 +525,6 @@ fn the_standing_notice_gives_way_in_order_and_names_only_the_newest_default() {
         }
         assert_eq!(runs.screen_notice(own, default), notice, "{stored:?} {own}");
     }
-    assert_eq!(ScreenNotice::Hidden.text(), None);
-    assert_eq!(
-        ScreenNotice::On(&luna).text(),
-        Some((Text::ScreenHoldsOn, Some(&luna)))
-    );
-    assert_eq!(
-        ScreenNotice::ModelCantSee(&luna).text(),
-        Some((Text::ScreenHoldsModelCantSee, Some(&luna)))
-    );
-    for (notice, text) in [
-        (ScreenNotice::NotReady, Text::ScreenHoldsNotReady),
-        (ScreenNotice::TurnedOff, Text::ScreenHoldsTurnedOff),
-        (ScreenNotice::OwnModel, Text::ScreenHoldsOwnModel),
-    ] {
-        assert_eq!(notice.text(), Some((text, None)));
-    }
 }
 
 #[test]
@@ -599,7 +583,6 @@ fn shown_to_luna(runs: &mut Runs) -> kumochi_protocol::message::ModelName {
 
 #[test]
 fn a_hold_that_shows_the_screen_at_release_is_admitted_as_any_hold_is() {
-    use kumochi_protocol::message::HeldScreen;
     let mut runs = ready();
     let luna = shown_to_luna(&mut runs);
     let begin = |runs: &mut Runs, gesture, t_qpc| {
@@ -614,9 +597,12 @@ fn a_hold_that_shows_the_screen_at_release_is_admitted_as_any_hold_is() {
             t_qpc: 515_151_515,
         })
     );
-    // It has no line of its own yet, so no outcome is its to show.
+    // It predicts nothing, so it has no line unless something refuses its screen.
     assert_eq!(runs.hold_screen_line(), None);
-    assert!(!runs.hold_screen(GestureId(1), HeldScreen::Screen));
+    assert_eq!(
+        runs.hold_screen_text(runs.screen_notice(false, Some(&luna))),
+        None
+    );
     assert!(!format!("{runs:?}").contains("515151515"));
     // One hold at a time, a cancel delivered before the next, and each gesture used once.
     assert_eq!(begin(&mut runs, 2, 1), Err(Refused::Busy));
@@ -773,8 +759,88 @@ fn only_the_current_hold_of_that_kind_builds_one_screen_release_while_the_notice
 }
 
 #[test]
+fn a_refusal_lands_once_on_a_hold_that_shows_the_screen_at_release_in_that_flow_s_words() {
+    use kumochi_protocol::message::{HeldScreen, ScreenClass, ScreenHolds, ScreenOff};
+    fn line<'a>(
+        runs: &'a Runs,
+        luna: &'a kumochi_protocol::message::ModelName,
+    ) -> Option<(Text, Option<&'a kumochi_protocol::message::ModelName>)> {
+        runs.hold_screen_text(runs.screen_notice(false, Some(luna)))
+    }
+    for (class, text) in [
+        (ScreenClass::Changed, Text::ShowScreenChanged),
+        (
+            ScreenClass::TooLarge,
+            Text::ScreenNotIncludedPictureTooLarge,
+        ),
+        (ScreenClass::NotReady, Text::ScreenNotIncludedNotReady),
+        (ScreenClass::ModelCantSee, Text::ScreenNotIncludedModel),
+    ] {
+        let mut runs = ready();
+        let luna = shown_to_luna(&mut runs);
+        runs.begin_screen_hold(GestureId(1), 1, false, Some(&luna))
+            .expect("held");
+        // Another gesture's outcome isn't this hold's.
+        assert!(!runs.hold_screen(GestureId(2), HeldScreen::NotIncluded(class)));
+        assert_eq!(line(&runs, &luna), None);
+        assert!(runs.hold_screen(GestureId(1), HeldScreen::NotIncluded(class)));
+        assert_eq!(line(&runs, &luna), Some((text, None)), "{class:?}");
+        // The first refusal stands.
+        assert!(!runs.hold_screen(
+            GestureId(1),
+            HeldScreen::NotIncluded(ScreenClass::NothingThere)
+        ));
+        assert_eq!(line(&runs, &luna), Some((text, None)), "{class:?}");
+    }
+
+    // A picture that was taken leaves no line: history's icon speaks for it.
+    let mut runs = ready();
+    let luna = shown_to_luna(&mut runs);
+    runs.begin_screen_hold(GestureId(1), 1, false, Some(&luna))
+        .expect("held");
+    assert!(runs.hold_screen(GestureId(1), HeldScreen::Screen));
+    assert_eq!(runs.hold_screen_line(), None);
+    // The brain's word lands once, whatever it was: a refusal after it changes nothing.
+    assert!(!runs.hold_screen(GestureId(1), HeldScreen::NotIncluded(ScreenClass::Changed)));
+    assert_eq!(runs.hold_screen_line(), None);
+
+    // The setting switched off while the keys were down has its own words.
+    runs.set_screen_holds(ScreenHolds::Off(ScreenOff::TurnedOff));
+    assert!(!runs.releases_screen(GestureId(1), false, Some(&luna)));
+    assert_eq!(
+        line(&runs, &luna),
+        Some((Text::ScreenNotIncludedTurnedOff, None))
+    );
+
+    // A hold that began as voice only has no line for an outcome to land on.
+    let mut runs = ready();
+    assert_eq!(
+        runs.begin_screen_hold(GestureId(1), 1, false, None),
+        Ok(ControlToBrain::VoiceHoldRecognized {
+            gesture: GestureId(1),
+            thread: Some(ThreadId(1)),
+            selection: 1,
+        })
+    );
+    assert!(!runs.hold_screen(GestureId(1), HeldScreen::NotIncluded(ScreenClass::Changed)));
+    assert_eq!(runs.hold_screen_line(), None);
+
+    // The window flow keeps its own words for the two classes that differ.
+    for (class, text) in [
+        (ScreenClass::Changed, Text::ScreenNotIncludedChanged),
+        (ScreenClass::TooLarge, Text::ScreenNotIncludedTooLarge),
+    ] {
+        let mut runs = ready();
+        let luna = shown_to_luna(&mut runs);
+        runs.begin_hold(GestureId(1), Some(SCREEN)).expect("held");
+        assert!(runs.hold_screen(GestureId(1), HeldScreen::NotIncluded(class)));
+        assert_eq!(line(&runs, &luna), Some((text, None)), "{class:?}");
+    }
+}
+
+#[test]
 fn a_release_the_notice_refuses_is_refused_for_good() {
-    use kumochi_protocol::message::{ModelName, ScreenHolds, ScreenOff};
+    use kumochi_protocol::message::{HeldScreen, ModelName, ScreenClass, ScreenHolds, ScreenOff};
     let luna = ModelName::new("GPT-6 Luna").expect("valid");
     let sol = ModelName::new("GPT-6 Sol").expect("valid");
     let on = ScreenHolds::On {
@@ -783,15 +849,28 @@ fn a_release_the_notice_refuses_is_refused_for_good() {
     let off = |why| Some(ScreenHolds::Off(why));
     // What changed while the keys were down: (what the brain says now, the target thread has
     // its own model now, the default's name now).
-    for (now, own, default) in [
-        (None, true, Some(&luna)),
+    // The last column is what the hold's line then says.
+    let not_ready = Some(ScreenLine::NotIncluded(ScreenClass::NotReady));
+    for (now, own, default, line) in [
+        (None, true, Some(&luna), not_ready),
         // The default just changed, so the stored `On` names the model before it.
-        (None, false, Some(&sol)),
-        (None, false, None),
-        (off(ScreenOff::Unsupported), false, Some(&luna)),
-        (off(ScreenOff::TurnedOff), false, Some(&luna)),
-        (off(ScreenOff::ModelCantSee), false, Some(&luna)),
-        (off(ScreenOff::NotReady), false, Some(&luna)),
+        (None, false, Some(&sol), not_ready),
+        (None, false, None, not_ready),
+        // No icon shows on a system that can't capture, so no line does.
+        (off(ScreenOff::Unsupported), false, Some(&luna), None),
+        (
+            off(ScreenOff::TurnedOff),
+            false,
+            Some(&luna),
+            Some(ScreenLine::TurnedOff),
+        ),
+        (
+            off(ScreenOff::ModelCantSee),
+            false,
+            Some(&luna),
+            Some(ScreenLine::NotIncluded(ScreenClass::ModelCantSee)),
+        ),
+        (off(ScreenOff::NotReady), false, Some(&luna), not_ready),
     ] {
         // Refused by the question the shell asks first, or by the builder.
         for asked in [true, false] {
@@ -809,7 +888,8 @@ fn a_release_the_notice_refuses_is_refused_for_good() {
                     .is_none()
             };
             assert!(refused, "{now:?} {own} {asked}");
-            // On again: still nothing.
+            assert_eq!(runs.hold_screen_line(), line, "{now:?} {own} {asked}");
+            // On again: still nothing, and the line still says why.
             runs.set_screen_holds(on.clone());
             assert!(
                 !runs.releases_screen(GestureId(1), false, Some(&luna)),
@@ -818,6 +898,16 @@ fn a_release_the_notice_refuses_is_refused_for_good() {
             assert_eq!(
                 runs.screen_release(GestureId(1), false, Some(&luna), release()),
                 None,
+                "{now:?} {own} {asked}"
+            );
+            assert_eq!(runs.hold_screen_line(), line, "{now:?} {own} {asked}");
+            // The brain's later word can't replace the reason the shell gave.
+            assert_eq!(
+                runs.hold_screen(
+                    GestureId(1),
+                    HeldScreen::NotIncluded(ScreenClass::NothingThere)
+                ),
+                line.is_none(),
                 "{now:?} {own} {asked}"
             );
             // The hold itself goes on, as voice.

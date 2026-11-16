@@ -838,10 +838,11 @@ fn episode(outer: &mut gpui_kit::TestAppContext, case: Case) {
     // allocation): two in the kept Scene (rest and view) and four in the recovered-scenes buffer.
     // They also include the screen unit each step's preparation carries (8 bytes, never retained).
     let bound = match case {
-        Case::A => [390, 131_281, 167, 65_694],
-        Case::B => [392, 130_145, 169, 64_558],
+        // A recreated host's root also holds its handle to a hold's line: 8 bytes, kept.
+        Case::A => [390, 131_289, 167, 65_702],
+        Case::B => [392, 130_153, 169, 64_566],
         Case::C | Case::E => [149, 46_108, 65, 19_394],
-        Case::D => [395, 131_209, 172, 65_622],
+        Case::D => [395, 131_217, 172, 65_630],
     };
     assert!(
         allocations <= bound[0]

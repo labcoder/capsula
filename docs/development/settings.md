@@ -24,7 +24,7 @@ Cancel-first confirmation and rechecks the session and allowed operation when co
 No login URL, code or credential contents reach the shell. See [Claude Code](claude-code.md).
 
 The status panel's **Settings…** opens a retained window, the tasks panel's size and anchored
-with the same work-area clamping. Kit's tabs expose **General**, **Accounts** and **Voice**.
+with the same work-area clamping. Kit's tabs expose **General**, **Accounts**, **Voice** and **Privacy**.
 `shell-core/settings.rs` owns the plain drafts, validation, per-field saving and errors;
 `presence/settings/window.rs` owns the window and session sends; `presence/settings/mod.rs`
 owns the shared view frame, retained Kit inputs and subscriptions. `general.rs` and `accounts.rs`
@@ -97,7 +97,7 @@ not idle-policy writes. Its ordered answer settles just that request slot, never
 state and never proves cancellation or physical release; an accepted cancel can remain Loading
 or become Ready. Only generation-fenced Voice snapshots update the displayed model state.
 
-Scoped Ctrl+Tab and Ctrl+Shift+Tab actions cycle the three tabs through `select_tab`, wrapping
+Scoped Ctrl+Tab and Ctrl+Shift+Tab actions cycle the four tabs through `select_tab`, wrapping
 in either direction and returning focus to the Settings frame, whose border shows that focus.
 The pinned Kit tabs are not keyboard focus targets. Tab and Shift+Tab reach the selected tab's
 controls in normal order; Space activates a focused radio. Switching tabs retains drafts and
@@ -253,7 +253,7 @@ than growing the window with the text. The existing Settings content region owns
 | `[voice] talk_back` | boolean | `false` |
 | `[voice] stt_unload` | `kept`, `15m` or `1h` | `kept` |
 | `[voice] hold_to_talk` | boolean | `true` |
-| `[voice] show_screen` | boolean | `false` |
+| `[voice] show_screen` | boolean | `true`, or `false` when `screen_holds` was refused |
 
 **Onboarding** is owed while `onboarded` reads `false`. With no `onboarded` key, a profile
 already in use counts as onboarded: at start the account's first load is a signed-in ChatGPT
@@ -278,10 +278,14 @@ fails closed to off without rewriting the file. Its setter changes no other voic
 
 `show_screen` is whether a hold may also show the model a picture of the screen, taken when the
 hold is released. `SetShowScreen` saves it. It has its own key so that `screen_holds`, a choice
-about the window under the pointer, is never read as a choice about the whole screen: a file
-without `show_screen` reads as `DEFAULT_SHOW_SCREEN`, off, whatever `screen_holds` says. A value
-of the wrong type reads as off, and so does a file that can't be read. No interface sends the
-op yet. The brain checks it when a screen hold is recognized, released and run, and turning it
+about the window under the pointer, is never read as consent to the whole screen. A file
+without `show_screen` reads as `DEFAULT_SHOW_SCREEN`, on, with one exception: someone who
+refused the window's picture isn't switched to the whole screen unasked, so a `screen_holds`
+that is stored off, or isn't a boolean and so reads as off, makes a missing `show_screen` off
+too. A value of the wrong type reads as off, and so does a file that can't be read. The Privacy
+tab's checkbox sends the op (`presence/settings/privacy.rs`); `screen_holds` keeps its key, and
+no interface sets it any more. `ScreenHolds` speaks for `show_screen`
+([ipc](ipc.md#screen-holds)). The brain checks it when a screen hold is recognized, released and run, and turning it
 off withdraws every run's screen picture, as turning `screen_holds` off withdraws every window
 image ([engines](engines.md)).
 

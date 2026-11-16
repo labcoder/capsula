@@ -160,42 +160,6 @@ impl SettingsView {
                     .text_color(cx.theme().danger)
                     .child(strings.error(error))
             }))
-            .child(
-                Checkbox::new("screen-holds")
-                    .label(strings.get(Text::ScreenHolds))
-                    .checked(state.screen_holds_choice() == Some(true))
-                    .disabled(state.view().is_none() || state.screen_holds_pending())
-                    .on_change(cx.listener(|view, on, _, cx| {
-                        let sent = view
-                            .owner
-                            .update(cx, |owner, cx| owner.save_screen_holds(*on, cx))
-                            .unwrap_or(false);
-                        view.hold_notice = (!sent).then_some(Text::SettingsUnavailable);
-                        cx.notify();
-                    }))
-                    .map(|checkbox| {
-                        #[cfg(test)]
-                        let checkbox = checkbox.debug_selector(|| "screen-holds".into());
-                        checkbox
-                    }),
-            )
-            .child(
-                div()
-                    .text_xs()
-                    .text_color(cx.theme().muted_foreground)
-                    .child(strings.get(Text::ScreenHoldsHelp)),
-            )
-            .children(
-                state
-                    .screen_holds_pending()
-                    .then(|| div().text_xs().child(strings.get(Text::SettingsSaving))),
-            )
-            .children(state.screen_holds_error().map(|error| {
-                div()
-                    .text_sm()
-                    .text_color(cx.theme().danger)
-                    .child(strings.error(error))
-            }))
             .children(self.hold_notice.map(|notice| {
                 div()
                     .text_sm()

@@ -119,10 +119,12 @@ and native key-up rendezvous once before KeyUp is sent, regardless of UI deliver
 Committed PCM may drain after native retirement; logical input/session/choice fences still
 discard stale packets. Typed submissions remain text-only
 (`ScreenChoice::None`). A recognized hold whose [standing notice](ipc.md#screen-holds) is on
-takes the [exclusion lease](screen.md#local-shell-exclusion) and goes out as `HoldRecognized`
-with that lease and the pointer. The native callback samples the pointer once, when its delivery
-carries the recognition, so the hold names the window the pointer was over then, however late
-the UI thread applies the delivery. `input/hold.rs` never sees the pointer.
+goes out as `ScreenHoldRecognized`, and its release takes the
+[exclusion lease](screen.md#local-shell-exclusion) and goes out as `ScreenRelease`
+([presence](presence.md#a-screen-holds-pointer-line)). The native callback samples the pointer
+when its delivery carries a recognition or a release that isn't a cancel. So the line starts
+where the pointer was at recognition, and the picture is of the display it was on at release,
+however late the UI thread applies the delivery. `input/hold.rs` never sees the pointer.
 
 ## The typing panel
 
@@ -610,5 +612,5 @@ that is under 100% or not a number counts as 100%.
   nothing, and the path joins up in a straight line when the pointer comes back.
 
 `sample` returns true when the path changed. A pointer that never leaves the first 24 pixels
-finishes as an empty path. Nothing samples yet: the timer and the line on screen come with the
-shell's side of the screen hold.
+finishes as an empty path. The shell's sampler feeds it every 16 ms while a screen hold's keys
+are down ([presence](presence.md#a-screen-holds-pointer-line)).

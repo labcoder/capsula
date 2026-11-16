@@ -74,6 +74,7 @@ fn hidden_drawing(owner: &gpui_kit::Entity<Presence>, cx: &mut gpui_kit::TestApp
             cx.weak_entity(),
             Rc::clone(&this.paint_scratch),
             Rc::clone(&this.paint_notice),
+            Rc::clone(&this.ink),
             cx,
         );
         this.overlay = super::super::overlay_visibility::Visibility::Hidden(overlay);

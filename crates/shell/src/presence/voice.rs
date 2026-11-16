@@ -3,16 +3,18 @@ use std::rc::Rc;
 use std::sync::atomic::Ordering;
 use std::time::Instant;
 
-use kumochi_protocol::geometry::PhysicalPoint;
+use kumochi_protocol::geometry::{PhysicalPoint, PhysicalRect, PointerPath};
 use kumochi_protocol::message::{
     CaptureFor, ControlToBrain, GestureId, HoldFailure, HoldStatus, ModelName, Phase, RunId,
     RunOrigin, ThreadId,
 };
 
+use super::ink::Sampler;
 use super::{Context, Presence, Session};
 use crate::input::hold::Intent;
+use crate::input::path::PathRecorder;
 use crate::platform::microphone::{Generation, Mode};
-use crate::runs::{ScreenHold, ScreenNotice};
+use crate::runs::{HoldRelease, ScreenNotice};
 use crate::strings::{Strings, Text};
 
 mod source;
@@ -58,6 +60,8 @@ enum FailureReason {
     StopSend,
     ReleaseSend,
     StaleReceipt,
+    PointerUnread,
+    ScreenReleaseSend,
 }
 
 #[cfg(test)]
@@ -90,6 +94,9 @@ pub(super) struct Hold {
     session: Session,
     source: Source,
     released: Option<u64>,
+    /// A hold the brain was told shows the screen, until it asks for that release: once, when
+    /// the keys come up or when the notice stops being `On` before they do.
+    screen: bool,
     terminal: Option<Text>,
     /// Later run states carry no origin, so they match the hold by the run its first one named.
     run: Option<RunId>,
@@ -221,6 +228,7 @@ impl Presence {
     }
 
     fn end_voice(&mut self, text: Text, cx: &mut Context<'_, Self>) {
+        self.stop_line(cx);
         let mut notice = text;
         if let Some(mut hold) = self.voice.pending.take() {
             let gesture = hold.token.gesture();
@@ -271,9 +279,10 @@ impl Presence {
         pending
     }
 
-    /// What a hold on the current target does with the window under the pointer. The send and
-    /// the dock's icon both read this, so the icon never names a model the image won't reach.
-    pub(super) fn screen_notice<'a>(&'a self, cx: &'a gpui_kit::App) -> ScreenNotice<'a> {
+    /// The standing notice's two inputs: whether the target thread runs on its own model, and
+    /// the default model's name. The dock's icon and every question a hold asks about the
+    /// screen read these, so the icon never names a model the picture won't reach.
+    fn screen_inputs<'a>(&self, cx: &'a gpui_kit::App) -> (bool, Option<&'a ModelName>) {
         let settings = self.settings.read(cx);
         // shortcut: a thread whose row was never read counts as on the default model (OSC-763), upgrade before any view sends `SetModel`.
         let own = self
@@ -281,33 +290,200 @@ impl Presence {
             .thread()
             .and_then(|thread| self.threads.read(cx).row(thread))
             .and_then(|row| row.choice.as_ref());
-        self.runs
-            .screen_notice(settings.own_model(own), settings.default_model_name())
+        (settings.own_model(own), settings.default_model_name())
     }
 
-    /// Follows the standing notice and the current hold's line in the status panel. A link event
-    /// batch that changes neither costs a comparison and no allocation.
-    pub(super) fn refresh_screen(&self, cx: &mut Context<'_, Self>) {
-        let notice = self.screen_notice(cx);
-        let shown = [notice.text(), self.runs.hold_screen_text(notice)];
-        let panel = self.panel.read(cx);
-        if [&panel.screen, &panel.screen_line]
-            .into_iter()
-            .zip(shown)
-            .all(|(old, new)| old.as_ref().map(|(text, model)| (*text, model.as_ref())) == new)
-        {
+    /// What a hold on the current target does with the screen.
+    pub(super) fn screen_notice<'a>(&'a self, cx: &'a gpui_kit::App) -> ScreenNotice<'a> {
+        let (own_model, default) = self.screen_inputs(cx);
+        self.runs.screen_notice(own_model, default)
+    }
+
+    /// Follows the notice while a hold that shows the screen has its keys down. A notice that
+    /// stops being `On` ends the line at once, and that refusal is the gesture's one ask: the
+    /// hold's line says why, and its release sends nothing even if the notice comes back.
+    pub(super) fn screen_changed(&mut self, cx: &mut Context<'_, Self>) {
+        if matches!(self.screen_notice(cx), ScreenNotice::On(_)) {
             return;
         }
-        let [screen, screen_line] =
-            shown.map(|shown| shown.map(|(text, model)| (text, model.cloned())));
-        self.panel.update(cx, |panel, cx| {
-            panel.screen = screen;
-            panel.screen_line = screen_line;
-            cx.notify();
-        });
+        let Some(gesture) = self
+            .voice
+            .pending
+            .as_mut()
+            .and_then(|hold| std::mem::take(&mut hold.screen).then(|| hold.token.gesture()))
+        else {
+            return;
+        };
+        self.stop_line(cx);
+        let (own_model, default) = self.screen_inputs(cx);
+        self.runs.releases_screen(gesture, own_model, default);
     }
 
-    /// `pointer` is where the pointer was when the native callback recognized a hold.
+    /// The primary display in physical pixels, which is the one the overlay covers and so the
+    /// one a hold's line is drawn on, with its scale.
+    fn line_display(&mut self, cx: &mut Context<'_, Self>) -> Option<(PhysicalRect, f32)> {
+        // The overlay sits on the primary display, so its scale is that display's; the dock may
+        // be on another one, and stands in only until the overlay first opens.
+        let window = self
+            .overlay
+            .window()
+            .map_or(self.dock_window, |overlay| overlay.window);
+        let scale = window
+            .update(cx, |_, window, _| window.scale_factor())
+            .ok()?;
+        let size = super::overlay::primary(scale, cx)?.map(i32::unsigned_abs);
+        Some((
+            PhysicalRect {
+                origin: [0, 0],
+                size,
+            },
+            scale,
+        ))
+    }
+
+    /// Starts a screen hold's line from where the pointer was at recognition: the recorder and
+    /// the timer that samples into it.
+    fn start_line(
+        &mut self,
+        gesture: GestureId,
+        origin: PhysicalPoint,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let Some((display, scale)) = self.line_display(cx) else {
+            return;
+        };
+        let recorder = PathRecorder::new(origin, scale, display);
+        let sampler = Sampler::start(gesture, recorder, cx, Self::sample_line);
+        *self.ink.borrow_mut() = Some(sampler);
+    }
+
+    /// One tick of a screen hold's timer; false ends it. The line belongs to the pending hold
+    /// while its keys are down, and anything else that is left of it is cleared here.
+    fn sample_line(&mut self, cx: &mut Context<'_, Self>) -> bool {
+        let held = self.ink.borrow().as_ref().is_some_and(|ink| {
+            self.voice.pending.as_ref().is_some_and(|hold| {
+                hold.token.gesture() == ink.gesture()
+                    && hold.released.is_none()
+                    && hold.terminal.is_none()
+            })
+        });
+        if !held {
+            self.stop_line(cx);
+            return false;
+        }
+        // The read takes no lock and doesn't block; a failed one is skipped.
+        let point = crate::platform::cursor_position().ok().map(PhysicalPoint);
+        let changed = point.is_some_and(|point| {
+            self.ink
+                .borrow_mut()
+                .as_mut()
+                .is_some_and(|ink| ink.sample(point))
+        });
+        if changed {
+            self.line_changed(cx);
+        }
+        true
+    }
+
+    /// Ends a screen hold's sampling and takes its line off the overlay.
+    fn stop_line(&mut self, cx: &mut Context<'_, Self>) -> Option<Sampler> {
+        let sampler = self.ink.borrow_mut().take()?;
+        self.line_changed(cx);
+        Some(sampler)
+    }
+
+    /// The keys of a hold that shows the screen came up. Asks once whether the release still
+    /// shows it, stops the line, covers every presence surface and stamps when the last one was
+    /// covered, then sends the one `ScreenRelease`. Whatever stops it short leaves the hold
+    /// voice only, and its line says why.
+    fn release_screen(
+        &mut self,
+        gesture: GestureId,
+        session: &Session,
+        t_qpc: u64,
+        pointer: Option<PhysicalPoint>,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let sampler = self.stop_line(cx);
+        let (own_model, default) = self.screen_inputs(cx);
+        if !self.runs.releases_screen(gesture, own_model, default) {
+            return;
+        }
+        // An unchecked box that is still saving is already the user's no.
+        if self.settings.read(cx).show_screen_choice() == Some(false) {
+            self.runs.hold_screen_turned_off();
+            return;
+        }
+        // The pointer picks the display, so a release that couldn't read it shows none.
+        let Some(pointer) = pointer else {
+            tracing::debug!(stage = ?FailureStage::Release, reason = ?FailureReason::PointerUnread, "screen release refused; voice only");
+            self.runs.hold_screen_refused();
+            return;
+        };
+        #[cfg(test)]
+        let read = {
+            let fixture = self.counter_fixture.clone();
+            move || fixture.map_or_else(crate::platform::performance_counter, |read| read())
+        };
+        #[cfg(not(test))]
+        let read = crate::platform::performance_counter;
+        let stamped = self.acquire_stamped(session, CaptureFor::Gesture(gesture), read, cx);
+        let (lease, excluded_qpc) = match stamped {
+            Ok(stamped) => stamped,
+            Err(reason) => {
+                tracing::debug!(stage = ?FailureStage::Release, ?reason, "screen release refused; voice only");
+                self.runs.hold_screen_refused();
+                return;
+            }
+        };
+        // The line was drawn on the overlay's display, so a picture of another one carries none.
+        let path = sampler
+            .filter(|sampler| {
+                let size = sampler.display();
+                [0, 1]
+                    .into_iter()
+                    .all(|axis| u32::try_from(pointer.0[axis]).is_ok_and(|at| at < size[axis]))
+            })
+            .map_or_else(|| PointerPath(Vec::new()), Sampler::finish);
+        let (own_model, default) = self.screen_inputs(cx);
+        let release = HoldRelease {
+            pointer,
+            path,
+            lease,
+            t_qpc,
+            excluded_qpc,
+        };
+        let sent = self
+            .runs
+            .screen_release(gesture, own_model, default, release)
+            .is_some_and(|message| self.link.send_control(session, message));
+        if sent {
+            self.screen_lease = Some(lease);
+        } else {
+            tracing::warn!(stage = ?FailureStage::Release, reason = ?FailureReason::ScreenReleaseSend, "held speech input failed");
+            // The brain never saw this lease, so releasing it is no lapse.
+            self.revoke_exclusion(cx);
+        }
+    }
+
+    /// Follows the current hold's line in the status panel. A link event batch that doesn't
+    /// change it costs a comparison and no allocation.
+    pub(super) fn refresh_screen(&self, cx: &mut Context<'_, Self>) {
+        let notice = self.screen_notice(cx);
+        let shown = self.runs.hold_screen_text(notice);
+        let old = &self.panel.read(cx).screen_line;
+        let line = (old.as_ref().map(|(text, model)| (*text, model.as_ref())) != shown)
+            .then(|| shown.map(|(text, model)| (text, model.cloned())));
+        if let Some(screen_line) = line {
+            self.panel.update(cx, |panel, cx| {
+                panel.screen_line = screen_line;
+                cx.notify();
+            });
+        }
+    }
+
+    /// `pointer` is where the pointer was when the native callback recognized a hold or saw its
+    /// keys come up.
     pub(super) fn voice_intent(
         &mut self,
         intent: Intent,
@@ -365,6 +541,10 @@ impl Presence {
                     self.end_voice(Text::HoldCancelled, cx);
                 } else {
                     hold.released = Some(qpc);
+                    if std::mem::take(&mut hold.screen) {
+                        let session = hold.session.clone();
+                        self.release_screen(gesture, &session, qpc, pointer, cx);
+                    }
                     self.voice_notice(Text::HoldStopping, cx);
                     self.finish_voice();
                 }
@@ -461,25 +641,13 @@ impl Presence {
             self.voice_notice(Text::HoldFailed, cx);
             return;
         }
-        // A screen hold only while the notice says so, and only under a lease taken here, after
-        // every refusal above; without one the hold is voice only.
-        let mut unleased = false;
-        let screen = match pointer {
-            Some(pointer) if matches!(self.screen_notice(cx), ScreenNotice::On(_)) => self
-                .acquire_exclusion(&session, CaptureFor::Gesture(gesture), cx)
-                .inspect_err(|reason| {
-                    unleased = true;
-                    tracing::debug!(stage = ?FailureStage::Admission, ?reason, "screen hold refused; voice only");
-                })
-                .ok()
-                .map(|lease| ScreenHold {
-                    pointer,
-                    lease,
-                    t_qpc: qpc,
-                }),
-            _ => None,
-        };
-        let request = self.runs.begin_hold(gesture, screen);
+        // Nothing of the screen is taken now, after every refusal above. The runs model reads
+        // the notice the dock's icon shows, and its answer says which hold this is.
+        let (own_model, default) = self.screen_inputs(cx);
+        let request = self
+            .runs
+            .begin_screen_hold(gesture, qpc, own_model, default);
+        let screen = matches!(request, Ok(ControlToBrain::ScreenHoldRecognized { .. }));
         let notice = if matches!(request, Err(crate::runs::Refused::Busy)) {
             Text::TurnBusy
         } else {
@@ -503,11 +671,10 @@ impl Presence {
             }
         };
         if sent {
-            if let Some(screen) = screen {
-                self.screen_lease = Some(screen.lease);
-            } else if unleased {
-                // The eye said this hold would show the window, so its line says it didn't.
-                self.runs.hold_screen_refused();
+            // The line starts only once the brain was told this hold shows the screen, and
+            // only from where the pointer was read: without that the picture goes alone.
+            if screen && let Some(origin) = pointer {
+                self.start_line(gesture, origin, cx);
             }
             self.voice.pending = Some(Hold {
                 token,
@@ -515,6 +682,7 @@ impl Presence {
                 session,
                 source: Source::Waiting,
                 released: None,
+                screen,
                 terminal: None,
                 run: None,
             });
@@ -523,10 +691,6 @@ impl Presence {
             self.refusal = None;
             self.voice_notice(Text::HoldPreparing, cx);
         } else {
-            if screen.is_some() {
-                // The brain never saw this lease, so releasing it is no lapse.
-                self.revoke_exclusion(cx);
-            }
             self.unused_voice(&token, &session);
             self.link.clear_input(gesture);
             self.runs.cancel_hold();

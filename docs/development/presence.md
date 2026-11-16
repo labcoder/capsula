@@ -209,16 +209,15 @@ flowchart LR
   grace timer covers the gap between them. The panel's background is blurred where Windows
   allows it, with 85% opacity as the fallback. The stretch is gone with the old pill: motion
   trials return with the pull (C2a), and `cargo xtask bench stretch` says so.
-- **Screen notice.** Beside the link status the peek draws an eye while a hold on the current
-  target also shows the model the window under the pointer, and a struck-through eye with the
-  reason when it doesn't: the model can't take images, screen sharing isn't ready or is switched
-  off, or the thread has its own model. Nothing draws when the system can't capture. The tooltip
-  names the only model the image can reach ([the check](ipc.md#screen-holds)). During a screen
-  hold the line under the status says `<model> will see this window`, then why the window
-  wasn't included, in place of the settings notice; when the image is attached the line clears
-  and history carries it. The typing panel shows the same line when no voice status does.
-  `Presence::refresh_screen` pushes both after link events and dock refreshes; it compares
-  first, so a batch that changes neither allocates nothing.
+- **Screen line.** The dock and its peek say nothing about the screen, in any state: no icon
+  and no tooltip, whether a hold will send the picture, the setting is off, or something else
+  stops it. A hold says nothing about the picture it will send, and shows the
+  [pointer's line](#a-screen-holds-pointer-line) instead. When the picture isn't included,
+  the line under the status says why, in place of the settings notice; when it is, nothing
+  shows and history carries its icon. The typing panel shows the same line when no voice
+  status does. A hold that is voice only from the start shows nothing.
+  `Presence::refresh_screen` pushes the line after link events and dock refreshes; it
+  compares first, so a batch that changes nothing allocates nothing.
 - **Kumo in the peek.** `presence/kumo_view.rs` owns a 64-pixel Kumo. Its body is baked once,
   on the background executor at the launch scale, and kept across hiding as a prewarm; a scale
   change needs a restart (OSC-188 wires display changes). The peek is 380 wide and only as tall
@@ -360,8 +359,6 @@ the answer text, and hands it the steps it lets through.
 
 ## A screen hold's pointer line
 
-Not called yet: the screen hold's activation is the first caller of everything in this section.
-
 While a screen hold's keys are down, the shell draws where the pointer goes, in the drawing
 overlay, as the picture will show it. `presence/ink.rs` holds the three pieces.
 
@@ -390,6 +387,33 @@ overlay, as the picture will show it. `presence/ink.rs` holds the three pieces.
 Points are physical desktop pixels, and the overlay covers the primary display from the
 desktop's origin, so a point needs only the display's scale to become the overlay's logical
 pixels. A point is drawn at its pixel's centre, where the painter puts it.
+
+**While the keys are down** (`presence/voice.rs`). A hold whose recognition went out as
+`ScreenHoldRecognized` starts a sampler from where the pointer was read at recognition. A hold
+whose pointer couldn't be read then still sends the screen, with no line. `sample_line` is the
+tick: it ends when the pending hold is no longer this one, was released or has ended; it reads
+the pointer without blocking and skips a failed read; and it repaints only when the path
+changed. The line also stops in `end_voice`, which every cancel and failure reaches, and as soon
+as the standing notice stops being `On` (`screen_changed`, after every batch of link events).
+That last stop is the gesture's one ask about its release, so the release sends nothing even
+if the notice comes back, and the hold's line says why.
+
+The overlay shows while a drawing is visible or the line has points (`sync_overlay`), so a line
+alone shows it and a line's end hides it when no drawing is up. Both strokes are rebuilt on
+every overlay paint, about 1.3 ms at the 2,048-point cap on Rez; a `shortcut:` at the build
+names keeping the triangles between paints as the upgrade.
+
+**At release** (`release_screen`), in order: the line stops; `Runs::releases_screen` is asked,
+once; the pointer read with the release delivery picks the display, and a release without one
+sends nothing; `acquire_stamped` takes the lease and the stamp; `Runs::screen_release` builds
+the one `ScreenRelease`, which is sent at once. `KeyUp` follows as before. Whatever stops this
+short leaves the hold voice-only, and its line says the screen wasn't ready. A lease whose
+release couldn't be built or sent is given back at once and tells no lapse. A release while the
+capture before it still holds its lease is refused the same way.
+
+The line is drawn on the primary display only, like every drawing. A release with the pointer
+on another display sends that display's picture with an empty path: what the model gets never
+shows a line the user didn't see on it.
 
 `measure_the_hold_line`, an ignored test beside the code, times building both paths for lines
 of 2, 256 and 2,048 points, and a sampler's worst case of a new point on every tick.

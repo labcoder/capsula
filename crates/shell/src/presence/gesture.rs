@@ -28,7 +28,7 @@ struct Pending {
     delivery: Delivery,
     stamp: Stamp,
     qpc: u64,
-    /// Where the pointer was when this delivery recognized a hold.
+    /// Where the pointer was when this delivery recognized a hold or saw its keys come up.
     pointer: Option<PhysicalPoint>,
     cancelled: Option<GestureId>,
     escape: bool,
@@ -153,8 +153,9 @@ pub(super) fn deliver(
         {
             return state.deadline();
         }
-        // Sampled once, here in the callback, so a screen hold names the window the pointer was
-        // over at recognition, however late the owner applies the delivery.
+        // Sampled once, here in the callback, so a screen hold's line starts where the pointer
+        // was at recognition and its picture is of the display the pointer was on at release,
+        // however late the owner applies the delivery.
         let pointer = delivery
             .intents
             .iter()
@@ -164,6 +165,9 @@ pub(super) fn deliver(
                     intent,
                     Intent::Recognized {
                         generation: Ok(_),
+                        ..
+                    } | Intent::End {
+                        cancelled: false,
                         ..
                     }
                 )

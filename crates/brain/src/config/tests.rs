@@ -348,29 +348,41 @@ fn screen_holds_read_as_off_when_the_file_cant_be_read() {
 }
 
 #[test]
-fn show_screen_defaults_off_whatever_screen_holds_says_persists_and_a_bad_value_reads_as_off() {
+fn show_screen_starts_on_unless_the_window_choice_was_refused_persists_and_a_bad_value_reads_as_off()
+ {
     let scratch = Scratch::new("config-show-screen");
     let dir = dir(&scratch);
-    assert!(
-        !Config::load(Some(dir.clone()), ThreadId(1))
+    let read = |dir: &std::path::Path| {
+        Config::load(Some(dir.into()), ThreadId(1))
             .view()
             .show_screen
-    );
-    // A stored On for the window under the pointer is not a choice about the whole screen.
-    std::fs::write(dir.join(CONFIG_FILE), "[voice]\nscreen_holds = true\n").unwrap();
+    };
+    assert!(read(&dir), "no file");
+    // The `[voice]` table and what the setting reads as.
+    for (voice, on) in [
+        ("screen_holds = true", true),
+        // Someone who refused the window's picture isn't switched to the whole screen.
+        ("screen_holds = false", false),
+        ("screen_holds = \"true\"", false),
+        ("screen_holds = false\nshow_screen = true", true),
+        ("screen_holds = true\nshow_screen = false", false),
+    ] {
+        std::fs::write(dir.join(CONFIG_FILE), format!("[voice]\n{voice}\n")).unwrap();
+        assert_eq!(read(&dir), on, "{voice}");
+    }
+    // A choice made here is stored under its own key and outlives the refusal beside it.
+    std::fs::write(dir.join(CONFIG_FILE), "[voice]\nscreen_holds = false\n").unwrap();
     let mut config = Config::load(Some(dir.clone()), ThreadId(1));
-    assert!(config.view().screen_holds);
-    assert!(!config.view().show_screen);
     for on in [true, false] {
         let op: SettingsOp = kumochi_protocol::frame::decode(&[15, u8::from(on)]).unwrap();
         apply(&mut config, op);
         let voice = &saved(&dir.join(CONFIG_FILE))["voice"];
         assert_eq!(voice["show_screen"].as_bool(), Some(on));
-        assert_eq!(voice["screen_holds"].as_bool(), Some(true));
+        assert_eq!(voice["screen_holds"].as_bool(), Some(false));
         apply(&mut config, SettingsOp::SetHoldToTalk(true));
         let reloaded = Config::load(Some(dir.clone()), ThreadId(1));
         assert_eq!(reloaded.view().show_screen, on);
-        assert!(reloaded.view().screen_holds);
+        assert!(!reloaded.view().screen_holds);
     }
     for value in ["\"true\"", "1", "[]"] {
         let seeded = format!("[voice]\nshow_screen = {value}\n");

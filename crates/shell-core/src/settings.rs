@@ -94,7 +94,7 @@ enum Slot {
     Taskbar(TaskbarChoice),
     SttUnload(SttUnload),
     HoldToTalk(bool),
-    ScreenHolds(bool),
+    ShowScreen(bool),
     SpeechInput(SpeechInputAction),
     /// The default model; the choice itself is `Settings::model_queued`.
     Model,
@@ -113,7 +113,7 @@ impl Slot {
             | (Self::Taskbar(_), Self::Taskbar(_))
             | (Self::SttUnload(_), Self::SttUnload(_))
             | (Self::HoldToTalk(_), Self::HoldToTalk(_))
-            | (Self::ScreenHolds(_), Self::ScreenHolds(_))
+            | (Self::ShowScreen(_), Self::ShowScreen(_))
             | (Self::SpeechInput(_), Self::SpeechInput(_))
             | (Self::Model, Self::Model)
             | (Self::Onboarding, Self::Onboarding)
@@ -130,7 +130,7 @@ impl Slot {
             | Self::Taskbar(_)
             | Self::SttUnload(_)
             | Self::HoldToTalk(_)
-            | Self::ScreenHolds(_)
+            | Self::ShowScreen(_)
             | Self::SpeechInput(_)
             | Self::Model
             | Self::Onboarding
@@ -411,7 +411,7 @@ impl Settings {
                 | Slot::Taskbar(_)
                 | Slot::SttUnload(_)
                 | Slot::HoldToTalk(_)
-                | Slot::ScreenHolds(_)
+                | Slot::ShowScreen(_)
                 | Slot::SpeechInput(_)
                 | Slot::Model
                 | Slot::Onboarding

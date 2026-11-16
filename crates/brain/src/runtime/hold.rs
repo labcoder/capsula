@@ -924,10 +924,11 @@ impl Brain {
         self.offline(Input::ShowScreenOff);
     }
 
-    /// Sends the gate's state for the default model once per connection, then whenever it changes.
+    /// Sends the gate's state for the default model once per connection, then whenever it
+    /// changes. It speaks for the screen's picture at release, which is the hold the shell sends.
     pub(super) fn screen_holds_changed(&mut self, link: &mut Link<'_, '_>) -> Result<(), Full> {
         let choice = self.config.view().default_model.clone();
-        let state = self.screen_gate(choice.as_ref());
+        let state = self.display_gate(choice.as_ref());
         if self.holds.screen_sent.as_ref() == Some(&state) {
             return Ok(());
         }

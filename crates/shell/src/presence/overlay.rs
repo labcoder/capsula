@@ -27,7 +27,8 @@ use kumochi_scene::{
     record::Align,
 };
 
-use super::overlay_visibility::Surface;
+use super::ink::{self, Held};
+use super::overlay_visibility::{Surface, Visibility};
 use super::paint_cache::{self, PaintScene, Pending};
 use super::paint_geometry;
 use super::paint_paths::{self, BuildError};
@@ -78,6 +79,7 @@ impl Overlay {
         owner: WeakEntity<Presence>,
         scratch: Rc<RefCell<Scratch>>,
         notice: Rc<PaintNotice>,
+        ink: Held,
         cx: &mut App,
     ) -> Self {
         let painting = Rc::new(Cell::new(false));
@@ -89,6 +91,7 @@ impl Overlay {
                 painting: gate,
                 scratch,
                 notice,
+                ink,
             })
         })
         .expect("a hidden GPUI test overlay");
@@ -108,6 +111,7 @@ struct Drawing {
     painting: Rc<Cell<bool>>,
     scratch: Rc<RefCell<Scratch>>,
     notice: Rc<PaintNotice>,
+    ink: Held,
 }
 
 impl Render for Drawing {
@@ -119,6 +123,7 @@ impl Render for Drawing {
             painting: Rc::clone(&self.painting),
             scratch: Rc::clone(&self.scratch),
             notice: Rc::clone(&self.notice),
+            ink: Rc::clone(&self.ink),
             style: StyleRefinement::default(),
             #[cfg(test)]
             observation: None,
@@ -133,6 +138,7 @@ struct DrawingElement {
     painting: Rc<Cell<bool>>,
     scratch: Rc<RefCell<Scratch>>,
     notice: Rc<PaintNotice>,
+    ink: Held,
     style: StyleRefinement,
     #[cfg(test)]
     observation: Option<u8>,
@@ -241,6 +247,26 @@ impl Element for DrawingElement {
                         )
                     })
                 });
+            if self.painting.get()
+                && let Some(sampler) = self.ink.borrow().as_ref()
+            {
+                // shortcut: both strokes are tessellated on every overlay paint, about 1.3 ms at the 2,048-point cap on Rez; keep the triangles between paints if long lines drop frames
+                let strokes = ink::strokes(
+                    &mut self.scratch.borrow_mut(),
+                    sampler.line(),
+                    sampler.display(),
+                    window.scale_factor(),
+                );
+                match strokes {
+                    Ok(strokes) => {
+                        for (path, colour) in strokes.into_iter().flatten() {
+                            let _gpui = paint_phase::enter(Phase::Gpui);
+                            window.paint_path(path, colour);
+                        }
+                    }
+                    Err(error) => tracing::debug!(%error, "a hold's line couldn't be built"),
+                }
+            }
             let observations = if self.painting.get() {
                 self.frames.borrow().observations()
             } else {
@@ -377,11 +403,29 @@ impl Presence {
         moving
     }
 
+    /// Follows a change in a screen hold's line. A shown overlay repaints; the line's first
+    /// points and its end go through the sync, which shows the overlay for a line alone and
+    /// hides it once neither a line nor a drawing is left.
+    pub(super) fn line_changed(&mut self, cx: &mut Context<'_, Self>) {
+        if let Visibility::Shown(overlay) = &self.overlay {
+            overlay.drawing.update(cx, |_, cx| cx.notify());
+            if ink::drawn(&self.ink) {
+                return;
+            }
+        }
+        self.draw_changed(cx);
+    }
+
     pub(super) fn sync_overlay(
         &mut self,
         sample: Sample,
         cx: &mut Context<'_, Self>,
     ) -> Result<(), OpenError> {
+        // The overlay shows while a drawing is visible or a hold's line has points.
+        let sample = Sample {
+            visible: sample.visible || ink::drawn(&self.ink),
+            ..sample
+        };
         let frames = self.presenter.frames();
         if sample.visible && self.overlay.window().is_some() {
             self.protect_surface(super::exclusion::Slot::Drawing, cx)?;
@@ -403,6 +447,7 @@ impl Presence {
             events: &self.events,
             scratch: &self.paint_scratch,
             notice: &self.paint_notice,
+            ink: &self.ink,
         };
         self.overlay.sync(&mut surface, &frames, sample)
     }
@@ -419,6 +464,7 @@ struct Gpui<'a> {
     events: &'a Sender<PresenceEvent>,
     scratch: &'a Rc<RefCell<Scratch>>,
     notice: &'a Rc<PaintNotice>,
+    ink: &'a Held,
 }
 
 impl Surface for Gpui<'_> {
@@ -432,6 +478,7 @@ impl Surface for Gpui<'_> {
             owner,
             Rc::clone(self.scratch),
             Rc::clone(self.notice),
+            Rc::clone(self.ink),
             self.surfaces.cx,
             |window, cx| {
                 #[cfg(test)]
@@ -501,6 +548,7 @@ fn open(
     owner: WeakEntity<Presence>,
     scratch: Rc<RefCell<Scratch>>,
     notice: Rc<PaintNotice>,
+    ink: Held,
     cx: &mut App,
     configure: impl FnOnce(&mut Window, &mut App) -> Result<(), platform::PresenceError>,
 ) -> Result<Overlay, OpenError> {
@@ -513,6 +561,7 @@ fn open(
             painting: gate,
             scratch,
             notice,
+            ink,
         })
     })
     .map_err(|error| OpenError::Gpui(error.into()))?;
@@ -535,21 +584,23 @@ fn open(
 
 /// Covers the primary display from its logical origin, topmost, without activating.
 pub(super) fn show(window: AnyWindowHandle, cx: &mut App) -> Result<(), OpenError> {
-    let display = cx
-        .primary_display()
-        .ok_or_else(|| OpenError::Gpui("no primary display".into()))?;
-    let logical = display.bounds().size;
     window
         .update(cx, |_, window, cx| {
-            let scale = window.scale_factor();
-            let [width, height] =
-                [logical.width, logical.height].map(|side| scaled(side.into(), scale));
+            let [width, height] = primary(window.scale_factor(), cx)
+                .ok_or_else(|| OpenError::Gpui("no primary display".into()))?;
             platform::place_presence_window(window, [0, 0, width, height])?;
             window.bounds_changed(cx);
-            Ok::<_, platform::PresenceError>(())
+            Ok::<_, OpenError>(())
         })
         .map_err(|error| OpenError::Gpui(error.into()))??;
     Ok(())
+}
+
+/// The primary display's physical size at `scale`: what the overlay covers, and so the display
+/// a screen hold's line is recorded and drawn on.
+pub(super) fn primary(scale: f32, cx: &App) -> Option<[i32; 2]> {
+    let logical = cx.primary_display()?.bounds().size;
+    Some([logical.width, logical.height].map(|side| scaled(side.into(), scale)))
 }
 
 pub(super) fn hide(window: AnyWindowHandle, cx: &mut App) -> Result<(), OpenError> {
