@@ -260,12 +260,14 @@ constant `On` together with those three.
   `scene_begin` the stamped header; the scene and the shell keep the real boxes in memory. While
   marks are on, every round of a run that took up a screen hold's picture stores its native items
   through `drawing::stored_item`, on any display and after the user turns sharing off, since
-  permission to draw can be withdrawn after the boxes exist. It reads the whole envelope first: a
-  call whose records all parse as ordinary drawing records is stored as it came; one screen scene
-  whose steps the screen surface admits (`scene::screen::admit`) keeps its records with every
-  box replaced; anything else, such as arguments that don't read whole, a record that doesn't
-  parse, a screen `begin` after another, or a shape, point or label position in a screen call, is
-  stored as `{"records":[]}`. Other runs store their items as they came. Every result of a call in a screen scene ends with "the marks'
+  permission to draw can be withdrawn after the boxes exist. It reads the whole envelope first and
+  parses each record as the reducer does: a call that opens with a `begin` and names no screen
+  surface is stored as it came, box targets included; one screen scene, a screen `begin`, steps
+  the screen surface admits (`scene::screen::admit`) and one `end` last, keeps its records with
+  every box replaced; anything else, such as arguments that don't read whole or say anything after
+  the records array, a record that doesn't parse, a call that doesn't open with a `begin`, a
+  screen `begin` after another, an `end` before the last record, or a shape, point or label
+  position in a screen call, is stored as `{"records":[]}`. Other runs store their items as they came. Every result of a call in a screen scene ends with "the marks'
   positions are not kept after this turn".
 - **Recovery** leaves a stored screen scene out, since its boxes were never stored, and clears
   it with the other scenes it skips.

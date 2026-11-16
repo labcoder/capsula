@@ -4,9 +4,7 @@
 use kumochi_protocol::message::{RunId, SceneId};
 use kumochi_scene::record::Surface;
 use kumochi_scene::screen::{admit, stamp, without_boxes};
-use kumochi_scene::{
-    Begin, Record, TokenError, Tokenizer, parse_draw_record, parse_screen_draw_record,
-};
+use kumochi_scene::{Begin, Record, Tokenizer, parse_screen_draw_record};
 
 use super::{CallError, Drawing, Output, Pend, Pending, Wait};
 use crate::context::{Geometry, NoCanvas};
@@ -94,8 +92,8 @@ impl Drawing {
 
 /// A round's native item as a run that took up a screen hold's picture stores it: a `draw` call
 /// naming the screen surface keeps its records with every box target replaced when it is one
-/// screen scene the surface admits, and none otherwise; one whose records don't read or parse
-/// keeps none. Any other item is stored as it came.
+/// screen scene the surface admits, and none otherwise; one whose arguments don't read or parse
+/// whole keeps none. Any other item is stored as it came.
 pub(crate) fn stored_item(item: Opaque) -> Opaque {
     let Ok(mut value) = serde_json::from_slice::<serde_json::Value>(item.bytes()) else {
         return item;
@@ -116,10 +114,11 @@ pub(crate) fn stored_item(item: Opaque) -> Opaque {
     with(records).or_else(|| with(Vec::new())).unwrap_or(item)
 }
 
-/// The records a `draw` call's arguments are stored with; `None` when no record names the screen
-/// surface. The whole envelope is read before anything is exempt: arguments that don't read or
-/// parse whole keep nothing, and so does an envelope naming the screen that isn't one screen
-/// scene whose steps the screen surface admits; those steps lose their boxes.
+/// The records a `draw` call's arguments are stored with; `None` when the envelope reads whole,
+/// every record parses as the reducer parses it with the screen surface offered, the first is a
+/// `begin`, and none names the screen. Arguments that don't read or parse whole keep nothing, text
+/// after the records array included, and so does any other envelope that isn't a screen `begin`,
+/// steps the screen surface admits and one `end` last; those steps lose their boxes.
 fn kept(args: &[u8]) -> Option<Vec<serde_json::Value>> {
     let mut tokenizer = Tokenizer::new();
     let mut input = args;
@@ -127,33 +126,30 @@ fn kept(args: &[u8]) -> Option<Vec<serde_json::Value>> {
     loop {
         let next = tokenizer
             .next(&mut input)
-            .map(|record| record.map(|record| record.bytes.to_vec()));
+            .map(|record| record.map(|record| parse_screen_draw_record(record.bytes)));
         match next {
-            Ok(Some(bytes)) => records.push(bytes),
+            Ok(Some(Ok(record))) => records.push(record),
             Ok(None) if tokenizer.finish().is_ok() => break,
-            Err(TokenError::AfterRecords) => break,
-            Ok(None) | Err(_) => return Some(Vec::new()),
+            _ => return Some(Vec::new()),
         }
     }
-    if records.iter().all(|bytes| parse_draw_record(bytes).is_ok()) {
+    let screen = |record: &Record| matches!(record, Record::Begin(begin) if begin.surface == Surface::Screen);
+    if matches!(records.first(), Some(Record::Begin(_))) && !records.iter().any(screen) {
         return None;
     }
-    let Ok(records) = records
-        .iter()
-        .map(|bytes| parse_screen_draw_record(bytes))
-        .collect::<Result<Vec<_>, _>>()
-    else {
-        return Some(Vec::new());
-    };
-    let screen = |record: &Record| matches!(record, Record::Begin(begin) if begin.surface == Surface::Screen);
+    let last = records.len().saturating_sub(1);
     let mut kept = Vec::new();
     for (index, record) in records.iter().enumerate() {
         let value = match record {
-            Record::Begin(_) if index == 0 && screen(record) => serde_json::to_value(record),
-            Record::Step(step) if index > 0 && admit(step, [f32::INFINITY; 2], 0).is_ok() => {
+            Record::Begin(_) if index == 0 && index < last && screen(record) => {
+                serde_json::to_value(record)
+            }
+            Record::Step(step)
+                if index > 0 && index < last && admit(step, [f32::INFINITY; 2], 0).is_ok() =>
+            {
                 serde_json::to_value(Record::Step(without_boxes(step)))
             }
-            Record::End(_) if index > 0 => serde_json::to_value(record),
+            Record::End(_) if index == last => serde_json::to_value(record),
             _ => return Some(Vec::new()),
         };
         let Ok(value) = value else {

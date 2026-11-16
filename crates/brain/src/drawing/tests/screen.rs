@@ -135,6 +135,8 @@ fn an_overlay_scene_beside_it_is_stored_as_written() {
         &begin("card", ""),
         &[r#"{"id":"c1","put":[{"callout":{"id":"l","target":{"box":[10,20,30,40]},"text":"x"}}]}"#.to_owned()],
     );
+    let item = draw_item(std::str::from_utf8(&card).expect("UTF-8"));
+    assert_eq!(stored_item(item.clone()).bytes(), item.bytes());
     let out = store.run(&mut drawing, call(1, "c", card));
     assert_eq!(out.calls[0].tool_text(), "drawn: [c1]");
     assert_eq!(
@@ -503,8 +505,7 @@ fn turning_sharing_off_ends_an_open_screen_call_and_refuses_its_later_steps_and_
         .filter(|held| !held.gone)
         .map(|held| held.state.header().surface)
         .collect();
-    assert_eq!(live.len(), 1);
-    assert!(live.iter().all(|surface| *surface != Surface::Screen));
+    assert_eq!(live, [Surface::Overlay]);
     let card = store.run(&mut drawing, call(1, "e", args("card2", &[text("b", "y")])));
     assert_eq!(texts(&[&card]), ["drawn: [b]"]);
 }
@@ -571,8 +572,52 @@ fn a_screen_call_waiting_on_its_lookup_its_layout_or_its_write_when_sharing_goes
     }
 }
 
-/// A screen call keeps no records when its envelope names the screen anywhere but isn't one screen
-/// scene the surface admits, so none of its numbers reach the stored item.
+#[test]
+fn a_held_screen_scene_s_step_being_written_when_sharing_goes_off_shows_nothing() {
+    let mut drawing = told(Ok(Geometry::FIXTURE));
+    let mut store = Store::default();
+    let first = store.run(
+        &mut drawing,
+        screen_call(1, "b", &screen_begin("marks", ""), &[marked("s1", "x")]),
+    );
+    assert_eq!(shown(&first), 2);
+    let written = drawing
+        .handle(screen_call(
+            1,
+            "c",
+            &screen_begin("marks", ""),
+            &[marked("s2", "y")],
+        ))
+        .expect("a call");
+    assert_eq!(trace(&written), ["write step 2"]);
+    let off = drawing.handle(Input::ScreenOff).expect("the setting");
+    let mut both = written;
+    merge(
+        &mut both,
+        Output {
+            effects: off.effects.clone(),
+            calls: Vec::new(),
+        },
+    );
+    let settled = store.settle(&mut drawing, both);
+    assert_eq!(
+        texts(&[&off, &settled]),
+        [format!("drawn: [s2]; stopped: {OFF}{NOT_KEPT}")]
+    );
+    assert_eq!(shown(&off) + shown(&settled), 0);
+    assert!(drawing.scenes.iter().all(|held| held.gone));
+}
+
+/// Arguments with a screen scene after an ordinary records array: a second envelope, and a second
+/// `records` member of the same object. The reducer never reads it.
+const SUFFIXED: [&str; 2] = [
+    r#"{"records":[{"begin":{"scene":"card","surface":"overlay","alt":"a"}},{"end":{}}]} {"records":[{"begin":{"scene":"marks","surface":"screen","alt":"a"}},{"step":{"id":"s1","put":[{"highlight":{"id":"m","target":{"box":[917.375,300,50,40]}}}]}},{"end":{}}]}"#,
+    r#"{"records":[{"begin":{"scene":"card","surface":"overlay","alt":"a"}},{"end":{}}],"records":[{"begin":{"scene":"marks","surface":"screen","alt":"a","display":{"origin":[0,0],"size":[2731,1537],"dpi":97}}},{"step":{"id":"s1","put":[{"highlight":{"id":"m","target":{"box":[917.375,300,50,40]}}}]}},{"end":{}}]}"#,
+];
+
+/// A screen call keeps no records when its arguments say anything after the records array, or its
+/// envelope names the screen anywhere but isn't one screen scene the surface admits, so none of
+/// its numbers reach the stored item.
 #[test]
 fn a_mixed_or_forbidden_screen_call_is_stored_with_no_records() {
     const OVERLAY: &str = r#"{"begin":{"scene":"card","surface":"overlay","alt":"a"}}"#;
@@ -603,15 +648,21 @@ fn a_mixed_or_forbidden_screen_call_is_stored_with_no_records() {
             END.to_owned(),
         ],
         vec![OVERLAY.to_owned(), mark.clone(), WRITTEN.to_owned()],
-        vec![screen.clone(), mark, WRITTEN.to_owned()],
+        vec![screen.clone(), mark.clone(), WRITTEN.to_owned()],
+        vec![screen.clone(), END.to_owned(), mark.clone(), END.to_owned()],
+        vec![screen.clone(), mark],
     ];
     envelopes.extend(
         forbidden
             .iter()
             .map(|step| vec![screen.clone(), step.clone(), END.to_owned()]),
     );
-    for records in envelopes {
-        let args = format!(r#"{{"records":[{}]}}"#, records.join(","));
+    let mut calls: Vec<String> = envelopes
+        .iter()
+        .map(|records| format!(r#"{{"records":[{}]}}"#, records.join(",")))
+        .collect();
+    calls.extend(SUFFIXED.map(str::to_owned));
+    for args in calls {
         let stored = stored_item(draw_item(&args));
         assert_eq!(arguments(&stored), json!({"records": []}), "{args}");
         let text = String::from_utf8(stored.bytes().to_vec()).expect("UTF-8");

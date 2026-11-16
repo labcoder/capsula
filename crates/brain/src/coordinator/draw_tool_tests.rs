@@ -1320,18 +1320,61 @@ fn a_run_that_took_up_a_screen_picture_stores_its_items_without_boxes_whatever_w
     }
 }
 
+/// An ordinary call with a box target is stored as it came, whether or not its run took up a
+/// picture.
+#[test]
+fn an_overlay_call_with_a_box_target_is_stored_as_it_came_in_any_run() {
+    let args = r#"{"records":[{"begin":{"v":1,"scene":"card","surface":"overlay","alt":"","others":"keep"}},{"step":{"id":"c1","put":[{"callout":{"id":"l","target":{"box":[10,20,30,40]},"text":"x"}}]}},{"end":{}}]}"#;
+    let native =
+        json!({"type":"function_call","id":"fc1","call_id":"model","name":"draw","arguments":args});
+    let item =
+        crate::engines::Opaque::new(serde_json::to_vec(&native).expect("item")).expect("small");
+    for pictured in [true, false] {
+        let mut core = offered(vec![T]);
+        core.screen_marks = crate::drawing::ScreenMarks::On;
+        if pictured {
+            sent_picture(&mut core);
+        }
+        let key = super::engine_key(&core, R);
+        core.handle(Input::Engine {
+            key,
+            event: TurnEvent::OutputItem {
+                index: 0,
+                item: item.clone(),
+            },
+        })
+        .expect("engine event");
+        let round = core
+            .handle(Input::Engine {
+                key,
+                event: TurnEvent::Finished(Finish::Completed),
+            })
+            .expect("engine event")
+            .into_iter()
+            .find_map(|effect| match effect {
+                Effect::Store(StoreOp::RoundItems(round)) => Some(round),
+                _ => None,
+            })
+            .expect("the round");
+        assert_eq!(round.items[0].bytes(), item.bytes(), "{pictured}");
+    }
+}
+
 const OFF: &str = "drawn: []; stopped: surface: drawing.ScreenOff; the user turned off sharing the screen; explain in words or draw a card";
 
 #[test]
 fn turning_sharing_off_tells_the_drawing_only_while_marks_are_on() {
     let begin = r#"{"begin":{"scene":"marks","surface":"screen","alt":"marks"}}"#;
-    for (marks, told) in [
-        (crate::drawing::ScreenMarks::On, vec![OFF.to_owned()]),
-        (crate::drawing::ScreenMarks::Off, Vec::new()),
+    for (marks, pictured, told) in [
+        (crate::drawing::ScreenMarks::On, true, vec![OFF.to_owned()]),
+        (crate::drawing::ScreenMarks::On, false, vec![OFF.to_owned()]),
+        (crate::drawing::ScreenMarks::Off, true, Vec::new()),
     ] {
         let mut core = offered(vec![T]);
         core.screen_marks = marks;
-        sent_picture(&mut core);
+        if pictured {
+            sent_picture(&mut core);
+        }
         core.drawing
             .canvas(R, Ok(crate::context::Geometry::FIXTURE));
         core.handle(Input::ShowScreenOff).expect("the setting");
@@ -1350,7 +1393,7 @@ fn turning_sharing_off_tells_the_drawing_only_while_marks_are_on() {
             .iter()
             .map(crate::drawing::CallEnd::tool_text)
             .collect();
-        assert_eq!(texts, told, "{marks:?}");
+        assert_eq!(texts, told, "{marks:?} {pictured}");
     }
 }
 
@@ -1373,18 +1416,24 @@ fn no_screen_number_reaches_a_stored_round_whatever_the_call_holds() {
         r##"{{"step":{{"id":"s1","put":[{{"shape":{{"id":"m","kind":"rect","box":[{BOX},300,50,40],"fill":"#ffffff"}}}}]}}}}"##
     );
     let end = r#"{"end":{}}"#;
-    let calls = [
+    let mut calls: Vec<String> = [
         vec![begin, marked.as_str(), end],
         vec![overlay, begin, marked.as_str(), end],
         vec![begin, shaped.as_str(), end],
         vec![written.as_str(), marked.as_str()],
-    ];
+    ]
+    .iter()
+    .map(|records| format!(r#"{{"records":[{}]}}"#, records.join(",")))
+    .collect();
+    calls.extend([
+        format!(r#"{{"records":[{overlay},{end}]}} {{"records":[{begin},{marked},{end}]}}"#),
+        format!(r#"{{"records":[{overlay},{end}],"records":[{written},{marked},{end}]}}"#),
+    ]);
     let mut core = offered(vec![T]);
     core.screen_marks = crate::drawing::ScreenMarks::On;
     sent_picture(&mut core);
     let key = super::engine_key(&core, R);
-    for (index, records) in (0..).zip(&calls) {
-        let args = format!(r#"{{"records":[{}]}}"#, records.join(","));
+    for (index, args) in (0..).zip(&calls) {
         let native = json!({"type":"function_call","id":"fc1","call_id":"model","name":"draw","arguments":args});
         let item =
             crate::engines::Opaque::new(serde_json::to_vec(&native).expect("item")).expect("small");
