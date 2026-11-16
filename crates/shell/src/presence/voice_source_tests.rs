@@ -1656,6 +1656,48 @@ fn esc_during_listening_cancels_that_hold_and_the_next_hold_listens(cx: &mut Tes
 }
 
 #[gpui::test]
+fn esc_with_the_talk_keys_is_asked_for_only_while_a_hold_s_keys_are_down(cx: &mut TestAppContext) {
+    let (owner, _data, _controls) = ready(cx);
+    let deliver = native(&owner, cx);
+    // The test proxy is no window, so every ask is refused, and `refused` reads as "asked".
+    let asked =
+        |cx: &mut TestAppContext| owner.read_with(cx, |owner, _| owner.talk_escape.refused());
+    assert!(!asked(cx), "no hold yet");
+    let at = Instant::now();
+    let finish = listen(&owner, &deliver, 1, at, cx);
+    assert!(asked(cx), "the keys are down");
+    for edge in [Edge::Down, Edge::Up] {
+        let key = Key::Other(1);
+        deliver(Event::Key { key, edge }, after(at, 600));
+    }
+    cx.run_until_parked();
+    assert!(!asked(cx), "Esc ended the hold with its keys still down");
+    finish.send(()).unwrap();
+    until(cx, |cx| {
+        owner.read_with(cx, |o, _| o.voice.pending.is_none())
+    });
+    owner.read_with(cx, |owner, _| {
+        assert_eq!(owner.voice.status, Some(Text::HoldCancelled));
+    });
+    chord(&deliver, Edge::Up, at + Duration::from_millis(900));
+    let at = at + Duration::from_secs(2);
+    accepted(&owner, 1, cx);
+    let finish = listen(&owner, &deliver, 2, at, cx);
+    assert!(asked(cx), "the next hold asks again");
+    release(
+        &owner,
+        &deliver,
+        &finish,
+        at + Duration::from_millis(900),
+        cx,
+    );
+    owner.read_with(cx, |owner, _| {
+        assert!(owner.voice_working(), "the released hold still owns Esc");
+        assert!(!owner.talk_escape.refused(), "but its keys are up");
+    });
+}
+
+#[gpui::test]
 fn a_hold_seen_only_at_release_is_refused_with_a_notice_and_a_repeat_recovers_the_next(
     cx: &mut TestAppContext,
 ) {

@@ -233,6 +233,23 @@ An ignored fixture,
 second registration refused with Stop shown, and sees Esc released. It holds the desktop's Esc
 for milliseconds, so run it only in an approved session.
 
+While a hold's keys are down, an Esc press is Ctrl+Alt+Esc. The plain Esc hotkey doesn't match
+it, and Windows acts on it as Alt+Esc and brings another window to the front. So from a hold's
+recognition until its keys come up or it ends, the proxy holds a second hotkey, Esc with Ctrl
+and Alt (`TalkEscape`). Those are the only modifiers a hold's keys can have down, since any
+other key going down cancels the hold, and the chord is never held outside a hold.
+
+- Raw Input doesn't report a press a hotkey took. The proxy delivers this hotkey's message as
+  the Esc key going down and up, so the hold cancels as it does for any other key and the press
+  does nothing else: it stops no run and clears no drawing.
+- Windows is asked once per hold. If another app already holds the chord, the refusal is logged
+  once for that hold, without key or text content, and that app gets the press: Esc then
+  doesn't cancel the hold, and any other key still does.
+- A second ignored fixture, `cargo test -p kumochi-shell -- --ignored talk_keys_escape`,
+  registers the chord beside plain Esc on a hidden window, sees a second registration refused,
+  and sees dropping the chord free it and leave plain Esc held. Run it only in an approved
+  session too.
+
 ## Diagnostics for the input session
 
 Two opt-in flags serve the approved gate-session harness. A normal run uses neither, and

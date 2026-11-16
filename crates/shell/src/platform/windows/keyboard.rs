@@ -14,7 +14,8 @@ use windows::Win32::System::RemoteDesktop::{
 };
 use windows::Win32::UI::Accessibility::{HWINEVENTHOOK, SetWinEventHook, UnhookWinEvent};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    MAPVK_VK_TO_VSC_EX, MOD_NOREPEAT, MapVirtualKeyW, RegisterHotKey, UnregisterHotKey, VK_ESCAPE,
+    HOT_KEY_MODIFIERS, MAPVK_VK_TO_VSC_EX, MOD_ALT, MOD_CONTROL, MOD_NOREPEAT, MapVirtualKeyW,
+    RegisterHotKey, UnregisterHotKey, VK_ESCAPE,
 };
 use windows::Win32::UI::Input::{
     GetRawInputData, HRAWINPUT, RAWINPUT, RAWINPUTDEVICE, RAWINPUTHEADER, RID_INPUT,
@@ -23,7 +24,7 @@ use windows::Win32::UI::Input::{
 use windows::Win32::UI::WindowsAndMessaging::{
     EVENT_SYSTEM_DESKTOPSWITCH, GIDC_REMOVAL, GetQueueStatus, KillTimer, PBT_APMSUSPEND,
     PostMessageW, QS_ALLINPUT, RI_KEY_BREAK, RI_KEY_E0, RI_KEY_E1, SetTimer, WINEVENT_OUTOFCONTEXT,
-    WM_APP, WM_INPUT, WM_INPUT_DEVICE_CHANGE, WM_NCDESTROY, WM_POWERBROADCAST, WM_TIMER,
+    WM_APP, WM_HOTKEY, WM_INPUT, WM_INPUT_DEVICE_CHANGE, WM_NCDESTROY, WM_POWERBROADCAST, WM_TIMER,
     WM_WTSSESSION_CHANGE,
 };
 
@@ -35,6 +36,10 @@ use crate::input::{Edge, Event, Key};
 const DEADLINE_TIMER: usize = 1;
 /// The hotkey id for Esc on the proxy window.
 const ESCAPE_HOTKEY: i32 = 1;
+/// The hotkey id for Esc with the talk keys down.
+const TALK_ESCAPE_HOTKEY: i32 = 2;
+/// Esc's make code.
+const ESCAPE_MAKE_CODE: u16 = 0x01;
 /// A keyboard overrun: keys were lost, so held state can't be trusted.
 const OVERRUN_MAKE_CODE: u16 = 0xFF;
 /// HID generic desktop page, keyboard usage.
@@ -86,6 +91,19 @@ impl Keys {
         };
         let event = match message {
             _ if EscapeHotkey::fired(message, wparam) => Event::Escape,
+            // Raw Input doesn't report a press a hotkey took, so this message is the whole
+            // press: Esc down here and up below cancel the hold as any other key does, and
+            // nothing else.
+            _ if hotkey(message, wparam, TALK_ESCAPE_HOTKEY) => {
+                let escape = |edge| Event::Key {
+                    key: Key::Other(ESCAPE_MAKE_CODE),
+                    edge,
+                };
+                if let Some(deliver) = self.deliver.get() {
+                    deliver(escape(Edge::Down), at);
+                }
+                escape(Edge::Up)
+            }
             WM_INPUT => match read_key(lparam) {
                 Some(event) => event,
                 None => return false,
@@ -127,7 +145,7 @@ impl Keys {
         }
         message == WM_TIMER
             || message == DESKTOP_SWITCHED
-            || (event == Event::Escape && self.deliver.get().is_some())
+            || (message == WM_HOTKEY && self.deliver.get().is_some())
     }
 
     /// True once per armed deadline, when a chord key arrives more than `OVERDUE` after it.
@@ -275,37 +293,52 @@ pub(super) fn disarm(hwnd: HWND, keys: &Keys) {
     }
 }
 
-/// Esc held system-wide for the proxy window; dropping it gives Esc back to other apps.
+/// Esc held system-wide for the proxy window, alone or with the talk keys down; dropping it
+/// gives that Esc back to other apps.
 #[derive(Debug)]
-pub(crate) struct EscapeHotkey(HWND);
+pub(crate) struct EscapeHotkey(HWND, i32);
 
 impl EscapeHotkey {
     /// # Errors
     /// Fails when another app, or this one, already holds Esc.
     pub(super) fn register(hwnd: HWND) -> Result<Self, PresenceError> {
-        // SAFETY: `hwnd` is a live window on this thread; Drop releases the same id.
-        unsafe {
-            RegisterHotKey(
-                Some(hwnd),
-                ESCAPE_HOTKEY,
-                MOD_NOREPEAT,
-                u32::from(VK_ESCAPE.0),
-            )
-        }?;
-        Ok(Self(hwnd))
+        Self::hold(hwnd, ESCAPE_HOTKEY, MOD_NOREPEAT)
     }
 
-    /// Whether `message` is this hotkey firing.
-    pub(super) fn fired(message: u32, wparam: WPARAM) -> bool {
-        message == windows::Win32::UI::WindowsAndMessaging::WM_HOTKEY
-            && wparam.0 == usize::try_from(ESCAPE_HOTKEY).unwrap_or(0)
+    /// Esc with Ctrl and Alt down, which plain Esc doesn't match. Those are the only modifiers
+    /// a hold's keys can have down: any other key going down cancels the hold.
+    ///
+    /// # Errors
+    /// Fails when another app, or this one, already holds that chord.
+    pub(super) fn register_with_talk_keys(hwnd: HWND) -> Result<Self, PresenceError> {
+        Self::hold(
+            hwnd,
+            TALK_ESCAPE_HOTKEY,
+            MOD_CONTROL | MOD_ALT | MOD_NOREPEAT,
+        )
     }
+
+    fn hold(hwnd: HWND, id: i32, modifiers: HOT_KEY_MODIFIERS) -> Result<Self, PresenceError> {
+        // SAFETY: `hwnd` is a live window on this thread; Drop releases the same id.
+        unsafe { RegisterHotKey(Some(hwnd), id, modifiers, u32::from(VK_ESCAPE.0)) }?;
+        Ok(Self(hwnd, id))
+    }
+
+    /// Whether `message` is plain Esc's hotkey firing.
+    pub(super) fn fired(message: u32, wparam: WPARAM) -> bool {
+        hotkey(message, wparam, ESCAPE_HOTKEY)
+    }
+}
+
+/// Whether `message` is the proxy's hotkey `id` firing.
+fn hotkey(message: u32, wparam: WPARAM, id: i32) -> bool {
+    message == WM_HOTKEY && wparam.0 == usize::try_from(id).unwrap_or(0)
 }
 
 impl Drop for EscapeHotkey {
     fn drop(&mut self) {
         // SAFETY: releases the id this value registered on its window's thread.
-        if let Err(error) = unsafe { UnregisterHotKey(Some(self.0), ESCAPE_HOTKEY) } {
+        if let Err(error) = unsafe { UnregisterHotKey(Some(self.0), self.1) } {
             tracing::debug!(%error, "Esc was already released");
         }
     }
@@ -400,9 +433,12 @@ fn key_event(make_code: u16, flags: u16) -> Event {
 
 #[cfg(test)]
 mod tests {
-    use windows::Win32::Foundation::HWND;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
     use windows::Win32::UI::WindowsAndMessaging::{
-        CreateWindowExW, DestroyWindow, WINDOW_EX_STYLE, WS_POPUP,
+        CreateWindowExW, DestroyWindow, WINDOW_EX_STYLE, WM_HOTKEY, WS_POPUP,
     };
     use windows::core::{PCWSTR, w};
 
@@ -485,6 +521,56 @@ mod tests {
         blocked.acquire(|| EscapeHotkey::register(second.0));
         assert!(!blocked.shows_stop(), "releasing the first hold frees Esc");
         blocked.release();
+    }
+
+    /// Holds the desktop's Ctrl+Alt+Esc and Esc for milliseconds, so it runs only in an
+    /// approved desktop session: `cargo test -p kumochi-shell -- --ignored talk_keys_escape`.
+    #[test]
+    #[ignore = "holds the desktop's Ctrl+Alt+Esc and Esc briefly; run only in an approved session"]
+    fn talk_keys_escape_registers_beside_plain_esc_is_refused_when_taken_and_releases_only_itself()
+    {
+        let (first, second) = (TestWindow::new(), TestWindow::new());
+        let chord = EscapeHotkey::register_with_talk_keys(first.0)
+            .expect("Ctrl+Alt+Esc must be free before this fixture runs");
+        let plain = EscapeHotkey::register(first.0).expect("plain Esc is another hotkey");
+        assert!(EscapeHotkey::register_with_talk_keys(second.0).is_err());
+        drop(chord);
+        drop(
+            EscapeHotkey::register_with_talk_keys(second.0)
+                .expect("dropping the first hold frees the chord"),
+        );
+        assert!(
+            EscapeHotkey::register(second.0).is_err(),
+            "dropping the chord leaves plain Esc held"
+        );
+        drop(plain);
+    }
+
+    #[test]
+    fn esc_with_the_talk_keys_down_is_delivered_as_that_key_s_press_and_consumed() {
+        let keys = super::Keys::default();
+        let seen = Rc::new(RefCell::new(Vec::new()));
+        let events = Rc::clone(&seen);
+        let deliver: super::Deliver = Box::new(move |event, _| {
+            events.borrow_mut().push(event);
+            None
+        });
+        assert!(keys.deliver.set(deliver).is_ok());
+        let hotkey = |id| keys.on_message(HWND::default(), WM_HOTKEY, WPARAM(id), LPARAM(0));
+        let escape = |edge| Event::Key {
+            key: Key::Other(1),
+            edge,
+        };
+        assert!(hotkey(2), "the chord's message is consumed");
+        assert_eq!(*seen.borrow(), [escape(Edge::Down), escape(Edge::Up)]);
+        assert!(hotkey(1));
+        assert_eq!(
+            seen.borrow()[2..],
+            [Event::Escape],
+            "plain Esc is unchanged"
+        );
+        assert!(!hotkey(3), "another hotkey isn't the proxy's");
+        assert_eq!(seen.borrow().len(), 3);
     }
 
     #[test]
