@@ -11,23 +11,30 @@ use crate::{
 
 #[derive(Debug, Default, Clone, Copy)]
 pub(super) struct Placement {
-    stage: Option<Rect>,
-    /// A screen scene, which no stage moves: whether it is placed on its overlay.
-    screen: Option<bool>,
+    fit: Fit,
     pub(super) transform: Affine,
+}
+
+/// What places the drawing; one tag, so a view is no larger than with a stage alone.
+#[derive(Debug, Default, Clone, Copy, PartialEq)]
+enum Fit {
+    /// At its own scale until the host gives a stage.
+    #[default]
+    Free,
+    /// Fitted into the host's stage box.
+    Stage(Rect),
+    /// A screen scene, which no stage moves: whether it is placed on its overlay.
+    Screen { placed: bool },
 }
 
 impl Placement {
     pub(super) fn for_layout(self, layout: &LayoutState) -> Self {
-        if self.screen.is_some() {
+        let Fit::Stage(stage) = self.fit else {
             return self;
-        }
+        };
         Self {
-            screen: None,
-            stage: self.stage,
-            transform: self.stage.map_or_else(Affine::default, |stage| {
-                layout::place(layout.fit_extent(), stage, layout.presentation_scale())
-            }),
+            fit: self.fit,
+            transform: layout::place(layout.fit_extent(), stage, layout.presentation_scale()),
         }
     }
 }
@@ -35,10 +42,12 @@ impl Placement {
 impl SceneView {
     /// Snaps the drawing into a host-selected box without preparing it again.
     pub fn set_stage(&mut self, stage: Rect) -> bool {
-        if self.placement.screen.is_some() || self.placement.stage == Some(stage) {
+        if matches!(self.placement.fit, Fit::Screen { .. })
+            || self.placement.fit == Fit::Stage(stage)
+        {
             return false;
         }
-        self.placement.stage = Some(stage);
+        self.placement.fit = Fit::Stage(stage);
         self.placement = self.placement.for_layout(&self.layout);
         true
     }
@@ -60,13 +69,15 @@ impl SceneView {
                 .and_then(|((display, size), overlay)| {
                     screen::placement(display, size.map(Finite::get), overlay)
                 });
-        self.placement.screen = Some(placed.is_some());
+        self.placement.fit = Fit::Screen {
+            placed: placed.is_some(),
+        };
         self.placement.transform = placed.unwrap_or_default();
         placed.is_some()
     }
 
     /// Whether the view paints: not while its screen scene can't be placed.
     pub(super) fn placed(&self) -> bool {
-        self.placement.screen != Some(false)
+        self.placement.fit != Fit::Screen { placed: false }
     }
 }
