@@ -777,6 +777,7 @@ mod tests {
         use kumochi_protocol::message::{HeldScreen, ScreenClass};
         cx.update(|cx| {
             cx.set_global(Strings::english());
+            let app = kumochi_protocol::constants::DISPLAY_NAME;
             let mut user = event(1);
             user.kind = PageEventKind::User;
             let mut state = Threads::chat_for_tests();
@@ -792,12 +793,12 @@ mod tests {
                 (
                     HeldScreen::Attached,
                     None,
-                    Some("A snapshot of the window under your pointer was sent in this message. No copy is kept.".to_owned()),
+                    Some(format!("A screenshot of the window under your pointer was sent in this message. {app} keeps no copy.")),
                 ),
                 (
                     HeldScreen::Screen,
                     None,
-                    Some("A snapshot of your screen was sent in this message. No copy is kept.".to_owned()),
+                    Some(format!("A screenshot of your screen was sent in this message. {app} keeps no copy.")),
                 ),
                 (
                     HeldScreen::NotIncluded(ScreenClass::Changed),
@@ -835,9 +836,12 @@ mod tests {
         cx: &mut TestAppContext,
     ) {
         use kumochi_protocol::message::{HeldScreen, ScreenClass};
+        let app = kumochi_protocol::constants::DISPLAY_NAME;
         let sentences = [
-            "A snapshot of your screen was sent in this message. No copy is kept.".to_owned(),
-            "A snapshot of the window under your pointer was sent in this message. No copy is kept.".to_owned(),
+            format!("A screenshot of your screen was sent in this message. {app} keeps no copy."),
+            format!(
+                "A screenshot of the window under your pointer was sent in this message. {app} keeps no copy."
+            ),
         ];
         let events = [
             PageEventKind::HeldTurn {

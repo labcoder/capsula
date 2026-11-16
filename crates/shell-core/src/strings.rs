@@ -807,16 +807,21 @@ mod tests {
         );
         // A held turn's history says one thing: why no picture was included, as a line, or
         // which picture was taken, on its icon.
+        let app = kumochi_protocol::constants::DISPLAY_NAME;
         for (screen, line, icon) in [
             (
                 HeldScreen::Attached,
                 None,
-                Some("A snapshot of the window under your pointer was sent in this message. No copy is kept.".to_owned()),
+                Some(format!(
+                    "A screenshot of the window under your pointer was sent in this message. {app} keeps no copy."
+                )),
             ),
             (
                 HeldScreen::Screen,
                 None,
-                Some("A snapshot of your screen was sent in this message. No copy is kept.".to_owned()),
+                Some(format!(
+                    "A screenshot of your screen was sent in this message. {app} keeps no copy."
+                )),
             ),
             // A stored turn doesn't say which flow it came from, so these two read true of both.
             (
