@@ -496,8 +496,8 @@ async fn a_screen_holds_words_wait_for_its_picture_in_the_running_brain() {
         let (id, seal) = rig.next().await;
         assert!(matches!(seal, Request::Seal(_)), "{seal:?}");
         assert_eq!(decoded.recv().await, Some(()));
-        // The words come in while the seal is unanswered and wait in the brain's loop, which
-        // polls the hold again before the seal is answered.
+        // The words come in while the seal is unanswered, and the signal shows they're parked to
+        // wait for the picture before the seal is answered.
         release.send(()).unwrap();
         while !matches!(seen.recv().await, Some(Seen::WordsWaiting)) {}
         let refused = Reply::Refused(crate::screen::Refusal::DisplayChanged);

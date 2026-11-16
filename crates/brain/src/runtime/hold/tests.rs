@@ -1222,7 +1222,6 @@ async fn cancel_model_default_and_unload_changes_are_terminal_before_their_handl
     brain.close().await;
 }
 
-/// Leaves a recording hold on `thread` whose screen part is `screen`.
 #[tokio::test]
 async fn an_answered_decode_is_taken_in_the_poll_that_reads_it() {
     let scratch = Scratch::new("hold-decode-taken");
@@ -1248,6 +1247,7 @@ async fn an_answered_decode_is_taken_in_the_poll_that_reads_it() {
     brain.close().await;
 }
 
+/// Leaves a recording hold on `thread` whose screen part is `screen`.
 fn screen_hold(brain: &mut Brain, key: HoldKey, screen: ScreenPart) {
     recording(brain);
     let thread = brain.config.view().main_thread;
