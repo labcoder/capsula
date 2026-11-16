@@ -29,9 +29,8 @@ pub(super) fn run(folder: &Path, flag: &str) -> Result<()> {
         .stderr(Stdio::null())
         .spawn()
         .context("starting the image check (requests: 0)")?;
-    let (status, text) = drained(child, LIMIT, "the image check")?;
-    let text = text.context("reading the check's lines");
-    let lines = text.as_deref().map(request_lines).unwrap_or_default();
+    let (status, text, read) = drained(child, LIMIT, "the image check")?;
+    let lines = request_lines(&text);
     for line in &lines {
         println!("{line}");
     }
@@ -39,7 +38,7 @@ pub(super) fn run(folder: &Path, flag: &str) -> Result<()> {
         "{}",
         summary(status.as_ref().ok().and_then(ExitStatus::code), lines.len())
     );
-    text?;
+    read.context("reading the check's lines")?;
     ensure!(status?.success(), "the image check stopped");
     Ok(())
 }

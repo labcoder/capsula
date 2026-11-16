@@ -29,9 +29,8 @@ pub(super) fn run(folder: &Path) -> Result<()> {
         .stderr(Stdio::null())
         .spawn()
         .context("starting the marks check (requests: 0)")?;
-    let (status, text) = drained(child, LIMIT, "the marks check")?;
-    let text = text.context("reading the check's lines");
-    let lines = text.as_deref().map(kept).unwrap_or_default();
+    let (status, text, read) = drained(child, LIMIT, "the marks check")?;
+    let lines = kept(&text);
     for line in &lines {
         println!("{line}");
     }
@@ -39,7 +38,7 @@ pub(super) fn run(folder: &Path) -> Result<()> {
         "{}",
         summary(status.as_ref().ok().and_then(ExitStatus::code), &lines)
     );
-    text?;
+    read.context("reading the check's lines")?;
     ensure!(status?.success(), "the marks check stopped");
     Ok(())
 }

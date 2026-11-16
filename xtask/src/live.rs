@@ -20,7 +20,7 @@ mod marks;
 mod signin;
 
 use std::fs;
-use std::io::{self, Read as _, Write};
+use std::io::{self, Read, Write};
 
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::thread;
@@ -238,22 +238,30 @@ fn bounded(mut child: Child, limit: Duration, what: &str) -> Result<ExitStatus> 
 }
 
 /// Waits for `child` as [`bounded`] does while a thread reads its stdout, so a full pipe never
-/// blocks it, and returns its status and everything it printed.
+/// blocks it, and returns its status, what it printed and how the read ended, as [`read_kept`].
 fn drained(
     mut child: Child,
     limit: Duration,
     what: &str,
-) -> Result<(Result<ExitStatus>, io::Result<String>)> {
-    let mut output = child.stdout.take().context("the check's output")?;
-    let reader = thread::spawn(move || {
-        let mut text = String::new();
-        output.read_to_string(&mut text).map(|_| text)
-    });
+) -> Result<(Result<ExitStatus>, String, io::Result<()>)> {
+    let output = child.stdout.take().context("the check's output")?;
+    let reader = thread::spawn(move || read_kept(output));
     let status = bounded(child, limit, what);
-    let text = reader
+    let (text, read) = reader
         .join()
-        .unwrap_or_else(|_| Err(io::Error::other("the reader panicked")));
-    Ok((status, text))
+        .unwrap_or_else(|_| (String::new(), Err(io::Error::other("the reader panicked"))));
+    Ok((status, text, read))
+}
+
+/// Reads `output` to its end. A failed read keeps the complete lines read before it, so a check
+/// still prints and counts the requests it sent.
+fn read_kept(mut output: impl Read) -> (String, io::Result<()>) {
+    let mut text = String::new();
+    let read = output.read_to_string(&mut text).map(drop);
+    if read.is_err() {
+        text.truncate(text.rfind('\n').map_or(0, |end| end + 1));
+    }
+    (text, read)
 }
 
 /// Waits for `child` at most `limit`; `None` while it still runs.
@@ -399,13 +407,14 @@ impl Drop for Brain {
 
 #[cfg(test)]
 mod tests {
+    use std::io::{self, Read};
     use std::os::windows::process::CommandExt as _;
     use std::process::{Child, Command, Stdio};
     use std::time::{Duration, Instant};
 
     use super::{
-        Ask, Check, Entry, ProductIdentity, build, drained, end, end_with, entry, refuse_running,
-        run_bounded, wait_bounded, warn_cleanup, with_cleanup,
+        Ask, Check, Entry, ProductIdentity, build, drained, end, end_with, entry, read_kept,
+        refuse_running, run_bounded, wait_bounded, warn_cleanup, with_cleanup,
     };
     use crate::platform;
 
@@ -423,16 +432,33 @@ mod tests {
             .stderr(Stdio::null())
             .spawn()
             .expect("cmd starts");
-        let (status, text) =
+        let (status, text, read) =
             drained(child, Duration::from_secs(30), "the test child").expect("drained");
         assert!(status.expect("it exits within the bound").success());
-        let text = text.expect("its output is read");
+        read.expect("its output is read");
         assert!(text.len() > 64 * 1024, "{} bytes", text.len());
         assert_eq!(
             text.lines()
                 .filter(|line| line.starts_with("request="))
                 .count(),
             3000
+        );
+    }
+
+    #[test]
+    fn a_read_that_fails_keeps_the_complete_lines_before_it() {
+        struct Broken;
+        impl Read for Broken {
+            fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
+                Err(io::Error::other("the pipe broke"))
+            }
+        }
+        let output = &b"request=1 status=200\nrequest=2 status=200\nrequest=3 sta"[..];
+        let (text, read) = read_kept(output.chain(Broken));
+        assert_eq!(text, "request=1 status=200\nrequest=2 status=200\n");
+        assert_eq!(
+            read.expect_err("the failure is returned").to_string(),
+            "the pipe broke"
         );
     }
 
