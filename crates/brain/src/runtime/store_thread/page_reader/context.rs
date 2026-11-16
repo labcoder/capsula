@@ -129,7 +129,7 @@ pub(super) fn read(
                             .stored_choice(thread)?
                             .execution(snapshot.choice.take())?;
                     }
-                    let local_time = read.local_time()?;
+                    let local_time = read.local_time(key.run)?;
                     let turn = Turn {
                         thread,
                         run: key.run,

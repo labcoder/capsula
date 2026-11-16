@@ -653,6 +653,39 @@ fn a_task_never_dereferences_another_tasks_reference_and_kumo_never_its_own() {
 }
 
 #[test]
+fn a_runs_local_time_is_the_minute_it_started_in_every_round() {
+    const STARTED: i64 = 981_173_100_000;
+    let mut world = world("ctx-local-time");
+    let (_, run) = world.run(None, "ask", None);
+    world
+        .store
+        .conn_for_tests()
+        .execute(
+            "UPDATE runs SET started_ms = ?1 WHERE id = ?2",
+            rusqlite::params![STARTED, i64::try_from(run.0).expect("small")],
+        )
+        .expect("started long ago");
+    let reader = Connection::open(world.scratch.db()).expect("reader");
+    let started: String = reader
+        .query_row(
+            "SELECT strftime('%Y-%m-%d %H:%M', ?1 / 1000, 'unixepoch', 'localtime')",
+            [STARTED],
+            |row| row.get(0),
+        )
+        .expect("formatted");
+    assert!(started.starts_with("2001-02-0"), "{started}");
+    for _ in 0..2 {
+        let snapshot = Snapshot::begin(&reader).expect("snapshot");
+        assert_eq!(snapshot.local_time(run).expect("read"), started);
+        assert!(matches!(
+            snapshot.local_time(RunId(run.0 + 1)),
+            Err(StoreError::NoRun)
+        ));
+        snapshot.end().expect("ended");
+    }
+}
+
+#[test]
 fn the_conversation_and_its_sources_come_from_one_snapshot() {
     let mut world = world("ctx-snapshot");
     let (b, _) = world.run(None, "before", None);
