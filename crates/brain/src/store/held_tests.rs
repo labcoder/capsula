@@ -196,16 +196,24 @@ fn an_unsent_picture_is_cleared_and_every_other_value_kept() {
     let mut store = Store::open(&scratch.db()).expect("store");
     let (thread, attached) = held_run(&mut store, Some(HeldScreen::Attached));
     let (_, picture) = held_run(&mut store, Some(HeldScreen::Screen));
+    let (_, other_attached) = held_run(&mut store, Some(HeldScreen::Attached));
+    let (_, other_picture) = held_run(&mut store, Some(HeldScreen::Screen));
     let (_, closed) = held_run(
         &mut store,
         Some(HeldScreen::NotIncluded(ScreenClass::NotReady)),
     );
     let (_, withdrawn) = held_run(&mut store, Some(HeldScreen::Withdrawn));
-    for run in [attached, picture, closed, withdrawn] {
+    store.forget_screen(attached).expect("cleared");
+    assert_eq!(screen(&store, attached), None);
+    assert_eq!(screen(&store, picture).as_deref(), Some("screen"));
+    assert_eq!(screen(&store, other_attached).as_deref(), Some("attached"));
+    for run in [picture, closed, withdrawn] {
         store.forget_screen(run).expect("cleared");
     }
     assert_eq!(screen(&store, attached), None);
     assert_eq!(screen(&store, picture), None);
+    assert_eq!(screen(&store, other_attached).as_deref(), Some("attached"));
+    assert_eq!(screen(&store, other_picture).as_deref(), Some("screen"));
     assert_eq!(screen(&store, closed).as_deref(), Some("not_ready"));
     assert_eq!(screen(&store, withdrawn).as_deref(), Some("withdrawn"));
     assert_eq!(kinds(&store, thread), [PageEventKind::User]);

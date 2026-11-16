@@ -1577,6 +1577,14 @@ fn an_unsent_screen_is_cleared_after_its_turn() {
         text: "hi".into(),
         screen: Some(HeldScreen::Screen),
     }));
+    let other = RunId(2);
+    assert!(store.send(StoreOp::BeginTurn {
+        thread: ThreadId(2),
+        title: Some("u".into()),
+        run: other,
+        text: "hey".into(),
+        screen: Some(HeldScreen::Attached),
+    }));
     assert!(store.send(StoreOp::ForgetScreen { run }));
     store.close().blocking_recv().expect("closed");
     let mut got = Vec::new();
@@ -1585,12 +1593,16 @@ fn an_unsent_screen_is_cleared_after_its_turn() {
     }
     assert_eq!(
         got,
-        [Input::TurnStored { run }],
+        [Input::TurnStored { run }, Input::TurnStored { run: other }],
         "nothing answers the clear"
     );
     let conn = rusqlite::Connection::open(scratch.db()).expect("raw open");
-    let stored: Option<String> = conn
-        .query_row("SELECT screen FROM runs WHERE id = 1", [], |row| row.get(0))
-        .expect("the run's row");
-    assert_eq!(stored, None);
+    let stored = |id: i64| -> Option<String> {
+        conn.query_row("SELECT screen FROM runs WHERE id = ?1", [id], |row| {
+            row.get(0)
+        })
+        .expect("the run's row")
+    };
+    assert_eq!(stored(1), None);
+    assert_eq!(stored(2).as_deref(), Some("attached"));
 }
