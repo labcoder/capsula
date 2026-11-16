@@ -196,7 +196,9 @@ pull request that activates it.
 - **Placement.** `screen::placement` is a pure function from the stamped display, the canvas
   size and the overlay's display to the canvas-to-overlay transform, in logical pixels. It
   returns `None` when the overlay's display isn't the stamped one, or the scale is over
-  `MAX_SCREEN_SCALE` (4).
+  `MAX_SCREEN_SCALE` (4). `SceneView::set_screen` places a screen scene's view with it; from
+  then on the view ignores `set_stage`, and while it can't be placed it paints nothing. A
+  begun screen scene with no step paints nothing either way.
 - **Stored form.** `screen::without_boxes` returns a step with every box target replaced by
   `PLACEHOLDER_BOX` (`[0,0,1,1]`), keeping ids, labels and styles. No `Debug` prints a box
   or the stamp. The brain stores both forms of a screen call through it

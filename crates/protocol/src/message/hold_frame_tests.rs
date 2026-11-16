@@ -340,6 +340,20 @@ fn run_origins_screen_choices_and_refusals_round_trip() {
 }
 
 #[test]
+fn a_skipped_scene_appends_a_redacted_tag_after_the_screen_release() {
+    let skipped = ControlToBrain::SceneSkipped {
+        scene: super::SceneId(u64::MAX),
+    };
+    assert_eq!(postcard::to_allocvec(&skipped).expect("encodes")[0], 31);
+    round_trip(&skipped, Pipe::Control, 11);
+    redacted(&skipped, Direction::ToBrain, "SceneSkipped", 11);
+    let skipped = ControlToBrain::SceneSkipped {
+        scene: super::SceneId(2),
+    };
+    assert_eq!(postcard::to_allocvec(&skipped).expect("encodes"), [31, 2]);
+}
+
+#[test]
 fn a_screen_holds_controls_append_redacted_tags_and_fit_the_control_cap() {
     let recognized = ControlToBrain::ScreenHoldRecognized {
         gesture: GESTURE,

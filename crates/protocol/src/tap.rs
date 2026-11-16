@@ -73,6 +73,7 @@ impl Tapped for ControlToBrain {
             Self::VoiceHoldStopped { .. } => "VoiceHoldStopped",
             Self::ScreenHoldRecognized { .. } => "ScreenHoldRecognized",
             Self::ScreenRelease { .. } => "ScreenRelease",
+            Self::SceneSkipped { .. } => "SceneSkipped",
         }
     }
 
