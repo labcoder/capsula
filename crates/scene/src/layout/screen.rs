@@ -159,9 +159,9 @@ pub(super) fn highlight(
 /// Lays out a label on the screen surface: one line, off every other object and every box a mark
 /// points at, on the side named first and then the others. It keeps clear of its target's marked
 /// box and of any object around that target. A laid-out label stays where it is until something
-/// new lands on it, and then moves.
+/// new lands on it, and then moves; with no side left, it sits out until one frees.
 /// # Errors
-/// `NoRoom` when no side fits on the canvas.
+/// `NoRoom` when no side fits on the canvas for a label of this step.
 pub(super) fn callout(
     build: &mut Build<'_>,
     op: &Arc<Op>,
@@ -210,7 +210,7 @@ pub(super) fn callout(
             && taken.iter().all(|other| !rect.intersects(*other))
     };
     let named = callout.side.filter(|side| *side != Side::Center);
-    let center = cached
+    let shown = cached
         .map(|old| Rect::centered(old.anchors[1], size))
         .filter(fits)
         .or_else(|| {
@@ -219,35 +219,45 @@ pub(super) fn callout(
                 .chain(SIDES.into_iter().filter(|side| Some(*side) != named))
                 .map(|side| beside(keep_out, size, side))
                 .find(fits)
-        })
-        .ok_or_else(|| layout_error(ErrorCode::NoRoom))?
-        .center();
-    let rect = Rect::centered(center, size);
+        });
+    // An earlier label with no side left sits out this step and is tried again on the next.
+    let (center, rect) = match (shown, cached) {
+        (Some(rect), _) => (rect.center(), rect),
+        (None, Some(old)) => (
+            old.anchors[1],
+            Rect::centered(old.anchors[1], Vec2::default()),
+        ),
+        (None, None) => return Err(layout_error(ErrorCode::NoRoom)),
+    };
     let color = callout.color.as_ref().map_or_else(
         || paint(MARK_RGB),
         |color| build.theme.resolve(color).into(),
     );
-    let primitives = [
-        Prim::Rect {
-            rect,
-            radius: MARK_RADIUS * unit,
-            fill: Some(Paint::from(build.theme.surface_raised).faded(0.96)),
-            border: Some((color, MARK_STROKE * unit * 0.75)),
-        },
-        Prim::Text {
-            origin: rect.origin + pad,
-            text: callout.text.clone(),
-            style,
-            color: build.theme.fg.into(),
-            max_width: None,
-            align: Align::Left,
-        },
-    ];
+    let primitives: Arc<[Prim]> = if shown.is_none() {
+        Arc::from([])
+    } else {
+        Arc::new([
+            Prim::Rect {
+                rect,
+                radius: MARK_RADIUS * unit,
+                fill: Some(Paint::from(build.theme.surface_raised).faded(0.96)),
+                border: Some((color, MARK_STROKE * unit * 0.75)),
+            },
+            Prim::Text {
+                origin: rect.origin + pad,
+                text: callout.text.clone(),
+                style,
+                color: build.theme.fg.into(),
+                max_width: None,
+                align: Align::Left,
+            },
+        ])
+    };
     let mut placed = Placed::new(
         Item {
             handle,
             parent: None,
-            primitives: primitives.into(),
+            primitives,
             bounds: rect,
             transform: Affine::default(),
             opacity: callout.opacity.map_or(1.0, crate::Finite::get),

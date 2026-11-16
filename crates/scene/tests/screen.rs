@@ -75,7 +75,13 @@ fn prepared(steps: &[Value]) -> Result<PreparedStep, PrepareError> {
     let mut layout = LayoutState::new(&scene);
     let mut last = None;
     for (index, put) in steps.iter().enumerate() {
-        let value = json!({"step":{"id":format!("s{index}"),"put":put}});
+        let mut body = if put.is_array() {
+            json!({"put":put})
+        } else {
+            put.clone()
+        };
+        body["id"] = json!(format!("s{index}"));
+        let value = json!({"step":body});
         let Ok(Record::Step(step)) = record(&value) else {
             panic!("screen step");
         };
@@ -538,7 +544,7 @@ fn a_label_on_a_looped_mark_s_own_box_sits_beside_the_mark() {
         {"callout":{"id":"c","target":{"box":[100,100,200,20]},"text":"Save"}}
     ])])
     .expect("prepared");
-    // The round-ended outline reaches 6.97 units out (pad 2, the radius's growth 4.97, outline
+    // The round-ended outline reaches 8.97 units out (pad 2, the radius's growth 4.97, outline
     // 2), past the label's fixed 7; the label keeps its 3-unit gap from the outline instead.
     let top = item(&result, "c").bounds;
     assert!(near(top, [180.0, 73.029, 40.0, 15.0]), "{top:?}");
@@ -570,6 +576,31 @@ fn a_label_keeps_off_every_mark_of_its_step_and_moves_off_a_later_one() {
             "{steps:?}: {label:?}"
         );
     }
+}
+
+#[test]
+fn an_earlier_label_with_no_side_left_sits_out_until_one_frees() {
+    let callout = json!([{"callout":{"id":"c","target":{"box":[600,300,80,40]},"text":"Save"}}]);
+    // The eight sides' labels: one row above, one below, and one each to the left and right.
+    let fence = json!([
+        {"highlight":{"id":"t","target":{"box":[550,270,180,10]}}},
+        {"highlight":{"id":"b","target":{"box":[550,355,180,10]}}},
+        {"highlight":{"id":"l","target":{"box":[560,315,10,10]}}},
+        {"highlight":{"id":"r","target":{"box":[700,315,10,10]}}}
+    ]);
+    let fenced = prepared(&[callout.clone(), fence.clone()]).expect("the fencing step stands");
+    assert!(
+        item(&fenced, "c").primitives.is_empty(),
+        "the label sits out"
+    );
+    let freed = prepared(&[callout, fence, json!({"remove":["t"]})]).expect("prepared");
+    let label = item(&freed, "c");
+    assert_eq!(label.primitives.len(), 2, "the label is back");
+    assert!(
+        near(label.bounds, [620.0, 278.0, 40.0, 15.0]),
+        "{:?}",
+        label.bounds
+    );
 }
 
 #[test]

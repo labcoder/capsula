@@ -186,8 +186,11 @@ pull request that activates it.
   at, and its own target's marked box grown to cover any object around that target: first on
   the named side, then on the others. Labels are laid out after the other marks of their
   step, and every step lays the earlier labels out again: a label stays where it is until a
-  new mark lands on it, and then moves. With no side inside the canvas it fails the step with
-  `NoRoom`. The constants live in `screen` and
+  new mark lands on it, and then moves. A label of the step with no side inside the canvas
+  fails the step with `NoRoom`; an earlier label left with no side sits out of the frame for
+  that step and is tried again on each later one. Every object's bounds count as taken, so a
+  label never sits inside a larger mark's bounds: a label on a button inside a highlighted
+  panel goes outside the panel. The constants live in `screen` and
   `limits` for the designer to change.
 - **Placement.** `screen::placement` is a pure function from the stamped display, the canvas
   size and the overlay's display to the canvas-to-overlay transform, in logical pixels. It
