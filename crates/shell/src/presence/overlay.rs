@@ -426,10 +426,31 @@ impl Presence {
             visible: sample.visible || ink::drawn(&self.ink),
             ..sample
         };
-        let frames = self.presenter.frames();
         if sample.visible && self.overlay.window().is_some() {
             self.protect_surface(super::exclusion::Slot::Drawing, cx)?;
         }
+        self.reach_overlay(cx, |overlay, surface, frames| {
+            overlay.sync(surface, frames, sample)
+        })
+    }
+
+    /// Opens the overlay's hidden window ahead of its first show. Opening a window takes far
+    /// longer than showing one, and a hold's first line is shown while the pointer moves.
+    pub(super) fn prepare_overlay(&mut self, cx: &mut Context<'_, Self>) -> Result<(), OpenError> {
+        self.reach_overlay(cx, |overlay, surface, _| overlay.prepare(surface))
+    }
+
+    /// Runs `step` on the overlay's visibility, with its windows as GPUI opens and closes them.
+    fn reach_overlay(
+        &mut self,
+        cx: &mut Context<'_, Self>,
+        step: impl FnOnce(
+            &mut Visibility<Overlay>,
+            &mut Gpui<'_>,
+            &RefCell<Frames>,
+        ) -> Result<(), OpenError>,
+    ) -> Result<(), OpenError> {
+        let frames = self.presenter.frames();
         let handles = self.exclusion_handles();
         let mut surface = Gpui {
             input: &self.presenter.input,
@@ -449,7 +470,7 @@ impl Presence {
             notice: &self.paint_notice,
             ink: &self.ink,
         };
-        self.overlay.sync(&mut surface, &frames, sample)
+        step(&mut self.overlay, &mut surface, &frames)
     }
 }
 

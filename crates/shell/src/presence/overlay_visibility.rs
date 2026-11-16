@@ -61,6 +61,18 @@ impl<W> Visibility<W> {
         }
     }
 
+    /// Opens the hidden window ahead of the first show, which then only shows it. A window
+    /// that is already there stays.
+    pub(super) fn prepare<S: Surface<Window = W>>(
+        &mut self,
+        surface: &mut S,
+    ) -> Result<(), OpenError> {
+        if matches!(self, Self::Closed) {
+            *self = Self::Hidden(surface.open()?);
+        }
+        Ok(())
+    }
+
     fn show<S: Surface<Window = W>>(
         &mut self,
         surface: &mut S,
@@ -245,6 +257,39 @@ mod tests {
             (true, vec![Open(1), Show(1), Repaint(1, true)])
         );
         (fake, state)
+    }
+
+    #[test]
+    fn a_prepared_window_is_the_one_the_first_show_shows() {
+        let presenter = presenter();
+        let mut fake = Fake::new(&presenter);
+        let mut state = Visibility::Closed;
+        assert!(matches!(state.prepare(&mut fake), Ok(())));
+        assert_eq!(std::mem::take(&mut fake.calls), [Open(1)]);
+        assert_eq!(state, Visibility::Hidden(1));
+        assert!(!holds_esc(&presenter), "a hidden window holds nothing");
+        assert!(matches!(state.prepare(&mut fake), Ok(())));
+        assert_eq!(fake.calls, [], "one hidden window is enough");
+        assert_eq!(
+            fake.sync(&mut state, SHOW),
+            (true, vec![Show(1), Repaint(1, true)]),
+            "the show opens nothing"
+        );
+        assert!(matches!(state.prepare(&mut fake), Ok(())));
+        assert_eq!(fake.calls, [], "a shown window stays");
+        assert_eq!(state, Visibility::Shown(1));
+
+        // A refused open leaves the overlay closed, and the first show opens its own.
+        let mut fake = Fake::new(&presenter);
+        fake.refuse = Some(Open(1));
+        let mut state = Visibility::Closed;
+        assert!(state.prepare(&mut fake).is_err());
+        assert_eq!(std::mem::take(&mut fake.calls), [Open(1)]);
+        assert_eq!(state, Visibility::Closed);
+        assert_eq!(
+            fake.sync(&mut state, SHOW),
+            (true, vec![Open(2), Show(2), Repaint(2, true)])
+        );
     }
 
     #[test]
