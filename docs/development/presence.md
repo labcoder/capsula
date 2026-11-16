@@ -218,6 +218,18 @@ flowchart LR
   status does. A hold that is voice only from the start shows nothing.
   `Presence::refresh_screen` pushes the line after link events and dock refreshes; it
   compares first, so a batch that changes nothing allocates nothing.
+- **Screen note.** The same refresh tells the conversation's model (`Threads::screen_sees`)
+  what [the check](ipc.md#screen-holds) says of the default model: a hold sends it the picture
+  (`On`), or it can't take one (`ModelCantSee`). The first answer after start-up is
+  remembered and says nothing. A changed answer leaves one `ScreenNote` in the hold's target
+  conversation when that is the open one and its first page has landed: a centred, muted line
+  with the picture's icon, after the newest message, saying the model doesn't support
+  screenshots or that it does. The other states (the setting off, not ready, a thread with
+  its own model, no capture) say nothing and leave what is remembered alone. The note lives
+  in the shell only and is never stored: a newer one replaces it, a change while the target
+  is another conversation, one with no thread yet or one whose page hasn't landed drops it,
+  and a restart forgets it. It isn't a message, so paging up skips it when it looks for the
+  first one (`first_message` in `presence/messages.rs`).
 - **Kumo in the peek.** `presence/kumo_view.rs` owns a 64-pixel Kumo. Its body is baked once,
   on the background executor at the launch scale, and kept across hiding as a prewarm; a scale
   change needs a restart (OSC-188 wires display changes). The peek is 380 wide and only as tall

@@ -66,9 +66,9 @@ All three are payload-redacted in the pipe tap.
 
 `ScreenHolds` speaks for the default model, but a turn's image goes to its run's model, which is
 the thread's own when it has one. So the shell sends `ScreenHoldRecognized` only when three
-things hold at recognition, and a hold's line
-([presence](presence.md#the-line-and-hit-testing)) reads the same check
-(`Presence::screen_notice`), so no line names a model the image won't reach:
+things hold at recognition, and a hold's line and the conversation's screen note
+([presence](presence.md#the-line-and-hit-testing)) read the same check
+(`Presence::screen_notice`), so neither names a model the image won't reach:
 
 1. the stored state is `On { model }`;
 2. the target is a new thread, or a thread whose stored choice is none or the default model at

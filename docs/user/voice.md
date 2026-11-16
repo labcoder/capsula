@@ -80,6 +80,15 @@ that the setting is off, and not that something else will stop it. A hold is voi
 without a word, while screen sharing isn't ready yet, in a task that uses its own model
 (always, for now) and with a model that doesn't support screenshots.
 
+When you switch to a model that doesn't support screenshots, the conversation you have open
+says so once, in a quiet line: "GPT-5.5 doesn't support screenshots, so messages will go
+without one." Switching back to one that does adds "… supports screenshots, so holding to talk
+will send one along." The line isn't saved with the conversation, so it's gone after you
+restart Kumochi. It appears only in the conversation that is open in chat, once its messages
+have loaded: a switch made while chat is closed, or in a new conversation you haven't sent
+anything in yet, leaves no line. A switch made in a task that uses its own model can show up
+later, in the next conversation on the default model.
+
 A hold says nothing more about the screenshot while you hold. If the screenshot couldn't be
 included, the dock's panel says why: the screen wasn't ready, the display changed, the
 screenshot was too large, the model doesn't support screenshots, or you turned the setting off
