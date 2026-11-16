@@ -122,6 +122,7 @@ fn header() -> SceneHeader {
             title: None,
             alt: "private-alt".to_owned().try_into().expect("alt"),
             others: kumochi_scene::Others::Clear,
+            display: None,
         },
         layout_version: 1,
     }

@@ -4,7 +4,7 @@ use super::state::{Motions, Placed};
 use crate::{
     Op, Step, Text, WireId,
     mermaid::Extra,
-    record::{Anchor, Axis, Cell, Change, Start},
+    record::{Anchor, Axis, Cell, Change, Start, Target},
     state::object,
 };
 use std::{
@@ -152,11 +152,11 @@ fn op_bytes(op: &Op) -> usize {
         }
         Op::Text(label) => anchor(&label.at) + label.text.as_str().len(),
         Op::Callout(callout) => {
-            anchor(&callout.target)
+            target(&callout.target)
                 + callout.at.as_ref().map_or(0, anchor)
                 + callout.text.as_str().len()
         }
-        Op::Highlight(highlight) => anchor(&highlight.target),
+        Op::Highlight(highlight) => target(&highlight.target),
         Op::Diagram(_) => 0,
         Op::Node(node) => node.label.as_str().len() + optional(node.sub.as_ref()),
         Op::Edge(edge) => {
@@ -218,6 +218,13 @@ fn anchor(value: &Anchor) -> usize {
     match value {
         Anchor::At(_) => 0,
         Anchor::Ref(target) => target.as_str().len(),
+    }
+}
+
+fn target(value: &Target) -> usize {
+    match value {
+        Target::Anchor(value) => anchor(value),
+        Target::Box(_) => 0,
     }
 }
 

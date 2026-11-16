@@ -8,7 +8,7 @@ use crate::id::Ms;
 use crate::limits::{
     MAX_COORD, MAX_ID_CHARS, MAX_MOTION_MS, MAX_SOURCE_BYTES, MAX_STEPS, MAX_TEXT_CHARS,
 };
-use crate::record::{Anchor, Cell, Color, KeyValue, Point, Start, Token, Version};
+use crate::record::{Anchor, Cell, Color, KeyValue, Point, Start, Target, Token, Version};
 use crate::text::{Bounded, Number};
 use crate::{Finite, Record, Source, Text, WireId};
 
@@ -22,13 +22,37 @@ struct Envelope {
     records: Bounded<Record, { MAX_STEPS + 2 }>,
 }
 
-/// JSON Schema for a complete 2D draw envelope, using scene's JSON field forms.
-/// A begin's version and surface are optional because the draw tool supplies its only values.
-#[must_use]
-pub fn draw_schema() -> serde_json::Value {
+fn envelope_schema() -> serde_json::Value {
     let mut schema = schemars::schema_for!(Envelope).to_value();
     if let Some(required) = schema["$defs"]["Begin"]["required"].as_array_mut() {
         required.retain(|field| field != "v" && field != "surface");
+    }
+    schema
+}
+
+/// JSON Schema for a complete 2D draw envelope, using scene's JSON field forms.
+/// A begin's version and surface are optional because the draw tool supplies its only values.
+/// The screen surface and box targets are left out until `draw` offers them.
+#[must_use]
+pub fn draw_schema() -> serde_json::Value {
+    let mut schema = envelope_schema();
+    let defs = &mut schema["$defs"];
+    if let Some(surfaces) = defs["Surface"]["oneOf"].as_array_mut() {
+        surfaces.retain(|surface| surface["const"] != "screen");
+    }
+    if let Some(targets) = defs["Target"]["anyOf"].as_array_mut() {
+        targets.retain(|target| target["properties"]["box"].is_null());
+    }
+    schema
+}
+
+/// [`draw_schema`] with the screen surface and box targets offered, and lines and arrows not,
+/// since the screen surface refuses them.
+#[must_use]
+pub fn screen_draw_schema() -> serde_json::Value {
+    let mut schema = envelope_schema();
+    if let Some(ops) = schema["$defs"]["Op"]["oneOf"].as_array_mut() {
+        ops.retain(|op| op["properties"]["line"].is_null() && op["properties"]["arrow"].is_null());
     }
     schema
 }
@@ -77,6 +101,14 @@ schema!(Anchor, generator => json_schema!({"anyOf": [
     generator.subschema_for::<[Finite; 2]>(),
     {"type": "object", "properties": {"ref": generator.subschema_for::<WireId>()},
      "required": ["ref"], "additionalProperties": false}
+]}));
+schema!(Target, generator => json_schema!({"anyOf": [
+    generator.subschema_for::<[Finite; 2]>(),
+    {"type": "object", "properties": {"ref": generator.subschema_for::<WireId>()},
+     "required": ["ref"], "additionalProperties": false},
+    {"type": "object", "properties": {"box": generator.subschema_for::<[Finite; 4]>()},
+     "required": ["box"], "additionalProperties": false,
+     "description": "[x, y, width, height] of the thing itself, in canvas units"}
 ]}));
 schema!(Color, generator => json_schema!({"anyOf": [
     generator.subschema_for::<Token>(),

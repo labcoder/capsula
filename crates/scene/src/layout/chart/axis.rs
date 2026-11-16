@@ -479,6 +479,7 @@ mod tests {
             measure: &mut Measure,
             cancel: &AtomicBool::new(false),
             scales: &BTreeMap::new(),
+            screen: None,
         };
         let (plot, out) = header(&chart, &[&series], &mut build).expect("header");
         assert_eq!(plot.y.min.to_bits(), 2.0_f64.log10().to_bits());
@@ -513,6 +514,7 @@ mod tests {
             measure: &mut Measure,
             cancel: &AtomicBool::new(false),
             scales: &BTreeMap::new(),
+            screen: None,
         };
         let (plot, out) = header(&chart, &[&series], &mut build).expect("header");
         let labels: Vec<_> = out
@@ -630,6 +632,7 @@ mod tests {
             measure: &mut Measure,
             cancel: &AtomicBool::new(false),
             scales: &BTreeMap::new(),
+            screen: None,
         };
         let (plot, out) = header(&chart, &[&series], &mut build).expect("header");
         let mut texts = Vec::new();
