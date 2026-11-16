@@ -117,6 +117,15 @@ impl Placed {
     }
 }
 
+fn screen_unit(header: &crate::Begin) -> Option<f32> {
+    let display = header
+        .display
+        .filter(|_| header.surface == crate::record::Surface::Screen)?;
+    let size = header.size?.map(crate::Finite::get);
+    let [x, y] = crate::screen::logical_per_unit(display, size)?;
+    Some(1.0 / x.min(y))
+}
+
 /// Placed objects from the prepared prefix, sharing immutable geometry.
 #[derive(Clone)]
 pub struct LayoutState {
@@ -135,6 +144,8 @@ pub struct LayoutState {
     pub(super) content: Option<Rect>,
     pub(super) presentation_scale: f32,
     pub(super) presentation_limit: f32,
+    /// Canvas units per logical pixel on the screen surface, which sizes its chrome.
+    pub(super) screen: Option<f32>,
     /// Removed or cut `set.behind` anchors that live links still reach, directly or through
     /// each other, with each one's own last link: unpainted places in the paint walk.
     pub(super) held: BTreeMap<Handle, Option<Handle>>,
@@ -175,6 +186,7 @@ impl LayoutState {
             content: None,
             presentation_scale: crate::limits::presentation_scale(scene.header().surface),
             presentation_limit: crate::limits::presentation_scale(scene.header().surface),
+            screen: screen_unit(scene.header()),
         }
     }
     /// Prepared 3D views by view id.
@@ -447,6 +459,7 @@ impl LayoutState {
             content: None,
             presentation_scale: self.presentation_scale,
             presentation_limit: self.presentation_limit,
+            screen: self.screen,
             held: BTreeMap::new(),
             fits,
         });

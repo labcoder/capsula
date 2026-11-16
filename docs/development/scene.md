@@ -174,6 +174,17 @@ pull request that activates it.
   picture is `OutOfRange`. A label is one line of at most `MAX_SCREEN_LABEL_CHARS` (24);
   longer text is `LabelTooLong`, whose message states the cap, never cut. So a box target is
   the only position a screen scene holds.
+- **Dressing** (`layout::screen`). Chrome is sized in logical pixels: the stamp gives
+  logical pixels per canvas unit, at most `MAX_SCREEN_SCALE` (4). A box, ring or spotlight
+  is a two-tone rounded outline (a 2 px `#6B5CF0` stroke with a 1 px white edge each side)
+  wholly outside the target's padded box. Its inner edge is grown by `r(1 − 1/√2)` for a
+  corner radius `r`, so the corner arc clears the padded corner. A ring round a small thing
+  and a box round a wide, short one get round ends. An underline is a bar a pad below the
+  box. A marker is a wash at most `MAX_MARKER_OPACITY` (30%) opaque, and a spotlight dims
+  the rest by at most `MAX_SPOTLIGHT_DIM` (35%). A label sits outside its target's marked
+  box and every other object's: first on the named side, then on the others. With no side
+  inside the canvas it fails the step with `NoRoom`. The constants live in `screen` and
+  `limits` for the designer to change.
 - **Placement.** `screen::placement` is a pure function from the stamped display, the canvas
   size and the overlay's display to the canvas-to-overlay transform, in logical pixels. It
   returns `None` when the overlay's display isn't the stamped one, or the scale is over

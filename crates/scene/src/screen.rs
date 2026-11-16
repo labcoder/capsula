@@ -10,6 +10,27 @@ use crate::{
 /// The box every stored screen mark carries in place of the model's: one the format accepts.
 pub const PLACEHOLDER_BOX: [f32; 4] = [0.0, 0.0, 1.0, 1.0];
 
+/// A mark's stroke width, in logical pixels [designer's number].
+pub const MARK_STROKE: f32 = 2.0;
+/// The contrasting edge on each side of a mark's stroke, in logical pixels [designer's number].
+pub const MARK_EDGE: f32 = 1.0;
+/// A mark's default colour [designer's number].
+pub const MARK_RGB: u32 = 0x006B_5CF0;
+/// The colour of a mark's edge [designer's number].
+pub const MARK_EDGE_RGB: u32 = 0x00FF_FFFF;
+/// Default space between the thing and its mark, in logical pixels [placeholder].
+pub const MARK_PAD: f32 = 4.0;
+/// Corner radius inside a box mark, in logical pixels [placeholder].
+pub const MARK_RADIUS: f32 = 6.0;
+/// Corner radius inside a ring around a large thing, in logical pixels [placeholder].
+pub const RING_RADIUS: f32 = 12.0;
+/// Longest padded side, in logical pixels, a ring still loops round [placeholder].
+pub const RING_LOOP_MAX: f32 = 96.0;
+/// Space between a mark's outside and its label, in logical pixels [placeholder].
+pub const LABEL_GAP: f32 = 6.0;
+/// A label's inner padding, in logical pixels [placeholder].
+pub const LABEL_PAD: [f32; 2] = [8.0, 5.0];
+
 /// Checks a step of a screen scene: only marks that never cover their target are admitted. A
 /// highlight or callout targets a box or a mark, and a label is one short line. Nothing else
 /// holds a position, so a box target is the only one.

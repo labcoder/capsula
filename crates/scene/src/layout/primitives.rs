@@ -45,10 +45,10 @@ pub(super) struct Build<'a> {
     pub cancel: &'a AtomicBool,
     pub scales: &'a BTreeMap<Handle, f32>,
 }
-struct Geometry {
-    bounds: Rect,
-    anchors: [Vec2; 2],
-    primitives: Vec<Prim>,
+pub(super) struct Geometry {
+    pub bounds: Rect,
+    pub anchors: [Vec2; 2],
+    pub primitives: Vec<Prim>,
 }
 
 impl Build<'_> {
@@ -108,6 +108,11 @@ impl Build<'_> {
             Op::Shape(value) => self.shape(value, state, parent, cached)?,
             Op::Highlight(value) => self.highlight(value, state, parent, cached)?,
             Op::Callout(value) => {
+                if let Some(unit) = state.screen {
+                    return super::screen::callout(
+                        self, source, value, handle, state, cached, unit,
+                    );
+                }
                 return super::callout::build(self, source, value, handle, parent, state, cached);
             }
             _ => return Err(layout_error(ErrorCode::Unsupported)),
@@ -425,6 +430,9 @@ impl Build<'_> {
         parent: Option<Handle>,
         cached: Option<&Placed>,
     ) -> Result<Geometry, PrepareError> {
+        if let Some(unit) = state.screen {
+            return super::screen::highlight(self, highlight, state, parent, cached, unit);
+        }
         let anchors;
         let mut output = Vec::new();
         let bounds = {
@@ -477,7 +485,10 @@ impl Build<'_> {
                     border: Some((color, 2.0)),
                 }),
                 crate::record::HighlightStyle::Spotlight => {
-                    output = self.spotlight(bounds);
+                    output = self.spotlight(
+                        bounds,
+                        crate::display::Paint::from(self.theme.halo).faded(0.5),
+                    );
                     output.push(Prim::Rect {
                         rect: bounds,
                         radius: 8.0,
@@ -586,7 +597,7 @@ impl Build<'_> {
         Ok((bounds, output))
     }
 
-    fn spotlight(&self, bounds: Rect) -> Vec<Prim> {
+    pub(super) fn spotlight(&self, bounds: Rect, dim: crate::display::Paint) -> Vec<Prim> {
         let mut output = Vec::new();
         let min = Vec2::new(
             bounds
@@ -625,7 +636,7 @@ impl Build<'_> {
                 output.push(Prim::Rect {
                     rect: Rect { origin, size },
                     radius: 0.0,
-                    fill: Some(crate::display::Paint::from(self.theme.halo).faded(0.5)),
+                    fill: Some(dim),
                     border: None,
                 });
             }

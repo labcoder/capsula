@@ -1,12 +1,17 @@
 //! The screen surface: its stamp, what it admits, its dressing, its placement and its stored form.
 use kumochi_scene::{
-    Begin, ErrorCode, GlobalBudget, Op, Record, SceneState, Step, StepError,
-    geom::Affine,
+    Admission, Begin, ErrorCode, GlobalBudget, Op, Record, SceneState, Step, StepError, WireId,
+    display::{Item, MeasureError, Paint, Prim, TextMeasure, TextStyle},
+    geom::{Affine, Rect, Vec2},
+    layout::{LayoutState, PrepareError, PrepareInput, PreparedStep, SurfaceGeometry, prepare},
+    limits::{MAX_MARKER_OPACITY, MAX_SPOTLIGHT_DIM},
     parse_draw_record, parse_screen_draw_record,
     record::ScreenDisplay,
-    screen::{self, PLACEHOLDER_BOX},
+    screen::{self, MARK_RGB, PLACEHOLDER_BOX},
+    theme::Theme,
 };
 use serde_json::{Value, json};
+use std::sync::{Arc, atomic::AtomicBool};
 
 const DISPLAY: ScreenDisplay = ScreenDisplay {
     origin: [0, 0],
@@ -14,6 +19,19 @@ const DISPLAY: ScreenDisplay = ScreenDisplay {
     dpi: 96,
 };
 const PICTURE: [u32; 2] = [1280, 720];
+
+struct Measure;
+impl TextMeasure for Measure {
+    fn measure(
+        &mut self,
+        text: &str,
+        _: TextStyle,
+        _: Option<f32>,
+    ) -> Result<[f32; 2], MeasureError> {
+        let chars = u16::try_from(text.chars().count()).expect("fixture text");
+        Ok([f32::from(chars) * 8.0, 10.0])
+    }
+}
 
 fn record(value: &Value) -> Result<Record, StepError> {
     parse_screen_draw_record(&serde_json::to_vec(value).expect("fixture JSON"))
@@ -37,12 +55,117 @@ fn step(put: &Value) -> Step {
     };
     step
 }
+fn id(value: &str) -> WireId {
+    value.to_owned().try_into().expect("fixture id")
+}
 fn refusal(put: &Value) -> (String, ErrorCode) {
     let scene = SceneState::begin(header()).expect("scene");
     let error = scene
         .admit(&step(put), &GlobalBudget::default())
         .expect_err("refused");
     (error.path.as_str().to_owned(), error.code)
+}
+#[expect(
+    clippy::panic_in_result_fn,
+    reason = "fixture steps always parse and admit; only preparation's result is under test"
+)]
+fn prepared(steps: &[Value]) -> Result<PreparedStep, PrepareError> {
+    let mut scene = SceneState::begin(header()).expect("scene");
+    let mut budget = GlobalBudget::default();
+    let mut layout = LayoutState::new(&scene);
+    let mut last = None;
+    for (index, put) in steps.iter().enumerate() {
+        let value = json!({"step":{"id":format!("s{index}"),"put":put}});
+        let Ok(Record::Step(step)) = record(&value) else {
+            panic!("screen step");
+        };
+        let Admission::New(candidate) = scene.admit(&step, &budget).expect("admitted") else {
+            panic!("new step");
+        };
+        let committed = scene.commit(candidate, &mut budget).expect("committed");
+        let input = PrepareInput::new(
+            committed.preparation,
+            layout.clone(),
+            SurfaceGeometry::Overlay {
+                default_canvas: [960.0, 600.0],
+            },
+            Arc::new(Theme::default()),
+        )
+        .map_err(|(error, _)| error)?;
+        let result = prepare(input, &mut Measure, &AtomicBool::new(false))?;
+        layout = result.after.clone();
+        last = Some(result);
+    }
+    Ok(last.expect("at least one step"))
+}
+fn item(result: &PreparedStep, name: &str) -> Item {
+    let handle = result.after.handle(&id(name)).expect("placed");
+    result
+        .after
+        .items()
+        .into_iter()
+        .find(|item| item.handle == handle)
+        .expect("item")
+}
+type Drawn = (Rect, f32, Option<Paint>, Option<(Paint, f32)>);
+fn rects(item: &Item) -> Vec<Drawn> {
+    item.primitives
+        .iter()
+        .filter_map(|primitive| match primitive {
+            Prim::Rect {
+                rect,
+                radius,
+                fill,
+                border,
+            } => Some((*rect, *radius, *fill, *border)),
+            _ => None,
+        })
+        .collect()
+}
+fn near(actual: Rect, expected: [f32; 4]) -> bool {
+    let got = [
+        actual.origin.x,
+        actual.origin.y,
+        actual.size.x,
+        actual.size.y,
+    ];
+    got.iter().zip(expected).all(|(a, b)| (a - b).abs() < 1e-3)
+}
+fn rect(value: [f32; 4]) -> Rect {
+    Rect {
+        origin: Vec2::new(value[0], value[1]),
+        size: Vec2::new(value[2], value[3]),
+    }
+}
+/// Whether every point of `target` lies inside the hole of a rounded outline.
+fn clears(target: Rect, outline: Drawn) -> bool {
+    let (outer, radius, _, border) = outline;
+    let width = border.expect("an outline").1;
+    let hole = Rect {
+        origin: outer.origin + Vec2::new(width, width),
+        size: outer.size - Vec2::new(width * 2.0, width * 2.0),
+    };
+    let inner = radius - width;
+    [
+        target.origin,
+        target.max(),
+        Vec2::new(target.origin.x, target.max().y),
+        Vec2::new(target.max().x, target.origin.y),
+    ]
+    .into_iter()
+    .all(|corner| {
+        let core = Vec2::new(
+            corner
+                .x
+                .min(hole.max().x - inner)
+                .max(hole.origin.x + inner),
+            corner
+                .y
+                .min(hole.max().y - inner)
+                .max(hole.origin.y + inner),
+        );
+        (corner.x - core.x).hypot(corner.y - core.y) <= inner + 1e-3
+    })
 }
 
 #[test]
@@ -274,6 +397,146 @@ fn a_label_is_one_line_of_at_most_its_cap_and_the_refusal_states_the_cap() {
         ErrorCode::LabelTooLong
             .to_string()
             .contains("at most 24 characters")
+    );
+}
+
+#[test]
+fn a_box_mark_is_a_two_tone_outline_outside_the_padded_box_in_logical_pixels() {
+    let result = prepared(&[
+        json!([{"highlight":{"id":"h","target":{"box":[100,100,40,20]},"style":"box"}}]),
+    ])
+    .expect("prepared");
+    let drawn = rects(&item(&result, "h"));
+    assert_eq!(drawn.len(), 2);
+    // Two logical pixels per picture pixel: pad 2, edge 0.5, stroke 1, corner 3 grown by 3(1 - 1/√2).
+    let (outer, radius, fill, border) = drawn[0];
+    assert!(
+        near(outer, [95.121_32, 95.121_32, 49.757_36, 29.757_36]),
+        "{outer:?}"
+    );
+    assert!((radius - 5.0).abs() < 1e-4 && fill.is_none());
+    let (paint, width) = border.expect("white edge");
+    assert_eq!(
+        (paint.rgb.get(), paint.opacity, width),
+        (0x00FF_FFFF, 1.0, 2.0)
+    );
+    let (inner, radius, _, border) = drawn[1];
+    assert!(
+        near(inner, [95.621_32, 95.621_32, 48.757_36, 28.757_36]),
+        "{inner:?}"
+    );
+    assert!((radius - 4.5).abs() < 1e-4);
+    let (paint, width) = border.expect("stroke");
+    assert_eq!((paint.rgb.get(), width), (MARK_RGB, 1.0));
+}
+
+#[test]
+fn rings_underlines_markers_and_spotlights_keep_their_numbers() {
+    let mark = |style: &str| {
+        let result = prepared(&[
+            json!([{"highlight":{"id":"h","target":{"box":[100,100,40,20]},"style":style}}]),
+        ])
+        .expect("prepared");
+        rects(&item(&result, "h"))
+    };
+    let ring = mark("ring");
+    assert!(
+        near(ring[0].0, [91.029_44, 91.029_44, 57.941_12, 37.941_12]),
+        "{:?}",
+        ring[0].0
+    );
+    assert!((ring[0].1 - 18.970_56).abs() < 1e-3, "a loop: round ends");
+    let underline = mark("underline");
+    assert!(near(underline[0].0, [100.0, 122.0, 40.0, 2.0]));
+    assert!(near(underline[1].0, [100.5, 122.5, 39.0, 1.0]));
+    assert_eq!((underline[0].1, underline[1].1), (1.0, 0.5));
+    let marker = mark("marker");
+    assert_eq!(marker.len(), 1);
+    assert!(near(marker[0].0, [98.0, 98.0, 44.0, 24.0]));
+    assert_eq!(
+        marker[0].2.map(|paint| paint.opacity),
+        Some(MAX_MARKER_OPACITY)
+    );
+    let spotlight = mark("spotlight");
+    let dims: Vec<_> = spotlight.iter().filter(|drawn| drawn.3.is_none()).collect();
+    assert_eq!(dims.len(), 4);
+    for dim in dims {
+        let paint = dim.2.expect("dimming");
+        assert_eq!((paint.rgb.get(), paint.opacity), (0, MAX_SPOTLIGHT_DIM));
+    }
+}
+
+#[test]
+fn no_outline_ever_covers_its_target_whatever_its_shape_or_pad() {
+    for target in [
+        [600.0, 300.0, 4.0, 4.0],
+        [100.0, 100.0, 400.0, 12.0],
+        [200.0, 200.0, 300.0, 200.0],
+    ] {
+        for pad in [None, Some(0.1)] {
+            for style in ["box", "ring", "spotlight"] {
+                let mut highlight = json!({"id":"h","target":{"box":target},"style":style});
+                if let Some(pad) = pad {
+                    highlight["pad"] = json!(pad);
+                }
+                let result = prepared(&[json!([{ "highlight": highlight }])]).expect("prepared");
+                let outlines: Vec<_> = rects(&item(&result, "h"))
+                    .into_iter()
+                    .filter(|drawn| drawn.3.is_some())
+                    .collect();
+                assert_eq!(outlines.len(), 2);
+                for outline in outlines {
+                    assert!(clears(rect(target), outline), "{style} {target:?} {pad:?}");
+                }
+            }
+            let mut underline = json!({"id":"h","target":{"box":target},"style":"underline"});
+            if let Some(pad) = pad {
+                underline["pad"] = json!(pad);
+            }
+            let result = prepared(&[json!([{ "highlight": underline }])]).expect("prepared");
+            for (bar, ..) in rects(&item(&result, "h")) {
+                assert!(
+                    bar.origin.y > target[1] + target[3],
+                    "an underline below its words"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn a_label_sits_on_the_named_side_outside_its_mark_or_the_next_free_side() {
+    let label = |target: [u32; 4], side: &str, others: Value| {
+        let result = prepared(&[
+            others,
+            json!([{"callout":{"id":"c","target":{"box":target},"text":"Save","side":side}}]),
+        ])
+        .expect("prepared");
+        item(&result, "c").bounds
+    };
+    let marks = |target: [u32; 4]| json!([{"highlight":{"id":"h","target":{"box":target}}}]);
+    // Label 40 by 15; 7 canvas units from the box: pad 4, stroke 2, edges 2 and gap 6, halved.
+    let top = label([600, 300, 80, 40], "top", marks([600, 300, 80, 40]));
+    assert!(near(top, [620.0, 278.0, 40.0, 15.0]), "{top:?}");
+    let bottom = label([600, 2, 80, 40], "top", marks([600, 2, 80, 40]));
+    assert!(near(bottom, [620.0, 49.0, 40.0, 15.0]), "{bottom:?}");
+    let blocked = json!([
+        {"highlight":{"id":"h","target":{"box":[600,2,80,40]}}},
+        {"highlight":{"id":"k","target":{"box":[600,50,80,20]}}}
+    ]);
+    let right = label([600, 2, 80, 40], "top", blocked);
+    assert!(near(right, [687.0, 14.5, 40.0, 15.0]), "{right:?}");
+}
+
+#[test]
+fn a_label_with_no_legal_side_is_refused() {
+    let error = prepared(&[json!([
+        {"callout":{"id":"c","target":{"box":[0,0,1280,720]},"text":"Everything"}}
+    ])])
+    .expect_err("no room");
+    assert!(
+        matches!(&error, PrepareError::Layout(step) if step.code == ErrorCode::NoRoom),
+        "{error:?}"
     );
 }
 

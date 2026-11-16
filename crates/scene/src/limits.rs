@@ -34,6 +34,10 @@ pub const MAX_PRESENTATION_SCALE: f32 = 2.0;
 pub const MAX_SCREEN_SCALE: f32 = 4.0;
 /// Longest label on the screen surface, in Unicode scalar values on one line [designer's number].
 pub const MAX_SCREEN_LABEL_CHARS: usize = 24;
+/// Greatest opacity of a marker's wash, so what is under it stays readable [placeholder].
+pub const MAX_MARKER_OPACITY: f32 = 0.30;
+/// Greatest dimming a spotlight puts on the rest of the screen [designer's number].
+pub const MAX_SPOTLIGHT_DIM: f32 = 0.35;
 
 pub(crate) fn presentation_scale(surface: crate::record::Surface) -> f32 {
     match surface {
