@@ -2,6 +2,27 @@
 
 pub(crate) use kumochi_shell_core::platform::{host, input, microphone};
 
+/// Where a test says the pointer is. A test that sets it never reads the real one, which is
+/// wherever the person at the desk left it.
+#[cfg(test)]
+pub(crate) mod cursor_fixture {
+    use std::cell::Cell;
+
+    thread_local! {
+        static AT: Cell<Option<Result<[i32; 2], ()>>> = const { Cell::new(None) };
+    }
+
+    /// Puts this test thread's pointer at `at`; none makes the read fail.
+    pub(crate) fn set(at: Option<[i32; 2]>) {
+        AT.set(Some(at.ok_or(())));
+    }
+
+    /// What this test thread set, if it set anything.
+    pub(crate) fn get() -> Option<Result<[i32; 2], ()>> {
+        AT.get()
+    }
+}
+
 #[cfg(test)]
 pub(crate) mod work_area_fixture {
     use std::{cell::Cell, marker::PhantomData, rc::Rc};

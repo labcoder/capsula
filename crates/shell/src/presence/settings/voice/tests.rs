@@ -158,7 +158,9 @@ fn keyboard_voice_choice_sends_the_exact_policy_and_waits_for_its_ordered_answer
     for (keys, expected) in [
         ("ctrl-tab", 1),
         ("ctrl-tab", 2),
+        ("ctrl-tab", 3),
         ("ctrl-tab", 0),
+        ("ctrl-shift-tab", 3),
         ("ctrl-shift-tab", 2),
     ] {
         press(&mut frame, keys);
@@ -169,7 +171,7 @@ fn keyboard_voice_choice_sends_the_exact_policy_and_waits_for_its_ordered_answer
             window.draw(cx).clear(cx);
         });
     }
-    press(&mut frame, "tab tab tab tab tab space");
+    press(&mut frame, "tab tab tab tab space");
     frame.run_until_parked();
     assert!(matches!(
         control.try_recv(),
@@ -543,7 +545,7 @@ fn model_buttons_use_pointer_and_space_but_cancel_acceptance_does_not_mean_cance
         });
         assert!(frame.debug_bounds("speech-model-cancel-help").is_some());
         assert!(frame.debug_bounds("speech-model-pending").is_none());
-        press(&mut frame, "tab tab tab tab space");
+        press(&mut frame, "tab tab tab space");
         frame.run_until_parked();
         assert_eq!(
             controls.try_recv(),
@@ -584,7 +586,7 @@ fn model_buttons_use_pointer_and_space_but_cancel_acceptance_does_not_mean_cance
             );
             view.update(cx, |view, cx| view.focus(window, cx));
         });
-        press(&mut frame, "tab tab tab tab");
+        press(&mut frame, "tab tab tab");
         let unpressed = frame.update(|window, cx| {
             assert!(!view.read(cx).focus.is_focused(window));
             window.focused(cx).expect("unpressed model button focus")
@@ -613,14 +615,14 @@ fn model_buttons_use_pointer_and_space_but_cancel_acceptance_does_not_mean_cance
         press(&mut frame, "ctrl-tab escape");
         frame.run_until_parked();
         frame.update(|window, cx| {
-            assert_eq!(view.read(cx).tab, 0);
+            assert_eq!(view.read(cx).tab, 3);
             assert!(view.read(cx).focus.is_focused(window));
         });
         assert!(matches!(received.try_recv(), Ok(PresenceEvent::Escape)));
         press(&mut frame, "ctrl-shift-tab");
         frame.run_until_parked();
         if action_present {
-            press(&mut frame, "tab tab tab tab");
+            press(&mut frame, "tab tab tab");
             frame.update(|window, cx| assert!(!view.read(cx).focus.is_focused(window)));
         }
         deliver(&owner, vec![LinkEvent::State(LinkState::Reconnecting)], cx);
@@ -636,7 +638,7 @@ fn model_buttons_use_pointer_and_space_but_cancel_acceptance_does_not_mean_cance
         press(&mut frame, "ctrl-tab escape");
         frame.run_until_parked();
         frame.update(|window, cx| {
-            assert_eq!(view.read(cx).tab, 0);
+            assert_eq!(view.read(cx).tab, 3);
             assert!(view.read(cx).focus.is_focused(window));
         });
         assert!(matches!(received.try_recv(), Ok(PresenceEvent::Escape)));
@@ -699,7 +701,7 @@ fn reload_enter_refusal_and_captured_intents_stay_fenced_before_the_recording_se
             .speech_input_intent()
             .expect("reload")
     });
-    press(&mut frame, "tab tab tab tab enter");
+    press(&mut frame, "tab tab tab enter");
     frame.run_until_parked();
     assert_eq!(
         controls.try_recv(),
@@ -831,7 +833,9 @@ fn reload_enter_refusal_and_captured_intents_stay_fenced_before_the_recording_se
 }
 
 #[gpui::test]
-fn the_screen_holds_toggle_sends_once_and_waits_for_the_saved_answer(cx: &mut TestAppContext) {
+fn the_privacy_tab_holds_the_screen_toggle_which_sends_once_and_waits_for_the_saved_answer(
+    cx: &mut TestAppContext,
+) {
     use crate::link::{Batch, LinkEvent, Session};
     use kumochi_protocol::message::{ControlToBrain, Incarnation, SettingsOp};
 
@@ -848,26 +852,38 @@ fn the_screen_holds_toggle_sends_once_and_waits_for_the_saved_answer(cx: &mut Te
     let mut frame = gpui_kit::VisualTestContext::from_window(window, cx);
     frame.update(|window, cx| {
         assert_eq!(
-            view.read(cx).model.read(cx).screen_holds_choice(),
+            view.read(cx).model.read(cx).show_screen_choice(),
             Some(true)
         );
         window.draw(cx).clear(cx);
     });
+    // The Voice tab no longer holds it.
+    assert_eq!(frame.debug_bounds("show-screen"), None);
+    let tab = frame
+        .debug_bounds("settings-privacy-tab")
+        .expect("the Privacy tab")
+        .center();
+    frame.simulate_click(tab, gpui_kit::Modifiers::default());
+    frame.run_until_parked();
+    frame.update(|window, cx| {
+        assert_eq!(view.read(cx).tab, 3);
+        window.draw(cx).clear(cx);
+    });
     let toggle = frame
-        .debug_bounds("screen-holds")
-        .expect("the toggle under Hold to talk")
+        .debug_bounds("show-screen")
+        .expect("the toggle on the Privacy tab")
         .center();
     frame.simulate_click(toggle, gpui_kit::Modifiers::default());
     frame.run_until_parked();
     assert_eq!(
         controls.try_recv().unwrap(),
-        ControlToBrain::Settings(SettingsOp::SetScreenHolds(false))
+        ControlToBrain::Settings(SettingsOp::SetShowScreen(false))
     );
     frame.update(|_, cx| {
         let state = view.read(cx).model.read(cx);
-        assert!(state.screen_holds_pending());
-        assert_eq!(state.screen_holds_choice(), Some(false));
-        assert!(state.view().unwrap().screen_holds);
+        assert!(state.show_screen_pending());
+        assert_eq!(state.show_screen_choice(), Some(false));
+        assert!(state.view().unwrap().show_screen);
     });
     // A second click while the first waits sends nothing.
     frame.update(|window, cx| window.draw(cx).clear(cx));
@@ -876,7 +892,7 @@ fn the_screen_holds_toggle_sends_once_and_waits_for_the_saved_answer(cx: &mut Te
     assert!(controls.is_empty());
     frame.update(|_, cx| {
         let mut saved = view.read(cx).model.read(cx).view().unwrap().clone();
-        saved.screen_holds = false;
+        saved.show_screen = false;
         owner.update(cx, |owner, cx| {
             owner
                 .link_events(
@@ -890,8 +906,8 @@ fn the_screen_holds_toggle_sends_once_and_waits_for_the_saved_answer(cx: &mut Te
                 .unwrap();
         });
         let state = view.read(cx).model.read(cx);
-        assert!(!state.screen_holds_pending());
-        assert_eq!(state.screen_holds_choice(), Some(false));
+        assert!(!state.show_screen_pending());
+        assert_eq!(state.show_screen_choice(), Some(false));
     });
     assert!(controls.is_empty());
 }

@@ -4,11 +4,8 @@
 //! pink inside a white edge. The colours and widths here are that painter's, the widths mapped
 //! back from image pixels to the display, and a test on each side pins the same numbers.
 // shortcut: the line shows on the primary display only, so a hold released on another display sends that display with no line; upgrade with the overlay's per-display windows
-#![cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the screen hold's activation is the first caller")
-)]
-
+use std::cell::RefCell;
+use std::rc::Rc;
 use std::time::Duration;
 
 use gpui_kit::{Context, Path, Pixels, Rgba, Task, rgb};
@@ -30,6 +27,16 @@ const EDGE: f32 = 2.5;
 const IMAGE_LIMIT: [u32; 2] = [1280, 720];
 /// How often a screen hold reads the pointer.
 const PERIOD: Duration = Duration::from_millis(16);
+
+/// The running screen hold's sampler, shared with the overlay's root, which paints its line.
+pub(super) type Held = Rc<RefCell<Option<Sampler>>>;
+
+/// Whether a hold's line has anything to paint.
+pub(super) fn drawn(held: &Held) -> bool {
+    held.borrow()
+        .as_ref()
+        .is_some_and(|sampler| !sampler.line.is_empty())
+}
 
 /// One of the line's two paths and the colour it is painted in.
 type Stroke = (Path<Pixels>, Rgba);
@@ -127,6 +134,11 @@ impl Sampler {
     /// desktop's.
     pub(super) fn line(&self) -> &[Vec2] {
         &self.line
+    }
+
+    /// The physical size of the display the line is drawn on.
+    pub(super) const fn display(&self) -> [u32; 2] {
+        self.recorder.display().size
     }
 
     /// Stops sampling and gives the path a release carries.

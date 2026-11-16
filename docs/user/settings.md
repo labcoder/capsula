@@ -20,8 +20,13 @@ and Space to choose a focused radio.
 waits for the background process to save it. If saving is refused, the saved choice returns
 and the error stays beside the control until a successful retry. Offline controls are disabled;
 reconnecting reads the saved preference instead of assuming an interrupted save succeeded.
-**Hold to talk** and **Share the window under your pointer** are the two checkboxes above it;
-[voice](voice.md#showing-the-window-under-your-pointer) says what the second one sends.
+**Hold to talk** is the checkbox above it.
+
+**Privacy** has one checkbox, named for your assistant: **Kumo can see what you see**. While
+it's on, a hold to talk also sends the model you're using one picture of the screen your
+pointer is on, taken when you let go. The picture goes to the model service you connected and
+nowhere else, and Kumochi keeps no copy once the answer is done. The setting starts on.
+[Voice](voice.md#showing-your-screen) says what is in the picture and what is left out.
 
 The preference can be chosen before speech input is installed. It doesn't install models,
 start recording, reload an unloaded model or change spoken replies. **Installed · unloaded**

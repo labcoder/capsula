@@ -874,6 +874,10 @@ pub(crate) fn work_area() -> Result<[i32; 4], PresenceError> {
 /// # Errors
 /// Fails when Windows can't report it, such as while the secure desktop is up.
 pub(crate) fn cursor_position() -> Result<[i32; 2], PresenceError> {
+    #[cfg(test)]
+    if let Some(at) = crate::platform::cursor_fixture::get() {
+        return at.map_err(|()| PresenceError::NotWin32);
+    }
     let mut point = POINT::default();
     // SAFETY: `point` is writable for the call.
     unsafe { GetCursorPos(&raw mut point) }?;

@@ -170,6 +170,7 @@ texts! {
     GitHubCanceling => "github-canceling",
     GitHubRefreshing => "github-refreshing",
     Voice => "settings-voice",
+    Privacy => "settings-privacy",
     SpeechInput => "voice-speech-input",
     VoiceIdlePolicy => "voice-idle-policy",
     VoiceKept => "voice-idle-kept",
@@ -196,12 +197,8 @@ texts! {
     HoldUnavailable => "hold-unavailable",
     HoldMicrophoneUnavailable => "hold-microphone-unavailable",
     HoldFailed => "hold-failed",
-    ScreenHolds => "screen-holds",
-    ScreenHoldsHelp => "screen-holds-help",
-    ScreenHoldsOn => "screen-holds-on",
     ScreenHoldsModelCantSee => "screen-holds-model-cant-see",
     ScreenHoldsNotReady => "screen-holds-not-ready",
-    ScreenHoldsTurnedOff => "screen-holds-turned-off",
     ScreenHoldsOwnModel => "screen-holds-own-model",
     ScreenHoldWillSee => "screen-hold-will-see",
     ScreenNotIncludedModel => "screen-not-included-model",
@@ -214,6 +211,11 @@ texts! {
     ScreenNotIncludedTurnedOff => "screen-not-included-turned-off",
     ScreenHistoryAttached => "screen-history-attached",
     ShowScreenHistory => "show-screen-history",
+    ShowScreen => "show-screen",
+    ShowScreenHelp => "show-screen-help",
+    ShowScreenChanged => "show-screen-changed",
+    ScreenNotIncludedPictureTooLarge => "screen-not-included-picture-too-large",
+    ScreenHistoryChanged => "screen-history-changed",
     VoiceRestartRequired => "voice-restart-required",
     VoiceInstalledFailed => "voice-installed-failed",
     VoiceNotInstalledFailed => "voice-not-installed-failed",
@@ -346,6 +348,11 @@ impl Text {
     /// None for a turn whose picture was taken, which [`Strings::pictured`] speaks for.
     pub const fn held_screen(screen: HeldScreen) -> Option<Self> {
         Some(match screen {
+            // A stored turn doesn't say which flow it came from, so these two read true for both.
+            HeldScreen::NotIncluded(ScreenClass::TooLarge) => {
+                Self::ScreenNotIncludedPictureTooLarge
+            }
+            HeldScreen::NotIncluded(ScreenClass::Changed) => Self::ScreenHistoryChanged,
             HeldScreen::NotIncluded(class) => Self::screen_not_included(class),
             HeldScreen::Withdrawn => Self::ScreenNotIncludedTurnedOff,
             HeldScreen::Attached | HeldScreen::Screen => return None,
@@ -383,6 +390,20 @@ impl Strings {
         let mut args = FluentArgs::new();
         args.set("app", kumochi_protocol::constants::DISPLAY_NAME);
         Some(self.format(text.id(), Some(&args)))
+    }
+
+    /// The Privacy tab's setting, named for the assistant.
+    pub fn show_screen(&self, assistant: &str) -> String {
+        let mut args = FluentArgs::new();
+        args.set("assistant", assistant);
+        self.format(Text::ShowScreen.id(), Some(&args))
+    }
+
+    /// What that setting sends and where, with the product name.
+    pub fn show_screen_help(&self) -> String {
+        let mut args = FluentArgs::new();
+        args.set("app", kumochi_protocol::constants::DISPLAY_NAME);
+        self.format(Text::ShowScreenHelp.id(), Some(&args))
     }
 
     /// Loads the English catalog compiled into the binary.
@@ -770,10 +791,6 @@ mod tests {
         }
         for (text, line) in [
             (
-                Text::ScreenHoldsOn,
-                "Hold to talk also shows GPT-5.5 the window under your pointer",
-            ),
-            (
                 Text::ScreenHoldsModelCantSee,
                 "Screen sharing isn't available with GPT-5.5, so hold to talk is voice only",
             ),
@@ -781,9 +798,23 @@ mod tests {
         ] {
             assert_eq!(strings.with_model(text, "GPT-5.5"), line);
         }
+        // A hold that sends the screen at release: its own word for a display that changed, and
+        // the Privacy tab's row.
+        assert_eq!(
+            strings.get(Text::ShowScreenChanged),
+            "Screen not included: the display changed"
+        );
+        assert_eq!(strings.get(Text::Privacy), "Privacy");
+        assert_eq!(strings.show_screen("Cloud"), "Cloud can see what you see");
+        let app = kumochi_protocol::constants::DISPLAY_NAME;
+        assert_eq!(
+            strings.show_screen_help(),
+            format!(
+                "When you let go of the shortcut, {app} sends one picture of the screen your pointer is on, as it is, with your words to the model you're using. It sends it nowhere else and keeps no copy once the answer is done. This setting starts on."
+            )
+        );
         // A held turn's history says one thing: why no picture was included, as a line, or
         // which picture was taken, on its icon.
-        let app = kumochi_protocol::constants::DISPLAY_NAME;
         for (screen, line, icon) in [
             (
                 HeldScreen::Attached,
@@ -799,9 +830,20 @@ mod tests {
                     "{app} took a picture of your screen to send with this message to the model you were using. It didn't keep a copy."
                 )),
             ),
+            // A stored turn doesn't say which flow it came from, so these two read true of both.
             (
                 HeldScreen::NotIncluded(ScreenClass::Changed),
-                Some("Screen not included: the window changed"),
+                Some("Screen not included: it changed while the picture was being taken"),
+                None,
+            ),
+            (
+                HeldScreen::NotIncluded(ScreenClass::TooLarge),
+                Some("Screen not included: the picture was too large"),
+                None,
+            ),
+            (
+                HeldScreen::NotIncluded(ScreenClass::NotReady),
+                Some("Screen not included: the screen wasn't ready"),
                 None,
             ),
             (

@@ -141,6 +141,7 @@ fn owned_static_canvas(
                 owner.downgrade(),
                 scratch,
                 notice,
+                Rc::default(),
                 cx,
                 |_, _| Ok(()),
             )
@@ -220,6 +221,7 @@ fn a_failed_surface_configuration_removes_its_hidden_window(cx: &mut TestAppCont
             WeakEntity::new_invalid(),
             Rc::new(RefCell::new(super::Scratch::new())),
             Rc::default(),
+            Rc::default(),
             cx,
             |_, _| Err(crate::platform::PresenceError::NotWin32),
         )
@@ -250,6 +252,7 @@ fn a_retired_hosts_queued_canvas_cannot_read_the_new_hosts_frames(cx: &mut TestA
                     WeakEntity::new_invalid(),
                     Rc::new(RefCell::new(super::Scratch::new())),
                     Rc::default(),
+                    Rc::default(),
                     cx,
                     |_, _| Ok(()),
                 )
@@ -275,6 +278,7 @@ fn a_retired_hosts_queued_canvas_cannot_read_the_new_hosts_frames(cx: &mut TestA
                 events: &events,
                 scratch: &Rc::new(RefCell::new(super::Scratch::new())),
                 notice: &Rc::default(),
+                ink: &Rc::default(),
             }
             .repaint(&overlay);
         });
@@ -303,6 +307,7 @@ fn a_retired_hosts_queued_canvas_cannot_read_the_new_hosts_frames(cx: &mut TestA
                 events: &events,
                 scratch: &Rc::new(RefCell::new(super::Scratch::new())),
                 notice: &Rc::default(),
+                ink: &Rc::default(),
             };
             if closed {
                 surface.close(overlay).expect("the old host closes");
@@ -693,6 +698,7 @@ fn a_warm_real_element_draw_has_no_boxed_application_callback(cx: &mut TestAppCo
                 WeakEntity::new_invalid(),
                 Rc::new(RefCell::new(super::Scratch::new())),
                 Rc::default(),
+                Rc::default(),
                 cx,
                 |_, _| Ok(()),
             )
@@ -718,6 +724,85 @@ fn a_warm_real_element_draw_has_no_boxed_application_callback(cx: &mut TestAppCo
         0,
         "the empty warm draw has no handoffs or canvas box"
     );
+    visual.update(|window, _| window.remove_window());
+}
+
+#[gpui::test]
+fn the_real_element_paints_a_hold_s_line_as_two_strokes_only_while_its_host_is_enabled(
+    cx: &mut TestAppContext,
+) {
+    use gpui_kit::AppContext as _;
+    use kumochi_protocol::geometry::{PhysicalPoint, PhysicalRect};
+    use kumochi_protocol::message::GestureId;
+
+    cx.update(gpui_kit::init);
+    let presenter = begun(Box::new(Stager(size_of::<Stager>())));
+    let frames = presenter.frames();
+    frames.borrow_mut().shown = true;
+    let ink = super::Held::default();
+    let overlay = cx
+        .update(|cx| {
+            open(
+                Rc::clone(&frames),
+                WeakEntity::new_invalid(),
+                Rc::new(RefCell::new(super::Scratch::new())),
+                Rc::default(),
+                Rc::clone(&ink),
+                cx,
+                |_, _| Ok(()),
+            )
+        })
+        .expect("a synthetic host");
+    let display = PhysicalRect {
+        origin: [0, 0],
+        size: [4_000, 4_000],
+    };
+    let holder = cx.new(|_| ());
+    let sampler = holder.update(cx, |(), cx| {
+        let recorder = crate::input::path::PathRecorder::new(PhysicalPoint([10, 10]), 1.0, display);
+        super::ink::Sampler::start(GestureId(1), recorder, cx, |(), _| true)
+    });
+    let mut visual = gpui_kit::VisualTestContext::from_window(overlay.window, cx);
+    visual.simulate_resize(size(px(100.0), px(100.0)));
+    visual.run_until_parked();
+    // The paths one draw builds, hands to GPUI and GPUI frees, and what GPUI allocates in it.
+    let mut drawn = || {
+        let ((), requests) = crate::allocation::requests(10_000, || {
+            visual.update(|window, cx| window.draw(cx).clear(cx));
+        });
+        let kept = requests
+            .iter()
+            .filter(|r| r.action == 0 && r.tag == 3)
+            .count();
+        (super::paint_phase::tests::assert_paths(&requests, 3), kept)
+    };
+
+    overlay.painting.set(true);
+    let (none, idle) = drawn();
+    assert_eq!(none, 0, "no hold");
+    *ink.borrow_mut() = Some(sampler);
+    assert_eq!(
+        drawn().0,
+        0,
+        "a hold whose pointer hasn't left the dead zone"
+    );
+    let moved = ink
+        .borrow_mut()
+        .as_mut()
+        .is_some_and(|sampler| sampler.sample(PhysicalPoint([80, 60])));
+    assert!(moved);
+    let (paths, kept) = drawn();
+    assert_eq!(paths, 2, "the white edge and the pink core");
+    assert!(
+        kept > idle,
+        "GPUI keeps what it is handed; a path dropped unpainted costs it nothing"
+    );
+    assert_eq!(drawn().0, 2, "and again on the next paint");
+    overlay.painting.set(false);
+    assert_eq!(drawn().0, 0, "a retired host paints no line");
+    overlay.painting.set(true);
+    ink.borrow_mut().take();
+    assert_eq!(drawn().0, 0, "the hold ended");
     visual.update(|window, _| window.remove_window());
 }
 
@@ -795,6 +880,7 @@ fn draw_once(frames: &Rc<RefCell<Frames>>, owner: WeakEntity<Presence>, cx: &mut
                 owner.clone(),
                 Rc::new(RefCell::new(super::Scratch::new())),
                 Rc::default(),
+                Rc::default(),
                 cx,
                 |_, _| Ok(()),
             )
@@ -818,6 +904,7 @@ fn draw_once(frames: &Rc<RefCell<Frames>>, owner: WeakEntity<Presence>, cx: &mut
             events: &events,
             scratch: &Rc::new(RefCell::new(super::Scratch::new())),
             notice: &Rc::default(),
+            ink: &Rc::default(),
         }
         .repaint(&overlay);
     });
@@ -956,6 +1043,7 @@ fn a_warm_geometry_bearing_element_allocates_only_its_three_handoffs(cx: &mut Te
                 Rc::clone(&frames),
                 WeakEntity::new_invalid(),
                 Rc::clone(&scratch),
+                Rc::default(),
                 Rc::default(),
                 cx,
                 |_, _| Ok(()),

@@ -260,10 +260,6 @@ impl Presence {
     /// with `read`. Every surface was excluded before that reading, so the brain's capture takes
     /// no frame drawn before it. A reading that isn't a positive number gives the lease back
     /// and refuses as `Exhausted`.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "a screen hold's release is the first caller")
-    )]
     pub(super) fn acquire_stamped(
         &mut self,
         session: &crate::link::Session,

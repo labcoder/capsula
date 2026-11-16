@@ -96,27 +96,27 @@ impl Settings {
         true
     }
 
-    /// Whether a hold may also show the model a window: the choice in flight, else the saved one.
-    pub fn screen_holds_choice(&self) -> Option<bool> {
-        let saved = self.view.as_ref()?.screen_holds;
+    /// Whether a hold also sends the model the screen: the choice in flight, else the saved one.
+    pub fn show_screen_choice(&self) -> Option<bool> {
+        let saved = self.view.as_ref()?.show_screen;
         self.pending
             .iter()
             .find_map(|pending| match (pending.slot, pending.failed) {
-                (Slot::ScreenHolds(on), false) => Some(on),
+                (Slot::ShowScreen(on), false) => Some(on),
                 _ => None,
             })
             .or(Some(saved))
     }
 
-    pub fn screen_holds_pending(&self) -> bool {
+    pub fn show_screen_pending(&self) -> bool {
         self.pending
             .iter()
-            .any(|pending| matches!(pending.slot, Slot::ScreenHolds(_)))
+            .any(|pending| matches!(pending.slot, Slot::ShowScreen(_)))
     }
 
-    pub fn screen_holds_error(&self) -> Option<&UserError> {
+    pub fn show_screen_error(&self) -> Option<&UserError> {
         self.notice_slot
-            .filter(|slot| matches!(slot, Slot::ScreenHolds(_)))
+            .filter(|slot| matches!(slot, Slot::ShowScreen(_)))
             .and(self.notice.as_ref())
     }
 
@@ -124,15 +124,15 @@ impl Settings {
         clippy::fn_params_excessive_bools,
         reason = "the checkbox and wire setter carry this boolean unchanged"
     )]
-    pub fn send_screen_holds(&mut self, on: bool, send: impl FnOnce(SettingsOp) -> bool) -> bool {
-        if self.screen_holds_pending()
-            || self.screen_holds_choice().is_none_or(|old| old == on)
-            || !send(SettingsOp::SetScreenHolds(on))
+    pub fn send_show_screen(&mut self, on: bool, send: impl FnOnce(SettingsOp) -> bool) -> bool {
+        if self.show_screen_pending()
+            || self.show_screen_choice().is_none_or(|old| old == on)
+            || !send(SettingsOp::SetShowScreen(on))
         {
             return false;
         }
         self.pending.push_back(Pending {
-            slot: Slot::ScreenHolds(on),
+            slot: Slot::ShowScreen(on),
             failed: false,
             reset_draft: false,
         });

@@ -148,8 +148,7 @@ impl Config {
 
     fn refusing(path: Option<PathBuf>, refusal: Refusal, main_thread: ThreadId) -> Self {
         let mut view = view_of(&Table::new(), main_thread, true);
-        // A file that can't be read may have turned screen holds off, or never turned the
-        // screen's picture on.
+        // A file that can't be read may have turned screen holds off, or the screen's picture.
         view.screen_holds = false;
         view.show_screen = false;
         Self {
@@ -540,10 +539,12 @@ fn view_of(table: &Table, main_thread: ThreadId, in_use: bool) -> SettingsView {
         None => kumochi_protocol::message::DEFAULT_SCREEN_HOLDS,
         Some(_) => invalid(SCREEN_HOLDS).unwrap_or(false),
     };
-    // Its own key: a stored choice about one window is never read as one about the screen.
+    // Its own key. Without it the setting starts on, except for someone who refused the
+    // window's picture, a stored off or a value that reads as one, who isn't switched to the
+    // whole screen unasked.
     let show_screen = match voice.and_then(|voice| voice.get(SHOW_SCREEN)) {
         Some(Value::Boolean(on)) => *on,
-        None => kumochi_protocol::message::DEFAULT_SHOW_SCREEN,
+        None => screen_holds && kumochi_protocol::message::DEFAULT_SHOW_SCREEN,
         Some(_) => invalid(SHOW_SCREEN).unwrap_or(false),
     };
     SettingsView {

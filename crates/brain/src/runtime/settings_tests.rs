@@ -111,16 +111,29 @@ async fn the_screen_gate_is_sent_at_connect_and_after_a_change_that_moves_it() {
             labels.push(gate_or_settings(&mut shell).await);
         }
         assert_eq!(labels, ["Settings answer=false", "Off(NotReady)", "Scenes"]);
+        // The gate speaks for the screen's picture, whatever the older window choice says.
+        shell.send(&op(SettingsOp::SetShowScreen(true))).await;
+        assert_eq!(gate_or_settings(&mut shell).await, "Settings answer=true");
         shell.send(&op(SettingsOp::SetScreenHolds(false))).await;
-        assert_eq!(gate_or_settings(&mut shell).await, "Settings answer=true");
-        assert_eq!(gate_or_settings(&mut shell).await, "Off(TurnedOff)");
-        shell.send(&rename("Nimbus")).await;
-        assert_eq!(gate_or_settings(&mut shell).await, "Settings answer=true");
-        shell.send(&op(SettingsOp::SetScreenHolds(true))).await;
         assert_eq!(
             gate_or_settings(&mut shell).await,
             "Settings answer=true",
-            "an unrelated change didn't resend the gate"
+            "storing the choice it already read didn't resend the gate"
+        );
+        shell.send(&op(SettingsOp::SetShowScreen(false))).await;
+        assert_eq!(
+            gate_or_settings(&mut shell).await,
+            "Settings answer=true",
+            "the window choice going off didn't move the gate"
+        );
+        assert_eq!(gate_or_settings(&mut shell).await, "Off(TurnedOff)");
+        shell.send(&op(SettingsOp::SetScreenHolds(true))).await;
+        assert_eq!(gate_or_settings(&mut shell).await, "Settings answer=true");
+        shell.send(&op(SettingsOp::SetShowScreen(true))).await;
+        assert_eq!(
+            gate_or_settings(&mut shell).await,
+            "Settings answer=true",
+            "the window choice coming back didn't move the gate"
         );
         assert_eq!(gate_or_settings(&mut shell).await, "Off(NotReady)");
         drop(shell);

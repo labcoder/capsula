@@ -134,11 +134,11 @@ sequenceDiagram
   participant M as Model
   U->>Sh: hold the shortcut
   Sh->>Sh: Listening in the same frame, mic opens
-  Sh->>Br: HoldRecognized (after 300 ms)
-  Br->>Sw: capture with this run's ticket
-  Sw-->>Br: overview, crop, UI elements
+  Sh->>Br: ScreenHoldRecognized (after 300 ms)
   U->>Sh: release
-  Sh->>Br: last audio, KeyUp
+  Sh->>Br: ScreenRelease, last audio, KeyUp
+  Br->>Sw: capture the display under the pointer
+  Sw-->>Br: one picture, the pointer's path painted on it
   Br->>Br: Parakeet transcribes on the CPU
   Br->>M: request (context, overview and optional focus crop from one capture)
   M-->>Br: text and draw-tool stream

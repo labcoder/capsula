@@ -80,9 +80,11 @@ it remains unimplemented and unverified.
 
 Presence owns the exclusion transaction in `presence/exclusion.rs`; the lease and
 its cleanup rules are in `crates/shell-core/src/presence/exclusion/machine.rs`, with no GPUI.
-Its one production caller is a recognized screen hold (`presence/voice.rs`): the lease is taken
-after every refusal has passed, and its generation goes to the brain in `HoldRecognized`. It
-sends no Include, ticket or capture request.
+Its one production caller is a screen hold's release (`Presence::release_screen` in
+`presence/voice.rs`): the lease is taken when the keys come up, after the standing notice was
+asked once more, and its generation goes to the brain in `ScreenRelease` with the counter
+reading taken once the last surface was excluded (`acquire_stamped`). It sends no Include,
+ticket or capture request.
 The native callback's delivery (`presence/gesture.rs`) applies its effects inside the dock
 window's update and runs its intents when that update has ended. GPUI takes a window out of its
 table while updating it, so an acquisition made inside the dock's update can't reach the dock
@@ -117,12 +119,12 @@ releases nothing, so it can't release a newer lease. They do not establish nativ
 Connection loss and direct session replacement revoke before accepting another session, retaining
 failed cleanup debt; quit attempts bounded cleanup without waiting on a worker or pipe.
 
-The shell remembers the generation a sent `HoldRecognized` named until that capture answers.
+The shell remembers the generation a sent `ScreenRelease` named until that capture answers.
 While it is remembered, the first time that lease stops protecting capture sends
 `ExclusionLapsed` with that generation, once: from its timer, from a surface that can't be
 covered, or from any other revoke, including one that leaves restoration debt and so keeps the
 lease. A lease the brain never saw tells nothing and is released at once: one whose acquisition
-failed, whose hold the runs model refused, or whose `HoldRecognized` couldn't be sent. The brain
+failed, whose release the runs model refused, or whose `ScreenRelease` couldn't be sent. The brain
 closes a hold whose lapse arrives before its frame was captured as NotReady, and ignores a lapse
 after `CaptureDone` or for another lease ([the hold client](#the-brains-hold-client)).
 

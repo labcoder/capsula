@@ -121,6 +121,11 @@ struct Presence {
     screen_lease: Option<kumochi_protocol::message::LeaseGeneration>,
     #[cfg(test)]
     exclusion_fixture: Option<Rc<std::cell::RefCell<exclusion::Fixture>>>,
+    /// The running screen hold's pointer line, which the overlay paints.
+    ink: ink::Held,
+    /// What a screen release's stamp reads in place of the performance counter.
+    #[cfg(test)]
+    counter_fixture: Option<Rc<dyn Fn() -> i64>>,
     input_windows: platform::OverlayWindows,
     native: PresenceNative,
     dock_window: AnyWindowHandle,
@@ -699,24 +704,19 @@ impl Render for Panel {
                 .debug_selector(|| "presence-stop".into());
             Target(button.into_element())
         });
-        // The icon is the standing notice: an open eye only while a hold shows the named model
-        // the window, struck through with the reason otherwise.
+        // The icon shows only when a hold can't send the picture the setting allows, struck
+        // through with the reason; a hold that sends, or a setting that is off, shows nothing.
         let screen = self.screen.as_ref().map(|(text, model)| {
             let tip = SharedString::from(voice::screen_text(strings, *text, model.as_ref()));
-            let on = *text == Text::ScreenHoldsOn;
             div()
                 .id("screen-holds")
                 .role(gpui_kit::Role::Image)
                 .aria_label(tip.clone())
                 .debug_selector({
                     let tip = tip.clone();
-                    move || format!("screen-holds on={on} {tip}")
+                    move || format!("screen-holds {tip}")
                 })
-                .child(if on {
-                    gpui_kit::assets::IconName::Eye
-                } else {
-                    gpui_kit::assets::IconName::EyeOff
-                })
+                .child(gpui_kit::assets::IconName::EyeOff)
                 .tooltip(move |window, cx| {
                     // The longest notice is wider than the peek, so it wraps inside it.
                     let tip = tip.clone();
@@ -1035,6 +1035,9 @@ pub(crate) fn open(
             screen_lease: None,
             #[cfg(test)]
             exclusion_fixture: None,
+            ink: Rc::default(),
+            #[cfg(test)]
+            counter_fixture: None,
             input_windows,
             native,
             dock_window,

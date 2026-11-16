@@ -68,6 +68,12 @@ impl PathRecorder {
         true
     }
 
+    /// The display the line is drawn on, as given to [`Self::new`].
+    #[must_use]
+    pub const fn display(&self) -> PhysicalRect {
+        self.display
+    }
+
     /// The kept points, oldest first.
     pub fn points(&self) -> &[PhysicalPoint] {
         &self.points

@@ -215,9 +215,9 @@ pub const DEFAULT_HOLD_TO_TALK: bool = true;
 /// The initial screen-hold choice, also used by older settings files without the key.
 pub const DEFAULT_SCREEN_HOLDS: bool = true;
 
-/// The initial show-screen choice, also used by settings files without the key. A stored
-/// screen-hold choice never stands in for it.
-pub const DEFAULT_SHOW_SCREEN: bool = false;
+/// The initial show-screen choice, also used by settings files without the key, unless they
+/// store a refusal of the older screen-hold choice.
+pub const DEFAULT_SHOW_SCREEN: bool = true;
 
 /// When an idle speech-input model is unloaded to free its memory.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]

@@ -285,6 +285,7 @@ impl Presence {
         }
         events.attribute(events.capacity() * size_of::<LinkEvent>());
         if applied {
+            self.screen_changed(cx);
             self.runs_changed(cx)
         } else {
             Ok(())

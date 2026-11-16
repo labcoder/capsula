@@ -64,6 +64,8 @@ pub(super) fn presence(cx: &mut TestAppContext) -> Entity<Presence> {
             exclusion_timer: None,
             screen_lease: None,
             exclusion_fixture: None,
+            ink: Rc::default(),
+            counter_fixture: None,
             input_windows: platform::OverlayWindows::default(),
             native,
             dock_window,

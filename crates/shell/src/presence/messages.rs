@@ -806,7 +806,7 @@ mod tests {
                 ),
                 (
                     HeldScreen::NotIncluded(ScreenClass::Changed),
-                    Some("Screen not included: the window changed"),
+                    Some("Screen not included: it changed while the picture was being taken"),
                     None,
                 ),
                 (

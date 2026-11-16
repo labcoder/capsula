@@ -18,17 +18,21 @@ expiry is terminal but never releases an unconfirmed device owner.
 
 ## Screen holds
 
-The appended `ScreenHolds` tells the shell whether a hold also shows the model the window under
-the pointer: `On { model }` with the model's display name, or `Off` with `ModelCantSee`,
+The appended `ScreenHolds` tells the shell whether a hold also sends the model a picture of the
+screen ([screen release](#screen-release)): `On { model }` with the model's display name, or `Off` with `ModelCantSee`,
 `NotReady` (the catalog isn't read, or no model is chosen), `Unsupported` (no window capture on
 this platform, or the worker found at the session's first screen hold that this system can't
-capture) or the appended `TurnedOff` (the user's switch). It's for the standing notice and for
-which hold message the shell sends: `HoldRecognized` only while it's `On`, otherwise
-`VoiceHoldRecognized`. `HoldRecognized` carries the gesture, the thread, the selection revision,
+capture) or the appended `TurnedOff` (the user's switch, `show_screen`). It's for the standing
+notice and for which hold message the shell sends: `ScreenHoldRecognized` only while it's `On`,
+otherwise `VoiceHoldRecognized`. It spoke for `screen_holds` and the window under the pointer
+until the shell began sending screen holds. Both changed in one commit, so the notice never spoke
+for one setting while a hold sent what the other governs. `HoldRecognized` is that earlier hold,
+which the shell no longer sends. It carries the gesture, the thread, the selection revision,
 the pointer sampled once at recognition, the exclusion lease and the recognition time. Its
 fields changed in place, not by appending: `pointer_display`, the display that held the pointer,
 was replaced by `selection` and a physical `pointer`, and its smallest encoding went from 9 bytes
-to 8. That's safe because nothing sends it yet and the build-id handshake refuses mixed binaries.
+to 8. That was safe because nothing sent it then and the build-id handshake refuses mixed
+binaries.
 
 The appended `HoldScreen { gesture, outcome }` says what a screen hold carried into its turn,
 once, when its run's first request starts: `Attached` for the window's image, or `NotIncluded`
@@ -55,13 +59,13 @@ The brain sends `ScreenHolds` for the default model once a connection opens, aft
 the voice view, and again only when a saved settings change, a catalog read or an account
 operation the shell sent (a sign-out clears the catalog at once) moves it. In the running phase
 the shell keeps a connection's last `ScreenHolds` until that connection ends, and a
-`HoldScreen` for the current hold replaces that hold's predicted line; either one from another
-connection is dropped. Before `Welcome` the shell rejects either one and ends the connection.
+`HoldScreen` that refuses the current hold's picture sets that hold's line, once; either one
+from another connection is dropped. Before `Welcome` the shell rejects either one and ends the connection.
 All three are payload-redacted in the pipe tap.
 
 `ScreenHolds` speaks for the default model, but a turn's image goes to its run's model, which is
-the thread's own when it has one. So the shell sends `HoldRecognized` only when three things
-hold at recognition, and the standing icon reads the same check (`Presence::screen_notice`), so
+the thread's own when it has one. So the shell sends `ScreenHoldRecognized` only when three
+things hold at recognition, and the peek's icon reads the same check (`Presence::screen_notice`), so
 no notice names a model the image won't reach:
 
 1. the stored state is `On { model }`;
@@ -72,15 +76,17 @@ no notice names a model the image won't reach:
    a default change the shell sent and the brain's next `ScreenHolds`, the stored `On` still
    names the old model and counts as not ready.
 
-Under that check the shell takes the [exclusion lease](screen.md#local-shell-exclusion), then
-starts the hold once, with the lease and the pointer if the lease was taken and as
-`VoiceHoldRecognized` if not. The brain checks its own gate again at admission, so an
-out-of-date `On` costs only the lease.
+Under that check the shell sends `ScreenHoldRecognized` and takes nothing of the screen. It asks
+the same check once more for that gesture: when the keys come up, or as soon as the check stops
+holding while they are down. Only a yes at release takes the
+[exclusion lease](screen.md#local-shell-exclusion) and sends the release, and a no is final for
+that gesture. The brain checks its own gate at admission and again at release, so an
+out-of-date `On` costs at most the lease.
 
 ## Screen release
 
-These are staged for a hold that shows the model one picture of the screen, taken when the keys
-are released. Nothing sends or produces any of them yet, and the hold above is unchanged.
+A hold shows the model one picture of the screen, taken when the keys are released
+([presence](presence.md#a-screen-holds-pointer-line) has the shell's side).
 
 The appended `ScreenHoldRecognized { gesture, thread, selection, t_qpc }` (tag 29) is a
 recognized hold of that kind. It carries no lease and no pointer, because nothing of the screen
@@ -109,10 +115,11 @@ writes it as `screen` ([store](store.md#tables)), so a turn stored as `attached`
 the window.
 
 `SettingsOp::SetShowScreen` (tag 15) is appended and `SettingsView` gains `show_screen`, under
-the same handshake rule as `screen_holds`. It's a separate choice: `DEFAULT_SHOW_SCREEN` is off,
-a settings file without the key reads as that default whatever its `screen_holds` says, and it
-reads as off when the file can't be read ([settings](settings.md)). No interface sends the op
-yet; the brain reads the field to gate a screen hold's picture.
+the same handshake rule as `screen_holds`. It's a separate choice: `DEFAULT_SHOW_SCREEN` is on,
+a settings file without the key reads as that default unless it stores a refusal of
+`screen_holds`, and it reads as off when the file can't be read ([settings](settings.md)). The
+Privacy tab's checkbox sends the op, and nothing sends `SetScreenHolds` any more. The brain reads
+the field to gate a screen hold's picture and to say `ScreenHolds`.
 
 ## Anthropic paste metadata
 

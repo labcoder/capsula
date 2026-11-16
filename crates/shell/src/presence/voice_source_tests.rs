@@ -1691,3 +1691,57 @@ fn a_hold_seen_only_at_release_is_refused_with_a_notice_and_a_repeat_recovers_th
         );
     });
 }
+
+#[gpui::test]
+fn the_native_callback_reads_the_pointer_at_recognition_and_when_the_keys_come_up_and_logs_neither(
+    cx: &mut TestAppContext,
+) {
+    use super::super::screen_hold_tests::{luna, on, screen_ready};
+    use crate::platform::cursor_fixture;
+    use kumochi_protocol::geometry::{PhysicalPoint, PointerPath, ReleasePointer};
+
+    const ORIGIN: [i32; 2] = [1_613, 977];
+    const MOVED: [i32; 2] = [1_777, 1_013];
+    const RELEASED: [i32; 2] = [1_783, 1_019];
+    let (captured, _logging, _second) = capture();
+    let ready = screen_ready(Some(on(&luna())), cx);
+    let deliver = native(&ready.owner, cx);
+    cursor_fixture::set(Some(ORIGIN));
+    let at = Instant::now();
+    chord(&deliver, Edge::Down, at);
+    deliver(Event::Deadline, after(at, 301));
+    cx.run_until_parked();
+    ready.owner.update(cx, |owner, _| {
+        assert!(owner.voice.pending.is_some());
+        owner.voice.status = Some(Text::HoldListening);
+    });
+    // The line starts where the callback read the pointer at recognition.
+    cursor_fixture::set(Some(MOVED));
+    cx.background_executor
+        .advance_clock(Duration::from_millis(16));
+    cx.run_until_parked();
+    // The release names where the callback read it when the keys came up.
+    cursor_fixture::set(Some(RELEASED));
+    chord(&deliver, Edge::Up, at + Duration::from_millis(400));
+    cx.run_until_parked();
+    let release =
+        std::iter::from_fn(|| ready.controls.try_recv().ok()).find_map(|message| match message {
+            ControlToBrain::ScreenRelease { pointer, path, .. } => Some((pointer, path)),
+            _ => None,
+        });
+    assert_eq!(
+        release,
+        Some((
+            ReleasePointer(PhysicalPoint(RELEASED)),
+            PointerPath(vec![PhysicalPoint(ORIGIN), PhysicalPoint(MOVED)])
+        ))
+    );
+    // Where the user pointed is theirs: no log line carries a place the pointer was.
+    let text = String::from_utf8(captured.0.lock().unwrap().clone()).unwrap();
+    assert!(text.contains("held speech input"), "the hold was logged");
+    for [x, y] in [ORIGIN, MOVED, RELEASED] {
+        for place in [format!("{x}, {y}"), format!("{x},{y}"), format!("{x} {y}")] {
+            assert!(!text.contains(&place), "a log line names a place");
+        }
+    }
+}
