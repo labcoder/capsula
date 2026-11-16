@@ -875,7 +875,13 @@ fn ended(core: &mut Coordinator, how: usize) -> Vec<Effect> {
 #[test]
 fn a_run_that_ends_before_its_first_request_stores_no_picture() {
     use crate::context::{Jpeg, Screen, ScreenClass};
-    let picture = || Screen::Picture(Jpeg::new(vec![0xFF, 0xD8, 0xFF, 0xD9]).unwrap(), None);
+    let picture = || {
+        Screen::Picture(
+            Jpeg::new(vec![0xFF, 0xD8, 0xFF, 0xD9]).unwrap(),
+            None,
+            crate::context::Geometry::FIXTURE,
+        )
+    };
     for how in 0..3 {
         for (screen, cleared) in [
             (image(), vec![R]),
