@@ -228,21 +228,14 @@ impl<'de> Deserialize<'de> for Anchor {
     }
 }
 
-/// What a highlight or callout marks: a canvas point, an object, or a box in canvas units.
-#[derive(Clone, PartialEq)]
+/// What a highlight or callout marks: a canvas point, an object, or a box in canvas units. Its
+/// `Debug` prints no number, because `Finite`'s doesn't.
+#[derive(Debug, Clone, PartialEq)]
 pub enum Target {
     /// A canvas point or a scene object.
     Anchor(Anchor),
     /// `[x, y, w, h]` with a positive width and height.
     Box([Finite; 4]),
-}
-impl fmt::Debug for Target {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Anchor(anchor) => anchor.fmt(f),
-            Self::Box(_) => f.write_str("Box(..)"),
-        }
-    }
 }
 #[derive(Serialize, Deserialize)]
 enum TargetBinary {
