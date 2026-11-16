@@ -240,6 +240,10 @@ pub(crate) enum Seen {
     ControlDrained,
     /// The store answered a delete, and the brain applied the answer.
     DeleteAnswered,
+    /// A screen hold's words came in and wait for its picture.
+    WordsWaiting,
+    /// A screen hold's picture was sealed and taken into its pending part.
+    PictureSealed,
     /// A quit ended the current run and now waits for the store.
     QuitDraining,
     /// A settings write is on disk and became the settings.

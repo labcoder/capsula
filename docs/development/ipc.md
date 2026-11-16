@@ -755,6 +755,7 @@ tags and bytes do not change. Mixed builds still fail their build-id handshake.
 | Control, brain to shell | `DrawingReplacementFailed` | Fixed localized loss feedback for the original thread/run, including after its tool result ended. |
 | Control, brain to shell | `DrawingNotReturned` | A run whose `done` outcome is stored called `draw`, and the shell refused every step it committed, if any; fixed localized feedback for its thread/run. |
 | Control, shell to brain | `SceneFailed` | A terminal whole-scene refusal, distinct from a user clear; the brain already owns its originating run/thread. |
+| Control, shell to brain | `SceneSkipped { scene }` | The shell skipped a screen scene because the user's screen may have changed since its picture, so nothing of it was shown. Appended as tag 31, after `ScreenRelease`; it carries only the id. |
 
 `SceneFailed` reports a cause to the brain, including a header refused before the shell knows
 its run. `DrawingReplacementFailed` returns fixed localized feedback to the original conversation

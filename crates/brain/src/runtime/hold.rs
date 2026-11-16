@@ -5,7 +5,7 @@ mod audio;
 mod reconnect_tests;
 mod screen;
 #[cfg(test)]
-mod tests;
+pub(super) mod tests;
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
@@ -301,7 +301,7 @@ pub(super) enum Event {
 pub(super) async fn next(holds: &mut Holds) -> Event {
     let deadline = holds.pending.as_ref().map(|hold| hold.deadline);
     let key = holds.pending.as_ref().map(|hold| hold.key);
-    let decode = holds.pending.as_mut().and_then(|hold| hold.decode.as_mut());
+    let decode = holds.pending.as_mut().map(|hold| &mut hold.decode);
     tokio::select! {
         biased;
         () = super::sleep_until(deadline) => Event::Deadline,
@@ -309,10 +309,12 @@ pub(super) async fn next(holds: &mut Holds) -> Event {
         Some(packet) = holds.receive.recv() => Event::Packet(packet),
         Some(event) = holds.screen_answers.recv() => Event::Screen(event),
         result = async {
-            match decode {
-                Some(decode) => decode.await.unwrap_or(SttResult::Failed(crate::speech::SpeechError::WorkerLost)),
-                None => std::future::pending().await,
-            }
+            let Some(slot) = decode else { return std::future::pending().await };
+            let Some(receive) = slot.as_mut() else { return std::future::pending().await };
+            let result = receive.await.unwrap_or(SttResult::Failed(crate::speech::SpeechError::WorkerLost));
+            // An answered receiver panics if polled again, and a screen hold's words keep it pending.
+            *slot = None;
+            result
         } => Event::Decoded(key.expect("a decode owns its hold key"), result),
     }
 }
@@ -851,6 +853,8 @@ impl Brain {
                 {
                     hold.deadline = until;
                     hold.words = Some(text);
+                    #[cfg(test)]
+                    self.observer.send(super::Seen::WordsWaiting).ok();
                     return Ok(());
                 }
                 self.hold_submit(text, link)
@@ -991,7 +995,13 @@ impl Brain {
             }
             Outcome::Sealed(_) | Outcome::Closed(_) | Outcome::Unsupported => None,
         };
+        #[cfg(test)]
+        let sealed = matches!(event.outcome, Outcome::Sealed(_));
         self.holds.screen_event(event);
+        #[cfg(test)]
+        if sealed {
+            self.observer.send(super::Seen::PictureSealed).ok();
+        }
         if let Some(message) = lease {
             link.control(&message)?;
         }

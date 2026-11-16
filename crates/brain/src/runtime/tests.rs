@@ -314,6 +314,8 @@ fn scene_v1_control_reaches_the_canonical_drawing_consumer() {
             reason: SceneFailure::Timeout,
             cut: cut.cut.clone(),
         },
+        ControlToBrain::SceneFailed { scene: SceneId(2) },
+        ControlToBrain::SceneSkipped { scene: SceneId(3) },
     ];
     let expected = [
         Input::StopScenes {
@@ -332,6 +334,8 @@ fn scene_v1_control_reaches_the_canonical_drawing_consumer() {
             reason: SceneFailure::Timeout,
             cut: cut.cut,
         }),
+        Input::Drawing(crate::drawing::Input::SceneFailed { scene: SceneId(2) }),
+        Input::Drawing(crate::drawing::Input::SceneSkipped { scene: SceneId(3) }),
     ];
     for (message, expected) in messages.into_iter().zip(expected) {
         assert_eq!(super::controls::control_input(message), Ok(Some(expected)));

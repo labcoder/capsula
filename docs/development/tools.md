@@ -247,6 +247,10 @@ constant `On` together with those three.
   refused the same way. A step of such a call still being looked up or laid out ends there, and
   one being written settles discarded, so nothing new reaches the shell. Ordinary drawings and
   the spoken answer go on.
+- **A skipped scene.** When the shell skips a screen scene because the screen may have changed
+  since its picture (`SceneSkipped`), its open calls end with `drawing.ScreenChanged`, it
+  leaves, and the runs that drew it or were drawing in it refuse a later screen `begin` the
+  same way; its steps still count as drawn, and neither ending opens the repair round.
 - **The stamp.** A screen `begin` is stamped with the picture's size and display
   (`scene::screen::stamp`) before its name is looked up or compared with a held scene, so a
   later call continues it with the same header. A written size other than the picture's is
