@@ -348,12 +348,18 @@ each only the pictures it allowed: the run's own copy drops at once, and the byt
 when the last copy drops. The run's next build fails with `ScreenUnavailable`, and a request that has
 started keeps its copy until its round ends but is refused at the send, failing the run the same
 way. If no request has carried the image yet, the turn's `screen` becomes `withdrawn`; once one
-has, it stays `attached` or `screen`. Known limits:
+has, it stays `attached` or `screen`. A held run that ends any other way before a request
+carried its image (it fails, is stopped, cancelled or replaced) records no screen: a turn not
+yet written is written without it, and a written one is cleared by a store write queued behind
+the turn's. Known limits:
 - **A granted send can't be recalled.** Turning screen holds off refuses a request's send that
   hasn't been granted yet, but a body already granted goes out with its image.
-- **History can show a window that never left.** A held run that fails, is stopped or is
-  replaced before its first request still records its screen, so its history shows a window
-  for a turn whose image was never sent.
+- **History can show a window that never left.** The clear applies only before the first
+  request carrying the image is admitted. A request admitted but failed before its upload began
+  (an oversized body refused, the bearer not obtained, the upload budget spent) keeps the
+  screen recorded, and so does a crash or a failed write between a held run's turn and the
+  write that clears it. Either way its history shows a window for a turn whose image was never
+  sent.
 - **Every round resends the image.** Each tool round is a new stateless request, so the image's
   input tokens are charged again every round against the plan's usage, bounded by the round cap,
   and the body is uploaded again. At the 2 MiB image cap that's about 2.8 MB a round under the
