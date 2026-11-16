@@ -355,6 +355,7 @@ impl Drawing {
             out.effects
                 .push(Effect::Broken("a shown step the brain can't retire"));
         }
+        self.answered(scene, index, out);
     }
 
     pub(super) fn replacement_victims(

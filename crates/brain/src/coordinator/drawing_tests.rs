@@ -99,11 +99,13 @@ fn pending(effects: &[Effect]) -> (u64, Write) {
 fn commit(core: &mut Coordinator, store: &mut Store, effects: &[Effect]) -> Vec<Effect> {
     let (serial, write) = pending(effects);
     let reply = store.drawing_write(&write).expect("transaction");
-    core.handle(Input::DrawingWritten {
-        serial,
-        reply: Ok(reply),
-    })
-    .expect("matching acknowledgement")
+    let effects = core
+        .handle(Input::DrawingWritten {
+            serial,
+            reply: Ok(reply),
+        })
+        .expect("matching acknowledgement");
+    super::prepared(core, effects)
 }
 
 /// A committed step's `say` is spoken as its own segment, named by its step, and its scene's
@@ -1299,4 +1301,17 @@ fn replacement_lost(effects: &[Effect]) -> usize {
             )
         })
         .count()
+}
+
+/// A step answer from a run before this session is stale, whatever its scene and index.
+#[test]
+fn a_ready_step_from_before_this_session_is_stale() {
+    use kumochi_protocol::message::{RunId, SceneId};
+    let mut core = super::fresh();
+    let ready = Input::Drawing(drawing::Input::StepReady {
+        run: RunId(9),
+        scene: SceneId(1),
+        index: 0,
+    });
+    assert_eq!(core.handle(ready), Err(crate::coordinator::Stale));
 }

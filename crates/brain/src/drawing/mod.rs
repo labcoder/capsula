@@ -12,6 +12,7 @@ mod call;
 mod digest;
 pub mod io;
 mod prepare;
+mod ready;
 mod scenes;
 mod screen;
 mod snapshot;
@@ -36,6 +37,7 @@ pub use call::{CallEnd, CallError, Remaining};
 pub(crate) use digest::Digest;
 pub use io::{Reply, StoredScene, Target, Write};
 pub use prepare::{PrepareJob, Prepared, Shared};
+pub use ready::READY_WAIT;
 pub(crate) use screen::{SCREEN_MARKS, ScreenMarks, stored_item};
 pub(crate) use snapshot::CHUNK_TARGET;
 pub use snapshot::Snapshot;
@@ -47,7 +49,7 @@ use prepare::Paint;
 pub const LAYOUT_VERSION: u32 = 2;
 
 /// Jobs waiting behind the pending write: every record a run's calls may make, each call's
-/// refusal and finish, and room for the shell's shown steps, cuts and stops (guess).
+/// refusal and finish, and room for the shell's shown and ready steps, cuts and stops (guess).
 const MAX_QUEUED_JOBS: usize = call::MAX_CALLS_PER_RUN * (call::MAX_CALL_RECORDS + 2) + 256;
 
 /// Whether a run's lost drawing is told when the run can't repair it.
@@ -125,6 +127,17 @@ pub enum Input {
         /// Its zero-based lifetime index.
         index: u32,
     },
+    /// The shell prepared a step and queued it to activate.
+    StepReady {
+        /// The run that committed it.
+        run: RunId,
+        /// The scene.
+        scene: SceneId,
+        /// Its zero-based lifetime index.
+        index: u32,
+    },
+    /// [`READY_WAIT`] passed while a finished call waited for the shell.
+    ReadyWait,
     /// The shell couldn't prepare a step and stopped its scene at `cut`.
     StepFailed {
         /// The run that committed it.
@@ -260,6 +273,10 @@ enum Job {
         kind: CutKind,
     },
     Shown {
+        scene: SceneId,
+        index: u32,
+    },
+    Ready {
         scene: SceneId,
         index: u32,
     },
@@ -515,6 +532,12 @@ impl Drawing {
                     self.enqueue(Job::Shown { scene, index }, &mut out);
                 }
             }
+            Input::StepReady { run, scene, index } => {
+                if self.committed_by(run, scene, index, &mut out) {
+                    self.enqueue(Job::Ready { scene, index }, &mut out);
+                }
+            }
+            Input::ReadyWait => self.ready_wait(&mut out),
             Input::StepFailed {
                 run,
                 scene,
@@ -548,6 +571,7 @@ impl Drawing {
             Input::Prepared { serial, outcome } => self.prepared(serial, outcome, &mut out)?,
         }
         self.pump(&mut out);
+        self.release_left(&mut out);
         Ok(out)
     }
 
@@ -687,6 +711,7 @@ impl Drawing {
                 Job::Finish { run, call, error } => self.finish(run, &call, error, out),
                 Job::Cut { scene, cut, kind } => self.cut(scene, cut, kind, out),
                 Job::Shown { scene, index } => self.shown(scene, index, out),
+                Job::Ready { scene, index } => self.answered(scene, index, out),
                 Job::Unseen { run, named } => self.unseen(run, named, out),
                 Job::ClearVisible => self.clear_visible(out),
             }
@@ -785,6 +810,8 @@ impl fmt::Debug for Input {
             Self::CallFinished { .. } => "CallFinished",
             Self::StopScenes { .. } => "StopScenes",
             Self::StepShown { .. } => "StepShown",
+            Self::StepReady { .. } => "StepReady",
+            Self::ReadyWait => "ReadyWait",
             Self::StepFailed { .. } => "StepFailed",
             Self::Clear { .. } => "Clear",
             Self::SceneFailed { .. } => "SceneFailed",
