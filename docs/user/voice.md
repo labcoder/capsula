@@ -86,8 +86,8 @@ without one." Switching back to one that does adds "… supports screenshots, so
 will send one along." The line isn't saved with the conversation, so it's gone after you
 restart Kumochi. It appears only in the conversation that is open in chat, once its messages
 have loaded: a switch made while chat is closed, or in a new conversation you haven't sent
-anything in yet, leaves no line. A switch made in a task that uses its own model can show up
-later, in the next conversation on the default model.
+anything in yet, leaves no line. A switch made with the setting off, or in a task that uses its
+own model, is noticed later and may leave no line.
 
 A hold says nothing more about the screenshot while you hold. If the screenshot couldn't be
 included, the dock's panel says why: the screen wasn't ready, the display changed, the
