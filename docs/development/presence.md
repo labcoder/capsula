@@ -209,18 +209,25 @@ flowchart LR
   grace timer covers the gap between them. The panel's background is blurred where Windows
   allows it, with 85% opacity as the fallback. The stretch is gone with the old pill: motion
   trials return with the pull (C2a), and `cargo xtask bench stretch` says so.
-- **Screen notice.** The peek says nothing about the screen while a hold on the current target
-  sends the model its picture, while the setting is off, or when the system can't capture.
-  Beside the link status it draws a struck-through eye, with the reason as its tooltip, only
-  when something else stops the picture: the model can't take images (the tooltip names it),
-  screen sharing isn't ready, or the thread has its own model. The reason comes from
-  [the check](ipc.md#screen-holds) that decides the send. A hold says nothing about the picture
-  it will send, and shows the [pointer's line](#a-screen-holds-pointer-line) instead. When the
-  picture isn't included, the line under the status says why, in place of the settings notice;
-  when it is, nothing shows and history carries its icon. The typing panel shows the same line
-  when no voice status does.
-  `Presence::refresh_screen` pushes both after link events and dock refreshes; it compares
-  first, so a batch that changes neither allocates nothing.
+- **Screen line.** The dock and its peek say nothing about the screen, in any state: no icon
+  and no tooltip, whether a hold will send the picture, the setting is off, or something else
+  stops it. A hold says nothing about the picture it will send, and shows the
+  [pointer's line](#a-screen-holds-pointer-line) instead. When the picture isn't included,
+  the line under the status says why, in place of the settings notice; when it is, nothing
+  shows and history carries its icon. The typing panel shows the same line when no voice
+  status does. A hold that is voice only from the start shows nothing.
+  `Presence::refresh_screen` pushes the line after link events and dock refreshes; it
+  compares first, so a batch that changes nothing allocates nothing.
+- **Screen note.** The same refresh tells the conversation's model (`Threads::screen_sees`)
+  what [the check](ipc.md#screen-holds) says of the default model: a hold sends it the picture
+  (`On`), or it can't take one (`ModelCantSee`). The first answer after start-up is
+  remembered and says nothing. A changed answer leaves one `ScreenNote` in the hold's target
+  conversation when that is the open one: a centred, muted line with the picture's icon,
+  after the newest message, saying the model doesn't support screenshots or that it does. The
+  other states (the setting off, not ready, a thread with its own model, no capture) say
+  nothing and leave what is remembered alone. The note lives in the shell only and is never
+  stored: a newer one replaces it, a change while another conversation or one with no thread
+  yet is the target drops it, and a restart forgets it.
 - **Kumo in the peek.** `presence/kumo_view.rs` owns a 64-pixel Kumo. Its body is baked once,
   on the background executor at the launch scale, and kept across hiding as a prewarm; a scale
   change needs a restart (OSC-188 wires display changes). The peek is 380 wide and only as tall

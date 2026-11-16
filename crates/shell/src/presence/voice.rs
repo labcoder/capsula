@@ -322,8 +322,13 @@ impl Presence {
     /// The primary display in physical pixels, which is the one the overlay covers and so the
     /// one a hold's line is drawn on, with its scale.
     fn line_display(&mut self, cx: &mut Context<'_, Self>) -> Option<(PhysicalRect, f32)> {
-        let scale = self
-            .dock_window
+        // The overlay sits on the primary display, so its scale is that display's; the dock may
+        // be on another one, and stands in only until the overlay first opens.
+        let window = self
+            .overlay
+            .window()
+            .map_or(self.dock_window, |overlay| overlay.window);
+        let scale = window
             .update(cx, |_, window, _| window.scale_factor())
             .ok()?;
         let size = super::overlay::primary(scale, cx)?.map(i32::unsigned_abs);
@@ -404,6 +409,11 @@ impl Presence {
         if !self.runs.releases_screen(gesture, own_model, default) {
             return;
         }
+        // An unchecked box that is still saving is already the user's no.
+        if self.settings.read(cx).show_screen_choice() == Some(false) {
+            self.runs.hold_screen_turned_off();
+            return;
+        }
         // The pointer picks the display, so a release that couldn't read it shows none.
         let Some(pointer) = pointer else {
             tracing::debug!(stage = ?FailureStage::Release, reason = ?FailureReason::PointerUnread, "screen release refused; voice only");
@@ -456,26 +466,36 @@ impl Presence {
         }
     }
 
-    /// Follows the standing notice and the current hold's line in the status panel. A link event
-    /// batch that changes neither costs a comparison and no allocation.
+    /// Follows the current hold's line in the status panel, and says once in the conversation
+    /// when the default model starts or stops taking a hold's picture. A link event batch that
+    /// changes neither costs two comparisons and no allocation.
     pub(super) fn refresh_screen(&self, cx: &mut Context<'_, Self>) {
         let notice = self.screen_notice(cx);
-        let shown = [notice.text(), self.runs.hold_screen_text(notice)];
-        let panel = self.panel.read(cx);
-        if [&panel.screen, &panel.screen_line]
-            .into_iter()
-            .zip(shown)
-            .all(|(old, new)| old.as_ref().map(|(text, model)| (*text, model.as_ref())) == new)
-        {
-            return;
+        let sees = match notice {
+            ScreenNotice::On(model) => Some((Text::ScreenNoteCan, model)),
+            ScreenNotice::ModelCantSee(model) => Some((Text::ScreenNoteCant, model)),
+            _ => None,
         }
-        let [screen, screen_line] =
-            shown.map(|shown| shown.map(|(text, model)| (text, model.cloned())));
-        self.panel.update(cx, |panel, cx| {
-            panel.screen = screen;
-            panel.screen_line = screen_line;
-            cx.notify();
-        });
+        .filter(|(sees, _)| self.chat.read(cx).sees != Some(*sees))
+        .map(|(sees, model)| (sees, model.clone()));
+        let shown = self.runs.hold_screen_text(notice);
+        let old = &self.panel.read(cx).screen_line;
+        let line = (old.as_ref().map(|(text, model)| (*text, model.as_ref())) != shown)
+            .then(|| shown.map(|(text, model)| (text, model.cloned())));
+        if let Some((sees, model)) = sees {
+            let thread = self.runs.thread();
+            self.chat.update(cx, |chat, cx| {
+                if chat.screen_sees(thread, sees, &model) {
+                    cx.notify();
+                }
+            });
+        }
+        if let Some(screen_line) = line {
+            self.panel.update(cx, |panel, cx| {
+                panel.screen_line = screen_line;
+                cx.notify();
+            });
+        }
     }
 
     /// `pointer` is where the pointer was when the native callback recognized a hold or saw its

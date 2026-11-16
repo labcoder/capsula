@@ -58,7 +58,8 @@ saved.
 
 While **Kumo can see what you see** is on in **Settings → Privacy** (the checkbox carries your
 assistant's name), a hold to talk also sends your model one picture: the screen your pointer is
-on, as it is at the moment you let go of the shortcut. Everything visible on that screen is in
+on, as it is at the moment you let go of the shortcut, shrunk to fit 1280 by 720 before it
+goes. Everything visible on that screen is in
 the picture, including passwords, notifications and windows running as administrator. Kumochi
 doesn't look for or hide anything in it, so turn the setting off, or move what you don't want
 sent out of view, before you hold. The setting starts on, unless you had turned off the earlier
@@ -73,16 +74,21 @@ line is drawn on your main display only: if you draw there and let go with the p
 another display, the picture is of that other display, without the line.
 
 Nothing is captured while you hold. A hold cancelled before you let go captures nothing, and
-one cancelled after you let go sends nothing.
+one cancelled after you let go, before the answer starts, sends nothing.
 
-The dock says nothing about the picture while a hold will send it, and nothing while the
-setting is off. If something else stops a hold from sending it, pointing at the dock shows a
-struck-through eye beside the status, and its tooltip says why: the model can't take pictures,
-screen sharing isn't ready yet, or the task you're in uses its own model. A task with its own
-model is always voice only for now.
+The dock never says anything about the picture: not while a hold will send it, not while the
+setting is off, and not when something else stops it. A hold is voice only, without a word,
+while screen sharing isn't ready yet, in a task that uses its own model (always, for now) and
+with a model that can't take pictures.
+
+When you switch to a model that can't take pictures, the open conversation says so once, in a
+quiet line: "GPT-5.5 doesn't support screenshots, so messages will go without one." Switching
+back to one that can adds "… supports screenshots, so new messages will send one along." The
+line isn't saved with the conversation: it's gone after you restart Kumochi, and it doesn't
+appear in a conversation you haven't sent anything in yet.
 
 A hold says nothing more about the picture while you hold. If the picture couldn't be
-included, the same panel says why: the screen wasn't ready, the display changed, the picture
+included, the dock's panel says why: the screen wasn't ready, the display changed, the picture
 was too large, the model can't take pictures, or you turned the setting off during the hold.
 Turning the setting off while a picture is waiting to be sent withdraws it.
 

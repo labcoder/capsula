@@ -663,8 +663,6 @@ struct Panel {
     voice: Option<Text>,
     /// A settings notice the dock line can't show.
     notice: Option<Text>,
-    /// The standing screen notice's tooltip and the model it names; none hides the icon.
-    screen: Option<ScreenText>,
     /// The current screen hold's line, shown in place of the settings notice.
     screen_line: Option<ScreenText>,
     /// Shown only when Esc is wanted globally but Windows refused it.
@@ -704,28 +702,6 @@ impl Render for Panel {
                 .debug_selector(|| "presence-stop".into());
             Target(button.into_element())
         });
-        // The icon shows only when a hold can't send the picture the setting allows, struck
-        // through with the reason; a hold that sends, or a setting that is off, shows nothing.
-        let screen = self.screen.as_ref().map(|(text, model)| {
-            let tip = SharedString::from(voice::screen_text(strings, *text, model.as_ref()));
-            div()
-                .id("screen-holds")
-                .role(gpui_kit::Role::Image)
-                .aria_label(tip.clone())
-                .debug_selector({
-                    let tip = tip.clone();
-                    move || format!("screen-holds {tip}")
-                })
-                .child(gpui_kit::assets::IconName::EyeOff)
-                .tooltip(move |window, cx| {
-                    // The longest notice is wider than the peek, so it wraps inside it.
-                    let tip = tip.clone();
-                    gpui_kit::component::tooltip::Tooltip::element(move |_, _| {
-                        div().max_w(px(304.0)).child(tip.clone())
-                    })
-                    .build(window, cx)
-                })
-        });
         let line = self
             .screen_line
             .as_ref()
@@ -751,19 +727,13 @@ impl Render for Panel {
                             .child(constants::DISPLAY_NAME),
                     )
                     .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_1p5()
-                            .text_sm()
-                            .child(
-                                div()
-                                    .id("presence-status")
-                                    .role(gpui_kit::Role::Status)
-                                    .aria_label(status.clone())
-                                    .child(status),
-                            )
-                            .children(screen),
+                        div().flex().items_center().gap_1p5().text_sm().child(
+                            div()
+                                .id("presence-status")
+                                .role(gpui_kit::Role::Status)
+                                .aria_label(status.clone())
+                                .child(status),
+                        ),
                     )
                     .children(line.map(|line| {
                         div()
@@ -954,7 +924,6 @@ fn status_window(
             state: LinkState::Connecting,
             voice: None,
             notice: None,
-            screen: None,
             screen_line: None,
             stop: false,
             events: panel_events,

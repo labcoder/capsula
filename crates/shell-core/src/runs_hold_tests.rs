@@ -525,24 +525,6 @@ fn the_standing_notice_gives_way_in_order_and_names_only_the_newest_default() {
         }
         assert_eq!(runs.screen_notice(own, default), notice, "{stored:?} {own}");
     }
-    // Nothing shows while nothing is wrong: no capture here, a hold that sends, the switch off.
-    for quiet in [
-        ScreenNotice::Hidden,
-        ScreenNotice::On(&luna),
-        ScreenNotice::TurnedOff,
-    ] {
-        assert_eq!(quiet.text(), None, "{quiet:?}");
-    }
-    assert_eq!(
-        ScreenNotice::ModelCantSee(&luna).text(),
-        Some((Text::ScreenHoldsModelCantSee, Some(&luna)))
-    );
-    for (notice, text) in [
-        (ScreenNotice::NotReady, Text::ScreenHoldsNotReady),
-        (ScreenNotice::OwnModel, Text::ScreenHoldsOwnModel),
-    ] {
-        assert_eq!(notice.text(), Some((text, None)));
-    }
 }
 
 #[test]
@@ -817,6 +799,9 @@ fn a_refusal_lands_once_on_a_hold_that_shows_the_screen_at_release_in_that_flow_
     runs.begin_screen_hold(GestureId(1), 1, false, Some(&luna))
         .expect("held");
     assert!(runs.hold_screen(GestureId(1), HeldScreen::Screen));
+    assert_eq!(runs.hold_screen_line(), None);
+    // The brain's word lands once, whatever it was: a refusal after it changes nothing.
+    assert!(!runs.hold_screen(GestureId(1), HeldScreen::NotIncluded(ScreenClass::Changed)));
     assert_eq!(runs.hold_screen_line(), None);
 
     // The setting switched off while the keys were down has its own words.

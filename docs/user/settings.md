@@ -25,7 +25,8 @@ reconnecting reads the saved preference instead of assuming an interrupted save 
 **Privacy** has one checkbox, named for your assistant: **Kumo can see what you see**. While
 it's on, a hold to talk also sends the model you're using one picture of the screen your
 pointer is on, taken when you let go. The picture goes to the model service you connected and
-nowhere else, and Kumochi keeps no copy once the answer is done. The setting starts on.
+nowhere else, and Kumochi keeps no copy once the answer is done. The setting starts on, unless
+you had turned off the earlier setting that shared one window.
 [Voice](voice.md#showing-your-screen) says what is in the picture and what is left out.
 
 The preference can be chosen before speech input is installed. It doesn't install models,

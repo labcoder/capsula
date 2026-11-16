@@ -51,7 +51,6 @@ pub(super) fn presence(cx: &mut TestAppContext) -> Entity<Presence> {
             state: LinkState::Connecting,
             voice: None,
             notice: None,
-            screen: None,
             screen_line: None,
             stop: false,
             events: events.clone(),

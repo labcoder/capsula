@@ -44,7 +44,7 @@ pub enum ScreenLine {
 /// model it may name. A hold shows the screen only while this is `On`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ScreenNotice<'a> {
-    /// Nothing shows: this system can't capture a window.
+    /// This system can't capture.
     Hidden,
     /// A hold sends this model the screen's picture.
     On(&'a ModelName),
@@ -56,19 +56,7 @@ pub enum ScreenNotice<'a> {
     OwnModel,
 }
 
-impl<'a> ScreenNotice<'a> {
-    /// The struck-through icon's tooltip and the model it names. The icon shows only for a
-    /// hold that can't send the picture the setting allows: none while it is `On`, switched
-    /// off, or `Hidden`.
-    pub fn text(self) -> Option<(Text, Option<&'a ModelName>)> {
-        Some(match self {
-            Self::Hidden | Self::On(_) | Self::TurnedOff => return None,
-            Self::ModelCantSee(model) => (Text::ScreenHoldsModelCantSee, Some(model)),
-            Self::NotReady => (Text::ScreenHoldsNotReady, None),
-            Self::OwnModel => (Text::ScreenHoldsOwnModel, None),
-        })
-    }
-
+impl ScreenNotice<'_> {
     /// What a hold's line says when this notice refuses its release; none while it is `On`,
     /// and none where this system can't capture.
     const fn refusal(self) -> Option<ScreenLine> {
@@ -95,6 +83,8 @@ pub(super) struct Hold {
     /// A hold that shows the screen once it's released, until its `ScreenRelease` is built or
     /// refused.
     pub(super) release_due: bool,
+    /// The brain's word about this hold's screen has landed; a second one doesn't.
+    pub(super) told: bool,
 }
 
 impl Runs {
@@ -173,12 +163,13 @@ impl Runs {
             hold.gesture == gesture
                 && match hold.screen {
                     Some(ScreenLine::WillSee) => true,
-                    None => hold.at_release,
+                    None => hold.at_release && !hold.told,
                     Some(ScreenLine::NotIncluded(_) | ScreenLine::TurnedOff) => false,
                 }
         }) else {
             return false;
         };
+        hold.told = true;
         hold.screen = match outcome {
             HeldScreen::NotIncluded(class) => Some(ScreenLine::NotIncluded(class)),
             // History carries these.
@@ -193,6 +184,14 @@ impl Runs {
     pub fn hold_screen_refused(&mut self) {
         if let Some(hold) = &mut self.hold {
             hold.screen = Some(ScreenLine::NotIncluded(ScreenClass::NotReady));
+        }
+    }
+
+    /// The current hold was to show the screen and the user has switched that off, though the
+    /// brain hasn't answered yet: it goes on voice only, and its line says so.
+    pub fn hold_screen_turned_off(&mut self) {
+        if let Some(hold) = &mut self.hold {
+            hold.screen = Some(ScreenLine::TurnedOff);
         }
     }
 
@@ -223,6 +222,7 @@ impl Runs {
             screen: None,
             at_release: false,
             release_due: false,
+            told: false,
         }))
     }
 

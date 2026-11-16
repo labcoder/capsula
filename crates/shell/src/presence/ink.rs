@@ -3,7 +3,7 @@
 //! same path on the hold's image (`crates/brain/src/screen/ink.rs`) as one capsule per segment,
 //! pink inside a white edge. The colours and widths here are that painter's, the widths mapped
 //! back from image pixels to the display, and a test on each side pins the same numbers.
-// shortcut: the line shows on the primary display only, so a hold released on another display sends that display with no line; upgrade with the overlay's per-display windows
+// shortcut: the line shows on the primary display only, so a hold released on another display sends that display with no line, and a first line drawn before the overlay ever opened is sized with the dock's display scale; upgrade with the overlay's per-display windows
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::time::Duration;

@@ -6,10 +6,12 @@ use std::{cell::RefCell, rc::Rc};
 use kumochi_protocol::constants;
 use kumochi_protocol::frame::{self, Pipe};
 use kumochi_protocol::message::{
-    DataToBrain, DataToShell, DraftId, EventId, MAX_ISSUE_CARDS, PageEvent, PageOf, RunId,
-    SettingsView, ThreadCursor, ThreadId, ThreadKind, ThreadRow,
+    DataToBrain, DataToShell, DraftId, EventId, MAX_ISSUE_CARDS, ModelName, PageEvent, PageOf,
+    RunId, SettingsView, ThreadCursor, ThreadId, ThreadKind, ThreadRow,
 };
 use kumochi_scene::text::Bounded;
+
+use crate::strings::Text;
 
 mod cards;
 pub use cards::Feedback as IssueFeedback;
@@ -72,6 +74,18 @@ pub enum SearchError {
     TooLong,
 }
 
+/// A line the shell adds to one conversation and never stores: said once when the default
+/// model starts or stops taking a hold's picture.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ScreenNote {
+    pub thread: ThreadId,
+    /// The newest stored event when it was said, which it follows; none in an empty conversation.
+    pub after: Option<EventId>,
+    /// Which of the two lines: `model` takes the picture, or doesn't.
+    pub text: Text,
+    pub model: ModelName,
+}
+
 #[derive(Default)]
 #[expect(
     clippy::struct_excessive_bools,
@@ -98,6 +112,11 @@ pub struct Threads {
     pub deletes_full: bool,
     /// The last delete answered that nothing changed; cleared by the next confirm.
     pub delete_failed: bool,
+    /// The open conversation's one line that isn't stored; see [`Self::screen_sees`].
+    pub screen_note: Option<ScreenNote>,
+    /// The note for what the default model last did with a hold's picture; none until it has
+    /// said.
+    pub sees: Option<Text>,
     connected: bool,
     /// Pages are read only while the panel is shown.
     shown: bool,
@@ -293,6 +312,25 @@ impl Threads {
     #[cfg(any(test, feature = "test-support"))]
     pub fn chat_for_tests() -> Self {
         Self::chat()
+    }
+
+    /// Records which note is true of `model` now, that a hold sends it the screen's picture or
+    /// that it can't take one, and leaves it in `thread`'s conversation when that changed. The
+    /// first answer leaves none, and a change while `thread` isn't the open conversation leaves
+    /// none and drops the old one.
+    pub fn screen_sees(&mut self, thread: Option<ThreadId>, text: Text, model: &ModelName) -> bool {
+        if self.sees.replace(text).is_none_or(|was| was == text) {
+            return false;
+        }
+        self.screen_note = thread
+            .filter(|thread| self.open == Some(*thread))
+            .map(|thread| ScreenNote {
+                thread,
+                after: self.events.first().map(|event| event.id),
+                text,
+                model: model.clone(),
+            });
+        self.screen_note.is_some()
     }
 
     /// `apply`, for the shell's tests.

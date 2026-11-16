@@ -303,10 +303,18 @@ fn advance(seconds: u64, cx: &mut TestAppContext) {
     advance_ms(seconds * 1_000, cx);
 }
 
-fn icon(ready: &Ready, cx: &mut TestAppContext) -> Option<(Text, Option<ModelName>)> {
+/// What a hold on the current target does with the screen now, by the notice's name.
+fn notice(ready: &Ready, cx: &mut TestAppContext) -> &'static str {
     ready
         .owner
-        .read_with(cx, |owner, cx| owner.panel.read(cx).screen.clone())
+        .read_with(cx, |owner, cx| match owner.screen_notice(cx) {
+            ScreenNotice::Hidden => "hidden",
+            ScreenNotice::On(_) => "on",
+            ScreenNotice::ModelCantSee(_) => "cant see",
+            ScreenNotice::NotReady => "not ready",
+            ScreenNotice::TurnedOff => "off",
+            ScreenNotice::OwnModel => "own model",
+        })
 }
 
 fn line(ready: &Ready, cx: &mut TestAppContext) -> Option<(Text, Option<ModelName>)> {
@@ -394,21 +402,15 @@ fn read_row(ready: &Ready, choice: Option<ModelChoice>, cx: &mut TestAppContext)
 
 #[gpui::test]
 fn a_hold_shows_the_screen_only_while_the_stored_state_is_on(cx: &mut TestAppContext) {
-    for (state, tooltip) in [
-        (None, Some((Text::ScreenHoldsNotReady, None))),
-        (Some(ScreenHolds::Off(ScreenOff::Unsupported)), None),
-        (
-            Some(ScreenHolds::Off(ScreenOff::ModelCantSee)),
-            Some((Text::ScreenHoldsModelCantSee, Some(luna().display_name))),
-        ),
-        (
-            Some(ScreenHolds::Off(ScreenOff::NotReady)),
-            Some((Text::ScreenHoldsNotReady, None)),
-        ),
-        (Some(ScreenHolds::Off(ScreenOff::TurnedOff)), None),
+    for (state, said) in [
+        (None, "not ready"),
+        (Some(ScreenHolds::Off(ScreenOff::Unsupported)), "hidden"),
+        (Some(ScreenHolds::Off(ScreenOff::ModelCantSee)), "cant see"),
+        (Some(ScreenHolds::Off(ScreenOff::NotReady)), "not ready"),
+        (Some(ScreenHolds::Off(ScreenOff::TurnedOff)), "off"),
     ] {
         let ready = screen_ready(state, cx);
-        assert_eq!(icon(&ready, cx), tooltip);
+        assert_eq!(notice(&ready, cx), said);
         recognize(&ready.owner, 1, cx);
         assert_eq!(sent(&ready), [voice_only(1)]);
         listening(&ready.owner, cx);
@@ -422,9 +424,9 @@ fn a_hold_shows_the_screen_only_while_the_stored_state_is_on(cx: &mut TestAppCon
         assert_eq!(ready.fixture.borrow().affinities(), PRIOR);
     }
 
-    // The first run: no icon, and the hold says nothing about the screen.
+    // The first run: the hold says nothing about the screen.
     let ready = screen_ready(Some(on(&luna())), cx);
-    assert_eq!(icon(&ready, cx), None);
+    assert_eq!(notice(&ready, cx), "on");
     recognize(&ready.owner, 1, cx);
     assert_eq!(sent(&ready), [screen_hold(1)]);
     assert_eq!(line(&ready, cx), None);
@@ -511,12 +513,7 @@ fn a_notice_that_goes_off_while_the_keys_are_down_ends_the_line_and_the_release_
         default_model(&ready, &luna(), cx);
         read_row(&ready, None, cx);
         gate(&ready, on(&luna()), cx);
-        ready.owner.read_with(cx, |owner, cx| {
-            assert_eq!(
-                owner.screen_notice(cx),
-                ScreenNotice::On(&luna().display_name)
-            );
-        });
+        assert_eq!(notice(&ready, cx), "on");
         tick(DOWN, cx);
         assert_eq!(sampled(&ready, cx), None, "{said:?}");
         assert_eq!(sent(&ready), [], "{said:?}");
@@ -724,14 +721,13 @@ fn a_hold_that_ends_before_its_release_stops_the_line_and_takes_no_lease(cx: &mu
 
 #[gpui::test]
 fn the_target_threads_stored_model_decides_once_its_row_is_read(cx: &mut TestAppContext) {
-    // A hold that sends shows no icon.
-    let shown = None;
+    let shown = "on";
     // Never read: counted as on the default model.
     let ready = screen_ready(Some(on(&luna())), cx);
     ready.owner.read_with(cx, |owner, cx| {
         assert!(owner.threads.read(cx).row(ThreadId(1)).is_none());
     });
-    assert_eq!(icon(&ready, cx), shown);
+    assert_eq!(notice(&ready, cx), shown);
     recognize(&ready.owner, 1, cx);
     assert_eq!(sent(&ready), [screen_hold(1)]);
 
@@ -739,16 +735,16 @@ fn the_target_threads_stored_model_decides_once_its_row_is_read(cx: &mut TestApp
     for stored in [None, Some(choice(&luna(), Effort::High))] {
         let ready = screen_ready(Some(on(&luna())), cx);
         read_row(&ready, stored, cx);
-        assert_eq!(icon(&ready, cx), shown);
+        assert_eq!(notice(&ready, cx), shown);
         recognize(&ready.owner, 1, cx);
         assert_eq!(sent(&ready), [screen_hold(1)]);
     }
 
-    // Read, and pinned to another model, one that could see the screen too: the struck-through
-    // eye, and a hold that is voice only.
+    // Read, and pinned to another model, one that could see the screen too: a hold that is voice
+    // only.
     let ready = screen_ready(Some(on(&luna())), cx);
     read_row(&ready, Some(choice(&sol(), Effort::Low)), cx);
-    assert_eq!(icon(&ready, cx), Some((Text::ScreenHoldsOwnModel, None)));
+    assert_eq!(notice(&ready, cx), "own model");
     recognize(&ready.owner, 1, cx);
     assert_eq!(sent(&ready), [voice_only(1)]);
     assert_eq!(sampled(&ready, cx), None);
@@ -758,14 +754,14 @@ fn the_target_threads_stored_model_decides_once_its_row_is_read(cx: &mut TestApp
 fn an_on_state_naming_another_model_than_the_newest_default_is_not_ready(cx: &mut TestAppContext) {
     // The default is Luna; the brain's last word still names Sol.
     let ready = screen_ready(Some(on(&sol())), cx);
-    assert_eq!(icon(&ready, cx), Some((Text::ScreenHoldsNotReady, None)));
+    assert_eq!(notice(&ready, cx), "not ready");
     recognize(&ready.owner, 1, cx);
     assert_eq!(sent(&ready), [voice_only(1)]);
     finish(&ready, 1, cx);
 
     // The brain catches up with the default, and the next hold shows Luna the screen.
     gate(&ready, on(&luna()), cx);
-    assert_eq!(icon(&ready, cx), None);
+    assert_eq!(notice(&ready, cx), "on");
     recognize(&ready.owner, 2, cx);
     assert_eq!(sent(&ready), [screen_hold(2)]);
 }
@@ -804,7 +800,7 @@ fn the_holds_line_follows_the_brains_refusal_and_a_disconnect_clears_the_notice(
         );
         assert_eq!(line(&ready, cx), shown);
         receive(&ready.owner, LinkEvent::State(LinkState::Reconnecting), cx);
-        assert_eq!(icon(&ready, cx), Some((Text::ScreenHoldsNotReady, None)));
+        assert_eq!(notice(&ready, cx), "not ready");
         assert_eq!(line(&ready, cx), None);
     }
 }
@@ -981,13 +977,10 @@ fn the_overlay_shows_for_a_line_alone_and_hides_when_the_line_ends(cx: &mut Test
 }
 
 #[gpui::test]
-fn the_peek_draws_an_icon_only_for_a_hold_that_cant_send_and_the_holds_line(
+fn the_peek_shows_a_holds_line_in_place_of_the_settings_notice_and_nothing_else_of_the_screen(
     cx: &mut TestAppContext,
 ) {
     use gpui_kit::AppContext as _;
-    use kumochi_protocol::message::ModelName;
-    const CANT: &str = "screen-holds Screen sharing isn't available with GPT-6 Luna, so hold to talk is voice only";
-    const OWN: &str = "screen-holds Hold to talk is voice only in a thread with its own model";
     const LINE: &str = "peek-line Screen not included: the display changed";
     const NOTICE: &str = "peek-line Settings not saved";
     let (window, panel) = cx.update(|cx| {
@@ -1001,7 +994,6 @@ fn the_peek_draws_an_icon_only_for_a_hold_that_cant_send_and_the_holds_line(
                 state: super::LinkState::Connected,
                 voice: None,
                 notice: Some(Text::SettingsNotSaved),
-                screen: None,
                 screen_line: None,
                 stop: false,
                 events,
@@ -1014,26 +1006,84 @@ fn the_peek_draws_an_icon_only_for_a_hold_that_cant_send_and_the_holds_line(
         cx.run_until_parked();
         let mut frame = gpui_kit::VisualTestContext::from_window(window, cx);
         frame.update(|window, cx| window.draw(cx).clear(cx));
-        [CANT, OWN, LINE, NOTICE].map(|selector| frame.debug_bounds(selector).is_some())
+        [LINE, NOTICE].map(|selector| frame.debug_bounds(selector).is_some())
     };
-    assert_eq!(drawn(cx), [false, false, false, true]);
-    // A refusal's line takes the settings notice's place while it shows, and brings no icon.
+    assert_eq!(drawn(cx), [false, true]);
+    // A refusal's line takes the settings notice's place while it shows.
     panel.update(cx, |panel, cx| {
         panel.screen_line = Some((Text::ShowScreenChanged, None));
         cx.notify();
     });
-    assert_eq!(drawn(cx), [false, false, true, false]);
-    // A hold that can't send draws the struck-through icon with its reason and the model's name.
-    let luna = ModelName::new("GPT-6 Luna").unwrap();
+    assert_eq!(drawn(cx), [true, false]);
     panel.update(cx, |panel, cx| {
-        panel.screen = Some((Text::ScreenHoldsModelCantSee, Some(luna)));
         panel.screen_line = None;
         cx.notify();
     });
-    assert_eq!(drawn(cx), [true, false, false, true]);
-    panel.update(cx, |panel, cx| {
-        panel.screen = Some((Text::ScreenHoldsOwnModel, None));
-        cx.notify();
+    assert_eq!(drawn(cx), [false, true]);
+}
+
+#[gpui::test]
+fn a_release_while_the_box_is_unchecked_and_still_saving_sends_nothing_and_says_so(
+    cx: &mut TestAppContext,
+) {
+    let ready = screen_ready(Some(on(&luna())), cx);
+    held(&ready, 1, cx);
+    // The user unchecks the box. The brain hasn't answered, so its gate still says on.
+    assert!(
+        ready
+            .owner
+            .update(cx, |owner, cx| owner.save_show_screen(false, cx))
+    );
+    assert_eq!(
+        sent(&ready),
+        [ControlToBrain::Settings(
+            kumochi_protocol::message::SettingsOp::SetShowScreen(false)
+        )]
+    );
+    assert_eq!(notice(&ready, cx), "on");
+    release(&ready.owner, 1, Some(DOWN), cx);
+    assert_eq!(sent(&ready), []);
+    assert_eq!(
+        line(&ready, cx),
+        Some((Text::ScreenNotIncludedTurnedOff, None))
+    );
+    assert_eq!(lease(&ready, cx), (0, false));
+    assert_eq!(ready.fixture.borrow().affinities(), PRIOR);
+}
+
+#[gpui::test]
+fn a_default_model_that_stops_or_starts_taking_pictures_says_so_once_in_the_open_conversation(
+    cx: &mut TestAppContext,
+) {
+    let ready = screen_ready(Some(on(&luna())), cx);
+    let note = |ready: &Ready, cx: &mut TestAppContext| {
+        ready.owner.read_with(cx, |owner, cx| {
+            let note = owner.chat.read(cx).screen_note.clone();
+            note.map(|note| (note.thread, note.text, note.model))
+        })
+    };
+    let thread = ready.owner.update(cx, |owner, cx| {
+        let thread = owner.runs.thread();
+        owner.chat.update(cx, |chat, _| chat.open = thread);
+        thread.expect("a target thread")
     });
-    assert_eq!(drawn(cx), [false, true, false, true]);
+    // The first word, that Luna takes pictures, is no change.
+    assert_eq!(note(&ready, cx), None);
+    gate(&ready, ScreenHolds::Off(ScreenOff::ModelCantSee), cx);
+    assert_eq!(
+        note(&ready, cx),
+        Some((thread, Text::ScreenNoteCant, luna().display_name))
+    );
+    // Switched off and not ready say nothing and change nothing.
+    gate(&ready, ScreenHolds::Off(ScreenOff::TurnedOff), cx);
+    gate(&ready, ScreenHolds::Off(ScreenOff::NotReady), cx);
+    assert_eq!(
+        note(&ready, cx),
+        Some((thread, Text::ScreenNoteCant, luna().display_name))
+    );
+    gate(&ready, on(&luna()), cx);
+    assert_eq!(
+        note(&ready, cx),
+        Some((thread, Text::ScreenNoteCan, luna().display_name))
+    );
 }

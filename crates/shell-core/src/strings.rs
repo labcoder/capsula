@@ -197,9 +197,6 @@ texts! {
     HoldUnavailable => "hold-unavailable",
     HoldMicrophoneUnavailable => "hold-microphone-unavailable",
     HoldFailed => "hold-failed",
-    ScreenHoldsModelCantSee => "screen-holds-model-cant-see",
-    ScreenHoldsNotReady => "screen-holds-not-ready",
-    ScreenHoldsOwnModel => "screen-holds-own-model",
     ScreenHoldWillSee => "screen-hold-will-see",
     ScreenNotIncludedModel => "screen-not-included-model",
     ScreenNotIncludedNotReady => "screen-not-included-not-ready",
@@ -216,6 +213,8 @@ texts! {
     ShowScreenChanged => "show-screen-changed",
     ScreenNotIncludedPictureTooLarge => "screen-not-included-picture-too-large",
     ScreenHistoryChanged => "screen-history-changed",
+    ScreenNoteCant => "screen-note-cant",
+    ScreenNoteCan => "screen-note-can",
     VoiceRestartRequired => "voice-restart-required",
     VoiceInstalledFailed => "voice-installed-failed",
     VoiceNotInstalledFailed => "voice-not-installed-failed",
@@ -791,8 +790,12 @@ mod tests {
         }
         for (text, line) in [
             (
-                Text::ScreenHoldsModelCantSee,
-                "Screen sharing isn't available with GPT-5.5, so hold to talk is voice only",
+                Text::ScreenNoteCant,
+                "GPT-5.5 doesn't support screenshots, so messages will go without one.",
+            ),
+            (
+                Text::ScreenNoteCan,
+                "GPT-5.5 supports screenshots, so new messages will send one along.",
             ),
             (Text::ScreenHoldWillSee, "GPT-5.5 will see this window"),
         ] {
@@ -810,7 +813,7 @@ mod tests {
         assert_eq!(
             strings.show_screen_help(),
             format!(
-                "When you let go of the shortcut, {app} sends one picture of the screen your pointer is on, as it is, with your words to the model you're using. It sends it nowhere else and keeps no copy once the answer is done. This setting starts on."
+                "When you let go of the shortcut, {app} sends one picture of the screen your pointer is on, as it is, with your words to the model you're using. It sends it nowhere else and keeps no copy once the answer is done."
             )
         );
         // A held turn's history says one thing: why no picture was included, as a line, or
