@@ -713,7 +713,8 @@ pub enum ControlToShell {
     /// Whether a hold also shows the model the window under the pointer. Sent when the shell
     /// connects and whenever it changes.
     ScreenHolds(ScreenHolds),
-    /// What a screen hold carried into its turn, sent once, when its run's first request starts.
+    /// What a screen hold carried into its turn, sent once: an image when the first send carrying
+    /// it is granted, anything else when its run's first request starts.
     HoldScreen {
         /// The hold's gesture.
         gesture: GestureId,
@@ -723,7 +724,7 @@ pub enum ControlToShell {
 }
 
 /// What a screen hold carried into its turn. It never says the window was sent: a run can end
-/// before its first request leaves the machine.
+/// before its first send is granted.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum HeldScreen {
     /// The window's image was attached to the turn.
@@ -731,7 +732,8 @@ pub enum HeldScreen {
     /// The line telling the model the window wasn't included, and why, was attached instead.
     NotIncluded(ScreenClass),
     /// The image was attached, then withdrawn because the user turned screen holds off before
-    /// any request carried it. Only history carries it: no `HoldScreen` follows a withdrawal.
+    /// any send carrying it was granted. Only history carries it: no `HoldScreen` follows a
+    /// withdrawal.
     Withdrawn,
     /// The screen's picture, taken when the hold was released, was attached to the turn. Appended.
     Screen,

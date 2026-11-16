@@ -85,7 +85,22 @@ impl PartialEq for HoldSnapshot {
 impl Eq for HoldSnapshot {}
 
 impl super::Run {
-    /// At the run's first request: tells the shell what its hold's screen carried, once.
+    /// At the run's first request: tells the shell once what its hold's screen carried, unless it
+    /// carried an image, which waits for the grant since none of it leaves before that.
+    pub(super) fn tell_screen_unless_image(&mut self, effects: &mut Vec<Effect>) {
+        let image = self.screen.as_ref().map(crate::context::Screen::held);
+        if !matches!(
+            image,
+            Some(
+                kumochi_protocol::message::HeldScreen::Attached
+                    | kumochi_protocol::message::HeldScreen::Screen
+            )
+        ) {
+            self.tell_screen(effects);
+        }
+    }
+
+    /// At the first granted send: tells the shell what its hold's screen carried, once.
     pub(super) fn tell_screen(&mut self, effects: &mut Vec<Effect>) {
         let (Some(gesture), Some(screen)) = (self.untold.take(), &self.screen) else {
             return;
@@ -102,8 +117,8 @@ impl Coordinator {
     /// image follows its own setting: the run's own copy drops at once, and the bytes are
     /// zeroed when the last copy drops. The run's next build fails, and a request that has started
     /// keeps its copy until its round ends but is refused at the send. A turn whose image no
-    /// request has carried yet is recorded as withdrawn; once a request has started with it, the
-    /// turn keeps what it carried.
+    /// granted send has carried yet is recorded as withdrawn; once one has, the turn keeps what it
+    /// carried.
     pub(super) fn screen_holds_off(
         &mut self,
         allowed: fn(&crate::context::Screen) -> bool,

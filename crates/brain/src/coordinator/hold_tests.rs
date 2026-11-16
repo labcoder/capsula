@@ -691,20 +691,25 @@ fn a_held_turn_whose_write_fails_sends_nothing_and_fails_the_run() {
 }
 
 #[test]
-fn a_held_runs_screen_is_told_once_at_its_first_request() {
+fn a_held_runs_screen_is_told_once_and_an_image_only_at_its_granted_send() {
     use kumochi_protocol::message::{Deleted, HeldScreen};
 
     use crate::context::{Jpeg, Screen, ScreenClass};
     const B: ThreadId = ThreadId(2);
     let image = Jpeg::new(vec![0xFF, 0xD8, 0xFF, 0xD9]).unwrap();
     let changed = HeldScreen::NotIncluded(ScreenClass::Changed);
-    for (screen, held) in [
-        (Some(Screen::Image(image)), Some(HeldScreen::Attached)),
+    for (screen, held, early) in [
+        (
+            Some(Screen::Image(image)),
+            Some(HeldScreen::Attached),
+            false,
+        ),
         (
             Some(Screen::NotIncluded(ScreenClass::Changed)),
             Some(changed),
+            true,
         ),
-        (None, None),
+        (None, None, false),
     ] {
         let mut core = ready_for("captured");
         core.submit_hold(prepared(&core, Some(T)), "words".into(), screen)
@@ -712,7 +717,7 @@ fn a_held_runs_screen_is_told_once_at_its_first_request() {
         core.handle(Input::TurnStored { run: R }).unwrap();
         let first = engine_key(&core, R);
         let effects = core.handle(screened(first, &[T, B])).unwrap();
-        let expected = held.map_or_else(Vec::new, |outcome| {
+        let expected = held.filter(|_| early).map_or_else(Vec::new, |outcome| {
             vec![Effect::Control(ControlToShell::HoldScreen {
                 gesture: KEY.gesture,
                 outcome,
@@ -753,7 +758,33 @@ fn a_held_runs_screen_is_told_once_at_its_first_request() {
             1,
             "the rebuilt request starts"
         );
-        assert_eq!(told(&later), Vec::<&Effect>::new(), "told once");
+        later.extend(
+            core.handle(Input::SendReady {
+                key: SendKey::Build(again),
+                hold: None,
+            })
+            .unwrap(),
+        );
+        assert!(
+            later
+                .iter()
+                .any(|effect| matches!(effect, Effect::Grant(_)))
+        );
+        let granted: Vec<Effect> = held
+            .filter(|_| !early)
+            .map(|outcome| {
+                Effect::Control(ControlToShell::HoldScreen {
+                    gesture: KEY.gesture,
+                    outcome,
+                })
+            })
+            .into_iter()
+            .collect();
+        assert_eq!(
+            told(&later),
+            granted.iter().collect::<Vec<_>>(),
+            "told once"
+        );
     }
 }
 
@@ -850,8 +881,9 @@ fn forgotten(effects: &[Effect]) -> Vec<RunId> {
         .collect()
 }
 
-/// Ends the current run R: 0 the user's cancel, 1 a Stop, 2 its turn's failed store write, or
-/// 3 its engine failing once a request has started.
+/// Ends the current run R: 0 the user's cancel, 1 a Stop, 2 its turn's failed store write, 3 its
+/// engine failing once a request has started, 4 its model connection failing, 5 its body refused
+/// as too large, or 6 no bearer for its connection.
 fn ended(core: &mut Coordinator, how: usize) -> Vec<Effect> {
     use crate::engines::{EngineFailure, Finish};
     match how {
@@ -866,6 +898,28 @@ fn ended(core: &mut Coordinator, how: usize) -> Vec<Effect> {
             .handle(engine(
                 engine_key(core, R),
                 TurnEvent::Finished(Finish::Failed(EngineFailure::Provider)),
+            ))
+            .expect("current"),
+        4 => core
+            .handle(engine(
+                engine_key(core, R),
+                TurnEvent::Finished(Finish::Failed(EngineFailure::Stream(
+                    crate::connections::model::error::Failure::Transport,
+                ))),
+            ))
+            .expect("current"),
+        5 => core
+            .handle(engine(
+                engine_key(core, R),
+                TurnEvent::Finished(Finish::Failed(EngineFailure::Stream(
+                    crate::connections::model::error::Failure::Request,
+                ))),
+            ))
+            .expect("current"),
+        6 => core
+            .handle(engine(
+                engine_key(core, R),
+                TurnEvent::Finished(Finish::Failed(EngineFailure::Access(None))),
             ))
             .expect("current"),
         _ => core.handle(Input::StoreFailed { run: R }).expect("current"),
@@ -902,14 +956,19 @@ fn a_run_that_ends_before_its_first_request_stores_no_picture() {
 }
 
 #[test]
-fn a_run_whose_first_request_started_keeps_its_picture_however_it_ends() {
-    for how in [0, 1, 3] {
+fn a_run_whose_first_send_was_granted_keeps_its_picture_however_it_ends() {
+    for how in [0, 1, 3, 4] {
         let mut core = ready_for("captured");
         core.submit_hold(prepared(&core, Some(T)), "words".into(), Some(image()))
             .unwrap();
         core.handle(Input::TurnStored { run: R }).unwrap();
         let first = engine_key(&core, R);
         assert_eq!(starts(&core.handle(screened(first, &[T])).unwrap()), 1);
+        assert!(
+            sending(&mut core)
+                .iter()
+                .any(|effect| matches!(effect, Effect::Grant(_)))
+        );
         let effects = ended(&mut core, how);
         assert_eq!(core.current_run(), None, "{how}");
         assert_eq!(forgotten(&effects), [], "{how}");
@@ -1011,7 +1070,7 @@ fn a_turn_still_queued_when_its_run_ends_is_stored_with_no_picture() {
 }
 
 #[test]
-fn turning_screen_holds_off_after_the_first_request_keeps_the_turn_attached() {
+fn turning_screen_holds_off_after_the_first_granted_send_keeps_the_turn_attached() {
     use crate::context::Screen;
     let mut core = ready_for("captured");
     core.submit_hold(prepared(&core, Some(T)), "words".into(), Some(image()))
@@ -1019,6 +1078,11 @@ fn turning_screen_holds_off_after_the_first_request_keeps_the_turn_attached() {
     core.handle(Input::TurnStored { run: R }).unwrap();
     let first = engine_key(&core, R);
     assert_eq!(starts(&core.handle(screened(first, &[T])).unwrap()), 1);
+    assert!(
+        sending(&mut core)
+            .iter()
+            .any(|effect| matches!(effect, Effect::Grant(_)))
+    );
     assert_eq!(
         withdrawals(&core.handle(Input::ScreenHoldsOff).unwrap()),
         []
@@ -1059,9 +1123,10 @@ fn a_started_requests_send_is_refused_once_screen_holds_are_off() {
     )));
     assert_eq!(
         withdrawals(&effects),
-        [],
-        "the stored screen stays attached"
+        [R],
+        "no send was granted, so the turn says withdrawn"
     );
+    assert_eq!(told(&effects), Vec::<&Effect>::new());
     assert_eq!(core.current_run(), None);
 }
 
@@ -1161,4 +1226,129 @@ fn only_a_screen_hold_s_picture_makes_a_run_store_its_items_without_boxes() {
             .unwrap();
         assert_eq!(core.current.as_ref().expect("run").pictured, pictured);
     }
+}
+
+/// A request admitted but never granted its send, such as one whose body was refused as too large
+/// or whose sign-in couldn't be read, sent nothing of the hold's screen.
+#[test]
+fn a_run_admitted_but_never_granted_a_send_stores_no_picture_and_tells_nothing() {
+    use crate::context::{Jpeg, Screen};
+    let picture = || {
+        Screen::Picture(
+            Jpeg::new(vec![0xFF, 0xD8, 0xFF, 0xD9]).unwrap(),
+            None,
+            crate::context::Geometry::FIXTURE,
+        )
+    };
+    for how in [0, 1, 3, 5, 6] {
+        for screen in [image(), picture()] {
+            let mut core = ready_for("captured");
+            core.submit_hold(prepared(&core, Some(T)), "words".into(), Some(screen))
+                .unwrap();
+            core.handle(Input::TurnStored { run: R }).unwrap();
+            let first = engine_key(&core, R);
+            let admitted = core.handle(screened(first, &[T])).unwrap();
+            assert_eq!(starts(&admitted), 1);
+            let effects = ended(&mut core, how);
+            assert_eq!(core.current_run(), None, "{how}");
+            assert_eq!(forgotten(&effects), [R], "{how}");
+            assert_eq!(told(&admitted), Vec::<&Effect>::new(), "{how}");
+            assert_eq!(told(&effects), Vec::<&Effect>::new(), "{how}");
+        }
+    }
+}
+
+/// An inline compaction's request holds only text, so its grant leaves the image untold: a Stop
+/// then clears the stored picture, sharing turned off records it withdrawn, and the image's own
+/// grant afterwards tells once.
+#[test]
+fn an_inline_compaction_s_grant_leaves_a_held_image_untold() {
+    use kumochi_protocol::message::{EventId, HeldScreen};
+
+    use crate::coordinator::{CompactBuilt, JobAsk, Unbuilt};
+    for after in ["a stop", "sharing off", "the image's send"] {
+        let mut core = ready_for("captured");
+        core.submit_hold(prepared(&core, Some(T)), "words".into(), Some(image()))
+            .unwrap();
+        core.handle(Input::TurnStored { run: R }).unwrap();
+        let first = engine_key(&core, R);
+        core.handle(Input::ContextBuilt(ContextBuilt {
+            key: first,
+            snapshot: None,
+            result: Err(Unbuilt::TooLarge { room: Some(500) }),
+        }))
+        .unwrap();
+        let compaction = engine_key(&core, R);
+        let started = core
+            .handle(Input::CompactBuilt(CompactBuilt {
+                key: compaction,
+                result: Ok(Some((
+                    JobAsk {
+                        generation: Generation(5),
+                        built: crate::context::Built {
+                            request: request(),
+                            sources: vec![T],
+                        },
+                        covers: Some((EventId(20), EventId(31))),
+                    },
+                    100,
+                ))),
+            }))
+            .unwrap();
+        assert_eq!(starts(&started), 1, "{after}");
+        let granted = sending(&mut core);
+        assert!(
+            granted
+                .iter()
+                .any(|effect| matches!(effect, Effect::Grant(_))),
+            "{after}"
+        );
+        assert_eq!(told(&granted), Vec::<&Effect>::new(), "{after}");
+        match after {
+            "a stop" => {
+                let effects = ended(&mut core, 1);
+                assert_eq!(forgotten(&effects), [R]);
+                assert_eq!(told(&effects), Vec::<&Effect>::new());
+            }
+            "sharing off" => assert_eq!(
+                withdrawals(&core.handle(Input::ScreenHoldsOff).unwrap()),
+                [R]
+            ),
+            _ => {
+                core.handle(engine(compaction, TurnEvent::TextDelta("Short".to_owned())))
+                    .unwrap();
+                core.handle(engine(compaction, TurnEvent::Finished(Finish::Completed)))
+                    .unwrap();
+                core.handle(Input::SummaryStored {
+                    owner: SendKey::Build(compaction),
+                    applied: true,
+                })
+                .unwrap();
+                let built = engine_key(&core, R);
+                assert_ne!(built, compaction);
+                assert_eq!(starts(&core.handle(screened(built, &[T])).unwrap()), 1);
+                assert_eq!(
+                    told(&sending(&mut core)),
+                    [&Effect::Control(ControlToShell::HoldScreen {
+                        gesture: KEY.gesture,
+                        outcome: HeldScreen::Attached,
+                    })]
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn turning_screen_holds_off_before_any_send_is_granted_records_the_turn_withdrawn() {
+    let mut core = ready_for("captured");
+    core.submit_hold(prepared(&core, Some(T)), "words".into(), Some(image()))
+        .unwrap();
+    core.handle(Input::TurnStored { run: R }).unwrap();
+    let first = engine_key(&core, R);
+    assert_eq!(starts(&core.handle(screened(first, &[T])).unwrap()), 1);
+    assert_eq!(
+        withdrawals(&core.handle(Input::ScreenHoldsOff).unwrap()),
+        [R]
+    );
 }

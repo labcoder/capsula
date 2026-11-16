@@ -131,6 +131,11 @@ impl Coordinator {
             return;
         }
         let sources = build.sources().to_vec();
+        // Only a normal build adds the hold's screen; an inline compaction's request is text.
+        let carries_screen = build.inline.is_none();
+        if let Some(run) = self.current.as_mut().filter(|_| carries_screen) {
+            run.tell_screen(effects);
+        }
         self.grant(SendKey::Build(key), sources, hold, effects);
     }
 

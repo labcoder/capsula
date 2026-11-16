@@ -35,23 +35,24 @@ to 8. That was safe because nothing sent it then and the build-id handshake refu
 binaries.
 
 The appended `HoldScreen { gesture, outcome }` says what a screen hold carried into its turn,
-once, when its run's first request starts: `Attached` for the window's image, or `NotIncluded`
-with one of seven fixed classes, the last of them, `ModelCantSee`, appended for a hold whose
+once: `Attached` for the window's image when the first send carrying it is granted, or, when its
+run's first request starts, `NotIncluded` with one of seven fixed classes, the last of them, `ModelCantSee`, appended for a hold whose
 thread is pinned to a model that can't be sent images. Nothing in it names a window. A history
 page carries the same value on the turn's user event as the appended
 `PageEventKind::HeldTurn { screen }` (tag 6), read from the run's stored `screen`
 ([store](store.md#tables)). The value is stored with the turn, before any request exists, and
-the brain clears a picture when its run ends before a request carried it
+the brain clears a picture when its run ends before a send carrying it was granted
 ([engines](engines.md#the-bound)). The shell shows a `HeldTurn`
 as a user turn with one thing under it. A turn whose picture is recorded (`Attached`, `Screen`)
 gets an icon whose tooltip and accessible label say which picture was sent and that the app
 keeps no copy. The icon is never missing from a turn whose picture left the machine. It
-over-reports only where the store does: a request admitted but failed before its upload began,
-and a crash or a failed write before the clear. Any other turn gets one line saying why no
+over-reports only where the store does: a granted send that failed before its first byte was
+written, and a crash or a failed write before the clear. Any other turn gets one line saying why no
 picture was included. Neither names a model, because nothing records which model a held turn
 ran on. `HeldScreen::Withdrawn` (tag 2) is
 appended for history only: a turn whose image the user withdrew by turning screen holds off
-before any request carried it. No `HoldScreen` ever carries it, because that run fails first.
+before any send carrying it was granted. No `HoldScreen` ever carries it, because that run fails
+first.
 
 `SettingsOp::SetScreenHolds` is appended, and `SettingsView` gains `screen_holds` (on when a
 settings file has no key, off when it can't be read). A new struct field isn't append-only in

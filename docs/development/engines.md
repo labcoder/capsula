@@ -339,25 +339,27 @@ the pointer's path was painted inside the image, one saying the pink line follow
 movement and where it lies, in image pixels. Its changed display and too-large picture have their
 own class lines. The lines live in `locales/en/brain.ftl` and carry no window details. If the image can't go (another route, or no user message left), the run fails with
 `ScreenUnavailable` rather than sending without it. What the hold carried goes in the run's row
-with its turn (store.md, `runs.screen`), and the shell hears it once as `HoldScreen` when the
-run's first request starts. The row is written first on purpose: the first build starts only
+with its turn (store.md, `runs.screen`), and the shell hears it once as `HoldScreen`: an image
+when the first send carrying it is granted, anything else when the run's first request starts.
+An inline compaction's send carries only text, so its grant doesn't count. The row is written first on purpose: the first build starts only
 after `TurnStored`, so history can over-report a screen but never miss one that left the
 machine, and a failed turn write fails the run before anything is built. Turning screen holds off
 withdraws every run's window image, and turning show-screen off every run's screen picture,
 each only the pictures it allowed: the run's own copy drops at once, and the bytes are zeroed
 when the last copy drops. The run's next build fails with `ScreenUnavailable`, and a request that has
 started keeps its copy until its round ends but is refused at the send, failing the run the same
-way. If no request has carried the image yet, the turn's `screen` becomes `withdrawn`; once one
-has, it stays `attached` or `screen`. A held run that ends any other way before a request
-carried its image (it fails, is stopped, cancelled or replaced) records no screen: a turn not
+way. If no send carrying the image has been granted yet, the turn's `screen` becomes `withdrawn`;
+once one has, it stays `attached` or `screen`. A held run that ends any other way before a send
+carrying its image was granted (it fails, is stopped, cancelled or replaced) records no screen: a turn not
 yet written is written without it, and a written one is cleared by a store write queued behind
 the turn's. Known limits:
 - **A granted send can't be recalled.** Turning screen holds off refuses a request's send that
   hasn't been granted yet, but a body already granted goes out with its image.
-- **History can show a window that never left.** The clear applies only before the first
-  request carrying the image is admitted. A request admitted but failed before its upload began
-  (an oversized body refused, the bearer not obtained, the upload budget spent) keeps the
-  screen recorded, and so does a crash or a failed write between a held run's turn and the
+- **History can show a window that never left.** The clear applies until the first send carrying
+  the image is granted, which every send asks for right before its body goes to the network ("The
+  send lease"), so a body refused as too large or a sign-in not read clears it. A granted send
+  that fails before its first byte is written (a connect failure, the send deadline passing
+  first, or a debug build's request cap) keeps the screen recorded, and so does a crash or a failed write between a held run's turn and the
   write that clears it. Either way its history shows a window for a turn whose image was never
   sent.
 - **Every round resends the image.** Each tool round is a new stateless request, so the image's
