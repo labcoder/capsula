@@ -11,6 +11,8 @@ pub mod http_client;
 #[cfg(debug_assertions)]
 pub mod image_check;
 pub mod marker;
+#[cfg(debug_assertions)]
+pub mod marks_check;
 pub mod model;
 pub mod oauth;
 #[cfg(debug_assertions)]

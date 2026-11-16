@@ -74,7 +74,11 @@ impl Drawing {
                 more => format!(",\"more\":{more}"),
             };
             listed.reverse();
-            let begin = json!(held.state.header());
+            let mut begin = json!(held.state.header());
+            // The brain stamps a screen scene's display; the model never writes or reads it.
+            if let Some(header) = begin.as_object_mut() {
+                header.remove("display");
+            }
             scenes.push(format!(
                 "{{\"begin\":{begin},\"objects\":[{}]{more}}}",
                 listed.join(",")

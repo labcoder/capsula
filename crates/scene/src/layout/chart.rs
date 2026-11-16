@@ -679,6 +679,7 @@ mod tests {
             measure: &mut Measure,
             cancel: &cancel,
             scales: &scales,
+            screen: None,
         };
         for kind in [
             ChartKind::Bar,
@@ -715,6 +716,7 @@ mod tests {
             measure: &mut Measure,
             cancel: &AtomicBool::new(false),
             scales: &BTreeMap::new(),
+            screen: None,
         };
         let out = draw(&series("[-2]"), &basis, &mut build).expect("draw");
         let Prim::Rect { rect, .. } = out.output[0] else {
@@ -747,6 +749,7 @@ mod tests {
             measure: &mut Measure,
             cancel: &AtomicBool::new(false),
             scales: &BTreeMap::new(),
+            screen: None,
         };
         let (plot, _) = header(&chart, &[&a, &b], &mut build).expect("header");
         assert!(
@@ -765,6 +768,7 @@ mod tests {
             measure: &mut Measure,
             cancel: &AtomicBool::new(false),
             scales: &BTreeMap::new(),
+            screen: None,
         };
         assert!(
             draw(&series("[]"), &basis(ChartKind::Area), &mut build)
@@ -814,6 +818,7 @@ mod tests {
             measure: &mut Measure,
             cancel: &AtomicBool::new(false),
             scales: &BTreeMap::new(),
+            screen: None,
         };
         let mut basis = basis(ChartKind::Pie);
         let out = draw(&series("[1]"), &basis, &mut build).expect("half pie");
@@ -867,6 +872,7 @@ mod tests {
             measure: &mut Fail,
             cancel: &cancel,
             scales: &BTreeMap::new(),
+            screen: None,
         };
         assert!(
             matches!(

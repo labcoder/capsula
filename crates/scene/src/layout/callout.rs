@@ -1,6 +1,6 @@
 use super::{
     PrepareError,
-    primitives::{Build, anchor, layout_error},
+    primitives::{Build, anchor, layout_error, target},
     state::{LayoutState, Placed},
 };
 use crate::{
@@ -44,7 +44,7 @@ pub(super) fn build(
             },
         )
     } else {
-        anchor(state, &callout.target, parent)?
+        target(state, &callout.target, parent)?
     };
     let mut center = if let Some(previous) = cached {
         previous.anchors[1]

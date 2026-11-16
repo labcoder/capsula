@@ -29,10 +29,21 @@ pub const MAX_COMPOSED_SCALE: f32 = 64.0;
 /// Largest host-side enlargement reserved by curve preparation.
 pub const MAX_PRESENTATION_SCALE: f32 = 2.0;
 
+/// Largest logical pixels per canvas unit a screen scene is prepared for: a 1,280-pixel picture
+/// of a 5,120-pixel display at 100%.
+pub const MAX_SCREEN_SCALE: f32 = 4.0;
+/// Longest label on the screen surface, in Unicode scalar values on one line [designer's number].
+pub const MAX_SCREEN_LABEL_CHARS: usize = 24;
+/// Greatest opacity of a marker's wash, so what is under it stays readable [placeholder].
+pub const MAX_MARKER_OPACITY: f32 = 0.30;
+/// Greatest dimming a spotlight puts on the rest of the screen [designer's number].
+pub const MAX_SPOTLIGHT_DIM: f32 = 0.35;
+
 pub(crate) fn presentation_scale(surface: crate::record::Surface) -> f32 {
     match surface {
         crate::record::Surface::Overlay => MAX_PRESENTATION_SCALE,
         crate::record::Surface::Inline => 1.0,
+        crate::record::Surface::Screen => MAX_SCREEN_SCALE,
     }
 }
 /// Maximum nodes in one diagram.
