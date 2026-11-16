@@ -295,7 +295,7 @@ mod tests {
             ),
         ] {
             let mut gesture = Gesture::default();
-            assert!(gesture.talk_held() == TalkHeld::default());
+            assert_eq!(gesture.talk_held(), TalkHeld::default());
             chord(&mut gesture, now);
             assert_eq!(
                 gesture.handle(Event::Deadline, now + WINDOW),
@@ -305,12 +305,12 @@ mod tests {
                 key(&mut gesture, released, Edge::Up, now + WINDOW),
                 [None, Some(Effect::HoldEnded), Some(Effect::Resting)]
             );
-            assert!(gesture.talk_held() == held);
+            assert_eq!(gesture.talk_held(), held);
             // The held key repeats, then comes up.
             key(&mut gesture, other, Edge::Down, now + WINDOW);
-            assert!(gesture.talk_held() == held);
+            assert_eq!(gesture.talk_held(), held);
             key(&mut gesture, other, Edge::Up, now + WINDOW);
-            assert!(gesture.talk_held() == TalkHeld::default());
+            assert_eq!(gesture.talk_held(), TalkHeld::default());
         }
         let mut gesture = Gesture::default();
         chord(&mut gesture, now);
@@ -318,9 +318,9 @@ mod tests {
             control: true,
             alt: true,
         };
-        assert!(gesture.talk_held() == both);
+        assert_eq!(gesture.talk_held(), both);
         gesture.handle(Event::Reset, now);
-        assert!(gesture.talk_held() == TalkHeld::default());
+        assert_eq!(gesture.talk_held(), TalkHeld::default());
         assert_eq!(format!("{both:?}"), "TalkHeld { .. }");
         assert_eq!(format!("{:?}", TalkHeld::default()), "TalkHeld { .. }");
     }

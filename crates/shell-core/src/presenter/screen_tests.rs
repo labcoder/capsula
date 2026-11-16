@@ -962,7 +962,7 @@ fn each_release_hands_the_sources_the_talk_keys_still_down() {
         presenter
             .screen_released(after, held, now)
             .expect("a release");
-        assert!(log.borrow().held == Some(held));
+        assert_eq!(log.borrow().held, Some(held));
     }
     assert_eq!(counts(&log), (3, 2));
 }
