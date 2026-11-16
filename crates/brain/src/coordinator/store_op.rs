@@ -164,6 +164,12 @@ pub enum StoreOp {
         /// The run.
         run: RunId,
     },
+    /// A run ended before any request carried its image, so its turn's `attached` or `screen`
+    /// becomes none. Nothing answers it: a failed write leaves the value, which over-reports.
+    ForgetScreen {
+        /// The run.
+        run: RunId,
+    },
 }
 
 /// A summary's text. Its `Debug` shows only the length, so formatting a write never prints it.
@@ -205,7 +211,8 @@ impl StoreOp {
             | Self::StoreSummary { .. }
             | Self::SetModel { .. }
             | Self::Heard { .. }
-            | Self::WithdrawScreen { .. } => None,
+            | Self::WithdrawScreen { .. }
+            | Self::ForgetScreen { .. } => None,
         }
     }
 
@@ -287,7 +294,9 @@ impl StoreOp {
                 choice: choice.clone(),
                 applied: false,
             },
-            Self::Heard { .. } | Self::WithdrawScreen { .. } => return None,
+            Self::Heard { .. } | Self::WithdrawScreen { .. } | Self::ForgetScreen { .. } => {
+                return None;
+            }
         })
     }
 }

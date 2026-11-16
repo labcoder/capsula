@@ -41,12 +41,25 @@ impl super::Store {
     /// # Errors
     /// When the run's id doesn't fit SQL, or the write fails.
     pub(crate) fn withdraw_screen(&mut self, run: RunId) -> Result<(), StoreError> {
+        self.unsent_screen(run, Some(column(HeldScreen::Withdrawn)))
+    }
+
+    /// Clears `run`'s screen when it says `attached` or `screen`: the run ended before any
+    /// request carried the image.
+    ///
+    /// # Errors
+    /// When the run's id doesn't fit SQL, or the write fails.
+    pub(crate) fn forget_screen(&mut self, run: RunId) -> Result<(), StoreError> {
+        self.unsent_screen(run, None)
+    }
+
+    fn unsent_screen(&mut self, run: RunId, to: Option<&str>) -> Result<(), StoreError> {
         let run = super::sql_id(run.0, StoreError::NoRun)?;
         self.conn.execute(
             "UPDATE runs SET screen = ?2 WHERE id = ?1 AND screen IN (?3, ?4)",
             rusqlite::params![
                 run,
-                column(HeldScreen::Withdrawn),
+                to,
                 column(HeldScreen::Attached),
                 column(HeldScreen::Screen)
             ],

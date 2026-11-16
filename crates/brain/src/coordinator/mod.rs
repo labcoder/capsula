@@ -1322,6 +1322,21 @@ impl Coordinator {
         effects: &mut Vec<Effect>,
     ) {
         run.control.0.cancel();
+        // No request carried the hold's picture, so its turn mustn't say it was sent.
+        if run.untold.is_some()
+            && run.screen.as_ref().is_some_and(|screen| {
+                matches!(
+                    screen.held(),
+                    kumochi_protocol::message::HeldScreen::Attached
+                        | kumochi_protocol::message::HeldScreen::Screen
+                )
+            })
+        {
+            match &mut run.begin {
+                Some(StoreOp::BeginTurn { screen, .. }) => *screen = None,
+                _ => effects.push(Effect::Store(StoreOp::ForgetScreen { run: run.id })),
+            }
+        }
         if outcome != RunEnd::Done {
             speech::revoke(&mut run, crate::voice::reply::Revoker::Brain, effects);
         }
