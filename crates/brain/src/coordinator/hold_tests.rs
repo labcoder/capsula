@@ -970,6 +970,34 @@ fn a_turn_still_queued_behind_an_older_run_is_stored_withdrawn() {
 }
 
 #[test]
+fn a_turn_still_queued_when_its_run_ends_is_stored_with_no_picture() {
+    const NEXT: RunId = RunId(R.0 + 1);
+    let mut core = ready_for("captured");
+    core.submit_hold(prepared(&core, Some(T)), "first".into(), None)
+        .unwrap();
+    core.submit_hold(prepared(&core, Some(T)), "second".into(), Some(image()))
+        .unwrap();
+    let stopped = core
+        .handle(Input::Stop {
+            run: NEXT,
+            revealed: Vec::new(),
+        })
+        .unwrap();
+    assert_eq!(forgotten(&stopped), []);
+    let effects = core.handle(Input::TurnStored { run: R }).unwrap();
+    assert!(
+        effects.contains(&Effect::Store(StoreOp::BeginTurn {
+            thread: T,
+            title: None,
+            run: NEXT,
+            text: "second".into(),
+            screen: None,
+        })),
+        "{effects:?}"
+    );
+}
+
+#[test]
 fn turning_screen_holds_off_after_the_first_request_keeps_the_turn_attached() {
     use crate::context::Screen;
     let mut core = ready_for("captured");
