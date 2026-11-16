@@ -74,13 +74,14 @@ changed, something was drawn over it so Kumochi couldn't tell which window you m
 picture was too large. Turning the setting off while a picture is waiting to be sent withdraws
 it.
 
-In chat history, a small screen icon under your message means Kumochi took a screenshot to send
-with it. Point at the icon to read that. When no screenshot was included, a line under the
-message says why instead. The screenshot goes only to the model you chose, and Kumochi keeps no
-copy: it holds the screenshot in memory until the reply ends and never saves it to a file. Every
-request Kumochi makes for that reply carries the screenshot; later messages never do. The icon
-is recorded with your message, before anything is sent, so it also shows on a message whose
-reply failed before it started.
+In chat history, a small screen icon under your message means a screenshot was sent with it.
+Point at the icon to read that. When no screenshot was included, a line under the message says
+why instead. The screenshot goes only to the model you chose, and Kumochi keeps no copy: it
+holds the screenshot in memory until the reply ends and never saves it to a file. Every request
+Kumochi makes for that reply carries the screenshot; later messages never do. The icon is never
+missing from a message whose screenshot was sent. In two rare cases it can show on a message
+whose screenshot never left your computer: when the request failed just as it started, before
+its upload began, or when Kumochi crashed.
 
 Not checked yet: displays at different scales, and more than one monitor.
 
