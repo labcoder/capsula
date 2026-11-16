@@ -1,17 +1,28 @@
 //! Host geometry changes re-place existing views without restarting their clocks or preparing.
 use kumochi_scene::{
-    SceneView,
+    Begin, SceneView,
     geom::Rect,
     layout::{LayoutState, SurfaceGeometry},
+    record::ScreenDisplay,
 };
 
 use super::Presenter;
 
-pub(super) fn resting_view(rest: &LayoutState, activated: u32, stage: Option<Rect>) -> SceneView {
+/// A scene's view at rest, placed where its surface goes: an ordinary scene in the host's
+/// stage, a screen scene on the overlay's display. Whether a screen scene could be placed is
+/// judged at its first mark.
+pub(super) fn resting_view(
+    rest: &LayoutState,
+    activated: u32,
+    stage: Option<Rect>,
+    begin: &Begin,
+    display: Option<ScreenDisplay>,
+) -> SceneView {
     let mut view = SceneView::new(rest, activated);
     if let Some(stage) = stage {
         view.set_stage(stage);
     }
+    view.set_screen(begin, display);
     view
 }
 

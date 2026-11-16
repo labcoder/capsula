@@ -7,7 +7,7 @@ use kumochi_protocol::message::{
     ControlToBrain, DataToShell, RunId, SceneHeader, SceneId, SceneSnapshotChunk,
 };
 use kumochi_scene::{
-    Record, SceneEvent, Step, parse_screen_draw_record, record::ScreenDisplay, screen,
+    Frame, Record, SceneEvent, Step, parse_screen_draw_record, record::ScreenDisplay, screen,
     text::Bounded,
 };
 
@@ -25,6 +25,18 @@ const AFTER: RunId = RunId(4);
 const OTHER: RunId = RunId(6);
 const MARKS: SceneId = SceneId(30);
 const SECOND: SceneId = SceneId(31);
+/// The display the marks' picture was taken of, which the overlay covers.
+const DISPLAY: ScreenDisplay = ScreenDisplay {
+    origin: [0, 0],
+    size: [2560, 1440],
+    dpi: 96,
+};
+/// The display beside it.
+const ELSEWHERE: ScreenDisplay = ScreenDisplay {
+    origin: [2560, 0],
+    size: [2560, 1440],
+    dpi: 96,
+};
 
 #[derive(Default)]
 struct Log {
@@ -53,9 +65,11 @@ impl Sources for Scripted {
     }
 }
 
-/// A live presenter whose sources start, and their log.
+/// A live presenter whose sources start, and their log. Its overlay covers [`DISPLAY`].
 fn watched() -> (Presenter, Instant, Rc<RefCell<Log>>) {
     let (mut presenter, now) = live();
+    let effects = presenter.set_display(Some(DISPLAY), now);
+    assert!(effects.expect("a display").is_empty());
     let log = Rc::<RefCell<Log>>::default();
     presenter.watch_sources(Box::new(Scripted {
         log: Rc::clone(&log),
@@ -80,12 +94,7 @@ fn screen_header() -> SceneHeader {
     let Ok(Record::Begin(mut begin)) = parse_screen_draw_record(source) else {
         panic!("a screen begin record");
     };
-    let display = ScreenDisplay {
-        origin: [0, 0],
-        size: [2560, 1440],
-        dpi: 96,
-    };
-    screen::stamp(&mut begin, [1280, 720], display).expect("stamped");
+    screen::stamp(&mut begin, [1280, 720], DISPLAY).expect("stamped");
     SceneHeader {
         begin,
         layout_version: super::super::LAYOUT_VERSION,
@@ -142,8 +151,8 @@ fn cleared(scenes: &[SceneId]) -> ControlToBrain {
     }
 }
 
-fn refused(scene: SceneId) -> ControlToBrain {
-    ControlToBrain::SceneFailed { scene }
+fn skipped(scene: SceneId) -> ControlToBrain {
+    ControlToBrain::SceneSkipped { scene }
 }
 
 #[test]
@@ -160,14 +169,14 @@ fn a_change_before_the_first_mark_skips_the_scene_and_names_its_run() {
     release(&mut presenter, AFTER, now);
     set(&log);
     let effects = marked(&mut presenter, RUN, MARKS, now);
-    assert_eq!(controls(&effects), [&refused(MARKS)]);
+    assert_eq!(controls(&effects), [&skipped(MARKS)]);
     assert!(jobs(effects).is_empty());
     assert_eq!(scene_ids(&presenter), []);
     assert_eq!(presenter.marks_skipped(), Some(RUN));
     assert_eq!(counts(&log), (1, 1));
     // The change stays: the run's next screen scene is skipped as well.
     let effects = marked(&mut presenter, RUN, SECOND, now);
-    assert_eq!(controls(&effects), [&refused(SECOND)]);
+    assert_eq!(controls(&effects), [&skipped(SECOND)]);
     assert_eq!(scene_ids(&presenter), []);
     // The next release starts over.
     assert!(release(&mut presenter, RUN, now).is_empty());
@@ -197,7 +206,7 @@ fn a_first_mark_is_judged_as_it_arrives_while_its_frames_are_held() {
     );
     set(&log);
     let effects = arrive(&mut presenter, mark_frame(RUN, MARKS), now).expect("held");
-    assert_eq!(controls(&effects), [&refused(MARKS)]);
+    assert_eq!(controls(&effects), [&skipped(MARKS)]);
     assert_eq!(presenter.marks_skipped(), Some(RUN));
     let effects = presenter.completed(admission.run(), now).expect("admitted");
     assert!(controls(&effects).is_empty());
@@ -257,7 +266,7 @@ fn a_set_bit_clears_the_shown_scene_at_the_next_tick_or_frame() {
     assert_eq!(counts(&log), (1, 1));
     // The run's next screen scene isn't shown: the screen it marks has changed.
     let effects = marked(&mut presenter, RUN, SECOND, now);
-    assert_eq!(controls(&effects), [&refused(SECOND)]);
+    assert_eq!(controls(&effects), [&skipped(SECOND)]);
     assert_eq!(presenter.marks_skipped(), None);
 }
 
@@ -268,7 +277,7 @@ fn one_screen_scene_is_up_at_a_time() {
     assert_eq!(controls(&effects), [&cleared(&[MARKS])]);
     assert_eq!(scene_ids(&presenter), [SECOND]);
     let effects = marked(&mut presenter, OTHER, SceneId(32), now);
-    assert_eq!(controls(&effects), [&refused(SceneId(32))]);
+    assert_eq!(controls(&effects), [&skipped(SceneId(32))]);
     assert_eq!(scene_ids(&presenter), [SECOND]);
     assert_eq!(presenter.marks_skipped(), None);
     assert_eq!(counts(&log), (1, 0));
@@ -306,7 +315,7 @@ fn a_hold_that_ends_without_a_screen_scene_stops_the_watch() {
     presenter.run_ended(RUN, now);
     assert_eq!(counts(&log), (1, 1));
     let effects = marked(&mut presenter, RUN, MARKS, now);
-    assert_eq!(controls(&effects), [&refused(MARKS)]);
+    assert_eq!(controls(&effects), [&skipped(MARKS)]);
     assert_eq!(presenter.marks_skipped(), None);
 
     let (mut presenter, now, log) = watched();
@@ -314,7 +323,7 @@ fn a_hold_that_ends_without_a_screen_scene_stops_the_watch() {
     presenter.screen_dropped();
     assert_eq!(counts(&log), (1, 1));
     let effects = marked(&mut presenter, RUN, MARKS, now);
-    assert_eq!(controls(&effects), [&refused(MARKS)]);
+    assert_eq!(controls(&effects), [&skipped(MARKS)]);
     assert_eq!(presenter.marks_skipped(), None);
     assert_eq!(counts(&log), (1, 1));
 }
@@ -323,7 +332,7 @@ fn a_hold_that_ends_without_a_screen_scene_stops_the_watch() {
 fn no_mark_is_shown_without_a_release_or_without_running_sources() {
     let (mut presenter, now, log) = watched();
     let effects = marked(&mut presenter, RUN, MARKS, now);
-    assert_eq!(controls(&effects), [&refused(MARKS)]);
+    assert_eq!(controls(&effects), [&skipped(MARKS)]);
     assert_eq!(presenter.marks_skipped(), None);
     assert_eq!(counts(&log), (0, 0));
 
@@ -331,7 +340,7 @@ fn no_mark_is_shown_without_a_release_or_without_running_sources() {
     let (mut presenter, now) = live();
     release(&mut presenter, AFTER, now);
     let effects = marked(&mut presenter, RUN, MARKS, now);
-    assert_eq!(controls(&effects), [&refused(MARKS)]);
+    assert_eq!(controls(&effects), [&skipped(MARKS)]);
     assert_eq!(scene_ids(&presenter), []);
     assert_eq!(presenter.marks_skipped(), Some(RUN));
 
@@ -343,7 +352,7 @@ fn no_mark_is_shown_without_a_release_or_without_running_sources() {
     }));
     release(&mut presenter, AFTER, now);
     let effects = marked(&mut presenter, RUN, MARKS, now);
-    assert_eq!(controls(&effects), [&refused(MARKS)]);
+    assert_eq!(controls(&effects), [&skipped(MARKS)]);
     assert_eq!(presenter.marks_skipped(), Some(RUN));
     assert_eq!(counts(&log), (1, 0));
 }
@@ -373,7 +382,7 @@ fn the_setting_going_off_clears_the_marks_and_shows_none_after() {
     assert_eq!(scene_ids(&presenter), [LIVE]);
     assert_eq!(counts(&log), (1, 1));
     let effects = marked(&mut presenter, RUN, SECOND, now);
-    assert_eq!(controls(&effects), [&refused(SECOND)]);
+    assert_eq!(controls(&effects), [&skipped(SECOND)]);
     assert_eq!(presenter.marks_skipped(), None);
 
     let (mut presenter, now, log) = watched();
@@ -381,13 +390,13 @@ fn the_setting_going_off_clears_the_marks_and_shows_none_after() {
     assert!(presenter.screen_off(now).expect("the setting").is_empty());
     assert_eq!(counts(&log), (1, 1));
     let effects = marked(&mut presenter, RUN, MARKS, now);
-    assert_eq!(controls(&effects), [&refused(MARKS)]);
+    assert_eq!(controls(&effects), [&skipped(MARKS)]);
     assert_eq!(presenter.marks_skipped(), None);
     // A run skipped for a change is forgotten with the setting.
     release(&mut presenter, AFTER, now);
     set(&log);
     let effects = marked(&mut presenter, RUN, SECOND, now);
-    assert_eq!(controls(&effects), [&refused(SECOND)]);
+    assert_eq!(controls(&effects), [&skipped(SECOND)]);
     assert_eq!(presenter.marks_skipped(), Some(RUN));
     assert!(presenter.screen_off(now).expect("the setting").is_empty());
     assert_eq!(presenter.marks_skipped(), None);
@@ -420,7 +429,7 @@ fn a_lost_session_drops_the_marks_and_ends_the_watch() {
     presenter.connected(GENERATION);
     assert!(described(&mut presenter, &[], now).is_empty());
     let effects = marked(&mut presenter, RUN, MARKS, now);
-    assert_eq!(controls(&effects), [&refused(MARKS)]);
+    assert_eq!(controls(&effects), [&skipped(MARKS)]);
     assert_eq!(presenter.marks_skipped(), None);
     assert_eq!(counts(&log), (1, 1));
 }
@@ -506,7 +515,7 @@ fn an_unnamed_release_stops_listening_thirty_seconds_later() {
     // The watch stays ended: a name and a scene that come later change nothing.
     presenter.screen_run(RUN, now);
     let effects = marked(&mut presenter, RUN, MARKS, ms(now, 30_001));
-    assert_eq!(controls(&effects), [&refused(MARKS)]);
+    assert_eq!(controls(&effects), [&skipped(MARKS)]);
     assert_eq!(presenter.marks_skipped(), None);
     assert_eq!(counts(&log), (1, 1));
 }
@@ -618,6 +627,9 @@ fn a_clear_drops_the_marks_admission_that_still_waits_for_a_worker_slot() {
         log: Rc::default(),
         starts: true,
     }));
+    presenter
+        .set_display(Some(DISPLAY), now)
+        .expect("a display");
     let marks = SceneId(40);
     release(&mut presenter, AFTER, now);
     arrive(&mut presenter, begin_frame(marks), now).expect("a screen scene");
@@ -699,7 +711,7 @@ fn a_handoff_that_fails_or_never_comes_ends_the_watch() {
     // The successor's first mark is another run's.
     let (mut presenter, now, log) = passing();
     let effects = marked(&mut presenter, OTHER, SECOND, now);
-    assert_eq!(controls(&effects), [&refused(SECOND)]);
+    assert_eq!(controls(&effects), [&skipped(SECOND)]);
     assert_eq!(counts(&log), (1, 1));
     // The successor is no screen scene.
     let (mut presenter, now, log) = passing();
@@ -713,7 +725,7 @@ fn a_handoff_that_fails_or_never_comes_ends_the_watch() {
     presenter.run_ended(RUN, now);
     assert_eq!(counts(&log), (1, 1));
     let effects = marked(&mut presenter, RUN, SECOND, now);
-    assert_eq!(controls(&effects), [&refused(SECOND)]);
+    assert_eq!(controls(&effects), [&skipped(SECOND)]);
     // The user clears before the successor begins.
     let (mut presenter, now, log) = passing();
     let effects = presenter.clear(now).expect("the user's clear");
@@ -722,7 +734,7 @@ fn a_handoff_that_fails_or_never_comes_ends_the_watch() {
     // Another screen scene of the run is not the declared successor.
     let (mut presenter, now, log) = passing();
     let effects = marked(&mut presenter, RUN, SceneId(32), now);
-    assert_eq!(controls(&effects), [&refused(SceneId(32))]);
+    assert_eq!(controls(&effects), [&skipped(SceneId(32))]);
     assert_eq!(counts(&log), (1, 0));
     // A scene whose run has ended passes nothing on.
     let (mut presenter, now, log, _) = shown();
@@ -730,7 +742,7 @@ fn a_handoff_that_fails_or_never_comes_ends_the_watch() {
     data(&mut presenter, replaced_by(SECOND), now).expect("the marker");
     assert_eq!(counts(&log), (1, 1));
     let effects = marked(&mut presenter, RUN, SECOND, now);
-    assert_eq!(controls(&effects), [&refused(SECOND)]);
+    assert_eq!(controls(&effects), [&skipped(SECOND)]);
 }
 
 #[test]
@@ -746,7 +758,7 @@ fn a_first_mark_or_a_name_at_the_unnamed_limit_is_late_before_the_watchdog_runs(
     let (mut presenter, now, log) = watched();
     release(&mut presenter, AFTER, now);
     let effects = marked(&mut presenter, RUN, MARKS, ms(now, 30_000));
-    assert_eq!(controls(&effects), [&refused(MARKS)]);
+    assert_eq!(controls(&effects), [&skipped(MARKS)]);
     assert_eq!(scene_ids(&presenter), []);
     assert_eq!(presenter.marks_skipped(), None);
     assert_eq!(counts(&log), (1, 1));
@@ -758,7 +770,7 @@ fn a_first_mark_or_a_name_at_the_unnamed_limit_is_late_before_the_watchdog_runs(
     assert_eq!(counts(&log), (1, 1));
     assert_eq!(presenter.deadline(), None);
     let effects = marked(&mut presenter, RUN, MARKS, ms(now, 30_000));
-    assert_eq!(controls(&effects), [&refused(MARKS)]);
+    assert_eq!(controls(&effects), [&skipped(MARKS)]);
 
     let (mut presenter, now, log) = watched();
     release(&mut presenter, AFTER, now);
@@ -797,7 +809,7 @@ fn a_run_that_ends_before_it_is_named_ends_the_watch_for_good() {
     presenter.screen_run(RUN, now);
     assert_eq!(presenter.deadline(), None);
     let effects = marked(&mut presenter, RUN, MARKS, now);
-    assert_eq!(controls(&effects), [&refused(MARKS)]);
+    assert_eq!(controls(&effects), [&skipped(MARKS)]);
     assert_eq!(counts(&log), (1, 1));
 }
 
@@ -842,9 +854,8 @@ impl std::io::Write for Captured {
     }
 }
 
-/// The reason words of the "screen marks cleared" lines `road` logs after its marks are shown.
-fn reasons(road: impl FnOnce(&mut Presenter, Instant)) -> Vec<String> {
-    let (mut presenter, now, _, _) = shown();
+/// What `road` logs.
+fn logged(road: impl FnOnce()) -> String {
     let captured = Captured::default();
     let writer = captured.clone();
     let subscriber = tracing_subscriber::fmt()
@@ -853,9 +864,15 @@ fn reasons(road: impl FnOnce(&mut Presenter, Instant)) -> Vec<String> {
         .with_writer(move || writer.clone())
         .finish();
     let logging = tracing::subscriber::set_default(subscriber);
-    road(&mut presenter, now);
+    road();
     drop(logging);
-    let log = String::from_utf8(captured.0.lock().expect("the log").clone()).expect("text");
+    String::from_utf8(captured.0.lock().expect("the log").clone()).expect("text")
+}
+
+/// The reason words of the "screen marks cleared" lines `road` logs after its marks are shown.
+fn reasons(road: impl FnOnce(&mut Presenter, Instant)) -> Vec<String> {
+    let (mut presenter, now, _, _) = shown();
+    let log = logged(|| road(&mut presenter, now));
     log.lines()
         .filter_map(|line| line.split_once("screen marks cleared reason="))
         .map(|(_, reason)| reason.trim().trim_matches('"').to_owned())
@@ -865,8 +882,9 @@ fn reasons(road: impl FnOnce(&mut Presenter, Instant)) -> Vec<String> {
 #[test]
 fn every_road_that_takes_shown_marks_down_logs_one_fixed_word() {
     type Road = fn(&mut Presenter, Instant);
-    let roads: [(Road, &str); 10] = [
+    let roads: [(Road, &str); 11] = [
         (|p, now| drop(p.screen_changed(now)), "changed"),
+        (|p, now| drop(p.set_display(None, now)), "display"),
         (|p, now| drop(p.screen_off(now)), "off"),
         (|p, now| drop(release(p, RUN, now)), "release"),
         (
@@ -1115,7 +1133,7 @@ fn a_newer_run_that_is_not_the_hold_s_ending_before_the_name_ends_the_watch() {
     assert_eq!(presenter.deadline(), None);
     presenter.screen_run(OTHER, now);
     let effects = marked(&mut presenter, OTHER, MARKS, now);
-    assert_eq!(controls(&effects), [&refused(MARKS)]);
+    assert_eq!(controls(&effects), [&skipped(MARKS)]);
     assert_eq!(scene_ids(&presenter), []);
     assert_eq!(counts(&log), (1, 1));
     nothing_shows(&mut presenter, now);
@@ -1160,4 +1178,172 @@ fn a_sample_that_clears_the_marks_reports_a_held_frame_the_mirror_rejects() {
     );
     set(&log);
     assert_eq!(presenter.sample_at(now).err(), Some(Broken::Order));
+}
+
+#[test]
+fn a_first_mark_whose_view_cannot_be_placed_is_skipped_once_and_shows_nothing() {
+    for display in [None, Some(ELSEWHERE)] {
+        let (mut presenter, now, log) = watched();
+        assert!(
+            presenter
+                .set_display(display, now)
+                .expect("a display")
+                .is_empty()
+        );
+        release(&mut presenter, AFTER, now);
+        let mut effects = Vec::new();
+        let lines = logged(|| effects = marked(&mut presenter, RUN, MARKS, now));
+        assert_eq!(controls(&effects), [&skipped(MARKS)]);
+        assert_eq!(
+            lines
+                .matches("screen marks skipped reason=\"display\"")
+                .count(),
+            1
+        );
+        assert_eq!(lines.matches("screen marks").count(), 1);
+        assert_eq!(presenter.marks_skipped(), Some(RUN));
+        assert_eq!(counts(&log), (1, 1));
+        nothing_shows(&mut presenter, now);
+        // The display coming back undoes nothing: the run's next screen scene isn't shown.
+        assert!(
+            presenter
+                .set_display(Some(DISPLAY), now)
+                .expect("a display")
+                .is_empty()
+        );
+        let effects = marked(&mut presenter, RUN, SECOND, now);
+        assert_eq!(controls(&effects), [&skipped(SECOND)]);
+    }
+
+    // The same while the scene's begin is still held behind another scene's admission.
+    let (mut presenter, now, log) = watched();
+    presenter
+        .set_display(Some(ELSEWHERE), now)
+        .expect("a display");
+    begin(&mut presenter, LIVE, now);
+    release(&mut presenter, AFTER, now);
+    let frame = DataToShell::SceneStepCommit {
+        run: RUN,
+        scene: LIVE,
+        index: 0,
+        step: rect("a"),
+    };
+    let admission = only_admission(arrive(&mut presenter, frame, now).expect("a step"));
+    assert!(
+        arrive(&mut presenter, begin_frame(MARKS), now)
+            .expect("held")
+            .is_empty()
+    );
+    let effects = arrive(&mut presenter, mark_frame(RUN, MARKS), now).expect("held");
+    assert_eq!(controls(&effects), [&skipped(MARKS)]);
+    assert_eq!(presenter.marks_skipped(), Some(RUN));
+    assert_eq!(counts(&log), (1, 1));
+    let effects = presenter.completed(admission.run(), now).expect("admitted");
+    assert!(controls(&effects).is_empty());
+    assert_eq!(scene_ids(&presenter), [LIVE]);
+}
+
+#[test]
+fn a_shown_scene_whose_display_changes_is_cleared_under_the_word_display() {
+    for display in [None, Some(ELSEWHERE)] {
+        let (mut presenter, now, log, _) = shown();
+        let mut effects = Vec::new();
+        let lines = logged(|| effects = presenter.set_display(display, now).expect("a display"));
+        assert_eq!(controls(&effects), [&cleared(&[MARKS])]);
+        assert_eq!(effects.len(), 1);
+        assert_eq!(
+            lines
+                .matches("screen marks cleared reason=\"display\"")
+                .count(),
+            1
+        );
+        assert_eq!(lines.matches("screen marks").count(), 1);
+        assert_eq!(counts(&log), (1, 1));
+        assert!(
+            presenter
+                .set_display(display, now)
+                .expect("the same display")
+                .is_empty()
+        );
+        nothing_shows(&mut presenter, now);
+    }
+
+    // The display the marks were placed on, given again, changes nothing.
+    let (mut presenter, now, log, _) = shown();
+    assert!(
+        presenter
+            .set_display(Some(DISPLAY), now)
+            .expect("the same display")
+            .is_empty()
+    );
+    assert_eq!(scene_ids(&presenter), [MARKS]);
+    assert_eq!(counts(&log), (1, 0));
+}
+
+#[test]
+fn a_display_known_after_the_begin_places_the_scene_before_its_first_mark() {
+    let (mut presenter, now, log) = watched();
+    presenter.set_display(None, now).expect("no display");
+    release(&mut presenter, AFTER, now);
+    data(&mut presenter, begin_frame(MARKS), now).expect("a screen scene");
+    assert!(
+        presenter
+            .set_display(Some(DISPLAY), now)
+            .expect("a display")
+            .is_empty()
+    );
+    let effects = commit_as(&mut presenter, RUN, MARKS, 0, mark(), now).expect("a first mark");
+    assert!(controls(&effects).is_empty());
+    presenter
+        .completed(only_job(effects).run(&mut Shaper), now)
+        .expect("prepared");
+    presenter.advance(GENERATION, now).expect("activation");
+    assert!(presenter.sample_at(now).expect("a sample").0.visible);
+    let placed = scales(&presenter, MARKS);
+    assert!(!placed.is_empty());
+    assert_eq!(placed, vec![TWICE; placed.len()]);
+    assert_eq!(counts(&log), (1, 0));
+}
+
+/// The scale each painted mark of `scene` is placed at, as bits.
+fn scales(presenter: &Presenter, scene: SceneId) -> Vec<[u32; 2]> {
+    let mut frame = Frame::new();
+    presenter.scenes[&scene]
+        .view
+        .frame(60_000, &mut frame)
+        .expect("frame");
+    frame
+        .items()
+        .iter()
+        .map(|item| [item.transform.0[0].to_bits(), item.transform.0[3].to_bits()])
+        .collect()
+}
+
+/// 1,280 picture pixels across a 2,560-pixel display at 100%: two logical pixels each.
+const TWICE: [u32; 2] = [2.0_f32.to_bits(); 2];
+
+#[test]
+fn shown_marks_are_placed_on_the_overlay_s_display() {
+    let (mut presenter, now, _) = prepared();
+    presenter.advance(GENERATION, now).expect("activation");
+    assert!(presenter.sample_at(now).expect("a sample").0.visible);
+    let placed = scales(&presenter, MARKS);
+    assert!(!placed.is_empty());
+    assert_eq!(placed, vec![TWICE; placed.len()]);
+}
+
+#[test]
+fn the_frame_checks_allocate_nothing_while_nothing_changed() {
+    let (mut presenter, now, _) = prepared();
+    presenter.advance(GENERATION, now).expect("activation");
+    assert!(presenter.sample_at(now).expect("a sample").0.visible);
+    assert!(presenter.listening);
+    let at = ms(now, 7);
+    let (shown, [allocations, _], _) = crate::allocation::usage(|| {
+        let effects = presenter.advance(GENERATION, at).expect("a frame");
+        let (sample, sampled) = presenter.sample_at(at).expect("a sample");
+        effects.is_empty() && sampled.is_empty() && sample.visible
+    });
+    assert!(shown);
+    assert_eq!(allocations, 0);
 }

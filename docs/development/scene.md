@@ -2037,8 +2037,8 @@ that still names a locally cleared scene causes its idempotent clear to be sent 
 A screen scene's marks point at the screen as it was when a hold was released, so the
 presenter shows one only while nothing may have changed the screen since, and clears every
 one as soon as something may have. Nothing follows a window. This is dormant: `draw` still
-refuses the surface, so no screen scene arrives, and the shell installs no sources and
-reports no release.
+refuses the surface, so no screen scene arrives, and the shell installs no sources, reports
+no release and gives no display.
 
 - **The watch** (`presenter/watch.rs`) is plain state with no clock and no system call. The
   presenter owns it, feeds it events and does the clearing it answers.
@@ -2089,10 +2089,20 @@ stateDiagram-v2
   an admission. It is shown only while a release is waiting with nothing changed, from a
   run newer than `after`, and from the run `screen_run` named once there is one. Anything
   else is skipped: the scene never installs a step or paints, and the brain gets
-  `SceneFailed`. A begin that was still held never installs; one already applied left an
-  empty scene, which goes with the refusal. When a change was the reason, `marks_skipped` names the run until the
+  `SceneSkipped`, which tells the model the screen may have changed. `SceneFailed` would
+  read as a preparation it could try again. A begin that was still held never installs; one
+  already applied left an empty scene, which goes with the skip. When a change was the reason, `marks_skipped` names the run until the
   next release, for the dock's line. A change before the first mark stays: no later name or
   event undoes it.
+- **Placement.** `set_display(display, now)` gives the presenter the display the overlay
+  covers, in physical pixels, or none while it isn't known. A screen scene's view is placed
+  on it with `SceneView::set_screen` whenever the view is made and again at each
+  `set_display`, and no stage moves it. A scene that can't be placed, because its picture is
+  of another display or of this one before it changed, or because no display is known,
+  counts as a changed screen: its first mark is skipped like any other, and once shown it
+  is cleared, each under the log word `display`. The first mark is judged from the header
+  with `screen::placement`, the function `set_screen` places with, since the scene's begin
+  may still be held and have no view yet.
 - **One at a time.** A second screen scene from the shown run takes the first one's place
   and the first is cleared. One from any other run is skipped. The brain's own replacement
   says so first: `ScenesReplaced` names the successor before its begin and first commit.
