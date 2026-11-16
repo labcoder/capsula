@@ -1,6 +1,6 @@
 //! The overlay window's visibility, kept apart from the frames' paint eligibility. A window
 //! whose show or hide may not have taken effect is never shown again, and a hidden one is
-//! replaced, so the next drawing can't appear with the last one's frame still on its surface.
+//! closed, so the next drawing can't appear with the last one's frame still on its surface.
 
 use std::{cell::RefCell, mem};
 
@@ -61,7 +61,7 @@ impl<W> Visibility<W> {
         }
     }
 
-    /// Opens the hidden window ahead of the first show, which then only shows it. A window
+    /// Opens the hidden window ahead of the next show, which then only shows it. A window
     /// that is already there stays.
     pub(super) fn prepare<S: Surface<Window = W>>(
         &mut self,
@@ -124,10 +124,9 @@ impl<W> Visibility<W> {
             *self = Self::EmptyHideFailed(window);
             return Err(error);
         }
-        // The next show gets a window that never presented this drawing.
-        surface.close(window)?;
-        *self = Self::Hidden(surface.open()?);
-        Ok(())
+        // The next show gets a window that never presented this drawing. The owner opens it
+        // with `prepare` once the work at hand is done: an open takes far longer than a hide.
+        surface.close(window)
     }
 }
 
@@ -200,6 +199,12 @@ mod tests {
         fn sync(&mut self, state: &mut Visibility<u8>, sample: Sample) -> (bool, Vec<Call>) {
             let frames = Rc::clone(&self.frames);
             let ok = state.sync(self, &frames, sample).is_ok();
+            (ok, std::mem::take(&mut self.calls))
+        }
+
+        /// Opens the next hidden window as the owner does once a hide's update is over.
+        fn prepare(&mut self, state: &mut Visibility<u8>) -> (bool, Vec<Call>) {
+            let ok = state.prepare(self).is_ok();
             (ok, std::mem::take(&mut self.calls))
         }
     }
@@ -305,10 +310,13 @@ mod tests {
         assert_eq!(fake.sync(&mut state, SHOW), (true, vec![Repaint(1, true)]));
         assert_eq!(
             fake.sync(&mut state, HIDE),
-            (true, vec![Repaint(1, false), Hide(1), Close(1), Open(2)])
+            (true, vec![Repaint(1, false), Hide(1), Close(1)]),
+            "the hide opens nothing"
         );
-        assert_eq!(state, Visibility::Hidden(2));
+        assert_eq!(state, Visibility::Closed);
         assert!(!holds_esc(&presenter));
+        assert_eq!(fake.prepare(&mut state), (true, vec![Open(2)]));
+        assert_eq!(state, Visibility::Hidden(2));
         assert_eq!(fake.sync(&mut state, HIDE), (true, vec![]));
         assert_eq!(
             fake.sync(&mut state, SHOW),
@@ -369,8 +377,9 @@ mod tests {
         assert!(!holds_esc(&presenter));
         assert_eq!(
             fake.sync(&mut state, HIDE),
-            (true, vec![Repaint(1, false), Hide(1), Close(1), Open(2)])
+            (true, vec![Repaint(1, false), Hide(1), Close(1)])
         );
+        assert_eq!(fake.prepare(&mut state), (true, vec![Open(2)]));
         fake.refuse = Some(Show(2));
         assert_eq!(fake.sync(&mut state, SHOW), (false, vec![Show(2)]));
         assert_eq!(
@@ -384,11 +393,12 @@ mod tests {
     fn a_hidden_window_that_cannot_be_replaced_leaves_none() {
         let presenter = presenter();
         let (mut fake, mut state) = shown(&presenter);
-        fake.refuse = Some(Open(2));
         assert_eq!(
             fake.sync(&mut state, HIDE),
-            (false, vec![Repaint(1, false), Hide(1), Close(1), Open(2)])
+            (true, vec![Repaint(1, false), Hide(1), Close(1)])
         );
+        fake.refuse = Some(Open(2));
+        assert_eq!(fake.prepare(&mut state), (false, vec![Open(2)]));
         assert_eq!(state, Visibility::Closed);
         assert_eq!(
             fake.sync(&mut state, SHOW),

@@ -1158,11 +1158,8 @@ fn deleting_a_thread_resynchronizes_idle_retiring_ink_only_on_success(
             assert_eq!(this.scene_deadline, Some(expires));
             this.thread_deleted(ThreadId(99), outcome, None, cx);
             if terminal {
-                assert!(matches!(&this.overlay, Visibility::Hidden(_)));
-                assert_ne!(
-                    this.overlay.window().expect("fresh hidden host").window,
-                    window
-                );
+                // The hide closed its host; the next one opens once this update is over.
+                assert!(matches!(&this.overlay, Visibility::Closed));
                 assert!(!this.presenter.frames().borrow().shown);
                 assert!(!this.presenter.drawn());
                 assert_eq!(this.presenter.deadline(), None);
@@ -1181,9 +1178,73 @@ fn deleting_a_thread_resynchronizes_idle_retiring_ink_only_on_success(
             }
             assert_eq!(controls.try_recv(), Err(async_channel::TryRecvError::Empty));
         });
+        if terminal {
+            owner.read_with(&visual, |this, _| {
+                assert!(matches!(&this.overlay, Visibility::Hidden(_)));
+                assert_ne!(
+                    this.overlay.window().expect("fresh hidden host").window,
+                    window
+                );
+            });
+        }
         script.finish();
         close_callback_scene(&owner, cx);
     }
+}
+
+#[gpui::test]
+fn a_release_s_hide_opens_the_next_host_only_after_its_stamp(cx: &mut gpui_kit::TestAppContext) {
+    use crate::presence::overlay_visibility::Visibility;
+    use crate::presence::screen_hold_tests::{
+        detached, held, luna, on, release, screen_ready, tick,
+    };
+    use kumochi_protocol::geometry::PhysicalPoint;
+    use kumochi_protocol::message::ControlToBrain;
+
+    let at = PhysicalPoint([900, 320]);
+    let ready = screen_ready(Some(on(&luna())), cx);
+    let shown = detached(&ready, cx);
+    let first = shown.window;
+    ready.owner.update(cx, |owner, _| {
+        owner.presenter.frames().borrow_mut().shown = true;
+        owner.overlay = Visibility::Shown(shown);
+    });
+    held(&ready, 1, cx);
+    tick(at, cx);
+    let script = HostGuard::install(&[
+        Step(Operation::Hide, Outcome::Success),
+        Step(Operation::Configure, Outcome::Success),
+    ]);
+    ready.owner.update(cx, |owner, _| {
+        owner.counter_fixture = Some(Rc::new(|| {
+            let used = HOST.with(|host| host.borrow().as_ref().map(|script| script.used));
+            assert_eq!(
+                used,
+                Some(1),
+                "the stamp follows the hide, and no host is open yet"
+            );
+            9_001
+        }));
+    });
+    release(&ready.owner, 1, Some(at), cx);
+    script.finish();
+    assert!(matches!(
+        ready.controls.try_recv(),
+        Ok(ControlToBrain::ScreenRelease {
+            excluded_qpc: 9_001,
+            ..
+        })
+    ));
+    ready.owner.update(cx, |owner, cx| {
+        let Visibility::Hidden(next) = &owner.overlay else {
+            panic!("the next host is open and hidden once the release's update is over");
+        };
+        assert_ne!(next.window, first);
+        next.window
+            .update(cx, |_, window, _| window.remove_window())
+            .expect("close fixture host");
+        owner.overlay = Visibility::Closed;
+    });
 }
 
 #[gpui::test]
@@ -1500,8 +1561,16 @@ fn provider_done_with_a_shown_rest_and_a_future_step_stops_then_clears(
         this.text.as_mut().expect("typing panel").typing.open();
         this.escape(cx).expect("second Esc clears before cut acknowledgement");
         assert!(!this.presenter.holds_scenes());
-        this.overlay.window().expect("hidden replacement").window
-            .update(cx, |_, window, _| window.remove_window()).expect("close fixture host");
+        // The hide closed its host; the replacement opens once this update is over.
+        assert!(matches!(this.overlay, crate::presence::overlay_visibility::Visibility::Closed));
+    });
+    owner.update(&mut visual, |this, cx| {
+        this.overlay
+            .window()
+            .expect("hidden replacement")
+            .window
+            .update(cx, |_, window, _| window.remove_window())
+            .expect("close fixture host");
         this.overlay = crate::presence::overlay_visibility::Visibility::Closed;
     });
     script.finish();
@@ -2039,9 +2108,10 @@ fn persistent_stop_configuration_refusal_retires_motion_with_an_actionable_notic
             assert_eq!(this.panel_visibility, PanelVisibility::Hidden);
             assert!(!this.escape_hold.shows_stop());
             assert!(!this.panel.read(cx).stop);
+            // The hide closed its host; the next one opens once the dock's update is over.
             assert!(matches!(
                 this.overlay,
-                crate::presence::overlay_visibility::Visibility::Hidden(_)
+                crate::presence::overlay_visibility::Visibility::Closed
             ));
             assert_eq!(this.scene_deadline, None);
             assert!(this.scene_timer.is_none());
@@ -2049,6 +2119,12 @@ fn persistent_stop_configuration_refusal_retires_motion_with_an_actionable_notic
         assert_eq!(window.simulate_next_frame(cx), 0);
     })
     .expect("held dock");
+    owner.read_with(cx, |this, _| {
+        assert!(matches!(
+            this.overlay,
+            crate::presence::overlay_visibility::Visibility::Hidden(_)
+        ));
+    });
     script.finish();
     assert_eq!(retained_x(&owner, cx), Vec::<f32>::new());
     for at in [240, 260, 280] {

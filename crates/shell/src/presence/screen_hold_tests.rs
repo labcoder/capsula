@@ -195,7 +195,7 @@ fn listening(owner: &Entity<Presence>, cx: &mut TestAppContext) {
 }
 
 /// The keys of hold `id` come up with the pointer read at `pointer`.
-fn release(
+pub(super) fn release(
     owner: &Entity<Presence>,
     id: u32,
     pointer: Option<PhysicalPoint>,
@@ -209,14 +209,14 @@ fn release(
 }
 
 /// A recognized hold that is listening, its recognition message read.
-fn held(ready: &Ready, id: u32, cx: &mut TestAppContext) {
+pub(super) fn held(ready: &Ready, id: u32, cx: &mut TestAppContext) {
     recognize(&ready.owner, id, cx);
     assert_eq!(sent(ready), [screen_hold(id)]);
     listening(&ready.owner, cx);
 }
 
 /// The pointer is at `at` when the hold's next frame reads it.
-fn tick(at: PhysicalPoint, cx: &mut TestAppContext) {
+pub(super) fn tick(at: PhysicalPoint, cx: &mut TestAppContext) {
     cursor_fixture::set(Some(at.0));
     frame(cx);
 }
@@ -943,7 +943,7 @@ fn a_capture_answer_releases_its_own_lease_without_a_lapse_and_never_a_newer_one
 }
 
 /// An overlay window of the owner's, opened hidden as the real one is.
-fn detached(ready: &Ready, cx: &mut TestAppContext) -> super::overlay::Overlay {
+pub(super) fn detached(ready: &Ready, cx: &mut TestAppContext) -> super::overlay::Overlay {
     ready.owner.update(cx, |owner, cx| {
         super::overlay::Overlay::detached(
             owner.presenter.frames(),

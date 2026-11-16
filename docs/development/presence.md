@@ -418,9 +418,12 @@ if the notice comes back, and the hold's line says why.
 
 The overlay shows while a drawing is visible or the line has points (`sync_overlay`), so a line
 alone shows it and a line's end hides it when no drawing is up. Its hidden window is opened
-when the presence starts (`prepare_overlay`), so a first line only shows it: opening a window
-takes about 20 ms on Rez, and about 230 ms in a build with debug assertions, where the window
-backend compiles its shaders at run time. If that open fails, the first show opens its own. Both strokes are rebuilt on
+when the presence starts and again after every hide (`prepare_overlay`), so a line only shows
+it: opening a window takes about 20 ms on Rez, and about 230 ms in a build with debug
+assertions, where the window backend compiles its shaders at run time. A hide closes its
+window, and the next one opens once the update that hid it is over, so a release takes its
+lease and its stamp and sends before that open, not after it. If an open fails, the next show
+opens its own. Both strokes are rebuilt on
 every overlay paint, about 1.3 ms at the 2,048-point cap on Rez; a `shortcut:` at the build
 names keeping the triangles between paints as the upgrade.
 
@@ -430,7 +433,9 @@ sends nothing; `acquire_stamped` takes the lease and the stamp; `Runs::screen_re
 the one `ScreenRelease`, which is sent at once. `KeyUp` follows as before. Whatever stops this
 short leaves the hold voice-only, and its line says the screen wasn't ready. A lease whose
 release couldn't be built or sent is given back at once and tells no lapse. A release while the
-capture before it still holds its lease is refused the same way.
+capture before it still holds its lease is refused the same way. The overlay's next hidden
+window opens after the send, so the lease covers the surfaces that exist then; a window opened
+under a held lease joins it before it is shown, as every late surface does.
 
 The line is drawn on the primary display only, like every drawing. A release with the pointer
 on another display sends that display's picture with an empty path: what the model gets never

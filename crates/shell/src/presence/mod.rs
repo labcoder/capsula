@@ -1070,11 +1070,7 @@ pub(crate) fn open(
     let position = flags.position();
     owner.update(cx, |this, cx| this.position(position, cx))?;
     owner.update(cx, |this, cx| this.observe(position, cx))?;
-    owner.update(cx, |this, cx| {
-        if let Err(error) = this.prepare_overlay(cx) {
-            tracing::warn!(%error, "the drawing overlay will open when it is first shown");
-        }
-    });
+    owner.update(cx, Presence::prepare_overlay);
     let (link, target, paused) = {
         let this = owner.read(cx);
         (

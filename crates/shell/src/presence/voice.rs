@@ -439,9 +439,9 @@ impl Presence {
         self.want_line_frame(gesture, Some(window), cx);
     }
 
-    /// Runs `step` once the running frame is over. Showing and hiding the overlay reach
+    /// Runs `step` once the running update is over. Showing and hiding the overlay reach
     /// windows by their handles, and GPUI holds the window whose frame is running.
-    fn after_frame(
+    pub(super) fn after_frame(
         cx: &mut Context<'_, Self>,
         step: impl FnOnce(&mut Self, &mut Context<'_, Self>) + 'static,
     ) {
