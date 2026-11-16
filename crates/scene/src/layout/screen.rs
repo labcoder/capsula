@@ -158,6 +158,18 @@ pub(super) fn highlight(
     })
 }
 
+/// A label with no side left: `NoRoom` at its path, in the step the build lays out.
+fn no_room(build: &Build<'_>, handle: Handle) -> PrepareError {
+    let path = FieldPath::default()
+        .field("put")
+        .index(handle.slot())
+        .field("callout");
+    PrepareError::Layout(match build.screen.as_ref() {
+        Some(screen) => StepError::in_step(&screen.step, path, ErrorCode::NoRoom),
+        None => StepError::new(ErrorCode::NoRoom),
+    })
+}
+
 /// Lays out a label on the screen surface: one line, off every other object and every box a mark
 /// points at, on the side named first and then the others. It keeps clear of its target's marked
 /// box and of any object around that target. A laid-out label stays where it is until something
@@ -233,17 +245,7 @@ pub(super) fn callout(
             old.anchors[1],
             Rect::centered(old.anchors[1], Vec2::default()),
         ),
-        (None, None) => {
-            let step = build.screen.as_ref().map(|screen| &screen.step);
-            let path = FieldPath::default()
-                .field("put")
-                .index(handle.slot())
-                .field("callout");
-            return Err(PrepareError::Layout(match step {
-                Some(step) => StepError::in_step(step, path, ErrorCode::NoRoom),
-                None => StepError::new(ErrorCode::NoRoom),
-            }));
-        }
+        (None, None) => return Err(no_room(build, handle)),
     };
     let color = callout.color.as_ref().map_or_else(
         || paint(MARK_RGB),
