@@ -853,6 +853,8 @@ impl Brain {
                 {
                     hold.deadline = until;
                     hold.words = Some(text);
+                    #[cfg(test)]
+                    self.observer.send(super::Seen::WordsWaiting).ok();
                     return Ok(());
                 }
                 self.hold_submit(text, link)
@@ -993,7 +995,13 @@ impl Brain {
             }
             Outcome::Sealed(_) | Outcome::Closed(_) | Outcome::Unsupported => None,
         };
+        #[cfg(test)]
+        let sealed = matches!(event.outcome, Outcome::Sealed(_));
         self.holds.screen_event(event);
+        #[cfg(test)]
+        if sealed {
+            self.observer.send(super::Seen::PictureSealed).ok();
+        }
         if let Some(message) = lease {
             link.control(&message)?;
         }

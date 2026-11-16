@@ -152,6 +152,7 @@ async fn changed(progress: Option<&mut watch::Receiver<Progress>>) -> Option<()>
     progress?.changed().await.ok()
 }
 
+// shortcut: `joined` and `deleted` leave a finished task borrowed until `voice_event` takes it; clear it here if anything else polls.
 async fn joined(
     task: Option<&mut JoinHandle<Result<(), DownloadError>>>,
 ) -> Option<Result<(), DownloadError>> {

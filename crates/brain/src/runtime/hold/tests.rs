@@ -1223,6 +1223,31 @@ async fn cancel_model_default_and_unload_changes_are_terminal_before_their_handl
 }
 
 /// Leaves a recording hold on `thread` whose screen part is `screen`.
+#[tokio::test]
+async fn an_answered_decode_is_taken_in_the_poll_that_reads_it() {
+    let scratch = Scratch::new("hold-decode-taken");
+    let mut brain = test_support::brain(&scratch, "");
+    recording(&mut brain);
+    let (reply, receive) = oneshot::channel();
+    brain.holds.pending.as_mut().unwrap().decode = Some(receive);
+    reply.send(SttResult::Text("words".into())).unwrap();
+    let Event::Decoded(key, SttResult::Text(text)) = next(&mut brain.holds).await else {
+        panic!("not the decode")
+    };
+    assert_eq!((key, text.as_str()), (KEY, "words"));
+    assert!(brain.holds.pending.as_ref().unwrap().decode.is_none());
+    {
+        // With nothing else ready, the next poll waits instead of reading the receiver again.
+        let mut again = std::pin::pin!(next(&mut brain.holds));
+        let waker = std::task::Waker::noop();
+        let polled = again
+            .as_mut()
+            .poll(&mut std::task::Context::from_waker(waker));
+        assert!(polled.is_pending());
+    }
+    brain.close().await;
+}
+
 fn screen_hold(brain: &mut Brain, key: HoldKey, screen: ScreenPart) {
     recording(brain);
     let thread = brain.config.view().main_thread;

@@ -10,7 +10,7 @@ use tokio::io::AsyncWriteExt as _;
 use tokio::sync::mpsc;
 
 use super::{Brain, Ended, Shell, duplex};
-use crate::runtime::voice;
+use crate::runtime::{Seen, voice};
 use crate::store::Store;
 use crate::tap::Tap;
 use crate::test_support::{self, Scratch};
@@ -50,6 +50,37 @@ impl crate::engines::Engine for Requested {
                 }
             }
             drop(lease);
+        })
+    }
+}
+
+/// A `Requested` whose round reports its start, then waits for the test's word before it asks to
+/// send.
+struct Paced {
+    started: mpsc::UnboundedSender<()>,
+    go: Arc<tokio::sync::Notify>,
+    seen: mpsc::UnboundedSender<crate::engines::RunRequest>,
+}
+
+impl std::fmt::Debug for Paced {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Paced")
+    }
+}
+
+impl crate::engines::Engine for Paced {
+    fn start(
+        &self,
+        request: crate::engines::RunRequest,
+        events: mpsc::Sender<crate::engines::TurnEvent>,
+        gate: crate::engines::SendGate,
+    ) -> crate::engines::Round {
+        let (started, go) = (self.started.clone(), Arc::clone(&self.go));
+        let round = Requested(self.seen.clone()).start(request, events, gate);
+        Box::pin(async move {
+            started.send(()).unwrap();
+            go.notified().await;
+            round.await;
         })
     }
 }
@@ -443,6 +474,7 @@ async fn a_screen_holds_words_wait_for_its_picture_in_the_running_brain() {
     let (mut brain, release, mut decoded, _fetch) =
         input(&scratch, vec![5, -5], "words before the picture").await;
     let mut rig = seeing(&mut brain);
+    let mut seen = brain.observe();
     let ((control, data), mut shell) = duplex();
     let mut tap = Tap::from_env();
     let client = async {
@@ -464,10 +496,10 @@ async fn a_screen_holds_words_wait_for_its_picture_in_the_running_brain() {
         let (id, seal) = rig.next().await;
         assert!(matches!(seal, Request::Seal(_)), "{seal:?}");
         assert_eq!(decoded.recv().await, Some(()));
-        // The words come in while the seal is unanswered, within the ticket's 1.5 s, and wait in
-        // the brain's loop for the picture.
+        // The words come in while the seal is unanswered and wait in the brain's loop, which
+        // polls the hold again before the seal is answered.
         release.send(()).unwrap();
-        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        while !matches!(seen.recv().await, Some(Seen::WordsWaiting)) {}
         let refused = Reply::Refused(crate::screen::Refusal::DisplayChanged);
         rig.reply(id, &refused).await;
         let (id, retire) = rig.next().await;
@@ -487,6 +519,163 @@ async fn a_screen_holds_words_wait_for_its_picture_in_the_running_brain() {
     .unwrap();
     brain.close().await;
     assert_eq!(users(&scratch), ["words before the picture"]);
+}
+
+/// The sealed picture of a screen hold.
+const PICTURE: &[u8] = &[0xFF, 0xD8, 0xFF, 0xD9];
+
+/// Which half of a screen hold the brain takes first.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum First {
+    Words,
+    Picture,
+}
+
+/// Reads controls up to the hold's `HoldScreen`, which may come only after `go` lets the round
+/// ask to send: an unarmed release is answered at once, so anything told at the run's start
+/// arrives ahead of that answer.
+async fn told_at_the_grant(shell: &mut Shell<tokio::io::DuplexStream>, go: &tokio::sync::Notify) {
+    let other = GestureId(99);
+    shell
+        .send(&crate::runtime::hold::tests::screen_hold::release(
+            other, 100, 200, 2,
+        ))
+        .await;
+    let refused = ControlToShell::CaptureFailed {
+        capture_for: CaptureFor::Gesture(other),
+        reason: kumochi_protocol::message::CaptureFailure::Unavailable,
+    };
+    loop {
+        match shell.control().await {
+            Some(ControlToShell::RunState { .. }) => {}
+            Some(message) if message == refused => break,
+            other => panic!("expected the refused release, got {other:?}"),
+        }
+    }
+    go.notify_one();
+    let told = loop {
+        match shell.control().await {
+            Some(ControlToShell::RunState { .. }) => {}
+            Some(message) => break message,
+            None => panic!("the brain hung up"),
+        }
+    };
+    assert_eq!(
+        told,
+        ControlToShell::HoldScreen {
+            gesture: G,
+            outcome: kumochi_protocol::message::HeldScreen::Screen
+        }
+    );
+}
+
+/// The run's history line says the picture went with it.
+fn stored_with_its_picture(scratch: &Scratch) {
+    let screens: Vec<Option<String>> = Store::open(&scratch.db())
+        .unwrap()
+        .conn_for_tests()
+        .prepare("SELECT screen FROM runs ORDER BY id")
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(screens, [Some("screen".to_owned())]);
+}
+
+/// A spoken screen hold through the running brain whose picture is sealed, its words coming
+/// before the picture or after it: the run carries both, and `HoldScreen` waits for the grant.
+async fn a_screen_hold_reaches_its_run_with_its_picture(first: First) {
+    use crate::runtime::hold::tests::screen_hold::{recognized, release as released, seeing};
+    type Request = <crate::screen::Holds as crate::supervise::Kind>::Request;
+    type Reply = <crate::screen::Holds as crate::supervise::Kind>::Reply;
+    let scratch = Scratch::new("hold-screen-picture");
+    let (mut brain, release, mut decoded, _fetch) =
+        input(&scratch, vec![5, -5], "words and a picture").await;
+    let mut rig = seeing(&mut brain);
+    let mut observed = brain.observe();
+    let (seen, mut requests) = mpsc::unbounded_channel();
+    let (started, mut round) = mpsc::unbounded_channel();
+    let go = Arc::new(tokio::sync::Notify::new());
+    brain.engine = Box::new(Paced {
+        started,
+        go: Arc::clone(&go),
+        seen,
+    });
+    let ((control, data), mut shell) = duplex();
+    let mut tap = Tap::from_env();
+    let client = async {
+        opened(&mut shell).await;
+        shell.send(&recognized(G)).await;
+        status(&mut shell, HoldStatus::Admitted).await;
+        shell.send(&released(G, 100, 200, 2)).await;
+        let (id, display) = rig.next().await;
+        crate::screen::hold_frame(&rig, id, display).await;
+        assert_eq!(
+            shell.control().await,
+            Some(ControlToShell::CaptureDone {
+                capture_for: CaptureFor::Gesture(G)
+            })
+        );
+        let (id, seal) = rig.next().await;
+        let Request::Seal(key) = seal else {
+            panic!("not a seal: {seal:?}")
+        };
+        let sealed = Reply::Sealed(key, crate::screen::ScreenContext::fixture(PICTURE));
+        if first == First::Picture {
+            rig.reply(id, &sealed).await;
+            while !matches!(observed.recv().await, Some(Seen::PictureSealed)) {}
+        }
+        packet(&mut shell, 16_000, 0, true, vec![5, -5]).await;
+        release_source(&mut shell, 1).await;
+        status(&mut shell, HoldStatus::Transcribing).await;
+        assert_eq!(decoded.recv().await, Some(()));
+        release.send(()).unwrap();
+        if first == First::Words {
+            while !matches!(observed.recv().await, Some(Seen::WordsWaiting)) {}
+            rig.reply(id, &sealed).await;
+        }
+        let (run, _) = shell.state().await;
+        assert_eq!(round.recv().await, Some(()));
+        told_at_the_grant(&mut shell, &go).await;
+        assert!(matches!(shell.data().await, DataToShell::Models { .. }));
+        shell.read_to_end(run).await;
+        drop(shell);
+    };
+    let (_, ()) = tokio::time::timeout(super::PATIENCE, async {
+        tokio::join!(brain.serve(control, data, &mut tap), client)
+    })
+    .await
+    .unwrap();
+    let request = requests.try_recv().unwrap();
+    let jpeg = crate::context::Jpeg::new(PICTURE.to_vec()).unwrap();
+    let images: Vec<_> = request
+        .request
+        .input
+        .iter()
+        .filter_map(|item| match item {
+            crate::context::InputItem::Image(image) => Some(image),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(images, [&jpeg]);
+    assert!(requests.is_empty());
+    brain.close().await;
+    assert_eq!(users(&scratch), ["words and a picture"]);
+    stored_with_its_picture(&scratch);
+}
+
+#[tokio::test]
+async fn a_screen_holds_words_then_its_picture_reach_the_run_together() {
+    Box::pin(a_screen_hold_reaches_its_run_with_its_picture(First::Words)).await;
+}
+
+#[tokio::test]
+async fn a_screen_holds_picture_then_its_words_reach_the_run_together() {
+    Box::pin(a_screen_hold_reaches_its_run_with_its_picture(
+        First::Picture,
+    ))
+    .await;
 }
 
 #[tokio::test]
