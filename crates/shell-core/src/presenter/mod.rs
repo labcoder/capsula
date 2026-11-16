@@ -35,8 +35,10 @@ mod placement;
 mod prepare;
 mod recovery;
 mod scene;
+mod screen;
 mod snapshot;
 mod swap;
+mod watch;
 mod window;
 
 use std::{
@@ -71,7 +73,11 @@ pub use paint::{Frames, Sample, SceneCache, Stage};
 pub use prepare::{AdmitJob, Completion, PrepareJob, RecoveryJob};
 use recovery::Phase;
 use scene::{Cut, Out, Ready, Running, Scene, Ticket};
+use screen::on_screen;
 use snapshot::Assembler;
+use watch::Watch;
+
+use crate::platform::screen_watch::{Changed, Sources};
 
 /// The layout algorithm this shell prepares with; the brain stores it with each scene.
 const LAYOUT_VERSION: u32 = 2;
@@ -166,6 +172,13 @@ pub struct Presenter {
     returned: Arc<AtomicUsize>,
     /// Stages each committed view's paint cache.
     stage: Box<dyn Stage>,
+    /// When a screen scene may be shown, and when it goes.
+    watch: Watch,
+    /// The platform's sources, started while the watch listens.
+    sources: Option<Box<dyn Sources>>,
+    /// The bit those sources set.
+    changed: Changed,
+    listening: bool,
     /// This presenter's dropper liveness in tests; `None` asks the process-wide dropper.
     #[cfg(any(test, feature = "test-support"))]
     dropper: Option<bool>,
@@ -196,6 +209,10 @@ impl Presenter {
             refused: false,
             returned: Arc::new(AtomicUsize::new(0)),
             stage,
+            watch: Watch::default(),
+            sources: None,
+            changed: Changed::default(),
+            listening: false,
             #[cfg(any(test, feature = "test-support"))]
             dropper: None,
         }
@@ -242,6 +259,8 @@ impl Presenter {
         self.stopped_begins = [None; MAX_VISIBLE_SCENES];
         self.generation = None;
         self.assembler.disconnected();
+        self.watch = Watch::default();
+        self.hush();
     }
 
     /// The connection's `ScenesV1`. A legacy `Scenes` means the brain has no v1 scene, so the
@@ -287,6 +306,9 @@ impl Presenter {
     ) -> Result<Vec<Effect>, Broken> {
         let mut out = Out::default();
         let current = self.generation == Some(generation) && self.dropper_running();
+        if current {
+            self.heed(&mut out);
+        }
         let snapshot = frame
             .map(|frame| match frame {
                 DataToShell::SceneSnapshotV1 { chunk } => Ok(chunk),
@@ -299,6 +321,7 @@ impl Presenter {
                 self.assembled(effect, now, &mut out)?;
             }
             Err(frame) if current => {
+                self.judge(&frame, &mut out);
                 let removed = matches!(
                     &*frame,
                     DataToShell::ScenesRemoved { .. } | DataToShell::ScenesReplaced { .. }
@@ -405,6 +428,8 @@ impl Presenter {
     pub fn tick(&mut self, now: Instant) -> Result<Vec<Effect>, Broken> {
         self.frames.borrow_mut().expire_retirement(now);
         let mut out = Out::default();
+        self.heed(&mut out);
+        self.expire_marks(now, &mut out);
         let late: Vec<_> = self
             .scenes
             .iter()
@@ -437,6 +462,7 @@ impl Presenter {
             .chain(self.lane.as_ref().map(Lane::deadline))
             .chain(recovering)
             .chain(self.frames.borrow().retirement.as_ref().map(|r| r.expires))
+            .chain(self.watch.deadline())
             .min()
     }
 
@@ -730,6 +756,10 @@ impl Presenter {
                 self.install(
                     *scene, state, rest, retained, view, frame, cache, activation,
                 );
+                if on_screen(header) {
+                    let mirrored = self.scenes.get_mut(scene);
+                    mirrored.expect("the scene was just installed").screen = true;
+                }
                 self.make_room(self.residency(), self.paint_work());
                 Ok(())
             }
@@ -1134,6 +1164,8 @@ impl Presenter {
     }
 
     fn remember(&mut self, id: SceneId) {
+        self.watch.gone(id);
+        self.hush();
         for pending in &mut self.stopped_begins {
             if *pending == Some(id) {
                 *pending = None;

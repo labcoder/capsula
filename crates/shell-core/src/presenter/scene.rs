@@ -83,6 +83,8 @@ pub(super) struct Scene {
     pub(super) stopped_ms: Option<u64>,
     /// A commit went unprepared, so nothing prepares again until a cut resets the layout.
     pub(super) skipping: bool,
+    /// A screen scene: its marks point at the screen as it was when a hold was released.
+    pub(super) screen: bool,
 }
 
 /// A prepared result, with the worker's full charge of its layout for when it becomes rest.
@@ -185,6 +187,7 @@ impl Scene {
             sampled_ms: None,
             stopped_ms: None,
             skipping: false,
+            screen: false,
         }
     }
 

@@ -2027,6 +2027,69 @@ Clear intent made while scenes are mirrored survives brain restarts because scen
 durable event ids; membership
 that still names a locally cleared scene causes its idempotent clear to be sent again.
 
+### Screen scenes in the shell (dormant)
+
+A screen scene's marks point at the screen as it was when a hold was released, so the
+presenter shows one only while nothing may have changed the screen since, and clears every
+one as soon as something may have. Nothing follows a window. This is dormant: `draw` still
+refuses the surface, so no screen scene arrives, and the shell installs no sources and
+reports no release.
+
+- **The watch** (`presenter/watch.rs`) is plain state with no clock and no system call. The
+  presenter owns it, feeds it events and does the clearing it answers.
+- **The sources** (`platform/screen_watch.rs`) are the platform's. `Sources::start` receives
+  one bit, `Changed`, and between `start` and `stop` a source does nothing but set it: for a
+  key going down in another process's window, a mouse button going down, the wheel turning,
+  another process's window coming to the front, a lock, a desktop switch, a suspend, or a
+  display change. Never for a pointer move. Which key, where and which window never reach
+  the core, and the watch keeps nothing but the bit. The presenter reads the bit on every
+  data frame, on every `tick` and in `screen_changed`, which the UI calls when a source wakes
+  it. Sources run only while a change still matters.
+
+```mermaid
+stateDiagram-v2
+    [*] --> Idle
+    Idle --> Expecting: screen_released
+    Expecting --> Expecting: a change (kept, the first mark will be skipped)
+    Expecting --> Showing: first mark, nothing changed
+    Expecting --> Idle: screen_dropped, the hold's run ended, 30 s with no run named, screen_off, session lost
+    Showing --> Idle: a change, 60 s after its run ended, screen_off, the scene left, session lost
+    Showing --> Expecting: screen_released
+```
+
+- **Release.** The shell calls `screen_released(after, now)` once a hold's `ScreenRelease`
+  is sent, with the newest run named so far. Any screen scene still up is cleared, the bit is
+  cleared and the sources start. Without sources, or when `start` says no, the watch counts
+  as changed at once: nothing could say the screen stayed as it was.
+- **The first mark** is a screen scene's first `SceneStepCommit`. It is judged as its frame
+  arrives, in the pipe's order, so a change counts even while the scene's frames wait behind
+  an admission. It is shown only while a release is waiting with nothing changed, from a
+  run newer than `after`, and from the run `screen_run` named once there is one. Anything
+  else is skipped: the scene never paints, its held frames never install, and the brain
+  gets `SceneFailed`. When a change was the reason, `marks_skipped` names the run until the
+  next release, for the dock's line. A change before the first mark stays: no later name or
+  event undoes it.
+- **One at a time.** A second screen scene from the shown run takes the first one's place
+  and the first is cleared. One from any other run is skipped.
+- **Clears** use the shell's own `ClearDrawing`: a change while a scene is shown; the time
+  limit, `MARKS_KEPT` (60 seconds) from `run_ended` for the shown run, carried by
+  `deadline` and `tick`; `screen_off`, when the setting goes off; and the next release.
+  A watch that expects a scene ends without one at `screen_dropped` (the screenshot wasn't
+  sent, or the hold ended with no run) and at `run_ended` for the named run. The shell
+  calls `run_ended` when the run's terminal `RunState` and its `RunEnd` are both in.
+- **The hard bound.** A release whose run `screen_run` hasn't named within `UNNAMED_KEPT`
+  (30 seconds) ends by itself, through `deadline` and `tick`: the sources stop and a screen
+  scene that arrives later is skipped. So no road the shell misses leaves a hook or a mouse
+  registration behind. Once the run is named no timer applies; `run_ended` bounds the watch.
+- **Leaving any other way** (the user's clear, the brain's removal or replacement, a
+  failure) ends the watch too. A replaced screen scene leaves no frozen picture for the
+  [visual bridge](#bounded-visual-replacement).
+- **Session loss.** `disconnected` drops every scene and ends the watch. Recovery never
+  restores a screen scene: one in the batch is cleared, as a scene of another layout
+  version is.
+- **Logs** carry one fixed word per clear (`release`, `changed`, `limit`, `off`) and one
+  line per skip, with no ids.
+
 ### Bounded visual replacement
 
 `ScenesReplaced` ends old semantic bindings and tombstones their ids immediately. The UI-owned

@@ -77,6 +77,9 @@ mod retirement;
 #[path = "swap_tests.rs"]
 mod swap;
 
+#[path = "screen_tests.rs"]
+mod screen;
+
 #[path = "dead_dropper_tests.rs"]
 mod dead_dropper;
 
