@@ -393,8 +393,8 @@ fn each_prepared_step_is_announced_once_and_a_refused_or_late_one_never() {
         index,
     };
     let (mut presenter, now, first) = preparing();
-    let effects = commit(&mut presenter, LIVE, 1, label("b", "unshapeable"), now)
-        .expect("a matching step");
+    let effects =
+        commit(&mut presenter, LIVE, 1, label("b", "unshapeable"), now).expect("a matching step");
     assert!(jobs(effects).is_empty());
     let second = only_job(
         presenter

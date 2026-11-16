@@ -368,7 +368,10 @@ fn a_ready_step_appends_a_redacted_tag_after_the_skipped_scene() {
         scene: super::SceneId(2),
         index: 3,
     };
-    assert_eq!(postcard::to_allocvec(&ready).expect("encodes"), [32, 1, 2, 3]);
+    assert_eq!(
+        postcard::to_allocvec(&ready).expect("encodes"),
+        [32, 1, 2, 3]
+    );
 }
 
 #[test]
