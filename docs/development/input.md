@@ -589,3 +589,26 @@ The microphone generation remains occupied until its matching stop/join receipt 
 proof it was never started. Cancellation and startup/hold deadlines are not release
 receipts. The shared gate, source lifecycle and fixed failures are in
 `shell-core`'s `platform/microphone.rs`; device APIs stay behind its native adapter.
+
+## A hold's pointer path
+
+`PathRecorder` (`shell-core`'s `input/path.rs`) turns the pointer samples of one hold into the
+`PointerPath` its `ScreenRelease` carries. It has no GPUI and no `Debug`. Samples are physical
+desktop pixels. Its distances are logical pixels multiplied by the display's scale, and a scale
+that is under 100% or not a number counts as 100%.
+
+- Nothing is kept until a sample is 24 logical pixels, in a straight line, from where the
+  pointer was at recognition, so a resting hand draws nothing. The first sample that far starts
+  the path with two points: where the pointer was at recognition, if that place is on the
+  display, and then the sample. The line starts where the hand did.
+- After that a sample is kept when it is at least 2 logical pixels from the last kept point.
+- A path holds at most `MAX_PATH_POINTS` (2,048). The sample that would be the 2,049th is added
+  and then every second point is dropped, which keeps the first and the newest, and the spacing
+  doubles. So a hold of any length fits.
+- Only samples inside the display given to `new` are kept. That is the display the line will be
+  drawn on, so nothing reaches the picture that wasn't shown. A sample anywhere else changes
+  nothing, and the path joins up in a straight line when the pointer comes back.
+
+`sample` returns true when the path changed. A pointer that never leaves the first 24 pixels
+finishes as an empty path. Nothing samples yet: the timer and the line on screen come with the
+shell's side of the screen hold.

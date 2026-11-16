@@ -10,6 +10,7 @@
 use std::time::{Duration, Instant};
 
 pub mod hold;
+pub mod path;
 
 const WINDOW: Duration = Duration::from_millis(300);
 
