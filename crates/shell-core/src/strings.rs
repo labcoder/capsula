@@ -789,14 +789,14 @@ mod tests {
                 HeldScreen::Attached,
                 None,
                 Some(format!(
-                    "{app} took a picture of the window under your pointer to send to the model with this message. It didn't keep a copy."
+                    "{app} took a picture of the window under your pointer to send with this message to the model you were using. It didn't keep a copy."
                 )),
             ),
             (
                 HeldScreen::Screen,
                 None,
                 Some(format!(
-                    "{app} took a picture of your screen to send to the model with this message. It didn't keep a copy."
+                    "{app} took a picture of your screen to send with this message to the model you were using. It didn't keep a copy."
                 )),
             ),
             (

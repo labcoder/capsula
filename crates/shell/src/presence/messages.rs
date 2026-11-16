@@ -596,9 +596,16 @@ fn message(row: &Row, controls: Option<gpui_kit::AnyElement>, cx: &App) -> gpui_
                         let tip = tip.clone();
                         move || format!("held-picture-{} {tip}", id.1)
                     })
-                    .text_xs()
-                    .text_color(cx.theme().muted_foreground)
-                    .child(PICTURED)
+                    .child(
+                        // shortcut: today's theme has no text colour subtler than muted, so the icon
+                        // rests at muted and brightens to the text colour; use the design's subtle
+                        // and muted pair once the theme has both.
+                        gpui_kit::svg()
+                            .path(PICTURED.path())
+                            .size_4()
+                            .text_color(cx.theme().muted_foreground)
+                            .hover(|style| style.text_color(cx.theme().foreground)),
+                    )
                     .tooltip(move |window, cx| {
                         let tip = tip.clone();
                         gpui_kit::component::tooltip::Tooltip::element(move |_, _| {
@@ -787,14 +794,14 @@ mod tests {
                     HeldScreen::Attached,
                     None,
                     Some(format!(
-                        "{app} took a picture of the window under your pointer to send to the model with this message. It didn't keep a copy."
+                        "{app} took a picture of the window under your pointer to send with this message to the model you were using. It didn't keep a copy."
                     )),
                 ),
                 (
                     HeldScreen::Screen,
                     None,
                     Some(format!(
-                        "{app} took a picture of your screen to send to the model with this message. It didn't keep a copy."
+                        "{app} took a picture of your screen to send with this message to the model you were using. It didn't keep a copy."
                     )),
                 ),
                 (
@@ -836,10 +843,10 @@ mod tests {
         let app = kumochi_protocol::constants::DISPLAY_NAME;
         let sentences = [
             format!(
-                "{app} took a picture of your screen to send to the model with this message. It didn't keep a copy."
+                "{app} took a picture of your screen to send with this message to the model you were using. It didn't keep a copy."
             ),
             format!(
-                "{app} took a picture of the window under your pointer to send to the model with this message. It didn't keep a copy."
+                "{app} took a picture of the window under your pointer to send with this message to the model you were using. It didn't keep a copy."
             ),
         ];
         let events = [
@@ -877,8 +884,8 @@ mod tests {
             [[true, false], [false, true], [false, false], [false, false]]
         );
         let icon = drawn[0][0].expect("the screen turn's icon");
-        // The icon is the small text's size, not the row's width, so only it answers a hover.
-        assert_eq!(icon.size, size(px(12.0), px(12.0)));
+        // The icon is 16 pixels square, not the row's width, so only it answers a hover.
+        assert_eq!(icon.size, size(px(16.0), px(16.0)));
         let tip: &str = format!("held-picture-tip {}", sentences[0]).leak();
         assert!(frame.debug_bounds(tip).is_none());
         frame.simulate_mouse_move(icon.center(), None, gpui_kit::Modifiers::default());
