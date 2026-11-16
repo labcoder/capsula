@@ -777,7 +777,6 @@ mod tests {
         use kumochi_protocol::message::{HeldScreen, ScreenClass};
         cx.update(|cx| {
             cx.set_global(Strings::english());
-            let app = kumochi_protocol::constants::DISPLAY_NAME;
             let mut user = event(1);
             user.kind = PageEventKind::User;
             let mut state = Threads::chat_for_tests();
@@ -793,16 +792,12 @@ mod tests {
                 (
                     HeldScreen::Attached,
                     None,
-                    Some(format!(
-                        "{app} took a picture of the window under your pointer to send with this message to the model you were using. It didn't keep a copy."
-                    )),
+                    Some("A snapshot of the window under your pointer was sent in this message. No copy is kept.".to_owned()),
                 ),
                 (
                     HeldScreen::Screen,
                     None,
-                    Some(format!(
-                        "{app} took a picture of your screen to send with this message to the model you were using. It didn't keep a copy."
-                    )),
+                    Some("A snapshot of your screen was sent in this message. No copy is kept.".to_owned()),
                 ),
                 (
                     HeldScreen::NotIncluded(ScreenClass::Changed),
@@ -840,14 +835,9 @@ mod tests {
         cx: &mut TestAppContext,
     ) {
         use kumochi_protocol::message::{HeldScreen, ScreenClass};
-        let app = kumochi_protocol::constants::DISPLAY_NAME;
         let sentences = [
-            format!(
-                "{app} took a picture of your screen to send with this message to the model you were using. It didn't keep a copy."
-            ),
-            format!(
-                "{app} took a picture of the window under your pointer to send with this message to the model you were using. It didn't keep a copy."
-            ),
+            "A snapshot of your screen was sent in this message. No copy is kept.".to_owned(),
+            "A snapshot of the window under your pointer was sent in this message. No copy is kept.".to_owned(),
         ];
         let events = [
             PageEventKind::HeldTurn {
