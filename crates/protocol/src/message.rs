@@ -187,6 +187,10 @@ pub const MAX_STEPS: usize = 64;
 /// New scene v1 steps committed by one run, independently of a scene's lifetime step cap.
 pub const MAX_DRAW_STEPS_PER_RUN: usize = 64;
 
+/// Prepared steps a scene keeps ahead of activation; a later step prepares only once one
+/// activates.
+pub const MAX_READY_STEPS: usize = 8;
+
 /// The longest placeholder step label, in bytes [guess].
 pub const MAX_STEP_LABEL: usize = 256;
 
@@ -491,6 +495,16 @@ pub enum ControlToBrain {
     SceneSkipped {
         /// The committed screen scene.
         scene: SceneId,
+    },
+    /// The shell prepared a step and queued it to activate; activating can still refuse it.
+    /// Appended.
+    StepReady {
+        /// The run that committed the step.
+        run: RunId,
+        /// The scene.
+        scene: SceneId,
+        /// Zero-based lifetime commit index.
+        index: u32,
     },
 }
 

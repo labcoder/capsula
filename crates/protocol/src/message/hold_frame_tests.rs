@@ -354,6 +354,24 @@ fn a_skipped_scene_appends_a_redacted_tag_after_the_screen_release() {
 }
 
 #[test]
+fn a_ready_step_appends_a_redacted_tag_after_the_skipped_scene() {
+    let ready = ControlToBrain::StepReady {
+        run: RunId(u64::MAX),
+        scene: super::SceneId(u64::MAX),
+        index: u32::MAX,
+    };
+    assert_eq!(postcard::to_allocvec(&ready).expect("encodes")[0], 32);
+    round_trip(&ready, Pipe::Control, 26);
+    redacted(&ready, Direction::ToBrain, "StepReady", 26);
+    let ready = ControlToBrain::StepReady {
+        run: RunId(1),
+        scene: super::SceneId(2),
+        index: 3,
+    };
+    assert_eq!(postcard::to_allocvec(&ready).expect("encodes"), [32, 1, 2, 3]);
+}
+
+#[test]
 fn a_screen_holds_controls_append_redacted_tags_and_fit_the_control_cap() {
     let recognized = ControlToBrain::ScreenHoldRecognized {
         gesture: GESTURE,

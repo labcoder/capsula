@@ -56,6 +56,8 @@ pub(super) fn control_input(message: ControlToBrain) -> Result<Option<Input>, En
                 scene,
             }))
         }
+        // shortcut: nothing waits for a prepared step yet; the draw result's hold reads it.
+        ControlToBrain::StepReady { .. } => None,
         ControlToBrain::DeleteThread {
             thread,
             after_turns,
