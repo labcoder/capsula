@@ -2139,8 +2139,10 @@ stateDiagram-v2
   A watch that expects a scene ends without one at `screen_dropped` (the screenshot wasn't
   sent, or the hold ended with no run) and at `run_ended` for the named run. The shell
   calls `run_ended` when the run's terminal `RunState` and its `RunEnd` are both in. It
-  reports only the run `Runs` tracks as live, so a hold's run that ends after it stopped
-  being the live one gets no limit, and its marks go at the next change (`shortcut:`).
+  reports the run `Runs` tracks as live and the one that run replaced, so marks whose answer
+  is still coming when a newer run is named get their limit at that answer's own end. A run
+  replaced twice over before it ended is not reported, and its marks go at the next change
+  (`shortcut:`).
 - **The hard bound.** A release whose run `screen_run` hasn't named within `UNNAMED_KEPT`
   (30 seconds) ends by itself, through `deadline` and `tick`: the sources stop and a screen
   scene that arrives later is skipped. So no road the shell misses leaves a hook or a mouse

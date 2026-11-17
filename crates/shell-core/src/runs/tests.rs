@@ -1136,6 +1136,56 @@ fn a_run_s_end_is_told_once_whichever_ending_comes_last() {
 }
 
 #[test]
+fn a_run_a_newer_one_replaced_still_tells_its_end() {
+    for state_first in [true, false] {
+        let mut runs = answering(5);
+        state(&mut runs, 6, Phase::Thinking, None);
+        if state_first {
+            state(&mut runs, 5, Phase::Done, None);
+        } else {
+            data(&mut runs, end(5));
+        }
+        assert_eq!(runs.take_ended(), None, "one ending is in");
+        if state_first {
+            data(&mut runs, end(5));
+        } else {
+            state(&mut runs, 5, Phase::Done, None);
+        }
+        assert_eq!(runs.take_ended(), Some(RunId(5)));
+        // A duplicate tells nothing more, and the newer run's own end is still told.
+        state(&mut runs, 5, Phase::Done, None);
+        data(&mut runs, end(5));
+        assert_eq!(runs.take_ended(), None);
+        state(&mut runs, 6, Phase::Done, None);
+        data(&mut runs, end(6));
+        assert_eq!(runs.take_ended(), Some(RunId(6)));
+    }
+
+    // Only the run just replaced is kept.
+    let mut runs = answering(5);
+    state(&mut runs, 6, Phase::Thinking, None);
+    state(&mut runs, 7, Phase::Thinking, None);
+    state(&mut runs, 5, Phase::Done, None);
+    data(&mut runs, end(5));
+    assert_eq!(runs.take_ended(), None, "replaced twice over");
+    state(&mut runs, 6, Phase::Done, None);
+    data(&mut runs, end(6));
+    assert_eq!(runs.take_ended(), Some(RunId(6)));
+
+    // A lost connection forgets it.
+    let mut runs = answering(5);
+    state(&mut runs, 6, Phase::Thinking, None);
+    state(&mut runs, 5, Phase::Done, None);
+    runs.disconnected();
+    data(&mut runs, end(5));
+    assert_eq!(
+        runs.take_ended(),
+        None,
+        "nothing of that connection is told"
+    );
+}
+
+#[test]
 fn a_run_fenced_before_it_was_named_and_a_lost_connection_tell_no_end() {
     let mut runs = Runs::default();
     runs.connected(1);

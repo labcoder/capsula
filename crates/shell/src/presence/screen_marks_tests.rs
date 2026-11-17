@@ -865,6 +865,21 @@ fn a_press_that_takes_an_ended_answer_s_marks_stops_no_other_run(cx: &mut TestAp
 }
 
 #[gpui::test]
+fn marks_of_an_answer_a_newer_run_replaced_are_timed_from_its_own_end(cx: &mut TestAppContext) {
+    let before = Instant::now();
+    let watching = marks_up(cx);
+    // A newer run is named while the marks' answer still comes.
+    state(&watching, RUN + 1, Phase::Thinking, None, cx);
+    assert_eq!(watchdog(&watching, cx), None, "the answer hasn't ended");
+    state(&watching, RUN, Phase::Done, None, cx);
+    end(&watching, RUN, cx);
+    let limit = watchdog(&watching, cx).expect("armed at the answer's end");
+    let kept = Duration::from_secs(60);
+    assert!(limit >= before + kept && limit <= Instant::now() + kept);
+    assert_eq!(told(&watching), []);
+}
+
+#[gpui::test]
 fn shown_marks_are_timed_from_their_answer_s_end_and_one_esc_clears_them(cx: &mut TestAppContext) {
     let before = Instant::now();
     let watching = marks_up(cx);
