@@ -6,11 +6,12 @@ use std::time::{Duration, Instant};
 
 use async_channel::Receiver;
 use kumochi_shell_core::platform::screen_watch::{Changed, Sources};
+use windows::Win32::UI::WindowsAndMessaging::IsWindow;
 use windows::core::HSTRING;
 
 use super::{
     Armed, Ending, MOUSE_WATCH, Mouse, Native, PRESSES, PresenceEvent, Registration, ScreenSources,
-    Shared, Win32,
+    Shared, Win32, window,
 };
 use crate::input::{Edge, Event, Key, TalkHeld};
 
@@ -552,4 +553,55 @@ fn the_real_sources_register_the_mouse_to_their_own_window_and_leave_nothing() {
         "the thread ended"
     );
     assert_eq!(shared.window(), None);
+}
+
+/// What Windows does with a mouse registration whose target window is destroyed: the worker
+/// ends with its registration standing, and the registrations are read once its window is
+/// really gone. Registers the mouse's Raw Input and a foreground hook for milliseconds, so it
+/// runs only in an approved desktop session, and alone, since the registration is the
+/// process's: `cargo test -p kumochi-shell -- --ignored --exact` with this test's path.
+#[test]
+#[ignore = "registers the mouse's Raw Input and a foreground hook briefly; run only in an approved session"]
+fn a_mouse_registration_ends_with_the_worker_s_window() {
+    let wait = |ready: &dyn Fn() -> bool| {
+        let end = Instant::now() + Duration::from_secs(5);
+        while !ready() && Instant::now() < end {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        ready()
+    };
+    let (events, _wakes) = async_channel::unbounded();
+    let mut sources = ScreenSources::new(events);
+    let shared = Arc::clone(&sources.native.shared);
+    assert!(wait(&|| shared.window().is_some()), "the mouse window");
+    let target = window(shared.window().expect("published"));
+    assert_eq!(
+        sources.native.registration(),
+        Registration::None,
+        "the mouse must be unregistered before this fixture runs"
+    );
+    assert!(sources.start(Changed::default(), TalkHeld::default()));
+    assert_eq!(sources.native.registration(), Registration::Ours);
+
+    // The worker's window closes with the registration still made. The `exited` flag is set
+    // as the thread's end begins, so the window itself is asked for.
+    sources.native.quit();
+    // SAFETY: IsWindow only checks the handle; it never dereferences or changes the window.
+    let gone = || !unsafe { IsWindow(Some(target)) }.as_bool();
+    assert!(wait(&gone), "the worker's window was destroyed");
+    assert_eq!(shared.window(), None);
+    // Nothing is published now, so a registration that outlived its window would read as
+    // another component's.
+    assert_eq!(
+        sources.native.registration(),
+        Registration::None,
+        "Windows dropped the registration with its window"
+    );
+    sources.stop();
+    assert!(sources.native.hook.is_none());
+    assert!(
+        !sources.start(Changed::default(), TalkHeld::default()),
+        "no thread, no watch"
+    );
+    assert_eq!(sources.native.registration(), Registration::None);
 }
