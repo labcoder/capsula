@@ -983,7 +983,7 @@ fn stale_deferred_escape_marker_ends_on_raw_key_up_without_a_hotkey(cx: &mut Tes
     });
 }
 
-fn until(cx: &mut TestAppContext, ready: impl Fn(&mut TestAppContext) -> bool) {
+pub(super) fn until(cx: &mut TestAppContext, ready: impl Fn(&mut TestAppContext) -> bool) {
     let deadline = Instant::now() + Duration::from_secs(3);
     loop {
         cx.run_until_parked();

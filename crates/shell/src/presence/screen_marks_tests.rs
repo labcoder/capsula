@@ -24,10 +24,11 @@ use super::super::screen_hold_tests::{
 };
 use super::super::voice_wiring_tests::status;
 use super::Source;
-use super::tests::{after, listen, native};
+use super::tests::{after, listen, native, until};
 use crate::input::{Edge, Event, Key, TalkHeld};
 use crate::link::{LinkEvent, LinkState};
 use crate::platform::input::{Button, input};
+use crate::platform::{Deliver, PresenceEvent};
 use crate::presence::kumo::{Motion, v2};
 use crate::presence::pulling::{Grab, PullSpace};
 use crate::strings::Text;
@@ -59,11 +60,14 @@ enum Told {
 }
 
 type Log = Rc<RefCell<Vec<Told>>>;
+/// The bit the sources were last started with.
+type Bit = Rc<RefCell<Option<Changed>>>;
 
 /// Sources the test scripts. Each start and stop is logged after every control message
 /// already written, so the log is one sequence in the order things happened.
 struct Scripted {
     log: Log,
+    bit: Bit,
     controls: async_channel::Receiver<ControlToBrain>,
     starts: bool,
 }
@@ -77,8 +81,9 @@ impl Scripted {
 }
 
 impl Sources for Scripted {
-    fn start(&mut self, _changed: Changed, held: TalkHeld) -> bool {
+    fn start(&mut self, changed: Changed, held: TalkHeld) -> bool {
         self.tell(Told::Start(held.control, held.alt));
+        self.bit.replace(Some(changed));
         self.starts
     }
 
@@ -90,6 +95,7 @@ impl Sources for Scripted {
 struct Watching {
     ready: Ready,
     log: Log,
+    bit: Bit,
 }
 
 /// A connected presence whose presenter mirrors scenes and has scripted sources, which start
@@ -102,6 +108,7 @@ fn watch(starts: bool, cx: &mut TestAppContext) -> Watching {
     let watching = bare(cx);
     let sources = Scripted {
         log: Rc::clone(&watching.log),
+        bit: Rc::clone(&watching.bit),
         controls: watching.ready.controls.clone(),
         starts,
     };
@@ -122,8 +129,8 @@ fn bare(cx: &mut TestAppContext) -> Watching {
             .described(1, &Bounded::default(), Instant::now())
             .expect("empty membership");
     });
-    let log = Log::default();
-    Watching { ready, log }
+    let (log, bit) = (Log::default(), Bit::default());
+    Watching { ready, log, bit }
 }
 
 /// Everything told since the last read, in order.
@@ -721,27 +728,37 @@ fn marks_up(cx: &mut TestAppContext) -> Watching {
 )]
 fn marked(answering: bool, cx: &mut TestAppContext) -> Watching {
     let watching = released(true, cx);
+    mark_up(&watching, answering, cx);
+    watching
+}
+
+/// The released hold 1's run is named and its first mark comes, after its `Answering` or
+/// before it.
+#[expect(
+    clippy::fn_params_excessive_bools,
+    reason = "whether the run's Answering state came before the mark"
+)]
+fn mark_up(watching: &Watching, answering: bool, cx: &mut TestAppContext) {
     let hidden = detached(&watching.ready, cx);
     watching.ready.owner.update(cx, |owner, _| {
         owner.overlay = Visibility::Hidden(hidden);
     });
-    state(&watching, RUN, Phase::Thinking, HOLD, cx);
+    state(watching, RUN, Phase::Thinking, HOLD, cx);
     if answering {
-        state(&watching, RUN, Phase::Answering, None, cx);
+        state(watching, RUN, Phase::Answering, None, cx);
     }
-    text(&watching, RUN, cx);
-    mark(&watching, MARKS, RUN, DISPLAY, cx);
+    text(watching, RUN, cx);
+    mark(watching, MARKS, RUN, DISPLAY, cx);
     cx.run_until_parked();
     let (run, scene, index) = (RunId(RUN), MARKS, 0);
     assert_eq!(
-        told(&watching),
+        told(watching),
         [
             Told::Sent(ControlToBrain::StepReady { run, scene, index }),
             Told::Sent(ControlToBrain::StepShown { run, scene, index }),
         ],
         "the marks are up and the sources listen"
     );
-    watching
 }
 
 /// What one press of Esc tells while a running answer's marks are up: the sources stop, the
@@ -852,7 +869,7 @@ fn ended(watching: &Watching, cx: &mut TestAppContext) {
     });
 }
 
-// The two tests below pin the hold's cancel as it is told today: twice for one press, once
+// The four tests below pin the hold's cancel as it is told today: twice for one press, once
 // where the hold's input is revoked and once from the runs' hold.
 
 #[gpui::test]
@@ -869,6 +886,101 @@ fn the_hotkey_s_esc_takes_a_pending_hold_s_marks_and_cancels_it(cx: &mut TestApp
     let [stop, clear] = gone();
     assert_eq!(told(&watching), [cancel(), stop, clear, cancel()]);
     ended(&watching, cx);
+}
+
+/// Hold 1 was made and let go through the native callback, so the callback's reducer still
+/// names it, and its first mark overtook its run's `Answering`: the marks are up while the
+/// hold is pending.
+fn natively_marked(cx: &mut TestAppContext) -> (Watching, Deliver, Instant) {
+    let watching = watch(true, cx);
+    let owner = watching.ready.owner.clone();
+    let deliver = native(&owner, cx);
+    let at = Instant::now();
+    let finish = listen(&owner, &deliver, 1, at, cx);
+    for key in [Key::LeftAlt, Key::LeftControl] {
+        let edge = Edge::Up;
+        deliver(Event::Key { key, edge }, after(at, 900));
+    }
+    finish.send(()).expect("the fake microphone ends");
+    until(cx, |cx| {
+        owner.read_with(cx, |owner, _| {
+            let hold = owner.voice.pending.as_ref();
+            hold.is_some_and(|hold| matches!(hold.source, Source::Sent))
+        })
+    });
+    told(&watching);
+    mark_up(&watching, false, cx);
+    owner.read_with(cx, |owner, _| {
+        assert!(owner.voice_working(), "the hold is still pending");
+        assert!(owner.text_open());
+    });
+    (watching, deliver, at)
+}
+
+/// The press took the marks and cancelled the hold, and the panel stays open.
+fn only_taken(watching: &Watching, cx: &mut TestAppContext) {
+    ended(watching, cx);
+    watching.ready.owner.read_with(cx, |owner, _| {
+        assert_eq!(owner.presenter.marks_shown(), None);
+        assert!(owner.text_open());
+    });
+}
+
+#[gpui::test]
+fn esc_through_the_hotkey_s_reducer_takes_a_pending_hold_s_marks_and_cancels_it(
+    cx: &mut TestAppContext,
+) {
+    // Kumochi is in front, so the sources don't count the key: the reducer's own cancel ends
+    // the hold first, and the press then takes the marks.
+    let (watching, deliver, at) = natively_marked(cx);
+    let (key, edge) = (Key::Other(1), Edge::Down);
+    deliver(Event::Key { key, edge }, after(at, 2000));
+    deliver(Event::Escape, after(at, 2000));
+    cx.run_until_parked();
+    let [stop, clear] = gone();
+    assert_eq!(told(&watching), [cancel(), cancel(), stop, clear]);
+    only_taken(&watching, cx);
+}
+
+#[gpui::test]
+fn esc_in_another_app_takes_a_pending_hold_s_marks_and_cancels_it(cx: &mut TestAppContext) {
+    // Another app is in front, so the sources count the key as well. Their wake is handled
+    // before the hotkey's press or after it, and the marks go once either way.
+    for woke_first in [true, false] {
+        let (watching, deliver, at) = natively_marked(cx);
+        let wake = |cx: &mut TestAppContext| {
+            watching.ready.owner.update(cx, |owner, cx| {
+                owner
+                    .on_event(PresenceEvent::ScreenWoke, cx)
+                    .expect("a wake");
+            });
+        };
+        let (key, edge) = (Key::Other(1), Edge::Down);
+        deliver(Event::Key { key, edge }, after(at, 2000));
+        let heard = watching
+            .bit
+            .borrow()
+            .as_ref()
+            .expect("started sources")
+            .set();
+        assert!(heard, "the key is the first change since the release");
+        if woke_first {
+            wake(cx);
+        }
+        deliver(Event::Escape, after(at, 2000));
+        cx.run_until_parked();
+        if !woke_first {
+            wake(cx);
+        }
+        let [stop, clear] = gone();
+        let expected = if woke_first {
+            [cancel(), stop, clear, cancel()]
+        } else {
+            [cancel(), cancel(), stop, clear]
+        };
+        assert_eq!(told(&watching), expected);
+        only_taken(&watching, cx);
+    }
 }
 
 #[gpui::test]
