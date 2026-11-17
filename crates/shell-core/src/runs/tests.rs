@@ -1135,6 +1135,97 @@ fn a_run_s_end_is_told_once_whichever_ending_comes_last() {
     }
 }
 
+/// A hold's first state. These runs never began a hold, so the origin binds nothing else.
+const HELD: Option<RunOrigin> = Some(RunOrigin::Hold {
+    gesture: kumochi_protocol::message::GestureId(1),
+});
+
+/// A hold's run is answering.
+fn held(run: u64) -> Runs {
+    let mut runs = Runs::default();
+    runs.connected(1);
+    runs.settings(ThreadId(1));
+    runs.apply_scenes(&[]).expect("valid");
+    state(&mut runs, run, Phase::Answering, HELD);
+    runs
+}
+
+#[test]
+fn a_hold_s_run_a_newer_one_replaced_still_tells_its_end_once() {
+    let done: fn(&mut Runs) = |runs| {
+        state(runs, 5, Phase::Done, None);
+    };
+    let ended: fn(&mut Runs) = |runs| {
+        data(runs, end(5));
+    };
+    // The newer run is named before either ending of the hold's run, or between the two.
+    for before in [0, 1] {
+        for order in [[done, ended], [ended, done]] {
+            let mut runs = held(5);
+            for ending in &order[..before] {
+                ending(&mut runs);
+            }
+            state(&mut runs, 6, Phase::Thinking, None);
+            for ending in &order[before..] {
+                assert_eq!(runs.take_ended(), None, "an ending is missing");
+                ending(&mut runs);
+            }
+            assert_eq!(runs.take_ended(), Some(RunId(5)));
+            // A duplicate of either ending tells nothing more.
+            done(&mut runs);
+            ended(&mut runs);
+            assert_eq!(runs.take_ended(), None);
+            // The newer run is still the one Esc stops, and its own end is told.
+            assert_eq!(runs.stoppable(), Some(RunId(6)));
+            state(&mut runs, 6, Phase::Done, None);
+            data(&mut runs, end(6));
+            assert_eq!(runs.take_ended(), Some(RunId(6)));
+        }
+    }
+}
+
+#[test]
+fn only_the_newest_hold_s_run_is_kept_once_replaced() {
+    // A third run doesn't take the hold's run's place, and a typed run isn't kept at all.
+    let mut runs = held(5);
+    state(&mut runs, 6, Phase::Thinking, None);
+    state(&mut runs, 7, Phase::Thinking, None);
+    state(&mut runs, 6, Phase::Done, None);
+    data(&mut runs, end(6));
+    assert_eq!(runs.take_ended(), None, "a typed run's end is not kept");
+    state(&mut runs, 5, Phase::Done, None);
+    data(&mut runs, end(5));
+    assert_eq!(runs.take_ended(), Some(RunId(5)));
+    assert_eq!(runs.stoppable(), Some(RunId(7)));
+
+    // A newer hold's run does take it.
+    let mut runs = held(5);
+    state(&mut runs, 6, Phase::Thinking, HELD);
+    state(&mut runs, 7, Phase::Thinking, None);
+    state(&mut runs, 5, Phase::Done, None);
+    data(&mut runs, end(5));
+    assert_eq!(
+        runs.take_ended(),
+        None,
+        "the newer hold's run took its place"
+    );
+    state(&mut runs, 6, Phase::Done, None);
+    data(&mut runs, end(6));
+    assert_eq!(runs.take_ended(), Some(RunId(6)));
+
+    // A lost connection forgets it.
+    let mut runs = held(5);
+    state(&mut runs, 6, Phase::Thinking, None);
+    state(&mut runs, 5, Phase::Done, None);
+    runs.disconnected();
+    data(&mut runs, end(5));
+    assert_eq!(
+        runs.take_ended(),
+        None,
+        "nothing of that connection is told"
+    );
+}
+
 #[test]
 fn a_run_fenced_before_it_was_named_and_a_lost_connection_tell_no_end() {
     let mut runs = Runs::default();

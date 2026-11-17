@@ -134,6 +134,8 @@ struct Live {
     thread: ThreadId,
     /// The turn number and selection of the submission it answered, when it answered one.
     typed: Option<(u32, u64)>,
+    /// A hold's run: the screen watch may be showing its marks, or expecting them.
+    held: bool,
     state_ended: bool,
     data_ended: bool,
 }
@@ -157,6 +159,10 @@ pub struct Runs {
     turns_sent: u32,
     /// The newest named run while its output may still arrive.
     live: Option<Live>,
+    /// The newest hold's run that a newer run replaced as the live one before both its endings
+    /// were in. The screen watch may still show its marks or expect them, so its end is still
+    /// told; a newer hold has reset that watch, so one run is all it can need.
+    replaced: Option<Live>,
     /// The highest run Esc stopped; anything of it or older is dropped when applied.
     fence: RunId,
     /// The highest run any `RunState` named; only its first state can bind a typed turn.
@@ -198,6 +204,7 @@ impl fmt::Debug for Runs {
             .field("hold", &self.hold)
             .field("turns_sent", &self.turns_sent)
             .field("live", &self.live)
+            .field("replaced", &self.replaced)
             .field("fence", &self.fence)
             .field("answered", &self.answered)
             .field("submitted", &self.submitted)
@@ -340,7 +347,8 @@ impl Runs {
     }
 
     /// The run whose terminal `RunState` and `RunEnd` are now both in, whichever came last,
-    /// once. A run that Esc or a delete fenced off before it was named never comes this way.
+    /// once: the live run, or the hold's run it replaced. A run that Esc or a delete fenced
+    /// off before it was named never comes this way.
     pub fn take_ended(&mut self) -> Option<RunId> {
         self.ended.take()
     }
@@ -662,6 +670,7 @@ impl Runs {
         }
         self.fence = self.fence.max(self.answered);
         self.live = None;
+        self.replaced = None;
         self.ended = None;
         self.main = None;
         self.submitted.clear();
@@ -753,13 +762,17 @@ impl Runs {
                 self.named = (run > self.fence).then_some((run, submitted));
             }
             if run > self.fence {
-                self.live = Some(Live {
+                let live = Live {
                     run,
                     thread,
                     typed,
+                    held: matches!(origin, Some(RunOrigin::Hold { .. })),
                     state_ended: false,
                     data_ended: false,
-                });
+                };
+                if let Some(old) = self.live.replace(live).filter(|old| old.held) {
+                    self.replaced = Some(old);
+                }
             }
         }
         if matches!(
@@ -896,16 +909,18 @@ impl Runs {
         }
     }
 
-    /// Marks one of `run`'s two endings; the live run settles once both are in, and an older
-    /// run's ending never touches a newer one.
-    // shortcut: a hold's run that ends after it stopped being the live one is never reported,
-    // so marks it still shows get no 60-second limit and go at the next change; report that
-    // ending too if marks are ever seen to outstay their answer.
+    /// Marks one of `run`'s two endings; the live run, or the hold's run it replaced, settles
+    /// once both are in, and an older run's ending never touches a newer one.
     fn end(&mut self, run: RunId, mark: impl FnOnce(&mut Live)) {
-        if let Some(live) = self.live.as_mut().filter(|live| live.run == run) {
+        let slot = if self.replaced.is_some_and(|live| live.run == run) {
+            &mut self.replaced
+        } else {
+            &mut self.live
+        };
+        if let Some(live) = slot.as_mut().filter(|live| live.run == run) {
             mark(live);
             if live.state_ended && live.data_ended {
-                self.live = None;
+                *slot = None;
                 self.ended = Some(run);
             }
         }
