@@ -57,6 +57,12 @@ impl Presence {
         held: TalkHeld,
         cx: &mut Context<'_, Self>,
     ) {
+        // No shipped build installs sources, and without them no watch can run: a screen
+        // scene that arrives all the same finds none and is skipped. So such a release reads
+        // no display, starts no watch and sets no watchdog.
+        if !self.presenter.watches_screen() {
+            return;
+        }
         self.show_display(cx);
         let after = self.runs.newest_run();
         let effects = self.presenter.screen_released(after, held, Instant::now());

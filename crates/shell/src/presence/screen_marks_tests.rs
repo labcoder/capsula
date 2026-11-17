@@ -99,21 +99,30 @@ struct Watching {
     reason = "whether the scripted sources can start"
 )]
 fn watch(starts: bool, cx: &mut TestAppContext) -> Watching {
-    let ready = screen_ready(Some(on(&luna())), cx);
-    let log = Log::default();
+    let watching = bare(cx);
     let sources = Scripted {
-        log: Rc::clone(&log),
-        controls: ready.controls.clone(),
+        log: Rc::clone(&watching.log),
+        controls: watching.ready.controls.clone(),
         starts,
     };
+    watching.ready.owner.update(cx, |owner, _| {
+        owner.presenter.watch_sources(Box::new(sources));
+    });
+    watching
+}
+
+/// A connected presence whose presenter mirrors scenes and has no sources, as every shipped
+/// build is.
+fn bare(cx: &mut TestAppContext) -> Watching {
+    let ready = screen_ready(Some(on(&luna())), cx);
     ready.owner.update(cx, |owner, _| {
         owner.presenter.connected(1);
         owner
             .presenter
             .described(1, &Bounded::default(), Instant::now())
             .expect("empty membership");
-        owner.presenter.watch_sources(Box::new(sources));
     });
+    let log = Log::default();
     Watching { ready, log }
 }
 
@@ -327,6 +336,31 @@ fn sources_that_can_t_start_show_no_marks_and_the_dock_says_so(cx: &mut TestAppC
             assert_eq!(line(&watching.ready, cx), Some((Text::MarksSkipped, None)));
         }
     }
+}
+
+#[gpui::test]
+fn a_release_with_no_sources_does_none_of_the_watch_s_work(cx: &mut TestAppContext) {
+    let watching = bare(cx);
+    hold(&watching, 1, cx);
+    release(&watching.ready.owner, 1, Some(DOWN), cx);
+    assert_eq!(
+        told(&watching),
+        [
+            Told::Sent(screen_hold(1)),
+            Told::Sent(screen_release(1, 1, DOWN, &[])),
+        ]
+    );
+    assert_eq!(watchdog(&watching, cx), None, "no limit to keep");
+    watching.ready.owner.update(cx, |owner, _| {
+        assert!(owner.voice.watched.is_none());
+        owner.voice.pending.as_mut().expect("the hold").source = Source::Sent;
+    });
+    // A screen scene that arrives all the same finds no watch and is skipped.
+    state(&watching, RUN, Phase::Thinking, HOLD, cx);
+    text(&watching, RUN, cx);
+    mark(&watching, MARKS, RUN, DISPLAY, cx);
+    assert_eq!(told(&watching), [skipped(MARKS)]);
+    assert_eq!(line(&watching.ready, cx), None);
 }
 
 #[gpui::test]

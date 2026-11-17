@@ -458,9 +458,10 @@ and the foreground hook compile only for tests and for that feature.
 `cargo xtask check-shipped`, which CI runs, fails if the shipped selection (the shell and the
 brain with their default features) turns the feature on.
 
-Every build reports a hold to the watch, sources or not: where each report is made is in
-[The shell's reports](scene.md#the-shells-reports). Without sources a release counts as
-changed at once, so nothing is shown.
+Every build reports a hold's recognition, its run and its end to the watch, sources or not:
+where each report is made is in [The shell's reports](scene.md#the-shells-reports). A
+release is reported only when sources are installed. Without them no watch runs, and a
+screen scene that arrives all the same is skipped.
 
 Every source does one thing: it sets the watch's bit and queues a `PresenceEvent::ScreenWoke`,
 which carries nothing. The keys, the window in front and the proxy's messages queue at most

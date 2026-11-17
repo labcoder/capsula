@@ -48,6 +48,12 @@ impl Presenter {
         self.sources = Some(sources);
     }
 
+    /// Whether the platform's sources are installed. Without them no watch can run, so a
+    /// release has nothing to start and nothing to keep.
+    pub fn watches_screen(&self) -> bool {
+        self.sources.is_some()
+    }
+
     /// The keys of a hold came up at `now`, and its `ScreenRelease` is about to be written;
     /// `after` is the newest run named so far, and `held` the talk keys still down. The
     /// caller reports the release here first, so the sources listen before the brain can take
