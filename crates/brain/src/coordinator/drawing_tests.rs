@@ -912,7 +912,7 @@ fn revoking_the_last_scene_rehomes_its_end_to_a_surviving_scene() {
     }
     let snapshot = core.drawing_snapshot().expect("two committed scenes");
     assert_eq!(snapshot.scenes.len(), 2);
-    let survivor = snapshot.scenes[0].clone();
+    let survivor = snapshot.scenes[0];
     let revoked = snapshot.scenes[1].scene;
     let mut effects = core
         .handle(Input::Delete {
