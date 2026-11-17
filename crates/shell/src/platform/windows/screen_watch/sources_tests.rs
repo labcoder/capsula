@@ -333,7 +333,7 @@ fn a_move_ends_at_the_mask_and_a_press_counts_only_over_another_process() {
     assert!(mouse.record(100, LEFT_DOWN, || true));
     assert!(
         !mouse.record(101, LEFT_DOWN, || true),
-        "one wake for a watch"
+        "one wake for an arm"
     );
     assert!(!bit.set());
     for flags in [4, 16, 64, 256, WHEEL, 0x800] {
@@ -354,6 +354,10 @@ fn an_arm_wakes_once_however_often_its_bit_is_read_and_set_again() {
     bit.clear();
     assert!(!mouse.unread());
     assert!(!bit.set());
+    // Nor does the thread's end owe a second one.
+    bit.clear();
+    assert!(!mouse.lost([]));
+    assert!(!bit.set(), "the thread's end set it");
 
     // A bit the keyboard half set first owes the mouse's wake at its own first set.
     let (mut mouse, bit) = armed(100);

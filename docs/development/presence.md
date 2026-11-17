@@ -503,9 +503,10 @@ a change: a record that can't be read, a window that can't be named.
 - **The thread's end**, whether its window closed, a message couldn't be read or it unwound,
   runs one guard. Nothing stays published, so a later `start` says no. The watch the thread
   was armed for, and every watch whose arm it never dispatched, counts as changed and is
-  woken, so no marks stay up trusting a mouse source that is gone. The window is destroyed
-  if it is still there, and then its class is unregistered. The thread is not started again:
-  no marks show until Kumochi restarts.
+  woken, the armed one only if its arm's one wake wasn't queued before, so no marks stay up
+  trusting a mouse source that is gone. The window is destroyed if it is still there, and
+  then its class is unregistered. The thread is not started again: no marks show until
+  Kumochi restarts.
 - **Quit** sets a flag and then posts the window a close. A thread that hasn't published its
   window yet sees the flag, destroys the window and ends. The UI never waits for it.
 

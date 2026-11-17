@@ -116,10 +116,10 @@ impl Mouse {
     /// it never dispatched, has lost its mouse source, so each counts as changed. True when a
     /// wake is owed.
     fn lost(&mut self, pending: impl IntoIterator<Item = Changed>) -> bool {
-        let armed = self.armed.take().map(|armed| armed.changed);
-        let mut woke = false;
+        // The armed watch's one wake may be spent already; its bit is set all the same.
+        let mut woke = self.armed.take().is_some_and(|mut armed| armed.change());
         // Every one of them is set: a wake for the first must not leave the rest trusted.
-        for changed in armed.into_iter().chain(pending) {
+        for changed in pending {
             woke |= changed.set();
         }
         woke
