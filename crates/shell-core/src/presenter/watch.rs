@@ -153,20 +153,14 @@ impl Watch {
     }
 
     /// A run ended: its terminal state and its `RunEnd` are both in. A watch expecting that
-    /// run's scene ends, and a shown scene of that run gets its time limit, once. A run newer
-    /// than the release that ends before any was named is taken for the hold's: the watch
-    /// ends, and a name that comes later finds nothing to name.
+    /// run's scene ends, and a shown scene of that run gets its time limit, once. While no run
+    /// is named, no run's end ends the watch: a newer run that ends first can be an earlier
+    /// hold's, and the unnamed limit already bounds the wait.
     pub(super) fn ended(&mut self, run: RunId, now: Instant) {
         self.state = match self.state {
             State::Expecting {
                 run: Some(named), ..
             } if named == run => State::Idle,
-            // shortcut: the newer run that ends first can be an earlier hold's, and then this
-            // hold's marks never show; end an unnamed watch only for the hold's own run
-            // before marks are activated.
-            State::Expecting {
-                after, run: None, ..
-            } if run > after => State::Idle,
             State::Passing { run: shown, .. } if shown == run => State::Idle,
             State::Showing {
                 scene,

@@ -844,18 +844,24 @@ fn a_frame_at_the_time_limit_clears_the_marks_before_the_watchdog_runs() {
 }
 
 #[test]
-fn a_run_that_ends_before_it_is_named_ends_the_watch_for_good() {
+fn a_run_s_end_before_any_name_leaves_the_unnamed_watch_to_its_own_limit() {
     let (mut presenter, now, log) = watched();
     release(&mut presenter, AFTER, now);
-    presenter.run_ended(AFTER, now);
+    for run in [AFTER, RUN] {
+        presenter.run_ended(run, ms(now, 10_000));
+        assert_eq!(counts(&log), (1, 0));
+        assert_eq!(presenter.deadline(), Some(ms(now, 30_000)));
+    }
+    // With no name the release's own limit ends the watch, not one counted from that end.
+    assert!(presenter.tick(ms(now, 29_999)).expect("a tick").is_empty());
     assert_eq!(counts(&log), (1, 0));
-    presenter.run_ended(RUN, now);
+    assert!(presenter.tick(ms(now, 30_000)).expect("a tick").is_empty());
     assert_eq!(counts(&log), (1, 1));
     assert_eq!(presenter.deadline(), None);
-    // No second end comes, and the late name brings nothing back.
-    presenter.screen_run(RUN, now);
+    // A late name brings nothing back.
+    presenter.screen_run(RUN, ms(now, 30_000));
     assert_eq!(presenter.deadline(), None);
-    let effects = marked(&mut presenter, RUN, MARKS, now);
+    let effects = marked(&mut presenter, RUN, MARKS, ms(now, 30_000));
     assert_eq!(controls(&effects), [&skipped(MARKS)]);
     assert_eq!(counts(&log), (1, 1));
 }
@@ -1174,19 +1180,23 @@ fn a_queued_answer_cannot_publish_marks_a_pending_wake_or_a_due_limit_takes() {
 }
 
 #[test]
-fn a_newer_run_that_is_not_the_hold_s_ending_before_the_name_ends_the_watch() {
+fn a_newer_run_that_is_not_the_hold_s_ending_before_the_name_leaves_the_watch_to_the_hold() {
     let (mut presenter, now, log) = watched();
     release(&mut presenter, AFTER, now);
-    // Another run, newer than the release, ends before the hold's run is named.
-    presenter.run_ended(RUN, now);
-    assert_eq!(counts(&log), (1, 1));
-    assert_eq!(presenter.deadline(), None);
-    presenter.screen_run(OTHER, now);
-    let effects = marked(&mut presenter, OTHER, MARKS, now);
+    // Another run, newer than the release, marks and ends before the hold's run is named.
+    let effects = marked(&mut presenter, RUN, MARKS, now);
     assert_eq!(controls(&effects), [&skipped(MARKS)]);
-    assert_eq!(scene_ids(&presenter), []);
-    assert_eq!(counts(&log), (1, 1));
-    nothing_shows(&mut presenter, now);
+    let later = ms(now, 10_000);
+    presenter.run_ended(RUN, later);
+    assert_eq!(counts(&log), (1, 0), "the sources listen on, started once");
+    assert_eq!(presenter.deadline(), Some(ms(now, 30_000)));
+    nothing_shows(&mut presenter, later);
+    // The hold's run is named before the release's limit, and its mark shows.
+    presenter.screen_run(OTHER, later);
+    let effects = marked(&mut presenter, OTHER, SECOND, later);
+    assert!(controls(&effects).is_empty());
+    assert_eq!(scene_ids(&presenter), [SECOND]);
+    assert_eq!(counts(&log), (1, 0));
 }
 
 #[test]

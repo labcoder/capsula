@@ -2148,9 +2148,10 @@ stateDiagram-v2
   Both limits are applied before a data frame is judged, and while the sources listen at the
   start of `advance`, `sample_at` and `completed`, not only by the watchdog. Naming checks
   the 30-second limit alone, in `screen_run`: a first mark or a name that comes at 30 seconds
-  is too late even when it is handled before the due `tick`. A run newer than the release that ends before
-  any run was named ends the watch as well, and a name that comes after names nothing. That
-  run can be an earlier hold's, and then this hold's marks never show (`shortcut:`).
+  is too late even when it is handled before the due `tick`. While no run is named, no run's end
+  ends the watch: a newer run that ends first can be an earlier hold's. Its scene is not
+  shown, the release's limit stays where it was, and the hold's own run can still be named
+  and shown.
 - **Leaving any other way** (the user's clear, the brain's removal or replacement, a
   failure) ends the watch too. A replaced screen scene leaves no frozen picture for the
   [visual bridge](#bounded-visual-replacement).
