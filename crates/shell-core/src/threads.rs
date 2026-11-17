@@ -823,6 +823,8 @@ impl Threads {
             | DataToShell::SceneCutApplied { .. }
             | DataToShell::SceneEnd { .. }
             | DataToShell::Models { .. }
+            | DataToShell::HoldWords { .. }
+            | DataToShell::HoldStored { .. }
             | DataToShell::Transcript(_)
             | DataToShell::SegmentQueued { .. }
             | DataToShell::SpeechPcm(_) => {

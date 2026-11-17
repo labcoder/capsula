@@ -213,7 +213,11 @@ fn pinned_choice_survives_delayed_build_but_still_gets_the_first_catalog_check()
         core.submit_hold(prepared(&core, Some(T)), "words".into(), None)
             .unwrap();
         let effects = core.handle(Input::TurnStored { run: R }).unwrap();
-        let [Effect::Store(StoreOp::BuildContext(build))] = effects.as_slice() else {
+        let [
+            Effect::HoldStored(KEY),
+            Effect::Store(StoreOp::BuildContext(build)),
+        ] = effects.as_slice()
+        else {
             panic!("build: {effects:?}")
         };
         assert!(!build.first, "a pinned build must not reread thread choice");
@@ -659,9 +663,55 @@ fn a_held_turn_stores_its_screen_before_any_build_can_start() {
         let effects = core.handle(Input::TurnStored { run: R }).unwrap();
         assert!(matches!(
             effects[..],
-            [Effect::Store(StoreOp::BuildContext(_))]
+            [
+                Effect::HoldStored(KEY),
+                Effect::Store(StoreOp::BuildContext(_))
+            ]
         ));
     }
+}
+
+fn receipts(effects: &[Effect]) -> Vec<HoldKey> {
+    effects
+        .iter()
+        .filter_map(|effect| match effect {
+            Effect::HoldStored(key) => Some(*key),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn only_the_held_runs_stored_turn_sends_its_receipt() {
+    let mut core = fresh();
+    let effects = core
+        .submit_hold(prepared(&core, Some(T)), "words".into(), None)
+        .unwrap();
+    assert_eq!(
+        receipts(&effects),
+        [],
+        "the queued turn and Thinking aren't a receipt"
+    );
+    let effects = core.handle(Input::TurnStored { run: R }).unwrap();
+    assert_eq!(receipts(&effects), [KEY]);
+
+    let mut core = fresh();
+    let effects = core
+        .handle(Input::Turn {
+            turn: 1,
+            thread: Some(T),
+            text: "typed words".into(),
+        })
+        .unwrap();
+    assert_eq!(receipts(&effects), []);
+    let effects = core.handle(Input::TurnStored { run: R }).unwrap();
+    assert_eq!(receipts(&effects), [], "a typed turn has no hold");
+
+    let mut core = ready_for("captured");
+    core.submit_hold(prepared(&core, Some(T)), "words".into(), None)
+        .unwrap();
+    let effects = core.handle(Input::StoreFailed { run: R }).unwrap();
+    assert_eq!(receipts(&effects), []);
 }
 
 #[test]

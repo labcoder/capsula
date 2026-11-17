@@ -401,6 +401,8 @@ pub enum Effect {
     Control(ControlToShell),
     /// Send on the data pipe.
     Data(DataToShell),
+    /// Tell the shell a held recognition's turn is stored, only on the hold's own connection.
+    HoldStored(HoldKey),
     /// Deliver an admitted page without losing terminal ownership.
     Page {
         /// The admitted read.
@@ -1049,6 +1051,9 @@ impl Coordinator {
             return Err(Stale);
         }
         found.turn_stored = true;
+        if let Some(hold) = &found.hold {
+            effects.push(Effect::HoldStored(hold.key));
+        }
         if found.ending.is_some() {
             self.settle(run, effects);
             return Ok(());

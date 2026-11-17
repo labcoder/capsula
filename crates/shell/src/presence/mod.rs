@@ -334,10 +334,11 @@ impl Presence {
                 *notice == Text::SettingsNotSaved || self.state == LinkState::Connected
             })
             .or(self.settings.read(cx).native_taskbar_notice);
+        let voice = self.voice.lost.or(self.voice.status);
         self.panel.update(cx, |panel, cx| {
-            if panel.notice != notice || panel.voice != self.voice.status {
+            if panel.notice != notice || panel.voice != voice {
                 panel.notice = notice;
-                panel.voice = self.voice.status;
+                panel.voice = voice;
                 cx.notify();
             }
         });

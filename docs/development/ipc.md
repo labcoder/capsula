@@ -16,6 +16,16 @@ old-process exit can release it, not a timeout or connection replacement.
 The provisional 10-second startup and 2-second final-PCM drain bounds are unmeasured;
 expiry is terminal but never releases an unconfirmed device owner.
 
+The appended data frames `HoldWords { gesture, words }` (tag 22) and
+`HoldStored { gesture }` (tag 23) carry a held recognition's words, at most
+`MAX_TRANSCRIPT_BYTES`, and the receipt that its turn is stored. Both travel on the data pipe so
+the receipt follows the words in one FIFO. The shell takes them straight from the link, not
+through the run-keyed buffer, and on the live session returns their credit whether it keeps
+them or not; frames from an earlier connection are dropped without credit. Words
+over the bound are refused without being echoed. `words` is `Content`, which prints only
+its length, and the tap records the op name only. See
+[Voice](voice.md#held-words-after-a-lost-brain).
+
 ## Screen holds
 
 The appended `ScreenHolds` tells the shell whether a hold also sends the model a picture of the
