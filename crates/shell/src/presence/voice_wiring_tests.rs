@@ -9,6 +9,7 @@ use kumochi_protocol::message::{
 };
 
 use super::{Presence, test_fixture, voice::Stamp};
+use crate::input::TalkHeld;
 use crate::input::hold::Intent;
 use crate::link::{Batch, LinkEvent, LinkHandle, Session};
 use crate::platform::microphone::{Generation, Mode};
@@ -87,6 +88,7 @@ pub(super) fn hold(
             stamp,
             0,
             None,
+            TalkHeld::default(),
             cx,
         );
         assert_eq!(owner.voice.status, Some(Text::HoldPreparing));
@@ -222,6 +224,7 @@ fn a_captured_target_or_session_cannot_be_rebound_at_delivery(cx: &mut TestAppCo
                 },
                 0,
                 None,
+                TalkHeld::default(),
                 cx,
             );
             assert!(owner.voice.pending.is_none());
@@ -256,6 +259,7 @@ fn late_status_and_release_cannot_cancel_a_newer_held_input(cx: &mut TestAppCont
             old_stamp,
             0,
             None,
+            TalkHeld::default(),
             cx,
         );
     });

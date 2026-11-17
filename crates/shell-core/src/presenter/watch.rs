@@ -115,9 +115,10 @@ impl Watch {
 
     /// A screen scene's first mark, from `run`. True when it is shown, and every other screen
     /// scene then goes; false when it never is. It is shown only if nothing may have changed
-    /// the screen since the release and `run` is the hold's: newer than the release, and the
-    /// named run once there is one. A second scene from the run already shown takes its place,
-    /// and so does the declared successor of a replaced one.
+    /// the screen since the release and `run` is the run the released hold named. Until a run
+    /// is named none is shown: a newer run can be an earlier hold's, whose scene was queued
+    /// before either hold's first state came down the other pipe. A second scene from the run
+    /// already shown takes its place, and so does the declared successor of a replaced one.
     pub(super) fn marked(&mut self, scene: SceneId, run: RunId) -> bool {
         let ends = match self.state {
             State::Expecting {
@@ -126,7 +127,10 @@ impl Watch {
                 changed,
                 ..
             } if run > after && named.is_none_or(|named| named == run) => {
-                if changed {
+                // shortcut: the hold's own scene is skipped too when it comes before its
+                // run's first state, with the skipped line; hold such a scene back until the
+                // name comes if that order is ever seen in use.
+                if changed || named.is_none() {
                     self.skipped = Some(run);
                     return false;
                 }
@@ -149,14 +153,17 @@ impl Watch {
     }
 
     /// A run ended: its terminal state and its `RunEnd` are both in. A watch expecting that
-    /// run's scene ends, and a shown scene of that run gets its time limit, once. Runs go one
-    /// at a time, so a run newer than the release that ends before any was named is the
-    /// hold's: the watch ends, and a name that comes later finds nothing to name.
+    /// run's scene ends, and a shown scene of that run gets its time limit, once. A run newer
+    /// than the release that ends before any was named is taken for the hold's: the watch
+    /// ends, and a name that comes later finds nothing to name.
     pub(super) fn ended(&mut self, run: RunId, now: Instant) {
         self.state = match self.state {
             State::Expecting {
                 run: Some(named), ..
             } if named == run => State::Idle,
+            // shortcut: the newer run that ends first can be an earlier hold's, and then this
+            // hold's marks never show; end an unnamed watch only for the hold's own run
+            // before marks are activated.
             State::Expecting {
                 after, run: None, ..
             } if run > after => State::Idle,
@@ -249,6 +256,14 @@ impl Watch {
     pub(super) fn shown(&self) -> Option<SceneId> {
         match self.state {
             State::Showing { scene, .. } => Some(scene),
+            State::Idle | State::Expecting { .. } | State::Passing { .. } => None,
+        }
+    }
+
+    /// The run whose screen scene is up.
+    pub(super) fn shown_run(&self) -> Option<RunId> {
+        match self.state {
+            State::Showing { run, .. } => Some(run),
             State::Idle | State::Expecting { .. } | State::Passing { .. } => None,
         }
     }

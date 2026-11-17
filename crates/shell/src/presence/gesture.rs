@@ -16,7 +16,7 @@ use gpui_kit::{AnyWindowHandle, App, AppContext as _, AsyncApp, WeakEntity};
 
 use super::{Presence, voice::Stamp};
 use crate::input::{
-    Edge, Event, Gesture, Key,
+    Edge, Event, Gesture, Key, TalkHeld,
     hold::{Delivery, Fence, InputReason, InputStage, Intent},
 };
 use crate::link::LinkHandle;
@@ -30,6 +30,9 @@ struct Pending {
     qpc: u64,
     /// Where the pointer was when this delivery recognized a hold or saw its keys come up.
     pointer: Option<PhysicalPoint>,
+    /// The talk keys still down as this delivery was reduced: a hold ends at its first
+    /// key-up, and the screen watch must know which key may still repeat.
+    held: TalkHeld,
     cancelled: Option<GestureId>,
     escape: bool,
     collection: u64,
@@ -179,6 +182,7 @@ pub(super) fn deliver(
             delivery,
             qpc,
             pointer,
+            held: state.talk_held(),
             cancelled,
             escape,
             collection: link.microphone_gate().latest(),
@@ -286,11 +290,12 @@ fn apply(
         if applied && (pending.escape || pending.delivery.intents.iter().any(Option::is_some)) {
             let (owner, intents) = (owner.clone(), pending.delivery.intents.clone());
             let (stamp, qpc, pointer) = (pending.stamp, pending.qpc, pending.pointer);
+            let held = pending.held;
             let (escape, cancelled) = (pending.escape, pending.cancelled);
             let intents = move |app: &mut App| {
                 let _gone = owner.update(app, |this, cx| {
                     for intent in intents.into_iter().flatten() {
-                        this.voice_intent(intent, stamp, qpc, pointer, cx);
+                        this.voice_intent(intent, stamp, qpc, pointer, held, cx);
                     }
                     if escape && this.native_escape(cancelled, cx).is_err() {
                         tracing::error!("can't apply native Escape");
@@ -312,6 +317,10 @@ fn apply(
 
 /// Delivers one intent the way the native callback does, and says whether it applied.
 #[cfg(test)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "one argument for each thing the native callback reads"
+)]
 pub(super) fn deliver_intent(
     cx: &mut AsyncApp,
     dock: AnyWindowHandle,
@@ -320,6 +329,7 @@ pub(super) fn deliver_intent(
     stamp: Stamp,
     qpc: u64,
     pointer: Option<PhysicalPoint>,
+    held: TalkHeld,
 ) -> bool {
     let pending = Pending {
         delivery: Delivery {
@@ -329,6 +339,7 @@ pub(super) fn deliver_intent(
         stamp,
         qpc,
         pointer,
+        held,
         cancelled: None,
         escape: false,
         collection: 0,

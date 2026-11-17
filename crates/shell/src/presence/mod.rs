@@ -23,6 +23,7 @@ mod kumo_view;
 mod launch;
 pub(crate) mod line;
 mod link;
+mod marks;
 mod messages;
 pub(crate) mod observer;
 mod onboarding;

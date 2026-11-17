@@ -11,6 +11,11 @@ impl Presence {
         gesture: Option<GestureId>,
         cx: &mut Context<'_, Self>,
     ) -> Result<(), OpenError> {
+        // Marks that are up go at this press, and `escape` takes them before it ends a hold.
+        // A hold is still pending here when its first mark came before its run's `Answering`.
+        if self.presenter.marks_shown().is_some() {
+            return self.escape(cx);
+        }
         if let Some(gesture) = gesture
             && self.cancel_voice_gesture(gesture, cx)
         {
@@ -29,6 +34,14 @@ impl Presence {
         reason = "one Esc press keeps its local decision and every effect of it in order"
     )]
     pub(super) fn escape(&mut self, cx: &mut Context<'_, Self>) -> Result<(), OpenError> {
+        // Esc is a key like any other to screen marks: they go at the first press, whatever
+        // else that press stops. When they are a running answer's, the same press stops that
+        // answer too, whatever else it does here.
+        let answer = self
+            .presenter
+            .marks_shown()
+            .filter(|run| self.runs.stoppable() == Some(*run));
+        self.marks_changed(cx);
         self.voice.recovery = None;
         if self.voice_working() {
             self.cancel_voice(cx);
@@ -36,7 +49,10 @@ impl Presence {
         }
         if self.presenter.input.selection().is_some() {
             self.end_selection(crate::presenter::overlay_input::ExitCause::Escape, cx);
-            return Ok(());
+            // With a running answer's marks taken the press goes on, to stop that answer.
+            if answer.is_none() {
+                return Ok(());
+            }
         }
         let panel = if self.settings_focused() {
             if self
@@ -74,7 +90,8 @@ impl Presence {
             Escape::CancelPull => {
                 self.kumo
                     .update(cx, |kumo, cx| kumo.pull_event(Event::Escape, cx));
-                None
+                // The answer whose marks this press took is stopped after the pull's cancel.
+                answer.and_then(|_| self.runs.stop())
             }
             Escape::Stop => {
                 if let Some(message) = self.runs.stop() {

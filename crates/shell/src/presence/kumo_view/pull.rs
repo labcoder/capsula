@@ -123,7 +123,7 @@ impl KumoView {
     }
 
     /// Starts a pull at `at` in the peek whose client area starts at `origin`, unless one exists.
-    pub(super) fn grab(
+    pub(in crate::presence) fn grab(
         &mut self,
         button: Button,
         seq: u64,

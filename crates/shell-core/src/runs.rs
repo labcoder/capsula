@@ -161,6 +161,8 @@ pub struct Runs {
     fence: RunId,
     /// The highest run any `RunState` named; only its first state can bind a typed turn.
     answered: RunId,
+    /// The run whose two endings came in last, until the caller takes it.
+    ended: Option<RunId>,
     /// Turns sent and not answered yet.
     submitted: VecDeque<Submitted>,
     /// The newest named run's submission, until that run's first terminal `RunState`.
@@ -332,6 +334,17 @@ impl Runs {
         ))
     }
 
+    /// The highest run any `RunState` has named so far on this brain.
+    pub fn newest_run(&self) -> RunId {
+        self.answered
+    }
+
+    /// The run whose terminal `RunState` and `RunEnd` are now both in, whichever came last,
+    /// once. A run that Esc or a delete fenced off before it was named never comes this way.
+    pub fn take_ended(&mut self) -> Option<RunId> {
+        self.ended.take()
+    }
+
     /// A run is moving that Esc hasn't stopped, or a turn is waiting for its run.
     pub fn working(&self) -> bool {
         self.hold.is_some() || self.stoppable().is_some() || self.submitted.len() > self.cancelled
@@ -388,7 +401,8 @@ impl Runs {
         self.submit(&text, send)
     }
 
-    fn stoppable(&self) -> Option<RunId> {
+    /// The moving run, unless Esc has stopped it.
+    pub fn stoppable(&self) -> Option<RunId> {
         self.live
             .map(|live| live.run)
             .filter(|run| *run > self.fence)
@@ -648,6 +662,7 @@ impl Runs {
         }
         self.fence = self.fence.max(self.answered);
         self.live = None;
+        self.ended = None;
         self.main = None;
         self.submitted.clear();
         self.named = None;
@@ -883,11 +898,15 @@ impl Runs {
 
     /// Marks one of `run`'s two endings; the live run settles once both are in, and an older
     /// run's ending never touches a newer one.
+    // shortcut: a hold's run that ends after it stopped being the live one is never reported,
+    // so marks it still shows get no 60-second limit and go at the next change; report that
+    // ending too if marks are ever seen to outstay their answer.
     fn end(&mut self, run: RunId, mark: impl FnOnce(&mut Live)) {
         if let Some(live) = self.live.as_mut().filter(|live| live.run == run) {
             mark(live);
             if live.state_ended && live.data_ended {
                 self.live = None;
+                self.ended = Some(run);
             }
         }
     }

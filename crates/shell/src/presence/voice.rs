@@ -14,6 +14,7 @@ use gpui_kit::Window;
 use super::ink::Sampler;
 use super::overlay_visibility::Visibility;
 use super::{Context, Presence, Session};
+use crate::input::TalkHeld;
 use crate::input::hold::Intent;
 use crate::input::path::PathRecorder;
 use crate::platform::microphone::{Generation, Mode};
@@ -79,6 +80,10 @@ use kumochi_protocol::message::DataToBrain;
 #[path = "voice_source_tests.rs"]
 mod tests;
 
+#[cfg(test)]
+#[path = "screen_marks_tests.rs"]
+mod marks_tests;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct Stamp {
     pub(super) target: (Option<ThreadId>, u64),
@@ -132,6 +137,8 @@ pub(super) struct Voice {
     /// Set while the onboarding window shows; the native fence drops holds while it's set.
     pub(super) paused: Rc<Cell<bool>>,
     pub(super) pending: Option<Hold>,
+    /// The hold the screen watch was last told was released (`marks.rs`).
+    pub(super) watched: Option<super::marks::Watched>,
     pub(super) status: Option<Text>,
     pub(super) recovery: Option<Recovery>,
     /// What a lost brain did with the held words; reconnecting doesn't clear it.
@@ -292,6 +299,7 @@ impl Presence {
         let mut notice = text;
         if let Some(mut hold) = self.voice.pending.take() {
             let gesture = hold.token.gesture();
+            self.marks_dropped(gesture, cx);
             self.link.microphone_gate().cancel(gesture);
             self.link.clear_input(gesture);
             if matches!(hold.source, Source::Waiting) {
@@ -382,7 +390,10 @@ impl Presence {
 
     /// The primary display in physical pixels, which is the one the overlay covers and so the
     /// one a hold's line is drawn on, with its scale.
-    fn line_display(&mut self, cx: &mut Context<'_, Self>) -> Option<(PhysicalRect, f32)> {
+    pub(super) fn line_display(
+        &mut self,
+        cx: &mut Context<'_, Self>,
+    ) -> Option<(PhysicalRect, f32)> {
         // The overlay sits on the primary display, so its scale is that display's; the dock may
         // be on another one, and stands in only until the overlay first opens.
         let window = self
@@ -520,14 +531,16 @@ impl Presence {
 
     /// The keys of a hold that shows the screen came up. Asks once whether the release still
     /// shows it, stops the line, covers every presence surface and stamps when the last one was
-    /// covered, then sends the one `ScreenRelease`. Whatever stops it short leaves the hold
-    /// voice only, and its line says why.
+    /// covered, tells the screen watch, then sends the one `ScreenRelease`. Whatever stops it
+    /// short leaves the hold voice only, and its line says why. `held` is the talk keys still
+    /// down.
     fn release_screen(
         &mut self,
         gesture: GestureId,
         session: &Session,
         t_qpc: u64,
         pointer: Option<PhysicalPoint>,
+        held: TalkHeld,
         cx: &mut Context<'_, Self>,
     ) {
         let sampler = self.stop_line(cx);
@@ -582,14 +595,20 @@ impl Presence {
             t_qpc,
             excluded_qpc,
         };
-        let sent = self
+        let message = self
             .runs
-            .screen_release(gesture, own_model, default, release)
-            .is_some_and(|message| self.link.send_control(session, message));
+            .screen_release(gesture, own_model, default, release);
+        let sent = message.is_some_and(|message| {
+            // The watch starts before the message is written: the brain takes the picture only
+            // once it reads it, so the sources are listening before the picture exists.
+            self.marks_released(gesture, held, cx);
+            self.link.send_control(session, message)
+        });
         if sent {
             self.screen_lease = Some(lease);
         } else {
             tracing::warn!(stage = ?FailureStage::Release, reason = ?FailureReason::ScreenReleaseSend, "held speech input failed");
+            self.marks_dropped(gesture, cx);
             // The brain never saw this lease, so releasing it is no lapse.
             self.revoke_exclusion(cx);
         }
@@ -607,7 +626,10 @@ impl Presence {
         }
         .filter(|(sees, _)| self.chat.read(cx).sees != Some(*sees))
         .map(|(sees, model)| (sees, model.clone()));
-        let shown = self.runs.hold_screen_text(notice);
+        let shown = self
+            .runs
+            .hold_screen_text(notice)
+            .or_else(|| self.marks_line().map(|text| (text, None)));
         let old = &self.panel.read(cx).screen_line;
         let line = (old.as_ref().map(|(text, model)| (*text, model.as_ref())) != shown)
             .then(|| shown.map(|(text, model)| (text, model.cloned())));
@@ -628,13 +650,14 @@ impl Presence {
     }
 
     /// `pointer` is where the pointer was when the native callback recognized a hold or saw its
-    /// keys come up.
+    /// keys come up, and `keys` the talk keys still down then.
     pub(super) fn voice_intent(
         &mut self,
         intent: Intent,
         stamp: Stamp,
         qpc: u64,
         pointer: Option<PhysicalPoint>,
+        keys: TalkHeld,
         cx: &mut Context<'_, Self>,
     ) {
         match intent {
@@ -690,7 +713,7 @@ impl Presence {
                     hold.released = Some(qpc);
                     if std::mem::take(&mut hold.screen) {
                         let session = hold.session.clone();
-                        self.release_screen(gesture, &session, qpc, pointer, cx);
+                        self.release_screen(gesture, &session, qpc, pointer, keys, cx);
                     }
                     self.voice_notice(Text::HoldStopping, cx);
                     self.finish_voice();
@@ -819,6 +842,8 @@ impl Presence {
             }
         };
         if sent {
+            // The keys of a new hold are down: marks of the answer before it go now.
+            self.marks_changed(cx);
             // The line starts only once the brain was told this hold shows the screen, and
             // only from where the pointer was read: without that the picture goes alone.
             if screen && let Some(origin) = pointer {

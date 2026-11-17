@@ -35,6 +35,7 @@ impl Presence {
         if let Visibility::Shown(surface) = &self.overlay {
             overlay::show(surface.window, cx)?;
         }
+        self.show_display(cx);
         self.want_frames(cx);
         Ok(())
     }

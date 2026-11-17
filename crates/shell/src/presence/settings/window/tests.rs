@@ -402,6 +402,7 @@ fn dismissal_with_a_full_control_queue_keeps_the_error_and_ends_the_link(cx: &mu
 
 #[gpui::test]
 fn rejected_speech_input_keeps_the_settings_panel_open(cx: &mut TestAppContext) {
+    use crate::input::TalkHeld;
     use crate::input::hold::Intent;
     use crate::presence::voice::Stamp;
     use crate::strings::Text;
@@ -444,6 +445,7 @@ fn rejected_speech_input_keeps_the_settings_panel_open(cx: &mut TestAppContext) 
             stamp,
             0,
             None,
+            TalkHeld::default(),
             cx,
         );
         assert!(owner.settings_open());
@@ -860,6 +862,7 @@ fn closing_settings_after_its_sign_ins_complete_sends_nothing(cx: &mut TestAppCo
 /// The start of a hold closes Settings, so it cancels Settings' sign-in like any other close.
 #[gpui::test]
 fn a_hold_that_closes_settings_cancels_its_sign_in(cx: &mut TestAppContext) {
+    use crate::input::TalkHeld;
     use crate::input::hold::Intent;
     use crate::presence::voice::Stamp;
     use kumochi_protocol::message::GestureId;
@@ -915,6 +918,7 @@ fn a_hold_that_closes_settings_cancels_its_sign_in(cx: &mut TestAppContext) {
             stamp,
             0,
             None,
+            TalkHeld::default(),
             cx,
         );
         assert!(!owner.settings_open());

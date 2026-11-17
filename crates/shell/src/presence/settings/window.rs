@@ -97,7 +97,7 @@ impl Presence {
         cx: &mut Context<'_, Self>,
     ) -> bool {
         let (link, session) = (&self.link, &self.session);
-        self.settings.update(cx, |state, cx| {
+        let sent = self.settings.update(cx, |state, cx| {
             let sent = state.send_show_screen(on, |op| {
                 session
                     .as_ref()
@@ -105,7 +105,12 @@ impl Presence {
             });
             cx.notify();
             sent
-        })
+        });
+        // An unchecked box is already the user's no, saved or not.
+        if !on {
+            self.marks_off(cx);
+        }
+        sent
     }
 
     pub(in crate::presence) fn open_accounts(
