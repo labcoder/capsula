@@ -41,6 +41,7 @@ pub(super) async fn read_control(
     }
 }
 
+#[expect(clippy::too_many_lines, reason = "one flat arm per control message")]
 pub(super) fn control_input(message: ControlToBrain) -> Result<Option<Input>, Ended> {
     Ok(match message {
         ControlToBrain::Stop { run, revealed } => Some(Input::Stop { run, revealed }),
@@ -54,6 +55,13 @@ pub(super) fn control_input(message: ControlToBrain) -> Result<Option<Input>, En
         ControlToBrain::SceneSkipped { scene } => {
             Some(Input::Drawing(crate::drawing::Input::SceneSkipped {
                 scene,
+            }))
+        }
+        ControlToBrain::StepReady { run, scene, index } => {
+            Some(Input::Drawing(crate::drawing::Input::StepReady {
+                run,
+                scene,
+                index,
             }))
         }
         ControlToBrain::DeleteThread {

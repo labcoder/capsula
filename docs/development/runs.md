@@ -154,7 +154,8 @@ the user cleared counts as returned. Stop and failed runs, which report their ow
 notice, and neither does a step refused after its run ended. A run that never calls `draw` gets no notice: the brain doesn't guess intent from the
 request.
 
-`StepShown` and `StepFailed` validate lifetime indices and the run that committed the step.
+`StepShown`, `StepReady` and `StepFailed` validate lifetime indices and the run that committed
+the step.
 Bad observations or held-scene cuts break the connection; removed scenes are stale. Pending
 thread deletion holds late drawing frames until the outcome: a refusal releases them in
 order, while a hide or removal discards them and retires the canonical scenes. Reconnect

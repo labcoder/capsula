@@ -823,7 +823,8 @@ bound, so a later `Stop(1)` still works after replaying steps 1 and 2. Undo meta
 stays available until actual activation or a cut.
 
 At runtime the shell retires removals at activation; the brain calls `retire`
-only on StepShown or retires the kept prefix on Stop. Repeated retirement is a
+only on StepShown or retires the kept prefix on Stop. The presenter sends StepReady when a
+prepared step enters its ready queue. Repeated retirement is a
 no-op. Preparation failure stops the scene with the same cut: it keeps activated
 objects, drops the failed step and every queued successor, and restores their
 removals. A first-step failure cuts at zero and clears. The host accepts no further
@@ -1063,8 +1064,9 @@ dashed edge's length follows the layout instead of growing with it: a long edge 
 widens a rightward flow's rank gap, a link that skips ranks, and a fan-out to wide nodes all
 change it. The wide measure is the side that under-counts least on the measured fixtures, and
 the fan-out one still comes out at 110 pieces against a shell's 112. In each case a scene near
-a limit can pass the brain's count and still be refused by the shell after the call ended, the
-picture staying at its last shown step. Only paint work refuses at admission: a step whose
+a limit can pass the brain's count and still be refused by the shell while it prepares the
+step; the call's result waits for that answer within the limits in [tools](tools.md), "`draw`",
+and the picture stays at its last shown step. Only paint work refuses at admission: a step whose
 brain-side preparation fails for any other reason, such as the wider layout leaving the
 canvas range, is not refused, carries no charge and isn't counted against the other scenes.
 While any scene is uncounted, the shell's guard is the final check for every scene, since the

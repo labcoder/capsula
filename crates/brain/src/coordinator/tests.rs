@@ -225,6 +225,30 @@ fn commit_in_scene(text: Option<&str>, index: u32, label: &str) -> Effect {
 }
 
 /// A coordinator whose last ids were thread 3 and run 9, with nothing visible.
+/// The shell double prepares each step a batch committed at once, as a quiet shell does.
+fn prepared(core: &mut Coordinator, mut effects: Vec<Effect>) -> Vec<Effect> {
+    let ready: Vec<_> = effects
+        .iter()
+        .filter_map(|effect| match effect {
+            Effect::Data(DataToShell::SceneStepCommit {
+                run, scene, index, ..
+            }) => Some(crate::drawing::Input::StepReady {
+                run: *run,
+                scene: *scene,
+                index: *index,
+            }),
+            _ => None,
+        })
+        .collect();
+    for input in ready {
+        effects.extend(
+            core.handle(Input::Drawing(input))
+                .expect("a committed step"),
+        );
+    }
+    effects
+}
+
 fn fresh() -> Coordinator {
     Coordinator::ready_for_tests(ThreadId(1), ThreadId(3), RunId(9), Vec::new())
 }
