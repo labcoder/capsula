@@ -900,12 +900,19 @@ fn esc_in_another_app_takes_a_pending_hold_s_marks_and_cancels_it(cx: &mut TestA
         let (watching, deliver, at) = natively_marked(cx);
         let wake = |cx: &mut TestAppContext| {
             watching.ready.owner.update(cx, |owner, cx| {
-                owner.on_event(PresenceEvent::ScreenWoke, cx).expect("a wake");
+                owner
+                    .on_event(PresenceEvent::ScreenWoke, cx)
+                    .expect("a wake");
             });
         };
         let (key, edge) = (Key::Other(1), Edge::Down);
         deliver(Event::Key { key, edge }, after(at, 2000));
-        let heard = watching.bit.borrow().as_ref().expect("started sources").set();
+        let heard = watching
+            .bit
+            .borrow()
+            .as_ref()
+            .expect("started sources")
+            .set();
         assert!(heard, "the key is the first change since the release");
         if woke_first {
             wake(cx);
