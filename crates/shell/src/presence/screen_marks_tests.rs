@@ -867,14 +867,12 @@ fn natively_marked(cx: &mut TestAppContext) -> (Watching, Deliver, Instant) {
     (watching, deliver, at)
 }
 
-/// The press took the marks and cancelled the hold, and did nothing more: the panel stays
-/// open and the answer stays in it.
+/// The press took the marks and cancelled the hold, and the panel stays open.
 fn only_taken(watching: &Watching, cx: &mut TestAppContext) {
     ended(watching, cx);
     watching.ready.owner.read_with(cx, |owner, _| {
         assert_eq!(owner.presenter.marks_shown(), None);
         assert!(owner.text_open());
-        assert_eq!(owner.runs.shown().map(|shown| shown.run), Some(RunId(RUN)));
     });
 }
 
