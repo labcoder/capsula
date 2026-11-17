@@ -285,7 +285,12 @@ flowchart LR
   until it catches up [guess]. Memory stays bounded however slow the store or the shell is: the
   cap is checked before each event and each turn, and only a turn adds a run and so a `RunEnd`,
   so the queue can reach the cap plus one event, the text held behind a step, and one small
-  `RunEnd` per run still ending. That bound excludes typed turns not yet taken: up to 64
+  `RunEnd` per run still ending. Drawing frames held for a pending thread delete have their
+  own 64-slot bound; a run's owed end attaches to its last held run-bearing frame without
+  taking another slot, and can outlive its stored outcome. Replaying or discarding that
+  payload settles the end; revocation preserves it and connection loss retires old-session
+  debt before a new connection can receive delete replies, even before recovery description.
+  That bound excludes typed turns not yet taken: up to 64
   `TextSubmit`s of up to 256 KiB each wait ahead of the core, and one more ends the connection
   as broken. Separately, at most four page requests may remain unanswered [guess], counting
   replies waiting on credit or a blocked write; a fifth breaks the connection. Pages are at most

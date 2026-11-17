@@ -107,6 +107,17 @@ impl Coordinator {
         self.drawing_held.clear();
     }
 
+    pub(super) fn data_end(&mut self, run: RunId, thread: ThreadId, effects: &mut Vec<Effect>) {
+        if let Some((_, _, end)) = self.drawing_held.iter_mut().rfind(|(owner, frame, _)| {
+            *owner == thread
+                && matches!(frame, DataToShell::SceneStepCommit { run: source, .. } | DataToShell::SceneEnd { run: source, .. } if *source == run)
+        }) {
+            *end = Some(run);
+        } else {
+            effects.push(Effect::Data(DataToShell::RunEnd { run }));
+        }
+    }
+
     pub(super) fn stop_drawings(
         &mut self,
         run: RunId,
@@ -240,14 +251,13 @@ impl Coordinator {
                 if self.drawing_held.len() >= MAX_RESULTS {
                     effects.push(Effect::Broken("too many drawing frames await deletion"));
                 } else if let Effect::Data(message) = effect {
-                    self.drawing_held.push((thread, message));
+                    self.drawing_held.push((thread, message, None));
                 }
                 continue;
             }
-            if let Effect::RevokeScenes { scenes } = &effect {
-                self.drawing_held.retain(|(_, frame)| {
-                    scene_id(frame).is_none_or(|scene| !scenes.contains(&scene))
-                });
+            if let Effect::RevokeScenes { scenes } = effect {
+                self.drawing_revoke(scenes, effects);
+                continue;
             }
             if let Effect::Store(StoreOp::ClearScenes { scenes }) = &effect {
                 for scene in scenes {
@@ -324,8 +334,38 @@ impl Coordinator {
         }
     }
 
+    fn drawing_revoke(&mut self, scenes: Vec<SceneId>, effects: &mut Vec<Effect>) {
+        self.drawing_held.retain_mut(|(_, frame, end)| {
+            if scene_id(frame).is_some_and(|scene| scenes.contains(&scene)) {
+                let Some(run) = end.take() else {
+                    return false;
+                };
+                *frame = DataToShell::RunEnd { run };
+            }
+            true
+        });
+        effects.push(Effect::RevokeScenes { scenes });
+        let mut at = 0;
+        while at < self.drawing_held.len() {
+            if let DataToShell::RunEnd { run } = self.drawing_held[at].1 {
+                let (thread, _, _) = self.drawing_held.remove(at);
+                self.data_end(run, thread, effects);
+            } else {
+                at += 1;
+            }
+        }
+    }
+
     pub(super) fn drawing_deleted(&mut self, thread: ThreadId, effects: &mut Vec<Effect>) {
-        self.drawing_held.retain(|(owner, _)| *owner != thread);
+        self.drawing_held.retain(|(owner, _, end)| {
+            if *owner != thread {
+                return true;
+            }
+            if let Some(run) = end {
+                effects.push(Effect::Data(DataToShell::RunEnd { run: *run }));
+            }
+            false
+        });
         if let Ok(output) = self.drawing.handle(Input::ThreadDeleted { thread }) {
             self.drawing_output(output, effects);
         }
@@ -333,11 +373,14 @@ impl Coordinator {
 
     pub(super) fn drawing_not_deleted(&mut self, thread: ThreadId, effects: &mut Vec<Effect>) {
         let held = std::mem::take(&mut self.drawing_held);
-        for (owner, frame) in held {
+        for (owner, frame, end) in held {
             if owner == thread {
                 effects.push(Effect::Data(frame));
+                if let Some(run) = end {
+                    effects.push(Effect::Data(DataToShell::RunEnd { run }));
+                }
             } else {
-                self.drawing_held.push((owner, frame));
+                self.drawing_held.push((owner, frame, end));
             }
         }
     }
