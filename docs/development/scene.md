@@ -2149,7 +2149,8 @@ stateDiagram-v2
   start of `advance`, `sample_at` and `completed`, not only by the watchdog. Naming checks
   the 30-second limit alone, in `screen_run`: a first mark or a name that comes at 30 seconds
   is too late even when it is handled before the due `tick`. A run newer than the release that ends before
-  any run was named ends the watch as well, and a name that comes after names nothing.
+  any run was named ends the watch as well, and a name that comes after names nothing. That
+  run can be an earlier hold's, and then this hold's marks never show (`shortcut:`).
 - **Leaving any other way** (the user's clear, the brain's removal or replacement, a
   failure) ends the watch too. A replaced screen scene leaves no frozen picture for the
   [visual bridge](#bounded-visual-replacement).
@@ -2165,8 +2166,9 @@ stateDiagram-v2
 The presence makes each call from one file, `presence/marks.rs`, and keeps one thing of its
 own for it: `voice.watched`, the hold whose release the watch was last told of, with its run
 once named. It is apart from `voice.pending`, which is gone by `Answering` while the brain's
-word on the screenshot can still come. Every report can come twice and changes nothing the
-second time. A lost session forgets the watched hold.
+word on the screenshot can still come. Every report but the release can come twice and
+changes nothing the second time; the release is made once, immediately before its
+`ScreenRelease` is written. A lost session forgets the watched hold.
 
 | Call | From | When |
 |---|---|---|

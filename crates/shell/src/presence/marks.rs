@@ -1,6 +1,8 @@
 //! Where the presence tells the presenter's screen watch what became of a hold that sends the
 //! screen. The watch decides what is shown and when it goes (`docs/development/scene.md`);
-//! every road a hold or its run can take reports here, and a second report changes nothing.
+//! every road a hold or its run can take reports here. Every report but the release can come
+//! twice and changes nothing the second time; the release is made once, immediately before its
+//! `ScreenRelease` is written.
 
 use std::time::Instant;
 
