@@ -71,7 +71,8 @@ pub trait Sources {
     /// `screen_released` stops any still listening before it calls this.
     fn start(&mut self, changed: Changed, held: TalkHeld) -> bool;
 
-    /// Stops every source. A record one of them was already handling can still set this
-    /// watch's own bit afterwards and wake the UI for it; it can never set a newer watch's.
+    /// Stops every source. Work of theirs that was queued or in flight, or a source's own
+    /// end, can still set this watch's own bit afterwards and wake the UI for it; none of it
+    /// can set a newer watch's.
     fn stop(&mut self);
 }

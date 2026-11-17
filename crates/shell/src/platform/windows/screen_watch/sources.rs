@@ -1,6 +1,14 @@
 //! The sources that are started and stopped with a watch: the mouse, on its own thread, and
-//! the foreground hook. `start` and `stop` run on the UI thread and never wait for the mouse
-//! thread: the one lock they share with it is held for a push or a pop.
+//! the foreground hook. `start` and `stop` run on the UI thread. They never join the mouse
+//! thread or wait for its acknowledgement. The one lock they share with it is held for a push
+//! or a pop of a short queue, and its contention wasn't measured.
+//!
+//! A mouse registration ends with its target window: Windows drops it when the window is
+//! destroyed, which the ignored test `a_mouse_registration_ends_with_the_worker_s_window` saw
+//! on build 10.0.26200. So a mouse thread that ends with its registration standing leaves
+//! none behind. A `stop` between the publication's clearing and the window's destruction
+//! reads that registration as another component's and forgets it, and the destruction then
+//! removes it.
 
 use std::cell::RefCell;
 use std::collections::VecDeque;
@@ -221,7 +229,7 @@ impl Win32 {
         let Some(target) = self.shared.window() else {
             return false;
         };
-        // SAFETY: posts to the mouse thread's window; a handle that is gone only fails.
+        // SAFETY: every argument is a plain value, and PostMessageW checks the handle itself.
         unsafe { PostMessageW(Some(window(target)), message, WPARAM(0), lparam) }.is_ok()
     }
 
@@ -552,7 +560,8 @@ impl Drop for Ending<'_> {
                 tracing::warn!(reason = "destroy", code, "the screen watch's window stays");
             }
         }
-        // SAFETY: the class is this thread's, and its one window was destroyed above or before.
+        // SAFETY: the name and the instance are the ones this thread registered the class
+        // with; the call fails, and says so below, while a window of the class is left.
         let unregistered = unsafe { UnregisterClassW(PCWSTR(self.class.as_ptr()), Some(instance)) };
         if let Err(error) = unregistered {
             let code = error.code().0;
@@ -593,8 +602,12 @@ fn mouse_window(class: &HSTRING) -> windows::core::Result<(HINSTANCE, HWND)> {
         )
     };
     if made.is_err() {
-        // SAFETY: the class was registered above and has no window.
-        let _unregistered = unsafe { UnregisterClassW(PCWSTR(class.as_ptr()), Some(instance)) };
+        // SAFETY: the name and the instance are the ones the class was registered with above.
+        let unregistered = unsafe { UnregisterClassW(PCWSTR(class.as_ptr()), Some(instance)) };
+        if let Err(error) = unregistered {
+            let code = error.code().0;
+            tracing::debug!(reason = "class", code, "the screen watch's class stays");
+        }
     }
     Ok((instance, made?))
 }

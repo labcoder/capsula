@@ -488,7 +488,9 @@ a change: a record that can't be read, a window that can't be named.
   one mask; only a press or a wheel turn goes on to ask which window is under the pointer.
   An arm's one wake is queued without waiting, which may allocate. No record takes a lock,
   and none logs.
-- **`start`**, on the UI thread, never waits for the mouse thread. It first gives back
+- **`start`**, on the UI thread, never joins the mouse thread or waits for its
+  acknowledgement. It and `stop` share one lock with that thread, held for a push or a pop
+  of a short queue; its contention was not measured. `start` first gives back
   anything a failed `stop` left, and says no if that still fails. It says no, and takes
   nothing, when the process already has a mouse registration it didn't make, or when the
   registrations can't be read. Then it posts the arm for the new bit, registers the mouse to
@@ -509,13 +511,19 @@ a change: a record that can't be read, a window that can't be named.
   was armed for, and every watch whose arm it never dispatched, counts as changed and is
   woken, the armed one only if its arm's one wake wasn't queued before, so no marks stay up
   trusting a mouse source that is gone. The window is destroyed if it is still there, and
-  then its class is unregistered. The thread is not started again: no marks show until
-  Kumochi restarts.
+  then its class is unregistered. A registration still standing goes with the window:
+  Windows drops a mouse registration when its target window is destroyed, which the ignored
+  test `a_mouse_registration_ends_with_the_worker_s_window` saw on build 10.0.26200. A
+  `stop` between the publication's clearing and that destruction reads the registration as
+  another component's and forgets it, and the destruction then removes it. The thread is
+  not started again: no marks show until Kumochi restarts.
 - **Quit** sets a flag and then posts the window a close. A thread that hasn't published its
-  window yet sees the flag, destroys the window and ends. The UI never waits for it.
+  window yet sees the flag, destroys the window and ends. The UI never joins it.
 
-Not verified natively: nothing here has run against real input, and no shipped or evidence
-build has been launched with it.
+Run natively so far: the two ignored tests in `sources_tests.rs`, once each on Windows build
+10.0.26200. One registers the mouse to the thread's own window, removes it and leaves
+nothing; the other sees the registration go with the window. Nothing here has run against
+real input, and no shipped or evidence build has been launched with it.
 
 ## Perch hosts
 
