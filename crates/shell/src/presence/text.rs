@@ -498,7 +498,7 @@ pub(super) struct TextView {
     target: Target,
     _watch: Vec<gpui_kit::Subscription>,
     /// Pushed by presence, never read from it: the first frame renders while presence is updating.
-    notice: Option<SharedString>,
+    pub(super) notice: Option<SharedString>,
     owner: WeakEntity<Presence>,
     events: Sender<PresenceEvent>,
 }

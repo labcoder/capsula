@@ -951,7 +951,8 @@ sequenceDiagram
   the live one. `StoreFailed` and Thinking never send it.
 - **The shell** keeps one slot (`presence/voice.rs`): the session, gesture, target, whether
   the hold asked for a picture, and the words. See [Presence](presence.md#held-words-after-a-lost-brain).
-- Nothing is resubmitted. The words wait in the composer.
+- Nothing is resubmitted. The words wait in the composer. The copy's lifetime is bounded by
+  events, not time, and a failed or interrupted held run drops it.
 
 Two limits are known. A brain lost before `HoldWords` reaches the shell still loses the words.
 Between the store's commit and the receipt reaching the shell, the words can be both stored

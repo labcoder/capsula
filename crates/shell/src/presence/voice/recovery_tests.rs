@@ -4,9 +4,56 @@ use kumochi_protocol::message::{DataToShell, Incarnation, RunId};
 use super::super::PresenceEvent;
 use super::super::voice_wiring_tests::{hold, ready, status};
 use super::*;
+use crate::input::hold::Intent;
 use crate::link::{Batch, LinkEvent, LinkState, Session};
 
 const SENTINEL: &str = "zqxsentinellabel held words";
+
+fn assert_redacted(printed: &str) {
+    let marker = "zqxsentinellabel";
+    let list = format!("{:?}", marker.as_bytes());
+    assert!(!printed.contains(marker), "{printed}");
+    assert!(!printed.contains(&list[1..list.len() - 1]), "{printed}");
+}
+
+fn run_state(phase: Phase) -> LinkEvent {
+    LinkEvent::RunState {
+        generation: 1,
+        run: RunId(1),
+        thread: ThreadId(1),
+        phase,
+        error: None,
+        origin: None,
+    }
+}
+
+/// The voice notice as the status panel and the composer show it.
+fn shown(owner: &Entity<Presence>, cx: &mut TestAppContext) -> (Option<Text>, Option<String>) {
+    owner.read_with(cx, |owner, cx| {
+        let composer = owner.text.as_ref().expect("typing fixture").view.read(cx);
+        (
+            owner.panel.read(cx).voice,
+            composer.notice.as_ref().map(ToString::to_string),
+        )
+    })
+}
+
+/// A hold whose words went back into the composer when the brain was lost.
+fn recovered(cx: &mut TestAppContext) -> Entity<Presence> {
+    let (owner, _data, _controls) = ready(cx);
+    hold(&owner, 1, cx);
+    deliver(&owner, words(1, 1, SENTINEL, 40), cx);
+    deliver(&owner, LinkEvent::State(LinkState::Reconnecting), cx);
+    let strings = Strings::english();
+    assert_eq!(
+        shown(&owner, cx),
+        (
+            Some(Text::HoldLostRestored),
+            Some(strings.get(Text::HoldLostRestored))
+        )
+    );
+    owner
+}
 
 fn deliver(owner: &Entity<Presence>, event: LinkEvent, cx: &mut TestAppContext) {
     owner.update(cx, |owner, cx| {
@@ -185,6 +232,101 @@ fn words_after_a_terminal_status_or_from_another_hold_are_refused_with_their_cre
 }
 
 #[gpui::test]
+fn a_failed_or_stopped_held_run_drops_its_words(cx: &mut TestAppContext) {
+    for (phase, answered) in [
+        (Phase::Failed, false),
+        (Phase::Interrupted, false),
+        (Phase::Failed, true),
+        (Phase::Interrupted, true),
+    ] {
+        let (owner, _data, _controls) = ready(cx);
+        hold(&owner, 1, cx);
+        thinking(&owner, cx);
+        if answered {
+            deliver(&owner, run_state(Phase::Answering), cx);
+            owner.read_with(cx, |owner, _| assert!(owner.voice.pending.is_none()));
+        }
+        deliver(&owner, run_state(phase), cx);
+        owner.read_with(cx, |owner, _| assert!(owner.voice.recovery.is_none()));
+        let before = granted(&owner, cx);
+        deliver(&owner, words(1, 1, SENTINEL, 40), cx);
+        assert_eq!(granted(&owner, cx), before + 40);
+        deliver(&owner, LinkEvent::State(LinkState::Reconnecting), cx);
+        assert_eq!(draft(&owner, cx), "", "{phase:?} answered={answered}");
+        assert_eq!(lost(&owner, cx), None);
+    }
+    let (owner, _data, _controls) = ready(cx);
+    hold(&owner, 1, cx);
+    thinking(&owner, cx);
+    deliver(&owner, run_state(Phase::Answering), cx);
+    owner.update(cx, |owner, _| {
+        // A newer hold's slot, with words and no run yet.
+        owner.voice.recovery = Some(Recovery {
+            session: 1,
+            gesture: GestureId(2),
+            run: None,
+            target: owner.voice.target.get(),
+            picture: false,
+            words: Some(SENTINEL.into()),
+        });
+    });
+    deliver(&owner, run_state(Phase::Failed), cx);
+    deliver(&owner, LinkEvent::State(LinkState::Reconnecting), cx);
+    assert_eq!(draft(&owner, cx), SENTINEL, "an older run's failure");
+}
+
+#[gpui::test]
+fn a_newer_attempt_or_a_stuck_microphone_replaces_the_lost_notice(cx: &mut TestAppContext) {
+    let strings = Strings::english();
+    let owner = recovered(cx);
+    owner.update(cx, |owner, cx| {
+        let gesture = GestureId(2);
+        let token = owner
+            .link
+            .microphone_gate()
+            .arm(gesture)
+            .expect("fresh hold");
+        owner.link.track_input(gesture);
+        let stamp = Stamp {
+            target: owner.voice.target.get(),
+            session: 1,
+            choice: owner.link.choice_revision(),
+        };
+        owner.voice_intent(
+            Intent::Recognized {
+                gesture,
+                generation: Ok(token),
+            },
+            stamp,
+            0,
+            None,
+            cx,
+        );
+        assert!(owner.voice.pending.is_none(), "refused at admission");
+    });
+    assert_eq!(
+        shown(&owner, cx),
+        (
+            Some(Text::VoiceStatusUnknown),
+            Some(strings.get(Text::VoiceStatusUnknown))
+        ),
+        "the lost connection's speech input is unknown"
+    );
+    assert_eq!(draft(&owner, cx), SENTINEL);
+
+    let owner = recovered(cx);
+    owner.update(cx, |owner, cx| owner.end_voice(Text::HoldUnavailable, cx));
+    assert_eq!(
+        shown(&owner, cx),
+        (
+            Some(Text::HoldUnavailable),
+            Some(strings.get(Text::HoldUnavailable))
+        )
+    );
+    assert_eq!(draft(&owner, cx), SENTINEL);
+}
+
+#[gpui::test]
 fn esc_discards_the_copy_before_late_words_arrive(cx: &mut TestAppContext) {
     let (owner, _data, _controls) = ready(cx);
     hold(&owner, 1, cx);
@@ -317,25 +459,12 @@ fn held_words_are_kept_up_to_their_bound_and_never_printed(cx: &mut TestAppConte
         format!("{event:?}"),
         format!("{:?}", Batch::Plain(vec![words(1, 1, &exact, 1)])),
     ] {
-        assert!(!printed.contains("zqxsentinellabel"));
-        assert!(
-            !printed
-                .as_bytes()
-                .windows(16)
-                .any(|w| w == b"zqxsentinellabel")
-        );
+        assert_redacted(&printed);
     }
     deliver(&owner, event, cx);
     owner.read_with(cx, |owner, _| {
         let slot = owner.voice.recovery.as_ref().expect("slot");
         assert_eq!(slot.words.as_deref(), Some(exact.as_str()));
-        let printed = format!("{slot:?}");
-        assert!(!printed.contains("zqxsentinellabel"));
-        assert!(
-            !printed
-                .as_bytes()
-                .windows(16)
-                .any(|w| w == b"zqxsentinellabel")
-        );
+        assert_redacted(&format!("{slot:?}"));
     });
 }

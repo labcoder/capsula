@@ -110,13 +110,20 @@ pub(super) struct Hold {
 
 /// An accepted hold's words, kept until the brain says its turn is stored, so a lost brain
 /// can give them back as a draft.
-#[derive(Debug)]
 pub(super) struct Recovery {
     session: u64,
     gesture: GestureId,
+    /// The held run, once Thinking names it, so its failure drops the words after the hold ends.
+    run: Option<RunId>,
     target: (Option<ThreadId>, u64),
     picture: bool,
     words: Option<Content>,
+}
+
+impl std::fmt::Debug for Recovery {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Recovery").finish_non_exhaustive()
+    }
 }
 
 #[derive(Default)]
@@ -165,6 +172,19 @@ impl Presence {
         applied: &crate::runs::Applied,
         cx: &mut Context<'_, Self>,
     ) {
+        // A held run that failed or stopped isn't stored, so a later loss mustn't give its words back.
+        if let Some(slot) = self.voice.recovery.as_mut() {
+            let held = match origin {
+                Some(RunOrigin::Hold { gesture }) => slot.gesture == gesture,
+                Some(_) => false,
+                None => slot.run == Some(run),
+            };
+            if held && matches!(phase, Phase::Failed | Phase::Interrupted) {
+                self.voice.recovery = None;
+            } else if held {
+                slot.run = Some(run);
+            }
+        }
         if !applied.visible {
             return;
         }
@@ -218,6 +238,10 @@ impl Presence {
     fn voice_notice(&mut self, text: Text, cx: &mut Context<'_, Self>) {
         tracing::debug!(stage = ?FailureStage::Notice, reason = ?text, "held speech input notice");
         self.voice.status = Some(text);
+        // A microphone that may still be open matters more than the lost brain's notice.
+        if text == Text::HoldUnavailable {
+            self.voice.lost = None;
+        }
         // Every change to the pending hold ends in a notice, so the chord follows its keys here.
         if self.voice_held() {
             let native = &self.native;
@@ -646,6 +670,8 @@ impl Presence {
                 gesture,
                 generation,
             } => {
+                // A new attempt says how it went, accepted or refused.
+                self.voice.lost = None;
                 self.recognize_voice(gesture, generation, stamp, qpc, pointer, cx);
             }
             Intent::End { gesture, cancelled } => {
@@ -671,6 +697,7 @@ impl Presence {
                 }
             }
             Intent::Unavailable => {
+                self.voice.lost = None;
                 tracing::warn!(stage = ?FailureStage::Input, reason = ?FailureReason::GestureUnavailable, "held speech input failed");
                 self.voice_notice(Text::HoldFailed, cx);
             }
@@ -800,11 +827,11 @@ impl Presence {
             self.voice.recovery = Some(Recovery {
                 session: stamp.session,
                 gesture,
+                run: None,
                 target: stamp.target,
                 picture: screen,
                 words: None,
             });
-            self.voice.lost = None;
             self.voice.pending = Some(Hold {
                 token,
                 stamp,
