@@ -87,7 +87,7 @@ impl Drawing {
         }
     }
 
-    /// A held call whose scene left gets its result: nothing of it was refused.
+    /// A held call whose scene left gets its result, a refusal already received included.
     pub(super) fn release_left(&mut self, out: &mut Output) {
         for at in 0..self.calls.len() {
             let call = &self.calls[at];
