@@ -439,8 +439,14 @@ mod tests {
         for turn in &turns {
             assert!(path.sample(*turn), "{turn:?}");
         }
-        assert!(path.points().len() <= THINNED, "the second fill was thinned");
-        assert!(path.points().ends_with(&turns), "no turn of the second fill went");
+        assert!(
+            path.points().len() <= THINNED,
+            "the second fill was thinned"
+        );
+        assert!(
+            path.points().ends_with(&turns),
+            "no turn of the second fill went"
+        );
         assert_eq!(path.path.tolerance.to_bits(), 1.0_f64.to_bits());
     }
 
