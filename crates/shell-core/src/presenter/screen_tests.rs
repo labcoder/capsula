@@ -90,11 +90,16 @@ fn set(log: &RefCell<Log>) {
 }
 
 fn screen_header() -> SceneHeader {
+    header_of(DISPLAY)
+}
+
+/// The header of a screen scene whose picture was taken of `display`.
+fn header_of(display: ScreenDisplay) -> SceneHeader {
     let source = br#"{"begin":{"scene":"marks","surface":"screen","alt":""}}"#;
     let Ok(Record::Begin(mut begin)) = parse_screen_draw_record(source) else {
         panic!("a screen begin record");
     };
-    screen::stamp(&mut begin, [1280, 720], DISPLAY).expect("stamped");
+    screen::stamp(&mut begin, [1280, 720], display).expect("stamped");
     SceneHeader {
         begin,
         layout_version: super::super::LAYOUT_VERSION,
@@ -114,6 +119,14 @@ fn begin_frame(scene: SceneId) -> DataToShell {
     DataToShell::SceneBegin {
         scene,
         header: screen_header(),
+    }
+}
+
+/// A screen scene begins whose picture is of the display beside the overlay's.
+fn begin_elsewhere(scene: SceneId) -> DataToShell {
+    DataToShell::SceneBegin {
+        scene,
+        header: header_of(ELSEWHERE),
     }
 }
 
@@ -1237,6 +1250,57 @@ fn a_first_mark_whose_view_cannot_be_placed_is_skipped_once_and_shows_nothing() 
     let effects = arrive(&mut presenter, mark_frame(RUN, MARKS), now).expect("held");
     assert_eq!(controls(&effects), [&skipped(MARKS)]);
     assert_eq!(presenter.marks_skipped(), Some(RUN));
+    assert_eq!(counts(&log), (1, 1));
+    let effects = presenter.completed(admission.run(), now).expect("admitted");
+    assert!(controls(&effects).is_empty());
+    assert_eq!(scene_ids(&presenter), [LIVE]);
+}
+
+#[test]
+fn an_unplaceable_first_mark_is_skipped_while_the_marks_that_were_up_are_cleared() {
+    // The older scene is up; the next one's picture is of the display beside the overlay's.
+    let (mut presenter, now, log, _) = shown();
+    let effects = data(&mut presenter, begin_elsewhere(SECOND), now).expect("a screen scene");
+    assert!(controls(&effects).is_empty());
+    let mut effects = Vec::new();
+    let lines = logged(|| {
+        effects = commit_as(&mut presenter, RUN, SECOND, 0, mark(), now).expect("a first mark");
+    });
+    // The brain hears a skip for the scene that never showed, and a clear only for the other.
+    assert_eq!(controls(&effects), [&skipped(SECOND), &cleared(&[MARKS])]);
+    assert_eq!(
+        lines
+            .matches("screen marks skipped reason=\"display\"")
+            .count(),
+        1
+    );
+    assert_eq!(
+        lines
+            .matches("screen marks cleared reason=\"display\"")
+            .count(),
+        1
+    );
+    assert_eq!(lines.matches("screen marks").count(), 2);
+    assert_eq!(counts(&log), (1, 1));
+    nothing_shows(&mut presenter, now);
+
+    // The same while the scene's begin is still held behind another scene's admission.
+    let (mut presenter, now, log, _) = shown();
+    begin(&mut presenter, LIVE, now);
+    let frame = DataToShell::SceneStepCommit {
+        run: RUN,
+        scene: LIVE,
+        index: 0,
+        step: rect("a"),
+    };
+    let admission = only_admission(arrive(&mut presenter, frame, now).expect("a step"));
+    assert!(
+        arrive(&mut presenter, begin_elsewhere(SECOND), now)
+            .expect("held")
+            .is_empty()
+    );
+    let effects = arrive(&mut presenter, mark_frame(RUN, SECOND), now).expect("held");
+    assert_eq!(controls(&effects), [&skipped(SECOND), &cleared(&[MARKS])]);
     assert_eq!(counts(&log), (1, 1));
     let effects = presenter.completed(admission.run(), now).expect("admitted");
     assert!(controls(&effects).is_empty());

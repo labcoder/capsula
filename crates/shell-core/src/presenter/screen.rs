@@ -221,7 +221,8 @@ impl Presenter {
     /// Judges a screen scene's first mark as its frame arrives, in the pipe's order, so a
     /// change counts even while the scene's frames wait to be applied. A skipped scene goes
     /// whole: it never installs a step or paints, a begin still held never installs, and the
-    /// brain hears `SceneSkipped`. A scene whose view can't be placed is skipped as well.
+    /// brain hears `SceneSkipped`. A scene whose view can't be placed is skipped as well, and
+    /// the marks that were up are cleared under the word `display`.
     pub(super) fn judge(
         &mut self,
         frame: &DataToShell,
@@ -249,9 +250,10 @@ impl Presenter {
         if self.cleared.contains(&scene) || self.watch.shows(scene) {
             return Ok(());
         }
-        if !placed {
-            self.unplaced(now, out)?;
-        }
+        // A scene that can't be placed counts as a changed screen. The marks that were up go
+        // only once its own skip is settled: cleared first, it would be remembered as cleared
+        // and the brain would hear no `SceneSkipped` for it.
+        let unplaced = !placed && self.watch.changed();
         let displaced = self.watch.shown().is_some();
         if self.watch.marked(scene, run) {
             if displaced {
@@ -271,6 +273,9 @@ impl Presenter {
             }
             self.retire(scene, out);
             self.forget_skipped(scene, out);
+        }
+        if unplaced {
+            self.clear_screens("display", now, out)?;
         }
         self.drain(now, out)
     }
