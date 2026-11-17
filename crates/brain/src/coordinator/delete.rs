@@ -9,7 +9,7 @@ use kumochi_protocol::message::{
     Content, ControlToShell, DataToShell, Deleted, MAX_PENDING_DELETES, RunId, SceneId, ThreadId,
 };
 
-use super::{Coordinator, Effect, Input, Notify, Stale, StoreOp};
+use super::{Coordinator, Effect, Ending, Input, Notify, Stale, StoreOp};
 use crate::store::{Interruption, RunEnd};
 
 /// Deletes in flight before another is refused: those that outlived earlier connections, whose
@@ -255,7 +255,6 @@ impl Coordinator {
             self.current.as_ref().is_none_or(|run| run.thread != thread),
             "a turn naming a thread being deleted is refused"
         );
-        self.ending.retain(|run| run.thread != thread);
         let removed: Vec<SceneId> = self
             .scenes
             .iter()
@@ -274,6 +273,15 @@ impl Coordinator {
             });
             effects.push(Effect::Data(DataToShell::ScenesRemoved { scenes: removed }));
         }
+        self.ending.retain(|run| {
+            if run.thread != thread {
+                return true;
+            }
+            if run.ending.as_ref().is_some_and(Ending::data_end_unissued) {
+                effects.push(Effect::Data(DataToShell::RunEnd { run: run.id }));
+            }
+            false
+        });
         Ok(())
     }
 }

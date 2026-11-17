@@ -162,6 +162,9 @@ order, while a hide or removal discards them and retires the canonical scenes. A
 `RunEnd` travels with its last held run-bearing frame, after that frame on replay or alone
 when deletion discards the payload. Revoking that frame transfers the end to the last
 remaining frame of its run, or emits it when no run-bearing payload remains.
+Successful deletion fences future drawing work, then discharges any live-session end still
+owned by a removed run without waiting for preparation, storage or speech to go quiet. That
+discard boundary does not report a durable Done phase.
 The end uses no additional slot in the existing 64-frame bound; overflow still breaks the
 connection. Durable outcome storage, run release and send-lease settlement do not wait for
 this data-end delivery, so they cannot deadlock a delete waiting on a lease. Connection loss

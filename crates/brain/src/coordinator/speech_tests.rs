@@ -521,33 +521,57 @@ fn an_abandoned_run_stores_no_heard_point_and_ignores_late_reports() {
 
 #[test]
 fn a_deleted_runs_late_reports_store_no_heard_point() {
-    let mut core = draining();
-    core.handle(Input::Stop {
-        run: R,
-        revealed: Vec::new(),
-    })
-    .expect("current");
-    core.handle(Input::Delete {
-        thread: T,
-        after_turns: 1,
-        resend: false,
-    })
-    .expect("asked");
-    assert_eq!(
-        core.handle(Input::Deleted {
+    for (failed, stored, lost) in [
+        (false, false, false),
+        (false, true, false),
+        (true, false, false),
+        (false, false, true),
+    ] {
+        let mut core = draining();
+        core.handle(Input::Stop {
+            run: R,
+            revealed: Vec::new(),
+        })
+        .expect("current");
+        if failed {
+            core.handle(Input::StoreFailed { run: R })
+                .expect("quieting outcome failed");
+        }
+        if stored {
+            core.handle(Input::RunStored { run: R })
+                .expect("stored while still quieting");
+        }
+        if lost {
+            core.handle(Input::ShellLost).expect("lost while quieting");
+        }
+        assert_eq!(core.ending_runs(), 1);
+        core.handle(Input::Delete {
             thread: T,
-            outcome: kumochi_protocol::message::Deleted::Removed,
-            last_run: None,
-        }),
-        Ok(vec![Effect::Control(ControlToShell::ThreadDeleted {
+            after_turns: 1,
+            resend: false,
+        })
+        .expect("asked");
+        let mut expected = vec![Effect::Control(ControlToShell::ThreadDeleted {
             thread: T,
             outcome: kumochi_protocol::message::Deleted::Removed,
             last_run: Some(R),
-        })])
-    );
-    assert_eq!(core.handle(stopped(CUT)), Err(Stale));
-    assert_eq!(core.handle(Input::RunStored { run: R }), Err(Stale));
-    assert_eq!(core.ending_runs(), 0);
+        })];
+        if !lost {
+            expected.push(run_end(R));
+        }
+        assert_eq!(
+            core.handle(Input::Deleted {
+                thread: T,
+                outcome: kumochi_protocol::message::Deleted::Removed,
+                last_run: None,
+            }),
+            Ok(expected)
+        );
+        assert_eq!(core.handle(stopped(CUT)), Err(Stale));
+        assert_eq!(core.handle(Input::RunStored { run: R }), Err(Stale));
+        assert_eq!(core.handle(Input::StoreFailed { run: R }), Err(Stale));
+        assert_eq!(core.ending_runs(), 0);
+    }
 }
 
 #[test]

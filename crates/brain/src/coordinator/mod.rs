@@ -656,6 +656,15 @@ struct Ending {
     drew_nothing: bool,
 }
 
+impl Ending {
+    fn data_end_unissued(&self) -> bool {
+        self.notify == Notify::Shell
+            && (self.deferred_data
+                || self.quieting
+                || (self.outcome == RunEnd::Done && !self.failed))
+    }
+}
+
 impl Run {
     /// Steps sent to the store; the ones waiting for the scene's id aren't.
     fn sent(&self) -> u32 {
