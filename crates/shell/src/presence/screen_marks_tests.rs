@@ -28,6 +28,7 @@ use super::tests::{after, listen, native, until};
 use crate::input::{Edge, Event, Key, TalkHeld};
 use crate::link::{LinkEvent, LinkState};
 use crate::platform::input::{Button, input};
+use crate::platform::{Deliver, PresenceEvent};
 use crate::presence::kumo::{Motion, v2};
 use crate::presence::pulling::{Grab, PullSpace};
 use crate::strings::Text;
@@ -59,11 +60,14 @@ enum Told {
 }
 
 type Log = Rc<RefCell<Vec<Told>>>;
+/// The bit the sources were last started with.
+type Bit = Rc<RefCell<Option<Changed>>>;
 
 /// Sources the test scripts. Each start and stop is logged after every control message
 /// already written, so the log is one sequence in the order things happened.
 struct Scripted {
     log: Log,
+    bit: Bit,
     controls: async_channel::Receiver<ControlToBrain>,
     starts: bool,
 }
@@ -77,8 +81,9 @@ impl Scripted {
 }
 
 impl Sources for Scripted {
-    fn start(&mut self, _changed: Changed, held: TalkHeld) -> bool {
+    fn start(&mut self, changed: Changed, held: TalkHeld) -> bool {
         self.tell(Told::Start(held.control, held.alt));
+        self.bit.replace(Some(changed));
         self.starts
     }
 
@@ -90,6 +95,7 @@ impl Sources for Scripted {
 struct Watching {
     ready: Ready,
     log: Log,
+    bit: Bit,
 }
 
 /// A connected presence whose presenter mirrors scenes and has scripted sources, which start
@@ -102,6 +108,7 @@ fn watch(starts: bool, cx: &mut TestAppContext) -> Watching {
     let watching = bare(cx);
     let sources = Scripted {
         log: Rc::clone(&watching.log),
+        bit: Rc::clone(&watching.bit),
         controls: watching.ready.controls.clone(),
         starts,
     };
@@ -122,8 +129,8 @@ fn bare(cx: &mut TestAppContext) -> Watching {
             .described(1, &Bounded::default(), Instant::now())
             .expect("empty membership");
     });
-    let log = Log::default();
-    Watching { ready, log }
+    let (log, bit) = (Log::default(), Bit::default());
+    Watching { ready, log, bit }
 }
 
 /// Everything told since the last read, in order.
@@ -831,12 +838,10 @@ fn the_hotkey_s_esc_takes_a_pending_hold_s_marks_and_cancels_it(cx: &mut TestApp
     ended(&watching, cx);
 }
 
-#[gpui::test]
-fn esc_through_the_hotkey_s_reducer_takes_a_pending_hold_s_marks_and_cancels_it(
-    cx: &mut TestAppContext,
-) {
-    // The hold is made, let go and escaped through the native callback, so its reducer still
-    // names the hold when Esc comes and ends it before the press reaches the owner.
+/// Hold 1 was made and let go through the native callback, so the callback's reducer still
+/// names it, and its first mark overtook its run's `Answering`: the marks are up while the
+/// hold is pending.
+fn natively_marked(cx: &mut TestAppContext) -> (Watching, Deliver, Instant) {
     let watching = watch(true, cx);
     let owner = watching.ready.owner.clone();
     let deliver = native(&owner, cx);
@@ -859,21 +864,68 @@ fn esc_through_the_hotkey_s_reducer_takes_a_pending_hold_s_marks_and_cancels_it(
         assert!(owner.voice_working(), "the hold is still pending");
         assert!(owner.text_open());
     });
+    (watching, deliver, at)
+}
 
-    let (key, edge) = (Key::Other(1), Edge::Down);
-    deliver(Event::Key { key, edge }, after(at, 2000));
-    deliver(Event::Escape, after(at, 2000));
-    cx.run_until_parked();
-    // The reducer's own cancel ends the hold first, and the press then takes the marks.
-    let [stop, clear] = gone();
-    assert_eq!(told(&watching), [cancel(), cancel(), stop, clear]);
-    ended(&watching, cx);
-    // The press does nothing more: the panel stays open and the answer stays in it.
-    owner.read_with(cx, |owner, _| {
+/// The press took the marks and cancelled the hold, and did nothing more: the panel stays
+/// open and the answer stays in it.
+fn only_taken(watching: &Watching, cx: &mut TestAppContext) {
+    ended(watching, cx);
+    watching.ready.owner.read_with(cx, |owner, _| {
         assert_eq!(owner.presenter.marks_shown(), None);
         assert!(owner.text_open());
         assert_eq!(owner.runs.shown().map(|shown| shown.run), Some(RunId(RUN)));
     });
+}
+
+#[gpui::test]
+fn esc_through_the_hotkey_s_reducer_takes_a_pending_hold_s_marks_and_cancels_it(
+    cx: &mut TestAppContext,
+) {
+    // Kumochi is in front, so the sources don't count the key: the reducer's own cancel ends
+    // the hold first, and the press then takes the marks.
+    let (watching, deliver, at) = natively_marked(cx);
+    let (key, edge) = (Key::Other(1), Edge::Down);
+    deliver(Event::Key { key, edge }, after(at, 2000));
+    deliver(Event::Escape, after(at, 2000));
+    cx.run_until_parked();
+    let [stop, clear] = gone();
+    assert_eq!(told(&watching), [cancel(), cancel(), stop, clear]);
+    only_taken(&watching, cx);
+}
+
+#[gpui::test]
+fn esc_in_another_app_takes_a_pending_hold_s_marks_and_cancels_it(cx: &mut TestAppContext) {
+    // Another app is in front, so the sources count the key as well. Their wake is handled
+    // before the hotkey's press or after it, and the marks go once either way.
+    for woke_first in [true, false] {
+        let (watching, deliver, at) = natively_marked(cx);
+        let wake = |cx: &mut TestAppContext| {
+            watching.ready.owner.update(cx, |owner, cx| {
+                owner.on_event(PresenceEvent::ScreenWoke, cx).expect("a wake");
+            });
+        };
+        let (key, edge) = (Key::Other(1), Edge::Down);
+        deliver(Event::Key { key, edge }, after(at, 2000));
+        let heard = watching.bit.borrow().as_ref().expect("started sources").set();
+        assert!(heard, "the key is the first change since the release");
+        if woke_first {
+            wake(cx);
+        }
+        deliver(Event::Escape, after(at, 2000));
+        cx.run_until_parked();
+        if !woke_first {
+            wake(cx);
+        }
+        let [stop, clear] = gone();
+        let expected = if woke_first {
+            [cancel(), stop, clear, cancel()]
+        } else {
+            [cancel(), cancel(), stop, clear]
+        };
+        assert_eq!(told(&watching), expected);
+        only_taken(&watching, cx);
+    }
 }
 
 #[gpui::test]
