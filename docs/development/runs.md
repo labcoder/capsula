@@ -164,7 +164,8 @@ when deletion discards the payload. Revoking that frame transfers the end to the
 remaining frame of its run, or emits it when no run-bearing payload remains.
 The end uses no additional slot in the existing 64-frame bound; overflow still breaks the
 connection. Durable outcome storage, run release and send-lease settlement do not wait for
-this data-end delivery, so they cannot deadlock a delete waiting on a lease. Reconnect
+this data-end delivery, so they cannot deadlock a delete waiting on a lease. Connection loss
+retires owed ends immediately without dropping held payload or canonical scenes. Reconnect
 waits for pending writes and clear debt before freezing checked descriptors and whole-event
 chunks. A scene whose producer-built descriptor or chunks fail validation or frame encoding
 is omitted whole and cleared durably before the remaining scenes are described. Any transition
@@ -343,7 +344,9 @@ input checks the run again.
   ordered with each other, so a terminal `RunState` on control says nothing about what has
   arrived on data; the shell keeps reading the run's data until its `RunEnd`. Drawing frames
   held for deletion obey the same boundary for Done, interruption, failed storage and quieting
-  completion. Recovery descriptors supersede both old-session held frames and their owed ends.
+  completion. Scene-wide control such as `SceneCutApplied` is independent of run output and
+  may follow `RunEnd`. Connection loss retires old-session owed ends before further replay,
+  discard or rehome; recovery descriptors later supersede the held payload.
 - `RunState Done` means the run's text, steps and outcome are committed.
 - Every other terminal `RunState` comes at once, whatever the store is doing, so `Stop`'s
   answer never waits on an fsync or a long write. It's the shell's to show, not a promise that

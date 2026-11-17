@@ -288,7 +288,8 @@ flowchart LR
   `RunEnd` per run still ending. Drawing frames held for a pending thread delete have their
   own 64-slot bound; a run's owed end attaches to its last held run-bearing frame without
   taking another slot, and can outlive its stored outcome. Replaying or discarding that
-  payload settles the end; revocation preserves it and recovery retires old-session debt.
+  payload settles the end; revocation preserves it and connection loss retires old-session
+  debt before a new connection can receive delete replies, even before recovery description.
   That bound excludes typed turns not yet taken: up to 64
   `TextSubmit`s of up to 256 KiB each wait ahead of the core, and one more ends the connection
   as broken. Separately, at most four page requests may remain unanswered [guess], counting

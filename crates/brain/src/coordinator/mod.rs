@@ -948,6 +948,9 @@ impl Coordinator {
             Input::RunStored { run } => self.run_stored(run, &mut effects)?,
             Input::StoreFailed { run } => self.store_failed(run, &mut effects)?,
             Input::ShellLost => {
+                for (_, _, end) in &mut self.drawing_held {
+                    *end = None;
+                }
                 for run in &mut self.ending {
                     if let Some(ending) = &mut run.ending {
                         ending.notify = Notify::Nobody;
@@ -1502,7 +1505,7 @@ impl Coordinator {
     }
 
     /// Tells the shell a run ended: its terminal phase on the control pipe, and the end of its
-    /// data on the data pipe, after every frame it was sent.
+    /// produced data on the data pipe, after its run-bearing drawing frames.
     fn told(&mut self, run: &Run, phase: Phase, effects: &mut Vec<Effect>) {
         effects.push(run_state(run, phase));
         self.data_end(run.id, run.thread, effects);

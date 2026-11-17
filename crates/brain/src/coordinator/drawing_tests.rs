@@ -892,6 +892,76 @@ fn revoking_deletion_held_payload_keeps_its_owed_data_end() {
 }
 
 #[test]
+fn revoking_the_last_scene_rehomes_its_end_to_a_surviving_scene() {
+    let scratch = Scratch::new("drawing-revoke-survivor");
+    let mut store = open(&scratch);
+    let mut core = started();
+    for (call, scene) in [("first", "one"), ("second", "two")] {
+        let batch = draw_named(&mut core, call, scene);
+        let effects = settle(&mut core, &mut store, batch);
+        for effect in effects {
+            if let Effect::Data(
+                frame @ (DataToShell::SceneBegin { .. }
+                | DataToShell::SceneStepCommit { .. }
+                | DataToShell::SceneEnd { .. }),
+            ) = effect
+            {
+                core.drawing_held.push((T, frame, None));
+            }
+        }
+    }
+    let snapshot = core.drawing_snapshot().expect("two committed scenes");
+    assert_eq!(snapshot.scenes.len(), 2);
+    let survivor = snapshot.scenes[0].clone();
+    let revoked = snapshot.scenes[1].scene;
+    let mut effects = core
+        .handle(Input::Delete {
+            thread: T,
+            after_turns: 0,
+            resend: false,
+        })
+        .expect("accepted delete");
+    assert!(!effects.iter().any(|effect| *effect == super::run_end(R)));
+    core.drawing_clear(vec![revoked], &mut effects);
+    assert!(!effects.iter().any(|effect| *effect == super::run_end(R)));
+    effects.extend(
+        core.handle(Input::ScenesCleared {
+            scenes: vec![revoked],
+            ok: true,
+        })
+        .expect("clear stored"),
+    );
+    let answered = core
+        .handle(Input::Deleted {
+            thread: T,
+            outcome: kumochi_protocol::message::Deleted::NotHidden,
+            last_run: Some(R),
+        })
+        .expect("refused delete");
+    assert_eq!(answered.last(), Some(&super::run_end(R)));
+    assert_eq!(
+        answered
+            .iter()
+            .filter(|effect| **effect == super::run_end(R))
+            .count(),
+        1
+    );
+    assert_eq!(
+        answered.iter().filter(|effect| {
+            matches!(effect, Effect::Data(DataToShell::SceneStepCommit { scene, .. }) if *scene == survivor.scene)
+        }).count(),
+        2
+    );
+    assert!(!answered.iter().any(|effect| {
+        matches!(effect, Effect::Data(DataToShell::SceneBegin { scene, .. } | DataToShell::SceneStepCommit { scene, .. } | DataToShell::SceneEnd { scene, .. }) if *scene == revoked)
+    }));
+    let recovered = core.drawing_snapshot().expect("survivor recovered");
+    assert_eq!(recovered.scenes.len(), 1);
+    assert_eq!(recovered.scenes[0], survivor);
+    assert!(core.drawing_held.is_empty());
+}
+
+#[test]
 fn held_frame_capacity_does_not_charge_or_drop_the_owed_end() {
     let (mut core, mut effects) = deletion_before_ack(started());
     let scene = core.drawing_snapshot().expect("committed scene").scenes[0].scene;
@@ -982,6 +1052,49 @@ fn lost_session_discards_deletion_held_end_with_its_recovery_frames() {
         core.drawing_snapshot().expect("recovered scene").scenes,
         snapshot.scenes
     );
+}
+
+fn deletion_before_description(outcome: kumochi_protocol::message::Deleted) {
+    let (mut core, _) = deletion_before_ack(started());
+    let snapshot = core.drawing_snapshot().expect("committed scene");
+    assert_eq!(core.ending_runs(), 1);
+    let lost = core.handle(Input::ShellLost).expect("lost shell");
+    assert!(!lost.iter().any(|effect| *effect == super::run_end(R)));
+    core.begin_session();
+    let answered = core
+        .handle(Input::Deleted {
+            thread: T,
+            outcome,
+            last_run: Some(R),
+        })
+        .expect("delete before description");
+    assert!(
+        !answered.iter().any(|effect| *effect == super::run_end(R)),
+        "the old session's end has no delivery authority"
+    );
+    let recovered = core.drawing_snapshot().expect("canonical recovery").scenes;
+    if outcome == kumochi_protocol::message::Deleted::NotHidden {
+        assert_eq!(recovered, snapshot.scenes);
+        let stored = core
+            .handle(Input::RunStored { run: R })
+            .expect("old outcome stored");
+        assert!(!stored.iter().any(|effect| *effect == super::run_end(R)));
+    } else {
+        assert!(recovered.is_empty());
+        assert_eq!(core.handle(Input::RunStored { run: R }), Err(super::Stale));
+    }
+    core.drawing_described();
+    assert!(core.drawing_held.is_empty());
+}
+
+#[test]
+fn a_refused_delete_before_description_cannot_deliver_the_lost_sessions_end() {
+    deletion_before_description(kumochi_protocol::message::Deleted::NotHidden);
+}
+
+#[test]
+fn a_hidden_delete_before_description_cannot_deliver_the_lost_sessions_end() {
+    deletion_before_description(kumochi_protocol::message::Deleted::Hidden);
 }
 
 #[test]
