@@ -1032,6 +1032,19 @@ pub enum DataToShell {
         /// The authoritative full review, carried only on data.
         card: IssueCard,
     },
+    /// A held recognition's words once decoded, at most [`MAX_TRANSCRIPT_BYTES`], so the shell
+    /// can give them back as a draft if the brain is lost before their turn is stored.
+    HoldWords {
+        /// The hold.
+        gesture: GestureId,
+        /// The words.
+        words: Content,
+    },
+    /// The held recognition's turn is stored, so the shell drops its copy of the words.
+    HoldStored {
+        /// The hold.
+        gesture: GestureId,
+    },
 }
 
 #[cfg(test)]

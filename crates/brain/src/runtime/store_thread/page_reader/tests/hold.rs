@@ -157,7 +157,11 @@ fn recognition_reads_choice_and_live_generation_after_the_prior_write_barrier() 
         }
     }
     let effects = core.handle(running.ack()).unwrap();
-    let [Effect::Store(StoreOp::BuildContext(build))] = effects.as_slice() else {
+    let [
+        Effect::HoldStored(_),
+        Effect::Store(StoreOp::BuildContext(build)),
+    ] = effects.as_slice()
+    else {
         panic!("build")
     };
     assert!(!build.first);

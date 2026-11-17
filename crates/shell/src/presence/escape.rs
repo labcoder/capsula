@@ -29,6 +29,7 @@ impl Presence {
         reason = "one Esc press keeps its local decision and every effect of it in order"
     )]
     pub(super) fn escape(&mut self, cx: &mut Context<'_, Self>) -> Result<(), OpenError> {
+        self.voice.recovery = None;
         if self.voice_working() {
             self.cancel_voice(cx);
             return Ok(());

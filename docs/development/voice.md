@@ -927,6 +927,40 @@ have room. A closed gate ends that hold once as Busy without storing words or
 starting a provider. PCM ingress, control processing and credit remain live;
 there is no second queue of recognized words waiting for capacity.
 
+### Held words after a lost brain
+
+Recognized words exist only in the brain until their turn is stored, so a brain lost in
+between would lose them. The shell keeps a copy until the brain says the turn is stored, and
+puts it back as a draft if the brain is lost first.
+
+```mermaid
+sequenceDiagram
+    participant S as Shell
+    participant B as Brain
+    participant D as Store
+    B->>S: HoldWords (data, at most 16 KiB)
+    B->>D: BeginTurn
+    B->>S: RunState Thinking (control)
+    D-->>B: TurnStored
+    B->>S: HoldStored (data, same FIFO)
+    Note over S: the copy is dropped here and nowhere else on success
+```
+
+- **The brain** sends `HoldWords` in the pass that takes the decoded text, before the words
+  wait for a picture. Words over `MAX_TRANSCRIPT_BYTES` (16 KiB) aren't sent and the hold goes
+  on as before. The coordinator turns `TurnStored` for a held run into a receipt that names
+  the hold's key, and the runtime sends `HoldStored` only when that key's connection epoch is
+  the live one. `StoreFailed` and Thinking never send it.
+- **The shell** keeps one slot (`presence/voice.rs`): the session, gesture, target, whether
+  the hold asked for a picture, and the words. See [Presence](presence.md#held-words-after-a-lost-brain).
+- Nothing is resubmitted. The words wait in the composer. The copy's lifetime is bounded by
+  events, not time, and a failed or interrupted held run drops it.
+
+Two limits are known. A brain lost before `HoldWords` reaches the shell still loses the words.
+Between the store's commit and the receipt reaching the shell, the words can be both stored
+and given back with a "Not sent" notice. No hold identity goes into the store, so the shell
+can't tell those apart.
+
 The STT owner publishes serving-ready before Loaded in the same mutex-protected
 transition, after checking the current ask and shutdown. The serving loop retains
 its worker-loss check before decoding. A prepared
