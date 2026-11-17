@@ -103,7 +103,9 @@ compares two different builds of those crates, so build both sides with the same
 CI runs two jobs side by side. `lint` runs fmt, cargo-deny for dependency or CI configuration
 changes and on every scheduled or manual run, `check-vendor`, `check-core`, clippy on the core
 alone without test support, and clippy on the workspace. `test` runs the workspace tests and the
-vsync test. Each job restores its own cache, and only runs on main save one.
+vsync test. Each job restores its own cache, and only runs on main save one. The test job points
+`TEMP` and `TMP` at the runner's work disk: the tests' scratch stores make many durable writes,
+and the profile's temp folder on C: takes them seven to ten times slower.
 
 ## The brain is a game loop
 
