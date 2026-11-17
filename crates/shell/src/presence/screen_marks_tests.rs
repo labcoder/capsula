@@ -24,7 +24,7 @@ use super::super::screen_hold_tests::{
 };
 use super::super::voice_wiring_tests::status;
 use super::Source;
-use super::tests::{after, listen, native};
+use super::tests::{after, listen, native, until};
 use crate::input::{Edge, Event, Key, TalkHeld};
 use crate::link::{LinkEvent, LinkState};
 use crate::platform::input::{Button, input};
@@ -671,27 +671,37 @@ fn marks_up(cx: &mut TestAppContext) -> Watching {
 )]
 fn marked(answering: bool, cx: &mut TestAppContext) -> Watching {
     let watching = released(true, cx);
+    mark_up(&watching, answering, cx);
+    watching
+}
+
+/// The released hold 1's run is named and its first mark comes, after its `Answering` or
+/// before it.
+#[expect(
+    clippy::fn_params_excessive_bools,
+    reason = "whether the run's Answering state came before the mark"
+)]
+fn mark_up(watching: &Watching, answering: bool, cx: &mut TestAppContext) {
     let hidden = detached(&watching.ready, cx);
     watching.ready.owner.update(cx, |owner, _| {
         owner.overlay = Visibility::Hidden(hidden);
     });
-    state(&watching, RUN, Phase::Thinking, HOLD, cx);
+    state(watching, RUN, Phase::Thinking, HOLD, cx);
     if answering {
-        state(&watching, RUN, Phase::Answering, None, cx);
+        state(watching, RUN, Phase::Answering, None, cx);
     }
-    text(&watching, RUN, cx);
-    mark(&watching, MARKS, RUN, DISPLAY, cx);
+    text(watching, RUN, cx);
+    mark(watching, MARKS, RUN, DISPLAY, cx);
     cx.run_until_parked();
     let (run, scene, index) = (RunId(RUN), MARKS, 0);
     assert_eq!(
-        told(&watching),
+        told(watching),
         [
             Told::Sent(ControlToBrain::StepReady { run, scene, index }),
             Told::Sent(ControlToBrain::StepShown { run, scene, index }),
         ],
         "the marks are up and the sources listen"
     );
-    watching
 }
 
 /// What one press of Esc tells while a running answer's marks are up: the sources stop, the
@@ -802,7 +812,7 @@ fn ended(watching: &Watching, cx: &mut TestAppContext) {
     });
 }
 
-// The two tests below pin the hold's cancel as it is told today: twice for one press, once
+// The three tests below pin the hold's cancel as it is told today: twice for one press, once
 // where the hold's input is revoked and once from the runs' hold.
 
 #[gpui::test]
@@ -819,6 +829,51 @@ fn the_hotkey_s_esc_takes_a_pending_hold_s_marks_and_cancels_it(cx: &mut TestApp
     let [stop, clear] = gone();
     assert_eq!(told(&watching), [cancel(), stop, clear, cancel()]);
     ended(&watching, cx);
+}
+
+#[gpui::test]
+fn esc_through_the_hotkey_s_reducer_takes_a_pending_hold_s_marks_and_cancels_it(
+    cx: &mut TestAppContext,
+) {
+    // The hold is made, let go and escaped through the native callback, so its reducer still
+    // names the hold when Esc comes and ends it before the press reaches the owner.
+    let watching = watch(true, cx);
+    let owner = watching.ready.owner.clone();
+    let deliver = native(&owner, cx);
+    let at = Instant::now();
+    let finish = listen(&owner, &deliver, 1, at, cx);
+    for key in [Key::LeftAlt, Key::LeftControl] {
+        let edge = Edge::Up;
+        deliver(Event::Key { key, edge }, after(at, 900));
+    }
+    finish.send(()).expect("the fake microphone ends");
+    until(cx, |cx| {
+        owner.read_with(cx, |owner, _| {
+            let hold = owner.voice.pending.as_ref();
+            hold.is_some_and(|hold| matches!(hold.source, Source::Sent))
+        })
+    });
+    told(&watching);
+    mark_up(&watching, false, cx);
+    owner.read_with(cx, |owner, _| {
+        assert!(owner.voice_working(), "the hold is still pending");
+        assert!(owner.text_open());
+    });
+
+    let (key, edge) = (Key::Other(1), Edge::Down);
+    deliver(Event::Key { key, edge }, after(at, 2000));
+    deliver(Event::Escape, after(at, 2000));
+    cx.run_until_parked();
+    // The reducer's own cancel ends the hold first, and the press then takes the marks.
+    let [stop, clear] = gone();
+    assert_eq!(told(&watching), [cancel(), cancel(), stop, clear]);
+    ended(&watching, cx);
+    // The press does nothing more: the panel stays open and the answer stays in it.
+    owner.read_with(cx, |owner, _| {
+        assert_eq!(owner.presenter.marks_shown(), None);
+        assert!(owner.text_open());
+        assert_eq!(owner.runs.shown().map(|shown| shown.run), Some(RunId(RUN)));
+    });
 }
 
 #[gpui::test]
