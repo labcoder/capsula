@@ -766,7 +766,9 @@ flowchart LR
   not another kill path, and removal stays draining until matching physical confirmation.
   If the supervisor's retirement lane closes while a handle keeps the exit broadcast alive,
   speech input drains a queued matching exit or fails `ExitUnconfirmed`, retaining its ask.
-  A fatal unconfirmed exit publishes `Unavailable` before the owner ends. The installer keeps
+  A fatal unconfirmed exit publishes `Unavailable` before the owner ends. It is logged as an
+  error only while the handle is alive, because a quitting brain drops the handle before its
+  runtime ends the supervisor. The installer keeps
   its ask and model obligations, refuses further setup or removal, and Settings asks for a
   restart. This outcome is not a release receipt; late ordinary reports cannot revive it.
   The composed ownership tests use a private per-owner, test-only caller-poll cut in the actual

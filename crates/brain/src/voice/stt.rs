@@ -547,7 +547,12 @@ fn run(
         };
         let result = engine(&models, &mut serve);
         if result == Err(SpeechError::ExitUnconfirmed) {
-            tracing::error!("speech worker exit unconfirmed, so speech input stays unavailable");
+            // A dropped handle means the brain is quitting, and its runtime ends the supervisor.
+            if !control.update(|state| state.shutdown) {
+                tracing::error!(
+                    "speech worker exit unconfirmed, so speech input stays unavailable"
+                );
+            }
             let waiting = control.update(|state| {
                 state.ready = false;
                 state.shutdown = true;
