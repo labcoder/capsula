@@ -1311,9 +1311,10 @@ fn dropping_the_handle_tears_down_then_ends_the_thread() {
     assert_eq!(harness.events.recv_timeout(WAIT).ok(), Some(Event::Exited));
 }
 
-/// What the owner's thread logs when its load ends `ExitUnconfirmed`, with its handle dropped
-/// first when `quit`, as a quitting brain drops it before its runtime ends the supervisor.
-fn unconfirmed_exit_log(quit: bool) -> String {
+/// What the owner's thread logs when its load ends `ExitUnconfirmed`, after `keep` decides
+/// whether the handle outlives the failure: a quitting brain drops it before its runtime ends
+/// the supervisor.
+fn unconfirmed_exit_log(keep: fn(SttHandle) -> Option<SttHandle>) -> String {
     let captured = crate::test_support::Captured::default();
     let thread_log = captured.clone();
     let (reports, _observed) = Reports::new();
@@ -1333,7 +1334,7 @@ fn unconfirmed_exit_log(quit: bool) -> String {
     .expect("owner starts");
     handle.load(PathBuf::from("models"), 1);
     assert_eq!(start.recv_timeout(WAIT).expect("load starts"), Event::Lost);
-    let kept = (!quit).then_some(handle);
+    let kept = keep(handle);
     release.send(()).expect("fail load");
     assert_eq!(exit.recv_timeout(WAIT).expect("owner ended"), Event::Exited);
     drop(kept);
@@ -1342,14 +1343,14 @@ fn unconfirmed_exit_log(quit: bool) -> String {
 
 #[test]
 fn a_quit_logs_no_unconfirmed_speech_worker_exit() {
-    let log = unconfirmed_exit_log(true);
+    let log = unconfirmed_exit_log(|_| None);
     assert!(!log.contains("speech worker exit unconfirmed"), "{log}");
     assert!(!log.contains("ERROR"), "{log}");
 }
 
 #[test]
 fn an_unconfirmed_exit_while_the_brain_runs_is_logged_as_an_error() {
-    let log = unconfirmed_exit_log(false);
+    let log = unconfirmed_exit_log(Some);
     let line = log
         .lines()
         .find(|line| {
