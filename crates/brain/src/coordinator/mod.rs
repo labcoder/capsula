@@ -656,6 +656,15 @@ struct Ending {
     drew_nothing: bool,
 }
 
+impl Ending {
+    fn data_end_unissued(&self) -> bool {
+        self.notify == Notify::Shell
+            && (self.deferred_data
+                || self.quieting
+                || (self.outcome == RunEnd::Done && !self.failed))
+    }
+}
+
 impl Run {
     /// Steps sent to the store; the ones waiting for the scene's id aren't.
     fn sent(&self) -> u32 {
@@ -679,7 +688,7 @@ impl Run {
 )]
 pub struct Coordinator {
     drawing: crate::drawing::Drawing,
-    drawing_held: Vec<(ThreadId, DataToShell)>,
+    drawing_held: Vec<(ThreadId, DataToShell, Option<RunId>)>,
     /// Whether `draw` may mark the user's screen: [`crate::drawing::SCREEN_MARKS`].
     screen_marks: crate::drawing::ScreenMarks,
     /// Never deleted or renamed.
@@ -948,6 +957,9 @@ impl Coordinator {
             Input::RunStored { run } => self.run_stored(run, &mut effects)?,
             Input::StoreFailed { run } => self.store_failed(run, &mut effects)?,
             Input::ShellLost => {
+                for (_, _, end) in &mut self.drawing_held {
+                    *end = None;
+                }
                 for run in &mut self.ending {
                     if let Some(ending) = &mut run.ending {
                         ending.notify = Notify::Nobody;
@@ -1129,7 +1141,7 @@ impl Coordinator {
             } else {
                 terminal(ending.outcome)
             };
-            told(&done, phase, effects);
+            self.told(&done, phase, effects);
         }
         if let Some(Ending {
             outcome: RunEnd::Done,
@@ -1153,7 +1165,7 @@ impl Coordinator {
                     run: done.id,
                 }));
             }
-            told(&done, Phase::Done, effects);
+            self.told(&done, Phase::Done, effects);
         }
     }
 
@@ -1316,11 +1328,11 @@ impl Coordinator {
         }
         // A failed outcome was already told; any other ending now turns out failed. A quieting
         // one tells it once it's released.
-        if ending.notify == Notify::Shell
+        let tell_end = ending.notify == Notify::Shell
             && !ending.quieting
             && !ending.failed
-            && !matches!(ending.outcome, RunEnd::Failed(_))
-        {
+            && !matches!(ending.outcome, RunEnd::Failed(_));
+        if tell_end {
             effects.push(Effect::Control(ControlToShell::RunState {
                 run: id,
                 thread,
@@ -1328,11 +1340,12 @@ impl Coordinator {
                 error: None,
                 origin: None,
             }));
-            // Every ending but Done was already told, with its data's end.
-            if ending.outcome == RunEnd::Done {
-                effects.push(Effect::Data(DataToShell::RunEnd { run: id }));
-            }
         }
+        if tell_end && ending.outcome == RunEnd::Done {
+            self.data_end(id, thread, effects);
+        }
+        let ended = &mut self.ending[at];
+        let ending = ended.ending.as_mut().expect("an ending run has an Ending");
         if !ended.turn_stored || ending.written && ending.failed {
             // The turn never stored, so there's no row, or the failed(store) write failed too;
             // a run left active is marked failed(crash) at the next start. Its scene's clear or
@@ -1345,7 +1358,7 @@ impl Coordinator {
             let tell = ending.quieting && ending.notify == Notify::Shell;
             let gone = self.ending.swap_remove(at);
             if tell {
-                told(&gone, Phase::Failed, effects);
+                self.told(&gone, Phase::Failed, effects);
             }
             self.owe(clear, kept);
             return Ok(());
@@ -1429,7 +1442,7 @@ impl Coordinator {
             if deferred_data {
                 effects.push(run_state(&run, phase));
             } else {
-                told(&run, phase, effects);
+                self.told(&run, phase, effects);
             }
         }
         run.ending = Some(Ending {
@@ -1468,9 +1481,7 @@ impl Coordinator {
             return;
         };
         ending.written = true;
-        if std::mem::take(&mut ending.deferred_data) && ending.notify == Notify::Shell {
-            effects.push(Effect::Data(DataToShell::RunEnd { run }));
-        }
+        let tell_end = std::mem::take(&mut ending.deferred_data) && ending.notify == Notify::Shell;
         if let (Some(revealed), Some(scene)) = (&ending.revealed, scene)
             && !ending.trimmed
         {
@@ -1496,7 +1507,17 @@ impl Coordinator {
                 end: ending.outcome,
             }
         };
+        if tell_end {
+            self.data_end(run, thread, effects);
+        }
         effects.push(Effect::Store(op));
+    }
+
+    /// Tells the shell a run ended: its terminal phase on the control pipe, and the end of its
+    /// produced data on the data pipe, after its run-bearing drawing frames.
+    fn told(&mut self, run: &Run, phase: Phase, effects: &mut Vec<Effect>) {
+        effects.push(run_state(run, phase));
+        self.data_end(run.id, run.thread, effects);
     }
 
     fn current(&mut self, run: RunId) -> Result<&mut Run, Stale> {
@@ -1548,13 +1569,6 @@ fn run_state(run: &Run, phase: Phase) -> Effect {
         error: run.error.clone().filter(|_| phase == Phase::Failed),
         origin: None,
     })
-}
-
-/// Tells the shell a run ended: its terminal phase on the control pipe, and the end of its data on
-/// the data pipe, after every frame it was sent.
-fn told(run: &Run, phase: Phase, effects: &mut Vec<Effect>) {
-    effects.push(run_state(run, phase));
-    effects.push(Effect::Data(DataToShell::RunEnd { run: run.id }));
 }
 
 /// The text streamed since the last write, taken for the next one.

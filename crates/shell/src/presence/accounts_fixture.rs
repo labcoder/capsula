@@ -216,7 +216,7 @@ impl State {
 
 pub(crate) fn run(state: State, appearance: Option<Appearance>, delay: Duration) {
     gpui_kit::application()
-        .with_assets(gpui_kit::assets::Assets)
+        .with_assets(crate::assets::Assets)
         .run(move |cx| {
             gpui_kit::init(cx);
             crate::theme::init(cx);
