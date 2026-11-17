@@ -176,7 +176,8 @@ sequenceDiagram
 - **Deadline.** A lease that hasn't settled 15 s [guess] after its grant fails closed: its held
   deletes are refused with `NotHidden`, and so is any later delete of its sources; its run fails
   as `failed(engine)`; and nothing is granted again until the brain restarts. A late settlement
-  changes nothing. A delete is never released because time ran out.
+  settles only the picture its lease carried, and every fence stays. A delete is never released
+  because time ran out.
 - **Held sends.** A sender whose body can go out again until a process tree is confirmed ended
   (a Claude Code question, see [claude-code.md](claude-code.md#launches)) asks with
   `SendGate::ask_held(hold)`. Its lease's deadline is `hold`, capped at `MAX_HOLD` (165 s), in
@@ -347,8 +348,9 @@ movement and where it lies, in image pixels. Its changed display and too-large p
 own class lines. The lines live in `locales/en/brain.ftl` and carry no window details. If the image can't go (another route, or no user message left), the run fails with
 `ScreenUnavailable` rather than sending without it. What the hold carried goes in the run's row
 with its turn (store.md, `runs.screen`), and the shell hears it once as `HoldScreen`: an image
-when the first send carrying it is granted, anything else when the run's first request starts.
-An inline compaction's send carries only text, so its grant doesn't count. The row is written first on purpose: the first build starts only
+when a send carrying it settles after attempting a write ("The send lease"), anything else when
+the run's first request starts. An inline compaction's send carries only text, so it doesn't
+count. The row is written first on purpose: the first build starts only
 after `TurnStored`, so history can over-report a screen but never miss one that left the
 machine, and a failed turn write fails the run before anything is built. Turning screen holds off
 withdraws every run's window image, and turning show-screen off every run's screen picture,
