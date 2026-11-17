@@ -1,6 +1,8 @@
 //! The screen watch's Windows sources: what may have changed the screen since a hold's
-//! release. Each sets the watch's one bit and, the first time, wakes the UI. Which key it
-//! was, where the pointer was and which window came forward stay in this module.
+//! release. Each sets the watch's one bit and wakes the UI for it: at most once from this
+//! thread's half while the watch listens, and at most once from the mouse thread for each
+//! arm. Which key it was, where the pointer was and which window came forward stay in this
+//! module.
 //!
 //! Keys, the window in front, the session and the display are heard on the UI thread: by the
 //! proxy's keyboard and message arms, which call in here, and by one foreground hook. The mouse
@@ -42,7 +44,8 @@ struct Ui {
 }
 
 impl Ui {
-    /// Something may have changed the screen. The first time in a watch queues its one wake.
+    /// Something may have changed the screen. Setting the bit queues a wake, which happens
+    /// once while a watch listens: the presenter's read of a set bit stops the watch.
     fn change(&self) {
         if let Some((changed, events)) = &self.armed
             && changed.set()
