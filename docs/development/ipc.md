@@ -45,23 +45,26 @@ to 8. That was safe because nothing sent it then and the build-id handshake refu
 binaries.
 
 The appended `HoldScreen { gesture, outcome }` says what a screen hold carried into its turn,
-once: `Attached` for the window's image when the first send carrying it is granted, or, when its
+once: `Attached` for the window's image when a send carrying it settles after attempting a
+write, or, when its
 run's first request starts, `NotIncluded` with one of seven fixed classes, the last of them, `ModelCantSee`, appended for a hold whose
 thread is pinned to a model that can't be sent images. Nothing in it names a window. A history
 page carries the same value on the turn's user event as the appended
 `PageEventKind::HeldTurn { screen }` (tag 6), read from the run's stored `screen`
 ([store](store.md#tables)). The value is stored with the turn, before any request exists, and
-the brain clears a picture when its run ends before a send carrying it was granted
+the brain clears a picture when its run ends before any write of a request carrying it was
+attempted
 ([engines](engines.md#the-bound)). The shell shows a `HeldTurn`
 as a user turn with one thing under it. A turn whose picture is recorded (`Attached`, `Screen`)
 gets an icon whose tooltip and accessible label say which picture was sent and that the app
 keeps no copy. The icon is never missing from a turn whose picture left the machine. It
-over-reports only where the store does: a granted send that failed before its first byte was
-written, and a crash or a failed write before the clear. Any other turn gets one line saying why no
+over-reports only where the store does: a write that was attempted but may not have been
+accepted, a crash or a failed write before the clear, and a loaded row that a late clear reaches
+only when the thread is reopened. Any other turn gets one line saying why no
 picture was included. Neither names a model, because nothing records which model a held turn
 ran on. `HeldScreen::Withdrawn` (tag 2) is
 appended for history only: a turn whose image the user withdrew by turning screen holds off
-before any send carrying it was granted. No `HoldScreen` ever carries it, because that run fails
+before any send carrying it attempted a write. No `HoldScreen` ever carries it, because that run fails
 first.
 
 `SettingsOp::SetScreenHolds` is appended, and `SettingsView` gains `screen_holds` (on when a

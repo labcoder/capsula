@@ -1205,6 +1205,20 @@ impl Brain {
                         link = None;
                     }
                 }
+                Effect::HoldScreen { hold, outcome } => {
+                    if hold.epoch == self.epoch
+                        && let Some(shell) = link.as_deref_mut()
+                        && shell
+                            .control(&ControlToShell::HoldScreen {
+                                gesture: hold.gesture,
+                                outcome,
+                            })
+                            .is_err()
+                    {
+                        full = true;
+                        link = None;
+                    }
+                }
                 Effect::Page { key, reply } => {
                     if let Some(shell) = link.as_deref_mut() {
                         let frame = frame::encode(&reply, Pipe::Data).map_err(|_| Full);

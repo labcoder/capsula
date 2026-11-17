@@ -489,6 +489,35 @@ fn the_watch_ends_once_both_endings_of_the_hold_s_run_are_in(cx: &mut TestAppCon
     assert_eq!(told(&watching), [skipped(MARKS)]);
 }
 
+/// A send that wrote nothing tells no `HoldScreen`: the run's failure still ends the watch, once
+/// its terminal state and its `RunEnd` are both in, in either order.
+#[gpui::test]
+fn a_hold_told_nothing_ends_the_watch_once_its_failed_run_has_both_endings(
+    cx: &mut TestAppContext,
+) {
+    for state_first in [true, false] {
+        let watching = released(true, cx);
+        state(&watching, RUN, Phase::Thinking, HOLD, cx);
+        assert_eq!(sources(&watching), []);
+        if state_first {
+            state(&watching, RUN, Phase::Failed, None, cx);
+        } else {
+            end(&watching, RUN, cx);
+        }
+        assert_eq!(sources(&watching), [], "one ending is in");
+        if state_first {
+            end(&watching, RUN, cx);
+        } else {
+            state(&watching, RUN, Phase::Failed, None, cx);
+        }
+        assert_eq!(
+            sources(&watching),
+            [Told::Stop],
+            "state first: {state_first}"
+        );
+    }
+}
+
 #[gpui::test]
 fn a_hold_whose_screenshot_or_run_never_comes_drops_the_watch_once(cx: &mut TestAppContext) {
     let changed = HeldScreen::NotIncluded(ScreenClass::Changed);

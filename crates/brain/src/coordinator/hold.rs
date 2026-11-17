@@ -100,7 +100,20 @@ impl super::Run {
         }
     }
 
-    /// At the first granted send: tells the shell what its hold's screen carried, once.
+    /// At a granted send carrying the hold's image: the image still to be told goes with the
+    /// send, which tells the shell once it may have written any of it.
+    pub(super) fn carried(&mut self) -> Option<super::lease::Carried> {
+        let hold = self.hold.as_ref()?.key;
+        let outcome = self.screen.as_ref()?.held();
+        self.untold.take()?;
+        Some(super::lease::Carried {
+            run: self.id,
+            hold,
+            outcome,
+        })
+    }
+
+    /// Tells the shell what its hold's screen carried, once.
     pub(super) fn tell_screen(&mut self, effects: &mut Vec<Effect>) {
         let (Some(gesture), Some(screen)) = (self.untold.take(), &self.screen) else {
             return;
@@ -118,7 +131,7 @@ impl Coordinator {
     /// zeroed when the last copy drops. The run's next build fails, and a request that has started
     /// keeps its copy until its round ends but is refused at the send. A turn whose image no
     /// granted send has carried yet is recorded as withdrawn; once one has, the turn keeps what it
-    /// carried.
+    /// carried, unless that send wrote none of it.
     pub(super) fn screen_holds_off(
         &mut self,
         allowed: fn(&crate::context::Screen) -> bool,

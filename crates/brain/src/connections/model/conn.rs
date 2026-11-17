@@ -133,6 +133,9 @@ pub(in crate::connections) struct ModelConn<Io> {
     interim: usize,
     /// A success head that arrived while the request was still uploading.
     answer: Option<Head>,
+    /// A write of the request was attempted, so bytes of it may have left, even if no write
+    /// returned a count: TLS can write a record and then fail in the same call.
+    pub(super) may_have_written: bool,
 }
 
 impl<Io> fmt::Debug for ModelConn<Io> {
@@ -152,6 +155,7 @@ impl<Io: AsyncRead + AsyncWrite + Unpin> ModelConn<Io> {
             wire: 0,
             interim: 0,
             answer: None,
+            may_have_written: false,
         }
     }
 
@@ -184,6 +188,7 @@ impl<Io: AsyncRead + AsyncWrite + Unpin> ModelConn<Io> {
                 }
             }
             while written < request.len() {
+                self.may_have_written = true;
                 match ready!(Pin::new(&mut self.io).poll_write(cx, &request[written..])) {
                     Ok(0) | Err(_) => return Poll::Ready(Err(Failure::Transport)),
                     Ok(count) => written += count,

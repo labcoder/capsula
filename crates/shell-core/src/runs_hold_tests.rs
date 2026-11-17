@@ -434,6 +434,36 @@ fn a_screen_outcome_replaces_the_prediction_only_for_the_current_hold() {
     assert_eq!(runs.hold_screen_line(), None);
 }
 
+/// A send that wrote nothing tells no screen outcome: the window's prediction stays while the
+/// request connects, and goes at the run's terminal state, whichever ending comes first.
+#[test]
+fn a_screen_hold_told_nothing_keeps_its_prediction_until_its_run_ends() {
+    for state_first in [true, false] {
+        let mut runs = ready();
+        runs.begin_hold(GestureId(1), Some(SCREEN)).expect("held");
+        state(&mut runs, 1, 1, 1, Phase::Thinking);
+        assert_eq!(runs.hold_screen_line(), Some(ScreenLine::WillSee));
+        let end = DataToShell::RunEnd { run: RunId(1) };
+        if state_first {
+            state(&mut runs, 1, 1, 1, Phase::Failed);
+            assert_eq!(runs.hold_screen_line(), None);
+            assert_eq!(runs.take_ended(), None, "one ending is in");
+            runs.apply_data(end, 0);
+        } else {
+            runs.apply_data(end, 0);
+            assert_eq!(runs.take_ended(), None, "one ending is in");
+            state(&mut runs, 1, 1, 1, Phase::Failed);
+        }
+        assert_eq!(runs.hold_screen_line(), None, "state first: {state_first}");
+        assert_eq!(
+            runs.take_ended(),
+            Some(RunId(1)),
+            "state first: {state_first}"
+        );
+        assert_eq!(runs.take_ended(), None);
+    }
+}
+
 #[test]
 fn the_screen_holds_state_lasts_one_connection() {
     use kumochi_protocol::message::{ModelName, ScreenHolds, ScreenOff};

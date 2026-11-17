@@ -202,13 +202,15 @@ pub enum Answer {
 }
 
 /// A granted send. Dropping it, wherever it is, reports `SendSettled` on the store-reply
-/// channel, which the brain always drains, so a lost grant settles too.
+/// channel, which the brain always drains, so a lost grant settles too; `SendUnsent` instead
+/// once the transport has said no write of its request was attempted.
 #[derive(Debug)]
 #[must_use = "dropping a SendLease settles its send"]
 pub struct SendLease {
     lease: LeaseId,
     /// `None` once abandoned.
     inputs: Option<mpsc::UnboundedSender<Input>>,
+    unsent: bool,
 }
 
 impl SendLease {
@@ -216,6 +218,7 @@ impl SendLease {
         Self {
             lease,
             inputs: Some(inputs),
+            unsent: false,
         }
     }
 
@@ -226,12 +229,22 @@ impl SendLease {
     }
 }
 
+impl crate::connections::model::Lease for SendLease {
+    fn unsent(&mut self) {
+        self.unsent = true;
+    }
+}
+
 impl Drop for SendLease {
     fn drop(&mut self) {
         let Some(inputs) = self.inputs.take() else {
             return;
         };
-        let settled = Input::SendSettled { lease: self.lease };
+        let settled = if self.unsent {
+            Input::SendUnsent { lease: self.lease }
+        } else {
+            Input::SendSettled { lease: self.lease }
+        };
         if inputs.send(settled).is_err() {
             tracing::debug!("a send settled after the brain ended");
         }

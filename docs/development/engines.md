@@ -164,12 +164,20 @@ sequenceDiagram
   answer, a dropped round, a finished send), reports `SendSettled` on the store-reply channel the
   brain always drains, quit included. So a delete of the sending run's own task can't wait on
   itself.
+- **Unsent.** A send that stops before any write of its request was attempted (the upload budget
+  spent, a connect failure, its deadline while connecting, a refusal before the first write)
+  reports `SendUnsent` instead. The transport sets one flag right before its first write poll,
+  so a write that errors, returns 0 or is pending counts as attempted, even if no byte was
+  accepted. A lease carrying a hold's picture settles it once: unsent, the run is as if never
+  granted (a later grant carries the picture again, or the run's end clears the mark); otherwise
+  the shell is told `HoldScreen`. A failed lease's late settlement settles only the picture.
 - **Held deletes.** A delete whose thread an unsettled lease carries waits in `deleting` with no
   writer op. It goes out once, in the order accepted, when no lease carries it.
 - **Deadline.** A lease that hasn't settled 15 s [guess] after its grant fails closed: its held
   deletes are refused with `NotHidden`, and so is any later delete of its sources; its run fails
   as `failed(engine)`; and nothing is granted again until the brain restarts. A late settlement
-  changes nothing. A delete is never released because time ran out.
+  settles only the picture its lease carried, and every fence stays. A delete is never released
+  because time ran out.
 - **Held sends.** A sender whose body can go out again until a process tree is confirmed ended
   (a Claude Code question, see [claude-code.md](claude-code.md#launches)) asks with
   `SendGate::ask_held(hold)`. Its lease's deadline is `hold`, capped at `MAX_HOLD` (165 s), in
@@ -340,27 +348,28 @@ movement and where it lies, in image pixels. Its changed display and too-large p
 own class lines. The lines live in `locales/en/brain.ftl` and carry no window details. If the image can't go (another route, or no user message left), the run fails with
 `ScreenUnavailable` rather than sending without it. What the hold carried goes in the run's row
 with its turn (store.md, `runs.screen`), and the shell hears it once as `HoldScreen`: an image
-when the first send carrying it is granted, anything else when the run's first request starts.
-An inline compaction's send carries only text, so its grant doesn't count. The row is written first on purpose: the first build starts only
+when a send carrying it settles after attempting a write ("The send lease"), anything else when
+the run's first request starts. An inline compaction's send carries only text, so it doesn't
+count. The row is written first on purpose: the first build starts only
 after `TurnStored`, so history can over-report a screen but never miss one that left the
 machine, and a failed turn write fails the run before anything is built. Turning screen holds off
 withdraws every run's window image, and turning show-screen off every run's screen picture,
 each only the pictures it allowed: the run's own copy drops at once, and the bytes are zeroed
 when the last copy drops. The run's next build fails with `ScreenUnavailable`, and a request that has
 started keeps its copy until its round ends but is refused at the send, failing the run the same
-way. If no send carrying the image has been granted yet, the turn's `screen` becomes `withdrawn`;
-once one has, it stays `attached` or `screen`. A held run that ends any other way before a send
-carrying its image was granted (it fails, is stopped, cancelled or replaced) records no screen: a turn not
+way. If no send carrying the image has attempted a write yet, the turn's `screen` becomes
+`withdrawn`; once one has, it stays `attached` or `screen`. A held run that ends any other way
+before a send carrying its image attempted a write (it fails, is stopped, cancelled or replaced)
+records no screen: a turn not
 yet written is written without it, and a written one is cleared by a store write queued behind
 the turn's. Known limits:
 - **A granted send can't be recalled.** Turning screen holds off refuses a request's send that
   hasn't been granted yet, but a body already granted goes out with its image.
-- **History can show a window that never left.** The clear applies until the first send carrying
-  the image is granted, which every send asks for right before its body goes to the network ("The
-  send lease"), so a body refused as too large or a sign-in not read clears it. A granted send
-  that fails before its first byte is written (a connect failure, the send deadline passing
-  first, or a debug build's request cap) keeps the screen recorded, and so does a crash or a failed write between a held run's turn and the
-  write that clears it. Either way its history shows a window for a turn whose image was never
+- **History can show a window that never left.** The clear applies until a write of a request
+  carrying the image is attempted ("The send lease"), so a body refused as too large, a sign-in
+  not read, a spent upload budget, a connect failure or the deadline while connecting clears it.
+  A write that was attempted keeps the screen recorded even if no byte was accepted, and so does
+  a crash or a failed write between a held run's turn and the write that clears it. Either way its history shows a window for a turn whose image was never
   sent.
 - **Every round resends the image.** Each tool round is a new stateless request, so the image's
   input tokens are charged again every round against the plan's usage, bounded by the round cap,

@@ -116,11 +116,35 @@ impl<F: FnMut(&SseEvent)> Events for F {
     }
 }
 
+/// A granted send's lease, which the transport tells before it settles when no write of the
+/// request was attempted.
+pub trait Lease {
+    /// No write of the request was attempted on any connection, so none of it left.
+    fn unsent(&mut self);
+}
+
+/// A live check's send, which no coordinator leases.
+impl Lease for () {
+    fn unsent(&mut self) {}
+}
+
 /// One send's state. Fields drop in declaration order, so the connection always closes before
 /// the lease settles.
-struct Attempt<Io, L> {
+struct Attempt<Io, L: Lease> {
     conn: Option<ModelConn<Io>>,
     lease: Option<L>,
+}
+
+impl<Io, L: Lease> Drop for Attempt<Io, L> {
+    /// A lease still held here settles unsent only when no connection was made or nothing was
+    /// written on it; any attempted write may have sent bytes.
+    fn drop(&mut self) {
+        if let Some(lease) = &mut self.lease
+            && self.conn.as_ref().is_none_or(|conn| !conn.may_have_written)
+        {
+            lease.unsent();
+        }
+    }
 }
 
 /// Sends `body` once `ask` grants a lease, and hands each event to `out` until
@@ -129,7 +153,8 @@ struct Attempt<Io, L> {
 /// settles when it drops. A retry is another call, so it asks again.
 ///
 /// The lease settles once the request's last byte is flushed to the kernel, or once the
-/// connection holding it is closed. Nothing is retried after a byte is written; an idle
+/// connection holding it is closed, and it's told [`Lease::unsent`] first when no write of the
+/// request was attempted. Nothing is retried after a byte is written; an idle
 /// connection that turns out stale before the write is replaced under the same lease.
 ///
 /// # Errors
@@ -137,7 +162,7 @@ struct Attempt<Io, L> {
 ///
 /// # Panics
 /// Never: a flushed upload always holds its connection.
-pub async fn stream<C: Connect, L>(
+pub async fn stream<C: Connect, L: Lease>(
     client: &ModelClient<C>,
     body: &ResponsesBody,
     bearer: &Secret<Zeroizing<String>>,
@@ -148,13 +173,13 @@ pub async fn stream<C: Connect, L>(
     let request = wire::request(bearer.expose(), body.0.expose())?;
     let lease = ask.await.ok_or(Failure::Rebuild)?;
     let deadline = Instant::now() + SEND_DEADLINE;
-    if !budget.reserve() {
-        return Err(Failure::Spent);
-    }
     let mut attempt = Attempt {
         conn: None,
         lease: Some(lease),
     };
+    if !budget.reserve() {
+        return Err(Failure::Spent);
+    }
     let upload = timeout_at(deadline, async {
         let io = match client.checkout() {
             Some(io) => io,

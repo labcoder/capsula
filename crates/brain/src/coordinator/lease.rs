@@ -12,10 +12,10 @@
 use std::collections::BTreeSet;
 use std::time::Duration;
 
-use kumochi_protocol::message::{Deleted, ThreadId};
+use kumochi_protocol::message::{Deleted, HeldScreen, RunId, ThreadId};
 
 use super::availability::sign_in_needed;
-use super::{BuildKey, Coordinator, Effect, JobKey, Stale};
+use super::{BuildKey, Coordinator, Effect, HoldKey, JobKey, Stale, StoreOp};
 use crate::store::Failure;
 
 /// How long a granted send may go without settling [guess].
@@ -51,6 +51,16 @@ pub(super) struct Lease {
     failed: bool,
     /// Asked with a hold, so its deadline leaves the shared transport granting.
     held_send: bool,
+    /// The hold's picture this send carries, until it settles.
+    screen: Option<Carried>,
+}
+
+/// A granted send carrying a hold's picture, which its turn already records as sent.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct Carried {
+    pub(super) run: RunId,
+    pub(super) hold: HoldKey,
+    pub(super) outcome: HeldScreen,
 }
 
 impl Coordinator {
@@ -133,19 +143,22 @@ impl Coordinator {
         let sources = build.sources().to_vec();
         // Only a normal build adds the hold's screen; an inline compaction's request is text.
         let carries_screen = build.inline.is_none();
-        if let Some(run) = self.current.as_mut().filter(|_| carries_screen) {
-            run.tell_screen(effects);
-        }
-        self.grant(SendKey::Build(key), sources, hold, effects);
+        let screen = self
+            .current
+            .as_mut()
+            .filter(|_| carries_screen)
+            .and_then(super::Run::carried);
+        self.grant(SendKey::Build(key), sources, hold, screen, effects);
     }
 
-    /// Records a lease for `key` carrying `sources`, grants it and arms its deadline: `hold`,
-    /// capped at [`MAX_HOLD`], or [`SEND_DEADLINE`].
+    /// Records a lease for `key` carrying `sources` and `screen`, grants it and arms its deadline:
+    /// `hold`, capped at [`MAX_HOLD`], or [`SEND_DEADLINE`].
     pub(super) fn grant(
         &mut self,
         key: SendKey,
         sources: Vec<ThreadId>,
         hold: Option<Duration>,
+        screen: Option<Carried>,
         effects: &mut Vec<Effect>,
     ) {
         self.sends += 1;
@@ -158,6 +171,7 @@ impl Coordinator {
             sources,
             failed: false,
             held_send: hold.is_some(),
+            screen,
         });
         effects.push(Effect::Grant(id));
         effects.push(Effect::ArmSendDeadline {
@@ -166,11 +180,17 @@ impl Coordinator {
         });
     }
 
-    /// A granted send stopped: its lease retires, and each held delete no other lease carries
-    /// goes to the store. A failed lease's late settlement changes nothing.
+    /// A granted send stopped: the picture it carried is settled, its lease retires, and each held
+    /// delete no other lease carries goes to the store. A failed lease's late settlement settles
+    /// only the picture.
+    #[expect(
+        clippy::fn_params_excessive_bools,
+        reason = "whether the transport proved no write was attempted"
+    )]
     pub(super) fn send_settled(
         &mut self,
         lease: LeaseId,
+        unsent: bool,
         effects: &mut Vec<Effect>,
     ) -> Result<(), Stale> {
         let at = self
@@ -178,12 +198,52 @@ impl Coordinator {
             .iter()
             .position(|held| held.id == lease)
             .ok_or(Stale)?;
+        if let Some(carried) = self.leases[at].screen.take() {
+            self.screen_settled(carried, unsent, effects);
+        }
         if !self.leases[at].failed {
             self.leases.remove(at);
             let leased = self.leased();
             self.release_deletes(&leased, effects);
         }
         Ok(())
+    }
+
+    /// A send that may have written any of its request tells the shell, once; the turn already
+    /// records the picture as sent. One that wrote nothing leaves its run as if never granted: a
+    /// current run clears the mark at its end, or a later grant carries the picture again, and
+    /// any other run's mark is cleared now.
+    #[expect(
+        clippy::fn_params_excessive_bools,
+        reason = "whether the transport proved no write was attempted"
+    )]
+    fn screen_settled(&mut self, carried: Carried, unsent: bool, effects: &mut Vec<Effect>) {
+        if !unsent {
+            effects.push(Effect::HoldScreen {
+                hold: carried.hold,
+                outcome: carried.outcome,
+            });
+            return;
+        }
+        if let Some(run) = self.current.as_mut().filter(|run| {
+            run.id == carried.run
+                && run
+                    .screen
+                    .as_ref()
+                    .is_some_and(|screen| screen.held() == carried.outcome)
+        }) {
+            run.untold = Some(carried.hold.gesture);
+            return;
+        }
+        let withdrawn = self
+            .find(carried.run)
+            .is_ok_and(|run| matches!(run.screen, Some(crate::context::Screen::Withdrawn)));
+        let run = carried.run;
+        effects.push(Effect::Store(if withdrawn {
+            StoreOp::WithdrawScreen { run }
+        } else {
+            StoreOp::ForgetScreen { run }
+        }));
     }
 
     /// A lease ran past its deadline. A delete is never released because time ran out, so the

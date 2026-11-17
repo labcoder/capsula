@@ -219,6 +219,11 @@ pub enum Input {
         /// Its lease.
         lease: LeaseId,
     },
+    /// A granted send stopped before any write of its request was attempted.
+    SendUnsent {
+        /// Its lease.
+        lease: LeaseId,
+    },
     /// A granted send's deadline passed.
     SendDeadline {
         /// Its lease.
@@ -403,6 +408,14 @@ pub enum Effect {
     Data(DataToShell),
     /// Tell the shell a held recognition's turn is stored, only on the hold's own connection.
     HoldStored(HoldKey),
+    /// Tell the shell what a hold's screen carried into its turn, only on the hold's own
+    /// connection.
+    HoldScreen {
+        /// The hold.
+        hold: HoldKey,
+        /// What its turn carried.
+        outcome: kumochi_protocol::message::HeldScreen,
+    },
     /// Deliver an admitted page without losing terminal ownership.
     Page {
         /// The admitted read.
@@ -578,7 +591,8 @@ struct Run {
     /// native items without boxes, even after the picture is withdrawn or can't be drawn on.
     pictured: bool,
     /// The hold's gesture while its screen is still to be told to the shell, which happens once:
-    /// an image at the first granted send carrying it, anything else at the run's first request.
+    /// an image once a granted send carrying it may have written it, anything else at the run's
+    /// first request. A granted send holds it until it settles.
     untold: Option<kumochi_protocol::message::GestureId>,
     /// The round's current build; the engine starts once it's admitted.
     build: Option<admission::Build>,
@@ -918,7 +932,8 @@ impl Coordinator {
             } => self.inline_written(key, &mut effects)?,
             Input::SignedIn { generation } => self.signed_in(generation, &mut effects)?,
             Input::SignedOut { generation } => self.signed_out(generation, &mut effects)?,
-            Input::SendSettled { lease } => self.send_settled(lease, &mut effects)?,
+            Input::SendSettled { lease } => self.send_settled(lease, false, &mut effects)?,
+            Input::SendUnsent { lease } => self.send_settled(lease, true, &mut effects)?,
             Input::SendDeadline { lease } => self.send_deadline(lease, &mut effects)?,
             Input::TurnStored { run } => self.turn_stored(run, &mut effects)?,
             Input::StepStored {
@@ -1360,7 +1375,8 @@ impl Coordinator {
         effects: &mut Vec<Effect>,
     ) {
         run.control.0.cancel();
-        // No send carrying the hold's picture was granted, so its turn mustn't say it was sent.
+        // No send carrying the hold's picture was granted, or none wrote any of it, so its turn
+        // mustn't say it was sent.
         if run.untold.is_some()
             && run.screen.as_ref().is_some_and(|screen| {
                 matches!(
