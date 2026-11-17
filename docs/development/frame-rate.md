@@ -135,3 +135,53 @@ A first successful shown/nonempty paint requests one coalesced weak-owner defer,
 acknowledgement does not depend on a later frame or input. This is not a presentation
 timestamp. The one-off callback, effect-deque and control-queue allocations require measured
 bounds separately from steady-state painting; unchanged paints never rearm the notification.
+
+## The present budget
+
+A frame in one of Kumochi's transparent top-level windows (the overlay, the status panel, the
+dock) shows at the next refresh only if Windows' compositor picks it up in time. Measured on a
+144 Hz display, where a refresh is 6.94 ms:
+
+- **The pickup point.** A frame shows at the next refresh only when its GPU work has finished
+  about 6.3 to 6.5 ms after the vblank, about half a millisecond before the next one.
+- **What's left from the tick.** GPUI's vsync tick (its `DwmFlush` returning,
+  [gpui-patch.md](gpui-patch.md)) comes about 0.65 ms after the vblank while nothing draws, and
+  about 2.0 ms after it while the full-screen overlay is up. So a frame has about 4.4 ms from
+  the tick for `request_frame`, the renderer's encoding, Present and the GPU together. The
+  CPU frame alone isn't the budget: frames of 2.9 ms missed.
+- **A miss costs a whole refresh.** Every frame is still presented, but one that lands past the
+  point is shown a refresh later or replaced by the next. While frames land around the point,
+  the shown rate falls far below the present rate.
+- **GPU load is shared.** A window's GPU work costs the other windows frames through the
+  compositor: with a long hold line up, the status panel lost frames too (down to 76 shown a
+  second) although its own Present came 0.6 ms after the tick. A CPU delay of up to 5 ms before
+  the overlay's Present cost the panel nothing.
+
+**The hold line.** A screen hold's line costs more the longer it gets, on both sides: near the
+2,048-point cap a frame takes about 3.5 to 3.9 ms from the tick to Present, of which building
+the strokes is about 1.2 ms, and its GPU work finishes about 2 ms after that. In 45 seconds of
+unbroken drawing every frame was shown until about 19 s, single frames were lost from there,
+the first second under 140 shown came at about 29 s (about 1,400 points), and the lowest was
+72 to 75 shown a second, near the cap at 36 to 41 s. Every hold of a few seconds stayed at
+144. Keeping the triangles between paints would save only the CPU half and still miss at the
+cap; caching the settled line as an image would cut both halves (OSC-802).
+
+| Delay before the overlay's Present | GPU done, after the vblank | Shown a second |
+|---|---|---|
+| 0 to 2 ms | 3.5 to 5.6 ms | 141 to 144 |
+| 3 ms | about 6.4 ms | 133 to 140 |
+| 4 ms | past the next vblank | 69 to 136 |
+| 5 ms | a refresh later, steadily | 135 to 141 |
+
+**Method.** A local probe, not in the repository, read each window's swap chain's own frame
+statistics (`GetFrameStatistics`, which the overlay's composition swap chain reports) after
+every Present, and timed each Present from the vsync tick and from the vblank
+(`DwmGetCompositionTimingInfo`), with PresentMon on the shell beside it; for the overlay's swap
+chain PresentMon lists only the presents that were shown. For the pickup point it held a spin
+delay before the overlay's Present, 0 to 6 ms in 1 ms steps, each over a 5-second stroke whose
+GPU work stayed under 0.5 ms.
+
+**Limits.** One machine: Windows 11 build 26200, an NVIDIA RTX 3090, one 2,560 by 1,440 display
+at 144 Hz and 100% scale. One run of each step. The try builds' profile: release with debug
+assertions, without them in the window backend. Nothing was measured at 60 Hz, on another GPU
+or with a second display, so the point there is unknown.
