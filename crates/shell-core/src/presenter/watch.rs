@@ -257,6 +257,14 @@ impl Watch {
         }
     }
 
+    /// The run whose screen scene is up.
+    pub(super) fn shown_run(&self) -> Option<RunId> {
+        match self.state {
+            State::Showing { run, .. } => Some(run),
+            State::Idle | State::Expecting { .. } | State::Passing { .. } => None,
+        }
+    }
+
     pub(super) fn skipped(&self) -> Option<RunId> {
         self.skipped
     }

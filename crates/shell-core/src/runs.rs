@@ -401,7 +401,8 @@ impl Runs {
         self.submit(&text, send)
     }
 
-    fn stoppable(&self) -> Option<RunId> {
+    /// The moving run, unless Esc has stopped it.
+    pub fn stoppable(&self) -> Option<RunId> {
         self.live
             .map(|live| live.run)
             .filter(|run| *run > self.fence)

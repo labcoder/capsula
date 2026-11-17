@@ -27,7 +27,11 @@ use super::Source;
 use super::tests::{after, listen, native};
 use crate::input::{Edge, Event, Key, TalkHeld};
 use crate::link::{LinkEvent, LinkState};
+use crate::platform::input::{Button, input};
+use crate::presence::kumo::{Motion, v2};
+use crate::presence::pulling::{Grab, PullSpace};
 use crate::strings::Text;
+use kumochi_shell_core::presenter::fixture::select;
 
 /// The hold's run. Nothing was named before its release.
 const RUN: u64 = 7;
@@ -501,7 +505,7 @@ fn esc_the_next_hold_and_the_setting_end_the_watch(cx: &mut TestAppContext) {
         .expect("escape");
     assert_eq!(sources(&watching), [Told::Stop]);
 
-    // Esc while the answer runs.
+    // Esc while the answer runs: the watch ends, and the answer is stopped once.
     let watching = released(true, cx);
     state(&watching, RUN, Phase::Thinking, HOLD, cx);
     state(&watching, RUN, Phase::Answering, None, cx);
@@ -510,7 +514,11 @@ fn esc_the_next_hold_and_the_setting_end_the_watch(cx: &mut TestAppContext) {
         .owner
         .update(cx, Presence::escape)
         .expect("escape");
-    assert_eq!(sources(&watching), [Told::Stop]);
+    let stop = ControlToBrain::Stop {
+        run: RunId(RUN),
+        revealed: Vec::new(),
+    };
+    assert_eq!(told(&watching), [Told::Stop, Told::Sent(stop)]);
 
     // The next hold is recognized while the answer runs: the watch has ended before that
     // hold can release anything.
@@ -605,9 +613,8 @@ fn a_lost_session_ends_the_watch_once(cx: &mut TestAppContext) {
     });
 }
 
-#[gpui::test]
-fn shown_marks_are_timed_from_their_answer_s_end_and_one_esc_clears_them(cx: &mut TestAppContext) {
-    let before = Instant::now();
+/// Hold 1's run is answering and its marks are up, with the sources listening.
+fn marks_up(cx: &mut TestAppContext) -> Watching {
     let watching = released(true, cx);
     let hidden = detached(&watching.ready, cx);
     watching.ready.owner.update(cx, |owner, _| {
@@ -627,6 +634,126 @@ fn shown_marks_are_timed_from_their_answer_s_end_and_one_esc_clears_them(cx: &mu
         ],
         "the marks are up and the sources listen"
     );
+    watching
+}
+
+/// What one press of Esc tells while a running answer's marks are up: the sources stop, the
+/// marks are cleared and the answer is stopped, once each.
+fn taken() -> [Told; 3] {
+    [
+        Told::Stop,
+        Told::Sent(ControlToBrain::ClearDrawing {
+            scene_ids: vec![MARKS],
+        }),
+        Told::Sent(ControlToBrain::Stop {
+            run: RunId(RUN),
+            revealed: Vec::new(),
+        }),
+    ]
+}
+
+fn escape(watching: &Watching, cx: &mut TestAppContext) {
+    watching
+        .ready
+        .owner
+        .update(cx, Presence::escape)
+        .expect("escape");
+    cx.run_until_parked();
+}
+
+/// Kumo is grabbed out of the peek, which tells the brain nothing.
+fn pull(watching: &Watching, cx: &mut TestAppContext) {
+    let kumo = watching.ready.owner.update(cx, |owner, cx| {
+        owner.follow_kumo(cx);
+        owner.kumo.clone()
+    });
+    let space = PullSpace {
+        area: [0, 0, 1280, 1024],
+        scale: 1.0,
+    };
+    let grab = Grab::new(
+        space,
+        [612, 1000, 56, 3],
+        [608, 990, 64, 24],
+        v2(640.0, 920.0),
+        Motion::Reduced,
+    );
+    let seq = input(|input| input.press(|| input.pressed())).expect("a forwarded press");
+    kumo.update(cx, |kumo, cx| {
+        kumo.grab(Button::Left, seq, [560, 860], [80.0, 60.0], grab, cx);
+    });
+    cx.run_until_parked();
+    watching.ready.owner.read_with(cx, |owner, cx| {
+        assert!(owner.kumo.read(cx).pull_live());
+        assert!(owner.activity.pulling);
+    });
+    assert_eq!(told(watching), []);
+}
+
+#[gpui::test]
+fn one_esc_takes_a_running_answer_s_marks_and_stops_it_whatever_else_it_does(
+    cx: &mut TestAppContext,
+) {
+    // Nothing else is going on.
+    let watching = marks_up(cx);
+    escape(&watching, cx);
+    assert_eq!(told(&watching), taken());
+
+    // Kumo is being pulled out of the peek: the press cancels the pull as well.
+    let watching = marks_up(cx);
+    pull(&watching, cx);
+    escape(&watching, cx);
+    assert_eq!(told(&watching), taken());
+    watching.ready.owner.read_with(cx, |owner, cx| {
+        assert!(!owner.kumo.read(cx).pull_live(), "the pull was cancelled");
+    });
+
+    // A selection is live: the press ends it as well.
+    let watching = marks_up(cx);
+    watching.ready.owner.update(cx, |owner, _| {
+        select(&mut owner.presenter.input, GestureId(5));
+    });
+    escape(&watching, cx);
+    assert_eq!(told(&watching), taken());
+    watching.ready.owner.read_with(cx, |owner, _| {
+        assert_eq!(owner.presenter.input.selection(), None);
+    });
+}
+
+#[gpui::test]
+fn a_press_that_takes_an_ended_answer_s_marks_stops_no_other_run(cx: &mut TestAppContext) {
+    // The marks' answer has ended and a newer run works while Kumo is pulled: the press takes
+    // the marks and cancels the pull, and the newer run goes on as it would with no marks up.
+    let watching = marks_up(cx);
+    state(&watching, RUN, Phase::Done, None, cx);
+    end(&watching, RUN, cx);
+    state(&watching, RUN + 1, Phase::Thinking, None, cx);
+    let newer = Some(RunId(RUN + 1));
+    watching.ready.owner.read_with(cx, |owner, _| {
+        assert_eq!(owner.runs.stoppable(), newer);
+    });
+    assert_eq!(told(&watching), []);
+    pull(&watching, cx);
+    escape(&watching, cx);
+    assert_eq!(
+        told(&watching),
+        [
+            Told::Stop,
+            Told::Sent(ControlToBrain::ClearDrawing {
+                scene_ids: vec![MARKS]
+            }),
+        ]
+    );
+    watching.ready.owner.read_with(cx, |owner, cx| {
+        assert!(!owner.kumo.read(cx).pull_live(), "the pull was cancelled");
+        assert_eq!(owner.runs.stoppable(), newer, "and the newer run goes on");
+    });
+}
+
+#[gpui::test]
+fn shown_marks_are_timed_from_their_answer_s_end_and_one_esc_clears_them(cx: &mut TestAppContext) {
+    let before = Instant::now();
+    let watching = marks_up(cx);
 
     // Both endings in: the marks get their minute, and the sources go on listening.
     state(&watching, RUN, Phase::Done, None, cx);

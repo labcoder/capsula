@@ -172,6 +172,11 @@ impl Presenter {
         self.watch.skipped()
     }
 
+    /// The run whose screen marks are up.
+    pub fn marks_shown(&self) -> Option<RunId> {
+        self.watch.shown_run()
+    }
+
     /// The bit and the limits, before a frame is activated or sampled and before a job's
     /// answer is used, so neither shows marks that a change or a limit has already taken. One
     /// read while no sources listen.

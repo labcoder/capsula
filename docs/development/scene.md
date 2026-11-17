@@ -2168,7 +2168,7 @@ second time.
 
 | Call | From | When |
 |---|---|---|
-| `screen_changed` | `recognize_voice` (`voice.rs`); `escape` (`escape.rs`) | Every recognized hold, once the brain was told of it; every press of Esc, before anything else that press does, so one press stops the answer and takes the marks |
+| `screen_changed` | `recognize_voice` (`voice.rs`); `escape` (`escape.rs`) | Every recognized hold, once the brain was told of it; every press of Esc, before anything else that press does. When the marks it takes are a running answer's, the same press stops that answer too, after it cancels a pull or ends a selection |
 | `set_display` | `show_display`, at each release and from `display_changed` (`stage.rs`) | The primary display's origin, size and DPI in physical pixels, as a hold's line reads them |
 | `screen_released` | `release_screen` (`voice.rs`) | Before that hold's `ScreenRelease` is written, with `Runs::newest_run` and the talk keys still down as the gesture reduced the key-up (`gesture.rs`) |
 | `screen_dropped` | `release_screen`; `HoldScreen` in `link.rs`; `end_voice`; `run_state` | The `ScreenRelease` couldn't be written; the brain's outcome is anything but `Screen`; the hold ended with no run; a state of the hold's run arrives fenced off by Esc or a delete |
