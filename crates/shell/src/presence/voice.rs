@@ -141,6 +141,9 @@ pub(super) struct Voice {
     pub(super) watched: Option<super::marks::Watched>,
     pub(super) status: Option<Text>,
     pub(super) recovery: Option<Recovery>,
+    /// The hold a cancelled `End` ended, until the Esc press that cancelled it is applied:
+    /// `native_escape` takes it, and that press does nothing else.
+    pub(super) cancelled: Option<GestureId>,
     /// What a lost brain did with the held words; reconnecting doesn't clear it.
     pub(super) lost: Option<Text>,
     #[cfg(test)]
@@ -708,6 +711,9 @@ impl Presence {
                     return;
                 };
                 if cancelled || self.voice.status != Some(Text::HoldListening) {
+                    if cancelled {
+                        self.voice.cancelled = Some(gesture);
+                    }
                     self.end_voice(Text::HoldCancelled, cx);
                 } else {
                     hold.released = Some(qpc);

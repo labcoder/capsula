@@ -690,6 +690,7 @@ impl Presence {
             self.presenter.disconnected();
             // The watch went with the session, so no hold is watched.
             self.voice.watched = None;
+            self.voice.cancelled = None;
             self.scene_timer = None;
             self.scene_deadline = None;
             self.settings.update(cx, |state, cx| {

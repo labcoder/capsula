@@ -11,6 +11,14 @@ impl Presence {
         gesture: Option<GestureId>,
         cx: &mut Context<'_, Self>,
     ) -> Result<(), OpenError> {
+        // This press's cancelled `End` already ended its hold, in this delivery or at the raw
+        // Esc-down before it. Marks that are up go, as at any press, and the press does
+        // nothing else: no local decision is left for it.
+        let ended = self.voice.cancelled.take();
+        if gesture.is_some() && ended == gesture {
+            self.marks_changed(cx);
+            return self.runs_changed(cx);
+        }
         // Marks that are up go at this press, and `escape` takes them before it ends a hold.
         // A hold is still pending here when its first mark came before its run's `Answering`.
         if self.presenter.marks_shown().is_some() {

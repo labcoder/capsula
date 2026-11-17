@@ -11,8 +11,8 @@ use kumochi_protocol::message::{
     SceneHeader, SceneId, ScreenClass, ScreenHolds, ScreenOff, ThreadId,
 };
 use kumochi_scene::{
-    Record, deferred::Deferred, parse_screen_draw_record, record::ScreenDisplay, screen,
-    text::Bounded,
+    Record, deferred::Deferred, parse_record, parse_screen_draw_record, record::ScreenDisplay,
+    screen, text::Bounded,
 };
 use kumochi_shell_core::platform::screen_watch::{Changed, Sources};
 
@@ -32,7 +32,7 @@ use crate::platform::{Deliver, PresenceEvent};
 use crate::presence::kumo::{Motion, v2};
 use crate::presence::pulling::{Grab, PullSpace};
 use crate::strings::Text;
-use kumochi_shell_core::presenter::fixture::select;
+use kumochi_shell_core::presenter::fixture::{scene_ids, select};
 
 /// The hold's run. Nothing was named before its release.
 const RUN: u64 = 7;
@@ -739,10 +739,14 @@ fn marked(answering: bool, cx: &mut TestAppContext) -> Watching {
     reason = "whether the run's Answering state came before the mark"
 )]
 fn mark_up(watching: &Watching, answering: bool, cx: &mut TestAppContext) {
-    let hidden = detached(&watching.ready, cx);
-    watching.ready.owner.update(cx, |owner, _| {
-        owner.overlay = Visibility::Hidden(hidden);
-    });
+    // An ordinary drawing's overlay, when one is open, takes the marks as well.
+    let open = |owner: &Presence, _: &gpui_kit::App| owner.overlay.window().is_some();
+    if !watching.ready.owner.read_with(cx, open) {
+        let hidden = detached(&watching.ready, cx);
+        watching.ready.owner.update(cx, |owner, _| {
+            owner.overlay = Visibility::Hidden(hidden);
+        });
+    }
     state(watching, RUN, Phase::Thinking, HOLD, cx);
     if answering {
         state(watching, RUN, Phase::Answering, None, cx);
@@ -869,8 +873,8 @@ fn ended(watching: &Watching, cx: &mut TestAppContext) {
     });
 }
 
-// The four tests below pin the hold's cancel as it is told today: twice for one press, once
-// where the hold's input is revoked and once from the runs' hold.
+// The tests below that press Esc on a pending hold pin its cancel as it is told today: twice
+// for one press, once where the hold's input is revoked and once from the runs' hold.
 
 #[gpui::test]
 fn the_hotkey_s_esc_takes_a_pending_hold_s_marks_and_cancels_it(cx: &mut TestAppContext) {
@@ -888,11 +892,9 @@ fn the_hotkey_s_esc_takes_a_pending_hold_s_marks_and_cancels_it(cx: &mut TestApp
     ended(&watching, cx);
 }
 
-/// Hold 1 was made and let go through the native callback, so the callback's reducer still
-/// names it, and its first mark overtook its run's `Answering`: the marks are up while the
-/// hold is pending.
-fn natively_marked(cx: &mut TestAppContext) -> (Watching, Deliver, Instant) {
-    let watching = watch(true, cx);
+/// Hold 1 is made and let go through the native callback, so the callback's reducer still
+/// names it, and it is pending with its speech sent.
+fn natively_pending(watching: &Watching, cx: &mut TestAppContext) -> (Deliver, Instant) {
     let owner = watching.ready.owner.clone();
     let deliver = native(&owner, cx);
     let at = Instant::now();
@@ -908,9 +910,17 @@ fn natively_marked(cx: &mut TestAppContext) -> (Watching, Deliver, Instant) {
             hold.is_some_and(|hold| matches!(hold.source, Source::Sent))
         })
     });
-    told(&watching);
+    told(watching);
+    (deliver, at)
+}
+
+/// Hold 1 is pending as [`natively_pending`] leaves it, and its first mark overtook its run's
+/// `Answering`: the marks are up while the hold is pending.
+fn natively_marked(cx: &mut TestAppContext) -> (Watching, Deliver, Instant) {
+    let watching = watch(true, cx);
+    let (deliver, at) = natively_pending(&watching, cx);
     mark_up(&watching, false, cx);
-    owner.read_with(cx, |owner, _| {
+    watching.ready.owner.read_with(cx, |owner, _| {
         assert!(owner.voice_working(), "the hold is still pending");
         assert!(owner.text_open());
     });
@@ -994,6 +1004,235 @@ fn esc_takes_a_pending_hold_s_marks_and_cancels_it(cx: &mut TestAppContext) {
     let [stop, clear] = gone();
     assert_eq!(told(&watching), [stop, clear, cancel(), cancel()]);
     ended(&watching, cx);
+}
+
+/// An earlier answer's ordinary drawing, on the overlay.
+const DRAWN: SceneId = SceneId(40);
+
+/// Run 3 drew `DRAWN` on the overlay and ended, and one Esc stopped the drawing's motion: an
+/// ordinary drawing is up and nothing moves.
+fn drawn(watching: &Watching, cx: &mut TestAppContext) {
+    let hidden = detached(&watching.ready, cx);
+    watching.ready.owner.update(cx, |owner, _| {
+        owner.overlay = Visibility::Hidden(hidden);
+        // A release now covers the drawing's window too, which the fixture's stamp reader
+        // would refuse: it knows only its own four surfaces.
+        owner.counter_fixture = Some(Rc::new(|| 4_242));
+    });
+    state(watching, 3, Phase::Answering, None, cx);
+    let begin = br#"{"begin":{"v":1,"scene":"drawn","surface":"overlay","alt":""}}"#;
+    let step =
+        br#"{"step":{"id":"s","put":[{"shape":{"id":"b","kind":"rect","box":[0,0,10,10]}}]}}"#;
+    let (Ok(Record::Begin(begin)), Ok(Record::Step(step))) =
+        (parse_record(begin), parse_record(step))
+    else {
+        panic!("an overlay scene's records");
+    };
+    let (run, scene, index) = (RunId(3), DRAWN, 0);
+    let header = SceneHeader {
+        begin,
+        layout_version: 2,
+    };
+    for frame in [
+        DataToShell::SceneBegin { scene, header },
+        DataToShell::SceneStepCommit {
+            run,
+            scene,
+            index,
+            step,
+        },
+    ] {
+        let event = LinkEvent::SceneData {
+            generation: 1,
+            frame: Deferred::new(frame, 0),
+            bytes: 0,
+        };
+        receive(&watching.ready.owner, event, cx);
+    }
+    cx.run_until_parked();
+    state(watching, 3, Phase::Done, None, cx);
+    end(watching, 3, cx);
+    watching
+        .ready
+        .owner
+        .update(cx, Presence::escape)
+        .expect("escape");
+    cx.run_until_parked();
+    told(watching);
+    watching.ready.owner.read_with(cx, |owner, _| {
+        assert_eq!(scene_ids(&owner.presenter), [DRAWN]);
+        assert!(owner.activity.drawing);
+        assert!(!owner.activity.working);
+    });
+}
+
+/// The answer in the panel and whether the panel is open.
+fn panel(watching: &Watching, cx: &mut TestAppContext) -> (Option<RunId>, bool) {
+    watching.ready.owner.read_with(cx, |owner, _| {
+        (owner.runs.shown().map(|shown| shown.run), owner.text_open())
+    })
+}
+
+/// The press cancelled hold 1 and did nothing else: the ordinary drawing is still up and the
+/// panel is as it was.
+fn only_cancelled(watching: &Watching, before: (Option<RunId>, bool), cx: &mut TestAppContext) {
+    ended(watching, cx);
+    assert_eq!(panel(watching, cx), before);
+    watching.ready.owner.read_with(cx, |owner, _| {
+        assert_eq!(owner.voice.status, Some(Text::HoldCancelled));
+        assert_eq!(owner.voice.cancelled, None, "the press took the marker");
+        assert_eq!(owner.presenter.marks_shown(), None);
+        assert_eq!(scene_ids(&owner.presenter), [DRAWN]);
+        assert!(owner.runs.drawing());
+        assert!(owner.activity.drawing);
+        assert!(!owner.activity.working, "the press left a current activity");
+    });
+}
+
+#[gpui::test]
+fn a_press_that_cancelled_its_pending_hold_leaves_an_ordinary_drawing_up(cx: &mut TestAppContext) {
+    for marks in [true, false] {
+        // Kumochi is in front (`None`), or another app is and the sources' wake is handled
+        // before the hotkey's press or after it.
+        for woke_first in [None, Some(true), Some(false)] {
+            let watching = watch(true, cx);
+            drawn(&watching, cx);
+            let (deliver, at) = natively_pending(&watching, cx);
+            if marks {
+                mark_up(&watching, false, cx);
+            }
+            let before = panel(&watching, cx);
+            assert!(!marks || before.1, "with marks up the panel is open");
+            let wake = |cx: &mut TestAppContext| {
+                watching.ready.owner.update(cx, |owner, cx| {
+                    owner
+                        .on_event(PresenceEvent::ScreenWoke, cx)
+                        .expect("a wake");
+                });
+            };
+            let (key, edge) = (Key::Other(1), Edge::Down);
+            deliver(Event::Key { key, edge }, after(at, 2000));
+            if woke_first.is_some() {
+                let bit = watching.bit.borrow();
+                bit.as_ref().expect("started sources").set();
+            }
+            if woke_first == Some(true) {
+                wake(cx);
+            }
+            deliver(Event::Escape, after(at, 2000));
+            cx.run_until_parked();
+            if woke_first == Some(false) {
+                wake(cx);
+            }
+            // The hold's cancels, the sources' stop and the marks' clear, and nothing else:
+            // no `Stop`, and no `ClearDrawing` for the ordinary drawing.
+            let [stop, clear] = gone();
+            let expected = match (marks, woke_first) {
+                (true, Some(true)) => vec![cancel(), stop, clear, cancel()],
+                (true, _) => vec![cancel(), cancel(), stop, clear],
+                (false, _) => vec![cancel(), stop, cancel()],
+            };
+            assert_eq!(
+                told(&watching),
+                expected,
+                "marks {marks}, woke first {woke_first:?}"
+            );
+            only_cancelled(&watching, before, cx);
+        }
+    }
+}
+
+/// Hold 1 is recognized through the native callback and still waits for its microphone, with
+/// the talk keys down; then the raw Esc-down ends it in a delivery of its own.
+fn ended_by_esc_down(watching: &Watching, cx: &mut TestAppContext) -> (Deliver, Instant) {
+    let owner = watching.ready.owner.clone();
+    let deliver = native(&owner, cx);
+    let at = Instant::now();
+    for key in [Key::LeftControl, Key::LeftAlt] {
+        let edge = Edge::Down;
+        deliver(Event::Key { key, edge }, after(at, 0));
+    }
+    deliver(Event::Deadline, after(at, 301));
+    cx.run_until_parked();
+    owner.read_with(cx, |owner, _| {
+        let hold = owner.voice.pending.as_ref().expect("the hold");
+        assert!(matches!(hold.source, Source::Waiting));
+    });
+    let (key, edge) = (Key::Other(1), Edge::Down);
+    deliver(Event::Key { key, edge }, after(at, 600));
+    cx.run_until_parked();
+    owner.read_with(cx, |owner, _| {
+        assert!(owner.voice.pending.is_none());
+        assert_eq!(owner.voice.cancelled, Some(GestureId(1)));
+    });
+    (deliver, at)
+}
+
+#[gpui::test]
+fn the_hotkey_s_press_after_an_esc_down_that_ended_a_waiting_hold_does_nothing_more(
+    cx: &mut TestAppContext,
+) {
+    let watching = watch(true, cx);
+    drawn(&watching, cx);
+    let before = panel(&watching, cx);
+    let (deliver, at) = ended_by_esc_down(&watching, cx);
+    told(&watching);
+    deliver(Event::Escape, after(at, 601));
+    cx.run_until_parked();
+    assert_eq!(told(&watching), []);
+    only_cancelled(&watching, before, cx);
+}
+
+#[gpui::test]
+fn a_cancel_marker_left_behind_takes_no_other_press_and_cancels_no_other_hold(
+    cx: &mut TestAppContext,
+) {
+    let clear = Told::Sent(ControlToBrain::ClearDrawing {
+        scene_ids: vec![DRAWN],
+    });
+
+    // The hotkey's press never came. The next press names no hold and is an ordinary one.
+    let watching = watch(true, cx);
+    drawn(&watching, cx);
+    let _native = ended_by_esc_down(&watching, cx);
+    told(&watching);
+    watching.ready.owner.update(cx, |owner, cx| {
+        owner.native_escape(None, cx).expect("escape");
+        assert_eq!(owner.voice.cancelled, None);
+    });
+    cx.run_until_parked();
+    assert_eq!(told(&watching), [clear]);
+
+    // A newer hold's own press cancels that hold: hold 1's marker is not its.
+    let watching = watch(true, cx);
+    drawn(&watching, cx);
+    let _native = ended_by_esc_down(&watching, cx);
+    hold(&watching, 2, cx);
+    watching.ready.owner.update(cx, |owner, cx| {
+        owner.native_escape(Some(GestureId(2)), cx).expect("escape");
+        assert!(owner.voice.pending.is_none(), "hold 2 is cancelled");
+        assert_eq!(owner.voice.cancelled, None);
+    });
+
+    // And hold 1's marker, whatever brings it back, leaves hold 2 pending.
+    let watching = watch(true, cx);
+    drawn(&watching, cx);
+    let _native = ended_by_esc_down(&watching, cx);
+    hold(&watching, 2, cx);
+    watching.ready.owner.update(cx, |owner, cx| {
+        owner.native_escape(Some(GestureId(1)), cx).expect("escape");
+        let hold = owner.voice.pending.as_ref().expect("hold 2");
+        assert_eq!(hold.token.gesture(), GestureId(2));
+    });
+
+    // A lost session forgets the marker.
+    let watching = watch(true, cx);
+    let _native = ended_by_esc_down(&watching, cx);
+    let lost = LinkEvent::State(LinkState::Reconnecting);
+    receive(&watching.ready.owner, lost, cx);
+    watching.ready.owner.read_with(cx, |owner, _| {
+        assert_eq!(owner.voice.cancelled, None);
+    });
 }
 
 #[gpui::test]

@@ -367,6 +367,15 @@ the answer text, and hands it the steps it lets through.
   and held chunks go.
 - Scene ids, revisions and counts are the only things it reports; its errors never carry labels.
 
+An Esc press that cancelled its own pending hold does nothing else, so it leaves the drawing
+up. The hold's cancelled `End` can be applied before the press is: at the raw Esc-down, a
+delivery ahead of the hotkey's, or in the hotkey's own delivery just before `native_escape`.
+`voice_intent` therefore keeps the gesture that `End` ended in `Voice.cancelled`.
+`native_escape` takes it at every press, and a press naming that gesture only takes the marks
+that are up and brings `Activity` up to date: it makes no local decision, so it stops no run
+and clears no scene. The marker cancels nothing itself, any other press is an ordinary one,
+and a lost session drops it.
+
 [ipc](ipc.md#scenes-and-recovery) has the recovery states and the install rules.
 
 ## A screen hold's pointer line
