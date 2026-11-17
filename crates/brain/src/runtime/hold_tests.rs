@@ -320,8 +320,7 @@ async fn first_speech_setup_loads_and_holds_without_restarting_the_brain() {
         assert_eq!(decoded.recv().await, Some(()));
         release.send(()).unwrap();
         let (run, _) = shell.state().await;
-        shell.held_words(G, "first setup transcript").await;
-        shell.hold_stored(G).await;
+        shell.held(G, "first setup transcript").await;
         shell.read_to_end(run).await;
         drop(shell);
     };
@@ -396,8 +395,7 @@ async fn exact_ordered_pcm_and_independent_resampling_tail_reach_one_real_hold_r
                     }
                     other => panic!("expected authentic hold run, got {other:?}"),
                 };
-                shell.held_words(G, "recognized sentinel").await;
-                shell.hold_stored(G).await;
+                shell.held(G, "recognized sentinel").await;
                 assert_eq!(
                     shell.data().await,
                     DataToShell::AssistantText {
@@ -457,8 +455,7 @@ async fn accepted_sparse_capture_pcm_reaches_transcription() {
         assert_eq!(decoded.recv().await, Some(()));
         release.send(()).unwrap();
         let (run, _) = shell.state().await;
-        shell.held_words(G, "sparse capture transcript").await;
-        shell.hold_stored(G).await;
+        shell.held(G, "sparse capture transcript").await;
         shell.read_to_end(run).await;
         drop(shell);
     };
@@ -647,8 +644,7 @@ async fn a_screen_hold_reaches_its_run_with_its_picture(first: First) {
         assert_eq!(round.recv().await, Some(()));
         told_at_the_grant(&mut shell, &go).await;
         assert!(matches!(shell.data().await, DataToShell::Models { .. }));
-        shell.held_words(G, "words and a picture").await;
-        shell.hold_stored(G).await;
+        shell.held(G, "words and a picture").await;
         shell.read_to_end(run).await;
         drop(shell);
     };
@@ -950,8 +946,7 @@ async fn accepted_target_deletion_cancels_before_late_decode_and_uses_no_phantom
         release.send(()).unwrap();
         let (run, _) = shell.state().await;
         let thread = shell.thread.unwrap();
-        shell.held_words(G, "deletable voice words").await;
-        shell.hold_stored(G).await;
+        shell.held(G, "deletable voice words").await;
         shell.read_to_end(run).await;
         while shell.state().await != (run, Phase::Done) {}
         let next = GestureId(18);

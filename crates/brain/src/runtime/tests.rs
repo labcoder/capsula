@@ -581,6 +581,12 @@ impl<S: AsyncRead + AsyncWrite> Shell<S> {
         self.credit(words.len() + 64).await;
     }
 
+    /// Reads a held recognition's words and then its turn's stored receipt.
+    async fn held(&mut self, gesture: kumochi_protocol::message::GestureId, words: &str) {
+        self.held_words(gesture, words).await;
+        self.hold_stored(gesture).await;
+    }
+
     /// Reads a held turn's stored receipt, granting its credit.
     async fn hold_stored(&mut self, gesture: kumochi_protocol::message::GestureId) {
         assert_eq!(self.data().await, DataToShell::HoldStored { gesture });
