@@ -497,31 +497,32 @@ fn real_store_recovery_produces_decodable_descriptors_and_chunks() {
     );
 }
 
-fn deletion_before_ack() -> Coordinator {
+fn deletion_before_ack(mut core: Coordinator) -> (Coordinator, Vec<Effect>) {
     let scratch = Scratch::new("drawing-delete-held");
     let mut store = open(&scratch);
-    let mut core = started();
     let lookup = draw(&mut core);
     let first = commit(&mut core, &mut store, &lookup);
     assert!(core.drawing_snapshot().is_err());
-    core.handle(Input::Delete {
-        thread: T,
-        after_turns: 0,
-        resend: false,
-    })
-    .expect("accepted delete");
+    let mut effects = core
+        .handle(Input::Delete {
+            thread: T,
+            after_turns: 0,
+            resend: false,
+        })
+        .expect("accepted delete");
     let stored = commit(&mut core, &mut store, &first);
     assert!(!stored.iter().any(|effect| matches!(
         effect,
         Effect::Data(DataToShell::SceneBegin { .. } | DataToShell::SceneStepCommit { .. })
     )));
-    core
+    effects.extend(stored);
+    (core, effects)
 }
 
 fn deletion_during_write(
     outcome: kumochi_protocol::message::Deleted,
 ) -> (Coordinator, Vec<Effect>) {
-    let mut core = deletion_before_ack();
+    let (mut core, mut effects) = deletion_before_ack(started());
     let answered = core
         .handle(Input::Deleted {
             thread: T,
@@ -529,12 +530,13 @@ fn deletion_during_write(
             last_run: Some(R),
         })
         .expect("delete result");
-    (core, answered)
+    effects.extend(answered);
+    (core, effects)
 }
 
 #[test]
 fn reconnect_snapshot_supersedes_frames_held_for_a_pending_delete() {
-    let mut core = deletion_before_ack();
+    let (mut core, _) = deletion_before_ack(started());
     let snapshot = core
         .drawing_snapshot()
         .expect("the committed scene is recoverable");
@@ -549,7 +551,11 @@ fn reconnect_snapshot_supersedes_frames_held_for_a_pending_delete() {
         .expect("refused delete");
     assert!(!effects.iter().any(|effect| matches!(
         effect,
-        Effect::Data(DataToShell::SceneBegin { .. } | DataToShell::SceneStepCommit { .. })
+        Effect::Data(
+            DataToShell::SceneBegin { .. }
+                | DataToShell::SceneStepCommit { .. }
+                | DataToShell::RunEnd { .. }
+        )
     )));
     assert_eq!(
         core.drawing_snapshot()
@@ -561,7 +567,7 @@ fn reconnect_snapshot_supersedes_frames_held_for_a_pending_delete() {
 
 #[test]
 fn coordinator_debug_does_not_format_frames_held_for_deletion() {
-    let core = deletion_before_ack();
+    let (core, _) = deletion_before_ack(started());
     assert_eq!(core.drawing_held.len(), 3);
     assert!(matches!(
         core.drawing_held[2].1,
@@ -575,6 +581,8 @@ fn coordinator_debug_does_not_format_frames_held_for_deletion() {
     assert!(!debug.contains("SceneBegin"));
     assert!(!debug.contains("SceneStepCommit"));
     assert!(!debug.contains("SceneEnd"));
+    assert!(!debug.contains("test diagram"));
+    assert!(!debug.contains(&format!("{:?}", b"test diagram")));
 }
 
 #[test]
@@ -600,21 +608,380 @@ fn a_refused_delete_releases_late_drawing_frames_without_losing_canonical_state(
             .count(),
         1
     );
+    let ends: Vec<_> = effects
+        .iter()
+        .enumerate()
+        .filter_map(|(index, effect)| {
+            matches!(effect, Effect::Data(DataToShell::RunEnd { run: R })).then_some(index)
+        })
+        .collect();
+    assert_eq!(ends.len(), 1);
+    let committed = effects
+        .iter()
+        .position(|effect| {
+            matches!(
+                effect,
+                Effect::Data(DataToShell::SceneStepCommit { run: R, .. })
+            )
+        })
+        .expect("replayed commit");
+    assert!(
+        committed < ends[0],
+        "replay must precede the run's data end"
+    );
+    let closed = effects
+        .iter()
+        .position(|effect| matches!(effect, Effect::Data(DataToShell::SceneEnd { run: R, .. })))
+        .expect("replayed scene end");
+    assert!(closed < ends[0]);
+}
+
+#[test]
+fn deletion_held_data_end_does_not_hold_the_outcome_or_send_lease() {
+    let mut core = started();
+    let key = core
+        .current
+        .as_ref()
+        .expect("current")
+        .build
+        .as_ref()
+        .expect("build")
+        .key();
+    let granted = core
+        .handle(Input::SendReady {
+            key: super::super::SendKey::Build(key),
+            hold: None,
+        })
+        .expect("send grant");
+    let lease = granted
+        .iter()
+        .find_map(|effect| match effect {
+            Effect::Grant(lease) => Some(*lease),
+            _ => None,
+        })
+        .expect("granted lease");
+    let (mut core, mut effects) = deletion_before_ack(core);
+    assert_eq!(core.held_deletes(), vec![T]);
+    assert!(
+        effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::Store(StoreOp::EndRun { run: R, .. })))
+    );
+    effects.extend(
+        core.handle(Input::RunStored { run: R })
+            .expect("stored before delete"),
+    );
+    assert_eq!(core.ending_runs(), 0);
+    assert!(
+        !effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::Data(DataToShell::RunEnd { run: R })))
+    );
+    let released = core
+        .handle(Input::SendSettled { lease })
+        .expect("settled send");
+    assert_eq!(
+        released
+            .iter()
+            .filter(|effect| matches!(effect, Effect::Store(StoreOp::Delete { thread: T })))
+            .count(),
+        1
+    );
+    assert!(core.held_deletes().is_empty());
+    let answered = core
+        .handle(Input::Deleted {
+            thread: T,
+            outcome: kumochi_protocol::message::Deleted::NotHidden,
+            last_run: Some(R),
+        })
+        .expect("refused delete");
+    assert_eq!(answered.last(), Some(&super::run_end(R)));
+    assert_eq!(
+        answered
+            .iter()
+            .filter(|effect| **effect == super::run_end(R))
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn deletion_held_end_survives_store_failure_without_a_second_end() {
+    let (mut core, mut effects) = deletion_before_ack(started());
+    effects.extend(
+        core.handle(Input::StoreFailed { run: R })
+            .expect("outcome failed"),
+    );
+    effects.extend(
+        core.handle(Input::RunStored { run: R })
+            .expect("failed outcome stored"),
+    );
+    assert_eq!(core.ending_runs(), 0);
+    assert!(effects.iter().any(|effect| matches!(
+        effect,
+        Effect::Control(ControlToShell::RunState {
+            run: R,
+            phase: Phase::Failed,
+            ..
+        })
+    )));
+    assert!(!effects.iter().any(|effect| *effect == super::run_end(R)));
+    effects.extend(
+        core.handle(Input::Deleted {
+            thread: T,
+            outcome: kumochi_protocol::message::Deleted::NotHidden,
+            last_run: Some(R),
+        })
+        .expect("refused delete"),
+    );
+    assert_eq!(effects.last(), Some(&super::run_end(R)));
+    assert_eq!(
+        effects
+            .iter()
+            .filter(|effect| **effect == super::run_end(R))
+            .count(),
+        1
+    );
+    assert_eq!(core.handle(Input::RunStored { run: R }), Err(super::Stale));
+}
+
+#[test]
+fn quieting_and_abandoned_store_ends_stay_behind_deletion_replay() {
+    for abandoned in [false, true] {
+        let mut core = super::spoken();
+        core.handle(Input::Engine {
+            key: super::engine_key(&core, R),
+            event: TurnEvent::TextDelta("Hello there. ".into()),
+        })
+        .expect("spoken text");
+        let (mut core, mut effects) = deletion_before_ack(core);
+        if abandoned {
+            effects.extend(
+                core.handle(Input::StoreFailed { run: R })
+                    .expect("outcome failed"),
+            );
+            effects.extend(
+                core.handle(Input::StoreFailed { run: R })
+                    .expect("retry failed"),
+            );
+        } else {
+            effects.extend(
+                core.handle(Input::RunStored { run: R })
+                    .expect("stored outcome"),
+            );
+            effects.extend(
+                core.handle(Input::SpeechStopped {
+                    run: R,
+                    cursor: None,
+                })
+                .expect("quiet"),
+            );
+        }
+        assert_eq!(core.ending_runs(), 0);
+        assert!(!effects.iter().any(|effect| *effect == super::run_end(R)));
+        effects.extend(
+            core.handle(Input::Deleted {
+                thread: T,
+                outcome: kumochi_protocol::message::Deleted::NotHidden,
+                last_run: Some(R),
+            })
+            .expect("refused delete"),
+        );
+        assert_eq!(effects.last(), Some(&super::run_end(R)));
+        assert_eq!(
+            effects
+                .iter()
+                .filter(|effect| **effect == super::run_end(R))
+                .count(),
+            1
+        );
+    }
 }
 
 #[test]
 fn a_hidden_thread_never_releases_late_drawing_frames() {
-    let (core, effects) = deletion_during_write(kumochi_protocol::message::Deleted::Hidden);
+    for outcome in [
+        kumochi_protocol::message::Deleted::Hidden,
+        kumochi_protocol::message::Deleted::Removed,
+    ] {
+        let (mut core, effects) = deletion_during_write(outcome);
+        assert!(
+            core.drawing_snapshot()
+                .expect("retired scene")
+                .scenes
+                .is_empty()
+        );
+        assert!(!effects.iter().any(|effect| matches!(
+            effect,
+            Effect::Data(DataToShell::SceneBegin { .. } | DataToShell::SceneStepCommit { .. })
+        )));
+        assert_eq!(
+            effects
+                .iter()
+                .filter(|effect| **effect == super::run_end(R))
+                .count(),
+            1
+        );
+        assert!(core.drawing_held.is_empty());
+        assert_eq!(
+            core.handle(Input::Deleted {
+                thread: T,
+                outcome,
+                last_run: Some(R)
+            }),
+            Err(super::Stale)
+        );
+    }
+}
+
+#[test]
+fn revoking_deletion_held_payload_keeps_its_owed_data_end() {
+    for outcome in [
+        kumochi_protocol::message::Deleted::NotHidden,
+        kumochi_protocol::message::Deleted::Hidden,
+    ] {
+        let (mut core, mut effects) = deletion_before_ack(started());
+        let scene = core.drawing_snapshot().expect("committed scene").scenes[0].scene;
+        assert!(!effects.iter().any(|effect| *effect == super::run_end(R)));
+        core.drawing_clear(vec![scene], &mut effects);
+        assert_eq!(
+            effects
+                .iter()
+                .filter(|effect| **effect == super::run_end(R))
+                .count(),
+            1
+        );
+        effects.extend(
+            core.handle(Input::ScenesCleared {
+                scenes: vec![scene],
+                ok: true,
+            })
+            .expect("cleared payload"),
+        );
+        effects.extend(
+            core.handle(Input::Deleted {
+                thread: T,
+                outcome,
+                last_run: Some(R),
+            })
+            .expect("delete result"),
+        );
+        assert_eq!(
+            effects
+                .iter()
+                .filter(|effect| **effect == super::run_end(R))
+                .count(),
+            1
+        );
+        assert!(!effects.iter().any(|effect| matches!(
+            effect,
+            Effect::Data(
+                DataToShell::SceneBegin { .. }
+                    | DataToShell::SceneStepCommit { .. }
+                    | DataToShell::SceneEnd { .. }
+            )
+        )));
+        assert!(core.drawing_held.is_empty());
+        assert!(
+            core.drawing_snapshot()
+                .expect("cleared scene")
+                .scenes
+                .is_empty()
+        );
+    }
+}
+
+#[test]
+fn held_frame_capacity_does_not_charge_or_drop_the_owed_end() {
+    let (mut core, mut effects) = deletion_before_ack(started());
+    let scene = core.drawing_snapshot().expect("committed scene").scenes[0].scene;
+    let frame = DataToShell::SceneCutApplied {
+        scene,
+        revision: 1,
+        cut: serde_json::from_str(r#"{"activated":0,"revealed":[]}"#).expect("zero cut"),
+    };
+    for _ in 3..64 {
+        core.drawing_output(
+            drawing::Output {
+                effects: vec![Effect::Data(frame.clone())],
+                calls: Vec::new(),
+            },
+            &mut effects,
+        );
+    }
+    assert_eq!(core.drawing_held.len(), 64);
     assert!(
-        core.drawing_snapshot()
-            .expect("retired scene")
-            .scenes
-            .is_empty()
+        !effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::Broken(_)))
     );
-    assert!(!effects.iter().any(|effect| matches!(
-        effect,
-        Effect::Data(DataToShell::SceneBegin { .. } | DataToShell::SceneStepCommit { .. })
-    )));
+    core.drawing_output(
+        drawing::Output {
+            effects: vec![Effect::Data(frame)],
+            calls: Vec::new(),
+        },
+        &mut effects,
+    );
+    assert_eq!(core.drawing_held.len(), 64);
+    assert_eq!(
+        effects
+            .iter()
+            .filter(|effect| matches!(
+                effect,
+                Effect::Broken("too many drawing frames await deletion")
+            ))
+            .count(),
+        1
+    );
+    let answered = core
+        .handle(Input::Deleted {
+            thread: T,
+            outcome: kumochi_protocol::message::Deleted::NotHidden,
+            last_run: Some(R),
+        })
+        .expect("refused delete");
+    assert_eq!(
+        answered
+            .iter()
+            .filter(|effect| **effect == super::run_end(R))
+            .count(),
+        1
+    );
+    assert_eq!(
+        answered
+            .iter()
+            .filter(|effect| matches!(effect, Effect::Data(DataToShell::SceneCutApplied { .. })))
+            .count(),
+        61
+    );
+    assert!(core.drawing_held.is_empty());
+}
+
+#[test]
+fn lost_session_discards_deletion_held_end_with_its_recovery_frames() {
+    let (mut core, _) = deletion_before_ack(started());
+    let snapshot = core.drawing_snapshot().expect("committed scene");
+    let lost = core.handle(Input::ShellLost).expect("lost shell");
+    assert!(!lost.iter().any(|effect| *effect == super::run_end(R)));
+    core.begin_session();
+    core.drawing_described();
+    let answered = core
+        .handle(Input::Deleted {
+            thread: T,
+            outcome: kumochi_protocol::message::Deleted::NotHidden,
+            last_run: Some(R),
+        })
+        .expect("refused delete");
+    assert!(
+        !answered
+            .iter()
+            .any(|effect| matches!(effect, Effect::Data(_)))
+    );
+    assert!(core.drawing_held.is_empty());
+    assert_eq!(
+        core.drawing_snapshot().expect("recovered scene").scenes,
+        snapshot.scenes
+    );
 }
 
 #[test]
