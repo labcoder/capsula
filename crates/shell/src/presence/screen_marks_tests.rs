@@ -819,7 +819,7 @@ fn ended(watching: &Watching, cx: &mut TestAppContext) {
     });
 }
 
-// The three tests below pin the hold's cancel as it is told today: twice for one press, once
+// The four tests below pin the hold's cancel as it is told today: twice for one press, once
 // where the hold's input is revoked and once from the runs' hold.
 
 #[gpui::test]
