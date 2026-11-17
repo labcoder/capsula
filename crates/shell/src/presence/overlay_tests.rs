@@ -731,7 +731,6 @@ fn a_warm_real_element_draw_has_no_boxed_application_callback(cx: &mut TestAppCo
 fn the_real_element_paints_a_hold_s_line_as_two_strokes_only_while_its_host_is_enabled(
     cx: &mut TestAppContext,
 ) {
-    use gpui_kit::AppContext as _;
     use kumochi_protocol::geometry::{PhysicalPoint, PhysicalRect};
     use kumochi_protocol::message::GestureId;
 
@@ -757,11 +756,8 @@ fn the_real_element_paints_a_hold_s_line_as_two_strokes_only_while_its_host_is_e
         origin: [0, 0],
         size: [4_000, 4_000],
     };
-    let holder = cx.new(|_| ());
-    let sampler = holder.update(cx, |(), cx| {
-        let recorder = crate::input::path::PathRecorder::new(PhysicalPoint([10, 10]), 1.0, display);
-        super::ink::Sampler::start(GestureId(1), recorder, cx, |(), _| true)
-    });
+    let recorder = crate::input::path::PathRecorder::new(PhysicalPoint([10, 10]), 1.0, display);
+    let sampler = super::ink::Sampler::new(GestureId(1), recorder);
     let mut visual = gpui_kit::VisualTestContext::from_window(overlay.window, cx);
     visual.simulate_resize(size(px(100.0), px(100.0)));
     visual.run_until_parked();
@@ -789,7 +785,7 @@ fn the_real_element_paints_a_hold_s_line_as_two_strokes_only_while_its_host_is_e
     let moved = ink
         .borrow_mut()
         .as_mut()
-        .is_some_and(|sampler| sampler.sample(PhysicalPoint([80, 60])));
+        .is_some_and(|sampler| sampler.sample(PhysicalPoint([80, 60]), std::time::Instant::now()));
     assert!(moved);
     let (paths, kept) = drawn();
     assert_eq!(paths, 2, "the white edge and the pink core");

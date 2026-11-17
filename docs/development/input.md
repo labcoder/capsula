@@ -233,6 +233,23 @@ An ignored fixture,
 second registration refused with Stop shown, and sees Esc released. It holds the desktop's Esc
 for milliseconds, so run it only in an approved session.
 
+While a hold's keys are down, an Esc press is Ctrl+Alt+Esc. The plain Esc hotkey doesn't match
+it, and Windows acts on it as Alt+Esc and brings another window to the front. So from a hold's
+recognition until its keys come up or it ends, the proxy holds a second hotkey, Esc with Ctrl
+and Alt (`TalkEscape`). Those are the only modifiers a hold's keys can have down, since any
+other key going down cancels the hold, and the chord is never held outside a hold.
+
+- Raw Input doesn't report a press a hotkey took. The proxy delivers this hotkey's message as
+  the Esc key going down and up, so the hold cancels as it does for any other key and the press
+  does nothing else: it stops no run and clears no drawing.
+- Windows is asked once per hold. If another app already holds the chord, the refusal is logged
+  once for that hold, without key or text content, and that app gets the press: Esc then
+  doesn't cancel the hold, and any other key still does.
+- A second ignored fixture, `cargo test -p kumochi-shell -- --ignored talk_keys_escape`,
+  registers the chord beside plain Esc on a hidden window, sees a second registration refused,
+  and sees dropping the chord free it and leave plain Esc held. Run it only in an approved
+  session too.
+
 ## Diagnostics for the input session
 
 Two opt-in flags serve the approved gate-session harness. A normal run uses neither, and
@@ -603,14 +620,30 @@ that is under 100% or not a number counts as 100%.
   pointer was at recognition, so a resting hand draws nothing. The first sample that far starts
   the path with two points: where the pointer was at recognition, if that place is on the
   display, and then the sample. The line starts where the hand did.
-- After that a sample is kept when it is at least 2 logical pixels from the last kept point.
-- A path holds at most `MAX_PATH_POINTS` (2,048). The sample that would be the 2,049th is added
-  and then every second point is dropped, which keeps the first and the newest, and the spacing
-  doubles. So a hold of any length fits.
+- After that the kept points are an eased copy of the pointer: a first-order lag with a 12 ms
+  time constant (`EASE`), applied by the clock and not per sample, so every frame rate records
+  the same line. It is short because the line is evidence of where the user pointed: a circle
+  of 40 pixels drawn at three turns a second is recorded one pixel smaller.
+- An eased point is kept when it is at least 2 logical pixels from the last kept point and at
+  least 16 ms after it (`APART`), so a long line stays cheap to paint. By the clock that lands
+  on the display's frames: a 60 Hz display keeps a point on every frame (16.7 ms) and a 144 Hz
+  display on every third (20.8 ms, 48 a second), so its recorded line is slightly coarser.
+- `end` is the pointer's own last place on the display, which the shell draws the line on to.
+  `finish` ends the path at the pointer read with the release, never at an eased point.
+- A path holds at most `MAX_PATH_POINTS` (2,048), and sampling leaves room for the release's
+  point. A full path is thinned to three quarters, not stopped: each pass drops the points
+  within a tolerance (1 logical pixel) of the straight stretch between their neighbours, at
+  most every second one, and keeps the first and the newest. So straight runs lose points and
+  corners keep theirs. A path with too few such points, one that is nothing but turns, gets
+  twice the tolerance. So a hold of any length fits, and the line never stops. The raised
+  tolerance stays for the rest of the hold: later fills thin at it and their passes add up, so
+  in a long hold that is nothing but turns the line can move by the sum of several passes'
+  tolerances, not by one pixel. A `shortcut:` in `thin` names the fix, starting each thin from
+  the base tolerance.
 - Only samples inside the display given to `new` are kept. That is the display the line will be
   drawn on, so nothing reaches the picture that wasn't shown. A sample anywhere else changes
   nothing, and the path joins up in a straight line when the pointer comes back.
 
 `sample` returns true when the path changed. A pointer that never leaves the first 24 pixels
-finishes as an empty path. The shell's sampler feeds it every 16 ms while a screen hold's keys
+finishes as an empty path. The shell's sampler feeds it once a frame while a screen hold's keys
 are down ([presence](presence.md#a-screen-holds-pointer-line)).

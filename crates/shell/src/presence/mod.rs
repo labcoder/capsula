@@ -80,7 +80,7 @@ use gpui_kit::{
 use kumochi_protocol::constants;
 use kumochi_shell_core::presence::{frame_rate, geometry, kumo, perch, pulling, thread_selection};
 
-use crate::escape::{Activity, Escape, EscapeHold, Panel as EscapePanel};
+use crate::escape::{Activity, Escape, EscapeHold, Panel as EscapePanel, TalkEscape};
 use crate::input::{Effect, Gesture};
 use crate::link::{LinkEvent, LinkHandle, LinkState, Session};
 use crate::platform::input::{Input, input};
@@ -172,6 +172,8 @@ struct Presence {
     scene_timer: Option<Task<()>>,
     scene_deadline: Option<Instant>,
     escape_hold: EscapeHold<EscapeHotkey>,
+    /// Esc with the talk keys down, held only while a hold's keys are.
+    talk_escape: TalkEscape<EscapeHotkey>,
     /// `--esc-fixture`: hold global Esc from startup until the first Esc, with no fake work.
     escape_fixture: bool,
     layout: Layout,
@@ -1043,6 +1045,7 @@ pub(crate) fn open(
             scene_timer: None,
             scene_deadline: None,
             escape_hold: EscapeHold::default(),
+            talk_escape: TalkEscape::default(),
             escape_fixture: flags.escape_fixture,
             layout: Layout::default(),
             drawing_placement: None,
@@ -1070,6 +1073,7 @@ pub(crate) fn open(
     let position = flags.position();
     owner.update(cx, |this, cx| this.position(position, cx))?;
     owner.update(cx, |this, cx| this.observe(position, cx))?;
+    owner.update(cx, Presence::prepare_overlay);
     let (link, target, paused) = {
         let this = owner.read(cx);
         (

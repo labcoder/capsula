@@ -1152,10 +1152,12 @@ animation frames. Live steps activate and acknowledge their first paint as "Seri
 activation and first-paint acknowledgement" describes.
 
 The overlay lifecycle keeps native visibility separate from paint eligibility. A successful
-hide closes the old GPUI window and opens a fresh hidden replacement; a refused hide keeps
+hide closes the old GPUI window, and a fresh hidden replacement opens once the update that hid
+it is over; a refused hide keeps
 an empty, click-through host without Esc, paint acknowledgement or retry demand. The next
 show retires that uncertain host before opening another. A refused show is also uncertain,
-never trusted as a hidden window. Close/open failures fail the visible update closed.
+never trusted as a hidden window. Close/open failures fail the visible update closed; a
+replacement that can't open is logged, and the next show opens its own.
 If configuration or capture affinity fails after creation, the new hidden host is removed
 before the error returns.
 Each window has its own revocable painting gate: an old queued canvas cannot read another

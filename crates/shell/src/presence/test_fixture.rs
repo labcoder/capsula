@@ -12,7 +12,7 @@ use kumochi_scene::theme::Theme;
 use super::{
     Activity, Context, Dock, Drawn, EscapeHold, FrameLoop, KumoView, Layout, Line, LinkHandle,
     LinkState, Panel, PanelVisibility, Presence, PresenceNative, Runs, Settings, Strings,
-    TextPanel, Threads, Window, platform, presence_labels, pull_dock,
+    TalkEscape, TextPanel, Threads, Window, platform, presence_labels, pull_dock,
 };
 use crate::presenter::Presenter;
 
@@ -111,6 +111,7 @@ pub(super) fn presence(cx: &mut TestAppContext) -> Entity<Presence> {
             scene_timer: None,
             scene_deadline: None,
             escape_hold: EscapeHold::default(),
+            talk_escape: TalkEscape::default(),
             escape_fixture: false,
             layout: Layout::default(),
             drawing_placement: None,
