@@ -63,6 +63,7 @@ use kumochi_scene::{
     display::PaintWork,
     layout::{LayoutState, PrepareError, PrepareInput, PreparedStep, SurfaceGeometry},
     limits::MAX_RESIDENT_BYTES,
+    record::ScreenDisplay,
     text::Bounded,
     theme::Theme,
 };
@@ -181,6 +182,8 @@ pub struct Presenter {
     /// The bit those sources set.
     changed: Changed,
     listening: bool,
+    /// The display the overlay covers, where a screen scene's view is placed.
+    display: Option<ScreenDisplay>,
     /// This presenter's dropper liveness in tests; `None` asks the process-wide dropper.
     #[cfg(any(test, feature = "test-support"))]
     dropper: Option<bool>,
@@ -216,6 +219,7 @@ impl Presenter {
             sources: None,
             changed: Changed::default(),
             listening: false,
+            display: None,
             #[cfg(any(test, feature = "test-support"))]
             dropper: None,
         }
@@ -366,11 +370,13 @@ impl Presenter {
     }
 
     /// A job's answer. Answers for cancelled, timed-out or replaced work are dropped, but still
-    /// free their worker.
+    /// free their worker. The screen watch is applied first, so the answer of a screen scene
+    /// that a change or a limit takes here finds it gone.
     /// # Errors
     /// [`Broken`] when a held frame applied after recovery can't be mirrored.
     pub fn completed(&mut self, done: Completion, now: Instant) -> Result<Vec<Effect>, Broken> {
         let mut out = Out::default();
+        self.check_marks(now, &mut out)?;
         match done {
             Completion::Prepared {
                 id,
@@ -731,7 +737,13 @@ impl Presenter {
                 let state = SceneState::begin(header.begin.clone()).map_err(|_| Broken::Header)?;
                 let rest = LayoutState::new(&state);
                 let retained = rest.resident_bytes();
-                let view = placement::resting_view(&rest, state.activated(), self.drawing_stage);
+                let view = placement::resting_view(
+                    &rest,
+                    state.activated(),
+                    self.drawing_stage,
+                    state.header(),
+                    self.display,
+                );
                 let activation = Activation::new(&state, now);
                 let frame = Frame::new();
                 let cache = self.stage.stage(&view);
@@ -900,8 +912,13 @@ impl Presenter {
             StopOutcome::Cleared => None,
         };
         if let Some(rest) = rest {
-            let mut view =
-                placement::resting_view(&rest, scene.state.view().activated(), self.drawing_stage);
+            let mut view = placement::resting_view(
+                &rest,
+                scene.state.view().activated(),
+                self.drawing_stage,
+                scene.state.view().header(),
+                self.display,
+            );
             if let Some(at) = stopped {
                 view.carry_spin(&scene.view, at);
             }

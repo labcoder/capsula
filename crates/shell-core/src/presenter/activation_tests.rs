@@ -126,12 +126,12 @@ fn now_supersedes_without_fabricating_hidden_or_empty_acknowledgements() {
     presenter.advance(GENERATION, now).expect("first");
     presenter.advance(GENERATION, now).expect("empty");
     assert_eq!(bound(&presenter), 2);
-    assert!(!presenter.sample_at(now).0.visible);
+    assert!(!presenter.sample_at(now).expect("a sample").0.visible);
     presenter.frames.borrow_mut().shown = true;
     paint(&presenter);
     assert_eq!(presenter.take_shown(GENERATION), [None; 4]);
     presenter.advance(GENERATION, now).expect("last");
-    presenter.sample_at(ms(now, 800));
+    presenter.sample_at(ms(now, 800)).expect("a sample");
     paint(&presenter);
     assert_eq!(presenter.take_shown(GENERATION), shown(RunId(6), 2));
     assert_eq!(presenter.take_shown(GENERATION), [None; 4]);
@@ -149,7 +149,7 @@ fn visibility_epochs_rebind_fresh_paints_without_resetting_activation_once_state
     );
     let (mut presenter, now) = prepared(&[(RUN, rect("r")), (RunId(6), delayed)]);
     presenter.advance(GENERATION, now).expect("first");
-    presenter.sample_at(now);
+    presenter.sample_at(now).expect("a sample");
     presenter.frames.borrow_mut().shown = true;
     paint(&presenter);
     let old = presenter
@@ -158,11 +158,17 @@ fn visibility_epochs_rebind_fresh_paints_without_resetting_activation_once_state
         .painted(LIVE)
         .expect("first paint");
     presenter.advance(GENERATION, now).expect("delayed");
-    assert!(!presenter.sample_at(now).0.visible);
+    assert!(!presenter.sample_at(now).expect("a sample").0.visible);
     presenter.frames.borrow_mut().hide();
     assert!(!presenter.frames.borrow_mut().acknowledge(LIVE, old));
     assert_eq!(presenter.take_shown(GENERATION), [None; 4]);
-    assert!(presenter.sample_at(ms(now, 200)).0.visible);
+    assert!(
+        presenter
+            .sample_at(ms(now, 200))
+            .expect("a sample")
+            .0
+            .visible
+    );
     presenter.frames.borrow_mut().shown = true;
     assert_eq!(
         presenter.take_shown(GENERATION),
@@ -173,7 +179,7 @@ fn visibility_epochs_rebind_fresh_paints_without_resetting_activation_once_state
     assert_eq!(presenter.take_shown(GENERATION + 1), [None; 4]);
     assert_eq!(presenter.take_shown(GENERATION), shown(RunId(6), 1));
     presenter.frames.borrow_mut().hide();
-    presenter.sample_at(ms(now, 400));
+    presenter.sample_at(ms(now, 400)).expect("a sample");
     presenter.frames.borrow_mut().shown = true;
     paint(&presenter);
     assert_eq!(
@@ -187,7 +193,7 @@ fn visibility_epochs_rebind_fresh_paints_without_resetting_activation_once_state
 fn a_failed_epoch_cannot_deliver_an_earlier_success() {
     let (mut presenter, now) = prepared(&[(RUN, rect("r"))]);
     presenter.advance(GENERATION, now).expect("activate");
-    presenter.sample_at(ms(now, 800));
+    presenter.sample_at(ms(now, 800)).expect("a sample");
     presenter.frames.borrow_mut().shown = true;
     paint(&presenter);
     assert!(presenter.frames.borrow().paint(|_, _| Err::<(), _>(())));
@@ -366,7 +372,7 @@ fn independently_begun_scenes_have_distinct_origins_over_the_same_sampler() {
     begin(&mut presenter, other, ms(now, 100));
     assert_eq!(presenter.scenes[&LIVE].activation.time(ms(now, 300)), 300);
     assert_eq!(presenter.scenes[&other].activation.time(ms(now, 300)), 200);
-    presenter.sample_at(ms(now, 300));
+    presenter.sample_at(ms(now, 300)).expect("a sample");
     assert_eq!(presenter.scenes[&LIVE].sampled_ms, Some(300));
     assert_eq!(presenter.scenes[&other].sampled_ms, Some(200));
     presenter.sample(400);
@@ -389,7 +395,11 @@ fn same_bound_motion_and_skipped_delayed_endpoints_invalidate_once_then_rest() {
         (300, false, 100.0),
     ] {
         assert_eq!(
-            presenter.sample_at(ms(now, at)).0.changed,
+            presenter
+                .sample_at(ms(now, at))
+                .expect("a sample")
+                .0
+                .changed,
             changed,
             "at {at}"
         );
@@ -410,13 +420,23 @@ fn same_bound_motion_and_skipped_delayed_endpoints_invalidate_once_then_rest() {
         ),
     )]);
     presenter.advance(GENERATION, now).expect("activate");
-    presenter.sample_at(now);
+    presenter.sample_at(now).expect("a sample");
     paint_shown(&mut presenter, now);
     assert!(
-        presenter.sample_at(ms(now, 300)).0.changed,
+        presenter
+            .sample_at(ms(now, 300))
+            .expect("a sample")
+            .0
+            .changed,
         "crossed a whole delayed interval"
     );
-    assert!(!presenter.sample_at(ms(now, 400)).0.changed);
+    assert!(
+        !presenter
+            .sample_at(ms(now, 400))
+            .expect("a sample")
+            .0
+            .changed
+    );
 }
 
 #[test]
@@ -432,7 +452,7 @@ fn stop_latches_motion_cancels_a_nonzero_worker_and_ignores_late_results() {
     assert_eq!(presenter.workers(), 1);
     assert_eq!(presenter.stoppable_run(), Some(RunId(6)));
     assert!(presenter.live_work(now));
-    presenter.sample_at(ms(now, 100));
+    presenter.sample_at(ms(now, 100)).expect("a sample");
     presenter.stop(RunId(6), ms(now, 100)).expect("first stop");
     assert_eq!(presenter.scenes[&LIVE].cut, Cut::Outstanding);
     let cut = presenter.scenes[&LIVE].cut_now();
@@ -445,7 +465,13 @@ fn stop_latches_motion_cancels_a_nonzero_worker_and_ignores_late_results() {
         1,
         "cancellation is not physical completion"
     );
-    assert!(!presenter.sample_at(ms(now, 500)).0.changed);
+    assert!(
+        !presenter
+            .sample_at(ms(now, 500))
+            .expect("a sample")
+            .0
+            .changed
+    );
     assert_eq!(presenter.scenes[&LIVE].sampled_ms, Some(100));
     assert!(!presenter.live_work(ms(now, 500)));
     assert_eq!(presenter.stoppable_run(), None);
@@ -563,7 +589,7 @@ fn a_wake_whose_head_is_no_longer_due_drops_its_request_and_drains() {
     presenter
         .advance(GENERATION, now)
         .expect("first activation");
-    presenter.sample_at(now);
+    presenter.sample_at(now).expect("a sample");
     let due = presenter.next_wake(now).expect("the later step's wake");
     let admission = only_admission(
         arrive(&mut presenter, commit_frame(LIVE, 2, rect("next")), due).expect("lane"),

@@ -112,21 +112,33 @@ fn a_pending_first_paint_is_placed_and_a_stage_change_keeps_its_clock_pending() 
         transform(&presenter),
         Affine::pose(2.0, 0.0, Vec2::new(290.0, 340.0))
     );
-    presenter.sample_at(now);
-    presenter.sample_at(ms(now, 2000));
+    presenter.sample_at(now).expect("a sample");
+    presenter.sample_at(ms(now, 2000)).expect("a sample");
     presenter.set_stage(Rect {
         origin: Vec2::new(20.0, 30.0),
         size: Vec2::new(58.0, 58.0),
     });
-    assert!(presenter.sample_at(ms(now, 2000)).0.changed);
+    assert!(
+        presenter
+            .sample_at(ms(now, 2000))
+            .expect("a sample")
+            .0
+            .changed
+    );
     let frames = presenter.frames();
     frames.borrow_mut().shown = true;
     let placed = Affine::pose(1.0, 0.0, Vec2::new(44.0, 54.0));
     assert_eq!(painted(&presenter), [(placed, 0.0)]);
     presenter.set_stage(stage());
-    assert!(presenter.sample_at(ms(now, 2000)).0.changed);
+    assert!(
+        presenter
+            .sample_at(ms(now, 2000))
+            .expect("a sample")
+            .0
+            .changed
+    );
     assert!(presenter.begin_painted(ms(now, 2000)));
-    presenter.sample_at(ms(now, 2400));
+    presenter.sample_at(ms(now, 2400)).expect("a sample");
     assert_eq!(
         painted(&presenter),
         [(Affine::pose(2.0, 0.0, Vec2::new(290.0, 340.0)), 0.5)]
@@ -148,8 +160,14 @@ fn placement_preserves_an_empty_pending_slot_and_its_late_appearance_clamp() {
         .expect("prepare");
     presenter.advance(GENERATION, now).expect("activate");
     assert_eq!(presenter.scenes[&LIVE].view.first_appearance(), Some(200));
-    assert!(!presenter.sample_at(now).0.visible);
-    assert!(!presenter.sample_at(ms(now, 100)).0.visible);
+    assert!(!presenter.sample_at(now).expect("a sample").0.visible);
+    assert!(
+        !presenter
+            .sample_at(ms(now, 100))
+            .expect("a sample")
+            .0
+            .visible
+    );
     let frames = presenter.frames();
     let epoch = frames.borrow().epoch(LIVE).expect("epoch");
     presenter.set_stage(Rect {
@@ -160,7 +178,13 @@ fn placement_preserves_an_empty_pending_slot_and_its_late_appearance_clamp() {
     assert_eq!(frames.borrow().sampled_ms(LIVE), Some(100));
     assert_eq!(frames.borrow().painted(LIVE), None);
     assert!(!presenter.begin_painted(ms(now, 150)));
-    assert!(presenter.sample_at(ms(now, 300)).0.visible);
+    assert!(
+        presenter
+            .sample_at(ms(now, 300))
+            .expect("a sample")
+            .0
+            .visible
+    );
     assert_eq!(frames.borrow().sampled_ms(LIVE), Some(200));
     frames.borrow_mut().shown = true;
     assert_eq!(
@@ -173,7 +197,7 @@ fn placement_preserves_an_empty_pending_slot_and_its_late_appearance_clamp() {
     assert_eq!(frames.borrow().sampled_ms(LIVE), Some(200));
     assert_eq!(frames.borrow().painted(LIVE), Some(observation));
     assert!(presenter.begin_painted(ms(now, 400)));
-    presenter.sample_at(ms(now, 800));
+    presenter.sample_at(ms(now, 800)).expect("a sample");
     assert_eq!(
         painted(&presenter),
         [(Affine::pose(2.0, 0.0, Vec2::new(290.0, 340.0)), 0.5)]

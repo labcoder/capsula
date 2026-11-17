@@ -16,7 +16,7 @@ fn fixture(ids: &[SceneId]) -> (Presenter, Instant) {
     presenter
         .completed(job.run(&mut Shaper), now)
         .expect("recovery");
-    assert!(presenter.sample_at(now).0.visible);
+    assert!(presenter.sample_at(now).expect("a sample").0.visible);
     presenter.frames.borrow_mut().shown = true;
     (presenter, now)
 }
@@ -63,7 +63,13 @@ fn replacement_keeps_the_exact_old_sample_until_one_atomic_successor_selection()
     assert_eq!(presenter.global.usage().scenes, 0);
     assert_eq!(presenter.residency(), bytes);
     assert_eq!(presenter.deadline(), Some(ms(now, 250)));
-    assert!(presenter.sample_at(ms(now, 10)).0.visible);
+    assert!(
+        presenter
+            .sample_at(ms(now, 10))
+            .expect("a sample")
+            .0
+            .visible
+    );
     assert_eq!(picture(&presenter), old);
     assert_eq!(presenter.frames.borrow().observations(), [None; 4]);
     assert!(bound_everywhere(&presenter));
@@ -78,7 +84,7 @@ fn replacement_keeps_the_exact_old_sample_until_one_atomic_successor_selection()
     );
     presenter.advance(GENERATION, now).expect("activation");
     assert_eq!(picture(&presenter), old);
-    assert!(presenter.sample_at(now).0.visible);
+    assert!(presenter.sample_at(now).expect("a sample").0.visible);
     assert_ne!(picture(&presenter), old);
     assert_eq!(picture(&presenter).len(), 1);
     assert_eq!(presenter.frames.borrow().retirement_bytes(), 0);
@@ -104,11 +110,17 @@ fn a_zero_alpha_first_sample_hands_off_and_its_paint_starts_the_entrance_clock()
         now,
     );
     presenter.advance(GENERATION, now).expect("activation");
-    assert!(presenter.sample_at(now).0.visible);
+    assert!(presenter.sample_at(now).expect("a sample").0.visible);
     assert_eq!(presenter.frames.borrow().retirement_bytes(), 0);
     assert_eq!(picture(&presenter)[0][0].opacity, 0.0);
     paint_shown(&mut presenter, now);
-    assert!(presenter.sample_at(ms(now, 100)).0.visible);
+    assert!(
+        presenter
+            .sample_at(ms(now, 100))
+            .expect("a sample")
+            .0
+            .visible
+    );
     assert_eq!(picture(&presenter)[0][0].opacity, 1.0);
 }
 
@@ -130,11 +142,11 @@ fn a_survivor_does_not_trigger_handoff_and_an_empty_prefix_can_advance() {
     presenter
         .advance(GENERATION, now)
         .expect("empty activation");
-    assert!(presenter.sample_at(now).0.visible);
+    assert!(presenter.sample_at(now).expect("a sample").0.visible);
     assert_eq!(picture(&presenter), old);
     assert!(presenter.frames.borrow().retirement_bytes() > 0);
     presenter.advance(GENERATION, now).expect("next prefix");
-    assert!(presenter.sample_at(now).0.visible);
+    assert!(presenter.sample_at(now).expect("a sample").0.visible);
     assert_eq!(presenter.frames.borrow().retirement_bytes(), 0);
     assert_eq!(picture(&presenter).len(), 2);
     assert_eq!(presenter.scenes[&NEXT].view.activated(), 2);
@@ -157,7 +169,7 @@ fn the_selected_epoch_waits_only_for_its_first_paint_or_the_original_expiry() {
     second.start = Start::Now;
     prepare(&mut presenter, 1, second, now);
     presenter.advance(GENERATION, now).expect("first");
-    assert!(presenter.sample_at(now).0.visible);
+    assert!(presenter.sample_at(now).expect("a sample").0.visible);
     assert!(!presenter.animating(now));
     assert_eq!(presenter.next_wake(now), None);
     presenter
@@ -177,15 +189,33 @@ fn the_selected_epoch_waits_only_for_its_first_paint_or_the_original_expiry() {
 fn a_missing_successor_expires_without_a_failure_and_cannot_revive_old_ids() {
     let (mut presenter, now) = fixture(&[LIVE]);
     replace(&mut presenter, &[LIVE], NEXT, now);
-    assert!(presenter.sample_at(ms(now, 249)).0.visible);
+    assert!(
+        presenter
+            .sample_at(ms(now, 249))
+            .expect("a sample")
+            .0
+            .visible
+    );
     let effects = presenter.tick(ms(now, 250)).expect("expiry");
     assert!(controls(&effects).is_empty());
-    assert!(!presenter.sample_at(ms(now, 250)).0.visible);
+    assert!(
+        !presenter
+            .sample_at(ms(now, 250))
+            .expect("a sample")
+            .0
+            .visible
+    );
     assert_eq!(presenter.residency(), 0);
     assert_eq!(presenter.deadline(), None);
     begin(&mut presenter, LIVE, ms(now, 251));
     assert!(!presenter.scenes.contains_key(&LIVE));
-    assert!(!presenter.sample_at(ms(now, 251)).0.visible);
+    assert!(
+        !presenter
+            .sample_at(ms(now, 251))
+            .expect("a sample")
+            .0
+            .visible
+    );
 }
 
 #[test]
@@ -215,7 +245,13 @@ fn a_later_admission_does_not_reset_visual_expiry_and_its_own_failure_stays_fina
         .expect("late answer");
     assert!(controls(&effects).is_empty());
     assert!(!presenter.scenes.contains_key(&NEXT));
-    assert!(!presenter.sample_at(ms(now, 281)).0.visible);
+    assert!(
+        !presenter
+            .sample_at(ms(now, 281))
+            .expect("a sample")
+            .0
+            .visible
+    );
 }
 
 #[test]
@@ -240,7 +276,7 @@ fn stop_before_successor_begin_names_only_the_successor_and_drains_its_late_comm
     let effects =
         commit_as(&mut presenter, RUN, NEXT, 0, rect("late"), now).expect("fenced commit");
     assert!(super::jobs(effects).is_empty());
-    assert!(!presenter.sample_at(now).0.visible);
+    assert!(!presenter.sample_at(now).expect("a sample").0.visible);
     assert!(presenter.frames.borrow().retirement.is_none());
     assert!(!presenter.scenes.contains_key(&LIVE));
 }
@@ -254,7 +290,7 @@ fn clear_before_successor_begin_preserves_the_clear_intent_for_late_traffic() {
     let effects = commit_as(&mut presenter, RUN, NEXT, 0, rect("late"), now).expect("cleared step");
     assert!(super::jobs(effects).is_empty());
     assert!(!presenter.scenes.contains_key(&NEXT));
-    assert!(!presenter.sample_at(now).0.visible);
+    assert!(!presenter.sample_at(now).expect("a sample").0.visible);
     assert_eq!(presenter.residency(), 0);
 }
 
@@ -272,7 +308,7 @@ fn a_refused_host_reports_only_current_members_and_the_unbegun_successor_as_fail
         ]
     );
     begin(&mut presenter, NEXT, now);
-    assert!(!presenter.sample_at(now).0.visible);
+    assert!(!presenter.sample_at(now).expect("a sample").0.visible);
     assert_eq!(presenter.residency(), 0);
 }
 
@@ -295,7 +331,7 @@ fn retained_and_incoming_objects_share_the_cap_without_refusing_the_new_scene() 
         presenter
             .completed(job.run(&mut Shaper), now)
             .expect("900 outgoing objects");
-        assert!(presenter.sample_at(now).0.visible);
+        assert!(presenter.sample_at(now).expect("a sample").0.visible);
         replace(&mut presenter, &[SceneId(10), LIVE], NEXT, now);
         begin(&mut presenter, NEXT, now);
         prepare(&mut presenter, 0, labels(600), now);
@@ -305,7 +341,7 @@ fn retained_and_incoming_objects_share_the_cap_without_refusing_the_new_scene() 
             .advance(GENERATION, now)
             .expect("new scene fits after retirement");
         assert_eq!(presenter.scenes[&NEXT].view.activated(), 1);
-        assert!(presenter.sample_at(now).0.visible);
+        assert!(presenter.sample_at(now).expect("a sample").0.visible);
     }
 }
 
@@ -332,7 +368,7 @@ fn stop_clear_disconnect_removal_and_a_second_marker_dispose_the_first_attempt()
             }
             _ => replace(&mut presenter, &[NEXT], SceneId(40), now),
         }
-        assert!(!presenter.sample_at(now).0.visible);
+        assert!(!presenter.sample_at(now).expect("a sample").0.visible);
         assert_eq!(presenter.frames.borrow().retirement_bytes(), 0);
         assert_eq!(presenter.frames.borrow().observations(), [None; 4]);
     }
@@ -411,7 +447,7 @@ fn a_refused_successor_header_reports_failure_without_guessing_a_run() {
         [&ControlToBrain::SceneFailed { scene: NEXT }]
     );
     assert!(!presenter.scenes.contains_key(&NEXT));
-    assert!(!presenter.sample_at(now).0.visible);
+    assert!(!presenter.sample_at(now).expect("a sample").0.visible);
     assert_eq!(presenter.frames.borrow().retirement_bytes(), 0);
 }
 
@@ -440,7 +476,7 @@ fn frozen_text_is_redacted_by_its_outer_owners_and_reconnect_cannot_recover_it()
     presenter
         .completed(job.run(&mut Shaper), now)
         .expect("text recovery");
-    assert!(presenter.sample_at(now).0.visible);
+    assert!(presenter.sample_at(now).expect("a sample").0.visible);
     replace(&mut presenter, &[LIVE], NEXT, now);
     let debug = format!("{presenter:?} {:?}", presenter.frames.borrow().retirement);
     assert!(!debug.contains(marker));
@@ -448,7 +484,7 @@ fn frozen_text_is_redacted_by_its_outer_owners_and_reconnect_cannot_recover_it()
     presenter.connected(GENERATION + 1);
     assert!(presenter.frames.borrow().retirement.is_none());
     assert_eq!(presenter.residency(), 0);
-    assert!(!presenter.sample_at(now).0.visible);
+    assert!(!presenter.sample_at(now).expect("a sample").0.visible);
 }
 
 #[test]
@@ -462,7 +498,7 @@ fn a_cancelled_old_worker_cannot_replace_the_frozen_sample_or_acknowledge_it() {
         .completed(job.run(&mut Shaper), now)
         .expect("late old answer");
     assert!(controls(&effects).is_empty());
-    assert!(presenter.sample_at(now).0.visible);
+    assert!(presenter.sample_at(now).expect("a sample").0.visible);
     assert_eq!(picture(&presenter), old);
     assert_eq!(presenter.frames.borrow().observations(), [None; 4]);
     assert!(!presenter.scenes.contains_key(&LIVE));
@@ -486,7 +522,7 @@ fn stop_or_clear_after_handoff_cannot_deliver_a_deferred_paint_acknowledgement()
         presenter
             .advance(GENERATION, now)
             .expect("selected successor");
-        assert!(presenter.sample_at(now).0.visible);
+        assert!(presenter.sample_at(now).expect("a sample").0.visible);
         assert!(!presenter.frames.borrow().paint(|_, _| Ok::<_, ()>(())));
         let effects = if clear {
             presenter.clear(now)
@@ -544,7 +580,7 @@ fn an_incoming_success_prepared_before_a_second_marker_or_reconnect_stays_stale(
             presenter
                 .advance(GENERATION, now)
                 .expect("current activation");
-            assert!(presenter.sample_at(now).0.visible);
+            assert!(presenter.sample_at(now).expect("a sample").0.visible);
         }
         let before = picture(&presenter);
         let mut shown = [None; 4];
@@ -573,7 +609,7 @@ fn an_incoming_success_prepared_before_a_second_marker_or_reconnect_stays_stale(
             [None; 4]
         );
         if reconnect {
-            assert!(!presenter.sample_at(now).0.visible);
+            assert!(!presenter.sample_at(now).expect("a sample").0.visible);
             assert_eq!(presenter.residency(), 0);
         } else {
             assert_eq!(
@@ -596,5 +632,5 @@ fn four_retiring_frames_never_paint_a_fifth_and_their_failures_emit_no_old_ack()
     assert!(presenter.frames.borrow().paint(|_, _| Err(())));
     assert!(controls(&presenter.paint_failed()).is_empty());
     assert_eq!(presenter.frames.borrow().retirement_bytes(), 0);
-    assert!(!presenter.sample_at(now).0.visible);
+    assert!(!presenter.sample_at(now).expect("a sample").0.visible);
 }

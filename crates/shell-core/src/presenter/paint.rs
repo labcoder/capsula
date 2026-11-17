@@ -12,7 +12,7 @@ use kumochi_protocol::message::{MAX_VISIBLE_SCENES, SceneId};
 use kumochi_scene::{Frame, PreparedActivation, SceneView};
 
 use super::{
-    Effect, Presenter,
+    Broken, Effect, Presenter,
     scene::{Cut, Out, Scene},
 };
 
@@ -448,16 +448,25 @@ impl Presenter {
         expect(dead_code, reason = "numeric sampler compatibility")
     )]
     pub(crate) fn sample(&mut self, now_ms: u64) -> (Sample, Vec<Effect>) {
-        self.sample_times(|_| now_ms)
+        self.sample_times(Out::default(), |_| now_ms)
     }
 
-    pub fn sample_at(&mut self, now: std::time::Instant) -> (Sample, Vec<Effect>) {
-        self.frames.borrow_mut().expire_retirement(now);
-        self.sample_times(|scene| scene.activation.time(now))
-    }
-
-    fn sample_times(&mut self, time: impl Fn(&Scene) -> u64) -> (Sample, Vec<Effect>) {
+    /// Samples every scene's view at `now`, after the screen watch is applied, so no frame
+    /// shows marks that a change or a limit has taken.
+    /// # Errors
+    /// [`Broken`] when a frame held behind a cleared screen scene's admission can't be mirrored.
+    pub fn sample_at(&mut self, now: std::time::Instant) -> Result<(Sample, Vec<Effect>), Broken> {
         let mut out = Out::default();
+        self.check_marks(now, &mut out)?;
+        self.frames.borrow_mut().expire_retirement(now);
+        Ok(self.sample_times(out, |scene| scene.activation.time(now)))
+    }
+
+    fn sample_times(
+        &mut self,
+        mut out: Out,
+        time: impl Fn(&Scene) -> u64,
+    ) -> (Sample, Vec<Effect>) {
         loop {
             let at = |scene: &Scene| {
                 if scene.cut == Cut::Outstanding {

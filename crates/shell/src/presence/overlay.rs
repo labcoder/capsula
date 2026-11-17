@@ -396,7 +396,10 @@ impl Presence {
                 }
             }
         }
-        let (sample, effects) = self.presenter.sample_at(now);
+        let (sample, effects) = match self.presenter.sample_at(now) {
+            Ok(sampled) => sampled,
+            Err(broken) => return self.scene_effects_at(Err(broken), now, cx),
+        };
         if !effects.is_empty() {
             return self.scene_effects_at(Ok(effects), now, cx);
         }
