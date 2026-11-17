@@ -25,7 +25,9 @@ fn released(now: Instant) -> Watch {
 }
 
 fn showing() -> Watch {
-    let mut watch = released(Instant::now());
+    let now = Instant::now();
+    let mut watch = released(now);
+    watch.named(HOLD, now);
     assert!(watch.marked(FIRST, HOLD));
     watch
 }
@@ -73,6 +75,12 @@ fn a_release_expects_the_first_mark_of_a_newer_run() {
     }
     assert_eq!(watch.skipped(), None);
     assert!(watch.listening());
+    // A newer run's mark before any run is named is skipped, and the watch goes on.
+    assert!(!watch.marked(THIRD, OTHER));
+    assert_eq!(watch.skipped(), Some(OTHER));
+    assert_eq!(watch.state, expecting(now, None));
+    assert!(watch.listening());
+    watch.named(HOLD, now);
     assert!(watch.marked(FIRST, HOLD));
     assert_eq!(
         watch.state,
@@ -122,6 +130,7 @@ fn a_change_before_the_first_mark_stays_and_names_the_skipped_run() {
     watch.released(HOLD, now);
     assert_eq!(watch.skipped(), None);
     assert!(watch.listening());
+    watch.named(OTHER, now);
     assert!(watch.marked(FIRST, OTHER));
 }
 

@@ -2068,7 +2068,7 @@ stateDiagram-v2
     [*] --> Idle
     Idle --> Expecting: screen_released
     Expecting --> Expecting: a change (kept, the first mark will be skipped)
-    Expecting --> Showing: first mark, nothing changed
+    Expecting --> Showing: first mark of the named run, nothing changed
     Expecting --> Idle: screen_dropped, the hold's run ended, 30 s with no run named, screen_off, session lost
     Showing --> Idle: a change, 60 s after its run ended, screen_off, the scene left, session lost
     Showing --> Expecting: screen_released
@@ -2101,12 +2101,17 @@ stateDiagram-v2
   was.
 - **The first mark** is a screen scene's first `SceneStepCommit`. It is judged as its frame
   arrives, in the pipe's order, so a change counts even while the scene's frames wait behind
-  an admission. It is shown only while a release is waiting with nothing changed, from a
-  run newer than `after`, and from the run `screen_run` named once there is one. Anything
+  an admission. It is shown only while a release is waiting with nothing changed, and only
+  from the run `screen_run` named. Until a run is named no first mark is shown: control and
+  data come down separate pipes, so an earlier hold's queued scene can arrive under a new
+  release before either hold's first `RunState`, and a run that is only newer than `after`
+  is not known to be the hold's. The hold's own scene is skipped too if it comes before its
+  run's first state (`shortcut:`). A scene skipped for the missing name doesn't end the
+  watch: the hold's own marks still show once its state names its run. Anything
   else is skipped: the scene never installs a step or paints, and the brain gets
   `SceneSkipped`, which tells the model the screen may have changed. `SceneFailed` would
   read as a preparation it could try again. A begin that was still held never installs; one
-  already applied left an empty scene, which goes with the skip. When a change was the reason, `marks_skipped` names the run until the
+  already applied left an empty scene, which goes with the skip. When a change or a missing name was the reason, `marks_skipped` names the run until the
   next release, for the dock's line. A change before the first mark stays: no later name or
   event undoes it.
 - **Placement.** `set_display(display, now)` gives the presenter the display the overlay

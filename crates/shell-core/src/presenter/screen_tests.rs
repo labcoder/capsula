@@ -152,6 +152,7 @@ fn marked(presenter: &mut Presenter, run: RunId, scene: SceneId, now: Instant) -
 fn shown() -> (Presenter, Instant, Rc<RefCell<Log>>, Vec<Effect>) {
     let (mut presenter, now, log) = watched();
     assert!(release(&mut presenter, AFTER, now).is_empty());
+    presenter.screen_run(RUN, now);
     let effects = marked(&mut presenter, RUN, MARKS, now);
     assert!(controls(&effects).is_empty());
     assert_eq!(scene_ids(&presenter), [MARKS]);
@@ -180,6 +181,7 @@ fn a_first_mark_is_shown_while_nothing_changed_since_the_release() {
 fn a_change_before_the_first_mark_skips_the_scene_and_names_its_run() {
     let (mut presenter, now, log) = watched();
     release(&mut presenter, AFTER, now);
+    presenter.screen_run(RUN, now);
     set(&log);
     let effects = marked(&mut presenter, RUN, MARKS, now);
     assert_eq!(controls(&effects), [&skipped(MARKS)]);
@@ -193,6 +195,7 @@ fn a_change_before_the_first_mark_skips_the_scene_and_names_its_run() {
     assert_eq!(scene_ids(&presenter), []);
     // The next release starts over.
     assert!(release(&mut presenter, RUN, now).is_empty());
+    presenter.screen_run(OTHER, now);
     assert_eq!(presenter.marks_skipped(), None);
     assert_eq!(counts(&log), (2, 1));
     let effects = marked(&mut presenter, OTHER, SceneId(32), now);
@@ -205,6 +208,7 @@ fn a_first_mark_is_judged_as_it_arrives_while_its_frames_are_held() {
     let (mut presenter, now, log) = watched();
     begin(&mut presenter, LIVE, now);
     release(&mut presenter, AFTER, now);
+    presenter.screen_run(RUN, now);
     let frame = DataToShell::SceneStepCommit {
         run: RUN,
         scene: LIVE,
@@ -232,6 +236,7 @@ fn a_change_clears_a_shown_scene_whose_frames_are_still_held() {
     let (mut presenter, now, log) = watched();
     begin(&mut presenter, LIVE, now);
     release(&mut presenter, AFTER, now);
+    presenter.screen_run(RUN, now);
     let frame = DataToShell::SceneStepCommit {
         run: RUN,
         scene: LIVE,
@@ -352,6 +357,7 @@ fn no_mark_is_shown_without_a_release_or_without_running_sources() {
     // No sources installed: what the product does until the shell supplies them.
     let (mut presenter, now) = live();
     release(&mut presenter, AFTER, now);
+    presenter.screen_run(RUN, now);
     let effects = marked(&mut presenter, RUN, MARKS, now);
     assert_eq!(controls(&effects), [&skipped(MARKS)]);
     assert_eq!(scene_ids(&presenter), []);
@@ -364,6 +370,7 @@ fn no_mark_is_shown_without_a_release_or_without_running_sources() {
         starts: false,
     }));
     release(&mut presenter, AFTER, now);
+    presenter.screen_run(RUN, now);
     let effects = marked(&mut presenter, RUN, MARKS, now);
     assert_eq!(controls(&effects), [&skipped(MARKS)]);
     assert_eq!(presenter.marks_skipped(), Some(RUN));
@@ -380,6 +387,7 @@ fn a_release_clears_the_marks_of_the_hold_before_it() {
     // A bit set before the release doesn't count against the new hold.
     set(&log);
     release(&mut presenter, RUN, now);
+    presenter.screen_run(OTHER, now);
     assert_eq!(counts(&log), (3, 2));
     let effects = marked(&mut presenter, OTHER, SECOND, now);
     assert!(controls(&effects).is_empty());
@@ -407,6 +415,7 @@ fn the_setting_going_off_clears_the_marks_and_shows_none_after() {
     assert_eq!(presenter.marks_skipped(), None);
     // A run skipped for a change is forgotten with the setting.
     release(&mut presenter, AFTER, now);
+    presenter.screen_run(RUN, now);
     set(&log);
     let effects = marked(&mut presenter, RUN, SECOND, now);
     assert_eq!(controls(&effects), [&skipped(SECOND)]);
@@ -581,6 +590,7 @@ fn admitting() -> (Presenter, Instant, Rc<RefCell<Log>>, AdmitJob) {
     let (mut presenter, now, log) = watched();
     begin(&mut presenter, LIVE, now);
     release(&mut presenter, AFTER, now);
+    presenter.screen_run(RUN, now);
     let effects = arrive(&mut presenter, begin_frame(MARKS), now).expect("a screen scene");
     assert_eq!(credit(&effects), FRAME);
     let effects = arrive(&mut presenter, mark_frame(RUN, MARKS), now).expect("a first mark");
@@ -645,6 +655,7 @@ fn a_clear_drops_the_marks_admission_that_still_waits_for_a_worker_slot() {
         .expect("a display");
     let marks = SceneId(40);
     release(&mut presenter, AFTER, now);
+    presenter.screen_run(RUN, now);
     arrive(&mut presenter, begin_frame(marks), now).expect("a screen scene");
     let effects = arrive(&mut presenter, mark_frame(RUN, marks), now).expect("a first mark");
     assert!(effects.is_empty(), "no slot and no credit yet");
@@ -760,11 +771,12 @@ fn a_handoff_that_fails_or_never_comes_ends_the_watch() {
 
 #[test]
 fn a_first_mark_or_a_name_at_the_unnamed_limit_is_late_before_the_watchdog_runs() {
+    // Before the limit an unnamed release skips a first mark and goes on listening.
     let (mut presenter, now, log) = watched();
     release(&mut presenter, AFTER, now);
     let effects = marked(&mut presenter, RUN, MARKS, ms(now, 29_999));
-    assert!(controls(&effects).is_empty());
-    assert_eq!(scene_ids(&presenter), [MARKS]);
+    assert_eq!(controls(&effects), [&skipped(MARKS)]);
+    assert_eq!(presenter.marks_skipped(), Some(RUN));
     assert_eq!(counts(&log), (1, 0));
 
     // No tick comes first: the frame itself finds the limit passed.
@@ -791,6 +803,28 @@ fn a_first_mark_or_a_name_at_the_unnamed_limit_is_late_before_the_watchdog_runs(
     assert_eq!(presenter.deadline(), None);
     let effects = marked(&mut presenter, RUN, MARKS, ms(now, 45_000));
     assert!(controls(&effects).is_empty());
+    assert_eq!(counts(&log), (1, 0));
+}
+
+#[test]
+fn a_first_mark_before_the_run_is_named_is_skipped_and_the_named_run_s_still_shows() {
+    // An earlier hold's scene, queued before either hold's first state, comes under the new
+    // release: its run is newer than the release and is not the hold's.
+    let (mut presenter, now, log) = watched();
+    release(&mut presenter, AFTER, now);
+    let effects = marked(&mut presenter, RUN, MARKS, now);
+    assert_eq!(controls(&effects), [&skipped(MARKS)]);
+    assert_eq!(scene_ids(&presenter), []);
+    assert_eq!(
+        counts(&log),
+        (1, 0),
+        "the watch still expects the hold's own"
+    );
+    presenter.screen_run(OTHER, now);
+    let effects = marked(&mut presenter, OTHER, SECOND, now);
+    assert!(controls(&effects).is_empty());
+    assert_eq!(scene_ids(&presenter), [SECOND]);
+    assert_eq!(presenter.marks_skipped(), Some(RUN));
     assert_eq!(counts(&log), (1, 0));
 }
 
@@ -832,6 +866,7 @@ fn a_wake_queued_before_a_release_changes_nothing_after_it() {
     // A source sets the bit and queues its wake; the next hold's release comes first.
     set(&log);
     let effects = release(&mut presenter, RUN, now);
+    presenter.screen_run(OTHER, now);
     assert_eq!(controls(&effects), [&cleared(&[MARKS])]);
     assert!(presenter.source_woke(now).expect("the old wake").is_empty());
     let effects = marked(&mut presenter, OTHER, SECOND, now);
@@ -843,6 +878,7 @@ fn a_wake_queued_before_a_release_changes_nothing_after_it() {
     let effects = presenter.tick(now).expect("a tick");
     assert_eq!(controls(&effects), [&cleared(&[SECOND])]);
     release(&mut presenter, OTHER, now);
+    presenter.screen_run(RunId(7), now);
     assert!(presenter.source_woke(now).expect("the old wake").is_empty());
     let effects = marked(&mut presenter, RunId(7), SceneId(32), now);
     assert!(controls(&effects).is_empty());
@@ -955,6 +991,7 @@ fn every_release_starts_the_sources_again_on_a_bit_of_its_own() {
     release(&mut presenter, AFTER, now);
     let old = log.borrow().bit.clone().expect("started sources");
     release(&mut presenter, AFTER, now);
+    presenter.screen_run(RUN, now);
     assert_eq!(counts(&log), (2, 1));
     // A handler of the watch before is still running: the bit it sets is nobody's.
     assert!(old.set());
@@ -1174,6 +1211,7 @@ fn a_begun_screen_scene_with_no_mark_shows_nothing() {
 fn a_sample_that_clears_the_marks_reports_a_held_frame_the_mirror_rejects() {
     let (mut presenter, now, log) = watched();
     release(&mut presenter, AFTER, now);
+    presenter.screen_run(RUN, now);
     arrive(&mut presenter, begin_frame(MARKS), now).expect("a screen scene");
     let effects = arrive(&mut presenter, mark_frame(RUN, MARKS), now).expect("a first mark");
     let _admission = only_admission(effects);
@@ -1349,6 +1387,7 @@ fn a_display_known_after_the_begin_places_the_scene_before_its_first_mark() {
     let (mut presenter, now, log) = watched();
     presenter.set_display(None, now).expect("no display");
     release(&mut presenter, AFTER, now);
+    presenter.screen_run(RUN, now);
     data(&mut presenter, begin_frame(MARKS), now).expect("a screen scene");
     assert!(
         presenter

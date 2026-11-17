@@ -115,9 +115,10 @@ impl Watch {
 
     /// A screen scene's first mark, from `run`. True when it is shown, and every other screen
     /// scene then goes; false when it never is. It is shown only if nothing may have changed
-    /// the screen since the release and `run` is the hold's: newer than the release, and the
-    /// named run once there is one. A second scene from the run already shown takes its place,
-    /// and so does the declared successor of a replaced one.
+    /// the screen since the release and `run` is the run the released hold named. Until a run
+    /// is named none is shown: a newer run can be an earlier hold's, whose scene was queued
+    /// before either hold's first state came down the other pipe. A second scene from the run
+    /// already shown takes its place, and so does the declared successor of a replaced one.
     pub(super) fn marked(&mut self, scene: SceneId, run: RunId) -> bool {
         let ends = match self.state {
             State::Expecting {
@@ -126,7 +127,10 @@ impl Watch {
                 changed,
                 ..
             } if run > after && named.is_none_or(|named| named == run) => {
-                if changed {
+                // shortcut: the hold's own scene is skipped too when it comes before its
+                // run's first state, with the skipped line; hold such a scene back until the
+                // name comes if that order is ever seen in use.
+                if changed || named.is_none() {
                     self.skipped = Some(run);
                     return false;
                 }

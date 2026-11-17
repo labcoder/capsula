@@ -326,6 +326,28 @@ fn sources_that_can_t_start_show_no_marks_and_the_dock_says_so(cx: &mut TestAppC
 }
 
 #[gpui::test]
+fn a_scene_that_comes_before_the_hold_s_run_is_named_is_never_the_hold_s(cx: &mut TestAppContext) {
+    // An earlier hold's run had a screen scene queued, which arrives under this release
+    // before either hold's first state: nothing of it shows, and the watch goes on.
+    let watching = released(true, cx);
+    mark(&watching, OTHER, RUN, DISPLAY, cx);
+    assert_eq!(told(&watching), [skipped(OTHER)]);
+    // The earlier hold's state names nothing. This hold's own run still shows its marks.
+    let another = Some(RunOrigin::Hold {
+        gesture: GestureId(9),
+    });
+    state(&watching, RUN, Phase::Thinking, another, cx);
+    state(&watching, RUN + 1, Phase::Thinking, HOLD, cx);
+    let stop = ControlToBrain::Stop {
+        run: RunId(RUN),
+        revealed: Vec::new(),
+    };
+    assert_eq!(told(&watching), [Told::Sent(stop)]);
+    mark(&watching, MARKS, RUN + 1, DISPLAY, cx);
+    assert_eq!(told(&watching), [], "the hold's own marks");
+}
+
+#[gpui::test]
 fn the_dock_says_marks_were_skipped_only_beside_their_own_answer(cx: &mut TestAppContext) {
     let watching = watch(false, cx);
     // An answer from before the hold is on screen.
