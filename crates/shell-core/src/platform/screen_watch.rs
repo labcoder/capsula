@@ -26,6 +26,13 @@ impl Changed {
     pub(crate) fn take(&self) -> bool {
         self.0.load(Ordering::Acquire) && self.0.swap(false, Ordering::AcqRel)
     }
+
+    /// Clears the bit as the presenter's read does, so a source's tests can stand where the
+    /// presenter has read it.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn clear(&self) {
+        self.take();
+    }
 }
 
 /// The platform's event sources, held only while a watch listens. Between `start` and `stop`
@@ -64,6 +71,8 @@ pub trait Sources {
     /// `screen_released` stops any still listening before it calls this.
     fn start(&mut self, changed: Changed, held: TalkHeld) -> bool;
 
-    /// Stops every source, so nothing sets the bit afterwards.
+    /// Stops every source. Work of theirs that was queued or in flight, or a source's own
+    /// end, can still set this watch's own bit afterwards and wake the UI for it; none of it
+    /// can set a newer watch's.
     fn stop(&mut self);
 }

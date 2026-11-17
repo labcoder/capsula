@@ -565,6 +565,11 @@ impl Presence {
             PresenceEvent::Escape => self.escape(cx)?,
             PresenceEvent::Quit => self.quit(cx),
             PresenceEvent::Repaint => self.dock.update(cx, |_, cx| cx.notify()),
+            // The wake says nothing itself: the presenter reads its watch's bit.
+            PresenceEvent::ScreenWoke => {
+                let effects = self.presenter.source_woke(Instant::now());
+                self.scene_effects(effects, cx);
+            }
             event @ (PresenceEvent::CaptureLost { .. } | PresenceEvent::Reconcile) => {
                 let effects = match event {
                     PresenceEvent::CaptureLost { seq, released } => self
@@ -856,6 +861,8 @@ pub(crate) enum OpenError {
     ReceiptFixture,
     #[error("--accounts-fixture needs a debug build, one fixed state and a quit deadline")]
     AccountsFixture,
+    #[error("--screen-evidence needs a build with the screen-evidence feature and a quit deadline")]
+    ScreenEvidence,
     #[error("the scene dropper thread couldn't start")]
     Dropper(#[source] std::io::Error),
 }
@@ -997,6 +1004,11 @@ pub(crate) fn open(
         )),
     );
     presenter.input = input;
+    // The one place the screen watch's sources are installed, and only an evidence build has it.
+    #[cfg(feature = "screen-evidence")]
+    if flags.screen_evidence {
+        presenter.watch_sources(Box::new(platform::ScreenSources::new(events.clone())));
+    }
     let (threads, chat) = Threads::pair();
     let owner = cx.new(|cx| {
         listen(states, event_changes.clone(), cx);

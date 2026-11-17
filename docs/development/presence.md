@@ -446,6 +446,81 @@ shows a line the user didn't see on it.
 `measure_the_hold_line`, an ignored test beside the code, times building both paths for lines
 of 2, 256 and 2,048 points, and a sampler's worst case of a new point on every frame.
 
+## The screen watch's sources (evidence builds only)
+
+Screen marks stay up only while nothing may have changed the screen
+([Screen scenes in the shell](scene.md#screen-scenes-in-the-shell-dormant)). What tells the
+watch on Windows is `platform/windows/screen_watch.rs`, the shell's side of shell-core's
+`Sources`. No shipped build installs it. `Presenter::watch_sources` is called in one place,
+compiled only under the `screen-evidence` feature and reached only with `--screen-evidence`,
+which a build without the feature refuses and which needs a quit deadline. The mouse thread
+and the foreground hook compile only for tests and for that feature.
+`cargo xtask check-shipped`, which CI runs, fails if the shipped selection (the shell and the
+brain with their default features) turns the feature on.
+
+Every source does one thing: it sets the watch's bit and queues a `PresenceEvent::ScreenWoke`,
+which carries nothing. The keys, the window in front and the proxy's messages queue at most
+one wake while a watch listens, because the presenter's read of a set bit ends the watch. The
+mouse thread queues at most one for each arm, however often its bit is read and set again,
+and that one can arrive after the watch has stopped. The event loop answers with
+`Presenter::source_woke`. Which key it was, where the pointer was and which window came
+forward stay inside the module and are never logged. An answer a source can't get counts as
+a change: a record that can't be read, a window that can't be named.
+
+| Source | Heard by | Registered | Counts when |
+|---|---|---|---|
+| Keys | The proxy's keyboard Raw Input, as `Keys::on_message` reduced it | Always; inert unless a watch is armed | A key goes down while another process's window is in front, unless it repeats a talk key the released hold still had down |
+| Lock, desktop switch, suspend, lost keys | The same adapter's `Reset` | Always; inert unless armed | Always |
+| Display and scaling | `WM_DISPLAYCHANGE` on the proxy, `WM_DPICHANGED` on the overlay's subclass | Always; inert unless armed | Always |
+| Window in front | One `EVENT_SYSTEM_FOREGROUND` hook, out of context, so on the UI thread | `start` to `stop` | The window is another process's |
+| Mouse | Raw Input to a message-only window on the `screen-watch` thread | `start` to `stop` | A button goes down or the wheel turns while the window under the pointer is another process's. A move ends after one read and one mask |
+
+- **The mouse thread** (`screen_watch/sources.rs`) is spawned once with the sources and lives
+  as long as the process. A mouse can report thousands of times a second, and with its own
+  window as the target none of those records reaches the UI's queue or the proxy. Arming and
+  disarming are messages on its own queue, so neither interrupts a record being handled. An
+  arm's bit waits in a queue the two threads share, under a lock held for one push or pop,
+  until the thread dispatches that arm's message. A record costs one `GetRawInputData` and
+  one mask; only a press or a wheel turn goes on to ask which window is under the pointer.
+  An arm's one wake is queued without waiting, which may allocate. No record takes a lock,
+  and none logs.
+- **`start`**, on the UI thread, never joins the mouse thread or waits for its
+  acknowledgement. It and `stop` share one lock with that thread, held for a push or a pop
+  of a short queue; its contention was not measured. `start` first gives back
+  anything a failed `stop` left, and says no if that still fails. It says no, and takes
+  nothing, when the process already has a mouse registration it didn't make, or when the
+  registrations can't be read. Then it posts the arm for the new bit, registers the mouse to
+  the thread's window and sets the hook, in that order: the arm is queued before the
+  registration exists, so no record is handled ahead of it. A step that fails undoes the
+  steps before it. Last it arms the UI thread's half with the talk keys the hold still had
+  down.
+- **`stop`** makes the UI thread's half inert at once, posts the disarm, gives back the
+  registration and unhooks. The registration is removed only when it reads as still
+  targeting the mouse window. It is forgotten when it reads as gone or as another
+  component's, and it stays owed when it can't be read: nothing says it is gone. A second
+  `stop` does nothing. What is still owed is logged with a fixed word, and the next `stop`
+  or `start` tries again before anything is armed. A record the thread handles after `stop`
+  returned and before it reaches the disarm sets only the stopped watch's own bit, never a
+  newer watch's, and queues that arm's one wake if it hasn't been queued.
+- **The thread's end**, whether its window closed, a message couldn't be read or it unwound,
+  runs one guard. Nothing stays published, so a later `start` says no. The watch the thread
+  was armed for, and every watch whose arm it never dispatched, counts as changed and is
+  woken, the armed one only if its arm's one wake wasn't queued before, so no marks stay up
+  trusting a mouse source that is gone. The window is destroyed if it is still there, and
+  then its class is unregistered. A registration still standing goes with the window:
+  Windows drops a mouse registration when its target window is destroyed, which the ignored
+  test `a_mouse_registration_ends_with_the_worker_s_window` saw on build 10.0.26200. A
+  `stop` between the publication's clearing and that destruction reads the registration as
+  another component's and forgets it, and the destruction then removes it. The thread is
+  not started again: no marks show until Kumochi restarts.
+- **Quit** sets a flag and then posts the window a close. A thread that hasn't published its
+  window yet sees the flag, destroys the window and ends. The UI never joins it.
+
+Run natively so far: the two ignored tests in `sources_tests.rs`, once each on Windows build
+10.0.26200. One registers the mouse to the thread's own window, removes it and leaves
+nothing; the other sees the registration go with the window. Nothing here has run against
+real input, and no shipped or evidence build has been launched with it.
+
 ## Held words after a lost brain
 
 `Voice.recovery` is one slot, created when a hold is accepted and separate from the

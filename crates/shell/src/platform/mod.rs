@@ -91,6 +91,8 @@ mod windows;
 
 #[cfg(windows)]
 pub(crate) use kumochi_shell_core::platform::{data_dir, session_id};
+#[cfg(all(windows, feature = "screen-evidence"))]
+pub(crate) use windows::ScreenSources;
 #[cfg(windows)]
 pub(crate) use windows::{
     Affinity, Deliver, EscapeHotkey, EventTime, Foreground, HostWatch, MaskUpdate, OverlayWindows,

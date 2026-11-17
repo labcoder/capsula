@@ -55,5 +55,10 @@ kumochi-brain = { path = "../brain", features = ["test-support"] }
 kumochi-shell-core = { path = "../shell-core", features = ["test-support"] }
 tracing-subscriber.workspace = true
 
+[features]
+# The screen watch's evidence build, which installs the watch's sources. No shipped build
+# turns it on: `cargo xtask check-shipped` holds that.
+screen-evidence = []
+
 [lints]
 workspace = true

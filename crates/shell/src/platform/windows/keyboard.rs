@@ -124,6 +124,8 @@ impl Keys {
             }
             _ => return false,
         };
+        // The screen watch hears what the gesture hears: a talk key or another key, or a reset.
+        super::screen_watch::heard(event);
         if self.overdue(event, at.instant) {
             // SAFETY: reads only this thread's own message queue state.
             let queue = unsafe { GetQueueStatus(QS_ALLINPUT) };
@@ -384,6 +386,8 @@ fn read_key(lparam: LPARAM) -> Option<Event> {
     };
     if read == u32::MAX {
         tracing::warn!(stage = ?InputStage::Native, reason = ?InputReason::RawInputRead, "held speech input failed");
+        // A key that can't be read may have been typed anywhere.
+        super::screen_watch::changed();
         return None;
     }
     if raw.header.dwType != RIM_TYPEKEYBOARD.0 {

@@ -48,8 +48,9 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WDA_EXCLUDEFROMCAPTURE, WINDOW_DISPLAY_AFFINITY,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    WM_CANCELMODE, WM_CAPTURECHANGED, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_RBUTTONDOWN,
-    WM_RBUTTONUP, WM_XBUTTONDOWN, WM_XBUTTONUP, XBUTTON1, XBUTTON2,
+    WM_CANCELMODE, WM_CAPTURECHANGED, WM_DISPLAYCHANGE, WM_DPICHANGED, WM_LBUTTONUP,
+    WM_MBUTTONDOWN, WM_MBUTTONUP, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_XBUTTONDOWN, WM_XBUTTONUP,
+    XBUTTON1, XBUTTON2,
 };
 use windows::core::{HSTRING, PCWSTR, w};
 
@@ -108,6 +109,9 @@ pub(crate) enum PresenceEvent {
         w: WatchGen,
         change: HostChange,
     },
+    /// A screen watch source set its watch's bit. It carries nothing: the presenter reads the
+    /// bit.
+    ScreenWoke,
 }
 
 /// The localized text of the tray icon and its menu.
@@ -772,7 +776,7 @@ pub(crate) fn restore_window_affinity(
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Foreground(HWND, u32);
 
-fn process_of(hwnd: HWND) -> u32 {
+pub(super) fn process_of(hwnd: HWND) -> u32 {
     let mut process = 0;
     // SAFETY: `process` is writable; a handle that names no window leaves it 0.
     unsafe { GetWindowThreadProcessId(hwnd, Some(&raw mut process)) };
@@ -1118,6 +1122,7 @@ unsafe extern "system" fn proxy_proc(
             WM_MOUSEMOVE | WM_MOUSELEAVE => {
                 state.hover.on_pointer(hwnd, message);
             }
+            WM_DISPLAYCHANGE => super::screen_watch::changed(),
             _ if message == state.taskbar_created && message != 0 => {
                 if let Err(error) = add_tray(hwnd, &state) {
                     tracing::warn!(%error, "can't add the tray icon back");
@@ -1217,6 +1222,7 @@ unsafe extern "system" fn hover_subclass(
                 hover.on_pointer(hwnd, message);
             }
         }
+        WM_DPICHANGED => super::screen_watch::changed(),
         WM_NCDESTROY => {
             // SAFETY: the subclass owns Hover until this final destruction message.
             if let Some(hover) = unsafe { hover.as_ref() } {

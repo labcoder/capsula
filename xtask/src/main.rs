@@ -26,6 +26,7 @@ mod platform;
 mod scratch;
 #[cfg(windows)]
 mod session;
+mod shipped;
 #[cfg(windows)]
 mod slice2;
 mod vendor;
@@ -96,6 +97,8 @@ tasks:
   check-core        fail if kumochi-shell-core has a dependency that is not on its list, a UI
                     framework in its tree, its test support in a shipped binary, or a test
                     gate the shell's tests could miss; CI runs it to hold the crate boundary
+  check-shipped     fail if the shipped selection (the shell and the brain, default features)
+                    turns on a shell feature that exists for evidence builds only
   check-vendor      fail unless every crate in vendor/ is what Cargo.lock builds;
                     CI runs it so a GPUI bump can't silently drop a vendored patch
   voice-assets link <models-dir> <natives-dir>
@@ -116,6 +119,7 @@ fn main() -> Result<()> {
             Ok(())
         }
         Some("check-core") => check_core::run(),
+        Some("check-shipped") => shipped::run(),
         Some("check-vendor") => vendor::run(),
         Some("pipe-dump") => pipe_dump(
             &args
