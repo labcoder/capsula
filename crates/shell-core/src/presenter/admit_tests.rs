@@ -26,6 +26,80 @@ use super::{
 const OTHER: SceneId = SceneId(21);
 
 #[test]
+fn owned_stop_classifies_running_ready_installed_and_queued_work_without_stopping_another_scene() {
+    for stage in ["running", "ready", "installed", "queued"] {
+        let (mut presenter, now) = live();
+        begin(&mut presenter, OTHER, now);
+        let other = only_job(
+            commit_as(&mut presenter, RunId(3), OTHER, 0, rect("other"), now)
+                .expect("unowned worker"),
+        );
+        begin(&mut presenter, LIVE, now);
+        let first_run = if stage == "queued" { RunId(4) } else { RUN };
+        let first = only_job(
+            commit_as(&mut presenter, first_run, LIVE, 0, rect("first"), now)
+                .expect("first worker"),
+        );
+        let mut late = Vec::new();
+        if matches!(stage, "running" | "queued") {
+            late.push(first);
+        } else {
+            presenter
+                .completed(first.run(&mut Shaper), now)
+                .expect("prepared owner");
+        }
+        if stage == "installed" {
+            presenter.advance(GENERATION, now).expect("installed owner");
+            late.push(only_job(
+                commit_as(&mut presenter, RunId(6), LIVE, 1, rect("suffix"), now)
+                    .expect("newer same-scene suffix"),
+            ));
+        }
+        if stage == "queued" {
+            let effects =
+                commit_as(&mut presenter, RUN, LIVE, 1, rect("queued"), now).expect("queued owner");
+            assert!(jobs(effects).is_empty());
+            assert_eq!(presenter.scenes[&LIVE].queue.len(), 1);
+        }
+        let effects = presenter.stop_owned(RUN, now).expect("scoped stop");
+        assert_eq!(credit(&effects), 0);
+        assert_eq!(
+            controls(&effects),
+            [&ControlToBrain::StopScenes {
+                run: RUN,
+                cuts: SceneCuts::new(vec![SceneCut {
+                    scene: LIVE,
+                    cut: kumochi_scene::StopCut {
+                        activated: u32::from(stage == "installed"),
+                        revealed: Bounded::default(),
+                    }
+                }])
+                .expect("one owned scene"),
+            }],
+            "{stage}"
+        );
+        assert_eq!(presenter.scenes[&OTHER].cut, Cut::Open, "{stage}");
+        assert!(presenter.scenes[&LIVE].ready.is_empty());
+        assert!(presenter.scenes[&LIVE].queue.is_empty());
+        for worker in late {
+            assert!(
+                presenter
+                    .completed(worker.run(&mut Shaper), now)
+                    .expect("late cancelled worker")
+                    .is_empty(),
+                "{stage}"
+            );
+        }
+        assert_eq!(presenter.workers(), 1);
+        presenter
+            .completed(other.run(&mut Shaper), now)
+            .expect("unowned worker survives");
+        assert_eq!(presenter.workers(), 0);
+        assert_eq!(presenter.scenes[&OTHER].ready.len(), 1);
+    }
+}
+
+#[test]
 fn consume_checks_cut_and_skipping_before_remembering_a_busy_request() {
     for (cut, skipping) in [(Cut::Outstanding, false), (Cut::Open, true)] {
         let (mut presenter, now) = live();
