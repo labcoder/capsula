@@ -635,11 +635,8 @@ that is under 100% or not a number counts as 100%.
   within a tolerance (1 logical pixel) of the straight stretch between their neighbours, at
   most every second one, and keeps the first and the newest. So straight runs lose points and
   corners keep theirs. A path with too few such points, one that is nothing but turns, gets
-  twice the tolerance. So a hold of any length fits, and the line never stops. The raised
-  tolerance stays for the rest of the hold: later fills thin at it and their passes add up, so
-  in a long hold that is nothing but turns the line can move by the sum of several passes'
-  tolerances, not by one pixel. A `shortcut:` in `thin` names the fix, starting each thin from
-  the base tolerance.
+  twice the tolerance. So a hold of any length fits, and the line never stops. Each thin starts
+  again from 1 logical pixel, so a later fill never thins at a tolerance an earlier one raised.
 - Only samples inside the display given to `new` are kept. That is the display the line will be
   drawn on, so nothing reaches the picture that wasn't shown. A sample anywhere else changes
   nothing, and the path joins up in a straight line when the pointer comes back.
