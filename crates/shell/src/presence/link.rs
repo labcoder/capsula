@@ -315,7 +315,7 @@ impl Presence {
     ) {
         let (applied, notice) = self.runs.apply_run_state(run, thread, phase, error, origin);
         self.marks_run(run, origin, &applied, cx);
-        self.voice_run(run, origin, phase, &applied, cx);
+        self.voice_run(run, thread, origin, phase, &applied, cx);
         diagnostics::record(cx, format_args!("run phase={phase:?}"));
         if let Some(restore) = applied.restore
             && let Some(text) = &self.text
@@ -437,6 +437,16 @@ impl Presence {
         bytes: u32,
         cx: &mut Context<'_, Self>,
     ) {
+        let disposition = if self
+            .session
+            .as_ref()
+            .is_some_and(|session| session.generation() == generation)
+            && let DataToShell::SceneStepCommit { run, .. } = &*frame
+        {
+            self.runs.owned_disposition(*run)
+        } else {
+            crate::runs::RunDisposition::Live
+        };
         if self
             .session
             .as_ref()
@@ -454,9 +464,13 @@ impl Presence {
             let credit = self.runs.remove_scenes(scenes);
             self.grant(credit);
         }
-        let effects = self
-            .presenter
-            .data(generation, frame, bytes, Instant::now());
+        let effects = self.presenter.data_with_disposition(
+            generation,
+            frame,
+            bytes,
+            disposition,
+            Instant::now(),
+        );
         self.scene_effects(effects, cx);
     }
 
@@ -472,6 +486,9 @@ impl Presence {
             .as_ref()
             .is_some_and(|session| session.generation() == generation)
         {
+            if let DataToShell::RunEnd { run } = &message {
+                self.voice_input_ended(*run);
+            }
             let credit = match message {
                 DataToShell::IssueReview { request, card } => {
                     if self.deliver_issue_review(request, card, bytes, cx) {

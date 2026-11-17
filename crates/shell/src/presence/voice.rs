@@ -18,7 +18,7 @@ use crate::input::TalkHeld;
 use crate::input::hold::Intent;
 use crate::input::path::PathRecorder;
 use crate::platform::microphone::{Generation, Mode};
-use crate::runs::{HoldRelease, ScreenNotice};
+use crate::runs::{HoldRelease, RunTail, ScreenNotice};
 use crate::strings::{Strings, Text};
 
 mod source;
@@ -100,7 +100,7 @@ enum Source {
 }
 
 pub(super) struct Hold {
-    token: Generation,
+    pub(super) token: Generation,
     stamp: Stamp,
     session: Session,
     source: Source,
@@ -110,7 +110,7 @@ pub(super) struct Hold {
     screen: bool,
     terminal: Option<Text>,
     /// Later run states carry no origin, so they match the hold by the run its first one named.
-    run: Option<RunId>,
+    pub(super) run: Option<RunTail>,
 }
 
 /// An accepted hold's words, kept until the brain says its turn is stored, so a lost brain
@@ -144,7 +144,7 @@ pub(super) struct Voice {
     /// The pending hold torn down last and the run it became, if one was named, until the next
     /// native Esc press is applied: `native_escape` takes it, and the press that revoked that
     /// hold's input acts on that hold and that run only.
-    pub(super) ended: Option<(GestureId, Option<RunId>)>,
+    pub(super) ended: Option<(GestureId, Option<RunTail>)>,
     /// What a lost brain did with the held words; reconnecting doesn't clear it.
     pub(super) lost: Option<Text>,
     #[cfg(test)]
@@ -158,6 +158,16 @@ type Start = Box<
         std::sync::Arc<std::sync::atomic::AtomicBool>,
     ) -> Result<MicOwner, crate::platform::microphone::MicError>,
 >;
+
+impl Voice {
+    fn receipts(&mut self) -> impl Iterator<Item = (GestureId, &mut Option<RunTail>)> {
+        self.pending
+            .as_mut()
+            .map(|hold| (hold.token.gesture(), &mut hold.run))
+            .into_iter()
+            .chain(self.ended.as_mut().map(|(gesture, run)| (*gesture, run)))
+    }
+}
 
 impl Presence {
     pub(super) fn voice_working(&self) -> bool {
@@ -178,11 +188,30 @@ impl Presence {
     pub(super) fn voice_run(
         &mut self,
         run: RunId,
+        thread: ThreadId,
         origin: Option<RunOrigin>,
         phase: Phase,
         applied: &crate::runs::Applied,
         cx: &mut Context<'_, Self>,
     ) {
+        for (gesture, receipt) in self.voice.receipts() {
+            let matching = match origin {
+                Some(RunOrigin::Hold { gesture: owner }) => owner == gesture,
+                Some(_) => false,
+                None => receipt.is_some_and(|tail| tail.run == run),
+            };
+            if matching && receipt.is_none_or(|tail| tail.run == run) {
+                let tail = receipt.get_or_insert(RunTail {
+                    run,
+                    thread,
+                    control_closed: false,
+                    data_ended: false,
+                });
+                tail.control_closed |=
+                    matches!(phase, Phase::Done | Phase::Failed | Phase::Interrupted);
+                tail.data_ended |= applied.input_ended;
+            }
+        }
         // A held run that failed or stopped mustn't give its words back at a later loss.
         if let Some(slot) = self.voice.recovery.as_mut() {
             let held = match origin {
@@ -204,12 +233,12 @@ impl Presence {
                 && match origin {
                     Some(RunOrigin::Hold { gesture }) => hold.token.gesture() == gesture,
                     Some(_) => false,
-                    None => hold.run == Some(run),
+                    None => hold.run.is_some_and(|tail| tail.run == run),
                 }
         }) else {
             return;
         };
-        hold.run = Some(run);
+        let tail = hold.run;
         let gesture = hold.token.gesture();
         if !matches!(hold.source, Source::Sent) {
             tracing::warn!(stage = ?FailureStage::Run, reason = ?FailureReason::RunBeforeStop, "held speech input failed");
@@ -231,7 +260,7 @@ impl Presence {
                 self.link.microphone_gate().cancel(gesture);
                 self.link.clear_input(gesture);
                 self.voice.pending = None;
-                self.voice.ended = Some((gesture, Some(run)));
+                self.voice.ended = Some((gesture, tail));
                 self.voice.status = None;
                 self.refresh_dock(cx);
             }
@@ -299,7 +328,9 @@ impl Presence {
     }
 
     fn end_voice(&mut self, text: Text, cx: &mut Context<'_, Self>) {
-        self.voice.recovery = None;
+        if let Some(hold) = &self.voice.pending {
+            self.discard_voice_recovery(hold.token.gesture());
+        }
         self.stop_line(cx);
         let mut notice = text;
         if let Some(mut hold) = self.voice.pending.take() {
@@ -928,6 +959,22 @@ impl Presence {
             .is_some_and(|slot| slot.gesture == gesture)
         {
             self.voice.recovery = None;
+        }
+    }
+
+    pub(super) fn voice_input_ended(&mut self, run: RunId) {
+        for (_, receipt) in self.voice.receipts() {
+            if let Some(tail) = receipt.as_mut().filter(|tail| tail.run == run) {
+                tail.data_ended = true;
+            }
+        }
+    }
+
+    pub(super) fn voice_thread_deleted(&mut self, thread: ThreadId) {
+        for (_, receipt) in self.voice.receipts() {
+            if let Some(tail) = receipt.as_mut().filter(|tail| tail.thread == thread) {
+                tail.control_closed = true;
+            }
         }
     }
 

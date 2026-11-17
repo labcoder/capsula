@@ -196,6 +196,14 @@ Rejected alternatives:
 
 ## Esc
 
+An Esc captured by an admitted voice gesture consumes only that gesture's receipt and held
+words. It takes screen marks, then compares the receipt's run with the ordinary effective
+stop target, including the presenter's newer run only when ordinary Esc would use it. A
+mismatch consumes the press without stopping another run, clearing drawings or dismissing
+a panel. A match stops only that run's owned scenes and input; pending typed turns and other
+scenes survive. Scene cuts remain scene-atomic, including a newer suffix in the same scene.
+This captured route never promotes the receipted run. The rules below describe ordinary Esc.
+
 `escape.rs` decides each press: stop moving work first, clear an idle drawing second, cancel
 an active inline rename, Settings field edit or onboarding name edit third, otherwise dismiss
 the typing panel, the focused Tasks or Settings panel, or the onboarding window, which runs

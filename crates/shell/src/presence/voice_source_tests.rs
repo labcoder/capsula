@@ -905,6 +905,10 @@ fn stale_deferred_escape_cannot_cancel_a_new_native_hold(cx: &mut TestAppContext
     });
 }
 
+#[expect(
+    clippy::fn_params_excessive_bools,
+    reason = "the fixture selects loss alone or a replacement session"
+)]
 fn escape_after_session_loss(reconnect: bool, cx: &mut TestAppContext) {
     let (owner, _data, controls) = ready(cx);
     let deliver = native(&owner, cx);

@@ -16,25 +16,63 @@ impl Presence {
         // the hold's own run, applied while the press waited. It is that hold's press only.
         // Marks that are up go, as at any press. The run the hold became is stopped if it is
         // what Esc would stop now. Nothing else: no local decision is left for it.
-        let ended = self.voice.ended.take();
-        if let Some((hold, run)) = ended.filter(|(hold, _)| gesture == Some(*hold)) {
-            self.discard_voice_recovery(hold);
+        if let Some(gesture) = gesture {
+            let ended = self
+                .voice
+                .ended
+                .take_if(|(hold, _)| *hold == gesture)
+                .map(|(_, tail)| tail);
+            let pending = self
+                .voice
+                .pending
+                .as_ref()
+                .filter(|hold| hold.token.gesture() == gesture)
+                .map(|hold| hold.run);
+            let Some(tail) = ended.or(pending) else {
+                return if self.voice_working() {
+                    Ok(())
+                } else {
+                    self.escape(cx)
+                };
+            };
+            self.discard_voice_recovery(gesture);
             self.marks_changed(cx);
+            self.cancel_voice_gesture(gesture, cx);
+            self.voice.ended.take_if(|(hold, _)| *hold == gesture);
             let now = std::time::Instant::now();
-            if run.is_some_and(|run| self.moving_run(now) == Some(run)) {
-                self.stop_moving(cx);
+            let scenes = self.presenter.holds_scenes() || self.presenter.live_work(now);
+            let target = self.moving_run(now);
+            if let Some(tail) = tail.filter(|tail| target == Some(tail.run)) {
+                let message = self.runs.stop_owned(tail);
+                let effects = self.presenter.stop_owned(tail.run, now).map(|mut effects| {
+                    if !scenes {
+                        effects.retain(|effect| {
+                            !matches!(
+                                effect,
+                                crate::presenter::Effect::Control(
+                                    kumochi_protocol::message::ControlToBrain::StopScenes { .. }
+                                )
+                            )
+                        });
+                    }
+                    effects
+                });
+                let valid = effects.is_ok();
+                self.scene_effects(effects, cx);
+                if !scenes
+                    && valid
+                    && let Some(message) = message
+                {
+                    self.tell(message);
+                }
             }
             return self.runs_changed(cx);
         }
+        self.voice.ended = None;
         // Marks that are up go at this press, and `escape` takes them before it ends a hold.
         // A hold is still pending here when its first mark came before its run's `Answering`.
         if self.presenter.marks_shown().is_some() {
             return self.escape(cx);
-        }
-        if let Some(gesture) = gesture
-            && self.cancel_voice_gesture(gesture, cx)
-        {
-            return Ok(());
         }
         if self.voice_working() {
             return Ok(());
@@ -45,10 +83,21 @@ impl Presence {
     /// The run Esc's stop would stop at `now`: the moving run, else the one whose drawing still
     /// moves.
     pub(super) fn moving_run(&self, now: std::time::Instant) -> Option<RunId> {
-        self.runs.stoppable().or_else(|| {
-            let moving = self.presenter.live_work(now);
-            self.presenter.stoppable_run().filter(|_| moving)
-        })
+        self.runs
+            .stoppable()
+            .map(|run| {
+                if self.presenter.holds_scenes() || self.presenter.live_work(now) {
+                    self.presenter
+                        .stoppable_run()
+                        .map_or(run, |drawing| drawing.max(run))
+                } else {
+                    run
+                }
+            })
+            .or_else(|| {
+                let moving = self.presenter.live_work(now);
+                self.presenter.stoppable_run().filter(|_| moving)
+            })
     }
 
     /// Esc's stop: fences the moving run off, or stops what the presenter still moves.
