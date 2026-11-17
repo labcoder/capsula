@@ -401,6 +401,11 @@ id out once, a teardown clears it, and the fence never reuses an id. A hold that
 pending leaves no receipt, so the press after a refused hold is an ordinary one, and a lost
 session drops the receipt.
 
+Before owner effects and again before deferred intents, a named native Esc whose captured
+session is no longer live is consumed without touching the replacement session. A fresh
+unnamed Esc still follows the ordinary route. A consumed current-session receipt discards
+held-word recovery only for its own gesture, leaving a newer hold's copy recoverable.
+
 [ipc](ipc.md#scenes-and-recovery) has the recovery states and the install rules.
 
 ## A screen hold's pointer line

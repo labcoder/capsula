@@ -17,7 +17,8 @@ impl Presence {
         // Marks that are up go, as at any press. The run the hold became is stopped if it is
         // what Esc would stop now. Nothing else: no local decision is left for it.
         let ended = self.voice.ended.take();
-        if let Some((_, run)) = ended.filter(|(hold, _)| gesture == Some(*hold)) {
+        if let Some((hold, run)) = ended.filter(|(hold, _)| gesture == Some(*hold)) {
+            self.discard_voice_recovery(hold);
             self.marks_changed(cx);
             let now = std::time::Instant::now();
             if run.is_some_and(|run| self.moving_run(now) == Some(run)) {

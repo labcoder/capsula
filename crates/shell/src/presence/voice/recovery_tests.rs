@@ -3,8 +3,9 @@ use kumochi_protocol::message::{DataToShell, Incarnation, RunId};
 
 use super::super::PresenceEvent;
 use super::super::voice_wiring_tests::{hold, ready, status};
+use super::tests::{after, native};
 use super::*;
-use crate::input::hold::Intent;
+use crate::input::{Event, hold::Intent};
 use crate::link::{Batch, LinkEvent, LinkState, Session};
 
 const SENTINEL: &str = "zqxsentinellabel held words";
@@ -364,6 +365,58 @@ fn esc_discards_the_copy_before_late_words_arrive(cx: &mut TestAppContext) {
     });
     deliver(&owner, LinkEvent::State(LinkState::Reconnecting), cx);
     assert_eq!(draft(&owner, cx), "");
+}
+
+#[gpui::test]
+fn a_captured_answer_escape_discards_its_words_before_loss(cx: &mut TestAppContext) {
+    let (owner, _data, _controls) = ready(cx);
+    let native = native(&owner, cx);
+    hold(&owner, 1, cx);
+    deliver(&owner, words(1, 1, SENTINEL, 40), cx);
+    thinking(&owner, cx);
+    let at = Instant::now();
+    cx.update(|_| {
+        native(Event::Escape, after(at, 0));
+    });
+    deliver(&owner, run_state(Phase::Answering), cx);
+    owner.read_with(cx, |owner, _| {
+        assert!(owner.voice.pending.is_none());
+        assert!(owner.voice.recovery.is_some());
+    });
+    cx.run_until_parked();
+    owner.read_with(cx, |owner, _| {
+        assert!(
+            owner.voice.recovery.is_none(),
+            "the captured stop spent its copy"
+        );
+    });
+    deliver(&owner, LinkEvent::State(LinkState::Reconnecting), cx);
+    assert_eq!(draft(&owner, cx), "");
+    assert_eq!(lost(&owner, cx), None);
+}
+
+#[gpui::test]
+fn an_old_receipt_keeps_a_newer_hold_s_words_recoverable(cx: &mut TestAppContext) {
+    let (owner, _data, _controls) = ready(cx);
+    hold(&owner, 1, cx);
+    owner.update(cx, |owner, cx| {
+        owner.cancel_voice(cx);
+        owner.link.accept_recorded_microphone_stop(1, GestureId(1));
+        assert!(!owner.link.voice_stop_pending());
+    });
+    hold(&owner, 2, cx);
+    deliver(&owner, words(1, 2, SENTINEL, 40), cx);
+    owner.update(cx, |owner, cx| {
+        assert_eq!(owner.voice.ended, Some((GestureId(1), None)));
+        owner
+            .native_escape(Some(GestureId(1)), cx)
+            .expect("old press");
+        let copy = owner.voice.recovery.as_ref().expect("hold 2's copy");
+        assert_eq!(copy.gesture, GestureId(2));
+    });
+    deliver(&owner, LinkEvent::State(LinkState::Reconnecting), cx);
+    assert_eq!(draft(&owner, cx), SENTINEL);
+    assert_eq!(lost(&owner, cx), Some(Text::HoldLostRestored));
 }
 
 #[gpui::test]

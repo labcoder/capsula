@@ -905,6 +905,136 @@ fn stale_deferred_escape_cannot_cancel_a_new_native_hold(cx: &mut TestAppContext
     });
 }
 
+fn escape_after_session_loss(reconnect: bool, cx: &mut TestAppContext) {
+    let (owner, _data, controls) = ready(cx);
+    let deliver = native(&owner, cx);
+    let at = Instant::now();
+    let finish = listen(&owner, &deliver, 1, at, cx);
+    release(
+        &owner,
+        &deliver,
+        &finish,
+        at + Duration::from_millis(900),
+        cx,
+    );
+    owner.update(cx, |owner, cx| {
+        owner
+            .link_events(
+                Batch::Plain(vec![LinkEvent::RunState {
+                    generation: 1,
+                    run: RunId(1),
+                    thread: ThreadId(1),
+                    phase: Phase::Thinking,
+                    error: None,
+                    origin: Some(RunOrigin::Hold {
+                        gesture: GestureId(1),
+                    }),
+                }]),
+                cx,
+            )
+            .unwrap();
+        assert!(owner.text_open());
+    });
+    cx.update(|_| {
+        deliver(Event::Escape, after(at, 2000));
+    });
+    owner.update(cx, |owner, cx| {
+        assert!(!owner.link.input_is(GestureId(1)));
+        assert!(owner.voice.pending.is_some(), "the captured press waits");
+        let mut events = vec![LinkEvent::State(crate::link::LinkState::Reconnecting)];
+        if reconnect {
+            events.extend([
+                LinkEvent::Connected(Session::detached(
+                    2,
+                    kumochi_protocol::message::Incarnation(1),
+                )),
+                LinkEvent::RunState {
+                    generation: 2,
+                    run: RunId(8),
+                    thread: ThreadId(1),
+                    phase: Phase::Answering,
+                    error: None,
+                    origin: None,
+                },
+            ]);
+        }
+        owner.link_events(Batch::Plain(events), cx).unwrap();
+        assert!(owner.voice.ended.is_none(), "loss forgot the old authority");
+        assert!(owner.text_open());
+    });
+    while controls.try_recv().is_ok() {}
+    cx.run_until_parked();
+    assert_eq!(
+        std::iter::from_fn(|| controls.try_recv().ok()).collect::<Vec<_>>(),
+        [],
+        "the stale press sends nothing on the replacement session"
+    );
+    owner.read_with(cx, |owner, _| {
+        assert!(
+            owner.text_open(),
+            "the stale press did not dismiss the panel"
+        );
+        let run = reconnect.then_some(RunId(8));
+        assert_eq!(owner.runs.stoppable(), run);
+    });
+    deliver(Event::Escape, after(at, 2100));
+    cx.run_until_parked();
+    let expected = if reconnect {
+        vec![ControlToBrain::Stop {
+            run: RunId(8),
+            revealed: Vec::new(),
+        }]
+    } else {
+        Vec::new()
+    };
+    assert_eq!(
+        std::iter::from_fn(|| controls.try_recv().ok()).collect::<Vec<_>>(),
+        expected,
+        "a fresh unassociated press retains ordinary Esc"
+    );
+    owner.read_with(cx, |owner, _| {
+        assert_eq!(owner.runs.stoppable(), None);
+        assert_eq!(owner.text_open(), reconnect);
+    });
+}
+
+#[gpui::test]
+fn a_stale_named_deferred_escape_cannot_dismiss_after_loss(cx: &mut TestAppContext) {
+    escape_after_session_loss(false, cx);
+}
+
+#[gpui::test]
+fn a_stale_named_deferred_escape_cannot_stop_a_replacement_session(cx: &mut TestAppContext) {
+    escape_after_session_loss(true, cx);
+}
+
+#[gpui::test]
+fn a_stale_named_deferred_escape_cannot_apply_to_a_dead_session(cx: &mut TestAppContext) {
+    let (owner, _data, _controls) = ready(cx);
+    let deliver = native(&owner, cx);
+    hold(&owner, 1, cx);
+    let at = Instant::now();
+    cx.update(|_| {
+        deliver(Event::Escape, after(at, 0));
+    });
+    owner.update(cx, |owner, _| {
+        owner
+            .session
+            .as_ref()
+            .unwrap()
+            .alive()
+            .store(false, Ordering::Release);
+    });
+    cx.run_until_parked();
+    owner.read_with(cx, |owner, _| {
+        assert!(
+            owner.voice.pending.is_some(),
+            "no stale owner intent was applied"
+        );
+        assert_eq!(owner.voice.status, Some(Text::HoldPreparing));
+    });
+}
+
 #[gpui::test]
 fn stale_deferred_escape_marker_ends_on_raw_key_up_without_a_hotkey(cx: &mut TestAppContext) {
     let (owner, _data, _controls) = ready(cx);

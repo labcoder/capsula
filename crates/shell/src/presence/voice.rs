@@ -920,6 +920,17 @@ impl Presence {
         }
     }
 
+    pub(super) fn discard_voice_recovery(&mut self, gesture: GestureId) {
+        if self
+            .voice
+            .recovery
+            .as_ref()
+            .is_some_and(|slot| slot.gesture == gesture)
+        {
+            self.voice.recovery = None;
+        }
+    }
+
     /// The brain stored the hold's turn, so its words aren't needed any more.
     pub(super) fn hold_stored(&mut self, generation: u64, gesture: GestureId) {
         if self
