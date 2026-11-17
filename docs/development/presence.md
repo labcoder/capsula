@@ -446,6 +446,58 @@ shows a line the user didn't see on it.
 `measure_the_hold_line`, an ignored test beside the code, times building both paths for lines
 of 2, 256 and 2,048 points, and a sampler's worst case of a new point on every frame.
 
+## The screen watch's sources (evidence builds only)
+
+Screen marks stay up only while nothing may have changed the screen
+([Screen scenes in the shell](scene.md#screen-scenes-in-the-shell-dormant)). What tells the
+watch on Windows is `platform/windows/screen_watch.rs`, the shell's side of shell-core's
+`Sources`. No shipped build installs it. `Presenter::watch_sources` is called in one place,
+compiled only under the `screen-evidence` feature and reached only with `--screen-evidence`,
+which a build without the feature refuses and which needs a quit deadline. The mouse thread
+and the foreground hook compile only for tests and for that feature.
+`cargo xtask check-shipped`, which CI runs, fails if the shipped selection (the shell and the
+brain with their default features) turns the feature on.
+
+Every source does one thing: it sets the watch's bit, and the first time in a watch it queues
+one `PresenceEvent::ScreenWoke`, which carries nothing. The event loop answers with
+`Presenter::source_woke`. Which key it was, where the pointer was and which window came
+forward stay inside the module and are never logged. An answer a source can't get counts as
+a change: a record that can't be read, a window that can't be named.
+
+| Source | Heard by | Registered | Counts when |
+|---|---|---|---|
+| Keys | The proxy's keyboard Raw Input, as `Keys::on_message` reduced it | Always; inert unless a watch is armed | A key goes down while another process's window is in front, unless it repeats a talk key the released hold still had down |
+| Lock, desktop switch, suspend, lost keys | The same adapter's `Reset` | Always; inert unless armed | Always |
+| Display and scaling | `WM_DISPLAYCHANGE` on the proxy, `WM_DPICHANGED` on the overlay's subclass | Always; inert unless armed | Always |
+| Window in front | One `EVENT_SYSTEM_FOREGROUND` hook, out of context, so on the UI thread | `start` to `stop` | The window is another process's |
+| Mouse | Raw Input to a message-only window on the `screen-watch` thread | `start` to `stop` | A button goes down or the wheel turns while the window under the pointer is another process's. A move ends after one read and one mask |
+
+- **The mouse thread** (`screen_watch/sources.rs`) is spawned once with the sources and lives
+  as long as the process. A mouse can report thousands of times a second, and with its own
+  window as the target none of those records reaches the UI's queue or the proxy. Its window
+  procedure owns the bit of the watch it is armed for; arming and disarming are messages on
+  its own queue, so neither interrupts a record being handled. A record costs one
+  `GetRawInputData` and one mask; only a press or a wheel turn goes on to ask which window is
+  under the pointer. Nothing there allocates, locks or logs.
+- **`start`**, on the UI thread, never waits. It first gives back anything a failed `stop`
+  left, and says no if that still fails. It says no, and takes nothing, when the process
+  already has a mouse registration it didn't make. Then it posts the arm, which owns the new
+  bit, registers the mouse to the thread's window and sets the hook, in that order: the arm
+  is queued before the registration exists, so no record is handled ahead of it. A step that
+  fails undoes the steps before it. Last it arms the UI thread's half with the talk keys the
+  hold still had down.
+- **`stop`** makes the UI thread's half inert at once, posts the disarm, removes the
+  registration only if it still targets the mouse window, and unhooks. A second `stop` does
+  nothing. What can't be removed is remembered and logged with a fixed word, and the next
+  `start` retries it before arming anything. A record the thread handles after `stop`
+  returned and before it reaches the disarm sets the stopped watch's bit, which nobody
+  reads.
+- **Quit** sets a flag and then posts the window a close. A thread that hasn't published its
+  window yet sees the flag, destroys the window and ends. The UI never waits for it.
+
+Not verified natively: nothing here has run against real input, and no shipped or evidence
+build has been launched with it.
+
 ## Perch hosts
 
 The perch (C2b) drops Kumo on another app's title bar. C2b-1 adds the reads and the geometry.

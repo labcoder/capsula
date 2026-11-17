@@ -2044,7 +2044,8 @@ no release and gives no display.
 
 - **The watch** (`presenter/watch.rs`) is plain state with no clock and no system call. The
   presenter owns it, feeds it events and does the clearing it answers.
-- **The sources** (`platform/screen_watch.rs`) are the platform's. `Sources::start` receives
+- **The sources** (`platform/screen_watch.rs`) are the platform's; the Windows ones are in
+  [presence.md](presence.md#the-screen-watchs-sources-evidence-builds-only). `Sources::start` receives
   one bit, `Changed`, and between `start` and `stop` a source does nothing but set it: for a
   key going down in another process's window, a mouse button going down, the wheel turning,
   another process's window coming to the front, a lock, a desktop switch, a suspend, or a

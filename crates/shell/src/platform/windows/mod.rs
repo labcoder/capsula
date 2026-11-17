@@ -6,6 +6,7 @@ mod keyboard;
 mod observer;
 mod overlay_input;
 mod presence;
+mod screen_watch;
 mod taskbar;
 
 pub(crate) use hit_mask::MaskUpdate;
@@ -21,3 +22,5 @@ pub(crate) use presence::{
     exclude_window, hide_presence_window, performance_counter, place_presence_window,
     restore_foreground, restore_window_affinity, window_affinity, work_area,
 };
+#[cfg(feature = "screen-evidence")]
+pub(crate) use screen_watch::ScreenSources;
