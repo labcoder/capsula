@@ -2033,6 +2033,9 @@ running/ready/queued work, the lane and received run-bearing commits identify ow
 a bare begin or recovered snapshot does not. Other scenes and unrelated or unbound replacement
 retirement survive. The first tagged successor commit binds retirement before discarding only
 that matching bank. A scene remains the atomic cut unit, not a per-run partition.
+The automatic stop for a hold cancelled before its first naming state uses this same exact
+scene ownership, even with newer Presenter work present. With no owned cut it retains the
+original exact Stop rather than making a global or promoted scene-stop decision.
 
 Received commits retain Live/Stopped disposition in the existing held queue and admission
 lane, through recovery and FIFO drain, even after Runs retires its pending input record.

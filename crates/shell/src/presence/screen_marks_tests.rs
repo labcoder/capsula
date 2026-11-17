@@ -1290,11 +1290,16 @@ fn measure_captured_stop_and_raw_intake(cx: &mut TestAppContext) {
         std::mem::size_of::<super::Voice>(),
         std::mem::size_of::<crate::runs::Runs>()
     );
-    for stopped in [false, true] {
+    for (mode, stopped, automatic) in [
+        ("live", false, false),
+        ("named", true, false),
+        ("automatic", true, true),
+    ] {
         for iteration in 0..37 {
             let watching = watch(true, cx);
             drawn(&watching, cx);
             let mut registrations = Vec::new();
+            let mut automatic_names = Vec::new();
             for gesture in [1, 2, 3] {
                 hold(&watching, gesture, cx);
                 release(&watching.ready.owner, gesture, Some(DOWN), cx);
@@ -1306,24 +1311,51 @@ fn measure_captured_stop_and_raw_intake(cx: &mut TestAppContext) {
                     hold.source = Source::Sent;
                 });
                 let run = 6 + u64::from(gesture);
-                state(
-                    &watching,
-                    run,
-                    Phase::Thinking,
-                    Some(RunOrigin::Hold {
-                        gesture: GestureId(gesture),
-                    }),
-                    cx,
-                );
-                state(&watching, run, Phase::Answering, None, cx);
-                told(&watching);
-                if stopped && gesture < 3 {
-                    let row = watching.ready.owner.update(cx, |owner, cx| {
+                let cancel = |cx: &mut TestAppContext| {
+                    watching.ready.owner.update(cx, |owner, cx| {
                         let start = Instant::now();
                         let (result, counts, bytes) =
                             allocation::usage(|| owner.native_escape(Some(GestureId(gesture)), cx));
                         (result, start.elapsed().as_nanos(), counts, bytes)
+                    })
+                };
+                if automatic && gesture < 3 {
+                    let row = cancel(cx);
+                    row.0.expect("captured pre-name cancel");
+                    registrations.push((gesture, row.1, row.2, row.3));
+                    let batch = Batch::Plain(vec![LinkEvent::RunState {
+                        generation: 1,
+                        run: RunId(run),
+                        thread: ThreadId(1),
+                        phase: Phase::Thinking,
+                        error: None,
+                        origin: Some(RunOrigin::Hold {
+                            gesture: GestureId(gesture),
+                        }),
+                    }]);
+                    let row = watching.ready.owner.update(cx, |owner, cx| {
+                        let start = Instant::now();
+                        let (result, counts, bytes) =
+                            allocation::usage(|| owner.link_events(batch, cx));
+                        (result, start.elapsed().as_nanos(), counts, bytes)
                     });
+                    row.0.expect("automatic late-name stop");
+                    automatic_names.push((gesture, row.1, row.2, row.3));
+                } else {
+                    state(
+                        &watching,
+                        run,
+                        Phase::Thinking,
+                        Some(RunOrigin::Hold {
+                            gesture: GestureId(gesture),
+                        }),
+                        cx,
+                    );
+                }
+                state(&watching, run, Phase::Answering, None, cx);
+                told(&watching);
+                if stopped && !automatic && gesture < 3 {
+                    let row = cancel(cx);
                     row.0.expect("captured stop");
                     registrations.push((gesture, row.1, row.2, row.3));
                 }
@@ -1397,7 +1429,7 @@ fn measure_captured_stop_and_raw_intake(cx: &mut TestAppContext) {
             told(&watching);
             if iteration >= 5 {
                 println!(
-                    "captured_intake stopped={stopped} sample={} events=11 ns={} allocations={} releases={} allocated_bytes={} released_bytes={}; UI dispatch/application, raw ends precede local admission drain, unconsumed third receipt observes its raw end; no IPC/decode, raw input, worker completion or GPU paint",
+                    "captured_intake mode={mode} stopped={stopped} sample={} events=11 ns={} allocations={} releases={} allocated_bytes={} released_bytes={}; UI dispatch/application, raw ends precede local admission drain, unconsumed third receipt observes its raw end; no IPC/decode, raw input, worker completion or GPU paint",
                     iteration - 5,
                     row.1,
                     row.2[0],
@@ -1407,7 +1439,17 @@ fn measure_captured_stop_and_raw_intake(cx: &mut TestAppContext) {
                 );
                 for (gesture, ns, counts, bytes) in registrations {
                     println!(
-                        "captured_registration gesture={gesture} sample={} ns={ns} allocations={} releases={} allocated_bytes={} released_bytes={}; complete captured UI operation, not map-only cost",
+                        "captured_registration mode={mode} gesture={gesture} sample={} ns={ns} allocations={} releases={} allocated_bytes={} released_bytes={}; complete captured UI operation, not map-only cost",
+                        iteration - 5,
+                        counts[0],
+                        counts[1],
+                        bytes[0],
+                        bytes[1]
+                    );
+                }
+                for (gesture, ns, counts, bytes) in automatic_names {
+                    println!(
+                        "captured_first_name mode={mode} gesture={gesture} sample={} ns={ns} allocations={} releases={} allocated_bytes={} released_bytes={}; complete first-state application after captured cancellation, not map-only cost",
                         iteration - 5,
                         counts[0],
                         counts[1],
@@ -1473,6 +1515,206 @@ fn captured_stop_does_not_promote_its_receipt_to_a_newer_presenter_run(cx: &mut 
         assert_eq!(owner.presenter.stoppable_run(), Some(RunId(RUN + 1)));
         assert_eq!(scene_ids(&owner.presenter), [OTHER, DRAWN]);
     });
+}
+
+#[gpui::test]
+fn captured_cancel_before_first_state_never_promotes_its_automatic_stop(cx: &mut TestAppContext) {
+    let watching = watch(true, cx);
+    drawn(&watching, cx);
+    watching.ready.owner.update(cx, |owner, _| {
+        owner
+            .runs
+            .submit("keep this queued turn", |_| true)
+            .expect("queued before voice recognition");
+    });
+    let (deliver, at) = natively_pending(&watching, cx);
+    let older = SceneId(41);
+    draw(&watching, 6, older, cx);
+    draw(&watching, RUN + 1, OTHER, cx);
+    watching.ready.owner.read_with(cx, |owner, _| {
+        assert!(owner.presenter.live_work(Instant::now()));
+        assert_eq!(owner.presenter.stoppable_run(), Some(RunId(RUN + 1)));
+        assert_eq!(
+            owner.voice.pending.as_ref().expect("pending hold").run,
+            None
+        );
+    });
+    told(&watching);
+    press_deferred(&deliver, at, cx);
+    cx.run_until_parked();
+    assert_eq!(told(&watching), [cancel(), Told::Stop, cancel()]);
+    state(&watching, RUN, Phase::Thinking, HOLD, cx);
+    cx.run_until_parked();
+    assert_eq!(
+        told(&watching),
+        [Told::Sent(ControlToBrain::Stop {
+            run: RunId(RUN),
+            revealed: Vec::new(),
+        })]
+    );
+    watching.ready.owner.update(cx, |owner, _| {
+        assert_eq!(owner.presenter.stoppable_run(), Some(RunId(RUN + 1)));
+        assert_eq!(scene_ids(&owner.presenter), [OTHER, DRAWN, older]);
+        let typed = owner.runs.apply_state(
+            RunId(RUN + 2),
+            ThreadId(1),
+            Phase::Thinking,
+            Some(RunOrigin::Typed { turn: 1 }),
+        );
+        assert!(typed.visible);
+        assert_eq!(typed.stop, None);
+        assert_eq!(owner.runs.stoppable(), Some(RunId(RUN + 2)));
+    });
+}
+
+#[gpui::test]
+fn automatic_hold_stop_keeps_newer_voice_ownership_and_folds_a_prebind_raw_end(
+    cx: &mut TestAppContext,
+) {
+    let watching = watch(true, cx);
+    drawn(&watching, cx);
+    let (deliver, at) = natively_pending(&watching, cx);
+    press_deferred(&deliver, at, cx);
+    cx.run_until_parked();
+    told(&watching);
+    end(&watching, RUN, cx);
+    hold(&watching, 2, cx);
+    release(&watching.ready.owner, 2, Some(DOWN), cx);
+    watching.ready.owner.update(cx, |owner, _| {
+        let hold = owner.voice.pending.as_mut().expect("newer pending hold");
+        hold.token.discard_unstarted().expect("no source started");
+        hold.source = Source::Sent;
+        assert_eq!(hold.token.gesture(), GestureId(2));
+        assert_eq!(hold.run, None);
+        assert_eq!(owner.voice.ended, None);
+    });
+    told(&watching);
+    state(&watching, RUN, Phase::Thinking, HOLD, cx);
+    cx.run_until_parked();
+    assert_eq!(
+        told(&watching),
+        [Told::Sent(ControlToBrain::Stop {
+            run: RunId(RUN),
+            revealed: Vec::new(),
+        })]
+    );
+    watching.ready.owner.read_with(cx, |owner, _| {
+        let hold = owner.voice.pending.as_ref().expect("newer hold survives");
+        assert_eq!(hold.token.gesture(), GestureId(2));
+        assert_eq!(hold.run, None);
+        assert_eq!(owner.voice.ended, None);
+        assert_eq!(
+            owner.runs.owned_disposition(RunId(RUN)),
+            crate::runs::RunDisposition::Stopped
+        );
+    });
+    state(&watching, RUN, Phase::Done, None, cx);
+    state(
+        &watching,
+        RUN + 1,
+        Phase::Thinking,
+        Some(RunOrigin::Hold {
+            gesture: GestureId(2),
+        }),
+        cx,
+    );
+    state(&watching, RUN, Phase::Thinking, HOLD, cx);
+    watching.ready.owner.read_with(cx, |owner, _| {
+        assert_eq!(
+            owner.runs.owned_disposition(RunId(RUN)),
+            crate::runs::RunDisposition::Live
+        );
+        let hold = owner.voice.pending.as_ref().expect("newer named hold");
+        assert_eq!(hold.token.gesture(), GestureId(2));
+        assert_eq!(hold.run.expect("newer run").run, RunId(RUN + 1));
+        assert_eq!(owner.voice.ended, None);
+        assert_eq!(owner.runs.stoppable(), Some(RunId(RUN + 1)));
+    });
+}
+
+#[gpui::test]
+fn automatic_hold_stop_cuts_pre_named_work_and_tags_later_commits(cx: &mut TestAppContext) {
+    use kumochi_protocol::message::SceneFailure;
+    use kumochi_shell_core::presenter::fixture::{object_count, step, tip_revision};
+
+    let watching = watch(true, cx);
+    drawn(&watching, cx);
+    let (deliver, at) = natively_pending(&watching, cx);
+    let owned = SceneId(42);
+    let older = SceneId(41);
+    draw(&watching, 6, older, cx);
+    draw(&watching, RUN, owned, cx);
+    draw(&watching, RUN + 1, OTHER, cx);
+    told(&watching);
+    press_deferred(&deliver, at, cx);
+    cx.run_until_parked();
+    told(&watching);
+    state(&watching, RUN, Phase::Thinking, HOLD, cx);
+    cx.run_until_parked();
+    assert_eq!(told(&watching), [stopped(vec![cut(owned)])]);
+    for frame in [
+        DataToShell::SceneCutApplied {
+            scene: owned,
+            revision: 1,
+            cut: cut(owned).cut,
+        },
+        DataToShell::SceneStepCommit {
+            run: RunId(RUN),
+            scene: owned,
+            index: 1,
+            step: step(r#"{"step":{"id":"late"}}"#),
+        },
+    ] {
+        receive(
+            &watching.ready.owner,
+            LinkEvent::SceneData {
+                generation: 1,
+                frame: Deferred::new(frame, 0),
+                bytes: 0,
+            },
+            cx,
+        );
+    }
+    cx.run_until_parked();
+    assert_eq!(
+        told(&watching),
+        [Told::Sent(ControlToBrain::StepFailed {
+            run: RunId(RUN),
+            scene: owned,
+            index: 1,
+            reason: SceneFailure::Cancelled,
+            cut: StopCut {
+                activated: 1,
+                revealed: Bounded::default()
+            },
+        })]
+    );
+    watching.ready.owner.read_with(cx, |owner, _| {
+        assert_eq!(owner.presenter.stoppable_run(), Some(RunId(RUN + 1)));
+        assert_eq!(scene_ids(&owner.presenter), [OTHER, DRAWN, older, owned]);
+        assert_eq!(tip_revision(&owner.presenter, owned), 1);
+        assert_eq!(object_count(&owner.presenter, OTHER), 1);
+        assert_eq!(object_count(&owner.presenter, older), 1);
+    });
+    receive(
+        &watching.ready.owner,
+        LinkEvent::SceneData {
+            generation: 1,
+            frame: Deferred::new(
+                DataToShell::SceneStepCommit {
+                    run: RunId(RUN),
+                    scene: owned,
+                    index: 2,
+                    step: step(r#"{"step":{"id":"later"}}"#),
+                },
+                0,
+            ),
+            bytes: 0,
+        },
+        cx,
+    );
+    cx.run_until_parked();
+    assert_eq!(told(&watching), []);
 }
 
 #[gpui::test]

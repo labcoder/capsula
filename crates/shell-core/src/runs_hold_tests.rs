@@ -163,6 +163,90 @@ fn prebind_end_is_reported_and_completed_receipts_allocate_no_pending_stop() {
     assert!(!state(&mut runs, 8, 1, 2, Phase::Thinking).input_ended);
 }
 
+#[test]
+fn automatic_hold_stop_folds_prebind_end_and_retires_on_its_two_authorities() {
+    for deleted in [None, Some(Deleted::Hidden), Some(Deleted::Removed)] {
+        for (prebind, raw_first) in [(true, true), (false, true), (false, false)] {
+            let mut runs = ready();
+            recognized(&mut runs, 1);
+            runs.cancel_hold();
+            assert_eq!(runs.take_hold_cancel(), cancel(1));
+            assert!(runs.select_thread(Some(ThreadId(2))));
+            recognized(&mut runs, 2);
+            if prebind {
+                assert_eq!(runs.apply_data(DataToShell::RunEnd { run: RunId(7) }, 4), 0);
+            }
+            let applied = state(&mut runs, 7, 1, 1, Phase::Thinking);
+            assert_eq!(applied.stop, stop(7));
+            assert!(!applied.visible);
+            assert_eq!(applied.credit, if prebind { 4 } else { 0 });
+            assert_eq!(applied.input_ended, prebind);
+            assert_eq!(runs.pending_stops.len(), 1);
+            assert_eq!(runs.pending_stops[&RunId(7)].data_ended, prebind);
+            assert!(!runs.pending_stops[&RunId(7)].control_closed);
+            assert_eq!(runs.hold.expect("newer pending hold").gesture, GestureId(2));
+            assert!(state(&mut runs, 8, 2, 2, Phase::Thinking).visible);
+            assert_eq!(runs.hold.expect("newer named hold").run, Some(RunId(8)));
+            if raw_first && !prebind {
+                assert_eq!(runs.apply_data(DataToShell::RunEnd { run: RunId(7) }, 4), 4);
+            }
+            if let Some(outcome) = deleted {
+                assert_eq!(runs.deleted(ThreadId(1), outcome, None), 0);
+                assert!(!runs.pending_stops[&RunId(7)].control_closed);
+                assert!(runs.confirm_delete(ThreadId(1)));
+                assert_eq!(runs.deleted(ThreadId(1), Deleted::NotHidden, None), 0);
+                assert!(!runs.pending_stops[&RunId(7)].control_closed);
+                assert!(runs.confirm_delete(ThreadId(1)));
+                assert_eq!(runs.deleted(ThreadId(1), outcome, None), 0);
+            } else {
+                let terminal = runs.apply_state(RunId(7), ThreadId(1), Phase::Done, None);
+                assert!(!terminal.visible);
+                assert_eq!(terminal.stop, None);
+            }
+            if !raw_first {
+                assert!(runs.pending_stops[&RunId(7)].control_closed);
+                assert!(!runs.pending_stops[&RunId(7)].data_ended);
+                assert_eq!(runs.apply_data(DataToShell::RunEnd { run: RunId(7) }, 4), 4);
+            }
+            assert!(runs.pending_stops.is_empty());
+            assert_eq!(
+                runs.hold.expect("newer hold survives closure").run,
+                Some(RunId(8))
+            );
+            assert_eq!(runs.stoppable(), Some(RunId(8)));
+            assert_eq!(state(&mut runs, 7, 1, 1, Phase::Thinking).stop, None);
+            assert!(runs.pending_stops.is_empty());
+        }
+    }
+}
+
+#[test]
+fn historical_automatic_hold_stop_cannot_recreate_retired_input_ownership() {
+    let mut runs = ready();
+    recognized(&mut runs, 1);
+    runs.cancel_hold();
+    assert_eq!(runs.take_hold_cancel(), cancel(1));
+    assert_eq!(state(&mut runs, 7, 1, 1, Phase::Thinking).stop, stop(7));
+    assert_eq!(runs.apply_data(DataToShell::RunEnd { run: RunId(7) }, 4), 4);
+    runs.apply_state(RunId(7), ThreadId(1), Phase::Done, None);
+    assert!(runs.pending_stops.is_empty());
+    recognized(&mut runs, 2);
+    assert!(state(&mut runs, 8, 1, 2, Phase::Thinking).visible);
+    runs.apply_state(RunId(8), ThreadId(1), Phase::Answering, None);
+    assert_eq!(runs.apply_data(DataToShell::RunEnd { run: RunId(8) }, 4), 4);
+    runs.apply_state(RunId(8), ThreadId(1), Phase::Done, None);
+    recognized(&mut runs, 3);
+    runs.apply_state(RunId(9), ThreadId(1), Phase::Thinking, None);
+    let old = state(&mut runs, 8, 1, 2, Phase::Thinking);
+    assert_eq!(old.stop, stop(8));
+    assert!(!old.input_ended);
+    assert!(!old.visible);
+    assert!(runs.pending_stops.is_empty());
+    assert_eq!(runs.hold.expect("newer pending hold").gesture, GestureId(3));
+    assert_eq!(state(&mut runs, 8, 1, 2, Phase::Thinking).stop, None);
+    assert!(runs.pending_stops.is_empty());
+}
+
 fn recognized(runs: &mut Runs, gesture: u32) {
     let thread = runs.thread();
     let selection = runs.revision();

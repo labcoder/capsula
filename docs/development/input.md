@@ -202,7 +202,9 @@ stop target, including the presenter's newer run only when ordinary Esc would us
 mismatch consumes the press without stopping another run, clearing drawings or dismissing
 a panel. A match stops only that run's owned scenes and input; pending typed turns and other
 scenes survive. Scene cuts remain scene-atomic, including a newer suffix in the same scene.
-This captured route never promotes the receipted run. The rules below describe ordinary Esc.
+This captured route never promotes the receipted run. If cancellation precedes the hold's
+first naming state, that state's owed automatic stop also targets only its own run, even
+when a newer drawing is current. The rules below describe ordinary Esc.
 
 `escape.rs` decides each press: stop moving work first, clear an idle drawing second, cancel
 an active inline rename, Settings field edit or onboarding name edit third, otherwise dismiss

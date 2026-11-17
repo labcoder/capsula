@@ -804,13 +804,15 @@ impl Runs {
         origin: Option<RunOrigin>,
     ) -> Applied {
         let mut applied = Applied::default();
+        let newly_named = run > self.answered;
         let stopped = self.owned_disposition(run) == RunDisposition::Stopped;
         applied.input_ended = [self.live, self.replaced]
             .into_iter()
             .flatten()
             .any(|live| live.run == run && live.data_ended);
         self.apply_hold_state(run, thread, origin, &mut applied);
-        if run > self.answered {
+        let automatic_hold_stop = applied.stop.is_some();
+        if newly_named {
             self.answered = run;
             // A turn sent before its thread's delete never targets it, and shows nothing.
             let deleted = self.holds(thread);
@@ -915,6 +917,14 @@ impl Runs {
         let (credit, input_ended) = self.release(run);
         applied.credit = credit;
         applied.input_ended |= input_ended;
+        if newly_named && automatic_hold_stop {
+            let _stop = self.stop_owned(RunTail {
+                run,
+                thread,
+                control_closed: matches!(phase, Phase::Done | Phase::Interrupted | Phase::Failed),
+                data_ended: applied.input_ended,
+            });
+        }
         applied.visible = run > self.fence && !stopped;
         applied
     }

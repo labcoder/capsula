@@ -409,7 +409,13 @@ even without last_run. Raw matching-session RunEnd closes data before credit is 
 an end held before the first naming state is reported by that state's Applied.input_ended.
 These stamps are not screen-watch completion and survive Answering until receipt consumption.
 
-Runs owns one pending-stop map, only for selected receipts still missing either closure.
+Runs owns one pending-stop map for selected receipts and automatically cancelled holds still
+missing either closure. A rejected hold's genuinely new first naming folds uncredited held
+data before registration, so a prebind raw end is retained even after its voice receipt was
+consumed or replaced. Its original automatic stop remains owed and uses exact Presenter
+dispatch, without the direct key path's target-equality test: owned cuts use StopScenes;
+otherwise the original Stop is sent. Historical/repeated origins still receive exact local
+cancellation but cannot create a new input entry from closure knowledge no longer retained.
 Duplicate registration preserves observed bits; both closures retire the entry, and connection
 loss clears the map and stamps. Stopped disposition is captured before terminal retirement,
 so the retiring callback cannot show feedback or restore a retry. Already-received Presenter

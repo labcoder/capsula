@@ -333,7 +333,37 @@ impl Presence {
             self.show_error(&error, Source::Run(run), cx);
         }
         if let Some(stop) = applied.stop {
-            self.stop_run(stop, cx);
+            match (origin, stop) {
+                (Some(RunOrigin::Hold { .. }), ControlToBrain::Stop { run, revealed }) => {
+                    let effects =
+                        self.presenter
+                            .stop_owned(run, Instant::now())
+                            .map(|mut effects| {
+                                let cut = effects.iter().any(|effect| match effect {
+                                    crate::presenter::Effect::Control(
+                                        ControlToBrain::StopScenes { cuts, .. },
+                                    ) => !cuts.is_empty(),
+                                    _ => false,
+                                });
+                                if !cut {
+                                    effects.retain(|effect| {
+                                        !matches!(
+                                            effect,
+                                            crate::presenter::Effect::Control(
+                                                ControlToBrain::StopScenes { .. }
+                                            )
+                                        )
+                                    });
+                                    effects.push(crate::presenter::Effect::Control(
+                                        ControlToBrain::Stop { run, revealed },
+                                    ));
+                                }
+                                effects
+                            });
+                    self.scene_effects(effects, cx);
+                }
+                (_, stop) => self.stop_run(stop, cx),
+            }
         }
         self.grant(applied.credit);
         if phase == Phase::Done
