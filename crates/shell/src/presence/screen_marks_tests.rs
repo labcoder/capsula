@@ -665,6 +665,10 @@ fn marks_up(cx: &mut TestAppContext) -> Watching {
 
 /// Hold 1's marks are up, with the sources listening. Its run is answering, or its first mark
 /// overtook that state on the other pipe, so the hold is still pending.
+#[expect(
+    clippy::fn_params_excessive_bools,
+    reason = "whether the run's Answering state came before the mark"
+)]
 fn marked(answering: bool, cx: &mut TestAppContext) -> Watching {
     let watching = released(true, cx);
     let hidden = detached(&watching.ready, cx);
