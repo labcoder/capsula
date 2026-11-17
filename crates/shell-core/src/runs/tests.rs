@@ -1204,7 +1204,11 @@ fn only_the_newest_hold_s_run_is_kept_once_replaced() {
     state(&mut runs, 7, Phase::Thinking, None);
     state(&mut runs, 5, Phase::Done, None);
     data(&mut runs, end(5));
-    assert_eq!(runs.take_ended(), None, "the newer hold's run took its place");
+    assert_eq!(
+        runs.take_ended(),
+        None,
+        "the newer hold's run took its place"
+    );
     state(&mut runs, 6, Phase::Done, None);
     data(&mut runs, end(6));
     assert_eq!(runs.take_ended(), Some(RunId(6)));
