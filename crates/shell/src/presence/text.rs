@@ -334,6 +334,7 @@ impl Presence {
 impl Presence {
     pub(super) fn submit(&mut self, cx: &mut Context<'_, Self>) -> Result<(), OpenError> {
         self.cancel_voice(cx);
+        self.voice.lost = None;
         let Some(text) = &self.text else {
             return Ok(());
         };
@@ -443,7 +444,8 @@ impl Presence {
         )
         .or_else(|| {
             self.voice
-                .status
+                .lost
+                .or(self.voice.status)
                 .map(|status| cx.global::<Strings>().get(status).into())
         })
         // A hold's screen line outlives its voice status: the reason arrives with the run.
@@ -674,17 +676,20 @@ impl TextView {
             .into_any_element()
     }
 
+    /// Puts `text` in the input when it's empty, and says whether it did.
     pub(super) fn restore(
         &self,
         text: kumochi_protocol::message::Content,
         window: &mut Window,
         cx: &mut Context<'_, Self>,
-    ) {
-        if self.input.read(cx).value().is_empty() {
+    ) -> bool {
+        let empty = self.input.read(cx).value().is_empty();
+        if empty {
             self.input.update(cx, |input, cx| {
                 input.set_value(text.into_string(), window, cx);
             });
         }
+        empty
     }
 }
 

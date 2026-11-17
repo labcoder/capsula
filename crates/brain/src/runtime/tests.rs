@@ -569,6 +569,24 @@ impl<S: AsyncRead + AsyncWrite> Shell<S> {
         frame::payload_len(header, Pipe::Data).expect("under the cap")
     }
 
+    /// Reads a held recognition's words, granting their credit as a shell would.
+    async fn held_words(&mut self, gesture: kumochi_protocol::message::GestureId, words: &str) {
+        assert_eq!(
+            self.data().await,
+            DataToShell::HoldWords {
+                gesture,
+                words: words.into()
+            }
+        );
+        self.credit(words.len() + 64).await;
+    }
+
+    /// Reads a held turn's stored receipt, granting its credit.
+    async fn hold_stored(&mut self, gesture: kumochi_protocol::message::GestureId) {
+        assert_eq!(self.data().await, DataToShell::HoldStored { gesture });
+        self.credit(64).await;
+    }
+
     /// Reads `run`'s text up to its `RunEnd`, granting credit as a shell would; the text's
     /// length.
     async fn read_to_end(&mut self, run: RunId) -> usize {

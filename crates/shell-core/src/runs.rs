@@ -846,6 +846,8 @@ impl Runs {
             | DataToShell::IssueCardRead { .. }
             | DataToShell::IssueCardsDone { .. }
             | DataToShell::IssueReview { .. }
+            | DataToShell::HoldWords { .. }
+            | DataToShell::HoldStored { .. }
             | DataToShell::ThreadList { .. }
             | DataToShell::Page { .. }
             | DataToShell::PageFailed { .. }
@@ -936,7 +938,9 @@ fn run_of(message: &DataToShell) -> Option<RunId> {
         | DataToShell::IssueCard(_)
         | DataToShell::IssueCardRead { .. }
         | DataToShell::IssueCardsDone { .. }
-        | DataToShell::IssueReview { .. } => None,
+        | DataToShell::IssueReview { .. }
+        | DataToShell::HoldWords { .. }
+        | DataToShell::HoldStored { .. } => None,
     }
 }
 

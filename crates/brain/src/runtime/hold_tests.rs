@@ -320,6 +320,8 @@ async fn first_speech_setup_loads_and_holds_without_restarting_the_brain() {
         assert_eq!(decoded.recv().await, Some(()));
         release.send(()).unwrap();
         let (run, _) = shell.state().await;
+        shell.held_words(G, "first setup transcript").await;
+        shell.hold_stored(G).await;
         shell.read_to_end(run).await;
         drop(shell);
     };
@@ -394,6 +396,8 @@ async fn exact_ordered_pcm_and_independent_resampling_tail_reach_one_real_hold_r
                     }
                     other => panic!("expected authentic hold run, got {other:?}"),
                 };
+                shell.held_words(G, "recognized sentinel").await;
+                shell.hold_stored(G).await;
                 assert_eq!(
                     shell.data().await,
                     DataToShell::AssistantText {
@@ -453,6 +457,8 @@ async fn accepted_sparse_capture_pcm_reaches_transcription() {
         assert_eq!(decoded.recv().await, Some(()));
         release.send(()).unwrap();
         let (run, _) = shell.state().await;
+        shell.held_words(G, "sparse capture transcript").await;
+        shell.hold_stored(G).await;
         shell.read_to_end(run).await;
         drop(shell);
     };
@@ -500,6 +506,8 @@ async fn a_screen_holds_words_wait_for_its_picture_in_the_running_brain() {
         // wait for the picture before the seal is answered.
         release.send(()).unwrap();
         while !matches!(seen.recv().await, Some(Seen::WordsWaiting)) {}
+        assert!(matches!(shell.data().await, DataToShell::Models { .. }));
+        shell.held_words(G, "words before the picture").await;
         let refused = Reply::Refused(crate::screen::Refusal::DisplayChanged);
         rig.reply(id, &refused).await;
         let (id, retire) = rig.next().await;
@@ -508,7 +516,7 @@ async fn a_screen_holds_words_wait_for_its_picture_in_the_running_brain() {
         };
         rig.reply(id, &Reply::Released(owner, None)).await;
         let (run, _) = shell.state().await;
-        assert!(matches!(shell.data().await, DataToShell::Models { .. }));
+        shell.hold_stored(G).await;
         shell.read_to_end(run).await;
         drop(shell);
     };
@@ -639,6 +647,8 @@ async fn a_screen_hold_reaches_its_run_with_its_picture(first: First) {
         assert_eq!(round.recv().await, Some(()));
         told_at_the_grant(&mut shell, &go).await;
         assert!(matches!(shell.data().await, DataToShell::Models { .. }));
+        shell.held_words(G, "words and a picture").await;
+        shell.hold_stored(G).await;
         shell.read_to_end(run).await;
         drop(shell);
     };
@@ -840,6 +850,89 @@ async fn data_eof_fences_before_grace_and_only_the_old_authenticated_stop_clears
 }
 
 #[tokio::test]
+async fn held_words_go_out_up_to_their_bound_and_are_never_cut() {
+    use kumochi_protocol::message::MAX_TRANSCRIPT_BYTES;
+    for len in [MAX_TRANSCRIPT_BYTES, MAX_TRANSCRIPT_BYTES + 1] {
+        let words: &'static str = Box::leak("w".repeat(len).into_boxed_str());
+        let scratch = Scratch::new("hold-words-bound");
+        let (mut brain, release, mut decoded, _) = input(&scratch, vec![8, -17], words).await;
+        let ((control, data), mut shell) = duplex();
+        let mut tap = Tap::from_env();
+        let client = async {
+            opened(&mut shell).await;
+            recognize(&mut shell).await;
+            packet(&mut shell, 16_000, 0, true, vec![8, -17]).await;
+            release_source(&mut shell, 1).await;
+            status(&mut shell, HoldStatus::Transcribing).await;
+            assert_eq!(decoded.recv().await, Some(()));
+            release.send(()).unwrap();
+            let (run, _) = shell.state().await;
+            if len <= MAX_TRANSCRIPT_BYTES {
+                shell.held_words(G, words).await;
+            }
+            shell.hold_stored(G).await;
+            shell.read_to_end(run).await;
+            drop(shell);
+        };
+        let (ended, ()) = tokio::join!(brain.serve(control, data, &mut tap), client);
+        assert_eq!(ended, Ended::Lost);
+        brain.close().await;
+        assert_eq!(users(&scratch), [words], "the turn keeps every word");
+    }
+}
+
+#[tokio::test]
+async fn a_held_receipt_waits_for_the_commit_and_never_reaches_a_later_connection() {
+    use kumochi_protocol::message::Phase;
+    for lost in [false, true] {
+        let scratch = Scratch::new("hold-receipt");
+        let (mut brain, release, mut decoded, _) =
+            input(&scratch, vec![8, -17], "receipt words").await;
+        let commit =
+            brain.hold_store(|op| matches!(op, crate::coordinator::StoreOp::BeginTurn { .. }));
+        let ((control, data), mut shell) = duplex();
+        let mut tap = Tap::from_env();
+        let client = async {
+            opened(&mut shell).await;
+            recognize(&mut shell).await;
+            packet(&mut shell, 16_000, 0, true, vec![8, -17]).await;
+            release_source(&mut shell, 1).await;
+            status(&mut shell, HoldStatus::Transcribing).await;
+            assert_eq!(decoded.recv().await, Some(()));
+            release.send(()).unwrap();
+            shell.held_words(G, "receipt words").await;
+            let (run, phase) = shell.state().await;
+            assert_eq!(phase, Phase::Thinking);
+            let early = tokio::time::timeout(std::time::Duration::from_millis(200), shell.data());
+            assert!(early.await.is_err(), "no receipt before the commit");
+            if !lost {
+                commit.send(()).unwrap();
+                shell.hold_stored(G).await;
+                shell.read_to_end(run).await;
+            }
+            drop(shell);
+        };
+        let (ended, ()) = tokio::join!(brain.serve(control, data, &mut tap), client);
+        assert_eq!(ended, Ended::Lost);
+        if lost {
+            // The old connection's commit lands now; the next turn's answer comes after it.
+            commit.send(()).unwrap();
+            let ((control, data), mut shell) = duplex();
+            let client = async {
+                opened(&mut shell).await;
+                shell.submit("typed after the loss").await;
+                let (run, _) = shell.state().await;
+                shell.read_to_end(run).await;
+                drop(shell);
+            };
+            let (ended, ()) = tokio::join!(brain.serve(control, data, &mut tap), client);
+            assert_eq!(ended, Ended::Lost);
+        }
+        brain.close().await;
+    }
+}
+
+#[tokio::test]
 async fn accepted_target_deletion_cancels_before_late_decode_and_uses_no_phantom_typed_count() {
     use kumochi_protocol::message::{Deleted, Phase};
     let scratch = Scratch::new("hold-deletion");
@@ -857,6 +950,8 @@ async fn accepted_target_deletion_cancels_before_late_decode_and_uses_no_phantom
         release.send(()).unwrap();
         let (run, _) = shell.state().await;
         let thread = shell.thread.unwrap();
+        shell.held_words(G, "deletable voice words").await;
+        shell.hold_stored(G).await;
         shell.read_to_end(run).await;
         while shell.state().await != (run, Phase::Done) {}
         let next = GestureId(18);

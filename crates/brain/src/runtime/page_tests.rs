@@ -978,7 +978,9 @@ async fn read_pages_and_text(
             | DataToShell::IssueReview { .. }
             | DataToShell::Transcript(_)
             | DataToShell::SegmentQueued { .. }
-            | DataToShell::SpeechPcm(_)) => {
+            | DataToShell::SpeechPcm(_)
+            | DataToShell::HoldWords { .. }
+            | DataToShell::HoldStored { .. }) => {
                 panic!("unexpected {other:?}")
             }
         }
