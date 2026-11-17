@@ -788,9 +788,17 @@ impl Threads {
                     self.before = before;
                 } else if pending.read == Read::Repair {
                     let newest = self.events.first().map(|event| event.id);
-                    let fresh = events
-                        .into_iter()
-                        .take_while(|event| newest.is_none_or(|newest| event.id > newest));
+                    let mut fresh = Vec::new();
+                    for event in events {
+                        if newest.is_none_or(|newest| event.id > newest) {
+                            fresh.push(event);
+                        } else if let Some(shown) =
+                            self.events.iter_mut().find(|shown| shown.id == event.id)
+                        {
+                            // A turn's screen mark is cleared once its picture proves unsent.
+                            shown.kind = event.kind;
+                        }
+                    }
                     self.events.splice(0..0, fresh);
                 } else {
                     for event in events {

@@ -684,6 +684,9 @@ async fn a_screen_holds_picture_then_its_words_reach_the_run_together() {
     .await;
 }
 
+#[path = "screen_sent_tests.rs"]
+mod sent;
+
 #[tokio::test]
 async fn no_samples_or_blank_transcript_store_and_send_nothing() {
     for text in ["", " \t\r\n", "unused"] {

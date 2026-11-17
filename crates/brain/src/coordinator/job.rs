@@ -325,7 +325,7 @@ impl Coordinator {
             });
         match sources {
             Some(sources) if !self.transport_failed => {
-                self.grant(SendKey::Job(key), sources, hold, effects);
+                self.grant(SendKey::Job(key), sources, hold, None, effects);
             }
             _ => {
                 effects.push(Effect::Rebuild(SendKey::Job(key)));

@@ -52,6 +52,12 @@ struct SendLease {
     to: mpsc::UnboundedSender<Settled>,
 }
 
+impl super::Lease for SendLease {
+    fn unsent(&mut self) {
+        self.settled.unsent = true;
+    }
+}
+
 impl Drop for SendLease {
     fn drop(&mut self) {
         self.to.send(self.settled).ok();
@@ -62,6 +68,8 @@ impl Drop for SendLease {
 struct Settled {
     key: SendKey,
     send: u64,
+    /// Told that no write of the request was attempted.
+    unsent: bool,
 }
 
 /// The ask the transport awaits: `None` for Rebuild, a closed gate or a dropped answer.
@@ -93,6 +101,11 @@ struct Valve {
     hold_flush: bool,
     /// Writes fail once this many bytes have passed.
     fail_after: Option<usize>,
+    /// The first write passes this many bytes to the peer and still fails, as TLS can when it
+    /// writes a record and then fails on the next.
+    pass_then_fail: Option<usize>,
+    /// What the peer has already sent when the connection opens.
+    greeting: Option<Vec<u8>>,
     written: usize,
 }
 
@@ -142,6 +155,13 @@ impl AsyncWrite for Gated {
         let mut valve = lock(&this.shared.valve);
         if valve.hold {
             return Poll::Pending;
+        }
+        if let Some(passed) = valve.pass_then_fail.take() {
+            let mut cx = Context::from_waker(Waker::noop());
+            let sent = Pin::new(&mut this.io).poll_write(&mut cx, &buf[..passed]);
+            assert!(matches!(sent, Poll::Ready(Ok(count)) if count == passed));
+            valve.written += passed;
+            return Poll::Ready(Err(io::ErrorKind::ConnectionReset.into()));
         }
         let buf = match valve.fail_after {
             Some(limit) if valve.written >= limit => {
@@ -197,7 +217,10 @@ impl Connect for Pipes {
         if open.wait_for(|open| *open).await.is_err() {
             return Err(io::ErrorKind::NotConnected.into());
         }
-        let (io, server) = tokio::io::duplex(self.capacity);
+        let (io, mut server) = tokio::io::duplex(self.capacity);
+        if let Some(greeting) = lock(&self.shared.valve).greeting.take() {
+            reply(&mut server, &greeting);
+        }
         self.servers.send(server).map_err(io::Error::other)?;
         Ok(Gated {
             io,
@@ -292,6 +315,7 @@ impl<C: Connect> Harness<C> {
             settled: Settled {
                 key: ready.key,
                 send,
+                unsent: false,
             },
             to: self.settled.clone(),
         };
@@ -448,7 +472,8 @@ async fn no_settle_while_the_final_bytes_wait_on_a_gated_flush() {
         harness.settled(),
         [Settled {
             key: key(1),
-            send: 1
+            send: 1,
+            unsent: false,
         }]
     );
     // The flush finished before the lease settled.
@@ -484,7 +509,8 @@ async fn a_blocked_write_is_stopped_by_the_send_deadline() {
         harness.settled(),
         [Settled {
             key: key(1),
-            send: 1
+            send: 1,
+            unsent: false,
         }]
     );
     assert_eq!(received(&mut server), (Vec::new(), true));
@@ -532,7 +558,8 @@ async fn dropping_the_round_mid_write_closes_then_settles() {
         harness.settled(),
         [Settled {
             key: key(1),
-            send: 1
+            send: 1,
+            unsent: false,
         }]
     );
     assert_eq!(received(&mut server), (Vec::new(), true));
@@ -648,11 +675,151 @@ async fn an_early_400_stops_the_upload_without_the_server_closing() {
         }))
     );
     assert_eq!(harness.seen(), (vec![], vec![0]));
-    assert_eq!(harness.settled().len(), 1);
+    assert_eq!(
+        harness.settled(),
+        settled_once(false),
+        "a write was attempted"
+    );
     // At most what was already in the pipe follows; then the close. The request never finished.
     let (rest, closed) = received(&mut server);
     assert!(closed);
     assert!(part.len() + rest.len() < request_length(&harness, &body));
+}
+
+/// The one settlement of attempt 1's grant.
+#[expect(
+    clippy::fn_params_excessive_bools,
+    reason = "whether the lease settled unsent"
+)]
+fn settled_once(unsent: bool) -> [Settled; 1] {
+    [Settled {
+        key: key(1),
+        send: 1,
+        unsent,
+    }]
+}
+
+#[tokio::test]
+async fn a_spent_budget_settles_unsent() {
+    let harness = Harness::budgeted(1 << 20, Some(0));
+    let body = body("hello");
+    let mut call = harness.call(&body, 1);
+    assert!(poll(&mut call).is_pending());
+    harness.grant(1);
+    assert!(matches!(
+        poll(&mut call),
+        Poll::Ready((Err(Failure::Spent), _))
+    ));
+    assert_eq!(harness.settled(), settled_once(true));
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_deadline_while_connecting_settles_unsent() {
+    let harness = Harness::new(1 << 20);
+    let body = body("hello");
+    harness.open.send_replace(false);
+    let mut call = harness.call(&body, 1);
+    assert!(poll(&mut call).is_pending());
+    harness.grant(1);
+    assert!(poll(&mut call).is_pending());
+    tokio::time::advance(super::SEND_DEADLINE).await;
+    assert!(matches!(
+        poll(&mut call),
+        Poll::Ready((Err(Failure::Transport), _))
+    ));
+    assert_eq!(harness.accepts(), 0);
+    assert_eq!(harness.settled(), settled_once(true));
+}
+
+#[tokio::test]
+async fn a_final_head_waiting_before_any_write_settles_unsent() {
+    let harness = Harness::new(1 << 20);
+    let body = body("hello");
+    harness.valve(|valve| valve.greeting = Some(refused(400, UNSUPPORTED)));
+    let mut call = harness.call(&body, 1);
+    assert!(poll(&mut call).is_pending());
+    harness.grant(1);
+    assert!(matches!(
+        poll(&mut call),
+        Poll::Ready((Err(Failure::Provider(ProviderError { status: 400, .. })), _))
+    ));
+    assert_eq!(received(&mut harness.accept()), (Vec::new(), true));
+    assert_eq!(harness.settled(), settled_once(true));
+}
+
+#[tokio::test]
+async fn a_first_write_that_fails_with_nothing_passed_still_counts_as_maybe_sent() {
+    let harness = Harness::new(1 << 20);
+    let body = body("hello");
+    harness.valve(|valve| valve.fail_after = Some(0));
+    let mut call = harness.call(&body, 1);
+    assert!(poll(&mut call).is_pending());
+    harness.grant(1);
+    assert!(matches!(
+        poll(&mut call),
+        Poll::Ready((Err(Failure::Transport), _))
+    ));
+    assert_eq!(received(&mut harness.accept()), (Vec::new(), true));
+    assert_eq!(harness.settled(), settled_once(false));
+}
+
+#[tokio::test]
+async fn a_first_write_that_passes_bytes_and_fails_never_settles_unsent() {
+    let harness = Harness::new(1 << 20);
+    let body = body("hello");
+    let request = wire::request(harness.bearer.expose(), body.0.expose()).expect("a valid bearer");
+    harness.valve(|valve| valve.pass_then_fail = Some(16));
+    let mut call = harness.call(&body, 1);
+    assert!(poll(&mut call).is_pending());
+    harness.grant(1);
+    assert!(matches!(
+        poll(&mut call),
+        Poll::Ready((Err(Failure::Transport), _))
+    ));
+    assert_eq!(
+        received(&mut harness.accept()),
+        (request[..16].to_vec(), true)
+    );
+    assert_eq!(harness.settled(), settled_once(false));
+}
+
+#[tokio::test]
+async fn a_flushed_request_answered_500_settles_as_written() {
+    let harness = Harness::new(1 << 20);
+    let body = body("hello");
+    let mut call = harness.call(&body, 1);
+    assert!(poll(&mut call).is_pending());
+    harness.grant(1);
+    assert!(poll(&mut call).is_pending());
+    let mut server = harness.accept();
+    assert_eq!(
+        received(&mut server).0.len(),
+        request_length(&harness, &body)
+    );
+    assert_eq!(harness.settled(), settled_once(false));
+    reply(&mut server, &refused(500, DETAIL));
+    assert!(matches!(
+        poll(&mut call),
+        Poll::Ready((Err(Failure::Provider(ProviderError { status: 500, .. })), _))
+    ));
+    assert_eq!(harness.settled(), []);
+}
+
+#[tokio::test]
+async fn a_round_dropped_while_its_flush_waits_settles_as_written() {
+    let harness = Harness::new(1 << 20);
+    let body = body("hello");
+    harness.valve(|valve| valve.hold_flush = true);
+    let mut call = harness.call(&body, 1);
+    assert!(poll(&mut call).is_pending());
+    harness.grant(1);
+    assert!(poll(&mut call).is_pending());
+    assert_eq!(
+        received(&mut harness.accept()).0.len(),
+        request_length(&harness, &body)
+    );
+    drop(call);
+    assert_eq!(harness.settled(), settled_once(false));
 }
 
 #[tokio::test(start_paused = true)]
@@ -731,11 +898,13 @@ async fn two_completed_requests_reuse_one_connection_with_two_grants() {
         [
             Settled {
                 key: key(1),
-                send: 1
+                send: 1,
+                unsent: false,
             },
             Settled {
                 key: key(2),
-                send: 2
+                send: 2,
+                unsent: false,
             }
         ]
     );
@@ -815,7 +984,8 @@ async fn a_stale_pooled_connection_is_replaced_under_the_same_lease() {
         harness.settled(),
         [Settled {
             key: key(2),
-            send: 2
+            send: 2,
+            unsent: false,
         }]
     );
     // One unit for each request, none for the replacement.
@@ -842,7 +1012,8 @@ async fn cancel_during_the_stale_requeue_sends_nothing_later() {
         harness.settled(),
         [Settled {
             key: key(2),
-            send: 2
+            send: 2,
+            unsent: true,
         }]
     );
 }
@@ -1147,7 +1318,8 @@ async fn a_retry_after_a_failed_send_asks_again_on_a_new_connection() {
         harness.settled(),
         [Settled {
             key: key(1),
-            send: 1
+            send: 1,
+            unsent: false,
         }]
     );
     drop(harness.accept());
@@ -1158,7 +1330,8 @@ async fn a_retry_after_a_failed_send_asks_again_on_a_new_connection() {
         harness.settled(),
         [Settled {
             key: key(2),
-            send: 2
+            send: 2,
+            unsent: false,
         }]
     );
 }
@@ -1345,7 +1518,8 @@ async fn under_tls_bytes_held_in_rustls_count_as_not_sent() {
         harness.settled(),
         [Settled {
             key: key(1),
-            send: 1
+            send: 1,
+            unsent: false,
         }]
     );
     let Poll::Ready(request) = poll(&mut read) else {

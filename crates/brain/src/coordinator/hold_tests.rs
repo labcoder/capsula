@@ -595,7 +595,12 @@ fn screened(key: BuildKey, sources: &[ThreadId]) -> Input {
 fn told(effects: &[Effect]) -> Vec<&Effect> {
     effects
         .iter()
-        .filter(|effect| matches!(effect, Effect::Control(ControlToShell::HoldScreen { .. })))
+        .filter(|effect| {
+            matches!(
+                effect,
+                Effect::Control(ControlToShell::HoldScreen { .. }) | Effect::HoldScreen { .. }
+            )
+        })
         .collect()
 }
 
@@ -741,7 +746,7 @@ fn a_held_turn_whose_write_fails_sends_nothing_and_fails_the_run() {
 }
 
 #[test]
-fn a_held_runs_screen_is_told_once_and_an_image_only_at_its_granted_send() {
+fn a_held_runs_screen_is_told_once_and_an_image_once_its_send_may_have_written_it() {
     use kumochi_protocol::message::{Deleted, HeldScreen};
 
     use crate::context::{Jpeg, Screen, ScreenClass};
@@ -815,26 +820,21 @@ fn a_held_runs_screen_is_told_once_and_an_image_only_at_its_granted_send() {
             })
             .unwrap(),
         );
-        assert!(
-            later
-                .iter()
-                .any(|effect| matches!(effect, Effect::Grant(_)))
-        );
-        let granted: Vec<Effect> = held
-            .filter(|_| !early)
-            .map(|outcome| {
-                Effect::Control(ControlToShell::HoldScreen {
-                    gesture: KEY.gesture,
-                    outcome,
-                })
+        let lease = later
+            .iter()
+            .find_map(|effect| match effect {
+                Effect::Grant(lease) => Some(*lease),
+                _ => None,
             })
+            .expect("granted");
+        assert_eq!(told(&later), Vec::<&Effect>::new(), "nothing at the grant");
+        let settled = core.handle(Input::SendSettled { lease }).unwrap();
+        let sent: Vec<Effect> = held
+            .filter(|_| !early)
+            .map(|outcome| Effect::HoldScreen { hold: KEY, outcome })
             .into_iter()
             .collect();
-        assert_eq!(
-            told(&later),
-            granted.iter().collect::<Vec<_>>(),
-            "told once"
-        );
+        assert_eq!(settled, sent, "told once");
     }
 }
 
@@ -1310,7 +1310,7 @@ fn a_run_admitted_but_never_granted_a_send_stores_no_picture_and_tells_nothing()
 
 /// An inline compaction's request holds only text, so its grant leaves the image untold: a Stop
 /// then clears the stored picture, sharing turned off records it withdrawn, and the image's own
-/// grant afterwards tells once.
+/// send afterwards tells once it may have written it.
 #[test]
 fn an_inline_compaction_s_grant_leaves_a_held_image_untold() {
     use kumochi_protocol::message::{EventId, HeldScreen};
@@ -1377,17 +1377,29 @@ fn an_inline_compaction_s_grant_leaves_a_held_image_untold() {
                 let built = engine_key(&core, R);
                 assert_ne!(built, compaction);
                 assert_eq!(starts(&core.handle(screened(built, &[T])).unwrap()), 1);
+                let granted = sending(&mut core);
+                assert_eq!(told(&granted), Vec::<&Effect>::new());
+                let lease = granted
+                    .iter()
+                    .find_map(|effect| match effect {
+                        Effect::Grant(lease) => Some(*lease),
+                        _ => None,
+                    })
+                    .expect("granted");
                 assert_eq!(
-                    told(&sending(&mut core)),
-                    [&Effect::Control(ControlToShell::HoldScreen {
-                        gesture: KEY.gesture,
+                    core.handle(Input::SendSettled { lease }).unwrap(),
+                    [Effect::HoldScreen {
+                        hold: KEY,
                         outcome: HeldScreen::Attached,
-                    })]
+                    }]
                 );
             }
         }
     }
 }
+
+#[path = "screen_sent_tests.rs"]
+mod sent;
 
 #[test]
 fn turning_screen_holds_off_before_any_send_is_granted_records_the_turn_withdrawn() {

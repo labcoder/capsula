@@ -1812,6 +1812,62 @@ fn a_repair_that_misses_the_shown_events_keeps_the_gap_reachable() {
     assert_eq!(state.before, None);
 }
 
+/// A turn shown with its screen mark is read again by a repair the byte budget kept short: the
+/// mark follows the store, and the shown text, older events and cursor stay.
+#[test]
+fn a_repair_brings_a_shown_turn_s_screen_mark_up_to_date_and_keeps_its_history() {
+    use kumochi_protocol::message::HeldScreen;
+    let marked = PageEventKind::HeldTurn {
+        screen: HeldScreen::Attached,
+    };
+    let turn = |kind: PageEventKind, text: &str, cut: bool| PageEvent {
+        id: EventId(6),
+        run: Some(RunId(1)),
+        kind,
+        text: text.to_owned(),
+        cut,
+    };
+    for stored in [PageEventKind::User, marked] {
+        let mut state = loaded();
+        state.select(Some(ThreadId(3)));
+        let first = request_id(&state.requests()[0]);
+        state.apply(DataToShell::Page {
+            request: first,
+            thread: ThreadId(3),
+            events: vec![turn(marked, "the whole turn", false), event(5), event(4)],
+            before: Some(EventId(4)),
+        });
+        state.run_state(ThreadId(3));
+        let repair = state
+            .requests()
+            .into_iter()
+            .find(|request| {
+                matches!(
+                    request,
+                    DataToBrain::PageRequest {
+                        page: PageOf::Events { .. },
+                        ..
+                    }
+                )
+            })
+            .expect("an event read");
+        state.apply(DataToShell::Page {
+            request: request_id(&repair),
+            thread: ThreadId(3),
+            events: vec![event(8), event(7), turn(stored, "the", true)],
+            before: Some(EventId(6)),
+        });
+        let ids: Vec<u64> = state.events.iter().map(|event| event.id.0).collect();
+        assert_eq!(ids, [8, 7, 6, 5, 4]);
+        let shown = &state.events[2];
+        assert_eq!(
+            (&shown.kind, shown.text.as_str(), shown.cut),
+            (&stored, "the whole turn", false)
+        );
+        assert_eq!(state.before, Some(EventId(4)));
+    }
+}
+
 #[test]
 fn switching_or_closing_threads_drops_old_events_and_never_sends_two_event_reads() {
     let mut state = loaded();
