@@ -48,11 +48,17 @@ impl Presenter {
         self.sources = Some(sources);
     }
 
-    /// The keys of a hold whose `ScreenRelease` was sent came up at `now`; `after` is the
-    /// newest run named so far, and `held` the talk keys still down. Any screen scene still up
-    /// goes and the watch starts: the sources start again, on a bit of this watch's own, so
-    /// nothing left of the watch before can set it. If they can't start the watch has seen a
-    /// change: nothing could say the screen stayed as it was.
+    /// The keys of a hold came up at `now`, and its `ScreenRelease` is about to be written;
+    /// `after` is the newest run named so far, and `held` the talk keys still down. The
+    /// caller reports the release here first, so the sources listen before the brain can take
+    /// the hold's picture, which it does only after it reads that message. A `ScreenRelease`
+    /// that isn't sent after all is reported with [`Presenter::screen_dropped`].
+    ///
+    /// Any screen scene still up goes and the watch starts: the sources start again, on a bit
+    /// of this watch's own, so nothing left of the watch before can set it. The hold's
+    /// recognition has already stopped them, through [`Presenter::screen_changed`]; any still
+    /// listening are stopped here first. If they can't start the watch has seen a change:
+    /// nothing could say the screen stayed as it was.
     /// # Errors
     /// [`Broken`] when a frame held behind a cleared scene's admission can't be mirrored.
     pub fn screen_released(

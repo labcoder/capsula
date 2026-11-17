@@ -2074,11 +2074,22 @@ stateDiagram-v2
     Passing --> Expecting: screen_released
 ```
 
-- **Release.** The shell calls `screen_released(after, held, now)` once a hold's
-  `ScreenRelease` is sent, with the newest run named so far and the talk keys still down. Any
-  screen scene still up is cleared, and the sources are stopped if they were listening and
-  started again on a new bit. So each watch has a bit of its own: a wake still queued from
-  the watch before, or a handler of it still running, reads or sets a bit nothing uses.
+- **Release.** The shell calls `screen_released(after, held, now)` when a hold's keys come
+  up, before it writes that hold's `ScreenRelease` to the pipe, with the newest run named so
+  far and the talk keys still down. That order is what makes the watch whole. The brain
+  takes the hold's picture only after it reads `ScreenRelease`: a recognized screen hold is
+  only armed, and `hold_release` (`crates/brain/src/runtime/hold/screen.rs`) starts the one
+  capture, in a session of its own. So the sources listen before the picture exists. An
+  event between the start and the picture sets the bit and at worst skips a mark; one before
+  the start is older than the picture, and the watch guards only the time after it. No
+  event is dated. A `ScreenRelease` that isn't sent after all is reported with
+  `screen_dropped`.
+- **What a release starts.** Any screen scene still up is cleared, and the sources are
+  stopped if they were listening and started again on a new bit. A hold's recognition has
+  already called `screen_changed`, which stops them, so a release starts them from stopped;
+  only a release with no recognition before it, as in tests, finds them listening. Each
+  watch has a bit of its own: a wake still queued from the watch before, or a handler of it
+  still running, reads or sets a bit nothing uses.
   `held` (`TalkHeld`, from `Gesture::talk_held`) is two bits and prints nothing: a hold ends
   at its first key-up, so the other talk key can still be down and repeating, and the
   sources leave that key's repeats out until it comes up. Without sources, or when `start`

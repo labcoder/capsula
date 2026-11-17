@@ -45,11 +45,23 @@ impl Changed {
 /// changes nothing. A source never calls
 /// [`Presenter::screen_changed`](crate::presenter::Presenter::screen_changed), which sets the
 /// bit for an event the shell itself knows of.
+///
+/// The watch guards the time after the hold's picture is taken, and the caller's order gives
+/// the sources all of it. The shell starts them, through
+/// [`Presenter::screen_released`](crate::presenter::Presenter::screen_released), before it
+/// writes the hold's `ScreenRelease`, and the brain takes the picture only after it reads
+/// that message. So the sources listen before the picture exists: an event between the start
+/// and the picture sets the bit and at worst skips a mark, and one before the start is older
+/// than the picture and isn't the watch's to see. No event needs a time.
 pub trait Sources {
     /// Starts every source on `changed`, this watch's own bit. `held` names the talk keys
     /// still down from the hold just released: until each comes up, its repeats are the
     /// hold's and set nothing. False when one couldn't start; the implementation has then
     /// stopped the others, and the caller shows no marks.
+    ///
+    /// The sources are stopped when this is called. The shell reports every recognized hold
+    /// with `screen_changed` before that hold's release, which stops any that listen, and
+    /// `screen_released` stops any still listening before it calls this.
     fn start(&mut self, changed: Changed, held: TalkHeld) -> bool;
 
     /// Stops every source, so nothing sets the bit afterwards.
