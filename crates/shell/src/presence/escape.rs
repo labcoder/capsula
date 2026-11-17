@@ -32,6 +32,7 @@ impl Presence {
         // Esc is a key like any other to screen marks: they go at the first press, whatever
         // else that press stops.
         self.marks_changed(cx);
+        self.voice.recovery = None;
         if self.voice_working() {
             self.cancel_voice(cx);
             return Ok(());

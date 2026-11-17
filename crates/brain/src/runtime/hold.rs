@@ -13,9 +13,10 @@ use std::time::Duration;
 
 use kumochi_protocol::geometry::PhysicalPoint;
 use kumochi_protocol::message::{
-    CaptureFailure, CaptureFor, ControlToBrain, ControlToShell, HOLD_DRAIN_TIMEOUT_MS,
-    HOLD_START_TIMEOUT_MS, HoldFailure, HoldStatus, LeaseGeneration, MAX_HOLD_CHUNKS, MicPcm,
-    ModelChoice, PartState, ScreenClass, ScreenHolds, ScreenOff, SettingsOp, ThreadId, ThreadOp,
+    CaptureFailure, CaptureFor, ControlToBrain, ControlToShell, DataToShell, HOLD_DRAIN_TIMEOUT_MS,
+    HOLD_START_TIMEOUT_MS, HoldFailure, HoldStatus, LeaseGeneration, MAX_HOLD_CHUNKS,
+    MAX_TRANSCRIPT_BYTES, MicPcm, ModelChoice, PartState, ScreenClass, ScreenHolds, ScreenOff,
+    SettingsOp, ThreadId, ThreadOp,
 };
 use tokio::sync::{Notify, mpsc, oneshot};
 use tokio::time::Instant;
@@ -845,6 +846,15 @@ impl Brain {
             Event::Decoded(_, SttResult::Text(text)) => {
                 if text.trim().is_empty() {
                     return self.hold_end(HoldStatus::Empty, link);
+                }
+                // The shell keeps a copy until the turn is stored; longer words aren't kept.
+                if text.len() <= MAX_TRANSCRIPT_BYTES
+                    && let Some(hold) = &self.holds.pending
+                {
+                    link.data(&DataToShell::HoldWords {
+                        gesture: hold.key.gesture,
+                        words: text.as_str().into(),
+                    })?;
                 }
                 // A screen hold's words wait for the picture it's still capturing, until the
                 // ticket's deadline.

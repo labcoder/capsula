@@ -495,3 +495,35 @@ fn a_screen_picture_appends_a_held_screen_value() {
     round_trip(&message, Pipe::Control, 7);
     redacted(&message, Direction::ToShell, "HoldScreen", 7);
 }
+
+#[test]
+fn held_words_and_their_receipt_append_redacted_data_tags() {
+    let sentinel = "zqxsentinellabel";
+    let words = super::DataToShell::HoldWords {
+        gesture: GESTURE,
+        words: Content::from(sentinel),
+    };
+    let stored = super::DataToShell::HoldStored { gesture: GESTURE };
+    for (message, tag, size, op) in [
+        (words, 22, 7 + sentinel.len(), "HoldWords"),
+        (stored, 23, 6, "HoldStored"),
+    ] {
+        assert_eq!(postcard::to_allocvec(&message).expect("encodes")[0], tag);
+        round_trip(&message, Pipe::Data, size);
+        let record = Record::of(Pipe::Data, Direction::ToShell, &message, size).expect("records");
+        assert_eq!((record.op.as_str(), record.payload.as_ref()), (op, None));
+        let mut bytes = Vec::new();
+        tap::write(&mut bytes, &record).expect("writes");
+        assert!(!format!("{message:?} {record:?} {bytes:?}").contains(sentinel));
+        assert!(
+            !bytes
+                .windows(sentinel.len())
+                .any(|window| window == sentinel.as_bytes())
+        );
+    }
+    let longest = super::DataToShell::HoldWords {
+        gesture: GESTURE,
+        words: Content::from("a".repeat(super::MAX_TRANSCRIPT_BYTES)),
+    };
+    assert!(frame::encode(&longest, Pipe::Data).is_ok());
+}

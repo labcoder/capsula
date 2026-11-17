@@ -100,6 +100,11 @@ wait on processes, pipes and deadlines; elsewhere libtest uses one thread per co
 measurement pair whose two commits sit on either side of the commit that added that table
 compares two different builds of those crates, so build both sides with the same table.
 
+CI runs two jobs side by side. `lint` runs fmt, cargo-deny for dependency or CI configuration
+changes and on every scheduled or manual run, `check-vendor`, `check-core`, clippy on the core
+alone without test support, and clippy on the workspace. `test` runs the workspace tests and the
+vsync test. Each job restores its own cache, and only runs on main save one.
+
 ## The brain is a game loop
 
 The brain has a small **core loop**: a coordinator that takes events and returns effects, with no I/O of its own. Everything else is a **system** that does I/O and reports back as events.

@@ -228,6 +228,11 @@ hold-cancelled = Speech input cancelled.
 hold-unavailable = Speech input unavailable. Restart the app if the microphone stays active.
 hold-microphone-unavailable = Microphone unavailable. Check microphone access and your input device, then try again.
 hold-failed = Speech input failed. Try again.
+hold-lost = Not sent. Hold to try again.
+hold-lost-restored = Not sent. Your words are in the box.
+hold-lost-picture = The picture wasn't kept.
+hold-lost-pictured = { hold-lost } { hold-lost-picture }
+hold-lost-restored-pictured = { hold-lost-restored } { hold-lost-picture }
 # { $model } is the model's name as the picker shows it.
 screen-hold-will-see = { $model } will see this window
 screen-not-included-model = Screen not included: screen sharing isn't available with this model

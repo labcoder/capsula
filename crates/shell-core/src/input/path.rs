@@ -39,7 +39,8 @@ pub struct PathRecorder {
     /// The least distance between kept points, in physical pixels.
     spacing: f64,
     /// How close to the line a kept point must be to go when the path fills, in physical
-    /// pixels. It doubles when a full path has too few points that close.
+    /// pixels. Each thin starts from it and doubles its own copy when a full path has too few
+    /// points that close.
     tolerance: f64,
     /// Where the eased pointer is, and when a sample last moved it.
     eased: [f64; 2],
@@ -118,16 +119,15 @@ impl PathRecorder {
 
     /// Makes room in a full path without stopping the line or moving it far: the points that
     /// go are the ones the line passes closest to, wherever they are along it, and the first
-    /// and the newest stay. A path with too few of those gets twice the tolerance.
+    /// and the newest stay. A path with too few of those gets twice the tolerance, for this
+    /// thin only: the next one starts from the base again.
     fn thin(&mut self) {
+        let mut tolerance = self.tolerance;
         while self.points.len() > THINNED {
             let before = self.points.len();
-            straighten(&mut self.points, self.tolerance);
+            straighten(&mut self.points, tolerance);
             if before - self.points.len() < before / 8 {
-                // shortcut: the raised tolerance stays for the rest of the hold, so later fills
-                // thin at it and a long line of turns moves by several passes' sum; start each
-                // thin from the base tolerance instead (OSC-802).
-                self.tolerance *= 2.0;
+                tolerance *= 2.0;
             }
         }
     }
@@ -402,7 +402,7 @@ mod tests {
         }
         assert_eq!(path.points().len(), MAX_PATH_POINTS - 1);
         assert!(path.sample(jog(2_046)));
-        assert_eq!(path.path.tolerance.to_bits(), 4.0_f64.to_bits());
+        assert_eq!(path.path.tolerance.to_bits(), 1.0_f64.to_bits());
         assert_eq!(path.points().len(), 1_025);
         assert_eq!(path.points().first(), Some(&ORIGIN));
         assert_eq!(path.points().last(), Some(&jog(2_046)));
@@ -418,10 +418,36 @@ mod tests {
         for index in 0..2_047 {
             assert!(path.sample(place(index)), "{index}");
         }
-        assert_eq!(path.path.tolerance.to_bits(), 4.0_f64.to_bits());
+        assert_eq!(path.path.tolerance.to_bits(), 1.0_f64.to_bits());
         assert_eq!(path.points().len(), 912);
         assert_eq!(path.points().first(), Some(&ORIGIN));
         assert_eq!(path.points().last(), Some(&place(2_046)));
+    }
+
+    #[test]
+    fn a_later_fill_thins_from_the_base_tolerance_again() {
+        // Turns three pixels off the line fill the path and thin at four, which leaves a
+        // straight line. Turns fill it again, and at the base pixel the straight part's points
+        // go and make the room, so none of those turns does.
+        let jog = |index: i32| at(24 + 3 * index, 3 * (index % 2));
+        let mut path = recorder(1.0);
+        for index in 0..2_047 {
+            assert!(path.sample(jog(index)), "{index}");
+        }
+        assert_eq!(path.points().len(), 1_025);
+        let turns: Vec<_> = (2_047..3_070).map(jog).collect();
+        for turn in &turns {
+            assert!(path.sample(*turn), "{turn:?}");
+        }
+        assert!(
+            path.points().len() <= THINNED,
+            "the second fill was thinned"
+        );
+        assert!(
+            path.points().ends_with(&turns),
+            "no turn of the second fill went"
+        );
+        assert_eq!(path.path.tolerance.to_bits(), 1.0_f64.to_bits());
     }
 
     #[test]

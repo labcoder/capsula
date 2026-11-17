@@ -525,6 +525,40 @@ Run natively so far: the two ignored tests in `sources_tests.rs`, once each on W
 nothing; the other sees the registration go with the window. Nothing here has run against
 real input, and no shipped or evidence build has been launched with it.
 
+## Held words after a lost brain
+
+`Voice.recovery` is one slot, created when a hold is accepted and separate from the
+microphone hold's teardown. It records `Stamp.session`, the gesture, the target thread and
+selection revision, whether the hold asked for a picture, and the words once a matching
+`HoldWords` arrives on the same session.
+
+- A matching `HoldStored` consumes it. Thinking doesn't.
+- `end_voice` and `cancel_voice` discard it first, before any cancel goes to the brain, so
+  Esc, a cancel, a typed submit, a target change, deleting the thread, quitting and the brain's
+  Empty, Cancelled and failures (Busy and ChoiceChanged included) all drop it. `escape` also
+  drops it when no hold is pending, for an Esc during the answer. A newer accepted hold
+  replaces it. Late words for a dropped slot have nothing to fill.
+- A held run's `Failed` or `Interrupted` drops it too, matched by the hold's gesture or by the
+  run its Thinking named, so a run that wasn't stored never gives its words back, even after
+  Answering ended the microphone hold. Another run's failure leaves a newer hold's slot alone.
+- Its lifetime is bounded by events, not time: a receipt that never comes keeps the one
+  bounded copy until the next accepted hold, Esc, cancel, quit, a failed or stopped run, or the
+  first loss.
+- At the first `LinkEvent::State` loss, `recover_hold` runs before `cancel_voice`, the session
+  is cleared and `Runs::disconnected` drops the main thread. It puts the words into the
+  composer only when the target is the same thread (not `None`) and selection revision, a
+  composer exists and it's empty. `TextView::restore` says whether it inserted. Nothing is
+  shown, focused or switched. Then the slot is gone, whether or not the words went in.
+- The notice is `Voice.lost`, outside `voice.status`, so the teardown, Connected and Retry
+  leave it. The status panel and composer show it before the voice status. "Not sent. Your words
+  are in the box." needs a real insertion; otherwise it's "Not sent. Hold to try again.", and a
+  hold with a picture adds "The picture wasn't kept." A newer hold attempt, accepted or
+  refused, a typed submit and the microphone owner's `HoldUnavailable` replace it, so a newer
+  reason always shows; the restored draft stays where it is.
+
+There is no composer until one has been created, by typing or by a voice answer's panel, so
+a loss before that shows the plain notice.
+
 ## Perch hosts
 
 The perch (C2b) drops Kumo on another app's title bar. C2b-1 adds the reads and the geometry.

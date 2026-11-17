@@ -5,8 +5,8 @@ use std::time::Instant;
 
 use kumochi_protocol::geometry::{PhysicalPoint, PhysicalRect, PointerPath};
 use kumochi_protocol::message::{
-    CaptureFor, ControlToBrain, GestureId, HoldFailure, HoldStatus, ModelName, Phase, RunId,
-    RunOrigin, ThreadId,
+    CaptureFor, Content, ControlToBrain, GestureId, HoldFailure, HoldStatus, MAX_TRANSCRIPT_BYTES,
+    ModelName, Phase, RunId, RunOrigin, ThreadId,
 };
 
 use gpui_kit::Window;
@@ -22,6 +22,9 @@ use crate::runs::{HoldRelease, ScreenNotice};
 use crate::strings::{Strings, Text};
 
 mod source;
+
+#[cfg(test)]
+mod recovery_tests;
 
 /// A screen notice or line, naming its model when it has one.
 pub(super) fn screen_text(strings: &Strings, text: Text, model: Option<&ModelName>) -> String {
@@ -110,6 +113,24 @@ pub(super) struct Hold {
     run: Option<RunId>,
 }
 
+/// An accepted hold's words, kept until the brain says its turn is stored, so a lost brain
+/// can give them back as a draft.
+pub(super) struct Recovery {
+    session: u64,
+    gesture: GestureId,
+    /// The held run, once Thinking names it, so its failure drops the words after the hold ends.
+    run: Option<RunId>,
+    target: (Option<ThreadId>, u64),
+    picture: bool,
+    words: Option<Content>,
+}
+
+impl std::fmt::Debug for Recovery {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Recovery").finish_non_exhaustive()
+    }
+}
+
 #[derive(Default)]
 pub(super) struct Voice {
     pub(super) target: Rc<Cell<(Option<ThreadId>, u64)>>,
@@ -119,6 +140,9 @@ pub(super) struct Voice {
     /// The hold the screen watch was last told was released (`marks.rs`).
     pub(super) watched: Option<super::marks::Watched>,
     pub(super) status: Option<Text>,
+    pub(super) recovery: Option<Recovery>,
+    /// What a lost brain did with the held words; reconnecting doesn't clear it.
+    pub(super) lost: Option<Text>,
     #[cfg(test)]
     pub(super) start: Option<Start>,
 }
@@ -155,6 +179,19 @@ impl Presence {
         applied: &crate::runs::Applied,
         cx: &mut Context<'_, Self>,
     ) {
+        // A held run that failed or stopped mustn't give its words back at a later loss.
+        if let Some(slot) = self.voice.recovery.as_mut() {
+            let held = match origin {
+                Some(RunOrigin::Hold { gesture }) => slot.gesture == gesture,
+                Some(_) => false,
+                None => slot.run == Some(run),
+            };
+            if held && matches!(phase, Phase::Failed | Phase::Interrupted) {
+                self.voice.recovery = None;
+            } else if held {
+                slot.run = Some(run);
+            }
+        }
         if !applied.visible {
             return;
         }
@@ -208,6 +245,10 @@ impl Presence {
     fn voice_notice(&mut self, text: Text, cx: &mut Context<'_, Self>) {
         tracing::debug!(stage = ?FailureStage::Notice, reason = ?text, "held speech input notice");
         self.voice.status = Some(text);
+        // A microphone that may still be open matters more than the lost brain's notice.
+        if text == Text::HoldUnavailable {
+            self.voice.lost = None;
+        }
         // Every change to the pending hold ends in a notice, so the chord follows its keys here.
         if self.voice_held() {
             let native = &self.native;
@@ -253,6 +294,7 @@ impl Presence {
     }
 
     fn end_voice(&mut self, text: Text, cx: &mut Context<'_, Self>) {
+        self.voice.recovery = None;
         self.stop_line(cx);
         let mut notice = text;
         if let Some(mut hold) = self.voice.pending.take() {
@@ -278,6 +320,7 @@ impl Presence {
     }
 
     pub(super) fn cancel_voice(&mut self, cx: &mut Context<'_, Self>) {
+        self.voice.recovery = None;
         self.link.cancel_input();
         if self.voice.pending.is_some() {
             self.end_voice(Text::HoldCancelled, cx);
@@ -650,6 +693,8 @@ impl Presence {
                 gesture,
                 generation,
             } => {
+                // A new attempt says how it went, accepted or refused.
+                self.voice.lost = None;
                 self.recognize_voice(gesture, generation, stamp, qpc, pointer, cx);
             }
             Intent::End { gesture, cancelled } => {
@@ -675,6 +720,7 @@ impl Presence {
                 }
             }
             Intent::Unavailable => {
+                self.voice.lost = None;
                 tracing::warn!(stage = ?FailureStage::Input, reason = ?FailureReason::GestureUnavailable, "held speech input failed");
                 self.voice_notice(Text::HoldFailed, cx);
             }
@@ -803,6 +849,14 @@ impl Presence {
             if screen && let Some(origin) = pointer {
                 self.start_line(gesture, origin, cx);
             }
+            self.voice.recovery = Some(Recovery {
+                session: stamp.session,
+                gesture,
+                run: None,
+                target: stamp.target,
+                picture: screen,
+                words: None,
+            });
             self.voice.pending = Some(Hold {
                 token,
                 stamp,
@@ -844,6 +898,64 @@ impl Presence {
                 self.link.end(&hold.session);
             }
         }
+    }
+
+    /// Keeps the accepted hold's words, from its own connection, until its receipt.
+    pub(super) fn hold_words(&mut self, generation: u64, gesture: GestureId, words: Content) {
+        if words.len() > MAX_TRANSCRIPT_BYTES {
+            tracing::warn!(len = words.len(), "held words over the bound");
+            return;
+        }
+        if let Some(slot) = self.voice.recovery.as_mut().filter(|slot| {
+            slot.session == generation && slot.gesture == gesture && slot.words.is_none()
+        }) {
+            slot.words = Some(words);
+        }
+    }
+
+    /// The brain stored the hold's turn, so its words aren't needed any more.
+    pub(super) fn hold_stored(&mut self, generation: u64, gesture: GestureId) {
+        if self
+            .voice
+            .recovery
+            .as_ref()
+            .is_some_and(|slot| slot.session == generation && slot.gesture == gesture)
+        {
+            self.voice.recovery = None;
+        }
+    }
+
+    /// The brain was lost with a hold's turn unstored: its words go back into an empty composer
+    /// on the hold's own target, without showing it, and the notice says what happened.
+    pub(super) fn recover_hold(&mut self, cx: &mut Context<'_, Self>) {
+        let Some(slot) = self.voice.recovery.take() else {
+            return;
+        };
+        let restored = if slot.target.0.is_some()
+            && slot.target == (self.runs.thread(), self.runs.revision())
+            && let Some(words) = slot.words
+            && let Some(text) = &self.text
+        {
+            text.window
+                .update(cx, |_, window, cx| {
+                    text.view
+                        .update(cx, |view, cx| view.restore(words, window, cx))
+                })
+                .unwrap_or_else(|_| {
+                    tracing::warn!("can't restore the held words");
+                    false
+                })
+        } else {
+            false
+        };
+        self.voice.lost = Some(match (restored, slot.picture) {
+            (true, false) => Text::HoldLostRestored,
+            (true, true) => Text::HoldLostRestoredPictured,
+            (false, false) => Text::HoldLost,
+            (false, true) => Text::HoldLostPictured,
+        });
+        self.refresh_dock(cx);
+        self.refresh_conversation(cx);
     }
 
     pub(super) fn voice_status(

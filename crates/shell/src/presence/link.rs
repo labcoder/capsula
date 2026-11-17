@@ -49,6 +49,7 @@ impl Presence {
                     key, thread, run, ..
                 } => self.show_error(&key.into(), Source::Drawing { thread, run }, cx),
                 LinkEvent::State(state) => {
+                    self.recover_hold(cx);
                     self.cancel_voice(cx);
                     self.retire_issue_review(cx);
                     self.revoke_exclusion(cx);
@@ -500,6 +501,14 @@ impl Presence {
                     }
                     self.request_pages(cx);
                     credit
+                }
+                DataToShell::HoldWords { gesture, words } => {
+                    self.hold_words(generation, gesture, words);
+                    bytes
+                }
+                DataToShell::HoldStored { gesture } => {
+                    self.hold_stored(generation, gesture);
+                    bytes
                 }
                 DataToShell::Models { connection, models } => {
                     self.settings.update(cx, |state, cx| {
