@@ -469,7 +469,7 @@ impl Presenter {
     ) -> (Sample, Vec<Effect>) {
         loop {
             let at = |scene: &Scene| {
-                if scene.cut == Cut::Outstanding {
+                if scene.cut == Cut::Outstanding || scene.skipping {
                     scene.stopped_ms.unwrap_or(0)
                 } else {
                     time(scene)

@@ -41,6 +41,47 @@ fn bound(presenter: &Presenter) -> u32 {
 }
 
 #[test]
+fn a_stopped_admission_freezes_a_real_moving_view_before_issuing_its_cut() {
+    let moving = step(
+        r#"{"step":{"id":"motion","put":[{"shape":{"id":"r","kind":"rect","box":[0,0,10,10],"enter":"none"}},{"anim":{"target":"r","track":"x","ease":"linear","keys":[[0,0],[1000,100]]}}]}}"#,
+    );
+    let (mut presenter, now) = prepared(&[(RUN, moving)]);
+    presenter.advance(GENERATION, now).expect("activated");
+    presenter.sample_at(ms(now, 0)).expect("first sample");
+    paint_shown(&mut presenter, now);
+    assert!(presenter.animating(ms(now, 100)));
+    presenter.sample_at(ms(now, 100)).expect("moving sample");
+    let frame = commit_frame(LIVE, 1, rect("late"));
+    let effects = presenter
+        .data_with_disposition(
+            GENERATION,
+            kumochi_scene::deferred::Deferred::new(frame, 0),
+            super::FRAME,
+            crate::runs::RunDisposition::Stopped,
+            ms(now, 100),
+        )
+        .expect("suppressed lane");
+    assert_eq!(presenter.scenes[&LIVE].cut, Cut::Open);
+    presenter
+        .sample_at(ms(now, 200))
+        .expect("frozen before admission completes");
+    assert_eq!(presenter.scenes[&LIVE].sampled_ms, Some(100));
+    let mut x = None;
+    assert!(!presenter.frames.borrow().paint(|frame, _| {
+        x = Some(frame.items()[0].transform.0[4]);
+        Ok::<_, ()>(())
+    }));
+    assert_eq!(x, Some(10.0));
+    presenter
+        .completed(only_admission(effects).run(), ms(now, 200))
+        .expect("mirrored cut");
+    assert_eq!(presenter.scenes[&LIVE].cut, Cut::Outstanding);
+    presenter.sample_at(ms(now, 210)).expect("still frozen");
+    assert_eq!(presenter.scenes[&LIVE].sampled_ms, Some(100));
+    assert!(!presenter.live_work(ms(now, 210)));
+}
+
+#[test]
 fn one_absolute_wake_keeps_its_identity_across_fractional_millisecond_samples() {
     use std::time::Duration;
     let first = step(

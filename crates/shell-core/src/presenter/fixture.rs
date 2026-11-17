@@ -805,3 +805,20 @@ pub fn consume_ready(
         effects: consumed.effects,
     })
 }
+
+#[expect(
+    clippy::fn_params_excessive_bools,
+    reason = "the timing fixture selects pre-cut or outstanding-cut state"
+)]
+pub fn sample_stop_interval(presenter: &mut Presenter, pre_cut: bool) {
+    for scene in presenter.scenes.values_mut() {
+        scene.halt();
+        scene.cut = if pre_cut {
+            super::Cut::Open
+        } else {
+            super::Cut::Outstanding
+        };
+        scene.skipping = true;
+        scene.stopped_ms = scene.stopped_ms.or(scene.sampled_ms);
+    }
+}

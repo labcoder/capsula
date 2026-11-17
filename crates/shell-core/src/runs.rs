@@ -7,7 +7,7 @@
 //! Data for a run no `RunState` has named yet is held, with its credit, until one does, so a run
 //! Esc cancelled before it was named never shows anything.
 
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::fmt;
 
 mod hold;
@@ -29,6 +29,26 @@ use crate::drawing::{Broken, Chunk, Drawing, Effect};
 const TEXT_KEPT: usize = 4096;
 /// Room in a data frame for a `TextSubmit`'s other fields [guess].
 const SUBMIT_OVERHEAD: usize = 64;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RunTail {
+    pub run: RunId,
+    pub thread: ThreadId,
+    pub control_closed: bool,
+    pub data_ended: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RunDisposition {
+    Live,
+    Stopped,
+}
+
+struct PendingStop {
+    thread: ThreadId,
+    control_closed: bool,
+    data_ended: bool,
+}
 /// Sign-in failures that may restore a submission before its run starts answering.
 const RECONNECT: [ErrorKey; 7] = [
     ErrorKey::SessionEnded,
@@ -80,6 +100,7 @@ impl fmt::Debug for Shown {
 /// What applying a `RunState` asks of the caller.
 #[derive(Default, PartialEq, Eq)]
 pub struct Applied {
+    pub input_ended: bool,
     /// A `Stop` for a run Esc cancelled before it was named.
     pub stop: Option<ControlToBrain>,
     /// Credit for held data frames this state classified.
@@ -96,6 +117,7 @@ impl fmt::Debug for Applied {
         f.debug_struct("Applied")
             .field("stop", &self.stop)
             .field("credit", &self.credit)
+            .field("input_ended", &self.input_ended)
             .field("visible", &self.visible)
             .field("restore_len", &self.restore.as_ref().map(|text| text.len()))
             .finish()
@@ -150,6 +172,7 @@ pub enum Target {
 
 #[derive(Default)]
 pub struct Runs {
+    pending_stops: BTreeMap<RunId, PendingStop>,
     connected: bool,
     hold: Option<Hold>,
     hold_high: u32,
@@ -413,7 +436,52 @@ impl Runs {
     pub fn stoppable(&self) -> Option<RunId> {
         self.live
             .map(|live| live.run)
-            .filter(|run| *run > self.fence)
+            .filter(|run| *run > self.fence && self.owned_disposition(*run) == RunDisposition::Live)
+    }
+
+    pub fn owned_disposition(&self, run: RunId) -> RunDisposition {
+        if self.pending_stops.contains_key(&run) {
+            RunDisposition::Stopped
+        } else {
+            RunDisposition::Live
+        }
+    }
+
+    pub fn stop_owned(&mut self, tail: RunTail) -> Option<ControlToBrain> {
+        let stoppable = self.stoppable() == Some(tail.run);
+        if let Some(pending) = self.pending_stops.get_mut(&tail.run) {
+            pending.control_closed |= tail.control_closed;
+            pending.data_ended |= tail.data_ended;
+            self.retire_stop(tail.run);
+        } else if !tail.control_closed || !tail.data_ended {
+            self.pending_stops.insert(
+                tail.run,
+                PendingStop {
+                    thread: tail.thread,
+                    control_closed: tail.control_closed,
+                    data_ended: tail.data_ended,
+                },
+            );
+        }
+        self.named.take_if(|(run, _)| *run == tail.run);
+        self.recovery.take_if(|(run, _)| *run == tail.run);
+        stoppable.then(|| ControlToBrain::Stop {
+            run: tail.run,
+            revealed: self.drawing.revealed(tail.run),
+        })
+    }
+
+    fn retire_stop(&mut self, run: RunId) {
+        if self
+            .pending_stops
+            .get(&run)
+            .is_some_and(|pending| pending.control_closed && pending.data_ended)
+        {
+            self.pending_stops.remove(&run);
+            if self.pending_stops.is_empty() {
+                self.pending_stops.clear();
+            }
+        }
     }
 
     /// The first Esc: cancels every turn sent and not yet answered, fences the moving run off,
@@ -502,6 +570,7 @@ impl Runs {
     pub fn focus(&mut self, run: RunId, thread: ThreadId) -> bool {
         let current = self.connected
             && run > self.fence
+            && self.owned_disposition(run) == RunDisposition::Live
             && run == self.answered
             && self.live.is_some_and(|live| {
                 live.run == run && live.typed == Some((self.turns_sent, self.revision))
@@ -519,6 +588,7 @@ impl Runs {
         self.hold_cancel = None;
         self.answered = RunId(0);
         self.fence = RunId(0);
+        self.pending_stops.clear();
         self.forget_texts(|_| true);
         // A new thread whose first turn the last brain never stored doesn't exist for this one.
         // shortcut: a new thread stopped or failed before answering loses its target here even
@@ -583,6 +653,13 @@ impl Runs {
         self.deleting.remove(at);
         if outcome == Deleted::NotHidden {
             return 0;
+        }
+        self.pending_stops.retain(|_, pending| {
+            pending.control_closed |= pending.thread == thread;
+            !pending.control_closed || !pending.data_ended
+        });
+        if self.pending_stops.is_empty() {
+            self.pending_stops.clear();
         }
         self.fence = self.fence.max(last_run.unwrap_or_default());
         let fence = self.fence;
@@ -671,6 +748,7 @@ impl Runs {
         self.fence = self.fence.max(self.answered);
         self.live = None;
         self.replaced = None;
+        self.pending_stops.clear();
         self.ended = None;
         self.main = None;
         self.submitted.clear();
@@ -713,6 +791,10 @@ impl Runs {
         self.apply(run, thread, phase, None, origin)
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one state transition preserves input closure and terminal feedback ordering"
+    )]
     fn apply(
         &mut self,
         run: RunId,
@@ -722,6 +804,11 @@ impl Runs {
         origin: Option<RunOrigin>,
     ) -> Applied {
         let mut applied = Applied::default();
+        let stopped = self.owned_disposition(run) == RunDisposition::Stopped;
+        applied.input_ended = [self.live, self.replaced]
+            .into_iter()
+            .flatten()
+            .any(|live| live.run == run && live.data_ended);
         self.apply_hold_state(run, thread, origin, &mut applied);
         if run > self.answered {
             self.answered = run;
@@ -805,6 +892,7 @@ impl Runs {
             if let Some((_, submitted)) = self.named.take_if(|(named, _)| *named == run)
                 && phase == Phase::Failed
                 && run > self.fence
+                && !stopped
                 && submitted.revision == self.revision
                 && submitted.thread == Some(thread)
                 && self.thread() == Some(thread)
@@ -818,14 +906,28 @@ impl Runs {
                 }
             }
         }
-        applied.credit = self.release();
-        applied.visible = run > self.fence;
+        if matches!(phase, Phase::Done | Phase::Interrupted | Phase::Failed)
+            && let Some(pending) = self.pending_stops.get_mut(&run)
+        {
+            pending.control_closed = true;
+            self.retire_stop(run);
+        }
+        let (credit, input_ended) = self.release(run);
+        applied.credit = credit;
+        applied.input_ended |= input_ended;
+        applied.visible = run > self.fence && !stopped;
         applied
     }
 
     /// A data frame of `bytes` on the pipe. Returns the credit to grant for it now: none while
     /// it's held for its run's first `RunState`.
     pub fn apply_data(&mut self, message: DataToShell, bytes: u32) -> u32 {
+        if let DataToShell::RunEnd { run } = &message
+            && let Some(pending) = self.pending_stops.get_mut(run)
+        {
+            pending.data_ended = true;
+            self.retire_stop(*run);
+        }
         if run_of(&message).is_some_and(|run| run > self.answered) {
             self.held.push((message, bytes));
             return 0;
@@ -835,16 +937,20 @@ impl Runs {
     }
 
     /// Applies the held frames whose run is named now, in arrival order, and returns their credit.
-    fn release(&mut self) -> u32 {
+    fn release(&mut self, observe_run: RunId) -> (u32, bool) {
         let answered = self.answered;
         let (ready, held): (Vec<_>, Vec<_>) = std::mem::take(&mut self.held)
             .into_iter()
             .partition(|(message, _)| run_of(message).is_none_or(|run| run <= answered));
         self.held = held;
-        ready.into_iter().fold(0, |credit, (message, bytes)| {
-            self.show(message);
-            credit.saturating_add(bytes)
-        })
+        ready
+            .into_iter()
+            .fold((0_u32, false), |(credit, ended), (message, bytes)| {
+                let ended =
+                    ended || matches!(&message, DataToShell::RunEnd { run } if *run == observe_run);
+                self.show(message);
+                (credit.saturating_add(bytes), ended)
+            })
     }
 
     /// A newer run takes over the view, and anything fenced, cleared or older than the view is
@@ -928,7 +1034,10 @@ impl Runs {
 
     /// The view `run`'s data goes to, if it isn't fenced or older than the view.
     fn view(&mut self, run: RunId) -> Option<&mut Shown> {
-        if run <= self.fence || self.shown.as_ref().is_some_and(|shown| run < shown.run) {
+        if run <= self.fence
+            || self.owned_disposition(run) == RunDisposition::Stopped
+            || self.shown.as_ref().is_some_and(|shown| run < shown.run)
+        {
             return None;
         }
         if self.shown.as_ref().is_none_or(|shown| run > shown.run) {

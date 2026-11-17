@@ -10,6 +10,48 @@ use super::{
 
 const NEXT: SceneId = SceneId(30);
 
+#[test]
+fn owned_stop_preserves_unbound_and_unrelated_retirement_but_discards_its_bound_successor() {
+    for owner in [None, Some(RUN), Some(kumochi_protocol::message::RunId(9))] {
+        let (mut presenter, now) = fixture(&[LIVE]);
+        replace(&mut presenter, &[LIVE], NEXT, now);
+        begin(&mut presenter, NEXT, now);
+        if let Some(run) = owner {
+            let job = only_job(
+                commit_as(&mut presenter, run, NEXT, 0, rect("successor"), now)
+                    .expect("bound successor"),
+            );
+            presenter
+                .completed(job.run(&mut Shaper), now)
+                .expect("prepared successor");
+        }
+        presenter.stop_owned(RUN, now).expect("owned stop");
+        assert_eq!(
+            presenter.frames.borrow().retirement.is_some(),
+            owner != Some(RUN)
+        );
+        if owner.is_none() {
+            let effects = presenter
+                .data_with_disposition(
+                    GENERATION,
+                    kumochi_scene::deferred::Deferred::new(
+                        super::commit_frame(NEXT, 0, rect("stopped")),
+                        0,
+                    ),
+                    super::FRAME,
+                    crate::runs::RunDisposition::Stopped,
+                    now,
+                )
+                .expect("first tagged commit");
+            assert!(presenter.frames.borrow().retirement.is_none());
+            let effects = presenter
+                .completed(super::only_admission(effects).run(), now)
+                .expect("mirrored tagged successor");
+            assert!(super::jobs(effects).is_empty());
+        }
+    }
+}
+
 fn fixture(ids: &[SceneId]) -> (Presenter, Instant) {
     let (mut presenter, now, job) = recovering(ids.iter().map(|id| (*id, rect("old"))).collect());
     presenter.stage = Box::new(Witness);

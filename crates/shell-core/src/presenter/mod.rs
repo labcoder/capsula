@@ -79,6 +79,7 @@ use snapshot::Assembler;
 use watch::Watch;
 
 use crate::platform::screen_watch::{Changed, Sources};
+use crate::runs::RunDisposition;
 
 /// The layout algorithm this shell prepares with; the brain stores it with each scene.
 const LAYOUT_VERSION: u32 = 2;
@@ -154,7 +155,7 @@ pub struct Presenter {
     /// The one commit being admitted; later scene frames wait in `held` behind it.
     lane: Option<Lane>,
     /// Live frames waiting for recovery or the admission lane, with their withheld credit.
-    held: VecDeque<(Deferred<DataToShell>, u32)>,
+    held: VecDeque<(Deferred<DataToShell>, u32, RunDisposition)>,
     held_bytes: u32,
     /// A clear came before recovery was described, so the held live scenes clear once applied.
     clear_after_recovery: bool,
@@ -306,12 +307,23 @@ impl Presenter {
     /// presenter's to drop.
     /// # Errors
     /// [`Broken`] for a frame the mirror can't apply.
-    #[expect(clippy::result_large_err, reason = "preserve rejected ownership")]
     pub fn data(
         &mut self,
         generation: u64,
         frame: Deferred<DataToShell>,
         bytes: u32,
+        now: Instant,
+    ) -> Result<Vec<Effect>, Broken> {
+        self.data_with_disposition(generation, frame, bytes, RunDisposition::Live, now)
+    }
+
+    #[expect(clippy::result_large_err, reason = "preserve rejected ownership")]
+    pub fn data_with_disposition(
+        &mut self,
+        generation: u64,
+        frame: Deferred<DataToShell>,
+        bytes: u32,
+        disposition: RunDisposition,
         now: Instant,
     ) -> Result<Vec<Effect>, Broken> {
         let mut out = Out::default();
@@ -353,7 +365,7 @@ impl Presenter {
                     removed
                 };
                 if scene && direct {
-                    self.live(frame, bytes, now, &mut out)?;
+                    self.live(frame, bytes, disposition, now, &mut out)?;
                 } else if scene {
                     let lane = self.lane.as_ref().map_or(0, |lane| lane.bytes);
                     self.held_bytes = self
@@ -361,7 +373,7 @@ impl Presenter {
                         .checked_add(bytes)
                         .filter(|held| held.saturating_add(lane) <= DATA_WINDOW)
                         .ok_or(Broken::Window)?;
-                    self.held.push_back((frame, bytes));
+                    self.held.push_back((frame, bytes, disposition));
                 }
             }
             Ok(_) | Err(_) => {}
@@ -489,7 +501,7 @@ impl Presenter {
         for (slot, id) in visible.iter_mut().zip(self.scenes.keys()) {
             *slot = Some(*id);
         }
-        for (frame, _) in &self.held {
+        for (frame, _, _) in &self.held {
             match &**frame {
                 DataToShell::SceneBegin { scene, .. } if !self.cleared.contains(scene) => {
                     if pending == Some(*scene) {
@@ -597,6 +609,65 @@ impl Presenter {
         Ok(out.finish())
     }
 
+    pub fn stop_owned(&mut self, run: RunId, now: Instant) -> Result<Vec<Effect>, Broken> {
+        let mut owned = [None; MAX_VISIBLE_SCENES];
+        for (slot, (id, scene)) in owned.iter_mut().zip(&self.scenes) {
+            if scene.activation.owned_by(run)
+                || scene.running.as_ref().is_some_and(|work| work.run == run)
+                || scene.ready.iter().any(|work| work.run == run)
+                || scene.queue.iter().any(|work| work.run == run)
+            {
+                *slot = Some(*id);
+            }
+        }
+        if let Some(lane) = self.lane.as_mut().filter(|lane| lane.run == run) {
+            lane.disposition = RunDisposition::Stopped;
+            for (slot, id) in owned.iter_mut().zip(self.scenes.keys()) {
+                if *id == lane.scene {
+                    *slot = Some(*id);
+                }
+            }
+        }
+        for (frame, _, disposition) in &mut self.held {
+            if let DataToShell::SceneStepCommit {
+                run: owner, scene, ..
+            } = &**frame
+                && *owner == run
+            {
+                *disposition = RunDisposition::Stopped;
+                for (slot, id) in owned.iter_mut().zip(self.scenes.keys()) {
+                    if id == scene {
+                        *slot = Some(*id);
+                    }
+                }
+            }
+        }
+        self.discard_owned_replacement(run);
+        let mut cuts = Vec::new();
+        for id in owned.into_iter().flatten() {
+            let scene = self.scenes.get_mut(&id).expect("owned installed scene");
+            scene.halt();
+            scene.skipping = true;
+            scene.stopped_ms = scene.stopped_ms.or(scene.sampled_ms);
+            if scene.cut == Cut::Open {
+                scene.cut = Cut::Outstanding;
+                cuts.push(SceneCut {
+                    scene: id,
+                    cut: scene.cut_now(),
+                });
+            }
+        }
+        let mut out = Out::default();
+        self.drain(now, &mut out)?;
+        out.flush();
+        out.effects
+            .push(Effect::Control(ControlToBrain::StopScenes {
+                run,
+                cuts: SceneCuts::new(cuts).expect("at most four owned scenes"),
+            }));
+        Ok(out.finish())
+    }
+
     /// The second Esc: every scene goes, recovery included, in one `ClearDrawing`.
     /// # Errors
     /// [`Broken`] when a held frame applied after clearing recovery can't be mirrored.
@@ -701,6 +772,7 @@ impl Presenter {
         &mut self,
         frame: Deferred<DataToShell>,
         bytes: u32,
+        disposition: RunDisposition,
         now: Instant,
         out: &mut Out,
     ) -> Result<(), Broken> {
@@ -712,12 +784,15 @@ impl Presenter {
         };
         if let Some(commit) = commit {
             self.frames.borrow_mut().bind_successor(commit.1, commit.0);
+            if disposition == RunDisposition::Stopped {
+                self.discard_owned_replacement(commit.0);
+            }
             if self.fenced.is_some_and(|f| commit.0 <= f)
                 && self.frames.borrow().successor() == Some(commit.1)
             {
                 self.discard_replacement();
             }
-            return self.admit(commit, frame, bytes, now, out);
+            return self.admit(commit, frame, bytes, disposition, now, out);
         }
         out.credit(bytes);
         match &*frame {
@@ -820,6 +895,7 @@ impl Presenter {
             index,
             eligible_at,
             bytes,
+            disposition,
             ..
         } = lane;
         let fenced = self.fenced.is_some_and(|fenced| run <= fenced);
@@ -832,7 +908,8 @@ impl Presenter {
         let retained = preparation.attributed_bytes();
         let preparation = Deferred::new(preparation, retained);
         out.credit(bytes);
-        if let Some(pending) = scene.pending_consumption {
+        let stopped = disposition == RunDisposition::Stopped;
+        if let Some(pending) = scene.pending_consumption.filter(|_| !stopped) {
             out.effects.push(Effect::ConsumptionReady {
                 scene: id,
                 index: pending,
@@ -842,11 +919,11 @@ impl Presenter {
         if applied {
             scene.cut = Cut::Open;
         }
-        if scene.cut == Cut::Outstanding || fenced {
+        if scene.cut == Cut::Outstanding || fenced || stopped {
             scene.skipping = true;
             // A stopped run's late step on a scene its Stop skipped as already cut: this commit
             // allows one new cut, and only the shell can send it.
-            if fenced && applied {
+            if (fenced && applied || stopped) && scene.cut != Cut::Outstanding {
                 scene.cut = Cut::Outstanding;
                 scene.stopped_ms = scene.sampled_ms;
                 out.effects

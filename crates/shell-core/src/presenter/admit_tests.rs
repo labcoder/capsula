@@ -26,6 +26,251 @@ use super::{
 const OTHER: SceneId = SceneId(21);
 
 #[test]
+fn consume_checks_cut_and_skipping_before_remembering_a_busy_request() {
+    for (cut, skipping) in [(Cut::Outstanding, false), (Cut::Open, true)] {
+        let (mut presenter, now) = live();
+        begin(&mut presenter, LIVE, now);
+        let first = only_job(commit(&mut presenter, LIVE, 0, rect("first"), now).expect("first"));
+        presenter
+            .completed(first.run(&mut Shaper), now)
+            .expect("prepared");
+        let admission = only_admission(
+            arrive(&mut presenter, commit_frame(LIVE, 1, rect("next")), now).expect("lane"),
+        );
+        let scene = presenter.scenes.get_mut(&LIVE).expect("scene");
+        scene.cut = cut;
+        scene.skipping = skipping;
+        assert_eq!(
+            presenter
+                .consume_ready(LIVE, 0, now, 0, 0)
+                .expect_err("closed consumer"),
+            ConsumeError::NotReady
+        );
+        assert_eq!(presenter.scenes[&LIVE].pending_consumption, None);
+        drop(admission);
+    }
+}
+
+#[test]
+fn two_owned_tags_survive_raw_retirement_and_recovery_before_fifo_admission() {
+    use crate::runs::{RunDisposition, RunTail, Runs};
+    use kumochi_protocol::message::{Phase, ThreadId};
+    let mut runs = Runs::default();
+    let (mut presenter, now, recovery) = recovering(vec![(LIVE, rect("saved"))]);
+    for (run, scene) in [
+        (RunId(7), OTHER),
+        (RunId(8), SceneId(22)),
+        (RunId(9), SceneId(23)),
+    ] {
+        runs.apply_state(run, ThreadId(run.0), Phase::Thinking, None);
+        begin(&mut presenter, scene, now);
+        assert!(
+            commit_as(&mut presenter, run, scene, 0, rect("received"), now)
+                .expect("held commit")
+                .is_empty()
+        );
+        if run != RunId(9) {
+            runs.stop_owned(RunTail {
+                run,
+                thread: ThreadId(run.0),
+                control_closed: false,
+                data_ended: false,
+            });
+            presenter.stop_owned(run, now).expect("mark received work");
+        }
+    }
+    for run in [RunId(7), RunId(8)] {
+        assert_eq!(runs.apply_data(DataToShell::RunEnd { run }, 4), 4);
+        assert!(
+            !runs
+                .apply_state(run, ThreadId(run.0), Phase::Done, None)
+                .visible
+        );
+        assert_eq!(runs.owned_disposition(run), RunDisposition::Live);
+    }
+    let mut effects = presenter
+        .completed(recovery.run(&mut Shaper), now)
+        .expect("preserved recovery");
+    assert_eq!(credit(&effects), FRAME);
+    for (run, scene) in [(RunId(7), OTHER), (RunId(8), SceneId(22))] {
+        effects = presenter
+            .completed(only_admission(effects).run(), now)
+            .expect("suppressed admitted candidate");
+        assert_eq!(credit(&effects), 2 * FRAME);
+        assert_eq!(
+            controls(&effects),
+            [&ControlToBrain::StepFailed {
+                run,
+                scene,
+                index: 0,
+                reason: SceneFailure::Cancelled,
+                cut: zero_cut()
+            }]
+        );
+        assert_eq!(presenter.scenes[&scene].state.view().revision(), 1);
+        assert!(presenter.scenes[&scene].queue.is_empty());
+    }
+    let effects = presenter
+        .completed(only_admission(effects).run(), now)
+        .expect("unowned admission");
+    assert_eq!(credit(&effects), FRAME);
+    assert!(controls(&effects).is_empty());
+    let job = only_job(effects);
+    presenter
+        .completed(job.run(&mut Shaper), now)
+        .expect("unowned preparation");
+    assert_eq!(presenter.stoppable_run(), Some(RunId(9)));
+    assert_eq!(presenter.scenes[&SceneId(23)].ready.len(), 1);
+    assert!(presenter.held.is_empty());
+}
+
+#[test]
+fn owned_stop_keeps_semantic_admission_and_unowned_work_but_rejects_consumption() {
+    let (mut presenter, now) = live();
+    begin(&mut presenter, LIVE, now);
+    let old = only_job(
+        commit_as(&mut presenter, RunId(6), LIVE, 0, rect("old"), now).expect("old admission"),
+    );
+    presenter
+        .completed(old.run(&mut Shaper), now)
+        .expect("old prepared");
+    begin(&mut presenter, OTHER, now);
+    let first =
+        only_job(commit(&mut presenter, OTHER, 0, rect("owned"), now).expect("owned admission"));
+    presenter
+        .completed(first.run(&mut Shaper), now)
+        .expect("owned prepared");
+    let admission = only_admission(
+        arrive(&mut presenter, commit_frame(OTHER, 1, rect("late")), now).expect("lane"),
+    );
+    assert_eq!(
+        presenter
+            .consume_ready(OTHER, 0, now, 0, 0)
+            .expect_err("busy"),
+        ConsumeError::Busy
+    );
+    let effects = presenter.stop_owned(RUN, now).expect("owned stop");
+    assert_eq!(credit(&effects), 0);
+    assert_eq!(
+        controls(&effects),
+        [&ControlToBrain::StopScenes {
+            run: RUN,
+            cuts: SceneCuts::new(vec![SceneCut {
+                scene: OTHER,
+                cut: zero_cut()
+            }])
+            .expect("one cut")
+        }]
+    );
+    assert_eq!(presenter.scenes[&LIVE].ready.len(), 1);
+    assert_eq!(presenter.scenes[&LIVE].cut, Cut::Open);
+    assert_eq!(
+        presenter
+            .consume_ready(OTHER, 0, now, 0, 0)
+            .expect_err("stopped"),
+        ConsumeError::NotReady
+    );
+    assert_eq!(presenter.scenes[&OTHER].pending_consumption, None);
+    let effects = presenter
+        .completed(admission.run(), now)
+        .expect("still semantically admitted");
+    assert_eq!(credit(&effects), FRAME);
+    assert!(controls(&effects).is_empty());
+    assert!(jobs(effects).is_empty());
+    assert_eq!(presenter.scenes[&OTHER].state.view().revision(), 2);
+    assert_eq!(presenter.scenes[&OTHER].state.view().usage().objects, 2);
+    assert_eq!(presenter.stoppable_run(), Some(RunId(6)));
+    assert_eq!(presenter.scenes[&OTHER].cut, Cut::Outstanding);
+}
+
+#[test]
+fn stopped_commit_from_open_or_applied_mirrors_then_requests_one_exact_cut() {
+    for applied in [false, true] {
+        let (mut presenter, now) = live();
+        begin(&mut presenter, LIVE, now);
+        let first = only_job(commit(&mut presenter, LIVE, 0, rect("first"), now).expect("first"));
+        presenter
+            .completed(first.run(&mut Shaper), now)
+            .expect("prepared");
+        presenter.advance(GENERATION, now).expect("activated");
+        presenter.sample_at(now).expect("sampled");
+        let cut = presenter.scenes[&LIVE].cut_now();
+        if applied {
+            presenter.stop_owned(RUN, now).expect("stopped");
+            acknowledge(&mut presenter, LIVE, 1, cut.clone(), now).expect("cut applied");
+        }
+        let effects = presenter
+            .data_with_disposition(
+                GENERATION,
+                Deferred::new(commit_frame(LIVE, 1, rect("late")), 0),
+                FRAME,
+                if applied {
+                    crate::runs::RunDisposition::Live
+                } else {
+                    crate::runs::RunDisposition::Stopped
+                },
+                now,
+            )
+            .expect("late admission");
+        if applied {
+            presenter
+                .stop_owned(RUN, now)
+                .expect("mark the already-received lane");
+        }
+        assert_eq!(credit(&effects), 0);
+        assert!(presenter.scenes[&LIVE].skipping);
+        assert_eq!(presenter.scenes[&LIVE].stopped_ms, Some(0));
+        assert_eq!(
+            presenter
+                .consume_ready(LIVE, 1, now, 0, 0)
+                .expect_err("skipping"),
+            ConsumeError::NotReady
+        );
+        let effects = presenter
+            .completed(only_admission(effects).run(), now)
+            .expect("mirrored");
+        assert_eq!(credit(&effects), FRAME);
+        assert_eq!(
+            controls(&effects),
+            [&ControlToBrain::StepFailed {
+                run: RUN,
+                scene: LIVE,
+                index: 1,
+                reason: SceneFailure::Cancelled,
+                cut: cut.clone()
+            }]
+        );
+        assert!(jobs(effects).is_empty());
+        assert_eq!(presenter.scenes[&LIVE].state.view().revision(), 2);
+        let effects = presenter
+            .data_with_disposition(
+                GENERATION,
+                Deferred::new(commit_frame(LIVE, 2, rect("more")), 0),
+                FRAME,
+                crate::runs::RunDisposition::Stopped,
+                now,
+            )
+            .expect("outstanding admission");
+        assert_eq!(credit(&effects), 0);
+        let effects = presenter
+            .completed(only_admission(effects).run(), now)
+            .expect("outstanding mirror");
+        assert_eq!(credit(&effects), FRAME);
+        assert!(controls(&effects).is_empty());
+        assert!(jobs(effects).is_empty());
+        assert_eq!(presenter.scenes[&LIVE].state.view().revision(), 3);
+        assert_eq!(
+            acknowledge(&mut presenter, LIVE, 1, cut.clone(), now).err(),
+            Some(Broken::Cut)
+        );
+        acknowledge(&mut presenter, LIVE, 3, cut, now).expect("exact acknowledgement");
+        let next = commit_as(&mut presenter, RunId(8), LIVE, 3, rect("unowned"), now)
+            .expect("later unowned admission");
+        assert_eq!(jobs(next).len(), 1);
+    }
+}
+
+#[test]
 fn stop_drains_a_pending_consumption_without_a_worker_and_keeps_later_commits_unprepared() {
     let (mut presenter, now) = live();
     begin(&mut presenter, LIVE, now);

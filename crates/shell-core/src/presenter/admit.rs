@@ -14,7 +14,10 @@ use std::{
 use kumochi_protocol::message::{DataToShell, RunId, SceneId};
 use kumochi_scene::deferred::Deferred;
 
-use super::{AdmitJob, Broken, DEADLINE, Effect, MAX_WORKERS, Out, Phase, Presenter, wire_bytes};
+use super::{
+    AdmitJob, Broken, DEADLINE, Effect, MAX_WORKERS, Out, Phase, Presenter, RunDisposition,
+    wire_bytes,
+};
 
 pub(super) struct Lane {
     pub(super) id: u64,
@@ -27,6 +30,7 @@ pub(super) struct Lane {
     pub(super) eligible_at: Option<Instant>,
     /// Its frame's withheld credit.
     pub(super) bytes: u32,
+    pub(super) disposition: RunDisposition,
     /// The frame until a worker slot frees for it.
     frame: Option<Deferred<DataToShell>>,
     cancel: Arc<AtomicBool>,
@@ -55,6 +59,7 @@ impl Presenter {
         (run, id, index): (RunId, SceneId, u32),
         frame: Deferred<DataToShell>,
         bytes: u32,
+        disposition: RunDisposition,
         now: Instant,
         out: &mut Out,
     ) -> Result<(), Broken> {
@@ -66,6 +71,16 @@ impl Presenter {
         if index != scene.state.view().revision() {
             return Err(Broken::Index);
         }
+        if disposition == RunDisposition::Stopped {
+            let scene = self
+                .scenes
+                .get_mut(&id)
+                .expect("structurally checked scene");
+            scene.halt();
+            scene.skipping = true;
+            scene.stopped_ms = scene.stopped_ms.or(scene.sampled_ms);
+        }
+        let scene = self.scenes.get(&id).expect("structurally checked scene");
         let eligible_at = (scene.open() && scene.queue.is_empty()).then_some(now);
         self.lane = Some(Lane {
             id: self.job_id(),
@@ -75,6 +90,7 @@ impl Presenter {
             entered: now,
             eligible_at,
             bytes,
+            disposition,
             frame: Some(frame),
             cancel: Arc::new(AtomicBool::new(false)),
         });
@@ -137,18 +153,18 @@ impl Presenter {
     /// wake that can no longer serve it drops it.
     pub(super) fn drain(&mut self, now: Instant, out: &mut Out) -> Result<(), Broken> {
         while self.lane.is_none() && matches!(self.phase, Phase::Live) {
-            let Some((frame, _)) = self.held.front() else {
+            let Some((frame, _, _)) = self.held.front() else {
                 return Ok(());
             };
             if self.waits_for_consumption(frame) {
                 return Ok(());
             }
-            let (frame, bytes) = self
+            let (frame, bytes, disposition) = self
                 .held
                 .pop_front()
                 .expect("the front frame was just read");
             self.held_bytes -= bytes;
-            self.live(frame, bytes, now, out)?;
+            self.live(frame, bytes, disposition, now, out)?;
         }
         Ok(())
     }
@@ -159,7 +175,7 @@ impl Presenter {
         let held = Deferred::new(std::mem::take(&mut self.held), wire_bytes(self.held_bytes));
         out.credit(std::mem::take(&mut self.held_bytes));
         let mut begun = Vec::new();
-        for (frame, _) in &*held {
+        for (frame, _, _) in &*held {
             match &**frame {
                 DataToShell::SceneBegin { scene, .. } => begun.push(*scene),
                 DataToShell::ScenesRemoved { scenes }

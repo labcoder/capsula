@@ -91,6 +91,10 @@ impl Presenter {
     /// segment's end and its last entrance's.
     /// # Errors
     /// [`ConsumeError`], with nothing changed.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one charged activation stages and commits its owners together"
+    )]
     pub(crate) fn consume_ready(
         &mut self,
         id: SceneId,
@@ -104,6 +108,9 @@ impl Presenter {
         let scene = self.scenes.get_mut(&id).ok_or(ConsumeError::UnknownScene)?;
         if expected_index < scene.state.view().activated() {
             return Err(ConsumeError::AlreadyConsumed);
+        }
+        if scene.cut != super::Cut::Open || scene.skipping {
+            return Err(ConsumeError::NotReady);
         }
         let head = scene.ready.front().ok_or(ConsumeError::NotReady)?;
         if head.step.index != expected_index {

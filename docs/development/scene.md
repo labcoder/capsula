@@ -2027,6 +2027,23 @@ scenes with zero-activation cuts in its original covering-token `StopScenes`. Th
 older runs: the brain's unnamed-scene sweep covers only the named run and cannot substitute
 for these explicit cuts. Four fixed pending identities mark eventual FIFO adoptions as
 Outstanding/skipping, without another cut. Clear, removal and disconnect revoke the intent.
+The preceding covering-token behavior is ordinary Stop. A captured voice receipt instead
+uses `stop_owned` without clearing recovery or broadening its run id. Installed activation,
+running/ready/queued work, the lane and received run-bearing commits identify owned scenes;
+a bare begin or recovered snapshot does not. Other scenes and unrelated or unbound replacement
+retirement survive. The first tagged successor commit binds retirement before discarding only
+that matching bank. A scene remains the atomic cut unit, not a per-run partition.
+
+Received commits retain Live/Stopped disposition in the existing held queue and admission
+lane, through recovery and FIFO drain, even after Runs retires its pending input record.
+Stopped admission checks structure, halts the scene and latches its sample time, but still
+validates/applies the detached candidate and returns credit exactly once. Direct consumption
+and retries reject cut/skipping work. Sampling freezes throughout skipping, including the
+interval before admission issues a cut. A stopped candidate from Open or Applied requests
+one exact Cancelled StepFailed cut; Outstanding candidates mirror without duplicating it.
+Acknowledgement still requires the final mirrored revision, and a later unowned commit may
+reopen after acknowledgement. No permanent scene or Presenter run history is added.
+
 The brain durably wrote the first step before sending `SceneBegin`; no recovered run is
 guessed. Repeated Stops preserve the greatest covering token, and later work stays after
 the original cuts rather than being cut by a delayed follow-up Stop.
