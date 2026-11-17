@@ -1326,6 +1326,7 @@ fn unconfirmed_exit_log(keep: fn(SttHandle) -> Option<SttHandle>) -> String {
     let handle = SttHandle::spawn_with(reports, losses, move |_, _| {
         let _guard = &guard;
         // The owner logs on this thread after the engine returns, so capture stays installed.
+        // shortcut: leaks the guard for the process's life; harmless, this thread ends in the test.
         std::mem::forget(thread_log.install());
         started.send(Event::Lost).expect("load started");
         leave.recv_timeout(WAIT).expect("release load failure");
