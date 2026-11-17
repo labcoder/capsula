@@ -340,7 +340,7 @@ fn run(cases: Vec<Case>, repeats: usize) {
     let rows = Rc::clone(&saved);
     let output = Rc::clone(&cases);
     gpui_kit::application()
-        .with_assets(gpui_kit::assets::Assets)
+        .with_assets(crate::assets::Assets)
         .run(move |cx| {
             gpui_kit::init(cx);
             cx.set_global(crate::Strings::english());

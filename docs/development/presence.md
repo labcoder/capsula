@@ -30,6 +30,12 @@ and the keyboard is armed before the brain link starts connecting; [input.md](in
 the shortcut, the typing panel and Esc. A link failure shows in the status panel; Retry never sends
 the previous input again.
 
+The shell and its offline fixtures register `shell::assets::Assets`: GPUI Kit's default
+component bundle plus the `Monitor` icon used for a held picture in history and screen notes.
+An `IconName` supplies a path, not its SVG bytes; icons outside the default bundle must be
+selected with `icon_assets!` before they can paint. The asset tests load that icon through
+the same source startup installs, not just its layout and tooltip.
+
 `presence::stage` unions the accepted dock layout, the status peek's minimum reservation
 and the accepted bounds of the visible typing, Threads or Settings panel. It chooses the
 largest-area usable band below, above, left or right, in that tie order, with a

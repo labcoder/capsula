@@ -8,6 +8,7 @@
     reason = "shared allocator helpers serve several test binaries"
 )]
 mod allocation;
+mod assets;
 
 mod confirmation;
 #[cfg(test)]
@@ -93,7 +94,7 @@ fn main() -> ExitCode {
         }
     };
     gpui_kit::application()
-        .with_assets(gpui_kit::assets::Assets)
+        .with_assets(crate::assets::Assets)
         .run(move |cx| {
             gpui_kit::init(cx);
             crate::theme::init(cx);
