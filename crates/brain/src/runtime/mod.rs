@@ -187,6 +187,8 @@ pub(crate) struct Brain {
     quiet: Vec<(RunId, Instant)>,
     /// When owed writes are tried again.
     retry_at: Option<Instant>,
+    /// When a draw call waiting for the shell is checked again.
+    ready_at: Option<Instant>,
     /// Page completions belong only to the connection that requested them.
     epoch: u64,
     /// What a recovery chunk packs up to; tests lower it to force several chunks.
@@ -318,6 +320,7 @@ impl Brain {
             drain: None,
             quiet: Vec::new(),
             retry_at: None,
+            ready_at: None,
             epoch: 0,
             chunk_target: crate::drawing::CHUNK_TARGET,
             config,
@@ -889,6 +892,10 @@ impl Brain {
                     self.retry_at = None;
                     Input::Retry
                 }
+                () = sleep_until(self.ready_at) => {
+                    self.ready_at = None;
+                    Input::ReadyWait
+                }
                 () = sleep_until(send_due) => self.send_deadline_passed(),
                 (run, event) = next_tts(&mut self.pump), if take_engine => tts_input(run, event),
                 event = voice::next(&mut self.voice) => {
@@ -1277,6 +1284,10 @@ impl Brain {
                     self.retry_at = Some(Instant::now() + after);
                 }
                 Effect::CancelRetry => self.retry_at = None,
+                Effect::ArmReadyWait => {
+                    self.ready_at = Some(Instant::now() + crate::drawing::READY_WAIT);
+                }
+                Effect::CancelReadyWait => self.ready_at = None,
                 Effect::ArmDeadline { run, after } => {
                     self.deadline = Some((run, Instant::now() + after));
                 }

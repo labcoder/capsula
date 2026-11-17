@@ -206,7 +206,9 @@ impl Coordinator {
                     return Err(Stale);
                 }
             }
-            Input::StepShown { run, .. } | Input::StepFailed { run, .. }
+            Input::StepShown { run, .. }
+            | Input::StepReady { run, .. }
+            | Input::StepFailed { run, .. }
                 if *run < self.session_start =>
             {
                 return Err(Stale);
@@ -304,6 +306,15 @@ impl Coordinator {
                     self.drawn(&key, output, effects);
                 }
             }
+        }
+        let holding = self.drawing.holding();
+        if holding != self.ready_armed {
+            self.ready_armed = holding;
+            effects.push(if holding {
+                Effect::ArmReadyWait
+            } else {
+                Effect::CancelReadyWait
+            });
         }
     }
 

@@ -74,6 +74,7 @@ impl Tapped for ControlToBrain {
             Self::ScreenHoldRecognized { .. } => "ScreenHoldRecognized",
             Self::ScreenRelease { .. } => "ScreenRelease",
             Self::SceneSkipped { .. } => "SceneSkipped",
+            Self::StepReady { .. } => "StepReady",
         }
     }
 

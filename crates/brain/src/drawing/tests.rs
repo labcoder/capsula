@@ -22,6 +22,7 @@ use crate::coordinator::{Effect, Stale, StoreOp};
 use crate::engines::CallId;
 
 mod paint;
+mod ready;
 mod screen;
 mod timing;
 
@@ -1285,32 +1286,6 @@ fn a_second_failed_cut_counts_only_steps_the_first_did_not() {
     }
 }
 
-/// What happens today when a complete call's step is refused after the call ended; OSC-683
-/// may hold the call's result until its last step is shown or refused.
-#[test]
-fn a_complete_call_whose_step_is_refused_later_tells_the_model_nothing() {
-    let mut drawing = Drawing::default();
-    let mut store = Store::default();
-    let ended = store.run(
-        &mut drawing,
-        call(1, "done", args("done", &[text("s1", "a")])),
-    );
-    assert_eq!(ended.calls.len(), 1);
-    assert_eq!(ended.calls[0].error, None);
-    let failed = store.run(
-        &mut drawing,
-        Input::StepFailed {
-            run: RunId(1),
-            scene: SceneId(1),
-            index: 0,
-            reason: SceneFailure::PaintWork,
-            cut: cut(0, vec![]),
-        },
-    );
-    assert_eq!(failed.calls, []);
-    assert!(drawing.drew_nothing(RunId(1)));
-}
-
 /// Run `run` closed on its own, so a drawing it lost is told.
 fn closed(run: u64) -> Input {
     Input::RunClosed {
@@ -1459,6 +1434,8 @@ fn merge(into: &mut Output, more: Output) {
 struct Store {
     scenes: Vec<StoredScene>,
     cleared: Vec<SceneId>,
+    /// The shell double never prepares a step, so finished calls wait for it.
+    unprepared: bool,
 }
 
 impl Store {
@@ -1558,6 +1535,20 @@ impl Store {
                         .handle(job.clone().run())
                         .expect("the pending preparation");
                     merge(&mut out, more);
+                }
+            }
+            for effect in &fresh.effects {
+                if let Effect::Data(DataToShell::SceneStepCommit {
+                    run, scene, index, ..
+                }) = effect
+                    && !self.unprepared
+                {
+                    let ready = Input::StepReady {
+                        run: *run,
+                        scene: *scene,
+                        index: *index,
+                    };
+                    merge(&mut out, drawing.handle(ready).expect("a committed step"));
                 }
             }
             if let Some((serial, write)) = sent(&fresh) {
@@ -2266,7 +2257,14 @@ fn a_shown_step_waits_for_the_write_it_would_make_stale() {
     );
     let write = sent(&out).expect("the step").1;
     let out = reply(&mut drawing, &out, Ok(store.answer(&write)));
-    assert_eq!(trace(&out), ["step 1#1", "end 1 true"]);
+    assert_eq!(trace(&out), ["step 1#1"]);
+    let ready = Input::StepReady {
+        run: RunId(1),
+        scene: SceneId(1),
+        index: 1,
+    };
+    let out = drawing.handle(ready).expect("a prepared step");
+    assert_eq!(trace(&out), ["end 1 true"]);
     assert_eq!(
         drawing.scenes[0].state.activated(),
         1,

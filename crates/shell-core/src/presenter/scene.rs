@@ -7,7 +7,9 @@ use std::{
     time::Instant,
 };
 
-use kumochi_protocol::message::{ControlToBrain, MAX_VISIBLE_SCENES, RunId, SceneId};
+use kumochi_protocol::message::{
+    ControlToBrain, MAX_READY_STEPS, MAX_VISIBLE_SCENES, RunId, SceneId,
+};
 use kumochi_scene::{
     Frame, Preparation, SceneBinding, SceneEvent, SceneView, StopCut,
     deferred::Deferred,
@@ -52,7 +54,7 @@ impl Presenter {
 }
 
 /// Read-ahead positions per scene: prepared results not yet consumed, plus the running one.
-pub(super) const WINDOW: usize = 8;
+pub(super) const WINDOW: usize = MAX_READY_STEPS;
 
 pub(super) struct Scene {
     pub(super) activation: Activation,

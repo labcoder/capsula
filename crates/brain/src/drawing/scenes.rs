@@ -239,14 +239,7 @@ impl Drawing {
                 }
             }
             held.refused_through = held.committers.len();
-            let error = if reason == SceneFailure::PaintWork {
-                super::CallError::TooMuchToPaint {
-                    cleared: cut.activated == 0,
-                }
-            } else {
-                super::CallError::Failed
-            };
-            self.end_calls_in(scene, &error, out);
+            self.end_calls_in(scene, &failure(reason, &cut), out);
         }
         let held = &mut self.scenes[at];
         let logged = held.state.recovery_log().len();
@@ -355,6 +348,7 @@ impl Drawing {
             out.effects
                 .push(Effect::Broken("a shown step the brain can't retire"));
         }
+        self.answered(scene, index, out);
     }
 
     pub(super) fn replacement_victims(
@@ -487,5 +481,16 @@ impl Drawing {
             }
             !held.gone
         });
+    }
+}
+
+/// What a call drawing in a scene hears when the shell couldn't prepare a step there.
+pub(super) fn failure(reason: SceneFailure, cut: &StopCut) -> super::CallError {
+    if reason == SceneFailure::PaintWork {
+        super::CallError::TooMuchToPaint {
+            cleared: cut.activated == 0,
+        }
+    } else {
+        super::CallError::Failed
     }
 }

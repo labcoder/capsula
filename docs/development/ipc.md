@@ -735,7 +735,7 @@ Production drawing uses the v1 messages: drawing calls commit typed steps throug
 reducer and send `SceneBegin` and `SceneStepCommit` ([tools](tools.md), "`draw`"). Only the
 trusted debug fixture's newline-label route still uses the labelled placeholder messages
 above. The brain accepts
-`StopScenes`, `StepShown` and `StepFailed`; the shell consumes v1 data and `ScenesV1` through
+`StopScenes`, `StepShown`, `StepReady` and `StepFailed`; the shell consumes v1 data and `ScenesV1` through
 its presenter. The legacy run-only `NoVisual` control is an authenticated no-op: it never
 clears a scene, adds a call result or ends the connection. Before Welcome it remains invalid.
 These variants are appended; the handshake
@@ -744,7 +744,7 @@ tags and bytes do not change. Mixed builds still fail their build-id handshake.
 | Pipe | Messages | Meaning |
 | --- | --- | --- |
 | Control, shell to brain | `StopScenes { run, cuts }` | Fence the run and apply each scene's activated revision and finished handles. A scene can span runs. |
-| Control, shell to brain | `StepShown`, `StepFailed` | First paint containing a lifetime step index, or a content-free preparation failure with its scene-wide cut; the appended `PaintWork` reason marks a step past the shell's paint-work cap, which the brain reports to the model as `drawing.TooMuchToPaint` only while the step's draw call is still open, with the paint budget the draw prompt states (the shell sends no counts, so the refusal can't say how far over the step was). The brain refuses most such steps at admission, before writing them (scene.md, "The brain's count"); this is the late residual. Control order keeps these observations ahead of later Stop cuts. |
+| Control, shell to brain | `StepShown`, `StepReady`, `StepFailed` | First paint containing a lifetime step index, the step's preparation succeeding and queueing it to activate, or a content-free preparation failure with its scene-wide cut; the appended `PaintWork` reason marks a step past the shell's paint-work cap, which the brain reports to the model as `drawing.TooMuchToPaint` while the step's draw call is open or its result is held for the shell ([tools](tools.md), "`draw`"), with the paint budget the draw prompt states (the shell sends no counts, so the refusal can't say how far over the step was). The brain refuses most such steps at admission, before writing them (scene.md, "The brain's count"); this is the late residual. A draw call's result waits until the shell has prepared or refused its last step, so the model hears a refusal made while preparing; a step refused when it activates (Residency or Validation), or a screen scene skipped after its steps were prepared, is not reported to the model, and the person sees the existing notice when nothing is left on screen. Control order keeps these observations ahead of later Stop cuts. |
 | Control, brain to shell | `ScenesV1` | Authoritative visible membership and each scene's lifetime revision, retained count and full log-entry count. |
 | Control, brain to shell | `NoVisual` | Legacy run-level advisory, consumed without changing state. |
 | Data, brain to shell | `SceneBegin`, `SceneStepCommit` | An immutable typed header/layout version, then original typed steps after durable commit. |

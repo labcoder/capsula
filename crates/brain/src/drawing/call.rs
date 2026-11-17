@@ -212,6 +212,10 @@ impl CallEnd {
 }
 
 /// One draw call of an open run.
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "each flag is its own fact about the call, not one state spread over flags"
+)]
 pub(super) struct Call {
     pub(super) run: RunId,
     pub(super) id: CallId,
@@ -229,6 +233,28 @@ pub(super) struct Call {
     pub(super) done: bool,
     /// The picture's size once its `begin` was a screen scene's: its scene is a screen scene.
     pub(super) picture: Option<[u32; 2]>,
+    /// The lifetime index of the newest step it committed in its scene.
+    pub(super) last: Option<u32>,
+    /// It finished and waits for the shell to answer for this step of its scene.
+    pub(super) awaits: Option<u32>,
+    /// The newest step of its scene the shell prepared or showed while it was open.
+    pub(super) answered: Option<u32>,
+    /// The shell answered for its scene since the last [`super::READY_WAIT`] tick.
+    pub(super) heard: bool,
+    /// Text after its records array was ignored, told with its result.
+    pub(super) after_records: bool,
+    /// The shell refused one of its steps before the queued cut reached it.
+    pub(super) refusal: Option<CallError>,
+}
+
+impl Call {
+    /// The visible scene it drew steps in.
+    pub(super) fn drew_in(&self) -> Option<SceneId> {
+        match self.scene {
+            Bound::Held(scene) if !self.drawn.is_empty() => Some(scene),
+            Bound::None | Bound::New(_) | Bound::Held(_) => None,
+        }
+    }
 }
 
 /// The scene a call draws in.
@@ -245,7 +271,7 @@ enum Bound {
 pub(super) struct RunLedger {
     pub(super) run: RunId,
     calls: usize,
-    steps: usize,
+    pub(super) steps: usize,
     /// Committed steps a failed cut then dropped; `steps` keeps them, so no budget comes back.
     refused: usize,
     rejected: u8,
@@ -394,7 +420,8 @@ impl Drawing {
     }
 
     /// The open call `id`, started if it's new. `None` when a new call is refused for its run's
-    /// budget, which ends it at once.
+    /// budget, which ends it at once. A call whose arguments ended and whose result waits for
+    /// the shell takes no more of them.
     fn call_at(
         &mut self,
         thread: ThreadId,
@@ -410,7 +437,7 @@ impl Drawing {
             .iter()
             .position(|call| call.run == run && call.id == *id)
         {
-            return if self.calls[at].done {
+            return if self.calls[at].done || self.calls[at].awaits.is_some() {
                 Err(Stale)
             } else {
                 Ok(Some(at))
@@ -448,6 +475,12 @@ impl Drawing {
             refused: false,
             done: false,
             picture: None,
+            last: None,
+            awaits: None,
+            answered: None,
+            heard: false,
+            after_records: false,
+            refusal: None,
         });
         let at = self.calls.len() - 1;
         if exhausted {
@@ -745,10 +778,14 @@ impl Drawing {
         if let Some(ledger) = self.runs.iter_mut().find(|ledger| ledger.run == run) {
             ledger.steps += 1;
         }
+        let last = self
+            .live(scene)
+            .and_then(|at| self.scenes[at].state.revision().checked_sub(1));
         if let Some(at) = self.open_call(run, id) {
             let call = &mut self.calls[at];
             call.drawn.push(step.id.clone());
             call.scene = Bound::Held(scene);
+            call.last = last.or(call.last);
         }
     }
 
@@ -808,13 +845,7 @@ impl Drawing {
             _ => self.calls[at].guard.finish().map_err(CallError::Step),
         };
         match ended {
-            Ok(()) => {
-                self.end(at, None, out);
-                out.calls
-                    .last_mut()
-                    .expect("end pushed this call's result")
-                    .after_records = after_records;
-            }
+            Ok(()) => self.finished(at, after_records, out),
             Err(error) => self.fail(at, error, out),
         }
     }
@@ -1010,6 +1041,7 @@ impl Drawing {
         {
             write.loss_dropped = true;
         }
+        self.release_closed(closed, out);
         let calls: Vec<_> = self
             .calls
             .iter()
@@ -1025,7 +1057,11 @@ impl Drawing {
             Job::Record { run, .. } | Job::Reject { run, .. } | Job::Finish { run, .. } => {
                 *run > closed
             }
-            Job::Cut { .. } | Job::Shown { .. } | Job::Unseen { .. } | Job::ClearVisible => true,
+            Job::Cut { .. }
+            | Job::Shown { .. }
+            | Job::Ready { .. }
+            | Job::Unseen { .. }
+            | Job::ClearVisible => true,
         });
     }
 

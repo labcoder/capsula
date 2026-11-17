@@ -292,6 +292,8 @@ pub enum Input {
     },
     /// The timer for owed clears and selections fired.
     Retry,
+    /// [`crate::drawing::READY_WAIT`] passed while a draw call waited for the shell.
+    ReadyWait,
     /// The user confirmed deleting `thread`.
     Delete {
         /// The thread.
@@ -464,6 +466,10 @@ pub enum Effect {
     },
     /// Forget the armed `ArmRetry`: nothing owed is left unwritten.
     CancelRetry,
+    /// Report `ReadyWait` after [`crate::drawing::READY_WAIT`], replacing any earlier one.
+    ArmReadyWait,
+    /// Forget the armed `ArmReadyWait`: no draw call waits for the shell.
+    CancelReadyWait,
     /// Report `Deadline` for `run` after `after`.
     ArmDeadline {
         /// The run.
@@ -651,6 +657,10 @@ impl Run {
 }
 
 /// The core loop's state.
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "each flag is its own fact about the session, not one state spread over flags"
+)]
 pub struct Coordinator {
     drawing: crate::drawing::Drawing,
     drawing_held: Vec<(ThreadId, DataToShell)>,
@@ -677,6 +687,8 @@ pub struct Coordinator {
     retry_after: Duration,
     /// The wait of the `ArmRetry` that's out and hasn't come back as `Retry`.
     retry_armed: Option<Duration>,
+    /// An `ArmReadyWait` is out and hasn't come back as `ReadyWait`.
+    ready_armed: bool,
     /// Deletes sent to the store and not answered yet, from any connection.
     deleting: Vec<delete::Deleting>,
     /// Threads hidden or removed on this connection while a submit sent before their delete is
@@ -753,6 +765,7 @@ impl Coordinator {
             session_start: RunId(last_run.0 + 1),
             retry_after: scenes::FIRST_RETRY,
             retry_armed: None,
+            ready_armed: false,
             deleting: Vec::new(),
             fenced: Vec::new(),
             crossed: Vec::new(),
@@ -966,6 +979,10 @@ impl Coordinator {
             Input::SceneKept { scene, ok: true } => self.kept(scene),
             Input::SceneKept { scene, ok: false } => self.keep_failed(scene),
             Input::Retry => self.retry_now(&mut effects),
+            Input::ReadyWait => {
+                self.ready_armed = false;
+                self.drawing_input(crate::drawing::Input::ReadyWait, &mut effects)?;
+            }
             input @ (Input::Delete { .. } | Input::Deleted { .. }) => {
                 self.deletion(&input, &mut effects)?;
                 self.provider_sources_changed(&mut effects);

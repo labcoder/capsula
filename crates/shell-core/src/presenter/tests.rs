@@ -386,6 +386,41 @@ fn a_failed_preparation_cuts_its_scene_with_a_content_free_reason() {
 }
 
 #[test]
+fn each_prepared_step_is_announced_once_and_a_refused_or_late_one_never() {
+    let ready = |index| ControlToBrain::StepReady {
+        run: RUN,
+        scene: LIVE,
+        index,
+    };
+    let (mut presenter, now, first) = preparing();
+    let effects =
+        commit(&mut presenter, LIVE, 1, label("b", "unshapeable"), now).expect("a matching step");
+    assert!(jobs(effects).is_empty());
+    let second = only_job(
+        presenter
+            .completed(first.run(&mut Shaper), ms(now, 5))
+            .expect("a current answer"),
+    );
+    assert_eq!(controls(&presenter.take_ready()), [&ready(0)]);
+    assert!(presenter.take_ready().is_empty());
+    let effects = presenter
+        .completed(second.run(&mut Shaper), ms(now, 10))
+        .expect("an answer");
+    assert_eq!(
+        controls(&effects),
+        [&failed(LIVE, 1, SceneFailure::TextMeasure)]
+    );
+    assert!(presenter.take_ready().is_empty());
+
+    let (mut presenter, now, job) = preparing();
+    presenter.tick(ms(now, 250)).expect("a tick");
+    presenter
+        .completed(job.run(&mut Shaper), ms(now, 400))
+        .expect("a late answer");
+    assert!(presenter.take_ready().is_empty());
+}
+
+#[test]
 fn an_answer_before_the_deadline_is_published() {
     let (mut presenter, now, job) = preparing();
     let effects = presenter

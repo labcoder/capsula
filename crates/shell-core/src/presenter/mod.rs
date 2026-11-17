@@ -165,6 +165,8 @@ pub struct Presenter {
     // shortcut: tombstones assume one persisted database; add a store id before supporting live database wipes.
     cleared: VecDeque<SceneId>,
     next_job: u64,
+    /// A `StepReady` for each step prepared since the last [`Presenter::take_ready`].
+    ready: Vec<ControlToBrain>,
     /// One reference per job or answer alive, so dropping either frees its slot.
     slots: Arc<()>,
     /// The dropper stopped and intake was refused; logged once.
@@ -208,6 +210,7 @@ impl Presenter {
             stopped_begins: [None; MAX_VISIBLE_SCENES],
             cleared: VecDeque::new(),
             next_job: 0,
+            ready: Vec::new(),
             slots: Arc::new(()),
             refused: false,
             returned: Arc::new(AtomicUsize::new(0)),
@@ -232,6 +235,7 @@ impl Presenter {
 
     /// The connection ended: every job is cancelled and every scene, charge and held frame goes.
     pub fn disconnected(&mut self) {
+        self.ready.clear();
         self.discard_replacement();
         if let Phase::Recovering(recovery) = std::mem::replace(&mut self.phase, Phase::Offline) {
             recovery.cancel.store(true, Ordering::Relaxed);
@@ -1101,10 +1105,21 @@ impl Presenter {
                     step: prepared,
                     full_after,
                 });
+                self.ready.push(ControlToBrain::StepReady {
+                    run: running.run,
+                    scene: id,
+                    index: running.index,
+                });
             }
             Err(reason) => self.fail(id, running.run, running.index, reason, now, out)?,
         }
         Ok(())
+    }
+
+    /// The steps prepared since the last call, in order, each to tell the brain once; the caller
+    /// sends them ahead of the effects of the answer that prepared them.
+    pub fn take_ready(&mut self) -> Vec<Effect> {
+        self.ready.drain(..).map(Effect::Control).collect()
     }
 
     /// A step failed: its scene drops its work and, unless already cut since its last commit,
