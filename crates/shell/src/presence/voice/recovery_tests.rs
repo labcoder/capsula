@@ -300,6 +300,7 @@ fn a_newer_attempt_or_a_stuck_microphone_replaces_the_lost_notice(cx: &mut TestA
             stamp,
             0,
             None,
+            TalkHeld::default(),
             cx,
         );
         assert!(owner.voice.pending.is_none(), "refused at admission");
