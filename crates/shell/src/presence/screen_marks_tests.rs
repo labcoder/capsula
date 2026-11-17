@@ -660,13 +660,21 @@ fn a_lost_session_ends_the_watch_once(cx: &mut TestAppContext) {
 
 /// Hold 1's run is answering and its marks are up, with the sources listening.
 fn marks_up(cx: &mut TestAppContext) -> Watching {
+    marked(true, cx)
+}
+
+/// Hold 1's marks are up, with the sources listening. Its run is answering, or its first mark
+/// overtook that state on the other pipe, so the hold is still pending.
+fn marked(answering: bool, cx: &mut TestAppContext) -> Watching {
     let watching = released(true, cx);
     let hidden = detached(&watching.ready, cx);
     watching.ready.owner.update(cx, |owner, _| {
         owner.overlay = Visibility::Hidden(hidden);
     });
     state(&watching, RUN, Phase::Thinking, HOLD, cx);
-    state(&watching, RUN, Phase::Answering, None, cx);
+    if answering {
+        state(&watching, RUN, Phase::Answering, None, cx);
+    }
     text(&watching, RUN, cx);
     mark(&watching, MARKS, RUN, DISPLAY, cx);
     cx.run_until_parked();
@@ -763,6 +771,63 @@ fn one_esc_takes_a_running_answer_s_marks_and_stops_it_whatever_else_it_does(
     watching.ready.owner.read_with(cx, |owner, _| {
         assert_eq!(owner.presenter.input.selection(), None);
     });
+}
+
+/// The hold's cancel, which stops its run in the brain.
+fn cancel() -> Told {
+    Told::Sent(ControlToBrain::GestureCancel {
+        gesture: GestureId(1),
+    })
+}
+
+/// The sources stop and the marks are cleared, once each.
+fn gone() -> [Told; 2] {
+    [
+        Told::Stop,
+        Told::Sent(ControlToBrain::ClearDrawing {
+            scene_ids: vec![MARKS],
+        }),
+    ]
+}
+
+/// The pending hold is gone and its run is fenced off.
+fn ended(watching: &Watching, cx: &mut TestAppContext) {
+    watching.ready.owner.read_with(cx, |owner, _| {
+        assert!(owner.voice.pending.is_none());
+        assert_eq!(owner.runs.stoppable(), None);
+    });
+}
+
+// The two tests below pin the hold's cancel as it is told today: twice for one press, once
+// where the hold's input is revoked and once from the runs' hold.
+
+#[gpui::test]
+fn the_hotkey_s_esc_takes_a_pending_hold_s_marks_and_cancels_it(cx: &mut TestAppContext) {
+    let watching = marked(false, cx);
+    watching.ready.owner.update(cx, |owner, cx| {
+        assert!(owner.voice_working(), "the hold is still pending");
+        // The hotkey's reducer revokes the hold's input before the press is applied.
+        let cancelled = owner.link.cancel_input_gesture();
+        assert_eq!(cancelled, Some(GestureId(1)));
+        owner.native_escape(cancelled, cx).expect("escape");
+    });
+    cx.run_until_parked();
+    let [stop, clear] = gone();
+    assert_eq!(told(&watching), [cancel(), stop, clear, cancel()]);
+    ended(&watching, cx);
+}
+
+#[gpui::test]
+fn esc_takes_a_pending_hold_s_marks_and_cancels_it(cx: &mut TestAppContext) {
+    let watching = marked(false, cx);
+    watching.ready.owner.update(cx, |owner, cx| {
+        assert!(owner.voice_working(), "the hold is still pending");
+        owner.escape(cx).expect("escape");
+    });
+    cx.run_until_parked();
+    let [stop, clear] = gone();
+    assert_eq!(told(&watching), [stop, clear, cancel(), cancel()]);
+    ended(&watching, cx);
 }
 
 #[gpui::test]

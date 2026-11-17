@@ -11,6 +11,11 @@ impl Presence {
         gesture: Option<GestureId>,
         cx: &mut Context<'_, Self>,
     ) -> Result<(), OpenError> {
+        // Marks that are up go at this press, and `escape` takes them before it ends a hold.
+        // A hold is still pending here when its first mark came before its run's `Answering`.
+        if self.presenter.marks_shown().is_some() {
+            return self.escape(cx);
+        }
         if let Some(gesture) = gesture
             && self.cancel_voice_gesture(gesture, cx)
         {
