@@ -258,7 +258,7 @@ fn run(mode: Mode) {
     let shared = Rc::clone(&picture);
     let cleared = Rc::clone(&picture);
     gpui_kit::application()
-        .with_assets(gpui_kit::assets::Assets)
+        .with_assets(crate::assets::Assets)
         .run(move |cx| {
             gpui_kit::init(cx);
             UiTheme::change(ThemeMode::Dark, None, cx);
