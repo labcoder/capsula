@@ -1,9 +1,11 @@
 //! The sources that are started and stopped with a watch: the mouse, on its own thread, and
-//! the foreground hook. `start` and `stop` run on the UI thread and never wait.
+//! the foreground hook. `start` and `stop` run on the UI thread and never wait for the mouse
+//! thread: the one lock they share with it is held for a push or a pop.
 
 use std::cell::RefCell;
-use std::sync::Arc;
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use async_channel::Sender;
 use kumochi_protocol::constants::OBJECT_PREFIX;
@@ -29,7 +31,7 @@ use windows::core::{HSTRING, PCWSTR};
 use super::super::presence::{PresenceEvent, send, struct_size};
 use crate::input::TalkHeld;
 
-/// Posted to the mouse window: arm it for the watch whose bit the message owns.
+/// Posted to the mouse window: arm it for the oldest watch whose bit waits in [`Shared`].
 const ARM: u32 = WM_APP + 1;
 /// Posted to the mouse window: its watch stopped.
 const DISARM: u32 = WM_APP + 2;
@@ -50,46 +52,93 @@ thread_local! {
     static MOUSE_WATCH: RefCell<Mouse> = RefCell::new(Mouse::default());
 }
 
-/// What the mouse thread knows: the watch it is armed for, with the tick it was armed at, or
-/// none.
+/// What the mouse thread knows: the watch it is armed for, or none.
 #[derive(Default)]
 struct Mouse {
-    armed: Option<(Changed, u32)>,
+    armed: Option<Armed>,
     events: Option<Sender<PresenceEvent>>,
+    /// Where the bits of arms not dispatched yet wait.
+    shared: Option<Arc<Shared>>,
+    /// The window was destroyed, so the thread's end has none to destroy.
+    closed: bool,
+}
+
+/// The watch the mouse thread is armed for.
+struct Armed {
+    changed: Changed,
+    /// The tick of the arm's message.
+    at: u32,
+    /// This arm's one wake was queued.
+    woke: bool,
+}
+
+impl Armed {
+    /// Sets the watch's bit. True when this arm's wake is owed, which is once in its life:
+    /// the presenter clears the bit when it reads it, and a record that comes after the watch
+    /// stopped and before the disarm must not wake the UI a second time.
+    fn change(&mut self) -> bool {
+        self.changed.set() && !std::mem::replace(&mut self.woke, true)
+    }
 }
 
 impl Mouse {
     /// One mouse record with button `flags`, whose message is from tick `time`. True when it
-    /// set its watch's bit, which is when that watch's one wake is owed. A move ends at the
-    /// mask. A press or a wheel turn counts when the window under the pointer is another
-    /// process's, which `foreign` says. A record from before the arm is the watch before's;
-    /// one from the arm's own tick counts.
-    fn record(&self, time: u32, flags: u32, foreign: impl FnOnce() -> bool) -> bool {
-        let Some((changed, armed_at)) = &self.armed else {
+    /// owes its watch's wake. A move ends at the mask. A press or a wheel turn counts when the
+    /// window under the pointer is another process's, which `foreign` says, and sets the bit
+    /// every time. A record from before the arm is the watch before's; one from the arm's own
+    /// tick counts.
+    fn record(&mut self, time: u32, flags: u32, foreign: impl FnOnce() -> bool) -> bool {
+        let Some(armed) = &mut self.armed else {
             return false;
         };
         // Ticks wrap, so "earlier" is a negative difference.
-        let earlier = time.wrapping_sub(*armed_at).cast_signed() < 0;
-        !earlier && flags & PRESSES != 0 && foreign() && changed.set()
+        let earlier = time.wrapping_sub(armed.at).cast_signed() < 0;
+        !earlier && flags & PRESSES != 0 && foreign() && armed.change()
     }
 
     /// A record that couldn't be read, which counts as a change.
-    fn unread(&self) -> bool {
-        self.armed
-            .as_ref()
-            .is_some_and(|(changed, _)| changed.set())
+    fn unread(&mut self) -> bool {
+        self.armed.as_mut().is_some_and(Armed::change)
+    }
+
+    /// An ARM message from tick `at` was dispatched: the oldest waiting bit is its watch's.
+    fn arm(&mut self, at: u32) {
+        let waiting = self.shared.as_ref();
+        let changed = waiting.and_then(|shared| shared.pending().pop_front());
+        self.armed = changed.map(|changed| Armed {
+            changed,
+            at,
+            woke: false,
+        });
+    }
+
+    /// The thread is ending. The watch it is armed for, and every watch in `pending` whose arm
+    /// it never dispatched, has lost its mouse source, so each counts as changed. True when a
+    /// wake is owed.
+    fn lost(&mut self, pending: impl IntoIterator<Item = Changed>) -> bool {
+        // The armed watch's one wake may be spent already; its bit is set all the same.
+        let mut woke = self.armed.take().is_some_and(|mut armed| armed.change());
+        // Every one of them is set: a wake for the first must not leave the rest trusted.
+        for changed in pending {
+            woke |= changed.set();
+        }
+        woke
     }
 }
 
-/// What the UI thread and the mouse thread share: the mouse window's handle and the thread's
-/// end. Each side writes its own flag and then reads the other's, so the orderings are
-/// sequentially consistent: one of the two always sees the other's write.
+/// What the UI thread and the mouse thread share: the mouse window's handle, the thread's end
+/// and the arms on their way. Each side writes its own flag and then reads the other's, so
+/// the orderings are sequentially consistent: one of the two always sees the other's write.
 #[derive(Default)]
 struct Shared {
     /// The mouse window once it is published; 0 before, and after the thread ends.
     window: AtomicIsize,
     quit: AtomicBool,
     exited: AtomicBool,
+    /// The bits of the arms posted and not dispatched yet, oldest first. `Win32::arm` adds
+    /// one before it posts, the mouse thread takes one for each ARM it dispatches, and its
+    /// end takes what is left. Never held while a record is handled.
+    pending: Mutex<VecDeque<Changed>>,
 }
 
 impl Shared {
@@ -118,6 +167,11 @@ impl Shared {
     fn window(&self) -> Option<isize> {
         Some(self.window.load(Ordering::SeqCst)).filter(|window| *window != 0)
     }
+
+    fn pending(&self) -> MutexGuard<'_, VecDeque<Changed>> {
+        // A queue of bits is whole whoever panicked while holding it.
+        self.pending.lock().unwrap_or_else(PoisonError::into_inner)
+    }
 }
 
 fn handle(window: HWND) -> isize {
@@ -136,14 +190,16 @@ pub(crate) enum Registration {
     None,
     /// It targets the mouse window, so this source made it.
     Ours,
-    /// Another component's, or the registrations couldn't be read.
+    /// Another component's.
     Other,
+    /// The registrations couldn't be read, which proves nothing either way.
+    Unreadable,
 }
 
 /// What `start` and `stop` ask of Windows, so tests can script their order and failures.
 pub(crate) trait Native {
     fn registration(&self) -> Registration;
-    /// Posts the mouse thread its arm, which owns `changed`. False when it has no window.
+    /// Posts the mouse thread its arm for `changed`. False when it has no window.
     fn arm(&self, changed: Changed) -> bool;
     fn disarm(&self) -> bool;
     fn register(&self) -> bool;
@@ -188,7 +244,7 @@ impl Native for Win32 {
         let mut count = 0;
         // SAFETY: with no buffer this only writes the count.
         if unsafe { GetRegisteredRawInputDevices(None, &raw mut count, size) } == u32::MAX {
-            return Registration::Other;
+            return Registration::Unreadable;
         }
         let mut devices =
             vec![RAWINPUTDEVICE::default(); usize::try_from(count).unwrap_or_default()];
@@ -198,7 +254,7 @@ impl Native for Win32 {
                 GetRegisteredRawInputDevices(Some(devices.as_mut_ptr()), &raw mut count, size)
             };
             if read == u32::MAX {
-                return Registration::Other;
+                return Registration::Unreadable;
             }
             devices.truncate(usize::try_from(read).unwrap_or_default());
         }
@@ -215,11 +271,13 @@ impl Native for Win32 {
     }
 
     fn arm(&self, changed: Changed) -> bool {
-        let bit = Box::into_raw(Box::new(changed));
-        let posted = self.post(ARM, LPARAM(bit.expose_provenance().cast_signed()));
+        // The bit waits in `Shared` and not in the message, so the thread's end finds an arm
+        // it never dispatched.
+        self.shared.pending().push_back(changed);
+        let posted = self.post(ARM, LPARAM(0));
         if !posted {
-            // SAFETY: from `Box::into_raw` above; the message that would own it wasn't queued.
-            drop(unsafe { Box::from_raw(bit) });
+            // Only this thread adds to the back; the thread's end may have taken it already.
+            self.shared.pending().pop_back();
         }
         posted
     }
@@ -301,7 +359,12 @@ impl ScreenSources {
             .name("screen-watch".to_owned())
             .spawn(move || mouse_thread(&thread, wake));
         if let Err(error) = spawned {
-            tracing::warn!(%error, "the screen watch has no mouse source");
+            let code = error.raw_os_error();
+            tracing::warn!(
+                reason = "spawn",
+                ?code,
+                "the screen watch has no mouse source"
+            );
             shared.exit();
         }
         Self::over(Win32 { shared, hook: None }, events)
@@ -319,13 +382,17 @@ impl<N: Native> ScreenSources<N> {
         }
     }
 
-    /// Gives back what `start` took. True when nothing is left. Only a registration that
-    /// still targets the mouse window is removed: one another component has since replaced
-    /// is theirs, and is forgotten.
+    /// Gives back what `start` took. True when nothing is left. Only a registration read as
+    /// still targeting the mouse window is removed. One read as gone, or as another
+    /// component's since, is theirs and is forgotten. One that can't be read is still owed:
+    /// nothing says it is gone.
     fn release(&mut self) -> bool {
         if self.registered {
-            let ours = self.native.registration() == Registration::Ours;
-            self.registered = ours && !self.native.remove();
+            self.registered = match self.native.registration() {
+                Registration::Ours => !self.native.remove(),
+                Registration::None | Registration::Other => false,
+                Registration::Unreadable => true,
+            };
         }
         if self.hooked {
             self.hooked = !self.native.unhook();
@@ -340,7 +407,8 @@ impl<N: Native> Sources for ScreenSources<N> {
         if !self.release() {
             return false;
         }
-        // Registering over another component's mouse registration would take it from them.
+        // Registering over another component's mouse registration would take it from them,
+        // and one that can't be read may be theirs.
         if self.native.registration() != Registration::None {
             return false;
         }
@@ -399,33 +467,98 @@ unsafe extern "system" fn foreground_changed(
 }
 
 /// The mouse thread: one message-only window, read until it closes.
-fn mouse_thread(shared: &Shared, events: Sender<PresenceEvent>) {
-    MOUSE_WATCH.with_borrow_mut(|mouse| mouse.events = Some(events));
+// shortcut: a mouse thread that ends is never started again, so every later `start` says no
+// and no marks show until the app restarts; respawn it if that is ever seen in use.
+fn mouse_thread(shared: &Arc<Shared>, events: Sender<PresenceEvent>) {
     let class = HSTRING::from(format!("{OBJECT_PREFIX}-screen-watch"));
+    MOUSE_WATCH.with_borrow_mut(|mouse| {
+        mouse.events = Some(events);
+        mouse.shared = Some(Arc::clone(shared));
+    });
+    let mut ending = Ending {
+        shared,
+        class: &class,
+        made: None,
+    };
     match mouse_window(&class) {
-        Ok((instance, target)) => {
-            if shared.publish(handle(target)) {
-                let mut message = MSG::default();
-                // SAFETY: `message` is writable; reads this thread's own queue until WM_QUIT.
-                while unsafe { GetMessageW(&raw mut message, None, 0, 0) }.0 > 0 {
-                    // SAFETY: dispatches the message just read to this thread's window.
-                    unsafe { DispatchMessageW(&raw const message) };
-                }
-            } else {
-                // SAFETY: this thread made the window and nothing else destroys it.
-                if let Err(error) = unsafe { DestroyWindow(target) } {
-                    tracing::debug!(%error, "the screen watch's window was already gone");
-                }
-            }
-            // SAFETY: the class is this thread's and its only window is gone.
-            if let Err(error) = unsafe { UnregisterClassW(PCWSTR(class.as_ptr()), Some(instance)) }
-            {
-                tracing::debug!(%error, "can't unregister the screen watch's class");
+        Ok(made) => {
+            ending.made = Some(made);
+            if shared.publish(handle(made.1)) {
+                pump();
             }
         }
-        Err(error) => tracing::warn!(%error, "the screen watch has no mouse source"),
+        Err(error) => {
+            let code = error.code().0;
+            tracing::warn!(
+                reason = "window",
+                code,
+                "the screen watch has no mouse source"
+            );
+        }
     }
-    shared.exit();
+}
+
+/// Reads the thread's queue until its window closes.
+fn pump() {
+    let mut message = MSG::default();
+    loop {
+        // SAFETY: `message` is writable; reads this thread's own queue.
+        match unsafe { GetMessageW(&raw mut message, None, 0, 0) }.0 {
+            0 => return,
+            -1 => {
+                let code = windows::core::Error::from_thread().code().0;
+                tracing::warn!(
+                    reason = "pump",
+                    code,
+                    "the screen watch's mouse thread ended"
+                );
+                return;
+            }
+            _ => {
+                // SAFETY: dispatches the message just read to this thread's window.
+                unsafe { DispatchMessageW(&raw const message) };
+            }
+        }
+    }
+}
+
+/// What the mouse thread owes when it ends, by a return or by an unwind: nothing stays
+/// published, no watch goes on trusting a mouse source that is gone, and the window and its
+/// class are given back.
+struct Ending<'a> {
+    shared: &'a Shared,
+    class: &'a HSTRING,
+    made: Option<(HINSTANCE, HWND)>,
+}
+
+impl Drop for Ending<'_> {
+    fn drop(&mut self) {
+        // The publication goes first: an arm posted from here on finds no window and fails,
+        // and one posted before is in `pending`.
+        self.shared.exit();
+        let pending = std::mem::take(&mut *self.shared.pending());
+        let (woke, events, closed) = MOUSE_WATCH
+            .with_borrow_mut(|mouse| (mouse.lost(pending), mouse.events.take(), mouse.closed));
+        if woke && let Some(events) = &events {
+            send(events, PresenceEvent::ScreenWoke);
+        }
+        let Some((instance, target)) = self.made else {
+            return;
+        };
+        if !closed {
+            // SAFETY: this thread made the window, and its procedure hasn't seen it destroyed.
+            if let Err(error) = unsafe { DestroyWindow(target) } {
+                let code = error.code().0;
+                tracing::warn!(reason = "destroy", code, "the screen watch's window stays");
+            }
+        }
+        // SAFETY: the class is this thread's, and its one window was destroyed above or before.
+        let unregistered = unsafe { UnregisterClassW(PCWSTR(self.class.as_ptr()), Some(instance)) };
+        if let Err(error) = unregistered {
+            let code = error.code().0;
+            tracing::debug!(reason = "class", code, "the screen watch's class stays");
+        }
+    }
 }
 
 fn mouse_window(class: &HSTRING) -> windows::core::Result<(HINSTANCE, HWND)> {
@@ -467,7 +600,9 @@ fn mouse_window(class: &HSTRING) -> windows::core::Result<(HINSTANCE, HWND)> {
 }
 
 /// The mouse window's procedure. A record costs one read and one mask unless it is a press or
-/// a wheel turn; nothing here allocates, locks or logs while records arrive.
+/// a wheel turn, which also asks which window is under the pointer. An arm's one wake is
+/// queued without waiting and may allocate. No record takes a lock, and none logs unless the
+/// UI has stopped listening.
 unsafe extern "system" fn mouse_proc(
     hwnd: HWND,
     message: u32,
@@ -476,20 +611,17 @@ unsafe extern "system" fn mouse_proc(
 ) -> LRESULT {
     match message {
         ARM => {
-            let bit = std::ptr::with_exposed_provenance_mut::<Changed>(lparam.0.cast_unsigned());
-            // SAFETY: `Win32::arm` leaked this box into the message, which is handled once.
-            let changed = *unsafe { Box::from_raw(bit) };
             // The arm's own tick: a record queued before it belongs to the watch before.
             // SAFETY: reads the time of the message this thread is handling.
             let at = unsafe { GetMessageTime() }.cast_unsigned();
-            MOUSE_WATCH.with_borrow_mut(|mouse| mouse.armed = Some((changed, at)));
+            MOUSE_WATCH.with_borrow_mut(|mouse| mouse.arm(at));
             return LRESULT(0);
         }
         DISARM => {
             MOUSE_WATCH.with_borrow_mut(|mouse| mouse.armed = None);
             return LRESULT(0);
         }
-        WM_INPUT => MOUSE_WATCH.with_borrow(|mouse| {
+        WM_INPUT => MOUSE_WATCH.with_borrow_mut(|mouse| {
             let woke = match buttons(lparam) {
                 Some(flags) => {
                     // SAFETY: reads the time of the message this thread is handling.
@@ -502,8 +634,11 @@ unsafe extern "system" fn mouse_proc(
                 send(events, PresenceEvent::ScreenWoke);
             }
         }),
-        // SAFETY: ends this thread's message loop.
-        WM_DESTROY => unsafe { PostQuitMessage(0) },
+        WM_DESTROY => {
+            MOUSE_WATCH.with_borrow_mut(|mouse| mouse.closed = true);
+            // SAFETY: ends this thread's message loop.
+            unsafe { PostQuitMessage(0) };
+        }
         _ => {}
     }
     // WM_INPUT goes on too: DefWindowProc frees its buffer.

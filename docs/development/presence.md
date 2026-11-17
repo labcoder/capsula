@@ -462,8 +462,11 @@ Every build reports a hold to the watch, sources or not: where each report is ma
 [The shell's reports](scene.md#the-shells-reports). Without sources a release counts as
 changed at once, so nothing is shown.
 
-Every source does one thing: it sets the watch's bit, and the first time in a watch it queues
-one `PresenceEvent::ScreenWoke`, which carries nothing. The event loop answers with
+Every source does one thing: it sets the watch's bit and queues a `PresenceEvent::ScreenWoke`,
+which carries nothing. The keys, the window in front and the proxy's messages queue at most
+one wake while a watch listens, because the presenter's read of a set bit ends the watch. The
+mouse thread queues at most one for each arm, however often its bit is read and set again,
+and that one can arrive after the watch has stopped. The event loop answers with
 `Presenter::source_woke`. Which key it was, where the pointer was and which window came
 forward stay inside the module and are never logged. An answer a source can't get counts as
 a change: a record that can't be read, a window that can't be named.
@@ -478,24 +481,36 @@ a change: a record that can't be read, a window that can't be named.
 
 - **The mouse thread** (`screen_watch/sources.rs`) is spawned once with the sources and lives
   as long as the process. A mouse can report thousands of times a second, and with its own
-  window as the target none of those records reaches the UI's queue or the proxy. Its window
-  procedure owns the bit of the watch it is armed for; arming and disarming are messages on
-  its own queue, so neither interrupts a record being handled. A record costs one
-  `GetRawInputData` and one mask; only a press or a wheel turn goes on to ask which window is
-  under the pointer. Nothing there allocates, locks or logs.
-- **`start`**, on the UI thread, never waits. It first gives back anything a failed `stop`
-  left, and says no if that still fails. It says no, and takes nothing, when the process
-  already has a mouse registration it didn't make. Then it posts the arm, which owns the new
-  bit, registers the mouse to the thread's window and sets the hook, in that order: the arm
-  is queued before the registration exists, so no record is handled ahead of it. A step that
-  fails undoes the steps before it. Last it arms the UI thread's half with the talk keys the
-  hold still had down.
-- **`stop`** makes the UI thread's half inert at once, posts the disarm, removes the
-  registration only if it still targets the mouse window, and unhooks. A second `stop` does
-  nothing. What can't be removed is remembered and logged with a fixed word, and the next
-  `start` retries it before arming anything. A record the thread handles after `stop`
-  returned and before it reaches the disarm sets the stopped watch's bit, which nobody
-  reads.
+  window as the target none of those records reaches the UI's queue or the proxy. Arming and
+  disarming are messages on its own queue, so neither interrupts a record being handled. An
+  arm's bit waits in a queue the two threads share, under a lock held for one push or pop,
+  until the thread dispatches that arm's message. A record costs one `GetRawInputData` and
+  one mask; only a press or a wheel turn goes on to ask which window is under the pointer.
+  An arm's one wake is queued without waiting, which may allocate. No record takes a lock,
+  and none logs.
+- **`start`**, on the UI thread, never waits for the mouse thread. It first gives back
+  anything a failed `stop` left, and says no if that still fails. It says no, and takes
+  nothing, when the process already has a mouse registration it didn't make, or when the
+  registrations can't be read. Then it posts the arm for the new bit, registers the mouse to
+  the thread's window and sets the hook, in that order: the arm is queued before the
+  registration exists, so no record is handled ahead of it. A step that fails undoes the
+  steps before it. Last it arms the UI thread's half with the talk keys the hold still had
+  down.
+- **`stop`** makes the UI thread's half inert at once, posts the disarm, gives back the
+  registration and unhooks. The registration is removed only when it reads as still
+  targeting the mouse window. It is forgotten when it reads as gone or as another
+  component's, and it stays owed when it can't be read: nothing says it is gone. A second
+  `stop` does nothing. What is still owed is logged with a fixed word, and the next `stop`
+  or `start` tries again before anything is armed. A record the thread handles after `stop`
+  returned and before it reaches the disarm sets only the stopped watch's own bit, never a
+  newer watch's, and queues that arm's one wake if it hasn't been queued.
+- **The thread's end**, whether its window closed, a message couldn't be read or it unwound,
+  runs one guard. Nothing stays published, so a later `start` says no. The watch the thread
+  was armed for, and every watch whose arm it never dispatched, counts as changed and is
+  woken, the armed one only if its arm's one wake wasn't queued before, so no marks stay up
+  trusting a mouse source that is gone. The window is destroyed if it is still there, and
+  then its class is unregistered. The thread is not started again: no marks show until
+  Kumochi restarts.
 - **Quit** sets a flag and then posts the window a close. A thread that hasn't published its
   window yet sees the flag, destroys the window and ends. The UI never waits for it.
 
