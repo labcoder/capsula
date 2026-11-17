@@ -426,8 +426,10 @@ assertions, where the window backend compiles its shaders at run time. A hide cl
 window, and the next one opens once the update that hid it is over, so a release takes its
 lease and its stamp and sends before that open, not after it. If an open fails, the next show
 opens its own. Both strokes are rebuilt on
-every overlay paint, about 1.3 ms at the 2,048-point cap on Rez; a `shortcut:` at the build
-names keeping the triangles between paints as the upgrade.
+every overlay paint, about 1.2 ms at the 2,048-point cap on Rez. That isn't what costs a long
+line frames: a frame is shown only if its time to Present and its GPU work fit the compositor's
+pickup point together ([The present budget](frame-rate.md#the-present-budget)), so the
+`shortcut:` at the build, keeping the triangles between paints, wouldn't be enough alone.
 
 **At release** (`release_screen`), in order: the line stops; `Runs::releases_screen` is asked,
 once; the pointer read with the release delivery picks the display, and a release without one
