@@ -112,8 +112,8 @@ impl Presenter {
     }
 
     /// Cancels the admission that is out, or only `scene`'s own, and returns its withheld credit
-    /// once. Its late answer then finds no lane and drops. Whoever retires a whole scene comes
-    /// through here first, so no answer arrives for a scene that is gone.
+    /// once. Its late answer then finds no lane and drops. A screen scene's retirement and the
+    /// clear of every scene come through here first, so no answer arrives for a scene they took.
     pub(super) fn cancel_admission(&mut self, scene: Option<SceneId>, out: &mut Out) {
         let lane = self
             .lane

@@ -5,15 +5,33 @@
 
 use std::time::Instant;
 
-use kumochi_protocol::message::{DataToShell, RunId, SceneHeader, SceneId};
-use kumochi_scene::record::Surface;
+use kumochi_protocol::message::{ControlToBrain, DataToShell, RunId, SceneHeader, SceneId};
+use kumochi_scene::{
+    Begin,
+    record::{ScreenDisplay, Surface},
+    screen,
+    text::Finite,
+};
 
 use super::{Broken, Effect, Out, Presenter, watch::Watch};
-use crate::platform::screen_watch::Sources;
+use crate::input::TalkHeld;
+use crate::platform::screen_watch::{Changed, Sources};
 
 /// Whether `header` begins a screen scene.
 pub(super) fn on_screen(header: &SceneHeader) -> bool {
     header.begin.surface == Surface::Screen
+}
+
+/// Whether an overlay covering `overlay` covers the display `begin`'s picture was taken of, so
+/// the scene's view can be placed on it. `SceneView::set_screen` places it by the same rule.
+fn placeable(begin: &Begin, overlay: Option<ScreenDisplay>) -> bool {
+    begin
+        .display
+        .zip(begin.size)
+        .zip(overlay)
+        .is_some_and(|((display, size), overlay)| {
+            screen::placement(display, size.map(Finite::get), overlay).is_some()
+        })
 }
 
 /// The line for a shown screen scene that goes by a road with no word of its own: a successor
@@ -30,24 +48,37 @@ impl Presenter {
         self.sources = Some(sources);
     }
 
-    /// The keys of a hold whose `ScreenRelease` was sent came up at `now`; `after` is the
-    /// newest run named so far. Any screen scene still up goes and the watch starts, from a
-    /// clear bit. If its sources can't start it has seen a change: nothing could say the screen
-    /// stayed as it was.
+    /// The keys of a hold came up at `now`, and its `ScreenRelease` is about to be written;
+    /// `after` is the newest run named so far, and `held` the talk keys still down. The
+    /// caller reports the release here first, so the sources listen before the brain can take
+    /// the hold's picture, which it does only after it reads that message. A `ScreenRelease`
+    /// that isn't sent after all is reported with [`Presenter::screen_dropped`].
+    ///
+    /// Any screen scene still up goes and the watch starts: the sources start again, on a bit
+    /// of this watch's own, so nothing left of the watch before can set it. The hold's
+    /// recognition has already stopped them, through [`Presenter::screen_changed`]; any still
+    /// listening are stopped here first. If they can't start the watch has seen a change:
+    /// nothing could say the screen stayed as it was.
     /// # Errors
     /// [`Broken`] when a frame held behind a cleared scene's admission can't be mirrored.
-    pub fn screen_released(&mut self, after: RunId, now: Instant) -> Result<Vec<Effect>, Broken> {
+    pub fn screen_released(
+        &mut self,
+        after: RunId,
+        held: TalkHeld,
+        now: Instant,
+    ) -> Result<Vec<Effect>, Broken> {
         let mut out = Out::default();
         self.clear_screens("release", now, &mut out)?;
         self.watch.released(after, now);
-        self.changed.take();
-        if !self.listening {
-            let changed = self.changed.clone();
-            self.listening = self
-                .sources
-                .as_mut()
-                .is_some_and(|sources| sources.start(changed));
-        }
+        self.changed = Changed::default();
+        let changed = self.changed.clone();
+        let listening = std::mem::take(&mut self.listening);
+        self.listening = self.sources.as_mut().is_some_and(|sources| {
+            if listening {
+                sources.stop();
+            }
+            sources.start(changed, held)
+        });
         if !self.listening {
             self.watch.changed();
         }
@@ -95,6 +126,35 @@ impl Presenter {
         self.source_woke(now)
     }
 
+    /// The display the overlay covers, in physical pixels, or none while it isn't known. Every
+    /// screen scene's view is placed on it again. One that can't be, because its picture is of
+    /// another display or of this one before it changed, counts as a changed screen.
+    /// # Errors
+    /// [`Broken`] when a frame held behind a cleared scene's admission can't be mirrored.
+    pub fn set_display(
+        &mut self,
+        display: Option<ScreenDisplay>,
+        now: Instant,
+    ) -> Result<Vec<Effect>, Broken> {
+        let mut out = Out::default();
+        if self.display == display {
+            return Ok(Vec::new());
+        }
+        self.display = display;
+        let mut placed = true;
+        {
+            let mut frames = self.frames.borrow_mut();
+            for (id, scene) in self.scenes.iter_mut().filter(|(_, scene)| scene.screen) {
+                placed &= scene.view.set_screen(scene.state.view().header(), display);
+                frames.reposition(*id, &scene.view);
+            }
+        }
+        if !placed {
+            self.unplaced(now, &mut out)?;
+        }
+        Ok(out.finish())
+    }
+
     /// The setting went off: every screen scene goes, and one that arrives later isn't shown.
     /// # Errors
     /// [`Broken`] when a frame held behind a cleared scene's admission can't be mirrored.
@@ -110,6 +170,17 @@ impl Presenter {
     /// release.
     pub fn marks_skipped(&self) -> Option<RunId> {
         self.watch.skipped()
+    }
+
+    /// The bit and the limits, before a frame is activated or sampled and before a job's
+    /// answer is used, so neither shows marks that a change or a limit has already taken. One
+    /// read while no sources listen.
+    pub(super) fn check_marks(&mut self, now: Instant, out: &mut Out) -> Result<(), Broken> {
+        if self.listening {
+            self.heed(now, out)?;
+            self.expire_marks(now, out)?;
+        }
+        Ok(())
     }
 
     /// Applies the bit, if it is set.
@@ -133,6 +204,16 @@ impl Presenter {
         Ok(())
     }
 
+    /// A screen scene can't be placed on the overlay's display, which counts as a changed
+    /// screen: shown marks go, under the word `display`, and expected ones will be skipped.
+    fn unplaced(&mut self, now: Instant, out: &mut Out) -> Result<(), Broken> {
+        if self.watch.changed() {
+            self.clear_screens("display", now, out)?;
+        }
+        self.hush();
+        Ok(())
+    }
+
     /// Stops the sources once the watch has no more use for them.
     pub(super) fn hush(&mut self) {
         if self.listening && !self.watch.listening() {
@@ -144,8 +225,10 @@ impl Presenter {
     }
 
     /// Judges a screen scene's first mark as its frame arrives, in the pipe's order, so a
-    /// change counts even while the scene's frames wait to be applied. A skipped scene is
-    /// refused whole: it never installs a step or paints, and a begin still held never installs.
+    /// change counts even while the scene's frames wait to be applied. A skipped scene goes
+    /// whole: it never installs a step or paints, a begin still held never installs, and the
+    /// brain hears `SceneSkipped`. A scene whose view can't be placed is skipped as well, and
+    /// the marks that were up are cleared under the word `display`.
     pub(super) fn judge(
         &mut self,
         frame: &DataToShell,
@@ -155,13 +238,28 @@ impl Presenter {
         let DataToShell::SceneStepCommit { run, scene, .. } = *frame else {
             return Ok(());
         };
-        let screen = match self.scenes.get(&scene) {
-            Some(mirrored) => mirrored.screen,
-            None => self.screens().contains(&scene),
+        // The scene's header, if it is a screen scene: mirrored, or begun by a frame still held.
+        let begin = match self.scenes.get(&scene) {
+            Some(mirrored) => mirrored.screen.then(|| mirrored.state.view().header()),
+            None => self.held.iter().find_map(|(frame, _)| match &**frame {
+                DataToShell::SceneBegin {
+                    scene: begun,
+                    header,
+                } if *begun == scene && on_screen(header) => Some(&header.begin),
+                _ => None,
+            }),
         };
-        if !screen || self.cleared.contains(&scene) || self.watch.shows(scene) {
+        let Some(begin) = begin else {
+            return Ok(());
+        };
+        let placed = placeable(begin, self.display);
+        if self.cleared.contains(&scene) || self.watch.shows(scene) {
             return Ok(());
         }
+        // A scene that can't be placed counts as a changed screen. The marks that were up go
+        // only once its own skip is settled: cleared first, it would be remembered as cleared
+        // and the brain would hear no `SceneSkipped` for it.
+        let unplaced = !placed && self.watch.changed();
         let displaced = self.watch.shown().is_some();
         if self.watch.marked(scene, run) {
             if displaced {
@@ -174,9 +272,16 @@ impl Presenter {
                 }
             }
         } else {
-            tracing::info!("screen marks skipped");
+            if placed {
+                tracing::info!("screen marks skipped");
+            } else {
+                tracing::info!(reason = "display", "screen marks skipped");
+            }
             self.retire(scene, out);
-            self.forget_failed(scene, out);
+            self.forget_skipped(scene, out);
+        }
+        if unplaced {
+            self.clear_screens("display", now, out)?;
         }
         self.drain(now, out)
     }
@@ -208,6 +313,16 @@ impl Presenter {
     fn retire(&mut self, scene: SceneId, out: &mut Out) {
         self.cancel_admission(Some(scene), out);
         self.release(scene);
+    }
+
+    /// A screen scene skipped whole. The brain hears that the screen may have changed: not a
+    /// failure the model could retry, and not a clear.
+    fn forget_skipped(&mut self, scene: SceneId, out: &mut Out) {
+        if !self.cleared.contains(&scene) {
+            self.remember(scene);
+            out.effects
+                .push(Effect::Control(ControlToBrain::SceneSkipped { scene }));
+        }
     }
 
     /// Every screen scene not cleared: mirrored, or begun by a frame still held.

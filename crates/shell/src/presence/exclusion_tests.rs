@@ -356,7 +356,10 @@ fn actual_shown_overlay_can_clear_or_disconnect_while_restoration_debt_blocks_sh
         owner.update(cx, super::super::Presence::revoke_exclusion);
         assert!(owner.read_with(cx, |this, _| this.exclusion.lease().unwrap().revoked()));
         owner.update(cx, |this, cx| {
-            let (sample, effects) = this.presenter.sample_at(std::time::Instant::now());
+            let (sample, effects) = this
+                .presenter
+                .sample_at(std::time::Instant::now())
+                .expect("a sample");
             assert!(sample.visible);
             assert!(effects.is_empty());
             assert!(matches!(

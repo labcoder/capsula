@@ -311,7 +311,7 @@ mod tests {
                 .completed(job.run(&mut crate::presenter::tests::Shaper), now)
                 .expect("prepare");
             presenter.advance(1, now).expect("activate");
-            presenter.sample_at(now);
+            presenter.sample_at(now).expect("a sample");
             presence.presenter = presenter;
             presence.place_drawings(cx.weak_entity(), cx);
             let closed = transforms(presence, 1);
