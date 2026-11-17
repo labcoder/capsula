@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 use gpui_kit::TestAppContext;
 use kumochi_protocol::message::{
     ControlToBrain, DataToShell, GestureId, HeldScreen, HoldStatus, Phase, RunId, RunOrigin,
-    SceneHeader, SceneId, ScreenClass, ScreenHolds, ScreenOff, ThreadId,
+    SceneCuts, SceneHeader, SceneId, ScreenClass, ScreenHolds, ScreenOff, ThreadId,
 };
 use kumochi_scene::{
     Record, deferred::Deferred, parse_record, parse_screen_draw_record, record::ScreenDisplay,
@@ -1073,14 +1073,20 @@ fn panel(watching: &Watching, cx: &mut TestAppContext) -> (Option<RunId>, bool) 
     })
 }
 
-/// The press cancelled hold 1 and did nothing else: the ordinary drawing is still up and the
-/// panel is as it was.
+/// The press cancelled hold 1 and did nothing else, as [`nothing_else`] says.
 fn only_cancelled(watching: &Watching, before: (Option<RunId>, bool), cx: &mut TestAppContext) {
+    watching.ready.owner.read_with(cx, |owner, _| {
+        assert_eq!(owner.voice.status, Some(Text::HoldCancelled));
+    });
+    nothing_else(watching, before, cx);
+}
+
+/// Hold 1 is gone and its press did nothing else: the ordinary drawing is still up and the
+/// panel is as it was.
+fn nothing_else(watching: &Watching, before: (Option<RunId>, bool), cx: &mut TestAppContext) {
     ended(watching, cx);
     assert_eq!(panel(watching, cx), before);
     watching.ready.owner.read_with(cx, |owner, _| {
-        assert_eq!(owner.voice.status, Some(Text::HoldCancelled));
-        assert_eq!(owner.voice.cancelled, None, "the press took the marker");
         assert_eq!(owner.presenter.marks_shown(), None);
         assert_eq!(scene_ids(&owner.presenter), [DRAWN]);
         assert!(owner.runs.drawing());
@@ -1163,7 +1169,7 @@ fn ended_by_esc_down(watching: &Watching, cx: &mut TestAppContext) -> (Deliver, 
     cx.run_until_parked();
     owner.read_with(cx, |owner, _| {
         assert!(owner.voice.pending.is_none());
-        assert_eq!(owner.voice.cancelled, Some(GestureId(1)));
+        assert_eq!(owner.voice.ended, Some(GestureId(1)));
     });
     (deliver, at)
 }
@@ -1181,15 +1187,113 @@ fn the_hotkey_s_press_after_an_esc_down_that_ended_a_waiting_hold_does_nothing_m
     cx.run_until_parked();
     assert_eq!(told(&watching), []);
     only_cancelled(&watching, before, cx);
+    watching.ready.owner.read_with(cx, |owner, _| {
+        assert_eq!(owner.voice.ended, None, "the press took the receipt");
+    });
+}
+
+/// The app is borrowed while the press arrives, so its delivery waits in the callback's
+/// backlog: hold 1's input is revoked and its cancel is written, and nothing is applied yet.
+fn press_deferred(deliver: &Deliver, at: Instant, cx: &mut TestAppContext) {
+    cx.update(|_| {
+        let (key, edge) = (Key::Other(1), Edge::Down);
+        deliver(Event::Key { key, edge }, after(at, 2000));
+        deliver(Event::Escape, after(at, 2000));
+    });
+}
+
+#[gpui::test]
+fn a_reply_that_ends_the_hold_before_its_deferred_press_leaves_an_ordinary_drawing_up(
+    cx: &mut TestAppContext,
+) {
+    // The brain's answer to the press's cancel is applied before the press is: the hold's
+    // `Cancelled` status, or its run's `Interrupted` and end once `Thinking` had named it.
+    for interrupted in [false, true] {
+        let watching = watch(true, cx);
+        drawn(&watching, cx);
+        let (deliver, at) = natively_pending(&watching, cx);
+        if interrupted {
+            state(&watching, RUN, Phase::Thinking, HOLD, cx);
+        }
+        cx.run_until_parked();
+        told(&watching);
+        let before = panel(&watching, cx);
+        press_deferred(&deliver, at, cx);
+        watching.ready.owner.read_with(cx, |owner, _| {
+            assert!(owner.voice_working(), "the press is not applied yet");
+        });
+        if interrupted {
+            state(&watching, RUN, Phase::Interrupted, None, cx);
+            end(&watching, RUN, cx);
+        } else {
+            status(&watching.ready.owner, 1, 1, HoldStatus::Cancelled, cx);
+        }
+        watching.ready.owner.read_with(cx, |owner, _| {
+            assert!(owner.voice.pending.is_none(), "the reply ended the hold");
+        });
+        cx.run_until_parked();
+        // The press's cancel and what the reply itself did, and nothing from the press after
+        // it: no `Stop`, and no `ClearDrawing` for the ordinary drawing.
+        let expected = if interrupted {
+            vec![cancel(), Told::Stop]
+        } else {
+            vec![cancel(), Told::Stop, cancel()]
+        };
+        assert_eq!(told(&watching), expected, "interrupted {interrupted}");
+        let notice = (!interrupted).then_some(Text::HoldCancelled);
+        watching.ready.owner.read_with(cx, |owner, _| {
+            assert_eq!(owner.voice.status, notice);
+        });
+        nothing_else(&watching, before, cx);
+    }
+}
+
+#[gpui::test]
+fn a_deferred_press_whose_hold_became_an_answer_first_stops_that_answer(cx: &mut TestAppContext) {
+    let watching = watch(true, cx);
+    drawn(&watching, cx);
+    let (deliver, at) = natively_pending(&watching, cx);
+    state(&watching, RUN, Phase::Thinking, HOLD, cx);
+    cx.run_until_parked();
+    told(&watching);
+    press_deferred(&deliver, at, cx);
+    state(&watching, RUN, Phase::Answering, None, cx);
+    watching.ready.owner.read_with(cx, |owner, _| {
+        assert!(owner.voice.pending.is_none(), "the answer ended the hold");
+        assert_eq!(owner.runs.stoppable(), Some(RunId(RUN)));
+    });
+    cx.run_until_parked();
+    // The sources stop, and the press stops the answer, which has drawn nothing to cut.
+    let stop = Told::Sent(ControlToBrain::StopScenes {
+        run: RunId(RUN),
+        cuts: SceneCuts::default(),
+    });
+    assert_eq!(told(&watching), [cancel(), Told::Stop, stop]);
+    watching.ready.owner.read_with(cx, |owner, _| {
+        assert_eq!(owner.runs.stoppable(), None, "the answer is stopped");
+        assert_eq!(scene_ids(&owner.presenter), [DRAWN]);
+    });
 }
 
 #[gpui::test]
 fn a_cancel_marker_left_behind_takes_no_other_press_and_cancels_no_other_hold(
     cx: &mut TestAppContext,
 ) {
-    let clear = Told::Sent(ControlToBrain::ClearDrawing {
-        scene_ids: vec![DRAWN],
+    let clear = || {
+        Told::Sent(ControlToBrain::ClearDrawing {
+            scene_ids: vec![DRAWN],
+        })
+    };
+
+    // A press that names a hold which was never pending, as a refused one's does, is an
+    // ordinary one.
+    let watching = watch(true, cx);
+    drawn(&watching, cx);
+    watching.ready.owner.update(cx, |owner, cx| {
+        owner.native_escape(Some(GestureId(1)), cx).expect("escape");
     });
+    cx.run_until_parked();
+    assert_eq!(told(&watching), [clear()]);
 
     // The hotkey's press never came. The next press names no hold and is an ordinary one.
     let watching = watch(true, cx);
@@ -1198,10 +1302,10 @@ fn a_cancel_marker_left_behind_takes_no_other_press_and_cancels_no_other_hold(
     told(&watching);
     watching.ready.owner.update(cx, |owner, cx| {
         owner.native_escape(None, cx).expect("escape");
-        assert_eq!(owner.voice.cancelled, None);
+        assert_eq!(owner.voice.ended, None);
     });
     cx.run_until_parked();
-    assert_eq!(told(&watching), [clear]);
+    assert_eq!(told(&watching), [clear()]);
 
     // A newer hold's own press cancels that hold: hold 1's marker is not its.
     let watching = watch(true, cx);
@@ -1211,7 +1315,6 @@ fn a_cancel_marker_left_behind_takes_no_other_press_and_cancels_no_other_hold(
     watching.ready.owner.update(cx, |owner, cx| {
         owner.native_escape(Some(GestureId(2)), cx).expect("escape");
         assert!(owner.voice.pending.is_none(), "hold 2 is cancelled");
-        assert_eq!(owner.voice.cancelled, None);
     });
 
     // And hold 1's marker, whatever brings it back, leaves hold 2 pending.
@@ -1231,7 +1334,7 @@ fn a_cancel_marker_left_behind_takes_no_other_press_and_cancels_no_other_hold(
     let lost = LinkEvent::State(LinkState::Reconnecting);
     receive(&watching.ready.owner, lost, cx);
     watching.ready.owner.read_with(cx, |owner, _| {
-        assert_eq!(owner.voice.cancelled, None);
+        assert_eq!(owner.voice.ended, None);
     });
 }
 

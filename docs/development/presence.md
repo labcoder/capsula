@@ -367,14 +367,27 @@ the answer text, and hands it the steps it lets through.
   and held chunks go.
 - Scene ids, revisions and counts are the only things it reports; its errors never carry labels.
 
-An Esc press that cancelled its own pending hold does nothing else, so it leaves the drawing
-up. The hold's cancelled `End` can be applied before the press is: at the raw Esc-down, a
-delivery ahead of the hotkey's, or in the hotkey's own delivery just before `native_escape`.
-`voice_intent` therefore keeps the gesture that `End` ended in `Voice.cancelled`.
-`native_escape` takes it at every press, and a press naming that gesture only takes the marks
-that are up and brings `Activity` up to date: it makes no local decision, so it stops no run
-and clears no scene. The marker cancels nothing itself, any other press is an ordinary one,
-and a lost session drops it.
+An Esc press that revoked a pending hold's input does nothing else once that hold is torn
+down, so it leaves the drawing up. The teardown can be applied before the press is:
+
+- by the hold's cancelled `End`, at the raw Esc-down a delivery ahead of the hotkey's, or in
+  the hotkey's own delivery just before `native_escape`;
+- by the brain's reply to the press's `GestureCancel`, which arrives on the link while the
+  press still waits for a busy app: the hold's `Cancelled` status, or its run's `Failed` or
+  `Interrupted`.
+
+So `Voice.ended` is a receipt for the pending hold torn down last, whichever road tore it
+down. `end_voice` writes it where it takes the hold, and `voice_run` where the held run's
+`Done`, `Failed` or `Interrupted` removes it. `Answering` writes none: an answer under way is
+still that press's to stop. `native_escape` takes the receipt at every press, and a press
+naming that gesture only takes the marks that are up and brings `Activity` up to date. It
+makes no stop or clear decision of its own and clears no ordinary drawing.
+
+The receipt cancels nothing itself, and one left behind takes no later press. A press names a
+gesture only when it revoked that hold's input itself: `cancel_input_gesture` hands a tracked
+id out once, a teardown clears it, and the fence never reuses an id. A hold that was never
+pending leaves no receipt, so the press after a refused hold is an ordinary one, and a lost
+session drops the receipt.
 
 [ipc](ipc.md#scenes-and-recovery) has the recovery states and the install rules.
 

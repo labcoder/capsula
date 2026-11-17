@@ -141,9 +141,9 @@ pub(super) struct Voice {
     pub(super) watched: Option<super::marks::Watched>,
     pub(super) status: Option<Text>,
     pub(super) recovery: Option<Recovery>,
-    /// The hold a cancelled `End` ended, until the Esc press that cancelled it is applied:
-    /// `native_escape` takes it, and that press does nothing else.
-    pub(super) cancelled: Option<GestureId>,
+    /// The pending hold torn down last, until the next native Esc press is applied:
+    /// `native_escape` takes it, and the press that revoked that hold's input does nothing else.
+    pub(super) ended: Option<GestureId>,
     /// What a lost brain did with the held words; reconnecting doesn't clear it.
     pub(super) lost: Option<Text>,
     #[cfg(test)]
@@ -230,6 +230,10 @@ impl Presence {
                 self.link.microphone_gate().cancel(gesture);
                 self.link.clear_input(gesture);
                 self.voice.pending = None;
+                // An answer under way is still the press's to stop; an ended run leaves it nothing.
+                if !matches!(phase, Phase::Answering) {
+                    self.voice.ended = Some(gesture);
+                }
                 self.voice.status = None;
                 self.refresh_dock(cx);
             }
@@ -302,6 +306,8 @@ impl Presence {
         let mut notice = text;
         if let Some(mut hold) = self.voice.pending.take() {
             let gesture = hold.token.gesture();
+            // The Esc press that revoked this hold's input may be applied only after this.
+            self.voice.ended = Some(gesture);
             self.marks_dropped(gesture, cx);
             self.link.microphone_gate().cancel(gesture);
             self.link.clear_input(gesture);
@@ -711,9 +717,6 @@ impl Presence {
                     return;
                 };
                 if cancelled || self.voice.status != Some(Text::HoldListening) {
-                    if cancelled {
-                        self.voice.cancelled = Some(gesture);
-                    }
                     self.end_voice(Text::HoldCancelled, cx);
                 } else {
                     hold.released = Some(qpc);

@@ -11,10 +11,11 @@ impl Presence {
         gesture: Option<GestureId>,
         cx: &mut Context<'_, Self>,
     ) -> Result<(), OpenError> {
-        // This press's cancelled `End` already ended its hold, in this delivery or at the raw
-        // Esc-down before it. Marks that are up go, as at any press, and the press does
-        // nothing else: no local decision is left for it.
-        let ended = self.voice.cancelled.take();
+        // This press revoked the input of a hold that is already torn down: by its cancelled
+        // `End`, in this delivery or at the raw Esc-down before it, or by the brain's reply to
+        // its cancel, applied while the press waited. Marks that are up go, as at any press,
+        // and the press does nothing else: no local decision is left for it.
+        let ended = self.voice.ended.take();
         if gesture.is_some() && ended == gesture {
             self.marks_changed(cx);
             return self.runs_changed(cx);
