@@ -172,7 +172,7 @@ impl Presence {
         applied: &crate::runs::Applied,
         cx: &mut Context<'_, Self>,
     ) {
-        // A held run that failed or stopped isn't stored, so a later loss mustn't give its words back.
+        // A held run that failed or stopped mustn't give its words back at a later loss.
         if let Some(slot) = self.voice.recovery.as_mut() {
             let held = match origin {
                 Some(RunOrigin::Hold { gesture }) => slot.gesture == gesture,
