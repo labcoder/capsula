@@ -476,17 +476,36 @@ fn the_watch_ends_once_both_endings_of_the_hold_s_run_are_in(cx: &mut TestAppCon
         assert_eq!(sources(&watching), [Told::Stop]);
     }
 
-    // Another run that ends before the hold's is named ends the watch too, and the hold's
-    // marks are then skipped.
+    // The hold's own `RunEnd` that comes before its first state is kept for it.
     let watching = released(true, cx);
+    end(&watching, RUN, cx);
+    state(&watching, RUN, Phase::Thinking, HOLD, cx);
+    assert_eq!(sources(&watching), []);
+    state(&watching, RUN, Phase::Done, None, cx);
+    assert_eq!(sources(&watching), [Told::Stop]);
+
+    // Another run that ends before the hold's is named ends nothing: the sources listen on,
+    // and the hold's marks then show.
+    let watching = released(true, cx);
+    let hidden = detached(&watching.ready, cx);
+    watching.ready.owner.update(cx, |owner, _| {
+        owner.overlay = Visibility::Hidden(hidden);
+    });
     state(&watching, 3, Phase::Answering, None, cx);
     state(&watching, 3, Phase::Done, None, cx);
-    assert_eq!(sources(&watching), []);
     end(&watching, 3, cx);
-    assert_eq!(sources(&watching), [Told::Stop]);
+    assert_eq!(told(&watching), []);
     state(&watching, RUN, Phase::Thinking, HOLD, cx);
     mark(&watching, MARKS, RUN, DISPLAY, cx);
-    assert_eq!(told(&watching), [skipped(MARKS)]);
+    cx.run_until_parked();
+    let (run, scene, index) = (RunId(RUN), MARKS, 0);
+    assert_eq!(
+        told(&watching),
+        [
+            Told::Sent(ControlToBrain::StepReady { run, scene, index }),
+            Told::Sent(ControlToBrain::StepShown { run, scene, index }),
+        ]
+    );
 }
 
 /// A send that wrote nothing tells no `HoldScreen`: the run's failure still ends the watch, once
@@ -646,13 +665,15 @@ fn the_scene_watchdog_keeps_the_watch_s_limit_and_lets_it_go(cx: &mut TestAppCon
     state(&watching, RUN, Phase::Thinking, HOLD, cx);
     assert_eq!(watchdog(&watching, cx), None);
 
-    // Another run's end is the watch's end, and nothing is left to time.
+    // Another run's end leaves the release's limit where it was.
     let watching = released(true, cx);
+    let limit = watchdog(&watching, cx);
+    assert!(limit.is_some());
     state(&watching, 3, Phase::Answering, None, cx);
     state(&watching, 3, Phase::Done, None, cx);
-    assert!(watchdog(&watching, cx).is_some());
     end(&watching, 3, cx);
-    assert_eq!(watchdog(&watching, cx), None);
+    assert_eq!(watchdog(&watching, cx), limit);
+    assert_eq!(sources(&watching), []);
 
     // A dropped watch has no limit either.
     let watching = released(true, cx);
