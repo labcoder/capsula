@@ -134,6 +134,8 @@ struct Live {
     thread: ThreadId,
     /// The turn number and selection of the submission it answered, when it answered one.
     typed: Option<(u32, u64)>,
+    /// A hold's run: the screen watch may be showing its marks, or expecting them.
+    held: bool,
     state_ended: bool,
     data_ended: bool,
 }
@@ -157,10 +159,9 @@ pub struct Runs {
     turns_sent: u32,
     /// The newest named run while its output may still arrive.
     live: Option<Live>,
-    /// The run a newer one replaced as the live one before both its endings were in, so its
-    /// end is still told.
-    // shortcut: one run only, so a run replaced twice over before it ended is never told and
-    // marks it still shows go at the next change; keep every replaced run if that is seen.
+    /// The newest hold's run that a newer run replaced as the live one before both its endings
+    /// were in. The screen watch may still show its marks or expect them, so its end is still
+    /// told; a newer hold has reset that watch, so one run is all it can need.
     replaced: Option<Live>,
     /// The highest run Esc stopped; anything of it or older is dropped when applied.
     fence: RunId,
@@ -346,8 +347,8 @@ impl Runs {
     }
 
     /// The run whose terminal `RunState` and `RunEnd` are now both in, whichever came last,
-    /// once: the live run, or the one it replaced. A run that Esc or a delete fenced off
-    /// before it was named never comes this way.
+    /// once: the live run, or the hold's run it replaced. A run that Esc or a delete fenced
+    /// off before it was named never comes this way.
     pub fn take_ended(&mut self) -> Option<RunId> {
         self.ended.take()
     }
@@ -765,10 +766,13 @@ impl Runs {
                     run,
                     thread,
                     typed,
+                    held: matches!(origin, Some(RunOrigin::Hold { .. })),
                     state_ended: false,
                     data_ended: false,
                 };
-                self.replaced = self.live.replace(live).or(self.replaced);
+                if let Some(old) = self.live.replace(live).filter(|old| old.held) {
+                    self.replaced = Some(old);
+                }
             }
         }
         if matches!(
@@ -905,8 +909,8 @@ impl Runs {
         }
     }
 
-    /// Marks one of `run`'s two endings; the live run, or the one it replaced, settles once
-    /// both are in, and an older run's ending never touches a newer one.
+    /// Marks one of `run`'s two endings; the live run, or the hold's run it replaced, settles
+    /// once both are in, and an older run's ending never touches a newer one.
     fn end(&mut self, run: RunId, mark: impl FnOnce(&mut Live)) {
         let slot = if self.replaced.is_some_and(|live| live.run == run) {
             &mut self.replaced

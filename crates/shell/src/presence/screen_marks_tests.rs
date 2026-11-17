@@ -876,7 +876,24 @@ fn marks_of_an_answer_a_newer_run_replaced_are_timed_from_its_own_end(cx: &mut T
     let limit = watchdog(&watching, cx).expect("armed at the answer's end");
     let kept = Duration::from_secs(60);
     assert!(limit >= before + kept && limit <= Instant::now() + kept);
+    // A duplicate of either ending leaves that minute as it is, and the newer run goes on.
+    state(&watching, RUN, Phase::Done, None, cx);
+    end(&watching, RUN, cx);
+    assert_eq!(watchdog(&watching, cx), Some(limit));
     assert_eq!(told(&watching), []);
+    watching.ready.owner.read_with(cx, |owner, _| {
+        assert_eq!(owner.runs.stoppable(), Some(RunId(RUN + 1)));
+    });
+
+    // Marks that were only expected: the watch ends at that run's end instead.
+    let watching = released(true, cx);
+    state(&watching, RUN, Phase::Thinking, HOLD, cx);
+    state(&watching, RUN, Phase::Answering, None, cx);
+    state(&watching, RUN + 1, Phase::Thinking, None, cx);
+    state(&watching, RUN, Phase::Done, None, cx);
+    assert_eq!(sources(&watching), [], "one ending is in");
+    end(&watching, RUN, cx);
+    assert_eq!(sources(&watching), [Told::Stop]);
 }
 
 #[gpui::test]
