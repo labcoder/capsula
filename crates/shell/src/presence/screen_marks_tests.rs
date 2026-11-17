@@ -8,11 +8,11 @@ use std::time::{Duration, Instant};
 use gpui_kit::TestAppContext;
 use kumochi_protocol::message::{
     ControlToBrain, DataToShell, GestureId, HeldScreen, HoldStatus, Phase, RunId, RunOrigin,
-    SceneCuts, SceneHeader, SceneId, ScreenClass, ScreenHolds, ScreenOff, ThreadId,
+    SceneCut, SceneCuts, SceneHeader, SceneId, ScreenClass, ScreenHolds, ScreenOff, ThreadId,
 };
 use kumochi_scene::{
-    Record, deferred::Deferred, parse_record, parse_screen_draw_record, record::ScreenDisplay,
-    screen, text::Bounded,
+    Record, StopCut, deferred::Deferred, parse_record, parse_screen_draw_record,
+    record::ScreenDisplay, screen, text::Bounded,
 };
 use kumochi_shell_core::platform::screen_watch::{Changed, Sources};
 
@@ -1009,26 +1009,20 @@ fn esc_takes_a_pending_hold_s_marks_and_cancels_it(cx: &mut TestAppContext) {
 /// An earlier answer's ordinary drawing, on the overlay.
 const DRAWN: SceneId = SceneId(40);
 
-/// Run 3 drew `DRAWN` on the overlay and ended, and one Esc stopped the drawing's motion: an
-/// ordinary drawing is up and nothing moves.
-fn drawn(watching: &Watching, cx: &mut TestAppContext) {
-    let hidden = detached(&watching.ready, cx);
-    watching.ready.owner.update(cx, |owner, _| {
-        owner.overlay = Visibility::Hidden(hidden);
-        // A release now covers the drawing's window too, which the fixture's stamp reader
-        // would refuse: it knows only its own four surfaces.
-        owner.counter_fixture = Some(Rc::new(|| 4_242));
-    });
-    state(watching, 3, Phase::Answering, None, cx);
-    let begin = br#"{"begin":{"v":1,"scene":"drawn","surface":"overlay","alt":""}}"#;
+/// `run` draws `scene` on the overlay: its begin and its first step, which is shown.
+fn draw(watching: &Watching, run: u64, scene: SceneId, cx: &mut TestAppContext) {
+    let begin = format!(
+        r#"{{"begin":{{"v":1,"scene":"s{}","surface":"overlay","alt":""}}}}"#,
+        scene.0
+    );
     let step =
         br#"{"step":{"id":"s","put":[{"shape":{"id":"b","kind":"rect","box":[0,0,10,10]}}]}}"#;
     let (Ok(Record::Begin(begin)), Ok(Record::Step(step))) =
-        (parse_record(begin), parse_record(step))
+        (parse_record(begin.as_bytes()), parse_record(step))
     else {
         panic!("an overlay scene's records");
     };
-    let (run, scene, index) = (RunId(3), DRAWN, 0);
+    let (run, index) = (RunId(run), 0);
     let header = SceneHeader {
         begin,
         layout_version: 2,
@@ -1050,6 +1044,20 @@ fn drawn(watching: &Watching, cx: &mut TestAppContext) {
         receive(&watching.ready.owner, event, cx);
     }
     cx.run_until_parked();
+}
+
+/// Run 3 drew `DRAWN` on the overlay and ended, and one Esc stopped the drawing's motion: an
+/// ordinary drawing is up and nothing moves.
+fn drawn(watching: &Watching, cx: &mut TestAppContext) {
+    let hidden = detached(&watching.ready, cx);
+    watching.ready.owner.update(cx, |owner, _| {
+        owner.overlay = Visibility::Hidden(hidden);
+        // A release now covers the drawing's window too, which the fixture's stamp reader
+        // would refuse: it knows only its own four surfaces.
+        owner.counter_fixture = Some(Rc::new(|| 4_242));
+    });
+    state(watching, 3, Phase::Answering, None, cx);
+    draw(watching, 3, DRAWN, cx);
     state(watching, 3, Phase::Done, None, cx);
     end(watching, 3, cx);
     watching
@@ -1169,7 +1177,7 @@ fn ended_by_esc_down(watching: &Watching, cx: &mut TestAppContext) -> (Deliver, 
     cx.run_until_parked();
     owner.read_with(cx, |owner, _| {
         assert!(owner.voice.pending.is_none());
-        assert_eq!(owner.voice.ended, Some(GestureId(1)));
+        assert_eq!(owner.voice.ended, Some((GestureId(1), None)));
     });
     (deliver, at)
 }
@@ -1248,14 +1256,133 @@ fn a_reply_that_ends_the_hold_before_its_deferred_press_leaves_an_ordinary_drawi
     }
 }
 
-#[gpui::test]
-fn a_deferred_press_whose_hold_became_an_answer_first_stops_that_answer(cx: &mut TestAppContext) {
+/// An ordinary drawing is up, hold 1 is pending with its speech sent, and `Thinking` has
+/// named its run.
+fn thinking(cx: &mut TestAppContext) -> (Watching, Deliver, Instant) {
     let watching = watch(true, cx);
     drawn(&watching, cx);
     let (deliver, at) = natively_pending(&watching, cx);
     state(&watching, RUN, Phase::Thinking, HOLD, cx);
     cx.run_until_parked();
     told(&watching);
+    (watching, deliver, at)
+}
+
+/// What stopping run 7 tells while the presenter holds scenes: its cuts.
+fn stopped(cuts: Vec<SceneCut>) -> Told {
+    Told::Sent(ControlToBrain::StopScenes {
+        run: RunId(RUN),
+        cuts: SceneCuts::new(cuts).expect("cuts"),
+    })
+}
+
+/// The cut of a scene stopped while its first step enters.
+fn cut(scene: SceneId) -> SceneCut {
+    let cut = StopCut {
+        activated: 1,
+        revealed: Bounded::default(),
+    };
+    SceneCut { scene, cut }
+}
+
+#[gpui::test]
+fn a_deferred_press_whose_answer_already_ended_does_nothing(cx: &mut TestAppContext) {
+    let (watching, deliver, at) = thinking(cx);
+    press_deferred(&deliver, at, cx);
+    state(&watching, RUN, Phase::Answering, None, cx);
+    state(&watching, RUN, Phase::Done, None, cx);
+    end(&watching, RUN, cx);
+    // The answer took the panel; the press, applied now, changes nothing in it.
+    let before = panel(&watching, cx);
+    cx.run_until_parked();
+    assert_eq!(told(&watching), [cancel(), Told::Stop]);
+    nothing_else(&watching, before, cx);
+}
+
+#[gpui::test]
+fn a_deferred_press_stops_its_done_run_before_the_run_s_end(cx: &mut TestAppContext) {
+    // The run's state is `Done` and its data's end is still to come.
+    let (watching, deliver, at) = thinking(cx);
+    press_deferred(&deliver, at, cx);
+    state(&watching, RUN, Phase::Done, None, cx);
+    watching.ready.owner.read_with(cx, |owner, _| {
+        assert!(owner.voice.pending.is_none());
+        assert_eq!(owner.runs.stoppable(), Some(RunId(RUN)));
+    });
+    cx.run_until_parked();
+    assert_eq!(told(&watching), [cancel(), Told::Stop, stopped(Vec::new())]);
+    watching.ready.owner.read_with(cx, |owner, _| {
+        assert_eq!(owner.runs.stoppable(), None);
+        assert_eq!(scene_ids(&owner.presenter), [DRAWN]);
+    });
+}
+
+#[gpui::test]
+fn a_deferred_press_stops_what_its_ended_run_still_draws(cx: &mut TestAppContext) {
+    // The run drew without answering and has ended both ways; its drawing still moves.
+    let (watching, deliver, at) = thinking(cx);
+    draw(&watching, RUN, OTHER, cx);
+    told(&watching);
+    press_deferred(&deliver, at, cx);
+    state(&watching, RUN, Phase::Done, None, cx);
+    end(&watching, RUN, cx);
+    watching.ready.owner.read_with(cx, |owner, _| {
+        let now = Instant::now();
+        assert_eq!(owner.runs.stoppable(), None);
+        assert_eq!(owner.moving_run(now), Some(RunId(RUN)));
+        // Once that drawing is at rest nothing moves, and a press would stop nothing.
+        assert_eq!(owner.presenter.stoppable_run(), Some(RunId(RUN)));
+        assert_eq!(owner.moving_run(now + Duration::from_secs(60)), None);
+    });
+    cx.run_until_parked();
+    let stop = stopped(vec![cut(OTHER)]);
+    assert_eq!(told(&watching), [cancel(), Told::Stop, stop]);
+    watching.ready.owner.read_with(cx, |owner, _| {
+        assert_eq!(owner.presenter.stoppable_run(), None);
+        assert_eq!(scene_ids(&owner.presenter), [OTHER, DRAWN]);
+        assert!(!owner.activity.working);
+    });
+}
+
+#[gpui::test]
+fn a_deferred_press_stops_what_a_cancelled_hold_s_run_still_draws(cx: &mut TestAppContext) {
+    // The run drew while the hold was pending, and the brain's `Cancelled` ended the hold.
+    let (watching, deliver, at) = thinking(cx);
+    draw(&watching, RUN, OTHER, cx);
+    told(&watching);
+    press_deferred(&deliver, at, cx);
+    status(&watching.ready.owner, 1, 1, HoldStatus::Cancelled, cx);
+    cx.run_until_parked();
+    let stop = stopped(vec![cut(OTHER)]);
+    assert_eq!(told(&watching), [cancel(), Told::Stop, cancel(), stop]);
+    watching.ready.owner.read_with(cx, |owner, _| {
+        assert_eq!(owner.presenter.stoppable_run(), None);
+        assert_eq!(scene_ids(&owner.presenter), [OTHER, DRAWN]);
+    });
+}
+
+#[gpui::test]
+fn a_deferred_press_stops_no_other_run_once_its_answer_ended(cx: &mut TestAppContext) {
+    let (watching, deliver, at) = thinking(cx);
+    press_deferred(&deliver, at, cx);
+    state(&watching, RUN, Phase::Answering, None, cx);
+    state(&watching, RUN, Phase::Done, None, cx);
+    end(&watching, RUN, cx);
+    state(&watching, 8, Phase::Answering, None, cx);
+    watching.ready.owner.read_with(cx, |owner, _| {
+        assert_eq!(owner.runs.stoppable(), Some(RunId(8)));
+    });
+    cx.run_until_parked();
+    assert_eq!(told(&watching), [cancel(), Told::Stop]);
+    watching.ready.owner.read_with(cx, |owner, _| {
+        assert_eq!(owner.runs.stoppable(), Some(RunId(8)), "run 8 goes on");
+        assert_eq!(scene_ids(&owner.presenter), [DRAWN]);
+    });
+}
+
+#[gpui::test]
+fn a_deferred_press_whose_hold_became_an_answer_first_stops_that_answer(cx: &mut TestAppContext) {
+    let (watching, deliver, at) = thinking(cx);
     press_deferred(&deliver, at, cx);
     state(&watching, RUN, Phase::Answering, None, cx);
     watching.ready.owner.read_with(cx, |owner, _| {
@@ -1264,11 +1391,7 @@ fn a_deferred_press_whose_hold_became_an_answer_first_stops_that_answer(cx: &mut
     });
     cx.run_until_parked();
     // The sources stop, and the press stops the answer, which has drawn nothing to cut.
-    let stop = Told::Sent(ControlToBrain::StopScenes {
-        run: RunId(RUN),
-        cuts: SceneCuts::default(),
-    });
-    assert_eq!(told(&watching), [cancel(), Told::Stop, stop]);
+    assert_eq!(told(&watching), [cancel(), Told::Stop, stopped(Vec::new())]);
     watching.ready.owner.read_with(cx, |owner, _| {
         assert_eq!(owner.runs.stoppable(), None, "the answer is stopped");
         assert_eq!(scene_ids(&owner.presenter), [DRAWN]);

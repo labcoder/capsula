@@ -141,9 +141,10 @@ pub(super) struct Voice {
     pub(super) watched: Option<super::marks::Watched>,
     pub(super) status: Option<Text>,
     pub(super) recovery: Option<Recovery>,
-    /// The pending hold torn down last, until the next native Esc press is applied:
-    /// `native_escape` takes it, and the press that revoked that hold's input does nothing else.
-    pub(super) ended: Option<GestureId>,
+    /// The pending hold torn down last and the run it became, if one was named, until the next
+    /// native Esc press is applied: `native_escape` takes it, and the press that revoked that
+    /// hold's input acts on that hold and that run only.
+    pub(super) ended: Option<(GestureId, Option<RunId>)>,
     /// What a lost brain did with the held words; reconnecting doesn't clear it.
     pub(super) lost: Option<Text>,
     #[cfg(test)]
@@ -230,10 +231,7 @@ impl Presence {
                 self.link.microphone_gate().cancel(gesture);
                 self.link.clear_input(gesture);
                 self.voice.pending = None;
-                // An answer under way is still the press's to stop; an ended run leaves it nothing.
-                if !matches!(phase, Phase::Answering) {
-                    self.voice.ended = Some(gesture);
-                }
+                self.voice.ended = Some((gesture, Some(run)));
                 self.voice.status = None;
                 self.refresh_dock(cx);
             }
@@ -307,7 +305,7 @@ impl Presence {
         if let Some(mut hold) = self.voice.pending.take() {
             let gesture = hold.token.gesture();
             // The Esc press that revoked this hold's input may be applied only after this.
-            self.voice.ended = Some(gesture);
+            self.voice.ended = Some((gesture, hold.run));
             self.marks_dropped(gesture, cx);
             self.link.microphone_gate().cancel(gesture);
             self.link.clear_input(gesture);

@@ -367,21 +367,33 @@ the answer text, and hands it the steps it lets through.
   and held chunks go.
 - Scene ids, revisions and counts are the only things it reports; its errors never carry labels.
 
-An Esc press that revoked a pending hold's input does nothing else once that hold is torn
-down, so it leaves the drawing up. The teardown can be applied before the press is:
+An Esc press that revoked a pending hold's input belongs to that hold, and to the run the
+hold became, once the hold is torn down. It never goes on to the ordinary Esc action, so it
+leaves the drawing up. The teardown can be applied before the press is:
 
 - by the hold's cancelled `End`, at the raw Esc-down a delivery ahead of the hotkey's, or in
   the hotkey's own delivery just before `native_escape`;
-- by the brain's reply to the press's `GestureCancel`, which arrives on the link while the
-  press still waits for a busy app: the hold's `Cancelled` status, or its run's `Failed` or
-  `Interrupted`.
+- by the brain's reply to the press's `GestureCancel` or by the hold's own run, which arrive
+  on the link while the press still waits for a busy app: the hold's `Cancelled` status, or
+  its run's `Answering`, `Done`, `Failed` or `Interrupted`.
 
 So `Voice.ended` is a receipt for the pending hold torn down last, whichever road tore it
-down. `end_voice` writes it where it takes the hold, and `voice_run` where the held run's
-`Done`, `Failed` or `Interrupted` removes it. `Answering` writes none: an answer under way is
-still that press's to stop. `native_escape` takes the receipt at every press, and a press
-naming that gesture only takes the marks that are up and brings `Activity` up to date. It
-makes no stop or clear decision of its own and clears no ordinary drawing.
+down, with the run the hold became once a run state has named it. `end_voice` writes it
+where it takes the hold, and `voice_run` where the held run's state removes it.
+`native_escape` takes the receipt at every press. A press naming that gesture does three
+things at most:
+
+1. It takes the marks that are up, as any press does.
+2. If the receipt's run is the run Esc's stop would stop at that moment, it stops that run
+   the way Esc does, with the same `Stop` or `StopScenes`. That is the moving run, or else
+   the run whose drawing the presenter still moves. A terminal `RunState` doesn't settle it:
+   the run's data can still be arriving, and its drawing can still be entering after its
+   end.
+3. It brings `Activity` up to date.
+
+It makes no other stop or clear decision and clears no ordinary drawing. When another run is
+what Esc would stop, or the hold's run has ended and nothing of it moves, the press stops
+nothing.
 
 The receipt cancels nothing itself, and one left behind takes no later press. A press names a
 gesture only when it revoked that hold's input itself: `cancel_input_gesture` hands a tracked
