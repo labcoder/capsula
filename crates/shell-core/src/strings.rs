@@ -215,6 +215,7 @@ texts! {
     ScreenHistoryChanged => "screen-history-changed",
     ScreenNoteCant => "screen-note-cant",
     ScreenNoteCan => "screen-note-can",
+    MarksSkipped => "marks-skipped",
     VoiceRestartRequired => "voice-restart-required",
     VoiceInstalledFailed => "voice-installed-failed",
     VoiceNotInstalledFailed => "voice-not-installed-failed",

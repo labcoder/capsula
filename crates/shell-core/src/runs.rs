@@ -161,6 +161,8 @@ pub struct Runs {
     fence: RunId,
     /// The highest run any `RunState` named; only its first state can bind a typed turn.
     answered: RunId,
+    /// The run whose two endings came in last, until the caller takes it.
+    ended: Option<RunId>,
     /// Turns sent and not answered yet.
     submitted: VecDeque<Submitted>,
     /// The newest named run's submission, until that run's first terminal `RunState`.
@@ -330,6 +332,17 @@ impl Runs {
             turn,
             self.revision,
         ))
+    }
+
+    /// The highest run any `RunState` has named so far on this brain.
+    pub fn newest_run(&self) -> RunId {
+        self.answered
+    }
+
+    /// The run whose terminal `RunState` and `RunEnd` are now both in, whichever came last,
+    /// once. A run that Esc or a delete fenced off before it was named never comes this way.
+    pub fn take_ended(&mut self) -> Option<RunId> {
+        self.ended.take()
     }
 
     /// A run is moving that Esc hasn't stopped, or a turn is waiting for its run.
@@ -648,6 +661,7 @@ impl Runs {
         }
         self.fence = self.fence.max(self.answered);
         self.live = None;
+        self.ended = None;
         self.main = None;
         self.submitted.clear();
         self.named = None;
@@ -886,6 +900,7 @@ impl Runs {
             mark(live);
             if live.state_ended && live.data_ended {
                 self.live = None;
+                self.ended = Some(run);
             }
         }
     }

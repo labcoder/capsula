@@ -9,8 +9,8 @@ use crate::drawing::{Broken, Chunk, Effect};
 use crate::link::{Batch, LinkEvent, LinkState};
 use crate::settings::Update;
 use kumochi_protocol::message::{
-    AccountView, ConnectionsView, ControlToBrain, DataToShell, Phase, RunId, RunOrigin,
-    SettingsView, ThreadId, UserError,
+    AccountView, ConnectionsView, ControlToBrain, DataToShell, HeldScreen, Phase, RunId, RunOrigin,
+    ScreenHolds, ScreenOff, SettingsView, ThreadId, UserError,
 };
 use kumochi_scene::deferred::Deferred;
 use std::time::Instant;
@@ -111,12 +111,21 @@ impl Presence {
                 } => {
                     self.capture_finished(generation, capture_for, cx);
                 }
-                // Stored only: nothing reads either until the shell sends a screen hold.
-                LinkEvent::ScreenHolds { state, .. } => self.runs.set_screen_holds(state),
+                LinkEvent::ScreenHolds { state, .. } => {
+                    let off = matches!(state, ScreenHolds::Off(ScreenOff::TurnedOff));
+                    self.runs.set_screen_holds(state);
+                    if off {
+                        self.marks_off(cx);
+                    }
+                }
                 LinkEvent::HoldScreen {
                     gesture, outcome, ..
                 } => {
                     self.runs.hold_screen(gesture, outcome);
+                    // An answer that didn't get the screenshot has nothing to mark.
+                    if outcome != HeldScreen::Screen {
+                        self.marks_dropped(gesture, cx);
+                    }
                 }
                 LinkEvent::RunState {
                     run,
@@ -304,6 +313,7 @@ impl Presence {
         cx: &mut Context<'_, Self>,
     ) {
         let (applied, notice) = self.runs.apply_run_state(run, thread, phase, error, origin);
+        self.marks_run(run, origin, &applied, cx);
         self.voice_run(run, origin, phase, &applied, cx);
         diagnostics::record(cx, format_args!("run phase={phase:?}"));
         if let Some(restore) = applied.restore
@@ -522,6 +532,7 @@ impl Presence {
                 message => self.runs.apply_data(message, bytes),
             };
             self.grant(credit);
+            self.marks_ended(cx);
         }
     }
 

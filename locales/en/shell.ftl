@@ -246,6 +246,7 @@ screen-not-included-picture-too-large = Screen not included: the screenshot was 
 screen-history-changed = Screen not included: it changed while the screenshot was being taken
 screen-note-cant = { $model } doesn't support screenshots, so messages will go without one.
 screen-note-can = { $model } supports screenshots, so holding to talk will send one along.
+marks-skipped = Marks skipped: your screen changed
 show-screen-history = A screenshot of your screen was sent in this message. { $app } keeps no copy.
 voice-restart-required = Speech input unavailable. Restart the app.
 voice-installed-failed = Installed · speech input unavailable

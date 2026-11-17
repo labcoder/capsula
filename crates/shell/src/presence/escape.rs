@@ -29,6 +29,9 @@ impl Presence {
         reason = "one Esc press keeps its local decision and every effect of it in order"
     )]
     pub(super) fn escape(&mut self, cx: &mut Context<'_, Self>) -> Result<(), OpenError> {
+        // Esc is a key like any other to screen marks: they go at the first press, whatever
+        // else that press stops.
+        self.marks_changed(cx);
         if self.voice_working() {
             self.cancel_voice(cx);
             return Ok(());

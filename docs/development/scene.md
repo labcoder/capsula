@@ -2039,8 +2039,9 @@ that still names a locally cleared scene causes its idempotent clear to be sent 
 A screen scene's marks point at the screen as it was when a hold was released, so the
 presenter shows one only while nothing may have changed the screen since, and clears every
 one as soon as something may have. Nothing follows a window. This is dormant: `draw` still
-refuses the surface, so no screen scene arrives, and the shell installs no sources, reports
-no release and gives no display.
+refuses the surface, so no screen scene arrives, and no shipped build installs sources, so
+there every release counts as changed at once. The shell makes every report all the same
+([The shell's reports](#the-shells-reports)).
 
 - **The watch** (`presenter/watch.rs`) is plain state with no clock and no system call. The
   presenter owns it, feeds it events and does the clearing it answers.
@@ -2059,7 +2060,7 @@ no release and gives no display.
   limit has already taken, even when the wake or the watchdog is still queued behind it.
   With no sources listening that check is one read. A wake carries nothing and only has the
   bit read. `screen_changed` is for an event the shell itself knows of, the next hold's
-  recognition, and is the only call of the presenter's that sets the bit. Sources run only
+  recognition and a press of Esc, and is the only call of the presenter's that sets the bit. Sources run only
   while a change still matters.
 
 ```mermaid
@@ -2151,6 +2152,34 @@ stateDiagram-v2
 - **Logs** carry one fixed word per clear and one line per skip, with no ids: `release`,
   `changed`, `limit`, `off`, and `left` for shown marks that go any other way (a successor,
   the user's clear, the brain's removal, a failure, a lost session).
+
+#### The shell's reports
+
+The presence makes each call from one file, `presence/marks.rs`, and keeps one thing of its
+own for it: `voice.watched`, the hold whose release the watch was last told of, with its run
+once named. It is apart from `voice.pending`, which is gone by `Answering` while the brain's
+word on the screenshot can still come. Every report can come twice and changes nothing the
+second time.
+
+| Call | From | When |
+|---|---|---|
+| `screen_changed` | `recognize_voice` (`voice.rs`); `escape` (`escape.rs`) | Every recognized hold, once the brain was told of it; every press of Esc, before anything else that press does, so one press stops the answer and takes the marks |
+| `set_display` | `show_display`, at each release and from `display_changed` (`stage.rs`) | The primary display's origin, size and DPI in physical pixels, as a hold's line reads them |
+| `screen_released` | `release_screen` (`voice.rs`) | Before that hold's `ScreenRelease` is written, with `Runs::newest_run` and the talk keys still down as the gesture reduced the key-up (`gesture.rs`) |
+| `screen_dropped` | `release_screen`; `HoldScreen` in `link.rs`; `end_voice`; `run_state` | The `ScreenRelease` couldn't be written; the brain's outcome is anything but `Screen`; the hold ended with no run; a state of the hold's run arrives fenced off by Esc or a delete |
+| `screen_run` | `run_state` (`link.rs`) | The first `RunState` whose origin is the watched hold |
+| `run_ended` | After `run_state` and after `RunEnd` | Once, when `Runs::take_ended` gives the run whose terminal state and `RunEnd` are both in |
+| `screen_off` | `save_show_screen(false)`; `ScreenHolds::Off(TurnedOff)` | The box is unchecked, saved or not; the brain says the setting is off |
+| `marks_skipped` | The dock's screen line | "Marks skipped: your screen changed", only while the answer on screen is the skipped run's and no "Screen not included" line shows |
+
+After a report the scene watchdog is set to the presenter's deadline again, since a release, a
+name, a drop and an end each move the watch's limit. A report that cleared nothing leaves the
+drawing as it is.
+
+**The order at a release** is tested as one sequence of what the sources and the brain were
+told: the sources' start, then `ScreenRelease`. An input before the start is older than the
+picture and isn't seen. What it set off can still reach the screen after the picture (a click
+whose page lands late), with no later event to see, and the order can't close that.
 
 ### Bounded visual replacement
 

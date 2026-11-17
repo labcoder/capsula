@@ -24,6 +24,7 @@ use super::exclusion::{Error, Slot};
 use super::overlay_visibility::Visibility;
 use super::voice_wiring_tests::{ready, status};
 use super::{Presence, voice::Stamp};
+use crate::input::TalkHeld;
 use crate::input::hold::Intent;
 use crate::link::{Batch, LinkEvent, LinkState};
 use crate::platform::cursor_fixture;
@@ -34,7 +35,7 @@ use crate::strings::Text;
 /// dead zone and the spacing at any scale, and on the test display.
 const ORIGIN: PhysicalPoint = PhysicalPoint([640, 320]);
 const ACROSS: PhysicalPoint = PhysicalPoint([900, 320]);
-const DOWN: PhysicalPoint = PhysicalPoint([900, 600]);
+pub(super) const DOWN: PhysicalPoint = PhysicalPoint([900, 600]);
 const QPC: u64 = 77;
 const RELEASED: u64 = 4_077;
 const STAMP: u64 = 4_242;
@@ -74,7 +75,7 @@ pub(super) struct Ready {
     _data: async_channel::Receiver<DataToBrain>,
 }
 
-fn receive(owner: &Entity<Presence>, event: LinkEvent, cx: &mut TestAppContext) {
+pub(super) fn receive(owner: &Entity<Presence>, event: LinkEvent, cx: &mut TestAppContext) {
     owner
         .update(cx, |owner, cx| {
             owner.link_events(Batch::Plain(vec![event]), cx)
@@ -136,6 +137,7 @@ fn deliver(
     intent: Intent,
     qpc: u64,
     pointer: Option<PhysicalPoint>,
+    held: TalkHeld,
     cx: &mut TestAppContext,
 ) {
     let (dock, stamp) = owner.read_with(cx, |owner, _| {
@@ -154,6 +156,7 @@ fn deliver(
         stamp,
         qpc,
         pointer,
+        held,
     ));
 }
 
@@ -178,17 +181,17 @@ fn recognize_at(
         gesture,
         generation: Ok(token),
     };
-    deliver(owner, intent, QPC, pointer, cx);
+    deliver(owner, intent, QPC, pointer, TalkHeld::default(), cx);
     // The line's timer counts from here.
     cx.run_until_parked();
 }
 
-fn recognize(owner: &Entity<Presence>, id: u32, cx: &mut TestAppContext) {
+pub(super) fn recognize(owner: &Entity<Presence>, id: u32, cx: &mut TestAppContext) {
     recognize_at(owner, id, Some(ORIGIN), cx);
 }
 
 /// The hold hears the microphone open, as far as its release can tell.
-fn listening(owner: &Entity<Presence>, cx: &mut TestAppContext) {
+pub(super) fn listening(owner: &Entity<Presence>, cx: &mut TestAppContext) {
     owner.update(cx, |owner, _| {
         owner.voice.status = Some(Text::HoldListening);
     });
@@ -201,11 +204,22 @@ pub(super) fn release(
     pointer: Option<PhysicalPoint>,
     cx: &mut TestAppContext,
 ) {
+    release_holding(owner, id, pointer, TalkHeld::default(), cx);
+}
+
+/// The first key of hold `id` comes up while `held` are still down.
+pub(super) fn release_holding(
+    owner: &Entity<Presence>,
+    id: u32,
+    pointer: Option<PhysicalPoint>,
+    held: TalkHeld,
+    cx: &mut TestAppContext,
+) {
     let intent = Intent::End {
         gesture: GestureId(id),
         cancelled: false,
     };
-    deliver(owner, intent, RELEASED, pointer, cx);
+    deliver(owner, intent, RELEASED, pointer, held, cx);
 }
 
 /// A recognized hold that is listening, its recognition message read.
@@ -248,7 +262,7 @@ fn voice_only(id: u32) -> ControlToBrain {
     }
 }
 
-fn screen_hold(id: u32) -> ControlToBrain {
+pub(super) fn screen_hold(id: u32) -> ControlToBrain {
     ControlToBrain::ScreenHoldRecognized {
         gesture: GestureId(id),
         thread: Some(ThreadId(1)),
@@ -257,7 +271,7 @@ fn screen_hold(id: u32) -> ControlToBrain {
     }
 }
 
-fn screen_release(
+pub(super) fn screen_release(
     id: u32,
     lease: u32,
     pointer: PhysicalPoint,
@@ -329,7 +343,7 @@ fn notice(ready: &Ready, cx: &mut TestAppContext) -> &'static str {
         })
 }
 
-fn line(ready: &Ready, cx: &mut TestAppContext) -> Option<(Text, Option<ModelName>)> {
+pub(super) fn line(ready: &Ready, cx: &mut TestAppContext) -> Option<(Text, Option<ModelName>)> {
     ready
         .owner
         .read_with(cx, |owner, cx| owner.panel.read(cx).screen_line.clone())
@@ -685,7 +699,14 @@ fn a_hold_that_ends_before_its_release_stops_the_line_and_takes_no_lease(cx: &mu
                 gesture: GestureId(1),
                 cancelled: true,
             };
-            deliver(&ready.owner, intent, RELEASED, Some(DOWN), cx);
+            deliver(
+                &ready.owner,
+                intent,
+                RELEASED,
+                Some(DOWN),
+                TalkHeld::default(),
+                cx,
+            );
         },
         // The keys come up before the hold is listening.
         |ready, cx| {

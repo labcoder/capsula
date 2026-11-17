@@ -1104,6 +1104,68 @@ fn a_terminal_state_first_waits_for_run_end_to_settle() {
 }
 
 #[test]
+fn a_run_s_end_is_told_once_whichever_ending_comes_last() {
+    for state_first in [true, false] {
+        let mut runs = answering(5);
+        assert_eq!(runs.newest_run(), RunId(5));
+        if state_first {
+            state(&mut runs, 5, Phase::Done, None);
+        } else {
+            data(&mut runs, end(5));
+        }
+        assert_eq!(runs.take_ended(), None, "one ending is in");
+        if state_first {
+            data(&mut runs, end(5));
+        } else {
+            state(&mut runs, 5, Phase::Done, None);
+        }
+        assert_eq!(runs.take_ended(), Some(RunId(5)));
+        assert_eq!(runs.take_ended(), None, "told once");
+        // A duplicate of either ending tells nothing more.
+        state(&mut runs, 5, Phase::Done, None);
+        data(&mut runs, end(5));
+        assert_eq!(runs.take_ended(), None);
+
+        // A `RunEnd` that came before its run was named lands with the run's first state.
+        assert_eq!(data(&mut runs, end(6)), 0, "held for its run's state");
+        assert_eq!(runs.take_ended(), None);
+        state(&mut runs, 6, Phase::Interrupted, None);
+        assert_eq!(runs.take_ended(), Some(RunId(6)));
+        assert_eq!(runs.newest_run(), RunId(6));
+    }
+}
+
+#[test]
+fn a_run_fenced_before_it_was_named_and_a_lost_connection_tell_no_end() {
+    let mut runs = Runs::default();
+    runs.connected(1);
+    runs.settings(ThreadId(1));
+    submit(&mut runs, "a");
+    assert_eq!(runs.stop(), None, "a isn't named yet");
+    let named = state(
+        &mut runs,
+        1,
+        Phase::Thinking,
+        Some(RunOrigin::Typed { turn: 1 }),
+    );
+    assert!(!named.visible);
+    state(&mut runs, 1, Phase::Interrupted, None);
+    data(&mut runs, end(1));
+    assert_eq!(runs.take_ended(), None, "Esc fenced it before its name");
+    assert_eq!(runs.newest_run(), RunId(1));
+
+    let mut runs = answering(5);
+    state(&mut runs, 5, Phase::Done, None);
+    data(&mut runs, end(5));
+    runs.disconnected();
+    assert_eq!(
+        runs.take_ended(),
+        None,
+        "nothing of that connection is told"
+    );
+}
+
+#[test]
 fn a_reconnect_forgets_turns_esc_cancelled_and_their_held_data() {
     let mut runs = Runs::default();
     runs.connected(1);

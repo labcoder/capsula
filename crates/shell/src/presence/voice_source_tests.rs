@@ -94,7 +94,7 @@ fn hold_failures_log_closed_stages_and_reasons_without_user_content(cx: &mut Tes
     let (owner, _data, _controls) = ready(cx);
     let (_, stamp) = hold(&owner, 1, cx);
     owner.update(cx, |owner, cx| {
-        owner.voice_intent(Intent::Unavailable, stamp, 0, None, cx);
+        owner.voice_intent(Intent::Unavailable, stamp, 0, None, TalkHeld::default(), cx);
     });
     for reason in [
         HoldFailure::NotLoaded,
@@ -176,6 +176,7 @@ fn silent_hold_admission_exits_report_why_without_identifiers(cx: &mut TestAppCo
                 stamp,
                 0,
                 None,
+                TalkHeld::default(),
                 cx,
             );
             assert!(owner.voice.pending.is_none());
@@ -335,7 +336,7 @@ fn a_hold_whose_native_deadline_never_arrives_is_recognised_by_the_scheduled_one
     assert_eq!(recognised, ["by=Scheduled"]);
 }
 
-fn native(owner: &Entity<Presence>, cx: &mut TestAppContext) -> Deliver {
+pub(super) fn native(owner: &Entity<Presence>, cx: &mut TestAppContext) -> Deliver {
     let weak = owner.downgrade();
     owner.update(cx, |owner, cx| {
         super::super::gesture::deliver(
@@ -487,6 +488,7 @@ fn microphone_stop_acceptance_wait_keeps_typing_and_does_not_open_another_source
             stamp,
             0,
             None,
+            TalkHeld::default(),
             cx,
         );
         assert!(token.retired());
@@ -580,6 +582,7 @@ fn microphone_start_refusals_before_open_never_suggest_an_active_device(cx: &mut
             stamp,
             0,
             None,
+            TalkHeld::default(),
             cx,
         );
         assert_eq!(owner.voice.status, Some(Text::TurnBusy));
@@ -607,6 +610,7 @@ fn microphone_start_refusals_before_open_never_suggest_an_active_device(cx: &mut
             stamp,
             0,
             None,
+            TalkHeld::default(),
             cx,
         );
         assert_eq!(owner.voice.status, Some(Text::HoldFailed));
@@ -1113,6 +1117,7 @@ fn running_and_true_receipt_rendezvous_with_release_in_either_ui_order(cx: &mut 
                 stamp,
                 443,
                 None,
+                TalkHeld::default(),
                 cx,
             );
             assert_eq!(owner.voice.status, Some(Text::HoldStopping));
@@ -1223,6 +1228,7 @@ fn release_during_open_never_claims_listening_or_stop_before_join(cx: &mut TestA
             stamp,
             9,
             None,
+            TalkHeld::default(),
             cx,
         );
         assert_eq!(owner.voice.status, Some(Text::HoldStopping));
@@ -1343,6 +1349,7 @@ fn a_stalled_open_or_stop_warns_without_releasing_its_generation(cx: &mut TestAp
                     stamp,
                     19,
                     None,
+                    TalkHeld::default(),
                     cx,
                 );
             });
@@ -1405,13 +1412,13 @@ fn accepted(owner: &Entity<Presence>, gesture: u32, cx: &mut TestAppContext) {
     });
 }
 
-fn after(at: Instant, millis: u64) -> EventTime {
+pub(super) fn after(at: Instant, millis: u64) -> EventTime {
     EventTime {
         instant: at + Duration::from_millis(millis),
     }
 }
 
-fn listen(
+pub(super) fn listen(
     owner: &Entity<Presence>,
     deliver: &Deliver,
     gesture: u32,
