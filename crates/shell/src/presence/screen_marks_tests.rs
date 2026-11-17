@@ -645,6 +645,17 @@ fn a_lost_session_ends_the_watch_once(cx: &mut TestAppContext) {
     watching.ready.owner.read_with(cx, |owner, _| {
         assert!(owner.voice.watched.is_none());
     });
+
+    // The run is answering, so the hold is no longer pending: the loss still forgets it.
+    let watching = released(true, cx);
+    state(&watching, RUN, Phase::Thinking, HOLD, cx);
+    state(&watching, RUN, Phase::Answering, None, cx);
+    let lost = LinkEvent::State(LinkState::Reconnecting);
+    receive(&watching.ready.owner, lost, cx);
+    assert_eq!(sources(&watching), [Told::Stop]);
+    watching.ready.owner.read_with(cx, |owner, _| {
+        assert!(owner.voice.watched.is_none());
+    });
 }
 
 /// Hold 1's run is answering and its marks are up, with the sources listening.

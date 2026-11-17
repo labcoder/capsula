@@ -2138,7 +2138,9 @@ stateDiagram-v2
   on.
   A watch that expects a scene ends without one at `screen_dropped` (the screenshot wasn't
   sent, or the hold ended with no run) and at `run_ended` for the named run. The shell
-  calls `run_ended` when the run's terminal `RunState` and its `RunEnd` are both in.
+  calls `run_ended` when the run's terminal `RunState` and its `RunEnd` are both in. It
+  reports only the run `Runs` tracks as live, so a hold's run that ends after it stopped
+  being the live one gets no limit, and its marks go at the next change (`shortcut:`).
 - **The hard bound.** A release whose run `screen_run` hasn't named within `UNNAMED_KEPT`
   (30 seconds) ends by itself, through `deadline` and `tick`: the sources stop and a screen
   scene that arrives later is skipped. So no road the shell misses leaves a hook or a mouse
@@ -2164,7 +2166,7 @@ The presence makes each call from one file, `presence/marks.rs`, and keeps one t
 own for it: `voice.watched`, the hold whose release the watch was last told of, with its run
 once named. It is apart from `voice.pending`, which is gone by `Answering` while the brain's
 word on the screenshot can still come. Every report can come twice and changes nothing the
-second time.
+second time. A lost session forgets the watched hold.
 
 | Call | From | When |
 |---|---|---|

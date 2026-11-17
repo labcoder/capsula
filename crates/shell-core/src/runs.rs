@@ -898,6 +898,9 @@ impl Runs {
 
     /// Marks one of `run`'s two endings; the live run settles once both are in, and an older
     /// run's ending never touches a newer one.
+    // shortcut: a hold's run that ends after it stopped being the live one is never reported,
+    // so marks it still shows get no 60-second limit and go at the next change; report that
+    // ending too if marks are ever seen to outstay their answer.
     fn end(&mut self, run: RunId, mark: impl FnOnce(&mut Live)) {
         if let Some(live) = self.live.as_mut().filter(|live| live.run == run) {
             mark(live);
