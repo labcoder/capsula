@@ -1,0 +1,3 @@
+Phonon 31M English by Gradium, Apache-2.0.
+Source: https://huggingface.co/gradium/phonon-31m-en
+The pinned Q8 GGUF model, configuration and tokenizer are distributed unchanged.

@@ -20,6 +20,7 @@ mod gate;
 mod hermetic;
 #[cfg(windows)]
 mod live;
+mod notices;
 #[cfg(windows)]
 mod platform;
 #[cfg(test)]
@@ -101,6 +102,7 @@ tasks:
                     turns on a shell feature that exists for evidence builds only
   check-vendor      fail unless every crate in vendor/ is what Cargo.lock builds;
                     CI runs it so a GPUI bump can't silently drop a vendored patch
+  notices [--check] generate or check the third-party notices for the shipped Windows build
   voice-assets link <models-dir> <natives-dir>
                     verify the voice models and native runtime already on this machine
                     against the manifest, then hardlink them into the dev models folder
@@ -121,6 +123,7 @@ fn main() -> Result<()> {
         Some("check-core") => check_core::run(),
         Some("check-shipped") => shipped::run(),
         Some("check-vendor") => vendor::run(),
+        Some("notices") => notices::run(args),
         Some("pipe-dump") => pipe_dump(
             &args
                 .next()

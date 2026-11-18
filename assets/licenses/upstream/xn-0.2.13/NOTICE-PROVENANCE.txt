@@ -1,0 +1,6 @@
+Package: xn 0.2.13
+Source repository: https://github.com/LaurentMazare/xn
+Revision: 4242d4445ffafd8ed77380d30890db057102cb0c
+License source: https://raw.githubusercontent.com/LaurentMazare/xn/4242d4445ffafd8ed77380d30890db057102cb0c/LICENSE-MIT
+License SHA-256: 23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3
+The published crate omits this upstream license file; the text is retained unchanged.

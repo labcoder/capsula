@@ -1,0 +1,9 @@
+Package: zune-core 0.4.12
+Source repository: https://github.com/etemesi254/zune-image
+Revision: f8fbb123d5ed04441e8324a555bfcda0cb1bd28f
+License source: https://raw.githubusercontent.com/etemesi254/zune-image/f8fbb123d5ed04441e8324a555bfcda0cb1bd28f/LICENSE.md
+License SHA-256: c6dff146a9f31848ac296faa5a08a4253caf2c384c86f906dc99e7fc0a39cc8c
+The upstream LICENSE.md is retained verbatim as NOTICE-UPSTREAM.txt.
+The published manifest also offers Zlib. Its exact upstream text is retained unchanged:
+Zlib source: https://raw.githubusercontent.com/etemesi254/zune-image/f8fbb123d5ed04441e8324a555bfcda0cb1bd28f/LICENSE-ZLIB
+Zlib SHA-256: 7fa429541e55b1509909e058f2d21a37467e4958ec713b357f6e0cf9dc4ee352

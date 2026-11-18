@@ -1,0 +1,6 @@
+Package: rust-i18n-macro 4.2.4
+Source repository: https://github.com/longbridge/rust-i18n
+Revision: 5f3ea5ba03395f2f2908e3587e01788cfdfd3555
+License source: https://raw.githubusercontent.com/longbridge/rust-i18n/5f3ea5ba03395f2f2908e3587e01788cfdfd3555/LICENSE
+License SHA-256: d6fde6c28ecbccfc7f6d97c0badbb14bbea2cc8f5e81a8c1537204bdfed9a6d5
+The published crate omits this upstream license file; the text is retained unchanged.

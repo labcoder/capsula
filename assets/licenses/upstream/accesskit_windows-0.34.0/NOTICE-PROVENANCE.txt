@@ -1,0 +1,6 @@
+Package: accesskit_windows 0.34.0
+Source repository: https://github.com/AccessKit/accesskit
+Revision: c88605b96d04431f9c3c792464a0f2f253480e94
+License source: https://raw.githubusercontent.com/AccessKit/accesskit/c88605b96d04431f9c3c792464a0f2f253480e94/LICENSE-MIT
+License SHA-256: 23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3
+The published crate omits this upstream license file; the text is retained unchanged.

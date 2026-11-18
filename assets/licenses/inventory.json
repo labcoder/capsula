@@ -1,0 +1,70 @@
+[
+  {
+    "name": "parakeet",
+    "license": "CC-BY-4.0",
+    "source": "https://huggingface.co/csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8/resolve/2bda32ec70b097a55adaa07d9a7173915b43cc78",
+    "files": [
+      "model:encoder.int8.onnx:acfc2b4456377e15d04f0243af540b7fe7c992f8d898d751cf134c3a55fd2247",
+      "model:decoder.int8.onnx:179e50c43d1a9de79c8a24149a2f9bac6eb5981823f2a2ed88d655b24248db4e",
+      "model:joiner.int8.onnx:3164c13fc2821009440d20fcb5fdc78bff28b4db2f8d0f0b329101719c0948b3",
+      "model:tokens.txt:d58544679ea4bc6ac563d1f545eb7d474bd6cfa467f0a6e2c1dc1c7d37e3c35d"
+    ],
+    "notices": [
+      "parakeet.txt",
+      "CC-BY-4.0.txt"
+    ]
+  },
+  {
+    "name": "phonon",
+    "license": "Apache-2.0",
+    "source": "https://huggingface.co/gradium/phonon-31m-en/resolve/92741c5b07d085ff840e26fea8ce43110b87852f",
+    "files": [
+      "model:model.q8.gguf:a7d9aad2cd6dc66473f24a08bc6d2939030ef4d751ef82349361fbef3272dbae",
+      "model:config.json:b5d0f88353638370d94035b7d73d7d6577c0554d78f8d7ecfd40490aae39ae85",
+      "model:tokenizer.json:691a00068fa7b989f2f3e5ae5daa2d1a5bb319f2d5360deafcfb19a8bb6e7936"
+    ],
+    "notices": [
+      "phonon.txt",
+      "Apache-2.0.txt"
+    ]
+  },
+  {
+    "name": "juniper",
+    "license": "Apache-2.0",
+    "source": "https://huggingface.co/gradium/phonon-voices/resolve/0ee17205f254b5abc43b266c8a0f215565c352f7",
+    "files": [
+      "model:juniper.safetensors:444378eb06b7c492b86e8fc7d13e4db1a3c0cf3e68891a960bf6f0a41a13ef35"
+    ],
+    "notices": [
+      "juniper.txt",
+      "Apache-2.0.txt"
+    ]
+  },
+  {
+    "name": "voice-native-runtime",
+    "license": "Apache-2.0 AND MIT AND BSD-2-Clause AND BSD-3-Clause AND MPL-2.0 AND BSL-1.0",
+    "source": "https://github.com/k2-fsa/sherpa-onnx/releases/download/v2.0.1/sherpa-onnx-v2.0.1-win-x64-shared-MD-Release-lib.tar.bz2",
+    "files": [
+      "native:sherpa-onnx-c-api.dll:cf49e9ab5bac5e2d177fe14ae070cc4f52c791490333252150a745f9d03c1111",
+      "native:onnxruntime.dll:422d776ab0e3218260f7f628fcb84606aaa5c21116f720c8619a6da5e0b2e0f9"
+    ],
+    "notices": [
+      "voice-native-runtime.txt",
+      "sherpa-LICENSE.txt",
+      "onnxruntime-LICENSE.txt",
+      "onnxruntime-ThirdPartyNotices.txt"
+    ]
+  },
+  {
+    "name": "lucide",
+    "license": "ISC AND MIT",
+    "source": "https://github.com/longbridge/gpui-kit/tree/99576db58ec8103417c41a092e891b4022d24e7e/crates/assets",
+    "revision": "99576db58ec8103417c41a092e891b4022d24e7e",
+    "files": [
+      "icons:gpui-kit-assets"
+    ],
+    "notices": [
+      "LICENSE-LUCIDE.txt"
+    ]
+  }
+]

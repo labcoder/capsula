@@ -1,0 +1,8 @@
+sherpa-onnx 2.0.1 C API (Apache-2.0) and ONNX Runtime 1.28.2 (MIT).
+Only sherpa-onnx-c-api.dll and onnxruntime.dll from the pinned CPU archive ship.
+The full retained ONNX Runtime notice follows, including notices for optional
+components not necessarily compiled into that CPU build. It is not an exact-build
+SBOM. Eigen source-version and exact-build closure evidence remain packaging
+prerequisites documented in docs/development/voice-natives.md.
+BSL-1.0 is the accepted Boost exception from the 2026-11-04 owner decision;
+MPL-2.0 applies to Eigen. Neither exception admits GPL-family code.

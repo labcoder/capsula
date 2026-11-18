@@ -1,0 +1,4 @@
+Juniper voice by Gradium, Apache-2.0.
+Source: https://huggingface.co/gradium/phonon-voices
+Kumochi renames the catalog's NIWIOv5vTi5eRMj8.safetensors to juniper.safetensors.
+The voice bytes are unchanged.

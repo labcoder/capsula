@@ -1,0 +1,5 @@
+Parakeet TDT 0.6B v3 by NVIDIA (CC-BY-4.0).
+Original model: https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3
+Kumochi uses the sherpa-onnx project's int8 ONNX export at the pinned source
+in inventory.json. The conversion quantizes the weights and converts the model
+to ONNX; NVIDIA does not endorse Kumochi.
