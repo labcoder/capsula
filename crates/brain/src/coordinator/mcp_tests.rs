@@ -988,3 +988,23 @@ fn a_binding_releases_by_the_earliest_of_its_deadlines() {
         core.current.as_mut().expect("run").mcp = None;
     }
 }
+
+/// A run that finishes while its speech still drains revokes its launch's binding as it starts
+/// draining, not once the speech ends.
+#[test]
+fn a_run_draining_its_speech_after_it_finished_fails_its_gate_at_once() {
+    let mut core = super::spoken();
+    let (gate, until) = passed();
+    let build = super::engine_key(&core, R);
+    let offer = Offer::Mcp(Origin::Task(T), Vec::new());
+    assert!(binds(
+        &mut core,
+        (build, L1, T),
+        offer,
+        (gate.clone(), until)
+    ));
+    streamed(&mut core, TurnEvent::TextDelta("Hello there. ".to_owned()));
+    streamed(&mut core, TurnEvent::Finished(Finish::Completed));
+    assert_eq!(core.current_run(), Some(R), "still draining its speech");
+    assert!(!gate.may_call());
+}

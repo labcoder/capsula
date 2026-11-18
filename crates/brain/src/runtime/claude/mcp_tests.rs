@@ -474,3 +474,22 @@ async fn a_reply_queued_before_a_core_only_revocation_never_leaves_the_listener(
     let (end, ()) = tokio::join!(session(ours, id, &context), drive);
     assert_eq!(end, SessionEnd::Closed);
 }
+
+/// A launch withdrawn while a call of it waits has that call let go as soon as Claude Code's
+/// state is reported to the core, not at some later brain step.
+#[tokio::test]
+async fn a_withdrawn_launchs_waiter_goes_when_claude_code_is_next_reported() {
+    let scratch = Scratch::new("mcp-reported");
+    let mut brain = crate::test_support::brain(&scratch, "");
+    let build = running(&mut brain);
+    let (start, launch) = live(&mut brain);
+    let id = launch.id();
+    assert!(bind(&mut brain, build, id));
+    let (waiting, mut answer) = call(build, id, 1);
+    brain.mcp_call(waiting, None).expect("no link");
+    assert_eq!(brain.claude.waiting.len(), 1);
+    start.control().withdraw();
+    brain.claude_reported(None).expect("no shell");
+    assert!(brain.claude.waiting.is_empty());
+    assert!(matches!(answer.try_recv(), Err(TryRecvError::Closed)));
+}

@@ -1008,6 +1008,7 @@ impl Brain {
             .coordinator
             .handle(input)
             .expect("availability is never stale");
+        self.settle_mcp();
         self.apply(effects, link)
     }
 
