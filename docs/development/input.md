@@ -71,6 +71,10 @@ sequenceDiagram
   firing. AltGr's synthetic left Ctrl can't be told from a real one by its flags; the right Alt
   that follows still cancels. Pause (E1) resets, because it has no dependable key-up. A keyboard
   overrun resets. A key with no make code is named through `MapVirtualKeyW`.
+  The adapter hands the reducer semantic left Ctrl, left Alt, Escape or other-key events.
+  Escape remains distinguishable from the registered Escape event, and bounded opaque
+  slots track the other physical makes and breaks. The reducer doesn't decode Windows
+  scan codes; diagnostics don't print slots or edge values.
 - **Same callback.** The gesture lives in an `Rc<Cell<Gesture>>` shared by the native callback
   and the owner. The callback installs the shared hold fence and revokes collection before
   deferring anything. Voice intents capture the target revision, session generation, choice
@@ -103,6 +107,9 @@ sequenceDiagram
   case, so a missed key-up can still leave a modifier held until that key is pressed again.
 
 ## What each effect does
+
+Custom matching and trial transitions are fixture-only. They share the default gesture's
+tap/hold timing but add no saved shortcut, physical trial, hotkey registration or input route.
 
 | Effect | Current shell action |
 |---|---|

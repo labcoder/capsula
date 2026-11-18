@@ -54,7 +54,7 @@ impl Ui {
         match key {
             Key::LeftControl => Some(&mut self.held.control),
             Key::LeftAlt => Some(&mut self.held.alt),
-            Key::Other(_) => None,
+            Key::Escape(_) | Key::Other(_) => None,
         }
     }
 
@@ -145,7 +145,7 @@ mod tests {
     use super::{PresenceEvent, UI, arm, changed, disarm};
     use crate::input::{Edge, Event, Key, TalkHeld};
 
-    const OTHER: Key = Key::Other(0x1E);
+    const OTHER: Key = Key::Other(crate::input::PhysicalKey::new(0x1E).unwrap());
 
     fn watch(held: TalkHeld) -> (Changed, Receiver<PresenceEvent>) {
         let (events, wakes) = async_channel::unbounded();

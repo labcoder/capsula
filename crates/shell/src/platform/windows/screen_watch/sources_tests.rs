@@ -97,7 +97,7 @@ fn sources() -> (ScreenSources<Fake>, Fake, Receiver<PresenceEvent>) {
 /// Whether the UI thread's half hears a key in another app, which only an armed watch does.
 fn hears(bit: &Changed) -> bool {
     super::super::heard_for_test(Event::Key {
-        key: Key::Other(0x1E),
+        key: Key::Other(crate::input::PhysicalKey::new(0x1E).unwrap()),
         edge: Edge::Down,
     });
     !bit.set()

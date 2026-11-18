@@ -12,20 +12,50 @@ use std::time::{Duration, Instant};
 pub mod hold;
 pub mod path;
 
+#[cfg(test)]
+mod shortcut;
+
 const WINDOW: Duration = Duration::from_millis(300);
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct PhysicalKey(u16);
+
+impl PhysicalKey {
+    pub const fn new(slot: u16) -> Option<Self> {
+        if slot < 1024 { Some(Self(slot)) } else { None }
+    }
+}
+
+impl std::fmt::Debug for PhysicalKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("PhysicalKey(..)")
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Key {
     LeftControl,
     LeftAlt,
-    /// Native make code: low eight bits, E0 in bit eight and E1 in bit nine.
-    Other(u16),
+    Escape(PhysicalKey),
+    Other(PhysicalKey),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+impl std::fmt::Debug for Key {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Key(..)")
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Edge {
     Down,
     Up,
+}
+
+impl std::fmt::Debug for Edge {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Edge(..)")
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -76,10 +106,21 @@ enum Phase {
     Releasing,
 }
 
-#[derive(Debug, Default, Clone, Copy)]
+#[derive(Default, Clone, Copy)]
 pub struct Gesture {
     down: [bool; 2],
     other: [u64; 16],
+    timing: Timing,
+}
+
+impl std::fmt::Debug for Gesture {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Gesture(..)")
+    }
+}
+
+#[derive(Default, Clone, Copy)]
+struct Timing {
     phase: Phase,
     first_tap: Option<Instant>,
 }
@@ -91,7 +132,7 @@ impl Gesture {
         expect(dead_code, reason = "only this crate's tests read it")
     )]
     pub(crate) fn holding(&self) -> bool {
-        matches!(self.phase, Phase::Active { holding: true, .. })
+        matches!(self.timing.phase, Phase::Active { holding: true, .. })
     }
 
     /// The talk keys still down. A hold ends at its first key-up, so the other may be.
@@ -103,6 +144,100 @@ impl Gesture {
     }
 
     pub fn deadline(&self) -> Option<Instant> {
+        self.timing.deadline()
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn handle(&mut self, event: Event, now: Instant) -> [Option<Effect>; 3] {
+        self.recognize(event, now, |_| {})
+    }
+
+    fn reset(&mut self) {
+        *self = Self::default();
+    }
+
+    fn recognize(
+        &mut self,
+        event: Event,
+        now: Instant,
+        mut report: impl FnMut(hold::InputReason),
+    ) -> [Option<Effect>; 3] {
+        if matches!(event, Event::Reset | Event::Escape) {
+            if !matches!(self.timing.phase, Phase::Ready) {
+                report(hold::InputReason::Reset);
+            }
+            let effects = self.timing.cancel();
+            self.reset();
+            return effects;
+        }
+        let Event::Key { key, edge } = event else {
+            return [self.timing.advance(now), None, None];
+        };
+        let index = match key {
+            Key::LeftControl => 0,
+            Key::LeftAlt => 1,
+            Key::Escape(key) | Key::Other(key) => {
+                if edge == Edge::Down && matches!(self.timing.phase, Phase::Active { .. }) {
+                    report(hold::InputReason::Interrupted);
+                }
+                return self.other_key(key, edge);
+            }
+        };
+        let down = edge == Edge::Down;
+        // shortcut: a held key's auto-repeat also reaches the threshold if both deadline timers are
+        // late, but only after the keyboard's repeat delay (about 500 ms, up to 1 s), so such a
+        // hold starts late; drop it once desk logs never show `by=Repeat`.
+        if self.down[index] == down {
+            return [self.timing.advance(now), None, None];
+        }
+        let threshold = self.timing.advance(now);
+        self.down[index] = down;
+        if down && self.down == [true; 2] {
+            let reason = if matches!(self.timing.phase, Phase::Ready) && self.other == [0; 16] {
+                hold::InputReason::ChordStarted
+            } else {
+                hold::InputReason::ChordSuppressed
+            };
+            report(reason);
+        }
+        if down
+            && matches!(self.timing.phase, Phase::Ready)
+            && self.down == [true; 2]
+            && self.other == [0; 16]
+        {
+            return self.timing.start(now);
+        }
+        if !down {
+            if matches!(self.timing.phase, Phase::Active { .. }) {
+                return self.timing.finish(now, threshold);
+            }
+            if self.down == [false; 2] && self.other == [0; 16] {
+                self.timing.phase = Phase::Ready;
+            }
+        }
+        [threshold, None, None]
+    }
+
+    fn other_key(&mut self, key: PhysicalKey, edge: Edge) -> [Option<Effect>; 3] {
+        let word = usize::from(key.0 / 64);
+        let mask = 1u64 << (key.0 % 64);
+        if edge == Edge::Down {
+            if self.other[word] & mask != 0 {
+                return [None; 3];
+            }
+            self.other[word] |= mask;
+            return self.timing.cancel();
+        }
+        self.other[word] &= !mask;
+        if self.down == [false; 2] && self.other == [0; 16] {
+            self.timing.phase = Phase::Ready;
+        }
+        [None; 3]
+    }
+}
+
+impl Timing {
+    fn deadline(&self) -> Option<Instant> {
         let hold = match self.phase {
             Phase::Active {
                 started,
@@ -116,77 +251,25 @@ impl Gesture {
         }
     }
 
-    #[cfg(any(test, feature = "test-support"))]
-    pub fn handle(&mut self, event: Event, now: Instant) -> [Option<Effect>; 3] {
-        self.recognize(event, now)
+    fn start(&mut self, now: Instant) -> [Option<Effect>; 3] {
+        self.phase = Phase::Active {
+            started: now,
+            holding: false,
+        };
+        [Some(Effect::Listening), None, None]
     }
 
-    fn reset(&mut self) {
-        *self = Self::default();
-    }
-
-    fn recognize(&mut self, event: Event, now: Instant) -> [Option<Effect>; 3] {
-        if matches!(event, Event::Reset | Event::Escape) {
-            if !matches!(self.phase, Phase::Ready) {
-                tracing::debug!(stage = ?hold::InputStage::Gesture, reason = ?hold::InputReason::Reset, "held speech input boundary");
-            }
-            let effects = self.cancel();
-            self.reset();
-            return effects;
+    fn finish(&mut self, now: Instant, threshold: Option<Effect>) -> [Option<Effect>; 3] {
+        let holding = matches!(self.phase, Phase::Active { holding: true, .. });
+        self.phase = Phase::Ready;
+        if holding {
+            return [threshold, Some(Effect::HoldEnded), Some(Effect::Resting)];
         }
-        let Event::Key { key, edge } = event else {
-            return [self.advance(now), None, None];
-        };
-        let index = match key {
-            Key::LeftControl => 0,
-            Key::LeftAlt => 1,
-            Key::Other(code) => return self.other_key(code, edge),
-        };
-        let down = edge == Edge::Down;
-        // shortcut: a held key's auto-repeat also reaches the threshold if both deadline timers are
-        // late, but only after the keyboard's repeat delay (about 500 ms, up to 1 s), so such a
-        // hold starts late; drop it once desk logs never show `by=Repeat`.
-        if self.down[index] == down {
-            return [self.advance(now), None, None];
+        let open = self.first_tap.take().map(|_| Effect::OpenInput);
+        if open.is_none() {
+            self.first_tap = Some(now);
         }
-        let threshold = self.advance(now);
-        self.down[index] = down;
-        if down && self.down == [true; 2] {
-            let reason = if matches!(self.phase, Phase::Ready) && self.other == [0; 16] {
-                hold::InputReason::ChordStarted
-            } else {
-                hold::InputReason::ChordSuppressed
-            };
-            tracing::debug!(stage = ?hold::InputStage::Gesture, ?reason, "held speech input boundary");
-        }
-        if down
-            && matches!(self.phase, Phase::Ready)
-            && self.down == [true; 2]
-            && self.other == [0; 16]
-        {
-            self.phase = Phase::Active {
-                started: now,
-                holding: false,
-            };
-            return [Some(Effect::Listening), None, None];
-        }
-        if !down {
-            if let Phase::Active { holding, .. } = self.phase {
-                self.phase = Phase::Ready;
-                if holding {
-                    return [threshold, Some(Effect::HoldEnded), Some(Effect::Resting)];
-                }
-                let open = self.first_tap.take().map(|_| Effect::OpenInput);
-                if open.is_none() {
-                    self.first_tap = Some(now);
-                }
-                return [Some(Effect::Resting), open, None];
-            }
-            if self.down == [false; 2] && self.other == [0; 16] {
-                self.phase = Phase::Ready;
-            }
-        }
-        [threshold, None, None]
+        [Some(Effect::Resting), open, None]
     }
 
     fn cancel(&mut self) -> [Option<Effect>; 3] {
@@ -202,38 +285,17 @@ impl Gesture {
         effects
     }
 
-    fn other_key(&mut self, code: u16, edge: Edge) -> [Option<Effect>; 3] {
-        if edge == Edge::Down && matches!(self.phase, Phase::Active { .. }) {
-            tracing::debug!(stage = ?hold::InputStage::Gesture, reason = ?hold::InputReason::Interrupted, "held speech input boundary");
-        }
-        if code >= 1024 {
-            let effects = self.cancel();
-            self.reset();
-            return effects;
-        }
-        let word = usize::from(code / 64);
-        let mask = 1u64 << (code % 64);
-        if edge == Edge::Down {
-            if self.other[word] & mask != 0 {
-                return [None; 3];
-            }
-            self.other[word] |= mask;
-            return self.cancel();
-        }
-        self.other[word] &= !mask;
-        if self.down == [false; 2] && self.other == [0; 16] {
-            self.phase = Phase::Ready;
-        }
-        [None; 3]
-    }
-
-    fn advance(&mut self, now: Instant) -> Option<Effect> {
+    fn expire_tap(&mut self, now: Instant) {
         if self
             .first_tap
             .is_some_and(|released| now >= released + WINDOW)
         {
             self.first_tap = None;
         }
+    }
+
+    fn advance(&mut self, now: Instant) -> Option<Effect> {
+        self.expire_tap(now);
         if let Phase::Active {
             started,
             holding: false,
@@ -253,7 +315,7 @@ impl Gesture {
 
 #[cfg(test)]
 mod tests {
-    use super::{Edge, Effect, Event, Gesture, Key, TalkHeld, WINDOW};
+    use super::{Edge, Effect, Event, Gesture, Key, PhysicalKey, TalkHeld, WINDOW};
     use std::time::{Duration, Instant};
 
     fn key(gesture: &mut Gesture, key: Key, edge: Edge, now: Instant) -> [Option<Effect>; 3] {
@@ -435,7 +497,12 @@ mod tests {
         let mut releasing = Gesture::default();
         chord(&mut releasing, start);
         assert_eq!(
-            key(&mut releasing, Key::Other(0x1E), Edge::Down, at(10)),
+            key(
+                &mut releasing,
+                Key::Other(PhysicalKey::new(0x1E).unwrap()),
+                Edge::Down,
+                at(10)
+            ),
             [Some(Effect::Resting), None, None],
             "another key cancels"
         );
@@ -562,12 +629,22 @@ mod tests {
         tap(&mut gesture, start);
         chord(&mut gesture, start);
         assert_eq!(
-            key(&mut gesture, Key::Other(1), Edge::Down, start),
+            key(
+                &mut gesture,
+                Key::Other(PhysicalKey::new(1).unwrap()),
+                Edge::Down,
+                start
+            ),
             [Some(Effect::Resting), None, None],
             "other key cancels listening"
         );
         assert_eq!(gesture.deadline(), None, "interruption cancels both timers");
-        key(&mut gesture, Key::Other(1), Edge::Up, start);
+        key(
+            &mut gesture,
+            Key::Other(PhysicalKey::new(1).unwrap()),
+            Edge::Up,
+            start,
+        );
         assert_eq!(
             key(&mut gesture, Key::LeftAlt, Edge::Up, start),
             [None; 3],
@@ -595,7 +672,12 @@ mod tests {
         let mut gesture = Gesture::default();
         key(&mut gesture, Key::LeftControl, Edge::Down, now);
         assert_eq!(
-            key(&mut gesture, Key::Other(1), Edge::Down, now),
+            key(
+                &mut gesture,
+                Key::Other(PhysicalKey::new(1).unwrap()),
+                Edge::Down,
+                now
+            ),
             [None; 3],
             "AltGr synthetic Ctrl plus right Alt"
         );
@@ -632,15 +714,19 @@ mod tests {
     fn held_other_keys_block_chords_until_every_key_is_released() {
         let now = Instant::now();
         let mut gesture = Gesture::default();
-        let right_alt = Key::Other(0x138);
-        for other in [right_alt, right_alt, Key::Other(1023)] {
+        let right_alt = Key::Other(PhysicalKey::new(0x138).unwrap());
+        for other in [
+            right_alt,
+            right_alt,
+            Key::Other(PhysicalKey::new(1023).unwrap()),
+        ] {
             assert_eq!(
                 key(&mut gesture, other, Edge::Down, now),
                 [None; 3],
                 "other makes and repeats do not activate"
             );
         }
-        for released in [right_alt, Key::Other(1023)] {
+        for released in [right_alt, Key::Other(PhysicalKey::new(1023).unwrap())] {
             for modifier in [Key::LeftControl, Key::LeftAlt] {
                 assert_eq!(
                     key(&mut gesture, modifier, Edge::Down, now),
@@ -663,18 +749,24 @@ mod tests {
 
     #[test]
     fn invalid_other_identity_resets_and_cancels_without_indexing() {
+        let event = |code, edge| {
+            PhysicalKey::new(code).map_or(Event::Reset, |key| Event::Key {
+                key: Key::Other(key),
+                edge,
+            })
+        };
         let now = Instant::now();
         let mut gesture = Gesture::default();
         chord(&mut gesture, now);
         gesture.handle(Event::Deadline, now + WINDOW);
         assert_eq!(
-            key(&mut gesture, Key::Other(1024), Edge::Down, now + WINDOW),
+            gesture.handle(event(1024, Edge::Down), now + WINDOW),
             [Some(Effect::HoldEnded), Some(Effect::Resting), None],
             "invalid identity cancels active hold"
         );
         assert_eq!(gesture.deadline(), None, "invalid identity clears timers");
         assert_eq!(
-            key(&mut gesture, Key::Other(u16::MAX), Edge::Up, now + WINDOW),
+            gesture.handle(event(u16::MAX, Edge::Up), now + WINDOW),
             [None; 3],
             "invalid release also resets safely"
         );
@@ -687,7 +779,7 @@ mod tests {
         for event in [
             Event::Reset,
             Event::Key {
-                key: Key::Other(1),
+                key: Key::Other(PhysicalKey::new(1).unwrap()),
                 edge: Edge::Down,
             },
         ] {

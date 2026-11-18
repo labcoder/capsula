@@ -943,7 +943,10 @@ fn esc_through_the_hotkey_s_reducer_takes_a_pending_hold_s_marks_and_cancels_it(
     // Kumochi is in front, so the sources don't count the key: the reducer's own cancel ends
     // the hold first, and the press then takes the marks.
     let (watching, deliver, at) = natively_marked(cx);
-    let (key, edge) = (Key::Other(1), Edge::Down);
+    let (key, edge) = (
+        Key::Escape(crate::input::PhysicalKey::new(1).unwrap()),
+        Edge::Down,
+    );
     deliver(Event::Key { key, edge }, after(at, 2000));
     deliver(Event::Escape, after(at, 2000));
     cx.run_until_parked();
@@ -965,7 +968,10 @@ fn esc_in_another_app_takes_a_pending_hold_s_marks_and_cancels_it(cx: &mut TestA
                     .expect("a wake");
             });
         };
-        let (key, edge) = (Key::Other(1), Edge::Down);
+        let (key, edge) = (
+            Key::Escape(crate::input::PhysicalKey::new(1).unwrap()),
+            Edge::Down,
+        );
         deliver(Event::Key { key, edge }, after(at, 2000));
         let heard = watching
             .bit
@@ -1124,7 +1130,10 @@ fn a_press_that_cancelled_its_pending_hold_leaves_an_ordinary_drawing_up(cx: &mu
                         .expect("a wake");
                 });
             };
-            let (key, edge) = (Key::Other(1), Edge::Down);
+            let (key, edge) = (
+                Key::Escape(crate::input::PhysicalKey::new(1).unwrap()),
+                Edge::Down,
+            );
             deliver(Event::Key { key, edge }, after(at, 2000));
             if woke_first.is_some() {
                 let bit = watching.bit.borrow();
@@ -1172,7 +1181,10 @@ fn ended_by_esc_down(watching: &Watching, cx: &mut TestAppContext) -> (Deliver, 
         let hold = owner.voice.pending.as_ref().expect("the hold");
         assert!(matches!(hold.source, Source::Waiting));
     });
-    let (key, edge) = (Key::Other(1), Edge::Down);
+    let (key, edge) = (
+        Key::Escape(crate::input::PhysicalKey::new(1).unwrap()),
+        Edge::Down,
+    );
     deliver(Event::Key { key, edge }, after(at, 600));
     cx.run_until_parked();
     owner.read_with(cx, |owner, _| {
@@ -1204,7 +1216,10 @@ fn the_hotkey_s_press_after_an_esc_down_that_ended_a_waiting_hold_does_nothing_m
 /// backlog: hold 1's input is revoked and its cancel is written, and nothing is applied yet.
 fn press_deferred(deliver: &Deliver, at: Instant, cx: &mut TestAppContext) {
     cx.update(|_| {
-        let (key, edge) = (Key::Other(1), Edge::Down);
+        let (key, edge) = (
+            Key::Escape(crate::input::PhysicalKey::new(1).unwrap()),
+            Edge::Down,
+        );
         deliver(Event::Key { key, edge }, after(at, 2000));
         deliver(Event::Escape, after(at, 2000));
     });
