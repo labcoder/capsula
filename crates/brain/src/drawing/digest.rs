@@ -1,7 +1,8 @@
 //! The current turn's `Drawings on screen` line: each of a thread's visible scenes, oldest
 //! first, with its begin header and its objects' ids and kinds. Headers and objects come from
-//! the drawing system at one moment, so they always agree. A route that can't take a screen
-//! picture gets the line without screen scenes.
+//! the drawing system at one moment, so they always agree. The `ChatGPT` connection gets the full
+//! line regardless of the chosen model's image support. Every other connection gets the line
+//! without screen scenes.
 
 use std::fmt;
 
@@ -33,12 +34,12 @@ impl Default for Digest {
 }
 
 impl Digest {
-    /// The line with every scene, for a route that takes screen pictures.
+    /// The line with every scene, for `ChatGPT` regardless of the chosen model's image support.
     pub(crate) fn as_str(&self) -> &str {
         &self.all
     }
 
-    /// The line without screen scenes, for a route that doesn't.
+    /// The line without screen scenes, for every connection other than `ChatGPT`.
     pub(crate) fn off_screen(&self) -> &str {
         &self.off_screen
     }

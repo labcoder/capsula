@@ -84,10 +84,12 @@ a comma each. Scenes take room newest first, each from its newest object back to
 pair that doesn't fit, so an older scene may still list small pairs after a newer one ran out.
 A scene that lists fewer than it holds adds `"more"`, the count left out. The reducer
 renders the line twice, each under its own cap: with every scene, and without screen scenes.
-The build sends the second to a route that can't take a screen picture (`takes_images`), so
-Claude Code and the Anthropic key never get a screen scene's stamped size, title, alt or object
-ids, even after a model switch on the same thread. The line goes after
-Local time in the current user item, and the empty `[]` line overrides stale references after
+This keeps screen-scene metadata with the account that received the picture. The build chooses by
+connection: ChatGPT gets the full line even if the selected model can't take images, and every
+other connection gets the line without screen scenes. This does not filter user or model prose,
+summaries, or same-account native ChatGPT replay, whose stored arguments can retain object ids and
+whose size-error result can contain picture dimensions. The line goes after Local time in the
+current user item, and the empty `[]` line overrides stale references after
 Esc. The complete rendered item, including outer JSON escaping, counts against the ordinary
 request bound; the line's `Debug` shows only its length, and it is never logged.
 
