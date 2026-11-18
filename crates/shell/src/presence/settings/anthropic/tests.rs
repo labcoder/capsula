@@ -2,7 +2,7 @@ use gpui_kit::{
     AnyWindowHandle, AppContext as _, Entity, Render, TestAppContext, VisualTestContext,
     WindowOptions,
 };
-use kumochi_protocol::message::Incarnation;
+use kumochi_protocol::message::{Incarnation, KeyStageId, KeyStagePlan};
 
 use super::*;
 use crate::link::Session;
@@ -143,6 +143,62 @@ fn a_fresh_unconfirmed_view_warns_that_paste_can_replace_a_key(cx: &mut TestAppC
     visual.run_until_parked();
     visual.update(|window, cx| window.draw(cx).clear(cx));
     assert!(visual.debug_bounds(warning).is_some());
+}
+
+#[gpui::test]
+fn a_lost_save_acknowledgement_replaces_the_old_status(cx: &mut TestAppContext) {
+    let (window, owner, _) = isolated_row(cx);
+    let mut visual = VisualTestContext::from_window(window, cx);
+    let unknown = "anthropic-status:Couldn’t confirm the save. Check the key before pasting again.";
+    for (old, old_status) in [
+        (KeyView::Missing, "anthropic-status:No key saved"),
+        (
+            KeyView::Ready,
+            "anthropic-status:Anthropic accepted the key",
+        ),
+    ] {
+        visual.update(|_, cx| {
+            owner.update(cx, |owner, cx| {
+                owner.settings.update(cx, |state, cx| {
+                    let key = &mut state.key_paste;
+                    *key = KeyPaste::default();
+                    key.receive(old);
+                    let now = Instant::now();
+                    let at = key
+                        .begin(Some(Zeroizing::new(SYNTHETIC.into())), 7, now, |_| true)
+                        .expect("begin");
+                    let id = KeyStageId([4; 16]);
+                    let write = key
+                        .planned(
+                            7,
+                            &ControlToShell::AnthropicKeyStage {
+                                request: at.request,
+                                result: Ok(KeyStagePlan {
+                                    id,
+                                    len: u16::try_from(SYNTHETIC.len()).expect("bounded"),
+                                }),
+                            },
+                            now,
+                        )
+                        .expect("stage plan")
+                        .simulate_write(now);
+                    key.written(&write, now, |op| {
+                        assert_eq!(op, ConnectionOp::AnthropicKeyStaged { plan: id });
+                        true
+                    });
+                    assert!(key.expire(at, at.deadline));
+                    cx.notify();
+                });
+            });
+        });
+        visual.run_until_parked();
+        visual.update(|window, cx| window.draw(cx).clear(cx));
+        assert!(visual.debug_bounds(unknown).is_some());
+        assert!(visual.debug_bounds(old_status).is_none());
+        assert!(visual.debug_bounds("Key saved").is_none());
+        assert!(visual.debug_bounds("anthropic-check").is_some());
+        assert!(visual.debug_bounds("anthropic-remove").is_none());
+    }
 }
 
 #[gpui::test]

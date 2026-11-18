@@ -65,21 +65,33 @@ impl SettingsView {
                     Text::AnthropicIntro,
                     Text::AnthropicDisclosure,
                     Text::AnthropicBilling,
-                    status(state),
                 ]
                 .into_iter()
                 .map(|text| div().text_sm().child(strings.get(text))),
             )
+            .child({
+                let text = strings.get(status(state));
+                div()
+                    .debug_selector(|| format!("anthropic-status:{text}"))
+                    .text_sm()
+                    .child(text)
+            })
             .children(
                 (state.saved()
                     && state.removal() == Removal::None
+                    && state.failure() != Some(PasteFailure::Unconfirmed)
                     && matches!(state.view(), Some(KeyView::Checking | KeyView::Unconfirmed)))
-                .then(|| div().text_sm().child(strings.get(Text::AnthropicSaved))),
+                .then(|| {
+                    let text = strings.get(Text::AnthropicSaved);
+                    div().debug_selector(|| text.clone()).text_sm().child(text)
+                }),
             )
-            .children((state.can_paste() && state.view() != Some(KeyView::Missing)).then(|| {
-                let text = strings.get(Text::AnthropicReplaceNote);
-                div().debug_selector(|| text.clone()).text_sm().child(text)
-            }))
+            .children(
+                (state.can_paste() && state.view() != Some(KeyView::Missing)).then(|| {
+                    let text = strings.get(Text::AnthropicReplaceNote);
+                    div().debug_selector(|| text.clone()).text_sm().child(text)
+                }),
+            )
             .children(notice(state).map(|text| div().text_sm().child(strings.get(text))))
             .child(
                 div()
@@ -165,6 +177,9 @@ fn status(state: &KeyPaste) -> Text {
     if state.saving() {
         return Text::AnthropicSaving;
     }
+    if state.failure() == Some(PasteFailure::Unconfirmed) {
+        return Text::AnthropicSaveUnconfirmed;
+    }
     match state.view() {
         None => Text::Failed,
         Some(KeyView::Missing) => Text::AnthropicMissing,
@@ -180,7 +195,7 @@ fn notice(state: &KeyPaste) -> Option<Text> {
         Some(PasteFailure::Clipboard) => Some(Text::AnthropicClipboardInvalid),
         Some(PasteFailure::TooLong) => Some(Text::AnthropicClipboardTooLong),
         Some(PasteFailure::Unsaved) => Some(Text::AnthropicSaveFailed),
-        Some(PasteFailure::Unconfirmed) => Some(Text::AnthropicSaveUnconfirmed),
+        Some(PasteFailure::Unconfirmed) => None,
         Some(PasteFailure::Offline) => Some(Text::AccountSendFailed),
         Some(PasteFailure::Rejected(reason)) => Some(rejection(reason)),
         None => match state.view() {
