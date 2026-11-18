@@ -4,7 +4,7 @@
 //! drops of a speaker happen after it.
 
 use std::fmt;
-use std::sync::atomic::{Ordering, fence};
+use std::sync::atomic::{AtomicBool, Ordering, fence};
 use std::sync::mpsc::SyncSender;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, TryLockError};
 
@@ -30,6 +30,10 @@ pub struct OutputOwner {
     state: Mutex<State>,
     changed: Sender<()>,
     changes: Receiver<()>,
+    /// Runs as `opened` is entered, before its decision: a test's point between the link's own
+    /// check and the owner's.
+    #[cfg(any(test, feature = "test-support"))]
+    before_opened: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 
 impl Default for OutputOwner {
@@ -39,6 +43,8 @@ impl Default for OutputOwner {
             state: Mutex::default(),
             changed: sender,
             changes,
+            #[cfg(any(test, feature = "test-support"))]
+            before_opened: Mutex::default(),
         }
     }
 }
@@ -427,11 +433,15 @@ impl OutputOwner {
         begun
     }
 
-    /// The link thread's open of `generation` returned, before its reader starts. A kept speaker
-    /// is fenced first: withdrawn when talk-back went off, else paused under a held inhibit, and
-    /// only then accepted, so its announcement can't precede its fence. An
-    /// `Err` speaker couldn't be fenced: the link drops it and ends the session. A stream that
-    /// retired before this keeps its entry until now, so the session never goes live without it.
+    /// The link thread's open of `generation` returned, before its reader starts. Under the owner's
+    /// lock it reads whether Quit began and whether its session is still `alive`; Quit and
+    /// session loss pass through [`OutputOwner::cancelled`] after setting those, so this decision
+    /// and theirs are ordered. A refused speaker is never accepted, so it announces nothing, and is
+    /// let go after the lock. A kept speaker is fenced first: withdrawn when talk-back went off,
+    /// else paused under a held inhibit, and only then accepted, so its announcement can't
+    /// precede its fence. An `Err` speaker couldn't be fenced: the link drops it and ends the
+    /// session. A stream that retired before this keeps its entry until now, so the session never
+    /// goes live without it.
     ///
     /// # Errors
     /// The speaker, when it couldn't be fenced.
@@ -439,14 +449,34 @@ impl OutputOwner {
         &self,
         generation: OutputGeneration,
         speaker: Option<Speaker>,
+        quitting: &AtomicBool,
+        alive: &AtomicBool,
     ) -> Result<Option<Speaker>, Speaker> {
+        #[cfg(any(test, feature = "test-support"))]
+        if let Some(hook) = self
+            .before_opened
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take()
+        {
+            hook();
+        }
         let mut state = self.lock();
         let opening = state.output == Output::Opening(generation);
+        let current = !quitting.load(Ordering::SeqCst) && alive.load(Ordering::Acquire);
+        let mut refused = None;
         let opened = match speaker {
             None => {
                 if opening {
                     state.quiet(Why::Refused);
                 }
+                Ok(None)
+            }
+            Some(speaker) if !current => {
+                if opening {
+                    state.quiet(Why::Refused);
+                }
+                refused = Some(speaker);
                 Ok(None)
             }
             Some(speaker) => {
@@ -472,8 +502,24 @@ impl OutputOwner {
             }
         };
         drop(state);
+        drop(refused);
         self.wake();
         opened
+    }
+
+    /// Quit began or a session was lost, as the caller already published: returns once no open
+    /// is mid-decision, so every later [`OutputOwner::opened`] sees it.
+    pub(super) fn cancelled(&self) {
+        drop(self.state.lock().unwrap_or_else(PoisonError::into_inner));
+    }
+
+    /// Runs `hook` as the next `opened` is entered.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn before_opened(&self, hook: Box<dyn FnOnce() + Send>) {
+        *self
+            .before_opened
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(hook);
     }
 
     /// The link thread ends `session`, first in teardown: claims stop matching, a bound

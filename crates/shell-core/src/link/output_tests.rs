@@ -84,7 +84,12 @@ fn rig(owner: &OutputOwner, session: u64) -> Rig<'_> {
         wake: owner.waker(),
     };
     let mut speaker = owner
-        .opened(generation, fake::open(outlet, Arc::clone(&script)))
+        .opened(
+            generation,
+            fake::open(outlet, Arc::clone(&script)),
+            &AtomicBool::new(false),
+            &AtomicBool::new(true),
+        )
         .expect("fenced")
         .expect("opened");
     let ended = Arc::new(AtomicBool::new(false));
@@ -421,7 +426,12 @@ fn a_stream_that_retires_before_its_open_returns_leaves_the_session_retired() {
     });
     assert_eq!(owner.view().key, None, "still opening");
     let speaker = owner
-        .opened(generation, Some(speaker))
+        .opened(
+            generation,
+            Some(speaker),
+            &AtomicBool::new(false),
+            &AtomicBool::new(true),
+        )
         .expect("fenced")
         .expect("kept");
     let key = owner.view().key.expect("a key");
@@ -458,7 +468,15 @@ fn a_refused_open_whose_thread_outlives_its_caller_settles_on_its_own_last_wake(
     });
     assert!(refused.is_none(), "not started in time");
     assert!(
-        matches!(owner.opened(generation, refused), Ok(None)),
+        matches!(
+            owner.opened(
+                generation,
+                refused,
+                &AtomicBool::new(false),
+                &AtomicBool::new(true)
+            ),
+            Ok(None)
+        ),
         "refused"
     );
     let (token, _gate, _mic) = bound(&owner, 1);

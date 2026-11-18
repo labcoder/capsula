@@ -202,16 +202,19 @@ waits, and a read that overlaps a write returns nothing.
   owner reserves its generation and ledger slot before `Connected`, and fences it before its
   reader starts. A speaker that fails to open, opens too late, or whose open returns after Quit
   began or the session was lost, leaves the session working without output and announces
-  nothing: the owner accepts a speaker, so its reports go out, only once it's fenced.
+  nothing: the owner accepts a speaker, so its reports go out, only once it's fenced. It reads
+  Quit and the session's permit in the same locked step, and Quit and session loss pass through
+  that lock once set, so a cancellation after the link's own check still refuses the speaker.
 - **Routing.** The data reader hands `SegmentQueued` and `SpeechPcm` to the speaker instead of
   the UI. The control watcher hands it each newly named run from `RunState`, and each
   `SpeechRevoked` as a Stop. A frame whose run control hasn't named is held, uncredited, so
   data that overtakes its `RunState` can't start playback; a revoke that comes first fences it.
   Without a speaker, `SpeechPcm` is zeroed and credited.
 - **Failure.** A command the speaker's queue refuses ends the connection, since a lost revoke
-  would leave speech playing. Once a speaker opened, the link arms its worker's end: when the
-  worker ends for any reason, idle included, it aborts both pipes, so the link notices at once
-  and reconnects. A worker that ended before it was armed ends the connection as it's armed.
+  would leave speech playing. Once the owner kept a speaker, the link arms its worker's end:
+  when the worker ends for any reason, idle included, it aborts both pipes, so the link notices
+  at once and reconnects. A worker that ended before it was armed ends the connection as it's
+  armed.
 - **Teardown.** The link closes the control queue, so a worker left behind can't keep the
   writer waiting, aborts both pipes, drops the speaker (waiting up to 1 s for its thread), then
   joins its own threads.

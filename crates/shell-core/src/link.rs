@@ -349,11 +349,14 @@ struct Credit {
 }
 
 #[derive(Clone)]
-struct EndSession(Arc<AtomicBool>);
+struct EndSession {
+    alive: Arc<AtomicBool>,
+    shared: Arc<Shared>,
+}
 
 impl Drop for EndSession {
     fn drop(&mut self) {
-        self.0.store(false, Ordering::Release);
+        self.shared.lose(&self.alive);
     }
 }
 
@@ -487,6 +490,12 @@ struct Shared {
 }
 
 impl Shared {
+    /// Ends a session's permit; the output owner sees it before any later acceptance.
+    fn lose(&self, alive: &AtomicBool) {
+        alive.store(false, Ordering::Release);
+        self.output.cancelled();
+    }
+
     fn revoke_input(&self) -> Option<GestureId> {
         let gesture = GestureId(self.input.swap(0, Ordering::AcqRel));
         if gesture.0 == 0 {
@@ -582,11 +591,13 @@ impl LinkHandle {
         Some(gesture)
     }
 
-    /// Marks Quit, so the link starts no brain from here on. Cheap enough for the UI thread.
+    /// Marks Quit, so the link starts no brain from here on and no speaker opening now is
+    /// accepted. Cheap enough for the UI thread: the output owner's sections are short.
     /// Returns false when Quit was already under way.
     pub fn begin_quit(&self) -> bool {
         self.cancel_input();
         let first = !self.shared.quitting.swap(true, Ordering::SeqCst);
+        self.shared.output.cancelled();
         // Wakes a link waiting for Retry, so it sees Quit and ends.
         let _woken = self.retry.try_send(());
         first
@@ -705,7 +716,7 @@ impl LinkHandle {
         if let Some(recording) = &self.control_recording {
             let queued = send(recording);
             if !queued && mutation {
-                session.alive.store(false, Ordering::Release);
+                shared.lose(&session.alive);
             }
             return queued;
         }
@@ -713,7 +724,7 @@ impl LinkHandle {
             .outbox(session, |outbox| {
                 let queued = send(&outbox.control);
                 if !queued && mutation {
-                    session.alive.store(false, Ordering::Release);
+                    shared.lose(&session.alive);
                     outbox.pipe.abort();
                 }
                 queued
@@ -731,7 +742,7 @@ impl LinkHandle {
             recording.close();
         }
         self.shared.outbox(session, |outbox| outbox.pipe.abort());
-        session.alive.store(false, Ordering::Release);
+        self.shared.lose(&session.alive);
     }
 
     /// Queues a typed turn or a page request for `session`'s brain, like
@@ -760,7 +771,7 @@ impl LinkHandle {
                     DataOut::Submit(DataToBrain::TextSubmit { .. } | DataToBrain::AskAbout { .. })
                 );
                 if turn && outbox.submits.load(Ordering::SeqCst) == u32::MAX {
-                    session.alive.store(false, Ordering::Release);
+                    self.shared.lose(&session.alive);
                     outbox.pipe.abort();
                     return false;
                 }
@@ -963,7 +974,6 @@ impl Link {
         (generation, tail): (OutputGeneration, Arc<speaker::Tail>),
         control: &Sender<ControlToBrain>,
         credit: &Arc<Credit>,
-        pipes: [&Arc<PipeClient>; 2],
         alive: &AtomicBool,
     ) -> Option<Speaker> {
         let open = self.speaker.as_ref()?;
@@ -975,18 +985,11 @@ impl Link {
             tail,
             wake: self.shared.output.waker(),
         })?;
-        // Quit or a lost session while the open blocked: let go unarmed and never accepted, so
-        // it announces nothing.
+        // An early exit only: the owner decides again under its lock.
         if self.quitting() || !alive.load(Ordering::Acquire) {
             drop(speaker);
             return None;
         }
-        let pipes = pipes.map(Arc::clone);
-        speaker.arm(Box::new(move || {
-            for pipe in &pipes {
-                pipe.abort();
-            }
-        }));
         Some(speaker)
     }
 
@@ -1015,7 +1018,10 @@ impl Link {
             return false;
         };
         let generation = previous + 1;
-        let ended = EndSession(Arc::new(AtomicBool::new(true)));
+        let ended = EndSession {
+            alive: Arc::new(AtomicBool::new(true)),
+            shared: Arc::clone(&self.shared),
+        };
         let credit = Arc::new(Credit {
             bytes: AtomicU32::new(0),
             wake: data_out.downgrade(),
@@ -1074,7 +1080,7 @@ impl Link {
         );
         let open = events
             .send_blocking(LinkEvent::Connected(Session {
-                alive: Arc::clone(&ended.0),
+                alive: Arc::clone(&ended.alive),
                 generation,
                 credit: Arc::clone(&credit),
                 issue_origin,
@@ -1085,17 +1091,27 @@ impl Link {
         let mut speaker = match opening {
             Some(opening) if open && !self.quitting() => {
                 let output = opening.0;
-                let opened =
-                    self.open_speaker(opening, &control_out, &credit, [&control, &data], &ended.0);
-                self.shared
+                let opened = self.open_speaker(opening, &control_out, &credit, &ended.alive);
+                let kept = self
+                    .shared
                     .output
-                    .opened(output, opened)
+                    .opened(output, opened, &self.shared.quitting, &ended.alive)
                     .unwrap_or_else(|speaker| {
                         drop(speaker);
                         control.abort();
                         data.abort();
                         None
-                    })
+                    });
+                // Armed only once kept, so letting a refused one go ends nothing.
+                if let Some(speaker) = &kept {
+                    let pipes = [Arc::clone(&control), Arc::clone(&data)];
+                    speaker.arm(Box::new(move || {
+                        for pipe in &pipes {
+                            pipe.abort();
+                        }
+                    }));
+                }
+                kept
             }
             _ => None,
         };

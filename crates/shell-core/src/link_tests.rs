@@ -2547,40 +2547,66 @@ fn talk_back_off_while_opening_withdraws_the_late_open_before_any_speech() {
 
 #[test]
 fn an_open_that_returns_after_quit_began_announces_nothing() {
-    a_late_open_announces_nothing(Loss::Quit);
+    a_late_open_announces_nothing(Loss::Quit, At::Opener);
 }
 
 #[test]
 fn an_open_that_returns_after_the_session_was_lost_announces_nothing() {
-    a_late_open_announces_nothing(Loss::Session);
+    a_late_open_announces_nothing(Loss::Session, At::Opener);
 }
 
-/// What ends a session while its speaker's open is held.
+#[test]
+fn quit_after_the_link_checked_a_returned_open_still_refuses_it() {
+    a_late_open_announces_nothing(Loss::Quit, At::Decision);
+}
+
+#[test]
+fn a_session_lost_after_the_link_checked_a_returned_open_still_refuses_it() {
+    a_late_open_announces_nothing(Loss::Session, At::Decision);
+}
+
+/// What ends a session while its speaker opens.
 #[derive(Clone, Copy)]
 enum Loss {
     Quit,
     Session,
 }
 
-/// Holds the open, then quits or loses the session once the opener was entered and before
-/// the open returns.
-fn a_late_open_announces_nothing(loss: Loss) {
+/// When it ends: inside the blocked opener, or after the link's own check of the returned
+/// speaker and before the owner's decision.
+#[derive(Clone, Copy)]
+enum At {
+    Opener,
+    Decision,
+}
+
+/// Quits or loses the session while its speaker opens; the speaker is never announced.
+fn a_late_open_announces_nothing(loss: Loss, at: At) {
     use super::output::{OutputKey, OutputView, Why};
-    let label = match loss {
-        Loss::Quit => "quit-while-opening",
-        Loss::Session => "lost-while-opening",
+    let label = match (loss, at) {
+        (Loss::Quit, At::Opener) => "quit-in-opener",
+        (Loss::Quit, At::Decision) => "quit-before-decision",
+        (Loss::Session, At::Opener) => "lost-in-opener",
+        (Loss::Session, At::Decision) => "lost-before-decision",
     };
     let (link, script, go, entered) = opening_speaker(label);
     let events = patient(link.events);
     let session = connected(next(&events));
+    let cancel = {
+        let handle = link.handle.clone();
+        move || match loss {
+            Loss::Quit => assert!(handle.begin_quit(), "the first quit"),
+            Loss::Session => session
+                .alive()
+                .store(false, std::sync::atomic::Ordering::Release),
+        }
+    };
     entered
         .recv_timeout(PATIENCE)
         .expect("the opener was entered");
-    match loss {
-        Loss::Quit => assert!(link.handle.begin_quit(), "the first quit"),
-        Loss::Session => session
-            .alive()
-            .store(false, std::sync::atomic::Ordering::Release),
+    match at {
+        At::Opener => cancel(),
+        At::Decision => link.handle.output().before_opened(Box::new(cancel)),
     }
     go.send(()).expect("opening");
     let output = link.handle.output();
