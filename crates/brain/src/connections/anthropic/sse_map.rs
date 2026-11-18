@@ -7,6 +7,7 @@ use crate::connections::model::framer::{Framer, Limit};
 use crate::connections::model::sse::{MAX_TEXT_BYTES, Progress, SseEvent};
 
 use super::error::Failure;
+use super::request::literal;
 
 /// A successful round ending; tool execution belongs to the engine, not this reader.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -27,9 +28,21 @@ enum State {
     Failed(Failure),
 }
 
+/// What a reader keeps of the events it reads, beside their parsed JSON.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum Capture {
+    /// Nothing: an unbound stream.
+    #[default]
+    Nothing,
+    /// Each block start's bytes, for a mapper bound to its request.
+    BlockStarts,
+}
+
 /// One sticky stream: only `message_stop` after a supported stop reason completes it.
 #[derive(Default)]
 pub struct Reader {
+    /// Whether block starts keep their bytes, for a reply that goes back as it came.
+    capture: Capture,
     framer: Framer,
     text: usize,
     reason: Option<StopReason>,
@@ -39,6 +52,7 @@ pub struct Reader {
 impl fmt::Debug for Reader {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("AnthropicReader")
+            .field("capture", &self.capture)
             .field("text_bytes", &self.text)
             .field("state", &self.state)
             .finish_non_exhaustive()
@@ -52,6 +66,15 @@ impl From<Limit> for Failure {
 }
 
 impl Reader {
+    /// A fresh reader that keeps what `capture` names.
+    #[must_use]
+    pub fn new(capture: Capture) -> Self {
+        Self {
+            capture,
+            ..Self::default()
+        }
+    }
+
     /// Forward valid known events in order, ignoring pings and bounded future event types.
     ///
     /// # Errors
@@ -70,8 +93,8 @@ impl Reader {
             State::Open => {}
         }
         let result = self.framer.feed(bytes, &mut |data| {
-            let value = serde_json::from_slice(data).map_err(|_| Failure::Protocol)?;
-            let event = SseEvent::from_value(value).ok_or(Failure::Protocol)?;
+            let value = literal(data).map_err(|_| Failure::Protocol)?;
+            let mut event = SseEvent::from_value(value).ok_or(Failure::Protocol)?;
             match event.kind() {
                 "error" => return Err(Failure::streamed(event.value())),
                 "content_block_delta" => {
@@ -117,7 +140,12 @@ impl Reader {
                     on_event(&event);
                     return Ok(ControlFlow::Break(()));
                 }
-                "message_start" | "content_block_start" | "content_block_stop" => {}
+                "content_block_start" => {
+                    if self.capture == Capture::BlockStarts {
+                        event.capture(data);
+                    }
+                }
+                "message_start" | "content_block_stop" => {}
                 _ => return Ok(ControlFlow::Continue(())),
             }
             on_event(&event);

@@ -28,7 +28,8 @@ errors map to credit exhaustion, including only the exact documented legacy HTTP
 `invalid_request_error` message. Unknown text stays a generic request refusal. Context
 exhaustion in a stop reason is `Exhausted`, with an answer-limit catalog key and no Retry
 action. Premature EOF stays `Truncated`, with connection-retry advice. No error mapping
-retries, changes key state or forwards provider text.
+retries, changes key state or forwards provider text. A streamed `error` event is classified
+from the event as the reader already read it, never from a second parse of its bytes.
 
 The shared provider-neutral SSE framer enforces 1 MiB line and joined-event bounds and a
 16 MiB stream bound. It emits joined data bytes until its consumer stops; it does not parse
@@ -79,8 +80,8 @@ ending takes precedence. Empty initial text is skipped; other text becomes TextD
 Exact `draw` becomes Draw and every
 other bounded tool name becomes Unknown. The coordinator alone decides offers, charges
 calls and dispatches. Tool arguments use concatenated fragments, or the start object when
-there are none, ignoring empty argument fragments, and must be a complete JSON object
-before ToolCallReady. A nonempty start object used this way is also queued as one
+there are none, ignoring empty argument fragments, and must be a complete JSON object,
+with no member name repeated, before ToolCallReady. A start object with members (however it is spaced) is also queued as one
 ToolArgsDelta before ToolCallReady, so a streamed `draw` sees the bytes its Ready names.
 
 Thinking and redacted thinking become private Opaque items indexed in provider order;
@@ -101,3 +102,97 @@ Premature EOF emits no Usage because its snapshot is only a lower bound. A stall
 consumer during delivery can still replace the semantic failure with a delivery timeout.
 There is no usage persistence, retry loop, key access, runtime router or replay contract
 in A3a. Those integration decisions belong to A3b.
+
+## The request body (not yet activated)
+
+`engines::anthropic::encode::body` turns the store's `ModelRequest` into a `MessagesBody`, whose
+envelope check (`MessagesBody::from_json`) runs on the exact bytes it sends, and the run's
+`Conversation`, the exact request a tool round continues. The body holds: `model`, `max_tokens` 2048 (the envelope's cap, including
+thinking), `stream: true`, `output_config.effort`, the tools as `name`, `description` and
+`input_schema`, and the instructions as the one system block. That block carries the only
+`cache_control` breakpoint, so the tools and the instructions are the cached prefix and stay
+identical across turns. The body has no `thinking` field. On Claude Sonnet 5.5 that means
+adaptive thinking, which can't be turned off (`disabled` is a 400), so a reply can carry signed
+thinking blocks, usually with empty text, before its calls.
+
+Input items become content blocks, and neighbouring blocks of one role merge into one message,
+since Messages wants roles to alternate:
+
+| Input item | Block |
+|---|---|
+| a user message | a user `text` block |
+| a developer message (summaries, notes, the screen lines, the compaction prompt) | a user `text` block that starts `Kumochi note:`, since Messages has no developer role and the system block must stay the same |
+| an assistant message | an assistant `text` block |
+| a stored call | an assistant `tool_use` block whose `input` is the parsed arguments |
+| a result | a user `tool_result` block |
+| a native item | rebuilt from its known fields on the assistant side: a `text` block with its text, or a `tool_use` block with its id, name and object input; the build passes only this connection's |
+
+Empty messages are skipped. The `Kumochi note:` label tells the model where a line came from;
+it carries no authority, and a user who types it is still the user. Nothing is built for:
+
+- a request with no model, a model on another connection, or no instructions;
+- an empty conversation, or one that ends with the assistant, which would ask for a prefill;
+- arguments that aren't one JSON object;
+- a call id or tool name that isn't 1 to 64 ASCII letters, digits, `_` or `-`;
+- a native item other than those two blocks, with exactly those fields (a thinking, image or
+  document block among them, since stored items never carry thinking);
+- a call that isn't answered exactly once by the results that open the next user message, a
+  result anywhere else, or an id called twice. Nothing is moved to make a pair;
+- an image, which this route doesn't carry yet;
+- a serialised body over the 512 KiB bound.
+
+### Tool rounds
+
+A round that called tools continues its run's `Conversation` with `encode::next`. The context
+isn't built again: the next request is the last one unchanged, then the round's reply as one
+assistant message, then the results as one user message. Each signed block is bound to the
+system text, the tools and every message before it, so a rebuild, which refreshes the drawing
+digest, would invalidate it.
+
+Only the round's own mapper supplies the reply. The run makes it with
+`Mapper::answering(&conversation)` before the stream's first callback, which binds it to that
+request's `Prefix`; each built request gets its own, so a rebuild of the same input is another
+one. When the stream completes, `Mapper::reply` hands the whole reply over once: every block in
+output order, exactly as it came. Every event is read once, by the literal reader below, and
+the reader and mapper decide everything from that one read. The transport makes a fresh reader
+for each stream, keeping what `Mapper::capture` names: only a bound mapper's keeps each
+`content_block_start` event's bytes, and an unbound stream keeps none, with the same checks
+either way. The mapper keeps every member of a block's start as written and in its order (a
+call's `caller`, a text block's `citations`, a field this route doesn't know) and sets only the
+fields documented deltas stream: `text`, `thinking`, `signature`, and `input` when fragments
+came. A streamed field the start lacked comes last. `Reply` has no constructor or field outside
+the mapper, and the coordinator adds only the matched results. This is run memory only: the
+store never gets a raw block.
+
+There's no reply when the mapper can't put a block back as it came: an unknown block, a start
+that isn't an object, an empty text block or empty redacted data (Messages refuses both), a
+initial input with members that fragments then follow, or content already in `message_start`. Nor
+after a failed or partial stream: a member name repeated anywhere in an event or a call's input,
+an id or name that isn't a string, an unknown delta, unsigned thinking, a block left open, a
+missing index, or EOF before `message_stop`, even after closed blocks.
+
+Tool input stays text from the stream to the wire. On a bound stream the tool runs with the same
+bytes the reply sends back: the fragments, or the start's `input` as written when none came.
+`Conversation` keeps its messages as JSON text, read back literally only for the pairing and
+role checks, and `MessagesBody::from_json`, which only the encoder can call, checks the envelope
+and then sends those bytes. The literal reader refuses a member name repeated in any object, and
+reads every name as a plain string, so it never takes an object for serde_json's embedded raw
+value. That holds in a workspace build too, where gpui turns serde_json's `raw_value` feature
+on; the brain doesn't ask for it. The 512 KiB bound applies to the final bytes. A 30-digit integer or a long
+decimal goes back as the model wrote it. Whitespace between members and the escapes in streamed
+text may differ from the stream, since the provider's prefix check compares parsed JSON. An
+unbound stream's start-only input reaches the tool as its parsed value written again, as before,
+since nothing from that stream goes back as a reply.
+
+Nothing continues, and the tool flow ends with a local refusal, when the reply answered another
+request, or the next request would go on another sign-in tag or model. A `Prefix` means the
+request was built, nothing more: whether the run may still send, after a withdrawn source, Stop
+or a lost owner, is for the live owner to decide. A source deleted or withdrawn during the run is
+never sent again just to keep a signature valid.
+
+Signed thinking lives in the run's memory only. It isn't stored, and a later run replays the
+earlier ones' text and call pairs without it. Anthropic allows this: prior turns' thinking may
+be left out outside an open tool call, as long as no block is left out between two that are
+kept. The next model loses that reasoning, as it loses tool details the answer never stated.
+A reply without a call, a call without exactly one result, or an id that was already called
+builds nothing.

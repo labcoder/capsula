@@ -185,6 +185,7 @@ impl Harness {
             ready(Some(Lease(Arc::clone(&self.state)))),
             run,
             live,
+            Capture::Nothing,
             Sink(Arc::clone(&self.state)),
         ))
     }
@@ -316,6 +317,7 @@ async fn live_cap_is_shared_across_runs_and_admission_refusal_sends_nothing() {
         ready(None::<Lease>),
         &untouched,
         &live,
+        Capture::Nothing,
         Sink(Arc::clone(&harness.state)),
     )
     .await;
@@ -336,6 +338,7 @@ async fn dropping_a_pending_admission_touches_neither_socket_nor_budgets() {
         std::future::pending::<Option<Lease>>(),
         &run,
         &live,
+        Capture::Nothing,
         Sink(Arc::clone(&harness.state)),
     ));
     assert!(poll(call.as_mut()).is_pending());

@@ -42,13 +42,25 @@ const KNOWN: [&str; 16] = [
     "error",
 ];
 
-/// One event's JSON object, which always has a string `type`.
-pub struct SseEvent(Value);
+/// One event's JSON object, which always has a string `type`, and its bytes when a capturing
+/// reader kept them.
+pub struct SseEvent(Value, Option<Box<[u8]>>);
 
 impl SseEvent {
     /// The event for `value`, when it's an object with a string `type`.
     pub(in crate::connections) fn from_value(value: Value) -> Option<Self> {
-        value["type"].is_string().then_some(Self(value))
+        value["type"].is_string().then_some(Self(value, None))
+    }
+
+    /// Keeps the event as written.
+    pub(in crate::connections) fn capture(&mut self, data: &[u8]) {
+        self.1 = Some(data.into());
+    }
+
+    /// The event as written, when its reader kept it.
+    #[must_use]
+    pub fn written(&self) -> Option<&[u8]> {
+        self.1.as_deref()
     }
 
     /// The event's `type`.

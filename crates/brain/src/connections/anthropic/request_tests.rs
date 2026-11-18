@@ -4,6 +4,7 @@ use super::Failure;
 use super::MessagesBody;
 use crate::connections::model::MAX_REQUEST_BYTES;
 use serde_json::{Value, json};
+use zeroize::Zeroizing;
 
 fn request() -> Value {
     json!({"model":"claude-sonnet-5-5","messages":[{"role":"user","content":"hello"}],
@@ -204,4 +205,85 @@ fn serialized_request_bound_is_inclusive_and_debug_is_redacted() {
         !formatted.contains(byte_marker.trim_matches(['[', ']'])),
         "request bytes are redacted"
     );
+}
+
+#[test]
+fn json_is_checked_then_sent_as_written_up_to_the_bound() {
+    let written = br#"{"model":"claude-sonnet-5-5","stream":true,"max_tokens":2048,"system":[{"type":"text","text":"s","cache_control":{"type":"ephemeral"}}],"messages":[{"role":"user","content":"hi"},{"role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"draw","input":{"n": 123456789012345678901234567890, "d": 0.10000000000000000000000001}}]},{"role":"user","content":"next"}]}"#;
+    let mut padded = written.to_vec();
+    padded.resize(MAX_REQUEST_BYTES, b' ');
+    let body = MessagesBody::from_json(Zeroizing::new(padded.clone())).expect("at the bound");
+    assert_eq!(body.bytes(), padded.as_slice());
+    padded.push(b' ');
+    assert!(matches!(
+        MessagesBody::from_json(Zeroizing::new(padded)),
+        Err(Failure::Request)
+    ));
+    let uncapped = String::from_utf8_lossy(written).replace("2048", "2049");
+    for refused in [uncapped.as_bytes(), &written[..written.len() - 1]] {
+        assert!(matches!(
+            MessagesBody::from_json(Zeroizing::new(refused.to_vec())),
+            Err(Failure::Request)
+        ));
+    }
+}
+
+#[test]
+fn json_is_read_as_written_with_no_name_repeated_at_any_depth() {
+    let body = |messages: &str| {
+        format!(
+            r#"{{"model":"claude-sonnet-5-5","stream":true,"max_tokens":2048,"system":[{{"type":"text","text":"s","cache_control":{{"type":"ephemeral"}}}}],"messages":{messages}}}"#
+        )
+        .into_bytes()
+    };
+    let sound = body(
+        r#"[{"role":"user","content":[{"type":"tool_result","tool_use_id":"a","content":"x"}],"note":{"$serde_json::private::RawValue":"1"}}]"#,
+    );
+    assert_eq!(
+        MessagesBody::from_json(Zeroizing::new(sound.clone()))
+            .expect("a literal envelope")
+            .bytes(),
+        sound.as_slice()
+    );
+    for (case, messages) in [
+        (
+            "a repeated top name",
+            r#"[{"role":"user","content":"a"}],"messages":[{"role":"user","content":"b"}]"#,
+        ),
+        (
+            "a repeated deep name",
+            r#"[{"role":"user","content":[{"type":"text","text":"a","text":"b"}]}]"#,
+        ),
+        (
+            "an embedded raw value",
+            r#"[{"$serde_json::private::RawValue":"{\"role\":\"user\",\"content\":\"hi\"}"}]"#,
+        ),
+    ] {
+        assert!(
+            matches!(
+                MessagesBody::from_json(Zeroizing::new(body(messages))),
+                Err(Failure::Request)
+            ),
+            "{case}"
+        );
+    }
+}
+
+#[test]
+fn members_are_read_in_order_each_value_exactly_as_written() {
+    let object = r#" { "a" : 1.50 , "b\"c":"x\\\"}" ,"d":[{"e":[true]},null], "f":{}, "g":-2e3 } "#;
+    assert_eq!(
+        super::members(object),
+        Some(vec![
+            ("a".to_owned(), "1.50"),
+            ("b\"c".to_owned(), r#""x\\\"}""#),
+            ("d".to_owned(), r#"[{"e":[true]},null]"#),
+            ("f".to_owned(), "{}"),
+            ("g".to_owned(), "-2e3"),
+        ])
+    );
+    assert_eq!(super::members("{}"), Some(Vec::new()));
+    for refused in ["[1]", "\"a\"", r#"{"a":1} x"#, r#"{"a":1"#, ""] {
+        assert_eq!(super::members(refused), None, "{refused}");
+    }
 }
