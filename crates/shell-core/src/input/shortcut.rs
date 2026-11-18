@@ -10,8 +10,17 @@ pub(super) enum Modifier {
 }
 
 impl Modifier {
+    const fn index(self) -> usize {
+        match self {
+            Self::Control => 0,
+            Self::Alt => 1,
+            Self::Shift => 2,
+            Self::Super => 3,
+        }
+    }
+
     const fn bit(self) -> u8 {
-        1 << (self as u8)
+        1 << self.index()
     }
 }
 
@@ -138,9 +147,9 @@ impl Shortcut {
         self.pressed += 1;
         if let Role::Modifier(key) = role
             && self.chord.mask & key.bit() != 0
-            && self.modifiers[key as usize].is_none()
+            && self.modifiers[key.index()].is_none()
         {
-            self.modifiers[key as usize] = Some(id);
+            self.modifiers[key.index()] = Some(id);
             return [None; 3];
         }
         if matches!(role, Role::Named(key) if key == self.chord.trigger)
