@@ -315,7 +315,7 @@ impl Presence {
     ) {
         let (applied, notice) = self.runs.apply_run_state(run, thread, phase, error, origin);
         self.marks_run(run, origin, &applied, cx);
-        self.voice_run(run, origin, phase, &applied, cx);
+        self.voice_run(run, thread, origin, phase, &applied, cx);
         diagnostics::record(cx, format_args!("run phase={phase:?}"));
         if let Some(restore) = applied.restore
             && let Some(text) = &self.text
@@ -333,7 +333,37 @@ impl Presence {
             self.show_error(&error, Source::Run(run), cx);
         }
         if let Some(stop) = applied.stop {
-            self.stop_run(stop, cx);
+            match (origin, stop) {
+                (Some(RunOrigin::Hold { .. }), ControlToBrain::Stop { run, revealed }) => {
+                    let effects =
+                        self.presenter
+                            .stop_owned(run, Instant::now())
+                            .map(|mut effects| {
+                                let cut = effects.iter().any(|effect| match effect {
+                                    crate::presenter::Effect::Control(
+                                        ControlToBrain::StopScenes { cuts, .. },
+                                    ) => !cuts.is_empty(),
+                                    _ => false,
+                                });
+                                if !cut {
+                                    effects.retain(|effect| {
+                                        !matches!(
+                                            effect,
+                                            crate::presenter::Effect::Control(
+                                                ControlToBrain::StopScenes { .. }
+                                            )
+                                        )
+                                    });
+                                    effects.push(crate::presenter::Effect::Control(
+                                        ControlToBrain::Stop { run, revealed },
+                                    ));
+                                }
+                                effects
+                            });
+                    self.scene_effects(effects, cx);
+                }
+                (_, stop) => self.stop_run(stop, cx),
+            }
         }
         self.grant(applied.credit);
         if phase == Phase::Done
@@ -437,6 +467,16 @@ impl Presence {
         bytes: u32,
         cx: &mut Context<'_, Self>,
     ) {
+        let disposition = if self
+            .session
+            .as_ref()
+            .is_some_and(|session| session.generation() == generation)
+            && let DataToShell::SceneStepCommit { run, .. } = &*frame
+        {
+            self.runs.owned_disposition(*run)
+        } else {
+            crate::runs::RunDisposition::Live
+        };
         if self
             .session
             .as_ref()
@@ -454,9 +494,13 @@ impl Presence {
             let credit = self.runs.remove_scenes(scenes);
             self.grant(credit);
         }
-        let effects = self
-            .presenter
-            .data(generation, frame, bytes, Instant::now());
+        let effects = self.presenter.data_with_disposition(
+            generation,
+            frame,
+            bytes,
+            disposition,
+            Instant::now(),
+        );
         self.scene_effects(effects, cx);
     }
 
@@ -472,6 +516,9 @@ impl Presence {
             .as_ref()
             .is_some_and(|session| session.generation() == generation)
         {
+            if let DataToShell::RunEnd { run } = &message {
+                self.voice_input_ended(*run);
+            }
             let credit = match message {
                 DataToShell::IssueReview { request, card } => {
                     if self.deliver_issue_review(request, card, bytes, cx) {
@@ -690,6 +737,7 @@ impl Presence {
             self.presenter.disconnected();
             // The watch went with the session, so no hold is watched.
             self.voice.watched = None;
+            self.voice.ended = None;
             self.scene_timer = None;
             self.scene_deadline = None;
             self.settings.update(cx, |state, cx| {

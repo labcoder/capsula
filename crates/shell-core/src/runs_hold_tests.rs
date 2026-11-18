@@ -11,6 +11,242 @@ fn ready() -> Runs {
     runs
 }
 
+#[test]
+fn owned_stop_registration_is_released_without_allocating_on_duplicate_or_raw_end() {
+    let mut runs = ready();
+    state(&mut runs, 7, 1, 1, Phase::Thinking);
+    let tail = RunTail {
+        run: RunId(7),
+        thread: ThreadId(1),
+        control_closed: false,
+        data_ended: false,
+    };
+    let (stop, counts, bytes) = crate::allocation::usage(|| runs.stop_owned(tail));
+    assert_eq!(
+        stop,
+        Some(ControlToBrain::Stop {
+            run: RunId(7),
+            revealed: Vec::new()
+        })
+    );
+    assert_eq!(counts, [1, 0]);
+    assert!(bytes[0] > 0);
+    assert_eq!(bytes[1], 0);
+    let (stop, duplicate_counts, duplicate_bytes) =
+        crate::allocation::usage(|| runs.stop_owned(tail));
+    assert_eq!(stop, None);
+    assert_eq!((duplicate_counts, duplicate_bytes), ([0, 0], [0, 0]));
+    let (credit, raw_counts, raw_bytes) =
+        crate::allocation::usage(|| runs.apply_data(DataToShell::RunEnd { run: RunId(7) }, 4));
+    assert_eq!(credit, 4);
+    assert_eq!((raw_counts, raw_bytes), ([0, 0], [0, 0]));
+    let ((applied, notice), released_counts, released_bytes) = crate::allocation::usage(|| {
+        runs.apply_run_state(RunId(7), ThreadId(1), Phase::Failed, None, None)
+    });
+    assert!(!applied.visible);
+    assert_eq!(applied.restore, None);
+    assert_eq!(notice, None);
+    assert_eq!(released_counts, [0, 1]);
+    assert_eq!(released_bytes, [0, bytes[0]]);
+    assert!(runs.pending_stops.is_empty());
+    println!(
+        "owned_stop_allocation register_count={} register_bytes={} release_count={} release_bytes={} duplicate_allocations=0 raw_end_allocations=0",
+        counts[0], bytes[0], released_counts[1], released_bytes[1]
+    );
+}
+
+#[test]
+fn owned_stops_preserve_pending_turns_and_retire_only_after_both_input_authorities() {
+    let mut runs = ready();
+    state(&mut runs, 7, 1, 1, Phase::Thinking);
+    runs.submit("pending typed words", |_| true)
+        .expect("queued");
+    let tail = RunTail {
+        run: RunId(7),
+        thread: ThreadId(1),
+        control_closed: false,
+        data_ended: false,
+    };
+    assert_eq!(runs.stop_owned(tail), stop(7));
+    state(&mut runs, 8, 2, 2, Phase::Thinking);
+    let second = RunTail {
+        run: RunId(8),
+        thread: ThreadId(2),
+        ..tail
+    };
+    assert_eq!(runs.stop_owned(second), stop(8));
+    assert_eq!(runs.pending_stops.len(), 2);
+    assert_eq!(text(&mut runs, 7), 19);
+    assert_eq!(text(&mut runs, 8), 19);
+    assert!(runs.shown().is_none());
+    assert_eq!(runs.apply_data(DataToShell::RunEnd { run: RunId(7) }, 4), 4);
+    assert_eq!(runs.stop_owned(tail), None);
+    assert!(runs.pending_stops[&RunId(7)].data_ended);
+    let applied = state(&mut runs, 7, 1, 1, Phase::Done);
+    assert!(!applied.visible);
+    assert_eq!(runs.pending_stops.len(), 1);
+    assert_eq!(runs.owned_disposition(RunId(8)), RunDisposition::Stopped);
+    assert_eq!(runs.submitted.len(), 1);
+    let typed = runs.apply_state(
+        RunId(9),
+        ThreadId(1),
+        Phase::Thinking,
+        Some(RunOrigin::Typed { turn: 1 }),
+    );
+    assert!(typed.visible);
+    assert_eq!(typed.stop, None);
+    assert_eq!(runs.stoppable(), Some(RunId(9)));
+    assert_eq!(text(&mut runs, 9), 19);
+    assert_eq!(runs.shown().expect("unowned answer").text, "answer");
+    runs.disconnected();
+    assert!(runs.pending_stops.is_empty());
+    runs.connected(2);
+    assert_eq!(runs.owned_disposition(RunId(8)), RunDisposition::Live);
+}
+
+#[test]
+fn accepted_deletion_closes_only_its_thread_in_either_pipe_order() {
+    for outcome in [Deleted::Hidden, Deleted::Removed] {
+        for raw_first in [false, true] {
+            for last_run in [None, Some(RunId(7))] {
+                let mut runs = ready();
+                for (run, thread) in [(7, 1), (8, 2)] {
+                    state(&mut runs, run, thread, 1, Phase::Thinking);
+                    runs.stop_owned(RunTail {
+                        run: RunId(run),
+                        thread: ThreadId(thread),
+                        control_closed: false,
+                        data_ended: false,
+                    });
+                }
+                assert_eq!(runs.deleted(ThreadId(1), outcome, last_run), 0);
+                assert!(!runs.pending_stops[&RunId(7)].control_closed);
+                assert!(runs.confirm_delete(ThreadId(1)));
+                assert_eq!(runs.deleted(ThreadId(1), Deleted::NotHidden, last_run), 0);
+                assert!(!runs.pending_stops[&RunId(7)].control_closed);
+                assert!(runs.confirm_delete(ThreadId(1)));
+                if raw_first {
+                    assert_eq!(runs.apply_data(DataToShell::RunEnd { run: RunId(7) }, 4), 4);
+                }
+                assert_eq!(runs.deleted(ThreadId(1), outcome, last_run), 0);
+                if !raw_first {
+                    assert_eq!(runs.owned_disposition(RunId(7)), RunDisposition::Stopped);
+                    assert_eq!(runs.apply_data(DataToShell::RunEnd { run: RunId(7) }, 4), 4);
+                }
+                assert_eq!(runs.owned_disposition(RunId(7)), RunDisposition::Live);
+                assert_eq!(runs.pending_stops.len(), 1);
+                assert!(!runs.pending_stops[&RunId(8)].control_closed);
+                assert_eq!(runs.deleted(ThreadId(2), outcome, None), 0);
+                assert!(!runs.pending_stops[&RunId(8)].control_closed);
+            }
+        }
+    }
+}
+
+#[test]
+fn prebind_end_is_reported_and_completed_receipts_allocate_no_pending_stop() {
+    let mut runs = ready();
+    assert_eq!(runs.apply_data(DataToShell::RunEnd { run: RunId(7) }, 4), 0);
+    let applied = state(&mut runs, 7, 1, 1, Phase::Done);
+    assert_eq!(applied.credit, 4);
+    assert!(applied.input_ended);
+    assert_eq!(
+        runs.stop_owned(RunTail {
+            run: RunId(7),
+            thread: ThreadId(1),
+            control_closed: true,
+            data_ended: true
+        }),
+        None
+    );
+    assert!(runs.pending_stops.is_empty());
+    assert!(!state(&mut runs, 8, 1, 2, Phase::Thinking).input_ended);
+}
+
+#[test]
+fn automatic_hold_stop_folds_prebind_end_and_retires_on_its_two_authorities() {
+    for deleted in [None, Some(Deleted::Hidden), Some(Deleted::Removed)] {
+        for (prebind, raw_first) in [(true, true), (false, true), (false, false)] {
+            let mut runs = ready();
+            recognized(&mut runs, 1);
+            runs.cancel_hold();
+            assert_eq!(runs.take_hold_cancel(), cancel(1));
+            assert!(runs.select_thread(Some(ThreadId(2))));
+            recognized(&mut runs, 2);
+            if prebind {
+                assert_eq!(runs.apply_data(DataToShell::RunEnd { run: RunId(7) }, 4), 0);
+            }
+            let applied = state(&mut runs, 7, 1, 1, Phase::Thinking);
+            assert_eq!(applied.stop, stop(7));
+            assert!(!applied.visible);
+            assert_eq!(applied.credit, if prebind { 4 } else { 0 });
+            assert_eq!(applied.input_ended, prebind);
+            assert_eq!(runs.pending_stops.len(), 1);
+            assert_eq!(runs.pending_stops[&RunId(7)].data_ended, prebind);
+            assert!(!runs.pending_stops[&RunId(7)].control_closed);
+            assert_eq!(runs.hold.expect("newer pending hold").gesture, GestureId(2));
+            assert!(state(&mut runs, 8, 2, 2, Phase::Thinking).visible);
+            assert_eq!(runs.hold.expect("newer named hold").run, Some(RunId(8)));
+            if raw_first && !prebind {
+                assert_eq!(runs.apply_data(DataToShell::RunEnd { run: RunId(7) }, 4), 4);
+            }
+            if let Some(outcome) = deleted {
+                assert_eq!(runs.deleted(ThreadId(1), outcome, None), 0);
+                assert!(!runs.pending_stops[&RunId(7)].control_closed);
+                assert!(runs.confirm_delete(ThreadId(1)));
+                assert_eq!(runs.deleted(ThreadId(1), Deleted::NotHidden, None), 0);
+                assert!(!runs.pending_stops[&RunId(7)].control_closed);
+                assert!(runs.confirm_delete(ThreadId(1)));
+                assert_eq!(runs.deleted(ThreadId(1), outcome, None), 0);
+            } else {
+                let terminal = runs.apply_state(RunId(7), ThreadId(1), Phase::Done, None);
+                assert!(!terminal.visible);
+                assert_eq!(terminal.stop, None);
+            }
+            if !raw_first {
+                assert!(runs.pending_stops[&RunId(7)].control_closed);
+                assert!(!runs.pending_stops[&RunId(7)].data_ended);
+                assert_eq!(runs.apply_data(DataToShell::RunEnd { run: RunId(7) }, 4), 4);
+            }
+            assert!(runs.pending_stops.is_empty());
+            assert_eq!(
+                runs.hold.expect("newer hold survives closure").run,
+                Some(RunId(8))
+            );
+            assert_eq!(runs.stoppable(), Some(RunId(8)));
+            assert_eq!(state(&mut runs, 7, 1, 1, Phase::Thinking).stop, None);
+            assert!(runs.pending_stops.is_empty());
+        }
+    }
+}
+
+#[test]
+fn historical_automatic_hold_stop_cannot_recreate_retired_input_ownership() {
+    let mut runs = ready();
+    recognized(&mut runs, 1);
+    runs.cancel_hold();
+    assert_eq!(runs.take_hold_cancel(), cancel(1));
+    assert_eq!(state(&mut runs, 7, 1, 1, Phase::Thinking).stop, stop(7));
+    assert_eq!(runs.apply_data(DataToShell::RunEnd { run: RunId(7) }, 4), 4);
+    runs.apply_state(RunId(7), ThreadId(1), Phase::Done, None);
+    assert!(runs.pending_stops.is_empty());
+    recognized(&mut runs, 2);
+    assert!(state(&mut runs, 8, 1, 2, Phase::Thinking).visible);
+    runs.apply_state(RunId(8), ThreadId(1), Phase::Answering, None);
+    assert_eq!(runs.apply_data(DataToShell::RunEnd { run: RunId(8) }, 4), 4);
+    runs.apply_state(RunId(8), ThreadId(1), Phase::Done, None);
+    recognized(&mut runs, 3);
+    runs.apply_state(RunId(9), ThreadId(1), Phase::Thinking, None);
+    let old = state(&mut runs, 8, 1, 2, Phase::Thinking);
+    assert_eq!(old.stop, stop(8));
+    assert!(!old.input_ended);
+    assert!(!old.visible);
+    assert!(runs.pending_stops.is_empty());
+    assert_eq!(runs.hold.expect("newer pending hold").gesture, GestureId(3));
+    assert_eq!(state(&mut runs, 8, 1, 2, Phase::Thinking).stop, None);
+    assert!(runs.pending_stops.is_empty());
+}
+
 fn recognized(runs: &mut Runs, gesture: u32) {
     let thread = runs.thread();
     let selection = runs.revision();

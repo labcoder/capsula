@@ -8,11 +8,11 @@ use std::time::{Duration, Instant};
 use gpui_kit::TestAppContext;
 use kumochi_protocol::message::{
     ControlToBrain, DataToShell, GestureId, HeldScreen, HoldStatus, Phase, RunId, RunOrigin,
-    SceneHeader, SceneId, ScreenClass, ScreenHolds, ScreenOff, ThreadId,
+    SceneCut, SceneCuts, SceneHeader, SceneId, ScreenClass, ScreenHolds, ScreenOff, ThreadId,
 };
 use kumochi_scene::{
-    Record, deferred::Deferred, parse_screen_draw_record, record::ScreenDisplay, screen,
-    text::Bounded,
+    Record, StopCut, deferred::Deferred, parse_record, parse_screen_draw_record,
+    record::ScreenDisplay, screen, text::Bounded,
 };
 use kumochi_shell_core::platform::screen_watch::{Changed, Sources};
 
@@ -32,7 +32,7 @@ use crate::platform::{Deliver, PresenceEvent};
 use crate::presence::kumo::{Motion, v2};
 use crate::presence::pulling::{Grab, PullSpace};
 use crate::strings::Text;
-use kumochi_shell_core::presenter::fixture::select;
+use kumochi_shell_core::presenter::fixture::{scene_ids, select};
 
 /// The hold's run. Nothing was named before its release.
 const RUN: u64 = 7;
@@ -739,10 +739,14 @@ fn marked(answering: bool, cx: &mut TestAppContext) -> Watching {
     reason = "whether the run's Answering state came before the mark"
 )]
 fn mark_up(watching: &Watching, answering: bool, cx: &mut TestAppContext) {
-    let hidden = detached(&watching.ready, cx);
-    watching.ready.owner.update(cx, |owner, _| {
-        owner.overlay = Visibility::Hidden(hidden);
-    });
+    // An ordinary drawing's overlay, when one is open, takes the marks as well.
+    let open = |owner: &Presence, _: &gpui_kit::App| owner.overlay.window().is_some();
+    if !watching.ready.owner.read_with(cx, open) {
+        let hidden = detached(&watching.ready, cx);
+        watching.ready.owner.update(cx, |owner, _| {
+            owner.overlay = Visibility::Hidden(hidden);
+        });
+    }
     state(watching, RUN, Phase::Thinking, HOLD, cx);
     if answering {
         state(watching, RUN, Phase::Answering, None, cx);
@@ -869,8 +873,8 @@ fn ended(watching: &Watching, cx: &mut TestAppContext) {
     });
 }
 
-// The four tests below pin the hold's cancel as it is told today: twice for one press, once
-// where the hold's input is revoked and once from the runs' hold.
+// The tests below that press Esc on a pending hold pin its cancel as it is told today: twice
+// for one press, once where the hold's input is revoked and once from the runs' hold.
 
 #[gpui::test]
 fn the_hotkey_s_esc_takes_a_pending_hold_s_marks_and_cancels_it(cx: &mut TestAppContext) {
@@ -888,11 +892,9 @@ fn the_hotkey_s_esc_takes_a_pending_hold_s_marks_and_cancels_it(cx: &mut TestApp
     ended(&watching, cx);
 }
 
-/// Hold 1 was made and let go through the native callback, so the callback's reducer still
-/// names it, and its first mark overtook its run's `Answering`: the marks are up while the
-/// hold is pending.
-fn natively_marked(cx: &mut TestAppContext) -> (Watching, Deliver, Instant) {
-    let watching = watch(true, cx);
+/// Hold 1 is made and let go through the native callback, so the callback's reducer still
+/// names it, and it is pending with its speech sent.
+fn natively_pending(watching: &Watching, cx: &mut TestAppContext) -> (Deliver, Instant) {
     let owner = watching.ready.owner.clone();
     let deliver = native(&owner, cx);
     let at = Instant::now();
@@ -908,9 +910,17 @@ fn natively_marked(cx: &mut TestAppContext) -> (Watching, Deliver, Instant) {
             hold.is_some_and(|hold| matches!(hold.source, Source::Sent))
         })
     });
-    told(&watching);
+    told(watching);
+    (deliver, at)
+}
+
+/// Hold 1 is pending as [`natively_pending`] leaves it, and its first mark overtook its run's
+/// `Answering`: the marks are up while the hold is pending.
+fn natively_marked(cx: &mut TestAppContext) -> (Watching, Deliver, Instant) {
+    let watching = watch(true, cx);
+    let (deliver, at) = natively_pending(&watching, cx);
     mark_up(&watching, false, cx);
-    owner.read_with(cx, |owner, _| {
+    watching.ready.owner.read_with(cx, |owner, _| {
         assert!(owner.voice_working(), "the hold is still pending");
         assert!(owner.text_open());
     });
@@ -994,6 +1004,1067 @@ fn esc_takes_a_pending_hold_s_marks_and_cancels_it(cx: &mut TestAppContext) {
     let [stop, clear] = gone();
     assert_eq!(told(&watching), [stop, clear, cancel(), cancel()]);
     ended(&watching, cx);
+}
+
+/// An earlier answer's ordinary drawing, on the overlay.
+const DRAWN: SceneId = SceneId(40);
+
+/// `run` draws `scene` on the overlay: its begin and its first step, which is shown.
+fn draw(watching: &Watching, run: u64, scene: SceneId, cx: &mut TestAppContext) {
+    let begin = format!(
+        r#"{{"begin":{{"v":1,"scene":"s{}","surface":"overlay","alt":""}}}}"#,
+        scene.0
+    );
+    let step =
+        br#"{"step":{"id":"s","put":[{"shape":{"id":"b","kind":"rect","box":[0,0,10,10]}}]}}"#;
+    let (Ok(Record::Begin(begin)), Ok(Record::Step(step))) =
+        (parse_record(begin.as_bytes()), parse_record(step))
+    else {
+        panic!("an overlay scene's records");
+    };
+    let (run, index) = (RunId(run), 0);
+    let header = SceneHeader {
+        begin,
+        layout_version: 2,
+    };
+    for frame in [
+        DataToShell::SceneBegin { scene, header },
+        DataToShell::SceneStepCommit {
+            run,
+            scene,
+            index,
+            step,
+        },
+    ] {
+        let event = LinkEvent::SceneData {
+            generation: 1,
+            frame: Deferred::new(frame, 0),
+            bytes: 0,
+        };
+        receive(&watching.ready.owner, event, cx);
+    }
+    cx.run_until_parked();
+}
+
+/// Run 3 drew `DRAWN` on the overlay and ended, and one Esc stopped the drawing's motion: an
+/// ordinary drawing is up and nothing moves.
+fn drawn(watching: &Watching, cx: &mut TestAppContext) {
+    let hidden = detached(&watching.ready, cx);
+    watching.ready.owner.update(cx, |owner, _| {
+        owner.overlay = Visibility::Hidden(hidden);
+        // A release now covers the drawing's window too, which the fixture's stamp reader
+        // would refuse: it knows only its own four surfaces.
+        owner.counter_fixture = Some(Rc::new(|| 4_242));
+    });
+    state(watching, 3, Phase::Answering, None, cx);
+    draw(watching, 3, DRAWN, cx);
+    state(watching, 3, Phase::Done, None, cx);
+    end(watching, 3, cx);
+    watching
+        .ready
+        .owner
+        .update(cx, Presence::escape)
+        .expect("escape");
+    cx.run_until_parked();
+    told(watching);
+    watching.ready.owner.read_with(cx, |owner, _| {
+        assert_eq!(scene_ids(&owner.presenter), [DRAWN]);
+        assert!(owner.activity.drawing);
+        assert!(!owner.activity.working);
+    });
+}
+
+/// The answer in the panel and whether the panel is open.
+fn panel(watching: &Watching, cx: &mut TestAppContext) -> (Option<RunId>, bool) {
+    watching.ready.owner.read_with(cx, |owner, _| {
+        (owner.runs.shown().map(|shown| shown.run), owner.text_open())
+    })
+}
+
+/// The press cancelled hold 1 and did nothing else, as [`nothing_else`] says.
+fn only_cancelled(watching: &Watching, before: (Option<RunId>, bool), cx: &mut TestAppContext) {
+    watching.ready.owner.read_with(cx, |owner, _| {
+        assert_eq!(owner.voice.status, Some(Text::HoldCancelled));
+    });
+    nothing_else(watching, before, cx);
+}
+
+/// Hold 1 is gone and its press did nothing else: the ordinary drawing is still up and the
+/// panel is as it was.
+fn nothing_else(watching: &Watching, before: (Option<RunId>, bool), cx: &mut TestAppContext) {
+    ended(watching, cx);
+    assert_eq!(panel(watching, cx), before);
+    watching.ready.owner.read_with(cx, |owner, _| {
+        assert_eq!(owner.presenter.marks_shown(), None);
+        assert_eq!(scene_ids(&owner.presenter), [DRAWN]);
+        assert!(owner.runs.drawing());
+        assert!(owner.activity.drawing);
+        assert!(!owner.activity.working, "the press left a current activity");
+    });
+}
+
+#[gpui::test]
+fn a_press_that_cancelled_its_pending_hold_leaves_an_ordinary_drawing_up(cx: &mut TestAppContext) {
+    for marks in [true, false] {
+        // Kumochi is in front (`None`), or another app is and the sources' wake is handled
+        // before the hotkey's press or after it.
+        for woke_first in [None, Some(true), Some(false)] {
+            let watching = watch(true, cx);
+            drawn(&watching, cx);
+            let (deliver, at) = natively_pending(&watching, cx);
+            if marks {
+                mark_up(&watching, false, cx);
+            }
+            let before = panel(&watching, cx);
+            assert!(!marks || before.1, "with marks up the panel is open");
+            let wake = |cx: &mut TestAppContext| {
+                watching.ready.owner.update(cx, |owner, cx| {
+                    owner
+                        .on_event(PresenceEvent::ScreenWoke, cx)
+                        .expect("a wake");
+                });
+            };
+            let (key, edge) = (Key::Other(1), Edge::Down);
+            deliver(Event::Key { key, edge }, after(at, 2000));
+            if woke_first.is_some() {
+                let bit = watching.bit.borrow();
+                bit.as_ref().expect("started sources").set();
+            }
+            if woke_first == Some(true) {
+                wake(cx);
+            }
+            deliver(Event::Escape, after(at, 2000));
+            cx.run_until_parked();
+            if woke_first == Some(false) {
+                wake(cx);
+            }
+            // The hold's cancels, the sources' stop and the marks' clear, and nothing else:
+            // no `Stop`, and no `ClearDrawing` for the ordinary drawing.
+            let [stop, clear] = gone();
+            let expected = match (marks, woke_first) {
+                (true, Some(true)) => vec![cancel(), stop, clear, cancel()],
+                (true, _) => vec![cancel(), cancel(), stop, clear],
+                (false, _) => vec![cancel(), stop, cancel()],
+            };
+            assert_eq!(
+                told(&watching),
+                expected,
+                "marks {marks}, woke first {woke_first:?}"
+            );
+            only_cancelled(&watching, before, cx);
+        }
+    }
+}
+
+/// Hold 1 is recognized through the native callback and still waits for its microphone, with
+/// the talk keys down; then the raw Esc-down ends it in a delivery of its own.
+fn ended_by_esc_down(watching: &Watching, cx: &mut TestAppContext) -> (Deliver, Instant) {
+    let owner = watching.ready.owner.clone();
+    let deliver = native(&owner, cx);
+    let at = Instant::now();
+    for key in [Key::LeftControl, Key::LeftAlt] {
+        let edge = Edge::Down;
+        deliver(Event::Key { key, edge }, after(at, 0));
+    }
+    deliver(Event::Deadline, after(at, 301));
+    cx.run_until_parked();
+    owner.read_with(cx, |owner, _| {
+        let hold = owner.voice.pending.as_ref().expect("the hold");
+        assert!(matches!(hold.source, Source::Waiting));
+    });
+    let (key, edge) = (Key::Other(1), Edge::Down);
+    deliver(Event::Key { key, edge }, after(at, 600));
+    cx.run_until_parked();
+    owner.read_with(cx, |owner, _| {
+        assert!(owner.voice.pending.is_none());
+        assert_eq!(owner.voice.ended, Some((GestureId(1), None)));
+    });
+    (deliver, at)
+}
+
+#[gpui::test]
+fn the_hotkey_s_press_after_an_esc_down_that_ended_a_waiting_hold_does_nothing_more(
+    cx: &mut TestAppContext,
+) {
+    let watching = watch(true, cx);
+    drawn(&watching, cx);
+    let before = panel(&watching, cx);
+    let (deliver, at) = ended_by_esc_down(&watching, cx);
+    told(&watching);
+    deliver(Event::Escape, after(at, 601));
+    cx.run_until_parked();
+    assert_eq!(told(&watching), []);
+    only_cancelled(&watching, before, cx);
+    watching.ready.owner.read_with(cx, |owner, _| {
+        assert_eq!(owner.voice.ended, None, "the press took the receipt");
+    });
+}
+
+/// The app is borrowed while the press arrives, so its delivery waits in the callback's
+/// backlog: hold 1's input is revoked and its cancel is written, and nothing is applied yet.
+fn press_deferred(deliver: &Deliver, at: Instant, cx: &mut TestAppContext) {
+    cx.update(|_| {
+        let (key, edge) = (Key::Other(1), Edge::Down);
+        deliver(Event::Key { key, edge }, after(at, 2000));
+        deliver(Event::Escape, after(at, 2000));
+    });
+}
+
+#[gpui::test]
+fn a_reply_that_ends_the_hold_before_its_deferred_press_leaves_an_ordinary_drawing_up(
+    cx: &mut TestAppContext,
+) {
+    // The brain's answer to the press's cancel is applied before the press is: the hold's
+    // `Cancelled` status, or its run's `Interrupted` and end once `Thinking` had named it.
+    for interrupted in [false, true] {
+        let watching = watch(true, cx);
+        drawn(&watching, cx);
+        let (deliver, at) = natively_pending(&watching, cx);
+        if interrupted {
+            state(&watching, RUN, Phase::Thinking, HOLD, cx);
+        }
+        cx.run_until_parked();
+        told(&watching);
+        let before = panel(&watching, cx);
+        press_deferred(&deliver, at, cx);
+        watching.ready.owner.read_with(cx, |owner, _| {
+            assert!(owner.voice_working(), "the press is not applied yet");
+        });
+        if interrupted {
+            state(&watching, RUN, Phase::Interrupted, None, cx);
+            end(&watching, RUN, cx);
+        } else {
+            status(&watching.ready.owner, 1, 1, HoldStatus::Cancelled, cx);
+        }
+        watching.ready.owner.read_with(cx, |owner, _| {
+            assert!(owner.voice.pending.is_none(), "the reply ended the hold");
+        });
+        cx.run_until_parked();
+        // The press's cancel and what the reply itself did, and nothing from the press after
+        // it: no `Stop`, and no `ClearDrawing` for the ordinary drawing.
+        let expected = if interrupted {
+            vec![cancel(), Told::Stop]
+        } else {
+            vec![cancel(), Told::Stop, cancel()]
+        };
+        assert_eq!(told(&watching), expected, "interrupted {interrupted}");
+        let notice = (!interrupted).then_some(Text::HoldCancelled);
+        watching.ready.owner.read_with(cx, |owner, _| {
+            assert_eq!(owner.voice.status, notice);
+        });
+        nothing_else(&watching, before, cx);
+    }
+}
+
+/// An ordinary drawing is up, hold 1 is pending with its speech sent, and `Thinking` has
+/// named its run.
+fn thinking(cx: &mut TestAppContext) -> (Watching, Deliver, Instant) {
+    let watching = watch(true, cx);
+    drawn(&watching, cx);
+    let (deliver, at) = natively_pending(&watching, cx);
+    state(&watching, RUN, Phase::Thinking, HOLD, cx);
+    cx.run_until_parked();
+    told(&watching);
+    (watching, deliver, at)
+}
+
+#[gpui::test]
+#[ignore = "isolated quiet-Rez captured-stop and intake timing; no native window or input"]
+#[expect(
+    clippy::too_many_lines,
+    reason = "keep the bounded before/after input sequence together"
+)]
+fn measure_captured_stop_and_raw_intake(cx: &mut TestAppContext) {
+    use crate::allocation;
+    use crate::link::Batch;
+    use kumochi_protocol::frame::{self, Pipe};
+    use kumochi_shell_core::presenter::fixture::{header, rect};
+
+    let _timeout = std::thread::spawn(|| {
+        std::thread::sleep(Duration::from_secs(90));
+        std::process::exit(124);
+    });
+    println!(
+        "captured_fixed_storage hold_bytes={} voice_bytes={} runs_bytes={}",
+        std::mem::size_of::<super::Hold>(),
+        std::mem::size_of::<super::Voice>(),
+        std::mem::size_of::<crate::runs::Runs>()
+    );
+    for (mode, stopped, automatic) in [
+        ("live", false, false),
+        ("named", true, false),
+        ("automatic", true, true),
+    ] {
+        for iteration in 0..37 {
+            let watching = watch(true, cx);
+            drawn(&watching, cx);
+            let mut registrations = Vec::new();
+            let mut automatic_names = Vec::new();
+            for gesture in [1, 2, 3] {
+                hold(&watching, gesture, cx);
+                release(&watching.ready.owner, gesture, Some(DOWN), cx);
+                watching.ready.owner.update(cx, |owner, _| {
+                    let hold = owner.voice.pending.as_mut().expect("released hold");
+                    hold.token
+                        .discard_unstarted()
+                        .expect("the fixture never starts a source");
+                    hold.source = Source::Sent;
+                });
+                let run = 6 + u64::from(gesture);
+                let cancel = |cx: &mut TestAppContext| {
+                    watching.ready.owner.update(cx, |owner, cx| {
+                        let start = Instant::now();
+                        let (result, counts, bytes) =
+                            allocation::usage(|| owner.native_escape(Some(GestureId(gesture)), cx));
+                        (result, start.elapsed().as_nanos(), counts, bytes)
+                    })
+                };
+                if automatic && gesture < 3 {
+                    let row = cancel(cx);
+                    row.0.expect("captured pre-name cancel");
+                    registrations.push((gesture, row.1, row.2, row.3));
+                    let batch = Batch::Plain(vec![LinkEvent::RunState {
+                        generation: 1,
+                        run: RunId(run),
+                        thread: ThreadId(1),
+                        phase: Phase::Thinking,
+                        error: None,
+                        origin: Some(RunOrigin::Hold {
+                            gesture: GestureId(gesture),
+                        }),
+                    }]);
+                    let row = watching.ready.owner.update(cx, |owner, cx| {
+                        let start = Instant::now();
+                        let (result, counts, bytes) =
+                            allocation::usage(|| owner.link_events(batch, cx));
+                        (result, start.elapsed().as_nanos(), counts, bytes)
+                    });
+                    row.0.expect("automatic late-name stop");
+                    automatic_names.push((gesture, row.1, row.2, row.3));
+                } else {
+                    state(
+                        &watching,
+                        run,
+                        Phase::Thinking,
+                        Some(RunOrigin::Hold {
+                            gesture: GestureId(gesture),
+                        }),
+                        cx,
+                    );
+                }
+                state(&watching, run, Phase::Answering, None, cx);
+                told(&watching);
+                if stopped && !automatic && gesture < 3 {
+                    let row = cancel(cx);
+                    row.0.expect("captured stop");
+                    registrations.push((gesture, row.1, row.2, row.3));
+                }
+                cx.run_until_parked();
+                told(&watching);
+            }
+            let mut events = Vec::new();
+            for (run, scene) in [(7, SceneId(50)), (8, SceneId(51)), (9, SceneId(52))] {
+                for message in [
+                    DataToShell::SceneBegin {
+                        scene,
+                        header: header(),
+                    },
+                    DataToShell::SceneStepCommit {
+                        run: RunId(run),
+                        scene,
+                        index: 0,
+                        step: rect("measured"),
+                    },
+                ] {
+                    let bytes = u32::try_from(
+                        frame::encode(&message, Pipe::Data)
+                            .expect("bounded frame")
+                            .len(),
+                    )
+                    .expect("frame size");
+                    events.push(LinkEvent::SceneData {
+                        generation: 1,
+                        frame: Deferred::new(message, 0),
+                        bytes,
+                    });
+                }
+            }
+            for run in [7, 8, 9] {
+                let message = DataToShell::RunEnd { run: RunId(run) };
+                let bytes = u32::try_from(
+                    frame::encode(&message, Pipe::Data)
+                        .expect("bounded end")
+                        .len(),
+                )
+                .expect("frame size");
+                events.push(LinkEvent::Data {
+                    generation: 1,
+                    message,
+                    bytes,
+                });
+            }
+            for run in [7, 8] {
+                events.push(LinkEvent::RunState {
+                    generation: 1,
+                    run: RunId(run),
+                    thread: ThreadId(1),
+                    phase: Phase::Done,
+                    error: None,
+                    origin: None,
+                });
+            }
+            assert_eq!(events.len(), 11);
+            let row = watching.ready.owner.update(cx, |owner, cx| {
+                let start = Instant::now();
+                let (result, counts, bytes) =
+                    allocation::usage(|| owner.link_events(Batch::Plain(events), cx));
+                (result, start.elapsed().as_nanos(), counts, bytes)
+            });
+            row.0.expect("raw intake");
+            watching.ready.owner.read_with(cx, |owner, _| {
+                assert_eq!(owner.runs.stoppable(), Some(RunId(9)));
+                assert!(owner.session.is_some());
+            });
+            cx.run_until_parked();
+            told(&watching);
+            if iteration >= 5 {
+                println!(
+                    "captured_intake mode={mode} stopped={stopped} sample={} events=11 ns={} allocations={} releases={} allocated_bytes={} released_bytes={}; UI dispatch/application, raw ends precede local admission drain, unconsumed third receipt observes its raw end; no IPC/decode, raw input, worker completion or GPU paint",
+                    iteration - 5,
+                    row.1,
+                    row.2[0],
+                    row.2[1],
+                    row.3[0],
+                    row.3[1]
+                );
+                for (gesture, ns, counts, bytes) in registrations {
+                    println!(
+                        "captured_registration mode={mode} gesture={gesture} sample={} ns={ns} allocations={} releases={} allocated_bytes={} released_bytes={}; complete captured UI operation, not map-only cost",
+                        iteration - 5,
+                        counts[0],
+                        counts[1],
+                        bytes[0],
+                        bytes[1]
+                    );
+                }
+                for (gesture, ns, counts, bytes) in automatic_names {
+                    println!(
+                        "captured_first_name mode={mode} gesture={gesture} sample={} ns={ns} allocations={} releases={} allocated_bytes={} released_bytes={}; complete first-state application after captured cancellation, not map-only cost",
+                        iteration - 5,
+                        counts[0],
+                        counts[1],
+                        bytes[0],
+                        bytes[1]
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[gpui::test]
+fn captured_stop_preserves_an_older_moving_scene_and_a_pending_typed_turn(cx: &mut TestAppContext) {
+    let watching = watch(true, cx);
+    drawn(&watching, cx);
+    watching.ready.owner.update(cx, |owner, _| {
+        owner
+            .runs
+            .submit("keep this queued turn", |_| true)
+            .expect("queued before voice recognition");
+    });
+    let (deliver, at) = natively_pending(&watching, cx);
+    state(&watching, RUN, Phase::Thinking, HOLD, cx);
+    let older = SceneId(41);
+    draw(&watching, 6, older, cx);
+    draw(&watching, RUN, OTHER, cx);
+    told(&watching);
+    press_deferred(&deliver, at, cx);
+    state(&watching, RUN, Phase::Answering, None, cx);
+    cx.run_until_parked();
+    assert_eq!(
+        told(&watching),
+        [cancel(), Told::Stop, stopped(vec![cut(OTHER)])]
+    );
+    watching.ready.owner.update(cx, |owner, _| {
+        assert_eq!(owner.runs.stoppable(), None);
+        assert_eq!(owner.presenter.stoppable_run(), Some(RunId(6)));
+        assert_eq!(scene_ids(&owner.presenter), [OTHER, DRAWN, older]);
+        let applied = owner.runs.apply_state(
+            RunId(8),
+            ThreadId(1),
+            Phase::Thinking,
+            Some(RunOrigin::Typed { turn: 1 }),
+        );
+        assert_eq!(applied.stop, None);
+        assert!(applied.visible);
+        assert_eq!(owner.runs.stoppable(), Some(RunId(8)));
+    });
+}
+
+#[gpui::test]
+fn captured_stop_does_not_promote_its_receipt_to_a_newer_presenter_run(cx: &mut TestAppContext) {
+    let (watching, deliver, at) = thinking(cx);
+    draw(&watching, RUN + 1, OTHER, cx);
+    told(&watching);
+    press_deferred(&deliver, at, cx);
+    state(&watching, RUN, Phase::Answering, None, cx);
+    cx.run_until_parked();
+    assert_eq!(told(&watching), [cancel(), Told::Stop]);
+    watching.ready.owner.read_with(cx, |owner, _| {
+        assert_eq!(owner.runs.stoppable(), Some(RunId(RUN)));
+        assert_eq!(owner.presenter.stoppable_run(), Some(RunId(RUN + 1)));
+        assert_eq!(scene_ids(&owner.presenter), [OTHER, DRAWN]);
+    });
+}
+
+#[gpui::test]
+fn captured_cancel_before_first_state_never_promotes_its_automatic_stop(cx: &mut TestAppContext) {
+    let watching = watch(true, cx);
+    drawn(&watching, cx);
+    watching.ready.owner.update(cx, |owner, _| {
+        owner
+            .runs
+            .submit("keep this queued turn", |_| true)
+            .expect("queued before voice recognition");
+    });
+    let (deliver, at) = natively_pending(&watching, cx);
+    let older = SceneId(41);
+    draw(&watching, 6, older, cx);
+    draw(&watching, RUN + 1, OTHER, cx);
+    watching.ready.owner.read_with(cx, |owner, _| {
+        assert!(owner.presenter.live_work(Instant::now()));
+        assert_eq!(owner.presenter.stoppable_run(), Some(RunId(RUN + 1)));
+        assert_eq!(
+            owner.voice.pending.as_ref().expect("pending hold").run,
+            None
+        );
+    });
+    told(&watching);
+    press_deferred(&deliver, at, cx);
+    cx.run_until_parked();
+    assert_eq!(told(&watching), [cancel(), Told::Stop, cancel()]);
+    state(&watching, RUN, Phase::Thinking, HOLD, cx);
+    cx.run_until_parked();
+    assert_eq!(
+        told(&watching),
+        [Told::Sent(ControlToBrain::Stop {
+            run: RunId(RUN),
+            revealed: Vec::new(),
+        })]
+    );
+    watching.ready.owner.update(cx, |owner, _| {
+        assert_eq!(owner.presenter.stoppable_run(), Some(RunId(RUN + 1)));
+        assert_eq!(scene_ids(&owner.presenter), [OTHER, DRAWN, older]);
+        let typed = owner.runs.apply_state(
+            RunId(RUN + 2),
+            ThreadId(1),
+            Phase::Thinking,
+            Some(RunOrigin::Typed { turn: 1 }),
+        );
+        assert!(typed.visible);
+        assert_eq!(typed.stop, None);
+        assert_eq!(owner.runs.stoppable(), Some(RunId(RUN + 2)));
+    });
+}
+
+#[gpui::test]
+fn automatic_hold_stop_keeps_newer_voice_ownership_and_folds_a_prebind_raw_end(
+    cx: &mut TestAppContext,
+) {
+    let watching = watch(true, cx);
+    drawn(&watching, cx);
+    let (deliver, at) = natively_pending(&watching, cx);
+    press_deferred(&deliver, at, cx);
+    cx.run_until_parked();
+    told(&watching);
+    end(&watching, RUN, cx);
+    hold(&watching, 2, cx);
+    release(&watching.ready.owner, 2, Some(DOWN), cx);
+    watching.ready.owner.update(cx, |owner, _| {
+        let hold = owner.voice.pending.as_mut().expect("newer pending hold");
+        hold.token.discard_unstarted().expect("no source started");
+        hold.source = Source::Sent;
+        assert_eq!(hold.token.gesture(), GestureId(2));
+        assert_eq!(hold.run, None);
+        assert_eq!(owner.voice.ended, None);
+    });
+    told(&watching);
+    state(&watching, RUN, Phase::Thinking, HOLD, cx);
+    cx.run_until_parked();
+    assert_eq!(
+        told(&watching),
+        [Told::Sent(ControlToBrain::Stop {
+            run: RunId(RUN),
+            revealed: Vec::new(),
+        })]
+    );
+    watching.ready.owner.read_with(cx, |owner, _| {
+        let hold = owner.voice.pending.as_ref().expect("newer hold survives");
+        assert_eq!(hold.token.gesture(), GestureId(2));
+        assert_eq!(hold.run, None);
+        assert_eq!(owner.voice.ended, None);
+        assert_eq!(
+            owner.runs.owned_disposition(RunId(RUN)),
+            crate::runs::RunDisposition::Stopped
+        );
+    });
+    state(&watching, RUN, Phase::Done, None, cx);
+    state(
+        &watching,
+        RUN + 1,
+        Phase::Thinking,
+        Some(RunOrigin::Hold {
+            gesture: GestureId(2),
+        }),
+        cx,
+    );
+    state(&watching, RUN, Phase::Thinking, HOLD, cx);
+    watching.ready.owner.read_with(cx, |owner, _| {
+        assert_eq!(
+            owner.runs.owned_disposition(RunId(RUN)),
+            crate::runs::RunDisposition::Live
+        );
+        let hold = owner.voice.pending.as_ref().expect("newer named hold");
+        assert_eq!(hold.token.gesture(), GestureId(2));
+        assert_eq!(hold.run.expect("newer run").run, RunId(RUN + 1));
+        assert_eq!(owner.voice.ended, None);
+        assert_eq!(owner.runs.stoppable(), Some(RunId(RUN + 1)));
+    });
+}
+
+#[gpui::test]
+fn automatic_hold_stop_cuts_pre_named_work_and_tags_later_commits(cx: &mut TestAppContext) {
+    use kumochi_protocol::message::SceneFailure;
+    use kumochi_shell_core::presenter::fixture::{object_count, step, tip_revision};
+
+    let watching = watch(true, cx);
+    drawn(&watching, cx);
+    let (deliver, at) = natively_pending(&watching, cx);
+    let owned = SceneId(42);
+    let older = SceneId(41);
+    draw(&watching, 6, older, cx);
+    draw(&watching, RUN, owned, cx);
+    draw(&watching, RUN + 1, OTHER, cx);
+    told(&watching);
+    press_deferred(&deliver, at, cx);
+    cx.run_until_parked();
+    told(&watching);
+    state(&watching, RUN, Phase::Thinking, HOLD, cx);
+    cx.run_until_parked();
+    assert_eq!(told(&watching), [stopped(vec![cut(owned)])]);
+    for frame in [
+        DataToShell::SceneCutApplied {
+            scene: owned,
+            revision: 1,
+            cut: cut(owned).cut,
+        },
+        DataToShell::SceneStepCommit {
+            run: RunId(RUN),
+            scene: owned,
+            index: 1,
+            step: step(r#"{"step":{"id":"late"}}"#),
+        },
+    ] {
+        receive(
+            &watching.ready.owner,
+            LinkEvent::SceneData {
+                generation: 1,
+                frame: Deferred::new(frame, 0),
+                bytes: 0,
+            },
+            cx,
+        );
+    }
+    cx.run_until_parked();
+    assert_eq!(
+        told(&watching),
+        [Told::Sent(ControlToBrain::StepFailed {
+            run: RunId(RUN),
+            scene: owned,
+            index: 1,
+            reason: SceneFailure::Cancelled,
+            cut: StopCut {
+                activated: 1,
+                revealed: Bounded::default()
+            },
+        })]
+    );
+    watching.ready.owner.read_with(cx, |owner, _| {
+        assert_eq!(owner.presenter.stoppable_run(), Some(RunId(RUN + 1)));
+        assert_eq!(scene_ids(&owner.presenter), [OTHER, DRAWN, older, owned]);
+        assert_eq!(tip_revision(&owner.presenter, owned), 1);
+        assert_eq!(object_count(&owner.presenter, OTHER), 1);
+        assert_eq!(object_count(&owner.presenter, older), 1);
+    });
+    receive(
+        &watching.ready.owner,
+        LinkEvent::SceneData {
+            generation: 1,
+            frame: Deferred::new(
+                DataToShell::SceneStepCommit {
+                    run: RunId(RUN),
+                    scene: owned,
+                    index: 2,
+                    step: step(r#"{"step":{"id":"later"}}"#),
+                },
+                0,
+            ),
+            bytes: 0,
+        },
+        cx,
+    );
+    cx.run_until_parked();
+    assert_eq!(told(&watching), []);
+}
+
+#[gpui::test]
+fn voice_receipt_keeps_a_prebind_raw_end_and_terminal_closure_through_teardown(
+    cx: &mut TestAppContext,
+) {
+    let watching = watch(true, cx);
+    let (_deliver, _at) = natively_pending(&watching, cx);
+    end(&watching, RUN, cx);
+    state(&watching, RUN, Phase::Thinking, HOLD, cx);
+    watching.ready.owner.read_with(cx, |owner, _| {
+        let tail = owner
+            .voice
+            .pending
+            .as_ref()
+            .expect("pending voice")
+            .run
+            .expect("bound receipt");
+        assert_eq!(
+            tail,
+            crate::runs::RunTail {
+                run: RunId(RUN),
+                thread: ThreadId(1),
+                control_closed: false,
+                data_ended: true
+            }
+        );
+    });
+    state(&watching, RUN, Phase::Answering, None, cx);
+    state(&watching, RUN, Phase::Done, None, cx);
+    state(&watching, RUN, Phase::Thinking, None, cx);
+    watching.ready.owner.read_with(cx, |owner, _| {
+        assert!(owner.voice.pending.is_none());
+        assert_eq!(
+            owner.voice.ended,
+            Some((
+                GestureId(1),
+                Some(crate::runs::RunTail {
+                    run: RunId(RUN),
+                    thread: ThreadId(1),
+                    control_closed: true,
+                    data_ended: true
+                })
+            ))
+        );
+    });
+}
+
+#[gpui::test]
+fn voice_receipt_accepts_only_owned_successful_delete_closure(cx: &mut TestAppContext) {
+    use kumochi_protocol::message::Deleted;
+    for outcome in [Deleted::Hidden, Deleted::Removed] {
+        for raw_first in [false, true] {
+            for last_run in [None, Some(RunId(RUN))] {
+                let (watching, _deliver, _at) = thinking(cx);
+                status(&watching.ready.owner, 1, 1, HoldStatus::Cancelled, cx);
+                watching.ready.owner.update(cx, |owner, cx| {
+                    owner.thread_deleted(ThreadId(1), outcome, last_run, cx);
+                    assert!(
+                        !owner
+                            .voice
+                            .ended
+                            .expect("receipt")
+                            .1
+                            .expect("run")
+                            .control_closed
+                    );
+                    assert!(owner.runs.confirm_delete(ThreadId(1)));
+                    owner.thread_deleted(ThreadId(1), Deleted::NotHidden, last_run, cx);
+                    assert!(
+                        !owner
+                            .voice
+                            .ended
+                            .expect("receipt")
+                            .1
+                            .expect("run")
+                            .control_closed
+                    );
+                    assert!(owner.runs.confirm_delete(ThreadId(2)));
+                    owner.thread_deleted(ThreadId(2), outcome, None, cx);
+                    assert!(
+                        !owner
+                            .voice
+                            .ended
+                            .expect("receipt")
+                            .1
+                            .expect("run")
+                            .control_closed
+                    );
+                    assert!(owner.runs.confirm_delete(ThreadId(1)));
+                });
+                if raw_first {
+                    end(&watching, RUN, cx);
+                }
+                watching.ready.owner.update(cx, |owner, cx| {
+                    owner.thread_deleted(ThreadId(1), outcome, last_run, cx);
+                });
+                if !raw_first {
+                    end(&watching, RUN, cx);
+                }
+                watching.ready.owner.read_with(cx, |owner, _| {
+                    assert_eq!(
+                        owner.voice.ended,
+                        Some((
+                            GestureId(1),
+                            Some(crate::runs::RunTail {
+                                run: RunId(RUN),
+                                thread: ThreadId(1),
+                                control_closed: true,
+                                data_ended: true
+                            })
+                        ))
+                    );
+                });
+            }
+        }
+    }
+}
+
+#[gpui::test]
+fn a_suppressed_terminal_updates_its_receipt_before_retiring_the_pending_input(
+    cx: &mut TestAppContext,
+) {
+    let (watching, _deliver, _at) = thinking(cx);
+    state(&watching, RUN, Phase::Answering, None, cx);
+    end(&watching, RUN, cx);
+    watching.ready.owner.update(cx, |owner, _| {
+        let tail = owner.voice.ended.expect("ended hold").1.expect("bound run");
+        assert!(!tail.control_closed);
+        assert!(tail.data_ended);
+        assert_eq!(
+            owner.runs.stop_owned(tail),
+            Some(ControlToBrain::Stop {
+                run: RunId(RUN),
+                revealed: Vec::new()
+            })
+        );
+    });
+    state(&watching, RUN, Phase::Done, None, cx);
+    watching.ready.owner.read_with(cx, |owner, _| {
+        assert_eq!(
+            owner.runs.owned_disposition(RunId(RUN)),
+            crate::runs::RunDisposition::Live
+        );
+        assert_eq!(
+            owner.voice.ended,
+            Some((
+                GestureId(1),
+                Some(crate::runs::RunTail {
+                    run: RunId(RUN),
+                    thread: ThreadId(1),
+                    control_closed: true,
+                    data_ended: true
+                })
+            ))
+        );
+    });
+}
+
+/// What stopping run 7 tells while the presenter holds scenes: its cuts.
+fn stopped(cuts: Vec<SceneCut>) -> Told {
+    Told::Sent(ControlToBrain::StopScenes {
+        run: RunId(RUN),
+        cuts: SceneCuts::new(cuts).expect("cuts"),
+    })
+}
+
+/// The cut of a scene stopped while its first step enters.
+fn cut(scene: SceneId) -> SceneCut {
+    let cut = StopCut {
+        activated: 1,
+        revealed: Bounded::default(),
+    };
+    SceneCut { scene, cut }
+}
+
+#[gpui::test]
+fn a_deferred_press_whose_answer_already_ended_does_nothing(cx: &mut TestAppContext) {
+    let (watching, deliver, at) = thinking(cx);
+    press_deferred(&deliver, at, cx);
+    state(&watching, RUN, Phase::Answering, None, cx);
+    state(&watching, RUN, Phase::Done, None, cx);
+    end(&watching, RUN, cx);
+    // The answer took the panel; the press, applied now, changes nothing in it.
+    let before = panel(&watching, cx);
+    cx.run_until_parked();
+    assert_eq!(told(&watching), [cancel(), Told::Stop]);
+    nothing_else(&watching, before, cx);
+}
+
+#[gpui::test]
+fn a_deferred_press_stops_its_done_run_before_the_run_s_end(cx: &mut TestAppContext) {
+    // The run's state is `Done` and its data's end is still to come.
+    let (watching, deliver, at) = thinking(cx);
+    press_deferred(&deliver, at, cx);
+    state(&watching, RUN, Phase::Done, None, cx);
+    watching.ready.owner.read_with(cx, |owner, _| {
+        assert!(owner.voice.pending.is_none());
+        assert_eq!(owner.runs.stoppable(), Some(RunId(RUN)));
+    });
+    cx.run_until_parked();
+    assert_eq!(told(&watching), [cancel(), Told::Stop, stopped(Vec::new())]);
+    watching.ready.owner.read_with(cx, |owner, _| {
+        assert_eq!(owner.runs.stoppable(), None);
+        assert_eq!(scene_ids(&owner.presenter), [DRAWN]);
+    });
+}
+
+#[gpui::test]
+fn a_deferred_press_stops_what_its_ended_run_still_draws(cx: &mut TestAppContext) {
+    // The run drew without answering and has ended both ways; its drawing still moves.
+    let (watching, deliver, at) = thinking(cx);
+    draw(&watching, RUN, OTHER, cx);
+    told(&watching);
+    press_deferred(&deliver, at, cx);
+    state(&watching, RUN, Phase::Done, None, cx);
+    end(&watching, RUN, cx);
+    watching.ready.owner.read_with(cx, |owner, _| {
+        let now = Instant::now();
+        assert_eq!(owner.runs.stoppable(), None);
+        assert_eq!(owner.moving_run(now), Some(RunId(RUN)));
+        // Once that drawing is at rest nothing moves, and a press would stop nothing.
+        assert_eq!(owner.presenter.stoppable_run(), Some(RunId(RUN)));
+        assert_eq!(owner.moving_run(now + Duration::from_secs(60)), None);
+    });
+    cx.run_until_parked();
+    let stop = stopped(vec![cut(OTHER)]);
+    assert_eq!(told(&watching), [cancel(), Told::Stop, stop]);
+    watching.ready.owner.read_with(cx, |owner, _| {
+        assert_eq!(owner.presenter.stoppable_run(), None);
+        assert_eq!(scene_ids(&owner.presenter), [OTHER, DRAWN]);
+        assert!(!owner.activity.working);
+    });
+}
+
+#[gpui::test]
+fn a_deferred_press_stops_what_a_cancelled_hold_s_run_still_draws(cx: &mut TestAppContext) {
+    // The run drew while the hold was pending, and the brain's `Cancelled` ended the hold.
+    let (watching, deliver, at) = thinking(cx);
+    draw(&watching, RUN, OTHER, cx);
+    told(&watching);
+    press_deferred(&deliver, at, cx);
+    status(&watching.ready.owner, 1, 1, HoldStatus::Cancelled, cx);
+    cx.run_until_parked();
+    let stop = stopped(vec![cut(OTHER)]);
+    assert_eq!(told(&watching), [cancel(), Told::Stop, cancel(), stop]);
+    watching.ready.owner.read_with(cx, |owner, _| {
+        assert_eq!(owner.presenter.stoppable_run(), None);
+        assert_eq!(scene_ids(&owner.presenter), [OTHER, DRAWN]);
+    });
+}
+
+#[gpui::test]
+fn a_deferred_press_stops_no_other_run_once_its_answer_ended(cx: &mut TestAppContext) {
+    let (watching, deliver, at) = thinking(cx);
+    press_deferred(&deliver, at, cx);
+    state(&watching, RUN, Phase::Answering, None, cx);
+    state(&watching, RUN, Phase::Done, None, cx);
+    end(&watching, RUN, cx);
+    state(&watching, 8, Phase::Answering, None, cx);
+    watching.ready.owner.read_with(cx, |owner, _| {
+        assert_eq!(owner.runs.stoppable(), Some(RunId(8)));
+    });
+    cx.run_until_parked();
+    assert_eq!(told(&watching), [cancel(), Told::Stop]);
+    watching.ready.owner.read_with(cx, |owner, _| {
+        assert_eq!(owner.runs.stoppable(), Some(RunId(8)), "run 8 goes on");
+        assert_eq!(scene_ids(&owner.presenter), [DRAWN]);
+    });
+}
+
+#[gpui::test]
+fn a_deferred_press_whose_hold_became_an_answer_first_stops_that_answer(cx: &mut TestAppContext) {
+    let (watching, deliver, at) = thinking(cx);
+    press_deferred(&deliver, at, cx);
+    state(&watching, RUN, Phase::Answering, None, cx);
+    watching.ready.owner.read_with(cx, |owner, _| {
+        assert!(owner.voice.pending.is_none(), "the answer ended the hold");
+        assert_eq!(owner.runs.stoppable(), Some(RunId(RUN)));
+    });
+    cx.run_until_parked();
+    // The sources stop, and the press stops the answer, which has drawn nothing to cut.
+    assert_eq!(told(&watching), [cancel(), Told::Stop, stopped(Vec::new())]);
+    watching.ready.owner.read_with(cx, |owner, _| {
+        assert_eq!(owner.runs.stoppable(), None, "the answer is stopped");
+        assert_eq!(scene_ids(&owner.presenter), [DRAWN]);
+    });
+}
+
+#[gpui::test]
+fn a_cancel_marker_left_behind_takes_no_other_press_and_cancels_no_other_hold(
+    cx: &mut TestAppContext,
+) {
+    let clear = || {
+        Told::Sent(ControlToBrain::ClearDrawing {
+            scene_ids: vec![DRAWN],
+        })
+    };
+
+    // A press that names a hold which was never pending, as a refused one's does, is an
+    // ordinary one.
+    let watching = watch(true, cx);
+    drawn(&watching, cx);
+    watching.ready.owner.update(cx, |owner, cx| {
+        owner.native_escape(Some(GestureId(1)), cx).expect("escape");
+    });
+    cx.run_until_parked();
+    assert_eq!(told(&watching), [clear()]);
+
+    // The hotkey's press never came. The next press names no hold and is an ordinary one.
+    let watching = watch(true, cx);
+    drawn(&watching, cx);
+    let _native = ended_by_esc_down(&watching, cx);
+    told(&watching);
+    watching.ready.owner.update(cx, |owner, cx| {
+        owner.native_escape(None, cx).expect("escape");
+        assert_eq!(owner.voice.ended, None);
+    });
+    cx.run_until_parked();
+    assert_eq!(told(&watching), [clear()]);
+
+    // A newer hold's own press cancels that hold: hold 1's marker is not its.
+    let watching = watch(true, cx);
+    drawn(&watching, cx);
+    let _native = ended_by_esc_down(&watching, cx);
+    hold(&watching, 2, cx);
+    watching.ready.owner.update(cx, |owner, cx| {
+        owner.native_escape(Some(GestureId(2)), cx).expect("escape");
+        assert!(owner.voice.pending.is_none(), "hold 2 is cancelled");
+    });
+
+    // And hold 1's marker, whatever brings it back, leaves hold 2 pending.
+    let watching = watch(true, cx);
+    drawn(&watching, cx);
+    let _native = ended_by_esc_down(&watching, cx);
+    hold(&watching, 2, cx);
+    watching.ready.owner.update(cx, |owner, cx| {
+        owner.native_escape(Some(GestureId(1)), cx).expect("escape");
+        let hold = owner.voice.pending.as_ref().expect("hold 2");
+        assert_eq!(hold.token.gesture(), GestureId(2));
+    });
+
+    // A lost session forgets the marker.
+    let watching = watch(true, cx);
+    let _native = ended_by_esc_down(&watching, cx);
+    let lost = LinkEvent::State(LinkState::Reconnecting);
+    receive(&watching.ready.owner, lost, cx);
+    watching.ready.owner.read_with(cx, |owner, _| {
+        assert_eq!(owner.voice.ended, None);
+    });
 }
 
 #[gpui::test]

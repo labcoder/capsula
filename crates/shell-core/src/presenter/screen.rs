@@ -252,7 +252,7 @@ impl Presenter {
         // The scene's header, if it is a screen scene: mirrored, or begun by a frame still held.
         let begin = match self.scenes.get(&scene) {
             Some(mirrored) => mirrored.screen.then(|| mirrored.state.view().header()),
-            None => self.held.iter().find_map(|(frame, _)| match &**frame {
+            None => self.held.iter().find_map(|(frame, _, _)| match &**frame {
                 DataToShell::SceneBegin {
                     scene: begun,
                     header,
@@ -338,7 +338,7 @@ impl Presenter {
 
     /// Every screen scene not cleared: mirrored, or begun by a frame still held.
     fn screens(&self) -> Vec<SceneId> {
-        let held = self.held.iter().filter_map(|(frame, _)| match &**frame {
+        let held = self.held.iter().filter_map(|(frame, _, _)| match &**frame {
             DataToShell::SceneBegin { scene, header }
                 if on_screen(header) && !self.cleared.contains(scene) =>
             {

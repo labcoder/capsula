@@ -373,6 +373,65 @@ the answer text, and hands it the steps it lets through.
   and held chunks go.
 - Scene ids, revisions and counts are the only things it reports; its errors never carry labels.
 
+An Esc press that revoked a pending hold's input belongs to that hold, and to the run the
+hold became, once the hold is torn down. It never goes on to the ordinary Esc action, so it
+leaves the drawing up. The teardown can be applied before the press is:
+
+- by the hold's cancelled `End`, at the raw Esc-down a delivery ahead of the hotkey's, or in
+  the hotkey's own delivery just before `native_escape`;
+- by the brain's reply to the press's `GestureCancel` or by the hold's own run, which arrive
+  on the link while the press still waits for a busy app: the hold's `Cancelled` status, or
+  its run's `Answering`, `Done`, `Failed` or `Interrupted`.
+
+So `Voice.ended` is a receipt for the pending hold torn down last, whichever road tore it
+down, with the run the hold became once a run state has named it. `end_voice` writes it
+where it takes the hold, and `voice_run` where the held run's state removes it.
+`native_escape` takes only the receipt matching the captured gesture. A press naming it does three
+things at most:
+
+1. It takes the marks that are up, as any press does.
+2. If the receipt's run is the run Esc's stop would stop at that moment, it stops that run
+   with a scoped `Stop` or `StopScenes`, without promoting its run id. Selection uses the
+   ordinary effective target, including its conditional promotion to newer Presenter work.
+   With no live run, only moving Presenter work supplies a target. A terminal `RunState` doesn't settle it:
+   the run's data can still be arriving, and its drawing can still be entering after its
+   end.
+3. It brings `Activity` up to date.
+
+It makes no other stop or clear decision and clears no ordinary drawing. When another run is
+what Esc would stop, or the hold's run has ended and nothing of it moves, the press stops
+nothing.
+
+The pending hold and ended receipt each retain one `RunTail`: run, thread, control closure
+and raw data end. Updates OR the two closure bits before teardown or suppressed feedback.
+Control closes on a terminal RunState or an accepted successful ThreadDeleted for that thread,
+even without last_run. Raw matching-session RunEnd closes data before credit is returned;
+an end held before the first naming state is reported by that state's Applied.input_ended.
+These stamps are not screen-watch completion and survive Answering until receipt consumption.
+
+Runs owns one pending-stop map for selected receipts and automatically cancelled holds still
+missing either closure. A rejected hold's genuinely new first naming folds uncredited held
+data before registration, so a prebind raw end is retained even after its voice receipt was
+consumed or replaced. Its original automatic stop remains owed and uses exact Presenter
+dispatch, without the direct key path's target-equality test: owned cuts use StopScenes;
+otherwise the original Stop is sent. Historical/repeated origins still receive exact local
+cancellation but cannot create a new input entry from closure knowledge no longer retained.
+Duplicate registration preserves observed bits; both closures retire the entry, and connection
+loss clears the map and stamps. Stopped disposition is captured before terminal retirement,
+so the retiring callback cannot show feedback or restore a retry. Already-received Presenter
+work keeps its own stopped tag after raw input retires. No completed-stop history is retained.
+
+The receipt cancels nothing itself, and one left behind takes no later press. A press names a
+gesture only when it revoked that hold's input itself: `cancel_input_gesture` hands a tracked
+id out once, a teardown clears it, and the fence never reuses an id. A hold that was never
+pending leaves no receipt, so the press after a refused hold is an ordinary one, and a lost
+session drops the receipt.
+
+Before owner effects and again before deferred intents, a named native Esc whose captured
+session is no longer live is consumed without touching the replacement session. A fresh
+unnamed Esc still follows the ordinary route. A consumed current-session receipt discards
+held-word recovery only for its own gesture, leaving a newer hold's copy recoverable.
+
 [ipc](ipc.md#scenes-and-recovery) has the recovery states and the install rules.
 
 ## A screen hold's pointer line
@@ -542,7 +601,8 @@ selection revision, whether the hold asked for a picture, and the words once a m
 `HoldWords` arrives on the same session.
 
 - A matching `HoldStored` consumes it. Thinking doesn't.
-- `end_voice` and `cancel_voice` discard it first, before any cancel goes to the brain, so
+- `end_voice` discards its pending gesture's copy before any cancel goes to the brain;
+  `cancel_voice` discards recovery as part of ordinary cancellation, so
   Esc, a cancel, a typed submit, a target change, deleting the thread, quitting and the brain's
   Empty, Cancelled and failures (Busy and ChoiceChanged included) all drop it. `escape` also
   drops it when no hold is pending, for an Esc during the answer. A newer accepted hold

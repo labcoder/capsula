@@ -19,6 +19,10 @@ use super::{GENERATION, RUN, Shaper, begin, commit, controls, live, only_job, st
 fn measure_motion_heavy_prepared_tip_admission_and_clear() {
     use kumochi_protocol::frame::{self, Pipe};
 
+    let _timeout = std::thread::spawn(|| {
+        std::thread::sleep(std::time::Duration::from_secs(90));
+        std::process::exit(124);
+    });
     kumochi_scene::deferred::start().expect("dropper starts before scene intake");
 
     for counts in [vec![600], vec![375; 4]] {
@@ -211,6 +215,56 @@ fn measure_motion_heavy_prepared_tip_admission_and_clear() {
                     counts.iter().sum::<usize>(),
                     iteration - 5
                 );
+            }
+            let (mut sampling, sampled_at) = live();
+            for (offset, (first, _, _, _)) in workloads.iter().enumerate() {
+                let scene = SceneId(100 + u64::try_from(offset).expect("four scenes"));
+                begin(&mut sampling, scene, sampled_at);
+                let job = only_job(
+                    commit(&mut sampling, scene, 0, first.clone(), sampled_at)
+                        .expect("motion prefix"),
+                );
+                sampling
+                    .completed(job.run(&mut Shaper), sampled_at)
+                    .expect("prepared motion");
+            }
+            sampling
+                .advance(GENERATION, sampled_at)
+                .expect("real activation");
+            sampling.sample_at(sampled_at).expect("first sample");
+            sampling.frames().borrow_mut().shown = true;
+            assert!(!sampling.frames().borrow().paint(|_, _| Ok::<_, ()>(())));
+            sampling.begin_painted(sampled_at);
+            let live_at = sampled_at + std::time::Duration::from_millis(100);
+            sampling.sample_at(live_at).expect("moving frame warmup");
+            assert!(
+                sampling.animating(live_at),
+                "the timer must sample real motion"
+            );
+            assert_eq!(super::scene_ids(&sampling).len(), counts.len());
+            for (state, at) in [("live", 101), ("cut", 102), ("pre_cut_skipping", 103)] {
+                if state != "live" {
+                    super::sample_stop_interval(&mut sampling, state == "pre_cut_skipping");
+                }
+                let at = sampled_at + std::time::Duration::from_millis(at);
+                let start = Instant::now();
+                let (result, allocated, bytes) = allocation::usage(|| sampling.sample_at(at));
+                let ns = start.elapsed().as_nanos();
+                let (sample, effects) = result.expect("motion sample");
+                assert!(sample.visible);
+                assert!(effects.is_empty());
+                if iteration >= 5 {
+                    println!(
+                        "motion_sample state={state} scenes={} objects={} sample={} ns={ns} allocations={} releases={} allocated_bytes={} released_bytes={}; production sample_at, fixture stop states, no GPU paint",
+                        counts.len(),
+                        128 * counts.len(),
+                        iteration - 5,
+                        allocated[0],
+                        allocated[1],
+                        bytes[0],
+                        bytes[1]
+                    );
+                }
             }
         }
         admissions.sort_unstable();

@@ -10,6 +10,7 @@
 
 use std::cell::Cell;
 use std::rc::Rc;
+use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use gpui_kit::{AnyWindowHandle, App, AppContext as _, AsyncApp, WeakEntity};
@@ -262,6 +263,13 @@ fn schedule(
     .detach();
 }
 
+fn stale_hold_escape(owner: &Presence, gesture: Option<GestureId>, session: u64) -> bool {
+    gesture.is_some()
+        && owner.session.as_ref().is_none_or(|current| {
+            current.generation() != session || !current.alive().load(Ordering::Acquire)
+        })
+}
+
 /// Applies effects through a fallible borrow of the app.
 fn apply(
     cx: &mut AsyncApp,
@@ -270,30 +278,37 @@ fn apply(
     pending: &Pending,
 ) -> Applied {
     let result = cx.update_window(dock, |_, window, app| {
-        let applied = owner
-            .update(app, |this, cx| {
-                let mut effects = pending.delivery.effects;
-                if effects.contains(&Some(crate::input::Effect::OpenInput)) {
-                    if this.link.microphone_gate().latest() == pending.collection {
-                        if let Some(gesture) = pending.cancelled {
-                            this.cancel_voice_gesture(gesture, cx);
-                        }
-                    } else {
-                        effects = effects.map(|effect| {
-                            effect.filter(|effect| *effect != crate::input::Effect::OpenInput)
-                        });
+        let applied = owner.update(app, |this, cx| {
+            if pending.escape && stale_hold_escape(this, pending.cancelled, pending.stamp.session) {
+                return false;
+            }
+            let mut effects = pending.delivery.effects;
+            if effects.contains(&Some(crate::input::Effect::OpenInput)) {
+                if this.link.microphone_gate().latest() == pending.collection {
+                    if let Some(gesture) = pending.cancelled {
+                        this.cancel_voice_gesture(gesture, cx);
                     }
+                } else {
+                    effects = effects.map(|effect| {
+                        effect.filter(|effect| *effect != crate::input::Effect::OpenInput)
+                    });
                 }
-                this.apply_effects(effects, window, cx);
-            })
-            .is_ok();
-        if applied && (pending.escape || pending.delivery.intents.iter().any(Option::is_some)) {
+            }
+            this.apply_effects(effects, window, cx);
+            true
+        });
+        if applied.as_ref().is_ok_and(|apply| *apply)
+            && (pending.escape || pending.delivery.intents.iter().any(Option::is_some))
+        {
             let (owner, intents) = (owner.clone(), pending.delivery.intents.clone());
             let (stamp, qpc, pointer) = (pending.stamp, pending.qpc, pending.pointer);
             let held = pending.held;
             let (escape, cancelled) = (pending.escape, pending.cancelled);
             let intents = move |app: &mut App| {
                 let _gone = owner.update(app, |this, cx| {
+                    if escape && stale_hold_escape(this, cancelled, stamp.session) {
+                        return;
+                    }
                     for intent in intents.into_iter().flatten() {
                         this.voice_intent(intent, stamp, qpc, pointer, held, cx);
                     }
@@ -305,7 +320,7 @@ fn apply(
             // Deferred to the end of this update, where the dock is back in GPUI's window table.
             app.defer(intents);
         }
-        applied
+        applied.is_ok()
     });
     match result {
         Ok(true) => Applied::Yes,

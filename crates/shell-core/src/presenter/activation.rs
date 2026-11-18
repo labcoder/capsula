@@ -103,6 +103,10 @@ impl Activation {
         self.installed = None;
     }
 
+    pub(super) fn owned_by(&self, run: RunId) -> bool {
+        self.installed.is_some_and(|installed| installed.run == run)
+    }
+
     pub(super) fn retain(&mut self, state: &SceneState) {
         for (index, end) in self.ends.iter_mut().enumerate() {
             if state
@@ -352,12 +356,21 @@ impl Presenter {
                     .chain(scene.ready.iter().map(|r| r.run))
                     .chain(scene.queue.iter().map(|t| t.run))
             });
-        let held = self.held.iter().filter_map(|(frame, _)| match &**frame {
-            DataToShell::SceneStepCommit { run, .. } => Some(*run),
-            _ => None,
-        });
+        let held = self
+            .held
+            .iter()
+            .filter(|(_, _, disposition)| *disposition == super::RunDisposition::Live)
+            .filter_map(|(frame, _, _)| match &**frame {
+                DataToShell::SceneStepCommit { run, .. } => Some(*run),
+                _ => None,
+            });
         scenes
-            .chain(self.lane.as_ref().map(|lane| lane.run))
+            .chain(
+                self.lane
+                    .as_ref()
+                    .filter(|lane| lane.disposition == super::RunDisposition::Live)
+                    .map(|lane| lane.run),
+            )
             .chain(held)
             .chain(self.frames.borrow().retirement.as_ref().and_then(|r| r.run))
             .filter(|run| self.fenced.is_none_or(|f| *run > f))
@@ -369,9 +382,12 @@ impl Presenter {
             return true;
         }
         let open_run = |run| self.fenced.is_none_or(|f| run > f);
-        if self.lane.as_ref().is_some_and(|lane| open_run(lane.run))
-            || self.held.iter().any(|(frame, _)| matches!(&**frame, DataToShell::SceneStepCommit { run, .. } if open_run(*run)))
-        {
+        if self.lane.as_ref().is_some_and(|lane| {
+            lane.disposition == super::RunDisposition::Live && open_run(lane.run)
+        }) || self.held.iter().any(|(frame, _, disposition)| {
+            *disposition == super::RunDisposition::Live
+                && matches!(&**frame, DataToShell::SceneStepCommit { run, .. } if open_run(*run))
+        }) {
             return true;
         }
         self.scenes.values().any(|scene| {

@@ -249,6 +249,17 @@ impl Presenter {
         self.frames.borrow_mut().discard_retirement();
     }
 
+    pub(super) fn discard_owned_replacement(&mut self, run: RunId) {
+        let mut frames = self.frames.borrow_mut();
+        if frames
+            .retirement
+            .as_ref()
+            .is_some_and(|retirement| retirement.run == Some(run))
+        {
+            frames.discard_retirement();
+        }
+    }
+
     /// A refused host clears current scenes as failures, not as an explicit user clear.
     pub fn refuse_all(&mut self, now: Instant) -> Result<Vec<Effect>, Broken> {
         let mut out = Out::default();
