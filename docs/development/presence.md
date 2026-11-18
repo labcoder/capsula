@@ -590,8 +590,9 @@ a change: a record that can't be read, a window that can't be named.
 
 Run natively so far: the two ignored tests in `sources_tests.rs`, once each on Windows build
 10.0.26200. One registers the mouse to the thread's own window, removes it and leaves
-nothing; the other sees the registration go with the window. Nothing here has run against
-real input, and no shipped or evidence build has been launched with it.
+nothing; the other sees the registration go with the window. An isolated native shell test
+also exercised watch start and stop and mark expiry. These tests did not use real input or
+run a normal product session.
 
 ## Held words after a lost brain
 

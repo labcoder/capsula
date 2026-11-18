@@ -109,7 +109,8 @@ and clears them. A click, wheel scroll or key in another app, switching apps, an
 turning screen sharing off, locking the session or losing the connection clears the marks.
 They also expire 60 seconds after the answer ends. That deadline applies only to desktop
 annotations, not contained drawings. Esc takes the marks; if their answer is still running,
-the same press stops it too.
+the same press stops it too. Marks are the model's reading of the picture and can be wrong,
+so look at what a mark is on before you click.
 
 The watch notices selected input, not changing pixels. A late page load, moving video,
 touch or a touchpad's two-finger gesture can leave marks over content that has changed until
