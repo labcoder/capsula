@@ -205,9 +205,10 @@ impl Settings {
             return false;
         }
         let op = match intent.action {
-            SpeechInputAction::Install | SpeechInputAction::Retry | SpeechInputAction::Reload => {
+            SpeechInputAction::Install | SpeechInputAction::Retry => {
                 SettingsOp::InstallVoice(kumochi_protocol::voice::VoicePart::SpeechInput)
             }
+            SpeechInputAction::Reload => SettingsOp::LoadSpeechInput,
             SpeechInputAction::Cancel => SettingsOp::CancelVoiceInstall,
         };
         if !send(op) {

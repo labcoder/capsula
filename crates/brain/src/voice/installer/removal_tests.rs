@@ -8,6 +8,28 @@ use super::{Durable, Effect, Folder, Installer, RemoveAnswer};
 use crate::voice::download::{DownloadError, FetchPhase, Progress};
 use crate::voice::{LoadEvent, LoadReport};
 
+#[test]
+fn a_refused_removal_releases_the_restored_input_if_off_without_claiming_unknown_exit() {
+    let mut installer = ready();
+    intent(&mut installer, 3);
+    assert_eq!(installer.set_input_enabled(false), []);
+    assert_eq!(
+        installer.intended(SpeechInput, 3, Err(ErrorKey::SettingsRefused)),
+        [Effect::Unload {
+            part: SpeechInput,
+            ask: 1
+        }]
+    );
+    assert_eq!(installer.view().speech_input, PartState::Loading);
+    assert_eq!(
+        installer.reported(SpeechInput, report(1, LoadEvent::Unavailable)),
+        []
+    );
+    assert_eq!(installer.view().speech_input, PartState::Unavailable);
+    assert_eq!(installer.set_input_enabled(true), []);
+    assert_eq!(installer.reload_input(), []);
+}
+
 fn report(ask: u64, event: LoadEvent) -> LoadReport {
     LoadReport { ask, event }
 }
@@ -34,6 +56,7 @@ fn ready() -> Installer {
         [true, true].map(Ok),
         [true, true],
         &[],
+        true,
     );
     installer.reported(SpeechInput, report(1, LoadEvent::Loaded));
     assert!(installer.ready(SpeechInput));
@@ -60,8 +83,13 @@ fn diagnostics_keep_refused_write_and_delete_outcomes_without_listing_owners() {
 
 /// Nothing installed; speech input's fetch has token 3 and is downloading.
 fn fetching() -> Installer {
-    let (mut installer, _) =
-        Installer::start([Durable::Absent; 2], [true; 2].map(Ok), [true; 2], &[]);
+    let (mut installer, _) = Installer::start(
+        [Durable::Absent; 2],
+        [true; 2].map(Ok),
+        [true; 2],
+        &[],
+        true,
+    );
     assert_eq!(
         installer.install(SpeechInput),
         [Effect::Fetch {
@@ -316,8 +344,13 @@ fn an_install_during_the_delete_fetches_once_the_removal_finishes() {
 /// An install during a refused intent runs once it's refused.
 #[test]
 fn an_install_during_a_refused_intent_runs_once_its_refused() {
-    let (mut installer, _) =
-        Installer::start([Durable::Absent; 2], [true; 2].map(Ok), [true; 2], &[]);
+    let (mut installer, _) = Installer::start(
+        [Durable::Absent; 2],
+        [true; 2].map(Ok),
+        [true; 2],
+        &[],
+        true,
+    );
     intent(&mut installer, 3);
     assert_eq!(installer.install(SpeechInput), []);
     assert_eq!(
@@ -338,6 +371,7 @@ fn an_install_after_a_failed_start_up_delete_retries_it_first() {
         [true, true].map(Ok),
         [true, true],
         &[SpeechInput],
+        true,
     );
     assert_eq!(effects, []);
     assert_eq!(installer.view().speech_input, storage_failure());

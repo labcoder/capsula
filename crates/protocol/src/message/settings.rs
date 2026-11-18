@@ -191,8 +191,7 @@ pub enum SettingsOp {
     SetTalkBack(bool),
     /// When an idle speech-input model is unloaded.
     SetSttUnload(SttUnload),
-    /// Download, check and load a voice part. Refused with `VoiceUnavailable` until the
-    /// installer lands.
+    /// Download, check and load a voice part for installation or repair.
     InstallVoice(VoicePart),
     /// Unload and delete a voice part. Refused like `InstallVoice` until then.
     RemoveVoice(VoicePart),
@@ -207,6 +206,8 @@ pub enum SettingsOp {
     SetScreenHolds(bool),
     /// Let a hold also show the model a picture of the screen, taken when it's released.
     SetShowScreen(bool),
+    /// Load already installed speech input, without verifying or fetching files for an install.
+    LoadSpeechInput,
 }
 
 /// The initial held-speech choice, also used by older settings files without the key.
@@ -368,6 +369,7 @@ mod tests {
             (14, SettingsOp::SetScreenHolds(true)),
             (15, SettingsOp::SetShowScreen(false)),
             (15, SettingsOp::SetShowScreen(true)),
+            (16, SettingsOp::LoadSpeechInput),
         ];
         for (tag, op) in ops {
             let bytes = postcard::to_allocvec(&op).expect("encodes");

@@ -33,6 +33,114 @@ fn failed_absent(key: ErrorKey) -> PartState {
 }
 
 #[test]
+fn off_retires_a_loading_input_ask_and_does_not_replay_a_request_on_enable() {
+    let mut installer = both_loading();
+    assert_eq!(
+        installer.set_input_enabled(false),
+        [Effect::Unload {
+            part: SpeechInput,
+            ask: 1
+        }]
+    );
+    assert_eq!(
+        installer.load_input_refusal(),
+        Some(ErrorKey::HoldToTalkOff)
+    );
+    assert_eq!(installer.reload_input(), []);
+    assert_eq!(
+        installer.reported(SpeechInput, report(1, LoadEvent::Loaded)),
+        []
+    );
+    assert_eq!(
+        installer.reported(SpeechInput, report(9, LoadEvent::Lost)),
+        []
+    );
+    assert_eq!(installer.view().speech_input, PartState::Loading);
+    assert_eq!(
+        installer.reported(SpokenReplies, report(2, LoadEvent::Loaded)),
+        []
+    );
+    assert_eq!(
+        installer.reported(SpeechInput, report(1, LoadEvent::Discarded)),
+        []
+    );
+    assert_eq!(
+        installer.view(),
+        view(PartState::Unloaded, PartState::Ready)
+    );
+    assert_eq!(installer.set_input_enabled(true), []);
+    assert_eq!(
+        installer.view(),
+        view(PartState::Unloaded, PartState::Ready)
+    );
+    assert_eq!(
+        installer.reload_input(),
+        [Effect::Load {
+            part: SpeechInput,
+            ask: 3
+        }]
+    );
+}
+
+#[test]
+fn a_fresh_off_install_that_loses_its_worker_during_activation_does_not_reload() {
+    for (enabled_at_loss, enabled_at_ack) in [(false, false), (false, true), (true, false)] {
+        let mut installer = fresh();
+        assert_eq!(installer.set_input_enabled(false), []);
+        assert_eq!(installer.install(SpeechInput), [fetch(SpeechInput, 3)]);
+        assert_eq!(
+            installer.fetched(SpeechInput, 3, Ok(())),
+            [Effect::Load {
+                part: SpeechInput,
+                ask: 3
+            }]
+        );
+        assert_eq!(
+            installer.reported(SpeechInput, report(3, LoadEvent::Loaded)),
+            [Effect::Activate {
+                part: SpeechInput,
+                token: 3
+            }]
+        );
+        assert_eq!(installer.set_input_enabled(enabled_at_loss), []);
+        assert_eq!(
+            installer.reported(SpeechInput, report(3, LoadEvent::Lost)),
+            []
+        );
+        assert_eq!(installer.view().speech_input, PartState::Loading);
+        assert_eq!(installer.set_input_enabled(enabled_at_ack), []);
+        assert_eq!(installer.activated(SpeechInput, 3, Ok(())), []);
+        assert_eq!(installer.view().speech_input, PartState::Unloaded);
+    }
+}
+
+#[test]
+fn stale_load_does_not_start_install_or_retry() {
+    let mut absent = fresh();
+    assert_eq!(
+        absent.load_input_refusal(),
+        Some(ErrorKey::VoiceUnavailable)
+    );
+    assert_eq!(absent.reload_input(), []);
+    assert_eq!(absent.view().speech_input, PartState::NotInstalled);
+    let (mut broken, startup) = Installer::start(
+        [Durable::Installed, Durable::Absent],
+        [false, true].map(Ok),
+        [true; 2],
+        &[],
+        true,
+    );
+    assert_eq!(startup, []);
+    assert_eq!(
+        broken.load_input_refusal(),
+        Some(ErrorKey::VoiceUnavailable)
+    );
+    assert_eq!(broken.reload_input(), []);
+    assert_eq!(broken.view().speech_input, failed(ErrorKey::VoiceCorrupt));
+    assert_eq!(broken.install(SpeechInput), [fetch(SpeechInput, 3)]);
+}
+
+#[test]
 fn model_paths_have_one_actionable_failure_after_fetch_startup_and_load() {
     for part in VoicePart::ALL {
         let mut installer = fresh();
@@ -51,6 +159,7 @@ fn model_paths_have_one_actionable_failure_after_fetch_startup_and_load() {
             [Err(ErrorKey::VoiceModelPath); 2],
             [true; 2],
             &[],
+            true,
         );
         assert_eq!(effects, []);
         assert_eq!(
@@ -151,6 +260,7 @@ fn both_loading() -> Installer {
         [true, true].map(Ok),
         [true, true],
         &[],
+        true,
     );
     assert_eq!(
         loads,
@@ -277,6 +387,7 @@ fn ineligible_key_down_never_queues_an_install_or_replays_after_removal() {
             [whole, true].map(Ok),
             [available, true],
             &[],
+            true,
         );
         assert_eq!(installer.view(), view(expected, PartState::NotInstalled));
         dropped(&mut installer);
@@ -416,7 +527,7 @@ fn cancelling_an_explicit_idle_reload_waits_for_release_and_fences_late_success(
         []
     );
     assert_eq!(
-        installer.install(SpeechInput),
+        installer.reload_input(),
         [Effect::Load {
             part: SpeechInput,
             ask: 3
@@ -453,7 +564,7 @@ fn cancelling_an_explicit_idle_reload_waits_for_release_and_fences_late_success(
     assert_eq!(installer.parts[0].durable, Durable::Installed);
     assert_eq!(installer.view().speech_input, PartState::Unloaded);
     assert_eq!(
-        installer.install(SpeechInput),
+        installer.reload_input(),
         [Effect::Load {
             part: SpeechInput,
             ask: 4
@@ -496,7 +607,7 @@ fn idle_release_during_a_refused_remove_is_replayed_before_a_later_reload() {
     );
     assert_eq!(installer.view().speech_input, PartState::Unloaded);
     assert_eq!(
-        installer.install(SpeechInput),
+        installer.reload_input(),
         [Effect::Load {
             part: SpeechInput,
             ask: 4
@@ -538,6 +649,7 @@ fn start_up_loads_each_whole_installed_part_and_nothing_else() {
         [true, false].map(Ok),
         [true, true],
         &[],
+        true,
     );
     assert_eq!(
         loads,
@@ -560,6 +672,7 @@ fn a_part_with_a_short_file_is_corrupt_and_never_loads() {
         [false, true].map(Ok),
         [true, true],
         &[],
+        true,
     );
     assert_eq!(
         loads,
@@ -589,6 +702,7 @@ fn a_handle_that_didnt_start_is_a_load_failure_for_the_session() {
         [true, true].map(Ok),
         [false, false],
         &[],
+        true,
     );
     assert_eq!(loads, []);
     let fixed = view(
@@ -611,6 +725,7 @@ fn a_removal_whose_delete_failed_shows_a_storage_failure_and_never_loads() {
         [true, true].map(Ok),
         [true, true],
         &[SpeechInput],
+        true,
     );
     assert_eq!(loads, []);
     assert_eq!(
@@ -707,8 +822,13 @@ fn an_older_asks_reports_after_a_reload_change_nothing() {
 
 /// Neither part installed, both handles started; the next token is 3.
 fn fresh() -> Installer {
-    let (installer, effects) =
-        Installer::start([Durable::Absent; 2], [true; 2].map(Ok), [true; 2], &[]);
+    let (installer, effects) = Installer::start(
+        [Durable::Absent; 2],
+        [true; 2].map(Ok),
+        [true; 2],
+        &[],
+        true,
+    );
     assert_eq!(effects, []);
     installer
 }
@@ -1040,6 +1160,7 @@ fn a_retry_of_an_installed_part_is_ready_without_a_write() {
         [false, true].map(Ok),
         [true, true],
         &[],
+        true,
     );
     assert_eq!(effects, []);
     assert_eq!(installer.install(SpeechInput), [fetch(SpeechInput, 3)]);
@@ -1058,6 +1179,7 @@ fn a_removal_whose_last_write_fails_stays_removing_and_installs_nothing() {
         [true, true].map(Ok),
         [true, true],
         &[],
+        true,
     );
     assert_eq!(effects, []);
     assert_eq!(installer.view().speech_input, PartState::NotInstalled);
@@ -1087,6 +1209,7 @@ fn an_install_during_a_removals_last_write_starts_once_it_commits() {
         [true, true].map(Ok),
         [true, true],
         &[],
+        true,
     );
     assert_eq!(installer.install(SpeechInput), []);
     assert_eq!(installer.view().speech_input, PartState::NotInstalled);

@@ -112,6 +112,8 @@ pub enum ErrorKey {
     ClaudeCodeUnavailable,
     /// Claude Code is still finishing an earlier question.
     ClaudeCodeBusy,
+    /// Speech input cannot be manually loaded with Hold to talk off.
+    HoldToTalkOff,
 }
 
 macro_rules! catalog {
@@ -177,6 +179,7 @@ impl ErrorKey {
         VoiceLoad,
         VoiceUnavailable,
         VoiceModelPath,
+        HoldToTalkOff,
 
         GitHubUnavailable,
         DrawingReplacementFailed,

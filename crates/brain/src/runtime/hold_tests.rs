@@ -145,6 +145,7 @@ fn install_input(
         [Ok(true); 2],
         [true, false],
         &[],
+        true,
     );
     brain
         .voice_op(

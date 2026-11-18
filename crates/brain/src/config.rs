@@ -307,6 +307,7 @@ impl Config {
                 voice_mut(&mut table).insert(STT_UNLOAD.to_owned(), Value::String(name.to_owned()));
             }
             SettingsOp::InstallVoice(_)
+            | SettingsOp::LoadSpeechInput
             | SettingsOp::RemoveVoice(_)
             | SettingsOp::CancelVoiceInstall => return Err(ConfigError::VoiceUnavailable),
         }

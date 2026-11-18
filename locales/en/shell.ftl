@@ -458,4 +458,4 @@ error-voice-model-path = The speech model folder goes through a link or network 
 error-drawing-replacement-failed = The replacement couldn't be drawn. Your previous drawings were removed.
 error-drawing-not-returned = No drawing came back.
 error-screen-unavailable = The screen is no longer available, so this held turn wasn't sent.
-error-voice-unavailable = Voice can't be installed or removed right now.
+error-voice-unavailable = Voice can't be installed, loaded or removed right now.

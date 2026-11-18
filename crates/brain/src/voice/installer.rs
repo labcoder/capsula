@@ -96,6 +96,13 @@ enum Held {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ActivatingModel {
+    Live,
+    Lost,
+    LostWhileOff,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Phase {
     Idle,
     /// Waiting for the fetch in flight to end.
@@ -111,14 +118,14 @@ enum Phase {
         prior: Option<Rest>,
         ask: u64,
     },
-    /// A cancelled installed reload still owns its ask until the terminal report.
+    /// An off transition or cancelled reload still owns its ask until the terminal report.
     Unloading {
         ask: u64,
     },
-    /// The Activate write is in flight. A loss meanwhile waits for its result: `lost`.
+    /// The Activate write is in flight. A loss meanwhile waits for its result.
     Committing {
         ask: u64,
-        lost: bool,
+        model: ActivatingModel,
     },
     Ready {
         ask: u64,
@@ -197,6 +204,7 @@ pub(crate) struct Installer {
     fetching: Option<(VoicePart, u64)>,
     /// Quit began: no fetch starts again.
     quitting: bool,
+    input_enabled: bool,
     next_token: u64,
     effects: Vec<Effect>,
 }
@@ -212,11 +220,16 @@ impl Installer {
     /// couldn't be deleted; any other `Removing` part has its `RemoveDone` write queued.
     /// shortcut: a corrupt file of the right size still loads until the next install re-hashes
     /// it; hash at start once load failures point there.
+    #[expect(
+        clippy::fn_params_excessive_bools,
+        reason = "the committed input residency choice"
+    )]
     pub(crate) fn start(
         durable: [Durable; 2],
         whole: [Result<bool, ErrorKey>; 2],
         available: [bool; 2],
         stuck: &[VoicePart],
+        input_enabled: bool,
     ) -> (Self, Vec<Effect>) {
         let mut installer = Self {
             parts: [0, 1].map(|index| Entry {
@@ -235,6 +248,7 @@ impl Installer {
             }),
             fetching: None,
             quitting: false,
+            input_enabled,
             next_token: 1,
             effects: Vec::new(),
         };
@@ -249,6 +263,11 @@ impl Installer {
                 (Durable::Absent, true, _) => Phase::Idle,
                 (_, false, _) => Phase::Failed(ErrorKey::VoiceLoad),
                 (Durable::Installed, true, Ok(false)) => Phase::Failed(ErrorKey::VoiceCorrupt),
+                (Durable::Installed, true, Ok(true))
+                    if part == VoicePart::SpeechInput && !input_enabled =>
+                {
+                    Phase::Unloaded
+                }
                 (Durable::Installed, true, Ok(true)) => {
                     entry.models.push(token);
                     installer.effects.push(Effect::Load { part, ask: token });
@@ -284,42 +303,84 @@ impl Installer {
         entry.available && matches!(entry.shown(), Phase::Ready { .. })
     }
 
-    /// A connected key-down reloads only installed, idle-unloaded input; it never queues a fetch.
-    pub(crate) fn reload_input(&mut self) -> Vec<Effect> {
+    pub(crate) fn load_input_refusal(&self) -> Option<ErrorKey> {
+        if !self.input_enabled {
+            return Some(ErrorKey::HoldToTalkOff);
+        }
         let entry = &self.parts[index(VoicePart::SpeechInput)];
-        if self.quitting
+        (self.quitting
             || entry.phase != Phase::Unloaded
             || entry.durable != Durable::Installed
-            || !entry.available
-        {
-            return Vec::new();
-        }
-        self.install(VoicePart::SpeechInput)
+            || !entry.available)
+            .then_some(ErrorKey::VoiceUnavailable)
     }
 
-    /// `InstallVoice`, answered accepted with no write whatever it does. An idle unloaded part
-    /// reloads its installed files with a fresh ask. A failed part, installed
-    /// or not, is fetched again, which re-hashes its files. Nothing fetches around an unfinished
-    /// removal: an install waits for it to finish, and one after a failed removal first retries
-    /// its delete and `RemoveDone`.
+    /// A connected key-down or an explicit Load reloads only installed, idle-unloaded input.
+    pub(crate) fn reload_input(&mut self) -> Vec<Effect> {
+        if self.load_input_refusal().is_some() {
+            return self.take();
+        }
+        self.load_installed(VoicePart::SpeechInput)
+    }
+
+    #[expect(
+        clippy::fn_params_excessive_bools,
+        reason = "the committed input residency choice"
+    )]
+    pub(crate) fn set_input_enabled(&mut self, enabled: bool) -> Vec<Effect> {
+        self.input_enabled = enabled;
+        self.release_off_input(VoicePart::SpeechInput);
+        self.take()
+    }
+
+    fn release_off_input(&mut self, part: VoicePart) {
+        if part != VoicePart::SpeechInput || self.input_enabled {
+            return;
+        }
+        let entry = &mut self.parts[index(part)];
+        if !entry.available {
+            return;
+        }
+        let (Phase::Ready { ask }
+        | Phase::Loading {
+            prior: None | Some(Rest::Unloaded),
+            ask,
+        }) = entry.phase
+        else {
+            return;
+        };
+        if entry.models.contains(&ask) {
+            entry.phase = Phase::Unloading { ask };
+            self.effects.push(Effect::Unload { part, ask });
+        } else {
+            entry.phase = Phase::Unloaded;
+        }
+    }
+
+    fn load_installed(&mut self, part: VoicePart) -> Vec<Effect> {
+        let ask = self.token();
+        let entry = &mut self.parts[index(part)];
+        entry.token = ask;
+        entry.models.push(ask);
+        entry.phase = Phase::Loading {
+            prior: Some(Rest::Unloaded),
+            ask,
+        };
+        self.effects.push(Effect::Load { part, ask });
+        self.take()
+    }
+
+    /// Installs or repairs a part, retaining the user's explicit verify/fetch consent. Nothing
+    /// fetches around an unfinished removal; a failed removal first retries its cleanup.
     pub(crate) fn install(&mut self, part: VoicePart) -> Vec<Effect> {
         if !self.parts[index(part)].available {
             return self.take();
         }
         if self.parts[index(part)].phase == Phase::Unloaded {
-            if self.quitting {
+            if self.quitting || part == VoicePart::SpeechInput {
                 return self.take();
             }
-            let ask = self.token();
-            let entry = &mut self.parts[index(part)];
-            entry.token = ask;
-            entry.models.push(ask);
-            entry.phase = Phase::Loading {
-                prior: Some(Rest::Unloaded),
-                ask,
-            };
-            self.effects.push(Effect::Load { part, ask });
-            return self.take();
+            return self.load_installed(part);
         }
         let entry = &mut self.parts[index(part)];
         let prior = match entry.phase {
@@ -487,7 +548,7 @@ impl Installer {
     }
 
     /// A handle's report. A loaded fresh install commits before it's ready; a retry of an
-    /// installed part is ready at once. A loss of the current model starts one automatic reload;
+    /// installed part needs no new commit. A loss of the current model can start one automatic reload;
     /// a second loss, like a failed load, is a load failure. A draining part waits for the first
     /// report that its model is gone.
     pub(crate) fn reported(&mut self, part: VoicePart, report: LoadReport) -> Vec<Effect> {
@@ -531,15 +592,31 @@ impl Installer {
                 if entry.durable == Durable::Installed {
                     entry.phase = Phase::Ready { ask };
                 } else {
-                    entry.phase = Phase::Committing { ask, lost: false };
+                    entry.phase = Phase::Committing {
+                        ask,
+                        model: ActivatingModel::Live,
+                    };
                     self.effects.push(Effect::Activate {
                         part,
                         token: entry.token,
                     });
                 }
             }
-            (Phase::Committing { ask: current, .. }, LoadEvent::Lost) if current == ask => {
-                entry.phase = Phase::Committing { ask, lost: true };
+            (
+                Phase::Committing {
+                    ask: current,
+                    model: ActivatingModel::Live,
+                },
+                LoadEvent::Lost,
+            ) if current == ask => {
+                entry.phase = Phase::Committing {
+                    ask,
+                    model: if part == VoicePart::SpeechInput && !self.input_enabled {
+                        ActivatingModel::LostWhileOff
+                    } else {
+                        ActivatingModel::Lost
+                    },
+                };
             }
             (
                 Phase::Loading { ask: current, .. } | Phase::Ready { ask: current },
@@ -554,12 +631,13 @@ impl Installer {
             ) if current == ask => entry.phase = Phase::Failed(ErrorKey::VoiceLoad),
             _ => {}
         }
+        self.release_off_input(part);
         self.take()
     }
 
     /// The Activate write's result. What's on disk is mirrored whatever the token; the phase
     /// moves only for the current one. A refused write unloads the model it would have kept; a
-    /// committed one reloads a model lost during the write.
+    /// committed one can reload a model only if the loss was eligible at the time.
     pub(crate) fn activated(
         &mut self,
         part: VoicePart,
@@ -580,16 +658,17 @@ impl Installer {
         if entry.hold(token, Held::Activated(result)) {
             return self.take();
         }
-        let Phase::Committing { ask, lost } = entry.phase else {
+        let Phase::Committing { ask, model } = entry.phase else {
             return self.take();
         };
         if entry.token != token {
             return self.take();
         }
-        match result {
-            Ok(()) if lost => self.lost(part),
-            Ok(()) => entry.phase = Phase::Ready { ask },
-            Err(key) => {
+        match (result, model) {
+            (Ok(()), ActivatingModel::Live) => entry.phase = Phase::Ready { ask },
+            (Ok(()), ActivatingModel::Lost) => self.lost(part),
+            (Ok(()), ActivatingModel::LostWhileOff) => entry.phase = Phase::Unloaded,
+            (Err(key), _) => {
                 let fresh = self.token();
                 let entry = &mut self.parts[index(part)];
                 entry.token = fresh;
@@ -597,6 +676,7 @@ impl Installer {
                 self.effects.push(Effect::Unload { part, ask });
             }
         }
+        self.release_off_input(part);
         self.take()
     }
 
@@ -662,6 +742,7 @@ impl Installer {
             let effects = self.install(part);
             self.effects.extend(effects);
         }
+        self.release_off_input(part);
         self.take()
     }
 
@@ -772,6 +853,14 @@ impl Installer {
         entry.token = token;
         if self.quitting || entry.retry_left == 0 {
             entry.phase = Phase::Failed(ErrorKey::VoiceLoad);
+            return;
+        }
+        if part == VoicePart::SpeechInput && !self.input_enabled {
+            entry.phase = if entry.durable == Durable::Installed {
+                Phase::Unloaded
+            } else {
+                Phase::Failed(ErrorKey::VoiceLoad)
+            };
             return;
         }
         entry.retry_left -= 1;

@@ -235,6 +235,16 @@ impl Settings {
         if sync_user {
             self.user.value.clone_from(&self.user.authoritative);
         }
+        if view.hold_to_talk {
+            if self.speech_error.as_ref().map(UserError::key) == Some(ErrorKey::HoldToTalkOff) {
+                self.speech_error = None;
+            }
+            if self.notice_slot == Some(Slot::SpeechInput(SpeechInputAction::Reload))
+                && self.notice.as_ref().map(UserError::key) == Some(ErrorKey::HoldToTalkOff)
+            {
+                self.clear_notice();
+            }
+        }
         self.view = Some(view);
         if update == Update::Unsolicited {
             return None;
@@ -624,7 +634,10 @@ impl Settings {
 fn settings_error(key: ErrorKey) -> bool {
     matches!(
         key,
-        ErrorKey::SettingsRefused | ErrorKey::ConfigUnreadable | ErrorKey::VoiceUnavailable
+        ErrorKey::SettingsRefused
+            | ErrorKey::ConfigUnreadable
+            | ErrorKey::VoiceUnavailable
+            | ErrorKey::HoldToTalkOff
     )
 }
 

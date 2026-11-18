@@ -12,7 +12,7 @@ use tokio::task::{JoinError, JoinHandle};
 use super::{Brain, Full, Link};
 use crate::config::{ConfigError, Pending};
 use crate::connections::github::device::DefaultRepo;
-use crate::voice::installer::{Folder, RemoveAnswer};
+use crate::voice::installer::{Folder, Installer, RemoveAnswer};
 
 /// The epoch of a change the brain makes itself. Connections count from 1, so a shell hears only
 /// the settled settings.
@@ -252,6 +252,21 @@ impl Brain {
                     answered?;
                     continue;
                 }
+                Change::User(SettingsOp::LoadSpeechInput) => {
+                    if let Some(refusal) = self.voice_input_load_refusal() {
+                        self.settled(epoch, Outcome::Refused(refusal), link.as_deref_mut())?;
+                    } else {
+                        let answered = self.settled(epoch, Outcome::Accepted, link.as_deref_mut());
+                        let link = if answered.is_ok() {
+                            link.as_deref_mut()
+                        } else {
+                            None
+                        };
+                        self.voice_op(Installer::reload_input, link)?;
+                        answered?;
+                    }
+                    continue;
+                }
                 Change::User(SettingsOp::CancelVoiceInstall) if self.voice.is_some() => {
                     let answered = self.settled(epoch, Outcome::Accepted, link.as_deref_mut());
                     let link = if answered.is_ok() {
@@ -342,6 +357,7 @@ impl Brain {
         (epoch, voice, github, written): Written,
         mut link: Option<&mut Link<'_, '_>>,
     ) -> Result<(), Full> {
+        let input_was_enabled = self.config.view().hold_to_talk;
         let outcome = match written {
             Ok((pending, Ok(()))) => {
                 let (screen_holds, show_screen) = {
@@ -402,7 +418,20 @@ impl Brain {
             };
             self.voice_written(write, result, link.as_deref_mut())?;
         }
-        self.settled(epoch, outcome, link.as_deref_mut())?;
+        let answered = self.settled(epoch, outcome, link.as_deref_mut());
+        let input_enabled = self.config.view().hold_to_talk;
+        if input_enabled != input_was_enabled {
+            let voice_link = if answered.is_ok() {
+                link.as_deref_mut()
+            } else {
+                None
+            };
+            self.voice_op(
+                |installer| installer.set_input_enabled(input_enabled),
+                voice_link,
+            )?;
+        }
+        answered?;
         self.pump_settings(link)
     }
 

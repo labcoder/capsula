@@ -575,9 +575,10 @@ or explicitly unloaded input has no wanted model, so changing the setting does n
 
 Expiry clears only the current wanted ask under the owner's mutex. The existing unload and
 physical-release confirmation path still runs before `Unloaded` is reported. The installer
-then exposes the existing `PartState::Unloaded`, retaining the installed files. An explicit
-`InstallVoice(SpeechInput)` request in this state loads those files without another download,
-using a fresh ask; reports from the retired ask cannot restore readiness or release the new one.
+then exposes the existing `PartState::Unloaded`, retaining the installed files. With Hold to talk
+on, an explicit `LoadSpeechInput` request in this state loads those files without a download.
+It uses a fresh ask; reports from the retired ask cannot restore readiness or release the new
+one. Load is separate from `InstallVoice` (Install or Retry), so a stale Load cannot fetch files.
 The configured interval is armed again only after the new load is ready. A failed reload stays
 failed, and removal/quit cannot be bypassed by this reload path.
 
@@ -587,8 +588,21 @@ the part in `Loading` until that ask's physical terminal report arrives. Only th
 `Unloaded` again; the installed files and configuration remain intact for a fresh reload request.
 This idle policy does not unload SpokenReplies or certify all-model memory release.
 
-A connected `KeyDown` also requests this backend reload, but only when the installer is actually
-Unloaded, durably installed, has its handle and is not quitting. A removal intent may still show
+Committing Hold to talk off releases speech input even under Kept. Once read from the link, the
+off request stays queued if the hold's terminal status can't be sent. The Settings answer reports
+the saved choice; it is not a release receipt. The input part stays in `Loading` until the
+matching owner confirms release; an unavailable owner stays fenced. Starting with off and
+complete, durably installed input skips its startup load. Off preserves the model files and
+does not change Talk-back or the SpokenReplies startup load. Explicit Install and Retry can
+still verify, load and commit a model, then release speech input while off. If the worker is
+lost while off during activation, a successful write leaves the model installed and unloaded,
+even if Hold to talk was turned on before the write completed. Manual Load while off is refused
+before work starts, with the instruction to turn Hold to talk back on. The shell clears that
+refusal when the saved choice becomes on.
+
+A connected `KeyDown` can reload after turning Hold to talk on, but only when a fresh press finds
+input actually Unloaded, durably installed, with its handle and not quitting. Turning the setting
+on itself doesn't start a load. A removal intent may still show
 Unloaded in the view; it is not eligible. Other states are no-ops, without a download or a deferred
 install. A key-down received before the matching idle terminal report is dropped, not saved for
 that report. Offline/drained key-downs are also dropped and never replayed on reconnect. A load

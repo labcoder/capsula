@@ -43,6 +43,7 @@ async fn late_valid_owner(cut: Cut) {
             [true; 2].map(Ok),
             [true; 2],
             &[],
+            true,
         );
         assert_eq!(
             effects,
@@ -251,6 +252,7 @@ async fn invalid_load_terminals_cause_real_retirement_and_one_delete_only_after_
                 [true; 2].map(Ok),
                 [true; 2],
                 &[],
+                true,
             );
             owner.load(PathBuf::from("models"), 1);
             let (id, request) = rig.next().await;

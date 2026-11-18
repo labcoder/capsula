@@ -705,24 +705,24 @@ fn reload_enter_refusal_and_captured_intents_stay_fenced_before_the_recording_se
     frame.run_until_parked();
     assert_eq!(
         controls.try_recv(),
-        Ok(ControlToBrain::Settings(SettingsOp::InstallVoice(
-            SpeechInput
-        )))
+        Ok(ControlToBrain::Settings(SettingsOp::LoadSpeechInput))
     );
     deliver(
         &owner,
         vec![LinkEvent::Error {
             generation: 7,
-            error: ErrorKey::VoiceUnavailable.into(),
+            error: ErrorKey::HoldToTalkOff.into(),
         }],
         cx,
     );
     frame.update(|_, cx| assert!(view.read(cx).model.read(cx).speech_input_pending()));
+    let mut off = saved.clone();
+    off.hold_to_talk = false;
     deliver(
         &owner,
         vec![LinkEvent::Settings {
             generation: 7,
-            view: saved.clone(),
+            view: off,
             answer: true,
         }],
         cx,
@@ -731,6 +731,26 @@ fn reload_enter_refusal_and_captured_intents_stay_fenced_before_the_recording_se
     frame.update(|window, cx| window.draw(cx).clear(cx));
     assert!(frame.debug_bounds("speech-model-refused").is_some());
     assert!(frame.debug_bounds("speech-model-pending").is_none());
+    frame.update(|_, cx| {
+        let model = view.read(cx).model.read(cx);
+        assert_eq!(
+            cx.global::<crate::strings::Strings>()
+                .error(model.speech_input_error().expect("load was refused")),
+            "Hold to talk is off. Turn it on in Settings → Voice."
+        );
+    });
+    deliver(
+        &owner,
+        vec![LinkEvent::Settings {
+            generation: 7,
+            view: saved.clone(),
+            answer: false,
+        }],
+        cx,
+    );
+    frame.run_until_parked();
+    frame.update(|window, cx| window.draw(cx).clear(cx));
+    assert!(frame.debug_bounds("speech-model-refused").is_none());
     for (installed, status) in [
         (false, Text::VoiceNotInstalledFailed),
         (true, Text::VoiceInstalledFailed),

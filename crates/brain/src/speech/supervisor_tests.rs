@@ -71,6 +71,7 @@ async fn a_failed_load_request_cannot_delete_or_reinstall_until_its_worker_exit_
         [true; 2].map(Ok),
         [true; 2],
         &[],
+        true,
     );
     assert_eq!(
         effects,

@@ -32,6 +32,9 @@ use crate::voice::download::{DownloadError, Fetch, FetchPhase, Progress};
 use crate::voice::tts::{Engine, TtsError, TtsHandle};
 use crate::voice::{LoadEvent, Reports};
 
+#[path = "voice_input_off_tests.rs"]
+mod input_off;
+
 /// Returns the owner's idle terminal report without applying it to the installer.
 pub(super) async fn released_input(
     scratch: &Scratch,
@@ -62,6 +65,7 @@ pub(super) async fn released_input(
         [true; 2].map(Ok),
         [true, false],
         &[],
+        true,
     );
     brain
         .voice_op(
@@ -412,6 +416,7 @@ async fn idle_policy_reaches_the_owner_only_after_settings_commit_and_installer_
         [true; 2].map(Ok),
         [true, false],
         &[],
+        true,
     );
     brain
         .voice_op(
