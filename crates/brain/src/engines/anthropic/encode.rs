@@ -12,7 +12,7 @@ use zeroize::Zeroizing;
 
 use super::{Mapper, Reply};
 use crate::connections::anthropic::messages::MessagesBody;
-use crate::connections::anthropic::request::{literal, members};
+use crate::connections::anthropic::request::{literal, members, object_within_depth};
 use crate::connections::anthropic::sse_map::Capture;
 use crate::context::{BOUND, ConnectionTag, InputItem, ModelRequest, Role};
 use crate::engines::responses::effort;
@@ -25,6 +25,9 @@ const MAX_TOKENS: u64 = 2048;
 const NOTE: &str = "Kumochi note:\n";
 /// The longest tool name or call id this route sends, as `CallId` bounds ids.
 const NAME_BYTES: usize = 64;
+/// Tool-input containers, including the root object. Leaves headroom for the five enclosing
+/// request containers under serde_json's recursion limit.
+const MAX_TOOL_INPUT_DEPTH: usize = 96;
 
 /// Why no body was built.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
@@ -379,7 +382,9 @@ impl ToolUse {
         };
         let text = |name| serde_json::from_str::<String>(field(name)?).ok();
         let input = field("input")?;
-        members(input)?;
+        if !object_within_depth::<MAX_TOOL_INPUT_DEPTH>(input) {
+            return None;
+        }
         let (id, name) = (text("id")?, text("name")?);
         (text("type")? == "tool_use" && named(&id).is_ok() && named(&name).is_ok()).then(|| Self {
             id,

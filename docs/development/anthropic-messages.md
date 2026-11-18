@@ -208,8 +208,10 @@ stop reason and calls fails locally (`Protocol`) and keeps nothing. A tool round
 reply, and its input as the JSON text the reader read, nothing else. They must be the calls made
 ready, in order. The store takes this route's items only as `ToolUse` (`append_key_round`;
 `append_round` refuses the route) and writes, reads and re-encodes the input byte for byte, so no
-generic JSON parse can change it. The reply, with the request it answered, stays in `Live` for the
-run's next round.
+generic JSON parse can change it. Projected and stored call inputs have the same depth limit:
+at most 96 nested objects and arrays, including the input object, so the enclosing Messages
+request fits the JSON parser's recursion budget. The reply, with the request it answered, stays
+in `Live` for the run's next round.
 
 The next round takes it once. Its body is `encode::next` over that request, that reply, and the
 results the rebuilt request ends with: those right after the round's own stored calls, exactly

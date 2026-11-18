@@ -51,6 +51,10 @@ fn streamed(events: &[Value]) -> Vec<u8> {
 
 /// A signed thinking block, text, and one call, then `tool_use`.
 fn calling() -> Vec<u8> {
+    calling_with_input(r#"{"limit": 3}"#)
+}
+
+fn calling_with_input(input: &str) -> Vec<u8> {
     streamed(&[
         json!({"type":"message_start","message":{"usage":{"input_tokens":5}}}),
         json!({"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":"","signature":""}}),
@@ -61,7 +65,7 @@ fn calling() -> Vec<u8> {
         json!({"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"Looking."}}),
         json!({"type":"content_block_stop","index":1}),
         json!({"type":"content_block_start","index":2,"content_block":{"type":"tool_use","id":"toolu_1","name":"list_tasks","input":{},"signature":"CALL-SIG-SENTINEL"}}),
-        json!({"type":"content_block_delta","index":2,"delta":{"type":"input_json_delta","partial_json":"{\"limit\": 3}"}}),
+        json!({"type":"content_block_delta","index":2,"delta":{"type":"input_json_delta","partial_json":input}}),
         json!({"type":"content_block_stop","index":2}),
         json!({"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{"output_tokens":9}}),
         json!({"type":"message_stop"}),
@@ -530,6 +534,68 @@ async fn a_key_calls_input_keeps_its_bytes_through_the_store_and_later_requests(
         expected.iter().all(|call| later.contains(call.as_str())),
         "a later request sends each stored call as read: {later}"
     );
+}
+
+#[tokio::test]
+async fn a_key_input_fits_the_envelope_before_it_becomes_a_row() {
+    use crate::connections::anthropic::error::Failure;
+    use crate::engines::EngineFailure;
+    use crate::engines::anthropic::encode;
+
+    let input = |arrays: usize| {
+        format!(
+            r#"{{"note":{}, "value":{}0{}}}"#,
+            json!("[[{\"\\"),
+            "[".repeat(arrays),
+            "]".repeat(arrays)
+        )
+    };
+    let mut world = world("key-depth");
+    let run = world.start("ask");
+    let accepted = input(95);
+    let peer = Peer::new(vec![calling_with_input(&accepted)]);
+    let (finish, events) = peer
+        .play(&Live::default(), &request(&world, run, 1), Answer::Grant)
+        .await;
+    assert_eq!(finish, Some(Finish::Completed));
+    let calls: Vec<_> = key_calls(&events)
+        .into_iter()
+        .map(|(_, call)| call)
+        .collect();
+    let block =
+        format!(r#"{{"type":"tool_use","id":"toolu_1","name":"list_tasks","input":{accepted}}}"#);
+    assert_eq!(
+        calls.iter().map(ToolUse::json).collect::<Vec<_>>(),
+        [block.clone()]
+    );
+    keep_calls(&mut world, run, &calls, &[("toolu_1", "answer")]);
+    assert!(stored(&world).contains(&block));
+    world.reply(run, "Done.");
+    let next = world.start("next");
+    let (sent, _) = encode::body(&request(&world, next, 1).request, ConnectionTag(TAG))
+        .expect("the stored call fits inside a fresh request");
+    assert!(
+        sent.sent()
+            .windows(block.len())
+            .any(|bytes| bytes == block.as_bytes())
+    );
+
+    let before = stored(&world);
+    for arrays in [123, 96] {
+        let peer = Peer::new(vec![calling_with_input(&input(arrays))]);
+        let (finish, events) = peer
+            .play(&Live::default(), &request(&world, next, 1), Answer::Grant)
+            .await;
+        assert!(
+            key_calls(&events).is_empty(),
+            "{arrays} nested arrays must not produce a storable call"
+        );
+        assert_eq!(
+            finish,
+            Some(Finish::Failed(EngineFailure::Anthropic(Failure::Protocol)))
+        );
+        assert_eq!(stored(&world), before);
+    }
 }
 
 #[tokio::test]
