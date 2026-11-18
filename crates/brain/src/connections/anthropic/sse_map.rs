@@ -28,11 +28,21 @@ enum State {
     Failed(Failure),
 }
 
+/// What a reader keeps of the events it reads, beside their parsed JSON.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum Capture {
+    /// Nothing: an unbound stream.
+    #[default]
+    Nothing,
+    /// Each block start's bytes, for a mapper bound to its request.
+    BlockStarts,
+}
+
 /// One sticky stream: only `message_stop` after a supported stop reason completes it.
 #[derive(Default)]
 pub struct Reader {
     /// Whether block starts keep their bytes, for a reply that goes back as it came.
-    capture: bool,
+    capture: Capture,
     framer: Framer,
     text: usize,
     reason: Option<StopReason>,
@@ -56,11 +66,11 @@ impl From<Limit> for Failure {
 }
 
 impl Reader {
-    /// A reader whose block starts keep their bytes, for a mapper bound to its request.
+    /// A fresh reader that keeps what `capture` names.
     #[must_use]
-    pub fn capturing() -> Self {
+    pub fn new(capture: Capture) -> Self {
         Self {
-            capture: true,
+            capture,
             ..Self::default()
         }
     }
@@ -131,7 +141,7 @@ impl Reader {
                     return Ok(ControlFlow::Break(()));
                 }
                 "content_block_start" => {
-                    if self.capture {
+                    if self.capture == Capture::BlockStarts {
                         event.capture(data);
                     }
                 }

@@ -28,7 +28,8 @@ errors map to credit exhaustion, including only the exact documented legacy HTTP
 `invalid_request_error` message. Unknown text stays a generic request refusal. Context
 exhaustion in a stop reason is `Exhausted`, with an answer-limit catalog key and no Retry
 action. Premature EOF stays `Truncated`, with connection-retry advice. No error mapping
-retries, changes key state or forwards provider text.
+retries, changes key state or forwards provider text. A streamed `error` event is classified
+from the event as the reader already read it, never from a second parse of its bytes.
 
 The shared provider-neutral SSE framer enforces 1 MiB line and joined-event bounds and a
 16 MiB stream bound. It emits joined data bytes until its consumer stops; it does not parse
@@ -80,7 +81,7 @@ Exact `draw` becomes Draw and every
 other bounded tool name becomes Unknown. The coordinator alone decides offers, charges
 calls and dispatches. Tool arguments use concatenated fragments, or the start object when
 there are none, ignoring empty argument fragments, and must be a complete JSON object,
-with no member name repeated, before ToolCallReady. A nonempty start object used this way is also queued as one
+with no member name repeated, before ToolCallReady. A start object with members (however it is spaced) is also queued as one
 ToolArgsDelta before ToolCallReady, so a streamed `draw` sees the bytes its Ready names.
 
 Thinking and redacted thinking become private Opaque items indexed in provider order;
@@ -153,8 +154,8 @@ Only the round's own mapper supplies the reply. The run makes it with
 request's `Prefix`; each built request gets its own, so a rebuild of the same input is another
 one. When the stream completes, `Mapper::reply` hands the whole reply over once: every block in
 output order, exactly as it came. Every event is read once, by the literal reader below, and
-the reader and mapper decide everything from that one read. The stream's reader comes from
-`Mapper::reader`, chosen when the stream is made: only a bound mapper's keeps each
+the reader and mapper decide everything from that one read. The transport makes a fresh reader
+for each stream, keeping what `Mapper::capture` names: only a bound mapper's keeps each
 `content_block_start` event's bytes, and an unbound stream keeps none, with the same checks
 either way. The mapper keeps every member of a block's start as written and in its order (a
 call's `caller`, a text block's `citations`, a field this route doesn't know) and sets only the
@@ -165,7 +166,7 @@ store never gets a raw block.
 
 There's no reply when the mapper can't put a block back as it came: an unknown block, a start
 that isn't an object, an empty text block or empty redacted data (Messages refuses both), a
-nonempty initial input that fragments then follow, or content already in `message_start`. Nor
+initial input with members that fragments then follow, or content already in `message_start`. Nor
 after a failed or partial stream: a member name repeated anywhere in an event or a call's input,
 an id or name that isn't a string, an unknown delta, unsigned thinking, a block left open, a
 missing index, or EOF before `message_stop`, even after closed blocks.

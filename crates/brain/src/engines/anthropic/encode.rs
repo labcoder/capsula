@@ -13,7 +13,7 @@ use zeroize::Zeroizing;
 use super::{Mapper, Reply};
 use crate::connections::anthropic::messages::MessagesBody;
 use crate::connections::anthropic::request::literal;
-use crate::connections::anthropic::sse_map::Reader;
+use crate::connections::anthropic::sse_map::Capture;
 use crate::context::{BOUND, ConnectionTag, InputItem, ModelRequest, Role};
 use crate::engines::responses::effort;
 use crate::engines::{CallId, Opaque};
@@ -118,12 +118,12 @@ impl Mapper {
         }
     }
 
-    /// The reader for this mapper's stream: only a bound mapper's keeps block starts as written.
-    pub(crate) fn reader(&self) -> Reader {
+    /// What this mapper's stream keeps beside its parsed events: block starts only when bound.
+    pub(crate) fn capture(&self) -> Capture {
         if self.answering.is_some() {
-            Reader::capturing()
+            Capture::BlockStarts
         } else {
-            Reader::default()
+            Capture::Nothing
         }
     }
 }

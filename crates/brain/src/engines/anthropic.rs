@@ -26,6 +26,8 @@ enum Block {
     Tool {
         call: CallId,
         start: String,
+        /// Whether the start's input has members, decided from the read object, not its spelling.
+        filled: bool,
         args: Option<String>,
     },
     Thinking {
@@ -298,6 +300,9 @@ impl Mapper {
                 Block::Tool {
                     call,
                     start: String::from_utf8(start).map_err(|_| ())?,
+                    filled: v["input"]
+                        .as_object()
+                        .is_some_and(|input| !input.is_empty()),
                     args: None,
                 }
             }
@@ -374,11 +379,14 @@ impl Mapper {
                 self.events.push(TurnEvent::TextDelta(delta.to_owned()));
             }
             Block::Tool {
-                call, start, args, ..
+                call,
+                start,
+                filled,
+                args,
             } => {
                 if args.is_none() {
                     // Whether fragments replace or extend a nonempty initial input isn't documented.
-                    mixed = start != "{}";
+                    mixed = *filled;
                     self.bytes -= start.len();
                     *start = String::new();
                 }
@@ -407,17 +415,22 @@ impl Mapper {
         let at = self.at(index)?;
         let old = std::mem::replace(&mut self.blocks[at].1, Block::Closed);
         let retained = match &old {
-            Block::Tool { call, start, args } => {
-                call.as_str().len() + start.len() + args.as_ref().map_or(0, String::len)
-            }
+            Block::Tool {
+                call, start, args, ..
+            } => call.as_str().len() + start.len() + args.as_ref().map_or(0, String::len),
             Block::Text(text) => text.len(),
             Block::Thinking { text, signature } => text.len() + signature.len(),
             Block::RedactedThinking(data) => data.len(),
             _ => 0,
         };
         let kept = match old {
-            Block::Tool { call, start, args } => {
-                let initial = args.is_none() && start != "{}";
+            Block::Tool {
+                call,
+                start,
+                filled,
+                args,
+            } => {
+                let initial = args.is_none() && filled;
                 // Without fragments the start's own input goes back as written.
                 let input = args.as_ref().filter(|_| self.answering.is_some()).cloned();
                 let args = args.unwrap_or(start);

@@ -55,29 +55,11 @@ impl ProviderFailure {
             return Err(Failure::Protocol);
         }
         let value = serde_json::from_slice::<Value>(body.expose()).ok();
-        let kind = value
-            .as_ref()
-            .filter(|value| value["type"] == "error" && value["error"]["message"].is_string())
-            .and_then(|value| value["error"]["type"].as_str());
-        let kind = match (status, kind) {
-            (401, _) | (_, Some("authentication_error")) => Kind::Authentication,
-            (403, _) | (_, Some("permission_error")) => Kind::Permission,
-            (402, _) | (_, Some("billing_error")) => Kind::Credit,
-            (400, Some("invalid_request_error"))
-                if value
-                    .as_ref()
-                    .and_then(|value| value["error"]["message"].as_str())
-                    == Some(CREDIT_MESSAGE) =>
-            {
-                Kind::Credit
-            }
-            (429, _) | (_, Some("rate_limit_error")) => Kind::RateLimited,
-            (529, _) | (_, Some("overloaded_error")) => Kind::Overloaded,
-            (500..=599, _) | (_, Some("api_error" | "timeout_error")) => Kind::Api,
-            (400, _) | (_, Some("invalid_request_error")) => Kind::InvalidRequest,
-            _ => Kind::Other,
-        };
-        Ok(Self { status, kind, body })
+        Ok(Self {
+            status,
+            kind: classify(status, value.as_ref()),
+            body,
+        })
     }
 
     /// The HTTP status, or 200 for an SSE refusal.
@@ -114,6 +96,29 @@ impl ProviderFailure {
             Kind::InvalidRequest | Kind::Other => (ErrorKey::RequestRefused, None),
         };
         user_error(key, action)
+    }
+}
+
+/// The closed category for a refusal's status and, when it parsed, its JSON.
+fn classify(status: u16, value: Option<&Value>) -> Kind {
+    let kind = value
+        .filter(|value| value["type"] == "error" && value["error"]["message"].is_string())
+        .and_then(|value| value["error"]["type"].as_str());
+    match (status, kind) {
+        (401, _) | (_, Some("authentication_error")) => Kind::Authentication,
+        (403, _) | (_, Some("permission_error")) => Kind::Permission,
+        (402, _) | (_, Some("billing_error")) => Kind::Credit,
+        (400, Some("invalid_request_error"))
+            if value.and_then(|value| value["error"]["message"].as_str())
+                == Some(CREDIT_MESSAGE) =>
+        {
+            Kind::Credit
+        }
+        (429, _) | (_, Some("rate_limit_error")) => Kind::RateLimited,
+        (529, _) | (_, Some("overloaded_error")) => Kind::Overloaded,
+        (500..=599, _) | (_, Some("api_error" | "timeout_error")) => Kind::Api,
+        (400, _) | (_, Some("invalid_request_error")) => Kind::InvalidRequest,
+        _ => Kind::Other,
     }
 }
 
@@ -175,10 +180,12 @@ impl Failure {
         let Ok(body) = super::request::encode(event, MAX_BODY_BYTES) else {
             return Self::Protocol;
         };
-        match ProviderFailure::answered(200, Secret::new(body)) {
-            Ok(error) => Self::Provider(error),
-            Err(error) => error,
-        }
+        // The event as already read decides the category; the body only travels, bounded.
+        Self::Provider(ProviderFailure {
+            status: 200,
+            kind: classify(200, Some(event)),
+            body: Secret::new(body),
+        })
     }
 
     /// Advice only: never retries or mutates credentials.

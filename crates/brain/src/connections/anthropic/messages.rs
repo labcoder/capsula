@@ -18,7 +18,7 @@ use crate::connections::model::{ERROR_BODY_DEADLINE, Events, IDLE, SEND_DEADLINE
 use super::error::{Failure, ProviderFailure};
 use super::key::AnthropicKey;
 pub use super::request::MessagesBody;
-use super::sse_map::{Reader, StopReason};
+use super::sse_map::{Capture, Reader, StopReason};
 use super::tls::{AnthropicConnect, HOST};
 
 /// A consumer must take each read's events within this time.
@@ -48,7 +48,7 @@ struct Attempt<Io, L> {
 /// Never: a flushed upload owns its connection.
 #[expect(
     clippy::too_many_arguments,
-    reason = "the reader is chosen with the stream's mapper, before the stream starts"
+    reason = "the capture choice comes from the stream's mapper, before the stream starts"
 )]
 pub async fn stream<C: AnthropicConnect, L>(
     client: &ModelClient<C>,
@@ -57,7 +57,7 @@ pub async fn stream<C: AnthropicConnect, L>(
     ask: impl Future<Output = Option<L>>,
     run_budget: &Budget,
     live_budget: &Budget,
-    mut reader: Reader,
+    capture: Capture,
     mut out: impl Events,
 ) -> Result<StopReason, Failure> {
     let request = request(key.expose().as_str(), body.bytes())?;
@@ -99,6 +99,7 @@ pub async fn stream<C: AnthropicConnect, L>(
         return Err(Failure::Protocol);
     }
     let mut body = Body::new(head.framing);
+    let mut reader = Reader::new(capture);
     loop {
         let length = timeout_at(content_by, conn.next(&mut body, IDLE))
             .await

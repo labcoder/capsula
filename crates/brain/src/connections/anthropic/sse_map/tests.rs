@@ -428,3 +428,18 @@ fn outer_reader_debug_never_exposes_unknown_types_or_error_bodies() {
         );
     }
 }
+
+#[test]
+fn a_streamed_error_is_classified_from_the_event_as_read() {
+    let event = json!({
+        "type": "error",
+        "error": {"type": "authentication_error", "message": "synthetic"},
+        "meta": {"$serde_json::private::RawValue": "not json"},
+    });
+    let mut reader = Reader::default();
+    let read = reader.feed(format!("data: {event}\n\n").as_bytes(), &mut |_| {});
+    let Err(Failure::Provider(error)) = read else {
+        panic!("a streamed error is a provider failure");
+    };
+    assert_eq!((error.kind(), error.status()), (Kind::Authentication, 200));
+}

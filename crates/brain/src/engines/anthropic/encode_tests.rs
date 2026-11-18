@@ -490,7 +490,7 @@ fn end(reader: &mut Reader, mapper: &mut Mapper, read: Result<Progress, Failure>
 }
 
 fn streamed(mapper: &mut Mapper, events: &[String]) {
-    let mut reader = mapper.reader();
+    let mut reader = Reader::new(mapper.capture());
     let mut read = Ok(Progress::More);
     for event in events {
         read = feed(&mut reader, mapper, event);
@@ -670,7 +670,7 @@ fn interleaved_requests_on_one_sign_in_and_model_each_take_only_their_own_reply(
     let sonnet = slug("claude-sonnet-5-5");
     let both = |a: &Conversation, b: &Conversation| {
         let (mut ma, mut mb) = (Mapper::answering(a), Mapper::answering(b));
-        let (mut ra, mut rb) = (ma.reader(), mb.reader());
+        let (mut ra, mut rb) = (Reader::new(ma.capture()), Reader::new(mb.capture()));
         let (mut read_a, mut read_b) = (Ok(Progress::More), Ok(Progress::More));
         for (ea, eb) in called("toolu_a").iter().zip(&called("toolu_b")) {
             read_b = feed(&mut rb, &mut mb, eb);
@@ -855,7 +855,7 @@ fn bound_and_unbound_streams_refuse_the_same_blocks_locally() {
         blocks.push(stop(1));
         let events = after_a_call(&blocks);
         let outcome = |mut mapper: Mapper| {
-            let mut reader = mapper.reader();
+            let mut reader = Reader::new(mapper.capture());
             let mut read = Ok(Progress::More);
             for event in &events {
                 read = feed(&mut reader, &mut mapper, event);
@@ -889,13 +889,78 @@ fn only_a_bound_mappers_stream_keeps_its_block_starts_as_written() {
         assert_eq!(read, Ok(Progress::More));
         written
     };
-    assert_eq!(kept(Mapper::default().reader()), None);
+    assert_eq!(kept(Reader::new(Mapper::default().capture())), None);
     assert_eq!(
-        kept(Mapper::answering(&first("draw")).reader()),
+        kept(Reader::new(Mapper::answering(&first("draw")).capture())),
         Some(event.clone().into_bytes())
     );
 }
 
+#[test]
+fn an_empty_start_input_is_empty_however_it_is_spaced() {
+    let events = whole(&[
+        start_raw(
+            0,
+            r#"{"type":"tool_use","id":"toolu_1","name":"draw","input":{ }}"#,
+        ),
+        delta(
+            0,
+            &json!({"type": "input_json_delta", "partial_json": "{\"a\":1}"}),
+        ),
+        stop(0),
+        start_raw(
+            1,
+            r#"{"type":"tool_use","id":"toolu_2","name":"draw","input":{ }}"#,
+        ),
+        stop(1),
+    ]);
+    let tools = |mapper: &mut Mapper| {
+        streamed(mapper, &events);
+        let queued = mapper.take();
+        ["toolu_1", "toolu_2"].map(|id| {
+            let mut fragments = String::new();
+            let mut ready = Vec::new();
+            for event in &queued {
+                match event {
+                    TurnEvent::ToolArgsDelta { call, delta } if call.as_str() == id => {
+                        fragments.push_str(delta);
+                    }
+                    TurnEvent::ToolCallReady { call, args } if call.as_str() == id => {
+                        ready.push(args.clone());
+                    }
+                    _ => {}
+                }
+            }
+            (fragments, ready)
+        })
+    };
+    let first = first("draw");
+    let mut bound = Mapper::answering(&first);
+    let expected = [
+        (r#"{"a":1}"#.to_owned(), vec![r#"{"a":1}"#.to_owned()]),
+        (String::new(), vec!["{ }".to_owned()]),
+    ];
+    assert_eq!(tools(&mut bound), expected);
+    let reply = bound.reply().expect("a whole reply");
+    let (_, second) = next(
+        first,
+        TAG,
+        &slug("claude-sonnet-5-5"),
+        reply,
+        &results(&["toolu_1", "toolu_2"]),
+    )
+    .expect("continues");
+    assert_eq!(
+        second.messages[1],
+        r#"{"role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"draw","input":{"a":1}},{"type":"tool_use","id":"toolu_2","name":"draw","input":{ }}]}"#
+    );
+    let mut unbound = Mapper::default();
+    assert_eq!(
+        tools(&mut unbound)[0],
+        expected[0],
+        "an unbound stream reads the same call"
+    );
+}
 #[test]
 fn a_failed_or_unfinished_stream_continues_nothing() {
     let mut content = after_a_call(&[]);
@@ -937,7 +1002,7 @@ fn a_reply_comes_once_and_only_at_its_own_streams_end() {
     let conversation = first("draw");
     let events = called("toolu_1");
     let mut early = Mapper::answering(&conversation);
-    let mut reader = early.reader();
+    let mut reader = Reader::new(early.capture());
     for event in &events[..events.len() - 1] {
         assert_eq!(feed(&mut reader, &mut early, event), Ok(Progress::More));
     }
@@ -1039,7 +1104,7 @@ fn built_refused_and_replied_carriers_print_no_content() {
         ),
         stop(2),
     ]);
-    let mut reader = mapper.reader();
+    let mut reader = Reader::new(mapper.capture());
     let mut read = Ok(Progress::More);
     for event in &events {
         read = feed(&mut reader, &mut mapper, event);
