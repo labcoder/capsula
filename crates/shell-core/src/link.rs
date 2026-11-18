@@ -36,6 +36,7 @@ use crate::platform::{self, PipeClient};
 use crate::speaker::{self, Command, Data, Opener, Outlet, Packet, Speaker};
 
 mod microphone;
+pub mod output;
 
 /// How long one connection attempt may take, starting the brain included.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -479,8 +480,7 @@ struct Shared {
     outbox: Mutex<Option<Outbox>>,
     /// The last connection's generation.
     generations: AtomicU64,
-    /// The last output generation a speaker announced.
-    output_generations: AtomicU32,
+    output: output::OutputOwner,
     /// Locked only after `outbox`, so a delete and a turn are counted in the order they're
     /// queued.
     deletes: Mutex<Vec<Held>>,
@@ -539,6 +539,9 @@ pub struct LinkHandle {
 }
 
 impl LinkHandle {
+    pub fn output(&self) -> &output::OutputOwner {
+        &self.shared.output
+    }
     pub fn microphone_gate(&self) -> CollectionGate {
         self.shared.microphone.clone()
     }
@@ -953,30 +956,23 @@ impl Link {
         self.shared.quitting.load(Ordering::SeqCst)
     }
 
-    /// The connection's speaker, when this link has an opener; it announces its own output, and
-    /// its worker ends the connection when it ends. A normal launch has none.
+    /// The connection's speaker for the generation its output owner reserved; it announces its
+    /// own output, and its worker ends the connection when it ends. A normal launch has none.
     fn open_speaker(
         &self,
+        (generation, tail): (OutputGeneration, Arc<speaker::Tail>),
         control: &Sender<ControlToBrain>,
         credit: &Arc<Credit>,
         pipes: [&Arc<PipeClient>; 2],
     ) -> Option<Speaker> {
         let open = self.speaker.as_ref()?;
-        let generation = self
-            .shared
-            .output_generations
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |value| {
-                value.checked_add(1)
-            })
-            .ok()?
-            + 1;
         let credit = Arc::clone(credit);
         let speaker = (open.0)(Outlet {
-            generation: OutputGeneration(generation),
+            generation,
             control: control.clone(),
             grant: Box::new(move |bytes| credit.grant(bytes)),
-            tail: Arc::default(),
-            wake: async_channel::bounded(1).0,
+            tail,
+            wake: self.shared.output.waker(),
         })?;
         let pipes = pipes.map(Arc::clone);
         speaker.arm(Box::new(move || {
@@ -1059,6 +1055,16 @@ impl Link {
             control.set_timeout(Some(QUIT_TIMEOUT));
             let _told = self.shared.tell_quit();
         }
+        // Before Connected, so nothing can claim the session's output before its owner knows it.
+        let opening = self.shared.output.begin(
+            generation,
+            (self.speaker.is_some() && spawned.is_ok()).then(|| {
+                let pipes = [Arc::clone(&control), Arc::clone(&data)];
+                let abort: output::Abort =
+                    Arc::new(move || pipes.iter().for_each(|pipe| pipe.abort()));
+                abort
+            }),
+        );
         let open = events
             .send_blocking(LinkEvent::Connected(Session {
                 alive: Arc::clone(&ended.0),
@@ -1067,11 +1073,23 @@ impl Link {
                 issue_origin,
             }))
             .is_ok();
-        // Only on a live session, so a speaker never outlives a connection that didn't start.
-        let mut speaker = if spawned.is_ok() && open && !self.quitting() {
-            self.open_speaker(&control_out, &credit, [&control, &data])
-        } else {
-            None
+        // Only on a live session, so a speaker never outlives a connection that didn't start, and
+        // fenced before its reader starts.
+        let mut speaker = match opening {
+            Some(opening) if open && !self.quitting() => {
+                let output = opening.0;
+                let opened = self.open_speaker(opening, &control_out, &credit, [&control, &data]);
+                self.shared
+                    .output
+                    .opened(output, opened)
+                    .unwrap_or_else(|speaker| {
+                        drop(speaker);
+                        control.abort();
+                        data.abort();
+                        None
+                    })
+            }
+            _ => None,
         };
         let input = speaker.as_mut().and_then(Speaker::input);
         let read = spawned.and_then(|()| {
@@ -1105,6 +1123,7 @@ impl Link {
             Ok(()) => {}
             Err(error) => tracing::error!(%error, "can't start the link's threads"),
         }
+        self.shared.output.end(generation);
         drop(ended);
         *self
             .shared

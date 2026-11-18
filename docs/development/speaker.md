@@ -19,6 +19,7 @@ Slice 7's half-duplex change (D) enables output.
 | `Tail` | `speaker/tail.rs` | one generation's sequence-locked record of what it owes |
 | Windows adapter | `platform/windows/speaker.rs` | the WASAPI stream, its thread, its event and the platform results |
 | Link | `link.rs` | routing speech frames, run names, revokes and the speaker's reports on one connection |
+| `OutputOwner` | `link/output.rs` | each session's output, every generation's tail until it settles, talk-back off |
 
 ## The device seam
 
@@ -193,9 +194,10 @@ waits, and a read that overlaps a write returns nothing.
 ## The link
 
 - **Opening.** A link with an `Opener` opens one speaker per connection, and only once the
-  connection's threads run, `Connected` reached the UI and no quit is under way. Its generation
-  counts up across the link's connections. A speaker that fails to open, or opens too late,
-  leaves the session working without output and announces nothing.
+  connection's threads run, `Connected` reached the UI and no quit is under way. The output
+  owner reserves its generation and ledger slot before `Connected`, and fences it before its
+  reader starts. A speaker that fails to open, or opens too late, leaves the session working
+  without output and announces nothing.
 - **Routing.** The data reader hands `SegmentQueued` and `SpeechPcm` to the speaker instead of
   the UI. The control watcher hands it each newly named run from `RunState`, and each
   `SpeechRevoked` as a Stop. A frame whose run control hasn't named is held, uncredited, so
@@ -231,6 +233,40 @@ sequenceDiagram
   D->>S: last content frame played
   S->>B: SpeechStopped(cursor)
 ```
+
+## The output owner
+
+`link::output::OutputOwner` is one per link, in its shared state, and the only place that knows
+whether a session has an output and whether an earlier generation still owes audio.
+
+- **Output.** Each session's output is `Closed`, `Quiet { epoch, why }`, `Opening(g)`,
+  `Live(g)` or `Lost(g)`. `why` is `NoOpener` (every normal launch), `Off`, `Refused` or
+  `Retired`. Each no-output stretch gets a fresh epoch, so its `OutputKey` never matches an
+  earlier session's.
+- **The link thread's three calls.** `begin(session, abort)` before `Connected`: with an opener
+  and talk-back on it reserves a ledger slot and the next generation and publishes `Opening`;
+  otherwise the session is `Quiet`. `opened(g, speaker)` once the open returned and before the
+  reader starts: a speaker opened after talk-back went off is withdrawn first, and one that can't
+  take that command is handed back for the link to drop, which ends the session. `end(session)`
+  first in teardown lets go of the speaker's queue and the session's abort; the ledger keeps the
+  tail.
+- **The ledger.** Four entries, each a generation and its `Tail`. A fifth unresolved generation
+  is refused before it opens: the session goes on as `Quiet { Refused }` and every entry stays.
+- **Settling.** Every lock reads each pending tail. An entry is clean when its writer is gone or
+  its stream was released, and nothing is owed; terminal when something is owed then, or when the
+  clock faulted with something owed. A live generation that caught up is never settled, since it
+  can still speak. A clean live generation leaves its session `Quiet { Retired }`; a terminal
+  one leaves it `Lost`, and a terminal entry stays until restart.
+- **Talk-back off.** `withdraw()` sends `Withdraw` to a live speaker, fences an opening one when
+  it opens, and later sessions get none. The stream retires; the worker stays on without a
+  device, answering stops and crediting frames, and the session goes on.
+- **Stop.** `stop(session, run)` queues a speaker `Stop` on that session only.
+- **Never blocking.** Each section under the owner's lock is short. Opens, joins, pipe aborts and a
+  speaker's last drop happen after it. A command the speaker's queue refuses drops the output to
+  `Lost` and aborts the session's pipes, after the lock.
+- **Wakes.** `changes()` is a capacity-1 channel; workers and the owner wake it on every change,
+  and the speaker thread's final wake guarantees a settled tail is seen without polling.
+  `view()` gives the key, why there's none, and whether a tail is still retiring or terminal.
 
 ## Windows
 

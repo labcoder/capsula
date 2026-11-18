@@ -9,6 +9,8 @@
 
 mod clock;
 mod engine;
+#[cfg(test)]
+pub(crate) mod fake;
 mod tail;
 #[cfg(test)]
 #[path = "speaker_tests.rs"]
@@ -186,6 +188,11 @@ impl Speaker {
         self.commands
             .as_ref()
             .is_some_and(|commands| commands.try_send(command).is_ok())
+    }
+
+    /// Another sender on the worker's command queue, for the output owner.
+    pub(crate) fn commands(&self) -> Option<SyncSender<Command>> {
+        self.commands.clone()
     }
 
     /// The thread that owns the worker; dropping the speaker joins it once it has finished.

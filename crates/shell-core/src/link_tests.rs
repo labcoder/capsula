@@ -2415,3 +2415,75 @@ fn audio_without_an_output_is_credited_and_never_shown() {
     drop(link.control);
     assert!(link.link.join().expect("joined"));
 }
+
+/// A link whose speaker plays on a scripted device, and opens only when `go` sends. Named,
+/// playable speech for run 1 already waits on its pipes.
+fn opening_speaker(
+    label: &str,
+) -> (
+    Attended,
+    crate::speaker::fake::Shared,
+    std::sync::mpsc::Sender<()>,
+) {
+    use kumochi_protocol::message::{OutputGeneration, SegmentId, SpeechPcm};
+    let script = crate::speaker::fake::Shared::default();
+    script.lock().expect("unpoisoned").play_to = u64::MAX;
+    let (go, opening) = std::sync::mpsc::channel::<()>();
+    let opening = std::sync::Mutex::new(opening);
+    let opener = crate::speaker::Opener(Arc::new({
+        let script = Arc::clone(&script);
+        move |outlet| {
+            let _opened = opening.lock().expect("unpoisoned").recv();
+            crate::speaker::fake::open(outlet, Arc::clone(&script))
+        }
+    }));
+    let link = attended_speaking(label, opener);
+    let state = ControlToShell::RunState {
+        origin: None,
+        run: RunId(1),
+        thread: ThreadId(3),
+        phase: Phase::Answering,
+        error: None,
+    };
+    frame::write(&mut &link.control, &state, Pipe::Control).expect("state");
+    let queued = DataToShell::SegmentQueued {
+        run: RunId(1),
+        segment: SegmentId(0),
+        step: None,
+    };
+    let pcm = DataToShell::SpeechPcm(SpeechPcm {
+        run: RunId(1),
+        segment: SegmentId(0),
+        output_generation: OutputGeneration(1),
+        seq: 0,
+        samples: vec![7; 2_400],
+        last: Some(2_400),
+    });
+    for frame in [queued, pcm] {
+        frame::write(&mut &*link.data, &frame, Pipe::Data).expect("written");
+    }
+    (link, script, go)
+}
+
+fn played(script: &crate::speaker::fake::Shared) -> usize {
+    script.lock().expect("unpoisoned").content.len()
+}
+
+#[test]
+fn talk_back_off_while_opening_withdraws_the_late_open_before_any_speech() {
+    let (link, script, go) = opening_speaker("off-while-opening");
+    let events = patient(link.events);
+    let _session = connected(next(&events));
+    let output = link.handle.output();
+    output.withdraw();
+    go.send(()).expect("opening");
+    let deadline = Instant::now() + PATIENCE;
+    while output.view().why != Some(super::output::Why::Retired) {
+        assert!(Instant::now() < deadline, "withdrawn and retired");
+        thread::sleep(Duration::from_millis(5));
+    }
+    thread::sleep(Duration::from_millis(100));
+    assert_eq!(played(&script), 0, "nothing was ever written");
+    drop(link.control);
+    assert!(link.link.join().expect("joined"), "the UI was still there");
+}

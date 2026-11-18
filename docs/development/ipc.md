@@ -631,8 +631,8 @@ records only their operation and length.
   exactly one chunk whose `last` carries its total samples, at most `MAX_SEGMENT_SECONDS` (30 s)
   of them. That chunk may be empty, so audio goes out as it's made, and a segment that made no
   audio or was cut still ends.
-- **Withdrawal.** `AudioOutputUnavailable` withdraws the output of its `generation` without ending
-  the connection; a withdrawal of any other generation changes nothing. Until an `AudioOutput`
+- **Withdrawal.** `AudioOutputUnavailable` (a fault, or talk-back turned off) withdraws the
+  output of its `generation` without ending the connection; a withdrawal of any other generation changes nothing. Until an `AudioOutput`
   of a strictly newer generation, no run gets a reply: the brain ignores one at or below the
   withdrawn generation.
 - **Progress.** `SpeechProgress` goes out at most every 250 ms. `SpeechStopped` confirms that
