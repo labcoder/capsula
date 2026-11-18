@@ -3,12 +3,15 @@
 //! body").
 
 use std::collections::BTreeSet;
+use std::fmt;
+use std::sync::atomic::{AtomicU64, Ordering};
 
-use kumochi_protocol::message::ConnectionKind;
+use kumochi_protocol::message::{ConnectionKind, ModelSlug};
 use serde_json::{Map, Value, json};
 
+use crate::connections::anthropic::messages::MessagesBody;
 use crate::connections::model::serialized_len;
-use crate::context::{BOUND, InputItem, ModelRequest, Role};
+use crate::context::{BOUND, ConnectionTag, InputItem, ModelRequest, Role};
 use crate::engines::responses::effort;
 use crate::engines::{CallId, Opaque};
 
@@ -51,12 +54,134 @@ pub(crate) enum BodyError {
     /// The serialised body is over the request's bound.
     #[error("the request body is over its size bound")]
     TooLarge,
+    /// The conversation is empty or ends with the assistant, which would ask for a prefill.
+    #[error("the conversation doesn't end with the user")]
+    Ending,
+    /// The transport's envelope check refused the body.
+    #[error("the transport's envelope refuses the body")]
+    Envelope,
+    /// A tool round's reply answered another request, sign-in or model than the one it would
+    /// continue, so its signed thinking can't go back.
+    #[error("the round answered another conversation")]
+    Prefix,
 }
 
-/// The Messages body for `request`: the instructions as the one system block, which ends
-/// the cached prefix after the tools; then the input, neighbouring blocks of one role merged into
-/// one message, as Messages wants roles to alternate.
-pub(crate) fn body(request: &ModelRequest) -> Result<Value, BodyError> {
+/// The exact request a run last sent on this route. A tool round only appends to it, since a
+/// signed thinking block is bound to everything before it; it lives in the run's memory only.
+pub(crate) struct Conversation {
+    body: Value,
+    tag: ConnectionTag,
+    prefix: Prefix,
+}
+
+impl Conversation {
+    /// What a round streamed in answer to this request records, for `next`.
+    pub(crate) fn prefix(&self) -> Prefix {
+        self.prefix
+    }
+}
+
+impl fmt::Debug for Conversation {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Conversation")
+            .field(
+                "messages",
+                &self.body["messages"].as_array().map_or(0, Vec::len),
+            )
+            .field("tag", &self.tag)
+            .field("prefix", &self.prefix)
+            .finish()
+    }
+}
+
+/// One built request, unique in the process: a rebuild of the same input is another prefix.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Prefix(u64);
+
+static PREFIXES: AtomicU64 = AtomicU64::new(0);
+
+/// A tool round's reply, as the run's mapper passed it on in output order (thinking, text and
+/// `tool_use` blocks), and each call's result. Lives in the run's memory only, never the store.
+pub(crate) struct Round {
+    pub(crate) answered: Prefix,
+    pub(crate) blocks: Vec<Opaque>,
+    pub(crate) results: Vec<(CallId, String)>,
+}
+
+impl fmt::Debug for Round {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Round")
+            .field("answered", &self.answered)
+            .field("blocks", &self.blocks.len())
+            .field("results", &self.results.len())
+            .finish()
+    }
+}
+
+/// The Messages body for `request` on the sign-in `tag`, and the conversation a tool round
+/// continues. Stored items never carry thinking, so neither does this body.
+pub(crate) fn body(
+    request: &ModelRequest,
+    tag: ConnectionTag,
+) -> Result<(MessagesBody, Conversation), BodyError> {
+    sealed(json(request)?, tag)
+}
+
+/// The next request of a tool loop: `conversation` unchanged, then the round's reply as the
+/// assistant's message, its signed thinking passed back as it came, then the results. Only a
+/// reply to this very request, sent on the same sign-in and model, continues it.
+pub(crate) fn next(
+    mut conversation: Conversation,
+    tag: ConnectionTag,
+    model: &ModelSlug,
+    round: &Round,
+) -> Result<(MessagesBody, Conversation), BodyError> {
+    if round.answered != conversation.prefix
+        || tag != conversation.tag
+        || conversation.body["model"] != model.as_str()
+    {
+        return Err(BodyError::Prefix);
+    }
+    let reply = round
+        .blocks
+        .iter()
+        .map(|item| native(item, true))
+        .collect::<Result<Vec<_>, _>>()?;
+    if !reply.iter().any(|block| block["type"] == "tool_use") {
+        return Err(BodyError::Pairing);
+    }
+    let results = round
+        .results
+        .iter()
+        .map(|(call, output)| Ok(tool_result(id(call)?, output)))
+        .collect::<Result<Vec<_>, BodyError>>()?;
+    let messages = conversation.body["messages"]
+        .as_array_mut()
+        .ok_or(BodyError::Prefix)?;
+    messages.push(json!({ "role": "assistant", "content": reply }));
+    messages.push(json!({ "role": "user", "content": results }));
+    sealed(conversation.body, tag)
+}
+
+/// Checks a whole body and hands it to the transport's envelope.
+fn sealed(body: Value, tag: ConnectionTag) -> Result<(MessagesBody, Conversation), BodyError> {
+    let messages = body["messages"].as_array().map_or(&[][..], Vec::as_slice);
+    paired(messages)?;
+    if messages.last().is_none_or(|last| last["role"] != "user") {
+        return Err(BodyError::Ending);
+    }
+    if serialized_len(&body) > BOUND {
+        return Err(BodyError::TooLarge);
+    }
+    let sent = MessagesBody::new(&body).map_err(|_| BodyError::Envelope)?;
+    let prefix = Prefix(PREFIXES.fetch_add(1, Ordering::Relaxed));
+    Ok((sent, Conversation { body, tag, prefix }))
+}
+
+/// The request's JSON: the instructions as the one system block, which ends the cached prefix
+/// after the tools; then the input, neighbouring blocks of one role merged into one message, as
+/// Messages wants roles to alternate.
+fn json(request: &ModelRequest) -> Result<Value, BodyError> {
     let choice = request.choice.as_ref().ok_or(BodyError::NoModel)?;
     if choice.connection != ConnectionKind::AnthropicKey {
         return Err(BodyError::Route);
@@ -85,12 +210,10 @@ pub(crate) fn body(request: &ModelRequest) -> Result<Value, BodyError> {
                 (Role::Assistant, tool_use(id(call)?, named(name)?, &input))
             }
             InputItem::FunctionOutput { call, output } => {
-                let block =
-                    json!({ "type": "tool_result", "tool_use_id": id(call)?, "content": output });
-                (Role::User, block)
+                (Role::User, tool_result(id(call)?, output))
             }
             // Only this connection's own items reach here; the build filters the rest.
-            InputItem::Native(item) => (Role::Assistant, native(item)?),
+            InputItem::Native(item) => (Role::Assistant, native(item, false)?),
             InputItem::Image(_) => return Err(BodyError::Image),
         };
         match messages.last_mut() {
@@ -98,7 +221,6 @@ pub(crate) fn body(request: &ModelRequest) -> Result<Value, BodyError> {
             _ => messages.push((role, vec![block])),
         }
     }
-    paired(&messages)?;
     let messages: Vec<Value> = messages
         .into_iter()
         .map(|(role, content)| {
@@ -135,9 +257,6 @@ pub(crate) fn body(request: &ModelRequest) -> Result<Value, BodyError> {
             })
             .collect();
     }
-    if serialized_len(&body) > BOUND {
-        return Err(BodyError::TooLarge);
-    }
     Ok(body)
 }
 
@@ -149,14 +268,33 @@ fn tool_use(id: &str, name: &str, input: &Value) -> Value {
     json!({ "type": "tool_use", "id": id, "name": name, "input": input })
 }
 
-/// A stored native item rebuilt from the only fields this route writes: a text block with its
-/// text, or a `tool_use` block with its id, name and object input. Anything else, a thinking,
-/// image or document block among them, builds nothing.
-fn native(item: &Opaque) -> Result<Value, BodyError> {
+fn tool_result(id: &str, output: &str) -> Value {
+    json!({ "type": "tool_result", "tool_use_id": id, "content": output })
+}
+
+/// A native item rebuilt from the only fields this route writes: a text block with its text, or
+/// a `tool_use` block with its id, name and object input. Only a live round's reply (`signed`)
+/// may also hold a thinking block with its signature, or a redacted one, passed back as it came.
+/// Anything else, an image or document block among them, builds nothing.
+fn native(item: &Opaque, signed: bool) -> Result<Value, BodyError> {
     let block: Map<String, Value> =
         serde_json::from_slice(item.bytes()).map_err(|_| BodyError::Native)?;
     let field = |key: &str| block.get(key).ok_or(BodyError::Native);
+    let text = |key: &str| field(key).and_then(|value| value.as_str().ok_or(BodyError::Native));
     match (field("type")?.as_str(), block.len()) {
+        (Some("thinking"), 3) if signed => {
+            text("thinking")?;
+            if text("signature")?.is_empty() {
+                return Err(BodyError::Native);
+            }
+            Ok(Value::Object(block))
+        }
+        (Some("redacted_thinking"), 2) if signed => {
+            if text("data")?.is_empty() {
+                return Err(BodyError::Native);
+            }
+            Ok(Value::Object(block))
+        }
         (Some("text"), 2) => {
             let text = field("text")?.as_str().filter(|text| !text.is_empty());
             Ok(text_block(text.ok_or(BodyError::Native)?))
@@ -176,10 +314,11 @@ fn native(item: &Opaque) -> Result<Value, BodyError> {
 
 /// Each assistant message's calls are answered exactly once, by the results that open the next
 /// message, which must be the user's; no id is called twice and no result stands elsewhere.
-fn paired(messages: &[(Role, Vec<Value>)]) -> Result<(), BodyError> {
+fn paired(messages: &[Value]) -> Result<(), BodyError> {
     let mut called = BTreeSet::new();
     let mut open: Vec<&str> = Vec::new();
-    for (_, blocks) in messages {
+    for message in messages {
+        let blocks = message["content"].as_array().ok_or(BodyError::Pairing)?;
         let results = blocks
             .iter()
             .take_while(|block| block["type"] == "tool_result")

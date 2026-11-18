@@ -104,12 +104,15 @@ in A3a. Those integration decisions belong to A3b.
 
 ## The request body (not yet activated)
 
-`engines::anthropic::encode::body` turns the store's `ModelRequest` into the JSON that
-`MessagesBody::new` checks: `model`, `max_tokens` 2048 (the envelope's cap, including
+`engines::anthropic::encode::body` turns the store's `ModelRequest` into a `MessagesBody`,
+after `MessagesBody::new` has checked it, and the run's `Conversation`, the exact request a tool
+round continues. The body holds: `model`, `max_tokens` 2048 (the envelope's cap, including
 thinking), `stream: true`, `output_config.effort`, the tools as `name`, `description` and
 `input_schema`, and the instructions as the one system block. That block carries the only
 `cache_control` breakpoint, so the tools and the instructions are the cached prefix and stay
-identical across turns. Thinking is not requested.
+identical across turns. The body has no `thinking` field. On Claude Sonnet 5.5 that means
+adaptive thinking, which can't be turned off (`disabled` is a 400), so a reply can carry signed
+thinking blocks, usually with empty text, before its calls.
 
 Input items become content blocks, and neighbouring blocks of one role merge into one message,
 since Messages wants roles to alternate:
@@ -127,11 +130,35 @@ Empty messages are skipped. The `Kumochi note:` label tells the model where a li
 it carries no authority, and a user who types it is still the user. Nothing is built for:
 
 - a request with no model, a model on another connection, or no instructions;
+- an empty conversation, or one that ends with the assistant, which would ask for a prefill;
 - arguments that aren't one JSON object;
 - a call id or tool name that isn't 1 to 64 ASCII letters, digits, `_` or `-`;
 - a native item other than those two blocks, with exactly those fields (a thinking, image or
-  document block among them);
+  document block among them, since stored items never carry thinking);
 - a call that isn't answered exactly once by the results that open the next user message, a
   result anywhere else, or an id called twice. Nothing is moved to make a pair;
 - an image, which this route doesn't carry yet;
 - a serialised body over the 512 KiB bound.
+
+### Tool rounds
+
+A round that called tools continues its run's `Conversation` with `encode::next`. The context
+isn't built again: the next request is the last one unchanged, then the round's reply as one
+assistant message, then the results as one user message. The reply is what the run's mapper
+passed on, in output order: text, `tool_use`, and thinking or redacted thinking blocks, with
+exactly their fields, a nonempty signature, and their contents as they came. Each signed block
+is bound to the system text, the tools and every message before it, so a rebuild, which
+refreshes the drawing digest, would invalidate it.
+
+`Round.answered` names the request the reply answered. Each built request gets its own
+`Prefix`, so a rebuild of the same input is another one. Nothing continues, and the tool flow
+ends with a local refusal, when the reply answered another request, or the next request
+would go on another sign-in tag or model. A source deleted or withdrawn during the run is
+never sent again just to keep a signature valid.
+
+Signed thinking lives in the run's memory only. It isn't stored, and a later run replays the
+earlier ones' text and call pairs without it. Anthropic allows this: prior turns' thinking may
+be left out outside an open tool call, as long as no block is left out between two that are
+kept. The next model loses that reasoning, as it loses tool details the answer never stated.
+A reply's call id that was already called, a call without exactly one result, a reply without a
+call, or a block outside that set builds nothing.
