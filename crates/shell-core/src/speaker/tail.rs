@@ -1,7 +1,7 @@
 //! What one output generation publishes for the link's output owner
 //! (docs/development/speaker.md): one coherent snapshot, written only by its engine.
 
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering, fence};
+use std::sync::atomic::{AtomicU64, Ordering, fence};
 
 /// Content the device took may be unplaced: a gap, an unknown padding or a failed release.
 pub const UNKNOWN: u8 = 1;
@@ -39,10 +39,11 @@ impl Snapshot {
     }
 }
 
-/// A sequence lock over one [`Snapshot`]: one writer, and readers that never wait.
+/// A sequence lock over one [`Snapshot`]: one writer, and readers that never wait. Its stamp is
+/// 64 bits, as cheap as the payload's words, so it can't come back round under a stalled reader.
 #[derive(Debug, Default)]
 pub struct Tail {
-    seq: AtomicU32,
+    seq: AtomicU64,
     exposed: AtomicU64,
     played: AtomicU64,
     flight: AtomicU64,
@@ -76,6 +77,11 @@ impl Tail {
             quiet: u32::try_from(state >> 8).unwrap_or(u32::MAX),
             flags: u8::try_from(state & 0xff).unwrap_or(u8::MAX),
         };
+        self.confirm(seq, snapshot)
+    }
+
+    /// `snapshot`, read after the stamp `seq`, when no write was in progress or came since.
+    fn confirm(&self, seq: u64, snapshot: Snapshot) -> Option<Snapshot> {
         fence(Ordering::Acquire);
         (seq.is_multiple_of(2) && self.seq.load(Ordering::Relaxed) == seq).then_some(snapshot)
     }
