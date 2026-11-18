@@ -419,7 +419,10 @@ async fn removal_confirmed_on_the_next_link_cannot_delete_an_earlier_links_adopt
     else {
         panic!("the next link still sees the old Ready key");
     };
-    let remove = ConnectionOp::RemoveAnthropicKey { revision };
+    let remove = ConnectionOp::RemoveAnthropicKey {
+        revision,
+        request: 1,
+    };
     account.connection_event(ConnectionEvent::Op(remove));
     resume.send(()).expect("release adoption");
     let adopted = next(&mut account).await;
@@ -527,6 +530,7 @@ async fn fifo_adopt_then_begin_uses_the_new_head_and_remove_fences_late_results(
     let generation = account.connections.generation;
     account.connection_event(ConnectionEvent::Op(ConnectionOp::RemoveAnthropicKey {
         revision: 3,
+        request: 1,
     }));
     assert_eq!(
         account.connection_event(ConnectionEvent::StageDone {

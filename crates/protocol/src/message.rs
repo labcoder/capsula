@@ -28,8 +28,8 @@ pub use account::{
 };
 pub use connections::{
     ANTHROPIC_KEY_BYTES, AuditFailed, ClaudeCodeView, ClaudeVersion, ConnectionKind, ConnectionOp,
-    ConnectionsView, KeyRejection, KeyStageFailure, KeyStageId, KeyStagePlan, KeyView,
-    PolicyFailed, Unsupported, VersionError, validate_anthropic_key,
+    ConnectionsView, KeyRejection, KeyRemovalFailure, KeyStageFailure, KeyStageId, KeyStagePlan,
+    KeyView, PolicyFailed, Unsupported, VersionError, validate_anthropic_key,
 };
 pub use content::Content;
 pub use error::{
@@ -747,6 +747,13 @@ pub enum ControlToShell {
         gesture: GestureId,
         /// The image, or why not.
         outcome: HeldScreen,
+    },
+    /// A removal outcome, independent of Connections snapshots.
+    AnthropicKeyRemoved {
+        /// The shell's outstanding removal request number.
+        request: u64,
+        /// Whether the intended revision was removed.
+        result: Result<(), KeyRemovalFailure>,
     },
 }
 

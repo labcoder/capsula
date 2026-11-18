@@ -5,7 +5,7 @@ use std::fmt;
 use kumochi_protocol::Secret;
 use kumochi_protocol::message::{
     ClaudeCodeView, ConnectionKind, ConnectionOp, ConnectionsView, ControlToShell, DataToShell,
-    KeyStageFailure, KeyStageId, KeyStagePlan, KeyView,
+    KeyRemovalFailure, KeyStageFailure, KeyStageId, KeyStagePlan, KeyView,
 };
 use tokio::task::JoinHandle;
 use tokio::time::{Duration, timeout};
@@ -150,6 +150,7 @@ pub(super) struct Connections {
     // shortcut: the pending fence is process-local, so a restart before the removal commits can
     // reload the key; a durable pending intent is needed only if removal must survive that exit.
     removing: Option<u64>,
+    remove_request: Option<(u64, u64)>,
     stage_link: Option<u64>,
     stage_request: Option<u64>,
     stage_admission: Option<KeyStageId>,
@@ -170,6 +171,7 @@ impl Default for Connections {
             read: None,
             loading: false,
             removing: None,
+            remove_request: None,
             stage_link: None,
             stage_request: None,
             stage_admission: None,
@@ -319,6 +321,7 @@ impl Accounts {
     pub(super) fn load_key(&mut self, op: KeyOp) {
         let generation = self.connections.advance();
         self.connections.view.anthropic = KeyView::Checking;
+        self.connections.view.anthropic_revision = None;
         self.connections.loading = true;
         let work = Work::Key { generation, op };
         if self
@@ -329,6 +332,12 @@ impl Accounts {
             self.connections.view.anthropic = KeyView::Unconfirmed;
             self.connections.loading = false;
         }
+    }
+
+    fn removal_reply(&mut self, result: Result<(), KeyRemovalFailure>) -> Option<ControlToShell> {
+        let (epoch, request) = self.connections.remove_request.take()?;
+        (self.connections.stage_link == Some(epoch))
+            .then_some(ControlToShell::AnthropicKeyRemoved { request, result })
     }
 
     fn stage_done(
@@ -356,7 +365,69 @@ impl Accounts {
         }]
     }
 
+    fn key_loaded(
+        &mut self,
+        generation: u64,
+        (revision, result): KeyResult,
+    ) -> Option<ControlToShell> {
+        let mut removal = None;
+        self.connections.loading = false;
+        if self.connections.removing.is_some() {
+            if matches!(result, Err(KeyError::Changed)) {
+                self.connections.removing = None;
+                self.load_key(KeyOp::Load);
+                return self.removal_reply(Err(KeyRemovalFailure::Changed));
+            }
+            self.connections.stage_request = None;
+            self.connections.stage_admission = None;
+            if matches!(result, Ok(None)) {
+                self.connections.removing = None;
+                removal = self.removal_reply(Ok(()));
+            } else {
+                removal = self.removal_reply(Err(KeyRemovalFailure::Unconfirmed));
+            }
+        }
+        self.connections.view.anthropic_revision = if matches!(result, Ok(None)) {
+            None
+        } else {
+            revision
+        };
+        match result {
+            Ok(Some(key)) => {
+                self.connections.key = Some(key.clone());
+                let http = std::sync::Arc::clone(&self.net.http);
+                let events = self.reads_tx.clone();
+                self.connections.read = Some(tokio::spawn(async move {
+                    let result = timeout(Duration::from_secs(15), async {
+                        let http = tokio::task::spawn_blocking(move || http())
+                            .await
+                            .map_err(|_| CheckError::Unconfirmed)?
+                            .map_err(|_| CheckError::Unconfirmed)?;
+                        models::read(&http, key).await
+                    })
+                    .await
+                    .unwrap_or(Err(CheckError::Unconfirmed));
+                    events
+                        .send(Event::Connection(ConnectionEvent::Checked {
+                            generation,
+                            result,
+                        }))
+                        .ok();
+                }));
+            }
+            Ok(None) => self.connections.view.anthropic = KeyView::Missing,
+            Err(KeyError::Rejected(reason)) => {
+                self.connections.view.anthropic = KeyView::Rejected(reason);
+            }
+            Err(KeyError::Vault(_) | KeyError::Changed) => {
+                self.connections.view.anthropic = KeyView::Unconfirmed;
+            }
+        }
+        removal
+    }
+
     pub(super) fn connection_event(&mut self, event: ConnectionEvent) -> Vec<ControlToShell> {
+        let mut removal = None;
         match event {
             ConnectionEvent::StagePlan {
                 epoch,
@@ -385,74 +456,39 @@ impl Accounts {
                 return self.stage_done(epoch, generation, plan, result);
             }
             ConnectionEvent::Op(op) => {
-                if self.connections.removing.is_some() && self.connections.loading {
-                    return Vec::new();
-                }
+                let in_flight = self.connections.removing.is_some() && self.connections.loading;
                 match op {
                     ConnectionOp::CheckAnthropicKey => {}
-                    ConnectionOp::RemoveAnthropicKey { revision } => {
+                    ConnectionOp::RemoveAnthropicKey { revision, request } => {
+                        if self
+                            .connections
+                            .removing
+                            .is_some_and(|pending| pending != revision)
+                        {
+                            return vec![ControlToShell::AnthropicKeyRemoved {
+                                request,
+                                result: Err(KeyRemovalFailure::Changed),
+                            }];
+                        }
                         self.connections.removing.get_or_insert(revision);
+                        self.connections.remove_request =
+                            self.connections.stage_link.map(|epoch| (epoch, request));
                     }
                     _ => return Vec::new(),
                 }
+                if in_flight {
+                    return Vec::new();
+                }
                 self.load_key(self.connections.removing.map_or(KeyOp::Load, KeyOp::Remove));
+                if !self.connections.loading {
+                    removal = self.removal_reply(Err(KeyRemovalFailure::Unconfirmed));
+                }
             }
-            ConnectionEvent::Loaded {
-                generation,
-                result: (revision, result),
-            } => {
+            ConnectionEvent::Loaded { generation, result } => {
                 if generation != self.connections.generation || !self.connections.loading {
                     return Vec::new();
                 }
-                self.connections.loading = false;
-                if self.connections.removing.is_some() {
-                    if matches!(result, Err(KeyError::Changed)) {
-                        self.connections.removing = None;
-                        self.load_key(KeyOp::Load);
-                        return vec![ControlToShell::Connections(self.connections.view)];
-                    }
-                    self.connections.stage_request = None;
-                    self.connections.stage_admission = None;
-                    if matches!(result, Ok(None)) {
-                        self.connections.removing = None;
-                    }
-                }
-                self.connections.view.anthropic_revision = if matches!(result, Ok(None)) {
-                    None
-                } else {
-                    revision
-                };
-                match result {
-                    Ok(Some(key)) => {
-                        self.connections.key = Some(key.clone());
-                        let http = std::sync::Arc::clone(&self.net.http);
-                        let events = self.reads_tx.clone();
-                        self.connections.read = Some(tokio::spawn(async move {
-                            let result = timeout(Duration::from_secs(15), async {
-                                let http = tokio::task::spawn_blocking(move || http())
-                                    .await
-                                    .map_err(|_| CheckError::Unconfirmed)?
-                                    .map_err(|_| CheckError::Unconfirmed)?;
-                                models::read(&http, key).await
-                            })
-                            .await
-                            .unwrap_or(Err(CheckError::Unconfirmed));
-                            events
-                                .send(Event::Connection(ConnectionEvent::Checked {
-                                    generation,
-                                    result,
-                                }))
-                                .ok();
-                        }));
-                    }
-                    Ok(None) => self.connections.view.anthropic = KeyView::Missing,
-                    Err(KeyError::Rejected(reason)) => {
-                        self.connections.view.anthropic = KeyView::Rejected(reason);
-                    }
-                    Err(KeyError::Vault(_) | KeyError::Changed) => {
-                        self.connections.view.anthropic = KeyView::Unconfirmed;
-                    }
-                }
+                removal = self.key_loaded(generation, result);
             }
             ConnectionEvent::Checked { generation, result } => {
                 if generation != self.connections.generation || self.connections.read.is_none() {
@@ -474,7 +510,9 @@ impl Accounts {
                 self.connections.unsent = true;
             }
         }
-        vec![ControlToShell::Connections(self.connections.view)]
+        std::iter::once(ControlToShell::Connections(self.connections.view))
+            .chain(removal)
+            .collect()
     }
 }
 

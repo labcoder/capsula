@@ -36,6 +36,8 @@ pub enum ConnectionOp {
     RemoveAnthropicKey {
         /// The confirmed authority revision, unrelated to the key material.
         revision: u64,
+        /// The shell's outstanding removal request number.
+        request: u64,
     },
     /// Start Claude Code's own sign-in, in a console the user answers.
     ConnectClaudeCode,
@@ -118,6 +120,15 @@ pub enum KeyStageFailure {
     InvalidLength,
     /// Present, complete bytes were not an accepted API key.
     Rejected(KeyRejection),
+}
+
+/// Why a specific key removal didn't commit.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum KeyRemovalFailure {
+    /// The confirmed key no longer matches the authority head.
+    Changed,
+    /// The worker couldn't commit the removal; the same revision can be retried.
+    Unconfirmed,
 }
 
 /// Both Claude connections, authoritative: the shell never moves on its own.

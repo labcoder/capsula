@@ -226,6 +226,7 @@ async fn a_remove_sent_while_a_native_read_is_blocked_wins() {
     .expect("gate joined");
     accounts.connection_event(ConnectionEvent::Op(ConnectionOp::RemoveAnthropicKey {
         revision: 1,
+        request: 1,
     }));
     resume.send(()).expect("release the read");
     timeout(Duration::from_secs(5), async {
@@ -285,6 +286,28 @@ fn authority_sql(lock: &std::path::Path, sql: &str) {
 const REFUSE_HEADS: &str = "CREATE TRIGGER refuse_heads BEFORE UPDATE ON heads \
                             BEGIN SELECT RAISE(ABORT, 'refused'); END;";
 
+async fn expect_removal_receipt(
+    accounts: &mut Accounts,
+    request: u64,
+    view: KeyView,
+    result: Result<(), KeyRemovalFailure>,
+) {
+    let event = timeout(Duration::from_secs(5), accounts.next())
+        .await
+        .expect("removal outcome");
+    assert_eq!(
+        accounts.handle(event),
+        [
+            ControlToShell::Connections(ConnectionsView {
+                anthropic: view,
+                anthropic_revision: None,
+                claude_code: ClaudeCodeView::NotFound,
+            }),
+            ControlToShell::AnthropicKeyRemoved { request, result },
+        ]
+    );
+}
+
 /// CAPS-176 233-2-H1, design §5: a Remove whose commit fails stays pending. A Check queued
 /// behind it or sent after its failure publishes no key and requests nothing; each retries the
 /// removal instead, and the first one that commits ends Missing.
@@ -314,11 +337,26 @@ async fn a_failed_removal_stays_pending_until_a_retry_commits_it() {
     let sent = || requests.load(std::sync::atomic::Ordering::SeqCst);
     assert_eq!(sent(), 1);
     authority_sql(&lock, REFUSE_HEADS);
-    accounts.connection_event(ConnectionEvent::Op(ConnectionOp::RemoveAnthropicKey {
+    accounts.connections.stage_session(Some(1));
+    let start = accounts.connection_event(ConnectionEvent::Op(ConnectionOp::RemoveAnthropicKey {
         revision: 1,
+        request: 1,
     }));
+    assert!(matches!(
+        start.as_slice(),
+        [ControlToShell::Connections(ConnectionsView {
+            anthropic: KeyView::Checking,
+            ..
+        })]
+    ));
     accounts.connection_event(ConnectionEvent::Op(ConnectionOp::CheckAnthropicKey));
-    settle(&mut accounts).await;
+    expect_removal_receipt(
+        &mut accounts,
+        1,
+        KeyView::Unconfirmed,
+        Err(KeyRemovalFailure::Unconfirmed),
+    )
+    .await;
     assert_eq!(accounts.connections.view.anthropic, KeyView::Unconfirmed);
     assert_eq!(accounts.connections.key.as_ref().map(|_| ()), None);
     assert_eq!(
@@ -326,9 +364,20 @@ async fn a_failed_removal_stays_pending_until_a_retry_commits_it() {
         1,
         "a Check queued behind the failed removal requests nothing"
     );
-    authority_sql(&lock, "DROP TRIGGER refuse_heads;");
     accounts.connection_event(ConnectionEvent::Op(ConnectionOp::CheckAnthropicKey));
     settle(&mut accounts).await;
+    assert_eq!(accounts.connections.view.anthropic, KeyView::Unconfirmed);
+    assert_eq!(
+        sent(),
+        1,
+        "Check retries the pending removal without reading a key"
+    );
+    authority_sql(&lock, "DROP TRIGGER refuse_heads;");
+    accounts.connection_event(ConnectionEvent::Op(ConnectionOp::RemoveAnthropicKey {
+        revision: 1,
+        request: 2,
+    }));
+    expect_removal_receipt(&mut accounts, 2, KeyView::Missing, Ok(())).await;
     assert_eq!(accounts.connections.view.anthropic, KeyView::Missing);
     assert_eq!(accounts.connections.key.as_ref().map(|_| ()), None);
     accounts.connection_event(ConnectionEvent::Op(ConnectionOp::CheckAnthropicKey));
@@ -357,6 +406,7 @@ async fn changed_or_removed_keys_ignore_late_worker_and_check_results() {
     let first = accounts.connections.generation;
     accounts.connection_event(ConnectionEvent::Op(ConnectionOp::RemoveAnthropicKey {
         revision: 1,
+        request: 1,
     }));
     let current = accounts.connections.generation;
     assert_eq!(current, first + 1);

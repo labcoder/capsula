@@ -142,6 +142,7 @@ impl Tapped for ControlToShell {
             Self::Connections(_) => "Connections",
             Self::AnthropicKeyStage { .. } => "AnthropicKeyStage",
             Self::AnthropicKeyStageDone { .. } => "AnthropicKeyStageDone",
+            Self::AnthropicKeyRemoved { .. } => "AnthropicKeyRemoved",
             Self::SpeechRevoked { .. } => "SpeechRevoked",
             Self::GitHub(_) => "GitHub",
             Self::ActionState { .. } => "ActionState",

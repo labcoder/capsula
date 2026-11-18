@@ -87,7 +87,10 @@ async fn every_connections_frame_sent_carries_both_current_halves() {
         );
         shell
             .send(&ControlToBrain::Connection(
-                ConnectionOp::RemoveAnthropicKey { revision: 1 },
+                ConnectionOp::RemoveAnthropicKey {
+                    revision: 1,
+                    request: 1,
+                },
             ))
             .await;
         let removed = until(&mut shell, |view| view.anthropic == KeyView::Missing).await;

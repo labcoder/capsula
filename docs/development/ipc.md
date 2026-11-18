@@ -156,6 +156,9 @@ The Connections snapshot pairs the Anthropic key's status with its non-secret
 authority revision. Remove names that exact revision; the worker compares it
 inside the removal transaction even on retry. A mismatch changes neither the
 active key nor its pending plan, and the brain reloads the current key state.
+The separate removal reply names the request on the same authenticated link.
+A combined Connections snapshot is never a removal receipt, even if it says
+Unconfirmed or Missing. A refused commit leaves the exact revision retryable.
 
 The runtime binds Begin replies/admission to the authenticated shell epoch,
 clears admission on disconnect and refuses staging controls in offline drain.

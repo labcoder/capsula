@@ -5,7 +5,8 @@ use std::mem;
 use std::time::{Duration, Instant};
 
 use kumochi_protocol::message::{
-    ConnectionOp, ControlToShell, KeyRejection, KeyStageFailure, KeyStageId, KeyView,
+    ConnectionOp, ControlToShell, KeyRejection, KeyRemovalFailure, KeyStageFailure, KeyStageId,
+    KeyView,
 };
 use zeroize::Zeroizing;
 
@@ -29,6 +30,7 @@ pub enum PasteFailure {
     Unsaved,
     Unconfirmed,
     Offline,
+    RemovalChanged,
 }
 
 #[derive(Default)]
@@ -111,6 +113,11 @@ pub enum Removal {
     Retry,
 }
 
+enum RemovalAttempt {
+    Waiting { request: u64, revision: u64 },
+    Retry { revision: u64 },
+}
+
 #[derive(Default)]
 pub struct KeyPaste {
     stage: Stage,
@@ -119,7 +126,7 @@ pub struct KeyPaste {
     authority_revision: Option<u64>,
     view: Option<KeyView>,
     saved: bool,
-    removing: bool,
+    removal: Option<RemovalAttempt>,
     failure: Option<PasteFailure>,
 }
 
@@ -141,7 +148,6 @@ impl KeyPaste {
         self.authority_revision = authority_revision;
         if matches!(view, KeyView::Missing) {
             self.saved = false;
-            self.removing = false;
         } else if matches!(view, KeyView::Ready | KeyView::Rejected(_)) {
             self.saved = true;
         }
@@ -169,12 +175,10 @@ impl KeyPaste {
         self.failure
     }
     pub fn removal(&self) -> Removal {
-        if !self.removing {
-            Removal::None
-        } else if self.view == Some(KeyView::Unconfirmed) {
-            Removal::Retry
-        } else {
-            Removal::Waiting
+        match self.removal {
+            None => Removal::None,
+            Some(RemovalAttempt::Waiting { .. }) => Removal::Waiting,
+            Some(RemovalAttempt::Retry { .. }) => Removal::Retry,
         }
     }
     pub fn saving(&self) -> bool {
@@ -186,7 +190,9 @@ impl KeyPaste {
     }
 
     fn available(&self) -> bool {
-        self.view.is_some_and(|view| view != KeyView::Checking) && !self.saving() && !self.removing
+        self.view.is_some_and(|view| view != KeyView::Checking)
+            && !self.saving()
+            && self.removal.is_none()
     }
 
     pub fn begin(
@@ -347,6 +353,10 @@ impl KeyPaste {
         if !self.check_available() {
             return;
         }
+        if let Some(RemovalAttempt::Retry { revision }) = self.removal {
+            self.send_remove(revision, send);
+            return;
+        }
         if send(ConnectionOp::CheckAnthropicKey) {
             self.failure = None;
             self.receive(KeyView::Checking, self.authority_revision);
@@ -370,14 +380,48 @@ impl KeyPaste {
             return;
         };
         self.revision = self.revision.wrapping_add(1);
-        if send(ConnectionOp::RemoveAnthropicKey {
-            revision: authority_revision,
-        }) {
+        self.send_remove(authority_revision, send);
+    }
+
+    fn send_remove(&mut self, revision: u64, send: impl FnOnce(ConnectionOp) -> bool) {
+        self.request = self.request.wrapping_add(1);
+        let request = self.request;
+        if send(ConnectionOp::RemoveAnthropicKey { revision, request }) {
             self.failure = None;
-            self.removing = true;
+            self.removal = Some(RemovalAttempt::Waiting { request, revision });
             self.receive(KeyView::Checking, self.authority_revision);
         } else {
             self.failure = Some(PasteFailure::Offline);
+        }
+    }
+
+    pub fn removed(&mut self, reply: &ControlToShell) {
+        let ControlToShell::AnthropicKeyRemoved { request, result } = *reply else {
+            return;
+        };
+        let Some(RemovalAttempt::Waiting {
+            request: expected,
+            revision,
+        }) = self.removal
+        else {
+            return;
+        };
+        if request != expected {
+            return;
+        }
+        match result {
+            Ok(()) => {
+                self.removal = None;
+                self.receive(KeyView::Missing, None);
+            }
+            Err(KeyRemovalFailure::Changed) => {
+                self.removal = None;
+                self.saved = false;
+                self.failure = Some(PasteFailure::RemovalChanged);
+            }
+            Err(KeyRemovalFailure::Unconfirmed) => {
+                self.removal = Some(RemovalAttempt::Retry { revision });
+            }
         }
     }
 }

@@ -18,6 +18,7 @@ async fn remove_during_begin_never_forwards_the_discarded_plan_or_leaves_staged_
     );
     account.connection_event(ConnectionEvent::Op(ConnectionOp::RemoveAnthropicKey {
         revision: 1,
+        request: 1,
     }));
     let planned = next(&mut account).await;
     assert!(matches!(

@@ -362,7 +362,13 @@ fn a_ready_to_ready_replacement_invalidates_the_open_confirmation() {
     });
     let current = state.remove_revision().expect("new confirmation");
     state.remove(current, |op| {
-        assert_eq!(op, ConnectionOp::RemoveAnthropicKey { revision: 2 });
+        assert_eq!(
+            op,
+            ConnectionOp::RemoveAnthropicKey {
+                revision: 2,
+                request: 1
+            }
+        );
         true
     });
     assert_eq!(state.removal(), Removal::Waiting);
@@ -395,18 +401,44 @@ fn failed_adoption_preserves_a_key_but_catalog_rejection_is_removable() {
         .remove_revision()
         .expect("saved rejected key can be removed");
     state.remove(revision, |op| {
-        assert_eq!(op, ConnectionOp::RemoveAnthropicKey { revision: 1 });
+        assert_eq!(
+            op,
+            ConnectionOp::RemoveAnthropicKey {
+                revision: 1,
+                request: 3
+            }
+        );
         true
     });
     assert_eq!(state.removal(), Removal::Waiting);
-    state.receive(KeyView::Unconfirmed, Some(1));
+    state.receive(KeyView::Unconfirmed, Some(2));
+    state.removed(&ControlToShell::AnthropicKeyRemoved {
+        request: 2,
+        result: Err(KeyRemovalFailure::Unconfirmed),
+    });
+    assert_eq!(state.removal(), Removal::Waiting);
+    state.removed(&ControlToShell::AnthropicKeyRemoved {
+        request: 3,
+        result: Err(KeyRemovalFailure::Unconfirmed),
+    });
     assert_eq!(state.removal(), Removal::Retry);
     state.check(|op| {
-        assert_eq!(op, ConnectionOp::CheckAnthropicKey);
+        assert_eq!(
+            op,
+            ConnectionOp::RemoveAnthropicKey {
+                revision: 1,
+                request: 4
+            }
+        );
         true
     });
     assert_eq!(state.removal(), Removal::Waiting);
     state.receive(KeyView::Missing, None);
+    assert_eq!(state.removal(), Removal::Waiting);
+    state.removed(&ControlToShell::AnthropicKeyRemoved {
+        request: 4,
+        result: Ok(()),
+    });
     assert_eq!(state.removal(), Removal::None);
     assert!(!state.saved());
 }
