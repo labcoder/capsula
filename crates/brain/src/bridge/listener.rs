@@ -255,36 +255,37 @@ struct Assembly {
     body: Reassembly,
 }
 
-/// Sends `Hello`, then answers one request at a time until the session ends.
-pub(crate) async fn session<P>(
-    mut pipe: P,
-    launch: LaunchId,
-    context: &LaunchContext<'_>,
-) -> SessionEnd
+/// Sends `Hello`, then answers one request at a time until the authenticated client is gone.
+pub(crate) async fn session<P>(pipe: P, launch: LaunchId, context: &LaunchContext<'_>) -> SessionEnd
 where
     P: AsyncRead + AsyncWrite + Unpin,
 {
+    let end = connected(pipe, launch, context).await;
+    context.gate.fail();
+    end
+}
+
+async fn connected<P>(pipe: P, launch: LaunchId, context: &LaunchContext<'_>) -> SessionEnd
+where
+    P: AsyncRead + AsyncWrite + Unpin,
+{
+    let (mut reader, mut writer) = tokio::io::split(pipe);
     let left = context.deadline.saturating_duration_since(Instant::now());
     let hello = ToBridge::Hello {
         remaining_ms: u64::try_from(left.as_millis()).unwrap_or(u64::MAX),
     };
-    if send(&mut pipe, &hello, context.deadline, None)
+    if send(&mut writer, &hello, context.deadline, None)
         .await
         .is_err()
     {
         return SessionEnd::NoClient;
     }
     let mut assembly: Option<Assembly> = None;
+    let mut read = receive(&mut reader, context.deadline).await;
     loop {
-        let read = tokio::time::timeout_at(
-            context.deadline,
-            crate::ipc::read::<ToBrain>(&mut pipe, Pipe::Data),
-        )
-        .await;
         let message = match read {
-            Err(_) => return SessionEnd::Deadline,
-            Ok(Err(_)) => return SessionEnd::Broken,
-            Ok(Ok(message)) => message,
+            Err(end) => return end,
+            Ok(message) => message,
         };
         let (key, method, chunk, last) = match (message, assembly.is_some()) {
             (
@@ -299,7 +300,10 @@ where
             // An end or `Initialized` inside a request: the bridge never interleaves.
             (_, true) => return SessionEnd::Broken,
             (None, false) => return SessionEnd::Closed,
-            (Some(ToBrain::Initialized), false) => continue,
+            (Some(ToBrain::Initialized), false) => {
+                read = receive(&mut reader, context.deadline).await;
+                continue;
+            }
         };
         let mut current = match assembly.take() {
             None if is_call_key(&key) => Assembly {
@@ -313,26 +317,66 @@ where
         current.body.push(&chunk);
         if !last {
             assembly = Some(current);
+            read = receive(&mut reader, context.deadline).await;
             continue;
         }
-        let (body, error, release) = match current.body.finish() {
-            Ok(params) => answer(current.method, &params, launch, &current.key, context).await,
-            Err(_) => (RpcError::Internal.json().as_bytes().to_vec(), true, None),
-        };
-        let gate = release.map(|_| &context.gate);
-        for (chunk, last) in chunks(&body) {
-            let reply = ToBridge::Reply {
-                key: current.key.clone(),
-                chunk: chunk.to_vec(),
-                last,
-                error,
-            };
-            let deadline = release.unwrap_or(context.deadline);
-            if let Err(end) = send(&mut pipe, &reply, deadline, gate).await {
-                return end;
+        let mut next = pin!(async {
+            loop {
+                let frame = receive(&mut reader, context.deadline).await?;
+                if !matches!(frame, Some(ToBrain::Initialized)) {
+                    return Ok(frame);
+                }
+            }
+        });
+        tokio::select! {
+            biased;
+            early = next.as_mut() => return match early {
+                Err(end) => end,
+                Ok(None) => SessionEnd::Closed,
+                Ok(Some(_)) => SessionEnd::Broken,
+            },
+            sent = respond(&mut writer, &mut current, launch, context) => {
+                if let Err(end) = sent {
+                    return end;
+                }
             }
         }
+        read = next.await;
     }
+}
+
+async fn receive(
+    pipe: &mut (impl AsyncRead + Unpin),
+    deadline: Instant,
+) -> Result<Option<ToBrain>, SessionEnd> {
+    tokio::time::timeout_at(deadline, crate::ipc::read(pipe, Pipe::Data))
+        .await
+        .map_err(|_| SessionEnd::Deadline)?
+        .map_err(|_| SessionEnd::Broken)
+}
+
+async fn respond(
+    pipe: &mut (impl AsyncWrite + Unpin),
+    request: &mut Assembly,
+    launch: LaunchId,
+    context: &LaunchContext<'_>,
+) -> Result<(), SessionEnd> {
+    let (body, error, release) = match request.body.finish() {
+        Ok(params) => answer(request.method, &params, launch, &request.key, context).await,
+        Err(_) => (RpcError::Internal.json().as_bytes().to_vec(), true, None),
+    };
+    let gate = release.map(|_| &context.gate);
+    let deadline = release.unwrap_or(context.deadline);
+    for (chunk, last) in chunks(&body) {
+        let reply = ToBridge::Reply {
+            key: request.key.clone(),
+            chunk: chunk.to_vec(),
+            last,
+            error,
+        };
+        send(pipe, &reply, deadline, gate).await?;
+    }
+    Ok(())
 }
 
 /// One request's answer: the body, whether it's a JSON-RPC error, and for a tool's content the
@@ -508,4 +552,4 @@ async fn send<P: AsyncWrite + Unpin>(
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

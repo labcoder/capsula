@@ -650,6 +650,10 @@ sequenceDiagram
 - **Overlay only.** The Claude seed and MCP list offer the overlay schema and prompt. An MCP call
   containing a screen begin or a box target is refused before handing anything to the drawing
   system. The refusal stays in memory for that key, with no call row or scene write.
+- **Bridge loss.** The listener keeps reading the authenticated pipe while a request waits for
+  dispatch, a store acknowledgement, or a reply write. End of pipe fails the launch's existing
+  audit gate, so the coordinator revokes its tool binding before handling the next input. An
+  already issued drawing write can settle, but no later step or tool reply comes from that call.
 - **Stopped draws.** A draw that stopped part way answers with its committed steps and its typed
   failure as text, with `isError` true. The ledger keeps that per call key, so a replay of the
   key answers the same way.
