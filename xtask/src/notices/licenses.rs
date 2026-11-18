@@ -113,36 +113,7 @@ impl Policy {
 
     pub(super) fn package(&self, package: &serde_json::Value) -> Result<Vec<(String, String)>> {
         let name = package["name"].as_str().context("package name missing")?;
-        let dir = Path::new(
-            package["manifest_path"]
-                .as_str()
-                .context("manifest missing")?,
-        )
-        .parent()
-        .context("manifest has no directory")?;
-        let mut published = BTreeSet::new();
-        collect(dir, &mut published)?;
-        if let Some(path) = package["license_file"].as_str() {
-            published.insert(dir.join(path));
-        }
-        let mut references = BTreeSet::new();
-        let upstream = self.root.join("assets/licenses/upstream").join(format!(
-            "{name}-{}",
-            package["version"].as_str().context("version missing")?
-        ));
-        if upstream.is_dir() {
-            collect(&upstream, &mut references)?;
-        }
-        if package["source"]
-            .as_str()
-            .is_some_and(|source| source.starts_with("git+"))
-            && let Some(repository) = dir
-                .ancestors()
-                .skip(1)
-                .find(|parent| parent.join(".git").exists())
-        {
-            collect(repository, &mut references)?;
-        }
+        let (published, references) = self.license_paths(name, package)?;
         let mut identified = Vec::new();
         let mut supplements = Vec::new();
         let mut copyrights = BTreeSet::new();
@@ -216,6 +187,44 @@ impl Policy {
             }
         }
         Ok(output)
+    }
+
+    fn license_paths(
+        &self,
+        name: &str,
+        package: &serde_json::Value,
+    ) -> Result<(BTreeSet<PathBuf>, BTreeSet<PathBuf>)> {
+        let dir = Path::new(
+            package["manifest_path"]
+                .as_str()
+                .context("manifest missing")?,
+        )
+        .parent()
+        .context("manifest has no directory")?;
+        let mut published = BTreeSet::new();
+        collect(dir, &mut published)?;
+        if let Some(path) = package["license_file"].as_str() {
+            published.insert(dir.join(path));
+        }
+        let mut references = BTreeSet::new();
+        let upstream = self.root.join("assets/licenses/upstream").join(format!(
+            "{name}-{}",
+            package["version"].as_str().context("version missing")?
+        ));
+        if upstream.is_dir() {
+            collect(&upstream, &mut references)?;
+        }
+        if package["source"]
+            .as_str()
+            .is_some_and(|source| source.starts_with("git+"))
+            && let Some(repository) = dir
+                .ancestors()
+                .skip(1)
+                .find(|parent| parent.join(".git").exists())
+        {
+            collect(repository, &mut references)?;
+        }
+        Ok((published, references))
     }
 }
 
