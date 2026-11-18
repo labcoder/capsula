@@ -16,6 +16,7 @@
     reason = "shared allocator helpers serve several test binaries"
 )]
 mod allocation;
+mod speaker;
 
 pub mod accounts;
 pub mod chat_notice;
