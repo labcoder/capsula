@@ -16,7 +16,6 @@
     reason = "shared allocator helpers serve several test binaries"
 )]
 mod allocation;
-mod speaker;
 
 pub mod accounts;
 pub mod chat_notice;
@@ -36,5 +35,6 @@ pub mod presenter;
 pub mod runs;
 pub mod settings;
 pub mod sign_in_mark;
+pub mod speaker;
 pub mod strings;
 pub mod threads;

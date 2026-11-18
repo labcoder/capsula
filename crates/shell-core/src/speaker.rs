@@ -1,8 +1,8 @@
-//! The speaker: one connection's output device and the played-content clock behind it
-//! (docs/development/speaker.md). So far only the clock is here, and nothing opens a device.
+//! The speaker: one connection's output device, with the played-content clock behind it
+//! (docs/development/speaker.md). So far it holds the shared run owner; nothing opens one.
 
-#[expect(
-    dead_code,
-    reason = "the speaker's owner, added next, drives the clock"
-)]
 mod clock;
+mod engine;
+
+pub use clock::{Fault, Observation, STALL};
+pub use engine::{Data, Engine, Release, Staged, Taken};

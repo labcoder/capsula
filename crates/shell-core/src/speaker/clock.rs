@@ -11,11 +11,11 @@ mod tests;
 /// Intervals of written frames not yet played; running out freezes the clock.
 const LEDGER: usize = 64;
 /// How long written frames may wait, on the adapter's own clock, for a trusted advance [guess].
-pub(crate) const STALL: Duration = Duration::from_millis(200);
+pub const STALL: Duration = Duration::from_millis(200);
 
 /// One reading of a stream's clock, as the platform gave it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct Observation {
+pub struct Observation {
     /// The device position, in `frequency` units.
     pub position: u64,
     /// Position units per second.
@@ -33,7 +33,7 @@ pub(crate) struct Observation {
 
 /// Why the stream's frames can't be trusted any more. A fault freezes the clock for good.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
-pub(crate) enum Fault {
+pub enum Fault {
     /// The device, or a call on it, failed.
     #[error("the output device failed")]
     Lost,
