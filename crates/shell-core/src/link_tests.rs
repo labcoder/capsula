@@ -2415,3 +2415,259 @@ fn audio_without_an_output_is_credited_and_never_shown() {
     drop(link.control);
     assert!(link.link.join().expect("joined"));
 }
+
+/// A link whose speaker plays on a scripted device, and opens only when `go` sends; the last
+/// receiver hears once the opener was entered. Named, playable speech for run 1 already waits
+/// on its pipes.
+fn opening_speaker(
+    label: &str,
+) -> (
+    Attended,
+    crate::speaker::fake::Shared,
+    std::sync::mpsc::Sender<()>,
+    std::sync::mpsc::Receiver<()>,
+) {
+    use kumochi_protocol::message::{OutputGeneration, SegmentId, SpeechPcm};
+    let script = crate::speaker::fake::Shared::default();
+    script.lock().expect("unpoisoned").play_to = u64::MAX;
+    let (go, opening) = std::sync::mpsc::channel::<()>();
+    let (enter, entered) = std::sync::mpsc::channel::<()>();
+    let opening = std::sync::Mutex::new((enter, opening));
+    let opener = crate::speaker::Opener(Arc::new({
+        let script = Arc::clone(&script);
+        move |outlet| {
+            let opening = opening.lock().expect("unpoisoned");
+            let _entered = opening.0.send(());
+            let _opened = opening.1.recv();
+            crate::speaker::fake::open(outlet, Arc::clone(&script))
+        }
+    }));
+    let link = attended_speaking(label, opener);
+    let state = ControlToShell::RunState {
+        origin: None,
+        run: RunId(1),
+        thread: ThreadId(3),
+        phase: Phase::Answering,
+        error: None,
+    };
+    frame::write(&mut &link.control, &state, Pipe::Control).expect("state");
+    let queued = DataToShell::SegmentQueued {
+        run: RunId(1),
+        segment: SegmentId(0),
+        step: None,
+    };
+    let pcm = DataToShell::SpeechPcm(SpeechPcm {
+        run: RunId(1),
+        segment: SegmentId(0),
+        output_generation: OutputGeneration(1),
+        seq: 0,
+        samples: vec![7; 2_400],
+        last: Some(2_400),
+    });
+    for frame in [queued, pcm] {
+        frame::write(&mut &*link.data, &frame, Pipe::Data).expect("written");
+    }
+    (link, script, go, entered)
+}
+
+fn played(script: &crate::speaker::fake::Shared) -> usize {
+    script.lock().expect("unpoisoned").content.len()
+}
+
+/// Waits until the speaker took the queued speech: its credit reached the brain. The speech frame
+/// alone carries at least a byte per sample, and the segment's announcement far less.
+fn taken(data: &PipeClient) {
+    let mut credited = 0;
+    while credited < 2_400 {
+        match frame::read::<DataToBrain>(&mut &*data, Pipe::Data).expect("read") {
+            Some(DataToBrain::Credit { bytes }) => credited += bytes,
+            Some(_) => {}
+            None => panic!("the data pipe closed before the speech was credited"),
+        }
+    }
+}
+
+/// Waits for two more device passes, so anything playable would have been written.
+fn two_passes(script: &crate::speaker::fake::Shared) {
+    let passes = || script.lock().expect("unpoisoned").passes;
+    let from = passes();
+    let deadline = Instant::now() + PATIENCE;
+    while passes() < from + 2 {
+        assert!(Instant::now() < deadline, "two more passes");
+        thread::sleep(Duration::from_millis(2));
+    }
+}
+
+#[test]
+fn an_open_racing_the_inhibit_is_paused_before_any_speech_reaches_the_device() {
+    use kumochi_protocol::message::GestureId;
+    let (link, script, go, _entered) = opening_speaker("racing-inhibit");
+    let events = patient(link.events);
+    let _session = connected(next(&events));
+    let output = link.handle.output();
+    let token = output.acquire(GestureId(1)).expect("taken while opening");
+    go.send(()).expect("opening");
+    taken(&link.data);
+    two_passes(&script);
+    assert_eq!(
+        played(&script),
+        0,
+        "taken, and paused before any of it was written"
+    );
+    output
+        .retire(token, super::output::Retirement::NoMic)
+        .expect("retired");
+    let deadline = Instant::now() + PATIENCE;
+    while played(&script) < 2_400 {
+        assert!(Instant::now() < deadline, "it was playable all along");
+        thread::sleep(Duration::from_millis(5));
+    }
+    drop(link.control);
+    assert!(link.link.join().expect("joined"), "the UI was still there");
+}
+
+#[test]
+fn talk_back_off_while_opening_withdraws_the_late_open_before_any_speech() {
+    let (link, script, go, _entered) = opening_speaker("off-while-opening");
+    let events = patient(link.events);
+    let _session = connected(next(&events));
+    let output = link.handle.output();
+    output.withdraw();
+    go.send(()).expect("opening");
+    let deadline = Instant::now() + PATIENCE;
+    while output.view().why != Some(super::output::Why::Retired) {
+        assert!(Instant::now() < deadline, "withdrawn and retired");
+        thread::sleep(Duration::from_millis(5));
+    }
+    taken(&link.data);
+    assert_eq!(played(&script), 0, "credited as stale, never written");
+    drop(link.control);
+    assert!(link.link.join().expect("joined"), "the UI was still there");
+}
+
+#[test]
+fn an_open_that_returns_after_quit_began_announces_nothing() {
+    a_late_open_announces_nothing(Loss::Quit, At::Opener);
+}
+
+#[test]
+fn an_open_that_returns_after_the_session_was_lost_announces_nothing() {
+    a_late_open_announces_nothing(Loss::Session, At::Opener);
+}
+
+#[test]
+fn quit_after_the_link_checked_a_returned_open_still_refuses_it() {
+    a_late_open_announces_nothing(Loss::Quit, At::Decision);
+}
+
+#[test]
+fn a_session_lost_after_the_link_checked_a_returned_open_still_refuses_it() {
+    a_late_open_announces_nothing(Loss::Session, At::Decision);
+}
+
+/// What ends a session while its speaker opens.
+#[derive(Clone, Copy)]
+enum Loss {
+    Quit,
+    Session,
+}
+
+/// When it ends: inside the blocked opener, or after the link's own check of the returned
+/// speaker and before the owner's decision.
+#[derive(Clone, Copy)]
+enum At {
+    Opener,
+    Decision,
+}
+
+/// Quits or loses the session while its speaker opens; the speaker is never announced.
+fn a_late_open_announces_nothing(loss: Loss, at: At) {
+    use super::output::{OutputKey, OutputView, Why};
+    let label = match (loss, at) {
+        (Loss::Quit, At::Opener) => "quit-in-opener",
+        (Loss::Quit, At::Decision) => "quit-before-decision",
+        (Loss::Session, At::Opener) => "lost-in-opener",
+        (Loss::Session, At::Decision) => "lost-before-decision",
+    };
+    let (link, script, go, entered) = opening_speaker(label);
+    let events = patient(link.events);
+    let session = connected(next(&events));
+    let cancel = {
+        let handle = link.handle.clone();
+        move || match loss {
+            Loss::Quit => assert!(handle.begin_quit(), "the first quit"),
+            Loss::Session => session
+                .alive()
+                .store(false, std::sync::atomic::Ordering::Release),
+        }
+    };
+    entered
+        .recv_timeout(PATIENCE)
+        .expect("the opener was entered");
+    match at {
+        At::Opener => cancel(),
+        At::Decision => link.handle.output().before_opened(Box::new(cancel)),
+    }
+    go.send(()).expect("opening");
+    let output = link.handle.output();
+    let settled = OutputView {
+        key: Some(OutputKey::NoOutput(1)),
+        why: Some(Why::Refused),
+        retiring: false,
+        terminal: false,
+    };
+    let deadline = Instant::now() + PATIENCE;
+    while output.view() != settled {
+        assert!(Instant::now() < deadline, "{label}: let go, clean");
+        thread::sleep(Duration::from_millis(5));
+    }
+    frame::write(&mut &link.control, &ControlToShell::Ping, Pipe::Control).expect("ping");
+    loop {
+        let message = frame::read::<ControlToBrain>(&mut &link.control, Pipe::Control)
+            .expect("read")
+            .expect("a frame");
+        assert!(
+            !matches!(message, ControlToBrain::AudioOutput { .. }),
+            "{label}: never announced"
+        );
+        if message == ControlToBrain::Pong {
+            break;
+        }
+    }
+    assert_eq!(played(&script), 0, "{label}: nothing reached the device");
+    drop(link.control);
+    let _ui = link.link.join().expect("joined");
+}
+
+#[test]
+fn a_normal_session_has_no_output_and_still_lets_a_voice_hold_start() {
+    use kumochi_protocol::message::GestureId;
+    let link = attended("dormant-owner");
+    let events = patient(link.events);
+    let session = connected(next(&events));
+    let output = link.handle.output();
+    assert_eq!(
+        output.view().why,
+        Some(super::output::Why::NoOpener),
+        "no opener, no output"
+    );
+    let token = output.acquire(GestureId(1)).expect("nothing to pause");
+    let mic = link
+        .handle
+        .microphone_gate()
+        .arm(GestureId(1))
+        .expect("armed");
+    output.bind_mic(&token, &mic).expect("bound");
+    let claim = output
+        .claim(&token, session.generation())
+        .expect("claims the session's no-output key");
+    assert!(output.start_mic(&claim).is_ok(), "the hold may start");
+    frame::write(&mut &link.control, &ControlToShell::Ping, Pipe::Control).expect("ping");
+    assert_eq!(
+        frame::read::<ControlToBrain>(&mut &link.control, Pipe::Control).expect("read"),
+        Some(ControlToBrain::Pong),
+        "only the pong: no announcement, no speaker command"
+    );
+    drop(link.control);
+    assert!(link.link.join().expect("joined"), "the UI was still there");
+}

@@ -5,7 +5,6 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::SyncSender;
-use std::thread;
 use std::time::{Duration, Instant};
 
 use windows::Win32::Foundation::{CloseHandle, HANDLE, S_OK, WAIT_FAILED};
@@ -23,13 +22,11 @@ use zeroize::Zeroize;
 use super::microphone::{Apartment, Mix, read_format};
 use crate::platform::microphone::Render;
 use crate::speaker::{
-    Engine, Fault, Observation, Outlet, Release, Speaker, Staged, Worker, launch,
+    Device, Engine, Fault, Observation, Outlet, Release, Speaker, Staged, Worker, launch, serve,
 };
 
 /// The longest wait for the device's event; each pass also takes commands and data.
 const WAIT_MS: u32 = 20;
-/// A pass's wait once the device is gone.
-const IDLE: Duration = Duration::from_millis(20);
 /// How long opening may take before the link goes on without output [guess].
 const OPEN: Duration = Duration::from_secs(2);
 /// WASAPI's periods and clock times are in 100 ns units.
@@ -63,7 +60,7 @@ pub fn open(outlet: Outlet) -> Option<Speaker> {
     })
 }
 
-fn run(mut worker: Worker, ready: &SyncSender<bool>) {
+fn run(worker: Worker, ready: &SyncSender<bool>) {
     let Ok(_apartment) = Apartment::new() else {
         let _told = ready.send(false);
         return;
@@ -77,35 +74,15 @@ fn run(mut worker: Worker, ready: &SyncSender<bool>) {
         worker.generation(),
         stream.qpc_frequency,
         worker.revocation(),
+        worker.tail(),
     );
     let started = engine.begin(stream.frequency, stream.origin).is_ok()
         && stream.service(&mut engine).is_ok()
         && stream.start();
     let _told = ready.send(started);
-    if !started {
-        return;
+    if started {
+        serve(worker, engine, stream);
     }
-    let mut device = Some(stream);
-    loop {
-        let waited = if let Some(stream) = &device {
-            stream.wait()
-        } else {
-            thread::sleep(IDLE);
-            Ok(())
-        };
-        if !worker.ingest(&mut engine) {
-            break;
-        }
-        if let Some(stream) = &mut device
-            && let Err(fault) = waited.and_then(|()| stream.service(&mut engine))
-        {
-            engine.fail(fault);
-            device = None;
-        }
-        worker.flush(&mut engine);
-    }
-    worker.flush(&mut engine);
-    drop(device);
 }
 
 /// An auto-reset event the stream signals each period.
@@ -228,7 +205,9 @@ impl Stream {
         self.started = unsafe { self.client.Start() }.is_ok();
         self.started
     }
+}
 
+impl Device for Stream {
     /// Waits for the device's event, at most [`WAIT_MS`].
     fn wait(&self) -> Result<(), Fault> {
         // SAFETY: the event is open for the stream's life.
@@ -260,6 +239,13 @@ impl Stream {
         released
     }
 
+    fn stop(&mut self) -> bool {
+        // SAFETY: only this thread runs the stream, and no buffer is held.
+        !std::mem::take(&mut self.started) || unsafe { self.client.Stop() }.is_ok()
+    }
+}
+
+impl Stream {
     /// Copies the staged frames into the device's buffer and gives it back as
     /// [`Staged::release`] decides: as written, then committed with the padding read after it,
     /// or as silence once the speaker was revoked.
@@ -267,7 +253,10 @@ impl Stream {
         // SAFETY: frames fit the free space just measured; only this thread writes the stream.
         let data = match unsafe { self.render.GetBuffer(frames) } {
             Ok(data) if !data.is_null() => data,
-            _ => return Err(Fault::Lost),
+            _ => {
+                staged.abandon();
+                return Err(Fault::Lost);
+            }
         };
         // SAFETY: WASAPI lends frames * block_align writable bytes until ReleaseBuffer; the source
         // is initialized, holds exactly that many bytes and is our own, so they can't overlap.

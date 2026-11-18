@@ -36,6 +36,7 @@ use crate::platform::{self, PipeClient};
 use crate::speaker::{self, Command, Data, Opener, Outlet, Packet, Speaker};
 
 mod microphone;
+pub mod output;
 
 /// How long one connection attempt may take, starting the brain included.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -348,11 +349,14 @@ struct Credit {
 }
 
 #[derive(Clone)]
-struct EndSession(Arc<AtomicBool>);
+struct EndSession {
+    alive: Arc<AtomicBool>,
+    shared: Arc<Shared>,
+}
 
 impl Drop for EndSession {
     fn drop(&mut self) {
-        self.0.store(false, Ordering::Release);
+        self.shared.lose(&self.alive);
     }
 }
 
@@ -479,14 +483,19 @@ struct Shared {
     outbox: Mutex<Option<Outbox>>,
     /// The last connection's generation.
     generations: AtomicU64,
-    /// The last output generation a speaker announced.
-    output_generations: AtomicU32,
+    output: output::OutputOwner,
     /// Locked only after `outbox`, so a delete and a turn are counted in the order they're
     /// queued.
     deletes: Mutex<Vec<Held>>,
 }
 
 impl Shared {
+    /// Ends a session's permit; the output owner sees it before any later acceptance.
+    fn lose(&self, alive: &AtomicBool) {
+        alive.store(false, Ordering::Release);
+        self.output.cancelled();
+    }
+
     fn revoke_input(&self) -> Option<GestureId> {
         let gesture = GestureId(self.input.swap(0, Ordering::AcqRel));
         if gesture.0 == 0 {
@@ -539,6 +548,9 @@ pub struct LinkHandle {
 }
 
 impl LinkHandle {
+    pub fn output(&self) -> &output::OutputOwner {
+        &self.shared.output
+    }
     pub fn microphone_gate(&self) -> CollectionGate {
         self.shared.microphone.clone()
     }
@@ -579,11 +591,13 @@ impl LinkHandle {
         Some(gesture)
     }
 
-    /// Marks Quit, so the link starts no brain from here on. Cheap enough for the UI thread.
+    /// Marks Quit, so the link starts no brain from here on and no speaker opening now is
+    /// accepted. Cheap enough for the UI thread: the output owner's sections are short.
     /// Returns false when Quit was already under way.
     pub fn begin_quit(&self) -> bool {
         self.cancel_input();
         let first = !self.shared.quitting.swap(true, Ordering::SeqCst);
+        self.shared.output.cancelled();
         // Wakes a link waiting for Retry, so it sees Quit and ends.
         let _woken = self.retry.try_send(());
         first
@@ -702,7 +716,7 @@ impl LinkHandle {
         if let Some(recording) = &self.control_recording {
             let queued = send(recording);
             if !queued && mutation {
-                session.alive.store(false, Ordering::Release);
+                shared.lose(&session.alive);
             }
             return queued;
         }
@@ -710,7 +724,7 @@ impl LinkHandle {
             .outbox(session, |outbox| {
                 let queued = send(&outbox.control);
                 if !queued && mutation {
-                    session.alive.store(false, Ordering::Release);
+                    shared.lose(&session.alive);
                     outbox.pipe.abort();
                 }
                 queued
@@ -728,7 +742,7 @@ impl LinkHandle {
             recording.close();
         }
         self.shared.outbox(session, |outbox| outbox.pipe.abort());
-        session.alive.store(false, Ordering::Release);
+        self.shared.lose(&session.alive);
     }
 
     /// Queues a typed turn or a page request for `session`'s brain, like
@@ -757,7 +771,7 @@ impl LinkHandle {
                     DataOut::Submit(DataToBrain::TextSubmit { .. } | DataToBrain::AskAbout { .. })
                 );
                 if turn && outbox.submits.load(Ordering::SeqCst) == u32::MAX {
-                    session.alive.store(false, Ordering::Release);
+                    self.shared.lose(&session.alive);
                     outbox.pipe.abort();
                     return false;
                 }
@@ -953,35 +967,29 @@ impl Link {
         self.shared.quitting.load(Ordering::SeqCst)
     }
 
-    /// The connection's speaker, when this link has an opener; it announces its own output, and
-    /// its worker ends the connection when it ends. A normal launch has none.
+    /// The connection's speaker for the generation its output owner reserved; it announces its
+    /// own output, and its worker ends the connection when it ends. A normal launch has none.
     fn open_speaker(
         &self,
+        (generation, tail): (OutputGeneration, Arc<speaker::Tail>),
         control: &Sender<ControlToBrain>,
         credit: &Arc<Credit>,
-        pipes: [&Arc<PipeClient>; 2],
+        alive: &AtomicBool,
     ) -> Option<Speaker> {
         let open = self.speaker.as_ref()?;
-        let generation = self
-            .shared
-            .output_generations
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |value| {
-                value.checked_add(1)
-            })
-            .ok()?
-            + 1;
         let credit = Arc::clone(credit);
         let speaker = (open.0)(Outlet {
-            generation: OutputGeneration(generation),
+            generation,
             control: control.clone(),
             grant: Box::new(move |bytes| credit.grant(bytes)),
+            tail,
+            wake: self.shared.output.waker(),
         })?;
-        let pipes = pipes.map(Arc::clone);
-        speaker.arm(Box::new(move || {
-            for pipe in &pipes {
-                pipe.abort();
-            }
-        }));
+        // An early exit only: the owner decides again under its lock.
+        if self.quitting() || !alive.load(Ordering::Acquire) {
+            drop(speaker);
+            return None;
+        }
         Some(speaker)
     }
 
@@ -1010,7 +1018,10 @@ impl Link {
             return false;
         };
         let generation = previous + 1;
-        let ended = EndSession(Arc::new(AtomicBool::new(true)));
+        let ended = EndSession {
+            alive: Arc::new(AtomicBool::new(true)),
+            shared: Arc::clone(&self.shared),
+        };
         let credit = Arc::new(Credit {
             bytes: AtomicU32::new(0),
             wake: data_out.downgrade(),
@@ -1057,19 +1068,52 @@ impl Link {
             control.set_timeout(Some(QUIT_TIMEOUT));
             let _told = self.shared.tell_quit();
         }
+        // Before Connected, so nothing can claim the session's output before its owner knows it.
+        let opening = self.shared.output.begin(
+            generation,
+            (self.speaker.is_some() && spawned.is_ok()).then(|| {
+                let pipes = [Arc::clone(&control), Arc::clone(&data)];
+                let abort: output::Abort =
+                    Arc::new(move || pipes.iter().for_each(|pipe| pipe.abort()));
+                abort
+            }),
+        );
         let open = events
             .send_blocking(LinkEvent::Connected(Session {
-                alive: Arc::clone(&ended.0),
+                alive: Arc::clone(&ended.alive),
                 generation,
                 credit: Arc::clone(&credit),
                 issue_origin,
             }))
             .is_ok();
-        // Only on a live session, so a speaker never outlives a connection that didn't start.
-        let mut speaker = if spawned.is_ok() && open && !self.quitting() {
-            self.open_speaker(&control_out, &credit, [&control, &data])
-        } else {
-            None
+        // Only on a live session, so a speaker never outlives a connection that didn't start, and
+        // fenced before its reader starts.
+        let mut speaker = match opening {
+            Some(opening) if open && !self.quitting() => {
+                let output = opening.0;
+                let opened = self.open_speaker(opening, &control_out, &credit, &ended.alive);
+                let kept = self
+                    .shared
+                    .output
+                    .opened(output, opened, &self.shared.quitting, &ended.alive)
+                    .unwrap_or_else(|speaker| {
+                        drop(speaker);
+                        control.abort();
+                        data.abort();
+                        None
+                    });
+                // Armed only once kept, so letting a refused one go ends nothing.
+                if let Some(speaker) = &kept {
+                    let pipes = [Arc::clone(&control), Arc::clone(&data)];
+                    speaker.arm(Box::new(move || {
+                        for pipe in &pipes {
+                            pipe.abort();
+                        }
+                    }));
+                }
+                kept
+            }
+            _ => None,
         };
         let input = speaker.as_mut().and_then(Speaker::input);
         let read = spawned.and_then(|()| {
@@ -1103,6 +1147,7 @@ impl Link {
             Ok(()) => {}
             Err(error) => tracing::error!(%error, "can't start the link's threads"),
         }
+        self.shared.output.end(generation);
         drop(ended);
         *self
             .shared

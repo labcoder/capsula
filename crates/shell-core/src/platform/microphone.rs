@@ -321,6 +321,26 @@ impl Generation {
         self.gate.load(Ordering::Acquire) == (u64::from(self.gesture.0) << 3 | RETIRED)
     }
 
+    /// Retired, or a newer gesture armed, which needs this one retired first.
+    pub fn finished(&self) -> bool {
+        let state = self.gate.load(Ordering::Acquire);
+        state >> 3 > u64::from(self.gesture.0) || self.retired()
+    }
+
+    /// Claims this generation's single start (`Armed → Opening`), for [`MicOwner::start_reserved`].
+    /// A refused claim retires it.
+    pub fn reserve(&self) -> Result<Reserved, MicError> {
+        self.startup
+            .set(Instant::now())
+            .map_err(|_| MicError::Stale)?;
+        if let Err(error) = self.advance(ARMED, OPENING) {
+            self.cancel();
+            transition(&self.gate, self.gesture, RETIRED);
+            return Err(error);
+        }
+        Ok(Reserved(Some(self.clone())))
+    }
+
     fn advance(&self, from: u64, to: u64) -> Result<(), MicError> {
         let key = u64::from(self.gesture.0) << 3;
         self.gate
@@ -329,7 +349,7 @@ impl Generation {
             .map_err(|_| MicError::Stale)
     }
 
-    pub(super) fn cancel(&self) {
+    pub(crate) fn cancel(&self) {
         transition(&self.gate, self.gesture, CANCELLED);
     }
 
@@ -376,6 +396,20 @@ impl Generation {
         self.running()
     }
 }
+/// A generation's claimed single start. Dropped unstarted, it retires the generation, since no
+/// worker ever ran.
+#[derive(Debug)]
+pub struct Reserved(Option<Generation>);
+
+impl Drop for Reserved {
+    fn drop(&mut self) {
+        if let Some(generation) = self.0.take() {
+            generation.cancel();
+            transition(&generation.gate, generation.gesture, RETIRED);
+        }
+    }
+}
+
 /// Running is preparation evidence, never permission to copy samples.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Running {
@@ -450,13 +484,26 @@ impl fmt::Debug for MicOwner {
 impl MicOwner {
     /// Caller must have Brain admission and must forward PCM on a separate worker.
     /// No device is touched on this calling thread.
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "taking the generation keeps its one start with the caller that used it"
+    )]
     pub fn start(generation: Generation, session: Arc<AtomicBool>) -> Result<Self, MicError> {
+        Self::start_reserved(generation.reserve()?, session)
+    }
+
+    /// Starts a generation whose single start was claimed (see [`Generation::reserve`]).
+    pub fn start_reserved(
+        mut reserved: Reserved,
+        session: Arc<AtomicBool>,
+    ) -> Result<Self, MicError> {
+        let generation = reserved.0.take().ok_or(MicError::Stale)?;
         if cfg!(any(test, feature = "test-support")) {
-            return Self::start_with(generation, session, |_, _, _, _| {
+            return Self::spawn(generation, session, |_, _, _, _| {
                 Ok(Finalization::Discarded(MicError::Unavailable))
             });
         }
-        Self::start_with(generation, session, super::windows::microphone::capture)
+        Self::spawn(generation, session, super::windows::microphone::capture)
     }
 
     #[cfg(any(test, feature = "test-support"))]
@@ -475,6 +522,28 @@ impl MicOwner {
         Self::start_with(generation, session, capture)
     }
 
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn start_reserved_with_for_tests(
+        mut reserved: Reserved,
+        session: Arc<AtomicBool>,
+        capture: impl FnOnce(
+            &Generation,
+            &AtomicBool,
+            &async_channel::Sender<Running>,
+            &async_channel::Sender<MicPcm>,
+        ) -> Result<Finalization, MicError>
+        + Send
+        + 'static,
+    ) -> Result<Self, MicError> {
+        let generation = reserved.0.take().ok_or(MicError::Stale)?;
+        Self::spawn(generation, session, capture)
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "taking the generation keeps its one start with the caller that used it"
+    )]
     pub(crate) fn start_with(
         generation: Generation,
         session: Arc<AtomicBool>,
@@ -487,14 +556,23 @@ impl MicOwner {
         + Send
         + 'static,
     ) -> Result<Self, MicError> {
-        if generation.startup.set(Instant::now()).is_err() {
-            return Err(MicError::Stale);
-        }
-        if let Err(error) = generation.advance(ARMED, OPENING) {
-            generation.cancel();
-            transition(&generation.gate, generation.gesture, RETIRED);
-            return Err(error);
-        }
+        let mut reserved = generation.reserve()?;
+        let generation = reserved.0.take().ok_or(MicError::Stale)?;
+        Self::spawn(generation, session, capture)
+    }
+
+    fn spawn(
+        generation: Generation,
+        session: Arc<AtomicBool>,
+        capture: impl FnOnce(
+            &Generation,
+            &AtomicBool,
+            &async_channel::Sender<Running>,
+            &async_channel::Sender<MicPcm>,
+        ) -> Result<Finalization, MicError>
+        + Send
+        + 'static,
+    ) -> Result<Self, MicError> {
         let (running_tx, running) = async_channel::bounded(1);
         let (pcm_tx, pcm) = async_channel::bounded(PCM_QUEUE);
         let token = generation.clone();
@@ -551,6 +629,11 @@ impl MicOwner {
             running,
             pcm,
         })
+    }
+
+    /// Whether this worker runs `generation` itself, not another with the same gesture number.
+    pub(crate) fn runs(&self, generation: &Generation) -> bool {
+        Arc::ptr_eq(&self.generation.startup, &generation.startup)
     }
 
     /// Call only after accepting this running receipt and publishing matching UI state.

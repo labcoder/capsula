@@ -10,6 +10,7 @@ use kumochi_protocol::message::{
 };
 
 use super::{Data, Engine, Fault, Observation, Release, Taken};
+use crate::speaker::{Snapshot, Tail, UNKNOWN};
 
 const RATE: u32 = 8_000;
 /// Two position units per frame.
@@ -33,7 +34,7 @@ fn unnamed() -> Engine {
 }
 
 fn revocable(revoked: Arc<AtomicBool>) -> Engine {
-    let mut engine = Engine::new(RATE, GEN, QPC, revoked);
+    let mut engine = Engine::new(RATE, GEN, QPC, revoked, Arc::default());
     engine.begin(FREQ, ORIGIN).expect("begins");
     engine.reports.clear();
     engine
@@ -159,7 +160,7 @@ fn ten_written() -> Engine {
 
 #[test]
 fn the_first_report_announces_the_output() {
-    let mut engine = Engine::new(RATE, GEN, QPC, Arc::default());
+    let mut engine = Engine::new(RATE, GEN, QPC, Arc::default(), Arc::default());
     assert_eq!(
         reports(&mut engine),
         [ControlToBrain::AudioOutput {
@@ -899,5 +900,96 @@ fn a_revoked_speaker_stages_only_silence_but_owes_what_was_already_released() {
     assert_eq!(
         reports(&mut engine),
         [progress(0, 4, 10), stopped(R, Some((0, 4)))]
+    );
+}
+
+#[test]
+fn a_withdrawal_drops_unwritten_speech_writes_silence_and_still_answers_a_stop_once_played() {
+    let mut engine = ten_written();
+    assert_eq!(feed(&mut engine, 0, 1, vec![4; 6], None), Ok(Taken::Kept));
+    engine.withdraw();
+    engine.withdraw();
+    assert_eq!(reports(&mut engine), [WITHDRAWN], "announced once");
+    assert_eq!(
+        write(&mut engine, 6),
+        [0; 6],
+        "unwritten speech was dropped"
+    );
+    assert_eq!(
+        feed(&mut engine, 0, 2, vec![4; 2], None),
+        Ok(Taken::Stale),
+        "later frames are stale"
+    );
+    engine.stop(R);
+    assert_eq!(reports(&mut engine), [], "ten frames still unplayed");
+    play(&mut engine, 16, 10).expect("the clock still runs");
+    assert_eq!(
+        reports(&mut engine).last(),
+        Some(&stopped(R, Some((0, 10)))),
+        "answered once what was written played"
+    );
+}
+
+/// An engine publishing into `tail`, with ten samples of segment 0 queued.
+fn tailed(revoked: &Arc<AtomicBool>, tail: &Arc<Tail>) -> Engine {
+    let mut engine = Engine::new(RATE, GEN, QPC, Arc::clone(revoked), Arc::clone(tail));
+    engine.begin(FREQ, ORIGIN).expect("begins");
+    engine.name(R);
+    queue(&mut engine, 0);
+    assert_eq!(feed(&mut engine, 0, 0, vec![4; 10], None), Ok(Taken::Kept));
+    engine
+}
+
+#[test]
+fn the_tail_tells_releases_that_exposed_nothing_from_one_that_cannot_be_placed() {
+    let (revoked, tail) = (Arc::default(), Arc::default());
+    let mut engine = tailed(&revoked, &tail);
+    let mut out = [0; 10];
+    let staged = engine.stage(&mut out, HELD).expect("stages");
+    assert_eq!(
+        tail.read().map(|now| now.flight),
+        Some(10),
+        "in flight before the release"
+    );
+    revoked.store(true, Ordering::Release);
+    staged
+        .release(
+            |release| {
+                assert_eq!(release, Release::Silent, "revoked last");
+                Ok(Duration::ZERO)
+            },
+            || None,
+        )
+        .expect("released as silence");
+    assert_eq!(tail.read(), Some(Snapshot::default()), "nothing exposed");
+
+    let (revoked, tail) = (Arc::default(), Arc::default());
+    let mut engine = tailed(&revoked, &tail);
+    engine.stage(&mut out, HELD).expect("stages").abandon();
+    assert_eq!(tail.read(), Some(Snapshot::default()), "no buffer was lent");
+
+    let mut engine = tailed(&revoked, &tail);
+    let unplaced = engine
+        .stage(&mut out, HELD)
+        .expect("stages")
+        .release(|_| Ok(Duration::ZERO), || None);
+    assert_eq!(unplaced, Err(Fault::Lost), "the padding was unknown");
+    let now = tail.read().expect("coherent");
+    assert!(
+        now.owed() && now.flags & UNKNOWN != 0 && now.flight == 0,
+        "released content that can't be placed: {now:?}"
+    );
+
+    let (revoked, tail) = (Arc::default(), Arc::default());
+    let mut engine = tailed(&revoked, &tail);
+    let failed = engine
+        .stage(&mut out, HELD)
+        .expect("stages")
+        .release(|_| Err(Fault::Lost), || None);
+    assert_eq!(failed, Err(Fault::Lost), "the release failed");
+    let now = tail.read().expect("coherent");
+    assert!(
+        now.owed() && now.flags & UNKNOWN != 0 && now.flight == 0,
+        "a failed release may have exposed its content: {now:?}"
     );
 }

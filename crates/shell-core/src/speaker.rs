@@ -10,11 +10,14 @@
 mod clock;
 mod engine;
 #[cfg(test)]
+pub(crate) mod fake;
+mod tail;
+#[cfg(test)]
 #[path = "speaker_tests.rs"]
 mod tests;
 
 use std::fmt;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender, TryRecvError, TrySendError};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::{self, JoinHandle};
@@ -25,6 +28,7 @@ use zeroize::Zeroize;
 
 pub use clock::{Fault, Observation, STALL};
 pub use engine::{Data, Engine, Release, Staged, Taken};
+pub use tail::{FAULT, RELEASED, Snapshot, Tail, UNKNOWN};
 
 /// Frames a worker takes per pass, so the device is serviced between them.
 const PACKETS: usize = 8;
@@ -34,6 +38,11 @@ const COMMANDS: usize = 16;
 const TEARDOWN: Duration = Duration::from_secs(1);
 /// How often a reader waiting on a busy worker checks that the speaker is still wanted.
 const RETRY: Duration = Duration::from_millis(10);
+/// A pass's wait once the device is gone.
+const IDLE: Duration = Duration::from_millis(20);
+/// The longest a retiring stream plays out what was written [guess]: the device's buffer is at
+/// most 100 ms, and the clock's own stall deadline is 200 ms.
+const DRAIN: Duration = Duration::from_millis(500);
 
 /// A speech frame and its size on the pipe, which is credited once it's kept or dropped. Its
 /// decoded samples are zeroed however it's let go.
@@ -72,6 +81,8 @@ pub enum Command {
     Resume(u32),
     /// The control pipe named a run (see [`Engine::name`]).
     Name(RunId),
+    /// Talk-back off (see [`Engine::withdraw`]).
+    Withdraw,
 }
 
 /// What a connection gives its speaker.
@@ -82,6 +93,10 @@ pub struct Outlet {
     pub control: async_channel::Sender<ControlToBrain>,
     /// Grants the brain data credit.
     pub grant: Box<dyn Fn(u32) + Send>,
+    /// Where the generation's engine publishes what it owes.
+    pub tail: Arc<Tail>,
+    /// Wakes the output owner; a full channel already holds a wake.
+    pub wake: async_channel::Sender<()>,
 }
 
 impl fmt::Debug for Outlet {
@@ -108,7 +123,6 @@ impl fmt::Debug for Opener {
 pub struct Speaker {
     input: Option<Input>,
     commands: Option<SyncSender<Command>>,
-    quiet: Arc<AtomicU32>,
     gone: Arc<AtomicBool>,
     accepted: Arc<AtomicBool>,
     wake: Arc<Mutex<Wake>>,
@@ -176,9 +190,9 @@ impl Speaker {
             .is_some_and(|commands| commands.try_send(command).is_ok())
     }
 
-    /// The latest pause serial that went quiet; 0 for none.
-    pub fn quiet(&self) -> u32 {
-        self.quiet.load(Ordering::Acquire)
+    /// Another sender on the worker's command queue, for the output owner.
+    pub(crate) fn commands(&self) -> Option<SyncSender<Command>> {
+        self.commands.clone()
     }
 
     /// The thread that owns the worker; dropping the speaker joins it once it has finished.
@@ -186,8 +200,9 @@ impl Speaker {
         self.worker = Some(worker);
     }
 
-    /// The caller took the speaker: from now on its worker's reports go out.
-    fn accept(&self) {
+    /// The output owner kept the speaker, fenced, for a current session: from now on its
+    /// worker's reports go out.
+    pub(crate) fn accept(&self) {
         self.accepted.store(true, Ordering::Release);
     }
 
@@ -235,10 +250,11 @@ pub struct Worker {
     grant: Box<dyn Fn(u32) + Send>,
     generation: OutputGeneration,
     held: Option<Packet>,
-    quiet: Arc<AtomicU32>,
     gone: Arc<AtomicBool>,
     accepted: Arc<AtomicBool>,
     wake: Arc<Mutex<Wake>>,
+    tail: Arc<Tail>,
+    owner: async_channel::Sender<()>,
 }
 
 impl Drop for Worker {
@@ -268,7 +284,6 @@ pub fn pair(outlet: Outlet) -> (Speaker, Worker) {
     let (packets_in, packets) = mpsc::sync_channel(1);
     let (spent, spent_out) = mpsc::sync_channel(2);
     let (commands_in, commands) = mpsc::sync_channel(COMMANDS);
-    let quiet = Arc::new(AtomicU32::new(0));
     let gone = Arc::new(AtomicBool::new(false));
     let accepted = Arc::new(AtomicBool::new(false));
     let wake = Arc::new(Mutex::new(Wake::default()));
@@ -279,7 +294,6 @@ pub fn pair(outlet: Outlet) -> (Speaker, Worker) {
             gone: Arc::clone(&gone),
         }),
         commands: Some(commands_in),
-        quiet: Arc::clone(&quiet),
         gone: Arc::clone(&gone),
         accepted: Arc::clone(&accepted),
         wake: Arc::clone(&wake),
@@ -293,43 +307,127 @@ pub fn pair(outlet: Outlet) -> (Speaker, Worker) {
         grant: outlet.grant,
         generation: outlet.generation,
         held: None,
-        quiet,
         gone,
         accepted,
         wake,
+        tail: outlet.tail,
+        owner: outlet.wake,
     };
     (speaker, worker)
 }
 
 /// Runs `start` on the speaker's own thread with its worker and a channel for one answer: true
 /// once its device runs. Only a true answer received before the wait of `within` times out makes
-/// the speaker the caller's, and only then is it accepted, so its reports, the announcement
-/// first, go out. A no, a late yes or a thread that never started returns `None`, and that
-/// worker publishes nothing; letting a refused speaker go takes up to [`TEARDOWN`] more.
+/// the speaker the caller's, still unaccepted: its reports, the announcement first, go out only
+/// once the output owner accepts it. A no, a late yes or a thread that never started returns
+/// `None`, and that worker publishes nothing; letting a refused speaker go takes up to
+/// [`TEARDOWN`] more. The
+/// thread wakes the output owner once more after its worker, engine and device are gone, on
+/// return or unwinding, when nothing can write the tail again.
 pub fn launch(
     outlet: Outlet,
     within: Duration,
     start: impl FnOnce(Worker, SyncSender<bool>) + Send + 'static,
 ) -> Option<Speaker> {
     let (ready, opened) = mpsc::sync_channel(1);
+    let woken = Woken(outlet.wake.clone());
     let (mut speaker, worker) = pair(outlet);
     let thread = thread::Builder::new()
         .name("speaker".to_owned())
-        .spawn(move || start(worker, ready))
+        .spawn(move || {
+            let _woken = woken;
+            start(worker, ready);
+        })
         .ok()?;
     speaker.attach(thread);
-    if !opened.recv_timeout(within).unwrap_or(false) {
-        return None;
+    opened
+        .recv_timeout(within)
+        .unwrap_or(false)
+        .then_some(speaker)
+}
+
+/// Wakes the output owner when dropped.
+struct Woken(async_channel::Sender<()>);
+
+impl Drop for Woken {
+    fn drop(&mut self) {
+        // A full channel already holds a wake.
+        let _woken = self.0.try_send(());
     }
-    speaker.accept();
-    Some(speaker)
+}
+
+/// What a platform's render stream does for [`serve`].
+pub trait Device {
+    /// Waits for the device's next period, at most a pass.
+    ///
+    /// # Errors
+    /// The device failed.
+    fn wait(&self) -> Result<(), Fault>;
+    /// Reads the device's clock and tops it up through [`Engine::stage`].
+    ///
+    /// # Errors
+    /// The fault the device or the engine raised.
+    fn service(&mut self, engine: &mut Engine) -> Result<(), Fault>;
+    /// Stops the stream; false when the platform says it didn't.
+    fn stop(&mut self) -> bool;
+}
+
+/// Serves a started device until the link lets go. A withdrawal or a fault retires the stream,
+/// and the worker goes on without it, answering stops and crediting frames.
+pub fn serve(mut worker: Worker, mut engine: Engine, device: impl Device) {
+    let mut device = Some(device);
+    loop {
+        let waited = if let Some(device) = &device {
+            device.wait()
+        } else {
+            thread::sleep(IDLE);
+            Ok(())
+        };
+        let live = worker.ingest(&mut engine);
+        if let Some(mut stream) = device.take() {
+            if let Err(fault) = waited.and_then(|()| stream.service(&mut engine)) {
+                engine.fail(fault);
+            }
+            if live && !engine.sealed() {
+                device = Some(stream);
+            } else {
+                retire(stream, &mut engine);
+            }
+        }
+        worker.flush(&mut engine);
+        if !live {
+            return;
+        }
+    }
+}
+
+/// Plays out what was written, as silence follows it, until the clock is quiet or faults or
+/// [`DRAIN`] passes; then stops the stream and lets it go.
+fn retire(mut device: impl Device, engine: &mut Engine) {
+    let deadline = Instant::now() + DRAIN;
+    while engine.fault().is_none() && !engine.drained() && Instant::now() < deadline {
+        if let Err(fault) = device.wait().and_then(|()| device.service(engine)) {
+            engine.fail(fault);
+        }
+    }
+    if !device.stop() {
+        tracing::warn!("the speaker's stream didn't stop cleanly");
+    }
+    drop(device);
+    engine.released();
 }
 
 /// Answers that a device runs, then serves the worker with no device behind it until it ends.
 #[cfg(test)]
 fn idle(mut worker: Worker, ready: &SyncSender<bool>, rate: u32) {
     let _told = ready.send(true);
-    let mut engine = Engine::new(rate, worker.generation(), 10_000_000, worker.revocation());
+    let mut engine = Engine::new(
+        rate,
+        worker.generation(),
+        10_000_000,
+        worker.revocation(),
+        worker.tail(),
+    );
     while worker.ingest(&mut engine) {
         worker.flush(&mut engine);
         std::thread::sleep(std::time::Duration::from_millis(1));
@@ -360,6 +458,11 @@ impl Worker {
         Arc::clone(&self.gone)
     }
 
+    /// Where the [`Engine`] publishes this generation's tail.
+    pub fn tail(&self) -> Arc<Tail> {
+        Arc::clone(&self.tail)
+    }
+
     /// Applies up to [`COMMANDS`] commands, then, once none is left, up to [`PACKETS`] frames.
     /// False once the link has let go, the brain sent speech that can't be true, or it stopped
     /// reading reports; the adapter then tears the device down.
@@ -371,6 +474,7 @@ impl Worker {
                 Ok(Command::Pause(serial)) => engine.pause(serial),
                 Ok(Command::Resume(serial)) => engine.resume(serial),
                 Ok(Command::Name(run)) => engine.name(run),
+                Ok(Command::Withdraw) => engine.withdraw(),
                 Err(TryRecvError::Empty) => {
                     drained = true;
                     break;
@@ -382,9 +486,7 @@ impl Worker {
         if drained && !self.take(engine) {
             return false;
         }
-        if let Some(serial) = engine.quiet() {
-            self.quiet.store(serial, Ordering::Release);
-        }
+        engine.publish();
         !engine.backlogged()
     }
 
@@ -415,8 +517,12 @@ impl Worker {
 
     /// Sends the engine's reports, in order, until the control queue is full; the rest wait for
     /// the next pass. Nothing goes out until the caller accepted the speaker (see [`launch`]). A
-    /// closed queue drops them, since the connection has ended.
+    /// closed queue drops them, since the connection has ended. Wakes the output owner when what
+    /// a waiting claim depends on changed.
     pub fn flush(&mut self, engine: &mut Engine) {
+        if engine.changed() {
+            let _woken = self.owner.try_send(());
+        }
         if !self.accepted.load(Ordering::Acquire) {
             return;
         }
