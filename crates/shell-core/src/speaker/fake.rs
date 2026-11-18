@@ -22,6 +22,8 @@ pub(crate) struct Script {
     /// A release holding content panics.
     pub(crate) panic: bool,
     pub(crate) stop_fails: bool,
+    /// Each pass fails while set.
+    pub(crate) fail: bool,
     pub(crate) stopped: bool,
     /// Every nonzero sample released as content.
     pub(crate) content: Vec<i16>,
@@ -63,6 +65,9 @@ impl Device for Fake {
     fn service(&mut self, engine: &mut Engine) -> Result<(), Fault> {
         let (played, panic) = {
             let script = lock(&self.script);
+            if script.fail {
+                return Err(Fault::Lost);
+            }
             (
                 script.play_to.min(self.written.saturating_sub(1)),
                 script.panic,

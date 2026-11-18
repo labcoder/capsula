@@ -228,7 +228,11 @@ impl State {
             ..
         } = self;
         for slot in ledger.iter_mut() {
-            let Some(entry) = slot.as_mut().filter(|entry| !entry.terminal) else {
+            // An opening generation settles only once its open's outcome is applied.
+            let Some(entry) = slot
+                .as_mut()
+                .filter(|entry| !entry.terminal && *output != Output::Opening(entry.generation))
+            else {
                 continue;
             };
             let live = *output == Output::Live(entry.generation);
@@ -425,7 +429,8 @@ impl OutputOwner {
 
     /// The link thread's open of `generation` returned, before its reader starts. A kept speaker
     /// is fenced first: withdrawn when talk-back went off, else paused under a held inhibit. An
-    /// `Err` speaker couldn't be fenced: the link drops it and ends the session.
+    /// `Err` speaker couldn't be fenced: the link drops it and ends the session. A stream that
+    /// retired before this keeps its entry until now, so the session never goes live without it.
     ///
     /// # Errors
     /// The speaker, when it couldn't be fenced.

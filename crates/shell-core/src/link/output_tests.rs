@@ -377,6 +377,45 @@ fn a_teardown_that_plays_past_the_last_content_frame_on_silence_settles_clean() 
 }
 
 #[test]
+fn a_stream_that_retires_before_its_open_returns_leaves_the_session_retired() {
+    let owner = OutputOwner::default();
+    let (generation, tail) = owner.begin(1, Some(Arc::new(|| {}))).expect("reserved");
+    let (control, _brain) = async_channel::bounded(64);
+    let script = fake::Shared::default();
+    let outlet = Outlet {
+        generation,
+        control,
+        grant: Box::new(|_| {}),
+        tail: Arc::clone(&tail),
+        wake: owner.waker(),
+    };
+    let speaker = fake::open(outlet, Arc::clone(&script)).expect("ready");
+    fake::lock(&script).fail = true;
+    until("released before the open returned", || {
+        tail.read().is_some_and(|now| now.flags & RELEASED != 0)
+    });
+    assert_eq!(owner.view().key, None, "still opening");
+    let speaker = owner
+        .opened(generation, Some(speaker))
+        .expect("fenced")
+        .expect("kept");
+    let key = owner.view().key.expect("a key");
+    assert_eq!(
+        (key, owner.view().why),
+        (OutputKey::NoOutput(1), Some(Why::Retired)),
+        "never live without its entry"
+    );
+    let (token, _gate, _mic) = bound(&owner, 1);
+    assert_eq!(
+        owner.claim(&token, 1).map(|claim| claim.key),
+        Ok(key),
+        "voice-only on the session that goes on"
+    );
+    owner.end(1);
+    drop(speaker);
+}
+
+#[test]
 fn a_refused_open_whose_thread_outlives_its_caller_settles_on_its_own_last_wake() {
     let owner = OutputOwner::default();
     let (generation, tail) = owner.begin(1, Some(Arc::new(|| {}))).expect("reserved");

@@ -259,8 +259,11 @@ whether a session has an output and whether an earlier generation still owes aud
 - **Settling.** Every lock reads each pending tail. An entry is clean when its writer is gone or
   its stream was released, and nothing is owed; terminal when something is owed then, or when the
   clock faulted with something owed. A live generation that caught up is never settled, since it
-  can still speak. A clean live generation leaves its session `Quiet { Retired }`; a terminal
-  one leaves it `Lost`, and a terminal entry stays until restart.
+  can still speak. An opening generation isn't settled until `opened` applied its outcome, so a
+  stream that retired before its open returned keeps its entry and settles at the next lock,
+  leaving the session `Quiet { Retired }` or `Lost`, never live without its entry. A clean live
+  generation leaves its session `Quiet { Retired }`; a terminal one leaves it `Lost`, and a
+  terminal entry stays until restart.
 - **Talk-back off.** `withdraw()` sends `Withdraw` to a live speaker, fences an opening one when
   it opens, and later sessions get none. The stream retires; the worker stays on without a
   device, answering stops and crediting frames, and the session goes on.
