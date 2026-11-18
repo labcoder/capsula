@@ -154,6 +154,8 @@ struct Rig {
     /// Every report the core heard, in order.
     ended: Vec<(LaunchId, launch::Outcome)>,
     refreshes: usize,
+    /// Every launch a round asked to authorize, which the rig's core always does.
+    binds: Vec<LaunchId>,
 }
 
 impl Rig {
@@ -181,6 +183,7 @@ impl Rig {
             now,
             ended: Vec::new(),
             refreshes: 0,
+            binds: Vec::new(),
         };
         rig.settle().await;
         assert_eq!(rig.claude.view(), READY);
@@ -197,7 +200,7 @@ impl Rig {
                 ThreadId(1),
                 "claude-test".to_owned(),
                 None,
-                Offer::Mcp(Origin::Kumo),
+                Offer::Mcp(Origin::Kumo, vec![crate::engines::ToolName::Draw]),
             )
             .expect("ready")
     }
@@ -208,12 +211,31 @@ impl Rig {
     }
 
     fn wake(&mut self, wake: Wake) {
+        if let Wake::Note(Note::Bind(bind)) = wake {
+            self.binds.push(bind.launch);
+            bind.reply.send(Some(bind.until)).expect("the round waits");
+            return;
+        }
         match &wake {
             Wake::Note(Note::Ended { id, outcome }) => self.ended.push((*id, *outcome)),
             Wake::Note(Note::Refresh(_)) => self.refreshes += 1,
             _ => {}
         }
         self.claude.wake(wake);
+    }
+
+    /// Authorizes the round's launch as the core would, taking only its bind note, for a test
+    /// that orders every other note itself.
+    async fn authorize(&mut self) {
+        let note = timeout(WAIT, self.claude.notes.1.recv())
+            .await
+            .expect("a note in time")
+            .expect("notes open");
+        let Note::Bind(bind) = note else {
+            panic!("{note:?}");
+        };
+        self.binds.push(bind.launch);
+        bind.reply.send(Some(bind.until)).expect("the round waits");
     }
 
     async fn settle(&mut self) {
@@ -403,6 +425,7 @@ async fn a_taken_question_is_audited_seeded_and_answered_with_one_report() {
     );
     answered(&rig.drive(played.events()).await);
     assert_eq!(rig.stdin(), ["1 initialize", "1 mcp_status", "1 user"]);
+    assert_eq!(rig.binds, [id], "authorized before its seed");
     assert_eq!(rig.reported(id).await, [launch::Outcome::Clean]);
     assert_eq!(
         rig.claude.view(),
@@ -581,6 +604,23 @@ async fn a_refused_question_fails_with_claude_codes_reason_or_the_refusals_own()
     rig.close().await;
 }
 
+/// M1a is dormant: a production question whose built request offers `draw` still launches with
+/// no tool, and its round asks the core to authorize no launch.
+#[tokio::test]
+async fn a_production_question_offers_no_tool_even_when_its_request_does() {
+    let mut rig = Rig::new("question-dormant", &offering_nothing()).await;
+    let mut request = choosing("haiku", Effort::Low, ConnectionKind::ClaudeCode);
+    request.request.tools = crate::context::tools(Origin::Kumo);
+    assert!(request.request.tools.iter().any(|tool| tool.name == "draw"));
+    let (events, reports) = answer(&mut rig, request).await;
+    answered(&events);
+    assert_eq!(reports, [launch::Outcome::Clean]);
+    assert!(!rig.argv(1).contains("--allowedTools"), "{}", rig.argv(1));
+    assert!(rig.seed(1).ends_with("Tools:\n[]"), "{}", rig.seed(1));
+    assert_eq!(rig.binds, Vec::<LaunchId>::new());
+    rig.close().await;
+}
+
 /// Test 8: Stop mid-answer drops the round, and the launch's teardown confirms its job empty
 /// and deletes its folder.
 #[tokio::test]
@@ -682,7 +722,12 @@ async fn any_change_to_the_snapshot_replaces_the_warm_launch() {
         ("model", |s| s.model = "claude-other".to_owned()),
         ("effort", |s| s.effort = Some("high".to_owned())),
         ("thread", |s| s.thread = ThreadId(2)),
-        ("offer", |s| s.offer = Offer::Mcp(Origin::Task(ThreadId(1)))),
+        ("offer", |s| {
+            s.offer = Offer::Mcp(
+                Origin::Task(ThreadId(1)),
+                vec![crate::engines::ToolName::Draw],
+            );
+        }),
     ];
     for (what, change) in changes {
         let snapshot = rig.snapshot();
@@ -848,6 +893,7 @@ async fn a_late_post_seed_failure_still_quarantines_with_one_report() {
     let (id, control) = rig.last();
     let mut played = play(&question);
     let lease = played.lease();
+    rig.authorize().await;
     timeout(WAIT, played.asked(lease)).await.expect("asked");
     assert_eq!(
         timeout(WAIT, played.events()).await.expect("ended"),
@@ -1167,7 +1213,7 @@ fn a_snapshots_debug_shows_no_model_or_effort_text() {
         model: marker.to_owned(),
         effort: Some(marker.to_owned()),
         account: 3,
-        offer: Offer::Mcp(Origin::Kumo),
+        offer: Offer::Mcp(Origin::Kumo, vec![crate::engines::ToolName::Draw]),
         version: V,
     };
     let text = format!("{snapshot:?}");
@@ -1176,7 +1222,7 @@ fn a_snapshots_debug_shows_no_model_or_effort_text() {
     assert!(!text.contains(bytes.trim_matches(['[', ']'])), "{text}");
     assert_eq!(
         text,
-        "LaunchSnapshot { thread: ThreadId(1), model_bytes: 11, effort_bytes: Some(11), account: 3, offer: Mcp(Kumo), version: ClaudeVersion { major: 2, minor: 1, patch: 306 } }"
+        "LaunchSnapshot { thread: ThreadId(1), model_bytes: 11, effort_bytes: Some(11), account: 3, offer: Mcp(Kumo, [Draw]), version: ClaudeVersion { major: 2, minor: 1, patch: 306 } }"
     );
 }
 
@@ -1381,6 +1427,7 @@ async fn a_post_seed_failure_reported_after_a_find_still_quarantines() {
     let (id, control) = rig.last();
     let mut played = play(&question);
     let lease = played.lease();
+    rig.authorize().await;
     timeout(WAIT, played.asked(lease)).await.expect("asked");
     assert_eq!(
         timeout(WAIT, played.events()).await.expect("ended"),
@@ -1561,7 +1608,7 @@ fn refuses(claude: &mut Claude, what: &str) {
             ThreadId(1),
             "claude-test".to_owned(),
             None,
-            Offer::Mcp(Origin::Kumo),
+            Offer::Mcp(Origin::Kumo, vec![crate::engines::ToolName::Draw]),
         )
         .expect("the view still reads Ready");
     assert!(
@@ -2003,4 +2050,28 @@ async fn a_server_pending_until_the_audit_deadline_ends_the_launch_unseeded() {
         "{logs}"
     );
     rig.close().await;
+}
+
+/// A find starts a new generation, which ends a bound launch's authority; an unbound launch runs
+/// on.
+#[tokio::test]
+async fn a_new_generation_revokes_only_a_bound_launch() {
+    let script = synthetic_signed_in().held_until("go");
+    for bound in [true, false] {
+        let mut rig = Rig::new(&format!("question-generation-{bound}"), &script).await;
+        let id = rig.claude.warm(rig.snapshot()).expect("warm");
+        rig.claude
+            .launches
+            .iter_mut()
+            .filter(|held| held.id == id)
+            .for_each(|held| held.bound = bound);
+        rig.claude.op(ConnectionOp::FindClaudeCode);
+        let held = rig.claude.launches.iter().find(|held| held.id == id);
+        assert_eq!(
+            held.expect("held").control.is_revoked(),
+            bound,
+            "bound: {bound}"
+        );
+        rig.close().await;
+    }
 }

@@ -27,9 +27,10 @@ use super::supervisor::{
 use crate::bridge::LaunchId;
 use crate::connections::model::budget::Budget;
 use crate::context::{Origin, ToolSchema};
+use crate::coordinator::{BuildKey, SendKey};
 use crate::engines::{
     Answer, ClaudeStreamFailure, Engine, EngineFailure, Finish, Round, RunRequest, SendGate,
-    TurnEvent,
+    ToolName, TurnEvent,
 };
 
 /// How long a warm launch waits for its question [guess, the design's 30 s].
@@ -66,19 +67,43 @@ impl fmt::Debug for Clock {
 
 /// The tools a launch offers, frozen with it: the launch's allow list, its audit's expected set
 /// and its seed all read this one value.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Offer {
     /// No tools: a text answer.
     Nothing,
-    /// The MCP subset of the origin's model offers.
-    Mcp(Origin),
+    /// The authorized tools, out of the MCP subset of the origin's model offers.
+    Mcp(Origin, Vec<ToolName>),
 }
 
 impl Offer {
-    pub(crate) fn schemas(self) -> Vec<ToolSchema> {
+    /// What a build's launch may offer: the tools its built request offers that `origin` may
+    /// also call over MCP, or nothing when there are none.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "M1b's foreground offer is the first caller")
+    )]
+    pub(crate) fn authorized(origin: Origin, offered: &[ToolSchema]) -> Self {
+        let tools: Vec<ToolName> = crate::dispatch::mcp_schemas(origin)
+            .iter()
+            .filter(|schema| offered.iter().any(|tool| tool.name == schema.name))
+            .filter_map(|schema| crate::dispatch::named(schema.name))
+            .collect();
+        if tools.is_empty() {
+            Self::Nothing
+        } else {
+            Self::Mcp(origin, tools)
+        }
+    }
+
+    pub(crate) fn schemas(&self) -> Vec<ToolSchema> {
         match self {
             Self::Nothing => Vec::new(),
-            Self::Mcp(origin) => crate::dispatch::mcp_schemas(origin),
+            Self::Mcp(origin, tools) => crate::dispatch::mcp_schemas(*origin)
+                .into_iter()
+                .filter(|schema| {
+                    crate::dispatch::named(schema.name).is_some_and(|name| tools.contains(&name))
+                })
+                .collect(),
         }
     }
 }
@@ -139,6 +164,21 @@ pub(crate) enum Note {
     Analytics { id: LaunchId, on: bool },
     /// A round whose warm attempt expired before bind wants a fresh one.
     Refresh(Refresh),
+    /// A round's launch would seed a build that may call tools; the core authorizes it first.
+    Bind(Bind),
+}
+
+/// A launch to authorize for a build's calls: `reply` hears the deadline its calls' content must
+/// leave by once it's the build's one, and `None` otherwise.
+#[derive(Debug)]
+pub(crate) struct Bind {
+    pub(crate) build: BuildKey,
+    pub(crate) launch: LaunchId,
+    /// The attempt's frozen offer.
+    pub(crate) offer: Offer,
+    /// The earlier of the launch's and the question's deadlines.
+    pub(crate) until: Instant,
+    pub(crate) reply: oneshot::Sender<Option<Instant>>,
 }
 
 /// Sent by a round whose warm attempt expired before bind, which it has dropped already.
@@ -226,7 +266,7 @@ impl Attempt {
         report: Report,
         expires: Option<Instant>,
     ) -> Self {
-        let tools = tool_names(snapshot.offer);
+        let tools = tool_names(&snapshot.offer);
         let pre = PreInputAudit::new(reviewed, tools.clone());
         let post = PostSeedAudit::new(reviewed, tools);
         let (done, ready) = oneshot::channel();
@@ -271,7 +311,7 @@ impl Attempt {
 }
 
 /// The launch's frozen `mcp__kumochi__*` names.
-fn tool_names(offer: Offer) -> BTreeSet<String> {
+fn tool_names(offer: &Offer) -> BTreeSet<String> {
     offer
         .schemas()
         .iter()
@@ -481,11 +521,15 @@ impl Question<'_> {
             report,
         } = warmed;
         let launch = &attempt.launch;
-        if launch.binding().bind(request.run).is_err() {
-            report.report(Outcome::Launch);
-            return Some(Finish::Failed(EngineFailure::Provider));
-        }
         let until = launch.deadline().min(self.clock.now() + QUESTION);
+        match self.bind(&attempt, request, until).await {
+            Some(true) => {}
+            Some(false) => return None,
+            None => {
+                report.report(Outcome::Launch);
+                return Some(Finish::Failed(EngineFailure::Provider));
+            }
+        }
         let hold = (launch.deadline() + SETTLE).saturating_duration_since(Instant::now());
         // A timeout polls the ask first, so a Grant ready after the deadline still needs refusing.
         let lease = match tokio::time::timeout_at(until.into(), self.gate.ask_held(hold)).await {
@@ -537,6 +581,38 @@ impl Question<'_> {
                 Some(failed(outcome))
             }
         }
+    }
+
+    /// Binds the attempt's launch to `request`'s build when it offers tools, else to none, and has
+    /// the core authorize a tool-capable launch before its seed, at the deadline the core sets:
+    /// true once bound, false for a build that's no longer current, and `None` when the bind
+    /// failed or the core didn't answer in time.
+    async fn bind(&self, attempt: &Attempt, request: &RunRequest, until: Instant) -> Option<bool> {
+        let launch = &attempt.launch;
+        let build = match request.key {
+            SendKey::Build(build) if attempt.snapshot.offer != Offer::Nothing => Some(build),
+            SendKey::Build(_) | SendKey::Job(_) => None,
+        };
+        let Some(build) = build else {
+            launch.binding().bind(None).ok()?;
+            return Some(true);
+        };
+        let (reply, installed) = oneshot::channel();
+        let bind = Bind {
+            build,
+            launch: launch.id(),
+            offer: attempt.snapshot.offer.clone(),
+            until,
+            reply,
+        };
+        self.notes.send(Note::Bind(bind)).ok()?;
+        let until = tokio::time::timeout_at(launch.deadline().into(), installed)
+            .await
+            .ok()?
+            .ok()?;
+        let bound = until.map(|until| (build, until.into()));
+        launch.binding().bind(bound).ok()?;
+        Some(bound.is_some())
     }
 
     /// Reads the answer: every init through the one post-seed audit, then the text and the end.

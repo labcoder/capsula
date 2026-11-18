@@ -226,8 +226,18 @@ async fn a_launch_carries_its_id_deadline_binding_and_gate_from_admission() {
     let lane = found(&base, "echo").await;
     let (mut start, mut launch) = admit(question(Duration::from_secs(20))).expect("a launch id");
     assert_eq!(launch.deadline(), start.deadline);
-    launch.binding().bind(RunId(7)).expect("unbound");
-    assert!(start.binding.bind(RunId(8)).is_err(), "one binding");
+    launch
+        .binding()
+        .bind(Some((
+            crate::coordinator::BuildKey {
+                run: RunId(7),
+                round: 1,
+                attempt: 1,
+            },
+            launch.deadline().into(),
+        )))
+        .expect("unbound");
+    assert!(start.binding.bind(None).is_err(), "one binding");
     launch.gate().pass();
     assert!(start.control.gate.may_call(), "one gate");
     let (ids, id) = std_mpsc::channel();

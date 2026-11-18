@@ -93,18 +93,35 @@ writes `mcp.json`, under a fresh `LaunchId`; it's never recreated for the same l
   512 KiB gets one `-32603` when its last chunk arrives, and the session goes on.
 - **Methods.** `initialize` echoes a protocol version it knows, or offers `2025-06-18`.
   `tools/list` gives the launch's frozen tools whatever the gate says, so the audit can see them.
-  `tools/call` takes named params only (`name`, `arguments`, `_meta`); anything else, or a tool
-  outside the frozen set, is `-32602` with fixed text.
-- **Admission.** For a well-formed call, the listener reads the launch's `Binding` (set once, at
-  bind), checks the deadline, then loads C3's `AuditGate`, with no wait in between. That load is
+  `tools/call` takes named params only (`name`, `arguments`, `_meta`), each once; anything
+  else, `arguments` that isn't an object (`null` included), or a tool outside the frozen set, is
+  `-32602` with fixed text. Omitted `arguments` are `{}`. The bridge relays `params` as the client
+  wrote them and refuses a line that repeats `jsonrpc`, `id`, `method` or `params`, so the
+  dispatcher weighs and checks the original argument bytes, whitespace, escapes and repeated keys
+  included.
+- **Admission.** For a well-formed call, the listener reads the launch's `Binding` (set once,
+  when the core answers the bind, to the build whose calls it carries and its effective deadline,
+  the earliest of the launch's, its question's and its build's, or to none), checks that
+  deadline, then loads C3's `AuditGate`, with no wait in between. That load is
   the instant of admission: a `fail()` before it refuses the call, and one after it doesn't undo it.
   A refused call gets an error result and is dropped, never held for a later bind. Revocation
   (C5a: Disconnect, the route turned off, thread deletion) must fail the gate before it ends the
   launch, since killing the job doesn't stop input already in the pipe.
-- **No tool runs yet.** An admitted call gets the error result "This tool isn't available over MCP
-  yet." C4b-2 hands its origin (`McpOrigin { run, launch, key }`) to the dispatcher.
-- **Nothing the client sent is printed.** Error bodies are fixed; `McpOrigin` and `SessionEnd`
-  print kinds, ids and lengths only.
+- **Calls go to the brain.** An admitted call goes, with its origin (`McpOrigin { build, launch,
+  key }`), its tool and its original argument bytes, into the Claude Code core's one-slot
+  mailbox, and the listener waits for its one reply; both waits end at the effective deadline or
+  when the gate fails, both checked before the work at every wake, and a revoked launch's
+  listener is aborted. A reply the brain lets go is the error result "This
+  call ended before it finished." See [MCP calls](#mcp-calls).
+- **Release.** A tool's content leaves only while the gate passes and the effective deadline is
+  ahead: checked when the answer is read, and again before every write to the pipe, the deadline
+  first, then the gate, so a pipe that turns writable just as either ends takes nothing more. A
+  failed gate wakes a blocked write at once. Either ends the session on the frame as it stands,
+  unfinished (`SessionEnd::Deadline` or `Withheld`), rather than complete it. Bytes the OS
+  already accepted aren't recalled: the bridge may already have read part of the unfinished
+  frame.
+- **Nothing the client sent is printed.** Error bodies are fixed; `McpOrigin`, `McpCall`,
+  `McpReply` and `SessionEnd` print kinds, ids and lengths only.
 - **macOS counterpart:** the peer pid through `LOCAL_PEERPID` and a process-group check, which is
   weaker (unverified).
 
@@ -128,7 +145,10 @@ version: its launch policy and the facts its audit expects. Any other version is
   `CLAUDE_CODE_SKIP_PROMPT_HISTORY` and `CLAUDE_CODE_DISABLE_AUTO_MEMORY`, and
   `ENABLE_CLAUDEAI_MCP_SERVERS` is `false`, so a claude.ai sign-in's connectors are never fetched
   and Kumochi's server is the only one offered, whatever `--strict-mcp-config` does; the audit
-  still refuses any other server. `SystemRoot`,
+  still refuses any other server. `MCP_TOOL_TIMEOUT` is `300000`, above `MAX_LAUNCH`, which
+  bounds every wait a call has, and `CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT` is `0`, which turns the
+  idle check off (v2.1.187 and later): Claude Code can't time a call out while its launch lives, so
+  it never repeats one under a new id after a timeout. `SystemRoot`,
   `SystemDrive` and `PATH` come from the OS (`platform::system_env`): `PATH` is the system folder
   then the Windows folder, never the brain's own `PATH`, and there's no `PATHEXT`. `auth login`
   gets the same environment, and Kumochi sets no `BROWSER`. Claude Code's opener runs as a child
@@ -438,8 +458,9 @@ list after every op and wake, and the shell hears it only when it changes. A she
 hears the current list if it isn't empty, and nothing before Claude Code's first report.
 
 - **The snapshot.** A `LaunchSnapshot` fixes the thread, model, effort, Claude Code's connection
-  generation, the tools it offers (`Offer::Nothing`, or `Offer::Mcp` with the frozen MCP subset of
-  an origin's model tools) and the version.
+  generation, the tools it offers (`Offer::Nothing`, or `Offer::Mcp` with the authorized tools:
+  `Offer::authorized` keeps those of the built request's tools that the origin may also call over
+  MCP) and the version. Every production question offers `Offer::Nothing` until M1b.
   Model-only history schemas do not enter the MCP listener, launch audit or seed.
   `Claude::snapshot` makes one only while the view is `Ready`. A snapshot is current only while
   the view is `Ready` at its version and its generation is Claude Code's current one; `warm`,
@@ -548,8 +569,11 @@ sequenceDiagram
   agents and an `apiKeySource` of `none`. A later init must equal the first. `analytics_disabled`
   is recorded and shown, never judged; so is initialize's, which `PreInputAudit::analytics()`
   gives once initialize passed.
-- **The gate** starts pending. Failure is terminal, so a pass that races a failure loses. A tool
-  already admitted isn't undone; a call still waiting for admission is refused.
+- **The gate** is pending, passed or failed, each read as one load. It starts pending, and only
+  the post-seed audit passes it. Failure is terminal, so a pass that races a failure loses, and
+  it wakes every wait on `AuditGate::failed`, which registers before it reads the state so no
+  failure is missed. A tool already admitted isn't undone; a call still waiting for admission is
+  refused. Failing it neither kills the child nor reports an audit error.
 - **The stated limit:** the seed can reach the chosen model before init is checked, but no tool
   runs before the check.
 - **The log:** a failure is logged as a warning with its closed check and its phase, before stdin
@@ -558,3 +582,72 @@ sequenceDiagram
 
 The brain's side of the pipe, and the launch that writes `mcp.json`, come with C4b and C5a.
 On macOS the pipe would be a Unix socket in the owned folder (unverified).
+
+## MCP calls
+
+A question's launch reaches Kumochi's tools only through its listener, and the brain decides every
+call on its own loop (`runtime/claude/mcp.rs`). Claude Code's stdout never runs a tool.
+
+1. **Authorize before the seed.** A round whose launch offers tools binds the launch to its
+   `BuildKey` and sends `Note::Bind` with its frozen offer and the earlier of the launch's and the
+   question's deadlines. The brain answers, with the effective deadline it also caps at the
+   build's, only for a live launch of the
+   connection's generation the lane holds and hasn't bound, and the run's current admitted build
+   for that launch's thread and origin that offers every tool the launch does and has no launch yet
+   (`Coordinator::mcp_bound`). Only then does the round ask for its send. A refused bind ends the round as a rebuild, and no answer
+   by the launch's deadline fails it. A tool-free launch, a job's included, is bound to no build
+   and takes no call.
+2. **Dispatch.** The listener admitted the call before the mailbox, so the core checks again when
+   the brain takes it out: a call nobody waits for starts nothing, and `Coordinator::mcp_call`
+   refuses one whose launch lost its authority (below) as ended, and a tool the launch doesn't
+   offer as not here, before anything is charged or replayed. Only then does a new key cost one of
+   the run's 16 calls, and the call goes out as `Caller::Mcp`, whose build control the dispatcher
+   checks again before the ledger sees the key. A refusal is answered at once. Arguments over
+   16 KiB never reach the mailbox: the bridge and listener carry them only within the transport's
+   512 KiB bound, the call carries `None`, and the dispatcher refuses it as `TooLarge` and keeps
+   the key refused. Nothing over the cap reaches the core, the tool parser or a tool.
+3. **Reply once.** A dispatched call waits; after every coordinator transition the brain takes its
+   settled answer (`Coordinator::take_mcp_answer`), which for a write comes only with the store's
+   acknowledgement. Text goes back as a text result, a `ToolError` as an error result. A call whose
+   launch lost its authority, or whose listener stopped waiting, is let go unanswered, and an
+   immediate answer, a ledger replay's included, leaves only while it's still authorized.
+4. **One authority, one revocation.** A bound launch stands one of three ways: callable, pending
+   or revoked. It's revoked unless it's the run's bound one for its current admitted build, its
+   effective deadline is ahead, the build's control is live, the run isn't finishing and no source
+   of the build is deleted or voided; otherwise it's as its gate says. Pending (bound, its audit
+   still to pass) refuses work and replies as ended, charges nothing, records nothing and keeps the
+   binding. `Coordinator::mcp_authorized(build, launch, tool)` is the one check, made wherever MCP
+   work starts or content leaves the core: at dispatch, before the charge and the ledger, at
+   settlement and on every reply. It holds only while callable and the tool is among those frozen
+   at bind. Revocation is `revoke_mcp`: dropping the authority fails the launch's gate, so the
+   listener releases nothing more, and that launch's own draws are interrupted by their host call
+   ids. A step already issued settles; nothing more of theirs is submitted, and their answers can't
+   reach the next launch. The core raises it in the transition that ends the binding: a new build
+   or rebuild, a delete that voids a source, the run finishing, a `SetModel` or other input that
+   cancels a held run, and every way the run leaves, before it's detached. `fence_mcp`, before
+   every coordinator input and at dispatch, revokes for causes outside the core: a gate failed by
+   the audit, a withdrawal, replacement or teardown, and the deadline. A revoked launch's waiter
+   is let go at the brain's next `settle_mcp`: right after the transition when it came through
+   `Brain::handle` or `mcp_call`, and at the next one of those when it came from
+   `claude_reported`'s direct `coordinator.handle`. Its gate failed already, so the listener
+   releases nothing of it meanwhile.
+
+```mermaid
+sequenceDiagram
+    participant L as listener
+    participant B as brain loop
+    participant C as coordinator
+    participant S as store
+    L->>B: McpCall { origin, tool, args, reply }
+    B->>C: mcp_call(build, launch, key, tool, args)
+    C-->>B: Committing (CommitCall to the store)
+    S-->>B: CallCommitted
+    B->>C: handle, then take_mcp_answer
+    B-->>L: McpReply { text, error }
+```
+
+- **Dormant.** Every production question offers `Offer::Nothing`, so no launch is authorized and
+  no call reaches the dispatcher until M1b makes the foreground offer nonempty.
+- **Stopped draws.** A draw that stopped part way answers with its committed steps and its typed
+  failure as text, with `isError` true. The ledger keeps that per call key, so a replay of the
+  key answers the same way.

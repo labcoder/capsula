@@ -97,8 +97,15 @@ flowchart TD
   cancelled and the round is built again once the delete is answered, as for a send the lease
   voids. So a deleted task's text can't reach a write through a call's arguments, even when they
   name no id of it.
-- **MCP authority.** `Run::mcp` is the launch the coordinator authorizes for the run right now,
-  set at bind and cleared at revoke (C4b-2). The check and the `CommitCall` it allows happen in one
+- **MCP authority.** `Run::mcp` is the launch the coordinator authorizes for the run's current
+  build: `Coordinator::mcp_bound` sets it once, before the launch's seed, for the current admitted
+  build, with what keeps it authorized (its build, gate, effective deadline and tools). A launch
+  whose binding ends is revoked in the transition that ends it, or before the next input when
+  the cause is outside the core, which fails its gate and interrupts its own draws; one whose
+  audit is still pending is refused without a charge and stays bound. `Coordinator::mcp_call`
+  checks that authority, and the dispatcher checks the launch and the build's control
+  before the ledger sees any key, and that the build offered the tool before it replays a key's
+  earlier answer. The check and the `CommitCall` it allows happen in one
   core-loop step, so a revocation either comes first, and the call is refused, or after the write
   was accepted.
 - **The key** is the run, the route (`Model`, or `Mcp` with its launch) and the caller's id. The
@@ -372,7 +379,10 @@ from the store.
 ## The ledger
 
 The run holds its ledger in memory, and it's dropped with the run. The run's 16-call budget bounds
-it, because the loop and the listener charge the budget before dispatch. The store keeps a
+it, because the loop and `Coordinator::mcp_call` charge the budget before dispatch: an MCP key
+the run hasn't seen costs a call, a retry doesn't, and the seventeenth ends the run as `Budget`.
+A call that couldn't run any more (a finishing run, a deleted or voided source, a cancelled build)
+is refused without a charge, so stale work never ends a run on its budget. The store keeps a
 `tool_calls` row for each committed call, written in the same transaction as the call's own write
 (see [the store](store.md)). Recovery fails a run that was active, so nothing resumes a call from
 its row.

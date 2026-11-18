@@ -186,6 +186,7 @@ impl Coordinator {
         };
         let exposed = self.pending_deletes();
         let main = self.main_thread;
+        self.revoke_mcp(run, effects);
         let Ok(current) = self.current(run) else {
             return;
         };
@@ -368,6 +369,7 @@ impl Coordinator {
         pending: &BTreeSet<ThreadId>,
         effects: &mut Vec<Effect>,
     ) {
+        self.revoke_mcp(key.run, effects);
         self.close_provider_round(key.run, effects);
         let Some(current) = self.current.as_mut() else {
             return;

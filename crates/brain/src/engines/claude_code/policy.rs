@@ -152,7 +152,7 @@ impl fmt::Debug for LaunchData {
 
 /// The documented switches every entry point gets, with their values. Kumochi's server is the only
 /// one Claude Code may offer, so a claude.ai sign-in's connectors are never fetched.
-const SWITCHES: [(&str, &str); 7] = [
+const SWITCHES: [(&str, &str); 9] = [
     ("DISABLE_AUTOUPDATER", "1"),
     ("DISABLE_TELEMETRY", "1"),
     ("DISABLE_ERROR_REPORTING", "1"),
@@ -160,6 +160,10 @@ const SWITCHES: [(&str, &str); 7] = [
     ("CLAUDE_CODE_SKIP_PROMPT_HISTORY", "1"),
     ("CLAUDE_CODE_DISABLE_AUTO_MEMORY", "1"),
     ("ENABLE_CLAUDEAI_MCP_SERVERS", "false"),
+    // Above `MAX_LAUNCH`, which bounds every wait a call has, so no call times out while its
+    // launch lives, and no idle check: a call waiting on the store sends no progress.
+    ("MCP_TOOL_TIMEOUT", "300000"),
+    ("CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT", "0"),
 ];
 
 /// The arguments and environment for `entry`. `system` is `platform::system_env()`: the only

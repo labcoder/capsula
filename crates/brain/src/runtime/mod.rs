@@ -625,7 +625,9 @@ impl Brain {
         if let Input::ScenesCleared { scenes, ok: true } = &input {
             self.crashes.cleared(scenes);
         }
-        self.coordinator.handle(input).ok()
+        let effects = self.coordinator.handle(input).ok();
+        self.settle_mcp();
+        effects
     }
 
     /// Acts on one input with no shell to tell: only the store and the engine act.

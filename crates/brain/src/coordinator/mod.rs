@@ -620,8 +620,11 @@ struct Run {
     error: Option<UserError>,
     /// The run's tool calls, one entry per key.
     ledger: crate::dispatch::Ledger,
-    /// The Claude Code launch authorized to call tools for this run; C4b-2 sets it.
+    /// The Claude Code launch authorized for the current build's calls: set once the brain
+    /// authorizes the launch it seeds, and cleared when it's revoked.
     mcp: Option<crate::bridge::LaunchId>,
+    /// What keeps `mcp` authorized, frozen at its bind.
+    mcp_authority: Option<calls::McpAuthority>,
     /// Calls answered on their write's acknowledgement, for the tool loop to take.
     answered: Vec<(crate::dispatch::Caller, crate::dispatch::ToolOutput)>,
     /// The run's calls and the current round's native items.
@@ -852,7 +855,8 @@ impl Coordinator {
         self.ending.len()
     }
 
-    /// Acts on one input.
+    /// Acts on one input, once a bound Claude Code launch that lost its authority is revoked, so
+    /// the input can't start more of its work.
     ///
     /// # Errors
     /// [`Stale`] when the input names a run that isn't current or answers nothing that is
@@ -860,12 +864,23 @@ impl Coordinator {
     ///
     /// # Panics
     /// Only if a run in the ending list has no ending record, which `end` never allows.
+    pub fn handle(&mut self, input: Input) -> Result<Vec<Effect>, Stale> {
+        self.fence_hold_input(&input);
+        let mut fenced = Vec::new();
+        self.fence_mcp(&mut fenced);
+        let routed = self.route(input);
+        if fenced.is_empty() {
+            return routed;
+        }
+        fenced.extend(routed.unwrap_or_default());
+        Ok(fenced)
+    }
+
     #[expect(
         clippy::too_many_lines,
         reason = "one exhaustive input router; handlers live in dedicated modules"
     )]
-    pub fn handle(&mut self, input: Input) -> Result<Vec<Effect>, Stale> {
-        self.fence_hold_input(&input);
+    fn route(&mut self, input: Input) -> Result<Vec<Effect>, Stale> {
         let mut effects = Vec::new();
         match input {
             Input::HoldPrepared { .. } | Input::IssueWritten { .. } => return Err(Stale),
@@ -983,7 +998,7 @@ impl Coordinator {
                         ending.notify = Notify::Nobody;
                     }
                 }
-                if let Some(current) = self.current.take() {
+                if let Some(current) = self.detach() {
                     let lost = RunEnd::Interrupted(Interruption::ShellLost);
                     self.end(current, lost, None, Notify::Nobody, &mut effects);
                 }
@@ -1216,7 +1231,7 @@ impl Coordinator {
         effects: &mut Vec<Effect>,
     ) -> RunId {
         self.cancel_job(effects);
-        if let Some(current) = self.current.take() {
+        if let Some(current) = self.detach() {
             let replaced = RunEnd::Interrupted(Interruption::Replaced);
             self.end(current, replaced, None, Notify::Shell, effects);
         }
@@ -1284,6 +1299,7 @@ impl Coordinator {
             error: None,
             ledger: crate::dispatch::Ledger::default(),
             mcp: None,
+            mcp_authority: None,
             answered: Vec::new(),
             tools: tools::Loop::default(),
             finishing: false,
@@ -1550,7 +1566,15 @@ impl Coordinator {
 
     fn take(&mut self, run: RunId) -> Result<Run, Stale> {
         self.current(run)?;
-        self.current.take().ok_or(Stale)
+        self.detach().ok_or(Stale)
+    }
+
+    /// Takes the current run, its launch's binding revoked before it leaves, whatever ends it.
+    fn detach(&mut self) -> Option<Run> {
+        if let Some(current) = &mut self.current {
+            current.mcp_authority = None;
+        }
+        self.current.take()
     }
 
     fn ending_at(&self, run: RunId) -> Result<usize, Stale> {

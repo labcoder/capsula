@@ -2,7 +2,10 @@
 
 use std::fmt;
 
+use serde::Deserialize;
+use serde::de::IgnoredAny;
 use serde_json::Value;
+use serde_json::value::RawValue;
 
 use super::MAX_INCOMING;
 use super::id::JsonRpcId;
@@ -60,16 +63,16 @@ fn take_line(buf: &mut Vec<u8>) -> Vec<u8> {
     line
 }
 
-/// What one line is.
+/// What one line is, its params borrowed from the line as written.
 #[derive(PartialEq)]
-pub(crate) enum Incoming {
+pub(crate) enum Incoming<'a> {
     /// Empty or whitespace only: ignored.
     Blank,
     /// A request the brain answers, or `ping`, which the bridge answers.
     Request {
         id: JsonRpcId,
         method: Method,
-        params: Vec<u8>,
+        params: &'a [u8],
     },
     /// No id: nothing is answered. Only `notifications/initialized` is relayed.
     Notification { initialized: bool },
@@ -90,7 +93,7 @@ impl fmt::Debug for Line {
     }
 }
 
-impl fmt::Debug for Incoming {
+impl fmt::Debug for Incoming<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Blank => f.write_str("Blank"),
@@ -138,32 +141,43 @@ impl RpcError {
 
 /// Classifies one stdin line. A batch, a non-object, a bad `jsonrpc`, a bad id, or a request's
 /// `params` that are present but neither an object nor an array is `InvalidRequest`.
-pub(crate) fn classify(line: &[u8]) -> Incoming {
+pub(crate) fn classify(line: &[u8]) -> Incoming<'_> {
     if line.iter().all(u8::is_ascii_whitespace) {
         return Incoming::Blank;
     }
-    let Ok(value) = serde_json::from_slice::<Value>(line) else {
+    // Syntax first, building no tree: a request's params can be most of the line.
+    if serde_json::from_slice::<IgnoredAny>(line).is_err() {
         return Incoming::Invalid {
             id: None,
             error: RpcError::Parse,
         };
-    };
+    }
     let invalid = |id| Incoming::Invalid {
         id,
         error: RpcError::InvalidRequest,
     };
-    let Value::Object(mut fields) = value else {
+    // An array would deserialize into the routing fields by position.
+    if line.trim_ascii_start().first() != Some(&b'{') {
+        return invalid(None);
+    }
+    // A map keeps the last of repeated keys; which one routes the message would be a guess.
+    let Ok(routing) = serde_json::from_slice::<Routing<'_>>(line) else {
         return invalid(None);
     };
-    let id = match fields.remove("id") {
+    let id = match routing.id {
         None => None,
-        Some(value) => match JsonRpcId::from_value(&value) {
+        Some(raw) => match serde_json::from_str::<Value>(raw.get())
+            .ok()
+            .as_ref()
+            .and_then(JsonRpcId::from_value)
+        {
             Some(id) => Some(id),
             None => return invalid(None),
         },
     };
-    let method = fields.get("method").and_then(Value::as_str);
-    let (Some(method), Some("2.0")) = (method, fields.get("jsonrpc").and_then(Value::as_str))
+    let text =
+        |raw: Option<&RawValue>| raw.and_then(|raw| serde_json::from_str::<String>(raw.get()).ok());
+    let (Some(method), Some("2.0")) = (text(routing.method), text(routing.jsonrpc).as_deref())
     else {
         return invalid(id);
     };
@@ -172,13 +186,13 @@ pub(crate) fn classify(line: &[u8]) -> Incoming {
             initialized: method == "notifications/initialized",
         };
     };
-    if fields
-        .get("params")
-        .is_some_and(|params| !params.is_object() && !params.is_array())
+    if routing
+        .params
+        .is_some_and(|params| !matches!(params.get().as_bytes().first(), Some(b'{' | b'[')))
     {
         return invalid(Some(id));
     }
-    let method = match method {
+    let method = match method.as_str() {
         "initialize" => Method::Initialize,
         "tools/list" => Method::ToolsList,
         "tools/call" => Method::ToolsCall,
@@ -190,11 +204,28 @@ pub(crate) fn classify(line: &[u8]) -> Incoming {
             };
         }
     };
-    let params = fields.get("params").map_or_else(
-        || b"null".to_vec(),
-        |params| params.to_string().into_bytes(),
-    );
+    let params = routing
+        .params
+        .map_or(&b"null"[..], |params| params.get().as_bytes());
     Incoming::Request { id, method, params }
+}
+
+/// A message's routing fields, each at most once and kept as written, and its params.
+#[derive(Deserialize)]
+struct Routing<'a> {
+    #[serde(borrow, default, deserialize_with = "present")]
+    jsonrpc: Option<&'a RawValue>,
+    #[serde(borrow, default, deserialize_with = "present")]
+    id: Option<&'a RawValue>,
+    #[serde(borrow, default, deserialize_with = "present")]
+    method: Option<&'a RawValue>,
+    #[serde(borrow, default, deserialize_with = "present")]
+    params: Option<&'a RawValue>,
+}
+
+/// A present field, `null` included: only an omitted one is none.
+fn present<'de, D: serde::Deserializer<'de>>(field: D) -> Result<Option<&'de RawValue>, D::Error> {
+    <&RawValue>::deserialize(field).map(Some)
 }
 
 /// A reply's body.

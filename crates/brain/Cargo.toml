@@ -31,7 +31,8 @@ rusqlite = { version = "0.41", default-features = false, features = ["bundled", 
 # Tool schemas, from the structs that parse each tool's arguments.
 schemars = "1.2"
 serde.workspace = true
-serde_json = "1"
+# raw_value: an MCP call's arguments reach the dispatcher as the client wrote them.
+serde_json = { version = "1", features = ["raw_value"] }
 sha2 = "0.11"
 subtle = "2"
 thiserror.workspace = true

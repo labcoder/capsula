@@ -15,6 +15,7 @@ use tokio::sync::mpsc;
 
 use super::{Brain, Ended, Full, Link};
 use crate::bridge::LaunchId;
+use crate::bridge::listener::McpCall;
 use crate::connections::model::budget::Budget;
 use crate::context::ConnectionTag;
 use crate::coordinator::{Availability, Input, Ready, StoreOp, model_unavailable};
@@ -77,6 +78,10 @@ pub(crate) struct Claude {
     warm: Option<Attempt>,
     /// What attempts tell the core.
     notes: (mpsc::UnboundedSender<Note>, mpsc::UnboundedReceiver<Note>),
+    /// Calls the launches' listeners admitted, one at a time per listener.
+    calls: (mpsc::Sender<McpCall>, mpsc::Receiver<McpCall>),
+    /// Calls handed to the coordinator that wait on their settlement.
+    waiting: Vec<mcp::Waiter>,
     clock: Clock,
     /// The questions seeds may still take.
     budget: Arc<Budget>,
@@ -113,6 +118,8 @@ struct Held {
     due: bool,
     /// A replacement revoked it: its report changes nothing.
     replaced: bool,
+    /// Bound once for its build's calls; the core keeps what authorizes it.
+    bound: bool,
 }
 
 /// What woke the connection.
@@ -120,6 +127,8 @@ struct Held {
 pub(crate) enum Wake {
     Lane(Done),
     Note(Note),
+    /// A launch's listener admitted a call.
+    Call(McpCall),
     /// The warm attempt's window may have closed.
     Expired,
     /// The lane took a job off its queue, so work a full queue refused may fit now.
@@ -158,6 +167,8 @@ impl Claude {
             quarantine: None,
             warm: None,
             notes: mpsc::unbounded_channel(),
+            calls: mpsc::channel(1),
+            waiting: Vec::new(),
             clock: Clock::default(),
             budget: Arc::new(Budget::from_var(CLAUDE_QUESTIONS_ENV)),
             epoch: None,
@@ -199,6 +210,10 @@ impl Claude {
         };
         self.generation += 1;
         lane.fence(self.generation);
+        // A bound launch's authority ends with the generation it was bound under.
+        for held in self.launches.iter().filter(|held| held.bound) {
+            held.control.withdraw();
+        }
         self.again = false;
         self.submit(work)
     }
@@ -438,6 +453,7 @@ impl Claude {
             version,
             due: false,
             replaced: false,
+            bound: false,
         });
         Ok(launch)
     }
@@ -734,6 +750,7 @@ impl Claude {
             effort: snapshot.effort.clone(),
             tools: snapshot.offer.schemas(),
             lifetime: MAX_LAUNCH,
+            calls: Some(self.calls.0.clone()),
         })?;
         if let Some(held) = self.launches.last_mut() {
             held.due = true;
@@ -778,6 +795,8 @@ impl Claude {
                 self.refresh(refresh);
                 false
             }
+            // Only the brain can authorize; dropping the reply refuses the launch.
+            Note::Bind(_) => false,
         }
     }
 
@@ -882,7 +901,9 @@ impl Claude {
                 None => std::future::pending().await,
             }
         };
-        let Self { lane, notes, .. } = self;
+        let Self {
+            lane, notes, calls, ..
+        } = self;
         let lane = async {
             match lane {
                 Some(lane) => lane.next().await,
@@ -892,6 +913,7 @@ impl Claude {
         tokio::select! {
             done = lane => Wake::Lane(done),
             Some(note) = notes.1.recv() => Wake::Note(note),
+            Some(call) = calls.1.recv() => Wake::Call(call),
             () = room => Wake::Room,
             () = tokio::time::sleep(left.unwrap_or_default()), if left.is_some() => Wake::Expired,
         }
@@ -916,7 +938,8 @@ impl Claude {
                 self.find();
                 true
             }
-            Wake::Room => false,
+            // Only the brain can dispatch a call; dropping its reply ends it.
+            Wake::Room | Wake::Call(_) => false,
         }
     }
 
@@ -1009,6 +1032,14 @@ impl Brain {
         wake: Wake,
         mut link: Option<&mut Link<'_, '_>>,
     ) -> Result<(), Full> {
+        let wake = match wake {
+            Wake::Call(call) => return self.mcp_call(call, link),
+            Wake::Note(Note::Bind(bind)) => {
+                self.mcp_bind(bind);
+                return Ok(());
+            }
+            wake => wake,
+        };
         let changed = self.claude.wake(wake);
         self.claude_reported(link.as_deref_mut())
             .map_err(|_| Full)?;
@@ -1031,6 +1062,9 @@ impl Brain {
     }
 }
 
+mod mcp;
+#[cfg(test)]
+mod mcp_tests;
 #[cfg(test)]
 mod quarantine_tests;
 #[cfg(test)]
