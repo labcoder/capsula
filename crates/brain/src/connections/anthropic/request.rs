@@ -4,7 +4,8 @@ use std::fmt;
 use std::io::{self, Write};
 
 use kumochi_protocol::{Secret, message::ModelSlug};
-use serde_json::Value;
+use serde::de::{self, Deserialize, Deserializer, MapAccess, SeqAccess, Visitor};
+use serde_json::{Map, Value};
 use zeroize::Zeroizing;
 
 use super::error::Failure;
@@ -24,21 +25,95 @@ impl MessagesBody {
         Ok(Self(Secret::new(bytes)))
     }
 
-    /// Checks serialized JSON as [`MessagesBody::new`] checks a value, then keeps these exact
-    /// bytes, so a number in them is sent as it was written.
-    ///
-    /// # Errors
-    /// [`Failure::Request`] for JSON that isn't a valid envelope or is over 16 MiB.
-    pub fn from_json(bytes: Zeroizing<Vec<u8>>) -> Result<Self, Failure> {
+    /// Checks serialized JSON as [`MessagesBody::new`] checks a value, read by [`literal`], then
+    /// keeps these exact bytes, so a number in them is sent as it was written. Only the Messages
+    /// encoder sends a body it wrote this way.
+    pub(crate) fn from_json(bytes: Zeroizing<Vec<u8>>) -> Result<Self, Failure> {
         if bytes.len() > MAX_REQUEST_BYTES {
             return Err(Failure::Request);
         }
-        check(&serde_json::from_slice(&bytes).map_err(|_| Failure::Request)?)?;
+        check(&literal(&bytes)?)?;
         Ok(Self(Secret::new(bytes)))
+    }
+
+    /// The bytes sent, for a test outside the transport.
+    #[cfg(test)]
+    pub(crate) fn sent(&self) -> &[u8] {
+        self.bytes()
     }
 
     pub(super) fn bytes(&self) -> &[u8] {
         self.0.expose()
+    }
+}
+
+/// `bytes` as one JSON value read exactly as written: a member name repeated in any object is
+/// refused, since a reader may keep either copy, and no object is taken as `serde_json`'s embedded
+/// raw value, which its `Value` reader does for the marker name.
+pub(crate) fn literal(bytes: &[u8]) -> Result<Value, Failure> {
+    serde_json::from_slice::<Literal>(bytes)
+        .map(|Literal(value)| value)
+        .map_err(|_| Failure::Request)
+}
+
+struct Literal(Value);
+
+impl<'de> Deserialize<'de> for Literal {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        deserializer.deserialize_any(Literally)
+    }
+}
+
+struct Literally;
+
+impl<'de> Visitor<'de> for Literally {
+    type Value = Literal;
+
+    fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("JSON")
+    }
+
+    fn visit_bool<E: de::Error>(self, value: bool) -> Result<Literal, E> {
+        Ok(Literal(value.into()))
+    }
+
+    fn visit_i64<E: de::Error>(self, value: i64) -> Result<Literal, E> {
+        Ok(Literal(value.into()))
+    }
+
+    fn visit_u64<E: de::Error>(self, value: u64) -> Result<Literal, E> {
+        Ok(Literal(value.into()))
+    }
+
+    fn visit_f64<E: de::Error>(self, value: f64) -> Result<Literal, E> {
+        Ok(Literal(value.into()))
+    }
+
+    fn visit_str<E: de::Error>(self, value: &str) -> Result<Literal, E> {
+        Ok(Literal(value.into()))
+    }
+
+    fn visit_unit<E: de::Error>(self) -> Result<Literal, E> {
+        Ok(Literal(Value::Null))
+    }
+
+    fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Literal, A::Error> {
+        let mut items = Vec::new();
+        while let Some(Literal(item)) = seq.next_element()? {
+            items.push(item);
+        }
+        Ok(Literal(Value::Array(items)))
+    }
+
+    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Literal, A::Error> {
+        let mut object = Map::new();
+        while let Some(name) = map.next_key::<String>()? {
+            let Literal(value) = map.next_value()?;
+            if object.insert(name, value).is_some() {
+                return Err(de::Error::custom("a repeated member name"));
+            }
+        }
+        Ok(Literal(Value::Object(object)))
     }
 }
 

@@ -227,3 +227,44 @@ fn json_is_checked_then_sent_as_written_up_to_the_bound() {
         ));
     }
 }
+
+#[test]
+fn json_is_read_as_written_with_no_name_repeated_at_any_depth() {
+    let body = |messages: &str| {
+        format!(
+            r#"{{"model":"claude-sonnet-5-5","stream":true,"max_tokens":2048,"system":[{{"type":"text","text":"s","cache_control":{{"type":"ephemeral"}}}}],"messages":{messages}}}"#
+        )
+        .into_bytes()
+    };
+    let sound = body(
+        r#"[{"role":"user","content":[{"type":"tool_result","tool_use_id":"a","content":"x"}],"note":{"$serde_json::private::RawValue":"1"}}]"#,
+    );
+    assert_eq!(
+        MessagesBody::from_json(Zeroizing::new(sound.clone()))
+            .expect("a literal envelope")
+            .bytes(),
+        sound.as_slice()
+    );
+    for (case, messages) in [
+        (
+            "a repeated top name",
+            r#"[{"role":"user","content":"a"}],"messages":[{"role":"user","content":"b"}]"#,
+        ),
+        (
+            "a repeated deep name",
+            r#"[{"role":"user","content":[{"type":"text","text":"a","text":"b"}]}]"#,
+        ),
+        (
+            "an embedded raw value",
+            r#"[{"$serde_json::private::RawValue":"{\"role\":\"user\",\"content\":\"hi\"}"}]"#,
+        ),
+    ] {
+        assert!(
+            matches!(
+                MessagesBody::from_json(Zeroizing::new(body(messages))),
+                Err(Failure::Request)
+            ),
+            "{case}"
+        );
+    }
+}

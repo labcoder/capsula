@@ -5,7 +5,8 @@ use kumochi_protocol::message::{ConnectionKind, Effort, ModelChoice, ModelSlug};
 use serde_json::{Value, json};
 
 use super::{BodyError, Conversation, body, next};
-use crate::connections::model::sse::{Progress, Reader};
+use crate::connections::anthropic::{error::Failure, sse_map::Reader};
+use crate::connections::model::sse::Progress;
 use crate::context::{BOUND, ConnectionTag, InputItem, Jpeg, ModelRequest, Role, ToolSchema};
 use crate::engines::anthropic::{Mapper, Reply};
 use crate::engines::{CallId, Opaque};
@@ -434,43 +435,78 @@ fn first(ask: &str) -> Conversation {
         .1
 }
 
-/// Feeds `events` to `mapper` as one stream's callbacks.
-fn feed(mapper: &mut Mapper, events: &[Value]) {
+fn start(index: u32, block: &Value) -> String {
+    start_raw(index, &block.to_string())
+}
+
+/// A block start written as given, so a test can stream JSON a `Value` can't hold.
+fn start_raw(index: u32, block: &str) -> String {
+    format!(r#"{{"type":"content_block_start","index":{index},"content_block":{block}}}"#)
+}
+
+fn delta(index: u32, delta: &Value) -> String {
+    json!({"type": "content_block_delta", "index": index, "delta": delta}).to_string()
+}
+
+fn stop(index: u32) -> String {
+    json!({"type": "content_block_stop", "index": index}).to_string()
+}
+
+fn opened() -> String {
+    json!({"type": "message_start", "message": {"usage": {}}}).to_string()
+}
+
+/// The stream's real ending: a supported stop reason, then `message_stop`.
+fn ended(reason: &str) -> [String; 2] {
+    [
+        json!({"type": "message_delta", "delta": {"stop_reason": reason}, "usage": {"output_tokens": 9}})
+            .to_string(),
+        json!({"type": "message_stop"}).to_string(),
+    ]
+}
+
+/// A whole stream: opened, `blocks`, then ended for tool use.
+fn whole(blocks: &[String]) -> Vec<String> {
+    let mut events = vec![opened()];
+    events.extend_from_slice(blocks);
+    events.extend(ended("tool_use"));
+    events
+}
+
+/// One event through a stream's own Messages reader into its mapper.
+fn feed(reader: &mut Reader, mapper: &mut Mapper, event: &str) -> Result<Progress, Failure> {
+    reader.feed(format!("data: {event}\n\n").as_bytes(), &mut |event| {
+        mapper.event(event);
+    })
+}
+
+/// Ends the mapper with its reader's own outcome: EOF before `message_stop` is Truncated.
+fn end(reader: &mut Reader, mapper: &mut Mapper, read: Result<Progress, Failure>) {
+    let read = match read {
+        Ok(Progress::More) => reader.finish().map(|_| Progress::Completed),
+        read => read,
+    };
+    mapper.finish(read);
+}
+
+fn streamed(mapper: &mut Mapper, events: &[String]) {
+    let mut reader = Reader::default();
+    let mut read = Ok(Progress::More);
     for event in events {
-        let wire = format!("data: {event}\n\n");
-        assert_eq!(
-            Reader::default().feed(wire.as_bytes(), &mut |event| mapper.event(event)),
-            Ok(Progress::More)
-        );
+        read = feed(&mut reader, mapper, event);
     }
+    end(&mut reader, mapper, read);
 }
 
-fn start(index: u32, block: &Value) -> Value {
-    json!({"type": "content_block_start", "index": index, "content_block": block})
-}
-
-fn delta(index: u32, delta: &Value) -> Value {
-    json!({"type": "content_block_delta", "index": index, "delta": delta})
-}
-
-fn stop(index: u32) -> Value {
-    json!({"type": "content_block_stop", "index": index})
-}
-
-fn opened() -> Value {
-    json!({"type": "message_start", "message": {"usage": {}}})
-}
-
-/// The tool input exactly as streamed: a 30-digit integer and a 26-place decimal, which a
-/// binary64 parse would round.
+/// A 30-digit integer and a 26-place decimal, which a binary64 parse would round.
 const PRECISE: &str = r#"{"n": 123456789012345678901234567890, "d": 0.10000000000000000000000001}"#;
 
-/// A Sonnet 5.5 round, block 1 stopping after block 2: signed empty thinking, a call whose input
-/// streams in two raw fragments, a progress note, redacted thinking, text and a second call.
-fn signed_round() -> Vec<Value> {
+/// A Sonnet 5.5 round, block 1 stopping after block 3: signed empty thinking; a direct call
+/// whose input streams in two raw fragments; text with a citation; signed thinking with a field
+/// this route doesn't know; redacted thinking; text; and a call with its whole input at start.
+fn signed_round() -> Vec<String> {
     let (head, tail) = PRECISE.split_at(20);
-    vec![
-        opened(),
+    whole(&[
         start(0, &json!({"type": "thinking", "thinking": ""})),
         delta(
             0,
@@ -479,40 +515,43 @@ fn signed_round() -> Vec<Value> {
         stop(0),
         start(
             1,
-            &json!({"type": "tool_use", "id": "toolu_1", "name": "draw", "input": {}}),
+            &json!({"type": "tool_use", "id": "toolu_1", "name": "draw", "input": {}, "caller": {"type": "direct"}}),
         ),
         delta(
             1,
             &json!({"type": "input_json_delta", "partial_json": head}),
         ),
-        start(
-            2,
-            &json!({"type": "thinking", "thinking": "Drew one.", "signature": "c2lnbmVkLTI="}),
+        start_raw(2, CITED),
+        stop(2),
+        start_raw(
+            3,
+            r#"{"type":"thinking","thinking":"Drew one.","signature":"c2lnbmVkLTI=","future":{"n":123456789012345678901234567890}}"#,
         ),
         delta(
             1,
             &json!({"type": "input_json_delta", "partial_json": tail}),
         ),
-        stop(2),
-        stop(1),
-        start(3, &json!({"type": "redacted_thinking", "data": "ZW5j"})),
         stop(3),
-        start(4, &json!({"type": "text", "text": "And the "})),
-        delta(4, &json!({"type": "text_delta", "text": "second."})),
+        stop(1),
+        start(4, &json!({"type": "redacted_thinking", "data": "ZW5j"})),
         stop(4),
-        start(
-            5,
-            &json!({"type": "tool_use", "id": "toolu_2", "name": "draw", "input": {}}),
-        ),
+        start(5, &json!({"type": "text", "text": "And the "})),
+        delta(5, &json!({"type": "text_delta", "text": "second."})),
         stop(5),
-    ]
+        start_raw(
+            6,
+            r#"{"type":"tool_use","id":"toolu_2","name":"draw","input":{"big": 123456789012345678901234567890}}"#,
+        ),
+        stop(6),
+    ])
 }
 
-/// The reply the events make for a conversation's request, if its mapper yields one.
-fn replied(conversation: &Conversation, events: &[Value]) -> Option<Reply> {
+const CITED: &str = r#"{"citations":[{"cited_text":"x","document_index":0,"end_char_index":1,"start_char_index":0,"type":"char_location"}],"text":"Per the doc.","type":"text"}"#;
+
+/// The reply the stream makes for a conversation's request, if its mapper yields one.
+fn replied(conversation: &Conversation, events: &[String]) -> Option<Reply> {
     let mut mapper = Mapper::answering(conversation);
-    feed(&mut mapper, events);
-    mapper.finish(Ok(Progress::Completed));
+    streamed(&mut mapper, events);
     mapper.reply()
 }
 
@@ -527,10 +566,20 @@ fn results(ids: &[&str]) -> Vec<(CallId, String)> {
         .collect()
 }
 
+fn called(id: &str) -> Vec<String> {
+    whole(&[
+        start(
+            0,
+            &json!({"type": "tool_use", "id": id, "name": "draw", "input": {}}),
+        ),
+        stop(0),
+    ])
+}
+
 #[test]
 fn a_mapped_reply_continues_its_request_with_every_block_as_it_came() {
     let first = first("draw a box");
-    let before = first.messages[0].get().to_owned();
+    let round_one = first.wire().expect("json");
     let reply = replied(&first, &signed_round()).expect("a whole reply");
     let sonnet = slug("claude-sonnet-5-5");
     let (outgoing, second) = next(
@@ -541,38 +590,33 @@ fn a_mapped_reply_continues_its_request_with_every_block_as_it_came() {
         &results(&["toolu_2", "toolu_1"]),
     )
     .expect("continues");
-    let expected = format!(
+    let assistant = format!(
         concat!(
             r#"{{"role":"assistant","content":["#,
-            r#"{{"type":"thinking","thinking":"","signature":"c2lnbmVkLTE="}},"#,
-            r#"{{"type":"tool_use","id":"toolu_1","name":"draw","input":{}}},"#,
-            r#"{{"type":"thinking","thinking":"Drew one.","signature":"c2lnbmVkLTI="}},"#,
-            r#"{{"type":"redacted_thinking","data":"ZW5j"}},"#,
-            r#"{{"type":"text","text":"And the second."}},"#,
-            r#"{{"type":"tool_use","id":"toolu_2","name":"draw","input":{{}}}}]}}"#,
+            r#"{{"signature":"c2lnbmVkLTE=","thinking":"","type":"thinking"}},"#,
+            r#"{{"caller":{{"type":"direct"}},"id":"toolu_1","input":{},"name":"draw","type":"tool_use"}},"#,
+            "{},",
+            r#"{{"future":{{"n":123456789012345678901234567890}},"signature":"c2lnbmVkLTI=","thinking":"Drew one.","type":"thinking"}},"#,
+            r#"{{"data":"ZW5j","type":"redacted_thinking"}},"#,
+            r#"{{"text":"And the second.","type":"text"}},"#,
+            r#"{{"id":"toolu_2","input":{{"big": 123456789012345678901234567890}},"name":"draw","type":"tool_use"}}]}}"#,
         ),
-        PRECISE
+        PRECISE, CITED
     );
-    assert_eq!(second.messages.len(), 3);
-    assert_eq!(second.messages[0].get(), before);
-    assert_eq!(second.messages[1].get(), expected);
-    let wire = String::from_utf8(second.wire().expect("json")).expect("utf-8");
+    let answers = concat!(
+        r#"{"content":["#,
+        r#"{"content":"{\"done\":\"toolu_2\"}","tool_use_id":"toolu_2","type":"tool_result"},"#,
+        r#"{"content":"{\"done\":\"toolu_1\"}","tool_use_id":"toolu_1","type":"tool_result"}],"#,
+        r#""role":"user"}"#,
+    );
+    let mut expected = round_one[..round_one.len() - 2].to_vec();
+    expected.extend_from_slice(format!(",{assistant},{answers}]}}").as_bytes());
     assert_eq!(
-        format!("{outgoing:?}"),
-        format!("MessagesBody {{ bytes: {} }}", wire.len())
+        String::from_utf8_lossy(outgoing.sent()),
+        String::from_utf8_lossy(&expected)
     );
-    assert!(wire.contains(&expected), "{wire}");
-    let body = sent(&second);
-    assert_eq!(
-        body["messages"][2],
-        json!({"role": "user", "content": [
-            {"type": "tool_result", "tool_use_id": "toolu_2", "content": "{\"done\":\"toolu_2\"}"},
-            {"type": "tool_result", "tool_use_id": "toolu_1", "content": "{\"done\":\"toolu_1\"}"},
-        ]})
-    );
-    assert_eq!(breakpoints(&body), ["system/0"]);
-    let later = [
-        opened(),
+    assert_eq!(breakpoints(&sent(&second)), ["system/0"]);
+    let later = whole(&[
         start(
             0,
             &json!({"type": "thinking", "thinking": "", "signature": "c2lnbmVkLTM="}),
@@ -583,7 +627,7 @@ fn a_mapped_reply_continues_its_request_with_every_block_as_it_came() {
             &json!({"type": "tool_use", "id": "toolu_3", "name": "draw", "input": {}}),
         ),
         stop(1),
-    ];
+    ]);
     let reply = replied(&second, &later).expect("a whole reply");
     let kept: Vec<String> = second.messages.iter().map(|m| m.get().to_owned()).collect();
     let (_, third) = next(second, TAG, &sonnet, reply, &results(&["toolu_3"])).expect("continues");
@@ -594,33 +638,27 @@ fn a_mapped_reply_continues_its_request_with_every_block_as_it_came() {
     );
     assert_eq!(
         now[3],
-        r#"{"role":"assistant","content":[{"type":"thinking","thinking":"","signature":"c2lnbmVkLTM="},{"type":"tool_use","id":"toolu_3","name":"draw","input":{}}]}"#
+        r#"{"role":"assistant","content":[{"signature":"c2lnbmVkLTM=","thinking":"","type":"thinking"},{"id":"toolu_3","input":{},"name":"draw","type":"tool_use"}]}"#
     );
 }
 
 #[test]
 fn interleaved_requests_on_one_sign_in_and_model_each_take_only_their_own_reply() {
     let sonnet = slug("claude-sonnet-5-5");
-    let call = |id: &str| {
-        vec![
-            start(
-                0,
-                &json!({"type": "tool_use", "id": id, "name": "draw", "input": {}}),
-            ),
-            stop(0),
-        ]
-    };
     let both = |a: &Conversation, b: &Conversation| {
         let (mut ma, mut mb) = (Mapper::answering(a), Mapper::answering(b));
-        let (sa, sb) = (call("toolu_a"), call("toolu_b"));
-        feed(&mut ma, &[opened()]);
-        feed(&mut mb, &[opened()]);
-        for (ea, eb) in sa.iter().zip(&sb) {
-            feed(&mut mb, std::slice::from_ref(eb));
-            feed(&mut ma, std::slice::from_ref(ea));
+        let (mut ra, mut rb) = (Reader::default(), Reader::default());
+        let (mut read_a, mut read_b) = (Ok(Progress::More), Ok(Progress::More));
+        for (ea, eb) in called("toolu_a").iter().zip(&called("toolu_b")) {
+            read_b = feed(&mut rb, &mut mb, eb);
+            read_a = feed(&mut ra, &mut ma, ea);
         }
-        mb.finish(Ok(Progress::Completed));
-        ma.finish(Ok(Progress::Completed));
+        assert_eq!(
+            (&read_a, &read_b),
+            (&Ok(Progress::Completed), &Ok(Progress::Completed))
+        );
+        end(&mut rb, &mut mb, read_b);
+        end(&mut ra, &mut ma, read_a);
         (ma.reply().expect("a"), mb.reply().expect("b"))
     };
     let (a, b) = (first("one"), first("two"));
@@ -673,50 +711,75 @@ fn interleaved_requests_on_one_sign_in_and_model_each_take_only_their_own_reply(
     }
 }
 
-#[test]
-fn a_failed_partial_or_unrepresentable_stream_yields_no_reply() {
-    let call = [
+/// A whole stream: a call to `draw` at index 0, then `blocks`.
+fn after_a_call(blocks: &[String]) -> Vec<String> {
+    let mut events = vec![
         start(
             0,
             &json!({"type": "tool_use", "id": "toolu_1", "name": "draw", "input": {}}),
         ),
         stop(0),
     ];
-    let with = |blocks: &[Value]| {
-        let mut events = vec![opened()];
-        events.extend_from_slice(blocks);
-        events.extend_from_slice(&call);
-        events
-    };
-    for (case, events) in [
+    events.extend_from_slice(blocks);
+    whole(&events)
+}
+
+fn none_continue(cases: Vec<(&str, Vec<String>)>) {
+    for (case, events) in cases {
+        assert!(replied(&first("draw"), &events).is_none(), "{case}");
+    }
+}
+
+#[test]
+fn a_block_the_mapper_cannot_return_as_it_came_continues_nothing() {
+    let call = |input: &Value| json!({"type": "tool_use", "id": "toolu_2", "name": "draw", "input": input});
+    let fragment = |json: &str| json!({"type": "input_json_delta", "partial_json": json});
+    none_continue(vec![
         (
             "unknown block",
-            with(&[start(1, &json!({"type": "fallback"})), stop(1)]),
+            after_a_call(&[start(1, &json!({"type": "fallback"})), stop(1)]),
         ),
         (
             "empty text",
-            with(&[start(1, &json!({"type": "text", "text": ""})), stop(1)]),
+            after_a_call(&[start(1, &json!({"type": "text", "text": ""})), stop(1)]),
         ),
         (
-            "unsigned thinking",
-            with(&[
-                start(1, &json!({"type": "thinking", "thinking": ""})),
+            "empty redacted data",
+            after_a_call(&[
+                start(1, &json!({"type": "redacted_thinking", "data": ""})),
                 stop(1),
             ]),
         ),
         (
-            "a start-object input",
-            with(&[
-                start(
-                    1,
-                    &json!({"type": "tool_use", "id": "toolu_2", "name": "draw", "input": {"n": 1}}),
-                ),
+            "an initial input and fragments",
+            after_a_call(&[
+                start(1, &call(&json!({"n": 1}))),
+                delta(1, &fragment("{\"m\":2}")),
+                stop(1),
+            ]),
+        ),
+        (
+            "a start that isn't an object",
+            after_a_call(&[start_raw(1, "\"text\""), stop(1)]),
+        ),
+        (
+            "a repeated member name",
+            after_a_call(&[
+                start_raw(1, r#"{"type":"text","text":"a","text":"b"}"#),
+                stop(1),
+            ]),
+        ),
+        (
+            "a repeated name in streamed input",
+            after_a_call(&[
+                start(1, &call(&json!({}))),
+                delta(1, &fragment("{\"n\":1,\"n\":2}")),
                 stop(1),
             ]),
         ),
         (
             "a duplicated call",
-            with(&[
+            after_a_call(&[
                 start(
                     1,
                     &json!({"type": "tool_use", "id": "toolu_1", "name": "draw", "input": {}}),
@@ -724,37 +787,60 @@ fn a_failed_partial_or_unrepresentable_stream_yields_no_reply() {
                 stop(1),
             ]),
         ),
+    ]);
+}
+
+#[test]
+fn a_failed_or_unfinished_stream_continues_nothing() {
+    let mut content = after_a_call(&[]);
+    content[0] = json!({"type": "message_start", "message": {"usage": {}, "content": [{"type": "text", "text": "x"}]}})
+        .to_string();
+    let mut eof = after_a_call(&[]);
+    eof.truncate(eof.len() - 2);
+    none_continue(vec![
+        (
+            "unsigned thinking",
+            after_a_call(&[
+                start(1, &json!({"type": "thinking", "thinking": ""})),
+                stop(1),
+            ]),
+        ),
+        (
+            "an unknown delta",
+            after_a_call(&[
+                start(1, &json!({"type": "text", "text": "a"})),
+                delta(1, &json!({"type": "citations_delta", "citation": {}})),
+                stop(1),
+            ]),
+        ),
         (
             "a block left open",
-            with(&[start(1, &json!({"type": "text", "text": "hi"}))]),
+            after_a_call(&[start(1, &json!({"type": "text", "text": "hi"}))]),
         ),
         (
             "a block never seen",
-            with(&[start(2, &json!({"type": "text", "text": "hi"})), stop(2)]),
+            after_a_call(&[start(2, &json!({"type": "text", "text": "hi"})), stop(2)]),
         ),
-    ] {
-        assert!(replied(&first("draw"), &events).is_none(), "{case}");
-    }
+        ("initial message content", content),
+        ("EOF after closed blocks", eof),
+    ]);
+}
+
+#[test]
+fn a_reply_comes_once_and_only_at_its_own_streams_end() {
     let conversation = first("draw");
-    let events = with(&[]);
-    let mut partial = Mapper::answering(&conversation);
-    feed(&mut partial, &events);
-    assert!(partial.reply().is_none(), "before completion");
-    assert!(
-        partial
-            .finish(Err(
-                crate::connections::anthropic::error::Failure::Truncated
-            ))
-            .is_some()
-    );
-    assert!(partial.reply().is_none(), "after a failure");
+    let events = called("toolu_1");
+    let mut early = Mapper::answering(&conversation);
+    let mut reader = Reader::default();
+    for event in &events[..events.len() - 1] {
+        assert_eq!(feed(&mut reader, &mut early, event), Ok(Progress::More));
+    }
+    assert!(early.reply().is_none(), "before the end");
     let mut unbound = Mapper::default();
-    feed(&mut unbound, &events);
-    unbound.finish(Ok(Progress::Completed));
+    streamed(&mut unbound, &events);
     assert!(unbound.reply().is_none(), "a mapper bound to no request");
     let mut once = Mapper::answering(&conversation);
-    feed(&mut once, &events);
-    once.finish(Ok(Progress::Completed));
+    streamed(&mut once, &events);
     assert!(once.reply().is_some());
     assert!(once.reply().is_none(), "a reply is taken once");
 }
@@ -762,28 +848,21 @@ fn a_failed_partial_or_unrepresentable_stream_yields_no_reply() {
 #[test]
 fn a_reply_without_a_call_or_its_results_continues_nothing() {
     let sonnet = slug("claude-sonnet-5-5");
-    let words = [
+    let mut words = vec![
         opened(),
         start(0, &json!({"type": "text", "text": "done"})),
         stop(0),
     ];
+    words.extend(ended("end_turn"));
     let conversation = first("draw");
     let reply = replied(&conversation, &words).expect("a whole reply");
     assert_eq!(
         next(conversation, TAG, &sonnet, reply, &[]).err(),
         Some(BodyError::Pairing)
     );
-    let call = [
-        opened(),
-        start(
-            0,
-            &json!({"type": "tool_use", "id": "toolu_1", "name": "draw", "input": {}}),
-        ),
-        stop(0),
-    ];
     for answers in [&[][..], &["toolu_2"], &["toolu_1", "toolu_1"]] {
         let conversation = first("draw");
-        let reply = replied(&conversation, &call).expect("a whole reply");
+        let reply = replied(&conversation, &called("toolu_1")).expect("a whole reply");
         assert_eq!(
             next(conversation, TAG, &sonnet, reply, &results(answers)).err(),
             Some(BodyError::Pairing),
@@ -791,9 +870,9 @@ fn a_reply_without_a_call_or_its_results_continues_nothing() {
         );
     }
     let conversation = first("draw");
-    let reply = replied(&conversation, &call).expect("a whole reply");
+    let reply = replied(&conversation, &called("toolu_1")).expect("a whole reply");
     let (_, second) = next(conversation, TAG, &sonnet, reply, &results(&["toolu_1"])).expect("ok");
-    let reply = replied(&second, &call).expect("a whole reply");
+    let reply = replied(&second, &called("toolu_1")).expect("a whole reply");
     assert_eq!(
         next(second, TAG, &sonnet, reply, &results(&["toolu_1"])).err(),
         Some(BodyError::Pairing),
@@ -836,30 +915,31 @@ fn built_refused_and_replied_carriers_print_no_content() {
     assert_eq!(refused.as_ref().err(), Some(&BodyError::Ending));
     let conversation = first(marker);
     let mut mapper = Mapper::answering(&conversation);
-    feed(
-        &mut mapper,
-        &[
-            opened(),
-            start(
-                0,
-                &json!({"type": "thinking", "thinking": marker, "signature": marker}),
-            ),
-            stop(0),
-            start(1, &json!({"type": "text", "text": marker})),
-            stop(1),
-            start(
-                2,
-                &json!({"type": "tool_use", "id": "toolu_1", "name": "draw", "input": {}}),
-            ),
-            delta(
-                2,
-                &json!({"type": "input_json_delta", "partial_json": format!("{{\"m\":\"{marker}\"}}")}),
-            ),
-            stop(2),
-        ],
-    );
-    mapper.finish(Ok(Progress::Completed));
+    let events = whole(&[
+        start(
+            0,
+            &json!({"type": "thinking", "thinking": marker, "signature": marker, "extra": marker}),
+        ),
+        stop(0),
+        start(1, &json!({"type": "text", "text": marker})),
+        stop(1),
+        start(
+            2,
+            &json!({"type": "tool_use", "id": "toolu_1", "name": "draw", "input": {}}),
+        ),
+        delta(
+            2,
+            &json!({"type": "input_json_delta", "partial_json": format!("{{\"m\":\"{marker}\"}}")}),
+        ),
+        stop(2),
+    ]);
+    let mut reader = Reader::default();
+    let mut read = Ok(Progress::More);
+    for event in &events {
+        read = feed(&mut reader, &mut mapper, event);
+    }
     let streaming = format!("{mapper:?}");
+    end(&mut reader, &mut mapper, read);
     let reply = mapper.reply().expect("a whole reply");
     let debug = format!("{built:?} {refused:?} {conversation:?} {streaming} {reply:?}");
     let continued = next(

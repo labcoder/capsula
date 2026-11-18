@@ -152,16 +152,26 @@ Only the round's own mapper supplies the reply. The run makes it with
 `Mapper::answering(&conversation)` before the stream's first callback, which binds it to that
 request's `Prefix`; each built request gets its own, so a rebuild of the same input is another
 one. When the stream completes, `Mapper::reply` hands the whole reply over once: every block in
-output order, exactly as it came, so text, `tool_use` with its input as streamed, thinking with
-its signature, and redacted thinking. `Reply` has no constructor or field outside the mapper,
-and the coordinator adds only the matched results. There's no reply after a failed or partial
-stream, or when a block was left open, an index is missing, a block is unknown, a text block is
-empty (Messages refuses one), or a call's input came only as a nonempty start object, which has
-been through a parse that can round a number.
+output order, exactly as it came. The reader keeps each `content_block_start`'s block as
+written, and the mapper keeps every member of it untouched (a call's `caller`, a text block's
+`citations`, a field this route doesn't know) and sets only the fields documented deltas stream:
+`text`, `thinking`, `signature`, and `input` when fragments came. Members may come back in
+another order, which the prefix check ignores. `Reply` has no constructor or field outside the
+mapper, and the coordinator adds only the matched results. This is run memory only: the store
+never gets a raw block.
+
+There's no reply when the mapper can't put a block back as it came: an unknown block, a start
+that isn't an object, a member name repeated anywhere in a block or its streamed input, an
+empty text block or empty redacted data (Messages refuses both), a nonempty initial input that
+fragments then follow, or content already in `message_start`. Nor after a failed or partial
+stream: an unknown delta, unsigned thinking, a block left open, a missing index, or EOF before
+`message_stop`, even after closed blocks.
 
 Tool input stays text from the stream to the wire. `Conversation` keeps its messages as the JSON
-written (serde_json's `RawValue`), and `MessagesBody::from_json` checks the envelope and then
-sends those bytes. A 30-digit integer or a long decimal goes back as the model wrote it. Key
+written (serde_json's `RawValue`), and `MessagesBody::from_json`, which only the encoder can
+call, checks the envelope and then sends those bytes. It reads them literally, so what it checks
+is what goes out: a member name repeated in any object is refused, and no object is read as
+serde_json's embedded raw value. The 512 KiB bound applies to those final bytes. A 30-digit integer or a long decimal goes back as the model wrote it. Key
 order and escapes elsewhere may differ from the stream, since the provider's prefix check
 compares parsed JSON.
 

@@ -9,6 +9,7 @@ use std::fmt;
 use std::ops::ControlFlow;
 
 use serde_json::Value;
+use serde_json::value::RawValue;
 
 use super::error::{Failure, ProviderError};
 use super::framer::{self, Framer, Limit};
@@ -42,13 +43,25 @@ const KNOWN: [&str; 16] = [
     "error",
 ];
 
-/// One event's JSON object, which always has a string `type`.
-pub struct SseEvent(Value);
+/// One event's JSON object, which always has a string `type`, and for a Messages block start the
+/// block exactly as it came.
+pub struct SseEvent(Value, Option<Box<RawValue>>);
 
 impl SseEvent {
     /// The event for `value`, when it's an object with a string `type`.
     pub(in crate::connections) fn from_value(value: Value) -> Option<Self> {
-        value["type"].is_string().then_some(Self(value))
+        value["type"].is_string().then_some(Self(value, None))
+    }
+
+    /// The event with the block it started, as written.
+    pub(in crate::connections) fn with_block(self, block: Box<RawValue>) -> Self {
+        Self(self.0, Some(block))
+    }
+
+    /// The started block as written, when the reader kept it.
+    #[must_use]
+    pub fn block(&self) -> Option<&RawValue> {
+        self.1.as_deref()
     }
 
     /// The event's `type`.

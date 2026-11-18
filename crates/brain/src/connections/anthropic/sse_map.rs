@@ -3,6 +3,8 @@
 use std::fmt;
 use std::ops::ControlFlow;
 
+use serde_json::value::RawValue;
+
 use crate::connections::model::framer::{Framer, Limit};
 use crate::connections::model::sse::{MAX_TEXT_BYTES, Progress, SseEvent};
 
@@ -25,6 +27,12 @@ enum State {
     Open,
     Completed(StopReason),
     Failed(Failure),
+}
+
+/// A block start's block as written, so a reply can go back exactly as it came.
+#[derive(serde::Deserialize)]
+struct Start {
+    content_block: Box<RawValue>,
 }
 
 /// One sticky stream: only `message_stop` after a supported stop reason completes it.
@@ -71,7 +79,11 @@ impl Reader {
         }
         let result = self.framer.feed(bytes, &mut |data| {
             let value = serde_json::from_slice(data).map_err(|_| Failure::Protocol)?;
-            let event = SseEvent::from_value(value).ok_or(Failure::Protocol)?;
+            let mut event = SseEvent::from_value(value).ok_or(Failure::Protocol)?;
+            if event.kind() == "content_block_start" {
+                let start: Start = serde_json::from_slice(data).map_err(|_| Failure::Protocol)?;
+                event = event.with_block(start.content_block);
+            }
             match event.kind() {
                 "error" => return Err(Failure::streamed(event.value())),
                 "content_block_delta" => {

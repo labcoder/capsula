@@ -303,12 +303,18 @@ fn a_readers_debug_shows_counts_never_bytes() {
 
 #[test]
 fn debug_shows_only_a_known_event_kind() {
-    let known = SseEvent(json!({"type": "response.output_text.delta", "delta": "PLANTED-TEXT"}));
+    let known = SseEvent(
+        json!({"type": "response.output_text.delta", "delta": "PLANTED-TEXT"}),
+        None,
+    );
     assert_eq!(
         format!("{known:?}"),
         "SseEvent { kind: \"response.output_text.delta\" }"
     );
-    let unknown = SseEvent(json!({"type": "PLANTED-KIND", "delta": "PLANTED-TEXT"}));
+    let unknown = SseEvent(
+        json!({"type": "PLANTED-KIND", "delta": "PLANTED-TEXT"}),
+        None,
+    );
     assert_eq!(format!("{unknown:?}"), "SseEvent { kind: \"other\" }");
 }
 
