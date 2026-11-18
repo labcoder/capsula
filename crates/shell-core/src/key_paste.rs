@@ -56,7 +56,7 @@ pub struct KeyWriteJob {
 pub struct KeyWriteResult {
     at: Attempt,
     plan: KeyStageId,
-    wrote: bool,
+    result: Result<(), StageError>,
 }
 
 impl KeyWriteJob {
@@ -77,7 +77,13 @@ impl KeyWriteJob {
         KeyWriteResult {
             at,
             plan,
-            wrote: write(permit, key) == Ok(plan),
+            result: write(permit, key).and_then(|written| {
+                if written == plan {
+                    Ok(())
+                } else {
+                    Err(StageError::IdentityMismatch)
+                }
+            }),
         }
     }
 }
@@ -240,13 +246,17 @@ impl KeyPaste {
     }
 
     pub fn written(&mut self, result: &KeyWriteResult, send: impl FnOnce(ConnectionOp) -> bool) {
-        let KeyWriteResult { at, plan, wrote } = *result;
+        let KeyWriteResult {
+            at,
+            plan,
+            ref result,
+        } = *result;
         if !matches!(self.stage, Stage::Writing(writing, expected) if writing == at && expected == plan)
         {
             return;
         }
         self.stage = Stage::Idle;
-        if !wrote {
+        if result.is_err() {
             self.failure = Some(PasteFailure::Unsaved);
         } else if send(ConnectionOp::AnthropicKeyStaged { plan }) {
             self.stage = Stage::Saving(at, plan);

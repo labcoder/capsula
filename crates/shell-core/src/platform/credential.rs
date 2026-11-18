@@ -40,6 +40,8 @@ pub(crate) enum StageError {
     InvalidPlan,
     #[error("staging length mismatch")]
     LengthMismatch,
+    #[error("staging identity mismatch")]
+    IdentityMismatch,
     #[error("the credential store is unavailable")]
     Store,
 }

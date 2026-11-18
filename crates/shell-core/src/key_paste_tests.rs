@@ -220,6 +220,7 @@ fn a_partial_write_and_failed_enqueues_end_locally() {
             })
         });
     assert_eq!(chunks, [2000, 48]);
+    assert_eq!(partial.result, Err(StageError::Store));
     state.written(&partial, |_| panic!("partial write sent Staged"));
     assert_eq!(state.failure(), Some(PasteFailure::Unsaved));
     assert_eq!(state.view(), Some(KeyView::Ready));
@@ -231,6 +232,20 @@ fn a_partial_write_and_failed_enqueues_end_locally() {
     assert_eq!(state.failure(), Some(PasteFailure::Offline));
     assert_eq!(state.view(), Some(KeyView::Ready));
     assert!(!state.saving());
+}
+
+#[test]
+fn a_writer_returning_a_different_identity_does_not_admit_adoption() {
+    let mut state = model(KeyView::Ready);
+    let at = begin(&mut state, KEY);
+    let wrong = state
+        .planned(SESSION, &plan(at.request, 32))
+        .expect("job")
+        .run_with(|_, _| Ok(KeyStageId([1; 16])));
+    assert_eq!(wrong.result, Err(StageError::IdentityMismatch));
+    state.written(&wrong, |_| panic!("the wrong identity sent Staged"));
+    assert_eq!(state.failure(), Some(PasteFailure::Unsaved));
+    assert_eq!(state.view(), Some(KeyView::Ready));
 }
 
 #[test]
