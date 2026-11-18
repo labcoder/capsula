@@ -62,6 +62,8 @@ fn hidden_screen_label_char(ch: char) -> bool {
                 | '\u{1d173}'..='\u{1d17a}'
                 | '\u{e0000}'..='\u{e0fff}'
         )
+        // Interlinear annotations and Egyptian layout controls sit outside Default_Ignorable_Code_Point.
+        || matches!(ch, '\u{fff9}'..='\u{fffb}' | '\u{13430}'..='\u{13442}')
 }
 
 /// Checks a step of a screen scene: only marks that never cover their target are admitted. A

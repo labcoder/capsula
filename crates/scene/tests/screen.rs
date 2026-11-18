@@ -462,6 +462,8 @@ fn screen_labels_refuse_hidden_formatting_and_line_separators_at_admission() {
     ];
     let missing: Vec<_> = controls
         .into_iter()
+        .chain('\u{fff9}'..='\u{fffb}')
+        .chain('\u{13430}'..='\u{13442}')
         .filter_map(|control| {
             let text = format!("a{control}b");
             let parsed =
@@ -494,6 +496,10 @@ fn screen_labels_admit_writing_marks_and_variation_selectors() {
         "☀\u{fe0f}",
         "ᠠ\u{180b}\u{180d}\u{180f}",
         "禰\u{e0100}\u{e01ef}",
+        "\u{600}١\u{601}٢\u{602}٣\u{603}٤\u{604}٥\u{605}٦",
+        "\u{6dd}١\u{8e2}٢\u{890}٣\u{891}٤",
+        "\u{110bd}\u{11066}\u{110cd}\u{11067}",
+        "\u{70f}ܐܒ",
     ] {
         let parsed =
             step(&json!([{"callout":{"id":"c","target":{"box":[10,10,20,20]},"text":text}}]));

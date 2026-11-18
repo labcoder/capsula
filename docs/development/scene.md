@@ -175,7 +175,8 @@ semantic admission still refuses them.
   line between two marks would end at their centres, over both targets. A box outside the
   picture is `OutOfRange`. A label is one line of at most `MAX_SCREEN_LABEL_CHARS` (24).
   `LabelTooLong` at `put[i].text` also refuses control characters, U+2028 and U+2029,
-  and Unicode 17.0.0 default-ignorable characters except variation selectors. This includes
+  Unicode 17.0.0 default-ignorable characters and a few other invisible layout controls
+  (U+FFF9–U+FFFB and U+13430–U+13442). Variation selectors remain allowed. The refusal includes
   direction controls, joiners and emoji tags, so some joined words and emoji need different
   labels. Ordinary writing marks such as combining accents and Arabic or Hebrew vowel marks
   still work. The whole offending step is refused, not rewritten; earlier steps stay.
