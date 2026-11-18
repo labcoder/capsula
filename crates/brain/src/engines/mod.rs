@@ -304,6 +304,13 @@ pub enum TurnEvent {
         /// The provider's item as JSON: the same value it sent, though not always the same bytes.
         item: Opaque,
     },
+    /// A call of the Anthropic key's completed reply, as its rounds store it.
+    KeyCall {
+        /// Its place in the reply.
+        index: u32,
+        /// The call.
+        call: anthropic::encode::ToolUse,
+    },
     /// The question's tokens, sent once before an agent engine's `Finished`.
     Usage(Usage),
     /// The round ended.
@@ -333,6 +340,11 @@ impl fmt::Debug for TurnEvent {
                 .debug_struct("OutputItem")
                 .field("index", index)
                 .field("item", item)
+                .finish(),
+            Self::KeyCall { index, call } => f
+                .debug_struct("KeyCall")
+                .field("index", index)
+                .field("call", call)
                 .finish(),
             Self::Usage(usage) => f.debug_tuple("Usage").field(usage).finish(),
             Self::Finished(finish) => f.debug_tuple("Finished").field(finish).finish(),
@@ -599,7 +611,7 @@ async fn collect(
             TurnEvent::TextDelta(delta) if text.len() + delta.len() <= limit => {
                 text.push_str(&delta);
             }
-            TurnEvent::OutputItem { .. } | TurnEvent::Usage(_) => {}
+            TurnEvent::OutputItem { .. } | TurnEvent::KeyCall { .. } | TurnEvent::Usage(_) => {}
             TurnEvent::Finished(Finish::Completed) => {
                 break match kind {
                     JobKind::Title => crate::jobs::clean_title(&text).map(JobOutput::Title),

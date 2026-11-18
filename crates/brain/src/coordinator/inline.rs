@@ -211,7 +211,7 @@ impl Coordinator {
             {
                 text.push_str(&delta);
             }
-            TurnEvent::OutputItem { .. } | TurnEvent::Usage(_) => {}
+            TurnEvent::OutputItem { .. } | TurnEvent::KeyCall { .. } | TurnEvent::Usage(_) => {}
             TurnEvent::Finished(Finish::Completed) => {
                 let Some(summary) = fit_summary(text, *allowance) else {
                     return self.fail(run, Failure::Budget, effects);

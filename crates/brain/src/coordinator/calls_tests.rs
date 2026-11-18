@@ -129,6 +129,10 @@ fn rebuilt(attempt: u64) -> Effect {
         origin: Origin::Kumo,
         snapshot: None,
         first: true,
+        arrived: crate::coordinator::Arrived::of(
+            kumochi_protocol::message::ConnectionKind::ChatGpt,
+            crate::context::ConnectionTag(0),
+        ),
         drawings: crate::drawing::Digest::default(),
     }))
 }

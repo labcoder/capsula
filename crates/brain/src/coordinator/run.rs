@@ -158,6 +158,11 @@ impl Coordinator {
                     self.fail(run, Failure::Budget, effects)?;
                 }
             }
+            TurnEvent::KeyCall { index, call } => {
+                if !current.tools.keep_call(index, call) {
+                    self.fail(run, Failure::Budget, effects)?;
+                }
+            }
             // Nothing records usage yet.
             TurnEvent::Usage(_) => {}
             TurnEvent::Finished(Finish::Completed) if !current.tools.all_ready() => {

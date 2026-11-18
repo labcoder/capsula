@@ -196,3 +196,30 @@ be left out outside an open tool call, as long as no block is left out between t
 kept. The next model loses that reasoning, as it loses tool details the answer never stated.
 A reply without a call, a call without exactly one result, or an id that was already called
 builds nothing.
+
+### The live owner
+
+`live::Live` plays each key round in one call: it builds the body, binds the round's mapper to
+it, feeds that mapper the stream's own callbacks and takes the transport's real ending. Each
+read's text, call and usage events go to the coordinator before the next read; the mapper's items
+don't. A round that completes on `tool_use` with calls made ready is a tool round; any other mix of
+stop reason and calls fails locally (`Protocol`) and keeps nothing. A tool round's calls go out as
+`KeyCall` events, each an `encode::ToolUse`: the type, id and name of a `tool_use` block of the
+reply, and its input as the JSON text the reader read, nothing else. They must be the calls made
+ready, in order. The store takes this route's items only as `ToolUse` (`append_key_round`;
+`append_round` refuses the route) and writes, reads and re-encodes the input byte for byte, so no
+generic JSON parse can change it. Projected and stored call inputs have the same depth limit:
+at most 96 nested objects and arrays, including the input object, so the enclosing Messages
+request fits the JSON parser's recursion budget. The reply, with the request it answered, stays
+in `Live` for the run's next round.
+
+The next round takes it once. Its body is `encode::next` over that request, that reply, and the
+results the rebuilt request ends with: those right after the round's own stored calls, exactly
+one for each held call, in call order. A missing, repeated or extra result, or stored calls other
+than the held ones, refuse the round locally; nothing else of the rebuilt request is sent. A
+later round with nothing to continue fails with a local refusal before anything is sent: after a
+rebuild answer, a refused send, another run's round, or with no reply kept at all. A job or a
+compaction offers no tools and is built afresh. A key run whose next build no longer has a source
+an earlier round sent, such as a deleted task, ends instead. Stop drops a round in flight with
+the continuation it took. One a run left between rounds stays until the next round starts, which
+drops it unsent.

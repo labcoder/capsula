@@ -82,8 +82,23 @@ impl Arrived {
         self.0[slot(kind)]
     }
 
+    /// The tag `choice`'s kind had at arrival, which the run's stored rounds carry; `ChatGPT`'s
+    /// for no choice, and `ConnectionTag(0)` when that kind had none (`RunSnapshot::connection`).
+    pub(crate) fn replay(self, choice: Option<&ModelChoice>) -> ConnectionTag {
+        self.get(choice.map_or(ConnectionKind::ChatGpt, |choice| choice.connection))
+            .unwrap_or(ConnectionTag(0))
+    }
+
     pub(super) fn is_empty(self) -> bool {
         self.0.iter().all(Option::is_none)
+    }
+
+    /// Only `kind` ready, on `tag`.
+    #[cfg(test)]
+    pub(crate) fn of(kind: ConnectionKind, tag: ConnectionTag) -> Self {
+        let mut arrived = Self::default();
+        arrived.0[slot(kind)] = Some(tag);
+        arrived
     }
 }
 
@@ -268,16 +283,6 @@ impl Coordinator {
             after: super::FINDING_WAIT,
         });
         true
-    }
-
-    /// The `ChatGPT` sign-in `run` arrived under, while it's current or ending: the tag its
-    /// stored native items replay under. Never a bearer's: `sending` decides that.
-    pub(crate) fn replay_tag(&self, run: RunId) -> Option<ConnectionTag> {
-        self.current
-            .iter()
-            .chain(&self.ending)
-            .find(|found| found.id == run)
-            .and_then(|found| found.arrived.get(ConnectionKind::ChatGpt))
     }
 
     /// The `ChatGPT` sign-in a send under `key` may take the bearer of: a round's, only while its

@@ -51,6 +51,8 @@ pub(super) fn read_hold(
                             // A hold's run takes this snapshot whole, so its first build reads no choice.
                             snapshot.defaults.choice =
                                 stored.execution(snapshot.defaults.choice.take())?;
+                            snapshot.defaults.connection =
+                                snapshot.arrived.replay(snapshot.defaults.choice.as_ref());
                             read.end()?;
                             Ok(())
                         })
@@ -105,6 +107,7 @@ pub(super) fn read(
         thread,
         snapshot,
         first,
+        arrived,
         drawings,
         ..
     } = job;
@@ -128,6 +131,7 @@ pub(super) fn read(
                         snapshot.choice = read
                             .stored_choice(thread)?
                             .execution(snapshot.choice.take())?;
+                        snapshot.connection = arrived.replay(snapshot.choice.as_ref());
                     }
                     let local_time = read.local_time(key.run)?;
                     let turn = Turn {

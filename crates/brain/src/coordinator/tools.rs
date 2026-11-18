@@ -8,8 +8,9 @@ use std::fmt;
 use kumochi_protocol::message::{Content, RunId, ThreadId};
 
 use super::{Coordinator, Effect, Stale, StoreOp, unstored};
-use crate::context::{BOUND, ConnectionTag};
+use crate::context::{BOUND, Route};
 use crate::dispatch::{Caller, Dispatch, ToolOutput};
+use crate::engines::anthropic::encode::ToolUse;
 use crate::engines::{CallId, Opaque, ToolName};
 use crate::store::Failure;
 
@@ -25,10 +26,12 @@ pub struct RoundItems {
     pub(crate) thread: ThreadId,
     pub(crate) run: RunId,
     pub(crate) round: u32,
-    /// The run's connection, which replays the items.
-    pub(crate) connection: ConnectionTag,
+    /// The run's route, which replays the items.
+    pub(crate) connection: Route,
     pub(crate) text: Option<Content>,
     pub(crate) items: Vec<Opaque>,
+    /// The Anthropic key's calls, in output order: the only items its rounds store.
+    pub(crate) key_calls: Vec<ToolUse>,
     pub(crate) calls: Vec<(CallId, ToolOutput)>,
 }
 
@@ -52,6 +55,7 @@ pub(super) struct Loop {
     dispatched: bool,
     /// This round's native items, with their output index.
     items: Vec<(u32, Opaque)>,
+    key_calls: Vec<(u32, ToolUse)>,
     item_bytes: usize,
     /// The round being stored, and whether it's the run's last.
     writing: Option<(u32, bool)>,
@@ -64,6 +68,7 @@ impl fmt::Debug for Loop {
             .field("open", &self.open.len())
             .field("dispatched", &self.dispatched)
             .field("items", &self.items.len())
+            .field("key_calls", &self.key_calls.len())
             .field("item_bytes", &self.item_bytes)
             .field("writing", &self.writing)
             .finish()
@@ -129,6 +134,7 @@ impl Loop {
         self.open.clear();
         self.dispatched = false;
         self.items.clear();
+        self.key_calls.clear();
         self.item_bytes = 0;
     }
 
@@ -172,6 +178,17 @@ impl Loop {
         }
         self.item_bytes += item.size();
         self.items.push((index, item));
+        true
+    }
+
+    /// Keeps a call of the key's reply, within the same bound as items.
+    pub(super) fn keep_call(&mut self, index: u32, call: ToolUse) -> bool {
+        let size = call.json().len();
+        if self.item_bytes + size > BOUND {
+            return false;
+        }
+        self.item_bytes += size;
+        self.key_calls.push((index, call));
         true
     }
 
@@ -269,13 +286,14 @@ impl Coordinator {
                 return Ok(());
             }
         }
-        // shortcut: a stored native body has no kind, so only a `ChatGPT` round may write one; A2
-        // adds the kind.
-        let Some(connection) = current
-            .route
-            .filter(|route| route.kind == kumochi_protocol::message::ConnectionKind::ChatGpt)
-            .map(|route| route.tag)
-        else {
+        // Only the routes whose rounds the build replays store them; Claude Code keeps its own.
+        let Some(connection) = current.route.filter(|route| {
+            matches!(
+                route.kind,
+                kumochi_protocol::message::ConnectionKind::ChatGpt
+                    | kumochi_protocol::message::ConnectionKind::AnthropicKey
+            )
+        }) else {
             return self.fail(run, Failure::Engine, effects);
         };
         let round = current.build.as_ref().map_or(1, |build| build.key().round);
@@ -283,6 +301,8 @@ impl Coordinator {
         current.finishing = !calling;
         let mut items = std::mem::take(&mut current.tools.items);
         items.sort_by_key(|(index, _)| *index);
+        let mut key_calls = std::mem::take(&mut current.tools.key_calls);
+        key_calls.sort_by_key(|(index, _)| *index);
         current.tools.item_bytes = 0;
         let calls = std::mem::take(&mut current.tools.open)
             .into_iter()
@@ -306,6 +326,7 @@ impl Coordinator {
                     }
                 })
                 .collect(),
+            key_calls: key_calls.into_iter().map(|(_, call)| call).collect(),
             calls,
         })));
         Ok(())

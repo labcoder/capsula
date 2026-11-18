@@ -71,14 +71,14 @@ pub(crate) fn members(object: &str) -> Option<Vec<(String, &str)>> {
         return (space(bytes, at + 1) == bytes.len()).then_some(members);
     }
     loop {
-        let named = end(bytes, at)?;
+        let named = end::<{ usize::MAX }>(bytes, at)?;
         let name = serde_json::from_str(object.get(at..named)?).ok()?;
         at = space(bytes, named);
         if bytes.get(at) != Some(&b':') {
             return None;
         }
         let start = space(bytes, at + 1);
-        let stop = end(bytes, start)?;
+        let stop = end::<{ usize::MAX }>(bytes, start)?;
         members.push((name, object.get(start..stop)?));
         at = space(bytes, stop);
         match bytes.get(at) {
@@ -87,6 +87,14 @@ pub(crate) fn members(object: &str) -> Option<Vec<(String, &str)>> {
             _ => return None,
         }
     }
+}
+
+/// Whether already validated JSON is an object within `LIMIT` nested containers.
+pub(crate) fn object_within_depth<const LIMIT: usize>(object: &str) -> bool {
+    let bytes = object.as_bytes();
+    let start = space(bytes, 0);
+    bytes.get(start) == Some(&b'{')
+        && end::<LIMIT>(bytes, start).is_some_and(|stop| space(bytes, stop) == bytes.len())
 }
 
 fn space(bytes: &[u8], mut at: usize) -> usize {
@@ -101,7 +109,7 @@ fn space(bytes: &[u8], mut at: usize) -> usize {
 
 /// Where the value starting at `at` ends, in JSON already read: only strings and brackets
 /// need tracking, since a scalar runs to the next delimiter.
-fn end(bytes: &[u8], mut at: usize) -> Option<usize> {
+fn end<const LIMIT: usize>(bytes: &[u8], mut at: usize) -> Option<usize> {
     let mut depth = 0_usize;
     loop {
         match *bytes.get(at)? {
@@ -118,6 +126,9 @@ fn end(bytes: &[u8], mut at: usize) -> Option<usize> {
             }
             b'{' | b'[' => {
                 depth += 1;
+                if depth > LIMIT {
+                    return None;
+                }
                 at += 1;
             }
             b'}' | b']' => {

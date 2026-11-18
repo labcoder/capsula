@@ -20,6 +20,7 @@ use crate::test_support::Scratch;
 const TIME: &str = "Tuesday 4 November 2026, 09:30";
 
 mod image;
+mod key_rounds;
 mod recall_results;
 
 struct World {
@@ -797,27 +798,34 @@ fn reasoning_is_replayed_only_on_the_connection_that_made_it() {
         id: EventId(last.0 + id),
         run: current,
         body: Body::Native {
+            kind: Some(kumochi_protocol::message::ConnectionKind::ChatGpt),
             connection: ConnectionTag(tag),
             item: Opaque::new(vec![byte]).expect("small"),
         },
     };
-    let supplied = Supplied {
-        summary: None,
-        items: vec![item(1, 7, 1), item(2, 8, 2)],
-        ..Supplied::default()
-    };
-    let built = world
-        .build(
-            &snapshot(Origin::Kumo, None),
-            (main, current),
-            supplied,
-            BOUND,
-        )
-        .expect("built");
-    assert_eq!(
-        built.request.input[1..],
-        [InputItem::Native(Opaque::new(vec![1]).expect("small"))]
-    );
+    // A run with another connection's item among its own replays none of them.
+    for (items, replayed) in [
+        (
+            vec![item(1, 7, 1)],
+            vec![InputItem::Native(Opaque::new(vec![1]).expect("small"))],
+        ),
+        (vec![item(1, 7, 1), item(2, 8, 2)], vec![]),
+    ] {
+        let supplied = Supplied {
+            summary: None,
+            items,
+            ..Supplied::default()
+        };
+        let built = world
+            .build(
+                &snapshot(Origin::Kumo, None),
+                (main, current),
+                supplied,
+                BOUND,
+            )
+            .expect("built");
+        assert_eq!(built.request.input[1..], replayed);
+    }
 }
 
 #[test]
@@ -831,6 +839,7 @@ fn native_items_replay_only_on_a_chatgpt_route() {
         id: EventId(last.0 + 1),
         run: current,
         body: Body::Native {
+            kind: Some(kumochi_protocol::message::ConnectionKind::ChatGpt),
             connection: ConnectionTag(7),
             item: Opaque::new(vec![1]).expect("small"),
         },
@@ -1549,7 +1558,16 @@ fn round(world: &mut World, at: (ThreadId, RunId), text: &str, items: &[Value], 
         .collect();
     world
         .store
-        .append_round(at, ConnectionTag(7), Some(text), &items, &results)
+        .append_round(
+            at,
+            crate::context::Route {
+                kind: kumochi_protocol::message::ConnectionKind::ChatGpt,
+                tag: ConnectionTag(7),
+            },
+            Some(text),
+            &items,
+            &results,
+        )
         .expect("round");
 }
 
@@ -1806,7 +1824,10 @@ fn a_round_the_reader_would_refuse_is_never_written() {
     for output in [ToolOutput::Text(over), ToolOutput::History(backwards)] {
         let refused = world.store.append_round(
             at,
-            ConnectionTag(7),
+            crate::context::Route {
+                kind: kumochi_protocol::message::ConnectionKind::ChatGpt,
+                tag: ConnectionTag(7),
+            },
             Some("Refused."),
             &[opaque(said("assistant", "Refused."))],
             &[(call.clone(), output)],
@@ -1820,7 +1841,10 @@ fn a_round_the_reader_would_refuse_is_never_written() {
         .store
         .append_round(
             at,
-            ConnectionTag(7),
+            crate::context::Route {
+                kind: kumochi_protocol::message::ConnectionKind::ChatGpt,
+                tag: ConnectionTag(7),
+            },
             None,
             &[opaque(call_item("c3"))],
             &[(call, ToolOutput::Text(fits.clone()))],
@@ -1859,7 +1883,10 @@ fn a_native_item_the_reader_would_refuse_is_never_written() {
     let opaque = |item: &str| Opaque::new(item.as_bytes().to_vec()).expect("within the cap");
     let refused = world.store.append_round(
         at,
-        ConnectionTag(7),
+        crate::context::Route {
+            kind: kumochi_protocol::message::ConnectionKind::ChatGpt,
+            tag: ConnectionTag(7),
+        },
         Some("Refused."),
         &[opaque(&growing)],
         &[],
@@ -1870,7 +1897,16 @@ fn a_native_item_the_reader_would_refuse_is_never_written() {
     );
     world
         .store
-        .append_round(at, ConnectionTag(7), None, &[opaque(&fits)], &[])
+        .append_round(
+            at,
+            crate::context::Route {
+                kind: kumochi_protocol::message::ConnectionKind::ChatGpt,
+                tag: ConnectionTag(7),
+            },
+            None,
+            &[opaque(&fits)],
+            &[],
+        )
         .expect("the largest item the reader takes");
     let reader = Connection::open(world.scratch.db()).expect("reader");
     let items = Snapshot::begin(&reader)
@@ -1918,7 +1954,10 @@ fn a_full_text_output_replays_as_its_text_and_an_untagged_one_as_it_was() {
         .store
         .append_round(
             at,
-            ConnectionTag(7),
+            crate::context::Route {
+                kind: kumochi_protocol::message::ConnectionKind::ChatGpt,
+                tag: ConnectionTag(7),
+            },
             None,
             &items,
             &[(CallId::new("c1").expect("short"), output)],

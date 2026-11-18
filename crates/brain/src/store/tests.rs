@@ -76,7 +76,10 @@ fn plant(store: &mut Store) -> (ThreadId, RunId) {
     store
         .append_round(
             (thread, run),
-            ConnectionTag(7),
+            crate::context::Route {
+                kind: kumochi_protocol::message::ConnectionKind::ChatGpt,
+                tag: ConnectionTag(7),
+            },
             None,
             &[Opaque::new(item.into_bytes()).expect("small")],
             &[(call, crate::dispatch::ToolOutput::Text(MARKER.to_owned()))],
@@ -2061,4 +2064,55 @@ fn a_note_that_fails_rolls_back_the_whole_first_transaction() {
         Err(StoreError::NoThread)
     ));
     assert_eq!(notes(&store).len(), 1, "one note per delete");
+}
+
+#[test]
+fn a_native_row_without_a_kind_is_chatgpts_and_an_unknown_kind_is_no_route() {
+    use kumochi_protocol::message::ConnectionKind;
+    for (body, kind) in [
+        (
+            r#"{"connection":7,"item":{"type":"x"}}"#,
+            Some(ConnectionKind::ChatGpt),
+        ),
+        (
+            r#"{"connection":7,"kind":"anthropic_key","item":{"type":"tool_use","id":"a","name":"b","input":{}}}"#,
+            Some(ConnectionKind::AnthropicKey),
+        ),
+        (
+            r#"{"connection":7,"kind":"anthropic_key","item":{"type":"x"}}"#,
+            None,
+        ),
+        (
+            r#"{"connection":7,"kind":"anthropic_key","item":{"type":"tool_use","id":"a","name":"b","input":{},"signature":"s"}}"#,
+            None,
+        ),
+        (
+            r#"{"connection":7,"kind":"later","item":{"type":"x"}}"#,
+            None,
+        ),
+        (r#"{"connection":7,"kind":2,"item":{"type":"x"}}"#, None),
+    ] {
+        let Ok(crate::context::Body::Native {
+            kind: read,
+            connection,
+            ..
+        }) = super::rounds::native(body)
+        else {
+            panic!("a native row: {body}");
+        };
+        assert_eq!((read, connection), (kind, ConnectionTag(7)), "{body}");
+    }
+    // A key row's item is read as written, even where a generic parse would change it.
+    let item =
+        r#"{"type":"tool_use","id":"a","name":"b","input":{"$serde_json::private::RawValue":"5"}}"#;
+    let body = format!(r#"{{"connection":7,"kind":"anthropic_key","item":{item}}}"#);
+    let Ok(crate::context::Body::Native {
+        kind: Some(ConnectionKind::AnthropicKey),
+        item: read,
+        ..
+    }) = super::rounds::native(&body)
+    else {
+        panic!("a key row");
+    };
+    assert_eq!(read.bytes(), item.as_bytes());
 }

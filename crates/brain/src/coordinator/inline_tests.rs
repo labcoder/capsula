@@ -147,6 +147,10 @@ fn rebuilt(attempt: u64) -> Effect {
         origin: Origin::Task(T),
         snapshot: None,
         first: true,
+        arrived: crate::coordinator::Arrived::of(
+            kumochi_protocol::message::ConnectionKind::ChatGpt,
+            crate::context::ConnectionTag(0),
+        ),
         drawings: crate::drawing::Digest::default(),
     }))
 }
@@ -536,7 +540,14 @@ fn claude_code_compacting() -> Coordinator {
     .expect("a turn is never stale");
     assert_eq!(
         core.handle(Input::TurnStored { run: R }),
-        Ok(vec![build_context(R, T, 1)])
+        Ok(vec![{
+            let mut expected = build_context(R, T, 1);
+            if let Effect::Store(StoreOp::BuildContext(build)) = &mut expected {
+                build.arrived =
+                    crate::coordinator::Arrived::of(ConnectionKind::ClaudeCode, ConnectionTag(3));
+            }
+            expected
+        }])
     );
     let Effect::Store(StoreOp::CompactContext(mut read)) = compact_context(2) else {
         unreachable!("compact_context reads");

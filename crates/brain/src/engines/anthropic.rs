@@ -1,6 +1,7 @@
 //! Bounded Messages block assembly; transport and dispatch belong to their existing owners.
 
 pub(crate) mod encode;
+pub(crate) mod live;
 
 use std::{fmt, io};
 

@@ -54,9 +54,13 @@ fn round_items(round: u32, text: Option<&str>, items: Vec<Opaque>, calls: Vec<Ca
         thread: T,
         run: R,
         round,
-        connection: ConnectionTag(0),
+        connection: crate::context::Route {
+            kind: kumochi_protocol::message::ConnectionKind::ChatGpt,
+            tag: ConnectionTag(0),
+        },
         text: text.map(Into::into),
         items,
+        key_calls: Vec::new(),
         calls: calls
             .into_iter()
             .map(|call| (call, ToolOutput::Error(ToolError::Unknown)))
@@ -69,9 +73,13 @@ fn answered(round: u32, text: Option<&str>, calls: Vec<(CallId, ToolOutput)>) ->
         thread: T,
         run: R,
         round,
-        connection: ConnectionTag(0),
+        connection: crate::context::Route {
+            kind: kumochi_protocol::message::ConnectionKind::ChatGpt,
+            tag: ConnectionTag(0),
+        },
         text: text.map(Into::into),
         items: Vec::new(),
+        key_calls: Vec::new(),
         calls,
     }))
 }
@@ -950,9 +958,13 @@ fn round_writes_show_lengths_never_content() {
         thread: T,
         run: R,
         round: 1,
-        connection: ConnectionTag(0),
+        connection: crate::context::Route {
+            kind: kumochi_protocol::message::ConnectionKind::ChatGpt,
+            tag: ConnectionTag(0),
+        },
         text: Some(format!("said {MARKER}").into()),
         items: vec![item(&format!("{{\"text\":\"{MARKER}\"}}"))],
+        key_calls: Vec::new(),
         calls: vec![(call.clone(), ToolOutput::Text(format!("says {MARKER}")))],
     }));
     let result = crate::context::Body::Result {
@@ -989,4 +1001,208 @@ fn round_writes_show_lengths_never_content() {
     let bytes = format!("{:?}", MARKER.as_bytes());
     let listed = bytes.trim_start_matches('[').trim_end_matches(']');
     assert!(!printed.contains(listed), "{printed}");
+}
+
+#[test]
+fn a_key_round_ends_the_run_when_a_source_it_carries_on_has_gone() {
+    use crate::context::RunSnapshot;
+    use crate::coordinator::{Availability, Ready};
+    use kumochi_protocol::message::{
+        AssistantName, ConnectionKind, Effort, ModelChoice, ModelInfo, ModelName, ModelSlug,
+    };
+
+    let model = ModelSlug::new("claude-sonnet-5-5").expect("slug");
+    let choice = ModelChoice {
+        connection: ConnectionKind::AnthropicKey,
+        model: model.clone(),
+        effort: Effort::Low,
+    };
+    let other = ThreadId(5);
+    for kept in [true, false] {
+        let mut core = fresh();
+        core.handle(Input::Engines(
+            ConnectionKind::AnthropicKey,
+            Availability::Ready(Ready {
+                connection: ConnectionTag(41),
+                models: vec![ModelInfo {
+                    slug: model.clone(),
+                    display_name: ModelName::new("Sonnet").expect("name"),
+                    supported_efforts: None,
+                }],
+                trusted_draw: false,
+            }),
+        ))
+        .expect("never stale");
+        core.handle(Input::Turn {
+            turn: 1,
+            thread: None,
+            text: "words".into(),
+        })
+        .expect("a turn is never stale");
+        core.handle(Input::TurnStored { run: R }).expect("current");
+        let built = |key, snapshot, sources: Vec<ThreadId>| {
+            Input::ContextBuilt(ContextBuilt {
+                key,
+                snapshot,
+                result: Ok(Built {
+                    request: request(),
+                    sources,
+                }),
+            })
+        };
+        let snapshot = RunSnapshot {
+            origin: Origin::Task(T),
+            assistant: AssistantName::new("Kumo").expect("name"),
+            user: None,
+            choice: Some(choice.clone()),
+            connection: ConnectionTag(41),
+        };
+        let first = super::engine_key(&core, R);
+        let effects = core
+            .handle(built(first, Some(snapshot), vec![T, other]))
+            .expect("current");
+        assert!(starts_round(&effects, 1));
+        play(&mut core, called(1));
+        core.handle(completed(&core)).expect("current");
+        let effects = core
+            .handle(Input::RoundStored { run: R, round: 1 })
+            .expect("current");
+        let [Effect::Store(StoreOp::BuildContext(second))] = effects.as_slice() else {
+            panic!("one build, not {effects:?}");
+        };
+        let sources = if kept { vec![T, other] } else { vec![T] };
+        let effects = core
+            .handle(built(second.key, None, sources))
+            .expect("current");
+        if kept {
+            assert!(starts_round(&effects, 2));
+        } else {
+            assert_eq!(effects, ends_failed(Failure::Engine));
+        }
+    }
+}
+
+fn admitted_key_round(sources: Vec<ThreadId>) -> Coordinator {
+    use crate::context::RunSnapshot;
+    use crate::coordinator::{Availability, Ready};
+    use kumochi_protocol::message::{
+        AssistantName, ConnectionKind, Effort, ModelChoice, ModelInfo, ModelName, ModelSlug,
+    };
+
+    let mut core = fresh();
+    let model = ModelSlug::new("claude-sonnet-5-5").expect("slug");
+    let kind = ConnectionKind::AnthropicKey;
+    let tag = ConnectionTag(41);
+    core.handle(Input::Engines(
+        kind,
+        Availability::Ready(Ready {
+            connection: tag,
+            models: vec![ModelInfo {
+                slug: model.clone(),
+                display_name: ModelName::new("Sonnet").expect("name"),
+                supported_efforts: None,
+            }],
+            trusted_draw: false,
+        }),
+    ))
+    .expect("never stale");
+    core.handle(Input::Turn {
+        turn: 1,
+        thread: None,
+        text: "words".into(),
+    })
+    .expect("never stale");
+    core.handle(Input::TurnStored { run: R }).expect("current");
+    let first = Input::ContextBuilt(ContextBuilt {
+        key: attempt(1, 1),
+        snapshot: Some(RunSnapshot {
+            origin: Origin::Task(T),
+            assistant: AssistantName::new("Kumo").expect("name"),
+            user: None,
+            choice: Some(ModelChoice {
+                connection: kind,
+                model,
+                effort: Effort::Low,
+            }),
+            connection: tag,
+        }),
+        result: Ok(Built {
+            request: request(),
+            sources,
+        }),
+    });
+    assert!(starts_round(&core.handle(first).expect("admitted"), 1));
+    core
+}
+
+#[test]
+fn a_key_rebuild_stores_only_calls_from_the_replacement_round() {
+    use crate::engines::anthropic::encode::ToolUse;
+
+    let mut core = admitted_key_round(vec![T, B]);
+    let typed = |n: u32, word: &str| {
+        ToolUse::projected(&format!(
+            r#"{{"type":"tool_use","id":"tool-{n}","name":"list_tasks","input":{{"word":"{word}"}}}}"#
+        ))
+        .expect("a call")
+    };
+    play(&mut core, called(1));
+    play(
+        &mut core,
+        [TurnEvent::KeyCall {
+            index: 0,
+            call: typed(1, "withdrawn-source"),
+        }],
+    );
+    assert_eq!(
+        core.handle(Input::Delete {
+            thread: B,
+            after_turns: 1,
+            resend: false
+        }),
+        Ok(vec![Effect::Store(StoreOp::Delete { thread: B })])
+    );
+    assert_eq!(
+        core.handle(completed(&core)),
+        Ok(vec![Effect::CancelEngine { run: R }])
+    );
+    let effects = core
+        .handle(Input::Deleted {
+            thread: B,
+            outcome: Deleted::Hidden,
+            last_run: None,
+        })
+        .expect("answered");
+    let Some(Effect::Store(StoreOp::BuildContext(replacement))) = effects.first() else {
+        panic!("expected the replacement build: {effects:?}");
+    };
+    assert_eq!(replacement.key, attempt(1, 2));
+    assert!(starts_round(
+        &core
+            .handle(offering(replacement.key, &[T]))
+            .expect("admitted"),
+        1
+    ));
+    play(&mut core, called(2));
+    let fresh_call = typed(2, "replacement");
+    play(
+        &mut core,
+        [TurnEvent::KeyCall {
+            index: 0,
+            call: fresh_call.clone(),
+        }],
+    );
+    let effects = core.handle(completed(&core)).expect("current");
+    let [Effect::Store(StoreOp::RoundItems(round))] = effects.as_slice() else {
+        panic!("expected the replacement write: {effects:?}");
+    };
+    assert_eq!(
+        round.key_calls,
+        [fresh_call],
+        "the withdrawn call must not be written"
+    );
+    assert_eq!(
+        round.calls,
+        [(id(2), ToolOutput::Error(ToolError::Unknown))]
+    );
 }

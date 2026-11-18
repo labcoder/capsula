@@ -42,7 +42,7 @@ use crate::engines::{RunRequest, TurnEvent};
 use crate::store::{Failure, Interruption, RunEnd, SceneState};
 
 pub use admission::{BuildContext, BuildKey, ContextBuilt, Unbuilt};
-pub(crate) use availability::model_unavailable;
+pub(crate) use availability::{Arrived, model_unavailable};
 pub use availability::{Availability, Ready};
 pub use cards::{CardRead, Cards};
 pub use hold::{HoldKey, HoldRead, HoldSnapshot};
@@ -608,6 +608,8 @@ struct Run {
     arrived: availability::Arrived,
     /// What the run answers on, from its first admitted build on.
     route: Option<crate::context::Route>,
+    /// The sources of the builds admitted since its first round's, which a key round carries on.
+    sent: Vec<ThreadId>,
     /// A typed turn that arrived while Claude Code was being found, until it binds or is released.
     finding: Option<availability::Finding>,
     /// The round that compacted inline since the run's last admitted build.
@@ -1291,6 +1293,7 @@ impl Coordinator {
             build: None,
             arrived,
             route: None,
+            sent: Vec::new(),
             finding,
             compacted: None,
             draw: None,

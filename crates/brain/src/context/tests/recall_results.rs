@@ -35,7 +35,7 @@ fn native_results_dereference_live_sources_without_retaining_their_text() {
         )
         .unwrap()
     };
-    world.store.append_round((main,current), ConnectionTag(7), None,
+    world.store.append_round((main,current), crate::context::Route { kind: kumochi_protocol::message::ConnectionKind::ChatGpt, tag: ConnectionTag(7) }, None,
         &[Opaque::new(br#"{"type":"function_call","call_id":"recall","name":"search_history","arguments":"{}"}"#.to_vec()).unwrap()],
         &[(call("recall"), ToolOutput::Recall(selected))]).unwrap();
     let (stored, searchable): (String, Option<String>) = world
@@ -120,9 +120,12 @@ fn metadata_only_native_replay_is_source_fenced_and_other_connections_do_not_rep
         .store
         .append_round(
             (main, current),
-            ConnectionTag(7),
+            crate::context::Route {
+                kind: kumochi_protocol::message::ConnectionKind::ChatGpt,
+                tag: ConnectionTag(7),
+            },
             None,
-            &[Opaque::new(br#"{"type":"function_call"}"#.to_vec()).unwrap()],
+            &[Opaque::new(br#"{"type":"function_call","call_id":"list"}"#.to_vec()).unwrap()],
             &[(
                 call("list"),
                 ToolOutput::Recall(Selection::Tasks {

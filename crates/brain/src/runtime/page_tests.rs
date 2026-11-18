@@ -414,6 +414,10 @@ fn page_forwarding_leaves_the_current_run_and_its_pending_writes_alone() {
             origin: Origin::Task(ThreadId(2)),
             snapshot: None,
             first: true,
+            arrived: crate::coordinator::Arrived::of(
+                kumochi_protocol::message::ConnectionKind::ChatGpt,
+                crate::context::ConnectionTag(0),
+            ),
             drawings: crate::drawing::Digest::default(),
         }))])
     );

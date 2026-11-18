@@ -524,7 +524,8 @@ flowchart LR
   then each call's result in call order. `Input::RoundStored { run, round }` answers it, and only
   then does the next round's build go out through admission, so it reads what was just stored.
   The round counter is the build key's: a round that would be the 9th is refused before its build,
-  so no ninth ask or send happens. A delete's rebuild keeps `(run, round)` and the counters.
+  so no ninth ask or send happens. A delete's rebuild keeps `(run, round)` and the counters,
+  but drops the withdrawn attempt's response, including its typed key calls.
 - **A round with no calls** is stored too when it has native items, so the final message replays
   natively; `done` waits for its acknowledgement. A round with neither ends the run at once.
 - **A late acknowledgement only confirms storage.** After a Stop, a sign-out, a replacement or the

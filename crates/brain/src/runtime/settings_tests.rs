@@ -659,6 +659,7 @@ fn build(run: u64, attempt: u64, snapshot: Option<RunSnapshot>) -> BuildContext 
         thread: ThreadId(2),
         origin: Origin::Task(ThreadId(2)),
         first: snapshot.is_none(),
+        arrived: crate::coordinator::Arrived::default(),
         snapshot,
         drawings: crate::drawing::Digest::default(),
     }

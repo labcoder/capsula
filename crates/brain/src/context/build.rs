@@ -8,10 +8,12 @@ use serde_json::{Value, json};
 
 use super::bound::{fixed_bytes, item_bytes};
 use super::{
-    Body, BuildError, Built, HistoryRef, InputItem, Item, MAX_NOTES, ModelRequest, Origin,
-    RAW_RUNS, REMOVED, REREAD_CAP, Role, RunSnapshot, Supplied, UNAVAILABLE, note_item,
+    Body, BuildError, Built, ConnectionTag, HistoryRef, InputItem, Item, MAX_NOTES, ModelRequest,
+    Origin, RAW_RUNS, REMOVED, REREAD_CAP, Role, RunSnapshot, Supplied, UNAVAILABLE, note_item,
     summary_item, tools,
 };
+use crate::engines::Opaque;
+use crate::engines::anthropic::encode::ToolUse;
 use crate::store::StoreError;
 use crate::store::context::Snapshot;
 
@@ -210,10 +212,10 @@ fn runs(items: Vec<Item>, current: RunId) -> Result<Vec<Vec<Item>>, BuildError> 
 /// One run's input items. Its history results are re-read, adding each task they show text
 /// from to `sources`; `local_time` is added to the current run's turn.
 ///
-/// A run with stored rounds from the connection this run uses replays them natively, each
-/// round's items then its results, and of its text only what came after its last round, which
-/// no stored item carries (D13-M1). A run from another connection replays as its text only, so
-/// no call travels without its result.
+/// A run whose stored rounds all came from this run's route, its kind and tag, and pair up (see
+/// [`replayable`]) replays them natively, each round's items then its results, and of its text
+/// only what came after its last round, which a `ChatGPT` round's items carry (D13-M1). Any other
+/// run replays as its text only, so no call or result travels without its pair.
 pub(super) fn render(
     snapshot: &Snapshot<'_>,
     run: &RunSnapshot,
@@ -221,14 +223,14 @@ pub(super) fn render(
     local_time: Option<&str>,
     sources: &mut BTreeSet<ThreadId>,
 ) -> Result<Vec<InputItem>, StoreError> {
-    // Native items replay only on `ChatGPT`; any other route gets each run as its text.
-    let native = run
+    // Native items replay only on `ChatGPT` and the Anthropic key; any other route gets text.
+    let kind = run
         .choice
         .as_ref()
-        .is_none_or(|choice| choice.connection == ConnectionKind::ChatGpt)
-        && items.iter().any(
-            |item| matches!(&item.body, Body::Native { connection, .. } if *connection == run.connection),
-        );
+        .map_or(ConnectionKind::ChatGpt, |choice| choice.connection);
+    let native = kind != ConnectionKind::ClaudeCode && replayable(kind, run.connection, items);
+    // A `ChatGPT` round's items carry its text; the key's carry only its calls, so its text stays.
+    let carried = native && kind == ConnectionKind::ChatGpt;
     let after_rounds = items
         .iter()
         .rposition(|item| {
@@ -237,7 +239,7 @@ pub(super) fn render(
                 Body::Native { .. } | Body::Result { .. } | Body::Recall { .. }
             )
         })
-        .filter(|_| native);
+        .filter(|_| carried);
     let mut input: Vec<InputItem> = Vec::with_capacity(items.len());
     for (at, item) in items.iter().enumerate() {
         match &item.body {
@@ -278,8 +280,8 @@ pub(super) fn render(
                     output: json!({ "quoted_history": quoted }).to_string(),
                 });
             }
-            Body::Native { connection, item } => {
-                if native && *connection == run.connection {
+            Body::Native { item, .. } => {
+                if native {
                     input.push(InputItem::Native(item.clone()));
                 }
             }
@@ -302,6 +304,57 @@ pub(super) fn render(
         }
     }
     Ok(input)
+}
+
+/// Whether a run's stored rounds replay natively on `kind` and `tag`: at least one native item,
+/// every one from that route, no call made twice, and each result answering a call made before it,
+/// once. The key route also requires each call group to be answered before another group or text;
+/// `ChatGPT` keeps unfinished rounds as before. A foreign or unpaired row makes the whole run text.
+fn replayable(kind: ConnectionKind, tag: ConnectionTag, items: &[Item]) -> bool {
+    let key_route = kind == ConnectionKind::AnthropicKey;
+    let mut calls = BTreeSet::new();
+    let mut answered = BTreeSet::new();
+    let mut natives = false;
+    let mut in_results = false;
+    for item in items {
+        let fits = match &item.body {
+            Body::Native {
+                kind: made,
+                connection,
+                item,
+            } => {
+                if key_route && in_results && answered.len() != calls.len() {
+                    return false;
+                }
+                in_results = false;
+                natives = true;
+                *made == Some(kind)
+                    && *connection == tag
+                    && called(kind, item).is_none_or(|call| calls.insert(call))
+            }
+            Body::Result { call, .. } | Body::Recall { call, .. } => {
+                in_results = true;
+                calls.contains(call.as_str()) && answered.insert(call.as_str())
+            }
+            _ => !key_route || answered.len() == calls.len(),
+        };
+        if !fits {
+            return false;
+        }
+    }
+    natives && (!key_route || answered.len() == calls.len())
+}
+
+/// The call a stored item of `kind` makes, if it makes one.
+fn called(kind: ConnectionKind, item: &Opaque) -> Option<String> {
+    if kind == ConnectionKind::AnthropicKey {
+        return ToolUse::stored(item.bytes()).map(|call| call.id().to_owned());
+    }
+    let item: Value = serde_json::from_slice(item.bytes()).ok()?;
+    let call = item["call_id"]
+        .as_str()
+        .filter(|_| item["type"] == "function_call")?;
+    Some(call.to_owned())
 }
 
 /// Re-reads one reference as quoted data, only where `origin` may reach. A task that's gone or
