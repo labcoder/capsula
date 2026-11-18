@@ -211,7 +211,7 @@ fn blocked_hold_chords_and_refused_collection_arms_log_no_key_codes(cx: &mut Tes
     let at = Instant::now();
     deliver(
         Event::Key {
-            key: Key::Other(42),
+            key: Key::Other(crate::input::PhysicalKey::new(42).unwrap()),
             edge: Edge::Down,
         },
         EventTime { instant: at },
@@ -863,7 +863,7 @@ fn stale_deferred_escape_cannot_cancel_a_new_native_hold(cx: &mut TestAppContext
     cx.update(|_| {
         deliver(
             Event::Key {
-                key: Key::Other(1),
+                key: Key::Escape(crate::input::PhysicalKey::new(1).unwrap()),
                 edge: Edge::Down,
             },
             EventTime {
@@ -878,7 +878,7 @@ fn stale_deferred_escape_cannot_cancel_a_new_native_hold(cx: &mut TestAppContext
         );
         deliver(
             Event::Key {
-                key: Key::Other(1),
+                key: Key::Escape(crate::input::PhysicalKey::new(1).unwrap()),
                 edge: Edge::Up,
             },
             EventTime {
@@ -1067,7 +1067,7 @@ fn stale_deferred_escape_marker_ends_on_raw_key_up_without_a_hotkey(cx: &mut Tes
     cx.update(|_| {
         deliver(
             Event::Key {
-                key: Key::Other(1),
+                key: Key::Escape(crate::input::PhysicalKey::new(1).unwrap()),
                 edge: Edge::Down,
             },
             EventTime {
@@ -1076,7 +1076,7 @@ fn stale_deferred_escape_marker_ends_on_raw_key_up_without_a_hotkey(cx: &mut Tes
         );
         deliver(
             Event::Key {
-                key: Key::Other(1),
+                key: Key::Escape(crate::input::PhysicalKey::new(1).unwrap()),
                 edge: Edge::Up,
             },
             EventTime {
@@ -1808,7 +1808,7 @@ fn esc_with_the_talk_keys_is_asked_for_only_while_a_hold_s_keys_are_down(cx: &mu
     let finish = listen(&owner, &deliver, 1, at, cx);
     assert!(asked(cx), "the keys are down");
     for edge in [Edge::Down, Edge::Up] {
-        let key = Key::Other(1);
+        let key = Key::Escape(crate::input::PhysicalKey::new(1).unwrap());
         deliver(Event::Key { key, edge }, after(at, 600));
     }
     cx.run_until_parked();

@@ -30,7 +30,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 
 use super::presence::{PresenceError, struct_size};
 use crate::input::hold::{InputReason, InputStage};
-use crate::input::{Edge, Event, Key};
+use crate::input::{Edge, Event, Key, PhysicalKey};
 
 /// The proxy's only timer: the gesture's next one-shot deadline.
 const DEADLINE_TIMER: usize = 1;
@@ -95,8 +95,9 @@ impl Keys {
             // press: Esc down here and up below cancel the hold as any other key does, and
             // nothing else.
             _ if hotkey(message, wparam, TALK_ESCAPE_HOTKEY) => {
+                let id = PhysicalKey::new(ESCAPE_MAKE_CODE).expect("Escape has a bounded slot");
                 let escape = |edge| Event::Key {
-                    key: Key::Other(ESCAPE_MAKE_CODE),
+                    key: Key::Escape(id),
                     edge,
                 };
                 if let Some(deliver) = self.deliver.get() {
@@ -430,7 +431,15 @@ fn key_event(make_code: u16, flags: u16) -> Event {
     let key = match (make_code, e0) {
         (0x1D, false) => Key::LeftControl,
         (0x38, false) => Key::LeftAlt,
-        _ => Key::Other(make_code | u16::from(e0) << 8),
+        _ => {
+            let id = PhysicalKey::new(make_code | u16::from(e0) << 8)
+                .expect("validated make code and E0 fit a physical slot");
+            if make_code == ESCAPE_MAKE_CODE && !e0 {
+                Key::Escape(id)
+            } else {
+                Key::Other(id)
+            }
+        }
     };
     Event::Key { key, edge }
 }
@@ -459,12 +468,27 @@ mod tests {
         let key = |key, edge| Event::Key { key, edge };
         assert_eq!(key_event(0x1D, 0), key(Key::LeftControl, Edge::Down));
         assert_eq!(key_event(0x38, BREAK), key(Key::LeftAlt, Edge::Up));
-        assert_eq!(key_event(0x1D, E0), key(Key::Other(0x11D), Edge::Down));
+        assert_eq!(
+            key_event(0x1D, E0),
+            key(
+                Key::Other(crate::input::PhysicalKey::new(0x11D).unwrap()),
+                Edge::Down
+            )
+        );
         assert_eq!(
             key_event(0x38, E0 | BREAK),
-            key(Key::Other(0x138), Edge::Up)
+            key(
+                Key::Other(crate::input::PhysicalKey::new(0x138).unwrap()),
+                Edge::Up
+            )
         );
-        assert_eq!(key_event(0x1E, 0), key(Key::Other(0x1E), Edge::Down));
+        assert_eq!(
+            key_event(0x1E, 0),
+            key(
+                Key::Other(crate::input::PhysicalKey::new(0x1E).unwrap()),
+                Edge::Down
+            )
+        );
     }
 
     #[test]
@@ -562,7 +586,7 @@ mod tests {
         assert!(keys.deliver.set(deliver).is_ok());
         let hotkey = |id| keys.on_message(HWND::default(), WM_HOTKEY, WPARAM(id), LPARAM(0));
         let escape = |edge| Event::Key {
-            key: Key::Other(1),
+            key: Key::Escape(crate::input::PhysicalKey::new(1).unwrap()),
             edge,
         };
         assert!(hotkey(2), "the chord's message is consumed");
@@ -590,7 +614,7 @@ mod tests {
         keys.deadline.set(Some(at(300)));
         assert!(!keys.overdue(chord, at(350)), "exactly 50 ms late");
         let other = Event::Key {
-            key: Key::Other(0x1E),
+            key: Key::Other(crate::input::PhysicalKey::new(0x1E).unwrap()),
             edge: Edge::Down,
         };
         assert!(!keys.overdue(other, at(351)), "not a chord key");

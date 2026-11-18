@@ -95,13 +95,15 @@ impl Fence {
         paused: &Cell<bool>,
     ) -> Delivery {
         let paused = paused.get();
-        let reduced = state.recognize(event, now);
+        let reduced = state.recognize(event, now, |reason| {
+            tracing::debug!(stage = ?InputStage::Gesture, ?reason, "held speech input boundary");
+        });
         let cancelled = matches!(
             event,
             Event::Reset
                 | Event::Escape
                 | Event::Key {
-                    key: Key::Other(_),
+                    key: Key::Escape(_) | Key::Other(_),
                     ..
                 }
         );
@@ -243,7 +245,7 @@ mod tests {
         for event in [
             Event::Reset,
             Event::Key {
-                key: Key::Other(7),
+                key: Key::Other(crate::input::PhysicalKey::new(7).unwrap()),
                 edge: Edge::Down,
             },
         ] {

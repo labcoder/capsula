@@ -104,7 +104,7 @@ pub(super) fn deliver(
             escape_down.set(false);
         }
         if let Event::Key {
-            key: Key::Other(1),
+            key: Key::Escape(_),
             edge,
         } = event
         {
