@@ -330,6 +330,7 @@ texts! {
     AnthropicSaveUnconfirmed => "anthropic-save-unconfirmed",
     AnthropicRemoving => "anthropic-removing",
     AnthropicRemovePending => "anthropic-remove-pending",
+    AnthropicRemoveChanged => "anthropic-remove-changed",
     AnthropicRemoveOpen => "anthropic-remove-open",
     AnthropicRemove => "anthropic-remove",
     AnthropicRemoveTitle => "anthropic-remove-title",

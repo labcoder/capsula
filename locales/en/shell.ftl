@@ -398,6 +398,7 @@ anthropic-save-failed = Couldn’t save the key. Paste it again.
 anthropic-save-unconfirmed = Couldn’t confirm the save. Check the key before pasting again.
 anthropic-removing = Removing key
 anthropic-remove-pending = Removal not confirmed — retry
+anthropic-remove-changed = The saved key changed. Review it before removing it.
 anthropic-remove-open = Remove key…
 anthropic-remove = Remove key
 anthropic-remove-title = Remove this key from Kumochi?

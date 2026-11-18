@@ -197,6 +197,7 @@ fn notice(state: &KeyPaste) -> Option<Text> {
         Some(PasteFailure::Unsaved) => Some(Text::AnthropicSaveFailed),
         Some(PasteFailure::Unconfirmed) => None,
         Some(PasteFailure::Offline) => Some(Text::AccountSendFailed),
+        Some(PasteFailure::RemovalChanged) => Some(Text::AnthropicRemoveChanged),
         Some(PasteFailure::Rejected(reason)) => Some(rejection(reason)),
         None => match state.view() {
             Some(KeyView::Rejected(reason)) => Some(rejection(reason)),
@@ -257,7 +258,7 @@ impl Presence {
         }
     }
 
-    pub(in crate::presence) fn key_stage(
+    pub(in crate::presence) fn key_reply(
         &self,
         generation: u64,
         reply: &ControlToShell,
@@ -272,6 +273,10 @@ impl Presence {
         }
         let job = self.settings.update(cx, |state, cx| {
             let job = match reply {
+                ControlToShell::AnthropicKeyRemoved { .. } => {
+                    state.key_paste.removed(reply);
+                    None
+                }
                 ControlToShell::AnthropicKeyStageDone { .. } => {
                     state.key_paste.done(generation, reply, Instant::now());
                     None

@@ -280,7 +280,7 @@ impl Presence {
                         self.settle_github_interactive(cx);
                     }
                 }
-                LinkEvent::KeyStage { generation, reply } => self.key_stage(generation, &reply, cx),
+                LinkEvent::KeyStage { generation, reply } => self.key_reply(generation, &reply, cx),
                 LinkEvent::Error { generation, error } => {
                     if self
                         .session
@@ -450,7 +450,9 @@ impl Presence {
         let accepted = self.settings.update(cx, |state, cx| {
             let accepted = state.claude.receive(current, generation, view.claude_code);
             let key_changed = current == Some(generation)
-                && state.key_paste.receive(view.anthropic, view.anthropic_revision);
+                && state
+                    .key_paste
+                    .receive(view.anthropic, view.anthropic_revision);
             if accepted || key_changed {
                 cx.notify();
             }

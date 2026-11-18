@@ -32,8 +32,10 @@ A cancelled waiter never interrupts an in-flight call.
 
 A failed key removal remains pending in this brain process; Check/Retry retries
 the same revision, and staging requests/notifications are refused without adoption.
-A changed revision ends the old removal and reloads the current key.
-Unconfirmed is not confirmation of removal. Until the removal transaction commits,
+A changed revision ends the old removal and reloads the current key, so removing
+the replacement requires a new confirmation. The row waits for its own removal
+receipt before offering Retry; queued connection snapshots don't count as receipts.
+Until the removal transaction commits,
 quitting or restarting loses that in-memory
 intent and the next startup may load and check the still-current key; retry removal until it
 succeeds. A paste refused while removal is pending requires a new explicit paste;

@@ -2,7 +2,7 @@ use gpui_kit::{
     AnyWindowHandle, AppContext as _, Entity, Render, TestAppContext, VisualTestContext,
     WindowOptions,
 };
-use kumochi_protocol::message::{Incarnation, KeyStageId, KeyStagePlan};
+use kumochi_protocol::message::{Incarnation, KeyRemovalFailure, KeyStageId, KeyStagePlan};
 
 use super::*;
 use crate::link::Session;
@@ -231,6 +231,86 @@ fn a_stale_or_cancelled_confirmation_cannot_remove_a_key(cx: &mut TestAppContext
     click(&mut visual, "confirmation-danger");
     assert_eq!(
         controls.try_recv(),
-        Ok(ControlToBrain::Connection(ConnectionOp::RemoveAnthropicKey { revision: 2 }))
+        Ok(ControlToBrain::Connection(
+            ConnectionOp::RemoveAnthropicKey {
+                revision: 2,
+                request: 1
+            }
+        ))
+    );
+}
+
+#[gpui::test]
+fn removing_stays_visible_until_its_own_receipt_arrives(cx: &mut TestAppContext) {
+    let (window, owner, controls) = isolated_row(cx);
+    let mut visual = VisualTestContext::from_window(window, cx);
+    visual.update(|_, cx| {
+        owner.update(cx, |owner, cx| {
+            owner.settings.update(cx, |state, cx| {
+                state.key_paste.receive(KeyView::Ready, Some(2));
+                cx.notify();
+            });
+        });
+    });
+    click(&mut visual, "anthropic-remove");
+    click(&mut visual, "confirmation-danger");
+    assert_eq!(
+        controls.try_recv(),
+        Ok(ControlToBrain::Connection(
+            ConnectionOp::RemoveAnthropicKey {
+                revision: 2,
+                request: 1
+            }
+        ))
+    );
+    let failed = ControlToShell::AnthropicKeyRemoved {
+        request: 1,
+        result: Err(KeyRemovalFailure::Unconfirmed),
+    };
+    visual.update(|_, cx| {
+        owner.update(cx, |owner, cx| {
+            owner.settings.update(cx, |state, cx| {
+                state.key_paste.receive(KeyView::Unconfirmed, Some(2));
+                cx.notify();
+            });
+            owner.key_reply(6, &failed, cx);
+        });
+    });
+    visual.run_until_parked();
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+    assert!(
+        visual
+            .debug_bounds("anthropic-status:Removing key")
+            .is_some()
+    );
+    assert!(
+        visual
+            .debug_bounds("anthropic-status:Removal not confirmed — retry")
+            .is_none()
+    );
+    assert!(visual.debug_bounds("anthropic-check").is_none());
+
+    visual.update(|_, cx| owner.update(cx, |owner, cx| owner.key_reply(7, &failed, cx)));
+    visual.run_until_parked();
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+    assert!(
+        visual
+            .debug_bounds("anthropic-status:Removing key")
+            .is_none()
+    );
+    assert!(
+        visual
+            .debug_bounds("anthropic-status:Removal not confirmed — retry")
+            .is_some()
+    );
+    click(&mut visual, "anthropic-check");
+    assert_eq!(
+        controls.try_recv(),
+        Ok(ControlToBrain::Connection(
+            ConnectionOp::RemoveAnthropicKey {
+                revision: 2,
+                request: 2
+            }
+        ))
     );
 }
