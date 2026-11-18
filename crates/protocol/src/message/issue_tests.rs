@@ -171,8 +171,15 @@ fn tagged_github_refusal_appends_wire_tags_and_keeps_error_validation() {
         postcard::to_allocvec(&ErrorKey::ClaudeCodeBusy).unwrap(),
         [49]
     );
+    let hold_off = ControlToShell::Error(ErrorKey::HoldToTalkOff.into());
+    let hold_off_wire = encode(&hold_off, Pipe::Control).unwrap();
+    assert_eq!(hold_off_wire, [4, 0, 0, 0, 8, 50, 0, 0]);
+    assert_eq!(
+        read::<ControlToShell>(&mut hold_off_wire.as_slice(), Pipe::Control).unwrap(),
+        Some(hold_off)
+    );
     let mut unknown = wire;
-    unknown[5] = 50;
+    unknown[5] = 51;
     assert!(matches!(
         read::<ControlToShell>(&mut unknown.as_slice(), Pipe::Control),
         Err(FrameError::Malformed(_))
