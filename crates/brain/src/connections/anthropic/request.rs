@@ -48,12 +48,96 @@ impl MessagesBody {
 }
 
 /// `bytes` as one JSON value read exactly as written: a member name repeated in any object is
-/// refused, since a reader may keep either copy, and no object is taken as `serde_json`'s embedded
-/// raw value, which its `Value` reader does for the marker name.
+/// refused, since readers differ on which copy counts. Every Anthropic reply byte is read this
+/// way. Names are read as plain strings, so no object is taken for `serde_json`'s embedded raw
+/// value, even in a workspace build, where gpui turns `raw_value` on.
 pub(crate) fn literal(bytes: &[u8]) -> Result<Value, Failure> {
     serde_json::from_slice::<Literal>(bytes)
         .map(|Literal(value)| value)
         .map_err(|_| Failure::Request)
+}
+
+/// The members of `object`, JSON that [`literal`] has read, in order: each name decoded and
+/// each value exactly as written. None for anything else.
+pub(crate) fn members(object: &str) -> Option<Vec<(String, &str)>> {
+    let bytes = object.as_bytes();
+    let mut at = space(bytes, 0);
+    if bytes.get(at) != Some(&b'{') {
+        return None;
+    }
+    at = space(bytes, at + 1);
+    let mut members = Vec::new();
+    if bytes.get(at) == Some(&b'}') {
+        return (space(bytes, at + 1) == bytes.len()).then_some(members);
+    }
+    loop {
+        let named = end(bytes, at)?;
+        let name = serde_json::from_str(object.get(at..named)?).ok()?;
+        at = space(bytes, named);
+        if bytes.get(at) != Some(&b':') {
+            return None;
+        }
+        let start = space(bytes, at + 1);
+        let stop = end(bytes, start)?;
+        members.push((name, object.get(start..stop)?));
+        at = space(bytes, stop);
+        match bytes.get(at) {
+            Some(b',') => at = space(bytes, at + 1),
+            Some(b'}') => return (space(bytes, at + 1) == bytes.len()).then_some(members),
+            _ => return None,
+        }
+    }
+}
+
+fn space(bytes: &[u8], mut at: usize) -> usize {
+    while bytes
+        .get(at)
+        .is_some_and(|byte| matches!(byte, b' ' | b'\t' | b'\n' | b'\r'))
+    {
+        at += 1;
+    }
+    at
+}
+
+/// Where the value starting at `at` ends, in JSON already read: only strings and brackets
+/// need tracking, since a scalar runs to the next delimiter.
+fn end(bytes: &[u8], mut at: usize) -> Option<usize> {
+    let mut depth = 0_usize;
+    loop {
+        match *bytes.get(at)? {
+            b'"' => {
+                at += 1;
+                loop {
+                    match *bytes.get(at)? {
+                        b'\\' => at += 2,
+                        b'"' => break,
+                        _ => at += 1,
+                    }
+                }
+                at += 1;
+            }
+            b'{' | b'[' => {
+                depth += 1;
+                at += 1;
+            }
+            b'}' | b']' => {
+                depth = depth.checked_sub(1)?;
+                at += 1;
+            }
+            _ if depth == 0 => {
+                while bytes.get(at).is_some_and(|byte| {
+                    !matches!(byte, b',' | b'}' | b']' | b' ' | b'\t' | b'\n' | b'\r')
+                }) {
+                    at += 1;
+                }
+                return Some(at);
+            }
+            _ => at += 1,
+        }
+        if depth == 0 {
+            return Some(at);
+        }
+    }
 }
 
 struct Literal(Value);

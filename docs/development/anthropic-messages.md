@@ -79,8 +79,8 @@ ending takes precedence. Empty initial text is skipped; other text becomes TextD
 Exact `draw` becomes Draw and every
 other bounded tool name becomes Unknown. The coordinator alone decides offers, charges
 calls and dispatches. Tool arguments use concatenated fragments, or the start object when
-there are none, ignoring empty argument fragments, and must be a complete JSON object
-before ToolCallReady. A nonempty start object used this way is also queued as one
+there are none, ignoring empty argument fragments, and must be a complete JSON object,
+with no member name repeated, before ToolCallReady. A nonempty start object used this way is also queued as one
 ToolArgsDelta before ToolCallReady, so a streamed `draw` sees the bytes its Ready names.
 
 Thinking and redacted thinking become private Opaque items indexed in provider order;
@@ -152,28 +152,36 @@ Only the round's own mapper supplies the reply. The run makes it with
 `Mapper::answering(&conversation)` before the stream's first callback, which binds it to that
 request's `Prefix`; each built request gets its own, so a rebuild of the same input is another
 one. When the stream completes, `Mapper::reply` hands the whole reply over once: every block in
-output order, exactly as it came. The reader keeps each `content_block_start`'s block as
-written, and the mapper keeps every member of it untouched (a call's `caller`, a text block's
-`citations`, a field this route doesn't know) and sets only the fields documented deltas stream:
-`text`, `thinking`, `signature`, and `input` when fragments came. Members may come back in
-another order, which the prefix check ignores. `Reply` has no constructor or field outside the
-mapper, and the coordinator adds only the matched results. This is run memory only: the store
-never gets a raw block.
+output order, exactly as it came. Every event is read once, by the literal reader below, and
+the reader and mapper decide everything from that one read. The stream's reader comes from
+`Mapper::reader`, chosen when the stream is made: only a bound mapper's keeps each
+`content_block_start` event's bytes, and an unbound stream keeps none, with the same checks
+either way. The mapper keeps every member of a block's start as written and in its order (a
+call's `caller`, a text block's `citations`, a field this route doesn't know) and sets only the
+fields documented deltas stream: `text`, `thinking`, `signature`, and `input` when fragments
+came. A streamed field the start lacked comes last. `Reply` has no constructor or field outside
+the mapper, and the coordinator adds only the matched results. This is run memory only: the
+store never gets a raw block.
 
 There's no reply when the mapper can't put a block back as it came: an unknown block, a start
-that isn't an object, a member name repeated anywhere in a block or its streamed input, an
-empty text block or empty redacted data (Messages refuses both), a nonempty initial input that
-fragments then follow, or content already in `message_start`. Nor after a failed or partial
-stream: an unknown delta, unsigned thinking, a block left open, a missing index, or EOF before
-`message_stop`, even after closed blocks.
+that isn't an object, an empty text block or empty redacted data (Messages refuses both), a
+nonempty initial input that fragments then follow, or content already in `message_start`. Nor
+after a failed or partial stream: a member name repeated anywhere in an event or a call's input,
+an id or name that isn't a string, an unknown delta, unsigned thinking, a block left open, a
+missing index, or EOF before `message_stop`, even after closed blocks.
 
-Tool input stays text from the stream to the wire. `Conversation` keeps its messages as the JSON
-written (serde_json's `RawValue`), and `MessagesBody::from_json`, which only the encoder can
-call, checks the envelope and then sends those bytes. It reads them literally, so what it checks
-is what goes out: a member name repeated in any object is refused, and no object is read as
-serde_json's embedded raw value. The 512 KiB bound applies to those final bytes. A 30-digit integer or a long decimal goes back as the model wrote it. Key
-order and escapes elsewhere may differ from the stream, since the provider's prefix check
-compares parsed JSON.
+Tool input stays text from the stream to the wire. On a bound stream the tool runs with the same
+bytes the reply sends back: the fragments, or the start's `input` as written when none came.
+`Conversation` keeps its messages as JSON text, read back literally only for the pairing and
+role checks, and `MessagesBody::from_json`, which only the encoder can call, checks the envelope
+and then sends those bytes. The literal reader refuses a member name repeated in any object, and
+reads every name as a plain string, so it never takes an object for serde_json's embedded raw
+value. That holds in a workspace build too, where gpui turns serde_json's `raw_value` feature
+on; the brain doesn't ask for it. The 512 KiB bound applies to the final bytes. A 30-digit integer or a long
+decimal goes back as the model wrote it. Whitespace between members and the escapes in streamed
+text may differ from the stream, since the provider's prefix check compares parsed JSON. An
+unbound stream's start-only input reaches the tool as its parsed value written again, as before,
+since nothing from that stream goes back as a reply.
 
 Nothing continues, and the tool flow ends with a local refusal, when the reply answered another
 request, or the next request would go on another sign-in tag or model. A `Prefix` means the

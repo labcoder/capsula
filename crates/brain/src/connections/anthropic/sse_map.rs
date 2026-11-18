@@ -3,12 +3,11 @@
 use std::fmt;
 use std::ops::ControlFlow;
 
-use serde_json::value::RawValue;
-
 use crate::connections::model::framer::{Framer, Limit};
 use crate::connections::model::sse::{MAX_TEXT_BYTES, Progress, SseEvent};
 
 use super::error::Failure;
+use super::request::literal;
 
 /// A successful round ending; tool execution belongs to the engine, not this reader.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -29,15 +28,11 @@ enum State {
     Failed(Failure),
 }
 
-/// A block start's block as written, so a reply can go back exactly as it came.
-#[derive(serde::Deserialize)]
-struct Start {
-    content_block: Box<RawValue>,
-}
-
 /// One sticky stream: only `message_stop` after a supported stop reason completes it.
 #[derive(Default)]
 pub struct Reader {
+    /// Whether block starts keep their bytes, for a reply that goes back as it came.
+    capture: bool,
     framer: Framer,
     text: usize,
     reason: Option<StopReason>,
@@ -47,6 +42,7 @@ pub struct Reader {
 impl fmt::Debug for Reader {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("AnthropicReader")
+            .field("capture", &self.capture)
             .field("text_bytes", &self.text)
             .field("state", &self.state)
             .finish_non_exhaustive()
@@ -60,6 +56,15 @@ impl From<Limit> for Failure {
 }
 
 impl Reader {
+    /// A reader whose block starts keep their bytes, for a mapper bound to its request.
+    #[must_use]
+    pub fn capturing() -> Self {
+        Self {
+            capture: true,
+            ..Self::default()
+        }
+    }
+
     /// Forward valid known events in order, ignoring pings and bounded future event types.
     ///
     /// # Errors
@@ -78,12 +83,8 @@ impl Reader {
             State::Open => {}
         }
         let result = self.framer.feed(bytes, &mut |data| {
-            let value = serde_json::from_slice(data).map_err(|_| Failure::Protocol)?;
+            let value = literal(data).map_err(|_| Failure::Protocol)?;
             let mut event = SseEvent::from_value(value).ok_or(Failure::Protocol)?;
-            if event.kind() == "content_block_start" {
-                let start: Start = serde_json::from_slice(data).map_err(|_| Failure::Protocol)?;
-                event = event.with_block(start.content_block);
-            }
             match event.kind() {
                 "error" => return Err(Failure::streamed(event.value())),
                 "content_block_delta" => {
@@ -129,7 +130,12 @@ impl Reader {
                     on_event(&event);
                     return Ok(ControlFlow::Break(()));
                 }
-                "message_start" | "content_block_start" | "content_block_stop" => {}
+                "content_block_start" => {
+                    if self.capture {
+                        event.capture(data);
+                    }
+                }
+                "message_start" | "content_block_stop" => {}
                 _ => return Ok(ControlFlow::Continue(())),
             }
             on_event(&event);

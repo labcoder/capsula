@@ -2,15 +2,16 @@
 
 pub(crate) mod encode;
 
-use std::collections::BTreeMap;
 use std::{fmt, io};
 
 use serde_json::Value;
-use serde_json::value::RawValue;
 
 use super::{CallId, EngineFailure, Finish, Opaque, Tokens, ToolName, TurnEvent, Usage};
 use crate::connections::{
-    anthropic::{error::Failure, request::literal},
+    anthropic::{
+        error::Failure,
+        request::{literal, members},
+    },
     model::sse::{Progress, SseEvent},
 };
 
@@ -66,8 +67,8 @@ pub(crate) struct Mapper {
     answering: Option<encode::Prefix>,
     /// Each stopped block of the reply, as its JSON, by output index.
     kept: Vec<(u32, String)>,
-    /// Each open block's start as written, with its charged size, by output index.
-    starts: Vec<(u32, usize, BTreeMap<String, Box<RawValue>>)>,
+    /// Each open block's start as written, member by member, with its charged size, by index.
+    starts: Vec<(u32, usize, Members)>,
 }
 
 /// A completed round's whole reply, its blocks in output order exactly as they came (tool input as
@@ -212,7 +213,7 @@ impl Mapper {
                 }
                 self.final_usage |= v["delta"]["stop_reason"].is_string();
             }
-            "content_block_start" => self.start(index(v)?, &v["content_block"], event.block())?,
+            "content_block_start" => self.start(index(v)?, &v["content_block"], event.written())?,
             "content_block_delta" => self.delta(index(v)?, &v["delta"])?,
             "content_block_stop" => self.stop(index(v)?)?,
             _ => {}
@@ -249,13 +250,14 @@ impl Mapper {
         Ok(())
     }
 
-    fn start(&mut self, index: u32, v: &Value, raw: Option<&RawValue>) -> Result<(), ()> {
+    fn start(&mut self, index: u32, v: &Value, written: Option<&[u8]>) -> Result<(), ()> {
         if self.usage.is_none()
             || self.blocks.len() == ITEMS
             || self.blocks.iter().any(|(i, _)| *i == index)
         {
             return Err(());
         }
+        let held = self.answering.as_ref().and(written).and_then(held);
         let block = match text(&v["type"])? {
             "text" => {
                 let initial = text(&v["text"])?;
@@ -282,7 +284,11 @@ impl Mapper {
                     return Err(());
                 }
                 self.charge(id.len() * 2)?;
-                let start = self.serialize(&v["input"], BYTES)?;
+                // A bound call's tool gets the input as written, the bytes its reply returns.
+                let start = match held.iter().flatten().find(|(name, _)| name == "input") {
+                    Some((_, input)) => input.clone().into_bytes(),
+                    None => self.serialize(&v["input"], BYTES)?,
+                };
                 self.charge(start.len())?;
                 self.queue(TurnEvent::ToolCallStarted {
                     call: call.clone(),
@@ -315,10 +321,16 @@ impl Mapper {
             }
             _ => Block::Skipped,
         };
-        if matches!(block, Block::Skipped) {
-            self.unbind();
-        } else if self.answering.is_some() {
-            self.hold(index, raw)?;
+        match held {
+            Some(held) if !matches!(block, Block::Skipped) => {
+                let size = held
+                    .iter()
+                    .map(|(name, text)| name.len() + text.len())
+                    .sum();
+                self.charge(size)?;
+                self.starts.push((index, size, held));
+            }
+            _ => self.unbind(),
         }
         self.blocks.push((index, block));
         Ok(())
@@ -327,21 +339,19 @@ impl Mapper {
     fn delta(&mut self, index: u32, v: &Value) -> Result<(), ()> {
         let at = self.at(index)?;
         let kind = text(&v["type"])?;
-        let (key, copies) = match (&self.blocks[at].1, kind) {
-            (Block::Text(_), "text_delta") => ("text", 1 + usize::from(self.answering.is_some())),
-            (Block::Tool { .. }, "input_json_delta") => ("partial_json", 2),
-            (Block::Thinking { .. }, "thinking_delta") => ("thinking", 1),
-            (Block::Thinking { .. }, "signature_delta") => ("signature", 1),
+        let (key, copies, fragment) = match (&self.blocks[at].1, kind) {
+            (Block::Text(_), "text_delta") => {
+                ("text", 1 + usize::from(self.answering.is_some()), false)
+            }
+            (Block::Tool { .. }, "input_json_delta") => ("partial_json", 2, true),
+            (Block::Thinking { .. }, "thinking_delta") => ("thinking", 1, false),
+            (Block::Thinking { .. }, "signature_delta") => ("signature", 1, false),
             (Block::Skipped, _) => return Ok(()),
             _ => return Err(()),
         };
         let delta = text(&v[key])?;
-        if kind == "input_json_delta" && delta.is_empty() {
+        if fragment && delta.is_empty() {
             return Ok(());
-        }
-        if matches!(&self.blocks[at].1, Block::Tool { start, args: None, .. } if start != "{}") {
-            // Whether fragments replace or extend a nonempty initial input isn't documented.
-            self.unbind();
         }
         let queued = match &self.blocks[at].1 {
             Block::Tool { call, .. } => call.as_str().len() + EVENT_BYTES,
@@ -355,6 +365,7 @@ impl Mapper {
                 .and_then(|n| n.checked_add(queued))
                 .ok_or(())?,
         )?;
+        let mut mixed = false;
         match &mut self.blocks[at].1 {
             Block::Text(kept) => {
                 if self.answering.is_some() {
@@ -366,6 +377,8 @@ impl Mapper {
                 call, start, args, ..
             } => {
                 if args.is_none() {
+                    // Whether fragments replace or extend a nonempty initial input isn't documented.
+                    mixed = start != "{}";
                     self.bytes -= start.len();
                     *start = String::new();
                 }
@@ -383,6 +396,9 @@ impl Mapper {
                 }
             }
             _ => return Err(()),
+        }
+        if mixed {
+            self.unbind();
         }
         Ok(())
     }
@@ -405,10 +421,7 @@ impl Mapper {
                 // Without fragments the start's own input goes back as written.
                 let input = args.as_ref().filter(|_| self.answering.is_some()).cloned();
                 let args = args.unwrap_or(start);
-                if !serde_json::from_str::<Value>(&args)
-                    .map_err(|_| ())?
-                    .is_object()
-                {
+                if !literal(args.as_bytes()).map_err(|_| ())?.is_object() {
                     return Err(());
                 }
                 self.bytes -= retained;
@@ -417,12 +430,6 @@ impl Mapper {
                         call: call.clone(),
                         delta: args.clone(),
                     })?;
-                }
-                if input
-                    .as_ref()
-                    .is_some_and(|input| literal(input.as_bytes()).is_err())
-                {
-                    self.unbind();
                 }
                 self.queue(TurnEvent::ToolCallReady { call, args })?;
                 let kept = self.assembled(index, &[], input);
@@ -474,24 +481,8 @@ impl Mapper {
         })
     }
 
-    /// Holds a bound mapper's block start as written, unbinding when it can't be read exactly.
-    fn hold(&mut self, index: u32, start: Option<&RawValue>) -> Result<(), ()> {
-        let members = start
-            .filter(|start| literal(start.get().as_bytes()).is_ok())
-            .and_then(|start| {
-                serde_json::from_str::<BTreeMap<String, Box<RawValue>>>(start.get()).ok()
-            });
-        let (Some(start), Some(members)) = (start, members) else {
-            self.unbind();
-            return Ok(());
-        };
-        self.charge(start.get().len())?;
-        self.starts.push((index, start.get().len(), members));
-        Ok(())
-    }
-
-    /// A bound mapper's block exactly as it came: its start's members as written, each streamed
-    /// field set to what its deltas built, and `input` to the call's fragments when it had any.
+    /// A bound mapper's block exactly as it came: its start's members as written and in order, each
+    /// streamed field set to what its deltas built, and `input` to the call's fragments if any.
     fn assembled(
         &mut self,
         index: u32,
@@ -502,16 +493,28 @@ impl Mapper {
         let at = self.starts.iter().position(|(i, ..)| *i == index)?;
         let (_, size, mut members) = self.starts.swap_remove(at);
         self.bytes -= size;
+        let mut set = Vec::new();
         for (name, value) in streamed {
-            members.insert(
-                (*name).to_owned(),
-                serde_json::value::to_raw_value(value).ok()?,
-            );
+            set.push((*name, serde_json::to_string(value).ok()?));
         }
-        if let Some(input) = input {
-            members.insert("input".to_owned(), RawValue::from_string(input).ok()?);
+        set.extend(input.map(|input| ("input", input)));
+        for (name, text) in set {
+            match members.iter_mut().find(|(member, _)| member == name) {
+                Some((_, held)) => *held = text,
+                None => members.push((name.to_owned(), text)),
+            }
         }
-        serde_json::to_string(&members).ok()
+        let mut block = String::from("{");
+        for (name, text) in &members {
+            if block.len() > 1 {
+                block.push(',');
+            }
+            block.push_str(&serde_json::to_string(name).ok()?);
+            block.push(':');
+            block.push_str(text);
+        }
+        block.push('}');
+        Some(block)
     }
 
     /// Drops the reply when it can't go back as it came, so this stream continues nothing.
@@ -614,6 +617,23 @@ impl io::Write for Bounded {
     fn flush(&mut self) -> io::Result<()> {
         Ok(())
     }
+}
+
+/// A block start's members, each name decoded and each value as written, in order.
+type Members = Vec<(String, String)>;
+
+/// A block start's members as written, from its event's bytes.
+fn held(written: &[u8]) -> Option<Members> {
+    let event = std::str::from_utf8(written).ok()?;
+    let (_, block) = members(event)?
+        .into_iter()
+        .find(|(name, _)| name == "content_block")?;
+    Some(
+        members(block)?
+            .into_iter()
+            .map(|(name, text)| (name, text.to_owned()))
+            .collect(),
+    )
 }
 
 fn text(value: &Value) -> Result<&str, ()> {

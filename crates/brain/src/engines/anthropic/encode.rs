@@ -7,12 +7,13 @@ use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use kumochi_protocol::message::{ConnectionKind, ModelSlug};
-use serde_json::value::RawValue;
 use serde_json::{Map, Value, json};
 use zeroize::Zeroizing;
 
 use super::{Mapper, Reply};
 use crate::connections::anthropic::messages::MessagesBody;
+use crate::connections::anthropic::request::literal;
+use crate::connections::anthropic::sse_map::Reader;
 use crate::context::{BOUND, ConnectionTag, InputItem, ModelRequest, Role};
 use crate::engines::responses::effort;
 use crate::engines::{CallId, Opaque};
@@ -73,7 +74,7 @@ pub(crate) enum BodyError {
 /// in the run's memory only.
 pub(crate) struct Conversation {
     head: Map<String, Value>,
-    messages: Vec<Box<RawValue>>,
+    messages: Vec<String>,
     tag: ConnectionTag,
     prefix: Prefix,
 }
@@ -83,9 +84,9 @@ impl Conversation {
     fn wire(&self) -> Result<Vec<u8>, BodyError> {
         let mut bytes = serde_json::to_vec(&self.head).map_err(|_| BodyError::Envelope)?;
         bytes.pop();
-        bytes.extend_from_slice(b",\"messages\":");
-        serde_json::to_writer(&mut bytes, &self.messages).map_err(|_| BodyError::Envelope)?;
-        bytes.push(b'}');
+        bytes.extend_from_slice(b",\"messages\":[");
+        bytes.extend_from_slice(self.messages.join(",").as_bytes());
+        bytes.extend_from_slice(b"]}");
         Ok(bytes)
     }
 }
@@ -116,6 +117,15 @@ impl Mapper {
             ..Self::default()
         }
     }
+
+    /// The reader for this mapper's stream: only a bound mapper's keeps block starts as written.
+    pub(crate) fn reader(&self) -> Reader {
+        if self.answering.is_some() {
+            Reader::capturing()
+        } else {
+            Reader::default()
+        }
+    }
 }
 
 /// The Messages body for `request` on the sign-in `tag`, and the conversation a tool round
@@ -128,7 +138,7 @@ pub(crate) fn body(
         return Err(BodyError::Envelope);
     };
     let messages = match head.remove("messages") {
-        Some(Value::Array(messages)) => messages.iter().map(raw).collect::<Result<_, _>>()?,
+        Some(Value::Array(messages)) => messages.iter().map(written).collect::<Result<_, _>>()?,
         _ => return Err(BodyError::Envelope),
     };
     sealed(head, messages, tag)
@@ -160,7 +170,7 @@ pub(crate) fn next(
     }
     let mut called = false;
     for block in &blocks {
-        let block: Value = serde_json::from_str(block).map_err(|_| BodyError::Native)?;
+        let block = literal(block.as_bytes()).map_err(|_| BodyError::Native)?;
         if block["type"] == "tool_use" {
             named(block["id"].as_str().ok_or(BodyError::Name)?)?;
             named(block["name"].as_str().ok_or(BodyError::Name)?)?;
@@ -171,29 +181,29 @@ pub(crate) fn next(
         return Err(BodyError::Pairing);
     }
     let assistant = format!(r#"{{"role":"assistant","content":[{}]}}"#, blocks.join(","));
-    messages.push(RawValue::from_string(assistant).map_err(|_| BodyError::Native)?);
+    messages.push(assistant);
     let results = results
         .iter()
         .map(|(call, output)| Ok(tool_result(id(call)?, output)))
         .collect::<Result<Vec<_>, BodyError>>()?;
-    messages.push(raw(&json!({ "role": "user", "content": results }))?);
+    messages.push(written(&json!({ "role": "user", "content": results }))?);
     sealed(head, messages, tag)
 }
 
-fn raw(value: &Value) -> Result<Box<RawValue>, BodyError> {
-    serde_json::value::to_raw_value(value).map_err(|_| BodyError::Envelope)
+fn written(value: &Value) -> Result<String, BodyError> {
+    serde_json::to_string(value).map_err(|_| BodyError::Envelope)
 }
 
 /// Checks a whole body and hands its exact bytes to the transport's envelope.
 fn sealed(
     head: Map<String, Value>,
-    messages: Vec<Box<RawValue>>,
+    messages: Vec<String>,
     tag: ConnectionTag,
 ) -> Result<(MessagesBody, Conversation), BodyError> {
     // Read back only to check pairs and roles; what's sent is `messages` as written.
     let read = messages
         .iter()
-        .map(|message| serde_json::from_str(message.get()).map_err(|_| BodyError::Envelope))
+        .map(|message| literal(message.as_bytes()).map_err(|_| BodyError::Envelope))
         .collect::<Result<Vec<Value>, _>>()?;
     paired(&read)?;
     if read.last().is_none_or(|last| last["role"] != "user") {

@@ -268,3 +268,22 @@ fn json_is_read_as_written_with_no_name_repeated_at_any_depth() {
         );
     }
 }
+
+#[test]
+fn members_are_read_in_order_each_value_exactly_as_written() {
+    let object = r#" { "a" : 1.50 , "b\"c":"x\\\"}" ,"d":[{"e":[true]},null], "f":{}, "g":-2e3 } "#;
+    assert_eq!(
+        super::members(object),
+        Some(vec![
+            ("a".to_owned(), "1.50"),
+            ("b\"c".to_owned(), r#""x\\\"}""#),
+            ("d".to_owned(), r#"[{"e":[true]},null]"#),
+            ("f".to_owned(), "{}"),
+            ("g".to_owned(), "-2e3"),
+        ])
+    );
+    assert_eq!(super::members("{}"), Some(Vec::new()));
+    for refused in ["[1]", "\"a\"", r#"{"a":1} x"#, r#"{"a":1"#, ""] {
+        assert_eq!(super::members(refused), None, "{refused}");
+    }
+}

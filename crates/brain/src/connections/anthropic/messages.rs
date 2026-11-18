@@ -46,6 +46,10 @@ struct Attempt<Io, L> {
 ///
 /// # Panics
 /// Never: a flushed upload owns its connection.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the reader is chosen with the stream's mapper, before the stream starts"
+)]
 pub async fn stream<C: AnthropicConnect, L>(
     client: &ModelClient<C>,
     body: &MessagesBody,
@@ -53,6 +57,7 @@ pub async fn stream<C: AnthropicConnect, L>(
     ask: impl Future<Output = Option<L>>,
     run_budget: &Budget,
     live_budget: &Budget,
+    mut reader: Reader,
     mut out: impl Events,
 ) -> Result<StopReason, Failure> {
     let request = request(key.expose().as_str(), body.bytes())?;
@@ -94,7 +99,6 @@ pub async fn stream<C: AnthropicConnect, L>(
         return Err(Failure::Protocol);
     }
     let mut body = Body::new(head.framing);
-    let mut reader = Reader::default();
     loop {
         let length = timeout_at(content_by, conn.next(&mut body, IDLE))
             .await
