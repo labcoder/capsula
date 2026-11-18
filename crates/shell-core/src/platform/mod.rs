@@ -18,6 +18,8 @@ mod windows;
 #[cfg(any(test, feature = "test-support"))]
 pub(crate) use windows::pipe::test_pair;
 #[cfg(windows)]
+pub use windows::speaker::open as open_speaker;
+#[cfg(windows)]
 pub(crate) use windows::{PipeClient, launch_detached};
 #[cfg(windows)]
 pub use windows::{data_dir, session_id};

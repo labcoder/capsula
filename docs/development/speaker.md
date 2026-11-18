@@ -5,7 +5,7 @@ speech, writes it to the device, and decides from the device's own clock which s
 The brain still owns what is spoken and when a run ends ([voice.md](voice.md)). The speaker
 only reports what played and when its output is quiet.
 
-**Dormant.** Nothing opens a speaker.
+**Dormant.** Nothing calls the Windows opener.
 
 ## Pieces
 
@@ -14,6 +14,7 @@ only reports what played and when its output is quiet.
 | `Clock` | `speaker/clock.rs` | the device epoch, the ledger, the deadline and what counts as played |
 | `Engine` | `speaker/engine.rs` | the 20 s arena, up to 256 segments, runs, stops, pauses and the reports |
 | `Worker`, `Speaker`, `Input` | `speaker.rs` | the bounded channels to the worker; credit; spent buffers; teardown |
+| Windows adapter | `platform/windows/speaker.rs` | the WASAPI stream, its thread, its event and the platform results |
 
 ## The device seam
 
@@ -144,12 +145,49 @@ All go out on the connection's control queue, in order. The announcement comes f
 - **What is zeroed.** Decoded samples: in the arena as they're written to the device and when
   they're discarded, and the whole arena on drop; in a `Packet` however it's let go; in a kept
   or dropped frame's buffer, which goes back to the reader zeroed when the return channel has
-  room or is freed by the worker, already zeroed.
+  room or is freed by the worker, already zeroed; and in the adapter's scratch and byte buffers
+  after each write and on drop.
 - **What isn't.** The transport's framed bytes and the data reader's buffer, which predate the
   speaker, and the device's own copy of what it was given.
 - **Teardown.** Dropping the `Speaker` revokes it and waits up to 1 s [guess] for its thread to
-  finish, then leaves it. A revoked worker stages only silence; content already released is
-  owed, as above.
+  finish, then leaves it. A revoked worker stages only silence, and a buffer whose release decision
+  sees the revoke goes back silent; one decided before it is owed, as above.
+
+## Windows
+
+`platform/windows/speaker.rs` is the only Windows piece: one event-driven, shared-mode WASAPI
+stream on the default output, on its own thread with its own COM apartment.
+
+- **Format.** It writes the engine's mix format with no conversion and takes only 16-bit PCM or
+  float, mono or stereo. It reuses the microphone's mix reader, so a mix rate that isn't a
+  multiple of 50 Hz, such as 11,025 Hz, is refused and the connection gets no output.
+- **Passes.** Each pass reads the padding and the clock, observes, then tops the device up to
+  two periods. Samples are staged, written into the adapter's own byte buffer, then copied into
+  the native buffer between `GetBuffer` and `ReleaseBuffer`, so no Rust slice is ever made
+  over native memory. `Staged::release` decides the flags after the copy, right before
+  `ReleaseBuffer`: once the speaker is revoked the buffer goes back with
+  `AUDCLNT_BUFFERFLAGS_SILENT` and nothing is committed. A content release is committed with
+  the time it succeeded, read before the padding, and that padding is `unread`; if the read fails
+  the frames are still owed. Both scratch buffers are
+  zeroed after each write and on drop.
+- **Readings.** `IAudioClock::GetPosition` gives the position and a 100 ns QPC time, so
+  `host_frequency` is 10 MHz, and the engine converts it to the wire's QPC ticks with
+  `QueryPerformanceFrequency`. `S_FALSE` maps to `precise: false`, because the `windows`
+  wrapper's `.ok()` would turn it into success. `service` is the time since the stream opened.
+- **Waits.** Each pass waits for the stream's event for at most 20 ms. A failed wait, or any
+  failed device call, is `Fault::Lost`. A one-period buffer that shows no padding at a period
+  boundary looks like a device that ran dry and is withdrawn; that timing isn't supported.
+- **Opening and teardown.** Opening waits up to 2 s [guess] for the stream to say it runs; past
+  that the connection goes on without output, after the speaker's normal bounded teardown (up to
+  1 s more), and a stream that starts later is never accepted, so it announces nothing.
+  Only one speaker thread runs at a time, so one still tearing down never
+  overlaps a new stream. The event is created before the client, and every value that can fail
+  (the period, the lead, the QPC frequency, the buffers) is settled before the client, its
+  services and the event move into the stream, so on every path the client and its services are
+  released before the event closes. Teardown stops the stream (a failed stop is logged),
+  releases its interfaces, closes its event and leaves COM on its own thread.
+- **No capture.** It opens no capture or loopback endpoint and listens for no endpoint changes;
+  a pinned stream sees its own loss.
 
 ## Not here yet
 
