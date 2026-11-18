@@ -423,11 +423,7 @@ impl Accounts {
         models: Vec<ModelInfo>,
         images: Vec<kumochi_protocol::message::ModelSlug>,
     ) {
-        self.catalog.listing = Some(Listing {
-            models,
-            images,
-            ..Listing::default()
-        });
+        self.catalog.listing = Some(Listing::fixture(models, images));
     }
 
     /// Whether `choice` can be sent an image: the catalog's own model on the account's connection,

@@ -29,7 +29,8 @@ pub(crate) fn default_model(
 ) -> Option<ModelChoice> {
     if current.is_some_and(|choice| {
         choice.connection != ConnectionKind::ChatGpt
-            || listing.unknown_effort.contains(&choice.model)
+            || listing.withheld_incomplete
+            || listing.withheld.contains(&choice.model)
             || listing
                 .models
                 .iter()
@@ -69,7 +70,7 @@ pub enum CatalogError {
         /// Its error code, `Other` when there's none this build knows.
         code: OAuthCode,
     },
-    /// A 200 whose body isn't a model list.
+    /// A 200 with a malformed list or no known effort support on any listable row.
     #[error("invalid model list")]
     Response,
 }
@@ -139,9 +140,32 @@ pub struct Listing {
     /// The listed models whose entry's `input_modalities` names `"image"`. It changes nothing
     /// shown; absent or malformed means no.
     pub images: Vec<ModelSlug>,
-    /// Listed slugs without known effort support. They protect a saved default from repair but
-    /// are never advertised as sendable or image-capable.
-    pub(crate) unknown_effort: Vec<ModelSlug>,
+    /// Bounded membership of rows withheld from the offer, for saved-default repair only.
+    withheld: Vec<ModelSlug>,
+    /// A further distinct withheld slug didn't fit, so absence can't authorize a repair.
+    withheld_incomplete: bool,
+}
+
+impl Listing {
+    #[cfg(test)]
+    pub(crate) fn fixture(models: Vec<ModelInfo>, images: Vec<ModelSlug>) -> Self {
+        Self {
+            models,
+            images,
+            ..Self::default()
+        }
+    }
+
+    fn withhold(&mut self, slug: ModelSlug) {
+        if self.withheld.contains(&slug) {
+            return;
+        }
+        if self.withheld.len() == MAX_MODELS {
+            self.withheld_incomplete = true;
+        } else {
+            self.withheld.push(slug);
+        }
+    }
 }
 
 fn supported(value: &Value) -> Option<EffortSet> {
@@ -164,7 +188,8 @@ fn supported(value: &Value) -> Option<EffortSet> {
 /// order.
 ///
 /// # Errors
-/// [`CatalogError`] for a failed request, a refusal, or a body that isn't a model list.
+/// [`CatalogError`] for a failed request, a refusal, an invalid catalog envelope or row shape,
+/// or a listable catalog without any known effort support.
 pub async fn read(
     http: &impl Http,
     bearer: Secret<Zeroizing<String>>,
@@ -186,10 +211,17 @@ pub async fn read(
             code,
         });
     }
+    if bytes.trim_ascii_start().first() != Some(&b'{') {
+        return Err(CatalogError::Response);
+    }
     let body: Body = serde_json::from_slice(bytes).map_err(|_| CatalogError::Response)?;
     let mut listing = Listing::default();
     let mut skipped = 0_usize;
+    let mut unknown = 0_usize;
     for value in body.models {
+        if !value.is_object() {
+            return Err(CatalogError::Response);
+        }
         let efforts = supported(&value);
         let images = value
             .get("input_modalities")
@@ -208,13 +240,17 @@ pub async fn read(
         ) {
             (Ok(slug), Ok(display_name)) => {
                 let Some(efforts) = efforts else {
-                    listing.unknown_effort.push(slug);
+                    unknown += 1;
+                    listing.withhold(slug);
                     continue;
                 };
-                if listing.models.len() == MAX_MODELS
-                    || listing.models.iter().any(|model| model.slug == slug)
-                {
+                if listing.models.iter().any(|model| model.slug == slug) {
                     skipped += 1;
+                    continue;
+                }
+                if listing.models.len() == MAX_MODELS {
+                    skipped += 1;
+                    listing.withhold(slug);
                     continue;
                 }
                 if images {
@@ -232,11 +268,8 @@ pub async fn read(
     if skipped > 0 {
         tracing::warn!(skipped, "model list entries were skipped");
     }
-    if !listing.unknown_effort.is_empty() {
-        tracing::warn!(
-            skipped = listing.unknown_effort.len(),
-            "model list entries have no known effort"
-        );
+    if unknown != 0 {
+        tracing::warn!(skipped = unknown, "model list entries have no known effort");
         if listing.models.is_empty() {
             return Err(CatalogError::Response);
         }

@@ -617,14 +617,17 @@ whole sign-out makes, for Keep and Erase.
 
 ## Model catalog
 
-`connections::catalog::read` sends one bearer GET to `/v1/models`. Listable rows have
+`connections::catalog::read` sends one bearer GET to `/v1/models`. The response must be an
+object with one `models` array of objects; positional forms fail the read. Listable rows have
 `visibility: "list"`, a valid `ModelSlug`, and a one-line `ModelName` (1–80 characters).
 A sendable row must also advertise at least one exact known `supported_reasoning_levels[].effort`
 value: `low`, `medium`, `high`, `xhigh`, or `max`. Other shapes and names confer no
 support, and the provider's default field does not add support. The first sendable row for
 each slug supplies its effort and image capabilities; at most 200 sendable rows go to the shell,
-in server order. Listable slugs without known support don't use those slots. The account keeps
-their membership for default repair, but they authorize neither a request nor image capture.
+in server order. Listable slugs without known support don't use those slots. The account retains
+up to 200 distinct withheld slugs, including supported rows beyond the offer cap, for default
+repair only. They authorize neither a request nor image capture. If a further distinct slug
+doesn't fit, the account can't prove a saved choice disappeared, so it doesn't repair that choice.
 An admitted row takes images only if its own `input_modalities` array names `"image"`.
 The catalog's [capture provenance](../../crates/brain/src/connections/catalog/README.md)
 describes the recorded shape behind both decoders.
@@ -649,9 +652,9 @@ generation, which moves on every rotation and would clear the list hourly.
 `Unavailable` lasts in memory until the account moves, and that account's sign-out erases the
 registration. A 401 offers Retry and marks the bearer's set as due, so the Retry renews it first.
 
-A read that leaves `default_model` unset or no longer listed sets it, as the brain's own settings
-change: `gpt-6-luna` at `Low` if it offers Low, otherwise the first sendable model at its
-lowest advertised effort. A listed choice is never overwritten, even if it can't send, and
+A read that finds `default_model` unset or proves its choice is no longer listed sets it as the
+brain's own settings change: `gpt-6-luna` at `Low` if it offers Low, otherwise the first sendable
+model at its lowest advertised effort. A listed choice is never overwritten, even if it can't send, and
 an empty list changes nothing. Explicit non-ChatGPT or invalid saved intent is never repaired
 from this catalog. Repairs recompute at the serialized settings write
 boundary rather than applying the choice captured when the catalog arrived

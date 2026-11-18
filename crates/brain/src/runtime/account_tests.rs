@@ -45,6 +45,24 @@ const SIGNED_OUT: AccountView = AccountView::SignedOut {
 };
 
 impl<S: AsyncRead + AsyncWrite> Shell<S> {
+    async fn submit_on(&mut self, thread: kumochi_protocol::message::ThreadId) {
+        use kumochi_protocol::frame::{self, Pipe};
+        use kumochi_protocol::message::{DataToBrain, ScreenChoice};
+        use tokio::io::AsyncWriteExt;
+
+        let submit = frame::encode(
+            &DataToBrain::TextSubmit {
+                turn: 1,
+                screen: ScreenChoice::None,
+                thread: Some(thread),
+                text: "words".into(),
+            },
+            Pipe::Data,
+        )
+        .expect("typed submit");
+        self.data_out.write_all(&submit).await.expect("sent");
+    }
+
     /// The next control frame, whatever it is.
     async fn frame(&mut self) -> ControlToShell {
         loop {
@@ -1063,19 +1081,7 @@ async fn a_listed_default_with_unknown_efforts_is_kept_but_never_sent() {
         asks: mpsc::unbounded_channel().1,
     };
     let mut brain = test_support::brain_on(&scratch, selected, accounts);
-    timeout(PATIENCE, async {
-        loop {
-            let event = brain.account.next().await;
-            let read = matches!(event, Event::Read { .. });
-            brain.account_input(event, None).unwrap();
-            if read {
-                break;
-            }
-        }
-    })
-    .await
-    .unwrap();
-    Box::pin(brain.drain_settings()).await;
+    finish_catalog(&mut brain).await;
     let ((control, data), mut shell) = duplex();
     let mut tap = Tap::from_env();
     let client = async {
@@ -1099,6 +1105,117 @@ async fn a_listed_default_with_unknown_efforts_is_kept_but_never_sent() {
     );
     brain.close().await;
     assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+}
+
+async fn finish_catalog(brain: &mut crate::runtime::Brain) {
+    timeout(PATIENCE, async {
+        loop {
+            let event = brain.account.next().await;
+            let read = matches!(event, Event::Read { .. });
+            brain.account_input(event, None).unwrap();
+            if read {
+                break;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    Box::pin(brain.drain_settings()).await;
+}
+
+fn crowded_catalog(shifted: bool) -> (u16, String) {
+    let mut rows: Vec<_> = (0..199)
+        .map(|n| {
+            json!({
+                "slug": format!("m-{n}"), "display_name": "Model", "visibility": "list",
+                "supported_reasoning_levels": [{"effort": "low"}],
+            })
+        })
+        .collect();
+    rows.push(json!({
+        "slug": "earlier", "display_name": "Earlier", "visibility": "list",
+        "supported_reasoning_levels": [{"effort": if shifted { "low" } else { "future" }}],
+    }));
+    rows.push(json!({
+        "slug": "saved", "display_name": "Saved", "visibility": "list",
+        "supported_reasoning_levels": [{"effort": "low"}], "input_modalities": ["image"],
+    }));
+    (200, json!({"models": rows}).to_string())
+}
+
+#[tokio::test]
+async fn a_catalog_row_gaining_support_does_not_replace_the_saved_overflow_model() {
+    use kumochi_protocol::constants::CONFIG_FILE;
+    use kumochi_protocol::message::{RunId, ThreadId};
+
+    let scratch = Scratch::new("overflow-default-restart");
+    let thread = ThreadId(2);
+    let mut db = crate::store::Store::open(&scratch.db()).unwrap();
+    db.recover().unwrap();
+    db.begin_turn(thread, Some("Task"), RunId(1), "previous")
+        .unwrap();
+    db.end_run(thread, RunId(1), &[], crate::store::RunEnd::Done)
+        .unwrap();
+    drop(db);
+    let path = scratch.dir().join(CONFIG_FILE);
+    let original = "default_model = { model = 'saved', effort = 'High' }\n";
+    std::fs::write(&path, original).unwrap();
+    let saved = ModelChoice {
+        model: ModelSlug::new("saved").unwrap(),
+        effort: Effort::High,
+        connection: ConnectionKind::ChatGpt,
+    };
+    for (shifted, last) in [(false, "saved"), (true, "earlier")] {
+        let store = FakeStore::default();
+        let accounts = seeded(
+            &scratch,
+            &store,
+            Catalog::answering([crowded_catalog(shifted)]),
+            LATER,
+        );
+        let (sent, mut bodies) = mpsc::channel(1);
+        let starts = Arc::new(AtomicU64::new(0));
+        let engine: Box<dyn crate::engines::Engine> = if shifted {
+            Box::new(CountStarts(Arc::clone(&starts)))
+        } else {
+            Box::new(CaptureModelBody(sent))
+        };
+        let selected = crate::runtime::Selected::Account {
+            engine,
+            asks: mpsc::unbounded_channel().1,
+        };
+        let mut brain = test_support::brain_on(&scratch, selected, accounts);
+        finish_catalog(&mut brain).await;
+        assert_eq!(brain.account.takes_images(&saved), !shifted);
+        let ((control, data), mut shell) = duplex();
+        let mut tap = Tap::from_env();
+        let client = async {
+            let DataToShell::Models { connection, models } =
+                timeout(PATIENCE, shell.data()).await.unwrap()
+            else {
+                panic!("the catalog is published")
+            };
+            assert_eq!(connection, ConnectionKind::ChatGpt);
+            assert_eq!(models.len(), 200);
+            assert_eq!(models.last().map(|model| model.slug.as_str()), Some(last));
+            shell.submit_on(thread).await;
+            if shifted {
+                assert_eq!(failed_with(&mut shell).await, Some(model_unavailable()));
+                assert_eq!(starts.load(Ordering::Relaxed), 0);
+            } else {
+                assert_eq!(
+                    timeout(PATIENCE, bodies.recv()).await.unwrap(),
+                    Some(("saved".to_owned(), "low".to_owned()))
+                );
+                assert_eq!(failed_with(&mut shell).await, None);
+            }
+            drop(shell);
+        };
+        let (ended, ()) = tokio::join!(brain.serve(control, data, &mut tap), client);
+        assert_eq!(ended, Ended::Lost);
+        brain.close().await;
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+    }
 }
 
 /// Why a run on a saved default fails when `ready` is what reads ready: Claude Code isn't
@@ -1240,9 +1357,7 @@ impl crate::engines::Engine for CaptureModelBody {
 }
 
 async fn stored_effort(name: &str, stored: &str, displayed: Effort, sent_effort: &str) {
-    use kumochi_protocol::frame::{self, Pipe};
-    use kumochi_protocol::message::{DataToBrain, RunId, ScreenChoice, ThreadId};
-    use tokio::io::AsyncWriteExt;
+    use kumochi_protocol::message::{RunId, ThreadId};
 
     let scratch = Scratch::new(name);
     let thread = ThreadId(2);
@@ -1300,17 +1415,7 @@ async fn stored_effort(name: &str, stored: &str, displayed: Effort, sent_effort:
             timeout(PATIENCE, shell.data()).await.unwrap(),
             DataToShell::Models { .. }
         ));
-        let submit = frame::encode(
-            &DataToBrain::TextSubmit {
-                turn: 1,
-                screen: ScreenChoice::None,
-                thread: Some(thread),
-                text: "words".into(),
-            },
-            Pipe::Data,
-        )
-        .unwrap();
-        shell.data_out.write_all(&submit).await.unwrap();
+        shell.submit_on(thread).await;
         assert_eq!(
             timeout(PATIENCE, bodies.recv()).await.unwrap(),
             Some(("saved".to_owned(), sent_effort.to_owned())),
@@ -1508,11 +1613,7 @@ async fn the_catalog_is_read_retried_and_cleared_when_the_account_stops_being_us
     );
     accounts.handle(Event::Read {
         epoch: 0,
-        result: Ok(Listing {
-            models,
-            images: Vec::new(),
-            ..Listing::default()
-        }),
+        result: Ok(Listing::fixture(models, Vec::new())),
     });
     assert_eq!(
         accounts.models(),
@@ -1547,6 +1648,40 @@ async fn an_all_unknown_catalog_is_retryable_and_recovers_on_a_usable_list() {
     assert_eq!(
         accounts.models_unsent().as_deref().map(slugs),
         Some(vec!["gpt-6-sol", "gpt-6-luna"]),
+    );
+    accounts.close(Instant::now(), Instant::now()).await;
+}
+
+#[tokio::test]
+async fn positional_catalogs_are_not_cached_and_retry_reads_the_next_response() {
+    let scratch = Scratch::new("positional-catalog");
+    let store = FakeStore::default();
+    let http = Catalog::answering([
+        (200, "[[]]".to_owned()),
+        (200, r#"[[{"slug":"planted","display_name":"Planted","visibility":"list","supported_reasoning_levels":[{"effort":"low"}]}]]"#.to_owned()),
+        (200, r#"{"models":[{"slug":"planted","display_name":"Planted","visibility":"list","supported_reasoning_levels":[{"effort":"low"}]},["other","Other","list"]]}"#.to_owned()),
+        listing(),
+    ]);
+    let mut accounts = seeded(&scratch, &store, http, LATER);
+    let offline =
+        UserError::new(ErrorKey::AccountOffline, Vec::new(), vec![Action::Retry]).unwrap();
+    for _ in 0..3 {
+        assert_eq!(
+            read_ended(&mut accounts).await,
+            [ControlToShell::Error(offline.clone())]
+        );
+        assert_eq!(
+            accounts.models(),
+            None,
+            "no positional shape authorizes any model"
+        );
+        assert_eq!(accounts.models_unsent(), None);
+        accounts.handle(Input::Op(AccountOp::Retry));
+    }
+    assert_eq!(read_ended(&mut accounts).await, []);
+    assert_eq!(
+        accounts.models_unsent().as_deref().map(slugs),
+        Some(vec!["gpt-6-sol", "gpt-6-luna"])
     );
     accounts.close(Instant::now(), Instant::now()).await;
 }

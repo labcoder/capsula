@@ -304,6 +304,38 @@ async fn at_most_200_models_are_kept() {
 }
 
 #[tokio::test]
+async fn withheld_membership_deduplicates_and_a_full_index_cannot_prove_absence() {
+    let unknown =
+        |slug: &str| json!({"slug": slug, "display_name": "Unknown", "visibility": "list"});
+    let mut rows = vec![model("first", "First"), unknown("withheld-0")];
+    for n in 0..MAX_MODELS {
+        rows.push(unknown(&format!("withheld-{n}")));
+    }
+    let absent = at("withheld-extra", Effort::High);
+    for incomplete in [false, true] {
+        if incomplete {
+            rows.push(unknown("withheld-extra"));
+        }
+        let http = answering(200, &json!({ "models": rows }).to_string());
+        let listing = read(&http, Secret::new(Zeroizing::new("bearer".to_owned())))
+            .await
+            .expect("the known row remains useful");
+        assert_eq!(listing.withheld.len(), MAX_MODELS);
+        assert_eq!(
+            listing.withheld.last().map(ModelSlug::as_str),
+            Some("withheld-199")
+        );
+        assert_eq!(listing.withheld_incomplete, incomplete);
+        let first = Some(at("first", Effort::Low));
+        assert_eq!(default_model(None, &listing), first);
+        assert_eq!(
+            default_model(Some(&absent), &listing),
+            if incomplete { None } else { first }
+        );
+    }
+}
+
+#[tokio::test]
 async fn an_entry_that_breaks_a_rule_is_skipped_and_counted_but_never_logged() {
     let captured = Captured::default();
     let _logging = captured.install();
@@ -318,7 +350,7 @@ async fn an_entry_that_breaks_a_rule_is_skipped_and_counted_but_never_logged() {
         model("zqx-two-lines", "Two\nlines"),
         json!({ "slug": 7, "display_name": "Mistyped", "visibility": "list" }),
         json!({ "slug": "zqx-no-visibility", "display_name": "Missing" }),
-        json!("zqx-not-an-object"),
+        json!({ "slug": "zqx-non-string-display", "display_name": 4, "visibility": "list" }),
         model("gpt-6-luna", "GPT-6 Luna"),
         model("gpt-6-luna", "Zqx duplicate"),
     ])
@@ -353,6 +385,8 @@ async fn an_empty_list_is_read_and_a_body_that_isnt_one_is_refused() {
         "{\"models\":[",
         "{\"models\":{}}",
         "{\"models\":null}",
+        "{\"models\":[],\"models\":[]}",
+        "{\"models\":[\"zqx-not-an-object\"]}",
         "<html>",
     ] {
         let http = answering(200, body);
@@ -540,7 +574,7 @@ async fn sparse_supported_models_do_not_replace_a_listed_unsendable_default() {
     let catalog = read(&http, Secret::new(Zeroizing::new("bearer".to_owned())))
         .await
         .expect("mixed catalog");
-    assert_eq!(catalog.unknown_effort, [at("saved", Effort::Low).model]);
+    assert_eq!(catalog.withheld, [at("saved", Effort::Low).model]);
     assert_eq!(catalog.images, []);
     assert_eq!(
         catalog

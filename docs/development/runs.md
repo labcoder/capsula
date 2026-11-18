@@ -447,9 +447,10 @@ after every op and wake; while it's being found that's `Finding`, which reads as
   known effort support on that entry. The run pins the highest supported effort no higher
   than the wanted effort, or the lowest supported effort if none qualifies, before inline
   compaction. Inline compaction, rebuilt attempts and later rounds use that value on the
-  same model; they don't rewrite the saved choice. A held run still compares its full original
-  snapshot to the hold's defaults at the send fence. ChatGPT title and summary jobs resolve
-  their own requests on the job's route or end unsent; a title wants Low, while a summary
+  same model; they don't rewrite the saved choice. This proves effort support at admission,
+  not at upload: a same-tag catalog change doesn't re-resolve the pin. A held run still compares
+  its full original snapshot to the hold's defaults at the send fence. ChatGPT title and summary
+  jobs resolve their own requests on the job's route or end unsent; a title wants Low, while a summary
   wants the effort its own read found.
 - **Draws come only from an offered tool** (D13-H2). A `draw` call opens the draw buffer only
   when the admitted request offered `draw`, or when the dev fixture answers (`trusted_draw`,
