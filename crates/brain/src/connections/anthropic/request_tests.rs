@@ -4,6 +4,7 @@ use super::Failure;
 use super::MessagesBody;
 use crate::connections::model::MAX_REQUEST_BYTES;
 use serde_json::{Value, json};
+use zeroize::Zeroizing;
 
 fn request() -> Value {
     json!({"model":"claude-sonnet-5-5","messages":[{"role":"user","content":"hello"}],
@@ -204,4 +205,25 @@ fn serialized_request_bound_is_inclusive_and_debug_is_redacted() {
         !formatted.contains(byte_marker.trim_matches(['[', ']'])),
         "request bytes are redacted"
     );
+}
+
+#[test]
+fn json_is_checked_then_sent_as_written_up_to_the_bound() {
+    let written = br#"{"model":"claude-sonnet-5-5","stream":true,"max_tokens":2048,"system":[{"type":"text","text":"s","cache_control":{"type":"ephemeral"}}],"messages":[{"role":"user","content":"hi"},{"role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"draw","input":{"n": 123456789012345678901234567890, "d": 0.10000000000000000000000001}}]},{"role":"user","content":"next"}]}"#;
+    let mut padded = written.to_vec();
+    padded.resize(MAX_REQUEST_BYTES, b' ');
+    let body = MessagesBody::from_json(Zeroizing::new(padded.clone())).expect("at the bound");
+    assert_eq!(body.bytes(), padded.as_slice());
+    padded.push(b' ');
+    assert!(matches!(
+        MessagesBody::from_json(Zeroizing::new(padded)),
+        Err(Failure::Request)
+    ));
+    let uncapped = String::from_utf8_lossy(written).replace("2048", "2049");
+    for refused in [uncapped.as_bytes(), &written[..written.len() - 1]] {
+        assert!(matches!(
+            MessagesBody::from_json(Zeroizing::new(refused.to_vec())),
+            Err(Failure::Request)
+        ));
+    }
 }

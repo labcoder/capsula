@@ -533,7 +533,7 @@ fn a_mapped_reply_continues_its_request_with_every_block_as_it_came() {
     let before = first.messages[0].get().to_owned();
     let reply = replied(&first, &signed_round()).expect("a whole reply");
     let sonnet = slug("claude-sonnet-5-5");
-    let (_, second) = next(
+    let (outgoing, second) = next(
         first,
         TAG,
         &sonnet,
@@ -557,6 +557,10 @@ fn a_mapped_reply_continues_its_request_with_every_block_as_it_came() {
     assert_eq!(second.messages[0].get(), before);
     assert_eq!(second.messages[1].get(), expected);
     let wire = String::from_utf8(second.wire().expect("json")).expect("utf-8");
+    assert_eq!(
+        format!("{outgoing:?}"),
+        format!("MessagesBody {{ bytes: {} }}", wire.len())
+    );
     assert!(wire.contains(&expected), "{wire}");
     let body = sent(&second);
     assert_eq!(
