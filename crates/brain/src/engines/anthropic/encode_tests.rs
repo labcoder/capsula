@@ -467,7 +467,7 @@ fn a_signed_reply_continues_the_exact_request_with_its_blocks_unchanged() {
     let reply = signed_reply();
     let answer = round(&first, &reply, &["toolu_2", "toolu_1"]);
     let (_, second) = next(first, TAG, &slug("claude-sonnet-5-5"), &answer).expect("continues");
-    let mut expected = sent.clone();
+    let mut expected = sent;
     let messages = expected["messages"].as_array_mut().expect("messages");
     messages.push(json!({"role": "assistant", "content": reply}));
     messages.push(json!({"role": "user", "content": [
@@ -567,7 +567,7 @@ fn a_reply_outside_the_signed_set_or_unpaired_continues_nothing() {
     let thinking = json!({"type": "thinking", "thinking": "", "signature": "s"});
     for (blocks, results) in [
         (vec![thinking.clone()], vec![]),
-        (vec![thinking.clone(), call.clone()], vec![]),
+        (vec![thinking, call.clone()], vec![]),
         (vec![call.clone()], vec!["toolu_2"]),
         (vec![call.clone()], vec!["toolu_1", "toolu_1"]),
     ] {
@@ -580,7 +580,7 @@ fn a_reply_outside_the_signed_set_or_unpaired_continues_nothing() {
         );
     }
     let conversation = first();
-    let answer = round(&conversation, &[call.clone()], &["toolu_1"]);
+    let answer = round(&conversation, std::slice::from_ref(&call), &["toolu_1"]);
     let (_, second) = next(conversation, TAG, &sonnet, &answer).expect("continues");
     let answer = round(&second, &[call], &["toolu_1"]);
     assert_eq!(
@@ -619,7 +619,7 @@ fn built_and_refused_bodies_print_no_content() {
     ]);
     let built = body(&conversation, TAG);
     assert!(built.is_ok());
-    let mut refused = conversation.clone();
+    let mut refused = conversation;
     refused.input.push(message(Role::Assistant, marker));
     let refused = body(&refused, TAG);
     assert_eq!(refused.as_ref().err(), Some(&BodyError::Ending));
