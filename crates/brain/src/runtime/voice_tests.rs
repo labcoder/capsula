@@ -904,6 +904,133 @@ async fn a_talk_back_choice_made_during_an_install_wins() {
     );
 }
 
+async fn install_or_repair_spoken_replies(
+    scratch: &Scratch,
+    models: &Path,
+    initial: PartState,
+    supply: impl FnOnce(),
+) {
+    let (fetch, fetched) = held_fetch();
+    let (mut brain, release, loads) = attached_at(
+        scratch,
+        models.to_path_buf(),
+        Arc::<HeldFetch>::clone(&fetch),
+    );
+    let ((control, data), mut shell) = duplex();
+    let mut tap = Tap::from_env();
+    let client = async {
+        assert_eq!(opening(&mut shell).await.spoken_replies, initial);
+        shell.send(&install()).await;
+        assert_eq!(shell.control().await, Some(voice(PartState::Verifying)));
+        assert_eq!(
+            shell.control().await,
+            Some(voice(PartState::Downloading { done: 3, total: 9 }))
+        );
+        supply();
+        fetched.send(Ok(())).expect("the fetch waits");
+        assert_eq!(shell.control().await, Some(voice(PartState::Loading)));
+        release.send(()).expect("the model load waits");
+        assert_eq!(shell.control().await, Some(voice(PartState::Ready)));
+        drop(shell);
+    };
+    let (ended, ()) = tokio::time::timeout(super::PATIENCE, async {
+        tokio::join!(brain.serve(control, data, &mut tap), client)
+    })
+    .await
+    .expect("setup completes");
+    assert_eq!(ended, Ended::Lost);
+    assert_eq!(brain.config.installed(), [VoicePart::SpokenReplies]);
+    brain.close().await;
+    assert_eq!(fetch.begun.load(Ordering::SeqCst), 1);
+    assert_eq!(loads.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn talk_back_choice_survives_spoken_replies_install_repair_remove_and_restart() {
+    let part = VoicePart::SpokenReplies;
+    let pin = part.files().next().expect("a model file");
+    for choice in [None, Some(false), Some(true)] {
+        let scratch = Scratch::trusted("voice-talk-back-lifecycle");
+        let seed = choice.map_or_else(String::new, |on| format!("talk_back = {on}"));
+        let models = seeded(&scratch, &seed, 0);
+        let folder = models.join(part.dir());
+        let file = folder.join(pin.name);
+        let preference = || {
+            voice_on_disk(&scratch)
+                .get("talk_back")
+                .and_then(toml::Value::as_bool)
+        };
+
+        assert_eq!(preference(), choice);
+        assert_eq!(scratch.config().view().talk_back, choice.unwrap_or(false));
+        install_or_repair_spoken_replies(&scratch, &models, PartState::NotInstalled, || {}).await;
+        let expected = choice.unwrap_or(true);
+        assert_eq!(preference(), Some(expected));
+
+        let set_size = |size| {
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open(&file)
+                .expect("owned model fixture file")
+                .set_len(size)
+                .expect("change fixture size");
+        };
+        set_size(pin.bytes - 1);
+        assert_eq!(scratch.config().view().talk_back, expected);
+        install_or_repair_spoken_replies(
+            &scratch,
+            &models,
+            PartState::Failed {
+                key: ErrorKey::VoiceCorrupt,
+                installed: true,
+            },
+            || set_size(pin.bytes),
+        )
+        .await;
+        assert_eq!(preference(), Some(expected));
+
+        let (fetch, _fetched) = held_fetch();
+        let (mut brain, release, loads) =
+            attached_at(&scratch, models, Arc::<HeldFetch>::clone(&fetch));
+        assert_eq!(brain.config.view().talk_back, expected);
+        let ((control, data), mut shell) = duplex();
+        let mut tap = Tap::from_env();
+        let client = async {
+            assert_eq!(opening(&mut shell).await.spoken_replies, PartState::Loading);
+            release.send(()).expect("the restarted owner waits");
+            assert_eq!(shell.control().await, Some(voice(PartState::Ready)));
+            shell.send(&remove()).await;
+            assert_eq!(
+                shell.unaccounted().await.expect("voice receipt"),
+                Some(voice(PartState::NotInstalled))
+            );
+            for answer in [true, false] {
+                assert!(
+                    matches!(shell.unaccounted().await.expect("settings receipt"),
+                    Some(ControlToShell::Settings { answer: got, view })
+                        if got == answer && view.talk_back == expected)
+                );
+            }
+            drop(shell);
+        };
+        let (ended, ()) = tokio::time::timeout(super::PATIENCE, async {
+            tokio::join!(brain.serve(control, data, &mut tap), client)
+        })
+        .await
+        .expect("removal completes");
+        assert_eq!(ended, Ended::Lost);
+        brain.close().await;
+        assert!(!folder.exists(), "removal deleted the model files");
+        let restarted = scratch.config();
+        assert_eq!(restarted.installed(), []);
+        assert_eq!(restarted.removing(), []);
+        assert_eq!(restarted.view().talk_back, expected);
+        assert_eq!(preference(), Some(expected));
+        assert_eq!(fetch.begun.load(Ordering::SeqCst), 0);
+        assert_eq!(loads.load(Ordering::SeqCst), 1);
+    }
+}
+
 #[tokio::test]
 async fn a_cancelled_install_goes_back_and_the_next_fetches_once_the_first_ends() {
     let scratch = Scratch::trusted("voice-install-cancel");
