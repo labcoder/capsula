@@ -101,3 +101,37 @@ Premature EOF emits no Usage because its snapshot is only a lower bound. A stall
 consumer during delivery can still replace the semantic failure with a delivery timeout.
 There is no usage persistence, retry loop, key access, runtime router or replay contract
 in A3a. Those integration decisions belong to A3b.
+
+## The request body (not yet activated)
+
+`engines::anthropic::encode::body` turns the store's `ModelRequest` into the JSON that
+`MessagesBody::new` checks: `model`, `max_tokens` 2048 (the envelope's cap, including
+thinking), `stream: true`, `output_config.effort`, the tools as `name`, `description` and
+`input_schema`, and the instructions as the one system block. That block carries the only
+`cache_control` breakpoint, so the tools and the instructions are the cached prefix and stay
+identical across turns. Thinking is not requested.
+
+Input items become content blocks, and neighbouring blocks of one role merge into one message,
+since Messages wants roles to alternate:
+
+| Input item | Block |
+|---|---|
+| a user message | a user `text` block |
+| a developer message (summaries, notes, the screen lines, the compaction prompt) | a user `text` block that starts `Kumochi note:`, since Messages has no developer role and the system block must stay the same |
+| an assistant message | an assistant `text` block |
+| a stored call | an assistant `tool_use` block whose `input` is the parsed arguments |
+| a result | a user `tool_result` block |
+| a native item | rebuilt from its known fields on the assistant side: a `text` block with its text, or a `tool_use` block with its id, name and object input; the build passes only this connection's |
+
+Empty messages are skipped. The `Kumochi note:` label tells the model where a line came from;
+it carries no authority, and a user who types it is still the user. Nothing is built for:
+
+- a request with no model, a model on another connection, or no instructions;
+- arguments that aren't one JSON object;
+- a call id or tool name that isn't 1 to 64 ASCII letters, digits, `_` or `-`;
+- a native item other than those two blocks, with exactly those fields (a thinking, image or
+  document block among them);
+- a call that isn't answered exactly once by the results that open the next user message, a
+  result anywhere else, or an id called twice. Nothing is moved to make a pair;
+- an image, which this route doesn't carry yet;
+- a serialised body over the 512 KiB bound.

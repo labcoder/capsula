@@ -1,5 +1,7 @@
 //! Bounded Messages block assembly; transport and dispatch belong to their existing owners.
 
+pub(crate) mod encode;
+
 use std::{fmt, io};
 
 use serde_json::Value;

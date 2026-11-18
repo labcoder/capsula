@@ -167,7 +167,7 @@ fn input_item(item: &InputItem) -> Result<Value, BodyError> {
     })
 }
 
-fn effort(effort: Effort) -> &'static str {
+pub(super) fn effort(effort: Effort) -> &'static str {
     match effort {
         Effort::Low => "low",
         Effort::Medium => "medium",
