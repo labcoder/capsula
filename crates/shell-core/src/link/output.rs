@@ -604,15 +604,21 @@ impl OutputOwner {
             .map_err(|_| Denied::Stale)
     }
 
-    /// Checks `claim` and, in the same step, lets `mic` collect on its running receipt.
+    /// Checks `claim` and, in the same step, lets `mic` collect on its running receipt, only
+    /// when `mic` runs the bound generation itself.
     ///
     /// # Errors
-    /// What the check refuses, or `Stale` for another gesture's receipt or a generation that
-    /// can't collect.
+    /// What the check refuses, or `Stale` for another microphone, another gesture's receipt or
+    /// a generation that can't collect.
     pub fn collect(&self, claim: &Claim, mic: &MicOwner, running: Running) -> Result<(), Denied> {
         let state = self.lock();
         state.check(claim)?;
-        if running.gesture != claim.owner.gesture {
+        let bound = state
+            .inhibit
+            .as_ref()
+            .and_then(|inhibit| inhibit.mic.as_ref())
+            .ok_or(Denied::Inhibited)?;
+        if !mic.runs(bound) || running.gesture != claim.owner.gesture {
             return Err(Denied::Stale);
         }
         mic.accept_running(running).map_err(|_| Denied::Stale)

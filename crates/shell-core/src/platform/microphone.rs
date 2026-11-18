@@ -631,6 +631,11 @@ impl MicOwner {
         })
     }
 
+    /// Whether this worker runs `generation` itself, not another with the same gesture number.
+    pub(crate) fn runs(&self, generation: &Generation) -> bool {
+        Arc::ptr_eq(&self.generation.startup, &generation.startup)
+    }
+
     /// Call only after accepting this running receipt and publishing matching UI state.
     pub fn accept_running(&self, running: Running) -> Result<(), MicError> {
         if running.gesture != self.generation.gesture {

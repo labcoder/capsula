@@ -5,7 +5,7 @@ use std::sync::{Arc, MutexGuard, mpsc};
 use std::time::{Duration, Instant};
 
 use kumochi_protocol::message::{
-    ControlToBrain, Cursor, GestureId, OutputGeneration, RunId, SegmentId, SpeechPcm,
+    ControlToBrain, Cursor, GestureId, MicPcm, OutputGeneration, RunId, SegmentId, SpeechPcm,
 };
 
 use super::{Abort, Claim, Denied, InhibitToken, OutputKey, OutputOwner, Retirement, State, Why};
@@ -652,6 +652,70 @@ fn a_claim_whose_output_moved_on_neither_starts_nor_collects() {
         "it never collected"
     );
     release.send(()).expect("still running");
+}
+
+/// A capture that says it runs, then waits until `held` lets go.
+fn parked(
+    held: mpsc::Receiver<()>,
+) -> impl FnOnce(
+    &Generation,
+    &AtomicBool,
+    &async_channel::Sender<Running>,
+    &async_channel::Sender<MicPcm>,
+) -> Result<Finalization, MicError>
++ Send
++ 'static {
+    move |generation, _, running, _| {
+        generation.running_for_tests()?;
+        running
+            .try_send(Running::for_tests(generation.gesture(), 16_000))
+            .map_err(|_| MicError::Unavailable)?;
+        let _released = held.recv();
+        Ok(Finalization::Discarded(MicError::Cancelled))
+    }
+}
+
+#[test]
+fn only_the_bound_microphone_collects_under_a_claim() {
+    let alive = Arc::new(AtomicBool::new(true));
+    let owner = OutputOwner::default();
+    assert!(owner.begin(1, None).is_none(), "no opener");
+    let (token, _gate, mic) = bound(&owner, 1);
+    let claim = owner.claim(&token, 1).expect("claims");
+    let other = CollectionGate::default()
+        .arm(GestureId(1))
+        .expect("another gate, the same gesture number");
+    let (release, held) = mpsc::channel::<()>();
+    let source = MicOwner::start_reserved_with_for_tests(
+        other.reserve().expect("its own start"),
+        Arc::clone(&alive),
+        parked(held),
+    )
+    .expect("spawned");
+    let running = source.running.recv_blocking().expect("running");
+    assert_eq!(
+        owner.collect(&claim, &source, running),
+        Err(Denied::Stale),
+        "not the bound microphone"
+    );
+    assert_eq!(
+        other.mode(&alive, Instant::now()),
+        Ok(Mode::Preparing),
+        "it never collected"
+    );
+    let (release_bound, held) = mpsc::channel::<()>();
+    let bound_source = MicOwner::start_reserved_with_for_tests(
+        owner.start_mic(&claim).expect("starts"),
+        Arc::clone(&alive),
+        parked(held),
+    )
+    .expect("spawned");
+    let running = bound_source.running.recv_blocking().expect("running");
+    assert_eq!(owner.collect(&claim, &bound_source, running), Ok(()));
+    assert_eq!(mic.mode(&alive, Instant::now()), Ok(Mode::Collecting));
+    for release in [release, release_bound] {
+        release.send(()).expect("still running");
+    }
 }
 
 #[test]

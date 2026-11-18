@@ -275,8 +275,9 @@ whether a session has an output and whether an earlier generation still owes aud
   microphone generation. `end` cancels a bound microphone; the inhibit outlives the session.
 - **Claims.** `claim(token, session)` names the session's current `OutputKey` and checks it.
   `start_mic(claim)` checks again and, in the same step, claims the bound microphone's single
-  start; `collect(claim, mic, running)` checks again and lets it collect on its receipt. So a
-  claim can't be reused after its output moved on. A claim is refused while the open is still
+  start; `collect(claim, mic, running)` checks again and lets it collect on its receipt, only
+  when `mic` runs the bound generation itself: another gate's microphone with the same gesture
+  number is refused. So a claim can't be reused after its output moved on. A claim is refused while the open is still
   `Opening`, while another generation owes (`Debt`) or any tail is terminal, and on a live
   generation that isn't quiet under the inhibit's serial or ever exposed content
   (`Unqualified`: D1 qualifies no echo-safe route). A session with no output claims its
