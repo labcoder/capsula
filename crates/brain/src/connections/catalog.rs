@@ -7,7 +7,8 @@ mod tests;
 
 use kumochi_protocol::Secret;
 use kumochi_protocol::message::{
-    Action, Effort, ErrorKey, MAX_MODELS, ModelChoice, ModelInfo, ModelName, ModelSlug, UserError,
+    Action, ConnectionKind, Effort, EffortSet, ErrorKey, MAX_MODELS, ModelChoice, ModelInfo,
+    ModelName, ModelSlug, UserError,
 };
 use serde::Deserialize;
 use serde_json::Value;
@@ -20,27 +21,38 @@ use super::oauth::exchange::OAuthCode;
 /// The default model's slug when the catalog lists it (owner, plan §9.1).
 pub(crate) const DEFAULT_SLUG: &str = "gpt-6-luna";
 
-/// The default model `models` calls for when `current` is unset or no longer listed:
-/// [`DEFAULT_SLUG`] at `Low` if listed, else the first model at `Low`. `None` keeps `current`;
-/// an empty catalog changes nothing.
+/// Repairs an unset or missing default, preferring Luna at Low if offered, else the first
+/// sendable model at its lowest effort. A still-listed model keeps its choice even if it can't send.
 pub(crate) fn default_model(
     current: Option<&ModelChoice>,
-    models: &[ModelInfo],
+    listing: &Listing,
 ) -> Option<ModelChoice> {
     if current.is_some_and(|choice| {
-        choice.connection != kumochi_protocol::message::ConnectionKind::ChatGpt
-            || models.iter().any(|model| model.slug == choice.model)
+        choice.connection != ConnectionKind::ChatGpt
+            || listing.withheld_incomplete
+            || listing.withheld.contains(&choice.model)
+            || listing
+                .models
+                .iter()
+                .any(|model| model.slug == choice.model)
     }) {
         return None;
     }
-    let model = models
-        .iter()
-        .find(|model| model.slug.as_str() == DEFAULT_SLUG)
-        .or(models.first())?;
+    let eligible = || {
+        listing
+            .models
+            .iter()
+            .filter_map(|model| Some((model, model.supported_efforts?)))
+    };
+    let (model, supported) = eligible()
+        .find(|(model, efforts)| {
+            model.slug.as_str() == DEFAULT_SLUG && efforts.contains(Effort::Low)
+        })
+        .or_else(|| eligible().next())?;
     Some(ModelChoice {
         model: model.slug.clone(),
-        effort: Effort::Low,
-        connection: kumochi_protocol::message::ConnectionKind::ChatGpt,
+        effort: supported.lowest(),
+        connection: ConnectionKind::ChatGpt,
     })
 }
 
@@ -58,7 +70,7 @@ pub enum CatalogError {
         /// Its error code, `Other` when there's none this build knows.
         code: OAuthCode,
     },
-    /// A 200 whose body isn't a model list.
+    /// A 200 with a malformed list or no known effort support on any listable row.
     #[error("invalid model list")]
     Response,
 }
@@ -104,10 +116,20 @@ struct Body {
 }
 
 #[derive(Deserialize)]
-struct Entry {
-    slug: String,
-    display_name: String,
-    visibility: String,
+struct Entry<'a> {
+    slug: &'a str,
+    display_name: &'a str,
+    visibility: &'a str,
+}
+
+fn listable(value: &Value) -> Result<Option<(ModelSlug, ModelName)>, ()> {
+    let entry = Entry::deserialize(value).map_err(|_| ())?;
+    if entry.visibility != "list" {
+        return Ok(None);
+    }
+    let slug = ModelSlug::new(entry.slug).map_err(|_| ())?;
+    let name = ModelName::new(entry.display_name).map_err(|_| ())?;
+    Ok(Some((slug, name)))
 }
 
 #[derive(Deserialize)]
@@ -123,18 +145,61 @@ struct ErrorObject {
 /// A read catalog: the models shown, and which of them take image input.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Listing {
-    /// The listed models, in the server's order.
+    /// The sendable models, in the server's order.
     pub models: Vec<ModelInfo>,
     /// The listed models whose entry's `input_modalities` names `"image"`. It changes nothing
     /// shown; absent or malformed means no.
     pub images: Vec<ModelSlug>,
+    /// Bounded membership of rows withheld from the offer, for saved-default repair only.
+    withheld: Vec<ModelSlug>,
+    /// A further distinct withheld slug didn't fit, so absence can't authorize a repair.
+    withheld_incomplete: bool,
+}
+
+impl Listing {
+    #[cfg(test)]
+    pub(crate) fn fixture(models: Vec<ModelInfo>, images: Vec<ModelSlug>) -> Self {
+        Self {
+            models,
+            images,
+            ..Self::default()
+        }
+    }
+
+    fn withhold(&mut self, slug: ModelSlug) {
+        if self.models.iter().any(|model| model.slug == slug) || self.withheld.contains(&slug) {
+            return;
+        }
+        if self.withheld.len() == MAX_MODELS {
+            self.withheld_incomplete = true;
+        } else {
+            self.withheld.push(slug);
+        }
+    }
+}
+
+fn supported(value: &Value) -> Option<EffortSet> {
+    let levels = value.get("supported_reasoning_levels")?.as_array()?;
+    EffortSet::new(
+        levels
+            .iter()
+            .filter_map(|level| match level.get("effort")?.as_str()? {
+                "low" => Some(Effort::Low),
+                "medium" => Some(Effort::Medium),
+                "high" => Some(Effort::High),
+                "xhigh" => Some(Effort::XHigh),
+                "max" => Some(Effort::Max),
+                _ => None,
+            }),
+    )
 }
 
 /// Reads the catalog with `bearer`: the listed models, at most [`MAX_MODELS`], in the server's
 /// order.
 ///
 /// # Errors
-/// [`CatalogError`] for a failed request, a refusal, or a body that isn't a model list.
+/// [`CatalogError`] for a failed request, a refusal, an invalid catalog envelope or row shape,
+/// or a listable catalog without any known effort support.
 pub async fn read(
     http: &impl Http,
     bearer: Secret<Zeroizing<String>>,
@@ -156,39 +221,65 @@ pub async fn read(
             code,
         });
     }
+    if bytes.trim_ascii_start().first() != Some(&b'{') {
+        return Err(CatalogError::Response);
+    }
     let body: Body = serde_json::from_slice(bytes).map_err(|_| CatalogError::Response)?;
     let mut listing = Listing::default();
     let mut skipped = 0_usize;
-    for value in body.models {
+    let mut unknown = 0_usize;
+    for value in &body.models {
+        if !value.is_object() {
+            return Err(CatalogError::Response);
+        }
+        let efforts = supported(value);
         let images = value
             .get("input_modalities")
             .and_then(Value::as_array)
             .is_some_and(|modalities| modalities.iter().any(|modality| modality == "image"));
-        let Ok(entry) = serde_json::from_value::<Entry>(value) else {
-            skipped += 1;
-            continue;
-        };
-        if entry.visibility != "list" {
-            continue;
-        }
-        match (
-            ModelSlug::new(&entry.slug),
-            ModelName::new(&entry.display_name),
-        ) {
-            (Ok(slug), Ok(display_name))
-                if listing.models.len() < MAX_MODELS
-                    && listing.models.iter().all(|model| model.slug != slug) =>
-            {
+        match listable(value) {
+            Ok(Some((slug, display_name))) => {
+                let Some(efforts) = efforts else {
+                    unknown += 1;
+                    continue;
+                };
+                if listing.models.iter().any(|model| model.slug == slug) {
+                    skipped += 1;
+                    continue;
+                }
+                if listing.models.len() == MAX_MODELS {
+                    skipped += 1;
+                    continue;
+                }
                 if images {
                     listing.images.push(slug.clone());
                 }
-                listing.models.push(ModelInfo { slug, display_name });
+                listing.models.push(ModelInfo {
+                    slug,
+                    display_name,
+                    supported_efforts: Some(efforts),
+                });
             }
-            _ => skipped += 1,
+            Ok(None) => {}
+            Err(()) => skipped += 1,
         }
     }
     if skipped > 0 {
         tracing::warn!(skipped, "model list entries were skipped");
+    }
+    if unknown != 0 {
+        tracing::warn!(skipped = unknown, "model list entries have no known effort");
+        if listing.models.is_empty() {
+            return Err(CatalogError::Response);
+        }
+    }
+    for value in &body.models {
+        if let Ok(Some((slug, _))) = listable(value) {
+            listing.withhold(slug);
+            if listing.withheld_incomplete {
+                break;
+            }
+        }
     }
     Ok(listing)
 }

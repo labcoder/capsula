@@ -6,7 +6,8 @@
 //! model check (S4) runs once, on the first build, against the route's catalog.
 
 use kumochi_protocol::message::{
-    Action, ConnectionKind, ErrorKey, ModelChoice, ModelInfo, RunId, UserError,
+    Action, ConnectionKind, Effort, ErrorKey, ModelChoice, ModelInfo, RunId, UserError,
+    effective_effort,
 };
 
 use super::{Coordinator, Effect, SendKey, Stale};
@@ -364,7 +365,6 @@ impl Coordinator {
 
     /// S4: a run's model must be in its route's catalog, as its first build read it. The
     /// thread's choice is never changed, and nothing goes to another model.
-    /// shortcut: the catalog lists no efforts, so the effort isn't checked; 18b adds them.
     pub(super) fn unlisted(
         &self,
         kind: ConnectionKind,
@@ -376,6 +376,25 @@ impl Coordinator {
         let listed = choice
             .is_some_and(|choice| ready.models.iter().any(|model| model.slug == choice.model));
         (!listed && !ready.trusted()).then(model_unavailable)
+    }
+
+    pub(super) fn resolve_chatgpt_effort(
+        &self,
+        route: Route,
+        choice: Option<&ModelChoice>,
+    ) -> Option<Effort> {
+        let choice = choice.filter(|choice| choice.connection == route.kind)?;
+        let Availability::Ready(ready) = self.availability_of(route.kind) else {
+            return None;
+        };
+        if route.tag != ready.connection {
+            return None;
+        }
+        let model = ready
+            .models
+            .iter()
+            .find(|model| model.slug == choice.model)?;
+        Some(effective_effort(model.supported_efforts?, choice.effort))
     }
 
     /// The dev fixture's draw calls draw without being offered.

@@ -185,6 +185,108 @@ fn starts_round(effects: &[Effect], round: u32) -> bool {
 }
 
 #[test]
+fn a_typed_chatgpt_tool_round_reuses_the_first_granted_effort() {
+    use crate::context::RunSnapshot;
+    use crate::coordinator::{Availability, Ready, SendKey};
+    use kumochi_protocol::message::{
+        AssistantName, ConnectionKind, Effort, EffortSet, ModelChoice, ModelInfo, ModelName,
+        ModelSlug,
+    };
+
+    let model = ModelSlug::new("sparse").unwrap();
+    let catalog = |effort| {
+        Input::Engines(
+            ConnectionKind::ChatGpt,
+            Availability::Ready(Ready {
+                connection: ConnectionTag(0),
+                models: vec![ModelInfo {
+                    slug: model.clone(),
+                    display_name: ModelName::new("Sparse").unwrap(),
+                    supported_efforts: EffortSet::new([effort]),
+                }],
+                trusted_draw: false,
+            }),
+        )
+    };
+    let wanted = ModelChoice {
+        connection: ConnectionKind::ChatGpt,
+        model: model.clone(),
+        effort: Effort::High,
+    };
+    let mut core = fresh();
+    core.handle(catalog(Effort::Low)).unwrap();
+    core.handle(Input::Turn {
+        turn: 1,
+        thread: None,
+        text: "words".into(),
+    })
+    .unwrap();
+    core.handle(Input::TurnStored { run: R }).unwrap();
+    let first = crate::coordinator::tests::engine_key(&core, R);
+    let built = |key, snapshot, choice| {
+        Input::ContextBuilt(ContextBuilt {
+            key,
+            snapshot,
+            result: Ok(Built {
+                request: ModelRequest {
+                    choice,
+                    ..request()
+                },
+                sources: vec![T],
+            }),
+        })
+    };
+    let snapshot = RunSnapshot {
+        origin: Origin::Task(T),
+        assistant: AssistantName::new("Kumo").unwrap(),
+        user: None,
+        choice: Some(wanted.clone()),
+        connection: ConnectionTag(0),
+    };
+    let assert_body = |effects: &[Effect]| {
+        let [Effect::StartEngine { request }] = effects else {
+            panic!("the round starts");
+        };
+        let body = crate::engines::responses::body(&request.request).unwrap();
+        assert_eq!(body["model"], "sparse");
+        assert_eq!(body["reasoning"]["effort"], "low");
+        request.key
+    };
+    let grant = |core: &mut Coordinator, key| {
+        let effects = core.handle(Input::SendReady { key, hold: None }).unwrap();
+        let [Effect::Grant(lease), Effect::ArmSendDeadline { .. }] = &effects[..] else {
+            panic!("the round is granted");
+        };
+        assert_eq!(lease.key, key);
+        core.handle(Input::SendSettled { lease: *lease }).unwrap();
+    };
+    let sent = assert_body(
+        &core
+            .handle(built(first, Some(snapshot), Some(wanted)))
+            .unwrap(),
+    );
+    grant(&mut core, sent);
+    core.handle(catalog(Effort::Medium)).unwrap();
+    play(&mut core, called(1));
+    assert!(matches!(
+        core.handle(completed(&core)).unwrap().as_slice(),
+        [Effect::Store(StoreOp::RoundItems(_))]
+    ));
+    let effects = core
+        .handle(Input::RoundStored { run: R, round: 1 })
+        .unwrap();
+    let [Effect::Store(StoreOp::BuildContext(read))] = &effects[..] else {
+        panic!("a tool result starts round two");
+    };
+    assert_eq!(read.key.round, 2);
+    let kept = read.snapshot.as_ref().unwrap().choice.clone().unwrap();
+    assert_eq!(kept.effort, Effort::Low);
+    let sent = assert_body(&core.handle(built(read.key, None, Some(kept))).unwrap());
+    assert_eq!(sent, SendKey::Build(read.key));
+    grant(&mut core, sent);
+}
+
+#[test]
 fn a_round_with_calls_is_stored_with_their_results_then_the_next_round_is_built() {
     let mut core = started();
     assert_eq!(

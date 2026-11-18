@@ -11,8 +11,7 @@ use std::thread;
 use kumochi_protocol::Secret;
 use kumochi_protocol::message::{
     AccountOp, AccountRecovery, AccountView, Action, ConnectionKind, ControlToShell, DataToShell,
-    ErrorKey, ModelChoice, ModelInfo, ModelSlug, PlanState, ScreenHolds, ScreenOff, SettingsOp,
-    UserError,
+    ErrorKey, ModelChoice, ModelInfo, PlanState, ScreenHolds, ScreenOff, SettingsOp, UserError,
 };
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::{AbortHandle, JoinHandle};
@@ -111,10 +110,8 @@ struct Catalog {
     usable: bool,
     /// The read out, while it waits for the bearer, its client or the answer.
     read: Option<AbortHandle>,
-    /// The last read's models; `None` until one succeeds in this epoch.
-    models: Option<Vec<ModelInfo>>,
-    /// Which of those models take image input, cleared with them.
-    images: Vec<ModelSlug>,
+    /// The last successful read, cleared as a unit when the account stops being usable.
+    listing: Option<Listing>,
     /// The shell hasn't heard the current list.
     unsent: bool,
 }
@@ -132,8 +129,7 @@ impl Catalog {
         if self.usable && !usable {
             self.epoch += 1;
             self.cancel();
-            self.unsent |= self.models.take().is_some();
-            self.images.clear();
+            self.unsent |= self.listing.take().is_some();
         }
         self.usable = usable;
     }
@@ -305,14 +301,14 @@ impl Accounts {
         };
         let ask = matches!(input, Input::Op(AccountOp::Retry) | Input::Connected);
         // A new shell hears the list there is.
-        self.catalog.unsent |= matches!(input, Input::Connected) && self.catalog.models.is_some();
+        self.catalog.unsent |= matches!(input, Input::Connected) && self.catalog.listing.is_some();
         let was_usable = self.catalog.usable;
         let effects = self.state.handle(input);
         let mut frames = self.apply(effects);
         let catalog = &self.catalog;
         if catalog.usable
             && catalog.read.is_none()
-            && catalog.models.is_none()
+            && catalog.listing.is_none()
             && (ask || !was_usable)
         {
             let (wait, access) = self.access();
@@ -341,8 +337,7 @@ impl Accounts {
         self.catalog.read = None;
         match result {
             Ok(listing) => {
-                self.catalog.models = Some(listing.models);
-                self.catalog.images = listing.images;
+                self.catalog.listing = Some(listing);
                 self.catalog.unsent = true;
                 Vec::new()
             }
@@ -373,7 +368,7 @@ impl Accounts {
                 Some(connection) => {
                     return Availability::Ready(Ready {
                         connection: ConnectionTag(connection),
-                        models: self.catalog.models.clone().unwrap_or_default(),
+                        models: self.models().unwrap_or_default().to_vec(),
                         #[cfg(any(test, debug_assertions))]
                         trusted_draw: false,
                     });
@@ -415,22 +410,31 @@ impl Accounts {
 
     /// The last catalog read in this epoch, if one succeeded.
     pub(super) fn models(&self) -> Option<&[ModelInfo]> {
-        self.catalog.models.as_deref()
+        self.catalog
+            .listing
+            .as_ref()
+            .map(|listing| listing.models.as_slice())
     }
 
     /// A read catalog of `models`, of which `images` take image input.
     #[cfg(test)]
-    pub(super) fn read_catalog(&mut self, models: Vec<ModelInfo>, images: Vec<ModelSlug>) {
-        self.catalog.models = Some(models);
-        self.catalog.images = images;
+    pub(super) fn read_catalog(
+        &mut self,
+        models: Vec<ModelInfo>,
+        images: Vec<kumochi_protocol::message::ModelSlug>,
+    ) {
+        self.catalog.listing = Some(Listing::fixture(models, images));
     }
 
     /// Whether `choice` can be sent an image: the catalog's own model on the account's connection,
     /// listed as taking image input. Nothing else does, so the screen is skipped before capture.
     pub(super) fn takes_images(&self, choice: &ModelChoice) -> bool {
         choice.connection == ConnectionKind::ChatGpt
-            && self.catalog.models.is_some()
-            && self.catalog.images.contains(&choice.model)
+            && self
+                .catalog
+                .listing
+                .as_ref()
+                .is_some_and(|listing| listing.images.contains(&choice.model))
     }
 
     /// The image gate: whether a hold on `choice` also shows the model the window under the
@@ -469,8 +473,7 @@ impl Accounts {
 
     /// The catalog for the shell, once each time it changes or a shell connects.
     pub(super) fn models_unsent(&mut self) -> Option<Vec<ModelInfo>> {
-        std::mem::take(&mut self.catalog.unsent)
-            .then(|| self.catalog.models.clone().unwrap_or_default())
+        std::mem::take(&mut self.catalog.unsent).then(|| self.models().unwrap_or_default().to_vec())
     }
 
     fn apply(&mut self, effects: Vec<Effect>) -> Vec<ControlToShell> {
@@ -658,8 +661,10 @@ impl Brain {
             return self.claude.repaired_default(current.as_ref());
         }
         self.account
-            .models()
-            .and_then(|models| default_model(current.as_ref(), models))
+            .catalog
+            .listing
+            .as_ref()
+            .and_then(|listing| default_model(current.as_ref(), listing))
     }
 
     /// Queues the brain's own change to `default_model` when [`repaired_default`] calls for one.

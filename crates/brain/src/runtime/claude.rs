@@ -492,6 +492,7 @@ impl Claude {
             .map(|&(slug, name)| ModelInfo {
                 slug: ModelSlug::new(slug).expect("a reviewed alias is a valid slug"),
                 display_name: ModelName::new(name).expect("a reviewed name is valid"),
+                supported_efforts: None,
             })
             .collect();
         self.offer(models.clone());

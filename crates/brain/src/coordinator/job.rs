@@ -260,10 +260,10 @@ impl Coordinator {
     ) -> Result<(), Stale> {
         let job = self
             .job
-            .as_mut()
+            .as_ref()
             .filter(|job| job.key == done.key && matches!(job.stage, Stage::Reading))
             .ok_or(Stale)?;
-        let Ok(Some(ask)) = done.result else {
+        let Ok(Some(mut ask)) = done.result else {
             self.job_ended(effects);
             return Ok(());
         };
@@ -278,6 +278,19 @@ impl Coordinator {
             self.job_ended(effects);
             return Ok(());
         }
+        let route = job.route;
+        if route.kind == ConnectionKind::ChatGpt && !self.trusted_draw() {
+            let Some(effort) =
+                self.resolve_chatgpt_effort(route, ask.built.request.choice.as_ref())
+            else {
+                self.job_ended(effects);
+                return Ok(());
+            };
+            if let Some(choice) = &mut ask.built.request.choice {
+                choice.effort = effort;
+            }
+        }
+        let job = self.job.as_mut().expect("the reading job was just matched");
         let (key, kind, run) = (job.key, job.kind, job.run);
         let origin = origin(key.thread, self.main_thread);
         job.stage = Stage::Sending {

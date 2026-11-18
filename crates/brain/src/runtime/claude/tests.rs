@@ -1084,6 +1084,7 @@ fn row() -> Vec<ModelInfo> {
     .map(|(slug, name)| ModelInfo {
         slug: ModelSlug::new(slug).expect("valid"),
         display_name: ModelName::new(name).expect("valid"),
+        supported_efforts: None,
     })
     .collect()
 }

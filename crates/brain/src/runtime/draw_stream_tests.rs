@@ -48,6 +48,9 @@ fn brain(scratch: &Scratch) -> Brain {
             models: vec![ModelInfo {
                 slug,
                 display_name: ModelName::new("Offline model").expect("model name"),
+                supported_efforts: kumochi_protocol::message::EffortSet::new([
+                    kumochi_protocol::message::Effort::Low,
+                ]),
             }],
             trusted_draw: false,
         }),

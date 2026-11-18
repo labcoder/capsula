@@ -2,8 +2,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use kumochi_protocol::message::{
-    AssistantName, ConnectionKind, Effort, GestureId, ModelChoice, ModelInfo, ModelName, ModelSlug,
-    RunOrigin, ThreadOp,
+    AssistantName, ConnectionKind, Effort, EffortSet, GestureId, ModelChoice, ModelInfo, ModelName,
+    ModelSlug, RunOrigin, ThreadOp,
 };
 
 use super::*;
@@ -237,6 +237,9 @@ fn pinned_choice_survives_delayed_build_but_still_gets_the_first_catalog_check()
                     vec![ModelInfo {
                         slug: ModelSlug::new("captured").unwrap(),
                         display_name: ModelName::new("captured model").unwrap(),
+                        supported_efforts: kumochi_protocol::message::EffortSet::new([
+                            kumochi_protocol::message::Effort::Low,
+                        ]),
                     }]
                 } else {
                     Vec::new()
@@ -431,6 +434,9 @@ fn a_held_runs_screen_goes_with_its_request_or_fails_the_run() {
                 models: vec![ModelInfo {
                     slug: ModelSlug::new("captured").unwrap(),
                     display_name: ModelName::new("captured model").unwrap(),
+                    supported_efforts: kumochi_protocol::message::EffortSet::new([
+                        kumochi_protocol::message::Effort::Low,
+                    ]),
                 }],
                 trusted_draw: false,
             }),
@@ -877,21 +883,97 @@ fn a_held_run_that_never_starts_a_request_tells_nothing() {
 }
 
 /// A coordinator whose engines are ready with `model` listed.
-fn ready_for(model: &str) -> Coordinator {
-    let mut core = fresh();
-    core.handle(Input::Engines(
-        kumochi_protocol::message::ConnectionKind::ChatGpt,
+fn held_catalog(model: &str, effort: Effort) -> Input {
+    Input::Engines(
+        ConnectionKind::ChatGpt,
         Availability::Ready(Ready {
             connection: ConnectionTag(0),
             models: vec![ModelInfo {
                 slug: ModelSlug::new(model).unwrap(),
                 display_name: ModelName::new("captured model").unwrap(),
+                supported_efforts: EffortSet::new([effort]),
             }],
             trusted_draw: false,
         }),
-    ))
-    .unwrap();
+    )
+}
+
+fn ready_for(model: &str) -> Coordinator {
+    let mut core = fresh();
+    core.handle(held_catalog(model, Effort::Low)).unwrap();
     core
+}
+
+#[test]
+fn held_round_one_reentry_keeps_its_granted_effort_and_raw_fence() {
+    const B: ThreadId = ThreadId(2);
+    let mut core = ready_for("captured");
+    let hold = prepared(&core, Some(T));
+    assert_eq!(hold.defaults.choice, Some(choice("captured", Effort::High)));
+    core.submit_hold(hold, "words".into(), None).unwrap();
+    core.handle(Input::TurnStored { run: R }).unwrap();
+    let first = engine_key(&core, R);
+    let body = |effects: &[Effect]| {
+        let request = effects
+            .iter()
+            .find_map(|effect| match effect {
+                Effect::StartEngine { request } => Some(&request.request),
+                _ => None,
+            })
+            .expect("an eligible request starts");
+        crate::engines::responses::body(request).unwrap()
+    };
+    let started = core.handle(screened(first, &[T, B])).unwrap();
+    assert_eq!(body(&started)["reasoning"]["effort"], "low");
+    core.handle(held_catalog("captured", Effort::Medium))
+        .unwrap();
+    core.handle(Input::Delete {
+        thread: B,
+        after_turns: 0,
+        resend: false,
+    })
+    .unwrap();
+    assert!(
+        core.handle(Input::SendReady {
+            key: SendKey::Build(first),
+            hold: None,
+        })
+        .unwrap()
+        .contains(&Effect::Rebuild(SendKey::Build(first)))
+    );
+    let effects = core
+        .handle(Input::Deleted {
+            thread: B,
+            outcome: kumochi_protocol::message::Deleted::Hidden,
+            last_run: None,
+        })
+        .unwrap();
+    let rebuild = effects
+        .iter()
+        .find_map(|effect| match effect {
+            Effect::Store(StoreOp::BuildContext(rebuild)) => Some(rebuild),
+            _ => None,
+        })
+        .expect("the deleted source is rebuilt");
+    assert_ne!(rebuild.key, first);
+    assert_eq!(rebuild.key.round, 1);
+    assert_eq!(
+        rebuild.snapshot.as_ref().unwrap().choice,
+        Some(choice("captured", Effort::Low)),
+    );
+    let restarted = core.handle(screened(rebuild.key, &[T])).unwrap();
+    let body = body(&restarted);
+    assert_eq!(body["model"], "captured");
+    assert_eq!(body["reasoning"]["effort"], "low");
+    let granted = core
+        .handle(Input::SendReady {
+            key: SendKey::Build(rebuild.key),
+            hold: None,
+        })
+        .unwrap();
+    assert!(granted.iter().any(|effect| matches!(
+        effect, Effect::Grant(lease) if lease.key == SendKey::Build(rebuild.key)
+    )));
 }
 
 /// The inputs of every engine start in `effects`.

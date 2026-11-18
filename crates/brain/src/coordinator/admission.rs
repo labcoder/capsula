@@ -5,7 +5,7 @@
 
 use std::collections::BTreeSet;
 
-use kumochi_protocol::message::{RunId, ThreadId};
+use kumochi_protocol::message::{ConnectionKind, RunId, ThreadId};
 
 use super::inline::Inline;
 use super::{Coordinator, Effect, SendKey, Stale, StoreOp};
@@ -191,7 +191,7 @@ impl Coordinator {
         };
         let control = current.control.0.child();
         current.build = Some(Build::new(key, exposed, None, control.clone()));
-        let (thread, snapshot) = (current.thread, current.snapshot.clone());
+        let (thread, snapshot) = (current.thread, current.effective_snapshot());
         effects.push(Effect::Store(StoreOp::BuildContext(BuildContext {
             control,
             key,
@@ -238,8 +238,6 @@ impl Coordinator {
             snapshot,
             result,
         } = done;
-        let pending = self.pending_deletes();
-        let main = self.main_thread;
         let current = self.current(key.run)?;
         if !current.build.as_ref().is_some_and(|build| {
             build.key == key
@@ -265,8 +263,8 @@ impl Coordinator {
             .snapshot
             .as_ref()
             .and_then(|snapshot| snapshot.choice.clone());
-        let (route, arrived) = (current.route, current.arrived);
-        let route = match route.map_or_else(|| self.route_for(arrived, choice.as_ref()), Ok) {
+        let (bound, arrived, pinned) = (current.route, current.arrived, current.effective_effort);
+        let route = match bound.map_or_else(|| self.route_for(arrived, choice.as_ref()), Ok) {
             Ok(route) => route,
             Err(_) if self.waits_for_claude_code(key.run, choice.as_ref(), effects) => {
                 return Ok(());
@@ -281,18 +279,47 @@ impl Coordinator {
         if let Some(reason) = refused {
             return self.fail_with(key.run, Failure::Engine, reason, effects);
         }
+        let effective =
+            if bound.is_none() && route.kind == ConnectionKind::ChatGpt && !self.trusted_draw() {
+                let Some(effort) = self.resolve_chatgpt_effort(route, choice.as_ref()) else {
+                    return self.fail_with(
+                        key.run,
+                        Failure::Engine,
+                        super::availability::model_unavailable(),
+                        effects,
+                    );
+                };
+                Some(effort)
+            } else {
+                pinned
+            };
         let current = self.current(key.run)?;
+        current.effective_effort = effective;
         current.route = Some(route);
         current.finding = None;
         let made = match made {
             Ok(made) => made,
             Err(room) => return self.compact_inline(key, room, effects),
         };
+        self.admit_built(key, made, effects)
+    }
+
+    fn admit_built(
+        &mut self,
+        key: BuildKey,
+        made: Built,
+        effects: &mut Vec<Effect>,
+    ) -> Result<(), Stale> {
+        let pending = self.pending_deletes();
+        let main = self.main_thread;
         let offers_draw =
             made.request.tools.iter().any(|tool| tool.name == DRAW) || self.trusted_draw();
         let current = self.current(key.run)?;
         let thread = current.thread;
         let mut request = made.request;
+        if let (Some(choice), Some(effort)) = (&mut request.choice, current.effective_effort) {
+            choice.effort = effort;
+        }
         // shortcut: the screen's developer line isn't counted in BOUND, so a request built within
         // about 60 bytes of it is refused at send (failing safe); count it if that's ever hit.
         if current

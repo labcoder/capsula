@@ -442,10 +442,16 @@ after every op and wake; while it's being found that's `Finding`, which reads as
   `Coordinator::nothing_ready`). Every other Claude Code state, the one before its first report
   included, keeps `ChatGPT`'s notice and its Sign in. On Claude Code's choice it's Claude Code's
   own reason, with Open Settings.
-- **S4: the model is checked once,** when the first build's result arrives, against the route's
-  own catalog: a model missing from the catalog, an empty catalog or no choice at all fails the run with `ModelUnavailable` and
-  Open settings, and nothing goes to another model. A run in flight keeps its check when the
-  catalog changes. shortcut: the catalog lists no efforts yet, so effort isn't checked.
+- **S4: the model is checked against its own route.** When the first build returns, a missing
+  choice or catalog entry fails with `ModelUnavailable` and Open Settings. ChatGPT also needs
+  known effort support on that entry. The run pins the highest supported effort no higher
+  than the wanted effort, or the lowest supported effort if none qualifies, before inline
+  compaction. Inline compaction, rebuilt attempts and later rounds use that value on the
+  same model; they don't rewrite the saved choice. This proves effort support at admission,
+  not at upload: a same-tag catalog change doesn't re-resolve the pin. A held run still compares
+  its full original snapshot to the hold's defaults at the send fence. ChatGPT title and summary
+  jobs resolve their own requests on the job's route or end unsent; a title wants Low, while a summary
+  wants the effort its own read found.
 - **Draws come only from an offered tool** (D13-H2). A `draw` call opens the draw buffer only
   when the admitted request offered `draw`, or when the dev fixture answers (`trusted_draw`,
   which exists only in debug builds). Any other draw is an unknown call and draws nothing.
@@ -601,7 +607,7 @@ steps, and the run still settles.
 The runtime owns one pending hold, keyed by shell epoch and gesture with its captured
 selection revision and a shared cancellation flag. Recognition queues `ReadHold` on the
 existing stamped page reader: after prior accepted writes, one bounded, cancellable read
-transaction captures the live target's deletion generation and effective model/effort.
+transaction captures the live target's deletion generation and wanted model/effort.
 New captures defaults without creating a thread or inventing a run identity.
 
 Only `submit_hold` assigns real thread/run ids and emits a Hold-origin run. Recognized words

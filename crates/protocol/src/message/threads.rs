@@ -46,6 +46,8 @@ pub struct ModelInfo {
     pub slug: ModelSlug,
     /// What the picker shows.
     pub display_name: ModelName,
+    /// The model's known supported efforts; unknown support permits no `ChatGPT` send.
+    pub supported_efforts: Option<EffortSet>,
 }
 
 /// A model slug broke the rule.
@@ -100,10 +102,10 @@ impl From<ModelSlug> for String {
     }
 }
 
-/// How hard the model thinks: the documented effort vocabulary, which isn't proof that a model
-/// accepts a value, so a refusal shows at run time. A stored effort a build doesn't know keeps its
-/// model, shows as Medium and runs at Low, so adding one needs no store migration.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// How hard the model is asked to think. The vocabulary doesn't say what a model accepts.
+/// A stored effort this build doesn't know keeps its model, shows Medium and wants Low at
+/// admission, so adding one needs no store migration.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum Effort {
     /// Less than usual.
     Low,
@@ -120,6 +122,90 @@ pub enum Effort {
 impl Effort {
     /// Every effort, in ascending order.
     pub const ALL: [Self; 5] = [Self::Low, Self::Medium, Self::High, Self::XHigh, Self::Max];
+
+    fn bit(self) -> u8 {
+        match self {
+            Self::Low => 1,
+            Self::Medium => 2,
+            Self::High => 4,
+            Self::XHigh => 8,
+            Self::Max => 16,
+        }
+    }
+}
+
+/// A nonempty set of supported efforts, encoded as five checked bits in ascending order.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "u8", into = "u8")]
+pub struct EffortSet(u8);
+
+/// An effort set was empty or contained a bit outside the known vocabulary.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+#[error("an effort set must contain only known efforts and cannot be empty")]
+pub struct EffortSetError;
+
+impl EffortSet {
+    /// Collects known efforts, collapsing duplicates; an empty iterator gives `None`.
+    pub fn new(efforts: impl IntoIterator<Item = Effort>) -> Option<Self> {
+        Self::try_from(
+            efforts
+                .into_iter()
+                .fold(0, |bits, effort| bits | effort.bit()),
+        )
+        .ok()
+    }
+
+    /// Whether this set supports `effort`.
+    #[must_use]
+    pub fn contains(self, effort: Effort) -> bool {
+        self.0 & effort.bit() != 0
+    }
+
+    /// The least effort this nonempty set supports.
+    #[must_use]
+    #[expect(
+        clippy::missing_panics_doc,
+        reason = "the private field and checked constructors exclude empty sets"
+    )]
+    pub fn lowest(self) -> Effort {
+        self.iter()
+            .next()
+            .expect("EffortSet constructors reject empty sets")
+    }
+
+    /// The supported efforts in ascending order.
+    pub fn iter(self) -> impl Iterator<Item = Effort> {
+        Effort::ALL
+            .into_iter()
+            .filter(move |effort| self.contains(*effort))
+    }
+}
+
+impl TryFrom<u8> for EffortSet {
+    type Error = EffortSetError;
+
+    fn try_from(bits: u8) -> Result<Self, Self::Error> {
+        if bits == 0 || bits & !0b1_1111 != 0 {
+            return Err(EffortSetError);
+        }
+        Ok(Self(bits))
+    }
+}
+
+impl From<EffortSet> for u8 {
+    fn from(set: EffortSet) -> Self {
+        set.0
+    }
+}
+
+/// The highest supported effort at or below `wanted`, or the lowest when none is below it.
+#[must_use]
+pub fn effective_effort(supported: EffortSet, wanted: Effort) -> Effort {
+    Effort::ALL
+        .into_iter()
+        .rev()
+        .find(|effort| *effort <= wanted && supported.contains(*effort))
+        .unwrap_or_else(|| supported.lowest())
 }
 
 /// The model and effort a thread runs on.
@@ -158,6 +244,72 @@ pub enum ThreadOp {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn effort_sets_reject_empty_and_unknown_bits_on_construction_and_the_wire() {
+        assert_eq!(EffortSet::new([]), None);
+        assert_eq!(
+            postcard::from_bytes::<EffortSet>(&[]),
+            Err(postcard::Error::DeserializeUnexpectedEnd)
+        );
+        for bits in [0, 32, 33, 255] {
+            assert_eq!(EffortSet::try_from(bits), Err(EffortSetError));
+            assert_eq!(
+                postcard::from_bytes::<EffortSet>(&[bits]),
+                Err(postcard::Error::SerdeDeCustom)
+            );
+        }
+        assert_eq!(
+            EffortSet::try_from(1),
+            EffortSet::new([Effort::Low]).ok_or(EffortSetError)
+        );
+        let all = EffortSet::try_from(31).expect("all five bits");
+        assert_eq!(
+            all.iter().collect::<Vec<_>>(),
+            vec![
+                Effort::Low,
+                Effort::Medium,
+                Effort::High,
+                Effort::XHigh,
+                Effort::Max
+            ]
+        );
+        assert_eq!(postcard::to_allocvec(&all), Ok(vec![31]));
+        assert_eq!(postcard::from_bytes::<EffortSet>(&[31]), Ok(all));
+        assert_eq!(
+            EffortSet::new([Effort::High, Effort::Low, Effort::High])
+                .expect("two efforts")
+                .iter()
+                .collect::<Vec<_>>(),
+            vec![Effort::Low, Effort::High]
+        );
+    }
+
+    #[test]
+    fn resolution_matches_every_nonempty_set_and_wanted_effort() {
+        use Effort::{High, Low, Max, Medium, XHigh};
+        let ordered = [(1, Low), (2, Medium), (4, High), (8, XHigh), (16, Max)];
+        for bits in 1..=31 {
+            let set = EffortSet::try_from(bits).expect("known nonempty mask");
+            let supported: Vec<_> = ordered
+                .iter()
+                .filter_map(|(bit, effort)| (bits & bit != 0).then_some(*effort))
+                .collect();
+            assert_eq!(set.iter().collect::<Vec<_>>(), supported);
+            for (index, wanted) in ordered.iter().map(|(_, effort)| *effort).enumerate() {
+                let below: Vec<_> = ordered[..=index]
+                    .iter()
+                    .filter_map(|(bit, effort)| (bits & bit != 0).then_some(*effort))
+                    .collect();
+                let expected = below.last().copied().unwrap_or(supported[0]);
+                assert_eq!(
+                    effective_effort(set, wanted),
+                    expected,
+                    "{bits}: {wanted:?}"
+                );
+            }
+        }
+    }
 
     #[test]
     fn titles_are_one_trimmed_line_of_1_to_80_characters() {
