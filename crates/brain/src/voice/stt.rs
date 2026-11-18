@@ -669,20 +669,15 @@ fn serve_decodes(
                     .expect("a free slot");
                 #[cfg(test)]
                 let cut = state.decode_cut.take();
-                let Decode {
-                    rate,
-                    samples,
-                    reply,
-                } = decode;
-                state.replies[slot] = Some(reply);
+                state.replies[slot] = Some(decode.reply);
                 drop(state);
                 let spawned = spawn_decode(
                     scope,
                     control,
                     decoder,
                     slot,
-                    rate,
-                    samples,
+                    decode.rate,
+                    decode.samples,
                     #[cfg(test)]
                     cut,
                 );

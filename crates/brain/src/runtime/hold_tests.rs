@@ -221,6 +221,10 @@ async fn packet(
     packet_for(shell, G, rate, seq, last, samples).await;
 }
 
+#[expect(
+    clippy::fn_params_excessive_bools,
+    reason = "the fixture supplies the protocol's last bit for a selected gesture"
+)]
 async fn packet_for(
     shell: &mut Shell<tokio::io::DuplexStream>,
     gesture: GestureId,
