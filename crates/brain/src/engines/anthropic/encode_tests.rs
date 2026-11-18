@@ -603,12 +603,11 @@ fn a_mapped_reply_continues_its_request_with_every_block_as_it_came() {
         ),
         PRECISE, CITED
     );
-    let answers = concat!(
-        r#"{"content":["#,
-        r#"{"content":"{\"done\":\"toolu_2\"}","tool_use_id":"toolu_2","type":"tool_result"},"#,
-        r#"{"content":"{\"done\":\"toolu_1\"}","tool_use_id":"toolu_1","type":"tool_result"}],"#,
-        r#""role":"user"}"#,
-    );
+    // The results message is the encoder's own JSON, so its key order follows serde_json's map.
+    let answers = json!({"role": "user", "content": [
+        {"type": "tool_result", "tool_use_id": "toolu_2", "content": "{\"done\":\"toolu_2\"}"},
+        {"type": "tool_result", "tool_use_id": "toolu_1", "content": "{\"done\":\"toolu_1\"}"},
+    ]});
     let mut expected = round_one[..round_one.len() - 2].to_vec();
     expected.extend_from_slice(format!(",{assistant},{answers}]}}").as_bytes());
     assert_eq!(
