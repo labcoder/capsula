@@ -15,6 +15,47 @@ fn gate(harness: &Harness, samples: usize) -> mpsc::Sender<()> {
 }
 
 #[test]
+fn production_admission_refuses_live_replies_and_preserves_the_physical_slot_limit() {
+    use kumochi_protocol::message::HoldFailure;
+    let harness = Harness::loaded();
+    let first_gate = gate(&harness, 1);
+    let second_gate = gate(&harness, 2);
+    let third_gate = gate(&harness, 3);
+    let decode = |ask, len| {
+        let (reply, receiver) = oneshot::channel();
+        harness.handle.decode_for(
+            ask,
+            Decode {
+                rate: 16_000,
+                samples: vec![0; len],
+                reply,
+            },
+        )?;
+        Ok(receiver)
+    };
+    let first = decode(1, 1).expect("first");
+    assert_eq!(harness.event(), Event::Decoding(1));
+    assert_eq!(harness.handle.admit_use(), Err(HoldFailure::Busy));
+    assert_eq!(decode(1, 2).err(), Some(HoldFailure::Busy));
+    let second = harness.decode(2).expect("owner may queue while live");
+    harness.no_event();
+    drop(first);
+    assert_eq!(harness.event(), Event::Decoding(2));
+    drop(second);
+    assert_eq!(decode(0, 3).err(), Some(HoldFailure::NotLoaded));
+    assert_eq!(harness.handle.admit_use(), Ok(1));
+    let third = decode(1, 3).expect("one waiter while two stale calls still occupy slots");
+    assert_eq!(harness.handle.admit_use(), Err(HoldFailure::Busy));
+    assert_eq!(decode(1, 4).err(), Some(HoldFailure::Busy));
+    harness.no_event();
+    first_gate.send(()).unwrap();
+    assert_eq!(harness.event(), Event::Decoding(3));
+    third_gate.send(()).unwrap();
+    assert_eq!(answer(third), text(3));
+    second_gate.send(()).unwrap();
+}
+
+#[test]
 fn stale_decodes_allow_overlap_late_receiver_drop_and_reuse_without_exceeding_two() {
     for already_stale in [true, false] {
         let harness = Harness::loaded();
@@ -295,8 +336,8 @@ fn either_available_slot_loss_is_observed_before_any_sibling_success() {
                 want: Some(("models".into(), 1)),
                 current: Some(1),
                 ready: true,
-                decoding: 2,
                 waiting: None,
+                replies: [None, None],
                 finished: [None, None],
                 decode_cut: None,
                 hold_after_ready: false,
@@ -311,32 +352,22 @@ fn either_available_slot_loss_is_observed_before_any_sibling_success() {
         std::thread::scope(|scope| {
             let (first_send, first) = oneshot::channel();
             let (second_send, second) = oneshot::channel();
-            let first_task = spawn_decode(
-                scope,
-                &control,
-                &decoder,
-                0,
-                Decode {
-                    rate: 16_000,
-                    samples: vec![0],
-                    reply: first_send,
-                },
-                None,
-            )
-            .expect("first thread");
-            let second_task = spawn_decode(
-                scope,
-                &control,
-                &decoder,
-                1,
-                Decode {
-                    rate: 16_000,
-                    samples: vec![0; 2],
-                    reply: second_send,
-                },
-                None,
-            )
-            .expect("second thread");
+            control.update(|state| state.replies = [Some(first_send), Some(second_send)]);
+            let (let_join, joined) = mpsc::channel();
+            let first_control = &control;
+            let first_decoder = &decoder;
+            let first_task = scope.spawn(move || {
+                let result = match first_decoder.decode(16_000, &[0]) {
+                    Ok(text) => SttResult::Text(text),
+                    Err(error) => SttResult::Failed(error),
+                };
+                first_control.update(|state| state.finished[0] = Some(result));
+                joined
+                    .recv_timeout(WAIT)
+                    .expect("settlement reached its first join");
+            });
+            let second_task = spawn_decode(scope, &control, &decoder, 1, 16_000, vec![0; 2], None)
+                .expect("second thread");
             let mut running = [Some(first_task), Some(second_task)];
             let mut state = control.lock();
             let until = std::time::Instant::now() + WAIT;
@@ -350,9 +381,27 @@ fn either_available_slot_loss_is_observed_before_any_sibling_success() {
                     .expect("completion wake")
                     .0;
             }
+            let control = &control;
+            let during_join = scope.spawn(move || {
+                let until = Instant::now() + WAIT;
+                loop {
+                    let state = control.lock();
+                    if state.finished[0].is_none() {
+                        let ready = state.ready;
+                        let_join.send(()).unwrap();
+                        return ready;
+                    }
+                    drop(state);
+                    assert!(
+                        Instant::now() < until,
+                        "settlement never reached its first join"
+                    );
+                    std::thread::yield_now();
+                }
+            });
             let mut failed = false;
             drop(settle_decodes(
-                &control,
+                control,
                 state,
                 &mut running,
                 1,
@@ -360,6 +409,10 @@ fn either_available_slot_loss_is_observed_before_any_sibling_success() {
                 &mut losses,
                 &mut failed,
             ));
+            assert!(
+                !during_join.join().unwrap(),
+                "known worker loss must fence admission before join"
+            );
             assert!(failed);
             assert!(running.iter().all(Option::is_none));
             assert!(!control.lock().ready);

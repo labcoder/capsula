@@ -203,6 +203,7 @@ fn words_after_a_terminal_status_or_from_another_hold_are_refused_with_their_cre
     cx: &mut TestAppContext,
 ) {
     for terminal in [
+        HoldStatus::Empty,
         HoldStatus::Cancelled,
         HoldStatus::Failed(HoldFailure::TimedOut),
     ] {
@@ -215,6 +216,14 @@ fn words_after_a_terminal_status_or_from_another_hold_are_refused_with_their_cre
         owner.read_with(cx, |owner, _| assert!(owner.voice.recovery.is_none()));
         deliver(&owner, LinkEvent::State(LinkState::Reconnecting), cx);
         assert_eq!(draft(&owner, cx), "");
+        assert_eq!(lost(&owner, cx), None);
+        deliver(
+            &owner,
+            LinkEvent::Connected(Session::detached(2, Incarnation(1))),
+            cx,
+        );
+        assert_eq!(draft(&owner, cx), "");
+        assert_eq!(lost(&owner, cx), None);
     }
     let (owner, _data, _controls) = ready(cx);
     hold(&owner, 1, cx);

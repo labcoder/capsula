@@ -163,7 +163,7 @@ async fn played(wire: Wire) -> (Vec<ControlToShell>, Vec<Option<String>>) {
     type Reply = <crate::screen::Holds as crate::supervise::Kind>::Reply;
     let scratch = Scratch::new(&format!("hold-screen-sent-{wire:?}"));
     let (mut brain, release, mut decoded, _fetch) =
-        input(&scratch, vec![5, -5], "words and a picture").await;
+        input(&scratch, vec![105, -5], "words and a picture").await;
     let mut rig = seeing(&mut brain);
     let mut observed = brain.observe();
     let (wrote, mut writes) = mpsc::unbounded_channel();
@@ -194,7 +194,7 @@ async fn played(wire: Wire) -> (Vec<ControlToShell>, Vec<Option<String>>) {
         let sealed = Reply::Sealed(key, crate::screen::ScreenContext::fixture(PICTURE));
         rig.reply(id, &sealed).await;
         while !matches!(observed.recv().await, Some(Seen::PictureSealed)) {}
-        packet(&mut shell, 16_000, 0, true, vec![5, -5]).await;
+        packet(&mut shell, 16_000, 0, true, vec![105, -5]).await;
         release_source(&mut shell, 1).await;
         status(&mut shell, HoldStatus::Transcribing).await;
         assert_eq!(decoded.recv().await, Some(()));

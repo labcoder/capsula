@@ -17,10 +17,13 @@ pub(crate) use tests::held_for_runtime;
 pub(crate) use tests::held_for_runtime_checked;
 #[cfg(test)]
 pub(crate) use tests::hold_before_serving;
+#[cfg(test)]
+pub(crate) use tests::{pending_results, runtime_decoder};
 
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
+use std::thread::ScopedJoinHandle;
 use std::time::{Duration, Instant};
 
 use kumochi_protocol::message::{HoldFailure, SttUnload};
@@ -185,8 +188,8 @@ struct State {
     current: Option<u64>,
     /// Set by the worker only while a loaded model serves `want`.
     ready: bool,
-    decoding: usize,
     waiting: Option<Decode>,
+    replies: [Option<oneshot::Sender<SttResult>>; 2],
     finished: [Option<SttResult>; 2],
     #[cfg(test)]
     decode_cut: Option<DecodeCut>,
@@ -196,6 +199,15 @@ struct State {
     unload_after: Option<Duration>,
     idle_since: Instant,
     shutdown: bool,
+}
+
+impl State {
+    fn has_live_decode(&self) -> bool {
+        self.replies
+            .iter()
+            .flatten()
+            .any(|reply| !reply.is_closed())
+    }
 }
 
 #[cfg(test)]
@@ -241,7 +253,7 @@ impl SttHandle {
             if state.shutdown || !state.ready || !wants(state, ask) {
                 return Err(HoldFailure::NotLoaded);
             }
-            if state.waiting.is_some() || state.decoding != 0 {
+            if state.waiting.is_some() || state.has_live_decode() {
                 return Err(HoldFailure::Busy);
             }
             state.idle_since = Instant::now();
@@ -262,7 +274,7 @@ impl SttHandle {
                 || !wants(state, ask)
             {
                 Some(HoldFailure::NotLoaded)
-            } else if state.waiting.is_some() || state.decoding != 0 {
+            } else if state.waiting.is_some() || state.has_live_decode() {
                 Some(HoldFailure::Busy)
             } else {
                 None
@@ -373,8 +385,8 @@ impl SttHandle {
                 want: None,
                 current: None,
                 ready: false,
-                decoding: 0,
                 waiting: None,
+                replies: [None, None],
                 finished: [None, None],
                 #[cfg(test)]
                 decode_cut: None,
@@ -617,7 +629,7 @@ fn serve_decodes(
     losses: &mut broadcast::Receiver<Generation>,
 ) -> Served {
     std::thread::scope(|scope| {
-        let mut running: [Option<Running<'_>>; 2] = [None, None];
+        let mut running = [None, None];
         let mut failed = false;
         let mut state = control.lock();
         loop {
@@ -646,10 +658,7 @@ fn serve_decodes(
                 state = control.wait(state);
                 continue;
             }
-            let live = running
-                .iter()
-                .flatten()
-                .any(|task| task.reply.as_ref().is_some_and(|reply| !reply.is_closed()));
+            let live = state.has_live_decode();
             if occupied < 2
                 && !live
                 && let Some(decode) = state.waiting.take()
@@ -660,23 +669,33 @@ fn serve_decodes(
                     .expect("a free slot");
                 #[cfg(test)]
                 let cut = state.decode_cut.take();
-                state.decoding += 1;
+                let Decode {
+                    rate,
+                    samples,
+                    reply,
+                } = decode;
+                state.replies[slot] = Some(reply);
                 drop(state);
-                if let Ok(task) = spawn_decode(
+                let spawned = spawn_decode(
                     scope,
                     control,
                     decoder,
                     slot,
-                    decode,
+                    rate,
+                    samples,
                     #[cfg(test)]
                     cut,
-                ) {
+                );
+                state = control.lock();
+                if let Ok(task) = spawned {
                     running[slot] = Some(task);
                 } else {
-                    control.update(|state| state.decoding -= 1);
+                    state.ready = false;
                     failed = true;
+                    if let Some(reply) = state.replies[slot].take() {
+                        reply.send(SttResult::Failed(SpeechError::WorkerLost)).ok();
+                    }
                 }
-                state = control.lock();
                 continue;
             }
             let wait = if occupied == 0 {
@@ -716,7 +735,7 @@ fn serve_decodes(
 fn settle_decodes<'state>(
     control: &'state Control,
     mut state: MutexGuard<'state, State>,
-    running: &mut [Option<Running<'_>>; 2],
+    running: &mut [Option<ScopedJoinHandle<'_, ()>>; 2],
     ask: u64,
     generation: Generation,
     losses: &mut broadcast::Receiver<Generation>,
@@ -725,35 +744,35 @@ fn settle_decodes<'state>(
     *failed |= lost(losses, generation);
     let active = running.iter().any(Option::is_some);
     let mut completed = [None, None];
-    while state.finished.iter().any(Option::is_some) {
-        for (slot, entry) in running.iter_mut().enumerate() {
-            let Some(result) = state.finished[slot].take() else {
-                continue;
-            };
-            let task = entry.take().expect("a completion owns its slot");
-            drop(state);
-            let joined = task.thread.join();
-            state = control.lock();
-            state.decoding -= 1;
-            *failed |= joined.is_err()
-                || matches!(
-                    result,
-                    SttResult::Failed(
-                        SpeechError::WorkerLost
-                            | SpeechError::ExitUnconfirmed
-                            | SpeechError::NotLoaded
-                    )
-                );
-            completed[slot] = Some((task.reply, result));
+    while let Some(slot) = state.finished.iter().position(Option::is_some) {
+        *failed |= state.finished.iter().flatten().any(|result| {
+            matches!(
+                result,
+                SttResult::Failed(
+                    SpeechError::WorkerLost | SpeechError::ExitUnconfirmed | SpeechError::NotLoaded
+                )
+            )
+        });
+        if *failed {
+            state.ready = false;
         }
+        completed[slot] = state.finished[slot].take();
+        let task = running[slot].take().expect("a completion owns its slot");
+        drop(state);
+        let joined = task.join();
+        state = control.lock();
+        *failed |= joined.is_err();
+        *failed |= lost(losses, generation);
     }
     *failed |= lost(losses, generation);
     if active && running.iter().all(Option::is_none) {
         state.idle_since = Instant::now();
     }
     state.ready = !*failed && !state.shutdown && wants(&state, ask);
-    for (reply, result) in completed.into_iter().flatten() {
-        if let Some(reply) = reply {
+    for (slot, result) in completed.into_iter().enumerate() {
+        if let Some(result) = result
+            && let Some(reply) = state.replies[slot].take()
+        {
             reply
                 .send(if *failed {
                     SttResult::Failed(SpeechError::WorkerLost)
@@ -764,8 +783,8 @@ fn settle_decodes<'state>(
         }
     }
     if *failed {
-        for task in running.iter_mut().flatten() {
-            if let Some(reply) = task.reply.take() {
+        for reply in &mut state.replies {
+            if let Some(reply) = reply.take() {
                 reply.send(SttResult::Failed(SpeechError::WorkerLost)).ok();
             }
         }
@@ -789,21 +808,16 @@ fn spawn_decode<'scope, 'env>(
     control: &'env Control,
     decoder: &'env dyn Decoder,
     slot: usize,
-    decode: Decode,
+    rate: u32,
+    samples: Vec<i16>,
     #[cfg(test)] cut: Option<DecodeCut>,
-) -> io::Result<Running<'scope>> {
+) -> io::Result<ScopedJoinHandle<'scope, ()>> {
+    let samples = Zeroizing::new(samples);
     #[cfg(test)]
     if cut == Some(DecodeCut::Spawn) {
-        decode.answer(SttResult::Failed(SpeechError::WorkerLost));
         return Err(io::Error::other("decode thread refused"));
     }
-    let Decode {
-        rate,
-        samples,
-        reply,
-    } = decode;
-    let samples = Zeroizing::new(samples);
-    let spawned = std::thread::Builder::new()
+    std::thread::Builder::new()
         .name("voice-decode".into())
         .spawn_scoped(scope, move || {
             #[cfg(panic = "unwind")]
@@ -818,22 +832,7 @@ fn spawn_decode<'scope, 'env>(
                 Err(error) => SttResult::Failed(error),
             };
             control.update(|state| state.finished[slot] = Some(result));
-        });
-    match spawned {
-        Ok(thread) => Ok(Running {
-            reply: Some(reply),
-            thread,
-        }),
-        Err(error) => {
-            reply.send(SttResult::Failed(SpeechError::WorkerLost)).ok();
-            Err(error)
-        }
-    }
-}
-
-struct Running<'scope> {
-    reply: Option<oneshot::Sender<SttResult>>,
-    thread: std::thread::ScopedJoinHandle<'scope, ()>,
+        })
 }
 
 /// The models to load next with the ask they answer, or `None` on shutdown. A decode left
