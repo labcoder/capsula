@@ -449,8 +449,8 @@ impl Presence {
         let previous = self.settings.read(cx).claude.generation;
         let accepted = self.settings.update(cx, |state, cx| {
             let accepted = state.claude.receive(current, generation, view.claude_code);
-            let key_changed =
-                current == Some(generation) && state.key_paste.receive(view.anthropic);
+            let key_changed = current == Some(generation)
+                && state.key_paste.receive(view.anthropic, view.anthropic_revision);
             if accepted || key_changed {
                 cx.notify();
             }

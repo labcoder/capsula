@@ -24,7 +24,7 @@ fn accounts(cx: &mut TestAppContext) -> (AnyWindowHandle, Entity<SettingsView>) 
     view.update(cx, |view, cx| {
         view.tab = 1;
         view.model.update(cx, |state, cx| {
-            state.key_paste.receive(KeyView::Missing);
+            state.key_paste.receive(KeyView::Missing, None);
             cx.notify();
         });
     });
@@ -133,7 +133,7 @@ fn a_fresh_unconfirmed_view_warns_that_paste_can_replace_a_key(cx: &mut TestAppC
         owner.update(cx, |owner, cx| {
             owner.settings.update(cx, |state, cx| {
                 state.key_paste = KeyPaste::default();
-                state.key_paste.receive(KeyView::Unconfirmed);
+                state.key_paste.receive(KeyView::Unconfirmed, None);
                 assert!(!state.key_paste.saved());
                 assert!(state.key_paste.can_paste());
                 cx.notify();
@@ -162,7 +162,7 @@ fn a_lost_save_acknowledgement_replaces_the_old_status(cx: &mut TestAppContext) 
                 owner.settings.update(cx, |state, cx| {
                     let key = &mut state.key_paste;
                     *key = KeyPaste::default();
-                    key.receive(old);
+                    key.receive(old, (old == KeyView::Ready).then_some(1));
                     let now = Instant::now();
                     let at = key
                         .begin(Some(Zeroizing::new(SYNTHETIC.into())), 7, now, |_| true)
@@ -206,7 +206,7 @@ fn a_stale_or_cancelled_confirmation_cannot_remove_a_key(cx: &mut TestAppContext
     let (window, owner, controls) = isolated_row(cx);
     owner.update(cx, |owner, cx| {
         owner.settings.update(cx, |state, cx| {
-            state.key_paste.receive(KeyView::Ready);
+            state.key_paste.receive(KeyView::Ready, Some(2));
             cx.notify();
         });
     });
@@ -220,7 +220,7 @@ fn a_stale_or_cancelled_confirmation_cannot_remove_a_key(cx: &mut TestAppContext
             owner.settings.update(cx, |state, cx| {
                 state
                     .key_paste
-                    .receive(KeyView::Rejected(KeyRejection::Refused));
+                    .receive(KeyView::Rejected(KeyRejection::Refused), Some(2));
                 cx.notify();
             });
         });
@@ -231,6 +231,6 @@ fn a_stale_or_cancelled_confirmation_cannot_remove_a_key(cx: &mut TestAppContext
     click(&mut visual, "confirmation-danger");
     assert_eq!(
         controls.try_recv(),
-        Ok(ControlToBrain::Connection(ConnectionOp::RemoveAnthropicKey))
+        Ok(ControlToBrain::Connection(ConnectionOp::RemoveAnthropicKey { revision: 2 }))
     );
 }

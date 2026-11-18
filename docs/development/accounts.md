@@ -19,8 +19,11 @@ Only keys connected inside Kumochi are used; live checks must read the same Kumo
 credential, never another app's key.
 
 The saved key is the [credential authority](#credential-authority)'s `anthropic` record: Check
-reads its current generation, and Remove commits the removal first, then sweeps the names, so a
-removed key is never read again even while Credential Manager still serves it.
+reads its current generation, and a removal confirmation applies only to the
+revision shown when the dialog opened. The worker compares that revision before
+committing, then sweeps the names, so a stale confirmation can't delete a
+replacement and a removed key is never read again even while Credential Manager
+still serves it.
 Neither the legacy `anthropic-key-staged.{service}` target nor the old
 `anthropic-key.{service}` record is read. All work runs on the credential worker under the
 vault's session lock, one job at a time and in order, so a Remove sent while a Check's native
@@ -28,7 +31,8 @@ read is blocked runs after it, and the runtime generation guard drops the stale 
 A cancelled waiter never interrupts an in-flight call.
 
 A failed key removal remains pending in this brain process; Check/Retry retries
-Remove, and staging requests/notifications are refused without adoption.
+the same revision, and staging requests/notifications are refused without adoption.
+A changed revision ends the old removal and reloads the current key.
 Unconfirmed is not confirmation of removal. Until the removal transaction commits,
 quitting or restarting loses that in-memory
 intent and the next startup may load and check the still-current key; retry removal until it
