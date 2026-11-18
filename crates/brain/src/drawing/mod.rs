@@ -17,7 +17,7 @@ mod scenes;
 mod screen;
 mod snapshot;
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 
 use std::collections::VecDeque;
 use std::fmt;
