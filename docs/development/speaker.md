@@ -13,6 +13,7 @@ only reports what played and when its output is quiet.
 | --- | --- | --- |
 | `Clock` | `speaker/clock.rs` | the device epoch, the ledger, the deadline and what counts as played |
 | `Engine` | `speaker/engine.rs` | the 20 s arena, up to 256 segments, runs, stops, pauses and the reports |
+| `Worker`, `Speaker`, `Input` | `speaker.rs` | the bounded channels to the worker; credit; spent buffers; teardown |
 
 ## The device seam
 
@@ -93,8 +94,8 @@ All go out on the connection's control queue, in order. The announcement comes f
   stop is still answered, and a floor of run ids can't stand in for that memory.
 - `AudioOutputUnavailable { generation }` goes out on the first freeze.
 - **Bound.** At most 512 reports wait unread: every segment's receipt and as many again. Past
-  that the brain isn't reading: `backlogged()` holds, whatever faulted first, so the speaker can end
-  rather than grow the queue or drop a receipt in silence. The first fault stays the diagnostic.
+  that the brain isn't reading, and the worker ends, whatever faulted first, rather than grow
+  the queue or drop a receipt in silence. The first fault stays the diagnostic.
 
 ## Runs, fences and pauses
 
@@ -107,8 +108,9 @@ All go out on the connection's control queue, in order. The announcement comes f
   arrives after the old run gave way is answered with its last cursor. A revoke for a run
   never seen is answered at once with no cursor.
 - **Fences.** A stop fences its run and every older one: their later frames, and PCM for
-  another output generation, are dropped and credited. Frames released before a stop still play
-  and count.
+  another output generation, are dropped and credited. A stop is a command the worker applies at
+  its next pass, not a native cancel: frames released before it still play and count. Only the
+  session's revocation is read at the release decision.
 - **Pause and resume.** `pause(serial)` closes admission. `quiet()` names the serial once every
   content frame written before it has played. `resume(serial)` withdraws that pause, quiet or
   not, and speech goes on at the first unwritten sample, with no skip or repeat.
@@ -126,17 +128,28 @@ All go out on the connection's control queue, in order. The announcement comes f
 - **Memory.** The arena holds 20 s at the device rate (7,680,000 bytes at 192 kHz). Twenty
   seconds plus one sample unplayed is refused, counting content already in the device and not
   yet played, but a long segment streamed at playback pace fits.
+- **Credit.** A frame is credited once, when it's kept or dropped, never when it plays. Long
+  playback releases the brain's window through progress.
+- **Channels.** Frames go through a capacity-1 channel. A reader waiting on a busy worker gives
+  up once the link lets go. Commands go through a queue of 16 that never waits: a full queue
+  is refused, and the caller ends the connection. The worker applies at most 16 commands a
+  pass and takes data only once none is left, so data can't pass a fence. Its reports go out
+  only once the caller accepted the speaker: `launch` accepts one only when its device started
+  within the wait, so a device that starts late announces nothing.
 
 ## Privacy and teardown
 
 - **No content in diagnostics.** No sample or text is logged; `Data`'s Debug shows lengths
   only.
 - **What is zeroed.** Decoded samples: in the arena as they're written to the device and when
-  they're discarded, and the whole arena on drop.
+  they're discarded, and the whole arena on drop; in a `Packet` however it's let go; in a kept
+  or dropped frame's buffer, which goes back to the reader zeroed when the return channel has
+  room or is freed by the worker, already zeroed.
 - **What isn't.** The transport's framed bytes and the data reader's buffer, which predate the
   speaker, and the device's own copy of what it was given.
-- **Revocation.** Once the engine's revocation flag is set it stages only silence; content
-  already released is owed, as above.
+- **Teardown.** Dropping the `Speaker` revokes it and waits up to 1 s [guess] for its thread to
+  finish, then leaves it. A revoked worker stages only silence; content already released is
+  owed, as above.
 
 ## Not here yet
 
