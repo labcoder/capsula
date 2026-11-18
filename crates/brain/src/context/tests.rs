@@ -803,23 +803,29 @@ fn reasoning_is_replayed_only_on_the_connection_that_made_it() {
             item: Opaque::new(vec![byte]).expect("small"),
         },
     };
-    let supplied = Supplied {
-        summary: None,
-        items: vec![item(1, 7, 1), item(2, 8, 2)],
-        ..Supplied::default()
-    };
-    let built = world
-        .build(
-            &snapshot(Origin::Kumo, None),
-            (main, current),
-            supplied,
-            BOUND,
-        )
-        .expect("built");
-    assert_eq!(
-        built.request.input[1..],
-        [InputItem::Native(Opaque::new(vec![1]).expect("small"))]
-    );
+    // A run with another connection's item among its own replays none of them.
+    for (items, replayed) in [
+        (
+            vec![item(1, 7, 1)],
+            vec![InputItem::Native(Opaque::new(vec![1]).expect("small"))],
+        ),
+        (vec![item(1, 7, 1), item(2, 8, 2)], vec![]),
+    ] {
+        let supplied = Supplied {
+            summary: None,
+            items,
+            ..Supplied::default()
+        };
+        let built = world
+            .build(
+                &snapshot(Origin::Kumo, None),
+                (main, current),
+                supplied,
+                BOUND,
+            )
+            .expect("built");
+        assert_eq!(built.request.input[1..], replayed);
+    }
 }
 
 #[test]

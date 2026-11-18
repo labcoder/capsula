@@ -14,7 +14,7 @@ use std::sync::mpsc::{self, RecvTimeoutError};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use kumochi_protocol::message::{Deleted, RunId, SceneId, ThreadId};
+use kumochi_protocol::message::{ConnectionKind, Deleted, RunId, SceneId, ThreadId};
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::oneshot;
 
@@ -740,18 +740,26 @@ fn serve_op(store: &mut Store, purger: &mut Purger, acks: &UnboundedSender<Input
                 })
         }),
         StoreOp::RoundItems(round) => write(store, purger, acks, round.run, "round", |store| {
-            store
-                .append_round(
-                    (round.thread, round.run),
-                    round.connection,
-                    round.text.as_deref(),
-                    &round.items,
+            let ids = (round.thread, round.run);
+            let text = round.text.as_deref();
+            match round.connection.kind {
+                ConnectionKind::AnthropicKey if round.items.is_empty() => store.append_key_round(
+                    ids,
+                    round.connection.tag,
+                    text,
+                    &round.key_calls,
                     &round.calls,
-                )
-                .map(|()| Input::RoundStored {
-                    run: round.run,
-                    round: round.round,
-                })
+                ),
+                // `append_round` refuses the key's route, so its opaque items are never written.
+                _ if round.key_calls.is_empty() => {
+                    store.append_round(ids, round.connection, text, &round.items, &round.calls)
+                }
+                _ => Err(StoreError::RoundRecord),
+            }
+            .map(|()| Input::RoundStored {
+                run: round.run,
+                round: round.round,
+            })
         }),
         StoreOp::EndRun {
             thread,

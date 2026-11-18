@@ -2075,8 +2075,16 @@ fn a_native_row_without_a_kind_is_chatgpts_and_an_unknown_kind_is_no_route() {
             Some(ConnectionKind::ChatGpt),
         ),
         (
-            r#"{"connection":7,"kind":"anthropic_key","item":{"type":"x"}}"#,
+            r#"{"connection":7,"kind":"anthropic_key","item":{"type":"tool_use","id":"a","name":"b","input":{}}}"#,
             Some(ConnectionKind::AnthropicKey),
+        ),
+        (
+            r#"{"connection":7,"kind":"anthropic_key","item":{"type":"x"}}"#,
+            None,
+        ),
+        (
+            r#"{"connection":7,"kind":"anthropic_key","item":{"type":"tool_use","id":"a","name":"b","input":{},"signature":"s"}}"#,
+            None,
         ),
         (
             r#"{"connection":7,"kind":"later","item":{"type":"x"}}"#,
@@ -2094,4 +2102,17 @@ fn a_native_row_without_a_kind_is_chatgpts_and_an_unknown_kind_is_no_route() {
         };
         assert_eq!((read, connection), (kind, ConnectionTag(7)), "{body}");
     }
+    // A key row's item is read as written, even where a generic parse would change it.
+    let item =
+        r#"{"type":"tool_use","id":"a","name":"b","input":{"$serde_json::private::RawValue":"5"}}"#;
+    let body = format!(r#"{{"connection":7,"kind":"anthropic_key","item":{item}}}"#);
+    let Ok(crate::context::Body::Native {
+        kind: Some(ConnectionKind::AnthropicKey),
+        item: read,
+        ..
+    }) = super::rounds::native(&body)
+    else {
+        panic!("a key row");
+    };
+    assert_eq!(read.bytes(), item.as_bytes());
 }

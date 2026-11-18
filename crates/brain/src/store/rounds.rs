@@ -7,8 +7,10 @@ use kumochi_protocol::message::{ConnectionKind, RunId, ThreadId};
 use serde_json::{Value, json};
 
 use super::{EventKind, NewEvent, Store, StoreError};
+use crate::connections::anthropic::request::{literal, members};
 use crate::context::{Body, ConnectionTag, Route};
 use crate::dispatch::ToolOutput;
+use crate::engines::anthropic::encode::ToolUse;
 use crate::engines::{CallId, Opaque};
 
 /// The longest stored result read back: a full tool output, plus its call id, escaped, and the
@@ -18,19 +20,22 @@ const MAX_RESULT: usize = crate::dispatch::MAX_OUTPUT + 1024;
 impl Store {
     /// Appends one round to an active run in one transaction: the text streamed since the last
     /// write, the native items in the order given, each with the route that made it, then each
-    /// call's answer.
+    /// call's answer. The Anthropic key's rounds go through [`Store::append_key_round`] only.
     ///
     /// # Errors
-    /// [`StoreError::RoundRecord`] when an item or a result is one the reader would refuse,
-    /// writing nothing; and whatever [`Store::append`] fails with.
+    /// [`StoreError::RoundRecord`] when an item or a result is one the reader would refuse, or
+    /// the route is the key's, writing nothing; and whatever [`Store::append`] fails with.
     pub(crate) fn append_round(
         &mut self,
-        (thread, run): (ThreadId, RunId),
+        ids: (ThreadId, RunId),
         connection: Route,
         text: Option<&str>,
         items: &[Opaque],
         results: &[(CallId, ToolOutput)],
     ) -> Result<(), StoreError> {
+        if connection.kind == ConnectionKind::AnthropicKey {
+            return Err(StoreError::RoundRecord);
+        }
         let natives = items
             .iter()
             .map(|item| {
@@ -39,6 +44,49 @@ impl Store {
                 Ok(body)
             })
             .collect::<Result<Vec<_>, StoreError>>()?;
+        self.write_round(ids, text, &natives, results)
+    }
+
+    /// Appends one of the Anthropic key's rounds as [`Store::append_round`] does, its items only
+    /// its calls, each read back as the replay will read it before anything is written.
+    ///
+    /// # Errors
+    /// As [`Store::append_round`].
+    pub(crate) fn append_key_round(
+        &mut self,
+        ids: (ThreadId, RunId),
+        tag: ConnectionTag,
+        text: Option<&str>,
+        calls: &[ToolUse],
+        results: &[(CallId, ToolOutput)],
+    ) -> Result<(), StoreError> {
+        let natives = calls
+            .iter()
+            .map(|call| {
+                let body = format!(
+                    r#"{{"connection":{},"kind":"anthropic_key","item":{}}}"#,
+                    tag.0,
+                    call.json()
+                );
+                match native(&body)? {
+                    Body::Native {
+                        kind: Some(ConnectionKind::AnthropicKey),
+                        ..
+                    } => Ok(body),
+                    _ => Err(StoreError::RoundRecord),
+                }
+            })
+            .collect::<Result<Vec<_>, StoreError>>()?;
+        self.write_round(ids, text, &natives, results)
+    }
+
+    fn write_round(
+        &mut self,
+        (thread, run): (ThreadId, RunId),
+        text: Option<&str>,
+        natives: &[String],
+        results: &[(CallId, ToolOutput)],
+    ) -> Result<(), StoreError> {
         let results = results
             .iter()
             .map(|(call, output)| {
@@ -71,10 +119,7 @@ impl Store {
 /// JSON value.
 fn native_body(route: Route, item: &Opaque) -> Result<String, StoreError> {
     let item: Value = serde_json::from_slice(item.bytes()).map_err(|_| StoreError::RoundRecord)?;
-    // The key route replays only its calls (K1a's encoder takes nothing else from a stored item).
-    if !item.is_object()
-        || (route.kind == ConnectionKind::AnthropicKey && item["type"] != "tool_use")
-    {
+    if !item.is_object() {
         return Err(StoreError::RoundRecord);
     }
     let kind = match route.kind {
@@ -90,14 +135,16 @@ fn result_body(call: &CallId, output: &ToolOutput) -> String {
     json!({ "call": call.as_str(), "output": output.json() }).to_string()
 }
 
+/// A stored native row, read with no member repeated. A key row's item is kept byte for byte, and
+/// one that isn't a call the encoder takes back reads as no route, so its run replays as text.
 pub(super) fn native(body: &str) -> Result<Body, StoreError> {
-    let mut value: Value = serde_json::from_str(body).map_err(|_| StoreError::RoundRecord)?;
+    let mut value = literal(body.as_bytes()).map_err(|_| StoreError::RoundRecord)?;
     let connection = value["connection"]
         .as_u64()
         .ok_or(StoreError::RoundRecord)?;
     // A row written before kinds were kept is `ChatGPT`'s, the only route that stored rounds; any
     // other kind, or a kind that isn't one of these, never replays.
-    let kind = match value.get("kind") {
+    let mut kind = match value.get("kind") {
         None => Some(ConnectionKind::ChatGpt),
         Some(kind) => match kind.as_str() {
             Some("chatgpt") => Some(ConnectionKind::ChatGpt),
@@ -110,7 +157,18 @@ pub(super) fn native(body: &str) -> Result<Body, StoreError> {
     if !item.is_object() {
         return Err(StoreError::RoundRecord);
     }
-    let bytes = serde_json::to_vec(&item).map_err(|_| StoreError::RoundRecord)?;
+    let bytes = if kind == Some(ConnectionKind::AnthropicKey) {
+        let written = members(body)
+            .and_then(|members| members.into_iter().find(|(name, _)| name == "item"))
+            .map(|(_, item)| item.as_bytes().to_vec())
+            .ok_or(StoreError::RoundRecord)?;
+        if ToolUse::stored(&written).is_none() {
+            kind = None;
+        }
+        written
+    } else {
+        serde_json::to_vec(&item).map_err(|_| StoreError::RoundRecord)?
+    };
     Ok(Body::Native {
         kind,
         connection: ConnectionTag(connection),

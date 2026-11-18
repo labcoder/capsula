@@ -32,13 +32,16 @@ after their build stops; background jobs keep their separate job-keyed collector
 | Deletion notes | Kumo's thread only: up to the newest 32 notes [guess] past the summary, each one developer message, `Note: a task was deleted at 2026-11-06 01:23.` A note sits after the last run that began before it, never inside a run, and is dropped with that run. A summary covers the notes up to its last event. A note names no task, so a deleted title never comes back in a request. |
 | Current turn | The user's text, plus their local time to the minute when the run started (its `started_ms` through SQLite's `localtime`, so the system's time zone on every platform), the same in every round of the run. It's never dropped. |
 
-**Stored rounds** (runs.md, "The tool loop") replay per run (D13-M1). A run whose stored items came
-from this run's route, the same kind under the same sign-in tag, replays its rounds natively: each
+**Stored rounds** (runs.md, "The tool loop") replay per run (D13-M1). A run whose stored items all
+came from this run's route, the same kind under the same sign-in tag, and whose results each
+answer one call of the run made before them, once, replays its rounds natively: each
 round's items in output order, then its results. A `ChatGPT` round's items carry its text, so of
 its text only what was written after its last round, such as a Stop's partial answer, goes as one
 assistant message. An Anthropic key round stores only its calls, each a `tool_use` item of its id,
-name and input, so its text replays as written, beside them. A run from another route replays as
-its text only, with no items and no results, so no call travels without its result. The route is
+name and input, so its text replays as written, beside them; each of its calls must be answered
+too. Any other run, one with a single row of another route or of no known one among its own, or a
+result that answers no call or answers one twice, replays as its text only, with no items, no
+results and no recall read, so no call or result travels without its pair. The route is
 the kind of the run's choice (`ChatGPT` for none) and the tag that kind had when the turn arrived,
 recorded in its snapshot. Every stored item records both; an item stored before kinds were kept is
 `ChatGPT`'s, and one of a kind this build doesn't know never replays. Claude Code keeps its own

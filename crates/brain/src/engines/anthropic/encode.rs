@@ -12,7 +12,7 @@ use zeroize::Zeroizing;
 
 use super::{Mapper, Reply};
 use crate::connections::anthropic::messages::MessagesBody;
-use crate::connections::anthropic::request::literal;
+use crate::connections::anthropic::request::{literal, members};
 use crate::connections::anthropic::sse_map::Capture;
 use crate::context::{BOUND, ConnectionTag, InputItem, ModelRequest, Role};
 use crate::engines::responses::effort;
@@ -134,13 +134,10 @@ pub(crate) fn body(
     request: &ModelRequest,
     tag: ConnectionTag,
 ) -> Result<(MessagesBody, Conversation), BodyError> {
-    let Value::Object(mut head) = json(request)? else {
+    let (Value::Object(mut head), messages) = json(request)? else {
         return Err(BodyError::Envelope);
     };
-    let messages = match head.remove("messages") {
-        Some(Value::Array(messages)) => messages.iter().map(written).collect::<Result<_, _>>()?,
-        _ => return Err(BodyError::Envelope),
-    };
+    head.remove("messages");
     sealed(head, messages, tag)
 }
 
@@ -223,10 +220,10 @@ fn sealed(
     Ok((sent, conversation))
 }
 
-/// The request's JSON: the instructions as the one system block, which ends the cached prefix
-/// after the tools; then the input, neighbouring blocks of one role merged into one message, as
-/// Messages wants roles to alternate.
-fn json(request: &ModelRequest) -> Result<Value, BodyError> {
+/// The request's JSON, its messages written beside it: the instructions as the one system block,
+/// which ends the cached prefix after the tools; then the input, neighbouring blocks of one role
+/// merged into one message, as Messages wants roles to alternate.
+fn json(request: &ModelRequest) -> Result<(Value, Vec<String>), BodyError> {
     let choice = request.choice.as_ref().ok_or(BodyError::NoModel)?;
     if choice.connection != ConnectionKind::AnthropicKey {
         return Err(BodyError::Route);
@@ -234,14 +231,14 @@ fn json(request: &ModelRequest) -> Result<Value, BodyError> {
     if request.instructions.is_empty() {
         return Err(BodyError::NoInstructions);
     }
-    let mut messages: Vec<(Role, Vec<Value>)> = Vec::new();
+    let mut messages: Vec<(Role, Vec<String>)> = Vec::new();
     for item in &request.input {
         let (role, block) = match item {
             InputItem::Message { text, .. } if text.is_empty() => continue,
             InputItem::Message { role, text } => match role {
-                Role::User => (Role::User, text_block(text)),
-                Role::Developer => (Role::User, text_block(&format!("{NOTE}{text}"))),
-                Role::Assistant => (Role::Assistant, text_block(text)),
+                Role::User => (Role::User, written(&text_block(text))?),
+                Role::Developer => (Role::User, written(&text_block(&format!("{NOTE}{text}")))?),
+                Role::Assistant => (Role::Assistant, written(&text_block(text))?),
             },
             InputItem::FunctionCall {
                 call,
@@ -252,10 +249,11 @@ fn json(request: &ModelRequest) -> Result<Value, BodyError> {
                     .ok()
                     .filter(Value::is_object)
                     .ok_or(BodyError::Arguments)?;
-                (Role::Assistant, tool_use(id(call)?, named(name)?, &input))
+                let block = tool_use(id(call)?, named(name)?, &input);
+                (Role::Assistant, written(&block)?)
             }
             InputItem::FunctionOutput { call, output } => {
-                (Role::User, tool_result(id(call)?, output))
+                (Role::User, written(&tool_result(id(call)?, output))?)
             }
             // Only this connection's own items reach here; the build filters the rest.
             InputItem::Native(item) => (Role::Assistant, native(item)?),
@@ -266,7 +264,7 @@ fn json(request: &ModelRequest) -> Result<Value, BodyError> {
             _ => messages.push((role, vec![block])),
         }
     }
-    let messages: Vec<Value> = messages
+    let messages = messages
         .into_iter()
         .map(|(role, content)| {
             let role = if role == Role::Assistant {
@@ -274,7 +272,7 @@ fn json(request: &ModelRequest) -> Result<Value, BodyError> {
             } else {
                 "user"
             };
-            json!({ "role": role, "content": content })
+            format!(r#"{{"role":"{role}","content":[{}]}}"#, content.join(","))
         })
         .collect();
     let mut body = json!({
@@ -286,7 +284,7 @@ fn json(request: &ModelRequest) -> Result<Value, BodyError> {
             "text": request.instructions,
             "cache_control": { "type": "ephemeral" },
         }],
-        "messages": messages,
+        "messages": [],
         "output_config": { "effort": effort(choice.effort) },
     });
     if !request.tools.is_empty() {
@@ -302,7 +300,7 @@ fn json(request: &ModelRequest) -> Result<Value, BodyError> {
             })
             .collect();
     }
-    Ok(body)
+    Ok((body, messages))
 }
 
 fn text_block(text: &str) -> Value {
@@ -317,29 +315,96 @@ fn tool_result(id: &str, output: &str) -> Value {
     json!({ "type": "tool_result", "tool_use_id": id, "content": output })
 }
 
-/// A stored native item rebuilt from the only fields this route writes: a text block with its
-/// text, or a `tool_use` block with its id, name and object input. Anything else, a thinking,
-/// image or document block among them, builds nothing: stored items never carry thinking.
-fn native(item: &Opaque) -> Result<Value, BodyError> {
-    let block: Map<String, Value> =
-        serde_json::from_slice(item.bytes()).map_err(|_| BodyError::Native)?;
-    let field = |key: &str| block.get(key).ok_or(BodyError::Native);
-    match (field("type")?.as_str(), block.len()) {
-        (Some("text"), 2) => {
-            let text = field("text")?.as_str().filter(|text| !text.is_empty());
-            Ok(text_block(text.ok_or(BodyError::Native)?))
-        }
-        (Some("tool_use"), 4) => {
-            let id = field("id")?.as_str().ok_or(BodyError::Native)?;
-            let name = field("name")?.as_str().ok_or(BodyError::Native)?;
-            let input = field("input")?;
-            if !input.is_object() {
-                return Err(BodyError::Native);
-            }
-            Ok(tool_use(named(id)?, named(name)?, input))
+/// A stored native item as it goes back: a `tool_use` block exactly as [`ToolUse`] keeps it, or
+/// a text block with its text. Anything else, a thinking, image or document block among them,
+/// builds nothing: stored items never carry thinking.
+fn native(item: &Opaque) -> Result<String, BodyError> {
+    let block = literal(item.bytes()).map_err(|_| BodyError::Native)?;
+    let field = |name: &str| block.get(name).and_then(Value::as_str);
+    match (
+        field("type"),
+        block.as_object().map(Map::len),
+        field("text"),
+    ) {
+        (Some("text"), Some(2), Some(text)) if !text.is_empty() => written(&text_block(text)),
+        (Some("tool_use"), Some(4), _) if block["input"].is_object() => {
+            named(field("id").ok_or(BodyError::Native)?)?;
+            named(field("name").ok_or(BodyError::Native)?)?;
+            let call = ToolUse::stored(item.bytes()).ok_or(BodyError::Native)?;
+            Ok(call.json())
         }
         _ => Err(BodyError::Native),
     }
+}
+
+/// A call of the key's reply as its rounds store and replay it: the four fields of a `tool_use`
+/// block, its input the JSON text exactly as the reader read it. Only a call this encoder sends
+/// back can be made, so a stored one always encodes again.
+#[derive(Clone, PartialEq, Eq)]
+pub struct ToolUse {
+    id: String,
+    name: String,
+    input: String,
+}
+
+impl fmt::Debug for ToolUse {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ToolUse")
+            .field("input_bytes", &self.input.len())
+            .finish_non_exhaustive()
+    }
+}
+
+impl ToolUse {
+    /// The call in a reply's `tool_use` block: its four fields and nothing else the block holds.
+    pub(crate) fn projected(block: &str) -> Option<Self> {
+        Self::read(&fields(block)?)
+    }
+
+    /// A stored call, only as [`ToolUse::json`] writes one: those four members and no other.
+    pub(crate) fn stored(item: &[u8]) -> Option<Self> {
+        let fields = fields(std::str::from_utf8(item).ok()?)?;
+        if fields.len() != 4 {
+            return None;
+        }
+        Self::read(&fields)
+    }
+
+    fn read(fields: &[(String, &str)]) -> Option<Self> {
+        let field = |name: &str| {
+            fields
+                .iter()
+                .find(|(named, _)| named == name)
+                .map(|(_, value)| *value)
+        };
+        let text = |name| serde_json::from_str::<String>(field(name)?).ok();
+        let input = field("input")?;
+        members(input)?;
+        let (id, name) = (text("id")?, text("name")?);
+        (text("type")? == "tool_use" && named(&id).is_ok() && named(&name).is_ok()).then(|| Self {
+            id,
+            name,
+            input: input.to_owned(),
+        })
+    }
+
+    pub(crate) fn id(&self) -> &str {
+        &self.id
+    }
+
+    /// The block as stored and sent: an id and a name need no escaping, and the input goes as read.
+    pub(crate) fn json(&self) -> String {
+        format!(
+            r#"{{"type":"tool_use","id":"{}","name":"{}","input":{}}}"#,
+            self.id, self.name, self.input
+        )
+    }
+}
+
+/// `text`'s members, each value as written, when it is one object [`literal`] reads.
+fn fields(text: &str) -> Option<Vec<(String, &str)>> {
+    literal(text.as_bytes()).ok()?;
+    members(text)
 }
 
 /// Each assistant message's calls are answered exactly once, by the results that open the next

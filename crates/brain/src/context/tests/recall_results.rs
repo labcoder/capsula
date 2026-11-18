@@ -125,7 +125,7 @@ fn metadata_only_native_replay_is_source_fenced_and_other_connections_do_not_rep
                 tag: ConnectionTag(7),
             },
             None,
-            &[Opaque::new(br#"{"type":"function_call"}"#.to_vec()).unwrap()],
+            &[Opaque::new(br#"{"type":"function_call","call_id":"list"}"#.to_vec()).unwrap()],
             &[(
                 call("list"),
                 ToolOutput::Recall(Selection::Tasks {

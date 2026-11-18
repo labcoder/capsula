@@ -202,13 +202,19 @@ builds nothing.
 `live::Live` plays each key round in one call: it builds the body, binds the round's mapper to
 it, feeds that mapper the stream's own callbacks and takes the transport's real ending. Each
 read's text, call and usage events go to the coordinator before the next read; the mapper's items
-don't. Once a round that called tools completes, its calls go out as items, each a `tool_use`
-block of the reply's id, name and input and nothing else, which the coordinator stores under the
-run's route. The store refuses any other item on this route. The reply, with the request it
-answered, stays in `Live` for the run's next round.
+don't. A round that completes on `tool_use` with calls made ready is a tool round; any other mix of
+stop reason and calls fails locally (`Protocol`) and keeps nothing. A tool round's calls go out as
+`KeyCall` events, each an `encode::ToolUse`: the type, id and name of a `tool_use` block of the
+reply, and its input as the JSON text the reader read, nothing else. They must be the calls made
+ready, in order. The store takes this route's items only as `ToolUse` (`append_key_round`;
+`append_round` refuses the route) and writes, reads and re-encodes the input byte for byte, so no
+generic JSON parse can change it. The reply, with the request it answered, stays in `Live` for the
+run's next round.
 
 The next round takes it once. Its body is `encode::next` over that request, that reply, and the
-rebuilt request's results for the reply's calls; nothing else of the rebuilt request is sent. A
+results the rebuilt request ends with: those right after the round's own stored calls, exactly
+one for each held call, in call order. A missing, repeated or extra result, or stored calls other
+than the held ones, refuse the round locally; nothing else of the rebuilt request is sent. A
 later round with nothing to continue fails with a local refusal before anything is sent: after a
 rebuild answer, a refused send, another run's round, or with no reply kept at all. A job or a
 compaction offers no tools and is built afresh. A key run whose next build no longer has a source

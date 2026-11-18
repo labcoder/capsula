@@ -8,15 +8,15 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use kumochi_protocol::Secret;
 use kumochi_protocol::message::RunId;
-use serde_json::json;
 use tokio::sync::mpsc;
 
-use super::encode::{self, Conversation};
+use super::encode::{self, Conversation, ToolUse};
 use super::{Mapper, Reply};
 use crate::connections::anthropic::error::Failure;
 use crate::connections::anthropic::key::AnthropicKey;
 use crate::connections::anthropic::messages::{MessagesBody, stream};
-use crate::connections::anthropic::request::literal;
+use crate::connections::anthropic::request::members;
+use crate::connections::anthropic::sse_map::StopReason;
 use crate::connections::anthropic::tls::AnthropicConnect;
 use crate::connections::model::Events;
 use crate::connections::model::budget::Budget;
@@ -24,9 +24,7 @@ use crate::connections::model::conn::ModelClient;
 use crate::connections::model::sse::{Progress, SseEvent};
 use crate::context::{ConnectionTag, InputItem};
 use crate::coordinator::SendKey;
-use crate::engines::{
-    Answer, CallId, EngineFailure, Finish, Opaque, RunRequest, SendGate, TurnEvent,
-};
+use crate::engines::{Answer, CallId, EngineFailure, Finish, RunRequest, SendGate, TurnEvent};
 
 /// What a round sends on: the key, the tag it became Ready with, and the run's and the
 /// process's request budgets.
@@ -112,6 +110,7 @@ impl Live {
         if matches!(read, Err(Failure::Rebuild)) {
             return None;
         }
+        let tool_use = matches!(read, Ok(StopReason::ToolUse));
         let ended = state.ended.take();
         let finish = ended
             .or_else(|| state.mapper.finish(read.map(|_| Progress::Completed)))
@@ -119,21 +118,29 @@ impl Live {
         if state.hand_on(events).await.is_break() {
             return None;
         }
-        if finish != Finish::Completed || state.calls.is_empty() {
+        if finish != Finish::Completed {
+            return Some(finish);
+        }
+        // A tool round ends on `tool_use` with calls, and an answer has neither.
+        if tool_use == state.calls.is_empty() {
+            return failed(Failure::Protocol);
+        }
+        if !tool_use {
             return Some(finish);
         }
         let Some((reply, stored)) = state
             .mapper
             .reply()
             .and_then(|reply| stored_calls(&reply).map(|stored| (reply, stored)))
+            .filter(|(_, stored)| {
+                let stored = stored.iter().map(|(_, call)| call.id());
+                stored.eq(state.calls.iter().map(CallId::as_str))
+            })
         else {
             return failed(Failure::Protocol);
         };
-        for (index, item) in stored {
-            events
-                .send(TurnEvent::OutputItem { index, item })
-                .await
-                .ok()?;
+        for (index, call) in stored {
+            events.send(TurnEvent::KeyCall { index, call }).await.ok()?;
         }
         if let SendKey::Build(key) = request.key {
             *self.held() = Some(Held {
@@ -149,7 +156,8 @@ impl Live {
 
     /// The body to send. A run's first round, a job and a compaction are built from the
     /// request; a later round of a run only continues the round just before it, with that
-    /// round's reply and the request's results for its calls, and without one it is refused.
+    /// round's reply and the results the request ends with for its calls, and without one it is
+    /// refused.
     fn body(
         &self,
         request: &RunRequest,
@@ -171,42 +179,70 @@ impl Live {
             .filter(|held| held.run == request.run && held.round + 1 == key.round)
             .ok_or(())?;
         let model = &request.request.choice.as_ref().ok_or(())?.model;
-        let results = held
-            .calls
-            .iter()
-            .map(|call| {
-                request.request.input.iter().find_map(|item| match item {
-                    InputItem::FunctionOutput {
-                        call: answered,
-                        output,
-                    } if answered == call => Some((call.clone(), output.clone())),
-                    _ => None,
-                })
-            })
-            .collect::<Option<Vec<_>>>()
-            .ok_or(())?;
+        let results = round_results(&request.request.input, &held.calls).ok_or(())?;
         encode::next(held.conversation, tag, model, held.reply, &results).map_err(drop)
     }
 }
 
-/// The reply's calls as the store keeps them: each `tool_use` block's id, name and input and
-/// nothing else, at its place in the reply.
-fn stored_calls(reply: &Reply) -> Option<Vec<(u32, Opaque)>> {
-    let mut items = Vec::new();
+/// The reply's calls as the store keeps them, each at its place in the reply.
+fn stored_calls(reply: &Reply) -> Option<Vec<(u32, ToolUse)>> {
+    let mut calls = Vec::new();
     for (index, block) in (0..).zip(&reply.blocks) {
-        let block = literal(block.as_bytes()).ok()?;
-        if block["type"] != "tool_use" {
-            continue;
+        let fields = members(block)?;
+        let kind = fields.iter().find(|(name, _)| name == "type")?.1;
+        if serde_json::from_str::<String>(kind).ok()? == "tool_use" {
+            calls.push((index, ToolUse::projected(block)?));
         }
-        let item = json!({
-            "type": "tool_use",
-            "id": block["id"],
-            "name": block["name"],
-            "input": block["input"],
-        });
-        items.push((index, Opaque::new(serde_json::to_vec(&item).ok()?).ok()?));
     }
-    Some(items)
+    Some(calls)
+}
+
+/// The results of the round that made `calls`, in call order: the items the input ends with,
+/// right after that round's own stored calls, one result for each call and nothing else.
+fn round_results(input: &[InputItem], calls: &[CallId]) -> Option<Vec<(CallId, String)>> {
+    let answers = input
+        .iter()
+        .rev()
+        .take_while(|item| matches!(item, InputItem::FunctionOutput { .. }))
+        .count();
+    let (before, answers) = input.split_at(input.len() - answers);
+    let made = before
+        .iter()
+        .rev()
+        .take_while(|item| matches!(item, InputItem::Native(_)))
+        .count();
+    let made = before[before.len() - made..]
+        .iter()
+        .map(|item| match item {
+            InputItem::Native(item) => ToolUse::stored(item.bytes()),
+            _ => None,
+        })
+        .collect::<Option<Vec<_>>>()?;
+    if answers.len() != calls.len()
+        || !made
+            .iter()
+            .map(ToolUse::id)
+            .eq(calls.iter().map(CallId::as_str))
+    {
+        return None;
+    }
+    calls
+        .iter()
+        .map(|call| {
+            let mut outputs = answers.iter().filter_map(|item| match item {
+                InputItem::FunctionOutput {
+                    call: answered,
+                    output,
+                } if answered == call => Some(output),
+                _ => None,
+            });
+            let output = outputs.next()?;
+            outputs
+                .next()
+                .is_none()
+                .then(|| (call.clone(), output.clone()))
+        })
+        .collect()
 }
 
 /// One round's mapper, the calls it made ready, and an ending a read already gave.
@@ -254,3 +290,7 @@ impl Events for Out<'_> {
         ControlFlow::Continue(())
     }
 }
+
+#[cfg(test)]
+#[path = "live_tests.rs"]
+mod tests;

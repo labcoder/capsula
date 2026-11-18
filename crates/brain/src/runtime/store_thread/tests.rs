@@ -748,6 +748,7 @@ fn a_round_the_reader_would_refuse_fails_its_run_and_the_thread_goes_on() {
             connection: crate::context::Route::chatgpt(7),
             text: None,
             items: vec![Opaque::new(item.as_bytes().to_vec()).expect("small")],
+            key_calls: Vec::new(),
             calls: vec![(CallId::new("c1").expect("short"), output)],
         })
     };
