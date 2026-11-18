@@ -56,9 +56,9 @@ pub use settings::{
     SttUnload, UserName,
 };
 pub use threads::{
-    Effort, LISTED_MODELS_CALL_TOOLS, MAX_MODEL_NAME_CHARS, MAX_MODELS, MAX_SLUG_BYTES,
-    MAX_TITLE_CHARS, ModelChoice, ModelInfo, ModelName, ModelSlug, SlugError, ThreadKind, ThreadOp,
-    ThreadTitle,
+    Effort, EffortSet, EffortSetError, LISTED_MODELS_CALL_TOOLS, MAX_MODEL_NAME_CHARS, MAX_MODELS,
+    MAX_SLUG_BYTES, MAX_TITLE_CHARS, ModelChoice, ModelInfo, ModelName, ModelSlug, SlugError,
+    ThreadKind, ThreadOp, ThreadTitle, effective_effort,
 };
 pub use voice::{
     Cursor, HOLD_DRAIN_TIMEOUT_MS, HOLD_START_TIMEOUT_MS, HoldFailure, HoldStatus,
@@ -1276,17 +1276,22 @@ mod tests {
 
     #[test]
     fn the_longest_catalog_fits_a_data_frame() {
+        use super::EffortSet;
+
         let model = ModelInfo {
             slug: ModelSlug::new(&"a".repeat(MAX_SLUG_BYTES)).expect("valid"),
             display_name: ModelName::new(&"\u{1F600}".repeat(MAX_MODEL_NAME_CHARS)).expect("valid"),
+            supported_efforts: EffortSet::new(Effort::ALL),
         };
         let models = DataToShell::Models {
             connection: super::ConnectionKind::ClaudeCode,
             models: vec![model; MAX_MODELS],
         };
         // Tag, the connection's tag and a two-byte count, then 200 times a one-byte slug length,
-        // 64 bytes of slug, a two-byte name length and 80 four-byte characters.
-        assert_eq!(payload(&models, Pipe::Data), 77_404);
+        // 64 bytes of slug, a two-byte name length, 80 four-byte characters and Some(mask).
+        assert_eq!(payload(&models, Pipe::Data), 77_804);
+        let bytes = postcard::to_allocvec(&models).expect("encode catalog");
+        assert_eq!(postcard::from_bytes::<DataToShell>(&bytes), Ok(models));
     }
 
     /// Every slot of the shell's 64-slot control queues is as large as the largest variant.

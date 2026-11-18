@@ -47,6 +47,7 @@ fn model(slug: &str, name: &str) -> ModelInfo {
     ModelInfo {
         slug: ModelSlug::new(slug).unwrap(),
         display_name: ModelName::new(name).unwrap(),
+        supported_efforts: None,
     }
 }
 pub(super) fn luna() -> ModelInfo {

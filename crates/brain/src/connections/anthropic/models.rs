@@ -139,7 +139,11 @@ pub async fn read(
             "claude-fable-5-1" | "claude-opus-5-5" | "claude-sonnet-5-5" | "claude-haiku-5-5"
         );
         models.push(CatalogModel {
-            info: ModelInfo { slug, display_name },
+            info: ModelInfo {
+                slug,
+                display_name,
+                supported_efforts: None,
+            },
             capabilities: Capabilities {
                 images: known,
                 pdfs: known,

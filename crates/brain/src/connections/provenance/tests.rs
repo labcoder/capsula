@@ -457,7 +457,14 @@ async fn admitted(body: &Value, prefix: &str) -> Vec<usize> {
 
 #[tokio::test]
 async fn the_scrubbed_body_admits_the_same_models_at_the_same_positions() {
-    let entry = |name: &str, slug: Value, visibility: &str| json!({ "display_name": name, "slug": slug, "visibility": visibility });
+    let entry = |name: &str, slug: Value, visibility: &str| {
+        json!({
+            "display_name": name,
+            "slug": slug,
+            "visibility": visibility,
+            "supported_reasoning_levels": [{"effort": "low"}],
+        })
+    };
     let mut models = vec![
         entry("Original 0", json!("gpt-a"), "list"),
         entry("Original 1", json!("gpt-a"), "list"),

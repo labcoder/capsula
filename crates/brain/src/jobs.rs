@@ -31,8 +31,7 @@ pub(crate) fn compact_at() -> u64 {
 
 /// The title request for a task whose first ask is `ask`: the title prompt with the run's names,
 /// the ask as the only input, no tools, and the task's model at the lowest effort.
-/// shortcut: the catalog lists no efforts yet, so the lowest is `Low`; 13b checks the choice
-/// against the catalog for runs and jobs alike.
+/// ChatGPT job admission resolves the wanted Low to the lowest effort the catalog supports.
 pub(crate) fn title_request(snapshot: &RunSnapshot, ask: &str) -> ModelRequest {
     let template = TITLE_PROMPT
         .lines()

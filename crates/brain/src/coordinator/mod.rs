@@ -584,6 +584,8 @@ struct Run {
     held: VecDeque<Vec<DataToShell>>,
     /// What the run read when its first build began, reused by every later build.
     snapshot: Option<crate::context::RunSnapshot>,
+    /// Resolved once before the first send; the raw snapshot still fences held input.
+    effective_effort: Option<kumochi_protocol::message::Effort>,
     hold: Option<HoldSnapshot>,
     /// The hold's screen, which every request of the run carries.
     screen: Option<crate::context::Screen>,
@@ -666,6 +668,14 @@ impl Ending {
 }
 
 impl Run {
+    fn effective_snapshot(&self) -> Option<crate::context::RunSnapshot> {
+        let mut snapshot = self.snapshot.clone()?;
+        if let (Some(choice), Some(effort)) = (&mut snapshot.choice, self.effective_effort) {
+            choice.effort = effort;
+        }
+        Some(snapshot)
+    }
+
     /// Steps sent to the store; the ones waiting for the scene's id aren't.
     fn sent(&self) -> u32 {
         self.steps - u32::try_from(self.waiting.len()).expect("at most MAX_STEPS wait")
@@ -1248,6 +1258,7 @@ impl Coordinator {
             waiting: VecDeque::new(),
             held: VecDeque::new(),
             snapshot: hold.as_ref().map(|hold| hold.defaults.clone()),
+            effective_effort: None,
             untold,
             hold,
             pictured: matches!(screen, Some(crate::context::Screen::Picture(..))),

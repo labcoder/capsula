@@ -1833,6 +1833,9 @@ fn sees_on_sol(
     let info = |choice: &ModelChoice, name: &str| ModelInfo {
         slug: choice.model.clone(),
         display_name: ModelName::new(name).unwrap(),
+        supported_efforts: kumochi_protocol::message::EffortSet::new([
+            kumochi_protocol::message::Effort::Low,
+        ]),
     };
     brain.account.read_catalog(
         vec![info(&sol, "GPT-6 Sol"), info(&luna, "GPT-6 Luna")],

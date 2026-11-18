@@ -159,6 +159,7 @@ async fn keyed(scratch: &Scratch) -> (Accounts, FakeStore, Arc<std::sync::atomic
         info: kumochi_protocol::message::ModelInfo {
             slug: kumochi_protocol::message::ModelSlug::new("kept-model").expect("slug"),
             display_name: kumochi_protocol::message::ModelName::new("Kept model").expect("name"),
+            supported_efforts: None,
         },
         capabilities: models::Capabilities::default(),
     }];

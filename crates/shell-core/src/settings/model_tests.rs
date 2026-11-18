@@ -11,6 +11,7 @@ fn info(slug: &str) -> ModelInfo {
     ModelInfo {
         slug: ModelSlug::new(slug).expect("slug"),
         display_name: ModelName::new(slug).expect("name"),
+        supported_efforts: None,
     }
 }
 
@@ -133,10 +134,12 @@ fn the_newest_default_gives_the_notice_its_name_and_marks_a_threads_own_model() 
             ModelInfo {
                 slug: ModelSlug::new("m-0").expect("slug"),
                 display_name: ModelName::new("Model Zero").expect("name"),
+                supported_efforts: None,
             },
             ModelInfo {
                 slug: ModelSlug::new("m-1").expect("slug"),
                 display_name: ModelName::new("Model One").expect("name"),
+                supported_efforts: None,
             },
         ],
     );

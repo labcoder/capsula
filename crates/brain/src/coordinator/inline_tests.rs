@@ -361,6 +361,132 @@ fn a_compaction_read_never_answers_a_normal_build_or_the_reverse() {
     assert_eq!(core.handle(compact_built(1, &[T])), Err(Stale));
 }
 
+#[test]
+fn chatgpt_inline_and_its_rebuild_use_the_same_granted_effort() {
+    use kumochi_protocol::message::{
+        AssistantName, ConnectionKind, Effort, EffortSet, ModelChoice, ModelInfo, ModelName,
+        ModelSlug,
+    };
+
+    use crate::context::{ConnectionTag, RunSnapshot};
+    use crate::coordinator::{Availability, Ready};
+
+    let choice = ModelChoice {
+        model: ModelSlug::new("sparse").unwrap(),
+        effort: Effort::XHigh,
+        connection: ConnectionKind::ChatGpt,
+    };
+    let catalog = |effort| {
+        Input::Engines(
+            ConnectionKind::ChatGpt,
+            Availability::Ready(Ready {
+                connection: ConnectionTag(0),
+                models: vec![ModelInfo {
+                    slug: choice.model.clone(),
+                    display_name: ModelName::new("Sparse").unwrap(),
+                    supported_efforts: EffortSet::new([effort]),
+                }],
+                trusted_draw: false,
+            }),
+        )
+    };
+    let mut core = fresh();
+    core.handle(catalog(Effort::High)).unwrap();
+    core.handle(Input::Turn {
+        turn: 1,
+        thread: None,
+        text: "words".into(),
+    })
+    .unwrap();
+    core.handle(Input::TurnStored { run: R }).unwrap();
+    let effects = core
+        .handle(Input::ContextBuilt(ContextBuilt {
+            key: key(1),
+            snapshot: Some(RunSnapshot {
+                origin: Origin::Task(T),
+                assistant: AssistantName::new("Kumo").unwrap(),
+                user: None,
+                choice: Some(choice.clone()),
+                connection: ConnectionTag(0),
+            }),
+            result: Err(Unbuilt::TooLarge { room: Some(ROOM) }),
+        }))
+        .unwrap();
+    let [Effect::Store(StoreOp::CompactContext(read))] = &effects[..] else {
+        panic!("inline compaction starts reading");
+    };
+    let inline_choice = read.snapshot.as_ref().unwrap().choice.clone();
+    let Input::CompactBuilt(mut done) = compact_built(2, &[T]) else {
+        unreachable!();
+    };
+    done.result
+        .as_mut()
+        .unwrap()
+        .as_mut()
+        .unwrap()
+        .0
+        .built
+        .request
+        .choice = inline_choice;
+    let assert_body = |effects: &[Effect], attempt| {
+        let [Effect::StartEngine { request }] = effects else {
+            panic!("eligible request starts");
+        };
+        assert_eq!(request.key, SendKey::Build(key(attempt)));
+        let body = crate::engines::responses::body(&request.request).unwrap();
+        assert_eq!(body["model"], "sparse");
+        assert_eq!(body["reasoning"]["effort"], "high");
+    };
+    core.handle(catalog(Effort::Medium)).unwrap();
+    assert_body(&core.handle(Input::CompactBuilt(done)).unwrap(), 2);
+    assert_eq!(core.handle(ready(2)), Ok(granted(2)));
+    core.handle(Input::SendSettled {
+        lease: LeaseId {
+            key: SendKey::Build(key(2)),
+            send: 1,
+        },
+    })
+    .unwrap();
+    core.handle(engine(key(2), TurnEvent::TextDelta(" Short".to_owned())))
+        .unwrap();
+    core.handle(engine(key(2), TurnEvent::Finished(Finish::Completed)))
+        .unwrap();
+    let effects = core.handle(stored(2)).unwrap();
+    let [Effect::Store(StoreOp::BuildContext(read))] = &effects[..] else {
+        panic!("the summary write starts the rebuild");
+    };
+    let rebuilt_choice = read.snapshot.as_ref().unwrap().choice.clone().unwrap();
+    assert_eq!(rebuilt_choice.effort, Effort::High);
+    let effects = core
+        .handle(Input::ContextBuilt(ContextBuilt {
+            key: read.key,
+            snapshot: None,
+            result: Ok(Built {
+                request: crate::context::ModelRequest {
+                    choice: Some(rebuilt_choice),
+                    ..request()
+                },
+                sources: vec![T],
+            }),
+        }))
+        .unwrap();
+    assert_body(&effects, 3);
+    let lease = LeaseId {
+        key: SendKey::Build(key(3)),
+        send: 2,
+    };
+    assert_eq!(
+        core.handle(ready(3)),
+        Ok(vec![
+            Effect::Grant(lease),
+            Effect::ArmSendDeadline {
+                lease,
+                after: SEND_DEADLINE
+            },
+        ])
+    );
+}
+
 /// A run on Claude Code too large with its summary, whose compaction round is granted on its own
 /// route.
 fn claude_code_compacting() -> Coordinator {
@@ -390,6 +516,7 @@ fn claude_code_compacting() -> Coordinator {
             models: vec![ModelInfo {
                 slug: ModelSlug::new("haiku").expect("slug"),
                 display_name: ModelName::new("Haiku").expect("name"),
+                supported_efforts: None,
             }],
             trusted_draw: false,
         }),

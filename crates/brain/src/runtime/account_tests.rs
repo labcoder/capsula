@@ -857,8 +857,8 @@ impl Http for Catalog {
 
 fn listing() -> (u16, String) {
     let models = json!({ "models": [
-        { "slug": "gpt-6-sol", "display_name": "GPT-6 Sol", "visibility": "list" },
-        { "slug": "gpt-6-luna", "display_name": "GPT-6 Luna", "visibility": "list" },
+        { "slug": "gpt-6-sol", "display_name": "GPT-6 Sol", "visibility": "list", "supported_reasoning_levels": [{"effort": "low"}] },
+        { "slug": "gpt-6-luna", "display_name": "GPT-6 Luna", "visibility": "list", "supported_reasoning_levels": [{"effort": "low"}] },
     ] });
     (200, models.to_string())
 }
@@ -1038,6 +1038,69 @@ fn model_unavailable() -> UserError {
     .expect("one action")
 }
 
+#[tokio::test]
+async fn a_listed_default_with_unknown_efforts_is_kept_but_never_sent() {
+    use kumochi_protocol::constants::CONFIG_FILE;
+
+    let scratch = Scratch::new("mixed-effort-catalog");
+    std::fs::create_dir_all(scratch.dir()).unwrap();
+    let path = scratch.dir().join(CONFIG_FILE);
+    let original = "default_model = { model = 'unsupported', effort = 'High' }\n";
+    std::fs::write(&path, original).unwrap();
+    let store = FakeStore::default();
+    let accounts = seeded(&scratch, &store, Catalog::answering([(
+        200,
+        json!({"models": [
+            {"slug": "unsupported", "display_name": "Unsupported", "visibility": "list",
+             "supported_reasoning_levels": [{"effort":"future"}], "input_modalities": ["image"]},
+            {"slug": "sendable", "display_name": "Sendable", "visibility": "list",
+             "supported_reasoning_levels": [{"effort":"medium"}]},
+        ]}).to_string(),
+    )]), LATER);
+    let starts = Arc::new(AtomicU64::new(0));
+    let selected = crate::runtime::Selected::Account {
+        engine: Box::new(CountStarts(Arc::clone(&starts))),
+        asks: mpsc::unbounded_channel().1,
+    };
+    let mut brain = test_support::brain_on(&scratch, selected, accounts);
+    timeout(PATIENCE, async {
+        loop {
+            let event = brain.account.next().await;
+            let read = matches!(event, Event::Read { .. });
+            brain.account_input(event, None).unwrap();
+            if read {
+                break;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    Box::pin(brain.drain_settings()).await;
+    let ((control, data), mut shell) = duplex();
+    let mut tap = Tap::from_env();
+    let client = async {
+        let DataToShell::Models { connection, models } =
+            timeout(PATIENCE, shell.data()).await.unwrap()
+        else {
+            panic!("the catalog is published");
+        };
+        assert_eq!(connection, ConnectionKind::ChatGpt);
+        assert_eq!(slugs(&models), ["sendable"]);
+        shell.submit("words").await;
+        assert_eq!(failed_with(&mut shell).await, Some(model_unavailable()));
+        drop(shell);
+    };
+    let (ended, ()) = tokio::join!(brain.serve(control, data, &mut tap), client);
+    assert_eq!(ended, Ended::Lost);
+    assert_eq!(
+        starts.load(Ordering::Relaxed),
+        0,
+        "no request entered send admission"
+    );
+    brain.close().await;
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+}
+
 /// Why a run on a saved default fails when `ready` is what reads ready: Claude Code isn't
 /// installed here, so its own reason; no engine, or an invalid default, answers nothing.
 fn refused_with(ready: Option<kumochi_protocol::message::ConnectionKind>) -> UserError {
@@ -1120,6 +1183,126 @@ impl crate::engines::Engine for CountStarts {
     }
 }
 
+#[tokio::test]
+async fn a_legacy_effort_sends_low_without_rewriting_the_task_choice() {
+    use kumochi_protocol::frame::{self, Pipe};
+    use kumochi_protocol::message::{DataToBrain, RunId, ScreenChoice, ThreadId};
+    use tokio::io::AsyncWriteExt;
+
+    #[derive(Debug)]
+    struct Capture(mpsc::Sender<(String, String)>);
+    impl crate::engines::Engine for Capture {
+        fn start(
+            &self,
+            request: crate::engines::RunRequest,
+            events: mpsc::Sender<crate::engines::TurnEvent>,
+            gate: crate::engines::SendGate,
+        ) -> crate::engines::Round {
+            let captured = self.0.clone();
+            Box::pin(async move {
+                let crate::engines::Answer::Grant(lease) = gate.ask().await else {
+                    return;
+                };
+                let body = crate::engines::responses::body(&request.request).unwrap();
+                captured
+                    .send((
+                        body["model"].as_str().unwrap().to_owned(),
+                        body["reasoning"]["effort"].as_str().unwrap().to_owned(),
+                    ))
+                    .await
+                    .unwrap();
+                drop(lease);
+                events
+                    .send(crate::engines::TurnEvent::Finished(
+                        crate::engines::Finish::Failed(crate::engines::EngineFailure::Provider),
+                    ))
+                    .await
+                    .unwrap();
+            })
+        }
+    }
+
+    let scratch = Scratch::new("legacy-effort-execution");
+    let thread = ThreadId(2);
+    let mut database = crate::store::Store::open(&scratch.db()).unwrap();
+    database.recover().unwrap();
+    database
+        .begin_turn(thread, Some("Task"), RunId(1), "previous")
+        .unwrap();
+    database
+        .end_run(thread, RunId(1), &[], crate::store::RunEnd::Done)
+        .unwrap();
+    drop(database);
+    rusqlite::Connection::open(scratch.db()).unwrap().execute(
+        "UPDATE threads SET model = 'legacy', effort = 'ultra', connection = 'chatgpt' WHERE id = 2",
+        [],
+    ).unwrap();
+    let store = FakeStore::default();
+    let accounts = seeded(
+        &scratch,
+        &store,
+        Catalog::answering([(
+            200,
+            json!({"models": [
+                {"slug": "legacy", "display_name": "Legacy", "visibility": "list",
+                 "supported_reasoning_levels": [{"effort":"low"}, {"effort":"medium"}]},
+            ]})
+            .to_string(),
+        )]),
+        LATER,
+    );
+    let (sent, mut bodies) = mpsc::channel(1);
+    let selected = crate::runtime::Selected::Account {
+        engine: Box::new(Capture(sent)),
+        asks: mpsc::unbounded_channel().1,
+    };
+    let mut brain = test_support::brain_on(&scratch, selected, accounts);
+    let ((control, data), mut shell) = duplex();
+    let mut tap = Tap::from_env();
+    let client = async {
+        assert!(matches!(
+            timeout(PATIENCE, shell.data()).await.unwrap(),
+            DataToShell::Models { .. }
+        ));
+        let submit = frame::encode(
+            &DataToBrain::TextSubmit {
+                turn: 1,
+                screen: ScreenChoice::None,
+                thread: Some(thread),
+                text: "words".into(),
+            },
+            Pipe::Data,
+        )
+        .unwrap();
+        shell.data_out.write_all(&submit).await.unwrap();
+        assert_eq!(
+            timeout(PATIENCE, bodies.recv()).await.unwrap(),
+            Some(("legacy".to_owned(), "low".to_owned())),
+        );
+        assert_eq!(failed_with(&mut shell).await, None);
+        drop(shell);
+    };
+    let (ended, ()) = tokio::join!(brain.serve(control, data, &mut tap), client);
+    assert_eq!(ended, Ended::Lost);
+    brain.close().await;
+    let reopened = rusqlite::Connection::open(scratch.db()).unwrap();
+    let raw: (String, String, String) = reopened
+        .query_row(
+            "SELECT model, effort, connection FROM threads WHERE id = 2",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        raw,
+        (
+            "legacy".to_owned(),
+            "ultra".to_owned(),
+            "chatgpt".to_owned()
+        )
+    );
+}
+
 /// `kind` ready, listing `same-slug`.
 fn lists_same_slug(kind: kumochi_protocol::message::ConnectionKind) -> crate::coordinator::Input {
     crate::coordinator::Input::Engines(
@@ -1129,6 +1312,9 @@ fn lists_same_slug(kind: kumochi_protocol::message::ConnectionKind) -> crate::co
             models: vec![ModelInfo {
                 slug: kumochi_protocol::message::ModelSlug::new("same-slug").expect("slug"),
                 display_name: kumochi_protocol::message::ModelName::new("Same").expect("name"),
+                supported_efforts: kumochi_protocol::message::EffortSet::new([
+                    kumochi_protocol::message::Effort::Low,
+                ]),
             }],
             trusted_draw: false,
         }),
@@ -1293,12 +1479,42 @@ async fn the_catalog_is_read_retried_and_cleared_when_the_account_stops_being_us
         result: Ok(Listing {
             models,
             images: Vec::new(),
+            ..Listing::default()
         }),
     });
     assert_eq!(
         accounts.models(),
         None,
         "a read from before the sign-out is dropped"
+    );
+    accounts.close(Instant::now(), Instant::now()).await;
+}
+
+#[tokio::test]
+async fn an_all_unknown_catalog_is_retryable_and_recovers_on_a_usable_list() {
+    let scratch = Scratch::new("all-unknown-efforts");
+    let store = FakeStore::default();
+    let http = Catalog::answering([
+        (200, json!({"models": [
+            {"slug": "unknown", "display_name": "Unknown", "visibility": "list",
+             "supported_reasoning_levels": [{"effort": "future"}], "default_reasoning_level": "low"},
+        ]}).to_string()),
+        listing(),
+    ]);
+    let mut accounts = seeded(&scratch, &store, http, LATER);
+    let offline =
+        UserError::new(ErrorKey::AccountOffline, Vec::new(), vec![Action::Retry]).unwrap();
+    assert_eq!(
+        read_ended(&mut accounts).await,
+        [ControlToShell::Error(offline)]
+    );
+    assert_eq!(accounts.models(), None);
+    assert_eq!(accounts.models_unsent(), None);
+    accounts.handle(Input::Op(AccountOp::Retry));
+    assert_eq!(read_ended(&mut accounts).await, []);
+    assert_eq!(
+        accounts.models_unsent().as_deref().map(slugs),
+        Some(vec!["gpt-6-sol", "gpt-6-luna"]),
     );
     accounts.close(Instant::now(), Instant::now()).await;
 }
@@ -1310,9 +1526,9 @@ async fn only_a_listed_image_model_on_the_accounts_connection_takes_images() {
     let scratch = Scratch::new("account-images");
     let store = FakeStore::default();
     let body = json!({ "models": [
-        { "slug": "gpt-6-sol", "display_name": "GPT-6 Sol", "visibility": "list",
+        { "slug": "gpt-6-sol", "display_name": "GPT-6 Sol", "visibility": "list", "supported_reasoning_levels": [{"effort": "low"}],
           "input_modalities": ["text", "image"] },
-        { "slug": "gpt-6-luna", "display_name": "GPT-6 Luna", "visibility": "list",
+        { "slug": "gpt-6-luna", "display_name": "GPT-6 Luna", "visibility": "list", "supported_reasoning_levels": [{"effort": "low"}],
           "input_modalities": ["text"] },
     ] });
     let http = Catalog::answering([(200, body.to_string())]);
@@ -1341,9 +1557,9 @@ async fn the_image_gate_opens_only_for_a_listed_image_model_where_windows_can_be
     let scratch = Scratch::new("account-image-gate");
     let store = FakeStore::default();
     let body = json!({ "models": [
-        { "slug": "gpt-6-sol", "display_name": "GPT-6 Sol", "visibility": "list",
+        { "slug": "gpt-6-sol", "display_name": "GPT-6 Sol", "visibility": "list", "supported_reasoning_levels": [{"effort": "low"}],
           "input_modalities": ["text", "image"] },
-        { "slug": "gpt-6-luna", "display_name": "GPT-6 Luna", "visibility": "list",
+        { "slug": "gpt-6-luna", "display_name": "GPT-6 Luna", "visibility": "list", "supported_reasoning_levels": [{"effort": "low"}],
           "input_modalities": ["text"] },
     ] });
     let http = Catalog::answering([(200, body.to_string())]);

@@ -344,7 +344,7 @@ flowchart LR
 |---|---|---|
 | `AccountOp` | Control, shell to brain | `SignIn`, `CancelSignIn`, `SignOut`, `EnablePlan` or `Retry`; no fields |
 | `Account` | Control, brain to shell | an `AccountView`: `SignedOut`, `SigningIn`, `SigningOut` (cleanup progress), `Busy` or `SignedIn` (an optional `AccountEmail`, a `PlanState` and an optional `AccountRecovery`) |
-| `Models` | Data, brain to shell | the `ConnectionKind` the list belongs to, then at most 200 `ModelInfo`s, in the catalog's order: a `ModelSlug` and a `ModelName` (one line, 1–80 characters). The longest list, with four-byte characters, is 77,404 bytes, under the data frame cap |
+| `Models` | Data, brain to shell | the `ConnectionKind` the list belongs to, then at most 200 `ModelInfo`s in catalog order: a `ModelSlug`, a `ModelName` (one line, 1–80 characters) and optional `EffortSet`. A present set is one byte, a nonzero mask using only the five known effort bits. Absent means unknown, not all efforts. The largest postcard payload is 77,804 bytes before the frame header, under the data frame cap. This wire change requires the existing exact `BUILD_ID` match |
 
 - No token, code or account identifier crosses the pipe. The only identity is the display
   email: one line, 1–254 bytes, checked on decode, and its `Debug` prints only its length.

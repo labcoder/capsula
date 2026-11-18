@@ -7,7 +7,8 @@ mod tests;
 
 use kumochi_protocol::Secret;
 use kumochi_protocol::message::{
-    Action, Effort, ErrorKey, MAX_MODELS, ModelChoice, ModelInfo, ModelName, ModelSlug, UserError,
+    Action, ConnectionKind, Effort, EffortSet, ErrorKey, MAX_MODELS, ModelChoice, ModelInfo,
+    ModelName, ModelSlug, UserError,
 };
 use serde::Deserialize;
 use serde_json::Value;
@@ -20,27 +21,37 @@ use super::oauth::exchange::OAuthCode;
 /// The default model's slug when the catalog lists it (owner, plan §9.1).
 pub(crate) const DEFAULT_SLUG: &str = "gpt-6-luna";
 
-/// The default model `models` calls for when `current` is unset or no longer listed:
-/// [`DEFAULT_SLUG`] at `Low` if listed, else the first model at `Low`. `None` keeps `current`;
-/// an empty catalog changes nothing.
+/// Repairs an unset or missing default, preferring Luna at Low if offered, else the first
+/// sendable model at its lowest effort. A still-listed model keeps its choice even if it can't send.
 pub(crate) fn default_model(
     current: Option<&ModelChoice>,
-    models: &[ModelInfo],
+    listing: &Listing,
 ) -> Option<ModelChoice> {
     if current.is_some_and(|choice| {
-        choice.connection != kumochi_protocol::message::ConnectionKind::ChatGpt
-            || models.iter().any(|model| model.slug == choice.model)
+        choice.connection != ConnectionKind::ChatGpt
+            || listing.unknown_effort.contains(&choice.model)
+            || listing
+                .models
+                .iter()
+                .any(|model| model.slug == choice.model)
     }) {
         return None;
     }
-    let model = models
-        .iter()
-        .find(|model| model.slug.as_str() == DEFAULT_SLUG)
-        .or(models.first())?;
+    let eligible = || {
+        listing
+            .models
+            .iter()
+            .filter_map(|model| Some((model, model.supported_efforts?)))
+    };
+    let (model, supported) = eligible()
+        .find(|(model, efforts)| {
+            model.slug.as_str() == DEFAULT_SLUG && efforts.contains(Effort::Low)
+        })
+        .or_else(|| eligible().next())?;
     Some(ModelChoice {
         model: model.slug.clone(),
-        effort: Effort::Low,
-        connection: kumochi_protocol::message::ConnectionKind::ChatGpt,
+        effort: supported.lowest(),
+        connection: ConnectionKind::ChatGpt,
     })
 }
 
@@ -123,11 +134,30 @@ struct ErrorObject {
 /// A read catalog: the models shown, and which of them take image input.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Listing {
-    /// The listed models, in the server's order.
+    /// The sendable models, in the server's order.
     pub models: Vec<ModelInfo>,
     /// The listed models whose entry's `input_modalities` names `"image"`. It changes nothing
     /// shown; absent or malformed means no.
     pub images: Vec<ModelSlug>,
+    /// Listed slugs without known effort support. They protect a saved default from repair but
+    /// are never advertised as sendable or image-capable.
+    pub(crate) unknown_effort: Vec<ModelSlug>,
+}
+
+fn supported(value: &Value) -> Option<EffortSet> {
+    let levels = value.get("supported_reasoning_levels")?.as_array()?;
+    EffortSet::new(
+        levels
+            .iter()
+            .filter_map(|level| match level.get("effort")?.as_str()? {
+                "low" => Some(Effort::Low),
+                "medium" => Some(Effort::Medium),
+                "high" => Some(Effort::High),
+                "xhigh" => Some(Effort::XHigh),
+                "max" => Some(Effort::Max),
+                _ => None,
+            }),
+    )
 }
 
 /// Reads the catalog with `bearer`: the listed models, at most [`MAX_MODELS`], in the server's
@@ -160,6 +190,7 @@ pub async fn read(
     let mut listing = Listing::default();
     let mut skipped = 0_usize;
     for value in body.models {
+        let efforts = supported(&value);
         let images = value
             .get("input_modalities")
             .and_then(Value::as_array)
@@ -175,20 +206,40 @@ pub async fn read(
             ModelSlug::new(&entry.slug),
             ModelName::new(&entry.display_name),
         ) {
-            (Ok(slug), Ok(display_name))
-                if listing.models.len() < MAX_MODELS
-                    && listing.models.iter().all(|model| model.slug != slug) =>
-            {
+            (Ok(slug), Ok(display_name)) => {
+                let Some(efforts) = efforts else {
+                    listing.unknown_effort.push(slug);
+                    continue;
+                };
+                if listing.models.len() == MAX_MODELS
+                    || listing.models.iter().any(|model| model.slug == slug)
+                {
+                    skipped += 1;
+                    continue;
+                }
                 if images {
                     listing.images.push(slug.clone());
                 }
-                listing.models.push(ModelInfo { slug, display_name });
+                listing.models.push(ModelInfo {
+                    slug,
+                    display_name,
+                    supported_efforts: Some(efforts),
+                });
             }
             _ => skipped += 1,
         }
     }
     if skipped > 0 {
         tracing::warn!(skipped, "model list entries were skipped");
+    }
+    if !listing.unknown_effort.is_empty() {
+        tracing::warn!(
+            skipped = listing.unknown_effort.len(),
+            "model list entries have no known effort"
+        );
+        if listing.models.is_empty() {
+            return Err(CatalogError::Response);
+        }
     }
     Ok(listing)
 }

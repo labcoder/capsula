@@ -4,8 +4,8 @@
 use std::time::Duration;
 
 use kumochi_protocol::message::{
-    AssistantName, ConnectionKind, ControlToShell, Deleted, Effort, EventId, ModelChoice,
-    ModelInfo, ModelName, ModelSlug, Phase, RunId, ThreadId, ThreadTitle,
+    AssistantName, ConnectionKind, ControlToShell, Deleted, Effort, EffortSet, EventId,
+    ModelChoice, ModelInfo, ModelName, ModelSlug, Phase, RunId, ThreadId, ThreadTitle,
 };
 
 use super::{R, T, admit, built, ends_failed, engine, fresh, request, run_end, state};
@@ -955,6 +955,7 @@ fn ready_on(kind: ConnectionKind, tag: u64) -> Input {
             models: vec![ModelInfo {
                 slug: ModelSlug::new("haiku").expect("slug"),
                 display_name: ModelName::new("Haiku").expect("name"),
+                supported_efforts: None,
             }],
             trusted_draw: false,
         }),
@@ -1023,6 +1024,125 @@ fn job_built_on(key: JobKey, choice: Option<ModelChoice>) -> Input {
         ask.built.request.choice = choice;
     }
     Input::JobBuilt(built)
+}
+
+fn chatgpt_catalog(tag: u64, model: &str, efforts: Option<EffortSet>) -> Input {
+    Input::Engines(
+        ConnectionKind::ChatGpt,
+        Availability::Ready(Ready {
+            connection: ConnectionTag(tag),
+            models: vec![ModelInfo {
+                slug: ModelSlug::new(model).unwrap(),
+                display_name: ModelName::new("Sparse").unwrap(),
+                supported_efforts: efforts,
+            }],
+            trusted_draw: false,
+        }),
+    )
+}
+
+fn chatgpt_choice(effort: Effort) -> ModelChoice {
+    ModelChoice {
+        connection: ConnectionKind::ChatGpt,
+        model: ModelSlug::new("sparse").unwrap(),
+        effort,
+    }
+}
+
+#[test]
+fn chatgpt_title_and_summary_grant_separately_resolved_efforts() {
+    let mut core = reading();
+    core.handle(chatgpt_catalog(
+        0,
+        "sparse",
+        EffortSet::new([Effort::Medium, Effort::High]),
+    ))
+    .unwrap();
+    let title = crate::jobs::title_request(
+        &RunSnapshot {
+            origin: Origin::Task(T),
+            assistant: AssistantName::new("Kumo").unwrap(),
+            user: None,
+            choice: Some(chatgpt_choice(Effort::XHigh)),
+            connection: ConnectionTag(0),
+        },
+        "Plan a trip",
+    );
+    let Input::JobBuilt(mut done) = job_built(key(2), &[T]) else {
+        unreachable!();
+    };
+    done.result
+        .as_mut()
+        .unwrap()
+        .as_mut()
+        .unwrap()
+        .built
+        .request = title;
+    let body = |effects: &[Effect], job_key, job_kind| {
+        let [Effect::StartJob { job, kind, request }] = effects else {
+            panic!("the job starts");
+        };
+        assert_eq!((*job, *kind), (job_key, job_kind));
+        crate::engines::responses::body(&request.request).unwrap()
+    };
+    let effects = core.handle(Input::JobBuilt(done)).unwrap();
+    let sent = body(&effects, key(2), JobKind::Title);
+    assert_eq!(sent["model"], "sparse");
+    assert_eq!(sent["reasoning"]["effort"], "medium");
+    assert_eq!(core.handle(ready(key(2))), Ok(granted(lease(key(2), 1))));
+    core.handle(Input::SendSettled {
+        lease: lease(key(2), 1),
+    })
+    .unwrap();
+    assert_eq!(
+        core.handle(job_done(key(2), Some(titled("Lisbon trip")))),
+        Ok(vec![set_title(key(2), "Lisbon trip")]),
+    );
+    assert_eq!(
+        core.handle(Input::TitleSet {
+            job: Some(key(2)),
+            applied: true
+        }),
+        Ok(vec![nudge(), compacts(3)])
+    );
+    let Input::JobBuilt(mut done) = compact_built(key(3), &[T]) else {
+        unreachable!();
+    };
+    done.result
+        .as_mut()
+        .unwrap()
+        .as_mut()
+        .unwrap()
+        .built
+        .request
+        .choice = Some(chatgpt_choice(Effort::XHigh));
+    let effects = core.handle(Input::JobBuilt(done)).unwrap();
+    let sent = body(&effects, key(3), JobKind::Compact);
+    assert_eq!(sent["model"], "sparse");
+    assert_eq!(sent["reasoning"]["effort"], "high");
+    assert_eq!(core.handle(ready(key(3))), Ok(granted(lease(key(3), 2))));
+}
+
+#[test]
+fn chatgpt_jobs_without_a_matching_known_catalog_end_unsent() {
+    for (tag, model, efforts) in [
+        (0, "sparse", None),
+        (0, "different", EffortSet::new([Effort::Low])),
+        (1, "sparse", EffortSet::new([Effort::Low])),
+    ] {
+        let mut core = reading();
+        core.handle(chatgpt_catalog(tag, model, efforts)).unwrap();
+        assert_eq!(
+            core.handle(job_built_on(key(2), Some(chatgpt_choice(Effort::Low)))),
+            Ok(vec![compacts(3)]),
+        );
+        assert_eq!(core.handle(ready(key(2))), Ok(rebuild(key(2))));
+        assert_eq!(
+            core.handle(job_built_on(key(3), Some(chatgpt_choice(Effort::High)))),
+            Ok(Vec::new()),
+        );
+        assert_eq!(core.handle(ready(key(3))), Ok(rebuild(key(3))));
+    }
 }
 
 /// Job `key`'s title request of `run`, naming `choice`.

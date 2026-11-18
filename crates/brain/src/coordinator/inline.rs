@@ -116,7 +116,7 @@ impl Coordinator {
             control,
             key,
             thread: current.thread,
-            snapshot: current.snapshot.clone(),
+            snapshot: current.effective_snapshot(),
             room,
         })));
         Ok(())

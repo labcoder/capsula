@@ -17,6 +17,9 @@ fn info(slug: &str) -> ModelInfo {
     ModelInfo {
         slug: ModelSlug::new(slug).expect("valid"),
         display_name: ModelName::new("A model").expect("valid"),
+        supported_efforts: kumochi_protocol::message::EffortSet::new([
+            kumochi_protocol::message::Effort::Low,
+        ]),
     }
 }
 

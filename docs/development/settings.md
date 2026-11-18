@@ -35,8 +35,9 @@ by connection generation before changing any draft, save slot or saved view.
 **Model** (`shell-core/settings/model.rs`): Presence hands each `DataToShell::Models` catalog to
 the settings model, which keeps one per connection that has an engine (ChatGPT, and Claude Code
 once it lists models) and drops them on disconnect. General draws one radio per model and sends
-`SetDefaultModel` with the newest choice's effort on the same connection, else `Low`. The
-brain checks the model per run, so the shell doesn't validate it.
+`SetDefaultModel` with the newest choice's wanted effort on the same connection, else `Low`.
+The brain resolves ChatGPT's actual request effort at admission; this layer doesn't rewrite
+the saved choice to match the catalog.
 
 Enter or blur validates with the protocol's name types and queues the change. An unchanged
 normalized name sends no operation, including inline renames. While saving, that field is readonly and says Saving…;
@@ -307,7 +308,7 @@ refused with `Error(VoiceUnavailable)` and its one
 `Settings` answer, with nothing written. The refusal comes after the config read, so while
 `config.toml` is unreadable they're answered `ConfigUnreadable` like every other change.
 
-`default_model` is the model a thread with no choice runs on. Only the brain sets it today, with
+`default_model` is the model a thread with no choice runs on. The brain's automatic repairs use
 `SettingsOp::SetDefaultModel` under epoch 0, which no connection has, so a shell hears only the
 settled `SettingsView` (see [accounts](accounts.md#model-catalog)). Explicit user changes remain
 unconditional; queued epoch-0 repairs recompute against the latest committed choice and catalog
@@ -315,8 +316,9 @@ at the write boundary, so they cannot replace an acknowledged choice on another 
 repair with nothing left to write, or whose recompute lands on the other connection's half,
 changes nothing, pending holds included.
 The raw table reads as absent, valid or invalid intent. A table missing only `connection` means
-ChatGPT. An unknown effort keeps the connection and model, displays Medium and executes at Low,
-without rewriting the table. A malformed table that names ChatGPT or no connection, or a value
+ChatGPT. An unknown effort keeps the connection and model, displays Medium and wants Low at
+execution without rewriting the table. ChatGPT still resolves that Low against the catalog.
+A malformed table that names ChatGPT or no connection, or a value
 that isn't a table, reads as absent with an `invalid setting` warning, so the next catalog read
 repairs it. A table naming another connection that doesn't decode (an unknown or mistyped
 connection, a missing or bad model or effort) is invalid intent: it has no display choice, and
