@@ -3,6 +3,10 @@
 
 use std::sync::atomic::{AtomicU64, Ordering, fence};
 
+#[cfg(test)]
+#[path = "tail_tests.rs"]
+mod tests;
+
 /// Content the device took may be unplaced: a gap, an unknown padding or a failed release.
 pub const UNKNOWN: u8 = 1;
 /// Nothing more is staged as content: withdrawn or failed.

@@ -163,9 +163,34 @@ impl Rig<'_> {
         exposed
     }
 
+    /// Whether `report` came; another report of its kind coming first fails the test.
     fn heard(&self, report: &ControlToBrain) -> bool {
-        std::iter::from_fn(|| self.brain.try_recv().ok()).any(|sent| sent == *report)
+        std::iter::from_fn(|| self.brain.try_recv().ok()).any(|sent| {
+            let kind = std::mem::discriminant(&sent) == std::mem::discriminant(report);
+            assert!(!kind || sent == *report, "{sent:?} came first");
+            kind
+        })
     }
+
+    /// Waits for two more device passes: whatever was queued before has been applied and
+    /// reported.
+    fn passes(&self) {
+        let from = self.script().passes;
+        until("two more passes", || self.script().passes >= from + 2);
+    }
+}
+
+/// A claim, asked again only while a tail read overlapped a write.
+fn claimed(owner: &OutputOwner, token: &InhibitToken, session: u64) -> Result<Claim, Denied> {
+    let mut claim = owner.claim(token, session);
+    until("a claim past a busy read", || {
+        if claim.as_ref().err() != Some(&Denied::Busy) {
+            return true;
+        }
+        claim = owner.claim(token, session);
+        false
+    });
+    claim
 }
 
 impl Drop for Rig<'_> {
@@ -195,7 +220,7 @@ fn a_clean_off_retires_the_stream_keeps_the_session_and_allows_voice_only_captur
     rig.short(480);
     let (token, _gate, _mic) = bound(&owner, 1);
     assert_eq!(
-        owner.claim(&token, 1).map(drop),
+        claimed(&owner, &token, 1).map(drop),
         Err(Denied::Unqualified),
         "content was exposed"
     );
@@ -205,7 +230,7 @@ fn a_clean_off_retires_the_stream_keeps_the_session_and_allows_voice_only_captur
             .is_some_and(|now| !now.owed() && now.quiet == 1)
     });
     assert_eq!(
-        owner.claim(&token, 1).map(drop),
+        claimed(&owner, &token, 1).map(drop),
         Err(Denied::Unqualified),
         "quiet, but D1 qualifies no route for content it played"
     );
@@ -227,7 +252,7 @@ fn a_clean_off_retires_the_stream_keeps_the_session_and_allows_voice_only_captur
     let unavailable = ControlToBrain::AudioOutputUnavailable {
         generation: rig.generation,
     };
-    assert!(rig.heard(&unavailable), "the brain was told");
+    until("the brain was told", || rig.heard(&unavailable));
     let granted = rig.granted.load(Ordering::SeqCst);
     rig.speak(RunId(2), vec![7; 240]);
     until("stale speech is credited", || {
@@ -246,7 +271,7 @@ fn the_responder_answers_a_revoke_from_before_quiet_and_one_after_retirement() {
     let rig = rig(&owner, 1);
     rig.short(480);
     assert!(owner.stop(1, RunId(1)), "queued");
-    std::thread::sleep(Duration::from_millis(50));
+    rig.passes();
     let answered = ControlToBrain::SpeechStopped {
         run: RunId(1),
         cursor: Some(Cursor {
@@ -326,7 +351,7 @@ fn a_withdrawal_plays_out_what_was_written_before_it_stops_the_stream() {
     until("parked", || rig.script().parked);
     owner.withdraw();
     rig.script().frozen = false;
-    std::thread::sleep(Duration::from_millis(50));
+    rig.passes();
     assert!(!rig.script().stopped, "still playing out");
     rig.script().play_to = u64::MAX;
     until("retired", || retired(&owner));
@@ -605,9 +630,7 @@ fn a_claim_whose_output_moved_on_neither_starts_nor_collects() {
         until("quiet under the pause", || {
             rig.snapshot().is_some_and(|now| now.quiet == 1)
         });
-        let claim = owner
-            .claim(&token, 1)
-            .expect("a paused generation that exposed nothing");
+        let claim = claimed(&owner, &token, 1).expect("a paused generation that exposed nothing");
         owner.withdraw();
         until("retired", || retired(&owner));
         assert_eq!(
@@ -623,7 +646,7 @@ fn a_claim_whose_output_moved_on_neither_starts_nor_collects() {
     until("quiet under the pause", || {
         rig.snapshot().is_some_and(|now| now.quiet == 1)
     });
-    let claim = owner.claim(&token, 1).expect("claims");
+    let claim = claimed(&owner, &token, 1).expect("claims");
     let (release, held) = mpsc::channel::<()>();
     let source = MicOwner::start_reserved_with_for_tests(
         owner.start_mic(&claim).expect("starts"),
@@ -716,6 +739,78 @@ fn only_the_bound_microphone_collects_under_a_claim() {
     for release in [release, release_bound] {
         release.send(()).expect("still running");
     }
+}
+
+#[test]
+fn ending_the_session_cancels_a_collecting_bound_microphone_without_retiring_it() {
+    let alive = Arc::new(AtomicBool::new(true));
+    let owner = OutputOwner::default();
+    assert!(owner.begin(1, None).is_none(), "no opener");
+    let (token, _gate, mic) = bound(&owner, 1);
+    let claim = owner.claim(&token, 1).expect("claims");
+    let (release, held) = mpsc::channel::<()>();
+    let mut source = MicOwner::start_reserved_with_for_tests(
+        owner.start_mic(&claim).expect("starts"),
+        Arc::clone(&alive),
+        parked(held),
+    )
+    .expect("spawned");
+    let running = source.running.recv_blocking().expect("running");
+    assert_eq!(owner.collect(&claim, &source, running), Ok(()));
+    owner.end(1);
+    assert_eq!(
+        mic.mode(&alive, Instant::now()),
+        Err(MicError::Cancelled),
+        "the bound gate is cancelled while its session permit still holds"
+    );
+    assert!(owner.begin(2, None).is_none(), "the next session");
+    assert_eq!(
+        owner.collect(&claim, &source, running),
+        Err(Denied::Stale),
+        "the old claim collects nothing"
+    );
+    assert_eq!(
+        owner.acquire(GestureId(2)).map(drop),
+        Err(Denied::Inhibited),
+        "the inhibit outlives the session"
+    );
+    let (token, denied) = owner
+        .retire(token, Retirement::Retired)
+        .expect_err("cancelled is not retired");
+    assert_eq!(denied, Denied::Inhibited);
+    release.send(()).expect("still running");
+    until("joined", || source.try_receipt().is_some());
+    assert_eq!(owner.retire(token, Retirement::Retired), Ok(()));
+    assert!(owner.acquire(GestureId(2)).is_ok(), "free once it retired");
+}
+
+#[test]
+fn ending_the_session_cancels_a_reserved_microphone_that_retires_unspawned() {
+    let alive = Arc::new(AtomicBool::new(true));
+    let owner = OutputOwner::default();
+    assert!(owner.begin(1, None).is_none(), "no opener");
+    let (token, _gate, mic) = bound(&owner, 1);
+    let claim = owner.claim(&token, 1).expect("claims");
+    let reserved = owner.start_mic(&claim).expect("reserved");
+    owner.end(1);
+    assert_eq!(
+        mic.mode(&alive, Instant::now()),
+        Err(MicError::Cancelled),
+        "the bound gate is cancelled"
+    );
+    assert!(owner.begin(2, None).is_none(), "the next session");
+    assert_eq!(
+        owner.acquire(GestureId(2)).map(drop),
+        Err(Denied::Inhibited),
+        "the inhibit outlives the session"
+    );
+    let (token, denied) = owner
+        .retire(token, Retirement::Unstarted)
+        .expect_err("its start was claimed");
+    assert_eq!(denied, Denied::Inhibited);
+    drop(reserved);
+    assert_eq!(owner.retire(token, Retirement::Retired), Ok(()));
+    assert!(owner.acquire(GestureId(2)).is_ok(), "free once it retired");
 }
 
 #[test]

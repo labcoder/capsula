@@ -29,6 +29,8 @@ pub(crate) struct Script {
     pub(crate) content: Vec<i16>,
     /// Frames released as silence.
     pub(crate) silent: u64,
+    /// Passes the device was serviced.
+    pub(crate) passes: u64,
 }
 
 pub(crate) type Shared = Arc<Mutex<Script>>;
@@ -64,7 +66,8 @@ impl Device for Fake {
     )]
     fn service(&mut self, engine: &mut Engine) -> Result<(), Fault> {
         let (played, panic) = {
-            let script = lock(&self.script);
+            let mut script = lock(&self.script);
+            script.passes += 1;
             if script.fail {
                 return Err(Fault::Lost);
             }

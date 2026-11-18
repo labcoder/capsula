@@ -2469,6 +2469,30 @@ fn played(script: &crate::speaker::fake::Shared) -> usize {
     script.lock().expect("unpoisoned").content.len()
 }
 
+/// Waits until the speaker took the queued speech: its credit reached the brain. The speech frame
+/// alone carries at least a byte per sample, and the segment's announcement far less.
+fn taken(data: &PipeClient) {
+    let mut credited = 0;
+    while credited < 2_400 {
+        match frame::read::<DataToBrain>(&mut &*data, Pipe::Data).expect("read") {
+            Some(DataToBrain::Credit { bytes }) => credited += bytes,
+            Some(_) => {}
+            None => panic!("the data pipe closed before the speech was credited"),
+        }
+    }
+}
+
+/// Waits for two more device passes, so anything playable would have been written.
+fn two_passes(script: &crate::speaker::fake::Shared) {
+    let passes = || script.lock().expect("unpoisoned").passes;
+    let from = passes();
+    let deadline = Instant::now() + PATIENCE;
+    while passes() < from + 2 {
+        assert!(Instant::now() < deadline, "two more passes");
+        thread::sleep(Duration::from_millis(2));
+    }
+}
+
 #[test]
 fn an_open_racing_the_inhibit_is_paused_before_any_speech_reaches_the_device() {
     use kumochi_protocol::message::GestureId;
@@ -2478,8 +2502,13 @@ fn an_open_racing_the_inhibit_is_paused_before_any_speech_reaches_the_device() {
     let output = link.handle.output();
     let token = output.acquire(GestureId(1)).expect("taken while opening");
     go.send(()).expect("opening");
-    thread::sleep(Duration::from_millis(300));
-    assert_eq!(played(&script), 0, "paused before any of it was written");
+    taken(&link.data);
+    two_passes(&script);
+    assert_eq!(
+        played(&script),
+        0,
+        "taken, and paused before any of it was written"
+    );
     output
         .retire(token, super::output::Retirement::NoMic)
         .expect("retired");
@@ -2505,8 +2534,8 @@ fn talk_back_off_while_opening_withdraws_the_late_open_before_any_speech() {
         assert!(Instant::now() < deadline, "withdrawn and retired");
         thread::sleep(Duration::from_millis(5));
     }
-    thread::sleep(Duration::from_millis(100));
-    assert_eq!(played(&script), 0, "nothing was ever written");
+    taken(&link.data);
+    assert_eq!(played(&script), 0, "credited as stale, never written");
     drop(link.control);
     assert!(link.link.join().expect("joined"), "the UI was still there");
 }
