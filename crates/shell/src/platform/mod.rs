@@ -91,7 +91,7 @@ mod windows;
 
 #[cfg(windows)]
 pub(crate) use kumochi_shell_core::platform::{data_dir, session_id};
-#[cfg(all(windows, feature = "screen-evidence"))]
+#[cfg(windows)]
 pub(crate) use windows::ScreenSources;
 #[cfg(windows)]
 pub(crate) use windows::{

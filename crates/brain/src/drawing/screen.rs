@@ -17,9 +17,8 @@ pub(crate) enum ScreenMarks {
     On,
 }
 
-/// Off until the tool offers the screen surface. The coordinator reads it once, so turning the
-/// screen marks on is this one line.
-pub(crate) const SCREEN_MARKS: ScreenMarks = ScreenMarks::Off;
+/// The coordinator's screen-annotation policy, read once at startup.
+pub(crate) const SCREEN_MARKS: ScreenMarks = ScreenMarks::On;
 
 impl Drawing {
     /// What a screen scene of `run` may be drawn on, from the run's picture and route. A run

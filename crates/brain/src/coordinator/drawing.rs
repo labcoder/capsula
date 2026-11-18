@@ -99,7 +99,7 @@ impl Coordinator {
             .snapshot
             .as_ref()
             .and_then(|snapshot| snapshot.choice.as_ref());
-        (self.screen_marks == ScreenMarks::On)
+        (self.screen_marks != ScreenMarks::Off)
             .then(|| Screen::canvas(current.screen.as_ref(), choice))
     }
 

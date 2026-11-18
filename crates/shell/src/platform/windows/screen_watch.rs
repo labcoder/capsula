@@ -21,12 +21,8 @@ use windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
 use super::presence::{PresenceEvent, process_of, send};
 use crate::input::{Edge, Event, Key, TalkHeld};
 
-// Compiled for tests and for the evidence build only, so no shipped build holds the code that
-// registers the mouse or hooks the foreground.
-#[cfg(any(test, feature = "screen-evidence"))]
 mod sources;
 
-#[cfg(feature = "screen-evidence")]
 pub(crate) use sources::ScreenSources;
 
 thread_local! {
@@ -127,7 +123,6 @@ fn foreign(window: HWND) -> bool {
 }
 
 /// Arms the UI thread's half for a new watch, with the talk keys its hold still had down.
-#[cfg(any(test, feature = "screen-evidence"))]
 fn arm(changed: Changed, events: Sender<PresenceEvent>, held: TalkHeld) {
     UI.with_borrow_mut(|ui| {
         ui.armed = Some((changed, events));
@@ -136,7 +131,6 @@ fn arm(changed: Changed, events: Sender<PresenceEvent>, held: TalkHeld) {
 }
 
 /// Makes the key, foreground and message arms inert at once.
-#[cfg(any(test, feature = "screen-evidence"))]
 fn disarm() {
     UI.with_borrow_mut(|ui| ui.armed = None);
 }

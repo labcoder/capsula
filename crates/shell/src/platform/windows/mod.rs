@@ -22,5 +22,4 @@ pub(crate) use presence::{
     exclude_window, hide_presence_window, performance_counter, place_presence_window,
     restore_foreground, restore_window_affinity, window_affinity, work_area,
 };
-#[cfg(feature = "screen-evidence")]
 pub(crate) use screen_watch::ScreenSources;

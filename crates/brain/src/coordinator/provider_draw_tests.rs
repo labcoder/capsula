@@ -830,12 +830,23 @@ fn the_prompt_example_draws_two_steps_without_promising_an_overlay_canvas() {
         .collect();
     let cases = [
         (
+            "prompt-screen",
+            None,
+            &["point"][..],
+            "drawn: [point]; the marks' positions are not kept after this turn",
+        ),
+        (
             "prompt-diagram",
-            [600, 360],
+            Some([600, 360]),
             &["cycle", "heat"][..],
             "drawn: [cycle, heat]",
         ),
-        ("prompt-sine", [400, 300], &["graph"][..], "drawn: [graph]"),
+        (
+            "prompt-sine",
+            Some([400, 300]),
+            &["graph"][..],
+            "drawn: [graph]",
+        ),
     ];
     assert_eq!(examples.len(), cases.len());
     for (args, (call, size, steps, expected)) in examples.iter().zip(cases) {
@@ -848,6 +859,9 @@ fn the_prompt_example_draws_two_steps_without_promising_an_overlay_canvas() {
         let scratch = Scratch::new(call);
         let mut store = store(&scratch);
         let mut core = offered(vec![T]);
+        if size.is_none() {
+            sent_picture(&mut core);
+        }
         start(&mut core, call);
         let mut streamed = delta(&mut core, call, args);
         streamed.extend(ready(&mut core, call, args));
@@ -857,7 +871,7 @@ fn the_prompt_example_draws_two_steps_without_promising_an_overlay_canvas() {
         assert_eq!(ends(&effects), [true]);
         assert_prefix(&store, steps);
     }
-    let sine: Value = serde_json::from_str(examples[1]).expect("sine JSON");
+    let sine: Value = serde_json::from_str(examples[2]).expect("sine JSON");
     let data = sine["records"][1]["step"]["put"][1]["series"]["data"]
         .as_array()
         .expect("sine data");
@@ -876,6 +890,45 @@ fn the_prompt_example_draws_two_steps_without_promising_an_overlay_canvas() {
             json!([std::f64::consts::TAU, 0]),
         ]
     );
+}
+
+#[test]
+fn overlay_lines_and_arrows_draw_but_the_screen_refuses_them() {
+    for kind in ["line", "arrow"] {
+        for surface in ["overlay", "screen"] {
+            let scratch = Scratch::new(&format!("{surface}-{kind}"));
+            let mut store = store(&scratch);
+            let mut core = offered(vec![T]);
+            sent_picture(&mut core);
+            let args = serde_json::to_string(&json!({"records":[
+                {"begin":{"scene":"wire","surface":surface,"alt":"A connection"}},
+                {"step":{"id":"wire","put":[{(kind):{
+                    "id":"connection","from":[10,10],"to":[90,40]
+                }}]}},
+                {"end":{}}
+            ]}))
+            .expect("fixture");
+            start(&mut core, "connection");
+            let mut streamed = delta(&mut core, "connection", &args);
+            streamed.extend(ready(&mut core, "connection", &args));
+            let mut effects = drain(&mut core, &mut store, streamed);
+            effects.extend(send(&mut core, TurnEvent::Finished(Finish::Completed)));
+            if surface == "overlay" {
+                assert_eq!(result(&effects).output.json()["text"], "drawn: [wire]");
+                assert_eq!(ends(&effects), [true]);
+                assert_prefix(&store, &["wire"]);
+            } else {
+                assert_eq!(
+                    result(&effects).output.json()["text"],
+                    format!(
+                        "drawn: []; stopped: step wire: put[0]: scene.Unsupported{RETRY}; the marks' positions are not kept after this turn"
+                    )
+                );
+                assert_eq!(ends(&effects), Vec::<bool>::new());
+                assert_eq!(store.drawing_scenes().expect("recovery").scenes.len(), 0);
+            }
+        }
+    }
 }
 
 #[test]

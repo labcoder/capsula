@@ -69,7 +69,7 @@ Anchors are `[x,y]` or `{"ref":"object-id"}`. Coordinates must be finite and
 within ±20,000. Chart data uses finite f64 values instead of coordinate-bounded
 numbers. Composed transforms and domain-specific ranges are admission checks.
 Screen/capture anchors are absent, not ignored; a `highlight` or `callout` may also target a
-`{"box":[x,y,w,h]}`, which only the dormant screen surface below accepts.
+`{"box":[x,y,w,h]}`, as used by the screen surface below.
 
 Line, arrow and path stroke widths must be above 0. A shape's `width` is its outline,
 2 by default; 0 draws the shape without an outline, and negative widths are refused. A
@@ -148,17 +148,19 @@ The brain advertises this schema through its draw tool. Its complete-call adapte
 enforces the same 2D restrictions before admitting any scene record; the drawing
 reducer remains authoritative for semantic and resource admission.
 
-### The screen surface (dormant)
+### The screen surface
 
 A scene with `"surface":"screen"` draws on the picture of the user's screen the model was
-sent: one canvas unit per picture pixel, origin top-left. `draw` still refuses the surface and
-`draw_schema()` doesn't offer it, as with 3D. `parse_screen_draw_record` and
-`screen_draw_schema()` are the same contract with it admitted, for the live check and the
-pull request that activates it.
+sent: one canvas unit per picture pixel, origin top-left. The brain offers overlay and screen
+surfaces through `screen_draw_schema()` and preflights complete and streamed calls with
+`parse_screen_draw_record`. Inline and 3D remain refused. Permission still comes from the
+current run's own sent picture; a schema-valid screen call without that canvas is refused.
+The tool retains the ordinary schema's line and arrow forms for overlay drawings; screen
+semantic admission still refuses them.
 
 - **Box targets.** A `highlight`'s or `callout`'s `target` may be `{"box":[x,y,w,h]}` in
   canvas units, with a positive width and height (`OutOfRange` otherwise). Only the screen
-  parser accepts one; `draw` refuses it at `put[i].target`.
+  parser accepts one; the older overlay-only parser refuses it at `put[i].target`.
 - **The stamp.** `begin.display` (the display's physical origin and size and its DPI) is
   written only by the brain, after the parse: a model-written one is `Unsupported` in both
   parsers. `screen::stamp` sets `size` to the picture's and refuses a written size that
@@ -2054,14 +2056,15 @@ Clear intent made while scenes are mirrored survives brain restarts because scen
 durable event ids; membership
 that still names a locally cleared scene causes its idempotent clear to be sent again.
 
-### Screen scenes in the shell (dormant)
+### Screen scenes in the shell
 
 A screen scene's marks point at the screen as it was when a hold was released, so the
-presenter shows one only while nothing may have changed the screen since, and clears every
-one as soon as something may have. Nothing follows a window. This is dormant: `draw` still
-refuses the surface, so no screen scene arrives, and no shipped build installs sources, so
-there every release counts as changed at once. The shell makes every report all the same
-([The shell's reports](#the-shells-reports)).
+presenter shows one only while its input watch remains valid, and clears it on a qualifying
+input or lifecycle event. Nothing follows a window or detects changed pixels. Windows builds
+install the existing native sources; a platform without sources refuses the watch and skips
+marks, rather than pretending the screen stayed unchanged. The shell makes every report
+([The shell's reports](#the-shells-reports)). The sixty-second post-answer limit belongs only
+to desktop annotations, never ordinary contained drawings.
 
 - **The watch** (`presenter/watch.rs`) is plain state with no clock and no system call. The
   presenter owns it, feeds it events and does the clearing it answers.

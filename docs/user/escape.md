@@ -1,6 +1,11 @@
 # Esc
 
-Esc does one thing at a time, in this order:
+Desktop annotations are taken at the first press. If their answer is still running, that
+press also stops it. A press that cancels held input belongs to that hold and does not clear
+an unrelated ordinary drawing. Annotation expiry after 60 seconds does not apply to contained
+drawings.
+
+Otherwise, Esc does one thing at a time, in this order:
 
 1. If held speech is preparing, recording, transcribing or waiting for its reply to start, it
    cancels that input first.
