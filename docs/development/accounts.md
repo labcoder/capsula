@@ -9,8 +9,11 @@ clipboard. A validated paste stays in a zeroizing buffer until the brain replies
 with a one-use staging plan; only its trimmed byte length describes the key on the pipe.
 The shell-core writer puts chunks in Credential Manager at those authority-owned
 names in the background, then the shell sends `AnthropicKeyStaged { plan }`.
-Disconnect or expiry drops a waiting paste and prevents late replies or writes
-from triggering adoption. A save acknowledgement is separate from catalog verification.
+Disconnect or the 30-second monotonic deadline prevents late replies or writes
+from triggering adoption. A queued writer will not start after the deadline, but
+an already running OS write cannot be recalled. After Staged has been sent, a
+missing acknowledgement leaves the save unconfirmed, not failed. A save
+acknowledgement is separate from catalog verification.
 The key never crosses the pipe or enters a file, log, command line or environment variable.
 Only keys connected inside Kumochi are used; live checks must read the same Kumochi-owned
 credential, never another app's key.

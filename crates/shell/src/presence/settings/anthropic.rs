@@ -1,6 +1,6 @@
 //! The dormant Anthropic key row in Accounts.
 
-use std::time::Duration;
+use std::time::Instant;
 
 use gpui_kit::component::button::Button;
 use gpui_kit::component::{ActiveTheme as _, Disableable as _};
@@ -222,16 +222,18 @@ impl Presence {
 
     fn begin_key_paste(&self, text: Option<Zeroizing<String>>, cx: &mut Context<'_, Self>) {
         let at = self
-            .with_key_session(cx, |state, session, send| state.begin(text, session, send))
+            .with_key_session(cx, |state, session, send| {
+                state.begin(text, session, Instant::now(), send)
+            })
             .flatten();
         if let Some(at) = at {
             cx.spawn(async move |owner, cx| {
                 cx.background_executor()
-                    .timer(Duration::from_secs(30))
+                    .timer(at.deadline.saturating_duration_since(Instant::now()))
                     .await;
                 let _gone = owner.update(cx, |owner, cx| {
                     owner.settings.update(cx, |state, cx| {
-                        if state.key_paste.expire(at) {
+                        if state.key_paste.expire(at, Instant::now()) {
                             cx.notify();
                         }
                     });
@@ -257,10 +259,10 @@ impl Presence {
         let job = self.settings.update(cx, |state, cx| {
             let job = match reply {
                 ControlToShell::AnthropicKeyStageDone { .. } => {
-                    state.key_paste.done(generation, reply);
+                    state.key_paste.done(generation, reply, Instant::now());
                     None
                 }
-                _ => state.key_paste.planned(generation, reply),
+                _ => state.key_paste.planned(generation, reply, Instant::now()),
             };
             cx.notify();
             job
@@ -272,7 +274,7 @@ impl Presence {
                 let _gone = owner.update(cx, |owner, cx| {
                     owner.with_key_session(cx, |state, session, send| {
                         if session == generation {
-                            state.written(&result, send);
+                            state.written(&result, Instant::now(), send);
                         }
                     });
                 });
