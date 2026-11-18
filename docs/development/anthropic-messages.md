@@ -104,9 +104,9 @@ in A3a. Those integration decisions belong to A3b.
 
 ## The request body (not yet activated)
 
-`engines::anthropic::encode::body` turns the store's `ModelRequest` into a `MessagesBody`,
-after `MessagesBody::new` has checked it, and the run's `Conversation`, the exact request a tool
-round continues. The body holds: `model`, `max_tokens` 2048 (the envelope's cap, including
+`engines::anthropic::encode::body` turns the store's `ModelRequest` into a `MessagesBody`, whose
+envelope check (`MessagesBody::from_json`) runs on the exact bytes it sends, and the run's
+`Conversation`, the exact request a tool round continues. The body holds: `model`, `max_tokens` 2048 (the envelope's cap, including
 thinking), `stream: true`, `output_config.effort`, the tools as `name`, `description` and
 `input_schema`, and the instructions as the one system block. That block carries the only
 `cache_control` breakpoint, so the tools and the instructions are the cached prefix and stay
@@ -144,21 +144,36 @@ it carries no authority, and a user who types it is still the user. Nothing is b
 
 A round that called tools continues its run's `Conversation` with `encode::next`. The context
 isn't built again: the next request is the last one unchanged, then the round's reply as one
-assistant message, then the results as one user message. The reply is what the run's mapper
-passed on, in output order: text, `tool_use`, and thinking or redacted thinking blocks, with
-exactly their fields, a nonempty signature, and their contents as they came. Each signed block
-is bound to the system text, the tools and every message before it, so a rebuild, which
-refreshes the drawing digest, would invalidate it.
+assistant message, then the results as one user message. Each signed block is bound to the
+system text, the tools and every message before it, so a rebuild, which refreshes the drawing
+digest, would invalidate it.
 
-`Round.answered` names the request the reply answered. Each built request gets its own
-`Prefix`, so a rebuild of the same input is another one. Nothing continues, and the tool flow
-ends with a local refusal, when the reply answered another request, or the next request
-would go on another sign-in tag or model. A source deleted or withdrawn during the run is
+Only the round's own mapper supplies the reply. The run makes it with
+`Mapper::answering(&conversation)` before the stream's first callback, which binds it to that
+request's `Prefix`; each built request gets its own, so a rebuild of the same input is another
+one. When the stream completes, `Mapper::reply` hands the whole reply over once: every block in
+output order, exactly as it came, so text, `tool_use` with its input as streamed, thinking with
+its signature, and redacted thinking. `Reply` has no constructor or field outside the mapper,
+and the coordinator adds only the matched results. There's no reply after a failed or partial
+stream, or when a block was left open, an index is missing, a block is unknown, a text block is
+empty (Messages refuses one), or a call's input came only as a nonempty start object, which has
+been through a parse that can round a number.
+
+Tool input stays text from the stream to the wire. `Conversation` keeps its messages as the JSON
+written (serde_json's `RawValue`), and `MessagesBody::from_json` checks the envelope and then
+sends those bytes. A 30-digit integer or a long decimal goes back as the model wrote it. Key
+order and escapes elsewhere may differ from the stream, since the provider's prefix check
+compares parsed JSON.
+
+Nothing continues, and the tool flow ends with a local refusal, when the reply answered another
+request, or the next request would go on another sign-in tag or model. A `Prefix` means the
+request was built, nothing more: whether the run may still send, after a withdrawn source, Stop
+or a lost owner, is for the live owner to decide. A source deleted or withdrawn during the run is
 never sent again just to keep a signature valid.
 
 Signed thinking lives in the run's memory only. It isn't stored, and a later run replays the
 earlier ones' text and call pairs without it. Anthropic allows this: prior turns' thinking may
 be left out outside an open tool call, as long as no block is left out between two that are
 kept. The next model loses that reasoning, as it loses tool details the answer never stated.
-A reply's call id that was already called, a call without exactly one result, a reply without a
-call, or a block outside that set builds nothing.
+A reply without a call, a call without exactly one result, or an id that was already called
+builds nothing.

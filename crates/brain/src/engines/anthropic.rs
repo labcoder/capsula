@@ -18,9 +18,11 @@ const NAME: usize = 64;
 const EVENT_BYTES: usize = 64;
 
 enum Block {
-    Text,
+    /// A bound mapper keeps the text for the reply; an unbound one keeps none.
+    Text(String),
     Tool {
         call: CallId,
+        name: String,
         start: String,
         args: Option<String>,
     },
@@ -36,7 +38,7 @@ enum Block {
 impl fmt::Debug for Block {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
-            Self::Text => "Text",
+            Self::Text(_) => "Text",
             Self::Tool { .. } => "Tool",
             Self::Thinking { .. } => "Thinking",
             Self::RedactedThinking(_) => "RedactedThinking",
@@ -46,7 +48,8 @@ impl fmt::Debug for Block {
     }
 }
 
-/// One round's retained blocks and queued events, without any replay guarantee.
+/// One round's retained blocks and queued events. A mapper made by `Mapper::answering` for a
+/// request also keeps the round's whole reply, which only its successful completion yields.
 #[derive(Default)]
 pub(crate) struct Mapper {
     blocks: Vec<(u32, Block)>,
@@ -57,6 +60,28 @@ pub(crate) struct Mapper {
     final_usage: bool,
     broken: bool,
     terminal: bool,
+    /// The request this stream answers, set before its first callback and cleared once the reply
+    /// can't continue it.
+    answering: Option<encode::Prefix>,
+    /// Each stopped block of the reply, as its JSON, by output index.
+    kept: Vec<(u32, String)>,
+}
+
+/// A completed round's whole reply, its blocks in output order exactly as they came (tool input as
+/// its streamed text). Only the mapper bound to a request makes one, for that request alone; it
+/// lives in the run's memory and is never stored.
+pub(crate) struct Reply {
+    prefix: encode::Prefix,
+    blocks: Vec<String>,
+}
+
+impl fmt::Debug for Reply {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Reply")
+            .field("prefix", &self.prefix)
+            .field("blocks", &self.blocks.len())
+            .finish()
+    }
 }
 
 impl fmt::Debug for Mapper {
@@ -67,6 +92,8 @@ impl fmt::Debug for Mapper {
             .field("bytes", &self.bytes)
             .field("broken", &self.broken)
             .field("terminal", &self.terminal)
+            .field("answering", &self.answering)
+            .field("kept", &self.kept.len())
             .finish_non_exhaustive()
     }
 }
@@ -83,6 +110,25 @@ impl Mapper {
                 self.final_usage = false;
             }
         }
+    }
+
+    /// The round's whole reply, once: only after this mapper's request completed with every block
+    /// representable and none missing, never after a failure or a partial stream.
+    pub(crate) fn reply(&mut self) -> Option<Reply> {
+        if !self.terminal {
+            return None;
+        }
+        let prefix = self.answering.take()?;
+        let mut kept = std::mem::take(&mut self.kept);
+        kept.sort_by_key(|(index, _)| *index);
+        self.bytes -= kept.iter().map(|(_, block)| block.len()).sum::<usize>();
+        if (0..).zip(&kept).any(|(at, (index, _))| at != *index) {
+            return None;
+        }
+        Some(Reply {
+            prefix,
+            blocks: kept.into_iter().map(|(_, block)| block).collect(),
+        })
     }
 
     /// Transfers queued ownership to the caller, releasing its byte charge.
@@ -114,6 +160,9 @@ impl Mapper {
             Ok(Progress::Completed) => Finish::Completed,
             Err(failure) => Finish::Failed(EngineFailure::Anthropic(failure)),
         };
+        if !matches!(finish, Finish::Completed) {
+            self.unbind();
+        }
         let exact = matches!(
             &finish,
             Finish::Completed
@@ -201,11 +250,17 @@ impl Mapper {
         let block = match text(&v["type"])? {
             "text" => {
                 let initial = text(&v["text"])?;
+                let kept = if self.answering.is_some() {
+                    self.charge(initial.len())?;
+                    initial.to_owned()
+                } else {
+                    String::new()
+                };
                 if !initial.is_empty() {
                     self.charge(initial.len() + EVENT_BYTES)?;
                     self.events.push(TurnEvent::TextDelta(initial.to_owned()));
                 }
-                Block::Text
+                Block::Text(kept)
             }
             "tool_use" => {
                 let id = text(&v["id"])?;
@@ -218,15 +273,22 @@ impl Mapper {
                     return Err(());
                 }
                 self.charge(id.len() * 2)?;
+                let name = if self.answering.is_some() {
+                    self.charge(name.len())?;
+                    name.to_owned()
+                } else {
+                    String::new()
+                };
                 let start = self.serialize(&v["input"], BYTES)?;
                 self.charge(start.len())?;
                 self.queue(TurnEvent::ToolCallStarted {
                     call: call.clone(),
-                    name: ToolName::from_wire(name),
+                    name: ToolName::from_wire(text(&v["name"])?),
                 })?;
                 self.ids.push(call.clone());
                 Block::Tool {
                     call,
+                    name,
                     start: String::from_utf8(start).map_err(|_| ())?,
                     args: None,
                 }
@@ -259,7 +321,7 @@ impl Mapper {
         let at = self.at(index)?;
         let kind = text(&v["type"])?;
         let (key, copies) = match (&self.blocks[at].1, kind) {
-            (Block::Text, "text_delta") => ("text", 1),
+            (Block::Text(_), "text_delta") => ("text", 1 + usize::from(self.answering.is_some())),
             (Block::Tool { .. }, "input_json_delta") => ("partial_json", 2),
             (Block::Thinking { .. }, "thinking_delta") => ("thinking", 1),
             (Block::Thinking { .. }, "signature_delta") => ("signature", 1),
@@ -267,12 +329,12 @@ impl Mapper {
             _ => return Err(()),
         };
         let delta = text(&v[key])?;
-        if copies == 2 && delta.is_empty() {
+        if kind == "input_json_delta" && delta.is_empty() {
             return Ok(());
         }
         let queued = match &self.blocks[at].1 {
             Block::Tool { call, .. } => call.as_str().len() + EVENT_BYTES,
-            Block::Text => EVENT_BYTES,
+            Block::Text(_) => EVENT_BYTES,
             _ => 0,
         };
         self.charge(
@@ -283,8 +345,15 @@ impl Mapper {
                 .ok_or(())?,
         )?;
         match &mut self.blocks[at].1 {
-            Block::Text => self.events.push(TurnEvent::TextDelta(delta.to_owned())),
-            Block::Tool { call, start, args } => {
+            Block::Text(kept) => {
+                if self.answering.is_some() {
+                    kept.push_str(delta);
+                }
+                self.events.push(TurnEvent::TextDelta(delta.to_owned()));
+            }
+            Block::Tool {
+                call, start, args, ..
+            } => {
                 if args.is_none() {
                     self.bytes -= start.len();
                     *start = String::new();
@@ -311,15 +380,29 @@ impl Mapper {
         let at = self.at(index)?;
         let old = std::mem::replace(&mut self.blocks[at].1, Block::Closed);
         let retained = match &old {
-            Block::Tool { call, start, args } => {
-                call.as_str().len() + start.len() + args.as_ref().map_or(0, String::len)
+            Block::Tool {
+                call,
+                name,
+                start,
+                args,
+            } => {
+                call.as_str().len()
+                    + name.len()
+                    + start.len()
+                    + args.as_ref().map_or(0, String::len)
             }
+            Block::Text(text) => text.len(),
             Block::Thinking { text, signature } => text.len() + signature.len(),
             Block::RedactedThinking(data) => data.len(),
             _ => 0,
         };
-        match old {
-            Block::Tool { call, start, args } => {
+        let kept = match old {
+            Block::Tool {
+                call,
+                name,
+                start,
+                args,
+            } => {
                 let initial = args.is_none() && start != "{}";
                 let args = args.unwrap_or(start);
                 if !serde_json::from_str::<Value>(&args)
@@ -330,12 +413,22 @@ impl Mapper {
                 }
                 self.bytes -= retained;
                 if initial {
+                    // A start object came through a parse that can round numbers; fragments are raw.
+                    self.unbind();
                     self.queue(TurnEvent::ToolArgsDelta {
                         call: call.clone(),
                         delta: args.clone(),
                     })?;
                 }
-                return self.queue(TurnEvent::ToolCallReady { call, args });
+                let kept = self.answering.is_some().then(|| {
+                    format!(
+                        r#"{{"type":"tool_use","id":{},"name":{},"input":{args}}}"#,
+                        Value::from(call.as_str()),
+                        Value::from(name),
+                    )
+                });
+                self.queue(TurnEvent::ToolCallReady { call, args })?;
+                return self.keep(index, kept);
             }
             Block::Thinking { text, signature } => {
                 if signature.is_empty() {
@@ -345,24 +438,62 @@ impl Mapper {
                     thinking: &text,
                     signature: &signature,
                 };
-                let bytes = self.serialize(&item, Opaque::MAX)?;
-                self.queue(TurnEvent::OutputItem {
-                    index,
-                    item: Opaque::new(bytes).map_err(|_| ())?,
-                })?;
+                self.native(index, &item)?
             }
             Block::RedactedThinking(data) => {
-                let item = Native::RedactedThinking { data: &data };
-                let bytes = self.serialize(&item, Opaque::MAX)?;
-                self.queue(TurnEvent::OutputItem {
-                    index,
-                    item: Opaque::new(bytes).map_err(|_| ())?,
-                })?;
+                self.native(index, &Native::RedactedThinking { data: &data })?
             }
-            Block::Text | Block::Skipped => {}
+            Block::Text(text) => {
+                // Messages refuses an empty text block, so one can't go back as it came.
+                if text.is_empty() {
+                    self.unbind();
+                }
+                (!text.is_empty())
+                    .then(|| format!(r#"{{"type":"text","text":{}}}"#, Value::from(text)))
+            }
+            Block::Skipped => {
+                self.unbind();
+                None
+            }
             Block::Closed => return Err(()),
-        }
+        };
         self.bytes -= retained;
+        self.keep(index, kept)
+    }
+
+    /// Queues a thinking item, returning its JSON for a bound mapper's reply.
+    fn native(&mut self, index: u32, item: &Native<'_>) -> Result<Option<String>, ()> {
+        let bytes = self.serialize(item, Opaque::MAX)?;
+        let kept = self
+            .answering
+            .is_some()
+            .then(|| String::from_utf8(bytes.clone()))
+            .transpose()
+            .map_err(|_| ())?;
+        self.queue(TurnEvent::OutputItem {
+            index,
+            item: Opaque::new(bytes).map_err(|_| ())?,
+        })?;
+        Ok(kept)
+    }
+
+    /// Drops the reply when it can't go back as it came, so this stream continues nothing.
+    fn unbind(&mut self) {
+        self.answering = None;
+        self.bytes -= self
+            .kept
+            .iter()
+            .map(|(_, block)| block.len())
+            .sum::<usize>();
+        self.kept.clear();
+    }
+
+    /// Keeps a stopped block's JSON for a bound mapper's reply, charged until `reply` takes it.
+    fn keep(&mut self, index: u32, block: Option<String>) -> Result<(), ()> {
+        if let Some(block) = block.filter(|_| self.answering.is_some()) {
+            self.charge(block.len())?;
+            self.kept.push((index, block));
+        }
         Ok(())
     }
 

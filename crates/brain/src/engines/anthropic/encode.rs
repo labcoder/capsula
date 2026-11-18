@@ -7,10 +7,12 @@ use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use kumochi_protocol::message::{ConnectionKind, ModelSlug};
+use serde_json::value::RawValue;
 use serde_json::{Map, Value, json};
+use zeroize::Zeroizing;
 
+use super::{Mapper, Reply};
 use crate::connections::anthropic::messages::MessagesBody;
-use crate::connections::model::serialized_len;
 use crate::context::{BOUND, ConnectionTag, InputItem, ModelRequest, Role};
 use crate::engines::responses::effort;
 use crate::engines::{CallId, Opaque};
@@ -60,61 +62,59 @@ pub(crate) enum BodyError {
     /// The transport's envelope check refused the body.
     #[error("the transport's envelope refuses the body")]
     Envelope,
-    /// A tool round's reply answered another request, sign-in or model than the one it would
-    /// continue, so its signed thinking can't go back.
-    #[error("the round answered another conversation")]
+    /// The reply answered another request, or the next one would go on another sign-in or
+    /// model, so its signed thinking can't go back.
+    #[error("the reply answered another conversation")]
     Prefix,
 }
 
-/// The exact request a run last sent on this route. A tool round only appends to it, since a
-/// signed thinking block is bound to everything before it; it lives in the run's memory only.
+/// The exact request a run last sent on this route, its messages as the JSON sent. A tool round
+/// only appends to it, since a signed thinking block is bound to everything before it; it lives
+/// in the run's memory only.
 pub(crate) struct Conversation {
-    body: Value,
+    head: Map<String, Value>,
+    messages: Vec<Box<RawValue>>,
     tag: ConnectionTag,
     prefix: Prefix,
 }
 
 impl Conversation {
-    /// What a round streamed in answer to this request records, for `next`.
-    pub(crate) fn prefix(&self) -> Prefix {
-        self.prefix
+    /// The body's JSON: the head's fields, then the messages as they were written.
+    fn wire(&self) -> Result<Vec<u8>, BodyError> {
+        let mut bytes = serde_json::to_vec(&self.head).map_err(|_| BodyError::Envelope)?;
+        bytes.pop();
+        bytes.extend_from_slice(b",\"messages\":");
+        serde_json::to_writer(&mut bytes, &self.messages).map_err(|_| BodyError::Envelope)?;
+        bytes.push(b'}');
+        Ok(bytes)
     }
 }
 
 impl fmt::Debug for Conversation {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Conversation")
-            .field(
-                "messages",
-                &self.body["messages"].as_array().map_or(0, Vec::len),
-            )
+            .field("messages", &self.messages.len())
             .field("tag", &self.tag)
             .field("prefix", &self.prefix)
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
-/// One built request, unique in the process: a rebuild of the same input is another prefix.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// One built request, unique in the process: a rebuild of the same input is another one. It
+/// means built, nothing more; whether the run may still send is its owner's to say.
+#[derive(Debug, PartialEq, Eq)]
 pub(crate) struct Prefix(u64);
 
 static PREFIXES: AtomicU64 = AtomicU64::new(0);
 
-/// A tool round's reply, as the run's mapper passed it on in output order (thinking, text and
-/// `tool_use` blocks), and each call's result. Lives in the run's memory only, never the store.
-pub(crate) struct Round {
-    pub(crate) answered: Prefix,
-    pub(crate) blocks: Vec<Opaque>,
-    pub(crate) results: Vec<(CallId, String)>,
-}
-
-impl fmt::Debug for Round {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Round")
-            .field("answered", &self.answered)
-            .field("blocks", &self.blocks.len())
-            .field("results", &self.results.len())
-            .finish()
+impl Mapper {
+    /// A mapper for the stream answering `conversation`'s last request, made before the stream's
+    /// first callback: only its successful completion yields a reply that continues it.
+    pub(crate) fn answering(conversation: &Conversation) -> Self {
+        Self {
+            answering: Some(Prefix(conversation.prefix.0)),
+            ..Self::default()
+        }
     }
 }
 
@@ -124,58 +124,93 @@ pub(crate) fn body(
     request: &ModelRequest,
     tag: ConnectionTag,
 ) -> Result<(MessagesBody, Conversation), BodyError> {
-    sealed(json(request)?, tag)
+    let Value::Object(mut head) = json(request)? else {
+        return Err(BodyError::Envelope);
+    };
+    let messages = match head.remove("messages") {
+        Some(Value::Array(messages)) => messages.iter().map(raw).collect::<Result<_, _>>()?,
+        _ => return Err(BodyError::Envelope),
+    };
+    sealed(head, messages, tag)
 }
 
-/// The next request of a tool loop: `conversation` unchanged, then the round's reply as the
-/// assistant's message, its signed thinking passed back as it came, then the results. Only a
+/// The next request of a tool loop: `conversation` unchanged, then `reply` as the assistant's
+/// message, exactly as its mapper kept it, then `results`, one for each of its calls. Only the
 /// reply to this very request, sent on the same sign-in and model, continues it.
 pub(crate) fn next(
-    mut conversation: Conversation,
+    conversation: Conversation,
     tag: ConnectionTag,
     model: &ModelSlug,
-    round: &Round,
+    reply: Reply,
+    results: &[(CallId, String)],
 ) -> Result<(MessagesBody, Conversation), BodyError> {
-    if round.answered != conversation.prefix
-        || tag != conversation.tag
-        || conversation.body["model"] != model.as_str()
+    let Conversation {
+        head,
+        mut messages,
+        tag: built,
+        prefix,
+    } = conversation;
+    let Reply {
+        prefix: answered,
+        blocks,
+    } = reply;
+    if answered != prefix || tag != built || head.get("model") != Some(&Value::from(model.as_str()))
     {
         return Err(BodyError::Prefix);
     }
-    let reply = round
-        .blocks
-        .iter()
-        .map(|item| native(item, Source::Reply))
-        .collect::<Result<Vec<_>, _>>()?;
-    if !reply.iter().any(|block| block["type"] == "tool_use") {
+    let mut called = false;
+    for block in &blocks {
+        let block: Value = serde_json::from_str(block).map_err(|_| BodyError::Native)?;
+        if block["type"] == "tool_use" {
+            named(block["id"].as_str().ok_or(BodyError::Name)?)?;
+            named(block["name"].as_str().ok_or(BodyError::Name)?)?;
+            called = true;
+        }
+    }
+    if !called {
         return Err(BodyError::Pairing);
     }
-    let results = round
-        .results
+    let assistant = format!(r#"{{"role":"assistant","content":[{}]}}"#, blocks.join(","));
+    messages.push(RawValue::from_string(assistant).map_err(|_| BodyError::Native)?);
+    let results = results
         .iter()
         .map(|(call, output)| Ok(tool_result(id(call)?, output)))
         .collect::<Result<Vec<_>, BodyError>>()?;
-    let messages = conversation.body["messages"]
-        .as_array_mut()
-        .ok_or(BodyError::Prefix)?;
-    messages.push(json!({ "role": "assistant", "content": reply }));
-    messages.push(json!({ "role": "user", "content": results }));
-    sealed(conversation.body, tag)
+    messages.push(raw(&json!({ "role": "user", "content": results }))?);
+    sealed(head, messages, tag)
 }
 
-/// Checks a whole body and hands it to the transport's envelope.
-fn sealed(body: Value, tag: ConnectionTag) -> Result<(MessagesBody, Conversation), BodyError> {
-    let messages = body["messages"].as_array().map_or(&[][..], Vec::as_slice);
-    paired(messages)?;
-    if messages.last().is_none_or(|last| last["role"] != "user") {
+fn raw(value: &Value) -> Result<Box<RawValue>, BodyError> {
+    serde_json::value::to_raw_value(value).map_err(|_| BodyError::Envelope)
+}
+
+/// Checks a whole body and hands its exact bytes to the transport's envelope.
+fn sealed(
+    head: Map<String, Value>,
+    messages: Vec<Box<RawValue>>,
+    tag: ConnectionTag,
+) -> Result<(MessagesBody, Conversation), BodyError> {
+    // Read back only to check pairs and roles; what's sent is `messages` as written.
+    let read = messages
+        .iter()
+        .map(|message| serde_json::from_str(message.get()).map_err(|_| BodyError::Envelope))
+        .collect::<Result<Vec<Value>, _>>()?;
+    paired(&read)?;
+    if read.last().is_none_or(|last| last["role"] != "user") {
         return Err(BodyError::Ending);
     }
-    if serialized_len(&body) > BOUND {
+    let conversation = Conversation {
+        head,
+        messages,
+        tag,
+        prefix: Prefix(PREFIXES.fetch_add(1, Ordering::Relaxed)),
+    };
+    let bytes = conversation.wire()?;
+    if bytes.len() > BOUND {
         return Err(BodyError::TooLarge);
     }
-    let sent = MessagesBody::new(&body).map_err(|_| BodyError::Envelope)?;
-    let prefix = Prefix(PREFIXES.fetch_add(1, Ordering::Relaxed));
-    Ok((sent, Conversation { body, tag, prefix }))
+    let sent = MessagesBody::from_json(Zeroizing::new(bytes)).map_err(|_| BodyError::Envelope)?;
+    Ok((sent, conversation))
 }
 
 /// The request's JSON: the instructions as the one system block, which ends the cached prefix
@@ -213,7 +248,7 @@ fn json(request: &ModelRequest) -> Result<Value, BodyError> {
                 (Role::User, tool_result(id(call)?, output))
             }
             // Only this connection's own items reach here; the build filters the rest.
-            InputItem::Native(item) => (Role::Assistant, native(item, Source::Stored)?),
+            InputItem::Native(item) => (Role::Assistant, native(item)?),
             InputItem::Image(_) => return Err(BodyError::Image),
         };
         match messages.last_mut() {
@@ -272,38 +307,14 @@ fn tool_result(id: &str, output: &str) -> Value {
     json!({ "type": "tool_result", "tool_use_id": id, "content": output })
 }
 
-/// Where a native item comes from.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Source {
-    /// The store, which never holds thinking.
-    Stored,
-    /// A live round's reply, in the run's memory.
-    Reply,
-}
-
-/// A native item rebuilt from the only fields this route writes: a text block with its text, or
-/// a `tool_use` block with its id, name and object input. Only a live round's reply may also hold
-/// a thinking block with its signature, or a redacted one, passed back as it came. Anything
-/// else, an image or document block among them, builds nothing.
-fn native(item: &Opaque, source: Source) -> Result<Value, BodyError> {
+/// A stored native item rebuilt from the only fields this route writes: a text block with its
+/// text, or a `tool_use` block with its id, name and object input. Anything else, a thinking,
+/// image or document block among them, builds nothing: stored items never carry thinking.
+fn native(item: &Opaque) -> Result<Value, BodyError> {
     let block: Map<String, Value> =
         serde_json::from_slice(item.bytes()).map_err(|_| BodyError::Native)?;
     let field = |key: &str| block.get(key).ok_or(BodyError::Native);
-    let text = |key: &str| field(key).and_then(|value| value.as_str().ok_or(BodyError::Native));
     match (field("type")?.as_str(), block.len()) {
-        (Some("thinking"), 3) if source == Source::Reply => {
-            text("thinking")?;
-            if text("signature")?.is_empty() {
-                return Err(BodyError::Native);
-            }
-            Ok(Value::Object(block))
-        }
-        (Some("redacted_thinking"), 2) if source == Source::Reply => {
-            if text("data")?.is_empty() {
-                return Err(BodyError::Native);
-            }
-            Ok(Value::Object(block))
-        }
         (Some("text"), 2) => {
             let text = field("text")?.as_str().filter(|text| !text.is_empty());
             Ok(text_block(text.ok_or(BodyError::Native)?))
