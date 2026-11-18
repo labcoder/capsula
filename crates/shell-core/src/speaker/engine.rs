@@ -15,6 +15,7 @@ use kumochi_protocol::message::{
 use zeroize::Zeroize;
 
 use super::clock::{Clock, Fault, Lease, Observation, Tag, scale};
+use super::tail::{FAULT, RELEASED, SEALED, Snapshot, Tail, UNKNOWN};
 
 #[cfg(test)]
 #[path = "engine_tests.rs"]
@@ -107,7 +108,8 @@ impl Staged<'_> {
     /// by the last look at revocation, right before `put` makes the native release and returns
     /// when it succeeded: a revoke after it can't recall the buffer, so released content is owed
     /// like any other. `unread` reads the padding after a content release, as [`Staged::commit`]
-    /// takes it.
+    /// takes it. A failed release of a buffer holding content may have exposed it, so it's
+    /// unplaced for good.
     ///
     /// # Errors
     /// `put`'s fault, or the fault that froze the clock, now or before.
@@ -117,10 +119,26 @@ impl Staged<'_> {
         unread: impl FnOnce() -> Option<u32>,
     ) -> Result<(), Fault> {
         if self.engine.revoked.load(Ordering::Acquire) {
-            return put(Release::Silent).map(drop);
+            let put = put(Release::Silent);
+            if put.is_err() {
+                self.engine.lose();
+            } else {
+                self.engine.land();
+            }
+            return put.map(drop);
         }
-        let released = put(Release::Content)?;
-        self.commit(unread(), released)
+        match put(Release::Content) {
+            Ok(released) => self.commit(unread(), released),
+            Err(fault) => {
+                self.engine.lose();
+                Err(fault)
+            }
+        }
+    }
+
+    /// The platform lent no buffer, so nothing staged reached the device.
+    pub fn abandon(self) {
+        self.engine.land();
     }
 
     /// The native release succeeded at `released` (see [`Clock::commit`]). `unread` is how many
@@ -136,7 +154,9 @@ impl Staged<'_> {
             lease,
             next,
         } = self;
-        if let Err(fault) = engine.clock.commit(lease, unread, released) {
+        let committed = engine.clock.commit(lease, unread, released);
+        engine.flight = 0;
+        if let Err(fault) = committed {
             return Err(engine.fail(fault));
         }
         let cap = engine.arena.len();
@@ -151,12 +171,17 @@ impl Staged<'_> {
         engine.staged = next.staged;
         engine.read = next.read;
         engine.queued -= next.consumed;
+        engine.publish();
         Ok(())
     }
 }
 
 /// One connection's speaker state. Its methods never block, log or allocate past the bounds set
 /// up in [`Engine::new`].
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "each is an independent latch of the one worker's state"
+)]
 pub struct Engine {
     clock: Clock,
     rate: u32,
@@ -187,6 +212,14 @@ pub struct Engine {
     backlogged: bool,
     /// Set once the link lets go, from its thread; nothing more is staged as content.
     revoked: Arc<AtomicBool>,
+    tail: Arc<Tail>,
+    /// The content end of the release in flight; 0 for none.
+    flight: u64,
+    /// The stream was stopped and let go.
+    released: bool,
+    published: Snapshot,
+    /// What a waiting claim depends on changed since the worker last woke the owner.
+    changed: bool,
     pub(super) reports: VecDeque<ControlToBrain>,
 }
 
@@ -209,12 +242,13 @@ impl fmt::Debug for Engine {
 impl Engine {
     /// A speaker at the device's checked `rate`, for output `generation`. Its first report
     /// announces the output. `qpc_frequency` is the wire's QPC ticks per second; `revoked` is set
-    /// once the link lets go of the speaker.
+    /// once the link lets go of the speaker; `tail` is where it publishes what it owes.
     pub fn new(
         rate: u32,
         generation: OutputGeneration,
         qpc_frequency: u64,
         revoked: Arc<AtomicBool>,
+        tail: Arc<Tail>,
     ) -> Self {
         let arena = usize::try_from(u64::from(rate) * u64::from(MAX_UNPLAYED_SECONDS))
             .expect("20 s at the highest rate fits in usize");
@@ -247,6 +281,11 @@ impl Engine {
             withdrawn: false,
             backlogged: false,
             revoked,
+            tail,
+            flight: 0,
+            released: false,
+            published: Snapshot::default(),
+            changed: false,
             reports,
         }
     }
@@ -278,7 +317,7 @@ impl Engine {
             read: self.read,
             consumed: 0,
         };
-        let live = !self.revoked.load(Ordering::Acquire);
+        let live = !self.revoked.load(Ordering::Acquire) && !self.withdrawn;
         let mut at = 0;
         while at < out.len() {
             let available = if live && self.pause.is_none() && !self.stopping {
@@ -305,6 +344,10 @@ impl Engine {
                 return Err(self.fail(fault));
             }
             at += n;
+        }
+        if let Some(end) = lease.content() {
+            self.flight = end;
+            self.publish();
         }
         Ok(Staged {
             engine: self,
@@ -338,11 +381,18 @@ impl Engine {
         Ok(())
     }
 
-    /// Freezes the clock for good and withdraws the output, once. Unwritten speech is discarded;
-    /// what was verified played stays, and a stop is answered only when nothing written is
-    /// unplayed.
+    /// Freezes the clock for good and withdraws the output (see [`Engine::withdraw`]): a stop is
+    /// answered only when nothing written is unplayed.
     pub fn fail(&mut self, fault: Fault) -> Fault {
         let fault = self.clock.freeze(fault);
+        self.withdraw();
+        fault
+    }
+
+    /// Withdraws the output, once: unwritten speech is discarded, nothing more is written as
+    /// content and later frames are stale. What was verified played stays, and the clock runs
+    /// on, so a stop is still answered once what was written has played.
+    pub fn withdraw(&mut self) {
         if !self.withdrawn {
             self.withdrawn = true;
             self.discard();
@@ -352,7 +402,65 @@ impl Engine {
                     generation: self.generation,
                 });
         }
-        fault
+        self.publish();
+    }
+
+    /// Withdrawn or failed: nothing more is written as content.
+    pub fn sealed(&self) -> bool {
+        self.withdrawn
+    }
+
+    /// Every content frame the device took has played.
+    pub fn drained(&self) -> bool {
+        self.clock.quiet()
+    }
+
+    /// The stream was stopped and let go, so nothing more can be released.
+    pub fn released(&mut self) {
+        self.released = true;
+        self.publish();
+    }
+
+    /// Publishes the tail (see [`Tail`]).
+    pub(super) fn publish(&mut self) {
+        let flags = [
+            (self.clock.unplaced(), UNKNOWN),
+            (self.withdrawn, SEALED),
+            (self.clock.fault().is_some(), FAULT),
+            (self.released, RELEASED),
+        ];
+        let now = Snapshot {
+            exposed: self.clock.content_end(),
+            played: self.clock.frontier(),
+            flight: self.flight,
+            quiet: self.quiet.unwrap_or(0),
+            flags: flags
+                .into_iter()
+                .filter_map(|(set, flag)| set.then_some(flag))
+                .fold(0, |all, flag| all | flag),
+        };
+        self.changed |= now.differs(&self.published);
+        self.published = now;
+        self.tail.write(&now);
+    }
+
+    /// Whether a waiting claim's inputs changed since the last call.
+    pub(super) fn changed(&mut self) -> bool {
+        std::mem::take(&mut self.changed)
+    }
+
+    /// Resolves the release in flight, which exposed nothing.
+    fn land(&mut self) {
+        self.flight = 0;
+        self.publish();
+    }
+
+    /// Resolves the release in flight, whose content may have reached the device unplaced.
+    fn lose(&mut self) {
+        if self.flight != 0 {
+            self.clock.unplace();
+        }
+        self.land();
     }
 
     /// The fault that froze the clock, if one did.

@@ -25,6 +25,8 @@ fn counted() -> (
                 granted.fetch_add(bytes, Ordering::SeqCst);
             }
         }),
+        tail: Arc::default(),
+        wake: async_channel::bounded(1).0,
     };
     (outlet, granted, brain)
 }

@@ -975,6 +975,8 @@ impl Link {
             generation: OutputGeneration(generation),
             control: control.clone(),
             grant: Box::new(move |bytes| credit.grant(bytes)),
+            tail: Arc::default(),
+            wake: async_channel::bounded(1).0,
         })?;
         let pipes = pipes.map(Arc::clone);
         speaker.arm(Box::new(move || {

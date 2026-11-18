@@ -94,6 +94,13 @@ pub(crate) struct Lease {
     content_end: Option<u64>,
 }
 
+impl Lease {
+    /// The device frame after the lease's last content frame, if it holds any.
+    pub(crate) fn content(&self) -> Option<u64> {
+        self.content_end
+    }
+}
+
 /// One stream's clock. Its methods never block, log or allocate.
 #[derive(Debug)]
 pub(crate) struct Clock {
@@ -322,6 +329,26 @@ impl Clock {
     /// Every content frame the device took has played.
     pub(crate) fn quiet(&self) -> bool {
         !self.unplaced && self.frontier >= self.content_end
+    }
+
+    /// The device frame after the last content frame written.
+    pub(crate) fn content_end(&self) -> u64 {
+        self.content_end
+    }
+
+    /// The first device frame not yet verified played.
+    pub(crate) fn frontier(&self) -> u64 {
+        self.frontier
+    }
+
+    /// The device may have taken content the clock can't place.
+    pub(crate) fn unplaced(&self) -> bool {
+        self.unplaced
+    }
+
+    /// A release that may have exposed content failed, so nothing is quiet again.
+    pub(crate) fn unplace(&mut self) {
+        self.unplaced = true;
     }
 
     /// Content frames written and not yet played.

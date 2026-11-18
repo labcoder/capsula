@@ -15,7 +15,8 @@ Slice 7's half-duplex change (D) enables output.
 | --- | --- | --- |
 | `Clock` | `speaker/clock.rs` | the device epoch, the ledger, the deadline and what counts as played |
 | `Engine` | `speaker/engine.rs` | the 20 s arena, up to 256 segments, runs, stops, pauses and the reports |
-| `Worker`, `Speaker`, `Input` | `speaker.rs` | the bounded channels to the worker; credit; spent buffers; teardown |
+| `Worker`, `Speaker`, `Input` | `speaker.rs` | the bounded channels to the worker; credit; spent buffers; the shared `serve` loop; teardown |
+| `Tail` | `speaker/tail.rs` | one generation's sequence-locked record of what it owes |
 | Windows adapter | `platform/windows/speaker.rs` | the WASAPI stream, its thread, its event and the platform results |
 | Link | `link.rs` | routing speech frames, run names, revokes and the speaker's reports on one connection |
 
@@ -39,7 +40,15 @@ Everything else is shared and tested offline against a fake device clock
   picks the kind: silent once the link let go, taking nothing staged, or content, committed with
   the release time `put` returns and the padding read after it. That look is the in-flight
   boundary: a revoke after it can't recall the buffer, whose content is then owed like any
-  other, and nothing promises silence for a release already under way.
+  other, and nothing promises silence for a release already under way. A content release whose
+  `put` fails may have exposed it, so the clock is unplaced for good; `Staged::abandon` says the
+  platform lent no buffer, so nothing staged reached the device.
+- `Device` is what an adapter's started stream does: `wait` for its next period, `service`
+  (observe, then stage and release) and `stop`. `serve(worker, engine, device)` is the one loop
+  every adapter runs: wait, take commands and frames, service, send reports. A fault or a
+  withdrawal retires the stream: it plays out what was written until the clock is quiet, faults
+  or 500 ms [guess] pass, is stopped and let go, and the worker goes on without a device,
+  answering stops and crediting frames until the link lets go.
 
 ## What played means
 
@@ -76,6 +85,10 @@ Everything else is shared and tested offline against a fake device clock
   units other than the first reading's, a failed device call, speech from the brain that can't
   be true, or reports the brain left unread past their bound. A single imprecise reading never
   counts and never freezes.
+- **Withdrawal.** `Withdraw` (talk-back off) and every freeze withdraw the output once: unwritten
+  speech is discarded, only silence is written, later frames are stale and credited, and
+  `AudioOutputUnavailable` goes out. The clock runs on, so a stop is still answered once what
+  was written has played.
 
 ## Reports
 
@@ -101,6 +114,26 @@ All go out on the connection's control queue, in order. The announcement comes f
   that the brain isn't reading, and the worker ends, whatever faulted first, rather than grow
   the queue or drop a receipt in silence. The first fault stays the diagnostic.
 
+## The tail
+
+Each output generation's engine publishes a `Tail`: a sequence lock over one
+`Snapshot { exposed, played, flight, quiet, flags }`, in device frames of its one clock epoch.
+Only the engine writes it, on the worker thread, with no lock or allocation; a reader never
+waits, and a read that overlaps a write returns nothing.
+
+- `exposed` is the end of the content committed to the device, `played` the verified frontier,
+  `flight` the content end of a release under way (0 for none), and `quiet` the latest pause
+  serial that went quiet.
+- Flags: `UNKNOWN` once content may have reached the device unplaced (a continuity gap, a failed
+  padding read, a failed release), `SEALED` once withdrawn, `FAULT` once the clock froze, and
+  `RELEASED` once the stream was stopped and let go, so nothing more can be released.
+- `owed()` holds while anything is in flight, unknown, or exposed and not yet played. A live
+  generation that caught up owes nothing now but may still speak, so only `RELEASED` or a gone
+  writer ends its tail ([the output owner](#the-output-owner)).
+- The worker wakes the output owner through a capacity-1 channel when the quiet serial, the flags
+  or `owed()` changed. Its thread wakes it once more after the worker, engine and device are
+  gone, on return or unwinding, when nothing can write the tail again.
+
 ## Runs, fences and pauses
 
 - **Admission.** Only the run control named last may start playing; until it's named its frames
@@ -115,8 +148,8 @@ All go out on the connection's control queue, in order. The announcement comes f
   another output generation, are dropped and credited. A stop is a command the worker applies at
   its next pass, not a native cancel: frames released before it still play and count. Only the
   session's revocation is read at the release decision.
-- **Pause and resume.** `pause(serial)` closes admission. `quiet()` names the serial once every
-  content frame written before it has played. `resume(serial)` withdraws that pause, quiet or
+- **Pause and resume.** `pause(serial)` closes admission. The tail's `quiet` names the serial once
+  every content frame written before it has played. `resume(serial)` withdraws that pause, quiet or
   not, and speech goes on at the first unwritten sample, with no skip or repeat.
 - **Steps.** Every segment plays in order. Holding a step's narration until its drawing is
   shown, and dropping a failed scene's audio, come with the speech timeline (E).
@@ -207,7 +240,7 @@ stream on the default output, on its own thread with its own COM apartment.
 - **Format.** It writes the engine's mix format with no conversion and takes only 16-bit PCM or
   float, mono or stereo. It reuses the microphone's mix reader, so a mix rate that isn't a
   multiple of 50 Hz, such as 11,025 Hz, is refused and the connection gets no output.
-- **Passes.** Each pass reads the padding and the clock, observes, then tops the device up to
+- **Passes.** The stream is the adapter's `Device`, run by the shared `serve` loop. Each pass reads the padding and the clock, observes, then tops the device up to
   two periods. Samples are staged, written into the adapter's own byte buffer, then copied into
   the native buffer between `GetBuffer` and `ReleaseBuffer`, so no Rust slice is ever made
   over native memory. `Staged::release` decides the flags after the copy, right before
@@ -230,8 +263,10 @@ stream on the default output, on its own thread with its own COM apartment.
   overlaps a new stream. The event is created before the client, and every value that can fail
   (the period, the lead, the QPC frequency, the buffers) is settled before the client, its
   services and the event move into the stream, so on every path the client and its services are
-  released before the event closes. Teardown stops the stream (a failed stop is logged),
-  releases its interfaces, closes its event and leaves COM on its own thread.
+  released before the event closes. Teardown stops the stream,
+  releases its interfaces, closes its event and leaves COM on its own thread. A failed stop is
+  logged; the tail's verdict comes from what played, never from the stop's result. A
+  `GetBuffer` that lends nothing abandons the stage.
 - **No capture.** It opens no capture or loopback endpoint and listens for no endpoint changes;
   a pinned stream sees its own loss.
 
