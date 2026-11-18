@@ -2,6 +2,7 @@
 
 use std::fmt;
 use std::mem;
+use std::time::{Duration, Instant};
 
 use kumochi_protocol::message::{
     ConnectionOp, ControlToShell, KeyRejection, KeyStageFailure, KeyStageId, KeyView,
@@ -11,11 +12,13 @@ use zeroize::Zeroizing;
 use crate::platform::credential::{PastedAnthropicKey, StageError, StagePermit, write_key_stage};
 
 const MAX_PASTE_BYTES: usize = 2048;
+const PASTE_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Attempt {
     pub session: u64,
     pub request: u64,
+    pub deadline: Instant,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -61,11 +64,12 @@ pub struct KeyWriteResult {
 
 impl KeyWriteJob {
     pub fn run(self) -> KeyWriteResult {
-        self.run_with(write_key_stage)
+        self.run_with(Instant::now(), write_key_stage)
     }
 
     fn run_with(
         self,
+        now: Instant,
         write: impl FnOnce(StagePermit, PastedAnthropicKey) -> Result<KeyStageId, StageError>,
     ) -> KeyWriteResult {
         let Self {
@@ -77,13 +81,17 @@ impl KeyWriteJob {
         KeyWriteResult {
             at,
             plan,
-            result: write(permit, key).and_then(|written| {
-                if written == plan {
-                    Ok(())
-                } else {
-                    Err(StageError::IdentityMismatch)
-                }
-            }),
+            result: if now >= at.deadline {
+                Err(StageError::Expired)
+            } else {
+                write(permit, key).and_then(|written| {
+                    if written == plan {
+                        Ok(())
+                    } else {
+                        Err(StageError::IdentityMismatch)
+                    }
+                })
+            },
         }
     }
 }
@@ -176,6 +184,7 @@ impl KeyPaste {
         &mut self,
         text: Option<Zeroizing<String>>,
         session: u64,
+        now: Instant,
         send: impl FnOnce(ConnectionOp) -> bool,
     ) -> Option<Attempt> {
         if !self.can_paste() {
@@ -202,6 +211,7 @@ impl KeyPaste {
         let at = Attempt {
             session,
             request: self.request,
+            deadline: now + PASTE_TIMEOUT,
         };
         if !send(ConnectionOp::BeginAnthropicKeyStage {
             request: at.request,
@@ -214,15 +224,19 @@ impl KeyPaste {
         Some(at)
     }
 
-    pub fn planned(&mut self, session: u64, reply: &ControlToShell) -> Option<KeyWriteJob> {
+    pub fn planned(
+        &mut self,
+        session: u64,
+        reply: &ControlToShell,
+        now: Instant,
+    ) -> Option<KeyWriteJob> {
         let ControlToShell::AnthropicKeyStage { request, result } = reply else {
             return None;
         };
-        let at = Attempt {
-            session,
-            request: *request,
+        let Stage::Asked(at, _) = self.stage else {
+            return None;
         };
-        if !matches!(self.stage, Stage::Asked(asked, _) if asked == at) {
+        if at.session != session || at.request != *request || self.expire(at, now) {
             return None;
         }
         let Stage::Asked(_, key) = mem::take(&mut self.stage) else {
@@ -245,13 +259,19 @@ impl KeyPaste {
         }
     }
 
-    pub fn written(&mut self, result: &KeyWriteResult, send: impl FnOnce(ConnectionOp) -> bool) {
+    pub fn written(
+        &mut self,
+        result: &KeyWriteResult,
+        now: Instant,
+        send: impl FnOnce(ConnectionOp) -> bool,
+    ) {
         let KeyWriteResult {
             at,
             plan,
             ref result,
         } = *result;
         if !matches!(self.stage, Stage::Writing(writing, expected) if writing == at && expected == plan)
+            || self.expire(at, now)
         {
             return;
         }
@@ -265,12 +285,14 @@ impl KeyPaste {
         }
     }
 
-    pub fn done(&mut self, session: u64, reply: &ControlToShell) {
+    pub fn done(&mut self, session: u64, reply: &ControlToShell, now: Instant) {
         let ControlToShell::AnthropicKeyStageDone { plan, result } = reply else {
             return;
         };
-        if !matches!(self.stage, Stage::Saving(at, expected) if at.session == session && expected == *plan)
-        {
+        let Stage::Saving(at, expected) = self.stage else {
+            return;
+        };
+        if at.session != session || expected != *plan || self.expire(at, now) {
             return;
         }
         self.stage = Stage::Idle;
@@ -292,8 +314,8 @@ impl KeyPaste {
         });
     }
 
-    pub fn expire(&mut self, at: Attempt) -> bool {
-        if self.stage.attempt() != Some(at) {
+    pub fn expire(&mut self, at: Attempt, now: Instant) -> bool {
+        if now < at.deadline || self.stage.attempt() != Some(at) {
             return false;
         }
         self.failure = Some(if matches!(self.stage, Stage::Saving(..)) {

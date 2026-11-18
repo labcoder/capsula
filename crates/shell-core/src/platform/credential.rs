@@ -36,6 +36,8 @@ impl StagePermit {
 
 #[derive(Debug, PartialEq, Eq, thiserror::Error)]
 pub(crate) enum StageError {
+    #[error("staging deadline elapsed")]
+    Expired,
     #[error("invalid staging plan")]
     InvalidPlan,
     #[error("staging length mismatch")]
