@@ -229,18 +229,14 @@ fn round_results(input: &[InputItem], calls: &[CallId]) -> Option<Vec<(CallId, S
     calls
         .iter()
         .map(|call| {
-            let mut outputs = answers.iter().filter_map(|item| match item {
+            // As many results as calls, each call answered: no result repeats or answers another.
+            answers.iter().find_map(|item| match item {
                 InputItem::FunctionOutput {
                     call: answered,
                     output,
-                } if answered == call => Some(output),
+                } if answered == call => Some((call.clone(), output.clone())),
                 _ => None,
-            });
-            let output = outputs.next()?;
-            outputs
-                .next()
-                .is_none()
-                .then(|| (call.clone(), output.clone()))
+            })
         })
         .collect()
 }
