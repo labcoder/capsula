@@ -171,16 +171,25 @@ stored byte for byte (`.gitattributes`), so the CRLF one stays CRLF.
 
 ## Opt-in Dev text observation
 
-Only the Windows Dev brain copied to `live/<number>/bin/` can create
-`chatgpt-text.stamps` there. It requires an explicit opt-in and a model budget of 1–60,
-and it never reuses an existing file. A reservation comes after the ordinary send lease
-and a successful budget debit. Its first accepted nonempty text delta gets at most one
-stamp, before forwarding to the run pump. The terminal mark distinguishes dropping an
-owned local connection, returning it to the pool, and never acquiring one. Only the
-first case can witness local I/O destruction after Stop; none proves provider cancellation.
+The regular Windows brain with debug assertions and the Dev identity can open
+`live/<number>/chatgpt-text.stamps` when its executable path ends in
+`live/<number>/bin/kumochid.exe`, `KUMOCHI_LIVE_CHATGPT_TEXT` is exactly `1`, and
+`KUMOCHI_LIVE_BUDGET` parses as 1–60. It writes a ready row at startup and never
+overwrites an existing file. The path and variables don't prove this is a fresh copy,
+a trusted parent directory or a disposable profile. Copying the executable does not
+isolate account state.
 
-The stamps use QPC and fixed numeric fields: process and attempt identity, test model and
-effort codes, and counts. Auxiliary HTTP attempts use fixed categories, are capped at
-64, and don't spend the model budget. Neither stream content nor request data is written.
-Missing or inconsistent final counts invalidate the observation; the model budget still
-applies independently.
+A reservation follows an ordinary send lease and successful budget debit. The first
+accepted nonempty text delta is recorded before forwarding to the run pump. An owned
+connection's destruction gets a QPC sample on each side; only a Stop earlier than
+the first sample can establish that Stop preceded that drop. Pooling is distinct, and
+`no_io` means no connection was installed on the attempt, not that its connector did
+no I/O. None of these observations proves provider-side cancellation.
+
+These boundaries append fixed numeric records without waiting, formatting or file I/O.
+Only after runtime shutdown, when no more model or auxiliary work can dispatch, does
+the brain write the buffered rows and a final count. A failed append, a 65th auxiliary
+attempt, or a reservation beyond the model ceiling invalidates the observation, so
+there is no final count. Auxiliary HTTP categories do not spend the model budget.
+Missing or inconsistent totals are invalid; the model budget still applies independently.
+Neither stream content nor request data is written.

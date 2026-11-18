@@ -121,15 +121,6 @@ impl<C: Connect> Responses<C> {
     }
 }
 
-#[cfg(all(windows, debug_assertions))]
-impl<C: Connect> Drop for Shared<C> {
-    fn drop(&mut self) {
-        if let Some(observation) = &self.observation {
-            observation.finish();
-        }
-    }
-}
-
 impl<C: Connect> fmt::Debug for Responses<C> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Responses")

@@ -284,8 +284,9 @@ async fn observation_stamps_the_first_nonempty_parsed_delta_on_the_granted_choic
     tokio::time::timeout(Duration::from_secs(5), async {
         let lines = Arc::new(Mutex::new(Vec::new()));
         let out = Arc::clone(&lines);
-        let recorder =
-            text_observation::fixture(1, move |line| out.lock().unwrap().push(line.to_owned()));
+        let (recorder, release) = text_observation::stalled_fixture(1, move |line| {
+            out.lock().unwrap().push(line.to_owned());
+        });
         let records = || {
             lines
                 .lock()
@@ -303,7 +304,7 @@ async fn observation_stamps_the_first_nonempty_parsed_delta_on_the_granted_choic
         let reserve = format!("reserve {pid} 1 7 1 1 1 1 1");
         let first = format!("text {pid} 1");
         let mut round = start_with(request(Some("gpt-6-luna")), |engine| {
-            engine.observe_for_tests(recorder)
+            engine.observe_for_tests(Arc::clone(&recorder))
         });
         round.bearer(Ok(bearer())).await;
         assert_eq!(records().as_slice(), std::slice::from_ref(&ready));
@@ -326,13 +327,17 @@ async fn observation_stamps_the_first_nonempty_parsed_delta_on_the_granted_choic
             round.events.recv().await,
             Some(TurnEvent::TextDelta(String::new()))
         );
-        assert_eq!(records(), [ready.clone(), reserve.clone()]);
+        assert_eq!(recorder.buffered_for_tests(), 1, "only the reservation");
         server.write_all(hello.as_bytes()).await.unwrap();
         assert_eq!(
             round.events.recv().await,
             Some(TurnEvent::TextDelta("Hello, ".into()))
         );
-        assert_eq!(records(), [ready.clone(), reserve.clone(), first.clone()]);
+        assert_eq!(
+            recorder.buffered_for_tests(),
+            2,
+            "first nonempty delta is buffered"
+        );
         for frame in frames {
             server.write_all(frame.as_bytes()).await.unwrap();
         }
@@ -343,6 +348,9 @@ async fn observation_stamps_the_first_nonempty_parsed_delta_on_the_granted_choic
                 TurnEvent::Finished(Finish::Completed),
             ]
         );
+        assert_eq!(records().as_slice(), std::slice::from_ref(&ready));
+        release.send(()).unwrap();
+        recorder.finish();
         assert_eq!(
             records(),
             [

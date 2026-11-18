@@ -150,13 +150,11 @@ impl<Io, L: Lease> Drop for Attempt<Io, L> {
         }
         #[cfg(all(windows, debug_assertions))]
         if let Some(stamp) = self.stamp.take() {
-            let end = if let Some(conn) = self.conn.take() {
-                drop(conn);
-                text_observation::End::Closed
+            if let Some(conn) = self.conn.take() {
+                stamp.close(conn);
             } else {
-                text_observation::End::NoIo
-            };
-            stamp.ended(end);
+                stamp.ended(text_observation::End::NoIo);
+            }
         }
     }
 }

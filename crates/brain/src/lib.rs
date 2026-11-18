@@ -50,6 +50,8 @@ use tokio::task::JoinSet;
 
 use crate::connections::model::budget::Budget;
 use crate::connections::model::conn::{ModelClient, Tls};
+#[cfg(all(windows, debug_assertions))]
+use crate::connections::model::text_observation::Observation;
 #[cfg(debug_assertions)]
 use crate::engines::fixture::Fixture;
 use crate::engines::responses::{AccessHandle, Responses};
@@ -109,7 +111,22 @@ pub enum BrainError {
 /// waited for a settings write up to their deadline; one still stuck on a slow disk ends with the
 /// process, and `config.toml` stays whole because it's replaced, never written in place.
 pub fn shut_down(runtime: tokio::runtime::Runtime) {
+    end_runtime(
+        runtime,
+        #[cfg(all(windows, debug_assertions))]
+        Observation::active().map(AsRef::as_ref),
+    );
+}
+
+fn end_runtime(
+    runtime: tokio::runtime::Runtime,
+    #[cfg(all(windows, debug_assertions))] observation: Option<&Observation>,
+) {
     runtime.shutdown_timeout(Duration::ZERO);
+    #[cfg(all(windows, debug_assertions))]
+    if let Some(observation) = observation {
+        observation.finish();
+    }
 }
 
 /// Runs the brain until the shell quits or turns out to be from another build.
@@ -122,6 +139,8 @@ pub async fn run() -> Result<(), BrainError> {
     // The pipes come first: a second brain fails here, before it touches anything else.
     let mut pipes = Pipes::create(session)?;
     let exe = std::env::current_exe()?;
+    #[cfg(all(windows, debug_assertions))]
+    Observation::prepare(&exe);
     // Before any shell is served, so no run starts ahead of the recovery scan. Blocking is fine:
     // nothing else runs on the runtime yet.
     let mut store = store::Store::open(&store::default_path()?)?;

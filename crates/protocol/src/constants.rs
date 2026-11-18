@@ -296,6 +296,12 @@ pub const LIVE_BUDGET_ENV: &str = "KUMOCHI_LIVE_BUDGET";
 
 /// Enables content-free `ChatGPT` attempt stamps in a copied Dev brain.
 pub const LIVE_CHATGPT_TEXT_ENV: &str = "KUMOCHI_LIVE_CHATGPT_TEXT";
+/// The folder that holds numbered copies for Dev live checks.
+pub const LIVE_RUNS_DIR: &str = "live";
+/// The executable folder within one copied Dev live check.
+pub const LIVE_RUN_BIN_DIR: &str = "bin";
+/// The content-free record within one copied Dev live check.
+pub const LIVE_CHATGPT_TEXT_STAMPS_FILE: &str = "chatgpt-text.stamps";
 
 /// Dev builds only: the most Claude Code questions the brain may seed. A value that isn't a
 /// count allows none.
