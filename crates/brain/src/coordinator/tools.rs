@@ -134,6 +134,7 @@ impl Loop {
         self.open.clear();
         self.dispatched = false;
         self.items.clear();
+        self.key_calls.clear();
         self.item_bytes = 0;
     }
 

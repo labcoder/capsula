@@ -1081,3 +1081,129 @@ fn a_key_round_ends_the_run_when_a_source_it_carries_on_has_gone() {
         }
     }
 }
+
+#[test]
+fn a_key_rebuild_stores_only_calls_from_the_replacement_round() {
+    use crate::context::RunSnapshot;
+    use crate::coordinator::{Availability, Ready};
+    use crate::engines::anthropic::encode::ToolUse;
+    use kumochi_protocol::message::{
+        AssistantName, ConnectionKind, Effort, ModelChoice, ModelInfo, ModelName, ModelSlug,
+    };
+
+    let mut core = fresh();
+    let model = ModelSlug::new("claude-sonnet-5-5").expect("slug");
+    let kind = ConnectionKind::AnthropicKey;
+    let tag = ConnectionTag(41);
+    core.handle(Input::Engines(
+        kind,
+        Availability::Ready(Ready {
+            connection: tag,
+            models: vec![ModelInfo {
+                slug: model.clone(),
+                display_name: ModelName::new("Sonnet").expect("name"),
+                supported_efforts: None,
+            }],
+            trusted_draw: false,
+        }),
+    ))
+    .expect("never stale");
+    core.handle(Input::Turn {
+        turn: 1,
+        thread: None,
+        text: "words".into(),
+    })
+    .expect("never stale");
+    core.handle(Input::TurnStored { run: R }).expect("current");
+    let build = |key, snapshot, sources| {
+        Input::ContextBuilt(ContextBuilt {
+            key,
+            snapshot,
+            result: Ok(Built {
+                request: request(),
+                sources,
+            }),
+        })
+    };
+    let first = build(
+        attempt(1, 1),
+        Some(RunSnapshot {
+            origin: Origin::Task(T),
+            assistant: AssistantName::new("Kumo").expect("name"),
+            user: None,
+            choice: Some(ModelChoice {
+                connection: kind,
+                model,
+                effort: Effort::Low,
+            }),
+            connection: tag,
+        }),
+        vec![T, B],
+    );
+    assert!(starts_round(&core.handle(first).expect("admitted"), 1));
+    let typed = |n: u32, word: &str| {
+        ToolUse::projected(&format!(
+            r#"{{"type":"tool_use","id":"tool-{n}","name":"list_tasks","input":{{"word":"{word}"}}}}"#
+        ))
+        .expect("a call")
+    };
+    play(&mut core, called(1));
+    play(
+        &mut core,
+        [TurnEvent::KeyCall {
+            index: 0,
+            call: typed(1, "withdrawn-source"),
+        }],
+    );
+    assert_eq!(
+        core.handle(Input::Delete {
+            thread: B,
+            after_turns: 1,
+            resend: false
+        }),
+        Ok(vec![Effect::Store(StoreOp::Delete { thread: B })])
+    );
+    assert_eq!(
+        core.handle(completed(&core)),
+        Ok(vec![Effect::CancelEngine { run: R }])
+    );
+    let effects = core
+        .handle(Input::Deleted {
+            thread: B,
+            outcome: Deleted::Hidden,
+            last_run: None,
+        })
+        .expect("answered");
+    let Some(Effect::Store(StoreOp::BuildContext(replacement))) = effects.first() else {
+        panic!("expected the replacement build: {effects:?}");
+    };
+    assert_eq!(replacement.key, attempt(1, 2));
+    assert!(starts_round(
+        &core
+            .handle(build(replacement.key, None, vec![T]))
+            .expect("admitted"),
+        1
+    ));
+    play(&mut core, called(2));
+    let fresh_call = typed(2, "replacement");
+    play(
+        &mut core,
+        [TurnEvent::KeyCall {
+            index: 0,
+            call: fresh_call.clone(),
+        }],
+    );
+    let effects = core.handle(completed(&core)).expect("current");
+    let [Effect::Store(StoreOp::RoundItems(round))] = effects.as_slice() else {
+        panic!("expected the replacement write: {effects:?}");
+    };
+    assert_eq!(
+        round.key_calls,
+        [fresh_call],
+        "the withdrawn call must not be written"
+    );
+    assert_eq!(
+        round.calls,
+        [(id(2), ToolOutput::Error(ToolError::Unknown))]
+    );
+}
