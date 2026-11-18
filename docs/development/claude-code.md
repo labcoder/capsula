@@ -627,10 +627,10 @@ call on its own loop (`runtime/claude/mcp.rs`). Claude Code's stdout never runs 
    cancels a held run, and every way the run leaves, before it's detached. `fence_mcp`, before
    every coordinator input and at dispatch, revokes for causes outside the core: a gate failed by
    the audit, a withdrawal, replacement or teardown, and the deadline. A revoked launch's waiter
-   is let go at the brain's next `settle_mcp`: right after the transition when it came through
-   `Brain::handle` or `mcp_call`, and at the next one of those when it came from
-   `claude_reported`'s direct `coordinator.handle`. Its gate failed already, so the listener
-   releases nothing of it meanwhile.
+   is let go by `settle_mcp`, which runs right after `Brain::handle`, `mcp_call` and
+   `claude_reported`. ChatGPT's availability report (`availability_changed`) is the one direct
+   coordinator input that doesn't, so a waiter revoked there goes at the next of those. Its gate
+   failed already, so the listener releases nothing of it meanwhile.
 
 ```mermaid
 sequenceDiagram
