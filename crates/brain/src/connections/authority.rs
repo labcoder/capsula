@@ -170,10 +170,16 @@ impl fmt::Debug for Generation {
 }
 
 /// A value's chunk count and total length, derived from the length alone.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Layout {
     chunks: usize,
     bytes: usize,
+}
+
+impl fmt::Debug for Layout {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("Layout(***)")
+    }
 }
 
 impl Layout {

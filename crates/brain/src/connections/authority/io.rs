@@ -156,10 +156,12 @@ pub(crate) fn delete_pending(
     id: Generation,
     layout: Layout,
 ) {
+    let mut failed = false;
     for index in 0..layout.chunks() {
-        if store.delete(&target(service, kind, id, index)).is_err() {
-            tracing::warn!("a staged credential could not be deleted");
-        }
+        failed |= store.delete(&target(service, kind, id, index)).is_err();
+    }
+    if failed {
+        tracing::warn!("a staged credential could not be deleted");
     }
 }
 

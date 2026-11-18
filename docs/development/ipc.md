@@ -150,7 +150,8 @@ result }` are appended control replies. They carry metadata and closed errors,
 never a key, target supplied by the shell or provider text. The tap keeps only
 the staging operation's name: it drops the payload and its wire length, since
 the encoded size can reveal the length's encoding width. Debug also omits the
-trimmed length and plan identity.
+trimmed length and plan identity. Authority layouts hide byte and chunk counts
+in Debug, and a failed staged cleanup logs once without counting failed chunks.
 
 The Connections snapshot pairs the Anthropic key's status with its non-secret
 authority revision. Remove names that exact revision; the worker compares it
