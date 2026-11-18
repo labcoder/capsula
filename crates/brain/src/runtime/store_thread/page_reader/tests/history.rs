@@ -124,7 +124,7 @@ fn active_on(
     store.end_run(SOURCE, RunId(1), &[], RunEnd::Done).unwrap();
     if matches!(prior, Prior::Reference) {
         store.begin_turn(MAIN, None, RunId(2), "prior").unwrap();
-        store.append_round((MAIN, RunId(2)), ConnectionTag(0), None,
+        store.append_round((MAIN, RunId(2)), crate::context::Route { kind: kumochi_protocol::message::ConnectionKind::ChatGpt, tag: ConnectionTag(0) }, None,
             &[Opaque::new(br#"{"type":"function_call","call_id":"prior","name":"read_history","arguments":"{}"}"#.to_vec()).unwrap()],
             &[(CallId::new("prior").unwrap(), ToolOutput::Recall(Selection::Read { task: 2, first_shown: Some(1), last_shown: Some(1), cut: None, next: None }))]).unwrap();
         store.end_run(MAIN, RunId(2), &[], RunEnd::Done).unwrap();

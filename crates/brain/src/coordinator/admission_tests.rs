@@ -111,6 +111,10 @@ fn kumo_build(attempt: u64, snapshot: Option<RunSnapshot>) -> Effect {
         thread: MAIN,
         origin: Origin::Kumo,
         first: snapshot.is_none(),
+        arrived: crate::coordinator::Arrived::of(
+            kumochi_protocol::message::ConnectionKind::ChatGpt,
+            crate::context::ConnectionTag(0),
+        ),
         snapshot,
         drawings: crate::drawing::Digest::default(),
     }))

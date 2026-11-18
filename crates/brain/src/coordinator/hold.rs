@@ -11,7 +11,7 @@ use kumochi_protocol::message::{
 
 use super::availability::Arrived;
 use super::{Coordinator, Effect, Input, StoreOp, admission};
-use crate::context::{ConnectionTag, Origin, RunSnapshot};
+use crate::context::{Origin, RunSnapshot};
 use crate::recall::control::{Control, READ_TIME};
 use crate::store::Generation;
 
@@ -171,10 +171,8 @@ impl Coordinator {
             cancel.store(true, Ordering::SeqCst);
             return Err(());
         }
-        // Read only to replay native items, which only a `ChatGPT` route does.
-        defaults.connection = arrived
-            .get(ConnectionKind::ChatGpt)
-            .unwrap_or(ConnectionTag(0));
+        // The store sets it again once a pinned choice resolves; native items replay under it.
+        defaults.connection = arrived.replay(defaults.choice.as_ref());
         defaults.origin = thread.map_or(Origin::Kumo, |thread| {
             admission::origin(thread, self.main_thread)
         });

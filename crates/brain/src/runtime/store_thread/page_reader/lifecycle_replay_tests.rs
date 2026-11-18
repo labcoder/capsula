@@ -33,7 +33,7 @@ fn replay_store(scratch: &Scratch) -> Store {
     store
         .begin_turn(ThreadId(1), None, RunId(2), "recall")
         .unwrap();
-    store.append_round((ThreadId(1), RunId(2)), ConnectionTag(0), None,
+    store.append_round((ThreadId(1), RunId(2)), crate::context::Route { kind: kumochi_protocol::message::ConnectionKind::ChatGpt, tag: ConnectionTag(0) }, None,
         &[Opaque::new(br#"{"type":"function_call","call_id":"recall","name":"read_history","arguments":"{}"}"#.to_vec()).unwrap()],
         &[(CallId::new("recall").unwrap(), ToolOutput::Recall(Selection::Read {
             task: 2, first_shown: Some(1), last_shown: Some(1), cut: None, next: None,
@@ -63,6 +63,7 @@ fn build(control: Control) -> BuildContext {
         origin: Origin::Kumo,
         snapshot: Some(snapshot()),
         first: false,
+        arrived: crate::coordinator::Arrived::default(),
         drawings: crate::drawing::Digest::default(),
     }
 }

@@ -3,11 +3,11 @@
 //! so no row can be stored that fails every later build of its thread; a bad row from an older
 //! build still fails the read instead of reaching a request.
 
-use kumochi_protocol::message::{RunId, ThreadId};
+use kumochi_protocol::message::{ConnectionKind, RunId, ThreadId};
 use serde_json::{Value, json};
 
 use super::{EventKind, NewEvent, Store, StoreError};
-use crate::context::{Body, ConnectionTag};
+use crate::context::{Body, ConnectionTag, Route};
 use crate::dispatch::ToolOutput;
 use crate::engines::{CallId, Opaque};
 
@@ -17,7 +17,8 @@ const MAX_RESULT: usize = crate::dispatch::MAX_OUTPUT + 1024;
 
 impl Store {
     /// Appends one round to an active run in one transaction: the text streamed since the last
-    /// write, the native items in the order given, then each call's answer.
+    /// write, the native items in the order given, each with the route that made it, then each
+    /// call's answer.
     ///
     /// # Errors
     /// [`StoreError::RoundRecord`] when an item or a result is one the reader would refuse,
@@ -25,7 +26,7 @@ impl Store {
     pub(crate) fn append_round(
         &mut self,
         (thread, run): (ThreadId, RunId),
-        connection: ConnectionTag,
+        connection: Route,
         text: Option<&str>,
         items: &[Opaque],
         results: &[(CallId, ToolOutput)],
@@ -66,13 +67,22 @@ impl Store {
     }
 }
 
-/// A native item's body: the connection that made it, and the item as the same JSON value.
-fn native_body(connection: ConnectionTag, item: &Opaque) -> Result<String, StoreError> {
+/// A native item's body: the route that made it, its tag and kind, and the item as the same
+/// JSON value.
+fn native_body(route: Route, item: &Opaque) -> Result<String, StoreError> {
     let item: Value = serde_json::from_slice(item.bytes()).map_err(|_| StoreError::RoundRecord)?;
-    if !item.is_object() {
+    // The key route replays only its calls (K1a's encoder takes nothing else from a stored item).
+    if !item.is_object()
+        || (route.kind == ConnectionKind::AnthropicKey && item["type"] != "tool_use")
+    {
         return Err(StoreError::RoundRecord);
     }
-    Ok(json!({ "connection": connection.0, "item": item }).to_string())
+    let kind = match route.kind {
+        ConnectionKind::ChatGpt => "chatgpt",
+        ConnectionKind::AnthropicKey => "anthropic_key",
+        ConnectionKind::ClaudeCode => "claude_code",
+    };
+    Ok(json!({ "connection": route.tag.0, "kind": kind, "item": item }).to_string())
 }
 
 /// A result's body: the call it answers and its tagged output.
@@ -85,12 +95,24 @@ pub(super) fn native(body: &str) -> Result<Body, StoreError> {
     let connection = value["connection"]
         .as_u64()
         .ok_or(StoreError::RoundRecord)?;
+    // A row written before kinds were kept is `ChatGPT`'s, the only route that stored rounds; any
+    // other kind, or a kind that isn't one of these, never replays.
+    let kind = match value.get("kind") {
+        None => Some(ConnectionKind::ChatGpt),
+        Some(kind) => match kind.as_str() {
+            Some("chatgpt") => Some(ConnectionKind::ChatGpt),
+            Some("anthropic_key") => Some(ConnectionKind::AnthropicKey),
+            Some("claude_code") => Some(ConnectionKind::ClaudeCode),
+            _ => None,
+        },
+    };
     let item = value["item"].take();
     if !item.is_object() {
         return Err(StoreError::RoundRecord);
     }
     let bytes = serde_json::to_vec(&item).map_err(|_| StoreError::RoundRecord)?;
     Ok(Body::Native {
+        kind,
         connection: ConnectionTag(connection),
         item: Opaque::new(bytes).map_err(|_| StoreError::RoundRecord)?,
     })

@@ -145,6 +145,10 @@ fn build_context(run: RunId, thread: ThreadId, attempt: u64) -> Effect {
         origin: Origin::Task(thread),
         snapshot: None,
         first: true,
+        arrived: crate::coordinator::Arrived::of(
+            kumochi_protocol::message::ConnectionKind::ChatGpt,
+            crate::context::ConnectionTag(0),
+        ),
         drawings: crate::drawing::Digest::default(),
     }))
 }

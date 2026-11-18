@@ -196,3 +196,22 @@ be left out outside an open tool call, as long as no block is left out between t
 kept. The next model loses that reasoning, as it loses tool details the answer never stated.
 A reply without a call, a call without exactly one result, or an id that was already called
 builds nothing.
+
+### The live owner
+
+`live::Live` plays each key round in one call: it builds the body, binds the round's mapper to
+it, feeds that mapper the stream's own callbacks and takes the transport's real ending. Each
+read's text, call and usage events go to the coordinator before the next read; the mapper's items
+don't. Once a round that called tools completes, its calls go out as items, each a `tool_use`
+block of the reply's id, name and input and nothing else, which the coordinator stores under the
+run's route. The store refuses any other item on this route. The reply, with the request it
+answered, stays in `Live` for the run's next round.
+
+The next round takes it once. Its body is `encode::next` over that request, that reply, and the
+rebuilt request's results for the reply's calls; nothing else of the rebuilt request is sent. A
+later round with nothing to continue fails with a local refusal before anything is sent: after a
+rebuild answer, a refused send, another run's round, or with no reply kept at all. A job or a
+compaction offers no tools and is built afresh. A key run whose next build no longer has a source
+an earlier round sent, such as a deleted task, ends instead. Stop drops a round in flight with
+the continuation it took. One a run left between rounds stays until the next round starts, which
+drops it unsent.

@@ -59,6 +59,75 @@ impl Connect for AnthropicTls {
 impl sealed::Sealed for AnthropicTls {}
 impl AnthropicConnect for AnthropicTls {}
 
+/// An in-memory Anthropic peer: each connection answers with the next scripted response and
+/// keeps the bytes it was sent. No socket.
+#[cfg(test)]
+#[derive(Clone, Default)]
+pub(crate) struct Scripted(pub(crate) Arc<std::sync::Mutex<Script>>);
+
+#[cfg(test)]
+#[derive(Default)]
+pub(crate) struct Script {
+    pub(crate) responses: std::collections::VecDeque<Vec<u8>>,
+    pub(crate) requests: Vec<Vec<u8>>,
+}
+
+#[cfg(test)]
+pub(crate) struct Sent(Arc<std::sync::Mutex<Script>>);
+
+#[cfg(test)]
+impl tokio::io::AsyncWrite for Sent {
+    fn poll_write(
+        self: std::pin::Pin<&mut Self>,
+        _: &mut std::task::Context<'_>,
+        bytes: &[u8],
+    ) -> std::task::Poll<io::Result<usize>> {
+        let mut script = self.0.lock().expect("script");
+        script
+            .requests
+            .last_mut()
+            .expect("a connection")
+            .extend_from_slice(bytes);
+        std::task::Poll::Ready(Ok(bytes.len()))
+    }
+
+    fn poll_flush(
+        self: std::pin::Pin<&mut Self>,
+        _: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<io::Result<()>> {
+        std::task::Poll::Ready(Ok(()))
+    }
+
+    fn poll_shutdown(
+        self: std::pin::Pin<&mut Self>,
+        _: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<io::Result<()>> {
+        std::task::Poll::Ready(Ok(()))
+    }
+}
+
+#[cfg(test)]
+impl Connect for Scripted {
+    type Io = tokio::io::Join<io::Cursor<Vec<u8>>, Sent>;
+
+    fn connect(&self) -> impl Future<Output = io::Result<Self::Io>> + Send {
+        let mut script = self.0.lock().expect("script");
+        let io = script
+            .responses
+            .pop_front()
+            .map(|response| tokio::io::join(io::Cursor::new(response), Sent(Arc::clone(&self.0))));
+        if io.is_some() {
+            script.requests.push(Vec::new());
+        }
+        std::future::ready(io.ok_or_else(|| io::ErrorKind::ConnectionRefused.into()))
+    }
+}
+
+#[cfg(test)]
+impl sealed::Sealed for Scripted {}
+#[cfg(test)]
+impl AnthropicConnect for Scripted {}
+
 #[cfg(test)]
 mod tests {
     use super::*;

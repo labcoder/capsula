@@ -39,6 +39,8 @@ pub struct BuildContext {
     pub(crate) snapshot: Option<RunSnapshot>,
     /// The run's first build.
     pub(crate) first: bool,
+    /// The tag each kind had when the run's turn arrived; the first build takes its choice's.
+    pub(crate) arrived: super::Arrived,
     /// The thread's drawings on screen when the build began, headers and objects together.
     pub(crate) drawings: crate::drawing::Digest,
 }
@@ -50,6 +52,7 @@ impl PartialEq for BuildContext {
             && self.origin == other.origin
             && self.snapshot == other.snapshot
             && self.first == other.first
+            && self.arrived == other.arrived
             && self.drawings == other.drawings
     }
 }
@@ -192,13 +195,18 @@ impl Coordinator {
         };
         let control = current.control.0.child();
         current.build = Some(Build::new(key, exposed, None, control.clone()));
-        let (thread, snapshot) = (current.thread, current.effective_snapshot());
+        let (thread, snapshot, arrived) = (
+            current.thread,
+            current.effective_snapshot(),
+            current.arrived,
+        );
         effects.push(Effect::Store(StoreOp::BuildContext(BuildContext {
             control,
             key,
             thread,
             origin: origin(thread, main),
             first: snapshot.is_none(),
+            arrived,
             snapshot,
             drawings: self.drawing.digest(thread),
         })));
@@ -332,6 +340,19 @@ impl Coordinator {
             return self.fail_with(key.run, Failure::Engine, reason, effects);
         }
         let current = self.current(key.run)?;
+        // A key run's later round goes on from the request already sent, so it ends rather than
+        // send again a source that has gone since, such as a deleted task.
+        if key.round > 1
+            && current
+                .route
+                .is_some_and(|route| route.kind == ConnectionKind::AnthropicKey)
+            && current
+                .sent
+                .iter()
+                .any(|source| !made.sources.contains(source))
+        {
+            return self.fail(key.run, Failure::Engine, effects);
+        }
         let build = current.build.as_mut().expect("the build was just matched");
         build.offers_draw = offers_draw;
         build.offered = request
@@ -344,7 +365,11 @@ impl Coordinator {
             self.rebuild(key, &voided, &pending, effects);
             return Ok(());
         }
-        build.admit(made.sources);
+        build.admit(made.sources.clone());
+        if key.round == 1 {
+            current.sent.clear();
+        }
+        current.sent.extend(made.sources);
         current.compacted = None;
         current.tell_screen_unless_image(effects);
         effects.push(Effect::StartEngine {

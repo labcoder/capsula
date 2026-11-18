@@ -1050,10 +1050,10 @@ impl Brain {
     /// A run's first build takes the names and default model as they are now, so a rename
     /// applies from the next run.
     fn seed(&self, build: &mut BuildContext) {
-        let (origin, run) = (build.origin, build.key.run);
+        let origin = build.origin;
         build.snapshot.get_or_insert_with(|| RunSnapshot {
-            // A build for a run that already ended is stale, so its tag is never read.
-            connection: self.coordinator.replay_tag(run).unwrap_or(ConnectionTag(0)),
+            // The build reads the run's choice and sets the tag its kind arrived with.
+            connection: ConnectionTag(0),
             ..self.snapshot(origin)
         });
     }

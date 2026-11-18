@@ -470,7 +470,10 @@ fn a_draw_the_request_didnt_offer_commits_nothing() {
             thread: T,
             run: R,
             round: 1,
-            connection: ConnectionTag(7),
+            connection: crate::context::Route {
+                kind: kumochi_protocol::message::ConnectionKind::ChatGpt,
+                tag: ConnectionTag(7)
+            },
             text: None,
             items: Vec::new(),
             calls: vec![(
@@ -550,11 +553,6 @@ fn a_send_takes_its_runs_connection_only_while_the_run_is_current() {
         revealed: Vec::new(),
     })
     .expect("current");
-    assert_eq!(
-        core.replay_tag(R),
-        Some(ConnectionTag(7)),
-        "the run is ending"
-    );
     assert_eq!(core.sending(round), None);
 
     let core = typed(None);

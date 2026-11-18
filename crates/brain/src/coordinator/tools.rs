@@ -8,7 +8,7 @@ use std::fmt;
 use kumochi_protocol::message::{Content, RunId, ThreadId};
 
 use super::{Coordinator, Effect, Stale, StoreOp, unstored};
-use crate::context::{BOUND, ConnectionTag};
+use crate::context::{BOUND, Route};
 use crate::dispatch::{Caller, Dispatch, ToolOutput};
 use crate::engines::{CallId, Opaque, ToolName};
 use crate::store::Failure;
@@ -25,8 +25,8 @@ pub struct RoundItems {
     pub(crate) thread: ThreadId,
     pub(crate) run: RunId,
     pub(crate) round: u32,
-    /// The run's connection, which replays the items.
-    pub(crate) connection: ConnectionTag,
+    /// The run's route, which replays the items.
+    pub(crate) connection: Route,
     pub(crate) text: Option<Content>,
     pub(crate) items: Vec<Opaque>,
     pub(crate) calls: Vec<(CallId, ToolOutput)>,
@@ -269,15 +269,21 @@ impl Coordinator {
                 return Ok(());
             }
         }
-        // shortcut: a stored native body has no kind, so only a `ChatGPT` round may write one; A2
-        // adds the kind.
-        let Some(connection) = current
-            .route
-            .filter(|route| route.kind == kumochi_protocol::message::ConnectionKind::ChatGpt)
-            .map(|route| route.tag)
-        else {
+        // Only the routes whose rounds the build replays store them; Claude Code keeps its own.
+        let Some(connection) = current.route.filter(|route| {
+            matches!(
+                route.kind,
+                kumochi_protocol::message::ConnectionKind::ChatGpt
+                    | kumochi_protocol::message::ConnectionKind::AnthropicKey
+            )
+        }) else {
             return self.fail(run, Failure::Engine, effects);
         };
+        // The key's items are its calls alone (its mapper keeps signed thinking in the run's
+        // memory), and a screen call's boxes are only taken out of a `ChatGPT` call.
+        if screen && connection.kind == kumochi_protocol::message::ConnectionKind::AnthropicKey {
+            return self.fail(run, Failure::Engine, effects);
+        }
         let round = current.build.as_ref().map_or(1, |build| build.key().round);
         let calling = current.tools.calling();
         current.finishing = !calling;

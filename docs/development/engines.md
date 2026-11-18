@@ -32,14 +32,17 @@ after their build stops; background jobs keep their separate job-keyed collector
 | Deletion notes | Kumo's thread only: up to the newest 32 notes [guess] past the summary, each one developer message, `Note: a task was deleted at 2026-11-06 01:23.` A note sits after the last run that began before it, never inside a run, and is dropped with that run. A summary covers the notes up to its last event. A note names no task, so a deleted title never comes back in a request. |
 | Current turn | The user's text, plus their local time to the minute when the run started (its `started_ms` through SQLite's `localtime`, so the system's time zone on every platform), the same in every round of the run. It's never dropped. |
 
-**Stored rounds** (runs.md, "The tool loop") replay per run (D13-M1). A run whose native items came
-from the connection this run uses replays its rounds natively: each round's items in output order,
-then its results, and of its text only what was written after its last round, such as a Stop's
-partial answer, as one assistant message. The text before that is already in the items. A run from
-another connection replays as its text only, with no items and no results, so no call travels
-without its result. The connection is the `ChatGPT` sign-in the run arrived under, recorded in its
-snapshot. Native items replay only for a run on `ChatGPT`'s choice or on none; for any other
-connection's choice every run replays as its text. A stored item or result that doesn't decode, or a result over 64 KiB [guess],
+**Stored rounds** (runs.md, "The tool loop") replay per run (D13-M1). A run whose stored items came
+from this run's route, the same kind under the same sign-in tag, replays its rounds natively: each
+round's items in output order, then its results. A `ChatGPT` round's items carry its text, so of
+its text only what was written after its last round, such as a Stop's partial answer, goes as one
+assistant message. An Anthropic key round stores only its calls, each a `tool_use` item of its id,
+name and input, so its text replays as written, beside them. A run from another route replays as
+its text only, with no items and no results, so no call travels without its result. The route is
+the kind of the run's choice (`ChatGPT` for none) and the tag that kind had when the turn arrived,
+recorded in its snapshot. Every stored item records both; an item stored before kinds were kept is
+`ChatGPT`'s, and one of a kind this build doesn't know never replays. Claude Code keeps its own
+history and stores no rounds. A stored item or result that doesn't decode, or a result over 64 KiB [guess],
 fails the build, and their bytes count toward the bound. `append_round` runs those same checks
 on every item and result before it writes, so a round the build would refuse is never stored: its
 write fails and the run ends `failed(store)`, and the thread's next run builds as usual.

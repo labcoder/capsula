@@ -210,10 +210,10 @@ fn runs(items: Vec<Item>, current: RunId) -> Result<Vec<Vec<Item>>, BuildError> 
 /// One run's input items. Its history results are re-read, adding each task they show text
 /// from to `sources`; `local_time` is added to the current run's turn.
 ///
-/// A run with stored rounds from the connection this run uses replays them natively, each
+/// A run with stored rounds from this run's route, its kind and tag, replays them natively, each
 /// round's items then its results, and of its text only what came after its last round, which
-/// no stored item carries (D13-M1). A run from another connection replays as its text only, so
-/// no call travels without its result.
+/// a `ChatGPT` round's items carry (D13-M1). A run from another route replays as its text only,
+/// so no call travels without its result.
 pub(super) fn render(
     snapshot: &Snapshot<'_>,
     run: &RunSnapshot,
@@ -221,14 +221,19 @@ pub(super) fn render(
     local_time: Option<&str>,
     sources: &mut BTreeSet<ThreadId>,
 ) -> Result<Vec<InputItem>, StoreError> {
-    // Native items replay only on `ChatGPT`; any other route gets each run as its text.
-    let native = run
+    // Native items replay only on `ChatGPT` and the Anthropic key; any other route gets text.
+    let kind = run
         .choice
         .as_ref()
-        .is_none_or(|choice| choice.connection == ConnectionKind::ChatGpt)
-        && items.iter().any(
-            |item| matches!(&item.body, Body::Native { connection, .. } if *connection == run.connection),
-        );
+        .map_or(ConnectionKind::ChatGpt, |choice| choice.connection);
+    let made_here = |body: &Body| {
+        matches!(body, Body::Native { kind: made, connection, .. }
+            if *made == Some(kind) && *connection == run.connection)
+    };
+    let native =
+        kind != ConnectionKind::ClaudeCode && items.iter().any(|item| made_here(&item.body));
+    // A `ChatGPT` round's items carry its text; the key's carry only its calls, so its text stays.
+    let carried = native && kind == ConnectionKind::ChatGpt;
     let after_rounds = items
         .iter()
         .rposition(|item| {
@@ -237,7 +242,7 @@ pub(super) fn render(
                 Body::Native { .. } | Body::Result { .. } | Body::Recall { .. }
             )
         })
-        .filter(|_| native);
+        .filter(|_| carried);
     let mut input: Vec<InputItem> = Vec::with_capacity(items.len());
     for (at, item) in items.iter().enumerate() {
         match &item.body {
@@ -278,8 +283,8 @@ pub(super) fn render(
                     output: json!({ "quoted_history": quoted }).to_string(),
                 });
             }
-            Body::Native { connection, item } => {
-                if native && *connection == run.connection {
+            body @ Body::Native { item, .. } => {
+                if native && made_here(body) {
                     input.push(InputItem::Native(item.clone()));
                 }
             }

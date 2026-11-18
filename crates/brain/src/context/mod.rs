@@ -66,6 +66,17 @@ pub(crate) struct Route {
     pub(crate) tag: ConnectionTag,
 }
 
+#[cfg(test)]
+impl Route {
+    /// `ChatGPT` on the sign-in `tag`.
+    pub(crate) fn chatgpt(tag: u64) -> Self {
+        Self {
+            kind: ConnectionKind::ChatGpt,
+            tag: ConnectionTag(tag),
+        }
+    }
+}
+
 /// What a run reads once when it starts and reuses for every round, so a rename applies from the
 /// next run.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -76,6 +87,9 @@ pub(crate) struct RunSnapshot {
     /// The thread's model, else the default; `None` until a catalog has been read. The fixture
     /// engine needs none, and a real engine (PR 13a) refuses a request without one.
     pub(crate) choice: Option<ModelChoice>,
+    /// The tag the choice's kind had when the run's turn arrived, which its stored rounds carry;
+    /// the store sets it as it reads the choice. `ConnectionTag(0)` when that kind had none: the
+    /// run is then refused before anything is sent, so no replay it reads is ever sent.
     pub(crate) connection: ConnectionTag,
 }
 
@@ -125,8 +139,10 @@ pub(crate) enum Body {
         call: CallId,
         refs: Vec<HistoryRef>,
     },
-    /// A native output item of a stored round, replayed only on the connection that made it.
+    /// A native output item of a stored round, replayed only on the connection that made it:
+    /// its kind, `None` when the stored kind is one this build doesn't know, and its tag.
     Native {
+        kind: Option<ConnectionKind>,
         connection: ConnectionTag,
         item: Opaque,
     },
@@ -152,8 +168,13 @@ impl fmt::Debug for Body {
                 .field("call", call)
                 .field("refs", refs)
                 .finish(),
-            Self::Native { connection, item } => f
+            Self::Native {
+                kind,
+                connection,
+                item,
+            } => f
                 .debug_struct("Native")
+                .field("kind", kind)
                 .field("connection", connection)
                 .field("item", item)
                 .finish(),
