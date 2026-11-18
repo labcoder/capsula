@@ -3,6 +3,8 @@
 //! so no row can be stored that fails every later build of its thread; a bad row from an older
 //! build still fails the read instead of reaching a request.
 
+use std::collections::BTreeSet;
+
 use kumochi_protocol::message::{ConnectionKind, RunId, ThreadId};
 use serde_json::{Value, json};
 
@@ -51,7 +53,8 @@ impl Store {
     /// its calls, each read back as the replay will read it before anything is written.
     ///
     /// # Errors
-    /// As [`Store::append_round`].
+    /// As [`Store::append_round`], or [`StoreError::RoundRecord`] unless the calls and results
+    /// match one-to-one by id.
     pub(crate) fn append_key_round(
         &mut self,
         ids: (ThreadId, RunId),
@@ -60,6 +63,15 @@ impl Store {
         calls: &[ToolUse],
         results: &[(CallId, ToolOutput)],
     ) -> Result<(), StoreError> {
+        let mut pending: BTreeSet<_> = calls.iter().map(ToolUse::id).collect();
+        if pending.len() != calls.len()
+            || results
+                .iter()
+                .any(|(call, _)| !pending.remove(call.as_str()))
+            || !pending.is_empty()
+        {
+            return Err(StoreError::RoundRecord);
+        }
         let natives = calls
             .iter()
             .map(|call| {

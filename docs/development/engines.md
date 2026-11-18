@@ -38,10 +38,10 @@ answer one call of the run made before them, once, replays its rounds natively: 
 round's items in output order, then its results. A `ChatGPT` round's items carry its text, so of
 its text only what was written after its last round, such as a Stop's partial answer, goes as one
 assistant message. An Anthropic key round stores only its calls, each a `tool_use` item of its id,
-name and input, so its text replays as written, beside them; each of its calls must be answered
-too. Any other run, one with a single row of another route or of no known one among its own, or a
-result that answers no call or answers one twice, replays as its text only, with no items, no
-results and no recall read, so no call or result travels without its pair. The route is
+name and input, so its text replays as written, beside them. Its writer requires exactly one
+result per call, with no repeated or stray IDs. Replay checks that each call group is fully
+answered before the next group or text. A run with foreign or unpaired rows replays as its
+text only, without items, results or recall, so no call or result travels without its pair. The route is
 the kind of the run's choice (`ChatGPT` for none) and the tag that kind had when the turn arrived,
 recorded in its snapshot. Every stored item records both; an item stored before kinds were kept is
 `ChatGPT`'s, and one of a kind this build doesn't know never replays. Claude Code keeps its own

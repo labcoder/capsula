@@ -308,13 +308,14 @@ pub(super) fn render(
 
 /// Whether a run's stored rounds replay natively on `kind` and `tag`: at least one native item,
 /// every one from that route, no call made twice, and each result answering a call made before it,
-/// once. A key run's calls are each answered too, as Messages requires; `ChatGPT` keeps a call
-/// left unanswered, as it always has. A row from any other route, or of no known one, makes the
-/// whole run text.
+/// once. The key route also requires each call group to be answered before another group or text;
+/// `ChatGPT` keeps unfinished rounds as before. A foreign or unpaired row makes the whole run text.
 fn replayable(kind: ConnectionKind, tag: ConnectionTag, items: &[Item]) -> bool {
+    let key_route = kind == ConnectionKind::AnthropicKey;
     let mut calls = BTreeSet::new();
     let mut answered = BTreeSet::new();
     let mut natives = false;
+    let mut in_results = false;
     for item in items {
         let fits = match &item.body {
             Body::Native {
@@ -322,21 +323,26 @@ fn replayable(kind: ConnectionKind, tag: ConnectionTag, items: &[Item]) -> bool 
                 connection,
                 item,
             } => {
+                if key_route && in_results && answered.len() != calls.len() {
+                    return false;
+                }
+                in_results = false;
                 natives = true;
                 *made == Some(kind)
                     && *connection == tag
                     && called(kind, item).is_none_or(|call| calls.insert(call))
             }
             Body::Result { call, .. } | Body::Recall { call, .. } => {
+                in_results = true;
                 calls.contains(call.as_str()) && answered.insert(call.as_str())
             }
-            _ => true,
+            _ => !key_route || answered.len() == calls.len(),
         };
         if !fits {
             return false;
         }
     }
-    natives && (kind != ConnectionKind::AnthropicKey || answered.len() == calls.len())
+    natives && (!key_route || answered.len() == calls.len())
 }
 
 /// The call a stored item of `kind` makes, if it makes one.

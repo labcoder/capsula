@@ -667,18 +667,17 @@ fn a_key_run_with_another_routes_row_or_unpaired_results_replays_as_its_text() {
         .expect("a foreign round");
     world.reply(first, "Done.");
     let doubled = world.start("again");
-    keep_calls(
+    seed_unpaired(
         &mut world,
         doubled,
-        &[stored_call()],
         &[("toolu_1", "one"), ("toolu_1", "two")],
     );
     world.reply(doubled, "Done.");
     let unanswered = world.start("alone");
-    keep_calls(&mut world, unanswered, &[stored_call()], &[]);
+    seed_unpaired(&mut world, unanswered, &[]);
     world.reply(unanswered, "Done.");
     let stray = world.start("stray");
-    keep_calls(&mut world, stray, &[stored_call()], &[("toolu_9", "stray")]);
+    seed_unpaired(&mut world, stray, &[("toolu_9", "stray")]);
     world.reply(stray, "Done.");
     let next = world.start("next");
     let mut chatgpt = on_key(TAG);
@@ -716,5 +715,154 @@ fn a_key_run_with_another_routes_row_or_unpaired_results_replays_as_its_text() {
         );
         assert_eq!(built.sources, vec![main], "no recall was read: {run:?}");
         assert!(!format!("{input:?}").contains("private-sentinel"));
+    }
+}
+
+fn seed_unpaired(world: &mut World, run: RunId, results: &[(&str, &str)]) {
+    let call = format!(r#"{{"connection":{TAG},"kind":"anthropic_key","item":{STORED}}}"#);
+    let results: Vec<_> = results
+        .iter()
+        .map(|(id, text)| json!({"call":id,"output":text}).to_string())
+        .collect();
+    let mut events = vec![
+        NewEvent {
+            kind: EventKind::AssistantText,
+            text: Some("Looking."),
+            body: None,
+        },
+        NewEvent {
+            kind: EventKind::OutputItem,
+            text: None,
+            body: Some(&call),
+        },
+    ];
+    events.extend(results.iter().map(|body| NewEvent {
+        kind: EventKind::ToolResult,
+        text: None,
+        body: Some(body),
+    }));
+    world
+        .store
+        .append(world.main, run, &events)
+        .expect("historical unpaired rows");
+}
+
+#[test]
+fn a_key_replay_does_not_resolve_recall_across_result_groups() {
+    use crate::recall::Query;
+
+    let mut world = world("key-round-groups");
+    let (_task, _) = world.run(None, "needle elsewhere", None);
+    let main = world.main;
+    let run = world.start("ask");
+    let selected = Snapshot::begin(world.store.conn_for_tests())
+        .expect("snapshot")
+        .select_recall(
+            Origin::Kumo,
+            &Query::Search {
+                query: "needle".into(),
+                task: None,
+            },
+        )
+        .expect("selected");
+    let native = |id: &str| {
+        format!(
+            r#"{{"connection":{TAG},"kind":"anthropic_key","item":{{"type":"tool_use","id":"{id}","name":"search_history","input":{{}}}}}}"#
+        )
+    };
+    let (a, b) = (native("a"), native("b"));
+    let result = json!({"call":"b","output":"b's answer"}).to_string();
+    let recall = json!({"call":"a","output":ToolOutput::Recall(selected).json()}).to_string();
+    world
+        .store
+        .append(
+            main,
+            run,
+            &[
+                NewEvent {
+                    kind: EventKind::OutputItem,
+                    text: None,
+                    body: Some(&a),
+                },
+                NewEvent {
+                    kind: EventKind::AssistantText,
+                    text: Some("First."),
+                    body: None,
+                },
+                NewEvent {
+                    kind: EventKind::OutputItem,
+                    text: None,
+                    body: Some(&b),
+                },
+                NewEvent {
+                    kind: EventKind::ToolResult,
+                    text: None,
+                    body: Some(&result),
+                },
+                NewEvent {
+                    kind: EventKind::AssistantText,
+                    text: Some("Later."),
+                    body: None,
+                },
+                NewEvent {
+                    kind: EventKind::ToolResult,
+                    text: None,
+                    body: Some(&recall),
+                },
+            ],
+        )
+        .expect("historical rows with a recall in the wrong group");
+    world.reply(run, "Done.");
+    let next = world.start("next");
+    let built = world
+        .build(&on_key(TAG), (main, next), Supplied::default(), BOUND)
+        .expect("built");
+    assert_eq!(
+        built.sources,
+        [main],
+        "the late recall must not be resolved"
+    );
+    assert_eq!(
+        built.request.input[1..built.request.input.len() - 1],
+        [InputItem::Message {
+            role: Role::Assistant,
+            text: "First.Later.Done.".into()
+        }]
+    );
+    crate::engines::anthropic::encode::body(&built.request, ConnectionTag(TAG))
+        .expect("fallback is encodable");
+}
+
+#[test]
+fn a_key_write_refuses_unpaired_calls_before_appending_any_row() {
+    let mut world = world("key-round-write-pairs");
+    let run = world.start("ask");
+    let before = stored(&world);
+    let a = stored_call();
+    let b = ToolUse::stored(STORED.replace("toolu_1", "toolu_2").as_bytes()).expect("a call");
+    let result = |id: &str| (call(id), ToolOutput::Text("answer".into()));
+    for (calls, results) in [
+        (
+            vec![a.clone(), b],
+            vec![result("toolu_1"), result("toolu_9")],
+        ),
+        (vec![a.clone()], vec![result("toolu_1"), result("toolu_1")]),
+        (
+            vec![a.clone(), a],
+            vec![result("toolu_1"), result("toolu_2")],
+        ),
+    ] {
+        let outcome = world.store.append_key_round(
+            (world.main, run),
+            ConnectionTag(TAG),
+            Some("must not append"),
+            &calls,
+            &results,
+        );
+        assert!(
+            matches!(outcome, Err(StoreError::RoundRecord)),
+            "unpaired round: {outcome:?}"
+        );
+        assert_eq!(stored(&world), before);
     }
 }
