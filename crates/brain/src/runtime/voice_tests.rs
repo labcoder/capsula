@@ -1343,9 +1343,30 @@ fn remove() -> ControlToBrain {
     ControlToBrain::Settings(SettingsOp::RemoveVoice(VoicePart::SpokenReplies))
 }
 
+async fn next_voice_write(brain: &mut Brain) -> crate::runtime::settings::Written {
+    tokio::time::timeout(
+        super::PATIENCE,
+        crate::runtime::settings::written(&mut brain.config_write),
+    )
+    .await
+    .expect("next settings write completes")
+}
+
+fn taskbar_answers(output: &mut mpsc::Receiver<Vec<u8>>) -> Vec<bool> {
+    std::iter::from_fn(|| output.try_recv().ok())
+        .filter_map(|bytes| {
+            match frame::decode(&bytes[frame::HEADER_LEN..]).expect("control frame") {
+                ControlToShell::Settings { answer: true, view } => Some(view.show_in_taskbar),
+                ControlToShell::Error(_) => panic!("all settings are accepted"),
+                _ => None,
+            }
+        })
+        .collect()
+}
+
 #[tokio::test]
 async fn cancel_received_during_remove_done_fences_only_older_installs() {
-    use crate::runtime::settings::{VoiceWrite, written};
+    use crate::runtime::settings::VoiceWrite;
     use crate::voice::installer::Folder;
 
     let scratch = Scratch::trusted("voice-cancel-remove-done");
@@ -1358,9 +1379,7 @@ async fn cancel_received_during_remove_done_fences_only_older_installs() {
     let mut tap = Tap::from_env();
     brain.control_offline(remove(), 0, &mut tap);
     brain.pump_settings_offline();
-    let intent = tokio::time::timeout(super::PATIENCE, written(&mut brain.config_write))
-        .await
-        .expect("RemoveIntent writes");
+    let intent = next_voice_write(&mut brain).await;
     assert!(matches!(intent.1, Some(VoiceWrite::RemoveIntent { part: p, .. }) if p == part));
     brain
         .settings_done(intent, None)
@@ -1403,9 +1422,7 @@ async fn cancel_received_during_remove_done_fences_only_older_installs() {
     }
     assert_eq!(output.try_recv(), Err(mpsc::error::TryRecvError::Empty));
     clear.send(Gate::Write).expect("release RemoveDone");
-    let done = tokio::time::timeout(super::PATIENCE, written(&mut brain.config_write))
-        .await
-        .expect("RemoveDone writes");
+    let done = next_voice_write(&mut brain).await;
     brain
         .settings_done(done, Some(&mut link))
         .expect("starts the write ahead of Cancel");
@@ -1423,9 +1440,7 @@ async fn cancel_received_during_remove_done_fences_only_older_installs() {
     ahead
         .send(Gate::Write)
         .expect("release the write ahead of Cancel");
-    let done = tokio::time::timeout(super::PATIENCE, written(&mut brain.config_write))
-        .await
-        .expect("earlier change writes");
+    let done = next_voice_write(&mut brain).await;
     brain
         .settings_done(done, Some(&mut link))
         .expect("settles older Install and Cancel");
@@ -1435,25 +1450,12 @@ async fn cancel_received_during_remove_done_fences_only_older_installs() {
             .is_err()
     );
     assert_eq!(fetch.begun.load(Ordering::SeqCst), 0);
-    let answers = |output: &mut mpsc::Receiver<Vec<u8>>| {
-        std::iter::from_fn(|| output.try_recv().ok())
-            .filter_map(|bytes| {
-                match frame::decode(&bytes[frame::HEADER_LEN..]).expect("control frame") {
-                    ControlToShell::Settings { answer: true, view } => Some(view.show_in_taskbar),
-                    ControlToShell::Error(_) => panic!("all settings are accepted"),
-                    _ => None,
-                }
-            })
-            .collect::<Vec<_>>()
-    };
-    assert_eq!(answers(&mut output), [true; 3]);
+    assert_eq!(taskbar_answers(&mut output), [true; 3]);
 
     behind
         .send(Gate::Write)
         .expect("release the write behind Cancel");
-    let done = tokio::time::timeout(super::PATIENCE, written(&mut brain.config_write))
-        .await
-        .expect("later change writes");
+    let done = next_voice_write(&mut brain).await;
     brain
         .settings_done(done, Some(&mut link))
         .expect("starts only the fresh Install");
@@ -1461,7 +1463,7 @@ async fn cancel_received_during_remove_done_fences_only_older_installs() {
         .await
         .expect("the fresh install fetches");
     assert_eq!(fetch.begun.load(Ordering::SeqCst), 1);
-    assert_eq!(answers(&mut output), [false; 2]);
+    assert_eq!(taskbar_answers(&mut output), [false; 2]);
     results
         .send(Err(DownloadError::Refused))
         .expect("finish fixture fetch");
