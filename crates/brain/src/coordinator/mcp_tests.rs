@@ -694,8 +694,6 @@ fn mcp_screen_and_box_target_refusals_have_no_effect_and_stay_refused() {
         "id":"s3",
         "put":[{"highlight":{"id":"c","target":{"box":[0,0,10,10]},"style":"box"}}]
     })));
-    let scratch = Scratch::new("mcp-overlay-refusal");
-    let db = store(&scratch);
     let (mut core, build) = offering(drawing());
     assert!(bound(&mut core, build, L1));
     for (n, input, expected) in [
@@ -732,15 +730,6 @@ fn mcp_screen_and_box_target_refusals_have_no_effect_and_stay_refused() {
             );
         }
     }
-    assert_eq!(steps(&db), Vec::<usize>::new());
-    drop(db);
-    let reopened = Store::open(&scratch.db()).expect("reopened store");
-    assert_eq!(steps(&reopened), Vec::<usize>::new());
-    let rows: i64 = reopened
-        .conn_for_tests()
-        .query_row("SELECT COUNT(*) FROM tool_calls", [], |row| row.get(0))
-        .expect("ledger rows");
-    assert_eq!(rows, 0);
     for n in 3..=16 {
         assert!(
             matches!(

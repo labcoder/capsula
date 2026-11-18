@@ -1991,6 +1991,90 @@ fn brain_on(rig: &mut Rig, name: &str) -> Brain {
     brain
 }
 
+#[tokio::test]
+async fn an_admitted_foreground_draw_offer_binds_before_seeding() {
+    use crate::context::{Built, tools};
+    use crate::coordinator::{ContextBuilt, Effect, StoreOp};
+
+    let script = synthetic_signed_in().held_at_user("go");
+    let mut rig = Rig::new("question-admitted-draw", &script).await;
+    let mut brain = brain_on(&mut rig, "question-admitted-draw");
+    brain.claude_reported(None).expect("no shell");
+    brain
+        .coordinator
+        .handle(Input::Turn {
+            turn: 1,
+            thread: None,
+            text: "hi".into(),
+        })
+        .expect("a turn");
+    let run = brain.coordinator.current_run().expect("current run");
+    let effects = brain
+        .coordinator
+        .handle(Input::TurnStored { run })
+        .expect("a stored turn");
+    let key = effects
+        .iter()
+        .find_map(|effect| match effect {
+            Effect::Store(StoreOp::BuildContext(build)) => Some(build.key),
+            _ => None,
+        })
+        .expect("a build");
+    let mut request = choosing("haiku", Effort::Low, ConnectionKind::ClaudeCode).request;
+    request.tools = tools(Origin::Kumo);
+    let mut snapshot = brain.snapshot(Origin::Kumo);
+    snapshot.choice.clone_from(&request.choice);
+    let admitted = brain
+        .coordinator
+        .handle(Input::ContextBuilt(ContextBuilt {
+            key,
+            snapshot: Some(snapshot),
+            result: Ok(Built {
+                request,
+                sources: Vec::new(),
+            }),
+        }))
+        .expect("the build is current");
+    assert!(admitted.iter().any(|effect| matches!(
+        effect,
+        Effect::StartEngine { request } if request.key == SendKey::Build(key)
+    )));
+    brain.apply(admitted, None).expect("no shell");
+    drive_until(&mut brain, || rig.base.0.join("seed.1").is_file()).await;
+    assert!(
+        brain.claude.launches.last().expect("the launch").bound,
+        "the real brain accepted the launch's offer for the admitted build"
+    );
+
+    rig.go("go");
+    let mut events = Vec::new();
+    run_brain(&mut brain, |input| match input {
+        Input::Engine { key: found, event } if key == found => {
+            let finished = matches!(event, TurnEvent::Finished(_));
+            events.push(event);
+            finished.then_some(())
+        }
+        _ => None,
+    })
+    .await;
+    answered(&events);
+    let seed = rig.seed(1);
+    let (_, inventory) = seed
+        .rsplit_once(
+            "Tools:
+",
+        )
+        .expect("seed inventory");
+    let tools: Value = serde_json::from_str(inventory).expect("schemas");
+    assert_eq!(tools.as_array().map(Vec::len), Some(1));
+    assert_eq!(tools[0]["name"], "draw");
+    assert_eq!(
+        tools[0]["parameters"]["$defs"]["Surface"],
+        json!({"type":"string","const":"overlay"})
+    );
+    assert!(brain.claude.close(soon()).await);
+}
+
 /// A title job's request on haiku at Low over Claude Code.
 fn title_job(job: crate::coordinator::JobKey) -> RunRequest {
     let mut request = choosing("haiku", Effort::Low, ConnectionKind::ClaudeCode);
