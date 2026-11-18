@@ -33,6 +33,10 @@ flowchart LR
 - The client answers `Ping`, grants credit for each data frame it takes, and records every frame
   with the instant its reader thread took it. Its data reader can pause, take frames one at a
   time, or keep reading while it withholds credit.
+- An owned live check can use the same readers in projected mode. Each open pipe must belong
+  to the held child before its Hello; the control pipe is checked before the capability is read.
+  Frames are reduced to check-specific facts before queuing. Frame, byte, queue and deadline
+  limits fail closed, and truncated frames aren't accepted as clean pipe ends.
 - It prints a table of verdicts and numbers and writes it to `report.md` in the gate's folder.
   `slice2-gate <words>` runs only the items whose names contain them.
 - `slice2-gate --inner` is internal: it is how the copy runs the items, and it starts brains

@@ -15,6 +15,7 @@ use windows::Win32::Storage::FileSystem::{
     SECURITY_IDENTIFICATION, SECURITY_SQOS_PRESENT, WriteFile,
 };
 use windows::Win32::System::IO::{CancelIoEx, GetOverlappedResult, OVERLAPPED};
+use windows::Win32::System::Pipes::GetNamedPipeServerProcessId;
 use windows::Win32::System::RemoteDesktop::ProcessIdToSessionId;
 use windows::Win32::System::Threading::{CreateEventW, INFINITE, WaitForSingleObject};
 use windows::core::{HSTRING, PCWSTR};
@@ -33,6 +34,21 @@ pub(crate) struct PipeClient {
 }
 
 impl PipeClient {
+    /// The process serving this open handle.
+    pub(crate) fn server_pid(&self) -> io::Result<u32> {
+        let mut pid = 0;
+        // SAFETY: the handle is borrowed and the PID output is writable.
+        unsafe { GetNamedPipeServerProcessId(self.raw(), &raw mut pid) }?;
+        Ok(pid)
+    }
+
+    pub(crate) fn require_server(&self, pid: u32) -> io::Result<()> {
+        if self.server_pid()? != pid {
+            return Err(io::Error::from(io::ErrorKind::PermissionDenied));
+        }
+        Ok(())
+    }
+
     /// Connects to the pipe `name`.
     pub(crate) fn open(name: &str) -> io::Result<Self> {
         let wide = HSTRING::from(name);
@@ -164,4 +180,51 @@ pub(crate) fn session_id() -> io::Result<u32> {
 
 fn millis(timeout: Duration) -> u32 {
     u32::try_from(timeout.as_millis()).unwrap_or(INFINITE - 1)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io;
+    use std::os::windows::io::{FromRawHandle as _, OwnedHandle};
+
+    use windows::Win32::Storage::FileSystem::PIPE_ACCESS_DUPLEX;
+    use windows::Win32::System::Pipes::{
+        CreateNamedPipeW, PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE,
+    };
+    use windows::core::HSTRING;
+
+    use super::PipeClient;
+
+    #[test]
+    fn an_opened_pipe_has_its_actual_server_pid() {
+        let pid = std::process::id();
+        let name = format!(r"\\.\pipe\kumochi-gate-pid-test-{pid}");
+        let wide = HSTRING::from(&name);
+        // SAFETY: the name is valid for the call; default security attributes are sufficient for this private fixture.
+        let server = unsafe {
+            CreateNamedPipeW(
+                &wide,
+                PIPE_ACCESS_DUPLEX,
+                PIPE_TYPE_BYTE | PIPE_REJECT_REMOTE_CLIENTS,
+                1,
+                4096,
+                4096,
+                0,
+                None,
+            )
+        };
+        assert!(!server.is_invalid(), "one local fixture server");
+        // SAFETY: the successful call returned an owned handle.
+        let _server = unsafe { OwnedHandle::from_raw_handle(server.0) };
+        let client = PipeClient::open(&name).expect("open the existing fixture pipe");
+        assert_eq!(client.server_pid().expect("server owner"), pid);
+        client.require_server(pid).expect("correct server owner");
+        assert_eq!(
+            client
+                .require_server(pid ^ 1)
+                .expect_err("wrong server owner")
+                .kind(),
+            io::ErrorKind::PermissionDenied
+        );
+    }
 }
