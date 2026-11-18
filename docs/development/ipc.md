@@ -620,6 +620,7 @@ records only their operation and length.
 | Shell to brain | control | `SegmentPlayed` | `run`, `segment`, `samples` |
 | Shell to brain | control | `SpeechStopped` | `run`, optional `cursor` (`Cursor { segment, sample }`) |
 | Shell to brain | control | `AudioOutput` | `rate`, `generation` |
+| Shell to brain | control | `AudioOutputUnavailable` | `generation` |
 | Brain to shell | control | `SpeechRevoked` | `run` |
 
 - **Microphone.** A `MicPcm` holds exactly `rate / 50` samples (20 ms) unless `last` is set,
@@ -630,6 +631,10 @@ records only their operation and length.
   exactly one chunk whose `last` carries its total samples, at most `MAX_SEGMENT_SECONDS` (30 s)
   of them. That chunk may be empty, so audio goes out as it's made, and a segment that made no
   audio or was cut still ends.
+- **Withdrawal.** `AudioOutputUnavailable` withdraws the output of its `generation` without ending
+  the connection; a withdrawal of any other generation changes nothing. Until an `AudioOutput`
+  of a strictly newer generation, no run gets a reply: the brain ignores one at or below the
+  withdrawn generation.
 - **Progress.** `SpeechProgress` goes out at most every 250 ms. `SpeechStopped` confirms that
   output for the run is quiet; `cursor` is `None` when nothing of it played.
 - **Out of bounds.** A `MicPcm` or an `AudioOutput` rate out of bounds ends the connection as

@@ -339,6 +339,11 @@ pub enum Input {
         /// The device's generation.
         generation: OutputGeneration,
     },
+    /// The shell withdrew its output device of `generation`.
+    AudioOutputUnavailable {
+        /// The generation withdrawn.
+        generation: OutputGeneration,
+    },
     /// Spoken replies were loaded or unloaded; a run admitted while they're loaded, with an output
     /// device, speaks its answer.
     SpokenReplies {
@@ -747,6 +752,8 @@ pub struct Coordinator {
     signed_out: Option<u64>,
     /// The shell's output device on this connection: its rate and generation.
     output: Option<(u32, OutputGeneration)>,
+    /// The newest generation the shell withdrew on this connection; it never announces again.
+    withdrawn: Option<OutputGeneration>,
     /// Spoken replies are loaded.
     spoken: bool,
 }
@@ -807,6 +814,7 @@ impl Coordinator {
             account: None,
             signed_out: None,
             output: None,
+            withdrawn: None,
             spoken: false,
         }
     }
@@ -970,6 +978,7 @@ impl Coordinator {
                     self.end(current, lost, None, Notify::Nobody, &mut effects);
                 }
                 self.output = None;
+                self.withdrawn = None;
                 let runs: Vec<_> = self.ending.iter().map(|run| run.id).collect();
                 for run in runs {
                     self.release(run, &mut effects);
@@ -1056,6 +1065,7 @@ impl Coordinator {
                 }
             }
             input @ (Input::AudioOutput { .. }
+            | Input::AudioOutputUnavailable { .. }
             | Input::SpokenReplies { .. }
             | Input::Tts { .. }
             | Input::SpeechProgress { .. }

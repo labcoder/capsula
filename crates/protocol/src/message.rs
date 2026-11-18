@@ -506,6 +506,13 @@ pub enum ControlToBrain {
         /// Zero-based lifetime commit index.
         index: u32,
     },
+    /// The output device of `generation` is gone or unusable: spoken replies have no output
+    /// until an [`ControlToBrain::AudioOutput`] of a newer generation; the brain ignores one at
+    /// or below it. Another generation's withdrawal changes nothing. Appended.
+    AudioOutputUnavailable {
+        /// The generation withdrawn.
+        generation: OutputGeneration,
+    },
 }
 
 /// What a thread's delete came to.
