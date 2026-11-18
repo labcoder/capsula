@@ -33,6 +33,37 @@ pub const LABEL_GAP: f32 = 6.0;
 /// A label's inner padding, in logical pixels [placeholder].
 pub const LABEL_PAD: [f32; 2] = [8.0, 5.0];
 
+fn hidden_screen_label_char(ch: char) -> bool {
+    // Unicode 17.0.0: keep Variation_Selector (PropList.txt) out of the
+    // Default_Ignorable_Code_Point ranges (DerivedCoreProperties.txt).
+    if matches!(ch, '\u{180b}'..='\u{180d}' | '\u{180f}' | '\u{fe00}'..='\u{fe0f}' | '\u{e0100}'..='\u{e01ef}')
+    {
+        return false;
+    }
+    ch.is_control()
+        || matches!(
+            ch,
+            '\u{ad}'
+                | '\u{34f}'
+                | '\u{61c}'
+                | '\u{115f}'..='\u{1160}'
+                | '\u{17b4}'..='\u{17b5}'
+                | '\u{180b}'..='\u{180f}'
+                | '\u{200b}'..='\u{200f}'
+                | '\u{2028}'..='\u{2029}'
+                | '\u{202a}'..='\u{202e}'
+                | '\u{2060}'..='\u{206f}'
+                | '\u{3164}'
+                | '\u{fe00}'..='\u{fe0f}'
+                | '\u{feff}'
+                | '\u{ffa0}'
+                | '\u{fff0}'..='\u{fff8}'
+                | '\u{1bca0}'..='\u{1bca3}'
+                | '\u{1d173}'..='\u{1d17a}'
+                | '\u{e0000}'..='\u{e0fff}'
+        )
+}
+
 /// Checks a step of a screen scene: only marks that never cover their target are admitted. A
 /// highlight or callout targets a box or a mark, and a label is one short line. Nothing else
 /// holds a position, so a box target is the only one.
@@ -40,7 +71,8 @@ pub const LABEL_PAD: [f32; 2] = [8.0, 5.0];
 /// `spotlights` counts those its earlier steps put.
 /// # Errors
 /// Returns `Unsupported` at the first other kind or field and at a second spotlight's `style`,
-/// `OutOfRange` for a box outside the canvas of `size`, and `LabelTooLong` for a long label.
+/// `OutOfRange` for a box outside the canvas of `size`, and `LabelTooLong` for a label
+/// that is too long, breaks the line or contains hidden formatting controls.
 pub fn admit(step: &Step, size: [f32; 2], mut spotlights: usize) -> Result<(), StepError> {
     let fail = |path, code| Err(StepError::in_step(&step.id, path, code));
     if !step.set.is_empty() {
@@ -79,7 +111,7 @@ pub fn admit(step: &Step, size: [f32; 2], mut spotlights: usize) -> Result<(), S
             Op::Callout(label) => {
                 let text = label.text.as_str();
                 if text.chars().count() > MAX_SCREEN_LABEL_CHARS
-                    || text.chars().any(char::is_control)
+                    || text.chars().any(hidden_screen_label_char)
                 {
                     return fail(at("text"), ErrorCode::LabelTooLong);
                 }

@@ -132,9 +132,9 @@ pub enum ErrorCode {
     /// A `set` or `anim` targets an object the same step removes.
     #[error("scene.RemovedInStep")]
     RemovedInStep,
-    /// A label on the screen is longer than its cap, or more than one line.
+    /// A screen label exceeds the cap, breaks the line or contains hidden formatting controls.
     #[error(
-        "scene.LabelTooLong: a label on the screen is one line of at most {} characters",
+        "scene.LabelTooLong: a label on the screen is one line of at most {} characters, without hidden formatting controls",
         crate::limits::MAX_SCREEN_LABEL_CHARS
     )]
     LabelTooLong,

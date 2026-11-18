@@ -408,6 +408,148 @@ fn a_label_is_one_line_of_at_most_its_cap_and_the_refusal_states_the_cap() {
 }
 
 #[test]
+fn screen_labels_refuse_hidden_formatting_and_line_separators_at_admission() {
+    let scene = SceneState::begin(header()).expect("scene");
+    let budget = GlobalBudget::default();
+    let controls = [
+        '\u{ad}',
+        '\u{34f}',
+        '\u{61c}',
+        '\u{115f}',
+        '\u{1160}',
+        '\u{17b4}',
+        '\u{17b5}',
+        '\u{180e}',
+        '\u{200b}',
+        '\u{200c}',
+        '\u{200d}',
+        '\u{200e}',
+        '\u{200f}',
+        '\u{2028}',
+        '\u{2029}',
+        '\u{202a}',
+        '\u{202b}',
+        '\u{202c}',
+        '\u{202d}',
+        '\u{202e}',
+        '\u{2060}',
+        '\u{2061}',
+        '\u{2064}',
+        '\u{2065}',
+        '\u{2066}',
+        '\u{2067}',
+        '\u{2068}',
+        '\u{2069}',
+        '\u{206a}',
+        '\u{206f}',
+        '\u{3164}',
+        '\u{feff}',
+        '\u{ffa0}',
+        '\u{fff0}',
+        '\u{fff8}',
+        '\u{1bca0}',
+        '\u{1bca3}',
+        '\u{1d173}',
+        '\u{1d17a}',
+        '\u{e0000}',
+        '\u{e0001}',
+        '\u{e0020}',
+        '\u{e0061}',
+        '\u{e007f}',
+        '\u{e00ff}',
+        '\u{e01f0}',
+        '\u{e0fff}',
+    ];
+    let missing: Vec<_> = controls
+        .into_iter()
+        .filter_map(|control| {
+            let text = format!("a{control}b");
+            let parsed =
+                step(&json!([{"callout":{"id":"c","target":{"box":[10,10,20,20]},"text":text}}]));
+            let refused = scene.admit(&parsed, &budget).err().is_some_and(|error| {
+                error.path.as_str() == "put[0].text" && error.code == ErrorCode::LabelTooLong
+            });
+            (!refused).then_some(u32::from(control))
+        })
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "wrong or missing refusals: {missing:X?}"
+    );
+    assert_eq!(
+        ErrorCode::LabelTooLong.to_string(),
+        "scene.LabelTooLong: a label on the screen is one line of at most 24 characters, without hidden formatting controls"
+    );
+}
+
+#[test]
+fn screen_labels_admit_writing_marks_and_variation_selectors() {
+    let scene = SceneState::begin(header()).expect("scene");
+    let budget = GlobalBudget::default();
+    for text in [
+        "Cafe\u{301}",
+        "שָׁלוֹם",
+        "عَرَبِيّ",
+        "हिन्दी",
+        "☀\u{fe0f}",
+        "ᠠ\u{180b}\u{180d}\u{180f}",
+        "禰\u{e0100}\u{e01ef}",
+    ] {
+        let parsed =
+            step(&json!([{"callout":{"id":"c","target":{"box":[10,10,20,20]},"text":text}}]));
+        assert!(matches!(
+            scene.admit(&parsed, &budget).expect("valid label"),
+            Admission::New(_)
+        ));
+    }
+}
+
+#[test]
+fn screen_labels_refuse_a_joined_emoji_before_commit_but_overlays_admit_it() {
+    let text = "👩\u{200d}💻";
+    let mut overlay_header = model_header();
+    overlay_header.surface = Surface::Overlay;
+    let overlay = SceneState::begin(overlay_header).expect("overlay");
+    let ordinary = json!({"step":{"id":"overlay","put":[
+        {"text":{"id":"anchor","text":"Anchor","at":[0,0]}},
+        {"callout":{"id":"label","target":{"ref":"anchor"},"text":text}}
+    ]}});
+    let bytes = serde_json::to_vec(&ordinary).expect("fixture JSON");
+    let Record::Step(ordinary) = parse_draw_record(&bytes).expect("ordinary draw record") else {
+        panic!("ordinary draw step");
+    };
+    let mut budget = GlobalBudget::default();
+    assert!(matches!(
+        overlay.admit(&ordinary, &budget).expect("ordinary label"),
+        Admission::New(_)
+    ));
+
+    let mut scene = SceneState::begin(header()).expect("screen");
+    let first = step(&json!([{"highlight":{"id":"first","target":{"box":[10,10,20,20]}}}]));
+    let Admission::New(first) = scene.admit(&first, &budget).expect("first admitted") else {
+        panic!("first step");
+    };
+    scene.commit(first, &mut budget).expect("first committed");
+    let mut later = step(&json!([
+        {"highlight":{"id":"later","target":{"box":[30,30,20,20]}}},
+        {"callout":{"id":"label","target":{"box":[30,30,20,20]},"text":text}}
+    ]));
+    later.id = id("bad");
+    let error = scene
+        .admit(&later, &budget)
+        .err()
+        .expect("screen label refused");
+    assert_eq!(
+        (error.path.as_str(), error.code),
+        ("put[1].text", ErrorCode::LabelTooLong)
+    );
+    assert_eq!(scene.committed(), 1);
+    assert!(scene.handle(&id("first")).is_some());
+    assert_eq!(scene.handle(&id("later")), None);
+    assert_eq!(scene.handle(&id("label")), None);
+}
+
+#[test]
 fn a_box_mark_is_a_two_tone_outline_outside_the_padded_box_in_logical_pixels() {
     let result = prepared(&[
         json!([{"highlight":{"id":"h","target":{"box":[100,100,40,20]},"style":"box"}}]),
