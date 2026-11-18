@@ -13,7 +13,9 @@ use crate::platform::microphone::{
     CollectionGate, Finalization, Generation, MicError, MicOwner, Mode, Running,
 };
 use crate::speaker::fake::{self, Script};
-use crate::speaker::{Command, Data, Input, Outlet, Packet, Snapshot, Speaker};
+use crate::speaker::{
+    Command, Data, FAULT, Input, Outlet, Packet, RELEASED, Snapshot, Speaker, UNKNOWN,
+};
 
 const PATIENCE: Duration = Duration::from_secs(5);
 
@@ -330,6 +332,48 @@ fn a_withdrawal_plays_out_what_was_written_before_it_stops_the_stream() {
     until("retired", || retired(&owner));
     assert!(!owner.view().terminal, "every frame written played");
     assert!(rig.script().stopped, "stopped once played");
+}
+
+#[test]
+fn a_teardown_that_plays_past_the_last_content_frame_on_silence_settles_clean() {
+    let owner = OutputOwner::default();
+    let mut rig = rig(&owner, 1);
+    let exposed = rig.short(480);
+    owner.end(1);
+    let speaker = rig.speaker.take().expect("held");
+    std::thread::scope(|scope| {
+        let teardown = scope.spawn(move || drop(speaker));
+        until("silence released after the link let go", || {
+            rig.script().silent > 0
+        });
+        rig.script().play_to = u64::MAX;
+        teardown.join().expect("let go");
+    });
+    let mut released = None;
+    until("released", || {
+        released = rig.snapshot().filter(|now| now.flags & RELEASED != 0);
+        released.is_some()
+    });
+    let released = released.expect("read");
+    assert_eq!(
+        (
+            released.exposed,
+            released.flags & (FAULT | UNKNOWN),
+            released.owed()
+        ),
+        (exposed, 0, false),
+        "played past its last content frame on filler: {released:?}"
+    );
+    assert_eq!(
+        rig.script().content.len(),
+        480,
+        "no content after the link let go"
+    );
+    assert!(!owner.view().terminal, "no debt left");
+    assert!(
+        state(&owner).ledger.iter().all(Option::is_none),
+        "its slot is free"
+    );
 }
 
 #[test]

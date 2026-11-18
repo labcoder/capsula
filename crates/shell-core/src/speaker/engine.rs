@@ -108,8 +108,9 @@ impl Staged<'_> {
     /// by the last look at revocation, right before `put` makes the native release and returns
     /// when it succeeded: a revoke after it can't recall the buffer, so released content is owed
     /// like any other. `unread` reads the padding after a content release, as [`Staged::commit`]
-    /// takes it. A failed release of a buffer holding content may have exposed it, so it's
-    /// unplaced for good.
+    /// takes it, after either kind: a silent release whose padding is known is committed as
+    /// filler, taking nothing staged, so the device's clock still maps past it. A failed release of a buffer holding
+    /// content may have exposed it, so it's unplaced for good.
     ///
     /// # Errors
     /// `put`'s fault, or the fault that froze the clock, now or before.
@@ -118,22 +119,41 @@ impl Staged<'_> {
         put: impl FnOnce(Release) -> Result<Duration, Fault>,
         unread: impl FnOnce() -> Option<u32>,
     ) -> Result<(), Fault> {
-        if self.engine.revoked.load(Ordering::Acquire) {
-            let put = put(Release::Silent);
-            if put.is_err() {
-                self.engine.lose();
-            } else {
-                self.engine.land();
-            }
-            return put.map(drop);
-        }
-        match put(Release::Content) {
+        let silent = self.engine.revoked.load(Ordering::Acquire);
+        match put(if silent {
+            Release::Silent
+        } else {
+            Release::Content
+        }) {
+            Ok(released) if silent => self.silence(unread(), released),
             Ok(released) => self.commit(unread(), released),
             Err(fault) => {
                 self.engine.lose();
                 Err(fault)
             }
         }
+    }
+
+    /// The device took the staged frames as silence: they're filler on its clock, and nothing
+    /// staged is consumed.
+    fn silence(self, unread: Option<u32>, released: Duration) -> Result<(), Fault> {
+        let Self {
+            engine, mut lease, ..
+        } = self;
+        // Silence that can't be placed stays off the clock: a reading past it freezes the clock,
+        // which never invents progress.
+        let Some(unread) = unread else {
+            engine.land();
+            return Ok(());
+        };
+        engine.clock.silence(&mut lease);
+        let committed = engine.clock.commit(lease, Some(unread), released);
+        engine.flight = 0;
+        if let Err(fault) = committed {
+            return Err(engine.fail(fault));
+        }
+        engine.publish();
+        Ok(())
     }
 
     /// The platform lent no buffer, so nothing staged reached the device.

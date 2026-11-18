@@ -40,8 +40,9 @@ Everything else is shared and tested offline against a fake device clock
   when that read failed; dropping it takes nothing back.
 - `Staged::release(put, unread)` gives back the native buffer the staged frames were copied
   into. Its last look at the session's revocation, right before `put` makes the native release,
-  picks the kind: silent once the link let go, taking nothing staged, or content, committed with
-  the release time `put` returns and the padding read after it. That look is the in-flight
+  picks the kind: silent once the link let go, committed as filler with the same checks when the
+  padding after it reads, taking nothing staged, or content, committed with the release time `put` returns and the
+  padding read after it. That look is the in-flight
   boundary: a revoke after it can't recall the buffer, whose content is then owed like any
   other, and nothing promises silence for a release already under way. A content release whose
   `put` fails may have exposed it, so the clock is unplaced for good; `Staged::abandon` says the
@@ -301,7 +302,8 @@ stream on the default output, on its own thread with its own COM apartment.
   the native buffer between `GetBuffer` and `ReleaseBuffer`, so no Rust slice is ever made
   over native memory. `Staged::release` decides the flags after the copy, right before
   `ReleaseBuffer`: once the speaker is revoked the buffer goes back with
-  `AUDCLNT_BUFFERFLAGS_SILENT` and nothing is committed. A content release is committed with
+  `AUDCLNT_BUFFERFLAGS_SILENT` and, when the padding after it reads, is committed as filler, so
+  the clock still maps the device's position past it while the stream drains. A content release is committed with
   the time it succeeded, read before the padding, and that padding is `unread`; if the read fails
   the frames are still owed. Both scratch buffers are
   zeroed after each write and on drop.

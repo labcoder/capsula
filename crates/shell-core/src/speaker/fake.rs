@@ -25,6 +25,8 @@ pub(crate) struct Script {
     pub(crate) stopped: bool,
     /// Every nonzero sample released as content.
     pub(crate) content: Vec<i16>,
+    /// Frames released as silence.
+    pub(crate) silent: u64,
 }
 
 pub(crate) type Shared = Arc<Mutex<Script>>;
@@ -85,6 +87,9 @@ impl Device for Fake {
                 if release == Release::Content && content.clone().next().is_some() {
                     assert!(!panic, "the scripted panic, mid-release");
                     lock(&self.script).content.extend(content);
+                }
+                if release == Release::Silent {
+                    lock(&self.script).silent += u64::from(frames);
                 }
                 Ok(Duration::ZERO)
             },
