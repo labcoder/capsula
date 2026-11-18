@@ -85,12 +85,12 @@ pub(super) fn read(dir: &Path, package: &str) -> Result<Vec<String>> {
                     format!("reading reviewed notice input for {package}: {relative}")
                 })?
                 .replace("\r\n", "\n");
-            let starts = SCOPED.iter().filter_map(|&(id, path, start, _)| {
-                (id == package && path == relative).then_some(start)
-            });
-            let text = span(&data, begin, end, starts).with_context(|| {
-                format!("checking reviewed notice input for {package}: {relative}")
-            })?;
+            let text = span(&data, begin, end, |body| {
+                SCOPED.iter().any(|&(id, path, start, _)| {
+                    id == package && path == relative && body.contains(start)
+                })
+            })
+            .with_context(|| format!("checking reviewed notice input for {package}: {relative}"))?;
             Ok(text.to_owned())
         })
         .collect()
@@ -100,7 +100,7 @@ fn span<'a>(
     source: &'a str,
     begin: &str,
     end: &str,
-    starts: impl Iterator<Item = &'static str> + Clone,
+    crosses_start: impl Fn(&str) -> bool,
 ) -> Result<&'a str> {
     let mut found = None;
     for (offset, _) in source.match_indices(begin) {
@@ -109,7 +109,7 @@ fn span<'a>(
             .split_once(end)
             .context("reviewed notice end missing")?;
         ensure!(
-            !starts.clone().any(|start| body.contains(start)),
+            !crosses_start(body),
             "reviewed notice end missing before next start"
         );
         let text = &after[..begin.len() + body.len() + end.len()];
@@ -164,7 +164,7 @@ mod tests {
 
     #[test]
     fn only_complete_unambiguous_reviewed_spans_are_returned() {
-        let span = |source| span(source, "A", "END", std::iter::once("A"));
+        let span = |source| span(source, "A", "END", |body| body.contains('A'));
         assert_eq!(
             span("A grant END\nunrelated\nA grant END").unwrap(),
             "A grant END"
