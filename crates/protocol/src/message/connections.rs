@@ -23,7 +23,7 @@ pub enum ConnectionKind {
 
 /// Something the user asked of a Claude connection; answered by one
 /// [`crate::message::ControlToShell::Connections`].
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ConnectionOp {
     /// The shell staged a pasted key in Credential Manager; the brain checks it and moves it.
     AnthropicKeyStaged {
@@ -49,6 +49,24 @@ pub enum ConnectionOp {
         /// The validated trimmed byte length, not key text.
         len: u16,
     },
+}
+
+impl fmt::Debug for ConnectionOp {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::AnthropicKeyStaged { plan } => f
+                .debug_struct("AnthropicKeyStaged")
+                .field("plan", plan)
+                .finish(),
+            Self::CheckAnthropicKey => f.write_str("CheckAnthropicKey"),
+            Self::RemoveAnthropicKey => f.write_str("RemoveAnthropicKey"),
+            Self::ConnectClaudeCode => f.write_str("ConnectClaudeCode"),
+            Self::CancelClaudeSignIn => f.write_str("CancelClaudeSignIn"),
+            Self::DisconnectClaudeCode => f.write_str("DisconnectClaudeCode"),
+            Self::FindClaudeCode => f.write_str("FindClaudeCode"),
+            Self::BeginAnthropicKeyStage { .. } => f.write_str("BeginAnthropicKeyStage"),
+        }
+    }
 }
 
 /// A brain-minted write-once staging identity; never key material.

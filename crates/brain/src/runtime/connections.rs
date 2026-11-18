@@ -44,7 +44,6 @@ pub(crate) enum ConnectionEvent {
     },
 }
 
-#[derive(Debug)]
 pub(super) enum StageWork {
     Begin {
         epoch: u64,
@@ -56,6 +55,15 @@ pub(super) enum StageWork {
         generation: u64,
         plan: KeyStageId,
     },
+}
+
+impl fmt::Debug for StageWork {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Begin { .. } => "StageWork::Begin",
+            Self::Adopt { .. } => "StageWork::Adopt",
+        })
+    }
 }
 
 fn stage_error(error: &KeyError) -> KeyStageFailure {

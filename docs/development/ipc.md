@@ -147,8 +147,10 @@ The build-id handshake rejects mixed binaries before decoding connection work.
 the write-once generation using the validated trimmed byte length (16–2048).
 `AnthropicKeyStage { request, result }` and `AnthropicKeyStageDone { plan,
 result }` are appended control replies. They carry metadata and closed errors,
-never a key, target supplied by the shell or provider text. Their tap payloads
-are redacted, and plan ids have redacted Debug output.
+never a key, target supplied by the shell or provider text. The tap keeps only
+the staging operation's name: it drops the payload and its wire length, since
+the encoded size can reveal the length's encoding width. Debug also omits the
+trimmed length and plan identity.
 
 The runtime binds Begin replies/admission to the authenticated shell epoch,
 clears admission on disconnect and refuses staging controls in offline drain.
@@ -246,7 +248,8 @@ flowchart LR
   runs there are no timers, and a run's deadline goes when the run does.
 - **The tap** records control frames only; data frames carry what the user typed and the
   answer, so they're never written to it. Even on control it keeps only each frame's op and
-  length unless the op is on its content-free list (see Debugging).
+  length unless the op is on its content-free list (see Debugging) or omits length as well
+  (Anthropic staging).
 - **Settings** go to the shell once per connection before `Scenes`, once for every
   `Settings` change the shell sends, in order, applied or refused (`answer: true`), and when a
   change an earlier connection sent is saved (`answer: false`). See

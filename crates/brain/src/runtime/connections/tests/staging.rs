@@ -3,6 +3,18 @@ use kumochi_protocol::constants::{generation_hex, generation_target};
 
 mod fold;
 
+#[test]
+fn the_staging_worker_does_not_print_the_key_length() {
+    for len in [127, 128] {
+        let work = StageWork::Begin {
+            epoch: 1,
+            request: 7,
+            len,
+        };
+        assert_eq!(format!("{work:?}"), "StageWork::Begin");
+    }
+}
+
 #[tokio::test]
 async fn a_duplicate_notification_never_queues_or_rechecks_a_committed_key() {
     let scratch = Scratch::new("stage-runtime-once");
