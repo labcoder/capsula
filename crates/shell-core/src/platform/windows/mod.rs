@@ -5,6 +5,7 @@ mod folders;
 pub(super) mod microphone;
 pub(super) mod pipe;
 mod process;
+pub(super) mod speaker;
 
 #[expect(unused_imports, reason = "C7a-2b supplies the Accounts paste caller")]
 pub(crate) use credential::WindowsKeyStageWriter;

@@ -23,9 +23,9 @@ use crate::platform::microphone::{
     PacketStatus, Packetizer, Running, Sample,
 };
 
-struct Apartment;
+pub(super) struct Apartment;
 impl Apartment {
-    fn new() -> Result<Self, MicError> {
+    pub(super) fn new() -> Result<Self, MicError> {
         // SAFETY: this dedicated worker owns its COM apartment until all interfaces drop.
         unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) }
             .ok()
@@ -40,7 +40,7 @@ impl Drop for Apartment {
     }
 }
 
-struct Mix(*mut WAVEFORMATEX);
+pub(super) struct Mix(pub(super) *mut WAVEFORMATEX);
 impl Drop for Mix {
     fn drop(&mut self) {
         // SAFETY: GetMixFormat allocated this pointer with the COM allocator.
@@ -136,7 +136,7 @@ pub(in crate::platform) fn teardown_error(code: HRESULT) -> MicError {
     }
 }
 
-fn read_format(mix: &Mix) -> Result<Format, MicError> {
+pub(super) fn read_format(mix: &Mix) -> Result<Format, MicError> {
     if mix.0.is_null() {
         return Err(MicError::Format);
     }

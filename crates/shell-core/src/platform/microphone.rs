@@ -26,7 +26,7 @@ use kumochi_protocol::message::MicPcm;
 use kumochi_protocol::message::{GestureId, HOLD_START_TIMEOUT_MS};
 use zeroize::Zeroize;
 
-pub(super) use pcm::{Format, Packetizer, Sample};
+pub(super) use pcm::{Format, Packetizer, Render, Sample};
 
 /// The capture pump's sleep while the endpoint is empty, one wire chunk long; the reaper and
 /// the UI's hold watcher reuse it as their check interval.

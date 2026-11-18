@@ -22,8 +22,8 @@ use kumochi_protocol::frame::{self, FrameError, Pipe};
 use kumochi_protocol::message::{
     AccountView, ConnectionsView, ControlToBrain, ControlToShell, DataToBrain, DataToShell,
     Deleted, ErrorKey, GestureId, GitHubView, Hello, HoldStatus, Incarnation, IssueSession,
-    MAX_PENDING_TURNS, MAX_VISIBLE_SCENES, Phase, RunId, RunOrigin, SceneDescriptor,
-    SceneDescriptorV1, SettingsOp, SettingsView, ThreadId, ThreadOp, UserError,
+    MAX_PENDING_TURNS, MAX_VISIBLE_SCENES, OutputGeneration, Phase, RunId, RunOrigin,
+    SceneDescriptor, SceneDescriptorV1, SettingsOp, SettingsView, ThreadId, ThreadOp, UserError,
 };
 use kumochi_protocol::voice::VoicePart;
 
@@ -33,6 +33,7 @@ use zeroize::{Zeroize, Zeroizing};
 use crate::credential::{self, CredentialError};
 use crate::platform::microphone::CollectionGate;
 use crate::platform::{self, PipeClient};
+use crate::speaker::{self, Command, Data, Opener, Outlet, Packet, Speaker};
 
 mod microphone;
 
@@ -322,10 +323,16 @@ impl Session {
     /// Grants this connection's brain `bytes` more of data frames, once the UI has taken a frame
     /// that size. Grants add up until the data writer sends them. Never blocks or locks.
     pub fn grant(&self, bytes: u32) {
+        self.credit.grant(bytes);
+    }
+}
+
+impl Credit {
+    fn grant(&self, bytes: u32) {
         // The writer sends whatever has added up after each message, so only the first grant
         // since the last send needs to wake it; a full queue wakes it anyway.
-        if self.credit.bytes.fetch_add(bytes, Ordering::SeqCst) == 0
-            && let Some(wake) = self.credit.wake.upgrade()
+        if self.bytes.fetch_add(bytes, Ordering::SeqCst) == 0
+            && let Some(wake) = self.wake.upgrade()
         {
             let _woken = wake.try_send(DataOut::Credit);
         }
@@ -472,6 +479,8 @@ struct Shared {
     outbox: Mutex<Option<Outbox>>,
     /// The last connection's generation.
     generations: AtomicU64,
+    /// The last output generation a speaker announced.
+    output_generations: AtomicU32,
     /// Locked only after `outbox`, so a delete and a turn are counted in the order they're
     /// queued.
     deletes: Mutex<Vec<Held>>,
@@ -829,6 +838,8 @@ struct Link {
     brain: PathBuf,
     session: u32,
     shared: Arc<Shared>,
+    /// Opens each connection's speaker; none in a normal launch.
+    speaker: Option<Opener>,
 }
 
 /// A link that hasn't started connecting, so the UI can arm the keyboard first. Dropping it
@@ -851,6 +862,7 @@ pub fn prepare(events: Sender<LinkEvent>) -> std::io::Result<(LinkHandle, LinkSt
         brain: std::env::current_exe()?.with_file_name(BRAIN_EXE),
         session: platform::session_id()?,
         shared: Arc::new(Shared::default()),
+        speaker: None,
     };
     Ok(start(link, events))
 }
@@ -941,6 +953,38 @@ impl Link {
         self.shared.quitting.load(Ordering::SeqCst)
     }
 
+    /// The connection's speaker, when this link has an opener; it announces its own output, and
+    /// its worker ends the connection when it ends. A normal launch has none.
+    fn open_speaker(
+        &self,
+        control: &Sender<ControlToBrain>,
+        credit: &Arc<Credit>,
+        pipes: [&Arc<PipeClient>; 2],
+    ) -> Option<Speaker> {
+        let open = self.speaker.as_ref()?;
+        let generation = self
+            .shared
+            .output_generations
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |value| {
+                value.checked_add(1)
+            })
+            .ok()?
+            + 1;
+        let credit = Arc::clone(credit);
+        let speaker = (open.0)(Outlet {
+            generation: OutputGeneration(generation),
+            control: control.clone(),
+            grant: Box::new(move |bytes| credit.grant(bytes)),
+        })?;
+        let pipes = pipes.map(Arc::clone);
+        speaker.arm(Box::new(move || {
+            for pipe in &pipes {
+                pipe.abort();
+            }
+        }));
+        Some(speaker)
+    }
+
     /// Serves one connection until it ends: starts the writers, says Connected, then reads data
     /// on its own thread and control here. False when the UI has gone.
     #[expect(
@@ -1017,24 +1061,45 @@ impl Link {
             .send_blocking(LinkEvent::Connected(Session {
                 alive: Arc::clone(&ended.0),
                 generation,
-                credit,
+                credit: Arc::clone(&credit),
                 issue_origin,
             }))
             .is_ok();
+        // Only on a live session, so a speaker never outlives a connection that didn't start.
+        let mut speaker = if spawned.is_ok() && open && !self.quitting() {
+            self.open_speaker(&control_out, &credit, [&control, &data])
+        } else {
+            None
+        };
+        let input = speaker.as_mut().and_then(Speaker::input);
         let read = spawned.and_then(|()| {
             // Only now, so nothing from the brain reaches the UI before Connected.
             spawn_helper("link-data-reader", &mut helpers, {
                 let (data, control, events) =
                     (Arc::clone(&data), Arc::clone(&control), events.clone());
-                let ended = ended.clone();
+                let (ended, credit) = (ended.clone(), Arc::clone(&credit));
                 move || {
                     let _ended = ended;
-                    read_data(&data, &control, &events, generation);
+                    read_data(
+                        &data,
+                        &control,
+                        &events,
+                        generation,
+                        input.as_ref(),
+                        &credit,
+                    );
                 }
             })
         });
         match read {
-            Ok(()) if open => watch(&control, &control_out, events, generation, &self.shared),
+            Ok(()) if open => watch(
+                &control,
+                &control_out,
+                events,
+                generation,
+                &self.shared,
+                speaker.as_ref(),
+            ),
             Ok(()) => {}
             Err(error) => tracing::error!(%error, "can't start the link's threads"),
         }
@@ -1049,10 +1114,15 @@ impl Link {
             .control
             .lock()
             .unwrap_or_else(PoisonError::into_inner) = None;
+        // A speaker's worker left behind keeps a sender, so the queue is closed, not just dropped.
+        let _closed = control_out.close();
         drop(control_out);
         // The writers and the reader return once their pipes fail.
         control.abort();
         data.abort();
+        // Its worker holds a control sender, so it goes before the writers are joined; its own
+        // wait is bounded.
+        drop(speaker);
         for helper in helpers {
             if helper.join().is_err() {
                 tracing::error!("a link thread panicked");
@@ -1216,7 +1286,9 @@ fn watch(
     events: &Sender<LinkEvent>,
     generation: u64,
     shared: &Shared,
+    speaker: Option<&Speaker>,
 ) {
+    let mut named = RunId(0);
     loop {
         match frame::read::<ControlToShell>(&mut &*control, Pipe::Control) {
             Ok(None) => return,
@@ -1255,6 +1327,13 @@ fn watch(
                 error,
                 origin,
             })) => {
+                // The speaker plays a run's frames only once control has named it.
+                if run > named {
+                    named = run;
+                    if speaker.is_some_and(|speaker| !speaker.command(Command::Name(run))) {
+                        return;
+                    }
+                }
                 if events
                     .send_blocking(LinkEvent::RunState {
                         generation,
@@ -1529,12 +1608,13 @@ fn watch(
                     return;
                 }
             }
-            // Slice 7's PR 6 stops playback on SpeechRevoked; nothing plays yet.
-            Ok(Some(
-                ControlToShell::SpeechRevoked { .. }
-                | ControlToShell::ThreadModelSet { .. }
-                | ControlToShell::NoVisual { .. },
-            )) => {}
+            // Without a speaker nothing was announced, so nothing plays.
+            Ok(Some(ControlToShell::SpeechRevoked { run })) => {
+                if speaker.is_some_and(|speaker| !speaker.command(Command::Stop(run))) {
+                    return;
+                }
+            }
+            Ok(Some(ControlToShell::ThreadModelSet { .. } | ControlToShell::NoVisual { .. })) => {}
             Ok(Some(ControlToShell::Welcome { .. } | ControlToShell::BuildMismatch { .. })) => {
                 tracing::warn!("the brain repeated its handshake; ending the connection");
                 return;
@@ -1564,7 +1644,14 @@ impl<R: Read> Read for Counted<R> {
 /// Reads data frames and passes them on until the pipe ends. A malformed frame, or the data pipe
 /// ending, ends the whole connection, so the link reconnects instead of leaving the shell
 /// connected with nothing arriving.
-fn read_data(data: &PipeClient, control: &PipeClient, events: &Sender<LinkEvent>, generation: u64) {
+fn read_data(
+    data: &PipeClient,
+    control: &PipeClient,
+    events: &Sender<LinkEvent>,
+    generation: u64,
+    speaker: Option<&speaker::Input>,
+    credit: &Credit,
+) {
     let mut reader = Counted {
         inner: BufReader::with_capacity(READ_BUFFER, data),
         bytes: 0,
@@ -1575,6 +1662,29 @@ fn read_data(data: &PipeClient, control: &PipeClient, events: &Sender<LinkEvent>
             Ok(Some(message)) => {
                 // At most the data cap and a header.
                 let bytes = u32::try_from(reader.bytes).unwrap_or(u32::MAX);
+                let message = match (message, speaker) {
+                    (DataToShell::SegmentQueued { run, segment, .. }, Some(input)) => {
+                        let data = Data::Queued { run, segment };
+                        if input.send(Packet { bytes, data }).is_err() {
+                            break;
+                        }
+                        continue;
+                    }
+                    (DataToShell::SpeechPcm(pcm), Some(input)) => {
+                        let data = Data::Pcm(pcm);
+                        if input.send(Packet { bytes, data }).is_err() {
+                            break;
+                        }
+                        continue;
+                    }
+                    // No output was announced, so audio is unexpected: dropped, never shown.
+                    (DataToShell::SpeechPcm(mut pcm), None) => {
+                        pcm.samples.zeroize();
+                        credit.grant(bytes);
+                        continue;
+                    }
+                    (message, _) => message,
+                };
                 let event = if matches!(
                     &message,
                     DataToShell::SceneSnapshotV1 { .. }

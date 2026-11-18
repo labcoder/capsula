@@ -76,6 +76,53 @@ impl Format {
         }
         Ok((sum / f64::from(self.channels)).clamp(-32768.0, 32767.0) as i16)
     }
+
+    /// The speaker's writer for this format, which takes PCM16 or float only.
+    pub(crate) fn render(self) -> Option<Render> {
+        let float = match self.sample {
+            Sample::I16 => false,
+            Sample::F32 => true,
+            Sample::U8 | Sample::I24 | Sample::I32 => return None,
+        };
+        Some(Render {
+            float,
+            channels: self.channels,
+        })
+    }
+}
+
+/// Writes mono speech as one device format's frames.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Render {
+    float: bool,
+    channels: u16,
+}
+
+impl Render {
+    /// Bytes per frame.
+    pub(crate) fn frame(self) -> usize {
+        self.width() * usize::from(self.channels)
+    }
+
+    /// Writes mono samples as frames, the same sample in every channel.
+    pub(crate) fn write(self, mono: &[i16], out: &mut [u8]) {
+        let width = self.width();
+        for (frame, &sample) in out.chunks_exact_mut(self.frame()).zip(mono) {
+            let bytes = if self.float {
+                (f32::from(sample) / 32768.0).to_le_bytes()
+            } else {
+                let [low, high] = sample.to_le_bytes();
+                [low, high, 0, 0]
+            };
+            for channel in frame.chunks_exact_mut(width) {
+                channel.copy_from_slice(&bytes[..width]);
+            }
+        }
+    }
+
+    fn width(self) -> usize {
+        if self.float { 4 } else { 2 }
+    }
 }
 
 pub(crate) struct Packetizer {
