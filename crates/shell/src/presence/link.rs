@@ -61,6 +61,7 @@ impl Presence {
                     self.retire_issue_review(cx);
                     self.settings.update(cx, |state, cx| {
                         state.github.disconnected();
+                        state.key_paste.disconnected();
                         cx.notify();
                     });
                     self.revoke_exclusion(cx);
@@ -279,8 +280,7 @@ impl Presence {
                         self.settle_github_interactive(cx);
                     }
                 }
-                // shortcut: C7a-2b's Accounts paste consumer handles these replies.
-                LinkEvent::KeyStage { generation, reply } => drop((generation, reply)),
+                LinkEvent::KeyStage { generation, reply } => self.key_stage(generation, &reply, cx),
                 LinkEvent::Error { generation, error } => {
                     if self
                         .session
@@ -449,7 +449,9 @@ impl Presence {
         let previous = self.settings.read(cx).claude.generation;
         let accepted = self.settings.update(cx, |state, cx| {
             let accepted = state.claude.receive(current, generation, view.claude_code);
-            if accepted {
+            let key_changed =
+                current == Some(generation) && state.key_paste.receive(view.anthropic);
+            if accepted || key_changed {
                 cx.notify();
             }
             accepted
@@ -745,6 +747,7 @@ impl Presence {
                 state.accounts.disconnected();
                 state.claude.disconnected();
                 state.github.disconnected();
+                state.key_paste.disconnected();
                 state.disconnected();
                 cx.notify();
             });

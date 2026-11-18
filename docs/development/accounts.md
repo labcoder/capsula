@@ -2,10 +2,15 @@
 
 ## Anthropic API key
 
-The shell validates a pasted API key and asks the brain for a one-use staging
-plan using only its trimmed byte length. A background writer puts its chunks
-in Credential Manager at those authority-owned names, then sends
-`AnthropicKeyStaged { plan }`. The Accounts UI wiring lands separately.
+The Settings → Accounts key row is wired but hidden until key chat is activated.
+Its Paste action consumes one string from the GPUI clipboard and rejects more
+than 2,048 raw bytes before retaining the paste. It does not write to the
+clipboard. A validated paste stays in a zeroizing buffer until the brain replies
+with a one-use staging plan; only its trimmed byte length describes the key on the pipe.
+The shell-core writer puts chunks in Credential Manager at those authority-owned
+names in the background, then the shell sends `AnthropicKeyStaged { plan }`.
+Disconnect or expiry drops a waiting paste and prevents late replies or writes
+from triggering adoption. A save acknowledgement is separate from catalog verification.
 The key never crosses the pipe or enters a file, log, command line or environment variable.
 Only keys connected inside Kumochi are used; live checks must read the same Kumochi-owned
 credential, never another app's key.
@@ -78,8 +83,8 @@ A lost notification or failed operation leaves Pending until another begin
 or the next open retires it. Startup never resumes a paste. A shell write can
 outlive a brain restart, including the later lifetime that marks its generation
 Swept. Such late chunks can remain physically orphaned but cannot authorize a
-key: cleanup is not a physical-erasure guarantee. No Settings paste control
-is enabled by this backend/stager prerequisite.
+key: cleanup is not a physical-erasure guarantee. Removal from Kumochi does
+not revoke the key at Anthropic.
 
 ## Stored namespaces and credential names
 

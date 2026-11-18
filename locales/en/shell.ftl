@@ -377,6 +377,32 @@ error-model-unavailable = This thread's model isn't available on your account. P
 
 # Anthropic
 
+anthropic-title = Anthropic API key
+anthropic-intro = Copy a workspace-scoped API key from the Anthropic Console.
+anthropic-check-disclosure = Kumochi checks the key with Anthropic when you paste it and each time Kumochi starts.
+anthropic-billing = Anthropic bills your account for model usage.
+anthropic-paste = Paste and check key
+anthropic-replace-note = Pasting a new key replaces the saved key before Anthropic checks it.
+anthropic-missing = No key saved
+anthropic-saving = Saving key
+anthropic-checking = Checking key
+anthropic-saved = Key saved
+anthropic-ready = Anthropic accepted the key
+anthropic-rejected = Key not accepted
+anthropic-unconfirmed = Couldn’t confirm the key. Try again.
+anthropic-check = Check again
+anthropic-retry = Retry
+anthropic-clipboard-invalid = Copy one API key as text, then paste it again.
+anthropic-clipboard-too-long = That text is too long for an API key. Copy only the key and try again.
+anthropic-save-failed = Couldn’t save the key. Paste it again.
+anthropic-save-unconfirmed = Couldn’t confirm the save. Check the key before pasting again.
+anthropic-removing = Removing key
+anthropic-remove-pending = Removal not confirmed — retry
+anthropic-remove-open = Remove key…
+anthropic-remove = Remove key
+anthropic-remove-title = Remove this key from Kumochi?
+anthropic-remove-body = This removes the key from Kumochi. It does not revoke the key at Anthropic.
+
 error-anthropic-key-rejected = Anthropic didn't accept this API key. Check it and paste it again.
 error-anthropic-key-format = That doesn't look like an Anthropic API key.
 error-anthropic-key-subscription-token = This is a Claude subscription token. Paste an Anthropic API key instead.
