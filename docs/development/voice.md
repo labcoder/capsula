@@ -375,7 +375,8 @@ queue order, with the current settings, and progress follows as `Voice`.
 Cancel sends every install that's waiting, fetching or loading back to where it was, with its
 files kept, so the next install resumes. A cancelled load's late success is dropped and sends
 nothing, because the handle already freed it. Cancel takes effect on receipt even if a settings
-write is still active. Replies keep their original order; a newer Install can still start. A
+write is still active. It supersedes older queued installs and manual speech-input loads.
+Replies keep their original order; a newer Install or manual Load can still start. A
 commit in flight isn't cancelled, and neither is a removal. An install during a removal starts
 once the removal finishes, unless Cancel drops the deferred install. Installs keep going while
 no shell is connected. Quit tells the running fetch to stop and starts no other, so an install

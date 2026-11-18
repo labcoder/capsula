@@ -1365,6 +1365,91 @@ fn taskbar_answers(output: &mut mpsc::Receiver<Vec<u8>>) -> Vec<bool> {
 }
 
 #[tokio::test]
+async fn cancel_fences_an_older_queued_manual_load_but_not_a_fresh_one() {
+    let scratch = Scratch::trusted("voice-cancel-queued-load");
+    let (mut brain, release, fetch, unloaded) = released_input(&scratch).await;
+    brain.voice_event(unloaded, None).expect("idle release");
+    let (state, stt) = brain.hold_voice();
+    assert_eq!(state, PartState::Unloaded);
+    let wanted = crate::voice::stt::wanted_load(stt.expect("input owner"));
+    assert_eq!(wanted(), None);
+
+    brain.epoch += 1;
+    let (out, mut output) = mpsc::channel(16);
+    let queue = RefCell::new(DataQueue::new(window()));
+    let (ready, mut tap) = (Notify::new(), Tap::from_env());
+    let mut link = Link::new(&out, &queue, &ready, &mut tap);
+    let mut ping = None;
+    let first = brain.hold_config_write();
+    let load = ControlToBrain::Settings(SettingsOp::LoadSpeechInput);
+    for message in [
+        ControlToBrain::Settings(SettingsOp::SetTaskbar(true)),
+        load.clone(),
+        ControlToBrain::Settings(SettingsOp::SetTaskbar(false)),
+        ControlToBrain::Settings(SettingsOp::CancelVoiceInstall),
+    ] {
+        assert_eq!(
+            brain.control_frame(message, 0, &mut link, &mut ping),
+            Ok(None)
+        );
+    }
+    assert_eq!(output.try_recv(), Err(mpsc::error::TryRecvError::Empty));
+    let middle = brain.hold_config_write();
+    first
+        .send(Gate::Write)
+        .expect("release first settings write");
+    let written = next_voice_write(&mut brain).await;
+    brain
+        .settings_done(written, Some(&mut link))
+        .expect("settle older Load and start the next write");
+    assert_eq!(
+        wanted(),
+        None,
+        "the older manual Load reached the owner after Cancel"
+    );
+    assert_eq!(taskbar_answers(&mut output), [true; 2]);
+
+    middle
+        .send(Gate::Write)
+        .expect("release settings write ahead of Cancel");
+    let written = next_voice_write(&mut brain).await;
+    brain
+        .settings_done(written, Some(&mut link))
+        .expect("settle Cancel after the write");
+    assert_eq!(taskbar_answers(&mut output), [false; 2]);
+    assert_eq!(wanted(), None);
+    assert_eq!(brain.hold_voice().0, PartState::Unloaded);
+
+    assert_eq!(brain.control_frame(load, 0, &mut link, &mut ping), Ok(None));
+    assert_eq!(taskbar_answers(&mut output), [false]);
+    assert_eq!(
+        wanted(),
+        Some(3),
+        "only the fresh Load goes to the owner after startup"
+    );
+    release.send(()).expect("release the fresh owner load");
+    let loaded = tokio::time::timeout(super::PATIENCE, runtime_voice::next(&mut brain.voice))
+        .await
+        .expect("fresh owner load completes");
+    assert!(matches!(
+        loaded,
+        Event::Report(
+            VoicePart::SpeechInput,
+            crate::voice::LoadReport {
+                ask: 3,
+                event: LoadEvent::Loaded
+            }
+        )
+    ));
+    brain
+        .voice_event(loaded, Some(&mut link))
+        .expect("publish readiness");
+    assert_eq!(brain.hold_voice().0, PartState::Ready);
+    assert_eq!(fetch.begun.load(Ordering::SeqCst), 0);
+    brain.close().await;
+}
+
+#[tokio::test]
 async fn cancel_received_during_remove_done_fences_only_older_installs() {
     use crate::runtime::settings::VoiceWrite;
     use crate::voice::installer::Folder;

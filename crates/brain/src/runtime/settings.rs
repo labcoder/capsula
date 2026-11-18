@@ -22,7 +22,7 @@ pub(super) const BRAIN: u64 = 0;
 #[derive(Debug)]
 pub(super) enum Change {
     User(SettingsOp),
-    SupersededInstall,
+    SupersededVoiceSetup,
     VoiceInstallCancelled(VoiceView),
     Voice(VoiceWrite),
     GitHub(GitHubWrite),
@@ -202,14 +202,17 @@ impl Brain {
         });
     }
 
-    /// Stops superseded installs at receipt; their answers still take their original FIFO slots.
+    /// Stops superseded installs and manual loads at receipt, without reordering their replies.
     pub(super) fn queue_settings(&mut self, op: SettingsOp) {
         let change = if matches!(op, SettingsOp::CancelVoiceInstall)
             && let Some(before) = self.fence_voice_installs()
         {
             for queued in &mut self.settings_ops {
-                if matches!(queued.change, Change::User(SettingsOp::InstallVoice(_))) {
-                    queued.change = Change::SupersededInstall;
+                if matches!(
+                    queued.change,
+                    Change::User(SettingsOp::InstallVoice(_) | SettingsOp::LoadSpeechInput)
+                ) {
+                    queued.change = Change::SupersededVoiceSetup;
                 }
             }
             Change::VoiceInstallCancelled(before)
@@ -289,7 +292,7 @@ impl Brain {
                     }
                     continue;
                 }
-                Change::SupersededInstall => {
+                Change::SupersededVoiceSetup => {
                     self.settled(epoch, Outcome::Accepted, link.as_deref_mut())?;
                     continue;
                 }
