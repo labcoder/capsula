@@ -2,6 +2,7 @@
 
 mod graph;
 mod licenses;
+mod sources;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
@@ -209,6 +210,31 @@ fn check_icons(dir: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gradium_model_blocks_carry_the_publishers_attribution_not_gpuis() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+        let policy = Policy::read(root).unwrap();
+        let dir = crate::scratch::dir("embedded-icons");
+        fs::create_dir_all(dir.join("assets/icons")).unwrap();
+        let package = serde_json::json!({
+            "name":"gpui-kit-assets",
+            "source":"git+https://github.com/longbridge/gpui-kit#99576db58ec8103417c41a092e891b4022d24e7e",
+            "manifest_path": dir.join("Cargo.toml")
+        });
+        let output = assets(root, &policy, &[package]).unwrap();
+        for (name, credit) in [
+            ("phonon", "Phonon 31M English by Gradium, Apache-2.0."),
+            ("juniper", "Juniper voice by Gradium, Apache-2.0."),
+        ] {
+            let (_, rest) = output.split_once(&format!("\n## {name}\n")).unwrap();
+            let (block, _) = rest.split_once("\n## ").unwrap();
+            assert!(block.contains(credit));
+            assert!(block.contains("Version 2.0, January 2004"));
+            assert!(!block.contains("Zed Industries"));
+        }
+        fs::remove_dir_all(dir).unwrap();
+    }
 
     #[test]
     fn an_added_model_or_removed_inventory_row_fails_coverage() {

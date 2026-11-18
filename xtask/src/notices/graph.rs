@@ -40,7 +40,9 @@ fn cargo<'a>(root: &Path, args: impl IntoIterator<Item = &'a str>) -> Result<Str
         .context("running Cargo for the shipped dependency closure")?;
     ensure!(
         output.status.success(),
-        "Cargo dependency inspection failed"
+        "Cargo dependency inspection failed ({}): {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr).trim_end()
     );
     Ok(String::from_utf8(output.stdout)?)
 }
@@ -99,7 +101,7 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn production_roots_exclude_workspace_dev_build_and_unified_optional_dependencies() {
+    fn tree_selection_excludes_members_deduplicates_and_rejects_invalid_rows() {
         let metadata = json!({"workspace_members":["own"], "packages":[
             {"id":"own","name":"kumochi-shell","version":"1.0.0"},
             {"id":"normal","name":"normal","version":"1.0.0"},

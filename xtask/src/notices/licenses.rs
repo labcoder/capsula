@@ -7,6 +7,8 @@ use spdx::detection::scan::Scanner;
 use spdx::detection::{Store, TextData};
 use spdx::{Expression, Licensee, ParseMode};
 
+use super::sources;
+
 pub(super) struct Policy {
     root: PathBuf,
     allow: Vec<Licensee>,
@@ -18,7 +20,7 @@ pub(super) struct Policy {
 impl Policy {
     pub(super) fn read(root: &Path) -> Result<Self> {
         let policy: toml::Value = toml::from_str(&fs::read_to_string(root.join("deny.toml"))?)?;
-        let licenses = &policy["licenses"];
+        let licenses = policy.get("licenses").context("license policy missing")?;
         let parse = |value: &toml::Value| -> Result<Vec<Licensee>> {
             value
                 .as_array()
@@ -30,30 +32,52 @@ impl Policy {
                 })
                 .collect()
         };
+        let allow = parse(
+            licenses
+                .get("allow")
+                .context("license allow list missing")?,
+        )?;
         let mut exceptions = BTreeMap::new();
-        for entry in licenses["exceptions"]
-            .as_array()
+        for entry in licenses
+            .get("exceptions")
+            .and_then(toml::Value::as_array)
             .context("exceptions missing")?
         {
-            let name = entry["crate"].as_str().context("exception crate missing")?;
+            let name = entry
+                .get("crate")
+                .and_then(toml::Value::as_str)
+                .context("exception crate missing")?;
+            let allowed = parse(entry.get("allow").context("exception allow list missing")?)?;
             ensure!(
-                exceptions
-                    .insert(name.to_owned(), parse(&entry["allow"])?)
-                    .is_none(),
+                exceptions.insert(name.to_owned(), allowed).is_none(),
                 "duplicate license exception"
             );
         }
-        let confidence: f32 = licenses["confidence-threshold"].to_string().parse()?;
+        let confidence: f32 = licenses
+            .get("confidence-threshold")
+            .context("license confidence threshold missing")?
+            .to_string()
+            .parse()
+            .context("invalid license confidence threshold")?;
         ensure!(
             confidence.is_finite() && (0.0..=1.0).contains(&confidence),
             "invalid license confidence threshold"
         );
+        let mut texts = Store::new();
+        for allowed in allow.iter().chain(exceptions.values().flatten()) {
+            let name = allowed.to_string();
+            let text = spdx::license_id(&name)
+                .with_context(|| format!("no canonical SPDX text for policy license {name}"))?
+                .text();
+            texts.add_license(name, TextData::new(text));
+        }
+        ensure!(!texts.is_empty(), "no SPDX licenses in policy");
         Ok(Self {
             root: root.to_owned(),
-            allow: parse(&licenses["allow"])?,
+            allow,
             exceptions,
             confidence,
-            texts: Store::load_inline().context("loading SPDX license texts")?,
+            texts,
         })
     }
 
@@ -113,10 +137,18 @@ impl Policy {
 
     pub(super) fn package(&self, package: &serde_json::Value) -> Result<Vec<(String, String)>> {
         let name = package["name"].as_str().context("package name missing")?;
-        let (published, references) = self.license_paths(name, package)?;
+        let version = package["version"].as_str().context("version missing")?;
+        let dir = Path::new(
+            package["manifest_path"]
+                .as_str()
+                .context("manifest missing")?,
+        )
+        .parent()
+        .context("manifest has no directory")?;
+        let (published, references) =
+            self.license_paths(dir, &format!("{name}-{version}"), package)?;
         let mut identified = Vec::new();
         let mut supplements = Vec::new();
-        let mut copyrights = BTreeSet::new();
         let mut other_legal_text = Vec::new();
         for path in published.iter().chain(references.difference(&published)) {
             let text = fs::read_to_string(path)
@@ -134,14 +166,8 @@ impl Policy {
                 supplements.push(text.clone());
             }
             let in_package = published.contains(path);
-            let carries_notice = in_package && {
-                let mut lines = text.lines().filter_map(copyright_line).peekable();
-                let found = lines.peek().is_some();
-                copyrights.extend(lines.map(str::to_owned));
-                found
-            };
             let matches = self.identify(&text);
-            if in_package && !supplementary && (carries_notice || matches.is_empty()) {
+            if in_package && !supplementary && (has_copyright(&text) || matches.is_empty()) {
                 other_legal_text.push(text.clone());
             }
             for license in matches {
@@ -174,7 +200,7 @@ impl Policy {
                         .map(|(_, text)| (license.clone(), text.clone())),
                 );
             } else {
-                let text = canonical(name, &license, &copyrights, package)?;
+                let text = canonical(name, &license)?;
                 output.push((license, text));
             }
         }
@@ -186,31 +212,44 @@ impl Policy {
                 output.push(("other published legal text".to_owned(), text));
             }
         }
+        for (kind, text) in sources::notices(dir, &format!("{name} {version}"))? {
+            if output.iter().all(|(_, kept)| *kept != text) {
+                output.push((kind, text));
+            }
+        }
+        if output.iter().any(|(license, _)| license == "MPL-2.0") {
+            ensure!(
+                package["source"].as_str()
+                    == Some("registry+https://github.com/rust-lang/crates.io-index"),
+                "{name} {version} needs an exact source offer for MPL-2.0"
+            );
+            output.push((
+                "MPL-2.0 source".to_owned(),
+                format!("Source Code Form for {name} {version}: https://static.crates.io/crates/{name}/{name}-{version}.crate"),
+            ));
+        }
+        if !output.iter().any(|(_, text)| has_copyright(text)) {
+            output.push((
+                "manifest attribution".to_owned(),
+                attribution(name, package)?,
+            ));
+        }
         Ok(output)
     }
 
     fn license_paths(
         &self,
-        name: &str,
+        dir: &Path,
+        package_dir: &str,
         package: &serde_json::Value,
     ) -> Result<(BTreeSet<PathBuf>, BTreeSet<PathBuf>)> {
-        let dir = Path::new(
-            package["manifest_path"]
-                .as_str()
-                .context("manifest missing")?,
-        )
-        .parent()
-        .context("manifest has no directory")?;
         let mut published = BTreeSet::new();
         collect(dir, &mut published)?;
         if let Some(path) = package["license_file"].as_str() {
             published.insert(dir.join(path));
         }
         let mut references = BTreeSet::new();
-        let upstream = self.root.join("assets/licenses/upstream").join(format!(
-            "{name}-{}",
-            package["version"].as_str().context("version missing")?
-        ));
+        let upstream = self.root.join("assets/licenses/upstream").join(package_dir);
         if upstream.is_dir() {
             collect(&upstream, &mut references)?;
         }
@@ -228,71 +267,95 @@ impl Policy {
     }
 }
 
-fn copyright_line(line: &str) -> Option<&str> {
+pub(super) fn copyright_line(line: &str) -> Option<&str> {
     let line = line.trim();
     let owner = [
         "Copyright (c) ",
         "Copyright (C) ",
         "Copyright © ",
         "Copyright: ",
+        "SPDX-FileCopyrightText: ",
     ]
     .into_iter()
     .find_map(|marker| line.split_once(marker).map(|(_, owner)| owner))
     .or_else(|| {
-        line.strip_prefix("Copyright ")
-            .filter(|owner| owner.starts_with(|c: char| c.is_ascii_digit()))
+        ["©", "(c) ", "(C) "]
+            .into_iter()
+            .find_map(|marker| line.strip_prefix(marker))
+    })
+    .or_else(|| {
+        let (prefix, owner) = line.split_once(char::is_whitespace)?;
+        prefix.eq_ignore_ascii_case("copyright").then_some(owner)
     })?;
     let owner = owner.trim();
+    let phrase = owner.to_ascii_lowercase();
     (!owner.is_empty()
         && !owner.contains(['[', ']'])
         && owner.split('<').skip(1).all(|part| {
             part.split_once('>')
                 .is_some_and(|(contact, _)| contact.contains('@'))
         })
-        && !owner.eq_ignore_ascii_case("the copyright holders"))
+        && ![
+            "and related rights",
+            "holders",
+            "holder ",
+            "notice",
+            "license",
+            "the copyright holders",
+            "you must",
+        ]
+        .iter()
+        .any(|prose| phrase.starts_with(prose)))
     .then_some(line)
 }
 
-fn canonical(
-    name: &str,
-    license: &str,
-    copyrights: &BTreeSet<String>,
-    package: &serde_json::Value,
-) -> Result<String> {
+fn has_copyright(text: &str) -> bool {
+    text.lines().any(|line| copyright_line(line).is_some())
+}
+
+fn canonical(name: &str, license: &str) -> Result<String> {
     let text = spdx::license_id(license)
         .with_context(|| format!("{name} has no canonical SPDX text for {license}"))?
         .text();
-    let attribution = if copyrights.is_empty() {
-        let repository = package["repository"]
-            .as_str()
-            .filter(|url| !url.trim().is_empty())
-            .with_context(|| format!("{name} does not declare a repository for attribution"))?;
-        let authors = package["authors"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter_map(serde_json::Value::as_str)
-            .map(str::trim)
-            .filter(|author| !author.is_empty())
-            .collect::<Vec<_>>()
-            .join(", ");
-        let authors = if authors.is_empty() {
-            format!("The {name} authors (not named in published Cargo.toml)")
-        } else {
-            format!("{authors} (from published Cargo.toml)")
-        };
-        format!(
-            "No copyright notice found in the published crate's license or notice files.\nAttribution: {authors}\nRepository: {repository}"
-        )
-    } else {
-        copyrights
-            .iter()
-            .map(String::as_str)
-            .collect::<Vec<_>>()
-            .join("\n")
-    };
     Ok(format!(
-        "Selected {license} from the crate's declared license expression; canonical SPDX text (selected text not identified in package).\n{attribution}\n\n{text}"
+        "Selected {license} from the crate's declared license expression; canonical SPDX text (selected text not identified in package).\n\n{text}"
+    ))
+}
+
+fn attribution(name: &str, package: &serde_json::Value) -> Result<String> {
+    let repository = package["repository"]
+        .as_str()
+        .filter(|url| !url.trim().is_empty())
+        .map(str::to_owned)
+        .or_else(|| {
+            let locked = package["source"].as_str()?.strip_prefix("git+")?;
+            let (url, _) = locked.rsplit_once('#')?;
+            let url = url.split_once('?').map_or(url, |(url, _)| url);
+            Some(format!("{url} (from the locked Cargo git source)"))
+        });
+    let authors = package["authors"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|author| !author.is_empty())
+        .collect::<Vec<_>>()
+        .join(", ");
+    ensure!(
+        !authors.is_empty() || repository.is_some(),
+        "{name} does not declare authors or a repository for attribution"
+    );
+    let authors = if authors.is_empty() {
+        format!("The {name} authors (not named in published Cargo.toml)")
+    } else {
+        format!("{authors} (from published Cargo.toml)")
+    };
+    let repository = repository
+        .as_deref()
+        .unwrap_or("not declared in published Cargo.toml");
+    Ok(format!(
+        "No copyright notice found in the published legal files or source headers.\nAttribution: {authors}\nRepository: {repository}"
     ))
 }
 
@@ -314,9 +377,7 @@ fn collect(dir: &Path, files: &mut BTreeSet<PathBuf>) -> Result<()> {
         {
             files.insert(entry.path());
         }
-        if entry.file_type()?.is_dir()
-            && ["LICENSES", "LICENCES"].contains(&name.trim_start_matches('.'))
-        {
+        if entry.file_type()?.is_dir() && sources::license_dir(&entry.file_name()) {
             for child in fs::read_dir(entry.path())? {
                 let child = child?;
                 if child.file_type()?.is_file() {
@@ -331,6 +392,54 @@ fn collect(dir: &Path, files: &mut BTreeSet<PathBuf>) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn holder_lines_include_bare_copyright_symbols_but_not_license_prose() {
+        for line in [
+            "Copyright The Foo Developers",
+            "COPYRIGHT 2019 Fixture Foundation",
+            "© Fixture Publisher",
+            "(c) 2026 Fixture Publisher",
+            "SPDX-FileCopyrightText: 2026 Fixture Publisher",
+        ] {
+            assert_eq!(copyright_line(line), Some(line));
+        }
+        for line in [
+            "Copyright and Related Rights. A Work made available under CC0",
+            "(c) You must retain, in the Source form of any Derivative Works",
+            "Copyright (c) <year> <copyright holders>",
+        ] {
+            assert_eq!(copyright_line(line), None);
+        }
+    }
+
+    #[test]
+    fn missing_policy_keys_return_errors() {
+        let dir = crate::scratch::dir("notice-policy");
+        let path = dir.join("deny.toml");
+        for (document, message) in [
+            ("", "license policy missing"),
+            ("[licenses]\n", "license allow list missing"),
+            ("[licenses]\nallow = []\n", "exceptions missing"),
+            (
+                "[licenses]\nallow = []\nexceptions = []\n",
+                "license confidence threshold missing",
+            ),
+            (
+                "[licenses]\nallow = []\nexceptions = [{}]\n",
+                "exception crate missing",
+            ),
+            (
+                "[licenses]\nallow = []\nexceptions = [{ crate = 'fixture' }]\n",
+                "exception allow list missing",
+            ),
+        ] {
+            fs::write(&path, document).unwrap();
+            let error = Policy::read(&dir).err().expect("missing key must fail");
+            assert_eq!(error.to_string(), message);
+        }
+        fs::remove_dir_all(dir).unwrap();
+    }
 
     #[test]
     fn expression_selection_obeys_or_and_named_exceptions_and_asset_decisions() {
@@ -415,41 +524,47 @@ mod tests {
             "authors":["Ada Example <ada@example.invalid>", "Ben Example"],
             "repository":"https://example.invalid/fixture"
         });
-        fs::write(
-            dir.join("LICENSE"),
-            spdx::license_id("CC0-1.0").unwrap().text(),
-        )
-        .unwrap();
-        let expected = |attribution| {
+        let cc0 = spdx::license_id("CC0-1.0").unwrap().text();
+        fs::write(dir.join("LICENSE"), cc0).unwrap();
+        let other = |text: &str| ("other published legal text".to_owned(), text.to_owned());
+        let expected = || {
             (
                 "Apache-2.0".to_owned(),
                 format!(
-                    "Selected Apache-2.0 from the crate's declared license expression; canonical SPDX text (selected text not identified in package).\n{attribution}\n\n{}",
+                    "Selected Apache-2.0 from the crate's declared license expression; canonical SPDX text (selected text not identified in package).\n\n{}",
                     spdx::license_id("Apache-2.0").unwrap().text()
+                ),
+            )
+        };
+        let manifest_credit = |name| {
+            (
+                "manifest attribution".to_owned(),
+                format!(
+                    "No copyright notice found in the published legal files or source headers.\nAttribution: {name}\nRepository: https://example.invalid/fixture"
                 ),
             )
         };
         assert_eq!(
             policy.package(&package).unwrap(),
-            vec![expected(concat!(
-                "No copyright notice found in the published crate's license or notice files.\n",
-                "Attribution: Ada Example <ada@example.invalid>, Ben Example (from published Cargo.toml)\n",
-                "Repository: https://example.invalid/fixture",
-            ))]
+            vec![
+                expected(),
+                manifest_credit(
+                    "Ada Example <ada@example.invalid>, Ben Example (from published Cargo.toml)"
+                )
+            ]
         );
         package["authors"] = serde_json::json!([]);
         assert_eq!(
             policy.package(&package).unwrap(),
-            vec![expected(concat!(
-                "No copyright notice found in the published crate's license or notice files.\n",
-                "Attribution: The fixture authors (not named in published Cargo.toml)\n",
-                "Repository: https://example.invalid/fixture",
-            ))]
+            vec![
+                expected(),
+                manifest_credit("The fixture authors (not named in published Cargo.toml)")
+            ]
         );
         package["repository"] = serde_json::Value::Null;
         assert_eq!(
             policy.package(&package).unwrap_err().to_string(),
-            "fixture does not declare a repository for attribution"
+            "fixture does not declare authors or a repository for attribution"
         );
         let copyright =
             "Changes are Copyright (c) 2026 Fixture Publisher <fixture@example.invalid>";
@@ -459,10 +574,60 @@ mod tests {
         assert_eq!(
             policy.package(&package).unwrap(),
             vec![
-                expected(copyright),
+                expected(),
                 ("copyright and notices".to_owned(), format!("{copyright}\n")),
-                ("other published legal text".to_owned(), extra.to_owned(),)
+                other(extra)
             ]
+        );
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn package_keeps_the_unicode_component_and_both_isc_source_grants() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+        let policy = Policy::read(root).unwrap();
+        let dir = crate::scratch::dir("scoped-license-inputs");
+        let unicode = "Copyright © 1991-2018 Unicode, Inc. All rights reserved.\n";
+        let permission = "Permission to use, copy, modify, and/or distribute this software for any\npurpose with or without fee is hereby granted, provided that the above\ncopyright notice and this permission notice appear in all copies.";
+        let isc = [
+            (
+                "src/subject_name/mod.rs",
+                "Copyright 2022 Rafael Fernández López.",
+            ),
+            ("src/crl/mod.rs", "Copyright 2023 Daniel McCarney."),
+        ];
+        for (file, credit) in isc {
+            let path = dir.join(file);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            let source = format!("{credit}\n\n{permission}");
+            let header = source.replace('\n', "\n// ");
+            fs::write(path, format!("// {header}\n\npub struct Fixture;")).unwrap();
+        }
+        fs::create_dir_all(dir.join("src/unicode_tables")).unwrap();
+        fs::write(dir.join("src/unicode_tables/LICENSE-UNICODE"), unicode).unwrap();
+        fs::create_dir(dir.join("tests")).unwrap();
+        fs::write(dir.join("tests/LICENSE"), "Unrelated fixture license.").unwrap();
+        let package = serde_json::json!({
+            "name":"fixture", "version":"1.0.0", "manifest_path":dir.join("Cargo.toml"), "license":"ISC"
+        });
+        let output = policy.package(&package).unwrap();
+        assert_eq!(
+            output
+                .iter()
+                .filter(|(label, _)| label == "component license and notices")
+                .map(|(_, text)| text.as_str())
+                .collect::<Vec<_>>(),
+            vec![unicode]
+        );
+        assert_eq!(
+            output
+                .iter()
+                .filter(|(label, _)| label == "published source notices")
+                .map(|(_, text)| text.clone())
+                .collect::<BTreeSet<_>>(),
+            isc.into_iter()
+                .map(|(_, credit)| format!("{credit}\n\n{permission}"))
+                .collect::<BTreeSet<_>>()
         );
         fs::remove_dir_all(dir).unwrap();
     }
