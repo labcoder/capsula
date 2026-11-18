@@ -29,7 +29,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use anyhow::{Context as _, Result, anyhow, bail, ensure};
 use kumochi_protocol::constants::{
     BRAIN_EXE, CLAUDE_QUESTIONS_ENV, IMAGE_CHECK_ARG, IMAGE_DIAGNOSTIC_ARG, LIVE_BUDGET_ENV,
-    ProductIdentity, SHELL_EXE,
+    LIVE_RUN_BIN_DIR, LIVE_RUNS_DIR, ProductIdentity, SHELL_EXE,
 };
 
 use self::claude_signin::Ask;
@@ -177,9 +177,9 @@ fn prepare(check: Check) -> Result<()> {
     let folder = target
         .parent()
         .context("the profile folder has a parent")?
-        .join("live")
+        .join(LIVE_RUNS_DIR)
         .join(stamp.to_string());
-    let bin = folder.join("bin");
+    let bin = folder.join(LIVE_RUN_BIN_DIR);
     fs::create_dir_all(&bin)?;
     fs::copy(target.join(BRAIN_EXE), bin.join(BRAIN_EXE)).context("copying the brain")?;
     println!("live {name}: running in {}", folder.display());

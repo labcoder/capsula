@@ -73,6 +73,8 @@ pub(crate) use windows::fake_claude::FAKE_CLAUDE;
 #[cfg(windows)]
 pub(crate) use windows::ocr::open as open_ocr;
 #[cfg(all(windows, debug_assertions))]
+pub(crate) use windows::qpc_now;
+#[cfg(all(windows, debug_assertions))]
 pub use windows::raise_access_violation;
 #[cfg(windows)]
 pub use windows::{

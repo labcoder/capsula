@@ -447,6 +447,10 @@ impl Client {
                 _ => self.0.get(url).timeout(Duration::from_secs(10)),
             }
         };
+        #[cfg(all(windows, debug_assertions))]
+        if let Some(observation) = super::model::text_observation::Observation::active() {
+            observation.auxiliary(&request.endpoint);
+        }
         let response = builder
             .send()
             .await

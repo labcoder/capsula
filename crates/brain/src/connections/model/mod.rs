@@ -7,6 +7,8 @@ pub mod conn;
 pub mod error;
 pub(in crate::connections) mod framer;
 pub mod sse;
+#[cfg(all(windows, debug_assertions))]
+pub(crate) mod text_observation;
 pub mod wire;
 
 #[cfg(test)]
@@ -133,6 +135,8 @@ impl Lease for () {
 struct Attempt<Io, L: Lease> {
     conn: Option<ModelConn<Io>>,
     lease: Option<L>,
+    #[cfg(all(windows, debug_assertions))]
+    stamp: Option<text_observation::Stamp>,
 }
 
 impl<Io, L: Lease> Drop for Attempt<Io, L> {
@@ -143,6 +147,14 @@ impl<Io, L: Lease> Drop for Attempt<Io, L> {
             && self.conn.as_ref().is_none_or(|conn| !conn.may_have_written)
         {
             lease.unsent();
+        }
+        #[cfg(all(windows, debug_assertions))]
+        if let Some(stamp) = self.stamp.take() {
+            if let Some(conn) = self.conn.take() {
+                stamp.close(conn);
+            } else {
+                stamp.ended(text_observation::End::NoIo);
+            }
         }
     }
 }
@@ -168,7 +180,42 @@ pub async fn stream<C: Connect, L: Lease>(
     bearer: &Secret<Zeroizing<String>>,
     ask: impl Future<Output = Option<L>>,
     budget: &Budget,
+    out: impl Events,
+) -> Result<(), Failure> {
+    send(
+        client,
+        body,
+        bearer,
+        ask,
+        budget,
+        out,
+        #[cfg(all(windows, debug_assertions))]
+        None,
+    )
+    .await
+}
+
+#[cfg(all(windows, debug_assertions))]
+pub(crate) async fn stream_observed<C: Connect, L: Lease>(
+    client: &ModelClient<C>,
+    body: &ResponsesBody,
+    bearer: &Secret<Zeroizing<String>>,
+    ask: impl Future<Output = Option<L>>,
+    budget: &Budget,
+    out: impl Events,
+    stamp: Option<text_observation::Stamp>,
+) -> Result<(), Failure> {
+    send(client, body, bearer, ask, budget, out, stamp).await
+}
+
+async fn send<C: Connect, L: Lease>(
+    client: &ModelClient<C>,
+    body: &ResponsesBody,
+    bearer: &Secret<Zeroizing<String>>,
+    ask: impl Future<Output = Option<L>>,
+    budget: &Budget,
     mut out: impl Events,
+    #[cfg(all(windows, debug_assertions))] stamp: Option<text_observation::Stamp>,
 ) -> Result<(), Failure> {
     let request = wire::request(bearer.expose(), body.0.expose())?;
     let lease = ask.await.ok_or(Failure::Rebuild)?;
@@ -176,9 +223,15 @@ pub async fn stream<C: Connect, L: Lease>(
     let mut attempt = Attempt {
         conn: None,
         lease: Some(lease),
+        #[cfg(all(windows, debug_assertions))]
+        stamp,
     };
     if !budget.reserve() {
         return Err(Failure::Spent);
+    }
+    #[cfg(all(windows, debug_assertions))]
+    if let Some(stamp) = &attempt.stamp {
+        stamp.reserved();
     }
     let upload = timeout_at(deadline, async {
         let io = match client.checkout() {
@@ -247,6 +300,10 @@ pub async fn stream<C: Connect, L: Lease>(
         && let Some(conn) = attempt.conn.take()
     {
         client.put(conn.io);
+        #[cfg(all(windows, debug_assertions))]
+        if let Some(stamp) = attempt.stamp.take() {
+            stamp.ended(text_observation::End::Pooled);
+        }
     }
     Ok(())
 }
