@@ -33,11 +33,11 @@ use tokio::sync::{mpsc, oneshot, watch};
 use tokio::time::Instant;
 
 pub(crate) use self::id::LaunchId;
-pub(crate) use self::wire::CallKey;
+pub(crate) use self::wire::{CallKey, Method, ToBrain, ToBridge};
 
 use self::id::JsonRpcId;
 use self::stdio::{Body, Incoming, Line, LineReader, RpcError, classify, reply};
-use self::wire::{Method, Reassembly, ToBrain, ToBridge, chunks};
+use self::wire::{Reassembly, chunks};
 
 /// The longest stdin line, newline excluded [guess: call arguments].
 pub(crate) const MAX_INCOMING: usize = 512 * 1024;
@@ -296,7 +296,7 @@ impl<W: AsyncWrite + Unpin> Relay<W> {
             Incoming::Request { id, method, params } => {
                 let key = id.key();
                 self.in_flight = Some((id, key.clone(), Reassembly::new(MAX_REPLY)));
-                for (chunk, last) in chunks(&params) {
+                for (chunk, last) in chunks(params) {
                     let request = ToBrain::Request {
                         key: key.clone(),
                         method,

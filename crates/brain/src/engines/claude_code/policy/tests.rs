@@ -4,6 +4,22 @@ use std::path::PathBuf;
 
 use super::*;
 
+#[test]
+fn claude_code_never_times_out_a_call_while_its_launch_lives() {
+    let switch = |name| {
+        SWITCHES
+            .iter()
+            .find(|(switch, _)| *switch == name)
+            .map(|(_, value)| *value)
+    };
+    let timeout: u128 = switch("MCP_TOOL_TIMEOUT")
+        .expect("pinned")
+        .parse()
+        .expect("milliseconds");
+    assert!(timeout > super::super::supervisor::MAX_LAUNCH.as_millis());
+    assert_eq!(switch("CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT"), Some("0"));
+}
+
 fn folders() -> OwnedFolders {
     let at = |name: &str| PathBuf::from(format!(r"C:\k\claude-code\{name}"));
     OwnedFolders {
@@ -166,6 +182,8 @@ fn every_entry_point_gets_the_same_exact_environment() {
         ("CLAUDE_CODE_SKIP_PROMPT_HISTORY", "1"),
         ("CLAUDE_CODE_DISABLE_AUTO_MEMORY", "1"),
         ("ENABLE_CLAUDEAI_MCP_SERVERS", "false"),
+        ("MCP_TOOL_TIMEOUT", "300000"),
+        ("CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT", "0"),
         ("SystemRoot", r"C:\Windows"),
         ("SystemDrive", "C:"),
         ("PATH", r"C:\Windows\System32;C:\Windows"),
@@ -318,6 +336,6 @@ fn launch_data_debug_prints_counts_only() {
     let printed = format!("{data:?}");
     assert_eq!(
         printed,
-        format!("LaunchData {{ args: {}, env: 18 }}", data.args.len())
+        format!("LaunchData {{ args: {}, env: 20 }}", data.args.len())
     );
 }

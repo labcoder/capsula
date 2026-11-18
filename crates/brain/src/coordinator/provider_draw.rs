@@ -7,7 +7,7 @@ use kumochi_scene::{TokenError, Tokenizer};
 use sha2::{Digest as _, Sha256};
 
 use super::{BuildKey, Coordinator, Effect, Stale};
-use crate::dispatch::{CallInput, Caller, Dispatch, DrawAction, LedgerKey, ToolOutput};
+use crate::dispatch::{CallInput, Caller, Dispatch, DrawAction, DrawEnd, LedgerKey, ToolOutput};
 use crate::drawing::{CallEnd, CallError, Input};
 use crate::engines::{CallId, ToolName};
 
@@ -60,23 +60,31 @@ impl fmt::Debug for ProviderDraw {
 }
 
 impl DrawCall {
-    pub(super) fn ended(&mut self, end: CallEnd) -> Option<(LedgerKey, ToolOutput)> {
+    pub(super) fn ended(&mut self, end: CallEnd) -> Option<(LedgerKey, DrawEnd)> {
         if let Some(provider) = &mut self.provider {
             provider.stopped = true;
             provider.result = Some(end);
             self.result()
         } else {
-            Some((self.key.clone(), ToolOutput::Text(end.tool_text())))
+            Some((self.key.clone(), draw_end(&end)))
         }
     }
 
-    fn result(&mut self) -> Option<(LedgerKey, ToolOutput)> {
+    fn result(&mut self) -> Option<(LedgerKey, DrawEnd)> {
         let provider = self.provider.as_mut()?;
         if provider.identity == Identity::Pending {
             return None;
         }
         let result = provider.result.take()?;
-        Some((self.key.clone(), ToolOutput::Text(result.tool_text())))
+        Some((self.key.clone(), draw_end(&result)))
+    }
+}
+
+/// A finished draw call's result, which stopped early when it carries an error.
+fn draw_end(end: &CallEnd) -> DrawEnd {
+    DrawEnd {
+        output: ToolOutput::Text(end.tool_text()),
+        stopped: end.error.is_some(),
     }
 }
 

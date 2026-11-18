@@ -39,14 +39,14 @@ fn ids_are_numbers_and_short_strings_and_their_keys_never_collide() {
 
 #[test]
 fn lines_are_classified_by_envelope_method_and_id() {
-    let request = |line: &str| classify(line.as_bytes());
+    let request = |line: &'static str| classify(line.as_bytes());
     assert_eq!(request("  "), Incoming::Blank);
     assert_eq!(
         request(r#"{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"noop"}}"#),
         Incoming::Request {
             id: JsonRpcId::Number(7),
             method: Method::ToolsCall,
-            params: br#"{"name":"noop"}"#.to_vec()
+            params: &br#"{"name":"noop"}"#[..]
         }
     );
     assert_eq!(
@@ -54,7 +54,7 @@ fn lines_are_classified_by_envelope_method_and_id() {
         Incoming::Request {
             id: JsonRpcId::String("A".to_owned()),
             method: Method::ToolsList,
-            params: b"null".to_vec()
+            params: &b"null"[..]
         }
     );
     assert_eq!(
@@ -825,7 +825,7 @@ fn lines_near_and_over_the_cap_go_through_the_real_reader_relay_and_pipe() {
         String::from_utf8(stdout.recv_timeout(Duration::from_secs(5)).expect("a line"))
             .expect("utf-8")
     };
-    // The request's own whitespace is gone on the pipe: C4a reserializes params compactly.
+    // The request's params reach the pipe as the client wrote them, whitespace included.
     let text = "a".repeat(MAX_INCOMING - 80);
     let near = format!(
         r#"{{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{{ "text" : "{text}" }}}}"#
@@ -854,7 +854,7 @@ fn lines_near_and_over_the_cap_go_through_the_real_reader_relay_and_pipe() {
             }
         };
         assert_eq!(key, CallKey("m:n:7".to_owned()));
-        assert_eq!(params, format!(r#"{{"text":"{text}"}}"#).into_bytes());
+        assert_eq!(params, format!(r#"{{ "text" : "{text}" }}"#).into_bytes());
         assert_eq!(sizes.len(), 3, "{sizes:?}");
         assert!(sizes.iter().all(|&size| size <= CHUNK), "{sizes:?}");
         let reply = ToBridge::Reply {
@@ -883,9 +883,38 @@ fn lines_near_and_over_the_cap_go_through_the_real_reader_relay_and_pipe() {
         };
         assert_eq!(
             (key.0.as_str(), chunk.as_slice(), last),
-            ("m:n:8", br#"{"name":"noop"}"#.as_slice(), true)
+            ("m:n:8", br#"{ "name" : "noop" }"#.as_slice(), true)
         );
     });
     drop(feed);
     assert!(matches!(bridge.join().expect("joins"), Ok(())));
+}
+
+#[test]
+fn params_reach_the_brain_as_written_and_a_repeated_routing_field_is_refused() {
+    let params = r#"{"name":"probe","arguments":{"a" : "\u0041", "a":2}}"#;
+    let line = format!(r#"{{"jsonrpc":"2.0","id":1,"method":"tools/call","params": {params} }}"#);
+    assert_eq!(
+        classify(line.as_bytes()),
+        Incoming::Request {
+            id: JsonRpcId::Number(1),
+            method: Method::ToolsCall,
+            params: params.as_bytes(),
+        }
+    );
+    for repeated in [
+        r#"{"jsonrpc":"2.0","id":1,"id":2,"method":"ping"}"#,
+        r#"{"jsonrpc":"2.0","id":1,"method":"ping","method":"tools/call","params":{}}"#,
+        r#"{"jsonrpc":"2.0","jsonrpc":"2.0","id":1,"method":"ping"}"#,
+        r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{},"params":{"name":"probe"}}"#,
+    ] {
+        assert_eq!(
+            classify(repeated.as_bytes()),
+            Incoming::Invalid {
+                id: None,
+                error: RpcError::InvalidRequest,
+            },
+            "{repeated}"
+        );
+    }
 }

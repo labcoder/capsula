@@ -7,8 +7,10 @@ use std::path::PathBuf;
 use std::sync::mpsc as std_mpsc;
 use std::time::Duration;
 
-use tokio::io::{AsyncReadExt as _, DuplexStream};
+use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _, DuplexStream};
 use tokio::net::windows::named_pipe::ClientOptions;
+
+use kumochi_protocol::message::RunId;
 
 use super::*;
 use crate::bridge::id::{JsonRpcId, MAX_STRING_ID};
@@ -16,7 +18,11 @@ use crate::bridge::wire::CHUNK;
 use crate::platform::{Launch, Spawned, Stdio, create_owner_only, spawn};
 
 const LAUNCH: LaunchId = LaunchId(0x0123_4567_89ab_cdef_0123_4567_89ab_cdef);
-const RUN: RunId = RunId(42);
+const BUILD: BuildKey = BuildKey {
+    run: RunId(42),
+    round: 1,
+    attempt: 1,
+};
 const NOT_ADMITTED_TEXT: &str = "Kumochi isn't taking tool calls from this session now.";
 const UNAVAILABLE_TEXT: &str = "This tool isn't available over MCP yet.";
 const CHILD: &str = "bridge::listener::tests::child_client";
@@ -55,6 +61,7 @@ impl Fixture {
             tools: &self.tools,
             gate: AuditGate::new(),
             binding: Binding::default(),
+            calls: None,
         }
     }
 }
@@ -132,6 +139,11 @@ async fn with_session<F: Future<Output = ()>>(
 
 fn key(n: i64) -> CallKey {
     JsonRpcId::Number(n).key()
+}
+
+/// `BUILD`, bound until a minute from now.
+fn bound() -> (BuildKey, Instant) {
+    (BUILD, Instant::now() + Duration::from_secs(60))
 }
 
 fn call(name: &str) -> Vec<u8> {
@@ -221,7 +233,7 @@ async fn a_call_needs_a_bound_run_and_a_passed_gate_and_a_failure_stays() {
         ask(NOT_ADMITTED_TEXT).await;
         gate.pass();
         ask(NOT_ADMITTED_TEXT).await;
-        binding.bind(RUN).expect("first bind");
+        binding.bind(Some(bound())).expect("first bind");
         ask(UNAVAILABLE_TEXT).await;
         gate.fail();
         ask(NOT_ADMITTED_TEXT).await;
@@ -236,21 +248,29 @@ async fn a_call_needs_a_bound_run_and_a_passed_gate_and_a_failure_stays() {
 fn an_origin_is_frozen_at_admission_and_belongs_to_its_launch() {
     let fixture = fixture();
     let context = fixture.context(Duration::from_secs(60));
-    context.binding.bind(RUN).expect("first bind");
+    let until = Instant::now() + Duration::from_secs(30);
+    context
+        .binding
+        .bind(Some((BUILD, until)))
+        .expect("first bind");
     context.gate.pass();
     let call = key(7);
     let origin = McpOrigin {
-        run: RUN,
+        build: BUILD,
         launch: LAUNCH,
         key: key(7),
     };
-    assert_eq!(context.admit(LAUNCH, &call), Ok(origin.clone()));
-    assert_eq!(context.binding.bind(RunId(43)), Err(AlreadyBound));
+    assert_eq!(
+        context.admit(LAUNCH, &call),
+        Ok((origin.clone(), until)),
+        "content leaves by the bound deadline"
+    );
+    assert_eq!(context.binding.bind(None), Err(AlreadyBound));
     let admitted = context.admit(LAUNCH, &call);
     context.gate.fail();
     assert_eq!(
         admitted,
-        Ok(origin),
+        Ok((origin, until)),
         "a later failure doesn't undo an admission"
     );
     assert_eq!(context.admit(LAUNCH, &call), Err(NotAdmitted));
@@ -258,7 +278,7 @@ fn an_origin_is_frozen_at_admission_and_belongs_to_its_launch() {
     // The next launch has its own gate and binding; nothing carries over.
     let next = fixture.context(Duration::from_secs(60));
     assert_eq!(next.admit(LAUNCH, &call), Err(NotAdmitted));
-    next.binding.bind(RUN).expect("first bind");
+    next.binding.bind(Some(bound())).expect("first bind");
     assert_eq!(
         next.admit(LAUNCH, &call),
         Err(NotAdmitted),
@@ -266,9 +286,21 @@ fn an_origin_is_frozen_at_admission_and_belongs_to_its_launch() {
     );
 
     let late = fixture.context(Duration::ZERO);
-    late.binding.bind(RUN).expect("first bind");
+    late.binding.bind(Some(bound())).expect("first bind");
     late.gate.pass();
     assert_eq!(late.admit(LAUNCH, &call), Err(NotAdmitted));
+
+    let expired = fixture.context(Duration::from_secs(60));
+    expired
+        .binding
+        .bind(Some((BUILD, Instant::now())))
+        .expect("first bind");
+    expired.gate.pass();
+    assert_eq!(
+        expired.admit(LAUNCH, &call),
+        Err(NotAdmitted),
+        "past its question's deadline, with the launch's still ahead"
+    );
 }
 
 #[tokio::test]
@@ -475,7 +507,7 @@ async fn nothing_the_client_sent_reaches_debug_or_an_answer() {
         format!(
             "{:?}",
             McpOrigin {
-                run: RUN,
+                build: BUILD,
                 launch: LAUNCH,
                 key: planted
             }
@@ -725,7 +757,7 @@ fn measure_mcp_round_trip() {
         }
     });
     let context = fixture.context(Duration::from_secs(120));
-    context.binding.bind(RUN).expect("first bind");
+    context.binding.bind(Some(bound())).expect("first bind");
     context.gate.pass();
     let request = |id: usize| {
         format!(
@@ -800,4 +832,499 @@ fn measure_mcp_round_trip() {
         rank(99),
         samples[SAMPLES - 1],
     );
+}
+
+const ENDED_TEXT: &str = "This call ended before it finished.";
+
+/// A tool result the model reads as a success.
+fn succeeded(text: &str) -> Value {
+    json!({"content": [{"type": "text", "text": text}], "isError": false})
+}
+
+/// A bound, passed context that hands admitted calls to `calls`.
+fn calling(fixture: &Fixture, calls: mpsc::Sender<McpCall>) -> LaunchContext<'_> {
+    calling_until(fixture, calls, Instant::now() + Duration::from_secs(60))
+}
+
+/// As [`calling`], with the launch's own deadline a minute away and its question's at `until`.
+fn calling_until(
+    fixture: &Fixture,
+    calls: mpsc::Sender<McpCall>,
+    until: Instant,
+) -> LaunchContext<'_> {
+    let context = LaunchContext {
+        calls: Some(calls),
+        ..fixture.context(Duration::from_secs(60))
+    };
+    context
+        .binding
+        .bind(Some((BUILD, until)))
+        .expect("first bind");
+    context.gate.pass();
+    context
+}
+
+#[tokio::test]
+async fn an_admitted_call_reaches_the_brain_as_written_and_gets_one_reply() {
+    let fixture = fixture();
+    let (calls, mut brain) = mpsc::channel(1);
+    let context = calling(&fixture, calls);
+    let brain = tokio::spawn(async move {
+        let first = brain.recv().await.expect("the first call");
+        let origin = McpOrigin {
+            build: BUILD,
+            launch: LAUNCH,
+            key: key(5),
+        };
+        assert_eq!(first.origin, origin);
+        assert_eq!(first.tool, ToolName::Probe);
+        assert_eq!(
+            first.args.as_deref(),
+            Some(&br#"{"word" : "h\u0069", "word":"x"}"#[..])
+        );
+        let probed = McpReply {
+            text: "probed".to_owned(),
+            error: false,
+        };
+        first.reply.send(probed).expect("waiting");
+        let second = brain.recv().await.expect("the second call");
+        assert_eq!(second.args.as_deref(), Some(&b"{}"[..]));
+        drop(second);
+        let third = brain.recv().await.expect("the third call");
+        let refused = McpReply {
+            text: "not here".to_owned(),
+            error: true,
+        };
+        third.reply.send(refused).expect("waiting");
+    });
+    let end = with_session(&context, |mut peer| async move {
+        peer.hello().await;
+        let written = br#"{"name":"probe","arguments": {"word" : "h\u0069", "word":"x"} }"#;
+        peer.request(&key(5), Method::ToolsCall, written).await;
+        assert_eq!(peer.reply().await, (key(5), succeeded("probed"), false));
+        peer.request(&key(6), Method::ToolsCall, br#"{"name":"probe"}"#)
+            .await;
+        assert_eq!(peer.reply().await, (key(6), text_result(ENDED_TEXT), false));
+        peer.request(&key(7), Method::ToolsCall, &call("probe"))
+            .await;
+        assert_eq!(peer.reply().await, (key(7), text_result("not here"), false));
+        for params in [
+            br#"{"name":"probe","arguments":null}"#.to_vec(),
+            br#"{"name":"probe","name":"probe","arguments":{}}"#.to_vec(),
+            br#"{"name":"probe","arguments":[]}"#.to_vec(),
+        ] {
+            peer.request(&key(8), Method::ToolsCall, &params).await;
+            assert_eq!(
+                peer.reply().await,
+                (key(8), invalid_params(), true),
+                "{}",
+                String::from_utf8_lossy(&params)
+            );
+        }
+    })
+    .await;
+    assert_eq!(end, SessionEnd::Closed);
+    brain.await.expect("the brain's checks");
+}
+
+/// Claude Code's timeouts can't fire while a launch lives (the policy's pins), and a repeat
+/// under a new id while the first call is unsettled is refused by the bridge: one call reaches
+/// the brain.
+#[tokio::test]
+async fn a_second_request_while_one_is_unsettled_never_reaches_the_brain() {
+    let fixture = fixture();
+    let (calls, mut brain) = mpsc::channel(1);
+    let context = calling(&fixture, calls);
+    let (ours, theirs) = tokio::io::duplex(4 << 20);
+    let (lines, input) = mpsc::channel(16);
+    let (_stdin, stdin_end) = tokio::sync::watch::channel(false);
+    let (out, mut written) = mpsc::channel::<Vec<u8>>(16);
+    let request = |id: u32| {
+        let line = format!(
+            r#"{{"jsonrpc":"2.0","id":{id},"method":"tools/call","params":{{"name":"probe","arguments":{{}}}}}}"#
+        );
+        crate::bridge::Input::Line(crate::bridge::stdio::Line::Text(line.into_bytes()))
+    };
+    let drive = async move {
+        let mut line = async || -> Value {
+            serde_json::from_slice(&written.recv().await.expect("a line")).expect("json")
+        };
+        lines.send(request(1)).await.expect("relayed");
+        let first = brain.recv().await.expect("the first call");
+        assert_eq!(first.origin.key, key(1));
+        lines.send(request(2)).await.expect("relayed");
+        assert_eq!(
+            line().await,
+            json!({"jsonrpc":"2.0","id":2,"error":{"code":-32600,"message":"Invalid Request"}})
+        );
+        assert!(
+            brain.try_recv().is_err(),
+            "the repeat reached no dispatcher"
+        );
+        let drawn = McpReply {
+            text: "answered once".to_owned(),
+            error: false,
+        };
+        first.reply.send(drawn).expect("waiting");
+        assert_eq!(
+            line().await,
+            json!({"jsonrpc":"2.0","id":1,"result":succeeded("answered once")})
+        );
+        lines
+            .send(crate::bridge::Input::End)
+            .await
+            .expect("relayed");
+    };
+    let (end, relayed, ()) = tokio::join!(
+        session(ours, LAUNCH, &context),
+        crate::bridge::relay(theirs, input, stdin_end, out),
+        drive
+    );
+    assert_eq!(end, SessionEnd::Closed);
+    assert!(matches!(relayed, Ok(())));
+}
+
+#[test]
+fn a_call_and_its_reply_debug_no_arguments_text_or_request_id() {
+    const PLANTED: &str = "zq-mcp-planted";
+    let (reply, _answer) = oneshot::channel();
+    let call = McpCall {
+        origin: McpOrigin {
+            build: BUILD,
+            launch: LAUNCH,
+            key: CallKey(PLANTED.to_owned()),
+        },
+        tool: ToolName::Probe,
+        args: Some(PLANTED.as_bytes().to_vec()),
+        reply,
+    };
+    let answer = McpReply {
+        text: PLANTED.to_owned(),
+        error: true,
+    };
+    let bytes = format!("{:?}", PLANTED.as_bytes());
+    for printed in [format!("{call:?}"), format!("{answer:?}")] {
+        assert!(!printed.contains(PLANTED), "{printed}");
+        assert!(
+            !printed.contains(bytes.trim_matches(['[', ']'])),
+            "{printed}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn arguments_at_the_cap_reach_the_brain_as_written_and_one_byte_over_stay_out_of_the_mailbox()
+{
+    let fixture = fixture();
+    let (calls, mut brain) = mpsc::channel(1);
+    let context = calling(&fixture, calls);
+    let (ours, theirs) = tokio::io::duplex(4 << 20);
+    let (lines, input) = mpsc::channel(16);
+    let (_stdin, stdin_end) = tokio::sync::watch::channel(false);
+    let (out, mut written) = mpsc::channel::<Vec<u8>>(16);
+    let arguments = |len: usize| format!(r#"{{"word":"{}"}}"#, "w".repeat(len - 11));
+    let request = |id: u32, arguments: &str| {
+        let line = format!(
+            r#"{{"jsonrpc":"2.0","id":{id},"method":"tools/call","params":{{"name":"probe","arguments":{arguments}}}}}"#
+        );
+        crate::bridge::Input::Line(crate::bridge::stdio::Line::Text(line.into_bytes()))
+    };
+    let drive = async move {
+        let mut line = async || -> Value {
+            serde_json::from_slice(&written.recv().await.expect("a line")).expect("json")
+        };
+        let at_cap = arguments(16_384);
+        assert_eq!(at_cap.len(), crate::dispatch::MAX_ARGS);
+        lines.send(request(1, &at_cap)).await.expect("relayed");
+        let call = brain.recv().await.expect("the call at the cap");
+        assert_eq!(call.args.as_deref(), Some(at_cap.as_bytes()));
+        let probed = McpReply {
+            text: "probed".to_owned(),
+            error: false,
+        };
+        call.reply.send(probed).expect("waiting");
+        assert_eq!(
+            line().await,
+            json!({"jsonrpc":"2.0","id":1,"result":succeeded("probed")})
+        );
+        lines
+            .send(request(2, &arguments(16_385)))
+            .await
+            .expect("relayed");
+        let call = brain.recv().await.expect("the call over the cap");
+        assert_eq!(call.args, None, "only its size reaches the brain");
+        drop(call);
+        assert_eq!(
+            line().await,
+            json!({"jsonrpc":"2.0","id":2,"result":text_result(ENDED_TEXT)})
+        );
+        lines
+            .send(crate::bridge::Input::End)
+            .await
+            .expect("relayed");
+    };
+    let (end, relayed, ()) = tokio::join!(
+        session(ours, LAUNCH, &context),
+        crate::bridge::relay(theirs, input, stdin_end, out),
+        drive
+    );
+    assert_eq!(end, SessionEnd::Closed);
+    assert!(matches!(relayed, Ok(())));
+}
+
+#[tokio::test]
+async fn an_answer_for_a_launch_whose_gate_failed_meanwhile_never_leaves() {
+    let fixture = fixture();
+    let (calls, mut brain) = mpsc::channel(1);
+    let context = calling(&fixture, calls);
+    let gate = context.gate.clone();
+    let (ours, theirs) = tokio::io::duplex(1 << 20);
+    let (lines, input) = mpsc::channel(16);
+    let (_stdin, stdin_end) = tokio::sync::watch::channel(false);
+    let (out, mut written) = mpsc::channel::<Vec<u8>>(16);
+    let drive = async move {
+        let line = br#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"probe","arguments":{}}}"#;
+        lines
+            .send(crate::bridge::Input::Line(
+                crate::bridge::stdio::Line::Text(line.to_vec()),
+            ))
+            .await
+            .expect("relayed");
+        let call = brain.recv().await.expect("admitted while the gate passed");
+        gate.fail();
+        let probed = McpReply {
+            text: "probed".to_owned(),
+            error: false,
+        };
+        call.reply.send(probed).expect("waiting");
+        let answer: Value =
+            serde_json::from_slice(&written.recv().await.expect("a line")).expect("json");
+        assert_eq!(
+            answer,
+            json!({"jsonrpc":"2.0","id":1,"result":text_result(ENDED_TEXT)})
+        );
+        lines
+            .send(crate::bridge::Input::End)
+            .await
+            .expect("relayed");
+    };
+    let (end, relayed, ()) = tokio::join!(
+        session(ours, LAUNCH, &context),
+        crate::bridge::relay(theirs, input, stdin_end, out),
+        drive
+    );
+    assert_eq!(end, SessionEnd::Closed);
+    assert!(matches!(relayed, Ok(())));
+}
+
+/// A success ready before its question's deadline but read after it, with the launch's own
+/// deadline still ahead and its gate still passed, never leaves.
+#[tokio::test]
+async fn a_reply_ready_before_its_questions_deadline_but_read_after_it_never_leaves() {
+    let fixture = fixture();
+    let (calls, mut brain) = mpsc::channel(1);
+    let until = Instant::now() + Duration::from_millis(500);
+    let context = calling_until(&fixture, calls, until);
+    let end = with_session(&context, |mut peer| async move {
+        peer.hello().await;
+        peer.request(&key(1), Method::ToolsCall, &call("probe"))
+            .await;
+        let call = brain.recv().await.expect("admitted before the deadline");
+        let probed = McpReply {
+            text: "probed".to_owned(),
+            error: false,
+        };
+        call.reply.send(probed).expect("waiting");
+        // Blocks the only thread, so the session reads the answer after the deadline.
+        std::thread::sleep(until.saturating_duration_since(Instant::now()));
+        assert_eq!(peer.reply().await, (key(1), text_result(ENDED_TEXT), false));
+    })
+    .await;
+    assert_eq!(end, SessionEnd::Closed);
+}
+
+/// A reply whose write is still blocked at its question's deadline ends the session there, long
+/// before the launch's own deadline, with its frame unfinished.
+#[tokio::test]
+async fn a_reply_write_blocked_past_its_questions_deadline_closes_the_session_unfinished() {
+    let fixture = fixture();
+    let (calls, mut brain) = mpsc::channel(1);
+    let until = Instant::now() + Duration::from_millis(500);
+    let context = calling_until(&fixture, calls, until);
+    let (ours, theirs) = tokio::io::duplex(1024);
+    let drive = async move {
+        let mut peer = Peer(theirs);
+        peer.hello().await;
+        peer.request(&key(1), Method::ToolsCall, &call("probe"))
+            .await;
+        let call = brain.recv().await.expect("admitted");
+        let long = McpReply {
+            text: "w".repeat(4096),
+            error: false,
+        };
+        call.reply.send(long).expect("waiting");
+        // The bridge reads nothing more until past the question's deadline.
+        tokio::time::sleep_until(until + Duration::from_millis(200)).await;
+        peer
+    };
+    let (end, mut peer) = tokio::time::timeout(Duration::from_secs(10), async {
+        tokio::join!(session(ours, LAUNCH, &context), drive)
+    })
+    .await
+    .expect("ended by the question's deadline, not the launch's");
+    assert_eq!(end, SessionEnd::Deadline);
+    let mut rest = Vec::new();
+    peer.0.read_to_end(&mut rest).await.expect("read");
+    let read = crate::ipc::read::<ToBridge>(&mut &rest[..], Pipe::Data).await;
+    assert!(read.is_err(), "an unfinished frame: {:?}", read.map(|_| ()));
+}
+
+/// A reply whose one frame is blocked when its launch's gate fails ends the session at once,
+/// woken by the gate alone, from another thread, before the pipe has room again: the frame stays
+/// unfinished.
+#[tokio::test]
+async fn a_gate_that_fails_while_a_frame_is_blocked_closes_the_session_on_it_unfinished() {
+    let fixture = fixture();
+    let (calls, mut brain) = mpsc::channel(1);
+    let context = calling(&fixture, calls);
+    let gate = context.gate.clone();
+    let (ours, theirs) = tokio::io::duplex(1024);
+    let drive = async move {
+        let mut peer = Peer(theirs);
+        peer.hello().await;
+        peer.request(&key(1), Method::ToolsCall, &call("probe"))
+            .await;
+        let call = brain.recv().await.expect("admitted");
+        let long = McpReply {
+            text: "w".repeat(4096),
+            error: false,
+        };
+        call.reply.send(long).expect("waiting");
+        // The frame fills the pipe and blocks; nothing is read until the session has ended.
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(100));
+            gate.fail();
+        });
+        peer
+    };
+    let started = Instant::now();
+    let (end, mut peer) = tokio::time::timeout(Duration::from_secs(10), async {
+        tokio::join!(session(ours, LAUNCH, &context), drive)
+    })
+    .await
+    .expect("ended by the gate, not the launch's deadline");
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "woken by the gate, not by the test's own timeout"
+    );
+    assert_eq!(end, SessionEnd::Withheld);
+    let mut rest = Vec::new();
+    peer.0.read_to_end(&mut rest).await.expect("read");
+    let read = crate::ipc::read::<ToBridge>(&mut &rest[..], Pipe::Data).await;
+    assert!(read.is_err(), "an unfinished frame: {:?}", read.map(|_| ()));
+}
+
+/// A call still waiting for its answer ends once its launch's gate fails, long before its
+/// deadline, and the model reads that it ended.
+#[tokio::test]
+async fn a_call_waiting_for_its_answer_ends_when_its_gate_fails() {
+    let fixture = fixture();
+    let (calls, mut brain) = mpsc::channel(1);
+    let context = calling(&fixture, calls);
+    let gate = context.gate.clone();
+    let session = with_session(&context, |mut peer| async move {
+        peer.hello().await;
+        peer.request(&key(1), Method::ToolsCall, &call("probe"))
+            .await;
+        let _unanswered = brain.recv().await.expect("admitted");
+        gate.fail();
+        assert_eq!(peer.reply().await, (key(1), text_result(ENDED_TEXT), false));
+    });
+    let end = tokio::time::timeout(Duration::from_secs(10), session)
+        .await
+        .expect("ended by the gate, not the deadline");
+    assert_eq!(end, SessionEnd::Closed);
+}
+
+fn probed(chunk: Vec<u8>) -> ToBridge {
+    ToBridge::Reply {
+        key: key(1),
+        chunk,
+        last: true,
+        error: false,
+    }
+}
+
+/// A pipe that takes everything, but only once `.0` has elapsed.
+struct ReadyAt(Pin<Box<tokio::time::Sleep>>, Vec<u8>);
+
+impl AsyncWrite for ReadyAt {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        let this = self.get_mut();
+        ready!(this.0.as_mut().poll(cx));
+        this.1.extend_from_slice(buf);
+        Poll::Ready(Ok(buf.len()))
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, _: &mut std::task::Context<'_>) -> Poll<io::Result<()>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, _: &mut std::task::Context<'_>) -> Poll<io::Result<()>> {
+        Poll::Ready(Ok(()))
+    }
+}
+
+/// A pipe that turns writable at the frame's deadline loses to it and takes nothing.
+#[tokio::test]
+async fn a_pipe_that_turns_writable_at_the_deadline_takes_nothing() {
+    let at = Instant::now() + Duration::from_millis(200);
+    let mut pipe = ReadyAt(Box::pin(tokio::time::sleep_until(at)), Vec::new());
+    let gate = AuditGate::new();
+    gate.pass();
+    let sent = send(&mut pipe, &probed(b"{}".to_vec()), at, Some(&gate)).await;
+    assert_eq!(sent, Err(SessionEnd::Deadline));
+    assert_eq!(pipe.1, Vec::<u8>::new());
+}
+
+/// A pipe that takes at most 16 bytes a write and fails `.0` after its first write.
+struct Trickle(AuditGate, Vec<u8>);
+
+impl AsyncWrite for Trickle {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        _: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        let this = self.get_mut();
+        let taken = buf.len().min(16);
+        this.1.extend_from_slice(&buf[..taken]);
+        this.0.fail();
+        Poll::Ready(Ok(taken))
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, _: &mut std::task::Context<'_>) -> Poll<io::Result<()>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, _: &mut std::task::Context<'_>) -> Poll<io::Result<()>> {
+        Poll::Ready(Ok(()))
+    }
+}
+
+/// Every write of a frame checks the gate first, so one that fails between two writes of the
+/// same frame stops it there, inside a single poll.
+#[tokio::test]
+async fn each_write_of_a_frame_checks_the_gate_first() {
+    let gate = AuditGate::new();
+    gate.pass();
+    let mut pipe = Trickle(gate.clone(), Vec::new());
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let sent = send(&mut pipe, &probed(vec![b'w'; 256]), deadline, Some(&gate)).await;
+    assert_eq!(sent, Err(SessionEnd::Withheld));
+    assert_eq!(pipe.1.len(), 16, "one write, and none after the failure");
 }

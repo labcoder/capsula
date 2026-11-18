@@ -190,7 +190,12 @@ impl Coordinator {
             self.refused_delete = true;
             return;
         }
-        if let Some(current) = self.current.take_if(|current| current.thread == thread) {
+        if self
+            .current
+            .as_ref()
+            .is_some_and(|current| current.thread == thread)
+            && let Some(current) = self.detach()
+        {
             let deleted = RunEnd::Interrupted(Interruption::Deleted);
             self.end(current, deleted, None, Notify::Shell, effects);
         }
@@ -201,6 +206,7 @@ impl Coordinator {
             held,
         });
         self.expose(thread);
+        self.fence_mcp(effects);
         if !held {
             effects.push(Effect::Store(StoreOp::Delete { thread }));
         }

@@ -350,40 +350,84 @@ const PENDING: u8 = 0;
 const PASSED: u8 = 1;
 const FAILED: u8 = 2;
 
-/// Whether this launch may admit a `tools/call`: C5b writes it, C4b's listener reads it.
-/// It starts pending; failure is terminal, so a pass that races a failure loses.
+/// Whether this launch may admit a `tools/call`: C5b writes it, C4b's listener reads it, and the
+/// core fails it when it revokes the launch's binding. It starts pending; failure is terminal, so
+/// a pass that races a failure loses.
 #[derive(Clone)]
-pub(crate) struct AuditGate(Arc<AtomicU8>);
+pub(crate) struct AuditGate(Arc<Shared>);
+
+struct Shared {
+    state: AtomicU8,
+    /// Woken once the gate fails, for the waits that must end on it.
+    failed: tokio::sync::Notify,
+}
+
+/// A gate's state, from one read.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Standing {
+    /// The post-seed audit hasn't passed yet.
+    Pending,
+    Passed,
+    /// Failed or revoked, for good.
+    Failed,
+}
 
 impl AuditGate {
     pub(crate) fn new() -> Self {
-        Self(Arc::new(AtomicU8::new(PENDING)))
+        Self(Arc::new(Shared {
+            state: AtomicU8::new(PENDING),
+            failed: tokio::sync::Notify::new(),
+        }))
     }
 
     /// Only after this launch's post-seed audit passed; nothing once failed.
     pub(crate) fn pass(&self) {
         self.0
+            .state
             .compare_exchange(PENDING, PASSED, Ordering::AcqRel, Ordering::Acquire)
             .unwrap_or_default();
     }
 
     /// Failure or revocation, from any state. A tool already admitted isn't undone; a call still
-    /// waiting for admission is refused.
+    /// waiting for admission is refused, and every wait on [`Self::failed`] wakes.
     pub(crate) fn fail(&self) {
-        self.0.store(FAILED, Ordering::Release);
+        self.0.state.store(FAILED, Ordering::Release);
+        self.0.failed.notify_waiters();
+    }
+
+    pub(crate) fn standing(&self) -> Standing {
+        match self.0.state.load(Ordering::Acquire) {
+            PENDING => Standing::Pending,
+            PASSED => Standing::Passed,
+            _ => Standing::Failed,
+        }
     }
 
     pub(crate) fn may_call(&self) -> bool {
-        self.0.load(Ordering::Acquire) == PASSED
+        self.standing() == Standing::Passed
+    }
+
+    /// Resolves once the gate has failed, at once when it already has. The wait registers
+    /// before it reads the state, so a failure between the two still wakes it.
+    pub(crate) async fn failed(&self) {
+        loop {
+            let failed = self.0.failed.notified();
+            tokio::pin!(failed);
+            failed.as_mut().enable();
+            if self.standing() == Standing::Failed {
+                return;
+            }
+            failed.await;
+        }
     }
 }
 
 impl fmt::Debug for AuditGate {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let state = match self.0.load(Ordering::Acquire) {
-            PENDING => "Pending",
-            PASSED => "Passed",
-            _ => "Failed",
+        let state = match self.standing() {
+            Standing::Pending => "Pending",
+            Standing::Passed => "Passed",
+            Standing::Failed => "Failed",
         };
         f.debug_tuple("AuditGate").field(&state).finish()
     }

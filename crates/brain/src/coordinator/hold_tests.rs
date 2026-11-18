@@ -1496,3 +1496,29 @@ fn turning_screen_holds_off_before_any_send_is_granted_records_the_turn_withdraw
         [R]
     );
 }
+
+/// A `SetModel` that cancels a held run fails its bound launch's gate in that same transition.
+#[test]
+fn a_set_model_that_cancels_a_held_run_fails_its_launchs_gate_at_once() {
+    let mut core = fresh();
+    let snapshot = prepared(&core, Some(T));
+    core.submit_hold(snapshot, "words".into(), None).unwrap();
+    core.handle(Input::TurnStored { run: R }).unwrap();
+    core.handle(built(R, 1, &[T])).unwrap();
+    let gate = crate::engines::claude_code::audit::AuditGate::new();
+    gate.pass();
+    let bind = crate::engines::claude_code::launch::Bind {
+        build: engine_key(&core, R),
+        launch: crate::bridge::LaunchId(1),
+        offer: crate::engines::claude_code::launch::Offer::Mcp(Origin::Task(T), Vec::new()),
+        until: std::time::Instant::now() + std::time::Duration::from_secs(60),
+        reply: tokio::sync::oneshot::channel().0,
+    };
+    assert!(core.mcp_bound(&bind, T, gate.clone()).is_some());
+    core.handle(Input::ThreadOp(ThreadOp::SetModel {
+        thread: T,
+        choice: choice("away", Effort::High),
+    }))
+    .unwrap();
+    assert!(!gate.may_call());
+}

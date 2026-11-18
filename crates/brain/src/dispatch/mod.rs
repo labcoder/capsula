@@ -5,14 +5,6 @@
 //! reach or ledger. Everything here is pure: the store applies a call's one write, and the
 //! coordinator answers it on the acknowledgement.
 
-#![cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "slice 3's 13b-2 tool loop and slice 8's C4b-2 hand calls to Coordinator::tool_call"
-    )
-)]
-
 mod create_task;
 mod draft_issue;
 mod draw;
@@ -36,7 +28,7 @@ use crate::engines::{CallId, ToolName};
 
 pub(crate) use draw::{record as validate_draw_record, validate as validate_draw};
 pub use history::{ReadCall, ReadFinished};
-pub(crate) use ledger::{Drawn, Ledger};
+pub(crate) use ledger::{DrawEnd, Drawn, Ledger};
 
 /// The most bytes a call's complete arguments may hold [guess].
 pub(crate) const MAX_ARGS: usize = 16 * 1024;
@@ -160,7 +152,7 @@ pub enum ToolError {
 
 impl ToolError {
     /// What the model reads.
-    fn text(self) -> &'static str {
+    pub(crate) fn text(self) -> &'static str {
         match self {
             Self::Unknown => "unknown tool",
             Self::NotHere => "not available here",
@@ -610,10 +602,19 @@ pub(crate) fn call<'a>(
             return draw::stream(run.ledger, caller, action);
         }
     };
-    if let Caller::Mcp { launch, .. } = &caller
-        && run.mcp != Some(*launch)
-    {
-        return Step::Answer(ToolOutput::Error(ToolError::NotHere));
+    if let Caller::Mcp { launch, .. } = &caller {
+        if run.mcp != Some(*launch) {
+            return Step::Answer(ToolOutput::Error(ToolError::NotHere));
+        }
+        // Current authority decides before the ledger sees any key from this launch.
+        if let Err(error) = run.control.check() {
+            return Step::Answer(ToolOutput::Error(error.into()));
+        }
+        if run.ledger.has(&caller.key())
+            && let Err(error) = permitted(run, &caller, name)
+        {
+            return Step::Answer(ToolOutput::Error(error));
+        }
     }
     let key = caller.key();
     if let Some(step) = run.ledger.retry(&key, caller.clone(), name, args) {
@@ -694,7 +695,7 @@ fn permitted(
     let tool = tool(name).ok_or(ToolError::Unknown)?;
     let offered = match caller {
         Caller::Model { .. } => run.offered.contains(&name),
-        Caller::Mcp { .. } => tool.mcp,
+        Caller::Mcp { .. } => tool.mcp && run.offered.contains(&name),
     };
     if !offered || (tool.kumo_only && run.reach != Origin::Kumo) {
         return Err(ToolError::NotHere);

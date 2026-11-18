@@ -1,7 +1,7 @@
 //! A run's ledger: one entry per logical call, so a retry is answered, joined or refused and
 //! never runs twice.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 
 use super::{Caller, LedgerKey, ReadCall, Route, Step, ToolError, ToolOutput, rehash};
@@ -13,6 +13,8 @@ use crate::recall::control::CancelOnDrop;
 #[derive(Default)]
 pub(crate) struct Ledger {
     entries: HashMap<(Route, Box<str>), Entry>,
+    /// Draw calls that stopped early, so every answer to one, replays included, is an error.
+    stopped: HashSet<(Route, Box<str>)>,
 }
 
 enum Entry {
@@ -52,6 +54,22 @@ pub(crate) enum Drawn {
     Refused(Vec<(Caller, ToolOutput)>),
     Commit([u8; 32]),
     Stale,
+}
+
+/// A draw call's result and whether it stopped early.
+pub(crate) struct DrawEnd {
+    pub(crate) output: ToolOutput,
+    pub(crate) stopped: bool,
+}
+
+/// A refusal before anything was drawn: its output already says it's an error.
+impl From<ToolOutput> for DrawEnd {
+    fn from(output: ToolOutput) -> Self {
+        Self {
+            output,
+            stopped: false,
+        }
+    }
 }
 
 impl Ledger {
@@ -103,6 +121,24 @@ impl Ledger {
                 Step::Join
             }
         })
+    }
+
+    /// Whether `key` has an entry: a call the run has seen, whatever became of it.
+    pub(crate) fn has(&self, key: &LedgerKey) -> bool {
+        self.entries.contains_key(&(key.route, key.call.clone()))
+    }
+
+    /// Whether `key` is a draw the drawing may still be running.
+    pub(crate) fn drawing(&self, key: &LedgerKey) -> bool {
+        matches!(
+            self.entries.get(&(key.route, key.call.clone())),
+            Some(Entry::Reserved { .. } | Entry::Drawing { .. })
+        )
+    }
+
+    /// Whether `key` is a draw call that stopped early.
+    pub(crate) fn stopped(&self, key: &LedgerKey) -> bool {
+        self.stopped.contains(&(key.route, key.call.clone()))
     }
 
     pub(crate) fn refuse(&mut self, key: &LedgerKey, error: ToolError) {
@@ -179,9 +215,14 @@ impl Ledger {
         }
     }
 
-    pub(crate) fn drawn(&mut self, key: &LedgerKey, output: ToolOutput) -> Drawn {
+    pub(crate) fn drawn(&mut self, key: &LedgerKey, end: DrawEnd) -> Drawn {
+        let DrawEnd { output, stopped } = end;
         let id = (key.route, key.call.clone());
-        match self.entries.remove(&id) {
+        let entry = self.entries.remove(&id);
+        if stopped && matches!(entry, Some(Entry::Reserved { .. } | Entry::Drawing { .. })) {
+            self.stopped.insert(id.clone());
+        }
+        match entry {
             Some(Entry::Reserved { waiting }) => {
                 let answers = waiting
                     .into_iter()
@@ -353,6 +394,7 @@ impl fmt::Debug for Ledger {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Ledger")
             .field("entries", &self.entries.len())
+            .field("stopped", &self.stopped.len())
             .finish()
     }
 }

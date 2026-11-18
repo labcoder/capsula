@@ -169,6 +169,7 @@ impl Coordinator {
                 if current.acked < current.steps || drawing_pending =>
             {
                 current.finishing = true;
+                self.fence_mcp(effects);
             }
             TurnEvent::Finished(Finish::Completed) => self.round_end(run, effects)?,
             // Only the coordinator interrupts a run, so an engine's interruption fails it too.

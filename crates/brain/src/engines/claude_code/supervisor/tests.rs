@@ -140,6 +140,7 @@ pub(crate) fn question(lifetime: Duration) -> Question {
         effort: None,
         tools: Vec::new(),
         lifetime,
+        calls: None,
     }
 }
 

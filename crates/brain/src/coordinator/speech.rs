@@ -52,8 +52,9 @@ impl fmt::Debug for Synthesized {
 impl Coordinator {
     /// The run ends `Done` once its speech is final; until then it drains.
     pub(super) fn complete(&mut self, run: RunId, effects: &mut Vec<Effect>) -> Result<(), Stale> {
+        self.current(run)?.finishing = true;
+        self.fence_mcp(effects);
         let current = self.current(run)?;
-        current.finishing = true;
         if let Some(reply) = &mut current.reply {
             let mut out = Vec::new();
             reply.close(&mut out);

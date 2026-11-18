@@ -24,7 +24,7 @@ use super::audit::AuditGate;
 use super::lane::{Failure, Folders, Host, PIPE_GRACE, POLL, Program};
 use super::policy::{self, EntryPoint, OwnedFolders};
 use crate::bridge::LaunchId;
-use crate::bridge::listener::{Binding, LaunchContext, Listener};
+use crate::bridge::listener::{Binding, LaunchContext, Listener, McpCall};
 use crate::context::ToolSchema;
 use crate::engines::SendLease;
 use crate::platform::{self, Job, Stdio};
@@ -64,6 +64,8 @@ pub(crate) struct Question {
     pub(crate) tools: Vec<ToolSchema>,
     /// How long it may live from admission; at most [`MAX_LAUNCH`].
     pub(crate) lifetime: Duration,
+    /// Where its listener hands admitted calls.
+    pub(crate) calls: Option<mpsc::Sender<McpCall>>,
 }
 
 /// What the round sends on stdin.
@@ -293,9 +295,13 @@ impl Control {
     }
 
     /// Whether the listener would admit a call by the gate.
-    #[cfg(test)]
     pub(crate) fn may_call(&self) -> bool {
         self.gate.may_call()
+    }
+
+    /// The launch's gate, which its revocation and its teardown fail.
+    pub(crate) fn gate(&self) -> &AuditGate {
+        &self.gate
     }
 
     /// The instant a chunk is admitted, or false once revoked.
@@ -719,6 +725,7 @@ fn begin(
         tools: question.tools,
         gate: control.gate.clone(),
         binding,
+        calls: question.calls,
     };
     running.listener = Some(serve(listener, context, &host.runtime));
     let spawned = platform::spawn(&platform::Launch {
@@ -849,6 +856,7 @@ struct Context {
     tools: Vec<ToolSchema>,
     gate: AuditGate,
     binding: Binding,
+    calls: Option<mpsc::Sender<McpCall>>,
 }
 
 /// Serves `listener` on `runtime` until its session ends or it's aborted; the receiver hears
@@ -869,6 +877,7 @@ fn serve(
                 tools: &context.tools,
                 gate: context.gate,
                 binding: context.binding,
+                calls: context.calls,
             })
             .await;
     });
