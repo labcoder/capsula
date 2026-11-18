@@ -1,0 +1,6 @@
+Package: svg_fmt 0.4.5
+Source repository: https://github.com/nical/rust_debug
+Revision: 93f414cd572b5c2781df93dbdc068ed13443d05a
+License source: https://raw.githubusercontent.com/nical/rust_debug/93f414cd572b5c2781df93dbdc068ed13443d05a/LICENSE
+License SHA-256: 7e98bed7f100747aaae7d82ab94fbe6b76fd6b84b09a3aaa413bff8196d0fbb1
+The published crate omits this upstream license file; the text is retained unchanged.

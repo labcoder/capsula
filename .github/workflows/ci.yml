@@ -74,6 +74,7 @@ jobs:
       - run: cargo deny --locked check
         if: steps.dependencies.outputs.changed == 'True'
       - run: cargo xtask check-vendor
+      - run: cargo xtask notices --check
       - run: cargo xtask check-core
       - run: cargo xtask check-shipped
       - run: cargo clippy -p kumochi-shell-core --lib --locked -- -D warnings
