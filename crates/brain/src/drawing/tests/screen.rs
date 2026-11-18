@@ -932,8 +932,10 @@ pub(crate) fn overlay_then_screen() -> (crate::drawing::Digest, crate::drawing::
 fn a_thread_with_only_overlay_scenes_has_one_line_for_every_route() {
     let (overlay, _) = overlay_then_screen();
     let line = r#"[{"begin":{"alt":"overlay_alt_kept","others":"keep","scene":"overlay_scene_kept","size":null,"surface":"overlay","title":null,"v":1},"objects":[["overlay_object_kept","text"]]}]"#;
-    assert_eq!(overlay.as_str(), line);
-    assert_eq!(overlay.off_screen(), line);
+    assert_eq!(overlay.off_screen(), overlay.as_str());
+    let parsed: Value = serde_json::from_str(overlay.as_str()).expect("a JSON line");
+    let expected: Value = serde_json::from_str(line).expect("a JSON line");
+    assert_eq!(parsed, expected);
 }
 
 #[test]

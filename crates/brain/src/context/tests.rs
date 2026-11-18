@@ -2415,7 +2415,13 @@ fn a_route_without_screen_pictures_is_sent_no_screen_scene() {
         } else {
             format!("[{OVERLAY}]")
         };
-        assert_eq!(drawing_line(&built), line, "{connection:?}");
+        // Header key order follows the build's serde_json features, so compare values.
+        let parsed: Value = serde_json::from_str(drawing_line(&built)).expect("a JSON line");
+        let expected: Value = serde_json::from_str(&line).expect("a JSON line");
+        assert_eq!(parsed, expected, "{connection:?}");
+        if screens {
+            assert_eq!(drawing_line(&built), drawings.as_str());
+        }
         for marker in SCREEN {
             assert_eq!(sent.contains(marker), screens, "{connection:?} {marker}");
         }
