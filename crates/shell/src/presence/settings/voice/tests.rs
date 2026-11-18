@@ -716,11 +716,13 @@ fn reload_enter_refusal_and_captured_intents_stay_fenced_before_the_recording_se
         cx,
     );
     frame.update(|_, cx| assert!(view.read(cx).model.read(cx).speech_input_pending()));
+    let mut off = saved.clone();
+    off.hold_to_talk = false;
     deliver(
         &owner,
         vec![LinkEvent::Settings {
             generation: 7,
-            view: saved.clone(),
+            view: off,
             answer: true,
         }],
         cx,
@@ -737,6 +739,18 @@ fn reload_enter_refusal_and_captured_intents_stay_fenced_before_the_recording_se
             "Hold to talk is off. Turn it on in Settings → Voice."
         );
     });
+    deliver(
+        &owner,
+        vec![LinkEvent::Settings {
+            generation: 7,
+            view: saved.clone(),
+            answer: false,
+        }],
+        cx,
+    );
+    frame.run_until_parked();
+    frame.update(|window, cx| window.draw(cx).clear(cx));
+    assert!(frame.debug_bounds("speech-model-refused").is_none());
     for (installed, status) in [
         (false, Text::VoiceNotInstalledFailed),
         (true, Text::VoiceInstalledFailed),
