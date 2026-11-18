@@ -67,6 +67,13 @@ impl KeyWriteJob {
         self.run_with(Instant::now(), write_key_stage)
     }
 
+    /// Completes a staged write in shell tests without calling the credential store.
+    #[cfg(feature = "test-support")]
+    pub fn simulate_write(self, now: Instant) -> KeyWriteResult {
+        let plan = self.plan;
+        self.run_with(now, |_, _| Ok(plan))
+    }
+
     fn run_with(
         self,
         now: Instant,
