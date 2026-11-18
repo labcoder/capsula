@@ -105,6 +105,12 @@ only then do `SceneBegin` and `SceneStepCommit` leave on the scene-owned data FI
 step write leaves no handles, revision or reserved scene name behind. Call outcomes contain
 model-visible ids and fixed error codes, never diagnostic drawing content.
 
+A wire scene name is reserved only within its thread and typed surface, including after clear.
+A live name can continue only a scene on that surface and only with a matching header. First-step
+admission checks the same namespace before allocating a durable scene ID. Overlay calls don't
+learn screen-scene names through these lookups. Clear, replacement, recovery and presentation
+still use the durable IDs; the thread-wide replacement and global visibility policies are unchanged.
+
 Provider completion drains the accepted drawing prefix before ending its run. Stop closes
 queued records but still drains an accepted step transaction before acknowledging its cut.
 An empty Stop received before the first scene id arrives cuts that run's unseen, unactivated

@@ -3,7 +3,8 @@ use std::{error::Error as _, sync::Arc};
 use kumochi_protocol::message::{MAX_SCENE_LOG_ENTRIES, RunId, SceneHeader, SceneId, ThreadId};
 use kumochi_scene::{
     Admission, GlobalBudget, Handle, Op, SceneEvent, SceneState, Step, StopCut, WireId,
-    record::Point, text::Bounded,
+    record::{Point, Surface},
+    text::Bounded,
 };
 use rusqlite::params;
 
@@ -255,6 +256,7 @@ fn a_selected_clear_failure_rolls_back_the_entire_replacement_transaction() {
         store
             .drawing_write(&Write::Lookup {
                 thread: ids.0,
+                surface: Surface::Overlay,
                 name: "new".to_owned().try_into().expect("id")
             })
             .expect("lookup"),
@@ -412,6 +414,109 @@ fn drawing_content_never_reaches_search_or_page_text() {
 }
 
 #[test]
+fn first_writes_and_recovery_keep_same_names_on_distinct_surfaces() {
+    for first_surface in [Surface::Overlay, Surface::Screen] {
+        let scratch = Scratch::new("typed-names-reopen");
+        let mut store = Store::open(&scratch.db()).expect("store");
+        let ids = begin(&mut store);
+        let mut overlay = header("shared");
+        overlay.begin.others = kumochi_scene::Others::Keep;
+        let mut screen = overlay.clone();
+        screen.begin.surface = Surface::Screen;
+        let ordered = if first_surface == Surface::Overlay {
+            [&overlay, &screen]
+        } else {
+            [&screen, &overlay]
+        };
+        let first_writes = ordered.map(|header| {
+            let Reply::Step(scene) = write(
+                &mut store,
+                ids,
+                Target::New(header.clone()),
+                1,
+                step("first"),
+            )
+            .expect("each surface has its own first write") else {
+                panic!("step reply");
+            };
+            (scene, header.begin.surface)
+        });
+        assert_ne!(first_writes[0].0, first_writes[1].0);
+        drop(store);
+
+        let mut store = Store::open(&scratch.db()).expect("reopen");
+        let recovered = store.drawing_scenes().expect("both stored logs");
+        assert_eq!(
+            recovered
+                .scenes
+                .iter()
+                .map(|scene| (scene.scene, scene.header.begin.surface))
+                .collect::<Vec<_>>(),
+            first_writes
+        );
+        let (overlay_id, screen_id) = if first_surface == Surface::Overlay {
+            (first_writes[0].0, first_writes[1].0)
+        } else {
+            (first_writes[1].0, first_writes[0].0)
+        };
+        let (drawing, skipped) = crate::drawing::Drawing::recover(recovered.scenes);
+        assert_eq!(
+            skipped,
+            [screen_id],
+            "only the screen scene lacks a picture to replay"
+        );
+        assert_eq!(
+            drawing
+                .snapshot()
+                .scenes
+                .iter()
+                .map(|scene| scene.scene)
+                .collect::<Vec<_>>(),
+            [overlay_id]
+        );
+
+        for (header, scene) in [(&overlay, overlay_id), (&screen, screen_id)] {
+            let lookup = Write::Lookup {
+                thread: ids.0,
+                surface: header.begin.surface,
+                name: header.begin.scene.clone(),
+            };
+            assert_eq!(
+                store.drawing_write(&lookup).expect("live name"),
+                Reply::Lookup(Some(scene))
+            );
+            assert_eq!(
+                write(
+                    &mut store,
+                    ids,
+                    Target::Existing(scene),
+                    2,
+                    step("continued")
+                )
+                .expect("continuation"),
+                Reply::Step(scene)
+            );
+            store.clear_scenes(&[scene]).expect("clear");
+            assert_eq!(
+                store.drawing_write(&lookup).expect("cleared name"),
+                Reply::Lookup(Some(scene))
+            );
+            drawing_error(write(
+                &mut store,
+                ids,
+                Target::New(header.clone()),
+                1,
+                step("new"),
+            ));
+        }
+        assert_eq!(
+            store.drawing_scenes().expect("cleared"),
+            DrawingRecovery::default()
+        );
+    }
+}
+
+#[test]
 fn cleared_names_survive_reopen_but_are_not_recovered_or_reused() {
     let scratch = Scratch::new("typed-tombstone");
     let mut store = Store::open(&scratch.db()).expect("store");
@@ -424,6 +529,7 @@ fn cleared_names_survive_reopen_but_are_not_recovered_or_reused() {
         store
             .drawing_write(&Write::Lookup {
                 thread: ids.0,
+                surface: Surface::Overlay,
                 name: WireId::try_from("used".to_owned()).expect("name")
             })
             .expect("lookup"),
@@ -499,6 +605,7 @@ fn thread_and_run_membership_are_guarded() {
     assert!(matches!(
         store.drawing_write(&Write::Lookup {
             thread: ids.0,
+            surface: Surface::Overlay,
             name: header("scene").begin.scene
         }),
         Err(StoreError::NoThread)
@@ -842,6 +949,7 @@ fn zero_cut_survives_crash_before_clear_without_crowding_out_the_fourth_scene() 
         store
             .drawing_write(&Write::Lookup {
                 thread: ids.0,
+                surface: Surface::Overlay,
                 name: header("terminal").begin.scene
             })
             .expect("name tombstone"),

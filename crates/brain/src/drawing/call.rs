@@ -619,12 +619,15 @@ impl Drawing {
         call.guard.accept(record, header)
     }
 
-    /// A call's `begin`: a scene this thread holds continues with a typed-equal header; any
-    /// other name is new only if the store never began it, cleared or not.
+    /// A call's `begin`: a held scene with this name on this surface continues with a typed-equal
+    /// header; any other name is new only if the store never began it on that surface.
     fn begin(&mut self, at: usize, begin: Begin, out: &mut Output) -> Result<(), StepError> {
         let (run, thread) = (self.calls[at].run, self.calls[at].thread);
         let named = self.scenes.iter().find(|held| {
-            !held.gone && held.thread == thread && held.state.header().scene == begin.scene
+            !held.gone
+                && held.thread == thread
+                && held.state.header().surface == begin.surface
+                && held.state.header().scene == begin.scene
         });
         if let Some(held) = named {
             let call = &mut self.calls[at];
@@ -634,16 +637,25 @@ impl Drawing {
             return Ok(());
         }
         let name = begin.scene.clone();
+        let surface = begin.surface;
         let wait = Wait::Lookup {
             run,
             call: self.calls[at].id.clone(),
             begin: Box::new(begin),
         };
-        self.write(wait, Write::Lookup { thread, name }, out);
+        self.write(
+            wait,
+            Write::Lookup {
+                thread,
+                surface,
+                name,
+            },
+            out,
+        );
         Ok(())
     }
 
-    /// The store said whether the call's new scene name was ever used in its thread.
+    /// The store said whether the new name was ever used on this thread and surface.
     pub(super) fn looked_up(
         &mut self,
         run: RunId,
@@ -789,9 +801,8 @@ impl Drawing {
         }
     }
 
-    /// A new scene was stored. The thread's other calls that began its name while it wasn't
-    /// stored yet continue it, as a later call would, or are refused if their header differs,
-    /// so a name is never begun twice.
+    /// A new scene was stored. The thread's other calls that began its name on the same surface
+    /// continue it, as a later call would, or are refused if their header differs.
     pub(super) fn began(&mut self, thread: ThreadId, scene: SceneId, out: &mut Output) {
         let Some(header) = self
             .live(scene)
@@ -805,7 +816,10 @@ impl Drawing {
                 let Bound::New(state) = &call.scene else {
                     return false;
                 };
-                !call.done && call.thread == thread && state.header().scene == header.scene
+                !call.done
+                    && call.thread == thread
+                    && state.header().surface == header.surface
+                    && state.header().scene == header.scene
             })
             .collect();
         for at in rivals {
