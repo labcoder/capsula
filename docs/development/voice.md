@@ -593,9 +593,9 @@ that report. Offline/drained key-downs are also dropped and never replayed on re
 already started while connected may finish offline; failure to queue its Voice notification ends
 the connection without rolling back the load or retrying it.
 
-This is backend reload only: the production shell key-down sender, hold/run admission,
-microphone owner, capture and transcription flow remain unavailable. It does not enable
-recording, allocate a run or turn, change voice-off behavior or affect SpokenReplies.
+Key-down can warm the model for a later recognized hold; it doesn't open the
+microphone or create a turn. Hold admission still waits for a ready model before
+the production capture and transcription flow can start.
 
 Both owners, speech input's and spoken replies', take `load(models, ask)` and `unload(ask)`, where
 the ask is the caller's own counter, and send one `LoadReport { ask, event }` per outcome:
@@ -849,18 +849,29 @@ for one maximum packet plus both kernel wings (at most 4,246 f32 elements,
 16,984 bytes for 192→16 kHz); legal packets and final padding do not reallocate it.
 The shared 2,049-element f64 kernel table adds 16,392 bytes, not per utterance.
 
-Failure/drop zeroizes owned accumulator/scratch capacity and the reserved history
-allocation. Successful transfer moves normalized PCM intact and zeroizes the
-remaining scratch/history. This does not erase incoming frames,
-allocator/OS copies, buffers transferred to other owners or native inference state.
+After valid Last, the exact KeyUp count and matching microphone stop (or zero
+chunks and its stop), a peak magnitude of at most 103 in the original i16 samples
+ends the hold as Empty before STT. A magnitude of 104 on either sign is audible.
+An incomplete hold remains incomplete. Empty closes pending capture and discards
+any ready image without creating a turn or sending a provider request.
+
+Quiet completion and failure/drop zeroize the owned accumulator, scratch and
+resampler history. Successful transfer moves normalized PCM intact and zeroizes
+the remaining scratch/history. The brain's serialized IPC receive buffer is a
+separate copy and isn't wiped. This also doesn't erase allocator/OS copies,
+buffers transferred to other owners or native inference state.
 These payload figures are not the full peak: ingress/link queues, transport,
 metadata and allocator overhead also count. Scheduling moves the normalized
 vector to STT; cancelling its receiver fences the result, not audio already owned
 by an in-flight decode. STT's serialization/worker copies and native inference
 allocations remain part of the unmeasured end-to-end peak.
 
-Held decode admission reuses the STT owner's current ready load and busy tracking,
-resetting its existing idle clock. The shortest 15-minute idle interval exceeds
+Held decode admission reuses the STT owner's current ready load and resets its
+idle clock. A live result receiver or an occupied waiting slot refuses new holds.
+A cancelled hold's decode can keep running while a fresh hold progresses: the
+owner can run at most two physical decodes and hold one waiting request. A closed
+receiver doesn't free a running slot; the owner must join that decode. The
+shortest 15-minute idle interval exceeds
 the bounded hold plus decode; explicit unload, removal and worker loss still
 invalidate that load. PCM transferred to STT is scrubbed when its owned decode
 ends or is refused, including a busy queue. Cancelling the result receiver fences

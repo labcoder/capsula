@@ -5,9 +5,17 @@ use crate::voice::resample::Resampler;
 
 pub(super) const RATE: u32 = 16_000;
 const SAMPLES: usize = 960_000;
+const QUIET_PEAK: u16 = 103;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Signal {
+    Quiet,
+    Audible,
+    Sealed,
+}
 
 pub(super) struct Audio {
-    terminal: bool,
+    signal: Signal,
     rate: Option<u32>,
     next: u32,
     last: bool,
@@ -35,7 +43,7 @@ impl std::fmt::Debug for Audio {
 impl Audio {
     pub(super) fn new() -> Self {
         Self {
-            terminal: false,
+            signal: Signal::Quiet,
             rate: None,
             next: 0,
             last: false,
@@ -49,7 +57,7 @@ impl Audio {
     }
 
     pub(super) fn push(&mut self, chunk: &MicPcm) -> Result<(), HoldFailure> {
-        if self.terminal
+        if self.signal == Signal::Sealed
             || chunk.check().is_err()
             || self.last
             || chunk.seq != self.next
@@ -99,11 +107,19 @@ impl Audio {
             self.seal();
             return Err(HoldFailure::InvalidAudio);
         }
+        if self.signal == Signal::Quiet
+            && chunk
+                .samples
+                .iter()
+                .any(|sample| sample.unsigned_abs() > QUIET_PEAK)
+        {
+            self.signal = Signal::Audible;
+        }
         Ok(())
     }
 
     pub(super) fn end(&mut self, chunks: u32) -> Result<(), HoldFailure> {
-        if self.terminal
+        if self.signal == Signal::Sealed
             || self.ended.is_some()
             || chunks > MAX_HOLD_CHUNKS
             || chunks < self.next
@@ -117,7 +133,7 @@ impl Audio {
     }
 
     pub(super) fn stopped(&mut self) -> Result<(), HoldFailure> {
-        if self.terminal || self.stopped {
+        if self.signal == Signal::Sealed || self.stopped {
             self.seal();
             return Err(HoldFailure::InvalidAudio);
         }
@@ -126,20 +142,24 @@ impl Audio {
     }
 
     pub(super) fn take(&mut self) -> Option<Vec<i16>> {
-        if self.terminal {
+        if self.signal == Signal::Sealed {
             return None;
         }
         let count = self.ended?;
         if !self.stopped || self.next != count || !self.last && count != 0 {
             return None;
         }
-        let samples = std::mem::take(&mut *self.samples);
+        let samples = if self.signal == Signal::Audible {
+            std::mem::take(&mut *self.samples)
+        } else {
+            Vec::new()
+        };
         self.seal();
         Some(samples)
     }
 
     fn seal(&mut self) {
-        self.terminal = true;
+        self.signal = Signal::Sealed;
         self.samples.zeroize();
         self.raw.zeroize();
         self.output.zeroize();
@@ -235,6 +255,35 @@ mod tests {
     }
 
     #[test]
+    fn silence_uses_the_signed_pcm_peak_before_resampling() {
+        for (sample, audible) in [
+            (0, false),
+            (-103, false),
+            (103, false),
+            (-104, true),
+            (104, true),
+            (i16::MIN, true),
+        ] {
+            let mut audio = Audio::new();
+            audio.push(&packet(16_000, 0, true, vec![sample])).unwrap();
+            audio.end(1).unwrap();
+            assert_eq!(audio.take(), None);
+            audio.stopped().unwrap();
+            let expected = if audible { vec![sample] } else { Vec::new() };
+            assert_eq!(audio.take(), Some(expected), "peak sample {sample}");
+            assert_eq!(audio.take(), None);
+        }
+
+        let mut audio = Audio::new();
+        audio.push(&packet(48_000, 0, true, vec![104])).unwrap();
+        audio.end(1).unwrap();
+        audio.stopped().unwrap();
+        let samples = audio.take().unwrap();
+        assert_eq!(samples.len(), 1);
+        assert!(matches!(samples[0], 1..=103));
+    }
+
+    #[test]
     fn malformed_framing_and_repeated_terminals_are_rejected() {
         for fault in 0..8 {
             let mut audio = Audio::new();
@@ -286,13 +335,13 @@ mod tests {
                     16_000,
                     seq,
                     seq + 1 == MAX_HOLD_CHUNKS,
-                    vec![7; 320],
+                    vec![107; 320],
                 ))
                 .unwrap();
         }
         audio.end(MAX_HOLD_CHUNKS).unwrap();
         audio.stopped().unwrap();
-        assert_eq!(audio.take().unwrap(), vec![7; SAMPLES]);
+        assert_eq!(audio.take().unwrap(), vec![107; SAMPLES]);
         assert_eq!(
             audio.push(&packet(16_000, MAX_HOLD_CHUNKS, true, vec![7])),
             Err(HoldFailure::InvalidAudio)

@@ -103,20 +103,25 @@ pub(crate) fn held_for_runtime_checked(
     load: mpsc::Receiver<()>,
     check: impl Fn(u32, &[i16]) -> String + Send + Sync + 'static,
 ) -> (SttHandle, impl Fn() -> Option<Duration>) {
-    let release = Arc::new(Mutex::new(load));
+    runtime_decoder(reports, load, move |release, rate, samples| {
+        let text = check(rate, samples);
+        wait_runtime_release(release);
+        text
+    })
+}
+
+pub(crate) fn runtime_decoder(
+    reports: Reports,
+    load: mpsc::Receiver<()>,
+    check: impl Fn(&Mutex<mpsc::Receiver<()>>, u32, &[i16]) -> String + Send + Sync + 'static,
+) -> (SttHandle, impl Fn() -> Option<Duration>) {
+    let release = Mutex::new(load);
     let (_losses, losses) = broadcast::channel(4);
     let handle = SttHandle::spawn_with(reports, losses, move |_, serve| {
-        release
-            .lock()
-            .expect("one engine")
-            .recv_timeout(WAIT)
-            .expect("release load");
+        wait_runtime_release(&release);
         let served = serve(
             Generation(0),
-            &RuntimeDecoder {
-                release: Arc::clone(&release),
-                check: &check,
-            },
+            &RuntimeDecoder(|rate, samples: &[i16]| check(&release, rate, samples)),
         );
         assert_eq!(served, Served::Released);
         Ok(())
@@ -126,21 +131,25 @@ pub(crate) fn held_for_runtime_checked(
     (handle, move || control.lock().unload_after)
 }
 
-struct RuntimeDecoder<'a> {
-    release: Arc<Mutex<mpsc::Receiver<()>>>,
-    check: &'a (dyn Fn(u32, &[i16]) -> String + Sync),
+fn wait_runtime_release(release: &Mutex<mpsc::Receiver<()>>) {
+    release
+        .lock()
+        .expect("release gate")
+        .recv_timeout(WAIT)
+        .expect("release fixture");
 }
 
-impl Decoder for RuntimeDecoder<'_> {
+struct RuntimeDecoder<F>(F);
+
+impl<F: Fn(u32, &[i16]) -> String + Sync> Decoder for RuntimeDecoder<F> {
     fn decode(&self, rate: u32, samples: &[i16]) -> Result<String, SpeechError> {
-        let text = (self.check)(rate, samples);
-        self.release
-            .lock()
-            .expect("one decoder")
-            .recv_timeout(WAIT)
-            .expect("release decode");
-        Ok(text)
+        Ok((self.0)(rate, samples))
     }
+}
+
+pub(crate) fn pending_results(handle: &SttHandle) -> impl Fn() -> usize + use<> {
+    let control = Arc::clone(&handle.control);
+    move || control.lock().replies.iter().flatten().count()
 }
 
 #[test]

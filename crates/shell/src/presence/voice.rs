@@ -941,7 +941,7 @@ impl Presence {
     /// Keeps the accepted hold's words, from its own connection, until its receipt.
     pub(super) fn hold_words(&mut self, generation: u64, gesture: GestureId, words: Content) {
         if words.len() > MAX_TRANSCRIPT_BYTES {
-            tracing::warn!(len = words.len(), "held words over the bound");
+            tracing::warn!("held words over the bound");
             return;
         }
         if let Some(slot) = self.voice.recovery.as_mut().filter(|slot| {

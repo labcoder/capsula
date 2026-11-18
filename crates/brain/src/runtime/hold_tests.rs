@@ -1,5 +1,5 @@
-use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::sync::{Arc, Mutex};
 
 use kumochi_protocol::frame::{self, Pipe};
 use kumochi_protocol::message::{
@@ -16,7 +16,7 @@ use crate::tap::Tap;
 use crate::test_support::{self, Scratch};
 use crate::voice::Reports;
 use crate::voice::installer::{Durable, Installer};
-use crate::voice::stt::held_for_runtime_checked;
+use crate::voice::stt::{SttHandle, held_for_runtime_checked, pending_results, runtime_decoder};
 
 const G: GestureId = GestureId(17);
 
@@ -75,10 +75,10 @@ impl crate::engines::Engine for Paced {
         events: mpsc::Sender<crate::engines::TurnEvent>,
         gate: crate::engines::SendGate,
     ) -> crate::engines::Round {
-        let (started, go) = (self.started.clone(), Arc::clone(&self.go));
+        self.started.send(()).unwrap();
+        let go = Arc::clone(&self.go);
         let round = Requested(self.seen.clone()).start(request, events, gate);
         Box::pin(async move {
-            started.send(()).unwrap();
             go.notified().await;
             round.await;
         })
@@ -116,11 +116,21 @@ pub(in crate::runtime) fn loading_input(
     let (began, heard_decode) = mpsc::unbounded_channel();
     let (reports, heard) = Reports::new();
     let (stt, _policy) = held_for_runtime_checked(reports, held, move |rate, samples| {
+        began.send(()).expect("decode observed");
         assert_eq!(rate, 16_000);
         assert_eq!(samples, expected);
-        began.send(()).expect("decode observed");
         text.into()
     });
+    let fetch = install_input(&mut brain, scratch, stt, heard);
+    (brain, release, heard_decode, fetch)
+}
+
+fn install_input(
+    brain: &mut Brain,
+    scratch: &Scratch,
+    stt: SttHandle,
+    heard: mpsc::UnboundedReceiver<crate::voice::LoadReport>,
+) -> Arc<super::voice::HeldFetch> {
     let (_, tts) = Reports::new();
     let (fetch, _results) = super::voice::held_fetch();
     brain.attach_voice(
@@ -145,7 +155,7 @@ pub(in crate::runtime) fn loading_input(
             None,
         )
         .unwrap();
-    (brain, release, heard_decode, fetch)
+    fetch
 }
 
 async fn status(shell: &mut Shell<tokio::io::DuplexStream>, expected: HoldStatus) {
@@ -170,14 +180,18 @@ async fn status_for(
 }
 
 async fn recognize(shell: &mut Shell<tokio::io::DuplexStream>) {
+    recognize_for(shell, G).await;
+    status(shell, HoldStatus::Admitted).await;
+}
+
+async fn recognize_for(shell: &mut Shell<tokio::io::DuplexStream>, gesture: GestureId) {
     shell
         .send(&ControlToBrain::VoiceHoldRecognized {
-            gesture: G,
+            gesture,
             thread: None,
             selection: 4,
         })
         .await;
-    status(shell, HoldStatus::Admitted).await;
 }
 
 async fn opened(shell: &mut Shell<tokio::io::DuplexStream>) {
@@ -204,8 +218,23 @@ async fn packet(
     last: bool,
     samples: Vec<i16>,
 ) {
+    packet_for(shell, G, rate, seq, last, samples).await;
+}
+
+#[expect(
+    clippy::fn_params_excessive_bools,
+    reason = "the fixture supplies the protocol's last bit for a selected gesture"
+)]
+async fn packet_for(
+    shell: &mut Shell<tokio::io::DuplexStream>,
+    gesture: GestureId,
+    rate: u32,
+    seq: u32,
+    last: bool,
+    samples: Vec<i16>,
+) {
     let message = DataToBrain::MicPcm(MicPcm {
-        gesture: G,
+        gesture,
         rate,
         seq,
         last,
@@ -219,14 +248,22 @@ async fn packet(
 }
 
 async fn release_source(shell: &mut Shell<tokio::io::DuplexStream>, chunks: u32) {
+    release_source_for(shell, G, chunks).await;
+}
+
+async fn release_source_for(
+    shell: &mut Shell<tokio::io::DuplexStream>,
+    gesture: GestureId,
+    chunks: u32,
+) {
     shell
         .send(&ControlToBrain::KeyUp {
-            gesture: G,
+            gesture,
             t_qpc: 2,
             chunks,
         })
         .await;
-    source_stopped(shell, G).await;
+    source_stopped(shell, gesture).await;
 }
 
 async fn source_stopped(shell: &mut Shell<tokio::io::DuplexStream>, expected: GestureId) {
@@ -257,6 +294,21 @@ fn users(scratch: &Scratch) -> Vec<String> {
         .unwrap()
 }
 
+fn sent_users(request: &crate::engines::RunRequest) -> Vec<&str> {
+    request
+        .request
+        .input
+        .iter()
+        .filter_map(|item| match item {
+            crate::context::InputItem::Message {
+                role: crate::context::Role::User,
+                text,
+            } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect()
+}
+
 #[tokio::test]
 async fn first_speech_setup_loads_and_holds_without_restarting_the_brain() {
     use kumochi_protocol::message::{PartState, SettingsOp};
@@ -269,7 +321,7 @@ async fn first_speech_setup_loads_and_holds_without_restarting_the_brain() {
     let (reports, heard) = Reports::new();
     let (stt, _policy) = held_for_runtime_checked(reports, held, move |rate, samples| {
         assert_eq!(rate, 16_000);
-        assert_eq!(samples, [73, -19]);
+        assert_eq!(samples, [173, -19]);
         began.send(()).unwrap();
         "first setup transcript".into()
     });
@@ -314,7 +366,7 @@ async fn first_speech_setup_loads_and_holds_without_restarting_the_brain() {
         };
         assert_eq!(view.speech_input, PartState::Ready);
         recognize(&mut shell).await;
-        packet(&mut shell, 16_000, 0, true, vec![73, -19]).await;
+        packet(&mut shell, 16_000, 0, true, vec![173, -19]).await;
         release_source(&mut shell, 1).await;
         status(&mut shell, HoldStatus::Transcribing).await;
         assert_eq!(decoded.recv().await, Some(()));
@@ -413,18 +465,7 @@ async fn exact_ordered_pcm_and_independent_resampling_tail_reach_one_real_hold_r
             let request = requests.try_recv().unwrap();
             assert_eq!(request.thread, ThreadId(1));
             assert_eq!(request.request.choice, Some(choice));
-            let sent_users: Vec<_> = request
-                .request
-                .input
-                .iter()
-                .filter_map(|item| match item {
-                    crate::context::InputItem::Message {
-                        role: crate::context::Role::User,
-                        text,
-                    } => Some(text.as_str()),
-                    _ => None,
-                })
-                .collect();
+            let sent_users = sent_users(&request);
             assert_eq!(sent_users.len(), 1);
             let context = sent_users[0]
                 .strip_prefix("recognized sentinel\n\nLocal time: ")
@@ -443,13 +484,13 @@ async fn exact_ordered_pcm_and_independent_resampling_tail_reach_one_real_hold_r
 async fn accepted_sparse_capture_pcm_reaches_transcription() {
     let scratch = Scratch::trusted("hold-sparse-capture");
     let (mut brain, release, mut decoded, _fetch) =
-        input(&scratch, vec![21, 31, 41, 51], "sparse capture transcript").await;
+        input(&scratch, vec![121, 31, 41, 51], "sparse capture transcript").await;
     let ((control, data), mut shell) = duplex();
     let mut tap = Tap::from_env();
     let client = async {
         opened(&mut shell).await;
         recognize(&mut shell).await;
-        packet(&mut shell, 16_000, 0, true, vec![21, 31, 41, 51]).await;
+        packet(&mut shell, 16_000, 0, true, vec![121, 31, 41, 51]).await;
         release_source(&mut shell, 1).await;
         status(&mut shell, HoldStatus::Transcribing).await;
         assert_eq!(decoded.recv().await, Some(()));
@@ -475,7 +516,7 @@ async fn a_screen_holds_words_wait_for_its_picture_in_the_running_brain() {
     type Reply = <crate::screen::Holds as crate::supervise::Kind>::Reply;
     let scratch = Scratch::new("hold-screen-words");
     let (mut brain, release, mut decoded, _fetch) =
-        input(&scratch, vec![5, -5], "words before the picture").await;
+        input(&scratch, vec![105, -5], "words before the picture").await;
     let mut rig = seeing(&mut brain);
     let mut seen = brain.observe();
     let ((control, data), mut shell) = duplex();
@@ -486,7 +527,7 @@ async fn a_screen_holds_words_wait_for_its_picture_in_the_running_brain() {
         status(&mut shell, HoldStatus::Admitted).await;
         shell.send(&released(G, 100, 200, 2)).await;
         let (id, display) = rig.next().await;
-        packet(&mut shell, 16_000, 0, true, vec![5, -5]).await;
+        packet(&mut shell, 16_000, 0, true, vec![105, -5]).await;
         release_source(&mut shell, 1).await;
         status(&mut shell, HoldStatus::Transcribing).await;
         crate::screen::hold_frame(&rig, id, display).await;
@@ -528,6 +569,66 @@ async fn a_screen_holds_words_wait_for_its_picture_in_the_running_brain() {
 
 /// The sealed picture of a screen hold.
 const PICTURE: &[u8] = &[0xFF, 0xD8, 0xFF, 0xD9];
+
+#[tokio::test]
+async fn quiet_screen_holds_retire_pending_frames_and_discard_ready_images() {
+    use crate::runtime::hold::tests::screen_hold::{recognized, release as released, seeing};
+    type Request = <crate::screen::Holds as crate::supervise::Kind>::Request;
+    type Reply = <crate::screen::Holds as crate::supervise::Kind>::Reply;
+    for ready_image in [false, true] {
+        let scratch = Scratch::new("hold-quiet-picture");
+        let (mut brain, _release, mut decoded, _) =
+            input(&scratch, Vec::new(), "must not decode").await;
+        let mut rig = seeing(&mut brain);
+        let mut observed = brain.observe();
+        let owner = crate::coordinator::HoldKey {
+            epoch: brain.epoch + 1,
+            gesture: G,
+        };
+        let ((control, data), mut shell) = duplex();
+        let mut tap = Tap::from_env();
+        let client = async {
+            opened(&mut shell).await;
+            shell.send(&recognized(G)).await;
+            status(&mut shell, HoldStatus::Admitted).await;
+            shell.send(&released(G, 100, 200, 2)).await;
+            let (id, display) = rig.next().await;
+            crate::screen::hold_frame(&rig, id, display).await;
+            assert_eq!(
+                shell.control().await,
+                Some(ControlToShell::CaptureDone {
+                    capture_for: CaptureFor::Gesture(G)
+                })
+            );
+            let (id, seal) = rig.next().await;
+            let Request::Seal(key) = seal else {
+                panic!("not a seal: {seal:?}")
+            };
+            let sealed = Reply::Sealed(key, crate::screen::ScreenContext::fixture(PICTURE));
+            if ready_image {
+                rig.reply(id, &sealed).await;
+                while !matches!(observed.recv().await, Some(Seen::PictureSealed)) {}
+            }
+            packet(&mut shell, 16_000, 0, true, vec![-103]).await;
+            release_source(&mut shell, 1).await;
+            status(&mut shell, HoldStatus::Empty).await;
+            if !ready_image {
+                rig.reply(id, &sealed).await;
+                crate::screen::release_next(&mut rig, owner).await;
+            }
+            assert_eq!(decoded.try_recv(), Err(mpsc::error::TryRecvError::Empty));
+            drop(shell);
+        };
+        tokio::time::timeout(super::PATIENCE, async {
+            tokio::join!(brain.serve(control, data, &mut tap), client)
+        })
+        .await
+        .unwrap();
+        assert_eq!(brain.coordinator.current_run(), None);
+        brain.close().await;
+        assert!(users(&scratch).is_empty());
+    }
+}
 
 /// Which half of a screen hold the brain takes first.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -596,7 +697,7 @@ async fn a_screen_hold_reaches_its_run_with_its_picture(first: First) {
     type Reply = <crate::screen::Holds as crate::supervise::Kind>::Reply;
     let scratch = Scratch::new("hold-screen-picture");
     let (mut brain, release, mut decoded, _fetch) =
-        input(&scratch, vec![5, -5], "words and a picture").await;
+        input(&scratch, vec![105, -5], "words and a picture").await;
     let mut rig = seeing(&mut brain);
     let mut observed = brain.observe();
     let (seen, mut requests) = mpsc::unbounded_channel();
@@ -631,7 +732,7 @@ async fn a_screen_hold_reaches_its_run_with_its_picture(first: First) {
             rig.reply(id, &sealed).await;
             while !matches!(observed.recv().await, Some(Seen::PictureSealed)) {}
         }
-        packet(&mut shell, 16_000, 0, true, vec![5, -5]).await;
+        packet(&mut shell, 16_000, 0, true, vec![105, -5]).await;
         release_source(&mut shell, 1).await;
         status(&mut shell, HoldStatus::Transcribing).await;
         assert_eq!(decoded.recv().await, Some(()));
@@ -688,28 +789,59 @@ async fn a_screen_holds_picture_then_its_words_reach_the_run_together() {
 mod sent;
 
 #[tokio::test]
-async fn no_samples_or_blank_transcript_store_and_send_nothing() {
-    for text in ["", " \t\r\n", "unused"] {
+async fn quiet_audio_or_blank_transcript_store_and_send_nothing() {
+    for (samples, text, controls_first) in [
+        (Vec::new(), "unused", false),
+        (vec![103, -103], "unused", false),
+        (vec![103, -103], "unused", true),
+        (vec![191, -12], "", false),
+        (vec![191, -12], " \t\r\n", false),
+    ] {
         let scratch = Scratch::new("hold-empty");
-        let (mut brain, release, mut decoded, fetch) = input(&scratch, vec![91, -12], text).await;
+        let expected = if text == "unused" {
+            Vec::new()
+        } else {
+            samples.clone()
+        };
+        let (mut brain, release, mut decoded, fetch) = input(&scratch, expected, text).await;
+        let (started, mut starts) = mpsc::unbounded_channel();
+        brain.engine = Box::new(Paced {
+            started,
+            go: Arc::default(),
+            seen: mpsc::unbounded_channel().0,
+        });
         let ((control, data), mut shell) = duplex();
         let mut tap = Tap::from_env();
         let client = async {
             opened(&mut shell).await;
             recognize(&mut shell).await;
-            if text == "unused" {
-                release_source(&mut shell, 0).await;
-            } else {
-                packet(&mut shell, 16_000, 0, true, vec![91, -12]).await;
-                release_source(&mut shell, 1).await;
+            let chunks = u32::from(!samples.is_empty());
+            if controls_first {
+                release_source(&mut shell, chunks).await;
+            }
+            if chunks != 0 {
+                packet(&mut shell, 16_000, 0, true, samples).await;
+            }
+            if !controls_first {
+                release_source(&mut shell, chunks).await;
+            }
+            if text != "unused" {
                 status(&mut shell, HoldStatus::Transcribing).await;
                 assert_eq!(decoded.recv().await, Some(()));
                 release.send(()).unwrap();
             }
             status(&mut shell, HoldStatus::Empty).await;
+            packet(&mut shell, 16_000, 0, true, vec![200]).await;
+            source_stopped(&mut shell, G).await;
+            assert_eq!(decoded.try_recv(), Err(mpsc::error::TryRecvError::Empty));
             drop(shell);
         };
-        let (_, ()) = tokio::join!(brain.serve(control, data, &mut tap), client);
+        tokio::time::timeout(super::PATIENCE, async {
+            tokio::join!(brain.serve(control, data, &mut tap), client)
+        })
+        .await
+        .unwrap();
+        assert_eq!(starts.try_recv(), Err(mpsc::error::TryRecvError::Empty));
         assert_eq!(brain.coordinator.current_run(), None);
         assert_eq!(fetch.begun.load(Ordering::SeqCst), 0);
         brain.close().await;
@@ -718,16 +850,114 @@ async fn no_samples_or_blank_transcript_store_and_send_nothing() {
 }
 
 #[tokio::test]
-async fn cancellation_and_new_explicit_input_fence_an_already_running_decode() {
-    for typed in [false, true] {
-        let scratch = Scratch::new("hold-late-decode");
-        let (mut brain, release, mut decoded, _) = input(&scratch, vec![7, -90], "obsolete").await;
+async fn a_fresh_hold_uses_only_its_own_decode_in_either_completion_order() {
+    const REFUSED: GestureId = GestureId(G.0 + 1);
+    const FRESH: GestureId = GestureId(G.0 + 2);
+    for stale_first in [false, true] {
+        let scratch = Scratch::new("hold-overlapping-decodes");
+        let mut brain = test_support::brain(&scratch, "0 text selected answer");
+        let (seen, mut requests) = mpsc::unbounded_channel();
+        brain.engine = Box::new(Requested(seen));
+        let (reports, heard) = Reports::new();
+        let (load, loaded) = std::sync::mpsc::channel();
+        let (stale, wait_stale) = std::sync::mpsc::channel();
+        let (fresh, wait_fresh) = std::sync::mpsc::channel();
+        let gates = Mutex::new([Some(wait_stale), Some(wait_fresh)]);
+        let (started, mut starts) = mpsc::unbounded_channel();
+        let (stt, _) = runtime_decoder(reports, loaded, move |_, rate, samples| {
+            assert_eq!(rate, 16_000);
+            let (slot, words) = match samples {
+                [201] => (0, "obsolete words"),
+                [202] => (1, "fresh words"),
+                _ => panic!("unexpected fixture PCM"),
+            };
+            let gate = gates.lock().unwrap()[slot].take().unwrap();
+            started.send(slot).unwrap();
+            gate.recv_timeout(super::PATIENCE).unwrap();
+            words.into()
+        });
+        let pending = pending_results(&stt);
+        let fetch = install_input(&mut brain, &scratch, stt, heard);
+        load.send(()).unwrap();
+        let event = tokio::time::timeout(super::PATIENCE, voice::next(&mut brain.voice))
+            .await
+            .unwrap();
+        brain.voice_event(event, None).unwrap();
         let ((control, data), mut shell) = duplex();
         let mut tap = Tap::from_env();
         let client = async {
             opened(&mut shell).await;
             recognize(&mut shell).await;
-            packet(&mut shell, 16_000, 0, true, vec![7, -90]).await;
+            packet(&mut shell, 16_000, 0, true, vec![201]).await;
+            release_source(&mut shell, 1).await;
+            status(&mut shell, HoldStatus::Transcribing).await;
+            assert_eq!(starts.recv().await, Some(0));
+            recognize_for(&mut shell, REFUSED).await;
+            status_for(&mut shell, REFUSED, HoldStatus::Failed(HoldFailure::Busy)).await;
+            shell
+                .send(&ControlToBrain::GestureCancel { gesture: G })
+                .await;
+            status(&mut shell, HoldStatus::Cancelled).await;
+            recognize_for(&mut shell, REFUSED).await;
+            recognize_for(&mut shell, FRESH).await;
+            status_for(&mut shell, FRESH, HoldStatus::Admitted).await;
+            packet_for(&mut shell, FRESH, 16_000, 0, true, vec![202]).await;
+            release_source_for(&mut shell, FRESH, 1).await;
+            status_for(&mut shell, FRESH, HoldStatus::Transcribing).await;
+            assert_eq!(starts.recv().await, Some(1));
+            assert_eq!(pending(), 2);
+            if stale_first {
+                stale.send(()).unwrap();
+                while pending() == 2 {
+                    tokio::task::yield_now().await;
+                }
+                assert_eq!(pending(), 1);
+                assert!(matches!(
+                    requests.try_recv(),
+                    Err(mpsc::error::TryRecvError::Empty)
+                ));
+            }
+            fresh.send(()).unwrap();
+            let (run, _) = shell.state().await;
+            shell.held(FRESH, "fresh words").await;
+            shell.read_to_end(run).await;
+            if !stale_first {
+                assert_eq!(pending(), 1);
+                stale.send(()).unwrap();
+            }
+            while pending() != 0 {
+                tokio::task::yield_now().await;
+            }
+            let request = requests.try_recv().unwrap();
+            assert!(
+                matches!(sent_users(&request).as_slice(), [words] if words.starts_with("fresh words\n\nLocal time: "))
+            );
+            assert!(requests.is_empty());
+            drop(shell);
+        };
+        let (ended, ()) = tokio::time::timeout(super::PATIENCE, async {
+            tokio::join!(brain.serve(control, data, &mut tap), client)
+        })
+        .await
+        .unwrap();
+        assert_eq!(ended, Ended::Lost);
+        assert_eq!(fetch.begun.load(Ordering::SeqCst), 0);
+        brain.close().await;
+        assert_eq!(users(&scratch), ["fresh words"]);
+    }
+}
+
+#[tokio::test]
+async fn cancellation_and_new_explicit_input_fence_an_already_running_decode() {
+    for typed in [false, true] {
+        let scratch = Scratch::new("hold-late-decode");
+        let (mut brain, release, mut decoded, _) = input(&scratch, vec![7, -190], "obsolete").await;
+        let ((control, data), mut shell) = duplex();
+        let mut tap = Tap::from_env();
+        let client = async {
+            opened(&mut shell).await;
+            recognize(&mut shell).await;
+            packet(&mut shell, 16_000, 0, true, vec![7, -190]).await;
             release_source(&mut shell, 1).await;
             status(&mut shell, HoldStatus::Transcribing).await;
             assert_eq!(decoded.recv().await, Some(()));
@@ -771,7 +1001,7 @@ async fn a_failed_gapped_utterance_cannot_be_repaired_by_valid_late_frames() {
         recognize(&mut shell).await;
         packet(&mut shell, 16_000, 1, true, vec![9]).await;
         status(&mut shell, HoldStatus::Failed(HoldFailure::InvalidAudio)).await;
-        packet(&mut shell, 16_000, 0, true, vec![9]).await;
+        packet(&mut shell, 16_000, 0, true, vec![109]).await;
         release_source(&mut shell, 1).await;
         shell.submit("only typed").await;
         let (run, _) = shell.state().await;
@@ -854,13 +1084,13 @@ async fn held_words_go_out_up_to_their_bound_and_are_never_cut() {
     for len in [MAX_TRANSCRIPT_BYTES, MAX_TRANSCRIPT_BYTES + 1] {
         let words: &'static str = Box::leak("w".repeat(len).into_boxed_str());
         let scratch = Scratch::new("hold-words-bound");
-        let (mut brain, release, mut decoded, _) = input(&scratch, vec![8, -17], words).await;
+        let (mut brain, release, mut decoded, _) = input(&scratch, vec![108, -17], words).await;
         let ((control, data), mut shell) = duplex();
         let mut tap = Tap::from_env();
         let client = async {
             opened(&mut shell).await;
             recognize(&mut shell).await;
-            packet(&mut shell, 16_000, 0, true, vec![8, -17]).await;
+            packet(&mut shell, 16_000, 0, true, vec![108, -17]).await;
             release_source(&mut shell, 1).await;
             status(&mut shell, HoldStatus::Transcribing).await;
             assert_eq!(decoded.recv().await, Some(()));
@@ -886,7 +1116,7 @@ async fn a_held_receipt_waits_for_the_commit_and_never_reaches_a_later_connectio
     for lost in [false, true] {
         let scratch = Scratch::new("hold-receipt");
         let (mut brain, release, mut decoded, _) =
-            input(&scratch, vec![8, -17], "receipt words").await;
+            input(&scratch, vec![108, -17], "receipt words").await;
         let commit =
             brain.hold_store(|op| matches!(op, crate::coordinator::StoreOp::BeginTurn { .. }));
         let ((control, data), mut shell) = duplex();
@@ -894,7 +1124,7 @@ async fn a_held_receipt_waits_for_the_commit_and_never_reaches_a_later_connectio
         let client = async {
             opened(&mut shell).await;
             recognize(&mut shell).await;
-            packet(&mut shell, 16_000, 0, true, vec![8, -17]).await;
+            packet(&mut shell, 16_000, 0, true, vec![108, -17]).await;
             release_source(&mut shell, 1).await;
             status(&mut shell, HoldStatus::Transcribing).await;
             assert_eq!(decoded.recv().await, Some(()));
@@ -936,13 +1166,13 @@ async fn accepted_target_deletion_cancels_before_late_decode_and_uses_no_phantom
     use kumochi_protocol::message::{Deleted, Phase};
     let scratch = Scratch::new("hold-deletion");
     let (mut brain, release, mut decoded, _) =
-        input(&scratch, vec![8, -17], "deletable voice words").await;
+        input(&scratch, vec![108, -17], "deletable voice words").await;
     let ((control, data), mut shell) = duplex();
     let mut tap = Tap::from_env();
     let client = async {
         opened(&mut shell).await;
         recognize(&mut shell).await;
-        packet(&mut shell, 16_000, 0, true, vec![8, -17]).await;
+        packet(&mut shell, 16_000, 0, true, vec![108, -17]).await;
         release_source(&mut shell, 1).await;
         status(&mut shell, HoldStatus::Transcribing).await;
         assert_eq!(decoded.recv().await, Some(()));

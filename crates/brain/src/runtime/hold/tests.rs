@@ -491,7 +491,7 @@ async fn expired_finalization(last: ControlToBrain) {
     use crate::runtime::Recovery;
     let scratch = Scratch::new("hold-expired-finalization");
     let (mut brain, _release, mut decoded, _fetch) =
-        crate::runtime::tests::holds::input(&scratch, vec![21, -37], "not submitted").await;
+        crate::runtime::tests::holds::input(&scratch, vec![121, -37], "not submitted").await;
     let (out, mut output) = mpsc::channel(16);
     let queue = RefCell::new(DataQueue::new(super::super::window()));
     let ready = Notify::new();
@@ -500,7 +500,7 @@ async fn expired_finalization(last: ControlToBrain) {
     link.recovery = Some(Recovery::new(&[], 1024));
     recording(&mut brain);
     brain
-        .hold_event(packet(KEY.gesture, 0, true, vec![21, -37]), &mut link)
+        .hold_event(packet(KEY.gesture, 0, true, vec![121, -37]), &mut link)
         .unwrap();
     let stop_last = matches!(&last, ControlToBrain::VoiceHoldStopped { .. });
     let first = if stop_last {
@@ -977,6 +977,57 @@ async fn preparing_release_or_cancel_is_final_and_refusals_consume_the_gesture()
 }
 
 #[tokio::test]
+async fn quiet_count_and_stop_without_last_wait_for_the_deadline() {
+    let scratch = Scratch::new("hold-quiet-missing-last");
+    let (mut brain, _release, mut decoded, _) =
+        crate::runtime::tests::holds::input(&scratch, Vec::new(), "must not decode").await;
+    let (out, mut output) = mpsc::channel(16);
+    let queue = RefCell::new(DataQueue::new(super::super::window()));
+    let ready = Notify::new();
+    let mut tap = Tap::from_env();
+    let mut link = Link::new(&out, &queue, &ready, &mut tap);
+    recording(&mut brain);
+    brain
+        .hold_event(packet(KEY.gesture, 0, false, vec![103; 320]), &mut link)
+        .unwrap();
+    brain
+        .hold_control(
+            &ControlToBrain::KeyUp {
+                gesture: KEY.gesture,
+                t_qpc: 1,
+                chunks: 1,
+            },
+            &mut link,
+        )
+        .unwrap();
+    brain
+        .hold_control(
+            &ControlToBrain::VoiceHoldStopped {
+                gesture: KEY.gesture,
+            },
+            &mut link,
+        )
+        .unwrap();
+    accepted(&mut output, KEY.gesture);
+    assert_eq!(output.try_recv(), Err(mpsc::error::TryRecvError::Empty));
+    assert_eq!(brain.holds.debt, None);
+    brain.holds.pending.as_mut().unwrap().deadline = Instant::now();
+    let event = next(&mut brain.holds).await;
+    assert!(matches!(event, Event::Deadline));
+    brain.hold_event(event, &mut link).unwrap();
+    assert_eq!(
+        status(&mut output),
+        HoldStatus::Failed(HoldFailure::TimedOut)
+    );
+    brain
+        .hold_event(packet(KEY.gesture, 0, true, vec![200]), &mut link)
+        .unwrap();
+    assert_eq!(output.try_recv(), Err(mpsc::error::TryRecvError::Empty));
+    assert_eq!(decoded.try_recv(), Err(mpsc::error::TryRecvError::Empty));
+    brain.close().await;
+}
+
+#[tokio::test]
 async fn final_packet_and_key_up_without_source_receipt_cannot_schedule_decode() {
     let scratch = Scratch::new("hold-needs-stop");
     let mut brain = test_support::brain(&scratch, "");
@@ -987,7 +1038,7 @@ async fn final_packet_and_key_up_without_source_receipt_cannot_schedule_decode()
     let mut link = Link::new(&out, &queue, &ready, &mut tap);
     recording(&mut brain);
     brain
-        .hold_event(packet(KEY.gesture, 0, true, vec![21, -37]), &mut link)
+        .hold_event(packet(KEY.gesture, 0, true, vec![121, -37]), &mut link)
         .unwrap();
     brain
         .hold_control(
