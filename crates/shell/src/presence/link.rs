@@ -683,8 +683,15 @@ impl Presence {
             ControlToBrain::Stop { run, .. } | ControlToBrain::StopScenes { run, .. } => Some(*run),
             _ => None,
         };
-        self.link.send_control(session, message)
-            && run.is_none_or(|run| self.link.output().stop(session.generation(), run))
+        let sent = self.link.send_control(session, message);
+        // A speaker that can't take the `Stop` already ended the session through the owner.
+        if sent
+            && let Some(run) = run
+            && !self.link.output().stop(session.generation(), run)
+        {
+            tracing::debug!("no speech stopped for this session");
+        }
+        sent
     }
 
     /// Queues a `Stop` or `ClearDrawing` for the brain; its local effect has already happened.
