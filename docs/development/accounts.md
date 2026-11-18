@@ -625,9 +625,10 @@ value: `low`, `medium`, `high`, `xhigh`, or `max`. Other shapes and names confer
 support, and the provider's default field does not add support. The first sendable row for
 each slug supplies its effort and image capabilities; at most 200 sendable rows go to the shell,
 in server order. Listable slugs without known support don't use those slots. The account retains
-up to 200 distinct withheld slugs, including supported rows beyond the offer cap, for default
-repair only. They authorize neither a request nor image capture. If a further distinct slug
-doesn't fit, the account can't prove a saved choice disappeared, so it doesn't repair that choice.
+up to 200 distinct slugs outside the final offer, including supported rows beyond the offer cap.
+They're for default repair only and authorize neither a request nor image capture. If a
+further distinct slug doesn't fit, the account can't prove a saved choice disappeared, so it
+doesn't repair that choice.
 An admitted row takes images only if its own `input_modalities` array names `"image"`.
 The catalog's [capture provenance](../../crates/brain/src/connections/catalog/README.md)
 describes the recorded shape behind both decoders.

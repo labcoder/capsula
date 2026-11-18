@@ -116,10 +116,20 @@ struct Body {
 }
 
 #[derive(Deserialize)]
-struct Entry {
-    slug: String,
-    display_name: String,
-    visibility: String,
+struct Entry<'a> {
+    slug: &'a str,
+    display_name: &'a str,
+    visibility: &'a str,
+}
+
+fn listable(value: &Value) -> Result<Option<(ModelSlug, ModelName)>, ()> {
+    let entry = Entry::deserialize(value).map_err(|_| ())?;
+    if entry.visibility != "list" {
+        return Ok(None);
+    }
+    let slug = ModelSlug::new(entry.slug).map_err(|_| ())?;
+    let name = ModelName::new(entry.display_name).map_err(|_| ())?;
+    Ok(Some((slug, name)))
 }
 
 #[derive(Deserialize)]
@@ -157,7 +167,7 @@ impl Listing {
     }
 
     fn withhold(&mut self, slug: ModelSlug) {
-        if self.withheld.contains(&slug) {
+        if self.models.iter().any(|model| model.slug == slug) || self.withheld.contains(&slug) {
             return;
         }
         if self.withheld.len() == MAX_MODELS {
@@ -218,30 +228,19 @@ pub async fn read(
     let mut listing = Listing::default();
     let mut skipped = 0_usize;
     let mut unknown = 0_usize;
-    for value in body.models {
+    for value in &body.models {
         if !value.is_object() {
             return Err(CatalogError::Response);
         }
-        let efforts = supported(&value);
+        let efforts = supported(value);
         let images = value
             .get("input_modalities")
             .and_then(Value::as_array)
             .is_some_and(|modalities| modalities.iter().any(|modality| modality == "image"));
-        let Ok(entry) = serde_json::from_value::<Entry>(value) else {
-            skipped += 1;
-            continue;
-        };
-        if entry.visibility != "list" {
-            continue;
-        }
-        match (
-            ModelSlug::new(&entry.slug),
-            ModelName::new(&entry.display_name),
-        ) {
-            (Ok(slug), Ok(display_name)) => {
+        match listable(value) {
+            Ok(Some((slug, display_name))) => {
                 let Some(efforts) = efforts else {
                     unknown += 1;
-                    listing.withhold(slug);
                     continue;
                 };
                 if listing.models.iter().any(|model| model.slug == slug) {
@@ -250,7 +249,6 @@ pub async fn read(
                 }
                 if listing.models.len() == MAX_MODELS {
                     skipped += 1;
-                    listing.withhold(slug);
                     continue;
                 }
                 if images {
@@ -262,7 +260,8 @@ pub async fn read(
                     supported_efforts: Some(efforts),
                 });
             }
-            _ => skipped += 1,
+            Ok(None) => {}
+            Err(()) => skipped += 1,
         }
     }
     if skipped > 0 {
@@ -272,6 +271,14 @@ pub async fn read(
         tracing::warn!(skipped = unknown, "model list entries have no known effort");
         if listing.models.is_empty() {
             return Err(CatalogError::Response);
+        }
+    }
+    for value in &body.models {
+        if let Ok(Some((slug, _))) = listable(value) {
+            listing.withhold(slug);
+            if listing.withheld_incomplete {
+                break;
+            }
         }
     }
     Ok(listing)

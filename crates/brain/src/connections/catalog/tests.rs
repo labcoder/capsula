@@ -336,6 +336,35 @@ async fn withheld_membership_deduplicates_and_a_full_index_cannot_prove_absence(
 }
 
 #[tokio::test]
+async fn an_offered_slugs_unknown_duplicate_does_not_prevent_repair_at_the_withheld_cap() {
+    let unknown =
+        |slug: &str| json!({"slug": slug, "display_name": "Unknown", "visibility": "list"});
+    let offered = model("first", "First");
+    let duplicate = unknown("first");
+    let removed = at("removed", Effort::High);
+    for [first, last] in [[offered.clone(), duplicate.clone()], [duplicate, offered]] {
+        let rows: Vec<_> = std::iter::once(first)
+            .chain((0..MAX_MODELS).map(|n| unknown(&format!("withheld-{n}"))))
+            .chain(std::iter::once(last))
+            .collect();
+        let http = answering(200, &json!({ "models": rows }).to_string());
+        let listing = read(&http, Secret::new(Zeroizing::new("bearer".to_owned())))
+            .await
+            .expect("the supported row is offered");
+        assert_eq!(
+            default_model(Some(&removed), &listing),
+            Some(at("first", Effort::Low))
+        );
+        assert_eq!(listing.withheld.len(), MAX_MODELS);
+        assert_eq!(listing.withheld[0], at("withheld-0", Effort::Low).model);
+        assert_eq!(
+            listing.withheld[MAX_MODELS - 1],
+            at("withheld-199", Effort::Low).model
+        );
+    }
+}
+
+#[tokio::test]
 async fn an_entry_that_breaks_a_rule_is_skipped_and_counted_but_never_logged() {
     let captured = Captured::default();
     let _logging = captured.install();
