@@ -226,8 +226,9 @@ impl Brain {
             .is_some_and(|voice| voice.deletes[installer::index(part)].is_some())
     }
 
-    /// Starts voice at brain start, with no network: each installed part whose files have their
-    /// sizes loads. `stuck` names the removals whose folders couldn't be deleted; every other
+    /// Starts voice at brain start, with no network: installed parts with complete files load
+    /// except speech input when Hold to talk is off. `stuck` names the removals whose folders
+    /// couldn't be deleted; every other
     /// unfinished removal has its `RemoveDone` queued. A handle that didn't start is `None`, and
     /// its part fails to load for the session. `reports` are the handles' report receivers, in
     /// `VoicePart::ALL` order, and `fetcher` fetches what an install asks for.
@@ -251,8 +252,13 @@ impl Brain {
             }
         });
         let whole = VoicePart::ALL.map(|part| whole(&models, part));
-        let (installer, effects) =
-            Installer::start(durable, whole, [stt.is_some(), tts.is_some()], stuck);
+        let (installer, effects) = Installer::start(
+            durable,
+            whole,
+            [stt.is_some(), tts.is_some()],
+            stuck,
+            self.config.view().hold_to_talk,
+        );
         self.pump = tts.map(Pump::new);
         self.voice = Some(Voice {
             installer,
@@ -409,6 +415,19 @@ impl Brain {
         let before = voice.installer.view();
         let effects = op(&mut voice.installer);
         self.voice_apply(before, effects, link)
+    }
+
+    pub(super) fn voice_input_load_refusal(&self) -> Option<ErrorKey> {
+        self.voice.as_ref().map_or_else(
+            || {
+                Some(if self.config.view().hold_to_talk {
+                    ErrorKey::VoiceUnavailable
+                } else {
+                    ErrorKey::HoldToTalkOff
+                })
+            },
+            |voice| voice.installer.load_input_refusal(),
+        )
     }
 
     /// Whether the installer still wants the Activate write for `token`.

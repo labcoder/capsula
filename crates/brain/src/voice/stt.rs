@@ -18,7 +18,7 @@ pub(crate) use tests::held_for_runtime_checked;
 #[cfg(test)]
 pub(crate) use tests::hold_before_serving;
 #[cfg(test)]
-pub(crate) use tests::{pending_results, runtime_decoder};
+pub(crate) use tests::{pending_results, runtime_decoder, wanted_load};
 
 use std::io;
 use std::path::{Path, PathBuf};

@@ -661,6 +661,7 @@ impl Presence {
             error.key(),
             kumochi_protocol::message::ErrorKey::SettingsRefused
                 | kumochi_protocol::message::ErrorKey::ConfigUnreadable
+                | kumochi_protocol::message::ErrorKey::HoldToTalkOff
         ) {
             Source::Settings(field)
         } else {

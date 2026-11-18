@@ -152,6 +152,11 @@ pub(crate) fn pending_results(handle: &SttHandle) -> impl Fn() -> usize + use<> 
     move || control.lock().replies.iter().flatten().count()
 }
 
+pub(crate) fn wanted_load(handle: &SttHandle) -> impl Fn() -> Option<u64> + use<> {
+    let control = Arc::clone(&handle.control);
+    move || control.lock().want.as_ref().map(|(_, ask)| *ask)
+}
+
 #[test]
 fn idle_release_and_a_fresh_installer_request_reload_without_fetching_or_stale_revival() {
     use crate::voice::installer::{Durable, Effect, Installer};
@@ -164,6 +169,7 @@ fn idle_release_and_a_fresh_installer_request_reload_without_fetching_or_stale_r
             [true; 2].map(Ok),
             [true; 2],
             &[],
+            true,
         );
         assert_eq!(
             effects,
@@ -194,7 +200,7 @@ fn idle_release_and_a_fresh_installer_request_reload_without_fetching_or_stale_r
             SttResult::NotLoaded
         );
         assert_eq!(
-            installer.install(SpeechInput),
+            installer.reload_input(),
             [Effect::Load {
                 part: SpeechInput,
                 ask: 3
@@ -563,6 +569,7 @@ fn an_unconfirmed_exit_keeps_its_physical_ask_and_cannot_acknowledge_unload() {
         [true; 2].map(Ok),
         [true; 2],
         &[],
+        true,
     );
     assert_eq!(
         effects,

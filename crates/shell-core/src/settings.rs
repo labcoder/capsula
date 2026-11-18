@@ -624,7 +624,10 @@ impl Settings {
 fn settings_error(key: ErrorKey) -> bool {
     matches!(
         key,
-        ErrorKey::SettingsRefused | ErrorKey::ConfigUnreadable | ErrorKey::VoiceUnavailable
+        ErrorKey::SettingsRefused
+            | ErrorKey::ConfigUnreadable
+            | ErrorKey::VoiceUnavailable
+            | ErrorKey::HoldToTalkOff
     )
 }
 

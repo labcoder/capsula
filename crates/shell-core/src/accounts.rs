@@ -78,6 +78,7 @@ impl Accounts {
             | ErrorKey::VoiceLoad
             | ErrorKey::VoiceUnavailable
             | ErrorKey::VoiceModelPath
+            | ErrorKey::HoldToTalkOff
             | ErrorKey::GitHubUnavailable
             | ErrorKey::DrawingReplacementFailed
             | ErrorKey::DrawingNotReturned

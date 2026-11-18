@@ -216,7 +216,7 @@ fn speech_status_requires_the_current_session_and_does_not_survive_disconnect() 
 }
 
 #[test]
-fn model_actions_send_only_the_existing_operation_and_never_invent_progress() {
+fn model_actions_keep_load_distinct_from_install_or_retry_and_never_invent_progress() {
     use super::SpeechInputAction::{Cancel, Install, Reload, Retry};
     use kumochi_protocol::voice::VoicePart::SpeechInput;
 
@@ -226,11 +226,7 @@ fn model_actions_send_only_the_existing_operation_and_never_invent_progress() {
             Install,
             SettingsOp::InstallVoice(SpeechInput),
         ),
-        (
-            PartState::Unloaded,
-            Reload,
-            SettingsOp::InstallVoice(SpeechInput),
-        ),
+        (PartState::Unloaded, Reload, SettingsOp::LoadSpeechInput),
         (
             PartState::Failed {
                 key: ErrorKey::VoiceLoad,
