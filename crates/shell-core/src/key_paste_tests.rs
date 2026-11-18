@@ -9,7 +9,7 @@ const KEY: &str = "sk-ant-api-fixture-only-sentinel";
 
 fn model(view: KeyView) -> KeyPaste {
     let mut state = KeyPaste::default();
-    state.receive(view);
+    state.receive(view, (view != KeyView::Missing).then_some(1));
     state
 }
 
@@ -206,7 +206,7 @@ fn stale_staging_replies_neither_consume_nor_revive_an_attempt() {
             .is_none()
     );
     state.disconnected();
-    state.receive(KeyView::Missing);
+    state.receive(KeyView::Missing, None);
     let new = begin(&mut state, KEY);
     state.written(&old_write, Instant::now(), |_| {
         panic!("stale write sent Staged")
@@ -353,6 +353,22 @@ fn the_deadline_holds_before_the_timer_callback_in_each_phase() {
 }
 
 #[test]
+fn a_ready_to_ready_replacement_invalidates_the_open_confirmation() {
+    let mut state = model(KeyView::Ready);
+    let old = state.remove_revision().expect("old confirmation");
+    assert!(state.receive(KeyView::Ready, Some(2)));
+    state.remove(old, |_| {
+        panic!("confirmation was for the previous authority revision")
+    });
+    let current = state.remove_revision().expect("new confirmation");
+    state.remove(current, |op| {
+        assert_eq!(op, ConnectionOp::RemoveAnthropicKey { revision: 2 });
+        true
+    });
+    assert_eq!(state.removal(), Removal::Waiting);
+}
+
+#[test]
 fn failed_adoption_preserves_a_key_but_catalog_rejection_is_removable() {
     let mut state = model(KeyView::Ready);
     let old_revision = state.remove_revision().expect("old removal confirmation");
@@ -373,24 +389,24 @@ fn failed_adoption_preserves_a_key_but_catalog_rejection_is_removable() {
     state.written(&result, Instant::now(), |_| true);
     state.done(SESSION, &done(PLAN, Ok(())), Instant::now());
     assert_eq!(state.view(), Some(KeyView::Checking));
-    state.receive(KeyView::Rejected(KeyRejection::Refused));
+    state.receive(KeyView::Rejected(KeyRejection::Refused), Some(1));
     assert!(state.saved());
     let revision = state
         .remove_revision()
         .expect("saved rejected key can be removed");
     state.remove(revision, |op| {
-        assert_eq!(op, ConnectionOp::RemoveAnthropicKey);
+        assert_eq!(op, ConnectionOp::RemoveAnthropicKey { revision: 1 });
         true
     });
     assert_eq!(state.removal(), Removal::Waiting);
-    state.receive(KeyView::Unconfirmed);
+    state.receive(KeyView::Unconfirmed, Some(1));
     assert_eq!(state.removal(), Removal::Retry);
     state.check(|op| {
         assert_eq!(op, ConnectionOp::CheckAnthropicKey);
         true
     });
     assert_eq!(state.removal(), Removal::Waiting);
-    state.receive(KeyView::Missing);
+    state.receive(KeyView::Missing, None);
     assert_eq!(state.removal(), Removal::None);
     assert!(!state.saved());
 }

@@ -224,7 +224,9 @@ async fn a_remove_sent_while_a_native_read_is_blocked_wins() {
     })
     .await
     .expect("gate joined");
-    accounts.connection_event(ConnectionEvent::Op(ConnectionOp::RemoveAnthropicKey));
+    accounts.connection_event(ConnectionEvent::Op(ConnectionOp::RemoveAnthropicKey {
+        revision: 1,
+    }));
     resume.send(()).expect("release the read");
     timeout(Duration::from_secs(5), async {
         while accounts.connections.view.anthropic != KeyView::Missing {
@@ -243,6 +245,7 @@ async fn a_remove_sent_while_a_native_read_is_blocked_wins() {
     assert_eq!(
         vault
             .anthropic(crate::connections::anthropic::KeyOp::Load)
+            .1
             .expect("read")
             .map(|_| ()),
         None,
@@ -311,7 +314,9 @@ async fn a_failed_removal_stays_pending_until_a_retry_commits_it() {
     let sent = || requests.load(std::sync::atomic::Ordering::SeqCst);
     assert_eq!(sent(), 1);
     authority_sql(&lock, REFUSE_HEADS);
-    accounts.connection_event(ConnectionEvent::Op(ConnectionOp::RemoveAnthropicKey));
+    accounts.connection_event(ConnectionEvent::Op(ConnectionOp::RemoveAnthropicKey {
+        revision: 1,
+    }));
     accounts.connection_event(ConnectionEvent::Op(ConnectionOp::CheckAnthropicKey));
     settle(&mut accounts).await;
     assert_eq!(accounts.connections.view.anthropic, KeyView::Unconfirmed);
@@ -337,6 +342,7 @@ async fn a_failed_removal_stays_pending_until_a_retry_commits_it() {
     assert_eq!(
         vault
             .anthropic(crate::connections::anthropic::KeyOp::Load)
+            .1
             .expect("read")
             .map(|_| ()),
         None,
@@ -349,20 +355,22 @@ async fn changed_or_removed_keys_ignore_late_worker_and_check_results() {
     let scratch = Scratch::new("key-generation");
     let mut accounts = accounts(&scratch, SharedHttp::new(Held(Arc::new(Notify::new()))));
     let first = accounts.connections.generation;
-    accounts.connection_event(ConnectionEvent::Op(ConnectionOp::RemoveAnthropicKey));
+    accounts.connection_event(ConnectionEvent::Op(ConnectionOp::RemoveAnthropicKey {
+        revision: 1,
+    }));
     let current = accounts.connections.generation;
     assert_eq!(current, first + 1);
     assert_eq!(
         accounts.connection_event(ConnectionEvent::Loaded {
             generation: first,
-            result: Ok(Some(key()))
+            result: (Some(1), Ok(Some(key())))
         }),
         vec![]
     );
     assert_eq!(accounts.connections.key.as_ref().map(|_| ()), None);
     accounts.connection_event(ConnectionEvent::Loaded {
         generation: current,
-        result: Ok(None),
+        result: (None, Ok(None)),
     });
     accounts.connection_event(ConnectionEvent::Checked {
         generation: first,
@@ -393,7 +401,7 @@ async fn held_check_expires_and_valid_input_cannot_rescue_a_failed_attempt() {
     let generation = accounts.connections.generation;
     accounts.connection_event(ConnectionEvent::Loaded {
         generation,
-        result: Ok(Some(key())),
+        result: (Some(1), Ok(Some(key()))),
     });
     loop {
         let event = accounts.next().await;
@@ -445,7 +453,7 @@ async fn key_deadline_also_covers_a_held_client_factory() {
     let started = tokio::time::Instant::now();
     accounts.connection_event(ConnectionEvent::Loaded {
         generation,
-        result: Ok(Some(key())),
+        result: (Some(1), Ok(Some(key()))),
     });
     entered.notified().await;
     tokio::time::advance(Duration::from_secs(15)).await;
@@ -475,7 +483,7 @@ async fn connection_replay_is_tagged_and_outer_carriers_redact_the_key() {
     let generation = accounts.connections.generation;
     let event = ConnectionEvent::Loaded {
         generation,
-        result: Ok(Some(key())),
+        result: (Some(1), Ok(Some(key()))),
     };
     let text = format!("{event:?} {accounts:?}");
     assert!(!text.contains(test_support::SENTINEL), "no text marker");
@@ -488,6 +496,7 @@ async fn connection_replay_is_tagged_and_outer_carriers_redact_the_key() {
         accounts.connections.connected(),
         ControlToShell::Connections(ConnectionsView {
             anthropic: KeyView::Checking,
+            anthropic_revision: Some(1),
             claude_code: ClaudeCodeView::NotFound
         })
     );

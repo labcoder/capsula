@@ -16,12 +16,19 @@ use crate::connections::error::VaultError;
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum KeyOp {
     Load,
-    Remove,
+    Remove(u64),
 }
+
+pub(crate) type KeyResult = (
+    Option<u64>,
+    Result<Option<kumochi_protocol::Secret<key::AnthropicKey>>, KeyError>,
+);
 
 /// A content-free credential or local-format failure.
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum KeyError {
+    #[error("the saved key changed")]
+    Changed,
     #[error("the key was refused")]
     Rejected(KeyRejection),
     #[error("the key store is unavailable")]

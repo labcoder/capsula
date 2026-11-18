@@ -109,7 +109,7 @@ fn github_can_be_written_removed_and_swept_after_every_supported_upgrade() {
                 .as_slice(),
             &[7; 37]
         );
-        auth.remove(&[Kind::GitHub], None).unwrap();
+        auth.remove(&[Kind::GitHub], None, None).unwrap();
         let rows = auth.retired(20).unwrap();
         let row = rows.iter().find(|r| r.kind == Kind::GitHub).unwrap();
         assert_eq!(io::sweep(&setup.store, SERVICE, row), Observed::Absent);

@@ -644,6 +644,7 @@ fn claude_code(view: ClaudeCodeView) -> LinkEvent {
         generation: 7,
         view: ConnectionsView {
             anthropic: KeyView::Missing,
+            anthropic_revision: None,
             claude_code: view,
         },
     }
@@ -804,6 +805,7 @@ fn a_sign_in_from_chat_drops_settings_owed_cancels(cx: &mut TestAppContext) {
                 generation: 8,
                 view: ConnectionsView {
                     anthropic: KeyView::Missing,
+                    anthropic_revision: None,
                     claude_code: ClaudeCodeView::SigningIn,
                 },
             },

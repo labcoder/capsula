@@ -27,6 +27,7 @@ impl generation::Clock for FastClock {
 fn loaded(vault: &mut Vault<FakeStore>) -> Option<String> {
     vault
         .anthropic(KeyOp::Load)
+        .1
         .expect("load")
         .map(|key| key.expose().as_str().to_owned())
 }
@@ -105,7 +106,7 @@ fn paste_adoption_copies_to_fresh_active_names_and_is_single_use() {
         48
     );
     let result = vault.adopt_anthropic_paste(plan.generation).expect("adopt");
-    assert_eq!(result.expose().as_str(), key);
+    assert_eq!(result.1.expose().as_str(), key);
     assert_eq!(loaded(&mut vault), Some(key.clone()));
     assert!(names.iter().all(|name| !store.names().contains(name)));
     assert_eq!(store.names().len(), 2);
@@ -133,6 +134,7 @@ fn stale_paste_ids_do_not_consume_the_newer_permit() {
         vault
             .adopt_anthropic_paste(second.generation)
             .expect("second adopts")
+            .1
             .expose()
             .as_str(),
         NEW
@@ -235,7 +237,7 @@ fn remove_consumes_the_permit_even_if_its_commit_fails() {
     plant(&store, &service, &plan, NEW.as_bytes());
     refuse_commits(&path);
     assert!(matches!(
-        vault.anthropic(KeyOp::Remove),
+        vault.anthropic(KeyOp::Remove(vault.anthropic_revision())).1,
         Err(KeyError::Vault(VaultError::Authority))
     ));
     allow_commits(&path);
@@ -251,10 +253,49 @@ fn remove_consumes_the_permit_even_if_its_commit_fails() {
     ));
     assert_eq!(loaded(&mut vault).as_deref(), Some(OLD));
     assert_eq!(
-        vault.anthropic(KeyOp::Remove).expect("remove").map(|_| ()),
+        vault
+            .anthropic(KeyOp::Remove(vault.anthropic_revision()))
+            .1
+            .expect("remove")
+            .map(|_| ()),
         None
     );
     assert_eq!(loaded(&mut vault), None);
+}
+
+#[test]
+fn removal_and_retry_for_an_old_revision_keep_the_new_head_and_its_plan() {
+    let (_scratch, path, service, store) = setup("paste-stale-remove");
+    let mut vault = open(&store, &service, &path);
+    vault.save_anthropic_key(OLD.as_bytes()).expect("old key");
+    let revision = vault.anthropic_revision();
+    refuse_commits(&path);
+    assert!(matches!(
+        vault.anthropic(KeyOp::Remove(revision)).1,
+        Err(KeyError::Vault(VaultError::Authority))
+    ));
+    allow_commits(&path);
+    vault.save_anthropic_key(NEW.as_bytes()).expect("new key");
+    let plan = vault.begin_anthropic_paste(OLD.len()).expect("new plan");
+    plant(&store, &service, &plan, OLD.as_bytes());
+    let names = store.names();
+    for _ in 0..2 {
+        assert!(matches!(
+            vault.anthropic(KeyOp::Remove(revision)).1,
+            Err(KeyError::Changed)
+        ));
+        assert_eq!(loaded(&mut vault).as_deref(), Some(NEW));
+        assert_eq!(store.names(), names);
+    }
+    assert_eq!(
+        vault
+            .adopt_anthropic_paste(plan.generation)
+            .expect("plan still works")
+            .1
+            .expose()
+            .as_str(),
+        OLD
+    );
 }
 
 #[test]
@@ -290,7 +331,11 @@ fn abandoned_pastes_are_retired_on_open_and_late_writes_never_authorize() {
     let mut vault = open(&store, &service, &path);
     let plan = vault.begin_anthropic_paste(NEW.len()).expect("plan");
     assert_eq!(
-        vault.anthropic(KeyOp::Remove).expect("remove").map(|_| ()),
+        vault
+            .anthropic(KeyOp::Remove(vault.anthropic_revision()))
+            .1
+            .expect("remove")
+            .map(|_| ()),
         None
     );
     plant(&store, &service, &plan, NEW.as_bytes());
@@ -305,6 +350,7 @@ fn abandoned_pastes_are_retired_on_open_and_late_writes_never_authorize() {
         vault
             .adopt_anthropic_paste(fresh.generation)
             .expect("fresh adopt")
+            .1
             .expose()
             .as_str(),
         NEW
@@ -337,7 +383,7 @@ fn adoption_never_rebases_a_paste_over_a_changed_authority_head() {
     plant(&store, &service, &plan, NEW.as_bytes());
     vault
         .authority
-        .remove(&[Kind::AnthropicKey], None)
+        .remove(&[Kind::AnthropicKey], None, None)
         .expect("concurrent fence");
     assert!(matches!(
         vault.adopt_anthropic_paste(plan.generation),
@@ -396,6 +442,7 @@ fn failed_deletes_do_not_undo_committed_adoption() {
         vault
             .adopt_anthropic_paste(plan.generation)
             .expect("committed")
+            .1
             .expose()
             .as_str(),
         NEW

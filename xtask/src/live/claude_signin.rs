@@ -356,6 +356,7 @@ mod tests {
     fn connections(claude_code: ClaudeCodeView, anthropic: KeyView) -> Frame {
         Frame::Control(ControlToShell::Connections(ConnectionsView {
             anthropic,
+            anthropic_revision: None,
             claude_code,
         }))
     }

@@ -11,7 +11,7 @@ use tokio::task::JoinHandle;
 use tokio::time::{Duration, timeout};
 
 use crate::connections::anthropic::{
-    KeyError, KeyOp,
+    KeyError, KeyOp, KeyResult,
     key::AnthropicKey,
     models::{self, CatalogModel, CheckError},
 };
@@ -19,20 +19,18 @@ use crate::connections::anthropic::{
 use super::account::{Accounts, Event, Work};
 use super::{Brain, Full, Link};
 
-pub(super) type KeyResult = Result<Option<Secret<AnthropicKey>>, KeyError>;
-
 pub(crate) enum ConnectionEvent {
     Op(ConnectionOp),
     StagePlan {
         epoch: u64,
         request: u64,
-        result: Result<KeyStagePlan, KeyStageFailure>,
+        result: Result<(u64, KeyStagePlan), KeyStageFailure>,
     },
     StageDone {
         epoch: u64,
         generation: u64,
         plan: KeyStageId,
-        result: Result<Secret<AnthropicKey>, KeyStageFailure>,
+        result: Result<(u64, Secret<AnthropicKey>), KeyStageFailure>,
     },
     Loaded {
         generation: u64,
@@ -69,6 +67,7 @@ impl fmt::Debug for StageWork {
 fn stage_error(error: &KeyError) -> KeyStageFailure {
     match error {
         KeyError::Rejected(reason) => KeyStageFailure::Rejected(*reason),
+        KeyError::Changed => KeyStageFailure::Changed,
         KeyError::Vault(_) => KeyStageFailure::Unavailable,
     }
 }
@@ -88,9 +87,14 @@ impl StageWork {
                 request,
                 result: worker
                     .begin_key_paste(usize::from(len))
-                    .map(|plan| KeyStagePlan {
-                        id: plan.generation.stage_id(),
-                        len: u16::try_from(plan.bytes).expect("a paste length fits u16"),
+                    .map(|plan| {
+                        (
+                            plan.base,
+                            KeyStagePlan {
+                                id: plan.generation.stage_id(),
+                                len: u16::try_from(plan.bytes).expect("a paste length fits u16"),
+                            },
+                        )
                     })
                     .map_err(|error| {
                         if matches!(
@@ -145,7 +149,7 @@ pub(super) struct Connections {
     /// A Remove is admitted but hasn't committed (design §5): every key op retries it.
     // shortcut: the pending fence is process-local, so a restart before the removal commits can
     // reload the key; a durable pending intent is needed only if removal must survive that exit.
-    removing: bool,
+    removing: Option<u64>,
     stage_link: Option<u64>,
     stage_request: Option<u64>,
     stage_admission: Option<KeyStageId>,
@@ -158,13 +162,14 @@ impl Default for Connections {
             key: None,
             view: ConnectionsView {
                 anthropic: KeyView::Missing,
+                anthropic_revision: None,
                 claude_code: ClaudeCodeView::NotFound,
             },
             models: Vec::new(),
             unsent: false,
             read: None,
             loading: false,
-            removing: false,
+            removing: None,
             stage_link: None,
             stage_request: None,
             stage_admission: None,
@@ -197,6 +202,10 @@ impl Connections {
     /// The key's half of the view; the runtime puts it together with Claude Code's.
     pub(super) fn anthropic(&self) -> KeyView {
         self.view.anthropic
+    }
+
+    pub(super) fn anthropic_revision(&self) -> Option<u64> {
+        self.view.anthropic_revision
     }
 
     pub(super) fn connected(&mut self) -> ControlToShell {
@@ -234,14 +243,15 @@ impl Accounts {
     pub(super) fn stage_op(&mut self, epoch: u64, op: ConnectionOp) -> Vec<ControlToShell> {
         let work = match op {
             ConnectionOp::BeginAnthropicKeyStage { request, len } => {
-                self.connections.stage_admission = None;
-                self.connections.stage_request = Some(request);
-                if self.connections.removing || self.connections.stage_link != Some(epoch) {
+                if self.connections.removing.is_some() || self.connections.stage_link != Some(epoch)
+                {
                     return vec![ControlToShell::AnthropicKeyStage {
                         request,
                         result: Err(KeyStageFailure::Unavailable),
                     }];
                 }
+                self.connections.stage_admission = None;
+                self.connections.stage_request = Some(request);
                 StageWork::Begin {
                     epoch,
                     request,
@@ -249,7 +259,7 @@ impl Accounts {
                 }
             }
             ConnectionOp::AnthropicKeyStaged { plan } => {
-                if self.connections.removing
+                if self.connections.removing.is_some()
                     || self.connections.stage_link != Some(epoch)
                     || self.connections.stage_admission != Some(plan)
                 {
@@ -291,12 +301,13 @@ impl Accounts {
         Vec::new()
     }
     pub(super) fn start_key(&mut self, result: KeyResult) {
-        if matches!(result, Ok(None)) {
+        if matches!(result.1, Ok(None)) {
             return;
         }
         let generation = self.connections.advance();
         self.connections.loading = true;
         self.connections.view.anthropic = KeyView::Checking;
+        self.connections.view.anthropic_revision = result.0;
         self.reads_tx
             .send(Event::Connection(ConnectionEvent::Loaded {
                 generation,
@@ -306,10 +317,6 @@ impl Accounts {
     }
 
     pub(super) fn load_key(&mut self, op: KeyOp) {
-        if matches!(op, KeyOp::Remove) {
-            self.connections.stage_request = None;
-            self.connections.stage_admission = None;
-        }
         let generation = self.connections.advance();
         self.connections.view.anthropic = KeyView::Checking;
         self.connections.loading = true;
@@ -329,12 +336,12 @@ impl Accounts {
         epoch: u64,
         generation: u64,
         plan: KeyStageId,
-        result: Result<Secret<AnthropicKey>, KeyStageFailure>,
+        result: Result<(u64, Secret<AnthropicKey>), KeyStageFailure>,
     ) -> Vec<ControlToShell> {
         let outcome = match result {
-            Ok(key) => {
+            Ok((revision, key)) => {
                 if generation == self.connections.generation {
-                    self.start_key(Ok(Some(key)));
+                    self.start_key((Some(revision), Ok(Some(key))));
                 }
                 Ok(())
             }
@@ -362,6 +369,10 @@ impl Accounts {
                     return Vec::new();
                 }
                 self.connections.stage_request = None;
+                if matches!(result, Ok((base, _)) if self.connections.removing == Some(base)) {
+                    return Vec::new();
+                }
+                let result = result.map(|(_, plan)| plan);
                 self.connections.stage_admission = result.as_ref().ok().map(|plan| plan.id);
                 return vec![ControlToShell::AnthropicKeyStage { request, result }];
             }
@@ -374,24 +385,43 @@ impl Accounts {
                 return self.stage_done(epoch, generation, plan, result);
             }
             ConnectionEvent::Op(op) => {
-                let op = match op {
-                    ConnectionOp::CheckAnthropicKey => KeyOp::Load,
-                    ConnectionOp::RemoveAnthropicKey => KeyOp::Remove,
+                if self.connections.removing.is_some() && self.connections.loading {
+                    return Vec::new();
+                }
+                match op {
+                    ConnectionOp::CheckAnthropicKey => {}
+                    ConnectionOp::RemoveAnthropicKey { revision } => {
+                        self.connections.removing.get_or_insert(revision);
+                    }
                     _ => return Vec::new(),
-                };
-                self.connections.removing |= matches!(op, KeyOp::Remove);
-                self.load_key(if self.connections.removing {
-                    KeyOp::Remove
-                } else {
-                    op
-                });
+                }
+                self.load_key(self.connections.removing.map_or(KeyOp::Load, KeyOp::Remove));
             }
-            ConnectionEvent::Loaded { generation, result } => {
+            ConnectionEvent::Loaded {
+                generation,
+                result: (revision, result),
+            } => {
                 if generation != self.connections.generation || !self.connections.loading {
                     return Vec::new();
                 }
                 self.connections.loading = false;
-                self.connections.removing &= !matches!(result, Ok(None));
+                if self.connections.removing.is_some() {
+                    if matches!(result, Err(KeyError::Changed)) {
+                        self.connections.removing = None;
+                        self.load_key(KeyOp::Load);
+                        return vec![ControlToShell::Connections(self.connections.view)];
+                    }
+                    self.connections.stage_request = None;
+                    self.connections.stage_admission = None;
+                    if matches!(result, Ok(None)) {
+                        self.connections.removing = None;
+                    }
+                }
+                self.connections.view.anthropic_revision = if matches!(result, Ok(None)) {
+                    None
+                } else {
+                    revision
+                };
                 match result {
                     Ok(Some(key)) => {
                         self.connections.key = Some(key.clone());
@@ -419,7 +449,7 @@ impl Accounts {
                     Err(KeyError::Rejected(reason)) => {
                         self.connections.view.anthropic = KeyView::Rejected(reason);
                     }
-                    Err(KeyError::Vault(_)) => {
+                    Err(KeyError::Vault(_) | KeyError::Changed) => {
                         self.connections.view.anthropic = KeyView::Unconfirmed;
                     }
                 }
@@ -473,7 +503,7 @@ impl Brain {
                     .iter()
                     .try_for_each(|frame| link.control(frame))
             }
-            ConnectionOp::CheckAnthropicKey | ConnectionOp::RemoveAnthropicKey => {
+            ConnectionOp::CheckAnthropicKey | ConnectionOp::RemoveAnthropicKey { .. } => {
                 self.account_input(Event::Connection(ConnectionEvent::Op(op)), link)
             }
         }

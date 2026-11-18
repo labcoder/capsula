@@ -110,7 +110,6 @@ impl Tapped for ControlToBrain {
                 )
                 | Self::Connection(
                     ConnectionOp::CheckAnthropicKey
-                        | ConnectionOp::RemoveAnthropicKey
                         | ConnectionOp::ConnectClaudeCode
                         | ConnectionOp::CancelClaudeSignIn
                         | ConnectionOp::DisconnectClaudeCode
@@ -188,6 +187,7 @@ impl Tapped for ControlToShell {
                 // Versions, states and content-free reasons only.
                 | Self::Connections(ConnectionsView {
                     anthropic: _,
+                    anthropic_revision: _,
                     claude_code: _
                 })
                 // Part states, error keys and byte counts only.

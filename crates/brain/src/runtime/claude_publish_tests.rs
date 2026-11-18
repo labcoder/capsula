@@ -18,6 +18,7 @@ use crate::test_support::Scratch;
 
 const BOTH: ConnectionsView = ConnectionsView {
     anthropic: KeyView::Missing,
+    anthropic_revision: None,
     claude_code: READY,
 };
 
@@ -86,7 +87,7 @@ async fn every_connections_frame_sent_carries_both_current_halves() {
         );
         shell
             .send(&ControlToBrain::Connection(
-                ConnectionOp::RemoveAnthropicKey,
+                ConnectionOp::RemoveAnthropicKey { revision: 1 },
             ))
             .await;
         let removed = until(&mut shell, |view| view.anthropic == KeyView::Missing).await;

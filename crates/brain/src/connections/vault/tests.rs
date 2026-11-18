@@ -419,7 +419,11 @@ fn a_refused_head_update_rolls_back_the_whole_commit() {
         "every write landed before the commit"
     );
     assert!(matches!(
-        vault.anthropic(crate::connections::anthropic::KeyOp::Remove),
+        vault
+            .anthropic(crate::connections::anthropic::KeyOp::Remove(
+                vault.anthropic_revision()
+            ))
+            .1,
         Err(crate::connections::anthropic::KeyError::Vault(
             VaultError::Authority
         ))

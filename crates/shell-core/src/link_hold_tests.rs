@@ -356,7 +356,7 @@ fn recorded_choice_mutations_cancel_before_queueing_and_away_back_still_changes_
             choice: choice("other"),
         }),
         ControlToBrain::AccountOp(AccountOp::SignOut),
-        ControlToBrain::Connection(ConnectionOp::RemoveAnthropicKey),
+        ControlToBrain::Connection(ConnectionOp::RemoveAnthropicKey { revision: 1 }),
         ControlToBrain::Settings(SettingsOp::RemoveVoice(VoicePart::SpeechInput)),
     ];
     let mut link = LinkHandle::detached();

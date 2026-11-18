@@ -298,6 +298,7 @@ fn connection_ops_warm_and_the_connections_view_keep_their_fields() {
             Direction::ToShell,
             &ControlToShell::Connections(ConnectionsView {
                 anthropic: KeyView::Unconfirmed,
+                anthropic_revision: Some(1),
                 claude_code: ClaudeCodeView::SignedOut {
                     version: ClaudeVersion {
                         major: 2,
@@ -312,7 +313,7 @@ fn connection_ops_warm_and_the_connections_view_keep_their_fields() {
     dump(&mut recording(&records).as_slice(), &mut out).expect("dumps");
     assert_eq!(
         String::from_utf8(out).expect("utf-8"),
-        "    0 Control shell -> brain  Connection(CheckAnthropicKey)\n    1 Control shell -> brain  Warm { thread: ThreadId(3) }\n    2 Control brain -> shell  Connections(ConnectionsView { anthropic: Unconfirmed, claude_code: SignedOut { version: ClaudeVersion { major: 2, minor: 1, patch: 306 } } })\n3 frames\n"
+        "    0 Control shell -> brain  Connection(CheckAnthropicKey)\n    1 Control shell -> brain  Warm { thread: ThreadId(3) }\n    2 Control brain -> shell  Connections(ConnectionsView { anthropic: Unconfirmed, anthropic_revision: Some(1), claude_code: SignedOut { version: ClaudeVersion { major: 2, minor: 1, patch: 306 } } })\n3 frames\n"
     );
 }
 

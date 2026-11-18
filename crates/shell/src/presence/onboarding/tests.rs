@@ -817,6 +817,7 @@ fn claude(
                     generation,
                     view: ConnectionsView {
                         anthropic: KeyView::Missing,
+                        anthropic_revision: None,
                         claude_code: view,
                     },
                 }]),

@@ -13,6 +13,7 @@ use crate::platform::credential::CredentialStore;
 pub(crate) struct PastePlan {
     pub(crate) generation: Generation,
     pub(crate) bytes: usize,
+    pub(crate) base: u64,
 }
 
 impl fmt::Debug for PastePlan {
@@ -49,6 +50,7 @@ impl<S: CredentialStore> Vault<S> {
         let reply = PastePlan {
             generation: plan.generation(),
             bytes: plan.layout().bytes(),
+            base: plan.base(),
         };
         self.paste = Some(plan);
         self.sweep();
@@ -62,7 +64,7 @@ impl<S: CredentialStore> Vault<S> {
     pub(crate) fn adopt_anthropic_paste(
         &mut self,
         id: Generation,
-    ) -> Result<Secret<AnthropicKey>, PasteError> {
+    ) -> Result<(u64, Secret<AnthropicKey>), PasteError> {
         self.adopt_with_clock(id, &generation::System)
     }
 
@@ -70,7 +72,7 @@ impl<S: CredentialStore> Vault<S> {
         &mut self,
         id: Generation,
         clock: &dyn generation::Clock,
-    ) -> Result<Secret<AnthropicKey>, PasteError> {
+    ) -> Result<(u64, Secret<AnthropicKey>), PasteError> {
         let plan = self
             .paste
             .take_if(|plan| plan.generation() == id)
@@ -103,6 +105,6 @@ impl<S: CredentialStore> Vault<S> {
             );
             return Err(KeyError::from(error).into());
         }
-        Ok(key)
+        Ok((plan.base() + 1, key))
     }
 }

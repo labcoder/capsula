@@ -116,6 +116,7 @@ pub struct KeyPaste {
     stage: Stage,
     request: u64,
     revision: u64,
+    authority_revision: Option<u64>,
     view: Option<KeyView>,
     saved: bool,
     removing: bool,
@@ -134,9 +135,10 @@ impl fmt::Debug for KeyPaste {
 }
 
 impl KeyPaste {
-    pub fn receive(&mut self, view: KeyView) -> bool {
-        let changed = self.view != Some(view);
+    pub fn receive(&mut self, view: KeyView, authority_revision: Option<u64>) -> bool {
+        let changed = self.view != Some(view) || self.authority_revision != authority_revision;
         self.view = Some(view);
+        self.authority_revision = authority_revision;
         if matches!(view, KeyView::Missing) {
             self.saved = false;
             self.removing = false;
@@ -347,25 +349,33 @@ impl KeyPaste {
         }
         if send(ConnectionOp::CheckAnthropicKey) {
             self.failure = None;
-            self.receive(KeyView::Checking);
+            self.receive(KeyView::Checking, self.authority_revision);
         } else if self.failure != Some(PasteFailure::Unconfirmed) {
             self.failure = Some(PasteFailure::Offline);
         }
     }
 
     pub fn remove_revision(&self) -> Option<u64> {
-        (self.can_paste() && self.view != Some(KeyView::Missing)).then_some(self.revision)
+        (self.can_paste()
+            && self.view != Some(KeyView::Missing)
+            && self.authority_revision.is_some())
+        .then_some(self.revision)
     }
 
     pub fn remove(&mut self, revision: u64, send: impl FnOnce(ConnectionOp) -> bool) {
         if self.remove_revision() != Some(revision) {
             return;
         }
+        let Some(authority_revision) = self.authority_revision else {
+            return;
+        };
         self.revision = self.revision.wrapping_add(1);
-        if send(ConnectionOp::RemoveAnthropicKey) {
+        if send(ConnectionOp::RemoveAnthropicKey {
+            revision: authority_revision,
+        }) {
             self.failure = None;
             self.removing = true;
-            self.receive(KeyView::Checking);
+            self.receive(KeyView::Checking, self.authority_revision);
         } else {
             self.failure = Some(PasteFailure::Offline);
         }

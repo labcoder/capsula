@@ -1752,6 +1752,7 @@ fn connections_reach_the_shell_with_their_session() {
     let session = connected(next(&events));
     let connections = kumochi_protocol::message::ConnectionsView {
         anthropic: kumochi_protocol::message::KeyView::Missing,
+        anthropic_revision: None,
         claude_code: kumochi_protocol::message::ClaudeCodeView::Finding,
     };
     frame::write(

@@ -16,13 +16,15 @@ async fn remove_during_begin_never_forwards_the_discarded_plan_or_leaves_staged_
         ),
         vec![]
     );
-    account.connection_event(ConnectionEvent::Op(ConnectionOp::RemoveAnthropicKey));
+    account.connection_event(ConnectionEvent::Op(ConnectionOp::RemoveAnthropicKey {
+        revision: 1,
+    }));
     let planned = next(&mut account).await;
     assert!(matches!(
         planned,
         Event::Connection(ConnectionEvent::StagePlan {
             request: 41,
-            result: Ok(KeyStagePlan { len: 16, .. }),
+            result: Ok((1, KeyStagePlan { len: 16, .. })),
             ..
         })
     ));
@@ -30,7 +32,7 @@ async fn remove_during_begin_never_forwards_the_discarded_plan_or_leaves_staged_
     assert!(matches!(
         removed,
         Event::Connection(ConnectionEvent::Loaded {
-            result: Ok(None),
+            result: (None, Ok(None)),
             ..
         })
     ));

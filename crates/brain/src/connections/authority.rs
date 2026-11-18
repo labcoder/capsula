@@ -461,10 +461,16 @@ impl Authority {
         &mut self,
         kinds: &[Kind],
         marker: Option<SignOutMarker>,
+        expected: Option<(Kind, u64)>,
     ) -> Result<(), AuthorityError> {
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if let Some((kind, revision)) = expected
+            && current(&tx, kind)?.revision != revision
+        {
+            return Err(AuthorityError::Conflict);
+        }
         for kind in kinds {
             tx.execute(
                 "UPDATE generations SET state = 'removed'

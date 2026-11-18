@@ -63,34 +63,62 @@ impl<S: CredentialStore> fmt::Debug for Vault<S> {
 }
 
 impl<S: CredentialStore> Vault<S> {
-    pub(crate) fn anthropic(
-        &mut self,
-        op: super::anthropic::KeyOp,
-    ) -> Result<Option<Secret<super::anthropic::key::AnthropicKey>>, super::anthropic::KeyError>
-    {
-        use super::anthropic::{KeyError, KeyOp, key::AnthropicKey};
-        match op {
-            KeyOp::Remove => {
-                let paste = self.paste.take();
-                let result = self.remove(&[Kind::AnthropicKey], None);
-                if let Some(plan) = paste {
-                    generation::delete_pending(
-                        &self.store,
-                        &self.service,
-                        Kind::AnthropicKey,
-                        plan.generation(),
-                        plan.layout(),
-                    );
-                }
-                result?;
-                Ok(None)
-            }
-            KeyOp::Load => self
-                .read_bytes(Kind::AnthropicKey)?
-                .map(AnthropicKey::parse)
-                .transpose()
-                .map_err(KeyError::Rejected),
+    pub(crate) fn anthropic(&mut self, op: super::anthropic::KeyOp) -> super::anthropic::KeyResult {
+        use super::anthropic::KeyOp;
+        let result = match op {
+            KeyOp::Load => return self.load_anthropic(),
+            KeyOp::Remove(revision) => self.remove_anthropic(revision).map(|()| None),
+        };
+        (None, result)
+    }
+
+    fn remove_anthropic(&mut self, revision: u64) -> Result<(), super::anthropic::KeyError> {
+        use super::anthropic::KeyError;
+        let result = self.authority.remove(
+            &[Kind::AnthropicKey],
+            None,
+            Some((Kind::AnthropicKey, revision)),
+        );
+        if matches!(result, Err(authority::AuthorityError::Conflict)) {
+            return Err(KeyError::Changed);
         }
+        if let Some(plan) = self.paste.take_if(|plan| plan.base() == revision) {
+            generation::delete_pending(
+                &self.store,
+                &self.service,
+                Kind::AnthropicKey,
+                plan.generation(),
+                plan.layout(),
+            );
+        }
+        result.map_err(VaultError::from)?;
+        self.sweep();
+        Ok(())
+    }
+
+    fn load_anthropic(&self) -> super::anthropic::KeyResult {
+        use super::anthropic::{KeyError, key::AnthropicKey};
+        let current = match self.authority.current(Kind::AnthropicKey) {
+            Ok(current) => current,
+            Err(error) => return (None, Err(KeyError::from(VaultError::from(error)))),
+        };
+        let result = current
+            .active
+            .map(|active| {
+                let bytes = generation::read(&self.store, &self.service, &active)
+                    .map_err(VaultError::from)?;
+                AnthropicKey::parse(bytes).map_err(KeyError::Rejected)
+            })
+            .transpose();
+        (Some(current.revision), result)
+    }
+
+    #[cfg(test)]
+    fn anthropic_revision(&self) -> u64 {
+        self.authority
+            .current(Kind::AnthropicKey)
+            .expect("head")
+            .revision
     }
 
     /// Takes account-session ownership without reading any credential yet.
@@ -433,7 +461,7 @@ impl<S: CredentialStore> Vault<S> {
     }
 
     fn remove(&mut self, kinds: &[Kind], marker: Option<SignOutMarker>) -> Result<(), VaultError> {
-        self.authority.remove(kinds, marker)?;
+        self.authority.remove(kinds, marker, None)?;
         self.sweep();
         Ok(())
     }

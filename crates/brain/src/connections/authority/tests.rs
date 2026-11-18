@@ -236,7 +236,9 @@ fn begin_and_activate_compare_and_swap_the_head() {
     authority.activate(newer, None).expect("current candidate");
     let moved = authority.begin(Kind::Account, 1, 10).expect("third");
     let moved_generation = moved.generation;
-    authority.remove(&[Kind::Account], None).expect("remove");
+    authority
+        .remove(&[Kind::Account], None, None)
+        .expect("remove");
     let late = io::write(&setup.store, SERVICE, moved, &secret(3, 10)).expect("third");
     assert!(
         matches!(
@@ -307,7 +309,7 @@ fn a_removal_stays_final_when_the_store_serves_the_deleted_value_again() {
     let active = setup.save(&mut authority, Kind::AnthropicKey, &secret(9, 108));
     let before = setup.store.snapshot();
     authority
-        .remove(&[Kind::AnthropicKey], None)
+        .remove(&[Kind::AnthropicKey], None, None)
         .expect("remove");
     let retired = authority.retired(16).expect("retired");
     assert_eq!(
@@ -479,7 +481,7 @@ fn a_removed_generation_is_swept_only_after_a_clean_read_in_a_later_open() {
     let mut authority = setup.open();
     let active = setup.save(&mut authority, Kind::Host, &secret(1, 45));
     let before = setup.store.snapshot();
-    authority.remove(&[Kind::Host], None).expect("remove");
+    authority.remove(&[Kind::Host], None, None).expect("remove");
     let retired = authority.retired(16).expect("retired")[0];
     assert_eq!(io::sweep(&setup.store, SERVICE, &retired), Observed::Absent);
     authority
@@ -740,7 +742,7 @@ fn the_marker_never_defaults_and_commits_with_its_transition() {
     let promoted = SignOutMarker::fail_closed();
     setup.save(&mut authority, Kind::Account, &secret(1, 10));
     authority
-        .remove(&[Kind::Account, Kind::Revocations], Some(promoted))
+        .remove(&[Kind::Account, Kind::Revocations], Some(promoted), None)
         .expect("remove with marker");
     drop(authority);
     let authority = setup.open();

@@ -32,8 +32,11 @@ pub enum ConnectionOp {
     },
     /// Check the saved key again, after it was left unconfirmed.
     CheckAnthropicKey,
-    /// Forget the saved key.
-    RemoveAnthropicKey,
+    /// Forget the exact saved key that the user confirmed.
+    RemoveAnthropicKey {
+        /// The confirmed authority revision, unrelated to the key material.
+        revision: u64,
+    },
     /// Start Claude Code's own sign-in, in a console the user answers.
     ConnectClaudeCode,
     /// Stop that sign-in.
@@ -59,7 +62,7 @@ impl fmt::Debug for ConnectionOp {
                 .field("plan", plan)
                 .finish(),
             Self::CheckAnthropicKey => f.write_str("CheckAnthropicKey"),
-            Self::RemoveAnthropicKey => f.write_str("RemoveAnthropicKey"),
+            Self::RemoveAnthropicKey { .. } => f.write_str("RemoveAnthropicKey"),
             Self::ConnectClaudeCode => f.write_str("ConnectClaudeCode"),
             Self::CancelClaudeSignIn => f.write_str("CancelClaudeSignIn"),
             Self::DisconnectClaudeCode => f.write_str("DisconnectClaudeCode"),
@@ -122,6 +125,8 @@ pub enum KeyStageFailure {
 pub struct ConnectionsView {
     /// The Anthropic key.
     pub anthropic: KeyView,
+    /// The authority revision for the displayed saved key, when known.
+    pub anthropic_revision: Option<u64>,
     /// Claude Code.
     pub claude_code: ClaudeCodeView,
 }
