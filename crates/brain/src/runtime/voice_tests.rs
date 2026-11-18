@@ -1343,6 +1343,131 @@ fn remove() -> ControlToBrain {
     ControlToBrain::Settings(SettingsOp::RemoveVoice(VoicePart::SpokenReplies))
 }
 
+#[tokio::test]
+async fn cancel_received_during_remove_done_fences_only_older_installs() {
+    use crate::runtime::settings::{VoiceWrite, written};
+    use crate::voice::installer::Folder;
+
+    let scratch = Scratch::trusted("voice-cancel-remove-done");
+    let models = scratch.dir().join("models");
+    let part = VoicePart::SpokenReplies;
+    let folder = models.join(part.dir());
+    std::fs::create_dir_all(&folder).expect("part folder for removal");
+    let (fetch, results) = held_fetch();
+    let (mut brain, _release, _) = attached_at(&scratch, models, Arc::<HeldFetch>::clone(&fetch));
+    let mut tap = Tap::from_env();
+    brain.control_offline(remove(), 0, &mut tap);
+    brain.pump_settings_offline();
+    let intent = tokio::time::timeout(super::PATIENCE, written(&mut brain.config_write))
+        .await
+        .expect("RemoveIntent writes");
+    assert!(matches!(intent.1, Some(VoiceWrite::RemoveIntent { part: p, .. }) if p == part));
+    brain
+        .settings_done(intent, None)
+        .expect("starts actual deletion");
+    assert!(brain.voice_deleting(part));
+    brain.control_offline(install(), 0, &mut tap);
+    brain.pump_settings_offline();
+
+    let clear = brain.hold_config_write();
+    let deleted = tokio::time::timeout(super::PATIENCE, runtime_voice::next(&mut brain.voice))
+        .await
+        .expect("delete ends");
+    assert!(matches!(deleted, Event::Deleted(p, Folder::Missing) if p == part));
+    brain.voice_event(deleted, None).expect("queues RemoveDone");
+    brain.pump_settings_offline();
+    assert!(
+        matches!(brain.config_write.as_ref().map(crate::runtime::settings::Write::diagnostics),
+        Some((Some(VoiceWrite::RemoveDone(p)), false)) if p == part)
+    );
+    assert_eq!(fetch.begun.load(Ordering::SeqCst), 0);
+
+    let ahead = brain.hold_config_write();
+    brain.epoch += 1;
+    let (out, mut output) = mpsc::channel(16);
+    let queue = RefCell::new(DataQueue::new(window()));
+    let ready = Notify::new();
+    let mut link = Link::new(&out, &queue, &ready, &mut tap);
+    let mut ping = None;
+    for frame in [
+        ControlToBrain::Settings(SettingsOp::SetTaskbar(true)),
+        install(),
+        ControlToBrain::Settings(SettingsOp::CancelVoiceInstall),
+        ControlToBrain::Settings(SettingsOp::SetTaskbar(false)),
+        install(),
+    ] {
+        assert_eq!(
+            brain.control_frame(frame, 0, &mut link, &mut ping),
+            Ok(None)
+        );
+    }
+    assert_eq!(output.try_recv(), Err(mpsc::error::TryRecvError::Empty));
+    clear.send(Gate::Write).expect("release RemoveDone");
+    let done = tokio::time::timeout(super::PATIENCE, written(&mut brain.config_write))
+        .await
+        .expect("RemoveDone writes");
+    brain
+        .settings_done(done, Some(&mut link))
+        .expect("starts the write ahead of Cancel");
+    assert_eq!(brain.config.removing(), []);
+    assert!(!folder.exists());
+    assert!(
+        tokio::time::timeout(TICK, fetch.started.notified())
+            .await
+            .is_err(),
+        "an old deferred install started before the received Cancel settled"
+    );
+    assert_eq!(fetch.begun.load(Ordering::SeqCst), 0);
+
+    let behind = brain.hold_config_write();
+    ahead
+        .send(Gate::Write)
+        .expect("release the write ahead of Cancel");
+    let done = tokio::time::timeout(super::PATIENCE, written(&mut brain.config_write))
+        .await
+        .expect("earlier change writes");
+    brain
+        .settings_done(done, Some(&mut link))
+        .expect("settles older Install and Cancel");
+    assert!(
+        tokio::time::timeout(TICK, fetch.started.notified())
+            .await
+            .is_err()
+    );
+    assert_eq!(fetch.begun.load(Ordering::SeqCst), 0);
+    let answers = |output: &mut mpsc::Receiver<Vec<u8>>| {
+        std::iter::from_fn(|| output.try_recv().ok())
+            .filter_map(|bytes| {
+                match frame::decode(&bytes[frame::HEADER_LEN..]).expect("control frame") {
+                    ControlToShell::Settings { answer: true, view } => Some(view.show_in_taskbar),
+                    ControlToShell::Error(_) => panic!("all settings are accepted"),
+                    _ => None,
+                }
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(answers(&mut output), [true; 3]);
+
+    behind
+        .send(Gate::Write)
+        .expect("release the write behind Cancel");
+    let done = tokio::time::timeout(super::PATIENCE, written(&mut brain.config_write))
+        .await
+        .expect("later change writes");
+    brain
+        .settings_done(done, Some(&mut link))
+        .expect("starts only the fresh Install");
+    tokio::time::timeout(super::PATIENCE, fetch.started.notified())
+        .await
+        .expect("the fresh install fetches");
+    assert_eq!(fetch.begun.load(Ordering::SeqCst), 1);
+    assert_eq!(answers(&mut output), [false; 2]);
+    results
+        .send(Err(DownloadError::Refused))
+        .expect("finish fixture fetch");
+    brain.close().await;
+}
+
 /// Row 5: until the intent commits, the part keeps its model and speaks; a refused intent is the
 /// op's answer and changes nothing.
 #[tokio::test]

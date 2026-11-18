@@ -222,6 +222,32 @@ fn a_fetch_held_during_a_refused_intent_loads_once_its_refused() {
     assert!(installer.ready(SpeechInput));
 }
 
+#[test]
+fn cancel_fences_a_fetch_even_if_the_removal_intent_is_refused() {
+    for fetch_completed in [false, true] {
+        let mut installer = fetching();
+        intent(&mut installer, 4);
+        if fetch_completed {
+            assert_eq!(installer.fetched(SpeechInput, 3, Ok(())), []);
+        }
+        let expected = if fetch_completed {
+            Vec::new()
+        } else {
+            vec![Effect::CancelFetch]
+        };
+        assert_eq!(installer.cancel(), expected);
+        assert_eq!(
+            installer.intended(SpeechInput, 4, Err(ErrorKey::SettingsRefused)),
+            [],
+            "a refused removal cannot resume the cancelled install"
+        );
+        if !fetch_completed {
+            assert_eq!(installer.fetched(SpeechInput, 3, Ok(())), []);
+        }
+        assert_eq!(installer.view().speech_input, PartState::NotInstalled);
+    }
+}
+
 /// A fetch that ended during a committed intent leaves nothing to cancel.
 #[test]
 fn a_fetch_held_during_a_committed_intent_deletes_at_once() {

@@ -5,7 +5,7 @@
 
 use std::path::Path;
 
-use kumochi_protocol::message::{ControlToShell, ErrorKey, SettingsOp};
+use kumochi_protocol::message::{ControlToShell, ErrorKey, SettingsOp, VoiceView};
 use kumochi_protocol::voice::VoicePart;
 use tokio::task::{JoinError, JoinHandle};
 
@@ -22,6 +22,8 @@ pub(super) const BRAIN: u64 = 0;
 #[derive(Debug)]
 pub(super) enum Change {
     User(SettingsOp),
+    SupersededInstall,
+    VoiceInstallCancelled(VoiceView),
     Voice(VoiceWrite),
     GitHub(GitHubWrite),
 }
@@ -200,6 +202,26 @@ impl Brain {
         });
     }
 
+    /// Stops superseded installs at receipt; their answers still take their original FIFO slots.
+    pub(super) fn queue_settings(&mut self, op: SettingsOp) {
+        let change = if matches!(op, SettingsOp::CancelVoiceInstall)
+            && let Some(before) = self.fence_voice_installs()
+        {
+            for queued in &mut self.settings_ops {
+                if matches!(queued.change, Change::User(SettingsOp::InstallVoice(_))) {
+                    queued.change = Change::SupersededInstall;
+                }
+            }
+            Change::VoiceInstallCancelled(before)
+        } else {
+            Change::User(op)
+        };
+        self.settings_ops.push_back(Queued {
+            change,
+            epoch: self.epoch,
+        });
+    }
+
     /// Starts the next waiting settings change, unless a write is in flight. A refused one is
     /// settled at once with the settings unchanged.
     #[expect(clippy::too_many_lines, reason = "one ordered settings write pump")]
@@ -267,15 +289,13 @@ impl Brain {
                     }
                     continue;
                 }
-                Change::User(SettingsOp::CancelVoiceInstall) if self.voice.is_some() => {
-                    let answered = self.settled(epoch, Outcome::Accepted, link.as_deref_mut());
-                    let link = if answered.is_ok() {
-                        link.as_deref_mut()
-                    } else {
-                        None
-                    };
-                    self.voice_op(crate::voice::installer::Installer::cancel, link)?;
-                    answered?;
+                Change::SupersededInstall => {
+                    self.settled(epoch, Outcome::Accepted, link.as_deref_mut())?;
+                    continue;
+                }
+                Change::VoiceInstallCancelled(before) => {
+                    self.settled(epoch, Outcome::Accepted, link.as_deref_mut())?;
+                    self.voice_apply(before, Vec::new(), link.as_deref_mut())?;
                     continue;
                 }
                 Change::User(SettingsOp::RemoveVoice(part)) if self.voice.is_some() => {

@@ -417,6 +417,15 @@ impl Brain {
         self.voice_apply(before, effects, link)
     }
 
+    pub(super) fn fence_voice_installs(&mut self) -> Option<VoiceView> {
+        let voice = self.voice.as_mut()?;
+        let before = voice.installer.view();
+        let effects = voice.installer.cancel();
+        self.run(effects);
+        self.voice_policy();
+        Some(before)
+    }
+
     pub(super) fn voice_input_load_refusal(&self) -> Option<ErrorKey> {
         self.voice.as_ref().map_or_else(
             || {

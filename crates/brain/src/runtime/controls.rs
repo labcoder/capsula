@@ -7,7 +7,7 @@ use tokio::io::AsyncRead;
 use tokio::sync::mpsc;
 use tokio::time::Instant;
 
-use super::{Brain, Ended, Full, Link, close_wait, settings};
+use super::{Brain, Ended, Full, Link, close_wait};
 use crate::connections::account::Input as AccountInput;
 use crate::coordinator::Input;
 use crate::ipc;
@@ -188,10 +188,7 @@ impl Brain {
         }
         if let ControlToBrain::Settings(op) = message {
             // Still written; the shell that sent it is gone, so nothing answers it.
-            self.settings_ops.push_back(settings::Queued {
-                change: settings::Change::User(op),
-                epoch: self.epoch,
-            });
+            self.queue_settings(op);
             return;
         }
         if let Ok(Some(input)) = control_input(message) {
@@ -220,10 +217,7 @@ impl Brain {
                 Ok(true) => return Ok(None),
                 Err(Full) => return Err(Ended::Lost),
             }
-            self.settings_ops.push_back(settings::Queued {
-                change: settings::Change::User(op),
-                epoch: self.epoch,
-            });
+            self.queue_settings(op);
             hold.map_err(|Full| Ended::Lost)?;
             self.pump_settings(Some(link)).map_err(|Full| Ended::Lost)?;
             return Ok(None);
