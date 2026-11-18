@@ -1,7 +1,5 @@
 //! Consumes a validated paste and a brain-issued permit without sending key bytes on the pipe.
 
-#![expect(dead_code, reason = "C7a-2b supplies the Accounts paste caller")]
-
 use std::fmt;
 
 use kumochi_protocol::constants::{self, CREDENTIAL_SERVICE};
@@ -46,16 +44,33 @@ pub(crate) enum StageError {
     Store,
 }
 
+#[cfg(any(windows, test))]
 pub(crate) trait KeyStageWriter {
     fn write(&self, permit: StagePermit, key: PastedAnthropicKey)
     -> Result<KeyStageId, StageError>;
+}
+
+#[cfg(windows)]
+pub(crate) fn write_key_stage(
+    permit: StagePermit,
+    key: PastedAnthropicKey,
+) -> Result<KeyStageId, StageError> {
+    super::windows::WindowsKeyStageWriter.write(permit, key)
+}
+
+#[cfg(not(windows))]
+pub(crate) fn write_key_stage(
+    permit: StagePermit,
+    key: PastedAnthropicKey,
+) -> Result<KeyStageId, StageError> {
+    write_stage(permit, key, |_, _| Err(StageError::Store))
 }
 
 #[expect(
     clippy::needless_pass_by_value,
     reason = "a write attempt consumes both the one-use permit and the pasted key"
 )]
-pub(super) fn write_stage(
+pub(crate) fn write_stage(
     permit: StagePermit,
     key: PastedAnthropicKey,
     mut store: impl FnMut(&str, &[u8]) -> Result<(), StageError>,

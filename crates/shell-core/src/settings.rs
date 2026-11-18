@@ -165,6 +165,7 @@ pub struct Settings {
     pub accounts: crate::accounts::Accounts,
     pub claude: crate::claude_accounts::ClaudeAccounts,
     pub github: crate::github_connections::GitHubConnections,
+    pub key_paste: crate::key_paste::KeyPaste,
     pub native_taskbar_notice: Option<Text>,
     view: Option<SettingsView>,
     notice: Option<UserError>,

@@ -11,7 +11,6 @@ use crate::platform::credential::{
 };
 use kumochi_protocol::message::KeyStageId;
 
-#[expect(dead_code, reason = "C7a-2b supplies the Accounts paste caller")]
 #[derive(Debug)]
 pub(crate) struct WindowsKeyStageWriter;
 

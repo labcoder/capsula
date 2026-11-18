@@ -26,6 +26,7 @@ pub mod escape;
 pub mod github_connections;
 pub mod input;
 pub mod instance;
+pub mod key_paste;
 pub mod link;
 pub mod logging;
 pub mod onboarding;
