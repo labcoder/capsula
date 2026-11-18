@@ -17,7 +17,14 @@ use crate::connections::model::budget::Budget;
 use crate::connections::model::conn::{Connect, ModelClient};
 use crate::connections::model::error::Failure;
 use crate::connections::model::sse::{Progress, SseEvent};
-use crate::connections::model::{Events, ResponsesBody, stream};
+#[cfg(not(all(windows, debug_assertions)))]
+use crate::connections::model::stream;
+use crate::connections::model::{Events, ResponsesBody};
+#[cfg(all(windows, debug_assertions))]
+use crate::connections::model::{
+    stream_observed,
+    text_observation::{Observation, Stamp},
+};
 use crate::coordinator::SendKey;
 use crate::engines::{
     self, Answer, Engine, EngineFailure, Finish, RunRequest, SendGate, TurnEvent,
@@ -90,6 +97,8 @@ struct Shared<C: Connect> {
     client: ModelClient<C>,
     budget: Budget,
     access: AccessHandle,
+    #[cfg(all(windows, debug_assertions))]
+    observation: Option<Arc<Observation>>,
 }
 
 impl<C: Connect> Responses<C> {
@@ -98,7 +107,26 @@ impl<C: Connect> Responses<C> {
             client,
             budget,
             access,
+            #[cfg(all(windows, debug_assertions))]
+            observation: Observation::active().map(Arc::clone),
         }))
+    }
+
+    #[cfg(all(test, windows, debug_assertions))]
+    pub(super) fn observe_for_tests(mut self, observation: Arc<Observation>) -> Self {
+        Arc::get_mut(&mut self.0)
+            .expect("the engine has not started")
+            .observation = Some(observation);
+        self
+    }
+}
+
+#[cfg(all(windows, debug_assertions))]
+impl<C: Connect> Drop for Shared<C> {
+    fn drop(&mut self) {
+        if let Some(observation) = &self.observation {
+            observation.finish();
+        }
     }
 }
 
@@ -160,11 +188,30 @@ impl<C: Connect> Shared<C> {
             }
         };
         let mut round = Round::default();
+        #[cfg(all(windows, debug_assertions))]
+        let stamp = self
+            .observation
+            .as_ref()
+            .map(|record| Stamp::new(request, record));
         let out = Out {
             round: &mut round,
             events,
+            #[cfg(all(windows, debug_assertions))]
+            stamp: stamp.clone(),
         };
+        #[cfg(not(all(windows, debug_assertions)))]
         let read = stream(&self.client, &body, &bearer.token, ask, &self.budget, out).await;
+        #[cfg(all(windows, debug_assertions))]
+        let read = stream_observed(
+            &self.client,
+            &body,
+            &bearer.token,
+            ask,
+            &self.budget,
+            out,
+            stamp,
+        )
+        .await;
         if let Err(failure) = read
             && failure.user_error().key() == ErrorKey::AccountRefused
         {
@@ -189,11 +236,22 @@ impl<C: Connect> Shared<C> {
 struct Out<'a> {
     round: &'a mut Round,
     events: &'a mpsc::Sender<TurnEvent>,
+    #[cfg(all(windows, debug_assertions))]
+    stamp: Option<Stamp>,
 }
 
 impl Events for Out<'_> {
     fn event(&mut self, event: &SseEvent) {
+        #[cfg(all(windows, debug_assertions))]
+        let previous = self.stamp.as_ref().map(|_| self.round.events.len());
         self.round.event(event);
+        #[cfg(all(windows, debug_assertions))]
+        if previous.is_some_and(|len| self.round.events.len() > len)
+            && matches!(self.round.events.last(), Some(TurnEvent::TextDelta(delta)) if !delta.is_empty())
+            && let Some(stamp) = self.stamp.take()
+        {
+            stamp.first_text();
+        }
     }
 
     async fn taken(&mut self) -> ControlFlow<()> {

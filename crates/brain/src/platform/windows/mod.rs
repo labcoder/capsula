@@ -25,6 +25,8 @@ mod spawn;
 mod window;
 
 pub(crate) use capture::{WINDOW_CAPTURE, display_at, screen_capturer};
+#[cfg(debug_assertions)]
+pub(crate) use clock::qpc_now;
 pub(crate) use clock::{qpc_age, qpc_at, qpc_left};
 pub(crate) use credential::WindowsCredentialStore;
 pub(crate) use dump::DumpExclusion;

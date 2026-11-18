@@ -168,3 +168,19 @@ only the run that hit it; keeping later automatic requests from following is the
 
 Fixtures: `crates/brain/fixtures/responses/` holds the streams and the ledger's error bodies. They're
 stored byte for byte (`.gitattributes`), so the CRLF one stays CRLF.
+
+## Opt-in Dev text observation
+
+Only the Windows Dev brain copied to `live/<number>/bin/` can create
+`chatgpt-text.stamps` there. It requires an explicit opt-in and a model budget of 1–60,
+and it never reuses an existing file. A reservation comes after the ordinary send lease
+and a successful budget debit. Its first accepted nonempty text delta gets at most one
+stamp, before forwarding to the run pump. The terminal mark distinguishes dropping an
+owned local connection, returning it to the pool, and never acquiring one. Only the
+first case can witness local I/O destruction after Stop; none proves provider cancellation.
+
+The stamps use QPC and fixed numeric fields: process and attempt identity, test model and
+effort codes, and counts. Auxiliary HTTP attempts use fixed categories, are capped at
+64, and don't spend the model budget. Neither stream content nor request data is written.
+Missing or inconsistent final counts invalidate the observation; the model budget still
+applies independently.

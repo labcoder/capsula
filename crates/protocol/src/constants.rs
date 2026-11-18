@@ -294,6 +294,9 @@ pub const SCREEN_FAULT_ENV: &str = "KUMOCHI_SCREEN_FAULT";
 /// A value that isn't a count allows none.
 pub const LIVE_BUDGET_ENV: &str = "KUMOCHI_LIVE_BUDGET";
 
+/// Enables content-free `ChatGPT` attempt stamps in a copied Dev brain.
+pub const LIVE_CHATGPT_TEXT_ENV: &str = "KUMOCHI_LIVE_CHATGPT_TEXT";
+
 /// Dev builds only: the most Claude Code questions the brain may seed. A value that isn't a
 /// count allows none.
 pub const CLAUDE_QUESTIONS_ENV: &str = "KUMOCHI_CLAUDE_QUESTIONS";

@@ -75,6 +75,13 @@ fn bearer() -> Bearer {
 }
 
 fn start(request: RunRequest) -> Round {
+    start_with(request, std::convert::identity)
+}
+
+fn start_with(
+    request: RunRequest,
+    configure: impl FnOnce(Responses<Pipes>) -> Responses<Pipes>,
+) -> Round {
     let (servers_tx, servers) = mpsc::unbounded_channel();
     let (handle, access) = AccessHandle::new();
     let engine = Responses::new(
@@ -82,6 +89,7 @@ fn start(request: RunRequest) -> Round {
         Budget::limited(None),
         handle,
     );
+    let engine = configure(engine);
     let (inputs_tx, inputs) = mpsc::unbounded_channel();
     let asks = Asks::default();
     let gate = SendGate::new(request.key, Arc::clone(&asks), inputs_tx.clone());
@@ -263,6 +271,91 @@ async fn a_granted_round_sends_on_its_bearer_and_streams_its_answer() {
             TurnEvent::Finished(Finish::Completed),
         ]
     );
+}
+
+#[cfg(all(windows, debug_assertions))]
+#[tokio::test]
+async fn observation_stamps_the_first_nonempty_parsed_delta_on_the_granted_choice() {
+    use std::sync::Mutex;
+    use std::time::Duration;
+
+    use crate::connections::model::text_observation;
+
+    tokio::time::timeout(Duration::from_secs(5), async {
+        let lines = Arc::new(Mutex::new(Vec::new()));
+        let out = Arc::clone(&lines);
+        let recorder =
+            text_observation::fixture(1, move |line| out.lock().unwrap().push(line.to_owned()));
+        let records = || {
+            lines
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|line| {
+                    let (kind, at) = line.rsplit_once(' ').unwrap();
+                    assert!(at.parse::<u64>().unwrap() > 0);
+                    kind.to_owned()
+                })
+                .collect::<Vec<_>>()
+        };
+        let pid = std::process::id();
+        let ready = format!("ready {pid} 1");
+        let reserve = format!("reserve {pid} 1 7 1 1 1 1 1");
+        let first = format!("text {pid} 1");
+        let mut round = start_with(request(Some("gpt-6-luna")), |engine| {
+            engine.observe_for_tests(recorder)
+        });
+        round.bearer(Ok(bearer())).await;
+        assert_eq!(records().as_slice(), std::slice::from_ref(&ready));
+        round.answer(round.lease()).await;
+        let mut server = round.servers.recv().await.unwrap();
+        let sent = read_request(&mut server).await;
+        assert!(sent.contains(r#""model":"gpt-6-luna""#));
+        assert!(sent.contains(r#""reasoning":{"effort":"low"}"#));
+        let mut frames = std::str::from_utf8(TEXT).unwrap().split_inclusive("\n\n");
+        let created = frames.next().unwrap();
+        let hello = frames.next().unwrap();
+        let empty = hello.replace("Hello, ", "");
+        server
+            .write_all(head(TEXT.len() + empty.len()).as_bytes())
+            .await
+            .unwrap();
+        server.write_all(created.as_bytes()).await.unwrap();
+        server.write_all(empty.as_bytes()).await.unwrap();
+        assert_eq!(
+            round.events.recv().await,
+            Some(TurnEvent::TextDelta(String::new()))
+        );
+        assert_eq!(records(), [ready.clone(), reserve.clone()]);
+        server.write_all(hello.as_bytes()).await.unwrap();
+        assert_eq!(
+            round.events.recv().await,
+            Some(TurnEvent::TextDelta("Hello, ".into()))
+        );
+        assert_eq!(records(), [ready.clone(), reserve.clone(), first.clone()]);
+        for frame in frames {
+            server.write_all(frame.as_bytes()).await.unwrap();
+        }
+        assert_eq!(
+            round.ended().await,
+            [
+                TurnEvent::TextDelta("w\u{f6}rld \u{1f642}".into()),
+                TurnEvent::Finished(Finish::Completed),
+            ]
+        );
+        assert_eq!(
+            records(),
+            [
+                ready,
+                reserve,
+                first,
+                format!("pooled {pid} 1"),
+                format!("final {pid} 1 0")
+            ],
+        );
+    })
+    .await
+    .expect("the observed stream completes");
 }
 
 #[tokio::test]

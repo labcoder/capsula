@@ -1377,6 +1377,156 @@ async fn a_spent_budget_settles_and_connects_nothing() {
     assert_eq!(harness.settled().len(), 1);
 }
 
+#[cfg(all(windows, debug_assertions))]
+#[tokio::test]
+async fn observation_counts_the_reserved_failed_connect_not_a_denied_or_spent_ask() {
+    use super::text_observation::{self, Stamp};
+
+    struct NeverConnect;
+    impl Connect for NeverConnect {
+        type Io = DuplexStream;
+
+        fn connect(&self) -> impl Future<Output = io::Result<DuplexStream>> + Send {
+            std::future::ready(Err(io::ErrorKind::NotConnected.into()))
+        }
+    }
+
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let out = Arc::clone(&seen);
+    let observation = text_observation::fixture(1, move |line| lock(&out).push(line.to_owned()));
+    let request = crate::engines::RunRequest::for_tests(
+        RunId(7),
+        kumochi_protocol::message::ThreadId(2),
+        "words",
+    );
+    let client = ModelClient::new(NeverConnect);
+    let payload = body("words");
+    let bearer = Secret::new(Zeroizing::new(BEARER.to_owned()));
+    let budget = Budget::limited(Some(1));
+    for (grant, expected) in [
+        (None, Failure::Rebuild),
+        (Some(()), Failure::Transport),
+        (Some(()), Failure::Spent),
+    ] {
+        assert_eq!(
+            super::stream_observed(
+                &client,
+                &payload,
+                &bearer,
+                std::future::ready(grant),
+                &budget,
+                |_: &SseEvent| {},
+                Some(Stamp::new(&request, &observation)),
+            )
+            .await,
+            Err(expected)
+        );
+    }
+    observation.finish();
+    let records = lock(&seen);
+    assert_eq!(
+        records
+            .iter()
+            .map(|line| line.split(' ').next().unwrap())
+            .collect::<Vec<_>>(),
+        ["ready", "reserve", "no_io", "final"]
+    );
+    let pid = std::process::id();
+    assert!(records[2].starts_with(&format!("no_io {pid} 1 ")));
+    assert!(records[3].starts_with(&format!("final {pid} 1 0 ")));
+}
+
+#[cfg(all(windows, debug_assertions))]
+#[tokio::test]
+async fn observation_distinguishes_cancellation_after_owned_io_drop_from_pool_reuse() {
+    use super::text_observation::{self, Stamp};
+
+    let harness = Harness::budgeted(1 << 20, Some(2));
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let out = Arc::clone(&seen);
+    let io = Arc::clone(&harness.shared.seen);
+    let observation = text_observation::fixture(2, move |line| {
+        lock(&out).push((
+            line.split(' ').next().unwrap().to_owned(),
+            lock(&io).closes.len(),
+        ));
+    });
+    let request = crate::engines::RunRequest::for_tests(
+        RunId(7),
+        kumochi_protocol::message::ThreadId(2),
+        "words",
+    );
+    let payload = body("words");
+    for (serial, complete) in [(1, false), (2, true)] {
+        let mut call: Pin<Box<dyn Future<Output = Result<(), Failure>>>> =
+            Box::pin(tokio::task::unconstrained(super::stream_observed(
+                &harness.client,
+                &payload,
+                &harness.bearer,
+                ask(&harness.gate, key(serial)),
+                &harness.budget,
+                |_: &SseEvent| {},
+                Some(Stamp::new(&request, &observation)),
+            )));
+        assert!(poll(&mut call).is_pending());
+        harness.grant(serial);
+        assert!(poll(&mut call).is_pending());
+        let mut server = harness.accept();
+        if complete {
+            reply(&mut server, &sse(TEXT));
+            assert_eq!(poll(&mut call), Poll::Ready(Ok(())));
+        }
+        drop(call);
+        assert_eq!(received(&mut server).1, !complete);
+    }
+    let seen = lock(&seen);
+    let observed = seen
+        .iter()
+        .map(|(kind, count)| (kind.as_str(), *count))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        observed,
+        [
+            ("ready", 0),
+            ("reserve", 0),
+            ("closed", 1),
+            ("reserve", 1),
+            ("pooled", 1),
+        ]
+    );
+}
+
+#[cfg(all(windows, debug_assertions))]
+#[test]
+fn observation_records_only_fixed_http_classes_and_refuses_a_final_after_overflow() {
+    use super::text_observation;
+    use crate::connections::http_client::Endpoint;
+
+    let pid = std::process::id();
+    for calls in [64, 65] {
+        let lines = Arc::new(Mutex::new(Vec::new()));
+        let out = Arc::clone(&lines);
+        let observation = text_observation::fixture(1, move |line| {
+            let (fields, timestamp) = line.rsplit_once(' ').unwrap();
+            assert!(timestamp.parse::<u64>().unwrap() > 0);
+            lock(&out).push(fields.to_owned());
+        });
+        let models = Endpoint::Models(Secret::new(Zeroizing::new("PLANTED-ACCOUNT".into())));
+        for call in 1..=calls {
+            let endpoint = if call == 1 { &models } else { &Endpoint::Token };
+            observation.auxiliary(endpoint);
+        }
+        observation.finish();
+        let mut expected = vec![format!("ready {pid} 1")];
+        expected.push(format!("aux {pid} 1 5"));
+        expected.extend((2..=64).map(|ordinal| format!("aux {pid} {ordinal} 1")));
+        if calls == 64 {
+            expected.push(format!("final {pid} 0 64"));
+        }
+        assert_eq!(*lock(&lines), expected);
+    }
+}
+
 #[tokio::test]
 async fn a_bad_body_or_bearer_never_asks() {
     for value in [
