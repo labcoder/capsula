@@ -375,10 +375,10 @@ queue order, with the current settings, and progress follows as `Voice`.
 Cancel sends every install that's waiting, fetching or loading back to where it was, with its
 files kept, so the next install resumes. A cancelled load's late success is dropped and sends
 nothing, because the handle already freed it. A commit in flight isn't cancelled, and neither
-is a removal. An install during a removal starts once the removal finishes. Installs keep going while
-no shell is connected. Quit tells the running fetch to stop and starts no other, so an install
-still waiting never downloads; a commit already queued still lands. A model lost after Quit
-fails instead of reloading.
+is a removal. An install during a removal starts once the removal finishes, unless Cancel drops
+the deferred install first. Installs keep going while no shell is connected. Quit tells the
+running fetch to stop and starts no other, so an install still waiting never downloads; a
+commit already queued still lands. A model lost after Quit fails instead of reloading.
 
 ```mermaid
 stateDiagram-v2

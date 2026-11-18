@@ -1065,6 +1065,86 @@ fn install() -> ControlToBrain {
     ControlToBrain::Settings(SettingsOp::InstallVoice(VoicePart::SpokenReplies))
 }
 
+#[tokio::test]
+async fn finishing_onboarding_without_voice_consent_does_not_fetch_even_after_restart() {
+    let scratch = Scratch::trusted("voice-onboarding-skip");
+    let models = scratch.dir().join("models");
+    let partials = VoicePart::ALL.map(|part| {
+        let folder = models.join(part.dir());
+        std::fs::create_dir_all(&folder).expect("part folder");
+        let first = part.files().next().expect("manifest file");
+        let partial = folder.join(format!("{}.part", first.name));
+        std::fs::write(&partial, b"partial model").expect("partial cache");
+        partial
+    });
+    std::fs::write(
+        scratch.dir().join(CONFIG_FILE),
+        "onboarded = false\nonboarding_from = \"shortcut\"\n",
+    )
+    .expect("onboarding not finished");
+    let (fetch, _results) = held_fetch();
+
+    for onboarded in [false, true] {
+        let mut brain = test_support::brain(&scratch, "");
+        assert_eq!(brain.config.view().onboarded, onboarded);
+        let stuck = brain.finish_removals(&models);
+        let (stt_reports, stt_heard) = Reports::new();
+        let (_release, held) = std_mpsc::channel();
+        let (stt, _) = crate::voice::stt::held_for_runtime(stt_reports, held);
+        let (tts_reports, tts_heard) = Reports::new();
+        let tts = TtsHandle::spawn_with(
+            tokio::runtime::Handle::current(),
+            tts_reports,
+            |_: &Path| Ok(Silence),
+        )
+        .expect("the fake output owner starts");
+        brain.attach_voice(
+            models.clone(),
+            &stuck,
+            (Some(stt), Some(tts)),
+            [stt_heard, tts_heard],
+            Arc::<HeldFetch>::clone(&fetch),
+        );
+        let ((control, data), mut shell) = duplex();
+        let mut tap = Tap::from_env();
+        let client = async {
+            assert_eq!(
+                opening(&mut shell).await,
+                VoiceView {
+                    speech_input: PartState::NotInstalled,
+                    spoken_replies: PartState::NotInstalled,
+                }
+            );
+            if !onboarded {
+                shell
+                    .send(&ControlToBrain::Settings(SettingsOp::FinishOnboarding))
+                    .await;
+                assert!(matches!(
+                    shell.unaccounted().await.expect("readable"),
+                    Some(ControlToShell::Settings { answer: true, view }) if view.onboarded
+                ));
+            }
+            drop(shell);
+        };
+        let (ended, ()) = tokio::time::timeout(super::PATIENCE, async {
+            tokio::join!(brain.serve(control, data, &mut tap), client)
+        })
+        .await
+        .expect("the shell finishes");
+        assert_eq!(ended, Ended::Lost);
+        assert_eq!(brain.config.installed(), []);
+        assert_eq!(brain.config.removing(), []);
+        brain.close().await;
+        assert_eq!(fetch.begun.load(Ordering::SeqCst), 0);
+    }
+    for partial in partials {
+        assert_eq!(
+            std::fs::read(partial).expect("partial cache remains"),
+            b"partial model"
+        );
+    }
+}
+
 /// Pumps the queued settings changes to a shell whose control queue is already full.
 fn pump_full(brain: &mut Brain) {
     let (out, _unread) = mpsc::channel(1);

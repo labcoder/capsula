@@ -409,11 +409,13 @@ impl Installer {
         self.take()
     }
 
-    /// `CancelVoiceInstall`: every install still queued, fetching or loading goes back to where it
-    /// was, with its files kept. A commit in flight isn't cancelled, and neither is a removal.
+    /// `CancelVoiceInstall`: drops installs waiting for removal and returns installs still queued,
+    /// fetching or loading to where they were, with their files kept. A commit in flight isn't
+    /// cancelled, and neither is a removal.
     /// Answered accepted with no write.
     pub(crate) fn cancel(&mut self) -> Vec<Effect> {
         for (index, part) in VoicePart::ALL.into_iter().enumerate() {
+            self.parts[index].install_after = false;
             if !self.parts[index].available {
                 continue;
             }

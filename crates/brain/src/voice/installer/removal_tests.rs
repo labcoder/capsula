@@ -322,23 +322,64 @@ fn a_loss_while_draining_deletes_and_never_reloads() {
     );
 }
 
-/// Row 12: an install during the delete waits for the removal to finish, then fetches afresh.
+fn install_during_held_delete(part: VoicePart) -> Installer {
+    let (mut installer, _) = Installer::start(
+        [Durable::Absent; 2],
+        [false; 2].map(Ok),
+        [true; 2],
+        &[],
+        true,
+    );
+    assert_eq!(
+        installer.remove(part, Folder::Present),
+        (RemoveAnswer::Intent { token: 3 }, Vec::new())
+    );
+    assert_eq!(installer.intended(part, 3, Ok(())), [delete(part, 3)]);
+    assert_eq!(installer.install(part), []);
+    installer
+}
+
 #[test]
 fn an_install_during_the_delete_fetches_once_the_removal_finishes() {
-    let mut installer = ready();
-    intent(&mut installer, 3);
-    installer.intended(SpeechInput, 3, Ok(()));
-    installer.reported(SpeechInput, report(1, LoadEvent::Unloaded));
-    assert_eq!(installer.install(SpeechInput), []);
-    assert_eq!(installer.view().speech_input, PartState::NotInstalled);
-    installer.deleted(SpeechInput, 3, Folder::Missing);
+    for part in VoicePart::ALL {
+        let mut installer = install_during_held_delete(part);
+        assert_eq!(
+            installer.deleted(part, 3, Folder::Missing),
+            [Effect::Clear { part }]
+        );
+        assert_eq!(
+            installer.cleared(part, Ok(())),
+            [Effect::Fetch { part, token: 4 }]
+        );
+    }
+}
+
+fn cancel_during_held_delete(part: VoicePart) {
+    let mut installer = install_during_held_delete(part);
+    assert_eq!(installer.cancel(), []);
     assert_eq!(
-        installer.cleared(SpeechInput, Ok(())),
-        [Effect::Fetch {
-            part: SpeechInput,
-            token: 4
-        }]
+        installer.deleted(part, 3, Folder::Missing),
+        [Effect::Clear { part }],
+        "the removal still finishes"
     );
+    assert_eq!(
+        installer.cleared(part, Ok(())),
+        [],
+        "the cancelled install must not fetch"
+    );
+    let view = installer.view();
+    assert_eq!(view.speech_input, PartState::NotInstalled);
+    assert_eq!(view.spoken_replies, PartState::NotInstalled);
+}
+
+#[test]
+fn cancel_during_held_delete_drops_speech_input_install() {
+    cancel_during_held_delete(SpeechInput);
+}
+
+#[test]
+fn cancel_during_held_delete_drops_spoken_replies_install() {
+    cancel_during_held_delete(SpokenReplies);
 }
 
 /// An install during a refused intent runs once it's refused.
