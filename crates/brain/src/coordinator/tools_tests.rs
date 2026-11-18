@@ -1082,11 +1082,9 @@ fn a_key_round_ends_the_run_when_a_source_it_carries_on_has_gone() {
     }
 }
 
-#[test]
-fn a_key_rebuild_stores_only_calls_from_the_replacement_round() {
+fn admitted_key_round(sources: Vec<ThreadId>) -> Coordinator {
     use crate::context::RunSnapshot;
     use crate::coordinator::{Availability, Ready};
-    use crate::engines::anthropic::encode::ToolUse;
     use kumochi_protocol::message::{
         AssistantName, ConnectionKind, Effort, ModelChoice, ModelInfo, ModelName, ModelSlug,
     };
@@ -1115,19 +1113,9 @@ fn a_key_rebuild_stores_only_calls_from_the_replacement_round() {
     })
     .expect("never stale");
     core.handle(Input::TurnStored { run: R }).expect("current");
-    let build = |key, snapshot, sources| {
-        Input::ContextBuilt(ContextBuilt {
-            key,
-            snapshot,
-            result: Ok(Built {
-                request: request(),
-                sources,
-            }),
-        })
-    };
-    let first = build(
-        attempt(1, 1),
-        Some(RunSnapshot {
+    let first = Input::ContextBuilt(ContextBuilt {
+        key: attempt(1, 1),
+        snapshot: Some(RunSnapshot {
             origin: Origin::Task(T),
             assistant: AssistantName::new("Kumo").expect("name"),
             user: None,
@@ -1138,9 +1126,20 @@ fn a_key_rebuild_stores_only_calls_from_the_replacement_round() {
             }),
             connection: tag,
         }),
-        vec![T, B],
-    );
+        result: Ok(Built {
+            request: request(),
+            sources,
+        }),
+    });
     assert!(starts_round(&core.handle(first).expect("admitted"), 1));
+    core
+}
+
+#[test]
+fn a_key_rebuild_stores_only_calls_from_the_replacement_round() {
+    use crate::engines::anthropic::encode::ToolUse;
+
+    let mut core = admitted_key_round(vec![T, B]);
     let typed = |n: u32, word: &str| {
         ToolUse::projected(&format!(
             r#"{{"type":"tool_use","id":"tool-{n}","name":"list_tasks","input":{{"word":"{word}"}}}}"#
@@ -1180,7 +1179,7 @@ fn a_key_rebuild_stores_only_calls_from_the_replacement_round() {
     assert_eq!(replacement.key, attempt(1, 2));
     assert!(starts_round(
         &core
-            .handle(build(replacement.key, None, vec![T]))
+            .handle(offering(replacement.key, &[T]))
             .expect("admitted"),
         1
     ));

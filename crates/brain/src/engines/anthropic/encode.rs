@@ -26,7 +26,7 @@ const NOTE: &str = "Kumochi note:\n";
 /// The longest tool name or call id this route sends, as `CallId` bounds ids.
 const NAME_BYTES: usize = 64;
 /// Tool-input containers, including the root object. Leaves headroom for the five enclosing
-/// request containers under serde_json's recursion limit.
+/// request containers under `serde_json`'s recursion limit.
 const MAX_TOOL_INPUT_DEPTH: usize = 96;
 
 /// Why no body was built.

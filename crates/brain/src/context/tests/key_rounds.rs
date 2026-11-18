@@ -566,7 +566,7 @@ async fn a_key_input_fits_the_envelope_before_it_becomes_a_row() {
         format!(r#"{{"type":"tool_use","id":"toolu_1","name":"list_tasks","input":{accepted}}}"#);
     assert_eq!(
         calls.iter().map(ToolUse::json).collect::<Vec<_>>(),
-        [block.clone()]
+        std::slice::from_ref(&block)
     );
     keep_calls(&mut world, run, &calls, &[("toolu_1", "answer")]);
     assert!(stored(&world).contains(&block));
