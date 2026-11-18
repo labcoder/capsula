@@ -78,10 +78,6 @@ pub(crate) enum Offer {
 impl Offer {
     /// What a build's launch may offer: the tools its built request offers that `origin` may
     /// also call over MCP, or nothing when there are none.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "M1b's foreground offer is the first caller")
-    )]
     pub(crate) fn authorized(origin: Origin, offered: &[ToolSchema]) -> Self {
         let tools: Vec<ToolName> = crate::dispatch::mcp_schemas(origin)
             .iter()

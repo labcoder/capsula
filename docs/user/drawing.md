@@ -1,5 +1,8 @@
 # Drawings
 
+Claude Code can draw diagrams and other 2D visuals over your windows. It can’t mark a spot
+in a screenshot; screen annotations need the ChatGPT connection and a shared picture.
+
 Conversation history shows **Drawing unavailable in history** for stored drawing steps.
 It keeps surrounding text, but does not reconstruct the picture there. This message does
 not mean a drawing still visible on screen has failed, and reading history does not change it.

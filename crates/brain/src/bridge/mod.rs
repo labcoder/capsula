@@ -174,6 +174,13 @@ pub(crate) enum Input {
     End,
 }
 
+#[cfg(test)]
+impl Input {
+    pub(crate) fn from_test_json(value: &serde_json::Value) -> Self {
+        Self::Line(Line::Text(value.to_string().into_bytes()))
+    }
+}
+
 /// Reads stdin into `lines`. `ended` is set the moment a read sees the end, before the last
 /// sends, which can block on a full queue: the relay learns of the end even then. A reader
 /// blocked on a full queue before its end never sees it; the deadline ends that case.

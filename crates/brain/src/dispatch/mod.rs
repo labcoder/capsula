@@ -473,6 +473,7 @@ enum Prepared {
         query: crate::recall::Query,
     },
     Draw(Result<draw::DrawArgs, crate::drawing::CallError>),
+    RefusedDraw(kumochi_scene::StepError),
 }
 
 /// One tool.
@@ -544,7 +545,7 @@ pub(crate) fn model_schemas(origin: Origin) -> Vec<ToolSchema> {
         .collect()
 }
 
-/// Only model offers that the dispatcher also permits through MCP.
+/// Only model offers that the dispatcher also permits through MCP, `draw` on the overlay alone.
 pub(crate) fn mcp_schemas(origin: Origin) -> Vec<ToolSchema> {
     model_schemas(origin)
         .into_iter()
@@ -552,6 +553,13 @@ pub(crate) fn mcp_schemas(origin: Origin) -> Vec<ToolSchema> {
             named(schema.name)
                 .and_then(tool)
                 .is_some_and(|tool| tool.mcp)
+        })
+        .map(|schema| {
+            if schema.name == draw::DRAW.wire {
+                draw::overlay()
+            } else {
+                schema
+            }
         })
         .collect()
 }
@@ -639,16 +647,8 @@ pub(crate) fn call<'a>(
             run.ledger.reading(&call, caller);
             Step::Read(call)
         }
-        Ok((_, Prepared::Draw(draw))) => {
-            run.ledger.reserve(&key, caller);
-            if let Ok(draw) = &draw {
-                run.ledger.bind_draw(&key, draw.hash);
-            }
-            Step::Screen {
-                key,
-                draw: DrawAction::Complete(draw),
-            }
-        }
+        Ok((_, Prepared::Draw(draw))) => draw::complete(run.ledger, key, caller, draw),
+        Ok((_, Prepared::RefusedDraw(error))) => draw::refuse(run.ledger, &key, &error),
         Ok((
             tool,
             Prepared::Local {
@@ -713,7 +713,11 @@ fn first(
     if args.len() > MAX_ARGS {
         return Err(ToolError::TooLarge);
     }
-    let prepared = (tool.prepare)(args)?;
+    let prepared = if name == ToolName::Draw && matches!(caller, Caller::Mcp { .. }) {
+        draw::prepare_overlay(args)
+    } else {
+        (tool.prepare)(args)?
+    };
     if let Prepared::Local { write, output, .. } = &prepared {
         if let (Origin::Task(_), LocalWrite::Focus(target)) = (run.reach, write)
             && *target != run.main
@@ -740,6 +744,6 @@ fn rehash(name: ToolName, args: &[u8]) -> Option<[u8; 32]> {
         .and_then(|prepared| match prepared {
             Prepared::Local { hash, .. } | Prepared::Read { hash, .. } => Some(hash),
             Prepared::Draw(Ok(draw)) => Some(draw.hash),
-            Prepared::Draw(Err(_)) => None,
+            Prepared::Draw(Err(_)) | Prepared::RefusedDraw(_) => None,
         })
 }

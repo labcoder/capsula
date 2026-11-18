@@ -141,6 +141,13 @@ impl Ledger {
         self.stopped.contains(&(key.route, key.call.clone()))
     }
 
+    /// Refuses `key` with a draw's own `output`, read as an error like a draw that stopped early.
+    pub(crate) fn refuse_stopped(&mut self, key: &LedgerKey, output: ToolOutput) {
+        let id = (key.route, key.call.clone());
+        self.stopped.insert(id.clone());
+        self.entries.insert(id, Entry::Refused(output));
+    }
+
     pub(crate) fn refuse(&mut self, key: &LedgerKey, error: ToolError) {
         self.entries.insert(
             (key.route, key.call.clone()),

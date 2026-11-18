@@ -443,7 +443,7 @@ failure of both writes, loses the marker.
 attempts. A run's round, or a title or summary job, whose choice names Claude Code asks one: the
 runtime's `Brain::owned_engine` calls `Claude::question` for both, which looks the choice's model up in the reviewed row and passes the row's own
 alias, so no other text reaches `--model`; maps its effort to the CLI's word (`low`, `medium`,
-`high`, `xhigh`, `max`); fixes the snapshot with `Offer::Nothing`; and takes a fresh attempt. A
+`high`, `xhigh`, `max`); fixes the snapshot's tool offer; and takes a fresh attempt. A
 refusal becomes a round that fails at once through `Unserved`: with Claude Code's own reason while
 no launch would be admitted, and otherwise with the refusal's: `ModelUnavailable` with Open
 Settings for an alias the row doesn't list, `ClaudeCodeBusy` with Retry while the lane's queue is
@@ -460,7 +460,8 @@ hears the current list if it isn't empty, and nothing before Claude Code's first
 - **The snapshot.** A `LaunchSnapshot` fixes the thread, model, effort, Claude Code's connection
   generation, the tools it offers (`Offer::Nothing`, or `Offer::Mcp` with the authorized tools:
   `Offer::authorized` keeps those of the built request's tools that the origin may also call over
-  MCP) and the version. Every production question offers `Offer::Nothing` until M1b.
+  MCP) and the version. A foreground build that offers `draw` can call it on the overlay. Jobs
+  and tool-free builds, including inline compaction, offer `Nothing`.
   Model-only history schemas do not enter the MCP listener, launch audit or seed.
   `Claude::snapshot` makes one only while the view is `Ready`. A snapshot is current only while
   the view is `Ready` at its version and its generation is Claude Code's current one; `warm`,
@@ -646,8 +647,9 @@ sequenceDiagram
     B-->>L: McpReply { text, error }
 ```
 
-- **Dormant.** Every production question offers `Offer::Nothing`, so no launch is authorized and
-  no call reaches the dispatcher until M1b makes the foreground offer nonempty.
+- **Overlay only.** The Claude seed and MCP list offer the overlay schema and prompt. An MCP call
+  containing a screen begin or a box target is refused before handing anything to the drawing
+  system. The refusal stays in memory for that key, with no call row or scene write.
 - **Stopped draws.** A draw that stopped part way answers with its committed steps and its typed
   failure as text, with `isError` true. The ledger keeps that per call key, so a replay of the
   key answers the same way.
