@@ -122,6 +122,30 @@ fn the_row_pastes_only_from_the_test_clipboard_and_never_writes_it(cx: &mut Test
 }
 
 #[gpui::test]
+fn a_fresh_unconfirmed_view_warns_that_paste_can_replace_a_key(cx: &mut TestAppContext) {
+    let (window, owner, _) = isolated_row(cx);
+    let mut visual = VisualTestContext::from_window(window, cx);
+    let warning = "Pasting replaces any saved key before Anthropic checks the new one.";
+    visual.run_until_parked();
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+    assert!(visual.debug_bounds(warning).is_none());
+    visual.update(|_, cx| {
+        owner.update(cx, |owner, cx| {
+            owner.settings.update(cx, |state, cx| {
+                state.key_paste = KeyPaste::default();
+                state.key_paste.receive(KeyView::Unconfirmed);
+                assert!(!state.key_paste.saved());
+                assert!(state.key_paste.can_paste());
+                cx.notify();
+            });
+        });
+    });
+    visual.run_until_parked();
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+    assert!(visual.debug_bounds(warning).is_some());
+}
+
+#[gpui::test]
 fn a_stale_or_cancelled_confirmation_cannot_remove_a_key(cx: &mut TestAppContext) {
     let (window, owner, controls) = isolated_row(cx);
     owner.update(cx, |owner, cx| {

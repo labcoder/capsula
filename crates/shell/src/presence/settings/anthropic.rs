@@ -76,10 +76,9 @@ impl SettingsView {
                     && matches!(state.view(), Some(KeyView::Checking | KeyView::Unconfirmed)))
                 .then(|| div().text_sm().child(strings.get(Text::AnthropicSaved))),
             )
-            .children((state.saved() && state.can_paste()).then(|| {
-                div()
-                    .text_sm()
-                    .child(strings.get(Text::AnthropicReplaceNote))
+            .children((state.can_paste() && state.view() != Some(KeyView::Missing)).then(|| {
+                let text = strings.get(Text::AnthropicReplaceNote);
+                div().debug_selector(|| text.clone()).text_sm().child(text)
             }))
             .children(notice(state).map(|text| div().text_sm().child(strings.get(text))))
             .child(
