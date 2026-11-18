@@ -638,8 +638,9 @@ records only their operation and length.
 - **Progress.** `SpeechProgress` goes out at most every 250 ms. `SpeechStopped` confirms that
   output for the run is quiet; `cursor` is `None` when nothing of it played.
 - **Out of bounds.** A `MicPcm` or an `AudioOutput` rate out of bounds ends the connection as
-  broken. Until slice 7's later PRs consume them, the brain ignores in-bound microphone audio
-  and the speech controls, and the shell credits and drops the speech frames.
+  broken. A connection without a speaker, which is every normal launch today, sends no
+  `AudioOutput`, so no speech frames come; any that do are credited and dropped. A speaker
+  takes them off the data pipe itself and answers `SpeechRevoked` ([speaker.md](speaker.md)).
 
 ## GitHub and issue wire contract
 

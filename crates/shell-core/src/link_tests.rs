@@ -840,6 +840,16 @@ fn a_full_batch_leaves_the_next_event_queued() {
     assert_eq!(receiver.len(), 0);
 }
 
+/// A link to no brain, with no speaker.
+fn bare_link() -> Link {
+    Link {
+        brain: PathBuf::new(),
+        session: 0,
+        shared: Arc::new(Shared::default()),
+        speaker: None,
+    }
+}
+
 fn text(run: u64, delta: &str) -> DataToShell {
     DataToShell::AssistantText {
         run: RunId(run),
@@ -1481,11 +1491,7 @@ fn the_brain_s_first_frames_with_the_account_view_keep_the_connection() {
         }
     );
     let (sender, events) = async_channel::unbounded();
-    let link = Link {
-        brain: PathBuf::new(),
-        session: 0,
-        shared: Arc::new(Shared::default()),
-    };
+    let link = bare_link();
     let (_handle, start) = start(link, sender);
     let connection = Connection {
         control: Arc::new(shell_control),
@@ -1567,11 +1573,7 @@ fn an_ended_connection_s_sends_and_credit_never_reach_the_next() {
         pipe.set_timeout(Some(PATIENCE));
     }
     let (sender, events) = async_channel::unbounded();
-    let link = Link {
-        brain: PathBuf::new(),
-        session: 0,
-        shared: Arc::new(Shared::default()),
-    };
+    let link = bare_link();
     let (handle, start) = start(link, sender);
     let link = thread::spawn(move || {
         [
@@ -1887,11 +1889,7 @@ fn a_delete_answered_before_a_new_brain_never_fences_the_new_brain_s_runs() {
         pipe.set_timeout(Some(PATIENCE));
     }
     let (sender, events) = async_channel::unbounded();
-    let link = Link {
-        brain: PathBuf::new(),
-        session: 0,
-        shared: Arc::new(Shared::default()),
-    };
+    let link = bare_link();
     let (handle, start) = start(link, sender);
     let link = thread::spawn(move || {
         [
@@ -2165,3 +2163,255 @@ fn both_drawing_controls_reach_the_ui_as_notices_with_their_own_keys() {
 
 #[path = "link_hold_tests.rs"]
 mod hold_tests;
+
+#[test]
+fn a_prepared_link_has_no_speaker_opener() {
+    let (sender, _events) = async_channel::unbounded();
+    let (_handle, start) = super::prepare(sender).expect("prepares");
+    assert!(
+        start.link.speaker.is_none(),
+        "a normal launch never opens an output"
+    );
+}
+
+#[test]
+fn a_normal_session_never_announces_an_output() {
+    let link = attended("no-speaker");
+    let events = patient(link.events);
+    let _session = connected(next(&events));
+    frame::write(&mut &link.control, &ControlToShell::Ping, Pipe::Control).expect("ping");
+    loop {
+        let message = frame::read::<ControlToBrain>(&mut &link.control, Pipe::Control)
+            .expect("read")
+            .expect("a frame");
+        assert!(
+            !matches!(message, ControlToBrain::AudioOutput { .. }),
+            "no opener, no output"
+        );
+        if message == ControlToBrain::Pong {
+            break;
+        }
+    }
+    drop(link.control);
+    assert!(link.link.join().expect("joined"));
+}
+
+#[test]
+fn a_speaking_session_announces_its_output_keeps_speech_from_the_ui_and_answers_a_revoke() {
+    use kumochi_protocol::message::{OutputGeneration, SegmentId, SpeechPcm};
+    let opener = crate::speaker::Opener(Arc::new(|outlet| {
+        Some(crate::speaker::deviceless(outlet, 24_000))
+    }));
+    let link = attended_speaking("speaker", opener);
+    let events = patient(link.events);
+    let _session = connected(next(&events));
+    let read = || frame::read::<ControlToBrain>(&mut &link.control, Pipe::Control).expect("read");
+    assert_eq!(
+        read(),
+        Some(ControlToBrain::AudioOutput {
+            rate: 24_000,
+            generation: OutputGeneration(1)
+        })
+    );
+    let credit = |frame: &DataToShell| {
+        let size = frame::encode(frame, Pipe::Data).expect("encodes").len();
+        Some(DataToBrain::Credit {
+            bytes: u32::try_from(size).expect("small"),
+        })
+    };
+    let queued = DataToShell::SegmentQueued {
+        run: RunId(1),
+        segment: SegmentId(0),
+        step: None,
+    };
+    frame::write(&mut &*link.data, &queued, Pipe::Data).expect("written");
+    link.data.set_timeout(Some(Duration::from_millis(150)));
+    assert!(
+        frame::read::<DataToBrain>(&mut &*link.data, Pipe::Data).is_err(),
+        "held, uncredited, until control names its run"
+    );
+    link.data.set_timeout(Some(PATIENCE));
+    let state = ControlToShell::RunState {
+        origin: None,
+        run: RunId(1),
+        thread: ThreadId(3),
+        phase: Phase::Answering,
+        error: None,
+    };
+    frame::write(&mut &link.control, &state, Pipe::Control).expect("state");
+    assert_eq!(
+        frame::read::<DataToBrain>(&mut &*link.data, Pipe::Data).expect("read"),
+        credit(&queued),
+        "credited once the speaker kept it"
+    );
+    let pcm = DataToShell::SpeechPcm(SpeechPcm {
+        run: RunId(1),
+        segment: SegmentId(0),
+        output_generation: OutputGeneration(1),
+        seq: 0,
+        samples: vec![7; 240],
+        last: Some(240),
+    });
+    frame::write(&mut &*link.data, &pcm, Pipe::Data).expect("written");
+    assert_eq!(
+        frame::read::<DataToBrain>(&mut &*link.data, Pipe::Data).expect("read"),
+        credit(&pcm),
+        "the audio went to the speaker and was credited once"
+    );
+    let revoke = ControlToShell::SpeechRevoked { run: RunId(1) };
+    frame::write(&mut &link.control, &revoke, Pipe::Control).expect("revoke");
+    assert_eq!(
+        read(),
+        Some(ControlToBrain::SpeechStopped {
+            run: RunId(1),
+            cursor: None
+        })
+    );
+    assert!(
+        matches!(next(&events), LinkEvent::RunState { run: RunId(1), .. }),
+        "the UI still gets the run's state"
+    );
+    assert!(
+        events.recv_timeout(Duration::from_millis(100)).is_err(),
+        "speech never reaches the UI"
+    );
+    drop(link.control);
+    assert!(link.link.join().expect("joined"));
+}
+
+/// Opens no output however its worker ends, so the session must go on answering pings.
+fn stays_up_without_output(label: &str, opener: crate::speaker::Opener) {
+    let link = attended_speaking(label, opener);
+    let events = patient(link.events);
+    let _session = connected(next(&events));
+    std::thread::sleep(Duration::from_millis(200));
+    for _ in 0..2 {
+        frame::write(&mut &link.control, &ControlToShell::Ping, Pipe::Control).expect("ping");
+        assert_eq!(
+            frame::read::<ControlToBrain>(&mut &link.control, Pipe::Control).expect("read"),
+            Some(ControlToBrain::Pong),
+            "no output, and no lost connection"
+        );
+    }
+    drop(link.control);
+    assert!(link.link.join().expect("joined"), "the UI was still there");
+}
+
+#[test]
+fn a_speaker_that_fails_to_open_leaves_a_session_without_output() {
+    stays_up_without_output(
+        "refused-speaker",
+        crate::speaker::Opener(Arc::new(|outlet| {
+            let (speaker, worker) = crate::speaker::pair(outlet);
+            drop(worker);
+            drop(speaker);
+            None
+        })),
+    );
+    stays_up_without_output(
+        "unaccepted-speaker",
+        crate::speaker::Opener(Arc::new(crate::speaker::late)),
+    );
+    stays_up_without_output(
+        "late-speaker",
+        crate::speaker::Opener(Arc::new(|outlet| {
+            let (_speaker, worker) = crate::speaker::pair(outlet);
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(100));
+                drop(worker);
+            });
+            None
+        })),
+    );
+}
+
+/// Waits for the link to return on its own, with the brain's ends still open.
+fn returns_in_time(link: thread::JoinHandle<bool>, within: Duration) -> bool {
+    let (done, returned) = std::sync::mpsc::channel();
+    std::thread::spawn(move || done.send(link.join().expect("joined")));
+    returned.recv_timeout(within).is_ok()
+}
+
+#[test]
+fn an_opened_speaker_whose_worker_dies_ends_the_connection() {
+    let opener = crate::speaker::Opener(Arc::new(|outlet| {
+        let (mut speaker, worker) = crate::speaker::pair(outlet);
+        speaker.attach(std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(50));
+            drop(worker);
+        }));
+        Some(speaker)
+    }));
+    let link = attended_speaking("dying-speaker", opener);
+    let events = patient(link.events);
+    let _session = connected(next(&events));
+    assert!(
+        returns_in_time(link.link, PATIENCE),
+        "no speech needed to notice"
+    );
+    drop(link.control);
+}
+
+#[test]
+fn a_speaker_thread_left_behind_cannot_hold_up_teardown() {
+    let (release, stuck) = std::sync::mpsc::channel::<()>();
+    let stuck = std::sync::Mutex::new(Some(stuck));
+    let opener = crate::speaker::Opener(Arc::new(move |outlet| {
+        let (mut speaker, worker) = crate::speaker::pair(outlet);
+        let stuck = stuck
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+            .expect("opened once");
+        speaker.attach(std::thread::spawn(move || {
+            let _held = worker;
+            let _released = stuck.recv();
+        }));
+        Some(speaker)
+    }));
+    let link = attended_speaking("stuck-speaker", opener);
+    let events = patient(link.events);
+    let _session = connected(next(&events));
+    frame::write(&mut &link.control, &ControlToShell::Ping, Pipe::Control).expect("ping");
+    assert_eq!(
+        frame::read::<ControlToBrain>(&mut &link.control, Pipe::Control).expect("read"),
+        Some(ControlToBrain::Pong),
+        "the writer's queue is empty again"
+    );
+    drop(link.control);
+    assert!(
+        returns_in_time(link.link, Duration::from_secs(5)),
+        "the worker still holds a control sender"
+    );
+    release.send(()).expect("the worker was still held");
+}
+
+#[test]
+fn audio_without_an_output_is_credited_and_never_shown() {
+    use kumochi_protocol::message::{OutputGeneration, SegmentId, SpeechPcm};
+    let link = attended("no-output-audio");
+    let events = patient(link.events);
+    let _session = connected(next(&events));
+    let pcm = DataToShell::SpeechPcm(SpeechPcm {
+        run: RunId(1),
+        segment: SegmentId(0),
+        output_generation: OutputGeneration(1),
+        seq: 0,
+        samples: vec![7; 240],
+        last: Some(240),
+    });
+    frame::write(&mut &*link.data, &pcm, Pipe::Data).expect("written");
+    let size = frame::encode(&pcm, Pipe::Data).expect("encodes").len();
+    assert_eq!(
+        frame::read::<DataToBrain>(&mut &*link.data, Pipe::Data).expect("read"),
+        Some(DataToBrain::Credit {
+            bytes: u32::try_from(size).expect("small")
+        })
+    );
+    assert!(
+        events.recv_timeout(Duration::from_millis(100)).is_err(),
+        "the samples never reach the UI"
+    );
+    drop(link.control);
+    assert!(link.link.join().expect("joined"));
+}

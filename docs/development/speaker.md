@@ -5,7 +5,9 @@ speech, writes it to the device, and decides from the device's own clock which s
 The brain still owns what is spoken and when a run ends ([voice.md](voice.md)). The speaker
 only reports what played and when its output is quiet.
 
-**Dormant.** Nothing calls the Windows opener.
+**Dormant.** Nothing opens a speaker in a normal launch. `link::prepare` attaches no
+`Opener`, so no connection sends `AudioOutput` and no run gets a reply; link tests pin that.
+Slice 7's half-duplex change (D) enables output.
 
 ## Pieces
 
@@ -15,6 +17,7 @@ only reports what played and when its output is quiet.
 | `Engine` | `speaker/engine.rs` | the 20 s arena, up to 256 segments, runs, stops, pauses and the reports |
 | `Worker`, `Speaker`, `Input` | `speaker.rs` | the bounded channels to the worker; credit; spent buffers; teardown |
 | Windows adapter | `platform/windows/speaker.rs` | the WASAPI stream, its thread, its event and the platform results |
+| Link | `link.rs` | routing speech frames, run names, revokes and the speaker's reports on one connection |
 
 ## The device seam
 
@@ -146,12 +149,55 @@ All go out on the connection's control queue, in order. The announcement comes f
   they're discarded, and the whole arena on drop; in a `Packet` however it's let go; in a kept
   or dropped frame's buffer, which goes back to the reader zeroed when the return channel has
   room or is freed by the worker, already zeroed; and in the adapter's scratch and byte buffers
-  after each write and on drop.
+  after each write and on drop. Audio that arrives with no speaker is zeroed and credited, and
+  never reaches the UI.
 - **What isn't.** The transport's framed bytes and the data reader's buffer, which predate the
   speaker, and the device's own copy of what it was given.
 - **Teardown.** Dropping the `Speaker` revokes it and waits up to 1 s [guess] for its thread to
   finish, then leaves it. A revoked worker stages only silence, and a buffer whose release decision
   sees the revoke goes back silent; one decided before it is owed, as above.
+
+## The link
+
+- **Opening.** A link with an `Opener` opens one speaker per connection, and only once the
+  connection's threads run, `Connected` reached the UI and no quit is under way. Its generation
+  counts up across the link's connections. A speaker that fails to open, or opens too late,
+  leaves the session working without output and announces nothing.
+- **Routing.** The data reader hands `SegmentQueued` and `SpeechPcm` to the speaker instead of
+  the UI. The control watcher hands it each newly named run from `RunState`, and each
+  `SpeechRevoked` as a Stop. A frame whose run control hasn't named is held, uncredited, so
+  data that overtakes its `RunState` can't start playback; a revoke that comes first fences it.
+  Without a speaker, `SpeechPcm` is zeroed and credited.
+- **Failure.** A command the speaker's queue refuses ends the connection, since a lost revoke
+  would leave speech playing. Once a speaker opened, the link arms its worker's end: when the
+  worker ends for any reason, idle included, it aborts both pipes, so the link notices at once
+  and reconnects. A worker that ended before it was armed ends the connection as it's armed.
+- **Teardown.** The link closes the control queue, so a worker left behind can't keep the
+  writer waiting, aborts both pipes, drops the speaker (waiting up to 1 s for its thread), then
+  joins its own threads.
+
+```mermaid
+sequenceDiagram
+  participant B as brain
+  participant R as data reader
+  participant W as control watcher
+  participant S as speaker worker
+  participant D as device
+  S->>B: AudioOutput
+  B->>W: RunState(run)
+  W->>S: Name(run)
+  B->>R: SegmentQueued, SpeechPcm
+  R->>S: packet (capacity 1)
+  S->>B: credit for the frame
+  D->>S: padding, then position and QPC
+  S->>S: observe against what's written
+  S->>D: stage(padding), release, commit(padding after)
+  S->>B: SpeechProgress, SegmentPlayed
+  B->>W: SpeechRevoked
+  W->>S: Stop
+  D->>S: last content frame played
+  S->>B: SpeechStopped(cursor)
+```
 
 ## Windows
 

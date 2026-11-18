@@ -58,6 +58,21 @@ pub(super) fn attended_shared(
     shared: Arc<Shared>,
     incarnation: Incarnation,
 ) -> Attended {
+    attended_with(label, shared, incarnation, None)
+}
+
+/// A connection whose link opens a speaker with `opener`.
+#[cfg(test)]
+pub(super) fn attended_speaking(label: &str, opener: crate::speaker::Opener) -> Attended {
+    attended_with(label, Arc::default(), Incarnation(1), Some(opener))
+}
+
+fn attended_with(
+    label: &str,
+    shared: Arc<Shared>,
+    incarnation: Incarnation,
+    speaker: Option<crate::speaker::Opener>,
+) -> Attended {
     let (control, shell_control) = pair(&format!("{label}-control"));
     let (data, shell_data) = pair(&format!("{label}-data"));
     control.set_timeout(Some(PATIENCE));
@@ -67,6 +82,7 @@ pub(super) fn attended_shared(
         brain: PathBuf::new(),
         session: 0,
         shared,
+        speaker,
     };
     let (handle, start) = start(link, sender);
     let connection = Connection {

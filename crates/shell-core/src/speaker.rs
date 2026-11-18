@@ -1,5 +1,6 @@
 //! The speaker: one connection's output device, fed by the link, with the played-content clock
-//! behind it (docs/development/speaker.md). Nothing opens one yet.
+//! behind it (docs/development/speaker.md). Nothing opens one in a normal launch:
+//! [`crate::link::prepare`] attaches no [`Opener`].
 //!
 //! The link's data reader hands each speech frame through a capacity-1 channel and usually gets
 //! the zeroed sample buffer back on another. Commands come on a bounded queue. The worker, which
@@ -433,4 +434,14 @@ impl Worker {
             }
         }
     }
+}
+
+/// A speaker with no device behind it, for the link's tests: it keeps the queue and answers
+/// stops, but no frame ever plays.
+#[cfg(test)]
+pub(crate) fn deviceless(outlet: Outlet, rate: u32) -> Speaker {
+    launch(outlet, TEARDOWN, move |worker, ready| {
+        idle(worker, &ready, rate);
+    })
+    .expect("a speaker with no device starts at once")
 }
