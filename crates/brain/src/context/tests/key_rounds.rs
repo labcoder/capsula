@@ -611,6 +611,9 @@ fn a_key_run_with_another_routes_row_or_unpaired_results_replays_as_its_text() {
     let unanswered = world.start("alone");
     keep_calls(&mut world, unanswered, &[stored_call()], &[]);
     world.reply(unanswered, "Done.");
+    let stray = world.start("stray");
+    keep_calls(&mut world, stray, &[stored_call()], &[("toolu_9", "stray")]);
+    world.reply(stray, "Done.");
     let next = world.start("next");
     let mut chatgpt = on_key(TAG);
     chatgpt.choice.as_mut().expect("a choice").connection = ConnectionKind::ChatGpt;
@@ -635,6 +638,11 @@ fn a_key_run_with_another_routes_row_or_unpaired_results_replays_as_its_text() {
                 InputItem::Message {
                     role: Role::User,
                     text: "alone".into(),
+                },
+                said("Looking.Done."),
+                InputItem::Message {
+                    role: Role::User,
+                    text: "stray".into(),
                 },
                 said("Looking.Done."),
             ],
