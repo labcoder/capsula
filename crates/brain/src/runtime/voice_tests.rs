@@ -963,7 +963,13 @@ async fn talk_back_choice_survives_spoken_replies_install_repair_remove_and_rest
 
         assert_eq!(preference(), choice);
         assert_eq!(scratch.config().view().talk_back, choice.unwrap_or(false));
-        install_or_repair_spoken_replies(&scratch, &models, PartState::NotInstalled, || {}).await;
+        Box::pin(install_or_repair_spoken_replies(
+            &scratch,
+            &models,
+            PartState::NotInstalled,
+            || {},
+        ))
+        .await;
         let expected = choice.unwrap_or(true);
         assert_eq!(preference(), Some(expected));
 
@@ -977,7 +983,7 @@ async fn talk_back_choice_survives_spoken_replies_install_repair_remove_and_rest
         };
         set_size(pin.bytes - 1);
         assert_eq!(scratch.config().view().talk_back, expected);
-        install_or_repair_spoken_replies(
+        Box::pin(install_or_repair_spoken_replies(
             &scratch,
             &models,
             PartState::Failed {
@@ -985,7 +991,7 @@ async fn talk_back_choice_survives_spoken_replies_install_repair_remove_and_rest
                 installed: true,
             },
             || set_size(pin.bytes),
-        )
+        ))
         .await;
         assert_eq!(preference(), Some(expected));
 
