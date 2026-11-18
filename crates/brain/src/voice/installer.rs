@@ -409,37 +409,51 @@ impl Installer {
         self.take()
     }
 
-    /// `CancelVoiceInstall`: every install still queued, fetching or loading goes back to where it
-    /// was, with its files kept. A commit in flight isn't cancelled, and neither is a removal.
+    /// `CancelVoiceInstall`: drops installs waiting for removal and returns installs still queued,
+    /// fetching or loading to where they were, with their files kept. A commit in flight isn't
+    /// cancelled, and neither is a removal.
     /// Answered accepted with no write.
     pub(crate) fn cancel(&mut self) -> Vec<Effect> {
         for (index, part) in VoicePart::ALL.into_iter().enumerate() {
-            if !self.parts[index].available {
+            let entry = &mut self.parts[index];
+            entry.install_after = false;
+            if !entry.available {
                 continue;
             }
+            let held_by_removal = entry.intent.is_some();
+            let phase = entry
+                .intent
+                .as_mut()
+                .map_or(&mut entry.phase, |intent| &mut intent.phase);
             if let Phase::Loading {
                 prior: Some(Rest::Unloaded),
                 ask,
-            } = self.parts[index].phase
+            } = *phase
             {
-                self.parts[index].phase = Phase::Unloading { ask };
+                *phase = Phase::Unloading { ask };
                 self.effects.push(Effect::Unload { part, ask });
                 continue;
             }
-            let (prior, stop) = match self.parts[index].phase {
+            let (prior, stop) = match *phase {
                 Phase::Queued { prior } => (prior, None),
-                Phase::Fetching { prior, .. } => (prior, Some(Effect::CancelFetch)),
+                Phase::Fetching { prior, .. } => (
+                    prior,
+                    self.fetching
+                        .is_some_and(|(fetching, _)| fetching == part)
+                        .then_some(Effect::CancelFetch),
+                ),
                 Phase::Loading {
                     prior: Some(prior),
                     ask,
                 } => (prior, Some(Effect::Unload { part, ask })),
                 _ => continue,
             };
+            *phase = prior.phase();
             self.effects.extend(stop);
-            let token = self.token();
-            let entry = &mut self.parts[index];
-            entry.token = token;
-            entry.phase = prior.phase();
+            if !held_by_removal {
+                let token = self.token();
+                self.parts[index].token = token;
+            }
         }
         self.take()
     }

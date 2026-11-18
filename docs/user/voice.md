@@ -26,6 +26,7 @@ the status changes to unloaded only after the background owner reports release. 
 certify how much native memory returned to Windows.
 
 **Cancel voice setup** applies to pending setup for all voice features, not just speech input.
+It also drops setup waiting for a removal to finish, without stopping the removal.
 Some loading or finishing work cannot be stopped, including a model loading at startup.
 Installed files and reusable partial downloads are kept. A request answer is not a cancellation
 or release receipt: the current status can stay loading or later become ready. The tab shows
