@@ -439,6 +439,38 @@ mod tests {
     }
 
     #[test]
+    fn copyright_line_strips_leading_comment_marker() {
+        assert_eq!(
+            copyright_line("  // Copyright (c) 2018 Fixture"),
+            Some("Copyright (c) 2018 Fixture")
+        );
+    }
+
+    #[test]
+    fn mpl_source_offers_the_exact_crates_io_archive() {
+        let source = serde_json::json!("registry+https://github.com/rust-lang/crates.io-index");
+        assert_eq!(
+            mpl_source("option-ext", "0.2.0", &source).unwrap(),
+            "Source Code Form for option-ext 0.2.0: https://static.crates.io/crates/option-ext/option-ext-0.2.0.crate"
+        );
+    }
+
+    #[test]
+    fn mpl_source_refuses_non_crates_io_sources() {
+        for source in [
+            serde_json::json!("git+https://example.invalid/fixture"),
+            serde_json::Value::Null,
+        ] {
+            assert_eq!(
+                mpl_source("fixture", "1.0.0", &source)
+                    .unwrap_err()
+                    .to_string(),
+                "fixture 1.0.0 needs an exact source offer for MPL-2.0"
+            );
+        }
+    }
+
+    #[test]
     fn missing_policy_keys_return_errors() {
         let dir = crate::scratch::dir("notice-policy");
         let path = dir.join("deny.toml");
