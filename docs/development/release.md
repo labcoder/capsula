@@ -4,6 +4,12 @@
 with a fresh generation and fails if it is missing or stale. Neither command launches
 Kumochi, accesses its accounts or downloads voice assets.
 
+The notices must not invent a copyright holder or year, or attach a grant to the
+wrong crate or asset. The check fails if an input it covers can't be read or verified,
+or if the generated file is missing or stale. This is a source-package notice, not a
+complete audit of the linked product. Before any distribution, packaging must audit
+the actual linked installer and bundled files and close any remaining notice gaps.
+
 The Windows closure starts at `kumochi-shell` and `kumochi-brain`, with their shipped
 default features. Locked, platform-filtered Cargo metadata supplies package identities
 and license paths. `cargo tree --locked --target x86_64-pc-windows-msvc -p kumochi-shell
@@ -26,13 +32,21 @@ authors” without asserting a holder or year. A selected MPL-2.0 grant also car
 exact-version source URL. No permitted choice, no usable attribution, or no
 identifiable text for a `license-file` without an expression fails closed.
 
-Identical license texts are grouped. Nested legal files and leading legal comments
-in Rust and native source files appear separately; they cannot satisfy the crate's
-own SPDX expression. The scan omits standard Cargo test, fixture, benchmark and
-example directories, the root build script, and the package/version-specific
-non-production paths listed with reasons in `notices/sources.rs`. It fails on
-unreadable legal inputs. A git package may inherit its repository's top-level license.
-A dependency change requires regeneration and review of the changed output.
+Identical license texts are grouped. Nested legal files and leading Rust comments
+appear separately; they cannot satisfy the crate's own SPDX expression. Native
+headers are considered in crates with a Cargo build target, not in unrelated C
+tools packaged with Rust-only crates. This doesn't resolve every compilation
+condition. Versioned exclusions in `notices/sources.rs` name known nonshipping inputs.
+Versioned entries in `notices/sources/scoped.rs` retain specific non-leading grants
+and the Perl sources for two ring Windows x64 objects. Missing or ambiguous selected
+text, or a rule for a crate that no longer ships, fails the check.
+
+Other non-leading comments, embedded shaders and data loaded by `include_str!` or
+`include_bytes!`, symlinked directories, folders named `fixtures`, `examples` or
+`tests`, and generated or assembly sources beyond the ones handled here aren't
+covered. The scan also omits the root build script and standard fixture and
+benchmark directories. A git package may inherit its repository's top-level license.
+Dependency changes require regeneration and review of the changed output.
 
 Some published crates omit their repository's license files. Their exact-version
 upstream texts live in `assets/licenses/upstream/<name>-<version>/`, with a provenance

@@ -212,20 +212,17 @@ impl Policy {
                 output.push(("other published legal text".to_owned(), text));
             }
         }
-        for (kind, text) in sources::notices(dir, &format!("{name} {version}"))? {
+        for (kind, text) in
+            sources::notices(dir, &format!("{name} {version}"), &package["targets"])?
+        {
             if output.iter().all(|(_, kept)| *kept != text) {
                 output.push((kind, text));
             }
         }
         if output.iter().any(|(license, _)| license == "MPL-2.0") {
-            ensure!(
-                package["source"].as_str()
-                    == Some("registry+https://github.com/rust-lang/crates.io-index"),
-                "{name} {version} needs an exact source offer for MPL-2.0"
-            );
             output.push((
                 "MPL-2.0 source".to_owned(),
-                format!("Source Code Form for {name} {version}: https://static.crates.io/crates/{name}/{name}-{version}.crate"),
+                mpl_source(name, version, &package["source"])?,
             ));
         }
         if !output.iter().any(|(_, text)| has_copyright(text)) {
@@ -269,6 +266,7 @@ impl Policy {
 
 pub(super) fn copyright_line(line: &str) -> Option<&str> {
     let line = line.trim();
+    let line = line.strip_prefix("//").unwrap_or(line).trim_start();
     let owner = [
         "Copyright (c) ",
         "Copyright (C) ",
@@ -279,9 +277,16 @@ pub(super) fn copyright_line(line: &str) -> Option<&str> {
     .into_iter()
     .find_map(|marker| line.split_once(marker).map(|(_, owner)| owner))
     .or_else(|| {
-        ["©", "(c) ", "(C) "]
-            .into_iter()
-            .find_map(|marker| line.strip_prefix(marker))
+        ["©", "(c) ", "(C) "].into_iter().find_map(|marker| {
+            line.strip_prefix(marker).filter(|owner| {
+                let owner = owner.trim_start();
+                marker == "©"
+                    || owner.starts_with(|c: char| c.is_uppercase() || c.is_ascii_digit())
+                    || owner.strip_suffix(" developers").is_some_and(|project| {
+                        !project.is_empty() && !project.contains(char::is_whitespace)
+                    })
+            })
+        })
     })
     .or_else(|| {
         let (prefix, owner) = line.split_once(char::is_whitespace)?;
@@ -301,6 +306,11 @@ pub(super) fn copyright_line(line: &str) -> Option<&str> {
             "holder ",
             "notice",
             "license",
+            "protection under ",
+            "owner of ",
+            "owners of ",
+            "law of ",
+            "laws of ",
             "the copyright holders",
             "you must",
         ]
@@ -311,6 +321,16 @@ pub(super) fn copyright_line(line: &str) -> Option<&str> {
 
 fn has_copyright(text: &str) -> bool {
     text.lines().any(|line| copyright_line(line).is_some())
+}
+
+fn mpl_source(name: &str, version: &str, source: &serde_json::Value) -> Result<String> {
+    ensure!(
+        source.as_str() == Some("registry+https://github.com/rust-lang/crates.io-index"),
+        "{name} {version} needs an exact source offer for MPL-2.0"
+    );
+    Ok(format!(
+        "Source Code Form for {name} {version}: https://static.crates.io/crates/{name}/{name}-{version}.crate"
+    ))
 }
 
 fn canonical(name: &str, license: &str) -> Result<String> {
@@ -355,7 +375,7 @@ fn attribution(name: &str, package: &serde_json::Value) -> Result<String> {
         .as_deref()
         .unwrap_or("not declared in published Cargo.toml");
     Ok(format!(
-        "No copyright notice found in the published legal files or source headers.\nAttribution: {authors}\nRepository: {repository}"
+        "No copyright notice found in the legal files or source comments inspected.\nAttribution: {authors}\nRepository: {repository}"
     ))
 }
 
@@ -400,13 +420,18 @@ mod tests {
             "COPYRIGHT 2019 Fixture Foundation",
             "© Fixture Publisher",
             "(c) 2026 Fixture Publisher",
+            "(C) zune-image developers",
             "SPDX-FileCopyrightText: 2026 Fixture Publisher",
         ] {
             assert_eq!(copyright_line(line), Some(line));
         }
         for line in [
             "Copyright and Related Rights. A Work made available under CC0",
+            "copyright protection under copyright law of a country",
+            "Copyright owner of any part of the Work",
             "(c) You must retain, in the Source form of any Derivative Works",
+            "(c) compound (-1, n) is +0 for n > 0",
+            "(c) send a request for early data",
             "Copyright (c) <year> <copyright holders>",
         ] {
             assert_eq!(copyright_line(line), None);
@@ -540,7 +565,7 @@ mod tests {
             (
                 "manifest attribution".to_owned(),
                 format!(
-                    "No copyright notice found in the published legal files or source headers.\nAttribution: {name}\nRepository: https://example.invalid/fixture"
+                    "No copyright notice found in the legal files or source comments inspected.\nAttribution: {name}\nRepository: https://example.invalid/fixture"
                 ),
             )
         };

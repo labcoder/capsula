@@ -26,6 +26,7 @@ pub(crate) fn run(args: impl Iterator<Item = String>) -> Result<()> {
         .context("xtask is in the workspace")?;
     let policy = Policy::read(root)?;
     let packages = graph::packages(root)?;
+    sources::check_exclusions(&packages)?;
     let mut output = fs::read_to_string(root.join("THIRD-PARTY-NOTICES.md"))?.replace("\r\n", "\n");
     output.push_str("\n\n# Bundled assets\n");
     output.push_str(&assets(root, &policy, &packages)?);
@@ -42,7 +43,7 @@ pub(crate) fn run(args: impl Iterator<Item = String>) -> Result<()> {
                 .push(format!("{name} {version}"));
         }
     }
-    output.push_str("\n# Rust dependencies\n");
+    output.push_str("\n# Rust dependencies\n\nThese source-package notices are not an audit of the linked installer.\n");
     for ((license, text), mut names) in groups {
         names.sort();
         names.dedup();

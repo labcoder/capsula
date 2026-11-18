@@ -7425,6 +7425,8 @@ SOFTWARE.
 
 # Rust dependencies
 
+These source-package notices are not an audit of the linked installer.
+
 ## 0BSD
 
 enum-iterator 2.3.0
@@ -16076,84 +16078,6 @@ rustybuzz 0.20.1
 
 ## component license and notices
 
-xn 0.2.13
-
-Apache License
-Version 2.0, January 2004
-http://www.apache.org/licenses/
-
-TERMS AND CONDITIONS FOR USE, REPRODUCTION, AND DISTRIBUTION
-
-1. Definitions.
-
-"License" shall mean the terms and conditions for use, reproduction, and distribution as defined by Sections 1 through 9 of this document.
-
-"Licensor" shall mean the copyright owner or entity authorized by the copyright owner that is granting the License.
-
-"Legal Entity" shall mean the union of the acting entity and all other entities that control, are controlled by, or are under common control with that entity. For the purposes of this definition, "control" means (i) the power, direct or indirect, to cause the direction or management of such entity, whether by contract or otherwise, or (ii) ownership of fifty percent (50%) or more of the outstanding shares, or (iii) beneficial ownership of such entity.
-
-"You" (or "Your") shall mean an individual or Legal Entity exercising permissions granted by this License.
-
-"Source" form shall mean the preferred form for making modifications, including but not limited to software source code, documentation source, and configuration files.
-
-"Object" form shall mean any form resulting from mechanical transformation or translation of a Source form, including but not limited to compiled object code, generated documentation, and conversions to other media types.
-
-"Work" shall mean the work of authorship, whether in Source or Object form, made available under the License, as indicated by a copyright notice that is included in or attached to the work (an example is provided in the Appendix below).
-
-"Derivative Works" shall mean any work, whether in Source or Object form, that is based on (or derived from) the Work and for which the editorial revisions, annotations, elaborations, or other modifications represent, as a whole, an original work of authorship. For the purposes of this License, Derivative Works shall not include works that remain separable from, or merely link (or bind by name) to the interfaces of, the Work and Derivative Works thereof.
-
-"Contribution" shall mean any work of authorship, including the original version of the Work and any modifications or additions to that Work or Derivative Works thereof, that is intentionally submitted to Licensor for inclusion in the Work by the copyright owner or by an individual or Legal Entity authorized to submit on behalf of the copyright owner. For the purposes of this definition, "submitted" means any form of electronic, verbal, or written communication sent to the Licensor or its representatives, including but not limited to communication on electronic mailing lists, source code control systems, and issue tracking systems that are managed by, or on behalf of, the Licensor for the purpose of discussing and improving the Work, but excluding communication that is conspicuously marked or otherwise designated in writing by the copyright owner as "Not a Contribution."
-
-"Contributor" shall mean Licensor and any individual or Legal Entity on behalf of whom a Contribution has been received by Licensor and subsequently incorporated within the Work.
-
-2. Grant of Copyright License. Subject to the terms and conditions of this License, each Contributor hereby grants to You a perpetual, worldwide, non-exclusive, no-charge, royalty-free, irrevocable copyright license to reproduce, prepare Derivative Works of, publicly display, publicly perform, sublicense, and distribute the Work and such Derivative Works in Source or Object form.
-
-3. Grant of Patent License. Subject to the terms and conditions of this License, each Contributor hereby grants to You a perpetual, worldwide, non-exclusive, no-charge, royalty-free, irrevocable (except as stated in this section) patent license to make, have made, use, offer to sell, sell, import, and otherwise transfer the Work, where such license applies only to those patent claims licensable by such Contributor that are necessarily infringed by their Contribution(s) alone or by combination of their Contribution(s) with the Work to which such Contribution(s) was submitted. If You institute patent litigation against any entity (including a cross-claim or counterclaim in a lawsuit) alleging that the Work or a Contribution incorporated within the Work constitutes direct or contributory patent infringement, then any patent licenses granted to You under this License for that Work shall terminate as of the date such litigation is filed.
-
-4. Redistribution. You may reproduce and distribute copies of the Work or Derivative Works thereof in any medium, with or without modifications, and in Source or Object form, provided that You meet the following conditions:
-
-     (a) You must give any other recipients of the Work or Derivative Works a copy of this License; and
-
-     (b) You must cause any modified files to carry prominent notices stating that You changed the files; and
-
-     (c) You must retain, in the Source form of any Derivative Works that You distribute, all copyright, patent, trademark, and attribution notices from the Source form of the Work, excluding those notices that do not pertain to any part of the Derivative Works; and
-
-     (d) If the Work includes a "NOTICE" text file as part of its distribution, then any Derivative Works that You distribute must include a readable copy of the attribution notices contained within such NOTICE file, excluding those notices that do not pertain to any part of the Derivative Works, in at least one of the following places: within a NOTICE text file distributed as part of the Derivative Works; within the Source form or documentation, if provided along with the Derivative Works; or, within a display generated by the Derivative Works, if and wherever such third-party notices normally appear. The contents of the NOTICE file are for informational purposes only and do not modify the License. You may add Your own attribution notices within Derivative Works that You distribute, alongside or as an addendum to the NOTICE text from the Work, provided that such additional attribution notices cannot be construed as modifying the License.
-
-     You may add Your own copyright statement to Your modifications and may provide additional or different license terms and conditions for use, reproduction, or distribution of Your modifications, or for any such Derivative Works as a whole, provided Your use, reproduction, and distribution of the Work otherwise complies with the conditions stated in this License.
-
-5. Submission of Contributions. Unless You explicitly state otherwise, any Contribution intentionally submitted for inclusion in the Work by You to the Licensor shall be under the terms and conditions of this License, without any additional terms or conditions. Notwithstanding the above, nothing herein shall supersede or modify the terms of any separate license agreement you may have executed with Licensor regarding such Contributions.
-
-6. Trademarks. This License does not grant permission to use the trade names, trademarks, service marks, or product names of the Licensor, except as required for reasonable and customary use in describing the origin of the Work and reproducing the content of the NOTICE file.
-
-7. Disclaimer of Warranty. Unless required by applicable law or agreed to in writing, Licensor provides the Work (and each Contributor provides its Contributions) on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied, including, without limitation, any warranties or conditions of TITLE, NON-INFRINGEMENT, MERCHANTABILITY, or FITNESS FOR A PARTICULAR PURPOSE. You are solely responsible for determining the appropriateness of using or redistributing the Work and assume any risks associated with Your exercise of permissions under this License.
-
-8. Limitation of Liability. In no event and under no legal theory, whether in tort (including negligence), contract, or otherwise, unless required by applicable law (such as deliberate and grossly negligent acts) or agreed to in writing, shall any Contributor be liable to You for damages, including any direct, indirect, special, incidental, or consequential damages of any character arising as a result of this License or out of the use or inability to use the Work (including but not limited to damages for loss of goodwill, work stoppage, computer failure or malfunction, or any and all other commercial damages or losses), even if such Contributor has been advised of the possibility of such damages.
-
-9. Accepting Warranty or Additional Liability. While redistributing the Work or Derivative Works thereof, You may choose to offer, and charge a fee for, acceptance of support, warranty, indemnity, or other liability obligations and/or rights consistent with this License. However, in accepting such obligations, You may act only on Your own behalf and on Your sole responsibility, not on behalf of any other Contributor, and only if You agree to indemnify, defend, and hold each Contributor harmless for any liability incurred by, or claims asserted against, such Contributor by reason of your accepting any such warranty or additional liability.
-
-END OF TERMS AND CONDITIONS
-
-APPENDIX: How to apply the Apache License to your work.
-
-To apply the Apache License to your work, attach the following boilerplate notice, with the fields enclosed by brackets "[]" replaced with your own identifying information. (Don't include the brackets!)  The text should be enclosed in the appropriate comment syntax for the file format. We also recommend that a file or class name and description of purpose be included on the same "printed page" as the copyright notice for easier identification within third-party archives.
-
-Copyright [yyyy] [name of copyright owner]
-
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-
-## component license and notices
-
 ring 0.17.14
 
 Permission is hereby granted, free of charge, to any
@@ -16199,32 +16123,6 @@ distributed under the License is distributed on an "AS IS" BASIS,
 WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
-
-## component license and notices
-
-tracing-core 0.1.36
-
-The MIT License (MIT)
-
-Copyright (c) 2014 Mathijs van de Nes
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
 
 ## component license and notices
 
@@ -16874,7 +16772,7 @@ designated (see the individual files for PD/CC0-dedicated sections).
 
 pastey 0.2.3
 
-No copyright notice found in the published legal files or source headers.
+No copyright notice found in the legal files or source comments inspected.
 Attribution: Aditya Kumar <git@adityais.dev>, David Tolnay <dtolnay@gmail.com> (from published Cargo.toml)
 Repository: https://github.com/as1100k/pastey
 
@@ -16882,7 +16780,7 @@ Repository: https://github.com/as1100k/pastey
 
 once_cell 1.21.4
 
-No copyright notice found in the published legal files or source headers.
+No copyright notice found in the legal files or source comments inspected.
 Attribution: Aleksey Kladov <aleksey.kladov@gmail.com> (from published Cargo.toml)
 Repository: https://github.com/matklad/once_cell
 
@@ -16890,7 +16788,7 @@ Repository: https://github.com/matklad/once_cell
 
 smol_str 0.3.7
 
-No copyright notice found in the published legal files or source headers.
+No copyright notice found in the legal files or source comments inspected.
 Attribution: Aleksey Kladov <aleksey.kladov@gmail.com>, Lukas Wirth <lukastw97@gmail.com> (from published Cargo.toml)
 Repository: https://github.com/rust-lang/rust-analyzer/tree/master/lib/smol_str
 
@@ -16898,7 +16796,7 @@ Repository: https://github.com/rust-lang/rust-analyzer/tree/master/lib/smol_str
 
 tokenizers 0.23.2
 
-No copyright notice found in the published legal files or source headers.
+No copyright notice found in the legal files or source comments inspected.
 Attribution: Anthony MOI <m.anthony.moi@gmail.com>, Nicolas Patry <patry.nicolas@protonmail.com> (from published Cargo.toml)
 Repository: https://github.com/huggingface/tokenizers
 
@@ -16906,7 +16804,7 @@ Repository: https://github.com/huggingface/tokenizers
 
 similar 2.7.0
 
-No copyright notice found in the published legal files or source headers.
+No copyright notice found in the legal files or source comments inspected.
 Attribution: Armin Ronacher <armin.ronacher@active-4.com>, Pierre-Étienne Meunier <pe@pijul.org>, Brandon Williams <bwilliams.eng@gmail.com> (from published Cargo.toml)
 Repository: https://github.com/mitsuhiko/similar
 
@@ -16914,7 +16812,7 @@ Repository: https://github.com/mitsuhiko/similar
 
 unicode-linebreak 0.1.5
 
-No copyright notice found in the published legal files or source headers.
+No copyright notice found in the legal files or source comments inspected.
 Attribution: Axel Forsman <axelsfor@gmail.com> (from published Cargo.toml)
 Repository: https://github.com/axelf4/unicode-linebreak
 
@@ -16922,7 +16820,7 @@ Repository: https://github.com/axelf4/unicode-linebreak
 
 proc-macro-crate 3.5.0
 
-No copyright notice found in the published legal files or source headers.
+No copyright notice found in the legal files or source comments inspected.
 Attribution: Bastian Köcher <git@kchr.de> (from published Cargo.toml)
 Repository: https://github.com/bkchr/proc-macro-crate
 
@@ -16930,7 +16828,7 @@ Repository: https://github.com/bkchr/proc-macro-crate
 
 rustix 1.1.6
 
-No copyright notice found in the published legal files or source headers.
+No copyright notice found in the legal files or source comments inspected.
 Attribution: Dan Gohman <dev@sunfishcode.online>, Jakub Konka <kubkon@jakubkonka.com> (from published Cargo.toml)
 Repository: https://github.com/bytecodealliance/rustix
 
@@ -16938,7 +16836,7 @@ Repository: https://github.com/bytecodealliance/rustix
 
 anyhow 1.0.104
 
-No copyright notice found in the published legal files or source headers.
+No copyright notice found in the legal files or source comments inspected.
 Attribution: David Tolnay <dtolnay@gmail.com> (from published Cargo.toml)
 Repository: https://github.com/dtolnay/anyhow
 
@@ -16946,7 +16844,7 @@ Repository: https://github.com/dtolnay/anyhow
 
 dyn-clone 1.0.20
 
-No copyright notice found in the published legal files or source headers.
+No copyright notice found in the legal files or source comments inspected.
 Attribution: David Tolnay <dtolnay@gmail.com> (from published Cargo.toml)
 Repository: https://github.com/dtolnay/dyn-clone
 
@@ -16954,7 +16852,7 @@ Repository: https://github.com/dtolnay/dyn-clone
 
 enumn 0.1.14
 
-No copyright notice found in the published legal files or source headers.
+No copyright notice found in the legal files or source comments inspected.
 Attribution: David Tolnay <dtolnay@gmail.com> (from published Cargo.toml)
 Repository: https://github.com/dtolnay/enumn
 
@@ -16962,7 +16860,7 @@ Repository: https://github.com/dtolnay/enumn
 
 inventory 0.3.25
 
-No copyright notice found in the published legal files or source headers.
+No copyright notice found in the legal files or source comments inspected.
 Attribution: David Tolnay <dtolnay@gmail.com> (from published Cargo.toml)
 Repository: https://github.com/dtolnay/inventory
 
@@ -16970,7 +16868,7 @@ Repository: https://github.com/dtolnay/inventory
 
 itoa 1.0.18
 
-No copyright notice found in the published legal files or source headers.
+No copyright notice found in the legal files or source comments inspected.
 Attribution: David Tolnay <dtolnay@gmail.com> (from published Cargo.toml)
 Repository: https://github.com/dtolnay/itoa
 
@@ -16979,7 +16877,7 @@ Repository: https://github.com/dtolnay/itoa
 monostate 0.1.18
 monostate-impl 0.1.18
 
-No copyright notice found in the published legal files or source headers.
+No copyright notice found in the legal files or source comments inspected.
 Attribution: David Tolnay <dtolnay@gmail.com> (from published Cargo.toml)
 Repository: https://github.com/dtolnay/monostate
 
@@ -16987,7 +16885,7 @@ Repository: https://github.com/dtolnay/monostate
 
 paste 1.0.15
 
-No copyright notice found in the published legal files or source headers.
+No copyright notice found in the legal files or source comments inspected.
 Attribution: David Tolnay <dtolnay@gmail.com> (from published Cargo.toml)
 Repository: https://github.com/dtolnay/paste
 
@@ -16995,7 +16893,7 @@ Repository: https://github.com/dtolnay/paste
 
 serde_path_to_error 0.1.20
 
-No copyright notice found in the published legal files or source headers.
+No copyright notice found in the legal files or source comments inspected.
 Attribution: David Tolnay <dtolnay@gmail.com> (from published Cargo.toml)
 Repository: https://github.com/dtolnay/path-to-error
 
@@ -17003,7 +16901,7 @@ Repository: https://github.com/dtolnay/path-to-error
 
 quote 1.0.47
 
-No copyright notice found in the published legal files or source headers.
+No copyright notice found in the legal files or source comments inspected.
 Attribution: David Tolnay <dtolnay@gmail.com> (from published Cargo.toml)
 Repository: https://github.com/dtolnay/quote
 
@@ -17012,7 +16910,7 @@ Repository: https://github.com/dtolnay/quote
 ref-cast 1.0.27
 ref-cast-impl 1.0.27
 
-No copyright notice found in the published legal files or source headers.
+No copyright notice found in the legal files or source comments inspected.
 Attribution: David Tolnay <dtolnay@gmail.com> (from published Cargo.toml)
 Repository: https://github.com/dtolnay/ref-cast
 
@@ -17020,7 +16918,7 @@ Repository: https://github.com/dtolnay/ref-cast
 
 rustversion 1.0.23
 
-No copyright notice found in the published legal files or source headers.
+No copyright notice found in the legal files or source comments inspected.
 Attribution: David Tolnay <dtolnay@gmail.com> (from published Cargo.toml)
 Repository: https://github.com/dtolnay/rustversion
 
@@ -17028,7 +16926,7 @@ Repository: https://github.com/dtolnay/rustversion
 
 seq-macro 0.3.6
 
-No copyright notice found in the published legal files or source headers.
+No copyright notice found in the legal files or source comments inspected.
 Attribution: David Tolnay <dtolnay@gmail.com> (from published Cargo.toml)
 Repository: https://github.com/dtolnay/seq-macro
 
@@ -17036,7 +16934,7 @@ Repository: https://github.com/dtolnay/seq-macro
 
 serde_repr 0.1.21
 
-No copyright notice found in the published legal files or source headers.
+No copyright notice found in the legal files or source comments inspected.
 Attribution: David Tolnay <dtolnay@gmail.com> (from published Cargo.toml)
 Repository: https://github.com/dtolnay/serde-repr
 
@@ -17045,7 +16943,7 @@ Repository: https://github.com/dtolnay/serde-repr
 syn 2.0.119
 syn 3.0.9
 
-No copyright notice found in the published legal files or source headers.
+No copyright notice found in the legal files or source comments inspected.
 Attribution: David Tolnay <dtolnay@gmail.com> (from published Cargo.toml)
 Repository: https://github.com/dtolnay/syn
 
@@ -17054,7 +16952,7 @@ Repository: https://github.com/dtolnay/syn
 thiserror 2.0.21
 thiserror-impl 2.0.21
 
-No copyright notice found in the published legal files or source headers.
+No copyright notice found in the legal files or source comments inspected.
 Attribution: David Tolnay <dtolnay@gmail.com> (from published Cargo.toml)
 Repository: https://github.com/dtolnay/thiserror
 
@@ -17062,7 +16960,7 @@ Repository: https://github.com/dtolnay/thiserror
 
 zmij 1.0.23
 
-No copyright notice found in the published legal files or source headers.
+No copyright notice found in the legal files or source comments inspected.
 Attribution: David Tolnay <dtolnay@gmail.com> (from published Cargo.toml)
 Repository: https://github.com/dtolnay/zmij
 
@@ -17070,7 +16968,7 @@ Repository: https://github.com/dtolnay/zmij
 
 proc-macro2 1.0.107
 
-No copyright notice found in the published legal files or source headers.
+No copyright notice found in the legal files or source comments inspected.
 Attribution: David Tolnay <dtolnay@gmail.com>, Alex Crichton <alex@alexcrichton.com> (from published Cargo.toml)
 Repository: https://github.com/dtolnay/proc-macro2
 
@@ -17081,7 +16979,7 @@ serde_core 1.0.229
 serde_derive 1.0.229
 serde_derive_internals 0.30.0
 
-No copyright notice found in the published legal files or source headers.
+No copyright notice found in the legal files or source comments inspected.
 Attribution: Erick Tryzelaar <erick.tryzelaar@gmail.com>, David Tolnay <dtolnay@gmail.com> (from published Cargo.toml)
 Repository: https://github.com/serde-rs/serde
 
@@ -17089,7 +16987,7 @@ Repository: https://github.com/serde-rs/serde
 
 notify 8.2.1
 
-No copyright notice found in the published legal files or source headers.
+No copyright notice found in the legal files or source comments inspected.
 Attribution: Félix Saparelli <me@passcod.name>, Daniel Faust <hessijames@gmail.com>, Aron Heinecke <Ox0p54r36@t-online.de> (from published Cargo.toml)
 Repository: https://github.com/notify-rs/notify.git
 
@@ -17097,7 +16995,7 @@ Repository: https://github.com/notify-rs/notify.git
 
 dary_heap 0.3.9
 
-No copyright notice found in the published legal files or source headers.
+No copyright notice found in the legal files or source comments inspected.
 Attribution: Han Mertens <hanmertens@outlook.com> (from published Cargo.toml)
 Repository: https://github.com/hanmertens/dary_heap
 
@@ -17105,7 +17003,7 @@ Repository: https://github.com/hanmertens/dary_heap
 
 simdutf8 0.1.5
 
-No copyright notice found in the published legal files or source headers.
+No copyright notice found in the legal files or source comments inspected.
 Attribution: Hans Kratz <hans@appfour.com> (from published Cargo.toml)
 Repository: https://github.com/rusticstuff/simdutf8
 
@@ -17113,7 +17011,7 @@ Repository: https://github.com/rusticstuff/simdutf8
 
 displaydoc 0.2.7
 
-No copyright notice found in the published legal files or source headers.
+No copyright notice found in the legal files or source comments inspected.
 Attribution: Jane Lusby <jlusby@yaah.dev> (from published Cargo.toml)
 Repository: https://github.com/yaahc/displaydoc
 
@@ -17121,7 +17019,7 @@ Repository: https://github.com/yaahc/displaydoc
 
 event-listener-strategy 0.5.4
 
-No copyright notice found in the published legal files or source headers.
+No copyright notice found in the legal files or source comments inspected.
 Attribution: John Nunley <dev@notgull.net> (from published Cargo.toml)
 Repository: https://github.com/smol-rs/event-listener-strategy
 
@@ -17129,7 +17027,7 @@ Repository: https://github.com/smol-rs/event-listener-strategy
 
 mac 0.1.1
 
-No copyright notice found in the published legal files or source headers.
+No copyright notice found in the legal files or source comments inspected.
 Attribution: Jonathan Reem <jonathan.reem@gmail.com> (from published Cargo.toml)
 Repository: https://github.com/reem/rust-mac.git
 
@@ -17137,7 +17035,7 @@ Repository: https://github.com/reem/rust-mac.git
 
 flume 0.12.0
 
-No copyright notice found in the published legal files or source headers.
+No copyright notice found in the legal files or source comments inspected.
 Attribution: Joshua Barretto <joshua.s.barretto@gmail.com> (from published Cargo.toml)
 Repository: https://github.com/zesterer/flume
 
@@ -17145,7 +17043,7 @@ Repository: https://github.com/zesterer/flume
 
 half 2.7.1
 
-No copyright notice found in the published legal files or source headers.
+No copyright notice found in the legal files or source comments inspected.
 Attribution: Kathryn Long <squeeself@gmail.com> (from published Cargo.toml)
 Repository: https://github.com/VoidStarKat/half-rs
 
@@ -17153,7 +17051,7 @@ Repository: https://github.com/VoidStarKat/half-rs
 
 intl_pluralrules 7.0.2
 
-No copyright notice found in the published legal files or source headers.
+No copyright notice found in the legal files or source comments inspected.
 Attribution: Kekoa Riggin <kekoariggin@gmail.com>, Zibi Braniecki <zbraniecki@mozilla.com> (from published Cargo.toml)
 Repository: https://github.com/zbraniecki/pluralrules
 
@@ -17161,7 +17059,7 @@ Repository: https://github.com/zbraniecki/pluralrules
 
 daachorse 3.0.3
 
-No copyright notice found in the published legal files or source headers.
+No copyright notice found in the legal files or source comments inspected.
 Attribution: Koichi Akabe <vbkaisetsu@gmail.com>, Shunsuke Kanda <shnsk.knd@gmail.com> (from published Cargo.toml)
 Repository: https://github.com/daac-tools/daachorse
 
@@ -17169,7 +17067,7 @@ Repository: https://github.com/daac-tools/daachorse
 
 dunce 1.0.5
 
-No copyright notice found in the published legal files or source headers.
+No copyright notice found in the legal files or source comments inspected.
 Attribution: Kornel <kornel@geekhood.net> (from published Cargo.toml)
 Repository: https://gitlab.com/kornelski/dunce
 
@@ -17177,7 +17075,7 @@ Repository: https://gitlab.com/kornelski/dunce
 
 simd-adler32 0.3.10
 
-No copyright notice found in the published legal files or source headers.
+No copyright notice found in the legal files or source comments inspected.
 Attribution: Marvin Countryman <me@maar.vin> (from published Cargo.toml)
 Repository: https://github.com/mcountryman/simd-adler32
 
@@ -17185,7 +17083,7 @@ Repository: https://github.com/mcountryman/simd-adler32
 
 str_indices 0.4.4
 
-No copyright notice found in the published legal files or source headers.
+No copyright notice found in the legal files or source comments inspected.
 Attribution: Nathan Vegdahl <cessen@cessen.com> (from published Cargo.toml)
 Repository: https://github.com/cessen/str_indices
 
@@ -17193,15 +17091,23 @@ Repository: https://github.com/cessen/str_indices
 
 spm_precompiled 0.1.4
 
-No copyright notice found in the published legal files or source headers.
+No copyright notice found in the legal files or source comments inspected.
 Attribution: Nicolas Patry <patry.nicolas@protonmail.com> (from published Cargo.toml)
 Repository: https://github.com/huggingface/spm_precompiled
 
 ## manifest attribution
 
+option-ext 0.2.0
+
+No copyright notice found in the legal files or source comments inspected.
+Attribution: Simon Ochsenreither <simon@ochsenreither.de> (from published Cargo.toml)
+Repository: https://github.com/soc/option-ext.git
+
+## manifest attribution
+
 utf-8 0.7.6
 
-No copyright notice found in the published legal files or source headers.
+No copyright notice found in the legal files or source comments inspected.
 Attribution: Simon Sapin <simon.sapin@exyr.org> (from published Cargo.toml)
 Repository: https://github.com/SimonSapin/rust-utf8
 
@@ -17209,7 +17115,7 @@ Repository: https://github.com/SimonSapin/rust-utf8
 
 async-channel 2.5.0
 
-No copyright notice found in the published legal files or source headers.
+No copyright notice found in the legal files or source comments inspected.
 Attribution: Stjepan Glavina <stjepang@gmail.com> (from published Cargo.toml)
 Repository: https://github.com/smol-rs/async-channel
 
@@ -17217,7 +17123,7 @@ Repository: https://github.com/smol-rs/async-channel
 
 async-fs 2.2.0
 
-No copyright notice found in the published legal files or source headers.
+No copyright notice found in the legal files or source comments inspected.
 Attribution: Stjepan Glavina <stjepang@gmail.com> (from published Cargo.toml)
 Repository: https://github.com/smol-rs/async-fs
 
@@ -17225,7 +17131,7 @@ Repository: https://github.com/smol-rs/async-fs
 
 async-io 2.6.0
 
-No copyright notice found in the published legal files or source headers.
+No copyright notice found in the legal files or source comments inspected.
 Attribution: Stjepan Glavina <stjepang@gmail.com> (from published Cargo.toml)
 Repository: https://github.com/smol-rs/async-io
 
@@ -17233,7 +17139,7 @@ Repository: https://github.com/smol-rs/async-io
 
 async-lock 3.4.2
 
-No copyright notice found in the published legal files or source headers.
+No copyright notice found in the legal files or source comments inspected.
 Attribution: Stjepan Glavina <stjepang@gmail.com> (from published Cargo.toml)
 Repository: https://github.com/smol-rs/async-lock
 
@@ -17241,7 +17147,7 @@ Repository: https://github.com/smol-rs/async-lock
 
 async-net 2.0.0
 
-No copyright notice found in the published legal files or source headers.
+No copyright notice found in the legal files or source comments inspected.
 Attribution: Stjepan Glavina <stjepang@gmail.com> (from published Cargo.toml)
 Repository: https://github.com/smol-rs/async-net
 
@@ -17249,7 +17155,7 @@ Repository: https://github.com/smol-rs/async-net
 
 async-process 2.5.0
 
-No copyright notice found in the published legal files or source headers.
+No copyright notice found in the legal files or source comments inspected.
 Attribution: Stjepan Glavina <stjepang@gmail.com> (from published Cargo.toml)
 Repository: https://github.com/smol-rs/async-process
 
@@ -17257,7 +17163,7 @@ Repository: https://github.com/smol-rs/async-process
 
 async-task 4.7.1
 
-No copyright notice found in the published legal files or source headers.
+No copyright notice found in the legal files or source comments inspected.
 Attribution: Stjepan Glavina <stjepang@gmail.com> (from published Cargo.toml)
 Repository: https://github.com/smol-rs/async-task
 
@@ -17265,7 +17171,7 @@ Repository: https://github.com/smol-rs/async-task
 
 fastrand 2.5.0
 
-No copyright notice found in the published legal files or source headers.
+No copyright notice found in the legal files or source comments inspected.
 Attribution: Stjepan Glavina <stjepang@gmail.com> (from published Cargo.toml)
 Repository: https://github.com/smol-rs/fastrand
 
@@ -17273,7 +17179,7 @@ Repository: https://github.com/smol-rs/fastrand
 
 smol 2.0.2
 
-No copyright notice found in the published legal files or source headers.
+No copyright notice found in the legal files or source comments inspected.
 Attribution: Stjepan Glavina <stjepang@gmail.com> (from published Cargo.toml)
 Repository: https://github.com/smol-rs/smol
 
@@ -17281,7 +17187,7 @@ Repository: https://github.com/smol-rs/smol
 
 waker-fn 1.2.0
 
-No copyright notice found in the published legal files or source headers.
+No copyright notice found in the legal files or source comments inspected.
 Attribution: Stjepan Glavina <stjepang@gmail.com> (from published Cargo.toml)
 Repository: https://github.com/smol-rs/waker-fn
 
@@ -17289,7 +17195,7 @@ Repository: https://github.com/smol-rs/waker-fn
 
 async-executor 1.14.0
 
-No copyright notice found in the published legal files or source headers.
+No copyright notice found in the legal files or source comments inspected.
 Attribution: Stjepan Glavina <stjepang@gmail.com>, John Nunley <dev@notgull.net> (from published Cargo.toml)
 Repository: https://github.com/smol-rs/async-executor
 
@@ -17297,7 +17203,7 @@ Repository: https://github.com/smol-rs/async-executor
 
 event-listener 5.4.2
 
-No copyright notice found in the published legal files or source headers.
+No copyright notice found in the legal files or source comments inspected.
 Attribution: Stjepan Glavina <stjepang@gmail.com>, John Nunley <dev@notgull.net> (from published Cargo.toml)
 Repository: https://github.com/smol-rs/event-listener
 
@@ -17305,7 +17211,7 @@ Repository: https://github.com/smol-rs/event-listener
 
 piper 0.2.5
 
-No copyright notice found in the published legal files or source headers.
+No copyright notice found in the legal files or source comments inspected.
 Attribution: Stjepan Glavina <stjepang@gmail.com>, John Nunley <dev@notgull.net> (from published Cargo.toml)
 Repository: https://github.com/smol-rs/piper
 
@@ -17313,7 +17219,7 @@ Repository: https://github.com/smol-rs/piper
 
 polling 3.11.0
 
-No copyright notice found in the published legal files or source headers.
+No copyright notice found in the legal files or source comments inspected.
 Attribution: Stjepan Glavina <stjepang@gmail.com>, John Nunley <dev@notgull.net> (from published Cargo.toml)
 Repository: https://github.com/smol-rs/polling
 
@@ -17321,7 +17227,7 @@ Repository: https://github.com/smol-rs/polling
 
 concurrent-queue 2.5.0
 
-No copyright notice found in the published legal files or source headers.
+No copyright notice found in the legal files or source comments inspected.
 Attribution: Stjepan Glavina <stjepang@gmail.com>, Taiki Endo <te316e89@gmail.com>, John Nunley <dev@notgull.net> (from published Cargo.toml)
 Repository: https://github.com/smol-rs/concurrent-queue
 
@@ -17329,7 +17235,7 @@ Repository: https://github.com/smol-rs/concurrent-queue
 
 rustc-hash 2.1.3
 
-No copyright notice found in the published legal files or source headers.
+No copyright notice found in the legal files or source comments inspected.
 Attribution: The Rust Project Developers (from published Cargo.toml)
 Repository: https://github.com/rust-lang/rustc-hash
 
@@ -17337,7 +17243,7 @@ Repository: https://github.com/rust-lang/rustc-hash
 
 blocking 1.7.0
 
-No copyright notice found in the published legal files or source headers.
+No copyright notice found in the legal files or source comments inspected.
 Attribution: The blocking authors (not named in published Cargo.toml)
 Repository: https://github.com/smol-rs/blocking
 
@@ -17345,7 +17251,7 @@ Repository: https://github.com/smol-rs/blocking
 
 gpui-base 0.8.1
 
-No copyright notice found in the published legal files or source headers.
+No copyright notice found in the legal files or source comments inspected.
 Attribution: The gpui-base authors (not named in published Cargo.toml)
 Repository: https://github.com/longbridge/gpui-kit
 
@@ -17353,7 +17259,7 @@ Repository: https://github.com/longbridge/gpui-kit
 
 gpui-component 0.8.1
 
-No copyright notice found in the published legal files or source headers.
+No copyright notice found in the legal files or source comments inspected.
 Attribution: The gpui-component authors (not named in published Cargo.toml)
 Repository: https://github.com/longbridge/gpui-kit
 
@@ -17361,7 +17267,7 @@ Repository: https://github.com/longbridge/gpui-kit
 
 gpui-component-macros 0.8.1
 
-No copyright notice found in the published legal files or source headers.
+No copyright notice found in the legal files or source comments inspected.
 Attribution: The gpui-component-macros authors (not named in published Cargo.toml)
 Repository: https://github.com/longbridge/gpui-kit (from the locked Cargo git source)
 
@@ -17369,7 +17275,7 @@ Repository: https://github.com/longbridge/gpui-kit (from the locked Cargo git so
 
 gpui-kit 0.8.1
 
-No copyright notice found in the published legal files or source headers.
+No copyright notice found in the legal files or source comments inspected.
 Attribution: The gpui-kit authors (not named in published Cargo.toml)
 Repository: https://github.com/longbridge/gpui-kit
 
@@ -17377,23 +17283,15 @@ Repository: https://github.com/longbridge/gpui-kit
 
 fdeflate 0.3.7
 
-No copyright notice found in the published legal files or source headers.
+No copyright notice found in the legal files or source comments inspected.
 Attribution: The image-rs Developers (from published Cargo.toml)
 Repository: https://github.com/image-rs/fdeflate
 
 ## manifest attribution
 
-image 0.25.10
-
-No copyright notice found in the published legal files or source headers.
-Attribution: The image-rs Developers (from published Cargo.toml)
-Repository: https://github.com/image-rs/image
-
-## manifest attribution
-
 image-webp 0.2.4
 
-No copyright notice found in the published legal files or source headers.
+No copyright notice found in the legal files or source comments inspected.
 Attribution: The image-webp authors (not named in published Cargo.toml)
 Repository: https://github.com/image-rs/image-webp
 
@@ -17401,7 +17299,7 @@ Repository: https://github.com/image-rs/image-webp
 
 pin-project 1.1.13
 
-No copyright notice found in the published legal files or source headers.
+No copyright notice found in the legal files or source comments inspected.
 Attribution: The pin-project authors (not named in published Cargo.toml)
 Repository: https://github.com/taiki-e/pin-project
 
@@ -17409,7 +17307,7 @@ Repository: https://github.com/taiki-e/pin-project
 
 pin-project-internal 1.1.13
 
-No copyright notice found in the published legal files or source headers.
+No copyright notice found in the legal files or source comments inspected.
 Attribution: The pin-project-internal authors (not named in published Cargo.toml)
 Repository: https://github.com/taiki-e/pin-project
 
@@ -17417,7 +17315,7 @@ Repository: https://github.com/taiki-e/pin-project
 
 pin-project-lite 0.2.17
 
-No copyright notice found in the published legal files or source headers.
+No copyright notice found in the legal files or source comments inspected.
 Attribution: The pin-project-lite authors (not named in published Cargo.toml)
 Repository: https://github.com/taiki-e/pin-project-lite
 
@@ -17425,7 +17323,7 @@ Repository: https://github.com/taiki-e/pin-project-lite
 
 ptts 0.6.0
 
-No copyright notice found in the published legal files or source headers.
+No copyright notice found in the legal files or source comments inspected.
 Attribution: The ptts authors (not named in published Cargo.toml)
 Repository: https://github.com/gradium-ai/xn-ptts
 
@@ -17433,7 +17331,7 @@ Repository: https://github.com/gradium-ai/xn-ptts
 
 safetensors 0.7.0
 
-No copyright notice found in the published legal files or source headers.
+No copyright notice found in the legal files or source comments inspected.
 Attribution: The safetensors authors (not named in published Cargo.toml)
 Repository: https://github.com/huggingface/safetensors
 
@@ -17441,7 +17339,7 @@ Repository: https://github.com/huggingface/safetensors
 
 serde-saphyr 1.3.0
 
-No copyright notice found in the published legal files or source headers.
+No copyright notice found in the legal files or source comments inspected.
 Attribution: The serde-saphyr authors (not named in published Cargo.toml)
 Repository: https://github.com/bourumir-wyngs/serde-saphyr
 
@@ -17450,7 +17348,7 @@ Repository: https://github.com/bourumir-wyngs/serde-saphyr
 winnow 0.7.15
 winnow 1.0.4
 
-No copyright notice found in the published legal files or source headers.
+No copyright notice found in the legal files or source comments inspected.
 Attribution: The winnow authors (not named in published Cargo.toml)
 Repository: https://github.com/winnow-rs/winnow
 
@@ -17458,7 +17356,7 @@ Repository: https://github.com/winnow-rs/winnow
 
 allocator-api2 0.2.21
 
-No copyright notice found in the published legal files or source headers.
+No copyright notice found in the legal files or source comments inspected.
 Attribution: Zakarum <zaq.dev@icloud.com> (from published Cargo.toml)
 Repository: https://github.com/zakarumych/allocator-api2
 
@@ -17467,7 +17365,7 @@ Repository: https://github.com/zakarumych/allocator-api2
 unic-langid 0.9.6
 unic-langid-impl 0.9.6
 
-No copyright notice found in the published legal files or source headers.
+No copyright notice found in the legal files or source comments inspected.
 Attribution: Zibi Braniecki <gandalf@mozilla.com> (from published Cargo.toml)
 Repository: https://github.com/zbraniecki/unic-locale
 
@@ -17475,7 +17373,7 @@ Repository: https://github.com/zbraniecki/unic-locale
 
 seahash 4.1.0
 
-No copyright notice found in the published legal files or source headers.
+No copyright notice found in the legal files or source comments inspected.
 Attribution: ticki <ticki@users.noreply.github.com>, Tom Almeida <tom@tommoa.me> (from published Cargo.toml)
 Repository: https://gitlab.redox-os.org/redox-os/seahash
 
@@ -24982,628 +24880,6 @@ Authors:
 
 ## published source notices
 
-esaxx-rs 0.1.10
-
-/*
-* sais.hxx for sais-lite
-* Copyright (c) 2008-2009 Yuta Mori All Rights Reserved.
-*
-* Permission is hereby granted, free of charge, to any person
-* obtaining a copy of this software and associated documentation
-* files (the "Software"), to deal in the Software without
-* restriction, including without limitation the rights to use,
-* copy, modify, merge, publish, distribute, sublicense, and/or sell
-* copies of the Software, and to permit persons to whom the
-* Software is furnished to do so, subject to the following
-* conditions:
-*
-* The above copyright notice and this permission notice shall be
-* included in all copies or substantial portions of the Software.
-*
-* THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
-* EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES
-* OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
-* NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT
-* HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY,
-* WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
-* FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
-* OTHER DEALINGS IN THE SOFTWARE.
-*/
-
-#ifndef _SAIS_HXX
-#define _SAIS_HXX 1
-#ifdef __cplusplus
-
-#ifdef __INTEL_COMPILER
-#pragma warning(disable : 383 981 1418)
-// for icc 64-bit
-//#define __builtin_vsnprintf(a, b, c, d) __builtin_vsnprintf(a, b, c, (char *)d)
-#endif
-
-#include <iterator>
-#ifdef _OPENMP
-# include <omp.h>
-#endif
-
-namespace saisxx_private {
-
-/* find the start or end of each bucket */
-template<typename string_type, typename bucket_type, typename index_type>
-void
-getCounts(const string_type T, bucket_type C, index_type n, index_type k) {
-#ifdef _OPENMP
-bucket_type D;
-index_type i, j, p, sum, first, last;
-int thnum, maxthreads = omp_get_max_threads();
-#pragma omp parallel default(shared) private(D, i, thnum, first, last)
-{
-thnum = omp_get_thread_num();
-D = C + thnum * k;
-first = n / maxthreads * thnum;
-last = (thnum < (maxthreads - 1)) ? n / maxthreads * (thnum + 1) : n;
-for(i = 0; i < k; ++i) { D[i] = 0; }
-for(i = first; i < last; ++i) { ++D[T[i]]; }
-}
-if(1 < maxthreads) {
-#pragma omp parallel for default(shared) private(i, j, p, sum)
-for(i = 0; i < k; ++i) {
-for(j = 1, p = i + k, sum = C[i]; j < maxthreads; ++j, p += k) {
-sum += C[p];
-}
-C[i] = sum;
-}
-}
-#else
-index_type i;
-for(i = 0; i < k; ++i) { C[i] = 0; }
-for(i = 0; i < n; ++i) { ++C[T[i]]; }
-#endif
-}
-template<typename bucket_type, typename index_type>
-void
-getBuckets(const bucket_type C, bucket_type B, index_type k, bool end) {
-index_type i, sum = 0;
-if(end) { for(i = 0; i < k; ++i) { sum += C[i]; B[i] = sum; } }
-else { for(i = 0; i < k; ++i) { sum += C[i]; B[i] = sum - C[i]; } }
-}
-
-/* compute SA and BWT */
-template<typename string_type, typename sarray_type,
-typename bucket_type, typename index_type>
-void
-induceSA(string_type T, sarray_type SA, bucket_type C, bucket_type B,
-index_type n, index_type k) {
-typedef typename std::iterator_traits<string_type>::value_type char_type;
-sarray_type b;
-index_type i, j;
-char_type c0, c1;
-/* compute SAl */
-if(C == B) { getCounts(T, C, n, k); }
-getBuckets(C, B, k, false); /* find starts of buckets */
-b = SA + B[c1 = T[j = n - 1]];
-*b++ = ((0 < j) && (T[j - 1] < c1)) ? ~j : j;
-for(i = 0; i < n; ++i) {
-j = SA[i], SA[i] = ~j;
-if(0 < j) {
-if((c0 = T[--j]) != c1) { B[c1] = b - SA; b = SA + B[c1 = c0]; }
-*b++ = ((0 < j) && (T[j - 1] < c1)) ? ~j : j;
-}
-}
-/* compute SAs */
-if(C == B) { getCounts(T, C, n, k); }
-getBuckets(C, B, k, true); /* find ends of buckets */
-for(i = n - 1, b = SA + B[c1 = 0]; 0 <= i; --i) {
-if(0 < (j = SA[i])) {
-if((c0 = T[--j]) != c1) { B[c1] = b - SA; b = SA + B[c1 = c0]; }
-*--b = ((j == 0) || (T[j - 1] > c1)) ? ~j : j;
-} else {
-SA[i] = ~j;
-}
-}
-}
-template<typename string_type, typename sarray_type,
-typename bucket_type, typename index_type>
-int
-computeBWT(string_type T, sarray_type SA, bucket_type C, bucket_type B,
-index_type n, index_type k) {
-typedef typename std::iterator_traits<string_type>::value_type char_type;
-sarray_type b;
-index_type i, j, pidx = -1;
-char_type c0, c1;
-/* compute SAl */
-if(C == B) { getCounts(T, C, n, k); }
-getBuckets(C, B, k, false); /* find starts of buckets */
-b = SA + B[c1 = T[j = n - 1]];
-*b++ = ((0 < j) && (T[j - 1] < c1)) ? ~j : j;
-for(i = 0; i < n; ++i) {
-if(0 < (j = SA[i])) {
-SA[i] = ~(c0 = T[--j]);
-if(c0 != c1) { B[c1] = b - SA; b = SA + B[c1 = c0]; }
-*b++ = ((0 < j) && (T[j - 1] < c1)) ? ~j : j;
-} else if(j != 0) {
-SA[i] = ~j;
-}
-}
-/* compute SAs */
-if(C == B) { getCounts(T, C, n, k); }
-getBuckets(C, B, k, true); /* find ends of buckets */
-for(i = n - 1, b = SA + B[c1 = 0]; 0 <= i; --i) {
-if(0 < (j = SA[i])) {
-SA[i] = (c0 = T[--j]);
-if(c0 != c1) { B[c1] = b - SA; b = SA + B[c1 = c0]; }
-*--b = ((0 < j) && (T[j - 1] > c1)) ? ~((index_type)T[j - 1]) : j;
-} else if(j != 0) {
-SA[i] = ~j;
-} else {
-pidx = i;
-}
-}
-return pidx;
-}
-
-/* find the suffix array SA of T[0..n-1] in {0..k}^n
-use a working space (excluding s and SA) of at most 2n+O(1) for a constant alphabet */
-template<typename string_type, typename sarray_type, typename index_type>
-int
-suffixsort(string_type T, sarray_type SA,
-index_type fs, index_type n, index_type k,
-bool isbwt) {
-typedef typename std::iterator_traits<string_type>::value_type char_type;
-sarray_type RA;
-index_type i, j, m, p, q, plen, qlen, name, pidx = 0;
-bool diff;
-int c;
-#ifdef _OPENMP
-int maxthreads = omp_get_max_threads();
-#else
-# define maxthreads 1
-#endif
-char_type c0, c1;
-
-/* stage 1: reduce the problem by at least 1/2
-sort all the S-substrings */
-if(fs < (maxthreads * k)) {
-index_type *C, *B;
-if((C = new index_type[maxthreads * k]) == 0) { return -2; }
-B = (1 < maxthreads) ? C + k : C;
-getCounts(T, C, n, k); getBuckets(C, B, k, true); /* find ends of buckets */
-#ifdef _OPENMP
-#pragma omp parallel for default(shared) private(i)
-#endif
-for(i = 0; i < n; ++i) { SA[i] = 0; }
-for(i = n - 2, c = 0, c1 = T[n - 1]; 0 <= i; --i, c1 = c0) {
-if((c0 = T[i]) < (c1 + c)) { c = 1; }
-else if(c != 0) { SA[--B[c1]] = i + 1, c = 0; }
-}
-induceSA(T, SA, C, B, n, k);
-delete [] C;
-} else {
-sarray_type C, B;
-C = SA + n;
-B = ((1 < maxthreads) || (k <= (fs - k))) ? C + k : C;
-getCounts(T, C, n, k); getBuckets(C, B, k, true); /* find ends of buckets */
-#ifdef _OPENMP
-#pragma omp parallel for default(shared) private(i)
-#endif
-for(i = 0; i < n; ++i) { SA[i] = 0; }
-for(i = n - 2, c = 0, c1 = T[n - 1]; 0 <= i; --i, c1 = c0) {
-if((c0 = T[i]) < (c1 + c)) { c = 1; }
-else if(c != 0) { SA[--B[c1]] = i + 1, c = 0; }
-}
-induceSA(T, SA, C, B, n, k);
-}
-
-/* compact all the sorted substrings into the first m items of SA
-2*m must be not larger than n (proveable) */
-#ifdef _OPENMP
-#pragma omp parallel for default(shared) private(i, j, p, c0, c1)
-for(i = 0; i < n; ++i) {
-p = SA[i];
-if((0 < p) && (T[p - 1] > (c0 = T[p]))) {
-for(j = p + 1; (j < n) && (c0 == (c1 = T[j])); ++j) { }
-if((j < n) && (c0 < c1)) { SA[i] = ~p; }
-}
-}
-for(i = 0, m = 0; i < n; ++i) { if((p = SA[i]) < 0) { SA[m++] = ~p; } }
-#else
-for(i = 0, m = 0; i < n; ++i) {
-p = SA[i];
-if((0 < p) && (T[p - 1] > (c0 = T[p]))) {
-for(j = p + 1; (j < n) && (c0 == (c1 = T[j])); ++j) { }
-if((j < n) && (c0 < c1)) { SA[m++] = p; }
-}
-}
-#endif
-j = m + (n >> 1);
-#ifdef _OPENMP
-#pragma omp parallel for default(shared) private(i)
-#endif
-for(i = m; i < j; ++i) { SA[i] = 0; } /* init the name array buffer */
-/* store the length of all substrings */
-for(i = n - 2, j = n, c = 0, c1 = T[n - 1]; 0 <= i; --i, c1 = c0) {
-if((c0 = T[i]) < (c1 + c)) { c = 1; }
-else if(c != 0) { SA[m + ((i + 1) >> 1)] = j - i - 1; j = i + 1; c = 0; }
-}
-/* find the lexicographic names of all substrings */
-for(i = 0, name = 0, q = n, qlen = 0; i < m; ++i) {
-p = SA[i], plen = SA[m + (p >> 1)], diff = true;
-if(plen == qlen) {
-for(j = 0; (j < plen) && (T[p + j] == T[q + j]); ++j) { }
-if(j == plen) { diff = false; }
-}
-if(diff != false) { ++name, q = p, qlen = plen; }
-SA[m + (p >> 1)] = name;
-}
-
-/* stage 2: solve the reduced problem
-recurse if names are not yet unique */
-if(name < m) {
-RA = SA + n + fs - m;
-for(i = m + (n >> 1) - 1, j = m - 1; m <= i; --i) {
-if(SA[i] != 0) { RA[j--] = SA[i] - 1; }
-}
-if(suffixsort(RA, SA, fs + n - m * 2, m, name, false) != 0) { return -2; }
-for(i = n - 2, j = m - 1, c = 0, c1 = T[n - 1]; 0 <= i; --i, c1 = c0) {
-if((c0 = T[i]) < (c1 + c)) { c = 1; }
-else if(c != 0) { RA[j--] = i + 1, c = 0; } /* get p1 */
-}
-#ifdef _OPENMP
-#pragma omp parallel for default(shared) private(i)
-#endif
-for(i = 0; i < m; ++i) { SA[i] = RA[SA[i]]; } /* get index in s */
-}
-
-/* stage 3: induce the result for the original problem */
-if(fs < (maxthreads * k)) {
-index_type *B, *C;
-if((C = new index_type[maxthreads * k]) == 0) { return -2; }
-B = (1 < maxthreads) ? C + k : C;
-/* put all left-most S characters into their buckets */
-getCounts(T, C, n, k); getBuckets(C, B, k, true); /* find ends of buckets */
-#ifdef _OPENMP
-#pragma omp parallel for default(shared) private(i)
-#endif
-for(i = m; i < n; ++i) { SA[i] = 0; } /* init SA[m..n-1] */
-for(i = m - 1; 0 <= i; --i) {
-j = SA[i], SA[i] = 0;
-SA[--B[T[j]]] = j;
-}
-if(isbwt == false) { induceSA(T, SA, C, B, n, k); }
-else { pidx = computeBWT(T, SA, C, B, n, k); }
-delete [] C;
-} else {
-sarray_type C, B;
-C = SA + n;
-B = ((1 < maxthreads) || (k <= (fs - k))) ? C + k : C;
-/* put all left-most S characters into their buckets */
-getCounts(T, C, n, k); getBuckets(C, B, k, true); /* find ends of buckets */
-#ifdef _OPENMP
-#pragma omp parallel for default(shared) private(i)
-#endif
-for(i = m; i < n; ++i) { SA[i] = 0; } /* init SA[m..n-1] */
-for(i = m - 1; 0 <= i; --i) {
-j = SA[i], SA[i] = 0;
-SA[--B[T[j]]] = j;
-}
-if(isbwt == false) { induceSA(T, SA, C, B, n, k); }
-else { pidx = computeBWT(T, SA, C, B, n, k); }
-}
-
-return pidx;
-#ifndef _OPENMP
-# undef maxthreads
-#endif
-}
-
-} /* namespace saisxx_private */
-
-
-/**
-* @brief Constructs the suffix array of a given string in linear time.
-* @param T[0..n-1] The input string. (random access iterator)
-* @param SA[0..n-1] The output array of suffixes. (random access iterator)
-* @param n The length of the given string.
-* @param k The alphabet size.
-* @return 0 if no error occurred, -1 or -2 otherwise.
-*/
-template<typename string_type, typename sarray_type, typename index_type>
-int
-saisxx(string_type T, sarray_type SA, index_type n, index_type k = 256) {
-int err;
-if((n < 0) || (k <= 0)) { return -1; }
-if(n <= 1) { if(n == 1) { SA[0] = 0; } return 0; }
-try { err = saisxx_private::suffixsort(T, SA, 0U, n, k, false); }
-catch(...) { err = -2; }
-return err;
-}
-
-/**
-* @brief Constructs the burrows-wheeler transformed string of a given string in linear time.
-* @param T[0..n-1] The input string. (random access iterator)
-* @param U[0..n-1] The output string. (random access iterator)
-* @param A[0..n-1] The temporary array. (random access iterator)
-* @param n The length of the given string.
-* @param k The alphabet size.
-* @return The primary index if no error occurred, -1 or -2 otherwise.
-*/
-template<typename string_type, typename sarray_type, typename index_type>
-index_type
-saisxx_bwt(string_type T, string_type U, sarray_type A, index_type n, index_type k = 256) {
-typedef typename std::iterator_traits<string_type>::value_type char_type;
-index_type i, pidx;
-if((n < 0) || (k <= 0)) { return -1; }
-if(n <= 1) { if(n == 1) { U[0] = T[0]; } return n; }
-try {
-pidx = saisxx_private::suffixsort(T, A, 0, n, k, true);
-if(0 <= pidx) {
-U[0] = T[n - 1];
-for(i = 0; i < pidx; ++i) { U[i + 1] = (char_type)A[i]; }
-for(i += 1; i < n; ++i) { U[i] = (char_type)A[i]; }
-pidx += 1;
-}
-} catch(...) { pidx = -2; }
-return pidx;
-}
-
-
-#endif /* __cplusplus */
-#endif /* _SAIS_HXX */
-/*
-* esa.hxx
-* Copyright (c) 2010 Daisuke Okanohara All Rights Reserved.
-*
-* Permission is hereby granted, free of charge, to any person
-* obtaining a copy of this software and associated documentation
-* files (the "Software"), to deal in the Software without
-* restriction, including without limitation the rights to use,
-* copy, modify, merge, publish, distribute, sublicense, and/or sell
-* copies of the Software, and to permit persons to whom the
-* Software is furnished to do so, subject to the following
-* conditions:
-*
-* The above copyright notice and this permission notice shall be
-* included in all copies or substantial portions of the Software.
-*
-* THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
-* EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES
-* OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
-* NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT
-* HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY,
-* WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
-* FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
-* OTHER DEALINGS IN THE SOFTWARE.
-*/
-
-#ifndef _ESA_HXX
-#define _ESA_HXX
-
-#include <vector>
-#include <utility>
-#include <cassert>
-#include "sais.hxx"
-
-namespace esaxx_private {
-template<typename string_type, typename sarray_type, typename index_type>
-index_type suffixtree(string_type T, sarray_type SA, sarray_type L, sarray_type R, sarray_type D, index_type n){
-if (n == 0){
-return 0;
-}
-sarray_type Psi = L;
-Psi[SA[0]] = SA[n-1];
-for (index_type i = 1; i < n; ++i){
-Psi[SA[i]] = SA[i-1];
-}
-
-// Compare at most 2n log n charcters. Practically fastest
-// "Permuted Longest-Common-Prefix Array", Juha Karkkainen, CPM 09
-sarray_type PLCP = R;
-index_type h = 0;
-for (index_type i = 0; i < n; ++i){
-index_type j = Psi[i];
-while (i+h < n && j+h < n &&
-T[i+h] == T[j+h]){
-++h;
-}
-PLCP[i] = h;
-if (h > 0) --h;
-}
-
-sarray_type H = L;
-for (index_type i = 0; i < n; ++i){
-H[i] = PLCP[SA[i]];
-}
-H[0] = -1;
-
-std::vector<std::pair<index_type, index_type> > S;
-S.push_back(std::make_pair((index_type)-1, (index_type)-1));
-size_t nodeNum = 0;
-for (index_type i = 0; ; ++i){
-std::pair<index_type, index_type> cur (i, (i == n) ? -1 : H[i]);
-std::pair<index_type, index_type> cand(S.back());
-while (cand.second > cur.second){
-if (i - cand.first > 1){
-L[nodeNum] = cand.first;
-R[nodeNum] = i;
-D[nodeNum] = cand.second;
-++nodeNum;
-}
-cur.first = cand.first;
-S.pop_back();
-cand = S.back();
-}
-if (cand.second < cur.second){
-S.push_back(cur);
-}
-if (i == n) break;
-S.push_back(std::make_pair(i, n - SA[i] + 1));
-}
-return nodeNum;
-}
-}
-
-/**
-* @brief Build an enhanced suffix array of a given string in linear time
-* For an input text T, esaxx() builds an enhancd suffix array in linear time.
-* i-th internal node is represented as a triple (L[i], R[i], D[i]);
-*   L[i] and R[i] is the left/right boundary of the suffix array as SA[L[i]....R[i]-1]
-*   D[i] is the depth of the internal node
-* The number of internal node is at most N-1 and return the actual number by
-* @param T[0...n-1]  The input string. (random access iterator)
-* @param SA[0...n-1] The output suffix array (random access iterator)
-* @param L[0...n-1]  The output left boundary of internal node (random access iterator)
-* @param R[0...n-1]  The output right boundary of internal node (random access iterator)
-* @param D[0...n-1]  The output depth of internal node (random access iterator)
-* @param n The length of the input string
-* @param k The alphabet size
-* @pram nodeNum The output the number of internal node
-* @return 0 if succeded, -1 or -2 otherwise
-*/
-
-template<typename string_type, typename sarray_type, typename index_type>
-int esaxx(string_type T, sarray_type SA, sarray_type L, sarray_type R, sarray_type D,
-index_type n, index_type k, index_type& nodeNum) {
-if ((n < 0) || (k <= 0)) return -1;
-int err = saisxx(T, SA, n, k);
-if (err != 0){
-return err;
-}
-nodeNum = esaxx_private::suffixtree(T, SA, L, R, D, n);
-return 0;
-}
-
-
-#endif // _ESA_HXX
-/*
-* esa.hxx
-* Copyright (c) 2010 Daisuke Okanohara All Rights Reserved.
-*
-* Permission is hereby granted, free of charge, to any person
-* obtaining a copy of this software and associated documentation
-* files (the "Software"), to deal in the Software without
-* restriction, including without limitation the rights to use,
-* copy, modify, merge, publish, distribute, sublicense, and/or sell
-* copies of the Software, and to permit persons to whom the
-* Software is furnished to do so, subject to the following
-* conditions:
-*
-* The above copyright notice and this permission notice shall be
-* included in all copies or substantial portions of the Software.
-*
-* THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
-* EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES
-* OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
-* NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT
-* HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY,
-* WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
-* FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
-* OTHER DEALINGS IN THE SOFTWARE.
-*/
-
-#ifndef _ESA_HXX
-#define _ESA_HXX
-
-#include <vector>
-#include <utility>
-#include <cassert>
-#include "sais.hxx"
-
-namespace esaxx_private {
-template<typename string_type, typename sarray_type, typename index_type>
-index_type suffixtree(string_type T, sarray_type SA, sarray_type L, sarray_type R, sarray_type D, index_type n){
-if (n == 0){
-return 0;
-}
-sarray_type Psi = L;
-Psi[SA[0]] = SA[n-1];
-for (index_type i = 1; i < n; ++i){
-Psi[SA[i]] = SA[i-1];
-}
-
-// Compare at most 2n log n charcters. Practically fastest
-// "Permuted Longest-Common-Prefix Array", Juha Karkkainen, CPM 09
-sarray_type PLCP = R;
-index_type h = 0;
-for (index_type i = 0; i < n; ++i){
-index_type j = Psi[i];
-while (i+h < n && j+h < n &&
-T[i+h] == T[j+h]){
-++h;
-}
-PLCP[i] = h;
-if (h > 0) --h;
-}
-
-sarray_type H = L;
-for (index_type i = 0; i < n; ++i){
-H[i] = PLCP[SA[i]];
-}
-H[0] = -1;
-
-std::vector<std::pair<index_type, index_type> > S;
-S.push_back(std::make_pair((index_type)-1, (index_type)-1));
-size_t nodeNum = 0;
-for (index_type i = 0; ; ++i){
-std::pair<index_type, index_type> cur (i, (i == n) ? -1 : H[i]);
-std::pair<index_type, index_type> cand(S.back());
-while (cand.second > cur.second){
-if (i - cand.first > 1){
-L[nodeNum] = cand.first;
-R[nodeNum] = i;
-D[nodeNum] = cand.second;
-++nodeNum;
-}
-cur.first = cand.first;
-S.pop_back();
-cand = S.back();
-}
-if (cand.second < cur.second){
-S.push_back(cur);
-}
-if (i == n) break;
-S.push_back(std::make_pair(i, n - SA[i] + 1));
-}
-return nodeNum;
-}
-}
-
-/**
-* @brief Build an enhanced suffix array of a given string in linear time
-* For an input text T, esaxx() builds an enhancd suffix array in linear time.
-* i-th internal node is represented as a triple (L[i], R[i], D[i]);
-*   L[i] and R[i] is the left/right boundary of the suffix array as SA[L[i]....R[i]-1]
-*   D[i] is the depth of the internal node
-* The number of internal node is at most N-1 and return the actual number by
-* @param T[0...n-1]  The input string. (random access iterator)
-* @param SA[0...n-1] The output suffix array (random access iterator)
-* @param L[0...n-1]  The output left boundary of internal node (random access iterator)
-* @param R[0...n-1]  The output right boundary of internal node (random access iterator)
-* @param D[0...n-1]  The output depth of internal node (random access iterator)
-* @param n The length of the input string
-* @param k The alphabet size
-* @pram nodeNum The output the number of internal node
-* @return 0 if succeded, -1 or -2 otherwise
-*/
-
-template<typename string_type, typename sarray_type, typename index_type>
-int esaxx(string_type T, sarray_type SA, sarray_type L, sarray_type R, sarray_type D,
-index_type n, index_type k, index_type& nodeNum) {
-if ((n < 0) || (k <= 0)) return -1;
-std::count<<"Here"<<std::endl;
-int err = saisxx(T, SA, n, k);
-if (err != 0){
-return err;
-}
-std::cout<<"suffixtree"<<std::endl;
-nodeNum = esaxx_private::suffixtree(T, SA, L, R, D, n);
-std::count<<"ok"<<std::endl;
-return 0;
-}
-
-
-#endif // _ESA_HXX
-
-## published source notices
-
 moxcms 0.8.1
 
 // Copyright (c) Radzivon Bartoshyk 12/2025. All rights reserved.
@@ -25887,6 +25163,15 @@ pxfm 0.1.30
 
 ## published source notices
 
+moxcms 0.8.1
+
+// Copyright 2024 (c) the Radzivon Bartoshyk. All rights reserved.
+//
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file.
+
+## published source notices
+
 libm 0.2.16
 
 ====================================================
@@ -25934,39 +25219,6 @@ Permission to use, copy, modify, and distribute this
 software is freely granted, provided that this notice
 is preserved.
 ====================================================
-
-## published source notices
-
-qoi 0.4.1
-
-Command line tool to convert between png <> qoi format
-
-Requires "stb_image.h" and "stb_image_write.h"
-Compile with: 
-gcc qoiconv.c -std=c99 -O3 -o qoiconv
-
-Dominic Szablewski - https://phoboslab.org
-
-
--- LICENSE: The MIT License(MIT)
-
-Copyright(c) 2021 Dominic Szablewski
-
-Permission is hereby granted, free of charge, to any person obtaining a copy of
-this software and associated documentation files(the "Software"), to deal in
-the Software without restriction, including without limitation the rights to
-use, copy, modify, merge, publish, distribute, sublicense, and / or sell copies
-of the Software, and to permit persons to whom the Software is furnished to do
-so, subject to the following conditions :
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
 
 ## published source notices
 
@@ -28491,275 +27743,6 @@ DEALINGS IN THE SOFTWARE.
 
 ## published source notices
 
-qoi 0.4.1
-
-QOI - The "Quite OK Image" format for fast, lossless image compression
-
-Dominic Szablewski - https://phoboslab.org
-
-
--- LICENSE: The MIT License(MIT)
-
-Copyright(c) 2021 Dominic Szablewski
-
-Permission is hereby granted, free of charge, to any person obtaining a copy of
-this software and associated documentation files(the "Software"), to deal in
-the Software without restriction, including without limitation the rights to
-use, copy, modify, merge, publish, distribute, sublicense, and / or sell copies
-of the Software, and to permit persons to whom the Software is furnished to do
-so, subject to the following conditions :
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
-
-
--- About
-
-QOI encodes and decodes images in a lossless format. Compared to stb_image and
-stb_image_write QOI offers 20x-50x faster encoding, 3x-4x faster decoding and
-20% better compression.
-
-
--- Synopsis
-
-// Define `QOI_IMPLEMENTATION` in *one* C/C++ file before including this
-// library to create the implementation.
-
-#define QOI_IMPLEMENTATION
-#include "qoi.h"
-
-// Encode and store an RGBA buffer to the file system. The qoi_desc describes
-// the input pixel data.
-qoi_write("image_new.qoi", rgba_pixels, &(qoi_desc){
-.width = 1920,
-.height = 1080,
-.channels = 4,
-.colorspace = QOI_SRGB
-});
-
-// Load and decode a QOI image from the file system into a 32bbp RGBA buffer.
-// The qoi_desc struct will be filled with the width, height, number of channels
-// and colorspace read from the file header.
-qoi_desc desc;
-void *rgba_pixels = qoi_read("image.qoi", &desc, 4);
-
-
-
--- Documentation
-
-This library provides the following functions;
-- qoi_read    -- read and decode a QOI file
-- qoi_decode  -- decode the raw bytes of a QOI image from memory
-- qoi_write   -- encode and write a QOI file
-- qoi_encode  -- encode an rgba buffer into a QOI image in memory
-
-See the function declaration below for the signature and more information.
-
-If you don't want/need the qoi_read and qoi_write functions, you can define
-QOI_NO_STDIO before including this library.
-
-This library uses malloc() and free(). To supply your own malloc implementation
-you can define QOI_MALLOC and QOI_FREE before including this library.
-
-This library uses memset() to zero-initialize the index. To supply your own
-implementation you can define QOI_ZEROARR before including this library.
-
-
--- Data Format
-
-A QOI file has a 14 byte header, followed by any number of data "chunks" and an
-8-byte end marker.
-
-struct qoi_header_t {
-char     magic[4];   // magic bytes "qoif"
-uint32_t width;      // image width in pixels (BE)
-uint32_t height;     // image height in pixels (BE)
-uint8_t  channels;   // 3 = RGB, 4 = RGBA
-uint8_t  colorspace; // 0 = sRGB with linear alpha, 1 = all channels linear
-};
-
-Images are encoded row by row, left to right, top to bottom. The decoder and
-encoder start with {r: 0, g: 0, b: 0, a: 255} as the previous pixel value. An
-image is complete when all pixels specified by width * height have been covered.
-
-Pixels are encoded as
-- a run of the previous pixel
-- an index into an array of previously seen pixels
-- a difference to the previous pixel value in r,g,b
-- full r,g,b or r,g,b,a values
-
-The color channels are assumed to not be premultiplied with the alpha channel
-("un-premultiplied alpha").
-
-A running array[64] (zero-initialized) of previously seen pixel values is
-maintained by the encoder and decoder. Each pixel that is seen by the encoder
-and decoder is put into this array at the position formed by a hash function of
-the color value. In the encoder, if the pixel value at the index matches the
-current pixel, this index position is written to the stream as QOI_OP_INDEX.
-The hash function for the index is:
-
-index_position = (r * 3 + g * 5 + b * 7 + a * 11) % 64
-
-Each chunk starts with a 2- or 8-bit tag, followed by a number of data bits. The
-bit length of chunks is divisible by 8 - i.e. all chunks are byte aligned. All
-values encoded in these data bits have the most significant bit on the left.
-
-The 8-bit tags have precedence over the 2-bit tags. A decoder must check for the
-presence of an 8-bit tag first.
-
-The byte stream's end is marked with 7 0x00 bytes followed a single 0x01 byte.
-
-
-The possible chunks are:
-
-
-.- QOI_OP_INDEX ----------.
-|         Byte[0]         |
-|  7  6  5  4  3  2  1  0 |
-|-------+-----------------|
-|  0  0 |     index       |
-`-------------------------`
-2-bit tag b00
-6-bit index into the color index array: 0..63
-
-A valid encoder must not issue 7 or more consecutive QOI_OP_INDEX chunks to the
-index 0, to avoid confusion with the 8 byte end marker.
-
-
-.- QOI_OP_DIFF -----------.
-|         Byte[0]         |
-|  7  6  5  4  3  2  1  0 |
-|-------+-----+-----+-----|
-|  0  1 |  dr |  dg |  db |
-`-------------------------`
-2-bit tag b01
-2-bit   red channel difference from the previous pixel between -2..1
-2-bit green channel difference from the previous pixel between -2..1
-2-bit  blue channel difference from the previous pixel between -2..1
-
-The difference to the current channel values are using a wraparound operation,
-so "1 - 2" will result in 255, while "255 + 1" will result in 0.
-
-Values are stored as unsigned integers with a bias of 2. E.g. -2 is stored as
-0 (b00). 1 is stored as 3 (b11).
-
-The alpha value remains unchanged from the previous pixel.
-
-
-.- QOI_OP_LUMA -------------------------------------.
-|         Byte[0]         |         Byte[1]         |
-|  7  6  5  4  3  2  1  0 |  7  6  5  4  3  2  1  0 |
-|-------+-----------------+-------------+-----------|
-|  1  0 |  green diff     |   dr - dg   |  db - dg  |
-`---------------------------------------------------`
-2-bit tag b10
-6-bit green channel difference from the previous pixel -32..31
-4-bit   red channel difference minus green channel difference -8..7
-4-bit  blue channel difference minus green channel difference -8..7
-
-The green channel is used to indicate the general direction of change and is
-encoded in 6 bits. The red and blue channels (dr and db) base their diffs off
-of the green channel difference and are encoded in 4 bits. I.e.:
-dr_dg = (last_px.r - cur_px.r) - (last_px.g - cur_px.g)
-db_dg = (last_px.b - cur_px.b) - (last_px.g - cur_px.g)
-
-The difference to the current channel values are using a wraparound operation,
-so "10 - 13" will result in 253, while "250 + 7" will result in 1.
-
-Values are stored as unsigned integers with a bias of 32 for the green channel
-and a bias of 8 for the red and blue channel.
-
-The alpha value remains unchanged from the previous pixel.
-
-
-.- QOI_OP_RUN ------------.
-|         Byte[0]         |
-|  7  6  5  4  3  2  1  0 |
-|-------+-----------------|
-|  1  1 |       run       |
-`-------------------------`
-2-bit tag b11
-6-bit run-length repeating the previous pixel: 1..62
-
-The run-length is stored with a bias of -1. Note that the run-lengths 63 and 64
-(b111110 and b111111) are illegal as they are occupied by the QOI_OP_RGB and
-QOI_OP_RGBA tags.
-
-
-.- QOI_OP_RGB ------------------------------------------.
-|         Byte[0]         | Byte[1] | Byte[2] | Byte[3] |
-|  7  6  5  4  3  2  1  0 | 7 .. 0  | 7 .. 0  | 7 .. 0  |
-|-------------------------+---------+---------+---------|
-|  1  1  1  1  1  1  1  0 |   red   |  green  |  blue   |
-`-------------------------------------------------------`
-8-bit tag b11111110
-8-bit   red channel value
-8-bit green channel value
-8-bit  blue channel value
-
-The alpha value remains unchanged from the previous pixel.
-
-
-.- QOI_OP_RGBA ---------------------------------------------------.
-|         Byte[0]         | Byte[1] | Byte[2] | Byte[3] | Byte[4] |
-|  7  6  5  4  3  2  1  0 | 7 .. 0  | 7 .. 0  | 7 .. 0  | 7 .. 0  |
-|-------------------------+---------+---------+---------+---------|
-|  1  1  1  1  1  1  1  1 |   red   |  green  |  blue   |  alpha  |
-`-----------------------------------------------------------------`
-8-bit tag b11111111
-8-bit   red channel value
-8-bit green channel value
-8-bit  blue channel value
-8-bit alpha channel value
-
-## published source notices
-
-xn 0.2.13
-
-SPDX-FileCopyrightText: Copyright 2024 Arm Limited and/or its affiliates <open-source-office@arm.com>
-
-SPDX-License-Identifier: Apache-2.0
-
-## published source notices
-
-xn 0.2.13
-
-SPDX-FileCopyrightText: Copyright 2024-2025 Arm Limited and/or its affiliates <open-source-office@arm.com>
-
-SPDX-License-Identifier: Apache-2.0
-
-## published source notices
-
-xn 0.2.13
-
-SPDX-FileCopyrightText: Copyright 2024-2026 Arm Limited and/or its affiliates <open-source-office@arm.com>
-
-SPDX-License-Identifier: Apache-2.0
-
-## published source notices
-
-xn 0.2.13
-
-SPDX-FileCopyrightText: Copyright 2025 Arm Limited and/or its affiliates <open-source-office@arm.com>
-
-SPDX-License-Identifier: Apache-2.0
-
-## published source notices
-
-xn 0.2.13
-
-SPDX-FileCopyrightText: Copyright 2025-2026 Arm Limited and/or its affiliates <open-source-office@arm.com>
-
-SPDX-License-Identifier: Apache-2.0
-
-## published source notices
-
 pin-project 1.1.13
 pin-project-internal 1.1.13
 pin-project-lite 0.2.17
@@ -28931,39 +27914,6 @@ SPDX-License-Identifier: MIT OR Apache-2.0
 
 ## published source notices
 
-qoi 0.4.1
-
-Simple benchmark suite for png, stbi and qoi
-
-Requires libpng, "stb_image.h" and "stb_image_write.h"
-Compile with: 
-gcc qoibench.c -std=gnu99 -lpng -O3 -o qoibench 
-
-Dominic Szablewski - https://phoboslab.org
-
-
--- LICENSE: The MIT License(MIT)
-
-Copyright(c) 2021 Dominic Szablewski
-
-Permission is hereby granted, free of charge, to any person obtaining a copy of
-this software and associated documentation files(the "Software"), to deal in
-the Software without restriction, including without limitation the rights to
-use, copy, modify, merge, publish, distribute, sublicense, and / or sell copies
-of the Software, and to permit persons to whom the Software is furnished to do
-so, subject to the following conditions :
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
-
-## published source notices
-
 spin 0.10.1
 spin 0.9.9
 
@@ -29045,38 +27995,6 @@ https://www.boost.org/LICENSE_1_0.txt)
 Unless required by applicable law or agreed to in writing, this software
 is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
 KIND, either express or implied.
-
-## published source notices
-
-qoi 0.4.1
-
-clang fuzzing harness for qoi_decode
-
-Compile and run with: 
-clang -fsanitize=address,fuzzer -g -O0 qoifuzz.c && ./a.out
-
-Dominic Szablewski - https://phoboslab.org
-
-
--- LICENSE: The MIT License(MIT)
-
-Copyright(c) 2021 Dominic Szablewski
-
-Permission is hereby granted, free of charge, to any person obtaining a copy of
-this software and associated documentation files(the "Software"), to deal in
-the Software without restriction, including without limitation the rights to
-use, copy, modify, merge, publish, distribute, sublicense, and / or sell copies
-of the Software, and to permit persons to whom the Software is furnished to do
-so, subject to the following conditions :
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
 
 ## published source notices
 
@@ -29504,3 +28422,206 @@ libm 0.2.16
 origin: core-math/src/binary64/cbrt/cbrt.c
 Copyright (c) 2021-2022 Alexei Sibidanov.
 Ported to Rust in 2025 by Trevor Gross.
+
+## reviewed source notices
+
+ring 0.17.14
+
+# Copyright (c) 2015, CloudFlare Ltd.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+## reviewed source notices
+
+ring 0.17.14
+
+# Copyright 2016 The OpenSSL Project Authors. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+## reviewed source notices
+
+minimal-lexical 0.2.1
+
+/* origin: FreeBSD /usr/src/lib/msun/src/e_pow.c */
+/*
+ * ====================================================
+ * Copyright (C) 2004 by Sun Microsystems, Inc. All rights reserved.
+ *
+ * Permission to use, copy, modify, and distribute this
+ * software is freely granted, provided that this notice
+ * is preserved.
+ * ====================================================
+ */
+
+## reviewed source notices
+
+minimal-lexical 0.2.1
+
+/* origin: FreeBSD /usr/src/lib/msun/src/e_powf.c */
+/*
+ * Conversion to float by Ian Lance Taylor, Cygnus Support, ian@cygnus.com.
+ */
+/*
+ * ====================================================
+ * Copyright (C) 1993 by Sun Microsystems, Inc. All rights reserved.
+ *
+ * Developed at SunPro, a Sun Microsystems, Inc. business.
+ * Permission to use, copy, modify, and distribute this
+ * software is freely granted, provided that this notice
+ * is preserved.
+ * ====================================================
+ */
+
+## reviewed source notices
+
+esaxx-rs 0.1.10
+
+//  * esa.hxx
+//  * Copyright (c) 2010 Daisuke Okanohara All Rights Reserved.
+//  *
+//  * Permission is hereby granted, free of charge, to any person
+//  * obtaining a copy of this software and associated documentation
+//  * files (the "Software"), to deal in the Software without
+//  * restriction, including without limitation the rights to use,
+//  * copy, modify, merge, publish, distribute, sublicense, and/or sell
+//  * copies of the Software, and to permit persons to whom the
+//  * Software is furnished to do so, subject to the following
+//  * conditions:
+//  *
+//  * The above copyright notice and this permission notice shall be
+//  * included in all copies or substantial portions of the Software.
+//  *
+//  * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+//  * EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES
+//  * OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+//  * NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT
+//  * HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY,
+//  * WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+//  * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
+//  * OTHER DEALINGS IN THE SOFTWARE.
+
+## reviewed source notices
+
+esaxx-rs 0.1.10
+
+//  * sais.hxx for sais-lite
+//  * Copyright (c) 2008-2009 Yuta Mori All Rights Reserved.
+//  *
+//  * Permission is hereby granted, free of charge, to any person
+//  * obtaining a copy of this software and associated documentation
+//  * files (the "Software"), to deal in the Software without
+//  * restriction, including without limitation the rights to use,
+//  * copy, modify, merge, publish, distribute, sublicense, and/or sell
+//  * copies of the Software, and to permit persons to whom the
+//  * Software is furnished to do so, subject to the following
+//  * conditions:
+//  *
+//  * The above copyright notice and this permission notice shall be
+//  * included in all copies or substantial portions of the Software.
+//  *
+//  * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+//  * EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES
+//  * OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+//  * NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT
+//  * HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY,
+//  * WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+//  * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
+//  * OTHER DEALINGS IN THE SOFTWARE.
+
+## reviewed source notices
+
+gpui-pre 0.3.10
+
+// Adapted from https://github.com/microsoft/terminal/blob/1283c0f5b99a2961673249fa77c6b986efb5086c/src/renderer/atlas/dwrite.cpp
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
+## reviewed source notices
+
+schemars 1.2.3
+
+// Copied from regex_syntax crate to avoid pulling in the whole crate just for a utility function
+// https://github.com/rust-lang/regex/blob/431c4e4867e1eb33eb39b23ed47c9934b2672f8f/regex-syntax/src/lib.rs
+//
+// Copyright (c) 2014 The Rust Project Developers
+//
+// Permission is hereby granted, free of charge, to any
+// person obtaining a copy of this software and associated
+// documentation files (the "Software"), to deal in the
+// Software without restriction, including without
+// limitation the rights to use, copy, modify, merge,
+// publish, distribute, sublicense, and/or sell copies of
+// the Software, and to permit persons to whom the Software
+// is furnished to do so, subject to the following
+// conditions:
+//
+// The above copyright notice and this permission notice
+// shall be included in all copies or substantial portions
+// of the Software.
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
+// ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
+// TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+// PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
+// SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+// CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+// OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
+// IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+// DEALINGS IN THE SOFTWARE.
+
+## reviewed source notices
+
+xn 0.2.13
+
+// Copyright (c) Kyutai, all rights reserved.
+// This source code is licensed under the license found in the
+// LICENSE file in the root directory of this source tree.
+
+## reviewed source notices
+
+image 0.25.10
+
+// The inspiration for the macro and implementation is from
+// <https://github.com/GuillaumeGomez/doc-comment>
+//
+// MIT License
+//
+// Copyright (c) 2018 Guillaume Gomez
+
+## reviewed source notices
+
+icu_provider 2.4.0
+
+// This code is adapted from https://github.com/rust-lang/rustc-hash,
+    // whose license text is reproduced below.
+    //
+    // Copyright 2015 The Rust Project Developers. See the COPYRIGHT
+    // file at the top-level directory of this distribution and at
+    // http://rust-lang.org/COPYRIGHT.
+    //
+    // Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
+    // http://www.apache.org/licenses/LICENSE-2.0> or the MIT license
+    // <LICENSE-MIT or http://opensource.org/licenses/MIT>, at your
+    // option. This file may not be copied, modified, or distributed
+    // except according to those terms.
