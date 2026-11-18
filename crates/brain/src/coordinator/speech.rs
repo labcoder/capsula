@@ -11,7 +11,7 @@
 use std::fmt;
 use std::time::Duration;
 
-use kumochi_protocol::message::{ControlToShell, DataToShell, RunId, StepRef};
+use kumochi_protocol::message::{ControlToShell, DataToShell, OutputGeneration, RunId, StepRef};
 
 use super::{Coordinator, Effect, Input, Notify, Run, Stale};
 use crate::store::{Interruption, RunEnd};
@@ -105,6 +105,24 @@ impl Coordinator {
         }
     }
 
+    /// The shell's output device; one at or below a withdrawn generation stays withdrawn.
+    fn announce(&mut self, rate: u32, generation: OutputGeneration, effects: &mut Vec<Effect>) {
+        if self
+            .withdrawn
+            .is_some_and(|withdrawn| generation.0 <= withdrawn.0)
+        {
+            return;
+        }
+        self.output = Some((rate, generation));
+        if let Some(current) = self.current.as_mut()
+            && let Some(reply) = &mut current.reply
+        {
+            let mut out = Vec::new();
+            reply.output(generation, &mut out);
+            carry(current, out, effects);
+        }
+    }
+
     pub(super) fn speech_input(
         &mut self,
         input: Input,
@@ -112,13 +130,23 @@ impl Coordinator {
     ) -> Result<(), Stale> {
         let run = match input {
             Input::AudioOutput { rate, generation } => {
-                self.output = Some((rate, generation));
-                if let Some(current) = self.current.as_mut()
-                    && let Some(reply) = &mut current.reply
+                self.announce(rate, generation, effects);
+                return Ok(());
+            }
+            Input::AudioOutputUnavailable { generation } => {
+                if self
+                    .output
+                    .is_some_and(|(_, current)| current == generation)
                 {
-                    let mut out = Vec::new();
-                    reply.output(generation, &mut out);
-                    carry(current, out, effects);
+                    self.output = None;
+                    self.withdrawn = Some(generation);
+                    if let Some(current) = self.current.as_mut()
+                        && let Some(reply) = &mut current.reply
+                    {
+                        let mut out = Vec::new();
+                        reply.withdrawn(generation, &mut out);
+                        carry(current, out, effects);
+                    }
                 }
                 return Ok(());
             }

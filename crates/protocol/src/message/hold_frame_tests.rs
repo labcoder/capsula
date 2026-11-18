@@ -375,6 +375,20 @@ fn a_ready_step_appends_a_redacted_tag_after_the_skipped_scene() {
 }
 
 #[test]
+fn an_output_withdrawal_appends_a_redacted_tag_after_the_ready_step() {
+    let withdrawn = ControlToBrain::AudioOutputUnavailable {
+        generation: super::OutputGeneration(u32::MAX),
+    };
+    assert_eq!(postcard::to_allocvec(&withdrawn).expect("encodes")[0], 33);
+    round_trip(&withdrawn, Pipe::Control, 6);
+    redacted(&withdrawn, Direction::ToBrain, "AudioOutputUnavailable", 6);
+    let withdrawn = ControlToBrain::AudioOutputUnavailable {
+        generation: super::OutputGeneration(2),
+    };
+    assert_eq!(postcard::to_allocvec(&withdrawn).expect("encodes"), [33, 2]);
+}
+
+#[test]
 fn a_screen_holds_controls_append_redacted_tags_and_fit_the_control_cap() {
     let recognized = ControlToBrain::ScreenHoldRecognized {
         gesture: GESTURE,

@@ -285,6 +285,14 @@ fn speech_controls_reach_the_coordinator_and_an_output_rate_out_of_bounds_ends_t
                 samples: 6,
             },
         ),
+        (
+            ControlToBrain::AudioOutputUnavailable {
+                generation: OutputGeneration(4),
+            },
+            Input::AudioOutputUnavailable {
+                generation: OutputGeneration(4),
+            },
+        ),
     ] {
         assert_eq!(super::controls::control_input(message), Ok(Some(input)));
     }

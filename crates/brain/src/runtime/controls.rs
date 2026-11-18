@@ -115,6 +115,9 @@ pub(super) fn control_input(message: ControlToBrain) -> Result<Option<Input>, En
         ControlToBrain::AudioOutput { rate, generation } => {
             Some(Input::AudioOutput { rate, generation })
         }
+        ControlToBrain::AudioOutputUnavailable { generation } => {
+            Some(Input::AudioOutputUnavailable { generation })
+        }
         ControlToBrain::SpeechProgress {
             run,
             segment,

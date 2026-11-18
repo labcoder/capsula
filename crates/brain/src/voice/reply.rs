@@ -355,6 +355,14 @@ impl Reply {
         }
     }
 
+    /// The output device of `generation` is gone: a reply made for it stops speaking; its text
+    /// stays.
+    pub(crate) fn withdrawn(&mut self, generation: OutputGeneration, out: &mut Vec<Speech>) {
+        if generation == self.generation {
+            self.revoke(Revoker::Brain, out);
+        }
+    }
+
     /// Stops the run's speech for good.
     pub(crate) fn revoke(&mut self, by: Revoker, out: &mut Vec<Speech>) {
         if self.synthesis == Synthesis::Revoked {

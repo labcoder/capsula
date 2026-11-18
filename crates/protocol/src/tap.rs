@@ -67,6 +67,7 @@ impl Tapped for ControlToBrain {
             Self::SpeechStopped { .. } => "SpeechStopped",
             Self::SegmentPlayed { .. } => "SegmentPlayed",
             Self::AudioOutput { .. } => "AudioOutput",
+            Self::AudioOutputUnavailable { .. } => "AudioOutputUnavailable",
             Self::GitHub(_) => "GitHub",
             Self::Issue { .. } => "Issue",
             Self::VoiceHoldRecognized { .. } => "VoiceHoldRecognized",

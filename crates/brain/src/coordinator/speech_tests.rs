@@ -401,6 +401,69 @@ fn a_device_change_stops_the_speech_and_the_run_ends_done_once_the_shell_is_quie
 }
 
 #[test]
+fn withdrawing_the_output_stops_its_speech_and_leaves_later_runs_without_a_device() {
+    let mut core = spoken();
+    say(&mut core, "One. ");
+    let withdrawn = Input::AudioOutputUnavailable {
+        generation: OutputGeneration(1),
+    };
+    assert_eq!(
+        core.handle(withdrawn),
+        Ok(vec![
+            Effect::RevokeSpeech { run: R },
+            Effect::Control(ControlToShell::SpeechRevoked { run: R }),
+            quiet_wait(),
+        ])
+    );
+    assert_eq!(core.output, None, "no later run makes a reply");
+    assert_eq!(
+        core.handle(Input::AudioOutputUnavailable {
+            generation: OutputGeneration(1),
+        }),
+        Ok(Vec::new()),
+        "a repeat is a no-op"
+    );
+    assert_eq!(finish(&mut core), Vec::new(), "it waits for the shell");
+    assert_eq!(
+        core.handle(stopped(None)),
+        Ok(vec![end_run(Some("One. "), None, RunEnd::Done)])
+    );
+}
+
+#[test]
+fn only_a_strictly_newer_generation_announces_after_a_withdrawal() {
+    let mut core = super::fresh();
+    let withdrawn = Input::AudioOutputUnavailable {
+        generation: OutputGeneration(2),
+    };
+    let announce = |generation| Input::AudioOutput {
+        rate: RATE,
+        generation: OutputGeneration(generation),
+    };
+    assert_eq!(core.handle(announce(2)), Ok(Vec::new()));
+    assert_eq!(core.handle(withdrawn), Ok(Vec::new()));
+    for stale in [2, 1] {
+        assert_eq!(core.handle(announce(stale)), Ok(Vec::new()));
+        assert_eq!(core.output, None, "generation {stale} stays withdrawn");
+    }
+    assert_eq!(core.handle(announce(3)), Ok(Vec::new()));
+    assert_eq!(core.output, Some((RATE, OutputGeneration(3))));
+}
+
+#[test]
+fn withdrawing_another_generation_changes_nothing() {
+    let mut core = spoken();
+    say(&mut core, "One. ");
+    assert_eq!(
+        core.handle(Input::AudioOutputUnavailable {
+            generation: OutputGeneration(2),
+        }),
+        Ok(Vec::new())
+    );
+    assert_eq!(core.output, Some((RATE, OutputGeneration(1))));
+}
+
+#[test]
 fn a_new_turn_while_draining_revokes_the_old_speech_and_starts_at_once() {
     let mut core = draining();
     let effects = core

@@ -303,6 +303,8 @@ sequenceDiagram
   [runs.md](runs.md#draining-a-spoken-run).
 - **A device change** (a new `AudioOutput` generation) revokes the current run's speech. The run
   goes on as text and ends `done` once the shell's `SpeechStopped` comes back.
+- **A withdrawal** (`AudioOutputUnavailable` for the generation in use) clears the connection's
+  output, so later runs get no reply, and revokes the current run's speech the same way.
 
 ## The installer
 
