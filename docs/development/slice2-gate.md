@@ -35,8 +35,13 @@ flowchart LR
   time, or keep reading while it withholds credit.
 - An owned live check can use the same readers in projected mode. Each open pipe must belong
   to the held child before its Hello; the control pipe is checked before the capability is read.
-  Frames are reduced to check-specific facts before queuing. Frame, byte, queue and deadline
-  limits fail closed, and truncated frames aren't accepted as clean pipe ends.
+  An early open waits for capability publication, and a refused capability is never sent
+  again. A replacement must be observed before retrying the handshake. One absolute
+  deadline bounds the handshake, reads and writes. The frame and byte caps count admitted
+  post-handshake frames, including ignored frames; each reader can have decoded one extra
+  frame bounded by its pipe's per-frame maximum (64 KiB control, 256 KiB data, plus
+  headers). Frames are reduced to facts before queuing. Truncation isn't a clean pipe end.
+  Projected data timing uses the read stamp; the slice 2 gate still timestamps after credit.
 - It prints a table of verdicts and numbers and writes it to `report.md` in the gate's folder.
   `slice2-gate <words>` runs only the items whose names contain them.
 - `slice2-gate --inner` is internal: it is how the copy runs the items, and it starts brains

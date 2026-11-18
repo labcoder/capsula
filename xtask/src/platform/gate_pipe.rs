@@ -4,11 +4,12 @@
 use std::io::{self, Read, Write};
 use std::os::windows::io::{AsRawHandle as _, FromRawHandle as _, OwnedHandle};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use windows::Win32::Foundation::{
-    ERROR_BROKEN_PIPE, ERROR_IO_PENDING, ERROR_OPERATION_ABORTED, ERROR_TIMEOUT, GENERIC_READ,
-    GENERIC_WRITE, HANDLE, WAIT_OBJECT_0, WAIT_TIMEOUT,
+    ERROR_BROKEN_PIPE, ERROR_FILE_NOT_FOUND, ERROR_IO_PENDING, ERROR_OPERATION_ABORTED,
+    ERROR_PIPE_BUSY, ERROR_TIMEOUT, GENERIC_READ, GENERIC_WRITE, HANDLE, WAIT_OBJECT_0,
+    WAIT_TIMEOUT,
 };
 use windows::Win32::Storage::FileSystem::{
     CreateFileW, FILE_FLAG_OVERLAPPED, FILE_SHARE_NONE, OPEN_EXISTING, ReadFile,
@@ -31,6 +32,7 @@ pub(crate) struct PipeClient {
     aborted: AtomicBool,
     /// Milliseconds each read may take; `INFINITE` by default.
     read_timeout_ms: AtomicU32,
+    deadline: Option<Instant>,
 }
 
 impl PipeClient {
@@ -72,7 +74,17 @@ impl PipeClient {
             handle,
             aborted: AtomicBool::new(false),
             read_timeout_ms: AtomicU32::new(INFINITE),
+            deadline: None,
         })
+    }
+
+    pub(crate) fn until(mut self, deadline: Instant) -> Self {
+        self.deadline = Some(deadline);
+        self
+    }
+
+    pub(crate) fn read_stamp(&self) -> Option<Instant> {
+        self.deadline.map(|_| Instant::now())
     }
 
     /// Bounds each later read; `None` waits until the pipe ends or is aborted.
@@ -112,6 +124,15 @@ impl PipeClient {
         if self.aborted.load(Ordering::SeqCst) {
             return Err(ERROR_OPERATION_ABORTED.to_hresult().into());
         }
+        let timeout_ms = if let Some(end) = self.deadline {
+            let remaining = end.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(ERROR_TIMEOUT.to_hresult().into());
+            }
+            timeout_ms.min(millis(remaining).max(1))
+        } else {
+            timeout_ms
+        };
         if let Err(error) = start(self.raw(), &raw mut overlapped)
             && error.code() != ERROR_IO_PENDING.to_hresult()
         {
@@ -138,6 +159,9 @@ impl PipeClient {
             return Err(ERROR_TIMEOUT.to_hresult().into());
         }
         result?;
+        if self.deadline.is_some_and(|end| Instant::now() >= end) {
+            return Err(ERROR_TIMEOUT.to_hresult().into());
+        }
         Ok(usize::try_from(done).expect("u32 fits in usize on Windows"))
     }
 }
@@ -151,7 +175,7 @@ impl Read for &PipeClient {
             ReadFile(handle, Some(buf), None, Some(overlapped))
         }) {
             Err(error) if error.code() == ERROR_BROKEN_PIPE.to_hresult() => Ok(0),
-            result => result.map_err(io::Error::from),
+            result => result.map_err(pipe_io),
         }
     }
 }
@@ -162,7 +186,7 @@ impl Write for &PipeClient {
         self.transfer(millis(WRITE_TIMEOUT), |handle, overlapped| unsafe {
             WriteFile(handle, Some(buf), None, Some(overlapped))
         })
-        .map_err(io::Error::from)
+        .map_err(pipe_io)
     }
 
     fn flush(&mut self) -> io::Result<()> {
@@ -178,44 +202,61 @@ pub(crate) fn session_id() -> io::Result<u32> {
     Ok(session)
 }
 
+pub(crate) fn is_starting(error: &io::Error) -> bool {
+    [ERROR_FILE_NOT_FOUND, ERROR_PIPE_BUSY]
+        .iter()
+        .any(|code| error.raw_os_error() == Some(code.to_hresult().0))
+}
+
+fn pipe_io(error: windows::core::Error) -> io::Error {
+    if error.code() == ERROR_TIMEOUT.to_hresult() {
+        io::ErrorKind::TimedOut.into()
+    } else {
+        error.into()
+    }
+}
+
 fn millis(timeout: Duration) -> u32 {
     u32::try_from(timeout.as_millis()).unwrap_or(INFINITE - 1)
 }
 
 #[cfg(test)]
-mod tests {
-    use std::io;
-    use std::os::windows::io::{FromRawHandle as _, OwnedHandle};
-
+pub(crate) fn fixture_server(name: &str) -> std::fs::File {
     use windows::Win32::Storage::FileSystem::PIPE_ACCESS_DUPLEX;
     use windows::Win32::System::Pipes::{
         CreateNamedPipeW, PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE,
     };
-    use windows::core::HSTRING;
 
-    use super::PipeClient;
+    let wide = HSTRING::from(name);
+    // SAFETY: the name is live for the call; default security is sufficient for the local fixture.
+    let server = unsafe {
+        CreateNamedPipeW(
+            &wide,
+            PIPE_ACCESS_DUPLEX,
+            PIPE_TYPE_BYTE | PIPE_REJECT_REMOTE_CLIENTS,
+            2,
+            4096,
+            4096,
+            0,
+            None,
+        )
+    };
+    assert!(!server.is_invalid(), "one local fixture server");
+    // SAFETY: the successful call returned a new, exclusively owned server handle.
+    let server = unsafe { OwnedHandle::from_raw_handle(server.0) };
+    std::fs::File::from(server)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{PipeClient, fixture_server};
+    use std::io;
 
     #[test]
     fn an_opened_pipe_has_its_actual_server_pid() {
         let pid = std::process::id();
         let name = format!(r"\\.\pipe\kumochi-gate-pid-test-{pid}");
-        let wide = HSTRING::from(&name);
-        // SAFETY: the name is valid for the call; default security attributes are sufficient for this private fixture.
-        let server = unsafe {
-            CreateNamedPipeW(
-                &wide,
-                PIPE_ACCESS_DUPLEX,
-                PIPE_TYPE_BYTE | PIPE_REJECT_REMOTE_CLIENTS,
-                1,
-                4096,
-                4096,
-                0,
-                None,
-            )
-        };
-        assert!(!server.is_invalid(), "one local fixture server");
-        // SAFETY: the successful call returned an owned handle.
-        let _server = unsafe { OwnedHandle::from_raw_handle(server.0) };
+        let _server = fixture_server(&name);
         let client = PipeClient::open(&name).expect("open the existing fixture pipe");
         assert_eq!(client.server_pid().expect("server owner"), pid);
         client.require_server(pid).expect("correct server owner");

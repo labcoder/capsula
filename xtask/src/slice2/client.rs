@@ -1,6 +1,9 @@
 //! The scripted client: it plays the shell on both pipes, answers `Ping`, grants credit, and
 //! records every frame with the instant its reader took it.
 
+#[cfg(test)]
+mod owned_tests;
+
 use std::io::Read;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
@@ -11,7 +14,7 @@ use anyhow::{Context as _, Result, bail, ensure};
 use kumochi_protocol::constants::{INSTANCE_SERVICE, instance_entry};
 use kumochi_protocol::frame::{self, HEADER_LEN, Pipe};
 use kumochi_protocol::message::{
-    CAPABILITY_LEN, ControlToBrain, ControlToShell, DataToBrain, DataToShell, Hello,
+    Capability, ControlToBrain, ControlToShell, DataToBrain, DataToShell, Hello,
 };
 use kumochi_protocol::{BUILD_ID, Secret};
 use serde::de::DeserializeOwned;
@@ -296,7 +299,12 @@ impl<F> Drop for Client<F> {
 
 fn attempt(session: u32, allowed: Option<usize>) -> Result<Client> {
     let control = PipeClient::open(&Pipe::Control.name(session))?;
-    let shared = handshake(session, control, allowed, None)?;
+    control.set_read_timeout(Some(WELCOME));
+    let hello = hello(capability(session)?.context("instance capability is not yet published")?);
+    ensure!(welcome(&control, &hello)?, "no welcome");
+    control.set_read_timeout(None);
+    let data = PipeClient::open(&Pipe::Data.name(session))?;
+    let shared = paired(control, data, hello, allowed)?;
     let (sender, frames) = mpsc::channel();
     let send = move |seen: Option<Seen>, _| {
         seen.is_none_or(|mut seen| {
@@ -309,37 +317,35 @@ fn attempt(session: u32, allowed: Option<usize>) -> Result<Client> {
     Client::readers(shared, frames, send.clone(), send)
 }
 
-fn handshake(
-    session: u32,
-    control: PipeClient,
-    allowed: Option<usize>,
-    pid: Option<u32>,
-) -> Result<Arc<Shared>> {
-    if let Some(pid) = pid {
-        control.require_server(pid)?;
-    }
-    control.set_read_timeout(Some(WELCOME));
-    let hello = Hello {
+fn hello(capability: Capability) -> Hello {
+    Hello {
         build_id: BUILD_ID.to_owned(),
-        capability: capability(session)?,
-    };
+        capability,
+    }
+}
+
+fn welcome(control: &PipeClient, hello: &Hello) -> Result<bool> {
     frame::write(
-        &mut &control,
+        &mut &*control,
         &ControlToBrain::Hello(hello.clone()),
         Pipe::Control,
     )?;
-    match read::<ControlToShell>(&control, Pipe::Control)? {
-        Some((ControlToShell::Welcome { .. }, _)) => {}
+    match read::<ControlToShell>(control, Pipe::Control)? {
+        Some((ControlToShell::Welcome { .. }, _)) => Ok(true),
         Some((ControlToShell::BuildMismatch { .. }, _)) => {
             bail!("the brain is from another build; rebuild both")
         }
+        None => Ok(false),
         _ => bail!("no welcome"),
     }
-    control.set_read_timeout(None);
-    let data = PipeClient::open(&Pipe::Data.name(session))?;
-    if let Some(pid) = pid {
-        data.require_server(pid)?;
-    }
+}
+
+fn paired(
+    control: PipeClient,
+    data: PipeClient,
+    hello: Hello,
+    allowed: Option<usize>,
+) -> Result<Arc<Shared>> {
     frame::write(&mut &data, &DataToBrain::Hello(hello), Pipe::Data)?;
     Ok(Arc::new(Shared {
         control,
@@ -352,6 +358,64 @@ fn handshake(
         }),
         flow_changed: Condvar::new(),
     }))
+}
+
+fn owned_connect(
+    control_name: &str,
+    data_name: &str,
+    pid: u32,
+    deadline: Instant,
+    mut published: impl FnMut() -> Result<Option<Capability>>,
+) -> Result<Arc<Shared>> {
+    let mut refused: Option<Capability> = None;
+    loop {
+        let control = loop {
+            ensure!(
+                Instant::now() < deadline,
+                "owned pipes did not become ready"
+            );
+            match PipeClient::open(control_name) {
+                Ok(pipe) => break pipe,
+                Err(error) if gate_pipe::is_starting(&error) => startup_pause(deadline),
+                Err(error) => return Err(error.into()),
+            }
+        };
+        control.require_server(pid)?;
+        let control = control.until(deadline);
+        // Keep the first handle open until the capability appears: the server hasn't
+        // necessarily called ConnectNamedPipe yet. After a clean refusal, never resend
+        // that capability; only a different published value is evidence of startup.
+        let hello = loop {
+            ensure!(
+                Instant::now() < deadline,
+                "owned capability did not become ready"
+            );
+            if let Some(capability) = published()?
+                && refused
+                    .as_ref()
+                    .is_none_or(|old| old.expose() != capability.expose())
+            {
+                break hello(capability);
+            }
+            startup_pause(deadline);
+        };
+        if welcome(&control, &hello)? {
+            let data = PipeClient::open(data_name)?;
+            data.require_server(pid)?;
+            return paired(control, data.until(deadline), hello, None);
+        }
+        ensure!(
+            refused.is_none(),
+            "owned pipe authentication was refused with a changed capability"
+        );
+        refused = Some(hello.capability);
+    }
+}
+
+fn startup_pause(deadline: Instant) {
+    thread::sleep(
+        Duration::from_millis(20).min(deadline.saturating_duration_since(Instant::now())),
+    );
 }
 
 impl<F> Client<F> {
@@ -427,6 +491,8 @@ impl<F> Client<Option<F>> {
 struct Projection<F> {
     sender: SyncSender<Seen<Option<F>>>,
     deadline: Instant,
+    // Admission caps: a reader can have decoded one more frame before it checks these limits,
+    // bounded by its per-pipe frame maximum. Data credit still precedes admission.
     left: Option<(u32, u32)>,
 }
 
@@ -485,16 +551,13 @@ impl<F: Send + 'static> Client<Option<F>> {
         mut project: impl FnMut(Frame) -> std::result::Result<Option<F>, ()> + Send + 'static,
     ) -> Result<Self> {
         let session = gate_pipe::session_id()?;
-        let until = deadline.min(Instant::now() + CONNECT);
-        let name = Pipe::Control.name(session);
-        let control = loop {
-            ensure!(Instant::now() < until, "no owned control pipe");
-            if let Ok(control) = PipeClient::open(&name) {
-                break control;
-            }
-            thread::sleep(Duration::from_millis(50));
-        };
-        let shared = handshake(session, control, None, Some(pid))?;
+        let shared = owned_connect(
+            &Pipe::Control.name(session),
+            &Pipe::Data.name(session),
+            pid,
+            deadline,
+            || capability(session),
+        )?;
         let (sender, frames) = mpsc::sync_channel(128);
         let mut intake = Projection {
             sender,
@@ -526,13 +589,17 @@ fn spawn(name: &str, body: impl FnOnce() + Send + 'static) -> Result<JoinHandle<
         .context("starting a reader")
 }
 
-fn capability(session: u32) -> Result<Secret<[u8; CAPABILITY_LEN]>> {
+fn capability(session: u32) -> Result<Option<Capability>> {
     let account = instance_entry(session);
-    let bytes = keyring::Entry::new(INSTANCE_SERVICE, &account)?.get_secret()?;
-    let bytes: [u8; CAPABILITY_LEN] = bytes
+    let bytes = match keyring::Entry::new(INSTANCE_SERVICE, &account)?.get_secret() {
+        Ok(bytes) => bytes,
+        Err(keyring::Error::NoEntry) => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    let bytes = bytes
         .try_into()
         .map_err(|_| anyhow::anyhow!("the stored capability has the wrong length"))?;
-    Ok(Secret::new(bytes))
+    Ok(Some(Secret::new(bytes)))
 }
 
 fn control_reader(
@@ -578,21 +645,33 @@ fn data_reader(
     move || {
         while shared.take_turn() {
             let read = read::<DataToShell>(&shared.data, Pipe::Data);
-            let at = Instant::now();
-            let (frame, bytes) = match read {
-                Ok(Some((message, bytes))) if shared.credit(bytes).is_ok() => {
-                    (Frame::Data(message, bytes), bytes)
-                }
-                Ok(None) => (Frame::Closed, 0),
-                Ok(Some(_)) | Err(_) => (Frame::BadRead, 0),
-            };
-            let closed = matches!(frame, Frame::Closed | Frame::BadRead);
-            let seen = Seen { at, frame };
+            let read_at = shared.data.read_stamp();
+            let (seen, bytes) = credited_data(read, read_at, |bytes| shared.credit(bytes));
+            let closed = matches!(seen.frame, Frame::Closed | Frame::BadRead);
             if !send(Some(seen), bytes) || closed {
                 return;
             }
         }
     }
+}
+
+fn credited_data(
+    read: Result<Option<(DataToShell, u32)>>,
+    read_at: Option<Instant>,
+    credit: impl FnOnce(u32) -> Result<()>,
+) -> (Seen, u32) {
+    let (frame, bytes) = match read {
+        Ok(Some((message, bytes))) if credit(bytes).is_ok() => (Frame::Data(message, bytes), bytes),
+        Ok(None) => (Frame::Closed, 0),
+        Ok(Some(_)) | Err(_) => (Frame::BadRead, 0),
+    };
+    (
+        Seen {
+            at: read_at.unwrap_or_else(Instant::now),
+            frame,
+        },
+        bytes,
+    )
 }
 
 /// Reads one frame and its size on the pipe; `None` when the brain closed it.
