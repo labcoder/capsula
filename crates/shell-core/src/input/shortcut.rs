@@ -170,53 +170,5 @@ impl Shortcut {
     }
 }
 
-pub(super) enum Trial {
-    Capture,
-    WaitForNeutral(Chord),
-    Test(Shortcut),
-    WaitToConfirm(Chord),
-    Passed(Chord),
-    Ended,
-}
-
-impl Trial {
-    pub(super) fn capture(&mut self, chord: Chord) {
-        if matches!(self, Self::Capture) {
-            *self = Self::WaitForNeutral(chord);
-        }
-    }
-
-    pub(super) fn trusted_neutral(&mut self) {
-        match *self {
-            Self::WaitForNeutral(chord) => *self = Self::Test(Shortcut::new(chord)),
-            Self::WaitToConfirm(chord) => *self = Self::Passed(chord),
-            _ => {}
-        }
-    }
-
-    pub(super) fn preview(&mut self, id: PhysicalKey, role: Role, edge: Edge, now: Instant) {
-        if let Self::Test(recognizer) = self {
-            let effects = recognizer.key(id, role, edge, now);
-            if effects.contains(&Some(Effect::Resting))
-                && matches!(recognizer.timing.phase, Phase::Ready)
-            {
-                *self = Self::WaitToConfirm(recognizer.chord);
-            }
-        }
-    }
-
-    pub(super) fn confirm(&mut self) -> Option<Chord> {
-        let Self::Passed(chord) = *self else {
-            return None;
-        };
-        self.end();
-        Some(chord)
-    }
-
-    pub(super) fn end(&mut self) {
-        *self = Self::Ended;
-    }
-}
-
 #[path = "shortcut_tests.rs"]
 mod tests;

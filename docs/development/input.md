@@ -108,8 +108,8 @@ sequenceDiagram
 
 ## What each effect does
 
-Custom matching and trial transitions are fixture-only. They share the default gesture's
-tap/hold timing but add no saved shortcut, physical trial, hotkey registration or input route.
+Custom matching is fixture-only and shares the default gesture's tap/hold timing.
+It adds no saved shortcut, trial, hotkey registration or input route.
 
 | Effect | Current shell action |
 |---|---|

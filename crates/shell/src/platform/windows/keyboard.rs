@@ -432,9 +432,8 @@ fn key_event(make_code: u16, flags: u16) -> Event {
         (0x1D, false) => Key::LeftControl,
         (0x38, false) => Key::LeftAlt,
         _ => {
-            let Some(id) = PhysicalKey::new(make_code | u16::from(e0) << 8) else {
-                return Event::Reset;
-            };
+            let id = PhysicalKey::new(make_code | u16::from(e0) << 8)
+                .expect("validated make code and E0 fit a physical slot");
             if make_code == ESCAPE_MAKE_CODE && !e0 {
                 Key::Escape(id)
             } else {

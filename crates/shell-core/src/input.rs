@@ -36,6 +36,7 @@ impl std::fmt::Debug for PhysicalKey {
 pub enum Key {
     LeftControl,
     LeftAlt,
+    /// The adapter must give Escape a slot no other key uses.
     Escape(PhysicalKey),
     Other(PhysicalKey),
 }
@@ -745,32 +746,6 @@ mod tests {
             );
         }
         chord(&mut gesture, now);
-    }
-
-    #[test]
-    fn invalid_other_identity_resets_and_cancels_without_indexing() {
-        let event = |code, edge| {
-            PhysicalKey::new(code).map_or(Event::Reset, |key| Event::Key {
-                key: Key::Other(key),
-                edge,
-            })
-        };
-        let now = Instant::now();
-        let mut gesture = Gesture::default();
-        chord(&mut gesture, now);
-        gesture.handle(Event::Deadline, now + WINDOW);
-        assert_eq!(
-            gesture.handle(event(1024, Edge::Down), now + WINDOW),
-            [Some(Effect::HoldEnded), Some(Effect::Resting), None],
-            "invalid identity cancels active hold"
-        );
-        assert_eq!(gesture.deadline(), None, "invalid identity clears timers");
-        assert_eq!(
-            gesture.handle(event(u16::MAX, Edge::Up), now + WINDOW),
-            [None; 3],
-            "invalid release also resets safely"
-        );
-        chord(&mut gesture, now + WINDOW);
     }
 
     #[test]

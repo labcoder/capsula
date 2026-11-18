@@ -9,6 +9,17 @@ const K: Role = Role::Named(NAMED);
 const NONE: [Option<Effect>; 3] = [None; 3];
 const LISTENING: [Option<Effect>; 3] = [Some(Effect::Listening), None, None];
 const TAP: [Option<Effect>; 3] = [Some(Effect::Resting), None, None];
+const RELEASE_BOUNDARY: [(u64, [Option<Effect>; 3]); 2] = [
+    (299, TAP),
+    (
+        300,
+        [
+            Some(Effect::HoldStarted),
+            Some(Effect::HoldEnded),
+            Some(Effect::Resting),
+        ],
+    ),
+];
 
 fn id(n: u16) -> PhysicalKey {
     PhysicalKey::new(n).unwrap()
@@ -19,19 +30,9 @@ fn at(t: Instant, ms: u64) -> Instant {
 }
 
 #[test]
-fn release_at_299_is_a_tap_but_300_starts_and_ends_the_hold() {
+fn legacy_release_at_299_is_a_tap_but_300_starts_and_ends_the_hold() {
     let t = Instant::now();
-    for (ms, released) in [
-        (299, TAP),
-        (
-            300,
-            [
-                Some(Effect::HoldStarted),
-                Some(Effect::HoldEnded),
-                Some(Effect::Resting),
-            ],
-        ),
-    ] {
+    for (ms, released) in RELEASE_BOUNDARY {
         let make = |key| Event::Key {
             key,
             edge: Edge::Down,
@@ -50,7 +51,13 @@ fn release_at_299_is_a_tap_but_300_starts_and_ends_the_hold() {
             ),
             released
         );
+    }
+}
 
+#[test]
+fn custom_release_at_299_is_a_tap_but_300_starts_and_ends_the_hold() {
+    let t = Instant::now();
+    for (ms, released) in RELEASE_BOUNDARY {
         let mut custom = Shortcut::new(Chord::new(&[Modifier::Control], NAMED).unwrap());
         assert_eq!(custom.key(id(1), CTRL, Edge::Down, t), NONE);
         assert_eq!(custom.key(id(2), K, Edge::Down, t), LISTENING);
@@ -105,36 +112,6 @@ fn other_devices_and_lost_input_do_not_supply_missing_releases() {
     shortcut.trusted_neutral();
     assert_eq!(shortcut.key(id(1), CTRL, Edge::Down, at(t, 308)), NONE);
     assert_eq!(shortcut.key(id(2), K, Edge::Down, at(t, 309)), LISTENING);
-}
-
-#[test]
-fn fixture_trial_confirms_once_only_after_a_completed_test_and_neutral() {
-    let t = Instant::now();
-    let a = Chord::new(&[Modifier::Control], NAMED).unwrap();
-    let b = Chord::new(&[], NamedKey::Function(24)).unwrap();
-    let mut trial = Trial::Capture;
-    trial.capture(a);
-    trial.capture(b);
-    trial.preview(id(1), CTRL, Edge::Down, t);
-    assert_eq!(trial.confirm(), None);
-    trial.trusted_neutral();
-    trial.preview(id(1), CTRL, Edge::Down, t);
-    trial.preview(id(2), K, Edge::Down, t);
-    trial.preview(id(2), K, Edge::Up, at(t, 299));
-    assert_eq!(trial.confirm(), None);
-    trial.trusted_neutral();
-    assert_eq!(trial.confirm(), Some(a));
-    trial.capture(b);
-    trial.trusted_neutral();
-    assert_eq!(trial.confirm(), None);
-
-    let mut trial = Trial::Capture;
-    trial.capture(b);
-    trial.end();
-    trial.trusted_neutral();
-    trial.preview(id(3), Role::Named(NamedKey::Function(24)), Edge::Down, t);
-    trial.preview(id(3), Role::Named(NamedKey::Function(24)), Edge::Up, t);
-    assert_eq!(trial.confirm(), None);
 }
 
 #[test]
