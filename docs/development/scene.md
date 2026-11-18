@@ -173,9 +173,16 @@ semantic admission still refuses them.
   `ref` target. Everything else, `line` and `arrow` included, a point target, a callout `at`,
   `in` and `set` are `Unsupported`, and `screen_draw_schema` doesn't offer lines or arrows: a
   line between two marks would end at their centres, over both targets. A box outside the
-  picture is `OutOfRange`. A label is one line of at most `MAX_SCREEN_LABEL_CHARS` (24);
-  longer text is `LabelTooLong`, whose message states the cap, never cut. So a box target is
-  the only position a screen scene holds.
+  picture is `OutOfRange`. A label is one line of at most `MAX_SCREEN_LABEL_CHARS` (24).
+  `LabelTooLong` at `put[i].text` also refuses control characters, U+2028 and U+2029,
+  Unicode 17.0.0 default-ignorable characters and a few other invisible layout controls
+  (U+FFF9–U+FFFB and U+13430–U+13442). Variation selectors remain allowed. The refusal includes
+  direction controls, joiners and emoji tags, so some joined words and emoji need different
+  labels. Ordinary writing marks such as combining accents and Arabic or Hebrew vowel marks
+  still work. The whole offending step is refused, not rewritten; earlier steps stay.
+  Ordinary overlays and stored record formats are unchanged. An old screen step still
+  decodes but must meet this rule if admitted again. The restriction does not make a label
+  trustworthy. A box target is the only position a screen scene holds.
 - **Dressing** (`layout::screen`). Chrome is sized in logical pixels: the stamp gives
   logical pixels per canvas unit, at most `MAX_SCREEN_SCALE` (4). A box, ring or spotlight
   is a two-tone rounded outline (a 2 px `#6B5CF0` stroke with a 1 px white edge each side)
