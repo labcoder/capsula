@@ -4,8 +4,8 @@
 over its real pipes with the slice 2 gate's client (see [the slice 2 gate](slice2-gate.md)). Live
 checks run on Rez, never in CI, and only with the owner present or in a session the Captain
 approved. The checks are `account`, `signin`, `claude-signin`, `claude-question`,
-`catalog-provenance` and `image`. The last two run the brain alone, with no client (see their
-sections).
+`catalog-provenance`, `image`, and `chatgpt-text first-text`. Catalog provenance and image run
+the brain alone, with no client (see their sections).
 
 ## How it runs
 
@@ -21,9 +21,10 @@ flowchart LR
 ```
 
 - The brain serves only the `kumochi.exe` beside it, so an outer xtask builds the brain and copies
-  it and itself, renamed `kumochi.exe`, into a fresh folder, then runs that copy. Unlike the slice 2
+  it and itself, renamed `kumochi.exe`, into a fresh folder, then usually runs that copy. Unlike the slice 2
   gate, the brain uses the developer's real `%LOCALAPPDATA%` and the dev credential service, since
-  the point is a signed-in dev account that later checks and the dev shell use. Debug names keep it
+  the point is a signed-in dev account that later checks and the dev shell use. First-text requires
+  separate disposable data folders. Debug names keep it
   away from an installed Kumochi, and a release or gate xtask refuses to run.
 - Both sides refuse anything but the dev identity: a release build uses the installed product's
   names, and the [gate identity](gate-identity.md) never signs in, since its runs delete what
@@ -43,7 +44,8 @@ flowchart LR
   opens, takes focus and uses up the double-tap.
 - `KUMOCHI_LIVE_BUDGET` and `KUMOCHI_CLAUDE_QUESTIONS` are set on the brain's environment only.
   The client checks set both to 0, except that `claude-question` sets the second to the questions
-  its plan asks; each budget refuses its requests once its cap is spent.
+  its plan asks, and first-text sets the first to its explicitly supplied cap. Each budget
+  refuses its requests once its cap is spent.
 
 ## `account`
 
@@ -252,6 +254,68 @@ a brain that refuses it.
   saved. None of them is a model request.
 - A turn the brain takes but names no run for within 10 s leaves its thread in the dev profile,
   since the check never learns its id.
+
+## `chatgpt-text first-text`
+
+`cargo xtask live chatgpt-text first-text --budget N` prepares a fresh Dev copy, records
+the budget and startup work in its plan, and does not start the brain. The owner approves
+that plan before running the one-use copy. Only an approved run invokes the copied
+`kumochi.exe live chatgpt-text first-text --budget N --inner` with the same cap.
+The model cap must be 1–60. There are no
+Claude Code questions, automatic retries of typed turns, or replacement samples.
+
+Use a disposable Kumochi Dev setup whose local and roaming folders are the `local` and
+`roaming` children of the directory named by `KUMOCHI_LIVE_TEXT_PROFILE`. The harness refuses
+an existing history, pending issue work, a pinned main model, voice or screen settings,
+pending authority work, a Claude cleanup marker, and any active connection other than
+ChatGPT. The inner check compares current read-only metadata with the prepared plan
+before taking its claim or spawning a brain. It then requires the brain to report
+ChatGPT already signed in, with plan use enabled and no recovery required.
+
+An ordinary Dev start still opens the user-level Dev credential service and sweeps
+legacy and retired credential entries, including the old staged key name. Turning
+Claude Code off still lets the brain sweep old launch and session files in its
+ordinary Dev folder. ChatGPT may refresh a due bearer and fetch its catalog.
+
+Signing in through Kumochi with the disposable folders creates its own host and ChatGPT
+generations in the current Windows user's Dev credential service. The disposable authority
+doesn't use the everyday profile's generations. Its vault doesn't touch the everyday
+profile's entries apart from the fixed legacy names both startups sweep. Use a fresh
+authority; don't copy the everyday authority database.
+
+Before deleting the disposable folders, sign out of ChatGPT through Kumochi in that profile
+and wait for sign-out to finish. Check that the generation that held the tokens is no
+longer active in the disposable authority and its retired chunks have been swept. A normal
+sign-out leaves the host credential and can leave a token-free registration as an active
+ChatGPT generation; the presence of an active row alone doesn't mean tokens remain.
+Deleting the folders first can orphan the token entry in the Dev credential service.
+
+An active Anthropic key would fetch its catalog, a GitHub connection would be
+loaded and verified, and enabled Claude Code would discover its program; this profile
+refuses all three before startup. The plan also names one possible ChatGPT identity
+validation that cannot be ruled out from token-free metadata. That check can request
+discovery and fetch signing keys once or twice. These are auxiliary requests, not
+model reservations; their counts are separate. The harness never opens a token record.
+
+The harness uses the ordinary typed main-thread route, with no screen. It takes ten short
+samples per target, in this order: `gpt-6-luna`, then `gpt-6.1-sol`. A target without exact
+Low support is not run. Before changing a setting, the harness needs a restorable default
+from one of those targets. An ordinary failed or refused turn stops further submits
+but leaves the control pipe open for a confirmed restore and orderly quit. A disqualifying
+account or catalog update stops work even when a pending selection is acknowledged.
+A refused selection that confirms the still-current choice allows one verified restore.
+A lost pipe or killed child leaves restoration unknown; the profile is kept for inspection.
+
+The successful receipt contains fixed categories and numbers only: attempted model requests,
+auxiliary counts (token, discovery, signing keys, revocation and catalog), and per-target
+p50, p95 and max for submit-to-first-text and reservation-to-first-parsed-text. The two
+timings use different units and boundaries: client microseconds and brain QPC ticks. A complete
+receipt requires matching typed turns and transport records, a final newline, clean pipe ends,
+and a separately confirmed successful exit of the owned child. Work, restoration, and
+exit have separate outcomes. Ledger the copied run folder once: the exclusive claim
+charges the plan's full cap, even if the receipt never appears. Reconcile it down only
+from a complete successful receipt. An already-claimed folder never prints a second
+charge. An incomplete receipt has unknown auxiliary counts and no usable latency samples.
 
 ## `catalog-provenance`
 

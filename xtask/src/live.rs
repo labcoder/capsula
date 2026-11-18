@@ -13,6 +13,7 @@
 )]
 
 mod catalog;
+mod chatgpt_text;
 mod claude_question;
 mod claude_signin;
 mod image;
@@ -55,6 +56,7 @@ pub(crate) fn run(args: impl Iterator<Item = String>) -> Result<()> {
         Entry::Inner(Check::SignIn) => signin::inner(),
         Entry::Inner(Check::Claude(ask)) => claude_signin::inner(ask),
         Entry::Inner(Check::Question) => std::process::exit(claude_question::inner()),
+        Entry::Inner(Check::ChatGptText(budget)) => chatgpt_text::execute::run(budget),
         Entry::Inner(Check::Catalog | Check::Image | Check::ImageDiagnostic | Check::Marks) => {
             unreachable!("entry refuses --inner for the brain-only checks")
         }
@@ -78,6 +80,7 @@ enum Check {
     Image,
     ImageDiagnostic,
     Marks,
+    ChatGptText(u32),
 }
 
 impl Check {
@@ -105,6 +108,7 @@ impl Check {
             Self::Image => &["image"],
             Self::ImageDiagnostic => &["image", "--diagnostic"],
             Self::Marks => &["marks"],
+            Self::ChatGptText(_) => &["chatgpt-text"],
         }
     }
 }
@@ -121,7 +125,12 @@ fn entry(identity: ProductIdentity, args: &[String]) -> Result<Entry> {
         Some((last, words)) if last == INNER => (words, true),
         _ => (args, false),
     };
-    let check = Check::ALL
+    let check = if let [command, options @ ..] = words
+        && command == "chatgpt-text"
+    {
+        Check::ChatGptText(chatgpt_text::budget(options)?)
+    } else {
+        Check::ALL
         .into_iter()
         .find(|check| {
             words
@@ -137,8 +146,9 @@ fn entry(identity: ProductIdentity, args: &[String]) -> Result<Entry> {
                 ))
         })
         .context(
-            "usage: cargo xtask live account | signin | claude-signin [--disconnect] | claude-question | catalog-provenance | image [--diagnostic] | marks",
-        )?;
+            "usage: cargo xtask live account | signin | claude-signin [--disconnect] | claude-question | catalog-provenance | image [--diagnostic] | marks | chatgpt-text first-text --budget N",
+        )?
+    };
     Ok(if inner {
         Entry::Inner(check)
     } else {
@@ -169,20 +179,30 @@ fn prepare(check: Check) -> Result<()> {
     if check == Check::Question {
         claude_question::preflight(&platform::processes()?, std::process::id())?;
     }
+    let text_plan = match check {
+        Check::ChatGptText(budget) => Some(chatgpt_text::plan(budget)?),
+        _ => None,
+    };
     println!("live {name}: building the dev brain (at most {BUILD_LIMIT:?})");
     build_brain()?;
     let me = std::env::current_exe()?;
     let target = me.parent().context("xtask has a folder")?;
     let stamp = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
-    let folder = target
+    let live = target
         .parent()
         .context("the profile folder has a parent")?
-        .join(LIVE_RUNS_DIR)
-        .join(stamp.to_string());
+        .join(LIVE_RUNS_DIR);
+    let folder = live.join(stamp.to_string());
     let bin = folder.join(LIVE_RUN_BIN_DIR);
+    if matches!(check, Check::ChatGptText(_)) {
+        fs::create_dir_all(&live)?;
+        fs::create_dir(&folder)?;
+    }
     fs::create_dir_all(&bin)?;
     fs::copy(target.join(BRAIN_EXE), bin.join(BRAIN_EXE)).context("copying the brain")?;
-    println!("live {name}: running in {}", folder.display());
+    if text_plan.is_none() {
+        println!("live {name}: running in {}", folder.display());
+    }
     if check == Check::Catalog {
         return catalog::run(&folder);
     }
@@ -193,6 +213,11 @@ fn prepare(check: Check) -> Result<()> {
         _ => {}
     }
     fs::copy(&me, bin.join(SHELL_EXE)).context("copying the client")?;
+    if let Some(plan) = text_plan {
+        chatgpt_text::prepared(&folder, &plan)?;
+        println!("live {name}: prepared in {}", folder.display());
+        return Ok(());
+    }
     let mut inner = Command::new(bin.join(SHELL_EXE));
     inner.arg("live").args(check.args()).arg(INNER);
     if check == Check::Question {
@@ -364,20 +389,29 @@ impl Brain {
     /// question budget and no console output, inside a kill-on-close job this process holds, so
     /// the brain can't outlive it. Refuses while another product process runs.
     fn start(budget: u32, questions: u32) -> Result<Self> {
+        Self::start_with(budget, questions, |_| ())
+    }
+
+    fn start_with(
+        budget: u32,
+        questions: u32,
+        configure: impl FnOnce(&mut Command),
+    ) -> Result<Self> {
         let me = std::env::current_exe()?;
         let bin = me.parent().context("the harness has a folder")?;
         platform::Job::kill_on_close()
             .and_then(platform::Job::hold_self)
             .context("putting the run in a job")?;
         refuse_running(&platform::processes()?, std::process::id())?;
-        let child = Command::new(bin.join(BRAIN_EXE))
+        let mut command = Command::new(bin.join(BRAIN_EXE));
+        command
             .env(LIVE_BUDGET_ENV, budget.to_string())
             .env(CLAUDE_QUESTIONS_ENV, questions.to_string())
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .context("starting the brain")?;
+            .stderr(Stdio::null());
+        configure(&mut command);
+        let child = command.spawn().context("starting the brain")?;
         Ok(Self { child })
     }
 
@@ -686,7 +720,7 @@ mod tests {
             let error = entry(ProductIdentity::DEV, &args(list)).expect_err("refused");
             assert_eq!(
                 format!("{error:#}"),
-                "usage: cargo xtask live account | signin | claude-signin [--disconnect] | claude-question | catalog-provenance | image [--diagnostic] | marks"
+                "usage: cargo xtask live account | signin | claude-signin [--disconnect] | claude-question | catalog-provenance | image [--diagnostic] | marks | chatgpt-text first-text --budget N"
             );
         }
     }

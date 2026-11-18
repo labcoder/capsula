@@ -10,7 +10,7 @@ use rusqlite::types::ValueRef;
 use rusqlite::{Connection, OpenFlags, OptionalExtension as _};
 
 /// Opens a stopped brain's store without writing to it.
-pub(super) fn open(db: &Path) -> Result<Connection> {
+pub(crate) fn open(db: &Path) -> Result<Connection> {
     Connection::open_with_flags(db, OpenFlags::SQLITE_OPEN_READ_ONLY)
         .with_context(|| format!("opening {}", db.display()))
 }

@@ -15,7 +15,7 @@ pub(crate) mod client;
 mod delete;
 mod recover;
 mod stop;
-mod store;
+pub(crate) mod store;
 
 use std::fmt::Write as _;
 use std::fs;
