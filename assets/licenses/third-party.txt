@@ -136,12 +136,13 @@ Kumochi downloads these only when the user installs voice. Pins and provenance a
 
 The audit behind this list is in [docs/development/voice-natives.md](docs/development/voice-natives.md).
 
-## Unicode draft-authoring ranges
+## Unicode text validation ranges
 
-The format/default-ignorable ranges used by `crates/brain/src/dispatch/draft_issue.rs` derive
+The ranges used by `crates/brain/src/dispatch/draft_issue.rs` and `crates/scene/src/screen.rs` derive
 from Unicode Character Database 17.0.0's
-[`DerivedCoreProperties.txt`](https://www.unicode.org/Public/17.0.0/ucd/DerivedCoreProperties.txt)
-and [`DerivedGeneralCategory.txt`](https://www.unicode.org/Public/17.0.0/ucd/extracted/DerivedGeneralCategory.txt).
+[`DerivedCoreProperties.txt`](https://www.unicode.org/Public/17.0.0/ucd/DerivedCoreProperties.txt),
+[`DerivedGeneralCategory.txt`](https://www.unicode.org/Public/17.0.0/ucd/extracted/DerivedGeneralCategory.txt)
+and [`PropList.txt`](https://www.unicode.org/Public/17.0.0/ucd/PropList.txt).
 The merged range check is project code; no Unicode data file or runtime library is vendored.
 
 UNICODE LICENSE V3

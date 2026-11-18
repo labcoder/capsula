@@ -537,8 +537,7 @@ fn screen_labels_refuse_a_joined_emoji_before_commit_but_overlays_admit_it() {
     later.id = id("bad");
     let error = scene
         .admit(&later, &budget)
-        .err()
-        .expect("screen label refused");
+        .expect_err("screen label refused");
     assert_eq!(
         (error.path.as_str(), error.code),
         ("put[1].text", ErrorCode::LabelTooLong)
