@@ -18,6 +18,9 @@ After a lost acknowledgement, the row retains the unknown-save status through
 Check. Only a conclusive receipt for that Check on the same link unlocks paste
 or removal; a queued snapshot is not a result. Disconnect retires the request
 but keeps the unknown outcome. Once reconnected, the user can Check again.
+Whenever Paste is available, the row warns that it can replace a saved key.
+A fresh shell can receive a cached Missing view while a prior adoption is
+still in flight, so Missing does not suppress the warning.
 The key never crosses the pipe or enters a file, log, command line or environment variable.
 Only keys connected inside Kumochi are used; live checks must read the same Kumochi-owned
 credential, never another app's key.

@@ -7,10 +7,12 @@ use kumochi_protocol::message::{
 };
 
 use super::*;
-use crate::link::{Batch, LinkEvent, Session};
+use crate::link::{Batch, LinkEvent, LinkState, Session};
 use crate::presence::test_fixture;
 
 const SYNTHETIC: &str = "sk-ant-api-only-for-the-test-clipboard";
+
+const REPLACE_WARNING: &str = "Pasting replaces any saved key before Anthropic checks the new one.";
 
 struct Row(Entity<SettingsView>);
 
@@ -124,13 +126,52 @@ fn the_row_pastes_only_from_the_test_clipboard_and_never_writes_it(cx: &mut Test
 }
 
 #[gpui::test]
+fn a_reconnecting_shell_warns_before_paste_from_a_cached_missing_view(cx: &mut TestAppContext) {
+    let (window, owner, _) = isolated_row(cx);
+    let mut visual = VisualTestContext::from_window(window, cx);
+    key_event(
+        &mut visual,
+        &owner,
+        LinkEvent::State(LinkState::Reconnecting),
+    );
+    key_event(
+        &mut visual,
+        &owner,
+        LinkEvent::Connected(Session::detached(8, Incarnation(1))),
+    );
+    key_event(
+        &mut visual,
+        &owner,
+        LinkEvent::Connections {
+            generation: 8,
+            view: ConnectionsView {
+                anthropic: KeyView::Missing,
+                anthropic_revision: None,
+                claude_code: ClaudeCodeView::NotFound,
+            },
+        },
+    );
+    visual.run_until_parked();
+    visual.update(|window, cx| {
+        window.draw(cx).clear(cx);
+        assert!(owner.read(cx).settings.read(cx).key_paste.can_paste());
+    });
+    assert!(
+        visual
+            .debug_bounds("anthropic-status:No key saved")
+            .is_some()
+    );
+    assert!(visual.debug_bounds(REPLACE_WARNING).is_some());
+    assert!(visual.debug_bounds("Key saved").is_none());
+}
+
+#[gpui::test]
 fn a_fresh_unconfirmed_view_warns_that_paste_can_replace_a_key(cx: &mut TestAppContext) {
     let (window, owner, _) = isolated_row(cx);
     let mut visual = VisualTestContext::from_window(window, cx);
-    let warning = "Pasting replaces any saved key before Anthropic checks the new one.";
     visual.run_until_parked();
     visual.update(|window, cx| window.draw(cx).clear(cx));
-    assert!(visual.debug_bounds(warning).is_none());
+    assert!(visual.debug_bounds(REPLACE_WARNING).is_some());
     visual.update(|_, cx| {
         owner.update(cx, |owner, cx| {
             owner.settings.update(cx, |state, cx| {
@@ -144,7 +185,7 @@ fn a_fresh_unconfirmed_view_warns_that_paste_can_replace_a_key(cx: &mut TestAppC
     });
     visual.run_until_parked();
     visual.update(|window, cx| window.draw(cx).clear(cx));
-    assert!(visual.debug_bounds(warning).is_some());
+    assert!(visual.debug_bounds(REPLACE_WARNING).is_some());
 }
 
 fn expire_staged_save(key: &mut KeyPaste, old: KeyView) {
@@ -207,7 +248,7 @@ fn key_event(visual: &mut VisualTestContext, owner: &Entity<Presence>, event: Li
 }
 
 const UNKNOWN_SAVE: &str =
-    "anthropic-status:Couldn’t confirm the save. Check the key before pasting again.";
+    "anthropic-status:Couldn't confirm the save. Check the key before pasting again.";
 
 fn assert_unknown_save(visual: &mut VisualTestContext, owner: &Entity<Presence>) {
     visual.run_until_parked();
@@ -225,6 +266,7 @@ fn assert_unknown_save(visual: &mut VisualTestContext, owner: &Entity<Presence>)
         "anthropic-status:Anthropic accepted the key",
         "Key saved",
         "anthropic-remove",
+        REPLACE_WARNING,
     ] {
         assert!(visual.debug_bounds(stale).is_none(), "{stale}");
     }
