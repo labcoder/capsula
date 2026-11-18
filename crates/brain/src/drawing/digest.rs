@@ -1,45 +1,64 @@
 //! The current turn's `Drawings on screen` line: each of a thread's visible scenes, oldest
 //! first, with its begin header and its objects' ids and kinds. Headers and objects come from
-//! the drawing system at one moment, so they always agree.
+//! the drawing system at one moment, so they always agree. A route that can't take a screen
+//! picture gets the line without screen scenes.
 
 use std::fmt;
 
 use kumochi_protocol::message::ThreadId;
+use kumochi_scene::record::Surface;
 use serde_json::json;
 
 use super::Drawing;
 
-/// Bytes the listed `[id, kind]` pairs of every scene take together, a comma each (first value).
+/// Bytes the listed `[id, kind]` pairs of every scene in one line take together, a comma each
+/// (first value).
 pub(crate) const DIGEST_CAP: usize = 8 * 1024;
 
-/// The rendered line. It holds headers the model wrote, so Debug shows only its length.
+/// The rendered lines, each under its own cap: every visible scene, and every one but the
+/// screen scenes. They hold headers the model wrote, so Debug shows only their lengths.
 #[derive(Clone, PartialEq, Eq)]
-pub(crate) struct Digest(String);
+pub(crate) struct Digest {
+    all: String,
+    off_screen: String,
+}
 
 impl Default for Digest {
     fn default() -> Self {
-        Self("[]".to_owned())
+        Self {
+            all: "[]".to_owned(),
+            off_screen: "[]".to_owned(),
+        }
     }
 }
 
 impl Digest {
-    pub(crate) fn as_str(&self) -> &str {
-        &self.0
+    /// The line for a route that takes screen pictures (`screens`), or for one that doesn't.
+    pub(crate) fn line(&self, screens: bool) -> &str {
+        if screens { &self.all } else { &self.off_screen }
     }
 }
 
 #[cfg(test)]
 impl Digest {
-    /// A line as the drawing system renders one.
+    /// A line as the drawing system renders one for a thread with no screen scene.
     pub(crate) fn of(line: &str) -> Self {
-        Self(line.to_owned())
+        Self {
+            all: line.to_owned(),
+            off_screen: line.to_owned(),
+        }
+    }
+
+    /// The line with every scene.
+    pub(crate) fn as_str(&self) -> &str {
+        &self.all
     }
 }
 
 impl fmt::Debug for Digest {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Digest")
-            .field("bytes", &self.0.len())
+            .field("bytes", &self.all.len())
             .finish()
     }
 }
@@ -50,13 +69,25 @@ impl Drawing {
     /// that doesn't fit, so an older scene may still list small pairs after a newer one ran out.
     /// A scene that lists fewer than it holds adds `"more"`, the count left out.
     pub(crate) fn digest(&self, thread: ThreadId) -> Digest {
+        Digest {
+            all: self.line(thread, true),
+            off_screen: self.line(thread, false),
+        }
+    }
+
+    /// One line of [`Self::digest`], with screen scenes or without.
+    fn line(&self, thread: ThreadId, screens: bool) -> String {
         let mut room = DIGEST_CAP;
         let mut scenes = Vec::new();
         for held in self
             .scenes
             .iter()
             .rev()
-            .filter(|held| held.thread == thread && !held.gone)
+            .filter(|held| {
+                held.thread == thread
+                    && !held.gone
+                    && (screens || held.state.header().surface != Surface::Screen)
+            })
         {
             let mut objects: Vec<_> = held.state.objects().collect();
             objects.sort_unstable_by_key(|&(_, handle, _)| handle);
@@ -85,6 +116,6 @@ impl Drawing {
             ));
         }
         scenes.reverse();
-        Digest(format!("[{}]", scenes.join(",")))
+        format!("[{}]", scenes.join(","))
     }
 }

@@ -2363,3 +2363,65 @@ fn a_screen_picture_tells_the_model_what_it_is_and_where_the_line_lies() {
         );
     }
 }
+
+/// What each route is sent of the drawing line, read from the bytes it sends: the Responses
+/// request's line, Claude Code's seed and the Anthropic key's Messages body.
+#[test]
+fn a_route_without_screen_pictures_is_sent_no_screen_scene() {
+    use kumochi_protocol::message::ConnectionKind;
+    const SCREEN: [&str; 4] = [
+        "screen_scene_marker",
+        "screen_title_marker",
+        "screen_alt_marker",
+        "screen_step_marker",
+    ];
+    const OVERLAY: &str = r#"{"begin":{"alt":"overlay_alt_kept","others":"keep","scene":"overlay_scene_kept","size":null,"surface":"overlay","title":null,"v":1},"objects":[["overlay_object_kept","text"]]}"#;
+    const SCREEN_SCENE: &str = r#"{"begin":{"alt":"screen_alt_marker","others":"keep","scene":"screen_scene_marker","size":[1280.0,720.0],"surface":"screen","title":"screen_title_marker","v":1},"objects":[["screen_step_marker-mark","highlight"],["screen_step_marker-label","callout"]]}"#;
+    let mut world = world("ctx-screen-digest");
+    let main = world.main;
+    let (_, current) = world.run(Some(main), "ask", None);
+    let (_, drawings) = crate::drawing::tests::screen::overlay_then_screen();
+    for connection in [
+        ConnectionKind::ChatGpt,
+        ConnectionKind::ClaudeCode,
+        ConnectionKind::AnthropicKey,
+    ] {
+        let mut run = snapshot(Origin::Kumo, None);
+        run.choice.as_mut().expect("a choice").connection = connection;
+        let supplied = Supplied {
+            drawings: drawings.clone(),
+            ..Supplied::default()
+        };
+        let built = world
+            .build(&run, (main, current), supplied, BOUND)
+            .expect("built");
+        let sent = match connection {
+            ConnectionKind::ClaudeCode => {
+                crate::engines::claude_code::seed::encode(&built.request, &[])
+            }
+            ConnectionKind::AnthropicKey => {
+                crate::engines::anthropic::encode::body(&built.request, ConnectionTag(7))
+                    .expect("a body")
+                    .0
+                    .sent()
+                    .to_vec()
+            }
+            _ => drawing_line(&built).as_bytes().to_vec(),
+        };
+        let sent = String::from_utf8(sent).expect("UTF-8");
+        let screens = connection == ConnectionKind::ChatGpt;
+        let line = if screens {
+            format!("[{OVERLAY},{SCREEN_SCENE}]")
+        } else {
+            format!("[{OVERLAY}]")
+        };
+        assert_eq!(drawing_line(&built), line, "{connection:?}");
+        for marker in SCREEN {
+            assert_eq!(sent.contains(marker), screens, "{connection:?} {marker}");
+        }
+        assert_eq!(sent.contains("1280"), screens, "{connection:?} picture size");
+        for marker in ["overlay_scene_kept", "overlay_alt_kept", "overlay_object_kept"] {
+            assert!(sent.contains(marker), "{connection:?} {marker}");
+        }
+    }
+}

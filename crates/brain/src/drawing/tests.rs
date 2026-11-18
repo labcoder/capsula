@@ -23,7 +23,7 @@ use crate::engines::CallId;
 
 mod paint;
 mod ready;
-mod screen;
+pub(crate) mod screen;
 mod timing;
 
 const THREAD: ThreadId = ThreadId(7);

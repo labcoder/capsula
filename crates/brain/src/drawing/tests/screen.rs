@@ -896,3 +896,74 @@ fn a_mixed_or_forbidden_screen_call_is_stored_with_no_records() {
         }
     }
 }
+
+/// The digests of a thread with an overlay scene, then with a screen scene too, stamped from
+/// the fixture's picture as only a run whose route takes screen pictures can draw one. Each
+/// field a line carries holds a marker: scene names, the screen scene's title and alt, and
+/// object ids.
+pub(crate) fn overlay_then_screen() -> (crate::drawing::Digest, crate::drawing::Digest) {
+    let mut drawing = told(Ok(Geometry::FIXTURE));
+    let mut store = Store::default();
+    store.run(
+        &mut drawing,
+        call(
+            1,
+            "c1",
+            envelope(
+                &begin("overlay_scene_kept", "overlay_alt_kept"),
+                &[text("o1", "overlay_object_kept")],
+            ),
+        ),
+    );
+    let overlay = drawing.digest(THREAD);
+    store.run(
+        &mut drawing,
+        screen_call(
+            1,
+            "c2",
+            r#"{"begin":{"scene":"screen_scene_marker","surface":"screen","title":"screen_title_marker","alt":"screen_alt_marker","others":"keep"}}"#,
+            &[marked("screen_step_marker", "label")],
+        ),
+    );
+    (overlay, drawing.digest(THREAD))
+}
+
+#[test]
+fn a_thread_with_only_overlay_scenes_has_one_line_for_every_route() {
+    let (overlay, _) = overlay_then_screen();
+    let line = r#"[{"begin":{"alt":"overlay_alt_kept","others":"keep","scene":"overlay_scene_kept","size":null,"surface":"overlay","title":null,"v":1},"objects":[["overlay_object_kept","text"]]}]"#;
+    assert_eq!(overlay.line(true), line);
+    assert_eq!(overlay.line(false), line);
+}
+
+#[test]
+fn the_line_without_screen_scenes_has_a_cap_of_its_own() {
+    let mut drawing = told(Ok(Geometry::FIXTURE));
+    let mut store = Store::default();
+    // 600 pairs of 16 bytes with their commas: past the 8 KiB cap on their own.
+    store.run(&mut drawing, call(1, "c1", args("big", &texts("o", 0, 600))));
+    store.run(
+        &mut drawing,
+        screen_call(
+            1,
+            "c2",
+            &screen_begin("marks", r#","others":"keep""#),
+            &[marked("s1", "the question")],
+        ),
+    );
+    let digest = drawing.digest(THREAD);
+    let all: Value = serde_json::from_str(digest.line(true)).expect("a JSON line");
+    let off_screen: Value = serde_json::from_str(digest.line(false)).expect("a JSON line");
+    // The screen scene is newest, so its 47 bytes of pairs come first in the full line.
+    assert_eq!(
+        all[1]["objects"],
+        json!([["s1-mark", "highlight"], ["s1-label", "callout"]])
+    );
+    assert_eq!(all[0]["objects"].as_array().map(Vec::len), Some(509));
+    assert_eq!(all[0]["more"], json!(91));
+    assert_eq!(off_screen.as_array().map(Vec::len), Some(1));
+    assert_eq!(off_screen[0]["begin"]["scene"], json!("big"));
+    assert_eq!(off_screen[0]["objects"].as_array().map(Vec::len), Some(512));
+    assert_eq!(off_screen[0]["objects"][0], json!(["o088", "text"]));
+    assert_eq!(off_screen[0]["more"], json!(88));
+}
