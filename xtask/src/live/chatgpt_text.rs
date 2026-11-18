@@ -1,5 +1,6 @@
 //! Prepare a disposable Dev first-text copy without starting the brain.
 
+pub(super) mod execute;
 mod startup;
 #[cfg(test)]
 mod tests;

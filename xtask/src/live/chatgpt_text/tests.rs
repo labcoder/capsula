@@ -20,19 +20,17 @@ fn the_first_text_command_has_an_explicit_dev_only_budget() {
         }
         let inner = ["chatgpt-text", "first-text", "--budget", n, "--inner"].map(str::to_owned);
         assert_eq!(
-            entry(ProductIdentity::DEV, &inner)
-                .expect_err("must not execute")
-                .to_string(),
-            "first-text is prepare-only"
+            entry(ProductIdentity::DEV, &inner).expect("explicit inner"),
+            Entry::Inner(Check::ChatGptText(budget))
         );
     }
 }
 
-const TEXT_ONLY: &str =
+pub(super) const TEXT_ONLY: &str =
     "[claude_code]\nenabled=false\n[voice]\nhold_to_talk=false\nscreen_holds=false\n";
-const SAFE_PLAN: &str = "model_budget=19\nconnections=chatgpt\nchatgpt_startup_identity_validation=one possible check not visible in metadata (discovery and up to two signing-key requests)\n";
+pub(super) const SAFE_PLAN: &str = "model_budget=19\nconnections=chatgpt\nchatgpt_startup_identity_validation=one possible check not visible in metadata (discovery and up to two signing-key requests)\n";
 
-fn clean_metadata() -> (rusqlite::Connection, rusqlite::Connection) {
+pub(super) fn clean_metadata() -> (rusqlite::Connection, rusqlite::Connection) {
     let db = rusqlite::Connection::open_in_memory().expect("fixture history");
     db.execute_batch(
         "CREATE TABLE threads (kind TEXT, state TEXT, model TEXT);

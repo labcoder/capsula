@@ -56,13 +56,8 @@ pub(crate) fn run(args: impl Iterator<Item = String>) -> Result<()> {
         Entry::Inner(Check::SignIn) => signin::inner(),
         Entry::Inner(Check::Claude(ask)) => claude_signin::inner(ask),
         Entry::Inner(Check::Question) => std::process::exit(claude_question::inner()),
-        Entry::Inner(
-            Check::Catalog
-            | Check::Image
-            | Check::ImageDiagnostic
-            | Check::Marks
-            | Check::ChatGptText(_),
-        ) => {
+        Entry::Inner(Check::ChatGptText(budget)) => chatgpt_text::execute::run(budget),
+        Entry::Inner(Check::Catalog | Check::Image | Check::ImageDiagnostic | Check::Marks) => {
             unreachable!("entry refuses --inner for the brain-only checks")
         }
     }
@@ -133,7 +128,6 @@ fn entry(identity: ProductIdentity, args: &[String]) -> Result<Entry> {
     let check = if let [command, options @ ..] = words
         && command == "chatgpt-text"
     {
-        ensure!(!inner, "first-text is prepare-only");
         Check::ChatGptText(chatgpt_text::budget(options)?)
     } else {
         Check::ALL
@@ -395,20 +389,29 @@ impl Brain {
     /// question budget and no console output, inside a kill-on-close job this process holds, so
     /// the brain can't outlive it. Refuses while another product process runs.
     fn start(budget: u32, questions: u32) -> Result<Self> {
+        Self::start_with(budget, questions, |_| ())
+    }
+
+    fn start_with(
+        budget: u32,
+        questions: u32,
+        configure: impl FnOnce(&mut Command),
+    ) -> Result<Self> {
         let me = std::env::current_exe()?;
         let bin = me.parent().context("the harness has a folder")?;
         platform::Job::kill_on_close()
             .and_then(platform::Job::hold_self)
             .context("putting the run in a job")?;
         refuse_running(&platform::processes()?, std::process::id())?;
-        let child = Command::new(bin.join(BRAIN_EXE))
+        let mut command = Command::new(bin.join(BRAIN_EXE));
+        command
             .env(LIVE_BUDGET_ENV, budget.to_string())
             .env(CLAUDE_QUESTIONS_ENV, questions.to_string())
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .context("starting the brain")?;
+            .stderr(Stdio::null());
+        configure(&mut command);
+        let child = command.spawn().context("starting the brain")?;
         Ok(Self { child })
     }
 

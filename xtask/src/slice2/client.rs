@@ -451,10 +451,6 @@ impl<F> Client<F> {
     }
 }
 
-#[expect(
-    dead_code,
-    reason = "the stacked first-text command uses projected reads and clean EOF"
-)]
 impl<F> Client<Option<F>> {
     fn next_projected(&self, until: Instant) -> Result<Seen<Option<F>>> {
         let frame = self
@@ -540,10 +536,6 @@ impl<F> Projection<F> {
     }
 }
 
-#[expect(
-    dead_code,
-    reason = "the stacked first-text command selects the projected client"
-)]
 impl<F: Send + 'static> Client<Option<F>> {
     pub(crate) fn project(
         pid: u32,
