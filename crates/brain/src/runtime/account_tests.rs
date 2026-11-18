@@ -1123,7 +1123,7 @@ async fn finish_catalog(brain: &mut crate::runtime::Brain) {
     Box::pin(brain.drain_settings()).await;
 }
 
-fn crowded_catalog(shifted: bool) -> (u16, String) {
+fn crowded_catalog(earlier_effort: &str) -> (u16, String) {
     let mut rows: Vec<_> = (0..199)
         .map(|n| {
             json!({
@@ -1134,7 +1134,7 @@ fn crowded_catalog(shifted: bool) -> (u16, String) {
         .collect();
     rows.push(json!({
         "slug": "earlier", "display_name": "Earlier", "visibility": "list",
-        "supported_reasoning_levels": [{"effort": if shifted { "low" } else { "future" }}],
+        "supported_reasoning_levels": [{"effort": earlier_effort}],
     }));
     rows.push(json!({
         "slug": "saved", "display_name": "Saved", "visibility": "list",
@@ -1165,12 +1165,12 @@ async fn a_catalog_row_gaining_support_does_not_replace_the_saved_overflow_model
         effort: Effort::High,
         connection: ConnectionKind::ChatGpt,
     };
-    for (shifted, last) in [(false, "saved"), (true, "earlier")] {
+    for (earlier_effort, shifted, last) in [("future", false, "saved"), ("low", true, "earlier")] {
         let store = FakeStore::default();
         let accounts = seeded(
             &scratch,
             &store,
-            Catalog::answering([crowded_catalog(shifted)]),
+            Catalog::answering([crowded_catalog(earlier_effort)]),
             LATER,
         );
         let (sent, mut bodies) = mpsc::channel(1);
