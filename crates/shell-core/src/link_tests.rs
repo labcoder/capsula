@@ -2470,6 +2470,29 @@ fn played(script: &crate::speaker::fake::Shared) -> usize {
 }
 
 #[test]
+fn an_open_racing_the_inhibit_is_paused_before_any_speech_reaches_the_device() {
+    use kumochi_protocol::message::GestureId;
+    let (link, script, go) = opening_speaker("racing-inhibit");
+    let events = patient(link.events);
+    let _session = connected(next(&events));
+    let output = link.handle.output();
+    let token = output.acquire(GestureId(1)).expect("taken while opening");
+    go.send(()).expect("opening");
+    thread::sleep(Duration::from_millis(300));
+    assert_eq!(played(&script), 0, "paused before any of it was written");
+    output
+        .retire(token, super::output::Retirement::NoMic)
+        .expect("retired");
+    let deadline = Instant::now() + PATIENCE;
+    while played(&script) < 2_400 {
+        assert!(Instant::now() < deadline, "it was playable all along");
+        thread::sleep(Duration::from_millis(5));
+    }
+    drop(link.control);
+    assert!(link.link.join().expect("joined"), "the UI was still there");
+}
+
+#[test]
 fn talk_back_off_while_opening_withdraws_the_late_open_before_any_speech() {
     let (link, script, go) = opening_speaker("off-while-opening");
     let events = patient(link.events);
@@ -2484,6 +2507,39 @@ fn talk_back_off_while_opening_withdraws_the_late_open_before_any_speech() {
     }
     thread::sleep(Duration::from_millis(100));
     assert_eq!(played(&script), 0, "nothing was ever written");
+    drop(link.control);
+    assert!(link.link.join().expect("joined"), "the UI was still there");
+}
+
+#[test]
+fn a_normal_session_has_no_output_and_still_lets_a_voice_hold_start() {
+    use kumochi_protocol::message::GestureId;
+    let link = attended("dormant-owner");
+    let events = patient(link.events);
+    let session = connected(next(&events));
+    let output = link.handle.output();
+    assert_eq!(
+        output.view().why,
+        Some(super::output::Why::NoOpener),
+        "no opener, no output"
+    );
+    let token = output.acquire(GestureId(1)).expect("nothing to pause");
+    let mic = link
+        .handle
+        .microphone_gate()
+        .arm(GestureId(1))
+        .expect("armed");
+    output.bind_mic(&token, &mic).expect("bound");
+    let claim = output
+        .claim(&token, session.generation())
+        .expect("claims the session's no-output key");
+    assert!(output.start_mic(&claim).is_ok(), "the hold may start");
+    frame::write(&mut &link.control, &ControlToShell::Ping, Pipe::Control).expect("ping");
+    assert_eq!(
+        frame::read::<ControlToBrain>(&mut &link.control, Pipe::Control).expect("read"),
+        Some(ControlToBrain::Pong),
+        "only the pong: no announcement, no speaker command"
+    );
     drop(link.control);
     assert!(link.link.join().expect("joined"), "the UI was still there");
 }

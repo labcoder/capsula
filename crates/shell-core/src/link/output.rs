@@ -1,17 +1,18 @@
-//! One link's output owner: each session's output and every output generation's tail debt
-//! (docs/development/speaker.md).
+//! One link's output owner: each session's output, every output generation's tail debt, the
+//! capture inhibit, and whether a microphone may start or collect (docs/development/speaker.md).
 //! Each section under its lock is short and never blocks: opens, joins, pipe aborts and last
 //! drops of a speaker happen after it.
 
 use std::fmt;
 use std::sync::atomic::{Ordering, fence};
 use std::sync::mpsc::SyncSender;
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError, TryLockError};
 
 use async_channel::{Receiver, Sender};
-use kumochi_protocol::message::{OutputGeneration, RunId};
+use kumochi_protocol::message::{GestureId, OutputGeneration, RunId};
 
-use crate::speaker::{Command, FAULT, RELEASED, Speaker, Tail};
+use crate::platform::microphone::{Generation, MicOwner, Reserved, Running};
+use crate::speaker::{Command, FAULT, RELEASED, Speaker, Tail, UNKNOWN};
 
 #[cfg(test)]
 #[path = "output_tests.rs"]
@@ -24,7 +25,7 @@ const LEDGER: usize = 4;
 /// Aborts one session's pipes.
 pub type Abort = Arc<dyn Fn() + Send + Sync>;
 
-/// The owner of a link's outputs.
+/// The owner of a link's outputs and its capture inhibit.
 pub struct OutputOwner {
     state: Mutex<State>,
     changed: Sender<()>,
@@ -55,8 +56,10 @@ struct State {
     commands: Option<SyncSender<Command>>,
     abort: Option<Abort>,
     ledger: [Option<Entry>; LEDGER],
+    inhibit: Option<Inhibit>,
     off: bool,
     generations: u32,
+    serials: u32,
     epochs: u64,
 }
 
@@ -92,6 +95,31 @@ struct Entry {
     terminal: bool,
 }
 
+struct Inhibit {
+    serial: u32,
+    gesture: GestureId,
+    revision: u32,
+    mic: Option<Generation>,
+}
+
+impl Inhibit {
+    fn token(&self) -> InhibitToken {
+        InhibitToken {
+            serial: self.serial,
+            gesture: self.gesture,
+            revision: self.revision,
+        }
+    }
+}
+
+/// Holds the capture inhibit; only its holder can move or retire it.
+#[derive(Debug, PartialEq, Eq)]
+pub struct InhibitToken {
+    serial: u32,
+    gesture: GestureId,
+    revision: u32,
+}
+
 /// An output the owner named.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OutputKey {
@@ -99,6 +127,51 @@ pub enum OutputKey {
     Generation(OutputGeneration),
     /// A session's no-output epoch.
     NoOutput(u64),
+}
+
+/// One session's claim to start and collect a microphone under the inhibit, checked again at
+/// each microphone transition.
+#[derive(Debug)]
+pub struct Claim {
+    session: u64,
+    key: OutputKey,
+    owner: InhibitToken,
+}
+
+/// The proof that lets go of the inhibit; each is checked on the bound microphone generation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Retirement {
+    /// No microphone was bound.
+    NoMic,
+    /// The bound generation never started: the owner discards it.
+    Unstarted,
+    /// The bound generation's gate shows it retired.
+    Retired,
+}
+
+/// Why the owner said no.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Denied {
+    /// Contention on the native path, or a tail mid-publish.
+    Busy,
+    /// A key, owner or session that isn't current.
+    Stale,
+    /// An inhibit is held, a microphone is bound, or a proof failed.
+    Inhibited,
+    /// The session's output is still opening.
+    Opening,
+    /// Another generation's tail is still pending.
+    Debt,
+    /// Some tail can't be shown played: until restart.
+    Terminal,
+    /// The live generation hasn't gone quiet under this pause.
+    NotQuiet,
+    /// The live generation exposed content, and D1 qualifies no route.
+    Unqualified,
+    /// The speaker couldn't take a command, so the session is ending.
+    Lost,
+    /// A serial or revision ran out.
+    Overflow,
 }
 
 /// What the UI may show about outputs.
@@ -205,10 +278,61 @@ impl State {
         self.abort.clone()
     }
 
+    fn held(&mut self, token: &InhibitToken) -> Result<&mut Inhibit, Denied> {
+        self.inhibit
+            .as_mut()
+            .filter(|inhibit| inhibit.token() == *token)
+            .ok_or(Denied::Stale)
+    }
+
     fn live(&self) -> Option<OutputGeneration> {
         match self.output {
             Output::Live(generation) => Some(generation),
             _ => None,
+        }
+    }
+
+    /// Everything a claim needs, now.
+    fn check(&self, claim: &Claim) -> Result<(), Denied> {
+        if self.session != Some(claim.session) {
+            return Err(Denied::Stale);
+        }
+        let inhibit = self
+            .inhibit
+            .as_ref()
+            .filter(|inhibit| inhibit.token() == claim.owner)
+            .ok_or(Denied::Stale)?;
+        if inhibit.mic.is_none() {
+            return Err(Denied::Inhibited);
+        }
+        let mut entries = self.ledger.iter().flatten();
+        if entries.clone().any(|entry| entry.terminal) {
+            return Err(Denied::Terminal);
+        }
+        if entries.any(|entry| Some(entry.generation) != self.live()) {
+            return Err(Denied::Debt);
+        }
+        match (claim.key, self.output) {
+            (OutputKey::NoOutput(key), Output::Quiet { epoch, .. }) if key == epoch => Ok(()),
+            (OutputKey::Generation(key), Output::Live(generation)) if key == generation => {
+                let now = self
+                    .ledger
+                    .iter()
+                    .flatten()
+                    .find(|entry| entry.generation == generation)
+                    .ok_or(Denied::Stale)?
+                    .tail
+                    .read()
+                    .ok_or(Denied::Busy)?;
+                if now.exposed > 0 || now.flags & UNKNOWN != 0 {
+                    Err(Denied::Unqualified)
+                } else if now.quiet != claim.owner.serial || now.owed() {
+                    Err(Denied::NotQuiet)
+                } else {
+                    Ok(())
+                }
+            }
+            _ => Err(Denied::Stale),
         }
     }
 }
@@ -218,6 +342,16 @@ impl OutputOwner {
         let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         state.settle();
         state
+    }
+
+    fn try_lock(&self) -> Result<MutexGuard<'_, State>, Denied> {
+        let mut state = match self.state.try_lock() {
+            Ok(state) => state,
+            Err(TryLockError::Poisoned(state)) => state.into_inner(),
+            Err(TryLockError::WouldBlock) => return Err(Denied::Busy),
+        };
+        state.settle();
+        Ok(state)
     }
 
     fn wake(&self) {
@@ -233,7 +367,8 @@ impl OutputOwner {
         self.wake();
     }
 
-    /// Wakes once per change to an output or a tail; read [`OutputOwner::view`] after each.
+    /// Wakes once per change that can grant or refuse; read [`OutputOwner::view`] or claim
+    /// again after each.
     pub fn changes(&self) -> Receiver<()> {
         self.changes.clone()
     }
@@ -289,8 +424,8 @@ impl OutputOwner {
     }
 
     /// The link thread's open of `generation` returned, before its reader starts. A kept speaker
-    /// is fenced first: withdrawn when talk-back went off. An `Err` speaker couldn't be fenced:
-    /// the link drops it and ends the session.
+    /// is fenced first: withdrawn when talk-back went off, else paused under a held inhibit. An
+    /// `Err` speaker couldn't be fenced: the link drops it and ends the session.
     ///
     /// # Errors
     /// The speaker, when it couldn't be fenced.
@@ -309,7 +444,14 @@ impl OutputOwner {
                 Ok(None)
             }
             Some(speaker) => {
-                let fence = state.off.then_some(Command::Withdraw);
+                let fence = if state.off {
+                    Some(Command::Withdraw)
+                } else {
+                    state
+                        .inhibit
+                        .as_ref()
+                        .map(|inhibit| Command::Pause(inhibit.serial))
+                };
                 if opening && fence.is_none_or(|fence| speaker.command(fence)) {
                     state.commands = speaker.commands();
                     state.output = Output::Live(generation);
@@ -325,8 +467,9 @@ impl OutputOwner {
         opened
     }
 
-    /// The link thread ends `session`, first in teardown: the speaker's queue and the abort are
-    /// let go here. Pending tails stay in the ledger.
+    /// The link thread ends `session`, first in teardown: claims stop matching, a bound
+    /// microphone is cancelled, and the speaker's queue and the abort are let go here. Pending
+    /// tails stay in the ledger; the inhibit stays for the next session.
     pub(super) fn end(&self, session: u64) {
         let mut state = self.lock();
         if state.session != Some(session) {
@@ -334,10 +477,170 @@ impl OutputOwner {
         }
         state.session = None;
         state.output = Output::Closed;
+        if let Some(mic) = state
+            .inhibit
+            .as_ref()
+            .and_then(|inhibit| inhibit.mic.as_ref())
+        {
+            mic.cancel();
+        }
         let released = (state.commands.take(), state.abort.take());
         drop(state);
         drop(released);
         self.wake();
+    }
+
+    /// Takes the capture inhibit for `gesture` and pauses a live speaker under its serial. Never
+    /// waits: contention is `Busy`, and the gesture gets nothing.
+    ///
+    /// # Errors
+    /// `Busy`, `Inhibited` while one is held, `Overflow`, or `Lost` when the speaker
+    /// couldn't take the pause, which ends the session.
+    pub fn acquire(&self, gesture: GestureId) -> Result<InhibitToken, Denied> {
+        let mut state = self.try_lock()?;
+        if state.inhibit.is_some() {
+            return Err(Denied::Inhibited);
+        }
+        let serial = state.serials.checked_add(1).ok_or(Denied::Overflow)?;
+        state.serials = serial;
+        let abort = state.command(Command::Pause(serial));
+        let acquired = if abort.is_some() {
+            Err(Denied::Lost)
+        } else {
+            let inhibit = Inhibit {
+                serial,
+                gesture,
+                revision: 0,
+                mic: None,
+            };
+            let token = inhibit.token();
+            state.inhibit = Some(inhibit);
+            Ok(token)
+        };
+        drop(state);
+        self.after(abort);
+        acquired
+    }
+
+    /// Moves the inhibit to gesture `to` under the same serial, before a microphone is bound.
+    /// Never waits; on any refusal `token` stays good.
+    ///
+    /// # Errors
+    /// `Busy`, `Stale` for a token that isn't current, `Inhibited` once a microphone is
+    /// bound, or `Overflow`.
+    pub fn transfer(&self, token: &InhibitToken, to: GestureId) -> Result<InhibitToken, Denied> {
+        let mut state = self.try_lock()?;
+        let inhibit = state.held(token)?;
+        if inhibit.mic.is_some() {
+            return Err(Denied::Inhibited);
+        }
+        inhibit.revision = inhibit.revision.checked_add(1).ok_or(Denied::Overflow)?;
+        inhibit.gesture = to;
+        Ok(inhibit.token())
+    }
+
+    /// Binds the inhibit, once, to its gesture's microphone generation.
+    ///
+    /// # Errors
+    /// `Stale` for another token or gesture, `Inhibited` once bound.
+    pub fn bind_mic(&self, token: &InhibitToken, mic: &Generation) -> Result<(), Denied> {
+        let mut state = self.lock();
+        let inhibit = state.held(token)?;
+        if inhibit.mic.is_some() {
+            return Err(Denied::Inhibited);
+        }
+        if mic.gesture() != inhibit.gesture {
+            return Err(Denied::Stale);
+        }
+        inhibit.mic = Some(mic.clone());
+        Ok(())
+    }
+
+    /// A claim on `session`'s current output under `token`, with the owner's key for it.
+    ///
+    /// # Errors
+    /// `Opening` until the open is settled: wait for a wake and claim again. Otherwise what
+    /// the check refuses.
+    pub fn claim(&self, token: &InhibitToken, session: u64) -> Result<Claim, Denied> {
+        let state = self.lock();
+        let key = match state.output {
+            Output::Live(generation) => OutputKey::Generation(generation),
+            Output::Quiet { epoch, .. } => OutputKey::NoOutput(epoch),
+            Output::Opening(_) => return Err(Denied::Opening),
+            Output::Closed | Output::Lost(_) => return Err(Denied::Stale),
+        };
+        let claim = Claim {
+            session,
+            key,
+            owner: InhibitToken {
+                serial: token.serial,
+                gesture: token.gesture,
+                revision: token.revision,
+            },
+        };
+        state.check(&claim)?;
+        Ok(claim)
+    }
+
+    /// Checks `claim` and, in the same step, claims the bound microphone's single start; the
+    /// caller then starts it with [`MicOwner::start_reserved`].
+    ///
+    /// # Errors
+    /// What the check refuses, or `Stale` when the generation can't start.
+    pub fn start_mic(&self, claim: &Claim) -> Result<Reserved, Denied> {
+        let state = self.lock();
+        state.check(claim)?;
+        state
+            .inhibit
+            .as_ref()
+            .and_then(|inhibit| inhibit.mic.as_ref())
+            .ok_or(Denied::Inhibited)?
+            .reserve()
+            .map_err(|_| Denied::Stale)
+    }
+
+    /// Checks `claim` and, in the same step, lets `mic` collect on its running receipt.
+    ///
+    /// # Errors
+    /// What the check refuses, or `Stale` for another gesture's receipt or a generation that
+    /// can't collect.
+    pub fn collect(&self, claim: &Claim, mic: &MicOwner, running: Running) -> Result<(), Denied> {
+        let state = self.lock();
+        state.check(claim)?;
+        if running.gesture != claim.owner.gesture {
+            return Err(Denied::Stale);
+        }
+        mic.accept_running(running).map_err(|_| Denied::Stale)
+    }
+
+    /// Lets go of the inhibit on a proof the owner checks on the bound microphone, and resumes
+    /// the speaker. A refused proof hands `token` back, so a later one can still retire it.
+    ///
+    /// # Errors
+    /// `Stale` for a token that isn't current, `Inhibited` for a proof that doesn't hold.
+    pub fn retire(
+        &self,
+        token: InhibitToken,
+        how: Retirement,
+    ) -> Result<(), (InhibitToken, Denied)> {
+        let mut state = self.lock();
+        let proved = match state.held(&token) {
+            Err(denied) => return Err((token, denied)),
+            Ok(inhibit) => match (how, &inhibit.mic) {
+                (Retirement::NoMic, None) => true,
+                (Retirement::Unstarted, Some(mic)) => mic.discard_unstarted().is_ok(),
+                (Retirement::Retired, Some(mic)) => mic.finished(),
+                _ => false,
+            },
+        };
+        if !proved {
+            return Err((token, Denied::Inhibited));
+        }
+        state.inhibit = None;
+        let abort = state.command(Command::Resume(token.serial));
+        drop(state);
+        self.after(abort);
+        Ok(())
     }
 
     /// Queues the speaker's `Stop` of `run` on `session` only, after the brain accepted its

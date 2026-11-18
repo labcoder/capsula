@@ -7,6 +7,8 @@ only reports what played and when its output is quiet.
 
 **Dormant.** Nothing opens a speaker in a normal launch. `link::prepare` attaches no
 `Opener`, so no connection sends `AudioOutput` and no run gets a reply; link tests pin that.
+Every link has an output owner, but without an opener each session is `Quiet { NoOpener }`,
+and nothing outside tests takes the capture inhibit or claims a microphone.
 Slice 7's half-duplex change (D) enables output.
 
 ## Pieces
@@ -19,7 +21,7 @@ Slice 7's half-duplex change (D) enables output.
 | `Tail` | `speaker/tail.rs` | one generation's sequence-locked record of what it owes |
 | Windows adapter | `platform/windows/speaker.rs` | the WASAPI stream, its thread, its event and the platform results |
 | Link | `link.rs` | routing speech frames, run names, revokes and the speaker's reports on one connection |
-| `OutputOwner` | `link/output.rs` | each session's output, every generation's tail until it settles, talk-back off |
+| `OutputOwner` | `link/output.rs` | each session's output, every generation's tail until it settles, talk-back off, the capture inhibit |
 
 ## The device seam
 
@@ -247,7 +249,8 @@ whether a session has an output and whether an earlier generation still owes aud
   and talk-back on it reserves a ledger slot and the next generation and publishes `Opening`;
   otherwise the session is `Quiet`. `opened(g, speaker)` once the open returned and before the
   reader starts: a speaker opened after talk-back went off is withdrawn first, and one that can't
-  take that command is handed back for the link to drop, which ends the session. `end(session)`
+  take that command is handed back for the link to drop, which ends the session. Under a held
+  inhibit it's paused under the inhibit's serial instead, so no speech reaches the device. `end(session)`
   first in teardown lets go of the speaker's queue and the session's abort; the ledger keeps the
   tail.
 - **The ledger.** Four entries, each a generation and its `Tail`. A fifth unresolved generation
@@ -261,6 +264,23 @@ whether a session has an output and whether an earlier generation still owes aud
   it opens, and later sessions get none. The stream retires; the worker stays on without a
   device, answering stops and crediting frames, and the session goes on.
 - **Stop.** `stop(session, run)` queues a speaker `Stop` on that session only.
+- **The capture inhibit.** One per link, held by a voice gesture so the microphone never records
+  the speaker. `acquire(gesture)` takes it and pauses a live speaker under a fresh serial; it
+  never waits, so contention is `Busy` and the gesture gets nothing. `transfer` moves it to a
+  new gesture before a microphone is bound; `bind_mic` binds it, once, to that gesture's
+  microphone generation. `end` cancels a bound microphone; the inhibit outlives the session.
+- **Claims.** `claim(token, session)` names the session's current `OutputKey` and checks it.
+  `start_mic(claim)` checks again and, in the same step, claims the bound microphone's single
+  start; `collect(claim, mic, running)` checks again and lets it collect on its receipt. So a
+  claim can't be reused after its output moved on. A claim is refused while the open is still
+  `Opening`, while another generation owes (`Debt`) or any tail is terminal, and on a live
+  generation that isn't quiet under the inhibit's serial or ever exposed content
+  (`Unqualified`: D1 qualifies no echo-safe route). A session with no output claims its
+  no-output epoch.
+- **Retiring the inhibit.** `retire(token, how)` needs proof on the bound generation: `NoMic`
+  when none was bound, `Unstarted` when it never started (the owner discards it), `Retired` when
+  its gate shows it finished. A refused proof hands the token back, so a later valid one still
+  retires it. Retiring resumes the speaker.
 - **Never blocking.** Each section under the owner's lock is short. Opens, joins, pipe aborts and a
   speaker's last drop happen after it. A command the speaker's queue refuses drops the output to
   `Lost` and aborts the session's pipes, after the lock.

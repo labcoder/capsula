@@ -27,6 +27,11 @@ the generation's one start attempt and spawns the device worker. Only call it af
 Brain admission. No native audio work runs on the calling/UI thread. The owner
 exposes bounded `running: Receiver<Running>` and `pcm: Receiver<MicPcm>` channels.
 Forward audio on a separate nonblocking/cancellable link worker, not the UI thread.
+`Generation::reserve() -> Result<Reserved, MicError>` claims that one start on its own,
+so the speaker's output owner can claim it in the same step that checks the inhibit;
+`MicOwner::start_reserved(Reserved, ..)` then spawns the worker, and `start` is the two in
+one. A `Reserved` dropped unstarted retires its generation, since no worker ever ran.
+`Generation::finished()` is true once it retired or a newer gesture armed.
 
 `Running { gesture, rate }` means a stream exists but collection is **disarmed**.
 After accepting this exact receipt and publishing the corresponding UI state,
