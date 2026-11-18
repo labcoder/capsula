@@ -233,6 +233,21 @@ async fn a_signed_key_round_goes_on_from_memory_and_only_its_call_is_stored() {
     );
     assert!(events.contains(&TurnEvent::TextDelta("Looking.".into())));
 
+    let thinking = br#"{"type":"thinking","thinking":"t","signature":"s"}"#;
+    let refused = world.store.append_round(
+        (world.main, run),
+        Route {
+            kind: ConnectionKind::AnthropicKey,
+            tag: ConnectionTag(TAG),
+        },
+        Some("Looking."),
+        &[Opaque::new(thinking.to_vec()).expect("small")],
+        &[],
+    );
+    assert!(
+        matches!(refused, Err(StoreError::RoundRecord)),
+        "the key's rounds store only calls: {refused:?}"
+    );
     keep_round(&mut world, run);
     let rows = stored(&world);
     assert!(rows.contains("toolu_1"), "{rows}");

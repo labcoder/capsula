@@ -279,11 +279,6 @@ impl Coordinator {
         }) else {
             return self.fail(run, Failure::Engine, effects);
         };
-        // The key's items are its calls alone (its mapper keeps signed thinking in the run's
-        // memory), and a screen call's boxes are only taken out of a `ChatGPT` call.
-        if screen && connection.kind == kumochi_protocol::message::ConnectionKind::AnthropicKey {
-            return self.fail(run, Failure::Engine, effects);
-        }
         let round = current.build.as_ref().map_or(1, |build| build.key().round);
         let calling = current.tools.calling();
         current.finishing = !calling;
