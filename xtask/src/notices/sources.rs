@@ -201,6 +201,9 @@ fn native_source(extension: &str) -> bool {
 }
 
 fn source_header(path: &Path) -> Result<Vec<String>> {
+    const BLOCK_COMMENT: &str = "/*";
+    const LINE_COMMENTS: [&str; 6] = ["//!", "///", "//", "# ", "; ", "@ "];
+
     let mut bytes = Vec::new();
     fs::File::open(path)?
         .take(PREFIX_LIMIT + 1)
@@ -218,7 +221,7 @@ fn source_header(path: &Path) -> Result<Vec<String>> {
     let mut notices = Vec::new();
     loop {
         source = source.trim_start();
-        let body = if let Some(block) = source.strip_prefix("/*") {
+        let body = if let Some(block) = source.strip_prefix(BLOCK_COMMENT) {
             let (body, rest) = block
                 .split_once("*/")
                 .context("unterminated leading comment")?;
@@ -227,7 +230,7 @@ fn source_header(path: &Path) -> Result<Vec<String>> {
                 .map(|line| line.trim_start().trim_start_matches('*').trim_start())
                 .collect::<Vec<_>>()
                 .join("\n")
-        } else if let Some(marker) = ["//!", "///", "//", "# ", "; ", "@ "]
+        } else if let Some(marker) = LINE_COMMENTS
             .into_iter()
             .find(|marker| source.starts_with(marker))
         {
@@ -244,7 +247,11 @@ fn source_header(path: &Path) -> Result<Vec<String>> {
             body
         } else {
             ensure!(
-                !bounded || !source.is_empty(),
+                !bounded
+                    || !LINE_COMMENTS
+                        .into_iter()
+                        .chain([BLOCK_COMMENT])
+                        .any(|opener| opener.starts_with(source)),
                 "source header exceeds scan limit"
             );
             return Ok(notices);
@@ -338,6 +345,17 @@ mod tests {
         );
         for extra in ['x', 'é'] {
             fs::write(&file, format!("{exact}{extra}")).unwrap();
+            assert_eq!(
+                source_header(&file).unwrap_err().to_string(),
+                "source header exceeds scan limit"
+            );
+        }
+        let padding = "x".repeat(65_536 - "/* */\n".len());
+        for notice in [
+            "// Copyright 2026 Fixture Publisher",
+            "/* Copyright 2026 Fixture Publisher */",
+        ] {
+            fs::write(&file, format!("/* {padding}*/\n{notice}")).unwrap();
             assert_eq!(
                 source_header(&file).unwrap_err().to_string(),
                 "source header exceeds scan limit"

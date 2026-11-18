@@ -85,7 +85,10 @@ pub(super) fn read(dir: &Path, package: &str) -> Result<Vec<String>> {
                     format!("reading reviewed notice input for {package}: {relative}")
                 })?
                 .replace("\r\n", "\n");
-            let text = span(&data, begin, end).with_context(|| {
+            let starts = SCOPED.iter().filter_map(|&(id, path, start, _)| {
+                (id == package && path == relative).then_some(start)
+            });
+            let text = span(&data, begin, end, starts).with_context(|| {
                 format!("checking reviewed notice input for {package}: {relative}")
             })?;
             Ok(text.to_owned())
@@ -93,14 +96,23 @@ pub(super) fn read(dir: &Path, package: &str) -> Result<Vec<String>> {
         .collect()
 }
 
-fn span<'a>(source: &'a str, begin: &str, end: &str) -> Result<&'a str> {
+fn span<'a>(
+    source: &'a str,
+    begin: &str,
+    end: &str,
+    starts: impl Iterator<Item = &'static str> + Clone,
+) -> Result<&'a str> {
     let mut found = None;
     for (offset, _) in source.match_indices(begin) {
         let after = &source[offset..];
-        let (body, _) = after
+        let (body, _) = after[begin.len()..]
             .split_once(end)
             .context("reviewed notice end missing")?;
-        let text = &after[..body.len() + end.len()];
+        ensure!(
+            !starts.clone().any(|start| body.contains(start)),
+            "reviewed notice end missing before next start"
+        );
+        let text = &after[..begin.len() + body.len() + end.len()];
         ensure!(
             u64::try_from(text.len())? <= PREFIX_LIMIT && found.is_none_or(|prior| prior == text),
             "oversized or ambiguous reviewed notice"
@@ -152,23 +164,49 @@ mod tests {
 
     #[test]
     fn only_complete_unambiguous_reviewed_spans_are_returned() {
+        let span = |source| span(source, "A", "END", std::iter::once("A"));
         assert_eq!(
-            span("A grant END\nunrelated\nA grant END", "A", "END").unwrap(),
+            span("A grant END\nunrelated\nA grant END").unwrap(),
             "A grant END"
         );
         assert_eq!(
-            span("no grant", "A", "END").unwrap_err().to_string(),
+            span("no grant").unwrap_err().to_string(),
             "reviewed notice start missing"
         );
         assert_eq!(
-            span("A grant", "A", "END").unwrap_err().to_string(),
+            span("A grant").unwrap_err().to_string(),
             "reviewed notice end missing"
         );
         assert_eq!(
-            span("A grant END\nA other END", "A", "END")
-                .unwrap_err()
-                .to_string(),
+            span("A grant END\nA other END").unwrap_err().to_string(),
             "oversized or ambiguous reviewed notice"
         );
+    }
+
+    #[test]
+    fn esaxx_cannot_use_the_next_grants_terminator() {
+        let dir = crate::scratch::dir("esaxx-grant-boundary");
+        fs::create_dir(dir.join("src")).unwrap();
+        let path = dir.join("src/esaxx.cpp");
+        let end = "//  * OTHER DEALINGS IN THE SOFTWARE.";
+        let first = "//  * sais.hxx for sais-lite\n//  * First grant";
+        let second = "//  * esa.hxx\n//  * Second grant";
+        let code = "int fixture() { return 0; }";
+        fs::write(&path, format!("{first}\n{end}\n{code}\n{second}\n{end}\n")).unwrap();
+        assert_eq!(
+            read(&dir, "esaxx-rs 0.1.10").unwrap(),
+            [format!("{first}\n{end}"), format!("{second}\n{end}")]
+        );
+        fs::write(&path, format!("{first}\n{code}\n{second}\n{end}\n")).unwrap();
+        assert_eq!(
+            read(&dir, "esaxx-rs 0.1.10")
+                .unwrap_err()
+                .chain()
+                .last()
+                .unwrap()
+                .to_string(),
+            "reviewed notice end missing before next start"
+        );
+        fs::remove_dir_all(dir).unwrap();
     }
 }
