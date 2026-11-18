@@ -1377,7 +1377,7 @@ fn watch(
                 // The speaker plays a run's frames only once control has named it.
                 if run > named {
                     named = run;
-                    if speaker.is_some_and(|speaker| !speaker.command(Command::Name(run))) {
+                    if !shared.output.name(run) {
                         return;
                     }
                 }

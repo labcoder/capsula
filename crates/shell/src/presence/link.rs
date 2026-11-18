@@ -3,7 +3,7 @@
 #[cfg(test)]
 mod github_tests;
 
-use super::{Context, OpenError, Presence, diagnostics};
+use super::{Context, OpenError, Presence, Session, diagnostics};
 use crate::chat_notice::Source;
 use crate::drawing::{Broken, Chunk, Effect};
 use crate::link::{Batch, LinkEvent, LinkState};
@@ -676,12 +676,23 @@ impl Presence {
         self.sync_taskbar(cx);
     }
 
+    /// Queues `message` for the brain. A run's `Stop` or `StopScenes` then stops its speech, and
+    /// only once the brain's is queued, so speech never stops for a stop the brain wasn't told.
+    pub(super) fn send_stop(&self, session: &Session, message: ControlToBrain) -> bool {
+        let run = match &message {
+            ControlToBrain::Stop { run, .. } | ControlToBrain::StopScenes { run, .. } => Some(*run),
+            _ => None,
+        };
+        self.link.send_control(session, message)
+            && run.is_none_or(|run| self.link.output().stop(session.generation(), run))
+    }
+
     /// Queues a `Stop` or `ClearDrawing` for the brain; its local effect has already happened.
     pub(super) fn tell(&self, message: ControlToBrain) {
         let sent = self
             .session
             .as_ref()
-            .is_some_and(|session| self.link.send_control(session, message));
+            .is_some_and(|session| self.send_stop(session, message));
         if !sent {
             tracing::warn!("the brain isn't connected or isn't reading; nothing to tell");
         }

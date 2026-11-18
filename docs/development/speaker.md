@@ -272,7 +272,16 @@ whether a session has an output and whether an earlier generation still owes aud
 - **Talk-back off.** `withdraw()` sends `Withdraw` to a live speaker, fences an opening one when
   it opens, and later sessions get none. The stream retires; the worker stays on without a
   device, answering stops and crediting frames, and the session goes on.
-- **Stop.** `stop(session, run)` queues a speaker `Stop` on that session only.
+- **Stop.** `stop(session, run)` queues a speaker `Stop` on that session only. Presence calls it
+  only after the brain's `Stop` or `StopScenes` for that run was queued (`send_stop`), so speech
+  never stops for a stop the brain wasn't told; a refused brain send stops no speech.
+- **Naming and spoken runs.** The control reader names each newer run through `name(run)`,
+  which sends `Name` under the lock and keeps what the live output had exposed by then.
+  `spoken(session)` returns that run once the same live output exposed content past it: positive
+  evidence the run is speaking. A tail mid-publish leaves no evidence, and with no opener no
+  run is ever spoken. A hold takes the spoken run when its `Warm` is applied and, at
+  recognition, stops it if it is still the run Esc would stop: fenced locally, the brain's
+  `Stop` queued, then the speaker's. A refused brain send ends the connection and opens no hold.
 - **The capture inhibit.** One per link, held by a voice gesture so the microphone never records
   the speaker. `acquire(gesture)` takes it and pauses a live speaker under a fresh serial; it
   never waits, so contention is `Busy` and the gesture gets nothing. `transfer` moves it to a

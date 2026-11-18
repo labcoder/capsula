@@ -484,6 +484,18 @@ impl Runs {
         }
     }
 
+    /// A recognized hold talking over `run`: fences that run alone, while it is still the
+    /// stoppable one, and returns its `Stop`. Unlike [`Runs::stop`], turns and the hold stay.
+    pub fn fence_run(&mut self, run: RunId) -> Option<ControlToBrain> {
+        (self.stoppable() == Some(run)).then(|| {
+            self.fence = run;
+            ControlToBrain::Stop {
+                run,
+                revealed: self.drawing.revealed(run),
+            }
+        })
+    }
+
     /// The first Esc: cancels every turn sent and not yet answered, fences the moving run off,
     /// keeping what's on screen (a placeholder step has no entrance, so every one shown has
     /// finished entering), and returns the `Stop` to send after. A cancelled turn's `Stop`

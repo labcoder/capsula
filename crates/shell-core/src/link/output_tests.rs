@@ -14,7 +14,7 @@ use crate::platform::microphone::{
 };
 use crate::speaker::fake::{self, Script};
 use crate::speaker::{
-    Command, Data, FAULT, Input, Outlet, Packet, RELEASED, Snapshot, Speaker, UNKNOWN,
+    Command, Data, FAULT, Input, Outlet, Packet, RELEASED, Snapshot, Speaker, Tail, UNKNOWN,
 };
 
 const PATIENCE: Duration = Duration::from_secs(5);
@@ -875,4 +875,38 @@ fn a_pause_the_speaker_cannot_take_ends_the_session_and_denies_the_gesture() {
     );
     assert_eq!(owner.view().key, None, "no output");
     rig.script().frozen = false;
+}
+
+/// Exposed content past the frontier at its naming.
+fn exposes(tail: &Tail, exposed: u64) {
+    tail.publish(&Snapshot {
+        exposed,
+        ..Snapshot::default()
+    });
+}
+
+#[test]
+fn a_named_run_is_spoken_only_once_its_output_exposes_content_after_the_naming() {
+    let owner = OutputOwner::default();
+    let (commands, tail) = owner.scripted(1, RunId(5));
+    assert!(
+        matches!(commands.try_recv(), Ok(Command::Name(RunId(5)))),
+        "named"
+    );
+    assert_eq!(owner.spoken(1), None, "nothing exposed yet");
+    exposes(&tail, 480);
+    assert_eq!(owner.spoken(1), Some(RunId(5)));
+    assert_eq!(owner.spoken(2), None, "another session's");
+    assert!(owner.name(RunId(6)));
+    assert_eq!(owner.spoken(1), None, "480 was exposed before the naming");
+    exposes(&tail, 481);
+    assert_eq!(owner.spoken(1), Some(RunId(6)));
+}
+
+#[test]
+fn without_an_opener_a_named_run_is_never_spoken() {
+    let owner = OutputOwner::default();
+    assert!(owner.begin(1, None).is_none(), "no opener");
+    assert!(owner.name(RunId(5)), "nothing to tell");
+    assert_eq!(owner.spoken(1), None);
 }

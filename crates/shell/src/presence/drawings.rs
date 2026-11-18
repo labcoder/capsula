@@ -112,7 +112,7 @@ impl Presence {
                     let sent = self
                         .session
                         .as_ref()
-                        .is_some_and(|session| self.link.send_control(session, message));
+                        .is_some_and(|session| self.send_stop(session, message));
                     if !sent {
                         tracing::warn!("scene control queue unavailable; ending the connection");
                         self.end_scene_connection();

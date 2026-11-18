@@ -63,6 +63,7 @@ struct State {
     abort: Option<Abort>,
     ledger: [Option<Entry>; LEDGER],
     inhibit: Option<Inhibit>,
+    named: Option<Named>,
     off: bool,
     generations: u32,
     serials: u32,
@@ -99,6 +100,14 @@ struct Entry {
     generation: OutputGeneration,
     tail: Arc<Tail>,
     terminal: bool,
+}
+
+/// The run last named to the live output, and what that output had exposed by then.
+#[derive(Clone, Copy)]
+struct Named {
+    generation: OutputGeneration,
+    run: RunId,
+    exposed: u64,
 }
 
 struct Inhibit {
@@ -302,6 +311,14 @@ impl State {
         }
     }
 
+    fn tail(&self, generation: OutputGeneration) -> Option<&Arc<Tail>> {
+        self.ledger
+            .iter()
+            .flatten()
+            .find(|entry| entry.generation == generation)
+            .map(|entry| &entry.tail)
+    }
+
     /// Everything a claim needs, now.
     fn check(&self, claim: &Claim) -> Result<(), Denied> {
         if self.session != Some(claim.session) {
@@ -326,12 +343,8 @@ impl State {
             (OutputKey::NoOutput(key), Output::Quiet { epoch, .. }) if key == epoch => Ok(()),
             (OutputKey::Generation(key), Output::Live(generation)) if key == generation => {
                 let now = self
-                    .ledger
-                    .iter()
-                    .flatten()
-                    .find(|entry| entry.generation == generation)
+                    .tail(generation)
                     .ok_or(Denied::Stale)?
-                    .tail
                     .read()
                     .ok_or(Denied::Busy)?;
                 if now.exposed > 0 || now.flags & UNKNOWN != 0 {
@@ -707,6 +720,39 @@ impl OutputOwner {
     /// Queues the speaker's `Stop` of `run` on `session` only, after the brain accepted its
     /// own stop. False when `session` isn't current, or the speaker couldn't take it, which ends
     /// the session.
+    /// The link thread names `run` to the live speaker. The command goes under the lock, so
+    /// [`OutputOwner::spoken`] knows what that output had exposed before it; a tail
+    /// mid-publish leaves no evidence. False when the speaker couldn't take it.
+    pub(super) fn name(&self, run: RunId) -> bool {
+        let mut state = self.lock();
+        state.named = state.live().and_then(|generation| {
+            let exposed = state.tail(generation)?.read()?.exposed;
+            Some(Named {
+                generation,
+                run,
+                exposed,
+            })
+        });
+        let abort = state.command(Command::Name(run));
+        drop(state);
+        if abort.is_none() {
+            return true;
+        }
+        self.after(abort);
+        false
+    }
+
+    /// The run `session`'s live output has exposed content for since it was named: positive
+    /// evidence that it is speaking. A tail mid-publish is no evidence.
+    pub fn spoken(&self, session: u64) -> Option<RunId> {
+        let state = self.lock();
+        let named = state.named.filter(|named| {
+            state.session == Some(session) && state.live() == Some(named.generation)
+        })?;
+        let now = state.tail(named.generation)?.read()?;
+        (now.exposed > named.exposed).then_some(named.run)
+    }
+
     pub fn stop(&self, session: u64, run: RunId) -> bool {
         let mut state = self.lock();
         if state.session != Some(session) {
@@ -748,5 +794,36 @@ impl OutputOwner {
                 .any(|entry| !entry.terminal && Some(entry.generation) != state.live()),
             terminal: entries.any(|entry| entry.terminal),
         }
+    }
+
+    /// Makes `session`'s output a live generation with no speaker behind it and names `run` to
+    /// it: its commands come out of the receiver, and the test publishes its tail.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn scripted(
+        &self,
+        session: u64,
+        run: RunId,
+    ) -> (std::sync::mpsc::Receiver<Command>, Arc<Tail>) {
+        let (commands, receiver) = std::sync::mpsc::sync_channel(64);
+        let tail = Arc::<Tail>::default();
+        let mut state = self.lock();
+        let generation = OutputGeneration(state.generations + 1);
+        state.generations = generation.0;
+        let free = state
+            .ledger
+            .iter()
+            .position(Option::is_none)
+            .expect("a free slot");
+        state.ledger[free] = Some(Entry {
+            generation,
+            tail: Arc::clone(&tail),
+            terminal: false,
+        });
+        state.session = Some(session);
+        state.output = Output::Live(generation);
+        state.commands = Some(commands);
+        drop(state);
+        assert!(self.name(run), "the script takes the name");
+        (receiver, tail)
     }
 }

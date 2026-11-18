@@ -70,6 +70,12 @@ impl Tail {
         self.seq.store(seq.wrapping_add(1), Ordering::Release);
     }
 
+    /// Publishes `now` for a test standing in for the engine.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn publish(&self, now: &Snapshot) {
+        self.write(now);
+    }
+
     /// The last snapshot, or `None` while one is being written.
     pub fn read(&self) -> Option<Snapshot> {
         let seq = self.seq.load(Ordering::Acquire);

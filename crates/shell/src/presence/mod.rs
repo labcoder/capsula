@@ -45,6 +45,8 @@ mod position;
 mod pull_dock;
 mod pull_picture;
 #[cfg(test)]
+mod run_fence_tests;
+#[cfg(test)]
 mod screen_hold_tests;
 mod settings;
 mod sign_ins;
