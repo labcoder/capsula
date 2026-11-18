@@ -275,6 +275,48 @@ fn an_available_loss_beats_sibling_success_and_later_valid_results_cannot_revive
 }
 
 #[test]
+fn a_published_loss_fences_admission_before_owner_settlement() {
+    use kumochi_protocol::message::HoldFailure;
+    let harness = Harness::loaded();
+    let finish = gate(&harness, 1);
+    let stale = harness.decode(1).expect("first decode");
+    assert_eq!(harness.event(), Event::Decoding(1));
+    drop(stale);
+    let resume = hold_before_serving(&harness.handle);
+    harness.lose.store(true, Ordering::SeqCst);
+    finish.send(()).expect("publish the loss");
+    harness.wait_for(
+        |state| state.finished[0] == Some(SttResult::Failed(SpeechError::WorkerLost)),
+        "the fatal result was not published",
+    );
+    let (reply, _receive) = oneshot::channel();
+    let before_settlement = (
+        harness.handle.admit_use(),
+        harness.handle.current_use(1),
+        harness.handle.decode_for(
+            1,
+            Decode {
+                rate: 16_000,
+                samples: vec![0; 2],
+                reply,
+            },
+        ),
+    );
+    resume();
+    assert_eq!(harness.event(), Event::Lost);
+    harness.release();
+    assert_eq!(harness.reports(1), [report(1, LoadEvent::Lost)]);
+    assert_eq!(
+        before_settlement,
+        (
+            Err(HoldFailure::NotLoaded),
+            false,
+            Err(HoldFailure::NotLoaded)
+        )
+    );
+}
+
+#[test]
 fn a_refused_decode_thread_is_a_service_loss_not_a_silent_dropped_reply() {
     let harness = Harness::loaded();
     harness

@@ -133,6 +133,17 @@ pub(crate) enum SttResult {
     NotLoaded,
 }
 
+impl SttResult {
+    fn is_service_loss(&self) -> bool {
+        matches!(
+            self,
+            Self::Failed(
+                SpeechError::WorkerLost | SpeechError::ExitUnconfirmed | SpeechError::NotLoaded
+            )
+        )
+    }
+}
+
 /// The variant and the transcript's length, never its text.
 impl std::fmt::Debug for SttResult {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -740,14 +751,11 @@ fn settle_decodes<'state>(
     let active = running.iter().any(Option::is_some);
     let mut completed = [None, None];
     while let Some(slot) = state.finished.iter().position(Option::is_some) {
-        *failed |= state.finished.iter().flatten().any(|result| {
-            matches!(
-                result,
-                SttResult::Failed(
-                    SpeechError::WorkerLost | SpeechError::ExitUnconfirmed | SpeechError::NotLoaded
-                )
-            )
-        });
+        *failed |= state
+            .finished
+            .iter()
+            .flatten()
+            .any(SttResult::is_service_loss);
         if *failed {
             state.ready = false;
         }
@@ -826,7 +834,12 @@ fn spawn_decode<'scope, 'env>(
                 Ok(text) => SttResult::Text(text),
                 Err(error) => SttResult::Failed(error),
             };
-            control.update(|state| state.finished[slot] = Some(result));
+            control.update(|state| {
+                if result.is_service_loss() {
+                    state.ready = false;
+                }
+                state.finished[slot] = Some(result);
+            });
         })
 }
 
