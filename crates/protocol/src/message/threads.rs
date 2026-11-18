@@ -46,7 +46,7 @@ pub struct ModelInfo {
     pub slug: ModelSlug,
     /// What the picker shows.
     pub display_name: ModelName,
-    /// The model's known supported efforts; unknown support permits no ChatGPT send.
+    /// The model's known supported efforts; unknown support permits no `ChatGPT` send.
     pub supported_efforts: Option<EffortSet>,
 }
 

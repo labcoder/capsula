@@ -238,8 +238,6 @@ impl Coordinator {
             snapshot,
             result,
         } = done;
-        let pending = self.pending_deletes();
-        let main = self.main_thread;
         let current = self.current(key.run)?;
         if !current.build.as_ref().is_some_and(|build| {
             build.key == key
@@ -303,12 +301,23 @@ impl Coordinator {
             Ok(made) => made,
             Err(room) => return self.compact_inline(key, room, effects),
         };
+        self.admit_built(key, made, effects)
+    }
+
+    fn admit_built(
+        &mut self,
+        key: BuildKey,
+        made: Built,
+        effects: &mut Vec<Effect>,
+    ) -> Result<(), Stale> {
+        let pending = self.pending_deletes();
+        let main = self.main_thread;
         let offers_draw =
             made.request.tools.iter().any(|tool| tool.name == DRAW) || self.trusted_draw();
         let current = self.current(key.run)?;
         let thread = current.thread;
         let mut request = made.request;
-        if let (Some(choice), Some(effort)) = (&mut request.choice, effective) {
+        if let (Some(choice), Some(effort)) = (&mut request.choice, current.effective_effort) {
             choice.effort = effort;
         }
         // shortcut: the screen's developer line isn't counted in BOUND, so a request built within

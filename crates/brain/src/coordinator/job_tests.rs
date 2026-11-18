@@ -1125,22 +1125,31 @@ fn chatgpt_title_and_summary_grant_separately_resolved_efforts() {
 
 #[test]
 fn chatgpt_jobs_without_a_matching_known_catalog_end_unsent() {
-    for (tag, model, efforts) in [
-        (0, "sparse", None),
-        (0, "different", EffortSet::new([Effort::Low])),
-        (1, "sparse", EffortSet::new([Effort::Low])),
+    let low = EffortSet::new([Effort::Low]);
+    let wanted = Some(chatgpt_choice(Effort::High));
+    for (tag, model, efforts, choice) in [
+        (0, "sparse", None, wanted.clone()),
+        (0, "different", low, wanted.clone()),
+        (1, "sparse", low, wanted),
+        (0, "sparse", low, None),
+        (
+            0,
+            "sparse",
+            low,
+            Some(ModelChoice {
+                connection: ConnectionKind::AnthropicKey,
+                ..chatgpt_choice(Effort::Low)
+            }),
+        ),
     ] {
         let mut core = reading();
         core.handle(chatgpt_catalog(tag, model, efforts)).unwrap();
         assert_eq!(
-            core.handle(job_built_on(key(2), Some(chatgpt_choice(Effort::Low)))),
+            core.handle(job_built_on(key(2), choice.clone())),
             Ok(vec![compacts(3)]),
         );
         assert_eq!(core.handle(ready(key(2))), Ok(rebuild(key(2))));
-        assert_eq!(
-            core.handle(job_built_on(key(3), Some(chatgpt_choice(Effort::High)))),
-            Ok(Vec::new()),
-        );
+        assert_eq!(core.handle(job_built_on(key(3), choice)), Ok(Vec::new()),);
         assert_eq!(core.handle(ready(key(3))), Ok(rebuild(key(3))));
     }
 }

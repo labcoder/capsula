@@ -361,37 +361,12 @@ fn a_compaction_read_never_answers_a_normal_build_or_the_reverse() {
     assert_eq!(core.handle(compact_built(1, &[T])), Err(Stale));
 }
 
-#[test]
-fn chatgpt_inline_and_its_rebuild_use_the_same_granted_effort() {
-    use kumochi_protocol::message::{
-        AssistantName, ConnectionKind, Effort, EffortSet, ModelChoice, ModelInfo, ModelName,
-        ModelSlug,
-    };
-
+fn inline_read(
+    core: &mut Coordinator,
+    choice: kumochi_protocol::message::ModelChoice,
+) -> CompactBuilt {
     use crate::context::{ConnectionTag, RunSnapshot};
-    use crate::coordinator::{Availability, Ready};
-
-    let choice = ModelChoice {
-        model: ModelSlug::new("sparse").unwrap(),
-        effort: Effort::XHigh,
-        connection: ConnectionKind::ChatGpt,
-    };
-    let catalog = |effort| {
-        Input::Engines(
-            ConnectionKind::ChatGpt,
-            Availability::Ready(Ready {
-                connection: ConnectionTag(0),
-                models: vec![ModelInfo {
-                    slug: choice.model.clone(),
-                    display_name: ModelName::new("Sparse").unwrap(),
-                    supported_efforts: EffortSet::new([effort]),
-                }],
-                trusted_draw: false,
-            }),
-        )
-    };
-    let mut core = fresh();
-    core.handle(catalog(Effort::High)).unwrap();
+    use kumochi_protocol::message::AssistantName;
     core.handle(Input::Turn {
         turn: 1,
         thread: None,
@@ -406,7 +381,7 @@ fn chatgpt_inline_and_its_rebuild_use_the_same_granted_effort() {
                 origin: Origin::Task(T),
                 assistant: AssistantName::new("Kumo").unwrap(),
                 user: None,
-                choice: Some(choice.clone()),
+                choice: Some(choice),
                 connection: ConnectionTag(0),
             }),
             result: Err(Unbuilt::TooLarge { room: Some(ROOM) }),
@@ -419,15 +394,46 @@ fn chatgpt_inline_and_its_rebuild_use_the_same_granted_effort() {
     let Input::CompactBuilt(mut done) = compact_built(2, &[T]) else {
         unreachable!();
     };
-    done.result
-        .as_mut()
-        .unwrap()
-        .as_mut()
-        .unwrap()
-        .0
-        .built
-        .request
-        .choice = inline_choice;
+    let Ok(Some((ask, _))) = &mut done.result else {
+        unreachable!();
+    };
+    ask.built.request.choice = inline_choice;
+    done
+}
+
+#[test]
+fn chatgpt_inline_and_its_rebuild_use_the_same_granted_effort() {
+    use crate::context::ConnectionTag;
+    use crate::coordinator::{Availability, Ready};
+    use kumochi_protocol::message::{
+        ConnectionKind, Effort, EffortSet, ModelChoice, ModelInfo, ModelName, ModelSlug,
+    };
+
+    let slug = ModelSlug::new("sparse").unwrap();
+    let catalog = |effort| {
+        Input::Engines(
+            ConnectionKind::ChatGpt,
+            Availability::Ready(Ready {
+                connection: ConnectionTag(0),
+                models: vec![ModelInfo {
+                    slug: slug.clone(),
+                    display_name: ModelName::new("Sparse").unwrap(),
+                    supported_efforts: EffortSet::new([effort]),
+                }],
+                trusted_draw: false,
+            }),
+        )
+    };
+    let mut core = fresh();
+    core.handle(catalog(Effort::High)).unwrap();
+    let done = inline_read(
+        &mut core,
+        ModelChoice {
+            model: slug.clone(),
+            effort: Effort::XHigh,
+            connection: ConnectionKind::ChatGpt,
+        },
+    );
     let assert_body = |effects: &[Effect], attempt| {
         let [Effect::StartEngine { request }] = effects else {
             panic!("eligible request starts");

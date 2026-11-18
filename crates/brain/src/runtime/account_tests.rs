@@ -1185,44 +1185,66 @@ impl crate::engines::Engine for CountStarts {
 
 #[tokio::test]
 async fn a_legacy_effort_sends_low_without_rewriting_the_task_choice() {
+    Box::pin(stored_effort(
+        "legacy-effort-execution",
+        "ultra",
+        Effort::Medium,
+        "low",
+    ))
+    .await;
+}
+
+#[tokio::test]
+async fn a_known_unsupported_effort_changes_the_body_not_the_task_choice() {
+    Box::pin(stored_effort(
+        "known-effort-execution",
+        "max",
+        Effort::Max,
+        "medium",
+    ))
+    .await;
+}
+
+#[derive(Debug)]
+struct CaptureModelBody(mpsc::Sender<(String, String)>);
+
+impl crate::engines::Engine for CaptureModelBody {
+    fn start(
+        &self,
+        request: crate::engines::RunRequest,
+        events: mpsc::Sender<crate::engines::TurnEvent>,
+        gate: crate::engines::SendGate,
+    ) -> crate::engines::Round {
+        let captured = self.0.clone();
+        Box::pin(async move {
+            let crate::engines::Answer::Grant(lease) = gate.ask().await else {
+                return;
+            };
+            let body = crate::engines::responses::body(&request.request).unwrap();
+            captured
+                .send((
+                    body["model"].as_str().unwrap().to_owned(),
+                    body["reasoning"]["effort"].as_str().unwrap().to_owned(),
+                ))
+                .await
+                .unwrap();
+            drop(lease);
+            events
+                .send(crate::engines::TurnEvent::Finished(
+                    crate::engines::Finish::Failed(crate::engines::EngineFailure::Provider),
+                ))
+                .await
+                .unwrap();
+        })
+    }
+}
+
+async fn stored_effort(name: &str, stored: &str, displayed: Effort, sent_effort: &str) {
     use kumochi_protocol::frame::{self, Pipe};
     use kumochi_protocol::message::{DataToBrain, RunId, ScreenChoice, ThreadId};
     use tokio::io::AsyncWriteExt;
 
-    #[derive(Debug)]
-    struct Capture(mpsc::Sender<(String, String)>);
-    impl crate::engines::Engine for Capture {
-        fn start(
-            &self,
-            request: crate::engines::RunRequest,
-            events: mpsc::Sender<crate::engines::TurnEvent>,
-            gate: crate::engines::SendGate,
-        ) -> crate::engines::Round {
-            let captured = self.0.clone();
-            Box::pin(async move {
-                let crate::engines::Answer::Grant(lease) = gate.ask().await else {
-                    return;
-                };
-                let body = crate::engines::responses::body(&request.request).unwrap();
-                captured
-                    .send((
-                        body["model"].as_str().unwrap().to_owned(),
-                        body["reasoning"]["effort"].as_str().unwrap().to_owned(),
-                    ))
-                    .await
-                    .unwrap();
-                drop(lease);
-                events
-                    .send(crate::engines::TurnEvent::Finished(
-                        crate::engines::Finish::Failed(crate::engines::EngineFailure::Provider),
-                    ))
-                    .await
-                    .unwrap();
-            })
-        }
-    }
-
-    let scratch = Scratch::new("legacy-effort-execution");
+    let scratch = Scratch::new(name);
     let thread = ThreadId(2);
     let mut database = crate::store::Store::open(&scratch.db()).unwrap();
     database.recover().unwrap();
@@ -1233,10 +1255,24 @@ async fn a_legacy_effort_sends_low_without_rewriting_the_task_choice() {
         .end_run(thread, RunId(1), &[], crate::store::RunEnd::Done)
         .unwrap();
     drop(database);
-    rusqlite::Connection::open(scratch.db()).unwrap().execute(
-        "UPDATE threads SET model = 'legacy', effort = 'ultra', connection = 'chatgpt' WHERE id = 2",
-        [],
-    ).unwrap();
+    {
+        let raw = rusqlite::Connection::open(scratch.db()).unwrap();
+        raw.execute(
+            "UPDATE threads SET model = 'saved', effort = ?1, connection = 'chatgpt' WHERE id = 2",
+            [stored],
+        )
+        .unwrap();
+        let read = crate::store::context::Snapshot::begin(&raw).unwrap();
+        assert_eq!(
+            read.choice(thread).unwrap(),
+            Some(ModelChoice {
+                model: ModelSlug::new("saved").unwrap(),
+                effort: displayed,
+                connection: ConnectionKind::ChatGpt,
+            })
+        );
+        read.end().unwrap();
+    }
     let store = FakeStore::default();
     let accounts = seeded(
         &scratch,
@@ -1244,7 +1280,7 @@ async fn a_legacy_effort_sends_low_without_rewriting_the_task_choice() {
         Catalog::answering([(
             200,
             json!({"models": [
-                {"slug": "legacy", "display_name": "Legacy", "visibility": "list",
+                {"slug": "saved", "display_name": "Saved", "visibility": "list",
                  "supported_reasoning_levels": [{"effort":"low"}, {"effort":"medium"}]},
             ]})
             .to_string(),
@@ -1253,7 +1289,7 @@ async fn a_legacy_effort_sends_low_without_rewriting_the_task_choice() {
     );
     let (sent, mut bodies) = mpsc::channel(1);
     let selected = crate::runtime::Selected::Account {
-        engine: Box::new(Capture(sent)),
+        engine: Box::new(CaptureModelBody(sent)),
         asks: mpsc::unbounded_channel().1,
     };
     let mut brain = test_support::brain_on(&scratch, selected, accounts);
@@ -1277,7 +1313,7 @@ async fn a_legacy_effort_sends_low_without_rewriting_the_task_choice() {
         shell.data_out.write_all(&submit).await.unwrap();
         assert_eq!(
             timeout(PATIENCE, bodies.recv()).await.unwrap(),
-            Some(("legacy".to_owned(), "low".to_owned())),
+            Some(("saved".to_owned(), sent_effort.to_owned())),
         );
         assert_eq!(failed_with(&mut shell).await, None);
         drop(shell);
@@ -1295,11 +1331,7 @@ async fn a_legacy_effort_sends_low_without_rewriting_the_task_choice() {
         .unwrap();
     assert_eq!(
         raw,
-        (
-            "legacy".to_owned(),
-            "ultra".to_owned(),
-            "chatgpt".to_owned()
-        )
+        ("saved".to_owned(), stored.to_owned(), "chatgpt".to_owned())
     );
 }
 

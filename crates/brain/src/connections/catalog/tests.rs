@@ -8,7 +8,7 @@ use kumochi_protocol::message::{
 use serde_json::{Value, json};
 use zeroize::Zeroizing;
 
-use super::{CatalogError, Listing, default_model, read};
+use super::{CatalogError, Listing, default_model, read, supported};
 use crate::connections::http_client::{Endpoint, Http, HttpError, Request, Response};
 use crate::connections::oauth::exchange::OAuthCode;
 use crate::test_support::Captured;
