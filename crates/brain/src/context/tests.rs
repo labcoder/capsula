@@ -2406,7 +2406,7 @@ fn a_route_without_screen_pictures_is_sent_no_screen_scene() {
                     .sent()
                     .to_vec()
             }
-            _ => drawing_line(&built).as_bytes().to_vec(),
+            ConnectionKind::ChatGpt => drawing_line(&built).as_bytes().to_vec(),
         };
         let sent = String::from_utf8(sent).expect("UTF-8");
         let screens = connection == ConnectionKind::ChatGpt;
@@ -2419,8 +2419,16 @@ fn a_route_without_screen_pictures_is_sent_no_screen_scene() {
         for marker in SCREEN {
             assert_eq!(sent.contains(marker), screens, "{connection:?} {marker}");
         }
-        assert_eq!(sent.contains("1280"), screens, "{connection:?} picture size");
-        for marker in ["overlay_scene_kept", "overlay_alt_kept", "overlay_object_kept"] {
+        assert_eq!(
+            sent.contains("1280"),
+            screens,
+            "{connection:?} picture size"
+        );
+        for marker in [
+            "overlay_scene_kept",
+            "overlay_alt_kept",
+            "overlay_object_kept",
+        ] {
             assert!(sent.contains(marker), "{connection:?} {marker}");
         }
     }

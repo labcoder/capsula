@@ -92,7 +92,12 @@ fn assemble(
         )
     }) {
         text.push_str("\nDrawings on screen: ");
-        text.push_str(supplied.drawings.line(super::takes_images(run.choice.as_ref())));
+        let drawings = &supplied.drawings;
+        text.push_str(if super::takes_images(run.choice.as_ref()) {
+            drawings.as_str()
+        } else {
+            drawings.off_screen()
+        });
     }
     let unsummarized =
         fixed_bytes(&instructions, &tools) + current.iter().map(item_bytes).sum::<usize>();

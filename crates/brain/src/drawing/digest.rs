@@ -33,9 +33,14 @@ impl Default for Digest {
 }
 
 impl Digest {
-    /// The line for a route that takes screen pictures (`screens`), or for one that doesn't.
-    pub(crate) fn line(&self, screens: bool) -> &str {
-        if screens { &self.all } else { &self.off_screen }
+    /// The line with every scene, for a route that takes screen pictures.
+    pub(crate) fn as_str(&self) -> &str {
+        &self.all
+    }
+
+    /// The line without screen scenes, for a route that doesn't.
+    pub(crate) fn off_screen(&self) -> &str {
+        &self.off_screen
     }
 }
 
@@ -48,13 +53,12 @@ impl Digest {
             off_screen: line.to_owned(),
         }
     }
-
-    /// The line with every scene.
-    pub(crate) fn as_str(&self) -> &str {
-        &self.all
-    }
 }
 
+#[expect(
+    clippy::missing_fields_in_debug,
+    reason = "the line without screen scenes is part of the full one, so its length adds nothing"
+)]
 impl fmt::Debug for Digest {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Digest")
@@ -70,25 +74,18 @@ impl Drawing {
     /// A scene that lists fewer than it holds adds `"more"`, the count left out.
     pub(crate) fn digest(&self, thread: ThreadId) -> Digest {
         Digest {
-            all: self.line(thread, true),
-            off_screen: self.line(thread, false),
+            all: self.line(thread, |_| true),
+            off_screen: self.line(thread, |surface| surface != Surface::Screen),
         }
     }
 
-    /// One line of [`Self::digest`], with screen scenes or without.
-    fn line(&self, thread: ThreadId, screens: bool) -> String {
+    /// One line of [`Self::digest`]: the scenes on a surface it keeps.
+    fn line(&self, thread: ThreadId, keeps: impl Fn(Surface) -> bool) -> String {
         let mut room = DIGEST_CAP;
         let mut scenes = Vec::new();
-        for held in self
-            .scenes
-            .iter()
-            .rev()
-            .filter(|held| {
-                held.thread == thread
-                    && !held.gone
-                    && (screens || held.state.header().surface != Surface::Screen)
-            })
-        {
+        for held in self.scenes.iter().rev().filter(|held| {
+            held.thread == thread && !held.gone && keeps(held.state.header().surface)
+        }) {
             let mut objects: Vec<_> = held.state.objects().collect();
             objects.sort_unstable_by_key(|&(_, handle, _)| handle);
             let mut listed = Vec::new();

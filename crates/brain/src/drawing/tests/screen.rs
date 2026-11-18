@@ -932,8 +932,8 @@ pub(crate) fn overlay_then_screen() -> (crate::drawing::Digest, crate::drawing::
 fn a_thread_with_only_overlay_scenes_has_one_line_for_every_route() {
     let (overlay, _) = overlay_then_screen();
     let line = r#"[{"begin":{"alt":"overlay_alt_kept","others":"keep","scene":"overlay_scene_kept","size":null,"surface":"overlay","title":null,"v":1},"objects":[["overlay_object_kept","text"]]}]"#;
-    assert_eq!(overlay.line(true), line);
-    assert_eq!(overlay.line(false), line);
+    assert_eq!(overlay.as_str(), line);
+    assert_eq!(overlay.off_screen(), line);
 }
 
 #[test]
@@ -941,7 +941,14 @@ fn the_line_without_screen_scenes_has_a_cap_of_its_own() {
     let mut drawing = told(Ok(Geometry::FIXTURE));
     let mut store = Store::default();
     // 600 pairs of 16 bytes with their commas: past the 8 KiB cap on their own.
-    store.run(&mut drawing, call(1, "c1", args("big", &texts("o", 0, 600))));
+    store.run(
+        &mut drawing,
+        call(
+            1,
+            "c1",
+            envelope(&begin("big", ""), &super::texts("o", 0, 600)),
+        ),
+    );
     store.run(
         &mut drawing,
         screen_call(
@@ -952,8 +959,8 @@ fn the_line_without_screen_scenes_has_a_cap_of_its_own() {
         ),
     );
     let digest = drawing.digest(THREAD);
-    let all: Value = serde_json::from_str(digest.line(true)).expect("a JSON line");
-    let off_screen: Value = serde_json::from_str(digest.line(false)).expect("a JSON line");
+    let all: Value = serde_json::from_str(digest.as_str()).expect("a JSON line");
+    let off_screen: Value = serde_json::from_str(digest.off_screen()).expect("a JSON line");
     // The screen scene is newest, so its 47 bytes of pairs come first in the full line.
     assert_eq!(
         all[1]["objects"],
