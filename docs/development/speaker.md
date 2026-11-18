@@ -175,8 +175,9 @@ waits, and a read that overlaps a write returns nothing.
   up once the link lets go. Commands go through a queue of 16 that never waits: a full queue
   is refused, and the caller ends the connection. The worker applies at most 16 commands a
   pass and takes data only once none is left, so data can't pass a fence. Its reports go out
-  only once the caller accepted the speaker: `launch` accepts one only when its device started
-  within the wait, so a device that starts late announces nothing.
+  only once the output owner accepted the speaker: `launch` returns one only when its device
+  started within the wait, and `opened` accepts it after its fence, so a device that starts late
+  or a speaker the link lets go announces nothing.
 
 ## Privacy and teardown
 
@@ -199,8 +200,9 @@ waits, and a read that overlaps a write returns nothing.
 - **Opening.** A link with an `Opener` opens one speaker per connection, and only once the
   connection's threads run, `Connected` reached the UI and no quit is under way. The output
   owner reserves its generation and ledger slot before `Connected`, and fences it before its
-  reader starts. A speaker that fails to open, or opens too late, leaves the session working
-  without output and announces nothing.
+  reader starts. A speaker that fails to open, opens too late, or whose open returns after Quit
+  began or the session was lost, leaves the session working without output and announces
+  nothing: the owner accepts a speaker, so its reports go out, only once it's fenced.
 - **Routing.** The data reader hands `SegmentQueued` and `SpeechPcm` to the speaker instead of
   the UI. The control watcher hands it each newly named run from `RunState`, and each
   `SpeechRevoked` as a Stop. A frame whose run control hasn't named is held, uncredited, so

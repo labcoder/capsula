@@ -200,8 +200,9 @@ impl Speaker {
         self.worker = Some(worker);
     }
 
-    /// The caller took the speaker: from now on its worker's reports go out.
-    fn accept(&self) {
+    /// The output owner kept the speaker, fenced, for a current session: from now on its
+    /// worker's reports go out.
+    pub(crate) fn accept(&self) {
         self.accepted.store(true, Ordering::Release);
     }
 
@@ -317,9 +318,10 @@ pub fn pair(outlet: Outlet) -> (Speaker, Worker) {
 
 /// Runs `start` on the speaker's own thread with its worker and a channel for one answer: true
 /// once its device runs. Only a true answer received before the wait of `within` times out makes
-/// the speaker the caller's, and only then is it accepted, so its reports, the announcement
-/// first, go out. A no, a late yes or a thread that never started returns `None`, and that
-/// worker publishes nothing; letting a refused speaker go takes up to [`TEARDOWN`] more. The
+/// the speaker the caller's, still unaccepted: its reports, the announcement first, go out only
+/// once the output owner accepts it. A no, a late yes or a thread that never started returns
+/// `None`, and that worker publishes nothing; letting a refused speaker go takes up to
+/// [`TEARDOWN`] more. The
 /// thread wakes the output owner once more after its worker, engine and device are gone, on
 /// return or unwinding, when nothing can write the tail again.
 pub fn launch(
@@ -338,11 +340,10 @@ pub fn launch(
         })
         .ok()?;
     speaker.attach(thread);
-    if !opened.recv_timeout(within).unwrap_or(false) {
-        return None;
-    }
-    speaker.accept();
-    Some(speaker)
+    opened
+        .recv_timeout(within)
+        .unwrap_or(false)
+        .then_some(speaker)
 }
 
 /// Wakes the output owner when dropped.

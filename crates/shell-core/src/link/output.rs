@@ -428,7 +428,8 @@ impl OutputOwner {
     }
 
     /// The link thread's open of `generation` returned, before its reader starts. A kept speaker
-    /// is fenced first: withdrawn when talk-back went off, else paused under a held inhibit. An
+    /// is fenced first: withdrawn when talk-back went off, else paused under a held inhibit, and
+    /// only then accepted, so its announcement can't precede its fence. An
     /// `Err` speaker couldn't be fenced: the link drops it and ends the session. A stream that
     /// retired before this keeps its entry until now, so the session never goes live without it.
     ///
@@ -460,9 +461,12 @@ impl OutputOwner {
                 if opening && fence.is_none_or(|fence| speaker.command(fence)) {
                     state.commands = speaker.commands();
                     state.output = Output::Live(generation);
+                    speaker.accept();
                     Ok(Some(speaker))
                 } else {
-                    state.output = Output::Lost(generation);
+                    if opening {
+                        state.output = Output::Lost(generation);
+                    }
                     Err(speaker)
                 }
             }

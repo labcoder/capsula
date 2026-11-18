@@ -2512,6 +2512,70 @@ fn talk_back_off_while_opening_withdraws_the_late_open_before_any_speech() {
 }
 
 #[test]
+fn an_open_that_returns_after_quit_began_announces_nothing() {
+    a_late_open_announces_nothing(Loss::Quit);
+}
+
+#[test]
+fn an_open_that_returns_after_the_session_was_lost_announces_nothing() {
+    a_late_open_announces_nothing(Loss::Session);
+}
+
+/// What ends a session while its speaker's open is held.
+#[derive(Clone, Copy)]
+enum Loss {
+    Quit,
+    Session,
+}
+
+/// Holds the open, then quits or loses the session before the open returns.
+fn a_late_open_announces_nothing(loss: Loss) {
+    use super::output::{OutputKey, OutputView, Why};
+    let label = match loss {
+        Loss::Quit => "quit-while-opening",
+        Loss::Session => "lost-while-opening",
+    };
+    let (link, script, go) = opening_speaker(label);
+    let events = patient(link.events);
+    let session = connected(next(&events));
+    match loss {
+        Loss::Quit => assert!(link.handle.begin_quit(), "the first quit"),
+        Loss::Session => session
+            .alive()
+            .store(false, std::sync::atomic::Ordering::Release),
+    }
+    go.send(()).expect("opening");
+    let output = link.handle.output();
+    let settled = OutputView {
+        key: Some(OutputKey::NoOutput(1)),
+        why: Some(Why::Refused),
+        retiring: false,
+        terminal: false,
+    };
+    let deadline = Instant::now() + PATIENCE;
+    while output.view() != settled {
+        assert!(Instant::now() < deadline, "{label}: let go, clean");
+        thread::sleep(Duration::from_millis(5));
+    }
+    frame::write(&mut &link.control, &ControlToShell::Ping, Pipe::Control).expect("ping");
+    loop {
+        let message = frame::read::<ControlToBrain>(&mut &link.control, Pipe::Control)
+            .expect("read")
+            .expect("a frame");
+        assert!(
+            !matches!(message, ControlToBrain::AudioOutput { .. }),
+            "{label}: never announced"
+        );
+        if message == ControlToBrain::Pong {
+            break;
+        }
+    }
+    assert_eq!(played(&script), 0, "{label}: nothing reached the device");
+    drop(link.control);
+    let _ui = link.link.join().expect("joined");
+}
+
+#[test]
 fn a_normal_session_has_no_output_and_still_lets_a_voice_hold_start() {
     use kumochi_protocol::message::GestureId;
     let link = attended("dormant-owner");

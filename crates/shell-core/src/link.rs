@@ -964,6 +964,7 @@ impl Link {
         control: &Sender<ControlToBrain>,
         credit: &Arc<Credit>,
         pipes: [&Arc<PipeClient>; 2],
+        alive: &AtomicBool,
     ) -> Option<Speaker> {
         let open = self.speaker.as_ref()?;
         let credit = Arc::clone(credit);
@@ -974,6 +975,12 @@ impl Link {
             tail,
             wake: self.shared.output.waker(),
         })?;
+        // Quit or a lost session while the open blocked: let go unarmed and never accepted, so
+        // it announces nothing.
+        if self.quitting() || !alive.load(Ordering::Acquire) {
+            drop(speaker);
+            return None;
+        }
         let pipes = pipes.map(Arc::clone);
         speaker.arm(Box::new(move || {
             for pipe in &pipes {
@@ -1078,7 +1085,8 @@ impl Link {
         let mut speaker = match opening {
             Some(opening) if open && !self.quitting() => {
                 let output = opening.0;
-                let opened = self.open_speaker(opening, &control_out, &credit, [&control, &data]);
+                let opened =
+                    self.open_speaker(opening, &control_out, &credit, [&control, &data], &ended.0);
                 self.shared
                     .output
                     .opened(output, opened)
