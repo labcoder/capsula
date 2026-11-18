@@ -84,30 +84,34 @@ fn off_retires_a_loading_input_ask_and_does_not_replay_a_request_on_enable() {
 
 #[test]
 fn a_fresh_off_install_that_loses_its_worker_during_activation_does_not_reload() {
-    let mut installer = fresh();
-    assert_eq!(installer.set_input_enabled(false), []);
-    assert_eq!(installer.install(SpeechInput), [fetch(SpeechInput, 3)]);
-    assert_eq!(
-        installer.fetched(SpeechInput, 3, Ok(())),
-        [Effect::Load {
-            part: SpeechInput,
-            ask: 3
-        }]
-    );
-    assert_eq!(
-        installer.reported(SpeechInput, report(3, LoadEvent::Loaded)),
-        [Effect::Activate {
-            part: SpeechInput,
-            token: 3
-        }]
-    );
-    assert_eq!(
-        installer.reported(SpeechInput, report(3, LoadEvent::Lost)),
-        []
-    );
-    assert_eq!(installer.view().speech_input, PartState::Loading);
-    assert_eq!(installer.activated(SpeechInput, 3, Ok(())), []);
-    assert_eq!(installer.view().speech_input, PartState::Unloaded);
+    for (enabled_at_loss, enabled_at_ack) in [(false, false), (false, true), (true, false)] {
+        let mut installer = fresh();
+        assert_eq!(installer.set_input_enabled(false), []);
+        assert_eq!(installer.install(SpeechInput), [fetch(SpeechInput, 3)]);
+        assert_eq!(
+            installer.fetched(SpeechInput, 3, Ok(())),
+            [Effect::Load {
+                part: SpeechInput,
+                ask: 3
+            }]
+        );
+        assert_eq!(
+            installer.reported(SpeechInput, report(3, LoadEvent::Loaded)),
+            [Effect::Activate {
+                part: SpeechInput,
+                token: 3
+            }]
+        );
+        assert_eq!(installer.set_input_enabled(enabled_at_loss), []);
+        assert_eq!(
+            installer.reported(SpeechInput, report(3, LoadEvent::Lost)),
+            []
+        );
+        assert_eq!(installer.view().speech_input, PartState::Loading);
+        assert_eq!(installer.set_input_enabled(enabled_at_ack), []);
+        assert_eq!(installer.activated(SpeechInput, 3, Ok(())), []);
+        assert_eq!(installer.view().speech_input, PartState::Unloaded);
+    }
 }
 
 #[test]

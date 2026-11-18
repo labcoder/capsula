@@ -76,6 +76,50 @@ fn hold_to_talk_waits_for_its_own_answer_and_refusal_restores_the_saved_choice()
 }
 
 #[test]
+fn the_load_off_refusal_clears_only_when_enable_is_saved() {
+    for first_enable_fails in [false, true] {
+        let mut state = connected();
+        let mut off = saved(SttUnload::Kept);
+        off.hold_to_talk = false;
+        state.set_view(off.clone(), Update::Unsolicited);
+        assert!(state.receive_speech_input(Some(7), 7, PartState::Unloaded));
+        let load = state.speech_input_intent().expect("load");
+        assert!(state.send_speech_input(load, Some(7), |op| op == SettingsOp::LoadSpeechInput));
+        let refusal = UserError::from(ErrorKey::HoldToTalkOff);
+        state.error(refusal.clone());
+        state.set_view(off.clone(), Update::Answer);
+        assert_eq!(state.speech_input_error(), Some(&refusal));
+        assert_eq!(state.notice(), Some(&refusal));
+
+        assert!(state.send_hold_to_talk(true, |op| op == SettingsOp::SetHoldToTalk(true)));
+        state.set_view(off.clone(), Update::Unsolicited);
+        assert_eq!(state.speech_input_error(), Some(&refusal));
+        assert_eq!(state.notice(), Some(&refusal));
+
+        let unrelated = UserError::from(ErrorKey::UsageLimit);
+        let on = saved(SttUnload::Kept);
+        if first_enable_fails {
+            let refused_write = UserError::from(ErrorKey::SettingsRefused);
+            state.error(refused_write.clone());
+            state.set_view(off, Update::Answer);
+            assert_eq!(state.speech_input_error(), Some(&refusal));
+            assert_eq!(state.hold_to_talk_error(), Some(&refused_write));
+            state.error(unrelated.clone());
+            assert!(state.send_hold_to_talk(true, |_| true));
+            state.set_view(on.clone(), Update::Unsolicited);
+            assert_eq!(state.speech_input_error(), None);
+            assert_eq!(state.notice(), Some(&unrelated));
+            assert!(state.hold_to_talk_pending());
+        }
+        state.set_view(on, Update::Answer);
+        assert_eq!(state.speech_input_error(), None);
+        assert_eq!(state.notice(), first_enable_fails.then_some(&unrelated));
+        assert!(state.receive_speech_input(Some(7), 7, PartState::Ready));
+        assert_eq!(state.speech_input_error(), None);
+    }
+}
+
+#[test]
 fn an_unavailable_owner_shows_restart_and_revokes_the_previous_setup_action() {
     let mut state = connected();
     assert!(state.receive_speech_input(Some(7), 7, PartState::Loading));

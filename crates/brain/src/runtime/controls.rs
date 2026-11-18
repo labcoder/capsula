@@ -1,7 +1,7 @@
 use std::cell::Cell;
 
 use kumochi_protocol::frame::Pipe;
-use kumochi_protocol::message::{ControlToBrain, MAX_VISIBLE_SCENES, check_rate};
+use kumochi_protocol::message::{ControlToBrain, MAX_VISIBLE_SCENES, SettingsOp, check_rate};
 use kumochi_protocol::tap::{Direction, Tapped};
 use tokio::io::AsyncRead;
 use tokio::sync::mpsc;
@@ -212,10 +212,23 @@ impl Brain {
     ) -> Result<Option<Input>, Ended> {
         link.tap
             .record(Pipe::Control, Direction::ToBrain, &message, len);
-        if self
-            .hold_control(&message, link)
-            .map_err(|Full| Ended::Lost)?
-        {
+        let hold = self.hold_control(&message, link);
+        if let ControlToBrain::Settings(op) = message {
+            match hold {
+                Ok(false) => {}
+                Err(Full) if matches!(op, SettingsOp::SetHoldToTalk(false)) => {}
+                Ok(true) => return Ok(None),
+                Err(Full) => return Err(Ended::Lost),
+            }
+            self.settings_ops.push_back(settings::Queued {
+                change: settings::Change::User(op),
+                epoch: self.epoch,
+            });
+            hold.map_err(|Full| Ended::Lost)?;
+            self.pump_settings(Some(link)).map_err(|Full| Ended::Lost)?;
+            return Ok(None);
+        }
+        if hold.map_err(|Full| Ended::Lost)? {
             return Ok(None);
         }
         if message == ControlToBrain::Pong {
@@ -235,14 +248,6 @@ impl Brain {
         }
         if let ControlToBrain::GitHub(op) = message {
             self.github_op(op, Some(link)).map_err(|Full| Ended::Lost)?;
-            return Ok(None);
-        }
-        if let ControlToBrain::Settings(op) = message {
-            self.settings_ops.push_back(settings::Queued {
-                change: settings::Change::User(op),
-                epoch: self.epoch,
-            });
-            self.pump_settings(Some(link)).map_err(|Full| Ended::Lost)?;
             return Ok(None);
         }
         if let ControlToBrain::AccountOp(op) = message {

@@ -96,6 +96,13 @@ enum Held {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ActivatingModel {
+    Live,
+    Lost,
+    LostWhileOff,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Phase {
     Idle,
     /// Waiting for the fetch in flight to end.
@@ -115,10 +122,10 @@ enum Phase {
     Unloading {
         ask: u64,
     },
-    /// The Activate write is in flight. A loss meanwhile waits for its result: `lost`.
+    /// The Activate write is in flight. A loss meanwhile waits for its result.
     Committing {
         ask: u64,
-        lost: bool,
+        model: ActivatingModel,
     },
     Ready {
         ask: u64,
@@ -585,15 +592,31 @@ impl Installer {
                 if entry.durable == Durable::Installed {
                     entry.phase = Phase::Ready { ask };
                 } else {
-                    entry.phase = Phase::Committing { ask, lost: false };
+                    entry.phase = Phase::Committing {
+                        ask,
+                        model: ActivatingModel::Live,
+                    };
                     self.effects.push(Effect::Activate {
                         part,
                         token: entry.token,
                     });
                 }
             }
-            (Phase::Committing { ask: current, .. }, LoadEvent::Lost) if current == ask => {
-                entry.phase = Phase::Committing { ask, lost: true };
+            (
+                Phase::Committing {
+                    ask: current,
+                    model: ActivatingModel::Live,
+                },
+                LoadEvent::Lost,
+            ) if current == ask => {
+                entry.phase = Phase::Committing {
+                    ask,
+                    model: if part == VoicePart::SpeechInput && !self.input_enabled {
+                        ActivatingModel::LostWhileOff
+                    } else {
+                        ActivatingModel::Lost
+                    },
+                };
             }
             (
                 Phase::Loading { ask: current, .. } | Phase::Ready { ask: current },
@@ -614,7 +637,7 @@ impl Installer {
 
     /// The Activate write's result. What's on disk is mirrored whatever the token; the phase
     /// moves only for the current one. A refused write unloads the model it would have kept; a
-    /// committed one reloads a model lost during the write.
+    /// committed one can reload a model only if the loss was eligible at the time.
     pub(crate) fn activated(
         &mut self,
         part: VoicePart,
@@ -635,16 +658,17 @@ impl Installer {
         if entry.hold(token, Held::Activated(result)) {
             return self.take();
         }
-        let Phase::Committing { ask, lost } = entry.phase else {
+        let Phase::Committing { ask, model } = entry.phase else {
             return self.take();
         };
         if entry.token != token {
             return self.take();
         }
-        match result {
-            Ok(()) if lost => self.lost(part),
-            Ok(()) => entry.phase = Phase::Ready { ask },
-            Err(key) => {
+        match (result, model) {
+            (Ok(()), ActivatingModel::Live) => entry.phase = Phase::Ready { ask },
+            (Ok(()), ActivatingModel::Lost) => self.lost(part),
+            (Ok(()), ActivatingModel::LostWhileOff) => entry.phase = Phase::Unloaded,
+            (Err(key), _) => {
                 let fresh = self.token();
                 let entry = &mut self.parts[index(part)];
                 entry.token = fresh;

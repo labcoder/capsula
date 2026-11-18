@@ -253,6 +253,71 @@ async fn only_committed_off_releases_input_even_when_the_reply_queue_is_full() {
 }
 
 #[tokio::test]
+async fn consumed_off_survives_a_full_hold_status_queue() {
+    let scratch = Scratch::trusted("voice-input-off-hold-status");
+    let Rig {
+        mut brain,
+        release,
+        wanted,
+        ..
+    } = attach(&scratch, "installed = [\"speech-input\"]", Some(0));
+    release.send(()).unwrap();
+    owner_report(&mut brain, SpeechInput, 1, LoadEvent::Loaded).await;
+    brain.epoch = 1;
+    let mut tap = Tap::from_env();
+    let (out, mut unread) = mpsc::channel(1);
+    let queue = RefCell::new(DataQueue::new(window()));
+    let ready = Notify::new();
+    let mut link = Link::new(&out, &queue, &ready, &mut tap);
+    let mut ping_sent = None;
+    assert!(matches!(
+        brain.control_frame(
+            ControlToBrain::VoiceHoldRecognized {
+                gesture: GestureId(1),
+                thread: None,
+                selection: 1,
+            },
+            0,
+            &mut link,
+            &mut ping_sent,
+        ),
+        Ok(None)
+    ));
+    out.try_send(Vec::new()).unwrap();
+    let held = brain.hold_config_write();
+    assert!(matches!(
+        brain.control_frame(
+            ControlToBrain::Settings(SettingsOp::SetHoldToTalk(false)),
+            0,
+            &mut link,
+            &mut ping_sent,
+        ),
+        Err(Ended::Lost)
+    ));
+    assert_eq!(unread.try_recv().unwrap(), Vec::<u8>::new());
+    assert_eq!(unread.try_recv(), Err(mpsc::error::TryRecvError::Empty));
+
+    brain.pump_settings_offline();
+    assert!(brain.config.view().hold_to_talk);
+    assert_eq!(wanted(), Some(1));
+    held.send(Gate::Write).unwrap();
+    tokio::time::timeout(crate::runtime::tests::PATIENCE, brain.drain_settings())
+        .await
+        .unwrap();
+    assert_eq!(
+        voice_on_disk(&scratch)
+            .get("hold_to_talk")
+            .and_then(toml::Value::as_bool),
+        Some(false)
+    );
+    assert!(!brain.config.view().hold_to_talk);
+    assert_eq!(wanted(), None);
+    owner_report(&mut brain, SpeechInput, 1, LoadEvent::Unloaded).await;
+    assert_eq!(brain.hold_voice().0, PartState::Unloaded);
+    brain.close().await;
+}
+
+#[tokio::test]
 async fn explicit_install_and_retry_while_off_do_the_work_but_do_not_keep_input_loaded() {
     for installed in [false, true] {
         let scratch = Scratch::trusted("voice-input-off-install-or-retry");
