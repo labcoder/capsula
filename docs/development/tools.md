@@ -239,13 +239,11 @@ whole-envelope preflight. Only the explicitly trusted debug fixture retains newl
 placeholder drawing. Typed history/inline visual replay and fenced-text conversion remain
 separate work.
 
-### Screen scenes (dormant)
+### Screen scenes
 
-The brain's half of marking the user's screen ([scene](scene.md), the screen surface) is in
-place and off. `drawing::SCREEN_MARKS` is `Off`, the one value the coordinator reads, and
-`draw`'s schema, preflight and prompt still offer and accept only the overlay, so a screen
-scene is refused at `surface` as before. The pull request that offers the surface turns that
-constant `On` together with those three.
+The brain's half of marking the user's screen ([scene](scene.md), the screen surface) is on.
+`drawing::SCREEN_MARKS` is `On`, the one value the coordinator reads, and `draw`'s schema,
+preflight and prompt offer the overlay and the screen.
 
 - **The gates.** At each draw call the coordinator asks `Screen::canvas` of the current run,
   from its screen and its model choice. That is the route test `ModelRequest::attach` uses, so
@@ -294,8 +292,8 @@ constant `On` together with those three.
   screen scene it can't write the stamp, a box outside the picture, a long label or a line, but
   it can still sway which things the model marks, the order of its steps, its `say` lines and
   its labels' words. Outside a screen scene it can steer an ordinary drawing like any other
-  content. The marking paragraph, which arrives with the activation, will tell the model such
-  text is content, never instructions; nothing else checks it.
+  content. The marking paragraph in `prompts/draw.md` tells the model such text is content,
+  never instructions; nothing else checks it.
 - **Known limit.** The brain measures text at least as wide as the shell does, so it may refuse
   a label the shell would have fitted. With several labels, a narrower label in the shell can
   take an earlier side and leave a later label no room where the brain found one. The shell's

@@ -1179,6 +1179,11 @@ fn sent_picture(core: &mut Coordinator) {
 #[test]
 fn a_screen_scene_s_canvas_is_asked_of_the_current_run_only_while_marks_are_on() {
     let mut core = offered(vec![T]);
+    assert_eq!(
+        core.canvas(),
+        Some(Err(crate::context::NoCanvas::NoPicture))
+    );
+    core.screen_marks = crate::drawing::ScreenMarks::Off;
     assert_eq!(core.canvas(), None);
     core.screen_marks = crate::drawing::ScreenMarks::On;
     assert_eq!(
@@ -1709,8 +1714,7 @@ fn answer(core: &mut Coordinator, store: &mut Store, effects: &[Effect]) -> Tool
 }
 
 /// Streams the screen call `name` with `args` into the coordinator's draw step, which announces
-/// the canvas before every input. The dormant tool gate still refuses a screen begin before the
-/// drawing, so a screen call can't come in through `call`.
+/// the canvas before every input, without provider stream framing.
 fn screen(core: &mut Coordinator, name: &str, args: &str) -> Vec<Effect> {
     let key = crate::dispatch::LedgerKey {
         run: R,

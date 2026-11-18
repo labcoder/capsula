@@ -19,9 +19,6 @@ pub(crate) struct Launch {
     pub(super) observer: Option<PathBuf>,
     /// `--receipt-fixture`: start the dock middle-left for the gate's click-receipt phases.
     pub(super) receipt_fixture: bool,
-    /// `--screen-evidence`: install the screen watch's sources. Only an evidence build reads it.
-    #[cfg(feature = "screen-evidence")]
-    pub(super) screen_evidence: bool,
 }
 
 impl Launch {
@@ -29,8 +26,7 @@ impl Launch {
     ///
     /// # Errors
     /// Fails on a bad value, a fixture or observer without a quit deadline, a receipt fixture
-    /// that is repeated or has no observer, or the evidence flag in a build without its
-    /// feature.
+    /// that is repeated or has no observer.
     pub(crate) fn parse(args: impl Iterator<Item = String>) -> Result<Self, OpenError> {
         let mut launch = Self::default();
         for arg in args {
@@ -72,15 +68,6 @@ impl Launch {
                 launch.escape_fixture = true;
             } else if let Some(path) = arg.strip_prefix("--gate-observer=") {
                 launch.observer = Some(PathBuf::from(path));
-            } else if arg == "--screen-evidence" {
-                // Not gated on `test`: the ordinary test build compiles the refusal a shipped
-                // build runs.
-                #[cfg(feature = "screen-evidence")]
-                {
-                    launch.screen_evidence = true;
-                }
-                #[cfg(not(feature = "screen-evidence"))]
-                return Err(OpenError::ScreenEvidence);
             } else if arg == "--receipt-fixture" {
                 if launch.receipt_fixture {
                     return Err(OpenError::ReceiptFixture);
@@ -108,10 +95,6 @@ impl Launch {
             }
             if launch.observer.is_some() || launch.receipt_fixture {
                 return Err(OpenError::ObserverDeadline);
-            }
-            #[cfg(feature = "screen-evidence")]
-            if launch.screen_evidence {
-                return Err(OpenError::ScreenEvidence);
             }
         }
         if launch.receipt_fixture && launch.observer.is_none() {
@@ -286,25 +269,6 @@ mod tests {
                 Err(OpenError::QuitDelay)
             ));
         }
-    }
-
-    #[test]
-    fn the_evidence_flag_is_refused_without_its_feature_and_needs_a_deadline_with_it() {
-        let bounded = launch(args(&["--screen-evidence", "--quit-after-ms=5000"]));
-        #[cfg(not(feature = "screen-evidence"))]
-        assert!(matches!(bounded, Err(OpenError::ScreenEvidence)));
-        #[cfg(feature = "screen-evidence")]
-        assert!(
-            bounded
-                .expect("an evidence build takes the flag")
-                .screen_evidence
-        );
-        assert!(matches!(
-            launch(args(&["--screen-evidence"])),
-            Err(OpenError::ScreenEvidence)
-        ));
-        #[cfg(feature = "screen-evidence")]
-        assert!(!launch(args(&["--smoke"])).expect("no flag").screen_evidence);
     }
 
     #[cfg(not(debug_assertions))]

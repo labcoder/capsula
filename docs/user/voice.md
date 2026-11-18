@@ -103,7 +103,23 @@ screenshot; later messages never do. The icon is never missing from a message wh
 was sent. In two rare cases it can show on a message whose screenshot never left your computer:
 when the request failed just as it started, before its upload began, or when Kumochi crashed.
 
-Not checked yet: displays at different scales, and more than one monitor.
+On Windows, Kumochi can point at things in that picture with marks and short labels over
+your desktop as it answers. The marks do not take clicks: a click reaches the app underneath
+and clears them. A click, wheel scroll or key in another app, switching apps, another hold,
+turning screen sharing off, locking the session or losing the connection clears the marks.
+They also expire 60 seconds after the answer ends. That deadline applies only to desktop
+annotations, not contained drawings. Esc takes the marks; if their answer is still running,
+the same press stops it too. Marks are the model's reading of the picture and can be wrong,
+so look at what a mark is on before you click.
+
+The watch notices selected input, not changing pixels. A late page load, moving video,
+touch or a touchpad's two-finger gesture can leave marks over content that has changed until
+another recognized event or the deadline. Moving the pointer alone does not clear them.
+If marks are skipped, the dock says "Marks skipped: your screen changed"; separate pipe
+ordering can also cause that skip before a run is named. A lock cannot retract a picture
+already sent to the model. Other platforms without these sources skip desktop marks.
+
+Not checked yet: displays at different scales, multiple monitors, HDR and exclusive fullscreen.
 
 Esc, a target/model/connection change, deletion or a new typed submission cancels pending
 voice input. Another key cancels while the shortcut is held, not arbitrary typing after release.

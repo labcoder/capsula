@@ -513,17 +513,17 @@ shows a line the user didn't see on it.
 `measure_the_hold_line`, an ignored test beside the code, times building both paths for lines
 of 2, 256 and 2,048 points, and a sampler's worst case of a new point on every frame.
 
-## The screen watch's sources (evidence builds only)
+## The screen watch's sources
 
 Screen marks stay up only while nothing may have changed the screen
-([Screen scenes in the shell](scene.md#screen-scenes-in-the-shell-dormant)). What tells the
+([Screen scenes in the shell](scene.md#screen-scenes-in-the-shell)). What tells the
 watch on Windows is `platform/windows/screen_watch.rs`, the shell's side of shell-core's
-`Sources`. No shipped build installs it. `Presenter::watch_sources` is called in one place,
-compiled only under the `screen-evidence` feature and reached only with `--screen-evidence`,
-which a build without the feature refuses and which needs a quit deadline. The mouse thread
-and the foreground hook compile only for tests and for that feature.
-`cargo xtask check-shipped`, which CI runs, fails if the shipped selection (the shell and the
-brain with their default features) turns the feature on.
+`Sources`. `Presenter::watch_sources` installs it once when a Windows presence is created.
+The Windows platform guard stays: other platforms install no source, so the watch refuses
+and a screen scene is skipped. There is no evidence-only feature or launch switch. The
+former check-shipped task was removed with its now-empty evidence-feature list; clean builds
+still use the shell and brain packages with default features, with release validation separate
+from any external instrumented Dev build.
 
 Every build reports a hold's recognition, its run and its end to the watch, sources or not:
 where each report is made is in [The shell's reports](scene.md#the-shells-reports). A
@@ -590,8 +590,9 @@ a change: a record that can't be read, a window that can't be named.
 
 Run natively so far: the two ignored tests in `sources_tests.rs`, once each on Windows build
 10.0.26200. One registers the mouse to the thread's own window, removes it and leaves
-nothing; the other sees the registration go with the window. Nothing here has run against
-real input, and no shipped or evidence build has been launched with it.
+nothing; the other sees the registration go with the window. An isolated native shell test
+also exercised watch start and stop and mark expiry. These tests did not use real input or
+run a normal product session.
 
 ## Held words after a lost brain
 

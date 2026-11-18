@@ -59,9 +59,7 @@ impl Presence {
         held: TalkHeld,
         cx: &mut Context<'_, Self>,
     ) {
-        // No shipped build installs sources, and without them no watch can run: a screen
-        // scene that arrives all the same finds none and is skipped. So such a release reads
-        // no display, starts no watch and sets no watchdog.
+        // A platform without sources skips marks without reading a display or arming a watch.
         if !self.presenter.watches_screen() {
             return;
         }

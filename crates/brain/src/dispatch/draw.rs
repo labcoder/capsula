@@ -2,7 +2,7 @@
 
 use std::fmt;
 
-use kumochi_scene::{StepError, TokenError, Tokenizer, parse_draw_record};
+use kumochi_scene::{StepError, TokenError, Tokenizer, parse_screen_draw_record};
 use sha2::{Digest as _, Sha256};
 
 use super::{Prepared, Tool};
@@ -39,10 +39,11 @@ pub(super) const DRAW: Tool = Tool {
 };
 
 fn parameters() -> serde_json::Value {
-    let mut schema = kumochi_scene::draw_schema();
+    let mut schema = kumochi_scene::screen_draw_schema();
+    schema["$defs"]["Op"] = kumochi_scene::draw_schema()["$defs"]["Op"].take();
     schema["$defs"]["Surface"] = serde_json::json!({
         "type": "string",
-        "const": "overlay",
+        "enum": ["overlay", "screen"],
     });
     schema
 }
@@ -84,7 +85,7 @@ pub(crate) fn validate(args: &[u8]) -> Result<DrawArgs, CallError> {
 }
 
 pub(crate) fn record(bytes: &[u8]) -> Result<kumochi_scene::Record, CallError> {
-    parse_draw_record(bytes).map_err(|mut error| {
+    parse_screen_draw_record(bytes).map_err(|mut error| {
         if error.step.is_none() {
             error.step = serde_json::from_slice::<Named>(bytes)
                 .ok()
@@ -192,7 +193,7 @@ mod tests {
     }
 
     #[test]
-    fn offered_draw_schema_and_record_gate_restrict_surface_to_overlay() {
+    fn offered_draw_schema_and_record_gate_admit_screen_but_not_inline() {
         let generic = kumochi_scene::draw_schema();
         let generic_surface = serde_json::to_string(&generic["$defs"]["Surface"]).expect("JSON");
         assert!(generic_surface.contains("\"overlay\""));
@@ -211,16 +212,29 @@ mod tests {
             );
             assert_eq!(
                 draw.parameters["$defs"]["Surface"],
-                json!({"type": "string", "const": "overlay"})
+                json!({"type": "string", "enum": ["overlay", "screen"]})
             );
             assert!(
                 !serde_json::to_string(&draw.parameters)
                     .expect("JSON")
                     .contains("\"inline\"")
             );
-            let mut expected = generic.clone();
-            expected["$defs"]["Surface"] = json!({"type": "string", "const": "overlay"});
+            let mut expected = kumochi_scene::screen_draw_schema();
+            expected["$defs"]["Op"] = generic["$defs"]["Op"].clone();
+            expected["$defs"]["Surface"] = json!({"type": "string", "enum": ["overlay", "screen"]});
             assert_eq!(draw.parameters, expected);
+            for kind in ["line", "arrow"] {
+                assert_eq!(
+                    draw.parameters["$defs"]["Op"]["oneOf"]
+                        .as_array()
+                        .expect("operation forms")
+                        .iter()
+                        .filter(|op| op["properties"].get(kind).is_some())
+                        .count(),
+                    1,
+                    "overlay {kind} stays offered"
+                );
+            }
         }
         let overlay = br#"{"begin":{"v":1,"scene":"s","surface":"overlay","alt":"a"}}"#.as_slice();
         assert!(record(overlay).is_ok());
@@ -245,6 +259,14 @@ mod tests {
             assert_eq!(error.code, kumochi_scene::ErrorCode::Unsupported);
             assert_eq!(error.tool_text(), "surface: scene.Unsupported");
         }
+        let screen = br#"{"records":[{"begin":{"scene":"screen-mark","surface":"screen","alt":"A marked control"}},{"step":{"id":"point","put":[{"highlight":{"id":"target","target":{"box":[20,30,40,50]},"style":"box"}}]}},{"end":{}}]}"#;
+        assert_eq!(validate(screen).expect("screen preflight").args, screen);
+        let written_display = br#"{"begin":{"scene":"screen-mark","surface":"screen","alt":"a","display":{"origin":[0,0],"size":[2560,1440],"dpi":96}}}"#;
+        let CallError::Step(error) = record(written_display).expect_err("host-only display") else {
+            panic!("typed display refusal");
+        };
+        assert_eq!(error.path.as_str(), "display");
+        assert_eq!(error.code, kumochi_scene::ErrorCode::Unsupported);
     }
 
     #[test]
