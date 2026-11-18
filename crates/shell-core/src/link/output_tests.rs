@@ -661,7 +661,7 @@ fn a_claim_whose_output_moved_on_neither_starts_nor_collects() {
         },
     )
     .expect("spawned");
-    let running = source.running.recv_blocking().expect("running");
+    let running = receipt(&source);
     owner.withdraw();
     until("retired", || retired(&owner));
     assert_eq!(
@@ -675,6 +675,16 @@ fn a_claim_whose_output_moved_on_neither_starts_nor_collects() {
         "it never collected"
     );
     release.send(()).expect("still running");
+}
+
+/// The source's running receipt, waited for no longer than the test's patience.
+fn receipt(source: &MicOwner) -> Running {
+    let mut receipt = None;
+    until("a running receipt", || {
+        receipt = source.running.try_recv().ok();
+        receipt.is_some()
+    });
+    receipt.expect("received")
 }
 
 /// A capture that says it runs, then waits until `held` lets go.
@@ -715,7 +725,7 @@ fn only_the_bound_microphone_collects_under_a_claim() {
         parked(held),
     )
     .expect("spawned");
-    let running = source.running.recv_blocking().expect("running");
+    let running = receipt(&source);
     assert_eq!(
         owner.collect(&claim, &source, running),
         Err(Denied::Stale),
@@ -733,7 +743,7 @@ fn only_the_bound_microphone_collects_under_a_claim() {
         parked(held),
     )
     .expect("spawned");
-    let running = bound_source.running.recv_blocking().expect("running");
+    let running = receipt(&bound_source);
     assert_eq!(owner.collect(&claim, &bound_source, running), Ok(()));
     assert_eq!(mic.mode(&alive, Instant::now()), Ok(Mode::Collecting));
     for release in [release, release_bound] {
@@ -755,7 +765,7 @@ fn ending_the_session_cancels_a_collecting_bound_microphone_without_retiring_it(
         parked(held),
     )
     .expect("spawned");
-    let running = source.running.recv_blocking().expect("running");
+    let running = receipt(&source);
     assert_eq!(owner.collect(&claim, &source, running), Ok(()));
     owner.end(1);
     assert_eq!(

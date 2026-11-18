@@ -2416,24 +2416,29 @@ fn audio_without_an_output_is_credited_and_never_shown() {
     assert!(link.link.join().expect("joined"));
 }
 
-/// A link whose speaker plays on a scripted device, and opens only when `go` sends. Named,
-/// playable speech for run 1 already waits on its pipes.
+/// A link whose speaker plays on a scripted device, and opens only when `go` sends; the last
+/// receiver hears once the opener was entered. Named, playable speech for run 1 already waits
+/// on its pipes.
 fn opening_speaker(
     label: &str,
 ) -> (
     Attended,
     crate::speaker::fake::Shared,
     std::sync::mpsc::Sender<()>,
+    std::sync::mpsc::Receiver<()>,
 ) {
     use kumochi_protocol::message::{OutputGeneration, SegmentId, SpeechPcm};
     let script = crate::speaker::fake::Shared::default();
     script.lock().expect("unpoisoned").play_to = u64::MAX;
     let (go, opening) = std::sync::mpsc::channel::<()>();
-    let opening = std::sync::Mutex::new(opening);
+    let (enter, entered) = std::sync::mpsc::channel::<()>();
+    let opening = std::sync::Mutex::new((enter, opening));
     let opener = crate::speaker::Opener(Arc::new({
         let script = Arc::clone(&script);
         move |outlet| {
-            let _opened = opening.lock().expect("unpoisoned").recv();
+            let opening = opening.lock().expect("unpoisoned");
+            let _entered = opening.0.send(());
+            let _opened = opening.1.recv();
             crate::speaker::fake::open(outlet, Arc::clone(&script))
         }
     }));
@@ -2462,7 +2467,7 @@ fn opening_speaker(
     for frame in [queued, pcm] {
         frame::write(&mut &*link.data, &frame, Pipe::Data).expect("written");
     }
-    (link, script, go)
+    (link, script, go, entered)
 }
 
 fn played(script: &crate::speaker::fake::Shared) -> usize {
@@ -2496,7 +2501,7 @@ fn two_passes(script: &crate::speaker::fake::Shared) {
 #[test]
 fn an_open_racing_the_inhibit_is_paused_before_any_speech_reaches_the_device() {
     use kumochi_protocol::message::GestureId;
-    let (link, script, go) = opening_speaker("racing-inhibit");
+    let (link, script, go, _entered) = opening_speaker("racing-inhibit");
     let events = patient(link.events);
     let _session = connected(next(&events));
     let output = link.handle.output();
@@ -2523,7 +2528,7 @@ fn an_open_racing_the_inhibit_is_paused_before_any_speech_reaches_the_device() {
 
 #[test]
 fn talk_back_off_while_opening_withdraws_the_late_open_before_any_speech() {
-    let (link, script, go) = opening_speaker("off-while-opening");
+    let (link, script, go, _entered) = opening_speaker("off-while-opening");
     let events = patient(link.events);
     let _session = connected(next(&events));
     let output = link.handle.output();
@@ -2557,16 +2562,20 @@ enum Loss {
     Session,
 }
 
-/// Holds the open, then quits or loses the session before the open returns.
+/// Holds the open, then quits or loses the session once the opener was entered and before
+/// the open returns.
 fn a_late_open_announces_nothing(loss: Loss) {
     use super::output::{OutputKey, OutputView, Why};
     let label = match loss {
         Loss::Quit => "quit-while-opening",
         Loss::Session => "lost-while-opening",
     };
-    let (link, script, go) = opening_speaker(label);
+    let (link, script, go, entered) = opening_speaker(label);
     let events = patient(link.events);
     let session = connected(next(&events));
+    entered
+        .recv_timeout(PATIENCE)
+        .expect("the opener was entered");
     match loss {
         Loss::Quit => assert!(link.handle.begin_quit(), "the first quit"),
         Loss::Session => session
