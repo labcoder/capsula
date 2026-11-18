@@ -145,7 +145,7 @@ pub(crate) fn next(
     let reply = round
         .blocks
         .iter()
-        .map(|item| native(item, true))
+        .map(|item| native(item, Source::Reply))
         .collect::<Result<Vec<_>, _>>()?;
     if !reply.iter().any(|block| block["type"] == "tool_use") {
         return Err(BodyError::Pairing);
@@ -213,7 +213,7 @@ fn json(request: &ModelRequest) -> Result<Value, BodyError> {
                 (Role::User, tool_result(id(call)?, output))
             }
             // Only this connection's own items reach here; the build filters the rest.
-            InputItem::Native(item) => (Role::Assistant, native(item, false)?),
+            InputItem::Native(item) => (Role::Assistant, native(item, Source::Stored)?),
             InputItem::Image(_) => return Err(BodyError::Image),
         };
         match messages.last_mut() {
@@ -272,24 +272,33 @@ fn tool_result(id: &str, output: &str) -> Value {
     json!({ "type": "tool_result", "tool_use_id": id, "content": output })
 }
 
+/// Where a native item comes from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Source {
+    /// The store, which never holds thinking.
+    Stored,
+    /// A live round's reply, in the run's memory.
+    Reply,
+}
+
 /// A native item rebuilt from the only fields this route writes: a text block with its text, or
-/// a `tool_use` block with its id, name and object input. Only a live round's reply (`signed`)
-/// may also hold a thinking block with its signature, or a redacted one, passed back as it came.
-/// Anything else, an image or document block among them, builds nothing.
-fn native(item: &Opaque, signed: bool) -> Result<Value, BodyError> {
+/// a `tool_use` block with its id, name and object input. Only a live round's reply may also hold
+/// a thinking block with its signature, or a redacted one, passed back as it came. Anything
+/// else, an image or document block among them, builds nothing.
+fn native(item: &Opaque, source: Source) -> Result<Value, BodyError> {
     let block: Map<String, Value> =
         serde_json::from_slice(item.bytes()).map_err(|_| BodyError::Native)?;
     let field = |key: &str| block.get(key).ok_or(BodyError::Native);
     let text = |key: &str| field(key).and_then(|value| value.as_str().ok_or(BodyError::Native));
     match (field("type")?.as_str(), block.len()) {
-        (Some("thinking"), 3) if signed => {
+        (Some("thinking"), 3) if source == Source::Reply => {
             text("thinking")?;
             if text("signature")?.is_empty() {
                 return Err(BodyError::Native);
             }
             Ok(Value::Object(block))
         }
-        (Some("redacted_thinking"), 2) if signed => {
+        (Some("redacted_thinking"), 2) if source == Source::Reply => {
             if text("data")?.is_empty() {
                 return Err(BodyError::Native);
             }
