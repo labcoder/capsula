@@ -143,10 +143,11 @@ limit, the history reread bound or the 16 KiB tool-argument ceiling.
 For complete calls, including MCP, the dispatcher tokenizes the entire envelope, decodes every record
 and rejects unsupported `begin` surfaces, 3D views, solids, 3D tracks, three-component keys and any solid-only
 `set[].info` field, including null. The first typed failure returns its code, sanitized
-path and step id, and admits no scene record. Provider refusals spend the drawing
-rejection/repair budget; MCP refusals before drawing admission spend only the MCP
-call allowance. A refusal stays final for the caller's key. Semantic admission still
-runs once in the drawing reducer; a semantic failure can retain earlier committed steps.
+path and step id, and admits no scene record. The drawing reducer charges its repair budget
+on a rejected record. MCP's overlay-only refusals for a screen surface or box target are
+answered before that reducer and spend only the MCP call allowance. A refusal stays final
+for the caller's key. Semantic admission still runs once in the drawing reducer; a semantic
+failure can retain earlier committed steps.
 
 A stopped result can end with a fixed phrase saying what follows, judged from the drawing's own
 run state. After a record or envelope error, while a corrected call can still draw, it adds
