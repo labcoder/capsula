@@ -21,6 +21,7 @@ use super::{
 use crate::coordinator::{Effect, Stale, StoreOp};
 use crate::engines::CallId;
 
+mod names;
 mod paint;
 mod ready;
 pub(crate) mod screen;
@@ -1429,7 +1430,7 @@ fn merge(into: &mut Output, more: Output) {
     into.calls.extend(more.calls);
 }
 
-/// A store double: scene ids from 1, names per thread, and logs persisted as JSON.
+/// A store double: scene ids from 1, names per thread and surface, and logs persisted as JSON.
 #[derive(Default)]
 struct Store {
     scenes: Vec<StoredScene>,
@@ -1441,10 +1442,18 @@ struct Store {
 impl Store {
     fn answer(&mut self, write: &Write) -> Reply {
         match write {
-            Write::Lookup { thread, name } => Reply::Lookup(
+            Write::Lookup {
+                thread,
+                surface,
+                name,
+            } => Reply::Lookup(
                 self.scenes
                     .iter()
-                    .find(|stored| stored.thread == *thread && stored.header.begin.scene == *name)
+                    .find(|stored| {
+                        stored.thread == *thread
+                            && stored.header.begin.surface == *surface
+                            && stored.header.begin.scene == *name
+                    })
                     .map(|stored| stored.scene),
             ),
             Write::Step {
@@ -3296,6 +3305,7 @@ fn debug_and_display_never_carry_drawing_content() {
     let writes = [
         Write::Lookup {
             thread: THREAD,
+            surface: kumochi_scene::record::Surface::Overlay,
             name: wire(SECRET),
         },
         Write::Step {

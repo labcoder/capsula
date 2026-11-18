@@ -7,7 +7,7 @@
 use std::{fmt, sync::Arc};
 
 use kumochi_protocol::message::{RunId, SceneHeader, SceneId, ThreadId};
-use kumochi_scene::{SceneEvent, Step, StopCut, WireId};
+use kumochi_scene::{SceneEvent, Step, StopCut, WireId, record::Surface};
 
 /// The scene a step's write goes into.
 #[derive(Clone, PartialEq)]
@@ -22,10 +22,12 @@ pub enum Target {
 /// One store operation of the drawing system.
 #[derive(Clone, PartialEq)]
 pub enum Write {
-    /// An autocommit read: whether the scene `name` ever began in `thread`, cleared or not.
+    /// An autocommit read: whether the scene name ever began on this thread and surface.
     Lookup {
         /// The live thread.
         thread: ThreadId,
+        /// The scene's typed surface.
+        surface: Surface,
         /// The model's scene name.
         name: WireId,
     },
@@ -62,7 +64,7 @@ pub enum Write {
 /// nothing of it is in the store.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Reply {
-    /// The scene that name began in the thread, if any.
+    /// The scene that began with the given name on the given thread and surface, if any.
     Lookup(Option<SceneId>),
     /// The scene the step was written into; a new scene's id is allocated here.
     Step(SceneId),

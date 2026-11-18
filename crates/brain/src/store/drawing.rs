@@ -10,7 +10,7 @@ use kumochi_protocol::message::{
     MAX_SCENE_LOG_ENTRIES, MAX_SCENE_SNAPSHOT_BYTES, MAX_VISIBLE_SCENES, RunId, SceneHeader,
     SceneId, ThreadId,
 };
-use kumochi_scene::{Begin, SceneEvent, Step, StopCut, WireId, limits};
+use kumochi_scene::{Begin, SceneEvent, Step, StopCut, WireId, limits, record::Surface};
 use rusqlite::{Connection, OptionalExtension as _, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 
@@ -99,10 +99,15 @@ impl Store {
     }
 
     fn write_drawing(&mut self, write: &Write) -> Result<Reply, StoreError> {
-        if let Write::Lookup { thread, name } = write {
+        if let Write::Lookup {
+            thread,
+            surface,
+            name,
+        } = write
+        {
             let thread = sql_id(thread.0, StoreError::NoThread)?;
             live(&self.conn, thread)?;
-            return lookup(&self.conn, thread, name).map(Reply::Lookup);
+            return lookup(&self.conn, thread, *surface, name).map(Reply::Lookup);
         }
         let tx = self
             .conn
@@ -172,7 +177,7 @@ fn write_step(
     insert_events(conn, thread, run, &[], now)?;
     let scene = match target {
         Target::New(header) => {
-            if lookup(conn, thread, &header.begin.scene)?.is_some() {
+            if lookup(conn, thread, header.begin.surface, &header.begin.scene)?.is_some() {
                 return Err(StoreError::Drawing);
             }
             let body = encode(header)?;
@@ -310,13 +315,24 @@ fn cut_at(
         .transpose()
 }
 
-fn lookup(conn: &Connection, thread: i64, name: &WireId) -> Result<Option<SceneId>, StoreError> {
+fn lookup(
+    conn: &Connection,
+    thread: i64,
+    surface: Surface,
+    name: &WireId,
+) -> Result<Option<SceneId>, StoreError> {
+    let surface = match surface {
+        Surface::Overlay => "overlay",
+        Surface::Inline => "inline",
+        Surface::Screen => "screen",
+    };
     let id = conn
         .query_row(
             "SELECT id FROM events WHERE thread = ?1 AND kind = 'scene_begin'
-             AND CASE WHEN octet_length(body) <= ?3 THEN CASE WHEN json_valid(body)
-             THEN json_extract(body, '$.begin.scene') END END = ?2 ORDER BY id LIMIT 1",
-            params![thread, name.as_str(), body_cap()?],
+             AND CASE WHEN octet_length(body) <= ?4 THEN CASE WHEN json_valid(body)
+             THEN json_extract(body, '$.begin.scene') = ?2
+              AND json_extract(body, '$.begin.surface') = ?3 END END ORDER BY id LIMIT 1",
+            params![thread, name.as_str(), surface, body_cap()?],
             |row| row.get::<_, i64>(0),
         )
         .optional()?;
