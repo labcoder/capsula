@@ -691,10 +691,15 @@ impl OutputOwner {
     /// publishes the hold's state, then opens them with [`Self::collect`].
     ///
     /// # Errors
-    /// `Busy`, what the check refuses, or `Stale` for another microphone or another gesture's
-    /// receipt.
+    /// `Busy`, what the check refuses, or `Stale` for another microphone, another gesture's
+    /// receipt or a generation no longer running, such as one native input already released.
     pub fn accept(&self, claim: &Claim, mic: &MicOwner, running: Running) -> Result<(), Denied> {
-        Self::runs_bound(&*self.try_lock()?, claim, mic, running)
+        let state = self.try_lock()?;
+        Self::runs_bound(&state, claim, mic, running)?;
+        if !mic.still_running() {
+            return Err(Denied::Stale);
+        }
+        Ok(())
     }
 
     /// Checks `claim` again and, in the same step, opens copies on the accepted receipt, only

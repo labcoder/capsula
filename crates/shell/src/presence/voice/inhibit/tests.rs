@@ -1191,6 +1191,77 @@ fn a_cancel_while_the_copies_wait_copies_nothing(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn a_key_up_native_input_took_before_acceptance_releases_nothing(cx: &mut TestAppContext) {
+    use crate::platform::microphone::{Finalization, MicOwner, Mode, Running};
+    use crate::presence::screen_hold_tests::{DOWN, luna, on, recognize, release, screen_ready};
+    let ready = screen_ready(Some(on(&luna())), cx);
+    let owner = &ready.owner;
+    cx.background_executor.allow_parking();
+    let fence = owner.read_with(cx, |owner, _| owner.link.microphone_gate());
+    let (receipt, received) = std::sync::mpsc::channel();
+    let (seen, collected) = std::sync::mpsc::channel();
+    owner.update(cx, |owner, _| {
+        owner.voice.start = Some(Box::new(move |reserved, session| {
+            MicOwner::start_reserved_with_for_tests(
+                reserved,
+                session,
+                move |token, session, running, _| {
+                    token.running_for_tests()?;
+                    running
+                        .try_send(Running::for_tests(token.gesture(), 8_000))
+                        .expect("the receipt");
+                    // Native input takes the key-up before presence handles the receipt.
+                    fence.release(token.gesture());
+                    receipt.send(()).expect("told");
+                    let deadline = Instant::now() + Duration::from_secs(3);
+                    let mut copying = false;
+                    while let Ok(mode) = token.mode(session, Instant::now()) {
+                        copying |= mode == Mode::Collecting;
+                        if Instant::now() > deadline {
+                            break;
+                        }
+                        std::thread::park_timeout(Duration::from_millis(1));
+                    }
+                    seen.send(copying).expect("told");
+                    Ok(Finalization::Discarded(MicError::Cancelled))
+                },
+            )
+        }));
+        let link = owner.link.clone();
+        // Only the second owner call, the copies', is busy.
+        owner.voice.publish = Some(Box::new(move || link.output().refuse(1)));
+    });
+    recognize(owner, 1, cx);
+    status(owner, 1, 1, HoldStatus::Admitted, cx);
+    received
+        .recv_timeout(Duration::from_secs(3))
+        .expect("the receipt follows the key-up");
+    cx.run_until_parked();
+    owner.read_with(cx, |owner, _| {
+        assert_eq!(owner.voice.status, Some(Text::HoldStopping), "no Listening");
+    });
+    // The key-up's delayed delivery comes at a valid point.
+    release(owner, 1, Some(DOWN), cx);
+    cx.background_executor.advance_clock(super::RECHECK);
+    cx.run_until_parked();
+    let sent: Vec<_> = std::iter::from_fn(|| ready.controls.try_recv().ok()).collect();
+    assert!(
+        !sent
+            .iter()
+            .any(|message| matches!(message, ControlToBrain::ScreenRelease { .. })),
+        "no ScreenRelease"
+    );
+    owner.read_with(cx, |owner, _| {
+        assert!(owner.voice.watched.is_none(), "no watch");
+    });
+    assert_eq!(
+        collected.recv_timeout(Duration::from_secs(3)),
+        Ok(false),
+        "no copy"
+    );
+}
+
+#[gpui::test]
 fn a_lost_screen_hold_owes_its_stop_to_the_next_connection(cx: &mut TestAppContext) {
     use crate::presence::screen_hold_tests::{luna, on, recognize, screen_ready};
     use kumochi_protocol::message::Incarnation;
