@@ -587,7 +587,11 @@ and never stops the fixture. A target that goes stale after admission
 and an OS `SendInput` refusal keep their own existing messages. The surrounding refusal still names
 the foreground executable and its PID, as before. The refusal remains terminal.
 Only tagged mouse input is allowed at this stage: no Alt-key trick, `AttachThreadInput`, or
-message/input to another app is used. The prepare doesn't trust the raise's return value: it
+message/input to another app is used. The unattended fixture is created topmost and shown without
+activation, so it starts above the foreground window. Without the foreground right, a topmost
+raise sent while another app's maximized window was in front returned success on Rez and still
+left the root below it; a root born topmost sat above that window and stayed there. The
+attended fixture keeps its normal band. The prepare doesn't trust the raise's return value: it
 reads the fixture's extended style back and, if the fixture isn't topmost, refuses with its own
 fixed code, before the guard is announced armed and before any hit test. Just before the prepare
 is sent, the runner reads, changing nothing, whether the root is visible and topmost, its Z-order

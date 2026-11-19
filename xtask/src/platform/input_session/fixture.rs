@@ -884,7 +884,7 @@ fn open_fixture() -> Result<()> {
     // SAFETY: the registered class has a static callback; there is no borrowed creation data.
     let root = unsafe {
         CreateWindowExW(
-            WINDOW_EX_STYLE::default(),
+            root_ex_style(placement),
             &class_name,
             &title,
             WS_OVERLAPPEDWINDOW,
@@ -914,6 +914,16 @@ fn open_fixture() -> Result<()> {
         unsafe { DestroyWindow(root) }?;
     }
     result
+}
+
+/// The unattended fixture is born topmost: while another app's window is in front, a later topmost
+/// raise from a process without the foreground right can succeed and still leave it below.
+fn root_ex_style(placement: FixturePlacement) -> WINDOW_EX_STYLE {
+    if placement == FixturePlacement::AwayFromCursor {
+        WS_EX_TOPMOST
+    } else {
+        WINDOW_EX_STYLE::default()
+    }
 }
 
 fn child(
@@ -1083,8 +1093,9 @@ fn focus_edit() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        FRAME, IdleRefusal, POINT, RECT, current_queue_categories, frame_name, off_cursor_frame,
-        pack, published_frame,
+        FRAME, FixturePlacement, IdleRefusal, POINT, RECT, WINDOW_EX_STYLE, WS_EX_TOPMOST,
+        current_queue_categories, frame_name, off_cursor_frame, pack, published_frame,
+        root_ex_style,
     };
     use windows::Win32::UI::Input::{
         MOUSE_MOVE_ABSOLUTE, MOUSE_MOVE_NOCOALESCE, RAWINPUT, RAWKEYBOARD, RAWMOUSE, RAWMOUSE_0,
@@ -1105,6 +1116,18 @@ mod tests {
         assert_eq!(IdleRefusal::queue_mask(reply), Some((9, 0x0402)));
         assert_eq!(IdleRefusal::queue_mask(0x0004_0208), None);
         assert_eq!(IdleRefusal::queue_mask(9), None);
+    }
+
+    #[test]
+    fn only_the_unattended_fixture_is_born_topmost() {
+        assert_eq!(
+            root_ex_style(FixturePlacement::AwayFromCursor),
+            WS_EX_TOPMOST
+        );
+        assert_eq!(
+            root_ex_style(FixturePlacement::Default),
+            WINDOW_EX_STYLE::default()
+        );
     }
 
     #[test]
