@@ -1273,3 +1273,21 @@ fn a_recognition_fence_keeps_turns_and_the_hold_and_holds_back_its_runs_late_wor
     runs.apply_state(RunId(5), ThreadId(1), Phase::Done, None);
     assert!(runs.pending_stops.is_empty(), "both endings retire it");
 }
+
+#[test]
+fn a_run_fenced_before_its_run_state_takes_its_thread_from_it() {
+    let mut runs = ready();
+    recognized(&mut runs, 1);
+    assert_eq!(runs.fence_run(RunId(6)), stop(6), "no RunState yet");
+    assert_eq!(runs.owned_disposition(RunId(6)), RunDisposition::Stopped);
+    assert_eq!(runs.owned_disposition(RunId(7)), RunDisposition::Live);
+    let applied = runs.apply_state(RunId(6), ThreadId(2), Phase::Answering, None);
+    assert!(!applied.visible, "its late RunState shows nothing");
+    runs.apply_data(DataToShell::RunEnd { run: RunId(6) }, 4);
+    assert!(runs.confirm_delete(ThreadId(2)));
+    runs.deleted(ThreadId(2), Deleted::Hidden, None);
+    assert!(
+        runs.pending_stops.is_empty(),
+        "its thread's delete closed it"
+    );
+}
