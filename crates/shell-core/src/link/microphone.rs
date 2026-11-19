@@ -90,6 +90,24 @@ impl LinkHandle {
         self.shared.accept_microphone_stop(generation, gesture);
     }
 
+    /// Replays the owed stop on connection `generation`, as a real link's next connection does.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn replay_recorded_microphone_stop(&self, generation: u64) {
+        let recording = self
+            .control_recording
+            .as_ref()
+            .expect("only a recording link replays a recorded stop");
+        if let Some(stop) = self
+            .shared
+            .microphone_stop
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .as_mut()
+        {
+            assert!(stop.queue(recording, generation), "the replay is queued");
+        }
+    }
+
     pub fn voice_stop_pending(&self) -> bool {
         self.shared
             .microphone_stop

@@ -311,11 +311,7 @@ impl Presence {
     /// Discards an unstarted generation, and tells `session` the hold stopped. A gate that holds
     /// it is the one discard authority: its dispatcher discards it through the owner.
     fn unused_voice(&self, token: &Generation, session: Option<&Session>) {
-        if self
-            .voice
-            .gates
-            .unused(token, session.map(Session::generation))
-        {
+        if self.voice.gates.unused(token, session) {
             return;
         }
         let Some(session) = session else {

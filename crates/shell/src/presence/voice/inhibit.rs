@@ -9,7 +9,7 @@ use gpui_kit::{BackgroundExecutor, Task};
 use kumochi_protocol::message::{ControlToBrain, GestureId, RunId};
 use kumochi_shell_core::link::output::{Claim, Denied, InhibitToken, OutputOwner, Retirement};
 
-use super::{Context, FailureReason, FailureStage, Presence, Source};
+use super::{Context, FailureReason, FailureStage, Presence, Session, Source};
 use crate::platform::microphone::{Generation, MicOwner, Mode, Reserved, Running};
 use crate::strings::Text;
 
@@ -62,7 +62,7 @@ struct Gate {
     rechecks: u8,
     timer: Option<Task<()>>,
     /// The session to tell `VoiceHoldStopped` once its unstarted generation is discarded.
-    tell: Option<u64>,
+    tell: Option<Session>,
     received: bool,
 }
 
@@ -348,7 +348,7 @@ impl Gates {
     }
 
     /// Ends `mic`'s gate unstarted; false when no gate holds it, so the caller discards it.
-    pub(super) fn unused(&self, mic: &Generation, tell: Option<u64>) -> bool {
+    pub(super) fn unused(&self, mic: &Generation, tell: Option<&Session>) -> bool {
         let mut found = false;
         for gate in self
             .list
@@ -357,7 +357,7 @@ impl Gates {
             .filter(|gate| gate.holds(mic))
         {
             gate.stage = Stage::Ending;
-            gate.tell = tell;
+            gate.tell = tell.cloned();
             found = true;
         }
         if found {
@@ -385,7 +385,7 @@ impl Gates {
 enum After {
     End(GestureId, Text),
     Start(Reserved),
-    Stopped(GestureId, u64),
+    Stopped(GestureId, Session),
     Unconfirmed,
 }
 
@@ -440,17 +440,15 @@ impl Presence {
                     }
                 }
                 After::Start(reserved) => self.open_microphone(reserved, cx),
-                After::Stopped(gesture, generation) => {
-                    let Some(session) = self
-                        .session
-                        .clone()
-                        .filter(|session| session.generation() == generation)
-                    else {
-                        continue;
-                    };
+                // The link keeps the proof owed, and replays it on the next connection.
+                After::Stopped(gesture, session) => {
                     if !self
                         .link
                         .send_control(&session, ControlToBrain::VoiceHoldStopped { gesture })
+                        && self
+                            .session
+                            .as_ref()
+                            .is_some_and(|current| current.generation() == session.generation())
                     {
                         tracing::warn!(stage = ?FailureStage::Release, reason = ?FailureReason::StopSend, "held speech input failed");
                         self.end_session(&session, cx).detach();
@@ -653,8 +651,8 @@ fn forget(gate: &Gate, after: &mut Vec<After>) {
     let discarded = gate
         .mic
         .as_ref()
-        .is_none_or(|mic| mic.discard_unstarted().is_ok() || mic.retired());
-    if let (Some(session), true) = (gate.tell, discarded) {
-        after.push(After::Stopped(gate.gesture, session));
+        .is_none_or(|mic| mic.discard_unstarted().is_ok() || mic.finished());
+    if let (Some(session), true) = (&gate.tell, discarded) {
+        after.push(After::Stopped(gate.gesture, session.clone()));
     }
 }

@@ -734,3 +734,72 @@ fn an_output_change_before_running_drains_the_worker_and_starts_no_other(cx: &mu
     assert!(started.try_recv().is_err(), "no second start");
     assert!(data.is_empty(), "nothing collected");
 }
+
+#[gpui::test]
+fn a_proof_taken_on_a_lost_session_is_owed_to_the_next_connection(cx: &mut TestAppContext) {
+    use kumochi_protocol::message::Incarnation;
+    let (owner, _data, old_controls) = ready(cx);
+    hold(&owner, 1, cx);
+    owner.update(cx, |owner, cx| {
+        owner.voice_status(1, G1, HoldStatus::Cancelled, cx);
+        let old = owner.session.take().expect("connected");
+        owner.end_session(&old, cx).detach();
+    });
+    cx.run_until_parked();
+    let controls = owner.update(cx, |owner, _| {
+        let controls = owner.link.record_controls();
+        owner.session = Some(crate::link::Session::detached(2, Incarnation(2)));
+        owner.runs.met(Incarnation(2));
+        owner.runs.connected(2);
+        owner.runs.settings(ThreadId(1));
+        owner.link.replay_recorded_microphone_stop(2);
+        controls
+    });
+    let told = |controls: &async_channel::Receiver<ControlToBrain>| {
+        std::iter::from_fn(|| controls.try_recv().ok())
+            .filter(|message| *message == stopped(G1))
+            .count()
+    };
+    assert_eq!(told(&old_controls) + told(&controls), 1, "owed once");
+    owner.update(cx, |owner, _| {
+        owner.link.accept_recorded_microphone_stop(2, G1);
+        assert!(!owner.link.voice_stop_pending(), "acknowledged");
+    });
+    hold(&owner, 2, cx);
+    owner.read_with(cx, |owner, _| {
+        assert_eq!(
+            owner
+                .voice
+                .pending
+                .as_ref()
+                .map(|hold| hold.token.gesture()),
+            Some(G2),
+            "a new hold is admitted"
+        );
+        assert_ne!(owner.voice.status, Some(Text::TurnBusy));
+    });
+}
+
+#[gpui::test]
+fn a_discard_proved_after_a_newer_arm_still_tells_the_brain(cx: &mut TestAppContext) {
+    let (owner, _data, controls) = ready(cx);
+    let started = starts(&owner, cx);
+    hold(&owner, 1, cx);
+    cx.run_until_parked();
+    let _newer = owner.update(cx, |owner, cx| {
+        owner.voice_status(1, G1, HoldStatus::Admitted, cx);
+        // The failed start retired gesture 1; the native callback arms the next press.
+        owner
+            .link
+            .microphone_gate()
+            .arm(G2)
+            .expect("gesture 1 retired")
+    });
+    cx.run_until_parked();
+    assert_eq!(started.get(), 1);
+    let told = sent(&controls)
+        .into_iter()
+        .filter(|message| *message == stopped(G1))
+        .count();
+    assert_eq!(told, 1, "the brain is told once");
+}
