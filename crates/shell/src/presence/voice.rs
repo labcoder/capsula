@@ -780,6 +780,11 @@ impl Presence {
                     tracing::debug!(stage = ?FailureStage::Release, reason = ?FailureReason::NoPendingHold, "held speech input refused");
                     return;
                 };
+                // A terminal hold keeps its notice: only a cancel still ends it.
+                if hold.terminal.is_some() && !cancelled {
+                    tracing::debug!(stage = ?FailureStage::Release, reason = ?FailureReason::TerminalStatus, "held speech input refused");
+                    return;
+                }
                 // Only an accepted collection releases, and only once; anything else cancels.
                 if cancelled || !hold.collected || hold.released.is_some() {
                     self.end_voice(Text::HoldCancelled, cx);

@@ -1466,6 +1466,30 @@ fn first_terminal_is_preserved_and_unconfirmed_cleanup_cannot_release_debt(
     owner.read_with(cx, |owner, _| {
         assert_eq!(owner.voice.status, Some(Text::HoldUnavailable));
     });
+    // The keys come up late, normally: the warning stays and nothing is released.
+    owner.update(cx, |owner, cx| {
+        let stamp = owner.voice.pending.as_ref().unwrap().stamp;
+        owner.voice_intent(
+            Intent::End {
+                gesture: GestureId(1),
+                cancelled: false,
+            },
+            stamp,
+            0,
+            Some(kumochi_protocol::geometry::PhysicalPoint([900, 600])),
+            crate::input::TalkHeld::default(),
+            cx,
+        );
+    });
+    cx.run_until_parked();
+    status(&owner, 1, 1, HoldStatus::Admitted, cx);
+    owner.read_with(cx, |owner, _| {
+        assert_eq!(owner.voice.status, Some(Text::HoldUnavailable));
+        assert_eq!(owner.voice.pending.as_ref().unwrap().released, None);
+        assert!(owner.voice.watched.is_none());
+    });
+    assert!(controls.is_empty());
+    assert!(data.is_empty());
 }
 
 #[gpui::test]
