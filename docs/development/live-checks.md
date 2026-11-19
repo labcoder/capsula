@@ -566,9 +566,9 @@ The prompts go to Kumo's chat, not a task. A task's first `Done` starts a title 
 ### The allowance
 
 The approval is six requests: three GETs and three POSTs, with no retries.
-- The check starts each launch's brain itself, with exactly its slice in `KUMOCHI_LIVE_KEY_CATALOG_BUDGET` and `KUMOCHI_LIVE_KEY_MESSAGES_BUDGET`, and waits for its pipe. A request past the slice is refused before connecting. Only then does it start the shell, with both variables at 0, so the shell connects to that brain. A brain the shell starts, such as one replacing a brain that died, inherits the zeros and can't open a key connection. Every other `KUMOCHI_` variable is removed from both environments.
-- A new brain sends no Messages request on its own. Its store marks the run that was under way as failed when it starts, and a title or compaction job starts only after a run of that brain's own ends `Done`, which takes a submit.
-- One case can pass a slice on. If the shell dies, the brain starts a new shell 200 ms later, and that shell inherits the brain's slice. If the brain then dies too, before the check's next look at the processes (every 250 ms), the new shell's brain gets a fresh slice and checks the saved key as it starts: one model-list GET past the plan. The check sees the extra process at that look, stops as failed and ends them all. That is the only way the count can reach seven, and no Messages request can follow it, because a send needs a submit from the owner.
+- The check starts each launch's brain itself, with exactly its slice in `KUMOCHI_LIVE_KEY_CATALOG_BUDGET` and `KUMOCHI_LIVE_KEY_MESSAGES_BUDGET`, and waits for its pipe. A request past the slice is refused before connecting. Only then does it start the shell, with both variables at 0, so the shell connects to that brain. Every other `KUMOCHI_` variable is removed from both environments.
+- No other brain gets a slice. A brain the shell starts, such as one replacing a brain that died, inherits the shell's zeros. A shell the brain relaunches after the shell died gets both variables at 0 from the brain, because a debug brain that has either key budget sets both to 0 for every shell it starts ([processes.md](processes.md)). So a brain that relaunched shell starts has zeros too, however many times the shell and the brain die and come back. Each zero is refused before connecting.
+- So under any crash or restart the check sends at most three model-list GETs and three Messages POSTs: only the brain the check starts for each launch holds a slice, and each slice is refused past its count before connecting.
 - Before each launch, the check appends that launch's slice to `%LOCALAPPDATA%\kumochi-gate-anthropic-key.ledger`, beside the gate's run lock, and flushes it. Cleaning or moving build output doesn't touch it, and gate cleanup leaves it. The check creates it only while it holds the run lock, so a second run started at the same time refuses before it reaches the ledger.
 - The check refuses to start while that file exists, so a slice is never refunded: an interrupted or failed run can't be resumed or rerun. The file is deleted by hand, and only after a new approval.
 
@@ -583,13 +583,15 @@ The check watches the brain's pipe tap, which keeps only content-free control fr
 - an `Error`, `CaptureDone`, `HoldScreen`, `ScreenHoldRecognized` or `BuildMismatch` frame;
 - the brain or the shell exiting, or any other product process starting, during a step; a step that takes more than 10 minutes; or the shell still running 60 seconds after its window is closed.
 
+The process checks are for diagnosis and abort, not for the allowance, which holds without them. During a step the check looks at the running product processes every 250 ms. A process that starts and exits between two looks isn't seen. After the window is closed, the check waits up to 60 seconds for every `kumochi.exe` and `kumochid.exe` to exit without checking which ones are its own, so a replacement that starts and is closed in that minute isn't reported either. Neither can send a key request, because neither has a slice.
+
 ### What it can't see
 
 The tap carries no attempts, HTTP statuses or tool names. A request that a budget refuses shows up only through its effect. A refused check leaves the key unconfirmed and a refused answer fails the run, and both stop the check. A refused background job surfaces nowhere, but it sent nothing and cost nothing.
 
 The check also can't tell whether the model called `list_tasks`. It can't confirm that the first answer took a tool round and a continuation, only that the run ended `Done`.
 
-None of these gaps can send a paid request beyond the plan, because each launch's brain refuses anything past its slice before connecting and any other brain has no slice, apart from the one case above.
+None of these gaps can send a paid request beyond the plan, because each launch's brain refuses anything past its slice before connecting and every other brain has a slice of zero.
 
 ### Cleanup
 

@@ -404,7 +404,8 @@ async fn serve(
 /// counts the same way, so the backoff retries it and then gives up.
 async fn relaunch(shell: PathBuf, delay: Duration, exited: oneshot::Sender<()>) {
     tokio::time::sleep(delay).await;
-    let mut child = match platform::launch_detached(&shell) {
+    let budgets = connections::model::budget::handed_on(|name| std::env::var_os(name).is_some());
+    let mut child = match platform::launch_detached(&shell, budgets) {
         Ok(child) => child,
         Err(error) => {
             tracing::error!(%error, "can't relaunch the shell");
