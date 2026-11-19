@@ -31,6 +31,15 @@ impl Gates {
             .map(|gate| matches!(gate.authority, Authority::Held(_)))
     }
 
+    /// The rechecks `gesture`'s gate has left.
+    pub(in crate::presence) fn rechecks(&self, gesture: GestureId) -> Option<u8> {
+        self.list
+            .borrow()
+            .iter()
+            .find(|gate| gate.gesture == gesture)
+            .map(|gate| gate.rechecks)
+    }
+
     /// The run `gesture`'s gate fences.
     pub(in crate::presence) fn run(&self, gesture: GestureId) -> Option<(u64, RunId)> {
         self.list
@@ -851,4 +860,57 @@ fn an_esc_waiting_for_a_busy_owner_holds_the_resume_until_it_is_decided(cx: &mut
         };
         assert_eq!(heard(&commands), expected, "stops: {stops}");
     }
+}
+
+#[gpui::test]
+fn a_release_before_the_owner_accepts_collection_is_a_cancel(cx: &mut TestAppContext) {
+    use crate::presence::screen_hold_tests::{luna, on, recognize, release, screen_ready};
+    let ready = screen_ready(Some(on(&luna())), cx);
+    let owner = &ready.owner;
+    let (open, finish, started, samples) = source(owner, cx, None);
+    recognize(owner, 1, cx);
+    let token = owner.read_with(cx, |owner, _| {
+        owner.voice.pending.as_ref().expect("hold 1").token.clone()
+    });
+    status(owner, 1, 1, HoldStatus::Admitted, cx);
+    started
+        .recv_timeout(Duration::from_secs(3))
+        .expect("started");
+    refuse(owner, 1, cx);
+    open.send(()).expect("opens");
+    until(cx, |cx| {
+        owner.read_with(cx, |owner, _| owner.voice.gates.rechecks(G1) == Some(2))
+    });
+    owner.read_with(cx, |owner, _| {
+        assert_eq!(
+            owner.voice.status,
+            Some(Text::HoldPreparing),
+            "not listening while collection is barred"
+        );
+    });
+    release(owner, 1, None, cx);
+    cx.background_executor.advance_clock(super::RECHECK);
+    finish.send(()).expect("drains");
+    until(cx, |_| token.finished());
+    cx.run_until_parked();
+    let sent: Vec<_> = std::iter::from_fn(|| ready.controls.try_recv().ok()).collect();
+    assert!(
+        !sent
+            .iter()
+            .any(|message| matches!(message, ControlToBrain::ScreenRelease { .. })),
+        "no release"
+    );
+    assert_eq!(
+        sent.iter()
+            .filter(|message| **message == stopped(G1))
+            .count(),
+        1,
+        "one retirement"
+    );
+    owner.read_with(cx, |owner, _| {
+        assert!(owner.voice.watched.is_none(), "no watch");
+        assert!(owner.voice.pending.is_none(), "cancelled");
+        assert_eq!(owner.voice.gates.held(G1), None, "retired");
+    });
+    assert!(samples.try_recv().is_err(), "no PCM");
 }

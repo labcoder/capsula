@@ -1171,7 +1171,8 @@ pub(super) fn source(
                         }
                         if token.mode(session, Instant::now()) == Ok(Mode::Collecting) {
                             collected = true;
-                            copied.send(()).unwrap();
+                            // A test that dropped its receiver doesn't count copies.
+                            let _counted = copied.send(());
                         }
                     }
                     finishing.recv_timeout(Duration::from_secs(3)).unwrap();
@@ -1908,7 +1909,7 @@ fn the_native_callback_reads_the_pointer_at_recognition_and_when_the_keys_come_u
     deliver(Event::Deadline, after(at, 301));
     cx.run_until_parked();
     ready.owner.update(cx, |owner, _| {
-        assert!(owner.voice.pending.is_some());
+        owner.voice.pending.as_mut().expect("a hold").collected = true;
         owner.voice.status = Some(Text::HoldListening);
     });
     // The line starts where the callback read the pointer at recognition, and a frame reads

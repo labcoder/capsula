@@ -109,6 +109,8 @@ pub(super) struct Hold {
     stamp: Stamp,
     session: Session,
     source: Source,
+    /// The owner accepted this hold's collection: only then can its release send words.
+    pub(super) collected: bool,
     released: Option<u64>,
     /// A hold the brain was told shows the screen, until it asks for that release: once, when
     /// the keys come up or when the notice stops being `On` before they do.
@@ -775,7 +777,8 @@ impl Presence {
                     tracing::debug!(stage = ?FailureStage::Release, reason = ?FailureReason::NoPendingHold, "held speech input refused");
                     return;
                 };
-                if cancelled || self.voice.status != Some(Text::HoldListening) {
+                // Only an accepted collection releases, and only once; anything else cancels.
+                if cancelled || !hold.collected || hold.released.is_some() {
                     self.end_voice(Text::HoldCancelled, cx);
                 } else {
                     hold.released = Some(qpc);
@@ -952,6 +955,7 @@ impl Presence {
                 stamp,
                 session,
                 source: Source::Waiting,
+                collected: false,
                 released: None,
                 screen,
                 terminal: None,

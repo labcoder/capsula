@@ -196,6 +196,9 @@ pub(super) fn recognize(owner: &Entity<Presence>, id: u32, cx: &mut TestAppConte
 pub(super) fn listening(owner: &Entity<Presence>, cx: &mut TestAppContext) {
     owner.update(cx, |owner, _| {
         owner.voice.status = Some(Text::HoldListening);
+        if let Some(hold) = owner.voice.pending.as_mut() {
+            hold.collected = true;
+        }
     });
 }
 
@@ -715,6 +718,7 @@ fn a_hold_that_ends_before_its_release_stops_the_line_and_takes_no_lease(cx: &mu
         |ready, cx| {
             ready.owner.update(cx, |owner, _| {
                 owner.voice.status = Some(Text::HoldPreparing);
+                owner.voice.pending.as_mut().expect("hold 1").collected = false;
             });
             release(&ready.owner, 1, Some(DOWN), cx);
         },

@@ -73,11 +73,19 @@ impl Presence {
                         if !this.voice_current(stamp) || !this.link.input_is(token.gesture()) {
                             return Err(Denied::Stale);
                         }
-                        if this.voice.status != Some(Text::HoldListening) {
+                        let output = this.link.output();
+                        let collected =
+                            this.voice
+                                .gates
+                                .collect(output, token.gesture(), &mic, running);
+                        // Listening shows in the update the owner accepts it, before any copy.
+                        if collected.is_ok()
+                            && let Some(hold) = this.voice.pending.as_mut()
+                        {
+                            hold.collected = true;
                             this.voice_notice(Text::HoldListening, cx);
                         }
-                        let output = this.link.output();
-                        this.voice.gates.collect(output, token.gesture(), &mic, running)
+                        collected
                     });
                     if !matches!(collected, Ok(Err(Denied::Busy))) {
                         refused = !matches!(collected, Ok(Ok(())));
