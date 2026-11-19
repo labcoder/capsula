@@ -7,7 +7,10 @@ use std::time::Duration;
 
 use anyhow::{Context as _, Result, ensure};
 use kumochi_protocol::constants::{DISPLAY_NAME, OBJECT_PREFIX};
-use windows::Win32::Foundation::{HANDLE, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
+use windows::Win32::Foundation::{
+    ERROR_SUCCESS, GetLastError, HANDLE, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT,
+    SetLastError, WPARAM,
+};
 use windows::Win32::Graphics::Gdi::{ClientToScreen, MONITOR_DEFAULTTONEAREST, MonitorFromPoint};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Performance::QueryPerformanceCounter;
@@ -383,6 +386,16 @@ fn finalize_idle(root: HWND, confirmed: usize) -> Result<()> {
 fn restore(root: HWND) -> Result<()> {
     if RAISED.take() {
         band(root, HWND_NOTOPMOST)?;
+        // SAFETY: clears this thread's error slot so a failed read is told from a zero style.
+        unsafe { SetLastError(ERROR_SUCCESS) };
+        // SAFETY: reads back this thread's own window's extended style.
+        let style = unsafe { GetWindowLongPtrW(root, GWL_EXSTYLE) };
+        // SAFETY: reads this thread's error slot straight after the read.
+        let unread = style == 0 && unsafe { GetLastError() } != ERROR_SUCCESS;
+        ensure!(
+            !unread && !has_ex(style, WS_EX_TOPMOST),
+            "the fixture isn't confirmed out of the topmost band"
+        );
     }
     Ok(())
 }

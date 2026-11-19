@@ -598,7 +598,8 @@ is sent, the runner reads, changing nothing, whether the root is visible and top
 word against the foreground window and the milliseconds since the runner found the root. Only a
 failed prepare and an `edit_not_at_point` refusal report that read. Finalization returns the
 fixture to the normal band, even though it was born topmost, because the rest of the session
-expects it below the product's own topmost windows.
+expects it below the product's own topmost windows. It reads the style back after the demotion,
+and a style it can't read or a fixture still topmost fails the finalization.
 If that request fails or cannot arrive, the run refuses and closes its owned fixture instead.
 The demotion follows only a raise, so a prepare that refuses before raising leaves the fixture
 in the band it was born in, and only ending the fixture takes it away. Any failed session ends
