@@ -466,7 +466,7 @@ fn disconnect_retires_the_check_without_releasing_an_admitted_save() {
     });
     state.reconciled(&ControlToShell::AnthropicKeyReconciled {
         request: 2,
-        confirmed: true,
+        read: Some(KeyRecoveryRead::Missing),
     });
     assert_eq!(state.failure(), Some(PasteFailure::Unconfirmed));
     assert!(!state.saved());
@@ -474,11 +474,44 @@ fn disconnect_retires_the_check_without_releasing_an_admitted_save() {
     assert_eq!(state.remove_revision(), None);
     state.reconciled(&ControlToShell::AnthropicKeyReconciled {
         request: 3,
-        confirmed: false,
+        read: None,
     });
     assert!(state.check_available());
     assert!(!state.saved());
     assert!(!state.can_paste());
+}
+
+#[test]
+fn a_local_recovery_read_only_unlocks_its_revision_during_catalog_checking() {
+    let mut state = model(KeyView::Ready);
+    let at = begin(&mut state, KEY);
+    let written = fake_success(&mut state, at);
+    state.written(&written, Instant::now(), |_| true);
+    assert!(state.expire(at, at.deadline));
+    state.check(|_| true);
+    state.receive(KeyView::Checking, Some(2));
+    assert!(!state.can_paste());
+    state.reconciled(&ControlToShell::AnthropicKeyReconciled {
+        request: 2,
+        read: Some(KeyRecoveryRead::Present {
+            revision: 2,
+            rejection: None,
+        }),
+    });
+    assert_eq!(state.view(), Some(KeyView::Checking));
+    assert!(!state.saved());
+    assert!(state.can_paste());
+    assert!(state.remove_revision().is_some());
+    state.reconciled(&ControlToShell::AnthropicKeyReconciled {
+        request: 2,
+        read: Some(KeyRecoveryRead::Missing),
+    });
+    assert_eq!(state.view(), Some(KeyView::Checking));
+    state.receive(KeyView::Checking, Some(2));
+    assert!(state.can_paste());
+    state.receive(KeyView::Checking, Some(3));
+    assert!(!state.can_paste());
+    assert_eq!(state.remove_revision(), None);
 }
 
 #[test]

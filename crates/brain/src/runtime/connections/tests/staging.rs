@@ -366,7 +366,116 @@ async fn committed_paste_survives_disconnect_but_its_reply_does_not_cross_links(
 }
 
 #[tokio::test]
-async fn a_recovery_check_waits_for_adoption_and_catalog_and_replies_only_on_its_link() {
+async fn recovery_local_read_does_not_wait_for_a_catalog_timeout() {
+    recovery_with_unavailable_catalog(None).await;
+}
+
+#[tokio::test]
+async fn recovery_local_read_does_not_wait_for_a_rate_limited_catalog() {
+    recovery_with_unavailable_catalog(Some(429)).await;
+}
+
+struct UnavailableCatalog {
+    status: Option<u16>,
+    entered: Arc<Notify>,
+}
+
+impl Http for UnavailableCatalog {
+    async fn execute(&self, _: Request) -> Result<Response, HttpError> {
+        self.entered.notify_one();
+        let Some(status) = self.status else {
+            return std::future::pending().await;
+        };
+        Ok(Response {
+            status,
+            request_id: None,
+            meta: crate::connections::http_client::ResponseMeta::default(),
+            body: Secret::new(Zeroizing::new(Vec::new())),
+        })
+    }
+}
+
+async fn recovery_with_unavailable_catalog(status: Option<u16>) {
+    let scratch = Scratch::new("key-recovery-unavailable-catalog");
+    let (mut account, store, _) = keyed(&scratch).await;
+    let current = store
+        .names()
+        .into_iter()
+        .find(|name| name.starts_with("key-test/gen/anthropic/"))
+        .expect("stored key chunk");
+    let entered = Arc::new(Notify::new());
+    let notify = Arc::clone(&entered);
+    account.net.http = Arc::new(move || {
+        Ok(SharedHttp::new(UnavailableCatalog {
+            status,
+            entered: Arc::clone(&notify),
+        }))
+    });
+    let snapshot = |anthropic| {
+        ControlToShell::Connections(ConnectionsView {
+            anthropic,
+            anthropic_revision: Some(1),
+            claude_code: ClaudeCodeView::NotFound,
+        })
+    };
+    store.0.lock().expect("fake").denied_read = Some(current);
+    account.connection_event(ConnectionEvent::Op(ConnectionOp::ReconcileAnthropicKey {
+        request: 2,
+    }));
+    let unreadable = next(&mut account).await;
+    assert_eq!(
+        account.handle(unreadable),
+        [
+            snapshot(KeyView::Unconfirmed),
+            ControlToShell::AnthropicKeyReconciled {
+                request: 2,
+                read: None
+            },
+        ]
+    );
+    assert!(account.connections.read.is_none());
+
+    store.0.lock().expect("fake").denied_read = None;
+    account.connection_event(ConnectionEvent::Op(ConnectionOp::ReconcileAnthropicKey {
+        request: 3,
+    }));
+    let loaded = next(&mut account).await;
+    let local = account.handle(loaded);
+    timeout(Duration::from_secs(5), entered.notified())
+        .await
+        .expect("fake catalog entered");
+    if status.is_none() {
+        tokio::time::pause();
+        tokio::time::advance(Duration::from_secs(15)).await;
+    }
+    let checked = next(&mut account).await;
+    let remote = account.handle(checked);
+    if status.is_none() {
+        tokio::time::resume();
+    }
+    assert_eq!(account.connections.view.anthropic, KeyView::Unconfirmed);
+    assert_eq!(
+        local,
+        [
+            snapshot(KeyView::Checking),
+            ControlToShell::AnthropicKeyReconciled {
+                request: 3,
+                read: Some(KeyRecoveryRead::Present {
+                    revision: 1,
+                    rejection: None
+                }),
+            },
+        ],
+        "a healthy local retry resolves recovery before the provider does"
+    );
+    assert_eq!(remote, [snapshot(KeyView::Unconfirmed)]);
+    account
+        .close(tokio::time::Instant::now(), tokio::time::Instant::now())
+        .await;
+}
+
+#[tokio::test]
+async fn a_recovery_check_reads_after_adoption_and_replies_only_on_its_link() {
     let scratch = Scratch::new("key-reconcile");
     let (mut account, store, _) = keyed(&scratch).await;
     let replacement = "sk-ant-api123456";
@@ -422,19 +531,19 @@ async fn a_recovery_check_waits_for_adoption_and_catalog_and_replies_only_on_its
     let loaded = next(&mut account).await;
     assert_eq!(
         account.handle(loaded),
-        [snapshot(KeyView::Checking, Some(2))]
-    );
-    let checked = next(&mut account).await;
-    assert_eq!(
-        account.handle(checked),
         [
-            snapshot(KeyView::Ready, Some(2)),
+            snapshot(KeyView::Checking, Some(2)),
             ControlToShell::AnthropicKeyReconciled {
                 request: 3,
-                confirmed: true
+                read: Some(KeyRecoveryRead::Present {
+                    revision: 2,
+                    rejection: None
+                }),
             },
         ]
     );
+    let checked = next(&mut account).await;
+    assert_eq!(account.handle(checked), [snapshot(KeyView::Ready, Some(2))]);
     account
         .close(tokio::time::Instant::now(), tokio::time::Instant::now())
         .await;

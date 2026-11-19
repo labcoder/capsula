@@ -137,6 +137,20 @@ pub enum KeyRemovalFailure {
     Unconfirmed,
 }
 
+/// What the matching recovery Check established in the local credential store.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum KeyRecoveryRead {
+    /// No stored key.
+    Missing,
+    /// A stored key, before any provider check.
+    Present {
+        /// The current authority revision; local removal can target only this revision.
+        revision: u64,
+        /// A local parse refusal if the stored bytes couldn't be used as an API key.
+        rejection: Option<KeyRejection>,
+    },
+}
+
 /// Both Claude connections, authoritative: the shell never moves on its own.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ConnectionsView {

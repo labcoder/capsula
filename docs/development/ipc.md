@@ -162,10 +162,10 @@ A combined Connections snapshot is never a removal receipt, even if it says
 Unconfirmed or Missing. A refused commit leaves the exact revision retryable.
 
 After an unknown save, a recovery Check uses its own request number. The
-credential worker reads the current key after already admitted adoptions; any
-catalog check then finishes before a conclusive receipt. The brain sends the
-authoritative snapshot immediately before that receipt on the same link. Earlier
-snapshots and inconclusive receipts can't unlock paste or removal.
+credential worker reads the current key after already admitted adoptions. The
+brain sends the local result (no key, the stored revision, or an unreadable
+store) after the snapshot on the same link. Only a matching, successful local
+read unlocks paste or removal. The catalog reports its own outcome separately.
 
 The runtime binds Begin replies/admission to the authenticated shell epoch,
 clears admission on disconnect and refuses staging controls in offline drain.

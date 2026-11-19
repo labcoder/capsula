@@ -5,8 +5,8 @@ use std::mem;
 use std::time::{Duration, Instant};
 
 use kumochi_protocol::message::{
-    ConnectionOp, ControlToShell, KeyRejection, KeyRemovalFailure, KeyStageFailure, KeyStageId,
-    KeyView,
+    ConnectionOp, ControlToShell, KeyRecoveryRead, KeyRejection, KeyRemovalFailure,
+    KeyStageFailure, KeyStageId, KeyView,
 };
 use zeroize::Zeroizing;
 
@@ -128,6 +128,7 @@ pub struct KeyPaste {
     saved: bool,
     removal: Option<RemovalAttempt>,
     reconciliation: Option<u64>,
+    recovery_read: bool,
     failure: Option<PasteFailure>,
 }
 
@@ -145,6 +146,7 @@ impl fmt::Debug for KeyPaste {
 impl KeyPaste {
     pub fn receive(&mut self, view: KeyView, authority_revision: Option<u64>) -> bool {
         let changed = self.view != Some(view) || self.authority_revision != authority_revision;
+        self.recovery_read &= !changed && view == KeyView::Checking;
         self.view = Some(view);
         self.authority_revision = authority_revision;
         if matches!(view, KeyView::Missing) {
@@ -194,7 +196,8 @@ impl KeyPaste {
     }
 
     fn available(&self) -> bool {
-        self.view.is_some_and(|view| view != KeyView::Checking)
+        self.view
+            .is_some_and(|view| view != KeyView::Checking || self.recovery_read)
             && !self.saving()
             && self.removal.is_none()
     }
@@ -319,6 +322,7 @@ impl KeyPaste {
             Ok(()) => {
                 self.saved = true;
                 self.view = Some(KeyView::Checking);
+                self.recovery_read = false;
             }
             Err(error) => self.stage_failed(error),
         }
@@ -380,15 +384,32 @@ impl KeyPaste {
     }
 
     pub fn reconciled(&mut self, reply: &ControlToShell) {
-        let ControlToShell::AnthropicKeyReconciled { request, confirmed } = *reply else {
+        let ControlToShell::AnthropicKeyReconciled { request, read } = *reply else {
             return;
         };
         if self.reconciliation != Some(request) {
             return;
         }
         self.reconciliation = None;
-        if confirmed {
-            self.failure = None;
+        let Some(read) = read else {
+            return;
+        };
+        self.failure = None;
+        self.saved = false;
+        match read {
+            KeyRecoveryRead::Missing => {
+                self.receive(KeyView::Missing, None);
+            }
+            KeyRecoveryRead::Present {
+                revision,
+                rejection,
+            } => {
+                self.receive(
+                    rejection.map_or(KeyView::Checking, KeyView::Rejected),
+                    Some(revision),
+                );
+                self.recovery_read = rejection.is_none();
+            }
         }
     }
 

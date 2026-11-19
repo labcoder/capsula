@@ -28,8 +28,8 @@ pub use account::{
 };
 pub use connections::{
     ANTHROPIC_KEY_BYTES, AuditFailed, ClaudeCodeView, ClaudeVersion, ConnectionKind, ConnectionOp,
-    ConnectionsView, KeyRejection, KeyRemovalFailure, KeyStageFailure, KeyStageId, KeyStagePlan,
-    KeyView, PolicyFailed, Unsupported, VersionError, validate_anthropic_key,
+    ConnectionsView, KeyRecoveryRead, KeyRejection, KeyRemovalFailure, KeyStageFailure, KeyStageId,
+    KeyStagePlan, KeyView, PolicyFailed, Unsupported, VersionError, validate_anthropic_key,
 };
 pub use content::Content;
 pub use error::{
@@ -759,8 +759,8 @@ pub enum ControlToShell {
     AnthropicKeyReconciled {
         /// The shell's outstanding recovery check number.
         request: u64,
-        /// True only when the preceding Connections snapshot resolves the current key state.
-        confirmed: bool,
+        /// The current local key state, or None if the worker couldn't establish it.
+        read: Option<KeyRecoveryRead>,
     },
 }
 

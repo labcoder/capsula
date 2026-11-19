@@ -5,7 +5,7 @@ use std::fmt;
 use kumochi_protocol::Secret;
 use kumochi_protocol::message::{
     ClaudeCodeView, ConnectionKind, ConnectionOp, ConnectionsView, ControlToShell, DataToShell,
-    KeyRemovalFailure, KeyStageFailure, KeyStageId, KeyStagePlan, KeyView,
+    KeyRecoveryRead, KeyRemovalFailure, KeyStageFailure, KeyStageId, KeyStagePlan, KeyView,
 };
 use tokio::task::JoinHandle;
 use tokio::time::{Duration, timeout};
@@ -352,7 +352,7 @@ impl Accounts {
         }
         let refused = ControlToShell::AnthropicKeyReconciled {
             request,
-            confirmed: false,
+            read: None,
         };
         if self.connections.removing.is_some() || self.connections.check_request.is_some() {
             return vec![refused];
@@ -374,14 +374,21 @@ impl Accounts {
             .map(|(_, request)| request)
     }
 
-    fn settled_check(&mut self, generation: u64) -> Option<ControlToShell> {
-        let confirmed = match self.connections.view.anthropic {
-            KeyView::Checking => return None,
-            KeyView::Unconfirmed => false,
-            KeyView::Missing | KeyView::Ready | KeyView::Rejected(_) => true,
-        };
+    fn recovery_read(&mut self, generation: u64, result: &KeyResult) -> Option<ControlToShell> {
         let request = self.take_check_request(generation)?;
-        Some(ControlToShell::AnthropicKeyReconciled { request, confirmed })
+        let read = match (result.0, &result.1) {
+            (_, Ok(None)) => Some(KeyRecoveryRead::Missing),
+            (Some(revision), Ok(Some(_))) => Some(KeyRecoveryRead::Present {
+                revision,
+                rejection: None,
+            }),
+            (Some(revision), Err(KeyError::Rejected(reason))) => Some(KeyRecoveryRead::Present {
+                revision,
+                rejection: Some(*reason),
+            }),
+            _ => None,
+        };
+        Some(ControlToShell::AnthropicKeyReconciled { request, read })
     }
 
     fn stage_done(
@@ -501,7 +508,7 @@ impl Accounts {
             .take_check_request(self.connections.generation)
             .map(|request| ControlToShell::AnthropicKeyReconciled {
                 request,
-                confirmed: false,
+                read: None,
             });
         self.load_key(self.connections.removing.map_or(KeyOp::Load, KeyOp::Remove));
         let removal = if self.connections.loading {
@@ -548,8 +555,8 @@ impl Accounts {
                 if generation != self.connections.generation || !self.connections.loading {
                     return Vec::new();
                 }
-                self.key_loaded(generation, result)
-                    .or_else(|| self.settled_check(generation))
+                let recovered = self.recovery_read(generation, &result);
+                self.key_loaded(generation, result).or(recovered)
             }
             ConnectionEvent::Checked { generation, result } => {
                 if generation != self.connections.generation || self.connections.read.is_none() {
@@ -569,7 +576,7 @@ impl Accounts {
                     }
                 }
                 self.connections.unsent = true;
-                self.settled_check(generation)
+                None
             }
         };
         std::iter::once(ControlToShell::Connections(self.connections.view))
