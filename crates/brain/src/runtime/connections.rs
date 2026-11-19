@@ -821,6 +821,18 @@ impl Brain {
         if authority.tag != tag {
             return None;
         }
+        // Every send, a job's rereading of the saved choice included, goes only to a model the
+        // checked catalog offers now.
+        let model = &request.request.choice.as_ref()?.model;
+        if !self
+            .account
+            .connections
+            .models
+            .iter()
+            .any(|offered| offered.info.slug == *model)
+        {
+            return None;
+        }
         let authority = Arc::clone(authority);
         let allowance = self.key_allowance.of(request.run)?;
         let account = self.account.reads_tx.clone();

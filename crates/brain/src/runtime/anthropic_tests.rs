@@ -658,3 +658,148 @@ async fn a_title_jobs_refused_post_leaves_the_next_ask_unsent() {
         "the catalog read, the answer and the refused title"
     );
 }
+
+/// A title rereads the saved default when its task ends. A model the key's catalog doesn't offer
+/// gets no request, even when the run before it was answered on an offered one.
+#[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one real shell session through a default change and its title"
+)]
+async fn a_title_never_posts_to_a_saved_model_the_catalog_does_not_offer() {
+    let scratch = Scratch::new("offline-key-unoffered-title");
+    let store = FakeStore::default();
+    let lock = scratch.db().with_file_name("offline-key-runtime.lock");
+    Vault::with_service(store.clone(), "offline-key-runtime", &lock)
+        .expect("fake vault")
+        .save_anthropic_key(KEY.as_bytes())
+        .expect("synthetic key");
+    std::fs::write(
+        scratch.db().with_file_name(kumochi_protocol::constants::CONFIG_FILE),
+        format!("default_model = {{ connection = \"AnthropicKey\", model = \"{MODEL}\", effort = \"Medium\" }}\n"),
+    ).expect("settings");
+    let catalog = json!({"data":[{"type":"model","id":MODEL,"display_name":"Synthetic model"}],"has_more":false});
+    let gate = Arc::new(tokio::sync::Notify::new());
+    let peer = Scripted(Arc::new(Mutex::new(Script {
+        responses: [
+            http("application/json", &catalog.to_string()),
+            answers("Done."),
+            answers("Synthetic title"),
+        ]
+        .into(),
+        connect_gate: Some(Arc::clone(&gate)),
+        ..Script::default()
+    })));
+    gate.notify_one();
+    let worker = Worker::new(
+        Box::new(move || Vault::with_service(store.clone(), "offline-key-runtime", &lock)),
+        Arc::new(FixedClock(0)),
+    );
+    let mut accounts = Accounts::spawn_unconfigured(worker, test_support::net()).expect("worker");
+    accounts
+        .connections
+        .use_test_transport(Transport::offline(peer.clone(), 1, 2));
+    let mut brain = test_support::brain_with(&scratch, "", accounts);
+    brain.compact_at = u64::MAX;
+    let mut seen = brain.observe();
+    let ((control, data), mut shell) = duplex();
+    let mut tap = Tap::from_env();
+    let starts = || peer.0.lock().expect("peer").starts;
+    let unoffered = kumochi_protocol::message::ModelChoice {
+        model: kumochi_protocol::message::ModelSlug::new("claude-opus-5-5").expect("slug"),
+        effort: kumochi_protocol::message::Effort::Medium,
+        connection: kumochi_protocol::message::ConnectionKind::AnthropicKey,
+    };
+    let client = async {
+        loop {
+            if matches!(shell.next_control().await.expect("control"),
+                Some(ControlToShell::Connections(view)) if view.anthropic == KeyView::Ready)
+            {
+                break;
+            }
+        }
+        let DataToShell::Models { .. } = shell.data().await else {
+            panic!("the verified catalog did not arrive");
+        };
+        let message = DataToBrain::TextSubmit {
+            turn: 1,
+            screen: ScreenChoice::None,
+            thread: None,
+            text: "start".into(),
+        };
+        let frame = frame::encode(&message, Pipe::Data).expect("encodes");
+        shell.data_out.write_all(&frame).await.expect("submitted");
+        timeout(PATIENCE, async {
+            while starts() < 2 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the run's round connects");
+        shell
+            .send(&ControlToBrain::Settings(
+                kumochi_protocol::message::SettingsOp::SetDefaultModel(unoffered.clone()),
+            ))
+            .await;
+        loop {
+            if let Some(ControlToShell::Settings { view, answer: true }) =
+                shell.next_control().await.expect("control")
+            {
+                assert_eq!(view.default_model.as_ref(), Some(&unoffered));
+                break;
+            }
+        }
+        gate.notify_one();
+        let run = loop {
+            let (run, phase) = shell.state().await;
+            match phase {
+                Phase::Done => break run,
+                Phase::Thinking | Phase::Answering => {}
+                _ => panic!("unexpected phase {phase:?}"),
+            }
+        };
+        assert!(shell.read_to_end(run).await > 0);
+        timeout(PATIENCE, async {
+            loop {
+                if let crate::runtime::Seen::StoreOpQueued(crate::coordinator::StoreOp::ReadJob(
+                    crate::coordinator::ReadJob {
+                        kind: crate::coordinator::JobKind::Title,
+                        ..
+                    },
+                )) = seen.recv().await.expect("the brain reports")
+                {
+                    return;
+                }
+            }
+        })
+        .await
+        .expect("the task's end reads its title job");
+        gate.notify_one();
+        let titled = timeout(Duration::from_secs(3), async {
+            loop {
+                if let crate::runtime::Seen::StoreOpQueued(
+                    crate::coordinator::StoreOp::SetTitle { .. },
+                ) = seen.recv().await.expect("the brain reports")
+                {
+                    return;
+                }
+            }
+        })
+        .await;
+        assert!(titled.is_err(), "no title comes from an unoffered model");
+        drop(shell);
+    };
+    let (ended, ()) = timeout(PATIENCE, async {
+        tokio::join!(brain.serve(control, data, &mut tap), client)
+    })
+    .await
+    .expect("routed runtime finishes");
+    assert_eq!(ended, Ended::Lost);
+    brain.close().await;
+    let script = peer.0.lock().expect("peer");
+    assert_eq!(
+        script.starts, 2,
+        "the catalog and the run's round, and no title"
+    );
+    assert_eq!(script.responses.len(), 1, "the title never connected");
+}
