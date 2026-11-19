@@ -23,7 +23,7 @@ pub enum ConnectionKind {
 
 /// Something the user asked of a Claude connection; answered by one
 /// [`crate::message::ControlToShell::Connections`].
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ConnectionOp {
     /// The shell staged a pasted key in Credential Manager; the brain checks it and moves it.
     AnthropicKeyStaged {
@@ -32,8 +32,13 @@ pub enum ConnectionOp {
     },
     /// Check the saved key again, after it was left unconfirmed.
     CheckAnthropicKey,
-    /// Forget the saved key.
-    RemoveAnthropicKey,
+    /// Forget the exact saved key that the user confirmed.
+    RemoveAnthropicKey {
+        /// The confirmed authority revision, unrelated to the key material.
+        revision: u64,
+        /// The shell's outstanding removal request number.
+        request: u64,
+    },
     /// Start Claude Code's own sign-in, in a console the user answers.
     ConnectClaudeCode,
     /// Stop that sign-in.
@@ -49,6 +54,30 @@ pub enum ConnectionOp {
         /// The validated trimmed byte length, not key text.
         len: u16,
     },
+    /// Recheck the saved key after a paste whose outcome is unknown.
+    ReconcileAnthropicKey {
+        /// The shell's outstanding recovery check number.
+        request: u64,
+    },
+}
+
+impl fmt::Debug for ConnectionOp {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::AnthropicKeyStaged { plan } => f
+                .debug_struct("AnthropicKeyStaged")
+                .field("plan", plan)
+                .finish(),
+            Self::CheckAnthropicKey => f.write_str("CheckAnthropicKey"),
+            Self::RemoveAnthropicKey { .. } => f.write_str("RemoveAnthropicKey"),
+            Self::ConnectClaudeCode => f.write_str("ConnectClaudeCode"),
+            Self::CancelClaudeSignIn => f.write_str("CancelClaudeSignIn"),
+            Self::DisconnectClaudeCode => f.write_str("DisconnectClaudeCode"),
+            Self::FindClaudeCode => f.write_str("FindClaudeCode"),
+            Self::BeginAnthropicKeyStage { .. } => f.write_str("BeginAnthropicKeyStage"),
+            Self::ReconcileAnthropicKey { .. } => f.write_str("ReconcileAnthropicKey"),
+        }
+    }
 }
 
 /// A brain-minted write-once staging identity; never key material.
@@ -99,11 +128,36 @@ pub enum KeyStageFailure {
     Rejected(KeyRejection),
 }
 
+/// Why a specific key removal didn't commit.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum KeyRemovalFailure {
+    /// The confirmed key no longer matches the authority head.
+    Changed,
+    /// The worker couldn't commit the removal; the same revision can be retried.
+    Unconfirmed,
+}
+
+/// What the matching recovery Check established in the local credential store.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum KeyRecoveryRead {
+    /// No stored key.
+    Missing,
+    /// A stored key, before any provider check.
+    Present {
+        /// The current authority revision; local removal can target only this revision.
+        revision: u64,
+        /// A local parse refusal if the stored bytes couldn't be used as an API key.
+        rejection: Option<KeyRejection>,
+    },
+}
+
 /// Both Claude connections, authoritative: the shell never moves on its own.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ConnectionsView {
     /// The Anthropic key.
     pub anthropic: KeyView,
+    /// The authority revision for the displayed saved key, when known.
+    pub anthropic_revision: Option<u64>,
     /// Claude Code.
     pub claude_code: ClaudeCodeView,
 }

@@ -12,6 +12,7 @@ fn bytes(value: &[u8]) -> SecretBytes {
 fn loaded(vault: &mut Vault<FakeStore>) -> Option<String> {
     vault
         .anthropic(KeyOp::Load)
+        .1
         .expect("key read")
         .map(|key| key.expose().as_str().to_owned())
 }
@@ -35,7 +36,7 @@ fn the_current_key_loads_and_each_bad_key_is_rejected_exactly() {
         let (_scratch, path, service, store) = setup(label);
         let mut vault = open(&store, &service, &path);
         vault.save_anthropic_key(value).expect("current key");
-        let result = vault.anthropic(KeyOp::Load);
+        let result = vault.anthropic(KeyOp::Load).1;
         match expected {
             None => assert_eq!(result.expect("loaded").expect("key").expose().as_str(), KEY),
             Some(expected) => assert!(
@@ -96,7 +97,8 @@ fn removal_commits_its_fence_even_while_every_delete_is_refused() {
     store.0.lock().expect("fake lock").refusing = true;
     assert_eq!(
         vault
-            .anthropic(KeyOp::Remove)
+            .anthropic(KeyOp::Remove(vault.anthropic_revision()))
+            .1
             .expect("the fence commits")
             .map(|_| ()),
         None
@@ -125,7 +127,7 @@ fn a_refused_removal_commit_keeps_the_key_until_a_retry_commits() {
     refuse_commits(&path);
     assert!(
         matches!(
-            vault.anthropic(KeyOp::Remove),
+            vault.anthropic(KeyOp::Remove(vault.anthropic_revision())).1,
             Err(KeyError::Vault(VaultError::Authority))
         ),
         "a refused commit is not a removal"
@@ -133,7 +135,11 @@ fn a_refused_removal_commit_keeps_the_key_until_a_retry_commits() {
     allow_commits(&path);
     assert_eq!(loaded(&mut vault).as_deref(), Some(KEY));
     assert_eq!(
-        vault.anthropic(KeyOp::Remove).expect("retry").map(|_| ()),
+        vault
+            .anthropic(KeyOp::Remove(vault.anthropic_revision()))
+            .1
+            .expect("retry")
+            .map(|_| ()),
         None
     );
     assert_eq!(loaded(&mut vault), None);
@@ -150,7 +156,7 @@ fn a_missed_read_of_the_current_key_is_unsettled_never_missing() {
     store.0.lock().expect("fake lock").missed_reads = 1;
     assert!(
         matches!(
-            vault.anthropic(KeyOp::Load),
+            vault.anthropic(KeyOp::Load).1,
             Err(KeyError::Vault(VaultError::Store(
                 CredentialStoreError::Unsettled
             )))

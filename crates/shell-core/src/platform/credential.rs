@@ -1,7 +1,5 @@
 //! Consumes a validated paste and a brain-issued permit without sending key bytes on the pipe.
 
-#![expect(dead_code, reason = "C7a-2b supplies the Accounts paste caller")]
-
 use std::fmt;
 
 use kumochi_protocol::constants::{self, CREDENTIAL_SERVICE};
@@ -38,24 +36,45 @@ impl StagePermit {
 
 #[derive(Debug, PartialEq, Eq, thiserror::Error)]
 pub(crate) enum StageError {
+    #[error("staging deadline elapsed")]
+    Expired,
     #[error("invalid staging plan")]
     InvalidPlan,
     #[error("staging length mismatch")]
     LengthMismatch,
+    #[error("staging identity mismatch")]
+    IdentityMismatch,
     #[error("the credential store is unavailable")]
     Store,
 }
 
+#[cfg(windows)]
 pub(crate) trait KeyStageWriter {
     fn write(&self, permit: StagePermit, key: PastedAnthropicKey)
     -> Result<KeyStageId, StageError>;
+}
+
+#[cfg(windows)]
+pub(crate) fn write_key_stage(
+    permit: StagePermit,
+    key: PastedAnthropicKey,
+) -> Result<KeyStageId, StageError> {
+    super::windows::WindowsKeyStageWriter.write(permit, key)
+}
+
+#[cfg(not(windows))]
+pub(crate) fn write_key_stage(
+    permit: StagePermit,
+    key: PastedAnthropicKey,
+) -> Result<KeyStageId, StageError> {
+    write_stage(permit, key, |_, _| Err(StageError::Store))
 }
 
 #[expect(
     clippy::needless_pass_by_value,
     reason = "a write attempt consumes both the one-use permit and the pasted key"
 )]
-pub(super) fn write_stage(
+pub(crate) fn write_stage(
     permit: StagePermit,
     key: PastedAnthropicKey,
     mut store: impl FnMut(&str, &[u8]) -> Result<(), StageError>,
@@ -96,7 +115,7 @@ mod tests {
         fail_at: Option<usize>,
     }
 
-    impl KeyStageWriter for FakeWriter {
+    impl FakeWriter {
         #[expect(
             clippy::panic_in_result_fn,
             reason = "the fake asserts the write-once contract"

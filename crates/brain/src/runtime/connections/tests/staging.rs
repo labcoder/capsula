@@ -3,6 +3,18 @@ use kumochi_protocol::constants::{generation_hex, generation_target};
 
 mod fold;
 
+#[test]
+fn the_staging_worker_does_not_print_the_key_length() {
+    for len in [127, 128] {
+        let work = StageWork::Begin {
+            epoch: 1,
+            request: 7,
+            len,
+        };
+        assert_eq!(format!("{work:?}"), "StageWork::Begin");
+    }
+}
+
 #[tokio::test]
 async fn a_duplicate_notification_never_queues_or_rechecks_a_committed_key() {
     let scratch = Scratch::new("stage-runtime-once");
@@ -73,14 +85,14 @@ async fn stale_begin_replies_and_failed_queue_cannot_admit_a_paste() {
             account.connection_event(ConnectionEvent::StagePlan {
                 epoch,
                 request,
-                result: Ok(plan)
+                result: Ok((1, plan))
             }),
             vec![]
         );
         assert_eq!(account.connections.stage_request, Some(3));
         assert_eq!(account.connections.stage_admission, None);
     }
-    account.connections.removing = true;
+    account.connections.removing = Some(1);
     assert_eq!(
         account.stage_op(
             1,
@@ -105,7 +117,7 @@ async fn stale_begin_replies_and_failed_queue_cannot_admit_a_paste() {
         queued.try_recv(),
         Err(std::sync::mpsc::TryRecvError::Empty)
     ));
-    account.connections.removing = false;
+    account.connections.removing = None;
     drop(queued);
     assert_eq!(
         account.stage_op(
@@ -354,6 +366,289 @@ async fn committed_paste_survives_disconnect_but_its_reply_does_not_cross_links(
 }
 
 #[tokio::test]
+async fn recovery_local_read_does_not_wait_for_a_catalog_timeout() {
+    recovery_with_unavailable_catalog(None).await;
+}
+
+#[tokio::test]
+async fn recovery_local_read_does_not_wait_for_a_rate_limited_catalog() {
+    recovery_with_unavailable_catalog(Some(429)).await;
+}
+
+struct UnavailableCatalog {
+    status: Option<u16>,
+    entered: Arc<Notify>,
+}
+
+impl Http for UnavailableCatalog {
+    async fn execute(&self, _: Request) -> Result<Response, HttpError> {
+        self.entered.notify_one();
+        let Some(status) = self.status else {
+            return std::future::pending().await;
+        };
+        Ok(Response {
+            status,
+            request_id: None,
+            meta: crate::connections::http_client::ResponseMeta::default(),
+            body: Secret::new(Zeroizing::new(Vec::new())),
+        })
+    }
+}
+
+async fn recovery_with_unavailable_catalog(status: Option<u16>) {
+    let scratch = Scratch::new("key-recovery-unavailable-catalog");
+    let (mut account, store, _) = keyed(&scratch).await;
+    let current = store
+        .names()
+        .into_iter()
+        .find(|name| name.starts_with("key-test/gen/anthropic/"))
+        .expect("stored key chunk");
+    let entered = Arc::new(Notify::new());
+    let notify = Arc::clone(&entered);
+    account.net.http = Arc::new(move || {
+        Ok(SharedHttp::new(UnavailableCatalog {
+            status,
+            entered: Arc::clone(&notify),
+        }))
+    });
+    let snapshot = |anthropic| {
+        ControlToShell::Connections(ConnectionsView {
+            anthropic,
+            anthropic_revision: Some(1),
+            claude_code: ClaudeCodeView::NotFound,
+        })
+    };
+    store.0.lock().expect("fake").denied_read = Some(current);
+    account.connection_event(ConnectionEvent::Op(ConnectionOp::ReconcileAnthropicKey {
+        request: 2,
+    }));
+    let unreadable = next(&mut account).await;
+    assert_eq!(
+        account.handle(unreadable),
+        [
+            snapshot(KeyView::Unconfirmed),
+            ControlToShell::AnthropicKeyReconciled {
+                request: 2,
+                read: None
+            },
+        ]
+    );
+    assert!(account.connections.read.is_none());
+
+    store.0.lock().expect("fake").denied_read = None;
+    account.connection_event(ConnectionEvent::Op(ConnectionOp::ReconcileAnthropicKey {
+        request: 3,
+    }));
+    let loaded = next(&mut account).await;
+    let local = account.handle(loaded);
+    timeout(Duration::from_secs(5), entered.notified())
+        .await
+        .expect("fake catalog entered");
+    if status.is_none() {
+        tokio::time::pause();
+        tokio::time::advance(Duration::from_secs(15)).await;
+    }
+    let checked = next(&mut account).await;
+    let remote = account.handle(checked);
+    if status.is_none() {
+        tokio::time::resume();
+    }
+    assert_eq!(account.connections.view.anthropic, KeyView::Unconfirmed);
+    assert_eq!(
+        local,
+        [
+            snapshot(KeyView::Checking),
+            ControlToShell::AnthropicKeyReconciled {
+                request: 3,
+                read: Some(KeyRecoveryRead::Present {
+                    revision: 1,
+                    rejection: None
+                }),
+            },
+        ],
+        "a healthy local retry resolves recovery before the provider does"
+    );
+    assert_eq!(remote, [snapshot(KeyView::Unconfirmed)]);
+    account
+        .close(tokio::time::Instant::now(), tokio::time::Instant::now())
+        .await;
+}
+
+#[tokio::test]
+async fn a_recovery_check_reads_after_adoption_and_replies_only_on_its_link() {
+    let scratch = Scratch::new("key-reconcile");
+    let (mut account, store, _) = keyed(&scratch).await;
+    let replacement = "sk-ant-api123456";
+    let plan = begin(&mut account, 1, 16).await;
+    plant(&store, plan, replacement);
+    assert_eq!(
+        account.stage_op(1, ConnectionOp::AnthropicKeyStaged { plan: plan.id }),
+        vec![]
+    );
+    let snapshot = |anthropic, anthropic_revision| {
+        ControlToShell::Connections(ConnectionsView {
+            anthropic,
+            anthropic_revision,
+            claude_code: ClaudeCodeView::NotFound,
+        })
+    };
+    assert_eq!(
+        account.connection_event(ConnectionEvent::Op(ConnectionOp::ReconcileAnthropicKey {
+            request: 2
+        })),
+        [snapshot(KeyView::Checking, None)]
+    );
+    account.connections.stage_session(None);
+    account.connections.stage_session(Some(2));
+    let adopted = next(&mut account).await;
+    assert!(matches!(
+        adopted,
+        Event::Connection(ConnectionEvent::StageDone { result: Ok(_), .. })
+    ));
+    assert_eq!(account.handle(adopted), vec![]);
+    let loaded = next(&mut account).await;
+    assert_eq!(
+        account.handle(loaded),
+        [snapshot(KeyView::Checking, Some(2))]
+    );
+    let checked = next(&mut account).await;
+    assert_eq!(account.handle(checked), [snapshot(KeyView::Ready, Some(2))]);
+    assert_eq!(
+        account
+            .connections
+            .key
+            .as_ref()
+            .map(|key| key.expose().as_str()),
+        Some(replacement)
+    );
+
+    assert_eq!(
+        account.connection_event(ConnectionEvent::Op(ConnectionOp::ReconcileAnthropicKey {
+            request: 3
+        })),
+        [snapshot(KeyView::Checking, None)]
+    );
+    let loaded = next(&mut account).await;
+    assert_eq!(
+        account.handle(loaded),
+        [
+            snapshot(KeyView::Checking, Some(2)),
+            ControlToShell::AnthropicKeyReconciled {
+                request: 3,
+                read: Some(KeyRecoveryRead::Present {
+                    revision: 2,
+                    rejection: None
+                }),
+            },
+        ]
+    );
+    let checked = next(&mut account).await;
+    assert_eq!(account.handle(checked), [snapshot(KeyView::Ready, Some(2))]);
+    account
+        .close(tokio::time::Instant::now(), tokio::time::Instant::now())
+        .await;
+}
+
+#[tokio::test]
+async fn removal_confirmed_on_the_next_link_cannot_delete_an_earlier_links_adoption() {
+    let scratch = Scratch::new("stage-runtime-stale-removal");
+    let store = FakeStore::default();
+    let lock = scratch.db().with_file_name("key-test.lock");
+    save_key(&store, &lock);
+    let (entered, at_gate) = std::sync::mpsc::channel();
+    let (resume, held) = std::sync::mpsc::channel();
+    let armed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let mut held_store = Some(HeldStore {
+        armed: Arc::clone(&armed),
+        store: store.clone(),
+        entered,
+        resume: std::sync::Mutex::new(Some(held)),
+    });
+    let worker = Worker::new(
+        Box::new(move || {
+            Vault::with_service(held_store.take().expect("one open"), "key-test", &lock)
+        }),
+        Arc::new(FixedClock(0)),
+    );
+    let mut account = Accounts::spawn_unconfigured(
+        worker,
+        Net {
+            http: Arc::new(|| Ok(SharedHttp::new(EmptyCatalog))),
+            ..test_support::net()
+        },
+    )
+    .expect("worker");
+    settle(&mut account).await;
+    account.connections.stage_session(Some(1));
+    let replacement = "sk-ant-api123456";
+    let plan = begin(&mut account, 1, 16).await;
+    plant(&store, plan, replacement);
+    armed.store(true, std::sync::atomic::Ordering::SeqCst);
+    account.stage_op(1, ConnectionOp::AnthropicKeyStaged { plan: plan.id });
+    tokio::task::spawn_blocking(move || {
+        at_gate
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("adoption held");
+    })
+    .await
+    .expect("gate joined");
+
+    account.connections.stage_session(None);
+    account.connections.stage_session(Some(2));
+    let ControlToShell::Connections(ConnectionsView {
+        anthropic: KeyView::Ready,
+        anthropic_revision: Some(revision),
+        ..
+    }) = account.connections.connected()
+    else {
+        panic!("the next link still sees the old Ready key");
+    };
+    let remove = ConnectionOp::RemoveAnthropicKey {
+        revision,
+        request: 1,
+    };
+    account.connection_event(ConnectionEvent::Op(remove));
+    resume.send(()).expect("release adoption");
+    let adopted = next(&mut account).await;
+    assert!(matches!(
+        adopted,
+        Event::Connection(ConnectionEvent::StageDone {
+            epoch: 1,
+            result: Ok(_),
+            ..
+        })
+    ));
+    assert_eq!(
+        account.handle(adopted),
+        vec![],
+        "the old link's acknowledgement is lost"
+    );
+    assert_eq!(account.connections.view.anthropic, KeyView::Checking);
+    for retry in [false, true] {
+        if retry {
+            account.connection_event(ConnectionEvent::Op(remove));
+        }
+        settle(&mut account).await;
+        assert_eq!(account.connections.view.anthropic, KeyView::Ready);
+        assert_eq!(
+            account.connections.view.anthropic_revision,
+            Some(revision + 1)
+        );
+        assert_eq!(
+            account
+                .connections
+                .key
+                .as_ref()
+                .map(|key| key.expose().as_str()),
+            Some(replacement)
+        );
+    }
+    account
+        .close(tokio::time::Instant::now(), tokio::time::Instant::now())
+        .await;
+}
+
+#[tokio::test]
 async fn fifo_adopt_then_begin_uses_the_new_head_and_remove_fences_late_results() {
     let scratch = Scratch::new("stage-runtime-fifo");
     let (mut account, store, _) = keyed(&scratch).await;
@@ -417,13 +712,16 @@ async fn fifo_adopt_then_begin_uses_the_new_head_and_remove_fences_late_results(
     );
     settle(&mut account).await;
     let generation = account.connections.generation;
-    account.connection_event(ConnectionEvent::Op(ConnectionOp::RemoveAnthropicKey));
+    account.connection_event(ConnectionEvent::Op(ConnectionOp::RemoveAnthropicKey {
+        revision: 3,
+        request: 1,
+    }));
     assert_eq!(
         account.connection_event(ConnectionEvent::StageDone {
             epoch: 1,
             generation,
             plan: plan.id,
-            result: Ok(key())
+            result: Ok((1, key()))
         }),
         vec![ControlToShell::AnthropicKeyStageDone {
             plan: plan.id,

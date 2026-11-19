@@ -258,6 +258,7 @@ fn release(brain: &mut Brain) {
 
 const BOTH_READY: ControlToShell = ControlToShell::Connections(ConnectionsView {
     anthropic: KeyView::Ready,
+    anthropic_revision: Some(1),
     claude_code: READY,
 });
 

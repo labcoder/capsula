@@ -143,7 +143,7 @@ async fn a_closed_save_receiver_cannot_drop_the_queued_removal() {
         loaded,
         Input::Vault(crate::connections::account::Done::Loaded(Ok(_)))
     ));
-    assert!(matches!(key, Ok(None)));
+    assert!(matches!(key.1, Ok(None)));
     let removed = tokio::time::timeout(Duration::from_secs(5), remove_rx)
         .await
         .expect("removal finishes")

@@ -298,6 +298,7 @@ fn connection_ops_warm_and_the_connections_view_keep_their_fields() {
             Direction::ToShell,
             &ControlToShell::Connections(ConnectionsView {
                 anthropic: KeyView::Unconfirmed,
+                anthropic_revision: Some(1),
                 claude_code: ClaudeCodeView::SignedOut {
                     version: ClaudeVersion {
                         major: 2,
@@ -312,8 +313,68 @@ fn connection_ops_warm_and_the_connections_view_keep_their_fields() {
     dump(&mut recording(&records).as_slice(), &mut out).expect("dumps");
     assert_eq!(
         String::from_utf8(out).expect("utf-8"),
-        "    0 Control shell -> brain  Connection(CheckAnthropicKey)\n    1 Control shell -> brain  Warm { thread: ThreadId(3) }\n    2 Control brain -> shell  Connections(ConnectionsView { anthropic: Unconfirmed, claude_code: SignedOut { version: ClaudeVersion { major: 2, minor: 1, patch: 306 } } })\n3 frames\n"
+        "    0 Control shell -> brain  Connection(CheckAnthropicKey)\n    1 Control shell -> brain  Warm { thread: ThreadId(3) }\n    2 Control brain -> shell  Connections(ConnectionsView { anthropic: Unconfirmed, anthropic_revision: Some(1), claude_code: SignedOut { version: ClaudeVersion { major: 2, minor: 1, patch: 306 } } })\n3 frames\n"
     );
+}
+
+#[test]
+fn staging_frames_are_indistinguishable_at_different_encoded_widths() {
+    use crate::message::{KeyStageId, KeyStagePlan};
+    let plan = KeyStageId([19; 16]);
+    let messages = |len| {
+        (
+            ControlToBrain::Connection(ConnectionOp::BeginAnthropicKeyStage { request: 7, len }),
+            ControlToShell::AnthropicKeyStage {
+                request: 7,
+                result: Ok(KeyStagePlan { id: plan, len }),
+            },
+        )
+    };
+    let short = messages(127);
+    let long = messages(128);
+    assert_eq!(
+        wire_len(&short.0, Pipe::Control) + 1,
+        wire_len(&long.0, Pipe::Control)
+    );
+    assert_eq!(
+        wire_len(&short.1, Pipe::Control) + 1,
+        wire_len(&long.1, Pipe::Control)
+    );
+    assert_eq!(format!("{short:?}"), format!("{long:?}"));
+    let capture = |(begin, reply): &(ControlToBrain, ControlToShell)| {
+        recording(&[
+            record(Direction::ToBrain, begin),
+            record(Direction::ToShell, reply),
+            record(
+                Direction::ToBrain,
+                &ControlToBrain::Connection(ConnectionOp::AnthropicKeyStaged { plan }),
+            ),
+            record(
+                Direction::ToShell,
+                &ControlToShell::AnthropicKeyStageDone {
+                    plan,
+                    result: Ok(()),
+                },
+            ),
+        ])
+    };
+    let file = capture(&short);
+    assert_eq!(file, capture(&long));
+    let mut reader = &file[MAGIC.len()..];
+    for op in [
+        "BeginAnthropicKeyStage",
+        "AnthropicKeyStage",
+        "AnthropicKeyStaged",
+        "AnthropicKeyStageDone",
+    ] {
+        let record = read(&mut reader).expect("read").expect("stage record");
+        assert_eq!(
+            (record.op.as_str(), record.len, record.payload.as_ref()),
+            (op, 0, None)
+        );
+        assert_eq!(record.describe(), op);
+    }
+    assert_eq!(read(&mut reader).expect("end"), None);
 }
 
 #[test]

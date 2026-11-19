@@ -1,7 +1,8 @@
 //! The pipe tap: a dev-only recording of the brain's control frames, which `cargo xtask
 //! pipe-dump` prints. It fails closed: a record holds the frame's op name and length, and its
 //! fields only when the op is on an explicit content-free list, so a new op stays redacted until
-//! someone lists it. An unlisted message is never serialized for the tap.
+//! someone lists it. An unlisted message is never serialized for the tap, and staging records
+//! omit the wire length by storing zero.
 //!
 //! A recording starts with [`MAGIC`]. Each record is the pipe, the direction, the op name (a
 //! length byte, then ASCII), the payload's `u32` little-endian length, a flag byte, and when the
@@ -60,6 +61,10 @@ impl Tapped for ControlToBrain {
             Self::GestureCancel { .. } => "GestureCancel",
             Self::FocusHint { .. } => "FocusHint",
             Self::ExclusionLapsed { .. } => "ExclusionLapsed",
+            Self::Connection(ConnectionOp::BeginAnthropicKeyStage { .. }) => {
+                "BeginAnthropicKeyStage"
+            }
+            Self::Connection(ConnectionOp::AnthropicKeyStaged { .. }) => "AnthropicKeyStaged",
             Self::Connection(_) => "Connection",
             Self::Warm { .. } => "Warm",
             Self::KeyDown { .. } => "KeyDown",
@@ -105,7 +110,6 @@ impl Tapped for ControlToBrain {
                 )
                 | Self::Connection(
                     ConnectionOp::CheckAnthropicKey
-                        | ConnectionOp::RemoveAnthropicKey
                         | ConnectionOp::ConnectClaudeCode
                         | ConnectionOp::CancelClaudeSignIn
                         | ConnectionOp::DisconnectClaudeCode
@@ -138,6 +142,8 @@ impl Tapped for ControlToShell {
             Self::Connections(_) => "Connections",
             Self::AnthropicKeyStage { .. } => "AnthropicKeyStage",
             Self::AnthropicKeyStageDone { .. } => "AnthropicKeyStageDone",
+            Self::AnthropicKeyRemoved { .. } => "AnthropicKeyRemoved",
+            Self::AnthropicKeyReconciled { .. } => "AnthropicKeyReconciled",
             Self::SpeechRevoked { .. } => "SpeechRevoked",
             Self::GitHub(_) => "GitHub",
             Self::ActionState { .. } => "ActionState",
@@ -183,6 +189,7 @@ impl Tapped for ControlToShell {
                 // Versions, states and content-free reasons only.
                 | Self::Connections(ConnectionsView {
                     anthropic: _,
+                    anthropic_revision: _,
                     claude_code: _
                 })
                 // Part states, error keys and byte counts only.
@@ -259,7 +266,7 @@ pub struct Record {
     pub direction: Direction,
     /// The op's name.
     pub op: String,
-    /// The frame's payload length on the wire.
+    /// The frame's payload length on the wire, or zero when only the op is recorded.
     pub len: u32,
     /// The payload, only for a content-free op.
     pub payload: Option<Vec<u8>>,
@@ -278,6 +285,7 @@ impl Record {
         wire_len: usize,
     ) -> Result<Self, FrameError> {
         let len = capped(wire_len, pipe)?;
+        let op = message.op();
         let payload = if message.content_free() {
             Some(encode(message, pipe)?[HEADER_LEN..].to_vec())
         } else {
@@ -286,14 +294,17 @@ impl Record {
         Ok(Self {
             pipe,
             direction,
-            op: message.op().to_owned(),
-            len,
+            op: op.to_owned(),
+            len: if op_only(op) { 0 } else { len },
             payload,
         })
     }
 
     /// The op and length, plus the decoded fields when the payload decodes to a listed op.
     pub fn describe(&self) -> String {
+        if op_only(&self.op) {
+            return self.op.clone();
+        }
         let redacted = format!("{} ({} bytes)", self.op, self.len);
         let Some(payload) = &self.payload else {
             return redacted;
@@ -314,6 +325,16 @@ impl Record {
             Err(error) => format!("undecodable {} bytes: {error}", payload.len()),
         }
     }
+}
+
+fn op_only(op: &str) -> bool {
+    matches!(
+        op,
+        "BeginAnthropicKeyStage"
+            | "AnthropicKeyStaged"
+            | "AnthropicKeyStage"
+            | "AnthropicKeyStageDone"
+    )
 }
 
 /// A message's `Debug`, only when it's listed: a stored flag alone never authorizes it.

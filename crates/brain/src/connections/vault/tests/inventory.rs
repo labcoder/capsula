@@ -62,7 +62,10 @@ fn every_vault_write_and_delete_uses_generation_names_only() {
         .save_anthropic_key(b"sk-ant-api-inventory-fake-key")
         .expect("key");
     vault
-        .anthropic(crate::connections::anthropic::KeyOp::Remove)
+        .anthropic(crate::connections::anthropic::KeyOp::Remove(
+            vault.anthropic_revision(),
+        ))
+        .1
         .expect("remove fake key");
     let legacy: BTreeSet<_> = legacy.into_iter().collect();
     assert!(legacy.contains(&anthropic_key_target(&service)));

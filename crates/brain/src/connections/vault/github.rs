@@ -51,7 +51,7 @@ impl<S: CredentialStore> Vault<S> {
     }
 
     fn remove_github(&mut self) -> Removed {
-        if self.authority.remove(&[Kind::GitHub], None).is_err() {
+        if self.authority.remove(&[Kind::GitHub], None, None).is_err() {
             return Removed::NotDurable;
         }
         self.cleanup_github()

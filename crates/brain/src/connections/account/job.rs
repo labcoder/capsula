@@ -209,7 +209,10 @@ impl<S: CredentialStore> Worker<S> {
         &mut self,
         id: super::super::authority::Generation,
     ) -> Result<
-        Secret<crate::connections::anthropic::key::AnthropicKey>,
+        (
+            u64,
+            Secret<crate::connections::anthropic::key::AnthropicKey>,
+        ),
         super::super::vault::staging::PasteError,
     > {
         self.vault
@@ -223,11 +226,11 @@ impl<S: CredentialStore> Worker<S> {
     pub(crate) fn anthropic(
         &mut self,
         op: crate::connections::anthropic::KeyOp,
-    ) -> Result<
-        Option<Secret<crate::connections::anthropic::key::AnthropicKey>>,
-        crate::connections::anthropic::KeyError,
-    > {
-        self.vault.as_mut().ok_or(VaultError::Busy)?.anthropic(op)
+    ) -> crate::connections::anthropic::KeyResult {
+        self.vault.as_mut().map_or_else(
+            || (None, Err(VaultError::Busy.into())),
+            |vault| vault.anthropic(op),
+        )
     }
 
     /// A worker that opens its vault with `open` and stamps revocation entries with `clock`.

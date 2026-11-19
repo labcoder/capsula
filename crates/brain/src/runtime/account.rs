@@ -731,7 +731,7 @@ impl Brain {
 /// load, to `loaded`.
 fn spawn<S: CredentialStore + 'static>(
     mut worker: Worker<S>,
-    loaded: std_mpsc::Sender<(Input, super::connections::KeyResult)>,
+    loaded: std_mpsc::Sender<(Input, crate::connections::anthropic::KeyResult)>,
     events: mpsc::UnboundedSender<Input>,
     reads: mpsc::UnboundedSender<Event>,
 ) -> std::io::Result<(std_mpsc::Sender<Work>, oneshot::Receiver<()>)> {

@@ -164,7 +164,7 @@ async fn offline_staging_controls_drop_admission_and_never_queue_credential_work
                 .connection_event(super::connections::ConnectionEvent::StagePlan {
                     epoch: brain.epoch,
                     request: 7,
-                    result: Ok(plan)
+                    result: Ok((0, plan))
                 }),
             vec![ControlToShell::AnthropicKeyStage {
                 request: 7,

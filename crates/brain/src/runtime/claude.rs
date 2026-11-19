@@ -987,6 +987,7 @@ impl Brain {
     pub(super) fn connections_frame(&self) -> ControlToShell {
         ControlToShell::Connections(ConnectionsView {
             anthropic: self.account.connections.anthropic(),
+            anthropic_revision: self.account.connections.anthropic_revision(),
             claude_code: self.claude.view(),
         })
     }
