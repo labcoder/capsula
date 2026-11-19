@@ -48,7 +48,7 @@ pub(crate) enum StageError {
     Store,
 }
 
-#[cfg(any(windows, test))]
+#[cfg(windows)]
 pub(crate) trait KeyStageWriter {
     fn write(&self, permit: StagePermit, key: PastedAnthropicKey)
     -> Result<KeyStageId, StageError>;
@@ -115,7 +115,7 @@ mod tests {
         fail_at: Option<usize>,
     }
 
-    impl KeyStageWriter for FakeWriter {
+    impl FakeWriter {
         #[expect(
             clippy::panic_in_result_fn,
             reason = "the fake asserts the write-once contract"
