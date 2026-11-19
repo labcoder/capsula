@@ -354,13 +354,12 @@ fn a_call_without_exactly_its_result_first_in_the_next_user_message_builds_nothi
             ],
         ),
         (
-            "the same id twice",
+            "the same id twice in one group",
             vec![
                 draw_use("toolu_1"),
-                output("toolu_1", "ok"),
-                message(Role::Assistant, "again"),
                 draw_use("toolu_1"),
-                output("toolu_1", "ok"),
+                output("toolu_1", "first"),
+                output("toolu_1", "second"),
             ],
         ),
         (
@@ -1040,14 +1039,28 @@ fn a_reply_without_a_call_or_its_results_continues_nothing() {
             "{answers:?}"
         );
     }
+}
+
+#[test]
+fn a_tool_id_can_recur_with_a_distinct_result_in_the_next_round() {
+    let sonnet = slug("claude-sonnet-5-5");
+    let answers = |result: &str| [(CallId::new("toolu_1").expect("id"), result.to_owned())];
+    let events = called("toolu_1");
     let conversation = first("draw");
-    let reply = replied(&conversation, &called("toolu_1")).expect("a whole reply");
-    let (_, second) = next(conversation, TAG, &sonnet, reply, &results(&["toolu_1"])).expect("ok");
-    let reply = replied(&second, &called("toolu_1")).expect("a whole reply");
+    let reply = replied(&conversation, &events).expect("a whole reply");
+    let (_, second) = next(conversation, TAG, &sonnet, reply, &answers("first")).expect("first");
+    let reply = replied(&second, &events).expect("a whole reply");
+    let (_, third) = next(second, TAG, &sonnet, reply, &answers("second")).expect("second");
+    let outgoing = sent(&third);
+    let messages = outgoing["messages"].as_array().expect("messages");
     assert_eq!(
-        next(second, TAG, &sonnet, reply, &results(&["toolu_1"])).err(),
-        Some(BodyError::Pairing),
-        "an id called in an earlier round"
+        messages[1..],
+        [
+            json!({"role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"draw","input":{}}]}),
+            json!({"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":"first"}]}),
+            json!({"role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"draw","input":{}}]}),
+            json!({"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":"second"}]}),
+        ]
     );
 }
 
