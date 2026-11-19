@@ -54,6 +54,11 @@ pub enum ConnectionOp {
         /// The validated trimmed byte length, not key text.
         len: u16,
     },
+    /// Recheck the saved key after a paste whose outcome is unknown.
+    ReconcileAnthropicKey {
+        /// The shell's outstanding recovery check number.
+        request: u64,
+    },
 }
 
 impl fmt::Debug for ConnectionOp {
@@ -70,6 +75,7 @@ impl fmt::Debug for ConnectionOp {
             Self::DisconnectClaudeCode => f.write_str("DisconnectClaudeCode"),
             Self::FindClaudeCode => f.write_str("FindClaudeCode"),
             Self::BeginAnthropicKeyStage { .. } => f.write_str("BeginAnthropicKeyStage"),
+            Self::ReconcileAnthropicKey { .. } => f.write_str("ReconcileAnthropicKey"),
         }
     }
 }

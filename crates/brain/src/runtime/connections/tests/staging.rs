@@ -366,6 +366,81 @@ async fn committed_paste_survives_disconnect_but_its_reply_does_not_cross_links(
 }
 
 #[tokio::test]
+async fn a_recovery_check_waits_for_adoption_and_catalog_and_replies_only_on_its_link() {
+    let scratch = Scratch::new("key-reconcile");
+    let (mut account, store, _) = keyed(&scratch).await;
+    let replacement = "sk-ant-api123456";
+    let plan = begin(&mut account, 1, 16).await;
+    plant(&store, plan, replacement);
+    assert_eq!(
+        account.stage_op(1, ConnectionOp::AnthropicKeyStaged { plan: plan.id }),
+        vec![]
+    );
+    let snapshot = |anthropic, anthropic_revision| {
+        ControlToShell::Connections(ConnectionsView {
+            anthropic,
+            anthropic_revision,
+            claude_code: ClaudeCodeView::NotFound,
+        })
+    };
+    assert_eq!(
+        account.connection_event(ConnectionEvent::Op(ConnectionOp::ReconcileAnthropicKey {
+            request: 2
+        })),
+        [snapshot(KeyView::Checking, None)]
+    );
+    account.connections.stage_session(None);
+    account.connections.stage_session(Some(2));
+    let adopted = next(&mut account).await;
+    assert!(matches!(
+        adopted,
+        Event::Connection(ConnectionEvent::StageDone { result: Ok(_), .. })
+    ));
+    assert_eq!(account.handle(adopted), vec![]);
+    let loaded = next(&mut account).await;
+    assert_eq!(
+        account.handle(loaded),
+        [snapshot(KeyView::Checking, Some(2))]
+    );
+    let checked = next(&mut account).await;
+    assert_eq!(account.handle(checked), [snapshot(KeyView::Ready, Some(2))]);
+    assert_eq!(
+        account
+            .connections
+            .key
+            .as_ref()
+            .map(|key| key.expose().as_str()),
+        Some(replacement)
+    );
+
+    assert_eq!(
+        account.connection_event(ConnectionEvent::Op(ConnectionOp::ReconcileAnthropicKey {
+            request: 3
+        })),
+        [snapshot(KeyView::Checking, None)]
+    );
+    let loaded = next(&mut account).await;
+    assert_eq!(
+        account.handle(loaded),
+        [snapshot(KeyView::Checking, Some(2))]
+    );
+    let checked = next(&mut account).await;
+    assert_eq!(
+        account.handle(checked),
+        [
+            snapshot(KeyView::Ready, Some(2)),
+            ControlToShell::AnthropicKeyReconciled {
+                request: 3,
+                confirmed: true
+            },
+        ]
+    );
+    account
+        .close(tokio::time::Instant::now(), tokio::time::Instant::now())
+        .await;
+}
+
+#[tokio::test]
 async fn removal_confirmed_on_the_next_link_cannot_delete_an_earlier_links_adoption() {
     let scratch = Scratch::new("stage-runtime-stale-removal");
     let store = FakeStore::default();

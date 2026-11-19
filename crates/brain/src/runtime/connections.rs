@@ -151,6 +151,7 @@ pub(super) struct Connections {
     // reload the key; a durable pending intent is needed only if removal must survive that exit.
     removing: Option<u64>,
     remove_request: Option<(u64, u64)>,
+    check_request: Option<(u64, u64)>,
     stage_link: Option<u64>,
     stage_request: Option<u64>,
     stage_admission: Option<KeyStageId>,
@@ -172,6 +173,7 @@ impl Default for Connections {
             loading: false,
             removing: None,
             remove_request: None,
+            check_request: None,
             stage_link: None,
             stage_request: None,
             stage_admission: None,
@@ -194,6 +196,7 @@ impl Connections {
         self.stage_link = epoch;
         self.stage_request = None;
         self.stage_admission = None;
+        self.check_request = None;
     }
     pub(super) fn cancel(&mut self) {
         if let Some(read) = self.read.take() {
@@ -245,7 +248,9 @@ impl Accounts {
     pub(super) fn stage_op(&mut self, epoch: u64, op: ConnectionOp) -> Vec<ControlToShell> {
         let work = match op {
             ConnectionOp::BeginAnthropicKeyStage { request, len } => {
-                if self.connections.removing.is_some() || self.connections.stage_link != Some(epoch)
+                if self.connections.removing.is_some()
+                    || self.connections.check_request.is_some()
+                    || self.connections.stage_link != Some(epoch)
                 {
                     return vec![ControlToShell::AnthropicKeyStage {
                         request,
@@ -262,6 +267,7 @@ impl Accounts {
             }
             ConnectionOp::AnthropicKeyStaged { plan } => {
                 if self.connections.removing.is_some()
+                    || self.connections.check_request.is_some()
                     || self.connections.stage_link != Some(epoch)
                     || self.connections.stage_admission != Some(plan)
                 {
@@ -338,6 +344,44 @@ impl Accounts {
         let (epoch, request) = self.connections.remove_request.take()?;
         (self.connections.stage_link == Some(epoch))
             .then_some(ControlToShell::AnthropicKeyRemoved { request, result })
+    }
+
+    fn recovery_check(&mut self, request: u64) -> Vec<ControlToShell> {
+        if self.connections.stage_link.is_none() {
+            return Vec::new();
+        }
+        let refused = ControlToShell::AnthropicKeyReconciled {
+            request,
+            confirmed: false,
+        };
+        if self.connections.removing.is_some() || self.connections.check_request.is_some() {
+            return vec![refused];
+        }
+        self.load_key(KeyOp::Load);
+        let snapshot = ControlToShell::Connections(self.connections.view);
+        if self.connections.loading {
+            self.connections.check_request = Some((self.connections.generation, request));
+            vec![snapshot]
+        } else {
+            vec![snapshot, refused]
+        }
+    }
+
+    fn take_check_request(&mut self, generation: u64) -> Option<u64> {
+        self.connections
+            .check_request
+            .take_if(|(expected, _)| *expected == generation)
+            .map(|(_, request)| request)
+    }
+
+    fn settled_check(&mut self, generation: u64) -> Option<ControlToShell> {
+        let confirmed = match self.connections.view.anthropic {
+            KeyView::Checking => return None,
+            KeyView::Unconfirmed => false,
+            KeyView::Missing | KeyView::Ready | KeyView::Rejected(_) => true,
+        };
+        let request = self.take_check_request(generation)?;
+        Some(ControlToShell::AnthropicKeyReconciled { request, confirmed })
     }
 
     fn stage_done(
@@ -426,9 +470,53 @@ impl Accounts {
         removal
     }
 
+    fn key_op(&mut self, op: ConnectionOp) -> Vec<ControlToShell> {
+        if let ConnectionOp::ReconcileAnthropicKey { request } = op {
+            return self.recovery_check(request);
+        }
+        let in_flight = self.connections.removing.is_some() && self.connections.loading;
+        match op {
+            ConnectionOp::CheckAnthropicKey => {}
+            ConnectionOp::RemoveAnthropicKey { revision, request } => {
+                if self
+                    .connections
+                    .removing
+                    .is_some_and(|pending| pending != revision)
+                {
+                    return vec![ControlToShell::AnthropicKeyRemoved {
+                        request,
+                        result: Err(KeyRemovalFailure::Changed),
+                    }];
+                }
+                self.connections.removing.get_or_insert(revision);
+                self.connections.remove_request =
+                    self.connections.stage_link.map(|epoch| (epoch, request));
+            }
+            _ => return Vec::new(),
+        }
+        if in_flight {
+            return Vec::new();
+        }
+        let abandoned = self
+            .take_check_request(self.connections.generation)
+            .map(|request| ControlToShell::AnthropicKeyReconciled {
+                request,
+                confirmed: false,
+            });
+        self.load_key(self.connections.removing.map_or(KeyOp::Load, KeyOp::Remove));
+        let removal = if self.connections.loading {
+            None
+        } else {
+            self.removal_reply(Err(KeyRemovalFailure::Unconfirmed))
+        };
+        std::iter::once(ControlToShell::Connections(self.connections.view))
+            .chain(removal)
+            .chain(abandoned)
+            .collect()
+    }
+
     pub(super) fn connection_event(&mut self, event: ConnectionEvent) -> Vec<ControlToShell> {
-        let mut removal = None;
-        match event {
+        let reply = match event {
             ConnectionEvent::StagePlan {
                 epoch,
                 request,
@@ -455,40 +543,13 @@ impl Accounts {
             } => {
                 return self.stage_done(epoch, generation, plan, result);
             }
-            ConnectionEvent::Op(op) => {
-                let in_flight = self.connections.removing.is_some() && self.connections.loading;
-                match op {
-                    ConnectionOp::CheckAnthropicKey => {}
-                    ConnectionOp::RemoveAnthropicKey { revision, request } => {
-                        if self
-                            .connections
-                            .removing
-                            .is_some_and(|pending| pending != revision)
-                        {
-                            return vec![ControlToShell::AnthropicKeyRemoved {
-                                request,
-                                result: Err(KeyRemovalFailure::Changed),
-                            }];
-                        }
-                        self.connections.removing.get_or_insert(revision);
-                        self.connections.remove_request =
-                            self.connections.stage_link.map(|epoch| (epoch, request));
-                    }
-                    _ => return Vec::new(),
-                }
-                if in_flight {
-                    return Vec::new();
-                }
-                self.load_key(self.connections.removing.map_or(KeyOp::Load, KeyOp::Remove));
-                if !self.connections.loading {
-                    removal = self.removal_reply(Err(KeyRemovalFailure::Unconfirmed));
-                }
-            }
+            ConnectionEvent::Op(op) => return self.key_op(op),
             ConnectionEvent::Loaded { generation, result } => {
                 if generation != self.connections.generation || !self.connections.loading {
                     return Vec::new();
                 }
-                removal = self.key_loaded(generation, result);
+                self.key_loaded(generation, result)
+                    .or_else(|| self.settled_check(generation))
             }
             ConnectionEvent::Checked { generation, result } => {
                 if generation != self.connections.generation || self.connections.read.is_none() {
@@ -508,10 +569,11 @@ impl Accounts {
                     }
                 }
                 self.connections.unsent = true;
+                self.settled_check(generation)
             }
-        }
+        };
         std::iter::once(ControlToShell::Connections(self.connections.view))
-            .chain(removal)
+            .chain(reply)
             .collect()
     }
 }
@@ -541,7 +603,10 @@ impl Brain {
                     .iter()
                     .try_for_each(|frame| link.control(frame))
             }
-            ConnectionOp::CheckAnthropicKey | ConnectionOp::RemoveAnthropicKey { .. } => {
+            ConnectionOp::ReconcileAnthropicKey { .. } if link.is_none() => Ok(()),
+            ConnectionOp::CheckAnthropicKey
+            | ConnectionOp::RemoveAnthropicKey { .. }
+            | ConnectionOp::ReconcileAnthropicKey { .. } => {
                 self.account_input(Event::Connection(ConnectionEvent::Op(op)), link)
             }
         }

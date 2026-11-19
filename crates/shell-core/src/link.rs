@@ -1267,6 +1267,7 @@ fn welcome(control: &PipeClient) -> Result<IssueSession, LinkError> {
             | ControlToShell::AnthropicKeyStage { .. }
             | ControlToShell::AnthropicKeyStageDone { .. }
             | ControlToShell::AnthropicKeyRemoved { .. }
+            | ControlToShell::AnthropicKeyReconciled { .. }
             | ControlToShell::SpeechRevoked { .. }
             | ControlToShell::VoiceHoldStatus { .. }
             | ControlToShell::VoiceHoldStopAccepted { .. }
@@ -1533,7 +1534,8 @@ fn watch(
             Ok(Some(
                 reply @ (ControlToShell::AnthropicKeyStage { .. }
                 | ControlToShell::AnthropicKeyStageDone { .. }
-                | ControlToShell::AnthropicKeyRemoved { .. }),
+                | ControlToShell::AnthropicKeyRemoved { .. }
+                | ControlToShell::AnthropicKeyReconciled { .. }),
             )) => {
                 if events
                     .send_blocking(LinkEvent::KeyStage { generation, reply })

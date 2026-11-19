@@ -755,6 +755,13 @@ pub enum ControlToShell {
         /// Whether the intended revision was removed.
         result: Result<(), KeyRemovalFailure>,
     },
+    /// Finishes a recovery check on its original link.
+    AnthropicKeyReconciled {
+        /// The shell's outstanding recovery check number.
+        request: u64,
+        /// True only when the preceding Connections snapshot resolves the current key state.
+        confirmed: bool,
+    },
 }
 
 /// What a screen hold carried into its turn. It never says the window was sent: a run can end

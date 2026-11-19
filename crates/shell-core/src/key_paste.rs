@@ -127,6 +127,7 @@ pub struct KeyPaste {
     view: Option<KeyView>,
     saved: bool,
     removal: Option<RemovalAttempt>,
+    reconciliation: Option<u64>,
     failure: Option<PasteFailure>,
 }
 
@@ -158,9 +159,12 @@ impl KeyPaste {
     }
 
     pub fn disconnected(&mut self) {
+        let unknown = self.failure == Some(PasteFailure::Unconfirmed)
+            || matches!(self.stage, Stage::Saving(..));
         *self = Self {
             request: self.request,
             revision: self.revision.wrapping_add(1),
+            failure: unknown.then_some(PasteFailure::Unconfirmed),
             ..Self::default()
         };
     }
@@ -169,7 +173,7 @@ impl KeyPaste {
         self.view
     }
     pub fn saved(&self) -> bool {
-        self.saved
+        self.saved && self.failure != Some(PasteFailure::Unconfirmed)
     }
     pub fn failure(&self) -> Option<PasteFailure> {
         self.failure
@@ -343,10 +347,11 @@ impl KeyPaste {
     }
 
     pub fn check_available(&self) -> bool {
+        if self.failure == Some(PasteFailure::Unconfirmed) {
+            return self.view.is_some() && self.reconciliation.is_none();
+        }
         self.removal() == Removal::Retry
-            || (self.available()
-                && (self.view == Some(KeyView::Unconfirmed)
-                    || self.failure == Some(PasteFailure::Unconfirmed)))
+            || (self.available() && self.view == Some(KeyView::Unconfirmed))
     }
 
     pub fn check(&mut self, send: impl FnOnce(ConnectionOp) -> bool) {
@@ -357,11 +362,33 @@ impl KeyPaste {
             self.send_remove(revision, send);
             return;
         }
+        if self.failure == Some(PasteFailure::Unconfirmed) {
+            self.request = self.request.wrapping_add(1);
+            if send(ConnectionOp::ReconcileAnthropicKey {
+                request: self.request,
+            }) {
+                self.reconciliation = Some(self.request);
+            }
+            return;
+        }
         if send(ConnectionOp::CheckAnthropicKey) {
             self.failure = None;
             self.receive(KeyView::Checking, self.authority_revision);
-        } else if self.failure != Some(PasteFailure::Unconfirmed) {
+        } else {
             self.failure = Some(PasteFailure::Offline);
+        }
+    }
+
+    pub fn reconciled(&mut self, reply: &ControlToShell) {
+        let ControlToShell::AnthropicKeyReconciled { request, confirmed } = *reply else {
+            return;
+        };
+        if self.reconciliation != Some(request) {
+            return;
+        }
+        self.reconciliation = None;
+        if confirmed {
+            self.failure = None;
         }
     }
 

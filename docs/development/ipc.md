@@ -160,6 +160,12 @@ The separate removal reply names the request on the same authenticated link.
 A combined Connections snapshot is never a removal receipt, even if it says
 Unconfirmed or Missing. A refused commit leaves the exact revision retryable.
 
+After an unknown save, a recovery Check uses its own request number. The
+credential worker reads the current key after already admitted adoptions; any
+catalog check then finishes before a conclusive receipt. The brain sends the
+authoritative snapshot immediately before that receipt on the same link. Earlier
+snapshots and inconclusive receipts can't unlock paste or removal.
+
 The runtime binds Begin replies/admission to the authenticated shell epoch,
 clears admission on disconnect and refuses staging controls in offline drain.
 The credential worker has no link epoch: its FIFO and one-use ids govern

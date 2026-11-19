@@ -444,6 +444,44 @@ fn failed_adoption_preserves_a_key_but_catalog_rejection_is_removable() {
 }
 
 #[test]
+fn disconnect_retires_the_check_without_releasing_an_admitted_save() {
+    let mut state = model(KeyView::Ready);
+    let at = begin(&mut state, KEY);
+    let written = fake_success(&mut state, at);
+    state.written(&written, Instant::now(), |_| true);
+    state.disconnected();
+    assert_eq!(state.failure(), Some(PasteFailure::Unconfirmed));
+    assert!(!state.check_available());
+    state.receive(KeyView::Missing, None);
+    state.check(|op| {
+        assert_eq!(op, ConnectionOp::ReconcileAnthropicKey { request: 2 });
+        true
+    });
+    assert!(!state.check_available());
+    state.disconnected();
+    state.receive(KeyView::Ready, Some(2));
+    state.check(|op| {
+        assert_eq!(op, ConnectionOp::ReconcileAnthropicKey { request: 3 });
+        true
+    });
+    state.reconciled(&ControlToShell::AnthropicKeyReconciled {
+        request: 2,
+        confirmed: true,
+    });
+    assert_eq!(state.failure(), Some(PasteFailure::Unconfirmed));
+    assert!(!state.saved());
+    assert!(!state.can_paste());
+    assert_eq!(state.remove_revision(), None);
+    state.reconciled(&ControlToShell::AnthropicKeyReconciled {
+        request: 3,
+        confirmed: false,
+    });
+    assert!(state.check_available());
+    assert!(!state.saved());
+    assert!(!state.can_paste());
+}
+
+#[test]
 fn expiry_and_disconnect_drop_the_waiting_plan_admission() {
     let mut state = model(KeyView::Missing);
     let old = begin(&mut state, KEY);

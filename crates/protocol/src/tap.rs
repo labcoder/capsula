@@ -143,6 +143,7 @@ impl Tapped for ControlToShell {
             Self::AnthropicKeyStage { .. } => "AnthropicKeyStage",
             Self::AnthropicKeyStageDone { .. } => "AnthropicKeyStageDone",
             Self::AnthropicKeyRemoved { .. } => "AnthropicKeyRemoved",
+            Self::AnthropicKeyReconciled { .. } => "AnthropicKeyReconciled",
             Self::SpeechRevoked { .. } => "SpeechRevoked",
             Self::GitHub(_) => "GitHub",
             Self::ActionState { .. } => "ActionState",
