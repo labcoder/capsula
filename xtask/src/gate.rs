@@ -14,6 +14,7 @@ use std::ffi::OsString;
 use std::fs::{self, OpenOptions};
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
+use std::process::Child;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result, bail, ensure};
@@ -36,6 +37,7 @@ const FEEL_LIMIT: Duration = Duration::from_secs(90);
 const PHASE_LIMIT: Duration = Duration::from_secs(90);
 const INPUT_RESERVE: Duration = Duration::from_secs(13);
 const FINAL_RESERVE: Duration = Duration::from_secs(30);
+const CLOSE_GRACE: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Trial {
@@ -336,12 +338,12 @@ fn run_session(
         format!("guard_stop phase={phase} metadata={metadata:?}\n")
     });
     print!("{guard_report}");
-    let closed = fixture_window.map_or(Ok(()), Window::close);
-    let exited = session::wait_child(&mut fixture, end);
+    let clean = result.is_ok() && released.is_ok();
+    let exited = end_fixture(&mut fixture, fixture_window, clean, end);
     let environment = gate_capture::desktop_metadata().and_then(|metadata| {
         fs::write(output.join("environment-after.txt"), metadata).map_err(anyhow::Error::from)
     });
-    let final_result = session::combine([result, released, closed, exited, environment]);
+    let final_result = session::combine([result, released, exited, environment]);
     fs::write(
         output.join("session-result.txt"),
         format!(
@@ -350,6 +352,29 @@ fn run_session(
         ),
     )?;
     final_result
+}
+
+/// Ends the fixture. After a clean session it closes the window and waits for the fixture until
+/// the session deadline. After any failure a known window gets [`CLOSE_GRACE`] to close and the
+/// fixture is then terminated, so a fixture born topmost never outlives a failed session for long.
+fn end_fixture(
+    fixture: &mut Child,
+    window: Option<Window>,
+    clean: bool,
+    end: Instant,
+) -> Result<()> {
+    let closed = window.map_or(Ok(()), Window::close);
+    let exited = if clean && closed.is_ok() {
+        session::wait_child(fixture, end)
+    } else {
+        let grace = if window.is_some() {
+            CLOSE_GRACE
+        } else {
+            Duration::ZERO
+        };
+        session::end_child(fixture, grace)
+    };
+    session::combine([closed, exited])
 }
 
 fn feel(session: &mut Session, images: &Images, output: &Path, end: Instant) -> Result<()> {
@@ -834,11 +859,75 @@ fn summarize(
 
 #[cfg(test)]
 mod tests {
-    use super::{TRIALS, Trial, evidence_directory, phase_deadline};
+    use super::{TRIALS, Trial, end_fixture, evidence_directory, phase_deadline};
     use crate::platform::input_session::FixtureEscMode;
     use crate::session::Phase;
     use std::path::{Path, PathBuf};
+    use std::process::{Command, Stdio};
     use std::time::{Duration, Instant};
+
+    /// Stands in for a fixture whose window shows only after discovery gave up: it lives, with no
+    /// window the driver knows, until it's ended.
+    fn late_fixture() -> std::process::Child {
+        Command::new("cmd")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("cmd starts")
+    }
+
+    #[test]
+    fn a_failed_session_ends_a_fixture_it_never_found_within_a_second() {
+        let mut fixture = late_fixture();
+        let started = Instant::now();
+        let ended = end_fixture(&mut fixture, None, false, started + Duration::from_secs(10));
+        let took = started.elapsed();
+        let gone = fixture.try_wait().expect("the child can be read").is_some();
+        if !gone {
+            fixture.kill().expect("the test child can be killed");
+            fixture.wait().expect("the test child is reaped");
+        }
+        assert!(gone, "the fixture outlived the failed session's cleanup");
+        assert!(took < Duration::from_secs(1), "{took:?}");
+        ended.expect("terminating the owned fixture is a completed cleanup");
+    }
+
+    #[test]
+    fn a_fixture_that_ignores_its_close_is_ended_after_the_grace() {
+        let mut fixture = late_fixture();
+        let grace = Duration::from_millis(200);
+        let started = Instant::now();
+        let ended = crate::session::end_child(&mut fixture, grace);
+        let took = started.elapsed();
+        let gone = fixture.try_wait().expect("the child can be read").is_some();
+        if !gone {
+            fixture.kill().expect("the test child can be killed");
+            fixture.wait().expect("the test child is reaped");
+        }
+        assert!(gone, "the fixture outlived its close grace");
+        assert!(
+            took >= grace && took < grace + Duration::from_secs(1),
+            "{took:?}"
+        );
+        ended.expect("terminating the owned fixture is a completed cleanup");
+    }
+
+    #[test]
+    fn a_fixture_that_closes_within_the_grace_is_not_terminated() {
+        let mut fixture = Command::new("cmd")
+            .args(["/C", "exit 0"])
+            .spawn()
+            .expect("cmd starts");
+        crate::session::end_child(&mut fixture, Duration::from_secs(5)).expect("it exits");
+        assert_eq!(
+            fixture
+                .try_wait()
+                .expect("the child can be read")
+                .map(|status| status.code()),
+            Some(Some(0))
+        );
+    }
 
     #[test]
     fn transcript_and_evidence_are_adjacent_without_overwriting_the_transcript() {

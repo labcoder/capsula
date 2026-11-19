@@ -600,6 +600,14 @@ failed prepare and an `edit_not_at_point` refusal report that read. Finalization
 fixture to the normal band, even though it was born topmost, because the rest of the session
 expects it below the product's own topmost windows.
 If that request fails or cannot arrive, the run refuses and closes its owned fixture instead.
+The demotion follows only a raise, so a prepare that refuses before raising leaves the fixture
+in the band it was born in, and only ending the fixture takes it away. Any failed session ends
+its fixture promptly: a window the runner knows gets `WM_CLOSE` and 2 s to close, then the
+runner terminates the fixture through its own process handle and waits at most 1 s to see it
+exit. A fixture whose window discovery never found, such as one that showed only after
+discovery gave up, is terminated at once. So a topmost fixture outlives a failed opener by at
+most about 4 s: the 1 s limit on the uncover request, the 2 s close grace and the 1 s exit check.
+Only a clean session waits for the fixture until the session deadline.
 
 After the click's receipt, the runner waits up to 250 ms for the fixture's root to come to the
 front, because activation completes asynchronously. An empty front or another window of the

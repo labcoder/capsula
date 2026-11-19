@@ -345,6 +345,23 @@ pub(crate) fn wait_child(child: &mut Child, end: Instant) -> Result<()> {
     }
 }
 
+/// How long a terminated owned process gets to be seen exiting.
+const REAP_LIMIT: Duration = Duration::from_secs(1);
+
+/// Ends an owned child within `grace` plus [`REAP_LIMIT`], whatever the session deadline: it may
+/// exit on its own during `grace`, and is then terminated through its handle.
+pub(crate) fn end_child(child: &mut Child, grace: Duration) -> Result<()> {
+    if let Some(status) = crate::live::wait_bounded(child, grace)? {
+        println!("owned pid {} exit={status}", child.id());
+        return Ok(());
+    }
+    child.kill()?;
+    let status = crate::live::wait_bounded(child, REAP_LIMIT)?
+        .context("the terminated owned process didn't exit")?;
+    println!("owned pid {} terminated exit={status}", child.id());
+    Ok(())
+}
+
 pub(crate) fn combine(results: impl IntoIterator<Item = Result<()>>) -> Result<()> {
     let errors = results
         .into_iter()
