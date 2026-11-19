@@ -4,7 +4,7 @@
 
 use std::time::Duration;
 
-use anyhow::{Result, ensure};
+use anyhow::{Context as _, Result, ensure};
 use windows::Win32::Foundation::POINT;
 
 use super::Receipt;
@@ -38,8 +38,8 @@ pub(crate) struct Idle {
 /// One look at the desktop just before an activation step.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct Look {
-    /// The native guard stopped, or a key, button, menu or move loop is held.
-    pub(crate) foreign: bool,
+    /// The fixed reason the native guard or current input state disallows the move.
+    pub(crate) foreign: Option<&'static str>,
     /// The input desktop is Default and this thread's own.
     pub(crate) desktop: bool,
     pub(crate) in_time: bool,
@@ -92,7 +92,18 @@ impl Activation {
 
     /// Authorizes the tagged move to the point.
     pub(crate) fn may_move(&mut self, look: Look) -> Result<()> {
-        self.advance(Stage::Prepared, self.calm(look).then_some(Stage::Moved))
+        let refusal = if self.stage == Stage::Prepared {
+            self.obstruction(look)
+        } else {
+            Some("activation_state")
+        };
+        self.advance(Stage::Prepared, refusal.is_none().then_some(Stage::Moved))
+            .with_context(|| {
+                format!(
+                    "fixture activation move refused: {}",
+                    refusal.unwrap_or("activation_state")
+                )
+            })
     }
 
     /// Authorizes the one down/up batch, with the pointer exactly on the point.
@@ -144,12 +155,25 @@ impl Activation {
     }
 
     fn calm(&self, look: Look) -> bool {
-        !look.foreign
-            && look.desktop
-            && look.in_time
-            && look.age <= FRESH
-            && look.at_point == self.edit
-            && look.capture.is_none()
+        self.obstruction(look).is_none()
+    }
+
+    fn obstruction(&self, look: Look) -> Option<&'static str> {
+        if look.foreign.is_some() {
+            look.foreign
+        } else if !look.desktop {
+            Some("desktop")
+        } else if !look.in_time {
+            Some("deadline")
+        } else if look.age > FRESH {
+            Some("stale_look")
+        } else if look.at_point != self.edit {
+            Some("edit_not_at_point")
+        } else if look.capture.is_some() {
+            Some("mouse_capture")
+        } else {
+            None
+        }
     }
 
     fn advance(&mut self, from: Stage, next: Option<Stage>) -> Result<()> {
@@ -190,7 +214,7 @@ mod tests {
         in_time: true,
     };
     const CALM: Look = Look {
-        foreign: false,
+        foreign: None,
         desktop: true,
         in_time: true,
         age: Duration::from_millis(1),
@@ -321,7 +345,7 @@ mod tests {
             (
                 "input",
                 Look {
-                    foreign: true,
+                    foreign: Some("held_input"),
                     ..CALM
                 },
             ),
@@ -375,6 +399,66 @@ mod tests {
     }
 
     #[test]
+    fn a_refused_move_names_the_failed_predicate_and_stays_refused() {
+        for (reason, look) in [
+            (
+                "held_input",
+                Look {
+                    foreign: Some("held_input"),
+                    ..CALM
+                },
+            ),
+            (
+                "desktop",
+                Look {
+                    desktop: false,
+                    ..CALM
+                },
+            ),
+            (
+                "deadline",
+                Look {
+                    in_time: false,
+                    ..CALM
+                },
+            ),
+            (
+                "stale_look",
+                Look {
+                    age: FRESH + Duration::from_micros(1),
+                    ..CALM
+                },
+            ),
+            (
+                "edit_not_at_point",
+                Look {
+                    at_point: ROOT,
+                    ..CALM
+                },
+            ),
+            (
+                "mouse_capture",
+                Look {
+                    capture: Some(EDIT),
+                    ..CALM
+                },
+            ),
+        ] {
+            let mut activation = upto(0);
+            let error = activation.may_move(look).unwrap_err();
+            assert_eq!(
+                error.to_string(),
+                format!("fixture activation move refused: {reason}")
+            );
+            assert_eq!(activation.stage, Stage::Aborted);
+            assert_eq!(
+                activation.may_move(CALM).unwrap_err().to_string(),
+                "fixture activation move refused: activation_state"
+            );
+        }
+    }
+
+    #[test]
     fn the_click_needs_the_pointer_exactly_on_its_point() {
         for cursor in [POINT { x: 301, y: 260 }, POINT { x: 300, y: 259 }] {
             assert_refused(1, Look { cursor, ..CALM }, "pointer off the point");
@@ -415,7 +499,7 @@ mod tests {
         for stage in [0, 1, 3] {
             for look in [
                 Look {
-                    foreign: true,
+                    foreign: Some("held_input"),
                     ..CALM
                 },
                 Look {
@@ -511,7 +595,7 @@ mod tests {
             (
                 "the owner moved in",
                 Look {
-                    foreign: true,
+                    foreign: Some("held_input"),
                     ..CALM
                 },
             ),
