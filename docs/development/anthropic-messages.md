@@ -69,19 +69,34 @@ job is attributable, because the coordinator grants a job only for the run it na
 gets a fresh allowance, and an earlier run's late send gets none. The attempt after the last is
 refused as `Spent` without a connection, which ends the run with the existing failure text.
 
-The number is the coordinator's maximum for one run, with no margin:
+Seventeen is a spending policy for a pay-per-use key, not a proof that every legitimate run fits.
+It is the allowance for an ordinary run at the coordinator's limits:
 
-| Sends | Bound | Why |
+| Sends | Count | Limit |
 | --- | ---: | --- |
 | Foreground rounds, continuations included | 8 | `MAX_ROUNDS`; a round that still calls at the eighth fails as `Budget` |
-| Inline compactions | 8 | at most one per round; a second for the same round fails as `Budget` |
-| The job the run's end starts | 1 | a title or Kumo compaction, one request, no retry |
-| Rebuild resends | 0 | a rebuild before the grant sends nothing; after a key grant, a withdrawn sent source or screen fails the run |
+| Inline compactions | 8 | one per round since its last normal admission |
+| The job the run's end starts | 1 | a title, or Kumo's compaction |
 | **Total** | **17** | `RUN_ATTEMPTS = 2 * MAX_ROUNDS + 1` |
 
-There is no margin because a legitimate run can't exceed the table, and reaching the allowance
-means a path the table misses, which should fail closed on a pay-per-use key. A new send path
-changes the table and the constant together. The process allowance still applies after this one.
+Some schedules can need more:
+
+- **A task's title, then its compaction.** A successful title write hands over to the same run's
+  compaction, so a task's end can start two jobs.
+- **A voided round one rebuilt after a deletion race.** A history tool reads a task outside the
+  sent sources, the task is deleted before the read settles, and the coordinator voids the result
+  and builds the same round again with a fresh body. The sent-source check doesn't cover that
+  task, so a run can repeat this up to its 16 tool starts.
+- **A second inline compaction after a rebuild.** The one-per-round check holds only since the
+  round's last normal admission.
+
+When the allowance runs out, a refused background job is skipped and the finished foreground run
+stays Done. A refused foreground send ends the run with the existing failure text. A skipped job
+is offered again at a later run's end. The title job reads the task's first ask while the task
+still has its first-words title, so a skipped title is asked for at the task's next Done.
+Compaction runs at every Done after the title job ends, or at once for Kumo, and its read still
+finds the uncovered backlog, so a skipped summary is tried again at a later Done. The process
+allowance still applies after this one.
 
 The attempt accepts only `AnthropicConnect`, fixes `POST /v1/messages`, sensitive Bearer bytes
 and API version `2023-06-01`, and uses no proxy, redirect or fallback. Request bytes are wiped

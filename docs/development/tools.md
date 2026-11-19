@@ -407,7 +407,8 @@ still joins the call it started. The same model offer and
 retry argument checks apply, and each accepted model call start still charges
 the run's 16-call budget. The sixteen tool starts and eight foreground rounds are not the cap on
 HTTP attempts: each run has its own allowance of 17 Messages attempts, inline and job sends
-included (see [Anthropic Messages](anthropic-messages.md#one-attempt)).
+included. That is a spending policy for an ordinary run at these limits, not a bound every run
+fits under (see [Anthropic Messages](anthropic-messages.md#one-attempt)).
 The durable ledger stores a fixed-size digest of round and id without changing its schema; the typed round keeps the provider's id for replay.
 
 ## Results
