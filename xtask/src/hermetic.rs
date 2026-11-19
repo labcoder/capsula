@@ -149,6 +149,12 @@ impl Folders {
     }
 }
 
+/// The gate's own file `name` beside its run lock, in the real `LocalAppData`: no build moves or
+/// deletes it, and gate cleanup leaves it.
+pub(crate) fn gate_file(name: &str) -> Result<PathBuf> {
+    Ok(platform::local_app_data()?.join(format!("{}-{name}", GATE.object_prefix)))
+}
+
 /// One gate run, alone, with its launches' folders under a root it created.
 #[derive(Debug)]
 pub(crate) struct Run {
@@ -164,7 +170,7 @@ impl Run {
     /// away from it; cleans up after an interrupted run; and creates `root`, which must be new.
     pub(crate) fn begin(root: PathBuf) -> Result<Self> {
         require_gate(ProductIdentity::ACTIVE)?;
-        let lock = platform::local_app_data()?.join(format!("{}-run.lock", GATE.object_prefix));
+        let lock = gate_file("run.lock")?;
         let mut alone = take(&lock)?;
         live::refuse_running(&platform::processes()?, std::process::id())?;
         platform::Job::kill_on_close()

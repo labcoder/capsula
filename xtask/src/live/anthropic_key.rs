@@ -7,8 +7,10 @@
 //! are fixed slices, one per launch of the real gate shell. The supervisor starts each launch's
 //! debug brain itself with exactly its slice in the transport's budget variables, so a request
 //! past it is refused before connecting, and starts the shell with both at zero, so any brain the
-//! shell starts, a replacement for one that died included, can't connect at all. The ledger records each slice before its launch and is never rewritten: a
-//! run refuses to start while an earlier run's ledger exists, so a restart never gets a slice back.
+//! shell starts, a replacement for one that died included, can't connect at all. The ledger, beside
+//! the gate's run lock in `LocalAppData`, records each slice before its launch and is never
+//! rewritten: a run refuses to start while an earlier run's ledger exists, so a restart never gets
+//! a slice back.
 //! The supervisor watches the brain's pipe tap, which keeps only content-free control frames, and
 //! stops at the first state the plan doesn't expect. See `docs/development/live-checks.md`.
 
@@ -38,7 +40,7 @@ const TOOL_ASK: &str =
     "Use the list_tasks tool once, then say in one short sentence how many tasks it listed.";
 const SECOND_ASK: &str = "In one short sentence: what colour is a clear daytime sky?";
 const RETIRED_ASK: &str = "Say hello in one word.";
-/// The ledger, beside the runs' folders; only a person deletes it.
+/// The ledger's name beside the gate's run lock; only a person deletes it.
 const LEDGER: &str = "anthropic-key.ledger";
 /// How long the owner gets for one step [guess].
 const STEP: Duration = Duration::from_mins(10);
@@ -193,7 +195,7 @@ pub(super) fn run() -> Result<()> {
             .parent()
             .context("a launch folder has a parent")?
             .to_owned();
-        let mut ledger = Ledger::create(&live.join(LEDGER))?;
+        let mut ledger = Ledger::create(&ledger_path()?)?;
         for (index, launch) in PLAN.iter().enumerate() {
             let number = index + 1;
             ledger.grant(number, launch.slice)?;
@@ -265,6 +267,12 @@ fn only_ours(running: &[platform::Entry], me: u32, ours: [u32; 2]) -> bool {
     let mut ours = ours;
     ours.sort_unstable();
     others == ours
+}
+
+/// Where the ledger lives: beside the gate's run lock, so cleaning or moving build output can't
+/// lose it, and taken only under that lock, so a second run refuses while one is on.
+fn ledger_path() -> Result<std::path::PathBuf> {
+    hermetic::gate_file(LEDGER)
 }
 
 /// Grants each launch its slice, in order, before it starts; never reopened or rewritten.
@@ -675,6 +683,26 @@ mod tests {
             me,
             ours
         ));
+    }
+
+    #[test]
+    fn the_ledger_lives_beside_the_gate_run_lock_and_outside_build_output() {
+        let ledger = ledger_path().expect("ledger path");
+        assert_eq!(
+            ledger.parent(),
+            Some(platform::local_app_data().expect("LocalAppData").as_path())
+        );
+        let exe = std::env::current_exe().expect("test binary");
+        let target = exe
+            .ancestors()
+            .find(|folder| folder.file_name() == Some(OsStr::new("target")))
+            .expect("the test runs from build output");
+        assert!(!ledger.starts_with(target), "{}", ledger.display());
+        assert!(
+            ledger
+                .file_name()
+                .is_some_and(|name| name.to_string_lossy().ends_with("-anthropic-key.ledger"))
+        );
     }
 
     #[test]
