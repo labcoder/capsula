@@ -14,7 +14,7 @@ use crate::platform::microphone::{
 };
 use crate::speaker::fake::{self, Script};
 use crate::speaker::{
-    Command, Data, FAULT, Input, Outlet, Packet, RELEASED, Snapshot, Speaker, Tail, UNKNOWN,
+    Command, Data, FAULT, Input, Outlet, Packet, RELEASED, Snapshot, Speaker, UNKNOWN,
 };
 
 const PATIENCE: Duration = Duration::from_secs(5);
@@ -877,36 +877,54 @@ fn a_pause_the_speaker_cannot_take_ends_the_session_and_denies_the_gesture() {
     rig.script().frozen = false;
 }
 
-/// Exposed content past the frontier at its naming.
-fn exposes(tail: &Tail, exposed: u64) {
-    tail.publish(&Snapshot {
-        exposed,
-        ..Snapshot::default()
-    });
-}
-
 #[test]
-fn a_named_run_is_spoken_only_once_its_output_exposes_content_after_the_naming() {
+fn the_spoken_run_is_the_committed_one_even_once_the_device_drains() {
     let owner = OutputOwner::default();
-    let (commands, tail) = owner.scripted(1, RunId(5));
-    assert!(
-        matches!(commands.try_recv(), Ok(Command::Name(RunId(5)))),
-        "named"
-    );
-    assert_eq!(owner.spoken(1), None, "nothing exposed yet");
-    exposes(&tail, 480);
+    let (_commands, tail) = owner.scripted(1);
+    assert_eq!(owner.spoken(1), None, "nothing committed");
+    let now = Snapshot {
+        exposed: 480,
+        spoken: 5,
+        ..Snapshot::default()
+    };
+    tail.publish(&now);
     assert_eq!(owner.spoken(1), Some(RunId(5)));
     assert_eq!(owner.spoken(2), None, "another session's");
-    assert!(owner.name(RunId(6)));
-    assert_eq!(owner.spoken(1), None, "480 was exposed before the naming");
-    exposes(&tail, 481);
-    assert_eq!(owner.spoken(1), Some(RunId(6)));
+    tail.publish(&Snapshot { played: 480, ..now });
+    assert_eq!(
+        owner.spoken(1),
+        Some(RunId(5)),
+        "a drained device isn't an ended run"
+    );
+    let held = state(&owner);
+    assert_eq!(owner.spoken(1), None, "a busy owner is no evidence");
+    drop(held);
+    tail.publish(&Snapshot { spoken: 0, ..now });
+    assert_eq!(owner.spoken(1), None, "cleared");
 }
 
 #[test]
-fn without_an_opener_a_named_run_is_never_spoken() {
+fn without_an_opener_no_run_is_spoken() {
     let owner = OutputOwner::default();
     assert!(owner.begin(1, None).is_none(), "no opener");
-    assert!(owner.name(RunId(5)), "nothing to tell");
     assert_eq!(owner.spoken(1), None);
+}
+
+#[test]
+fn a_name_and_a_stop_queued_while_content_is_staged_apply_after_its_commit() {
+    let owner = OutputOwner::default();
+    let rig = rig(&owner, 1);
+    rig.script().hold = true;
+    rig.speak(RunId(5), vec![1; 480]);
+    until("a content release waits", || rig.script().holding);
+    assert_eq!(owner.spoken(1), None, "a flight isn't a run");
+    let speaker = rig.speaker.as_ref().expect("held");
+    assert!(speaker.command(Command::Name(RunId(6))));
+    assert!(speaker.command(Command::Stop(RunId(5))));
+    rig.script().frozen = true;
+    rig.script().hold = false;
+    until("the worker parks after the commit", || rig.script().parked);
+    assert_eq!(owner.spoken(1), Some(RunId(5)), "the commit is run 5's");
+    rig.script().frozen = false;
+    until("the stop clears it", || owner.spoken(1).is_none());
 }

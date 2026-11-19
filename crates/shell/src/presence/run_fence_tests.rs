@@ -15,11 +15,21 @@ use crate::input::hold::Intent;
 use crate::strings::Text;
 use kumochi_shell_core::speaker::{Command, Snapshot, Tail};
 
-/// Run 5 answers on a live output that names it and has exposed `exposed` frames since. The
-/// tail is kept, as a speaker's worker would keep it.
+/// Run 5's content committed, with nothing played yet.
+const SPOKEN: Snapshot = Snapshot {
+    exposed: 480,
+    played: 0,
+    flight: 0,
+    quiet: 0,
+    flags: 0,
+    spoken: 5,
+};
+
+/// Run 5 answers on a live output whose tail reads `now`. The tail is kept, as a speaker's
+/// worker would keep it.
 fn answering(
     owner: &Entity<Presence>,
-    exposed: u64,
+    now: Snapshot,
     cx: &mut TestAppContext,
 ) -> (Receiver<Command>, Arc<Tail>) {
     owner.update(cx, |owner, _| {
@@ -27,12 +37,8 @@ fn answering(
             .runs
             .apply_state(RunId(5), ThreadId(1), Phase::Answering, None);
         assert_eq!(owner.runs.stoppable(), Some(RunId(5)), "run 5 moves");
-        let (commands, tail) = owner.link.output().scripted(1, RunId(5));
-        assert!(matches!(commands.try_recv(), Ok(Command::Name(RunId(5)))));
-        tail.publish(&Snapshot {
-            exposed,
-            ..Snapshot::default()
-        });
+        let (commands, tail) = owner.link.output().scripted(1);
+        tail.publish(&now);
         (commands, tail)
     })
 }
@@ -109,7 +115,7 @@ fn brain_stops(controls: &async_channel::Receiver<ControlToBrain>) -> Vec<RunId>
 #[gpui::test]
 fn recognition_stops_the_run_spoken_at_key_down_once(cx: &mut TestAppContext) {
     let (owner, _data, controls) = ready(cx);
-    let (_commands, _tail) = answering(&owner, 480, cx);
+    let (_commands, _tail) = answering(&owner, SPOKEN, cx);
     let seen = witness(&owner, &controls, cx);
     warm(&owner, 1, cx);
     owner.update(cx, |owner, _| {
@@ -130,7 +136,7 @@ fn recognition_stops_the_run_spoken_at_key_down_once(cx: &mut TestAppContext) {
 #[gpui::test]
 fn a_refused_brain_stop_never_stops_the_speaker_and_opens_no_hold(cx: &mut TestAppContext) {
     let (owner, _data, controls) = ready(cx);
-    let (commands, _tail) = answering(&owner, 480, cx);
+    let (commands, _tail) = answering(&owner, SPOKEN, cx);
     warm(&owner, 1, cx);
     drop(controls);
     owner.update(cx, |owner, cx| {
@@ -162,7 +168,14 @@ fn a_refused_brain_stop_never_stops_the_speaker_and_opens_no_hold(cx: &mut TestA
 #[gpui::test]
 fn a_run_with_no_spoken_content_gets_no_recognition_stop(cx: &mut TestAppContext) {
     let (owner, _data, controls) = ready(cx);
-    let (commands, _tail) = answering(&owner, 0, cx);
+    let (commands, _tail) = answering(
+        &owner,
+        Snapshot {
+            spoken: 0,
+            ..SPOKEN
+        },
+        cx,
+    );
     warm(&owner, 1, cx);
     hold(&owner, 1, cx);
     assert_eq!(brain_stops(&controls), [], "the moving run keeps going");
@@ -172,7 +185,7 @@ fn a_run_with_no_spoken_content_gets_no_recognition_stop(cx: &mut TestAppContext
 #[gpui::test]
 fn a_run_replaced_after_key_down_is_not_stopped(cx: &mut TestAppContext) {
     let (owner, _data, controls) = ready(cx);
-    let (commands, _tail) = answering(&owner, 480, cx);
+    let (commands, _tail) = answering(&owner, SPOKEN, cx);
     warm(&owner, 1, cx);
     owner.update(cx, |owner, _| {
         owner
@@ -187,7 +200,7 @@ fn a_run_replaced_after_key_down_is_not_stopped(cx: &mut TestAppContext) {
 #[gpui::test]
 fn escape_stops_the_speaker_after_the_brain_and_never_without_it(cx: &mut TestAppContext) {
     let (owner, _data, controls) = ready(cx);
-    let (_commands, _tail) = answering(&owner, 480, cx);
+    let (_commands, _tail) = answering(&owner, SPOKEN, cx);
     let seen = witness(&owner, &controls, cx);
     escape(&owner, cx);
     assert_eq!(
@@ -196,7 +209,7 @@ fn escape_stops_the_speaker_after_the_brain_and_never_without_it(cx: &mut TestAp
     );
 
     let (owner, _data, controls) = ready(cx);
-    let (commands, _tail) = answering(&owner, 480, cx);
+    let (commands, _tail) = answering(&owner, SPOKEN, cx);
     drop(controls);
     escape(&owner, cx);
     assert_eq!(stops(&commands), [], "the brain wasn't told");
@@ -232,7 +245,7 @@ fn full(
 #[gpui::test]
 fn a_refused_stop_ends_the_session_and_never_stops_the_speaker(cx: &mut TestAppContext) {
     let (owner, _data, _controls) = ready(cx);
-    let (commands, _tail) = answering(&owner, 480, cx);
+    let (commands, _tail) = answering(&owner, SPOKEN, cx);
     let _full = full(&owner, cx);
     escape(&owner, cx);
     owner.update(cx, |owner, _| {
@@ -245,7 +258,7 @@ fn a_refused_stop_ends_the_session_and_never_stops_the_speaker(cx: &mut TestAppC
     assert_eq!(stops(&commands), [], "no speaker Stop");
 
     let (owner, _data, _controls) = ready(cx);
-    let (commands, _tail) = answering(&owner, 480, cx);
+    let (commands, _tail) = answering(&owner, SPOKEN, cx);
     let _full = full(&owner, cx);
     owner.update(cx, |owner, _| {
         let session = owner.session.clone().expect("connected");
@@ -260,4 +273,21 @@ fn a_refused_stop_ends_the_session_and_never_stops_the_speaker(cx: &mut TestAppC
         );
     });
     assert_eq!(stops(&commands), [], "no speaker Stop");
+}
+
+#[gpui::test]
+fn recognition_stops_a_spoken_run_the_gesture_s_pause_drained(cx: &mut TestAppContext) {
+    let (owner, _data, controls) = ready(cx);
+    let (commands, _tail) = answering(
+        &owner,
+        Snapshot {
+            played: 480,
+            ..SPOKEN
+        },
+        cx,
+    );
+    warm(&owner, 1, cx);
+    hold(&owner, 1, cx);
+    assert_eq!(brain_stops(&controls), [RunId(5)]);
+    assert_eq!(stops(&commands), [RunId(5)]);
 }

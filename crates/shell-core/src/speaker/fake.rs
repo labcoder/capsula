@@ -31,6 +31,10 @@ pub(crate) struct Script {
     pub(crate) silent: u64,
     /// Passes the device was serviced.
     pub(crate) passes: u64,
+    /// A release holding content waits, its buffer staged, until cleared; `holding` says it's
+    /// waiting.
+    pub(crate) hold: bool,
+    pub(crate) holding: bool,
 }
 
 pub(crate) type Shared = Arc<Mutex<Script>>;
@@ -94,6 +98,15 @@ impl Device for Fake {
                 let content = out.iter().filter(|sample| **sample != 0);
                 if release == Release::Content && content.clone().next().is_some() {
                     assert!(!panic, "the scripted panic, mid-release");
+                    loop {
+                        let mut script = lock(&self.script);
+                        script.holding = script.hold;
+                        if !script.hold {
+                            break;
+                        }
+                        drop(script);
+                        std::thread::sleep(Duration::from_millis(1));
+                    }
                     lock(&self.script).content.extend(content);
                 }
                 if release == Release::Silent {

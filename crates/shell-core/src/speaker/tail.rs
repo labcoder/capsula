@@ -29,6 +29,9 @@ pub struct Snapshot {
     pub quiet: u32,
     /// [`UNKNOWN`], [`SEALED`], [`FAULT`] and [`RELEASED`].
     pub flags: u8,
+    /// The run whose content the last successful content release committed, until a stop of it
+    /// or a newer run, the seal or the release; 0 for none.
+    pub spoken: u64,
 }
 
 impl Snapshot {
@@ -52,6 +55,7 @@ pub struct Tail {
     played: AtomicU64,
     flight: AtomicU64,
     state: AtomicU64,
+    spoken: AtomicU64,
 }
 
 impl Tail {
@@ -67,6 +71,7 @@ impl Tail {
             u64::from(now.quiet) << 8 | u64::from(now.flags),
             Ordering::Relaxed,
         );
+        self.spoken.store(now.spoken, Ordering::Relaxed);
         self.seq.store(seq.wrapping_add(1), Ordering::Release);
     }
 
@@ -86,6 +91,7 @@ impl Tail {
             flight: self.flight.load(Ordering::Relaxed),
             quiet: u32::try_from(state >> 8).unwrap_or(u32::MAX),
             flags: u8::try_from(state & 0xff).unwrap_or(u8::MAX),
+            spoken: self.spoken.load(Ordering::Relaxed),
         };
         self.confirm(seq, snapshot)
     }

@@ -67,7 +67,6 @@ struct State {
     abort: Option<Abort>,
     ledger: [Option<Entry>; LEDGER],
     inhibit: Option<Inhibit>,
-    named: Option<Named>,
     off: bool,
     /// Sees each speaker command as it is queued: a test's point to check what came before.
     #[cfg(any(test, feature = "test-support"))]
@@ -107,14 +106,6 @@ struct Entry {
     generation: OutputGeneration,
     tail: Arc<Tail>,
     terminal: bool,
-}
-
-/// The run last named to the live output, and what that output had exposed by then.
-#[derive(Clone, Copy)]
-struct Named {
-    generation: OutputGeneration,
-    run: RunId,
-    exposed: u64,
 }
 
 struct Inhibit {
@@ -728,37 +719,16 @@ impl OutputOwner {
         Ok(())
     }
 
-    /// The link thread names `run` to the live speaker. The command goes under the lock, so
-    /// [`OutputOwner::spoken`] knows what that output had exposed before it; a tail
-    /// mid-publish leaves no evidence. False when the speaker couldn't take it.
-    pub(super) fn name(&self, run: RunId) -> bool {
-        let mut state = self.lock();
-        state.named = state.live().and_then(|generation| {
-            let exposed = state.tail(generation)?.read()?.exposed;
-            Some(Named {
-                generation,
-                run,
-                exposed,
-            })
-        });
-        let abort = state.command(Command::Name(run));
-        drop(state);
-        if abort.is_none() {
-            return true;
-        }
-        self.after(abort);
-        false
-    }
-
-    /// The run `session`'s live output has exposed content for since it was named: positive
-    /// evidence that it is speaking. A tail mid-publish is no evidence.
+    /// The run whose content `session`'s live output committed last and hasn't been stopped:
+    /// positive evidence that it is speaking, even once the device has drained. Never waits: a
+    /// busy owner or a tail mid-publish is no evidence.
     pub fn spoken(&self, session: u64) -> Option<RunId> {
-        let state = self.lock();
-        let named = state.named.filter(|named| {
-            state.session == Some(session) && state.live() == Some(named.generation)
-        })?;
-        let now = state.tail(named.generation)?.read()?;
-        (now.exposed > named.exposed).then_some(named.run)
+        let state = self.try_lock().ok()?;
+        if state.session != Some(session) {
+            return None;
+        }
+        let now = state.tail(state.live()?)?.read()?;
+        (now.spoken != 0).then_some(RunId(now.spoken))
     }
 
     /// Queues the speaker's `Stop` of `run` on `session` only, after the brain accepted its
@@ -813,14 +783,10 @@ impl OutputOwner {
         self.lock().witness = Some(witness);
     }
 
-    /// Makes `session`'s output a live generation with no speaker behind it and names `run` to
-    /// it: its commands come out of the receiver, and the test publishes its tail.
+    /// Makes `session`'s output a live generation with no speaker behind it: its commands come
+    /// out of the receiver, and the test publishes its tail.
     #[cfg(any(test, feature = "test-support"))]
-    pub fn scripted(
-        &self,
-        session: u64,
-        run: RunId,
-    ) -> (std::sync::mpsc::Receiver<Command>, Arc<Tail>) {
+    pub fn scripted(&self, session: u64) -> (std::sync::mpsc::Receiver<Command>, Arc<Tail>) {
         let (commands, receiver) = std::sync::mpsc::sync_channel(64);
         let tail = Arc::<Tail>::default();
         let mut state = self.lock();
@@ -840,7 +806,6 @@ impl OutputOwner {
         state.output = Output::Live(generation);
         state.commands = Some(commands);
         drop(state);
-        assert!(self.name(run), "the script takes the name");
         (receiver, tail)
     }
 }
