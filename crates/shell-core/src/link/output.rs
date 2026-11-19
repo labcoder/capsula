@@ -775,6 +775,12 @@ impl OutputOwner {
         stopped
     }
 
+    /// Opens `session`'s output with no speaker, as a reconnect's link thread does.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn begin_quiet(&self, session: u64) {
+        let _opened = self.begin(session, None);
+    }
+
     /// Makes the next `calls` non-waiting calls find the owner busy.
     #[cfg(any(test, feature = "test-support"))]
     pub fn refuse(&self, calls: u32) {

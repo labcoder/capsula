@@ -161,7 +161,7 @@ pub(super) struct Voice {
 #[cfg(test)]
 type Start = Box<
     dyn FnOnce(
-        Generation,
+        crate::platform::microphone::Reserved,
         std::sync::Arc<std::sync::atomic::AtomicBool>,
     ) -> Result<MicOwner, crate::platform::microphone::MicError>,
 >;
@@ -1100,8 +1100,11 @@ impl Presence {
             return;
         }
         match status {
+            // The waiter is installed, then checked at once.
             HoldStatus::Admitted if matches!(hold.source, Source::Waiting) => {
-                self.open_microphone(cx);
+                if self.voice.gates.admit(gesture, cx.background_executor()) {
+                    self.dispatch(cx);
+                }
             }
             HoldStatus::Admitted => {}
             HoldStatus::Loading => self.voice_notice(Text::VoiceLoading, cx),

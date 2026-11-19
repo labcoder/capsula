@@ -585,7 +585,7 @@ fn a_hold_admitted_after_its_session_closed_never_opens_the_microphone(cx: &mut 
     use kumochi_protocol::message::{HoldStatus, Incarnation};
     for refused in [false, true] {
         let (owner, _data, _controls) = ready(cx);
-        let (_commands, _tail) = answering(&owner, SPOKEN, cx);
+        let (_commands, tail) = answering(&owner, SPOKEN, cx);
         hold(&owner, 1, cx);
         let controls = if refused {
             Some(full(&owner, cx))
@@ -633,6 +633,14 @@ fn a_hold_admitted_after_its_session_closed_never_opens_the_microphone(cx: &mut 
             owner.runs.met(Incarnation(2));
             owner.runs.connected(2);
             owner.runs.settings(ThreadId(1));
+            // Session 1's speaker played out and released; the link thread opens session 2's
+            // output with no speaker, as a reconnect does.
+            tail.publish(&Snapshot {
+                played: 480,
+                flags: kumochi_shell_core::speaker::RELEASED,
+                ..SPOKEN
+            });
+            owner.link.output().begin_quiet(2);
             let replacement = owner.session.clone().expect("reconnected");
             let replay = ControlToBrain::VoiceHoldStopped {
                 gesture: GestureId(1),

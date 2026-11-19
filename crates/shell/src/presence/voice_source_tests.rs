@@ -64,7 +64,7 @@ fn hold_failures_log_closed_stages_and_reasons_without_user_content(cx: &mut Tes
         owner.update(cx, |owner, _| {
             owner.voice.start = Some(Box::new(move |token, session| {
                 if worker {
-                    MicOwner::start_with_for_tests(token, session, move |_, _, _, _| {
+                    MicOwner::start_reserved_with_for_tests(token, session, move |_, _, _, _| {
                         if error == MicError::Unconfirmed {
                             Err(error)
                         } else {
@@ -540,7 +540,7 @@ fn microphone_start_without_running_reports_unavailable_not_cancellation(cx: &mu
         owner.update(cx, |owner, _| {
             owner.voice.start = Some(Box::new(move |token, session| {
                 if worker {
-                    MicOwner::start_with_for_tests(token, session, move |_, _, _, _| {
+                    MicOwner::start_reserved_with_for_tests(token, session, move |_, _, _, _| {
                         Ok(Finalization::Discarded(error))
                     })
                 } else {
@@ -1154,7 +1154,7 @@ pub(super) fn source(
     let (copied, samples) = mpsc::channel();
     owner.update(cx, |owner, _| {
         owner.voice.start = Some(Box::new(move |generation, session| {
-            MicOwner::start_with_for_tests(
+            MicOwner::start_reserved_with_for_tests(
                 generation,
                 session,
                 move |token, session, running, pcm| {

@@ -972,7 +972,9 @@ stateDiagram-v2
     [*] --> Native: key-down
     Native --> Recognized: recognized with a generation
     Native --> Ending: released, reset or superseded
+    Recognized --> Admitted: the brain admits the hold
     Recognized --> Ending: the hold ends, or its receipt comes
+    Admitted --> Ending: deadline, refusal, the hold ends, or its receipt comes
     Ending --> [*]: retired on its proof
 ```
 
@@ -980,6 +982,13 @@ One dispatcher task per presence makes every UI-side acquire, bind and retiremen
 callback, the owner's change hints, the receipt task and its own timers wake it through one
 bounded channel, and it runs after the delivery that woke it, so an Esc's speaker `Stop` is
 queued before any `Resume`. A busy owner gets three rechecks 10 ms apart.
+
+An admitted hold doesn't open the microphone at once: its gate waits, with a quiet deadline set
+once at admission (2 s, a guess). Each wake rechecks the hold's session, settings, input and mode,
+then asks the owner for a claim; `Opening` and `NotQuiet` wait for the next wake, and the claim
+reserves the start. Wakes never refill the rechecks or move the deadline, and the deadline stops
+applying once the start is reserved. The started worker's `Running` receipt is offered to the
+owner's `collect` under that claim; a refusal stops and drains that worker, and nothing reopens.
 
 Retirement needs proof: `NoMic` with no microphone bound, `Unstarted` for a generation that
 never started (the gate is its one discard, and `VoiceHoldStopped` follows as before), and

@@ -2,15 +2,15 @@
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use async_channel::{Receiver, Sender};
 use gpui_kit::{BackgroundExecutor, Task};
 use kumochi_protocol::message::{ControlToBrain, GestureId, RunId};
-use kumochi_shell_core::link::output::{Denied, InhibitToken, OutputOwner, Retirement};
+use kumochi_shell_core::link::output::{Claim, Denied, InhibitToken, OutputOwner, Retirement};
 
-use super::{Context, FailureReason, FailureStage, Presence};
-use crate::platform::microphone::Generation;
+use super::{Context, FailureReason, FailureStage, Presence, Source};
+use crate::platform::microphone::{Generation, MicOwner, Mode, Reserved, Running};
 use crate::strings::Text;
 
 #[cfg(test)]
@@ -18,7 +18,9 @@ mod tests;
 
 /// Rechecks a busy owner gets per operation: an attempt budget, not a latency promise.
 const RECHECKS: u8 = 3;
-const RECHECK: Duration = Duration::from_millis(10);
+pub(super) const RECHECK: Duration = Duration::from_millis(10);
+/// How long an admitted hold waits for the output to go quiet [guess].
+const QUIET_WAIT: Duration = Duration::from_secs(2);
 
 enum Authority {
     /// Busy at key-down: the dispatcher acquires.
@@ -35,6 +37,12 @@ enum Stage {
     Native,
     /// Recognized: its deferred delivery, then its hold, carries it.
     Recognized,
+    /// Admitted: the quiet deadline and its wake until the start is reserved, then the claim
+    /// its collection is checked under.
+    Admitted {
+        deadline: Option<(Instant, Task<()>)>,
+        claim: Option<Claim>,
+    },
     /// Over: the dispatcher retires it on its proof.
     Ending,
 }
@@ -265,6 +273,7 @@ impl Gates {
                     && gate.mic.is_none()
             })
             .ok_or(Denied::Stale)?;
+        gate.rechecks = RECHECKS;
         let bound = match &gate.authority {
             Authority::Held(token) => output.bind_mic(token, mic),
             // Authority still coming: the dispatcher binds once it has it.
@@ -288,12 +297,54 @@ impl Gates {
         Ok(run)
     }
 
-    /// Whether a gate holds `mic` bound: only then may it start.
-    pub(super) fn bound(&self, mic: &Generation) -> bool {
-        self.list
-            .borrow()
-            .iter()
-            .any(|gate| gate.holds(mic) && gate.bound)
+    /// The brain admitted `gesture`'s hold: its quiet deadline is set, once.
+    pub(super) fn admit(&self, gesture: GestureId, executor: &BackgroundExecutor) -> bool {
+        let mut gates = self.list.borrow_mut();
+        let Some(gate) = gates.iter_mut().find(|gate| {
+            gate.gesture == gesture && matches!(gate.stage, Stage::Recognized) && gate.mic.is_some()
+        }) else {
+            return false;
+        };
+        gate.stage = Stage::Admitted {
+            deadline: Some((
+                executor.now() + QUIET_WAIT,
+                self.after(executor, QUIET_WAIT),
+            )),
+            claim: None,
+        };
+        true
+    }
+
+    /// Lets `mic` collect on `running` under `gesture`'s claim.
+    ///
+    /// # Errors
+    /// `Busy` while a recheck is left: offer the same receipt again after [`RECHECK`]. Any other
+    /// refusal, or a busy owner with no recheck left, is final.
+    pub(super) fn collect(
+        &self,
+        output: &OutputOwner,
+        gesture: GestureId,
+        mic: &MicOwner,
+        running: Running,
+    ) -> Result<(), Denied> {
+        let mut gates = self.list.borrow_mut();
+        let Some(gate) = gates.iter_mut().find(|gate| gate.gesture == gesture) else {
+            return Err(Denied::Stale);
+        };
+        let Stage::Admitted {
+            claim: Some(claim), ..
+        } = &gate.stage
+        else {
+            return Err(Denied::Stale);
+        };
+        match output.collect(claim, mic, running) {
+            Err(Denied::Busy) => {
+                tracing::debug!(stage = ?FailureStage::Inhibit, left = gate.rechecks, "held speech input owner busy");
+                gate.rechecks = gate.rechecks.checked_sub(1).ok_or(Denied::Overflow)?;
+                Err(Denied::Busy)
+            }
+            collected => collected,
+        }
     }
 
     /// Ends `mic`'s gate unstarted; false when no gate holds it, so the caller discards it.
@@ -332,7 +383,8 @@ impl Gates {
 
 /// What the dispatcher does once no gate is borrowed.
 enum After {
-    End(GestureId),
+    End(GestureId, Text),
+    Start(Reserved),
     Stopped(GestureId, u64),
     Unconfirmed,
 }
@@ -376,17 +428,18 @@ impl Presence {
             .retain_mut(|gate| self.step(gate, &gates, &executor, current, &mut after));
         for step in after {
             match step {
-                After::End(gesture) => {
+                After::End(gesture, text) => {
                     if self
                         .voice
                         .pending
                         .as_ref()
                         .is_some_and(|hold| hold.token.gesture() == gesture)
                     {
-                        tracing::debug!(stage = ?FailureStage::Inhibit, reason = ?FailureReason::NoInhibit, "held speech input refused");
-                        self.end_voice(Text::TurnBusy, cx);
+                        tracing::debug!(stage = ?FailureStage::Inhibit, reason = ?text, "held speech input refused");
+                        self.end_voice(text, cx);
                     }
                 }
+                After::Start(reserved) => self.open_microphone(reserved, cx),
                 After::Stopped(gesture, generation) => {
                     let Some(session) = self
                         .session
@@ -444,7 +497,7 @@ impl Presence {
                         Authority::Acquiring
                     }
                     Err(_) => {
-                        after.push(After::End(gate.gesture));
+                        after.push(After::End(gate.gesture, Text::TurnBusy));
                         Authority::None
                     }
                 };
@@ -462,7 +515,7 @@ impl Presence {
                     gate.authority = Authority::Held(token);
                     gate.stage = Stage::Ending;
                     gates.poke();
-                    after.push(After::End(gate.gesture));
+                    after.push(After::End(gate.gesture, Text::TurnBusy));
                 }
             },
             Authority::Held(token) => {
@@ -473,15 +526,75 @@ impl Presence {
                         Err(_) => {
                             gate.stage = Stage::Ending;
                             gates.poke();
-                            after.push(After::End(gate.gesture));
+                            after.push(After::End(gate.gesture, Text::TurnBusy));
                         }
                     }
+                }
+                if gate.bound
+                    && let Err(text) = self.wait(gate, &token, gates, executor, after)
+                {
+                    after.push(After::End(gate.gesture, text));
                 }
                 gate.authority = Authority::Held(token);
             }
             Authority::None => {}
         }
         true
+    }
+
+    /// One check of an admitted hold: its deadline, today's checks, its claim and its start.
+    /// `Err` ends the hold with that notice. Wakes never refill the budget or move the deadline.
+    fn wait(
+        &self,
+        gate: &mut Gate,
+        token: &InhibitToken,
+        gates: &Gates,
+        executor: &BackgroundExecutor,
+        after: &mut Vec<After>,
+    ) -> Result<(), Text> {
+        let Stage::Admitted {
+            deadline: Some((at, _)),
+            ..
+        } = &gate.stage
+        else {
+            return Ok(());
+        };
+        if executor.now() >= *at {
+            return Err(Text::HoldCancelled);
+        }
+        let Some(hold) = self.voice.pending.as_ref().filter(|hold| {
+            hold.token.gesture() == gate.gesture
+                && matches!(hold.source, Source::Waiting)
+                && hold.terminal.is_none()
+        }) else {
+            return Ok(());
+        };
+        if !gates.on.get()
+            || !self.voice_current(hold.stamp)
+            || !self.link.input_is(gate.gesture)
+            || hold.token.mode(&hold.session.alive(), Instant::now()) != Ok(Mode::Preparing)
+        {
+            return Err(Text::HoldCancelled);
+        }
+        let output = self.link.output();
+        let claimed = match output.claim(token, hold.session.generation()) {
+            Ok(claimed) => claimed,
+            Err(Denied::Opening | Denied::NotQuiet) => return Ok(()),
+            Err(Denied::Busy) if gate.recheck(gates, executor) => return Ok(()),
+            Err(_) => return Err(Text::TurnBusy),
+        };
+        match output.start_mic(&claimed) {
+            Ok(reserved) => {
+                gate.stage = Stage::Admitted {
+                    deadline: None,
+                    claim: Some(claimed),
+                };
+                after.push(After::Start(reserved));
+                Ok(())
+            }
+            Err(Denied::Busy) if gate.recheck(gates, executor) => Ok(()),
+            Err(_) => Err(Text::TurnBusy),
+        }
     }
 
     /// False once the gate is gone.

@@ -49,6 +49,17 @@ fn speaker(owner: &Entity<Presence>, cx: &mut TestAppContext) -> (Receiver<Comma
     owner.update(cx, |owner, _| owner.link.output().scripted(1))
 }
 
+/// Every pause, resume and stop the owner queues, with no live output: a hold can start.
+fn witness(owner: &Entity<Presence>, cx: &mut TestAppContext) -> Receiver<Command> {
+    let (seen, commands) = std::sync::mpsc::channel();
+    owner.update(cx, |owner, _| {
+        owner.link.output().witness(Box::new(move |command| {
+            let _seen = seen.send(*command);
+        }));
+    });
+    commands
+}
+
 /// The pauses, resumes and stops the speaker was given, in order.
 fn heard(commands: &Receiver<Command>) -> Vec<Command> {
     commands
@@ -111,7 +122,7 @@ fn voice_input_off_takes_no_inhibit(cx: &mut TestAppContext) {
 #[gpui::test]
 fn a_busy_key_down_still_reaches_the_microphone(cx: &mut TestAppContext) {
     let (owner, _data, _controls) = ready(cx);
-    let (commands, _tail) = speaker(&owner, cx);
+    let commands = witness(&owner, cx);
     let starts = std::rc::Rc::new(std::cell::Cell::new(0));
     let counted = std::rc::Rc::clone(&starts);
     owner.update(cx, |owner, _| {
@@ -330,12 +341,12 @@ fn a_failed_start_retires_through_the_gate(cx: &mut TestAppContext) {
     cx.background_executor.allow_parking();
     for worker in [true, false] {
         let (owner, _data, _controls) = ready(cx);
-        let (commands, _tail) = speaker(&owner, cx);
+        let commands = witness(&owner, cx);
         let (token, _) = hold(&owner, 1, cx);
         owner.update(cx, |owner, _| {
             owner.voice.start = Some(Box::new(move |token, session| {
                 if worker {
-                    crate::platform::microphone::MicOwner::start_with_for_tests(
+                    crate::platform::microphone::MicOwner::start_reserved_with_for_tests(
                         token,
                         session,
                         |_, _, _, _| {
@@ -390,7 +401,7 @@ fn listening(
 #[gpui::test]
 fn only_the_physical_receipt_retires_a_live_microphone(cx: &mut TestAppContext) {
     let (owner, _data, _controls) = ready(cx);
-    let (commands, _tail) = speaker(&owner, cx);
+    let commands = witness(&owner, cx);
     let (finish, token) = listening(&owner, None, cx);
     status(&owner, 1, 1, HoldStatus::Failed(HoldFailure::Busy), cx);
     cx.run_until_parked();
@@ -416,7 +427,7 @@ fn only_the_physical_receipt_retires_a_live_microphone(cx: &mut TestAppContext) 
 #[gpui::test]
 fn an_unconfirmed_microphone_keeps_speech_paused_and_says_so(cx: &mut TestAppContext) {
     let (owner, _data, _controls) = ready(cx);
-    let (commands, _tail) = speaker(&owner, cx);
+    let commands = witness(&owner, cx);
     let (finish, token) = listening(&owner, Some(MicError::Unconfirmed), cx);
     owner.update(cx, Presence::cancel_voice);
     finish.send(()).expect("finishes");
@@ -551,7 +562,7 @@ fn a_pending_speaker_stop_holds_the_resume_back(cx: &mut TestAppContext) {
 #[gpui::test]
 fn a_busy_retire_after_the_last_receipt_retries_by_itself(cx: &mut TestAppContext) {
     let (owner, _data, _controls) = ready(cx);
-    let (commands, _tail) = speaker(&owner, cx);
+    let commands = witness(&owner, cx);
     let (finish, token) = listening(&owner, None, cx);
     status(&owner, 1, 1, HoldStatus::Failed(HoldFailure::Busy), cx);
     cx.run_until_parked();
@@ -568,4 +579,158 @@ fn a_busy_retire_after_the_last_receipt_retries_by_itself(cx: &mut TestAppContex
         [Command::Resume(1)],
         "retried with no other wake"
     );
+}
+
+/// Counts starts; each start fails, so a hold starts at most once.
+fn starts(owner: &Entity<Presence>, cx: &mut TestAppContext) -> std::rc::Rc<std::cell::Cell<u32>> {
+    let started = std::rc::Rc::<std::cell::Cell<u32>>::default();
+    let count = std::rc::Rc::clone(&started);
+    owner.update(cx, |owner, _| {
+        owner.voice.start = Some(Box::new(move |_, _| {
+            count.set(count.get() + 1);
+            Err(MicError::Unavailable)
+        }));
+    });
+    started
+}
+
+fn wake(owner: &Entity<Presence>, cx: &mut TestAppContext) {
+    owner.update(cx, |owner, _| owner.voice.gates.poke());
+    cx.run_until_parked();
+}
+
+/// Session 1's tail: never exposed, quiet under serial `quiet`.
+fn quiet(tail: &Tail, quiet: u32) {
+    tail.publish(&Snapshot {
+        exposed: 0,
+        played: 0,
+        flight: 0,
+        quiet,
+        flags: 0,
+        spoken: 0,
+    });
+}
+
+#[gpui::test]
+fn no_start_until_a_valid_admission(cx: &mut TestAppContext) {
+    for admitted in [false, true] {
+        let (owner, _data, _controls) = ready(cx);
+        let started = starts(&owner, cx);
+        hold(&owner, 1, cx);
+        wake(&owner, cx);
+        assert_eq!(started.get(), 0, "quiet, but not admitted");
+        let status_now = if admitted {
+            HoldStatus::Admitted
+        } else {
+            HoldStatus::Failed(HoldFailure::Busy)
+        };
+        status(&owner, 1, 1, status_now, cx);
+        status(&owner, 1, 1, HoldStatus::Admitted, cx);
+        wake(&owner, cx);
+        assert_eq!(started.get(), u32::from(admitted), "admitted: {admitted}");
+    }
+}
+
+#[gpui::test]
+fn admission_and_quiet_in_either_order_start_once(cx: &mut TestAppContext) {
+    for quiet_first in [true, false] {
+        let (owner, _data, _controls) = ready(cx);
+        let (_commands, tail) = speaker(&owner, cx);
+        quiet(&tail, 0);
+        let started = starts(&owner, cx);
+        hold(&owner, 1, cx);
+        if quiet_first {
+            quiet(&tail, 1);
+        }
+        status(&owner, 1, 1, HoldStatus::Admitted, cx);
+        assert_eq!(
+            started.get(),
+            u32::from(quiet_first),
+            "checked at admission"
+        );
+        quiet(&tail, 1);
+        wake(&owner, cx);
+        wake(&owner, cx);
+        assert_eq!(started.get(), 1, "quiet first: {quiet_first}");
+    }
+}
+
+#[gpui::test]
+fn a_busy_owner_gets_three_rechecks_and_wakes_never_refill_them(cx: &mut TestAppContext) {
+    for (refused, expected) in [(3, 1), (4, 0)] {
+        let (owner, _data, _controls) = ready(cx);
+        let started = starts(&owner, cx);
+        hold(&owner, 1, cx);
+        cx.run_until_parked();
+        refuse(&owner, refused, cx);
+        status(&owner, 1, 1, HoldStatus::Admitted, cx);
+        for _ in 0..5 {
+            wake(&owner, cx);
+            cx.background_executor
+                .advance_clock(Duration::from_millis(10));
+            cx.run_until_parked();
+        }
+        assert_eq!(started.get(), expected, "{refused} busy reads");
+        if expected == 0 {
+            owner.read_with(cx, |owner, _| {
+                assert!(owner.voice.pending.is_none(), "denied");
+                assert_eq!(owner.voice.status, Some(Text::TurnBusy));
+            });
+        }
+    }
+}
+
+#[gpui::test]
+fn the_quiet_deadline_expires_when_reached_exactly(cx: &mut TestAppContext) {
+    let (owner, _data, _controls) = ready(cx);
+    let (_commands, tail) = speaker(&owner, cx);
+    quiet(&tail, 0);
+    let started = starts(&owner, cx);
+    hold(&owner, 1, cx);
+    status(&owner, 1, 1, HoldStatus::Admitted, cx);
+    cx.background_executor.advance_clock(super::QUIET_WAIT);
+    cx.run_until_parked();
+    owner.read_with(cx, |owner, _| {
+        assert!(owner.voice.pending.is_none(), "expired");
+        assert_eq!(owner.voice.status, Some(Text::HoldCancelled));
+    });
+    quiet(&tail, 1);
+    wake(&owner, cx);
+    assert_eq!(started.get(), 0);
+}
+
+#[gpui::test]
+fn a_recording_outlives_the_quiet_deadline(cx: &mut TestAppContext) {
+    let (owner, _data, _controls) = ready(cx);
+    let (_finish, _token) = listening(&owner, None, cx);
+    cx.background_executor
+        .advance_clock(super::QUIET_WAIT + Duration::from_secs(1));
+    cx.run_until_parked();
+    owner.read_with(cx, |owner, _| {
+        assert!(owner.voice.pending.is_some(), "still recording");
+        assert_eq!(owner.voice.status, Some(Text::HoldListening));
+    });
+}
+
+#[gpui::test]
+fn an_output_change_before_running_drains_the_worker_and_starts_no_other(cx: &mut TestAppContext) {
+    let (owner, data, _controls) = ready(cx);
+    let (open, finish, started, _samples) = source(&owner, cx, None);
+    hold(&owner, 1, cx);
+    status(&owner, 1, 1, HoldStatus::Admitted, cx);
+    started
+        .recv_timeout(Duration::from_secs(3))
+        .expect("started");
+    // The claimed no-output stretch ends: a speaker opens before the worker runs.
+    let (_commands, _tail) = speaker(&owner, cx);
+    open.send(()).expect("opens");
+    finish.send(()).expect("drains");
+    until(cx, |cx| {
+        owner.read_with(cx, |owner, _| owner.voice.pending.is_none())
+    });
+    owner.read_with(cx, |owner, _| {
+        assert_ne!(owner.voice.status, Some(Text::HoldListening));
+    });
+    assert!(started.try_recv().is_err(), "no second start");
+    assert!(data.is_empty(), "nothing collected");
 }

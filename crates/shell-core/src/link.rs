@@ -833,6 +833,8 @@ impl LinkHandle {
         let mut link = Self::detached();
         link.recording = Some(recording);
         link.shared.generations.store(1, Ordering::Release);
+        // Session 1's output, as a normal launch has it: none, so a hold's claim can be granted.
+        link.shared.output.begin(1, None);
         (link, requests)
     }
 
