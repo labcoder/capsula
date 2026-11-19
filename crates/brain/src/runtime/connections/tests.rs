@@ -735,6 +735,25 @@ async fn a_check_waiting_on_its_load_cant_bring_a_refused_key_back() {
 }
 
 #[tokio::test]
+async fn a_refusal_during_a_checks_catalog_read_drops_it_and_its_key() {
+    let scratch = Scratch::new("key-refused-catalog-read");
+    let (mut accounts, tag) = ready_then_checking(&scratch, peer(EMPTY_CATALOG)).await;
+    assert!(step(&mut accounts).await, "the load");
+    assert!(
+        accounts.connections.read.is_some(),
+        "the catalog read is under way"
+    );
+    accounts.connection_event(ConnectionEvent::Refused { tag });
+    assert_eq!(retained_key(&accounts.connections), None);
+    while step(&mut accounts).await {}
+    assert_eq!(accounts.connections.view.anthropic, KeyView::Unconfirmed);
+    assert!(accounts.connections.verified.is_none());
+    accounts
+        .close(tokio::time::Instant::now(), tokio::time::Instant::now())
+        .await;
+}
+
+#[tokio::test]
 async fn a_check_ending_after_the_fence_closed_cant_bring_a_refused_key_back() {
     let scratch = Scratch::new("key-refused-late-check");
     let (mut accounts, tag) = ready_then_checking(&scratch, peer(EMPTY_CATALOG)).await;
