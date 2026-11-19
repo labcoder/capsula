@@ -281,9 +281,6 @@ fn clean(exe: &Path, folders: &Folders) -> Command {
     command
 }
 
-/// The brain's worker roles: every role but the shell's and the brain's own.
-const WORKERS: usize = crate::session::ROLES.len() - 2;
-
 /// Whether `running` holds this launch's brain and shell, `[brain, shell]`, and besides `me`
 /// nothing [`no_strangers`] refuses.
 fn only_ours(
@@ -300,22 +297,34 @@ fn only_ours(
 }
 
 /// Whether every product process in `running` besides `me` is this launch's brain or shell, or a
-/// worker of that brain. The brain starts its screen and speech workers from its own executable
-/// and nothing else under that name, so a worker is a child of the brain under the brain's name,
-/// one per role at most.
+/// worker of that brain: a child of it whose image is the gate brain's, `image`, and whose
+/// arguments name exactly one worker role, one child per role at most. A child that has exited
+/// before `identify` reads it counts for nothing, and the next look samples again; a live child
+/// that can't be read fails.
 fn no_strangers(
     running: &[platform::Entry],
     me: u32,
     [brain, shell]: [u32; 2],
-    _image: &Path,
-    _identify: impl Fn(u32) -> Result<Option<platform::Helper>>,
+    image: &Path,
+    identify: impl Fn(u32) -> Result<Option<platform::Helper>>,
 ) -> Result<bool> {
-    let worker = |entry: &&platform::Entry| !entry.shell && entry.parent == brain;
-    Ok(running.iter().filter(worker).count() <= WORKERS
-        && running
-            .iter()
-            .filter(|entry| !worker(entry))
-            .all(|entry| [me, brain, shell].contains(&entry.pid)))
+    let mut roles = Vec::new();
+    for entry in running
+        .iter()
+        .filter(|entry| ![me, brain, shell].contains(&entry.pid))
+    {
+        if entry.shell || entry.parent != brain {
+            return Ok(false);
+        }
+        let Some(helper) = identify(entry.pid)? else {
+            continue;
+        };
+        match helper.role {
+            Some(role) if helper.image == image && !roles.contains(&role) => roles.push(role),
+            _ => return Ok(false),
+        }
+    }
+    Ok(true)
 }
 
 /// Where the ledger lives: beside the gate's run lock, so cleaning or moving build output can't
