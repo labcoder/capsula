@@ -510,7 +510,9 @@ short leaves the hold voice-only, and its line says the screen wasn't ready. A l
 release couldn't be built or sent is given back at once and tells no lapse. A release while the
 capture before it still holds its lease is refused the same way. A release opens no window: the
 next overlay window opens with its show, and a window opened under a held lease joins it before
-it is shown, as every late surface does.
+it is shown, as every late surface does. A new window's show covers it itself, so `reach_overlay`
+checks the lease after every show and hide: if the cover was refused and revoked a sent lease,
+the brain hears `ExclusionLapsed` before the drawing's own recovery runs.
 
 The line is drawn on the primary display only, like every drawing. A release with the pointer
 on another display sends that display's picture with an empty path: what the model gets never

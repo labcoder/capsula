@@ -1306,7 +1306,11 @@ fn a_cold_overlay_show_that_can_t_join_a_sent_lease_tells_the_brain_before_anyth
                 "the other windows came back"
             );
         } else {
-            assert_eq!(sent, []);
+            // Only the shown drawing's own acknowledgement: no lapse.
+            assert!(matches!(
+                sent.as_slice(),
+                [ControlToBrain::StepShown { .. }]
+            ));
             fixture.borrow().assert_excluded(Slot::Drawing);
         }
     }

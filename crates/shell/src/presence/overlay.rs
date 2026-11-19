@@ -477,7 +477,10 @@ impl Presence {
             notice: &self.paint_notice,
             ink: &self.ink,
         };
-        step(&mut self.overlay, &mut surface, &frames)
+        let result = step(&mut self.overlay, &mut surface, &frames);
+        // A new window's show covers it directly, and a refused cover revokes the whole lease.
+        self.exclusion_lapsed();
+        result
     }
 }
 
