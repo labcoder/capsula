@@ -596,8 +596,9 @@ reads the fixture's extended style back and, if the fixture isn't topmost, refus
 fixed code, before the guard is announced armed and before any hit test. Just before the prepare
 is sent, the runner reads, changing nothing, whether the root is visible and topmost, its Z-order
 word against the foreground window and the milliseconds since the runner found the root. Only a
-failed prepare and an `edit_not_at_point` refusal report that read. Finalization restores the
-fixture's prior topmost state.
+failed prepare and an `edit_not_at_point` refusal report that read. Finalization returns the
+fixture to the normal band, even though it was born topmost, because the rest of the session
+expects it below the product's own topmost windows.
 If that request fails or cannot arrive, the run refuses and closes its owned fixture instead.
 
 After the click's receipt, the runner waits up to 250 ms for the fixture's root to come to the
