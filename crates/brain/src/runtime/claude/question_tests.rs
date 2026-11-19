@@ -2409,8 +2409,7 @@ fn brain_on(rig: &mut Rig, name: &str) -> Brain {
 }
 
 async fn started_provider_recheck(brain: &mut Brain, base: &Base) -> RunId {
-    use crate::context::{Built, tools};
-    use crate::coordinator::{ContextBuilt, Effect, StoreOp};
+    use crate::coordinator::Effect;
 
     brain.claude_reported(None).expect("no shell");
     let started = brain
@@ -2426,6 +2425,24 @@ async fn started_provider_recheck(brain: &mut Brain, base: &Base) -> RunId {
             .iter()
             .any(|effect| matches!(effect, Effect::ArmDeadline { run: id, .. } if *id == run))
     );
+    let effects = admit_provider_build(brain, run);
+    brain.apply(effects, None).unwrap();
+    drive_until(brain, || base.0.join("seed.1").is_file()).await;
+    timeout(WAIT, async {
+        while brain.claude.recheck.is_none() {
+            let wake = brain.claude.next().await;
+            brain.claude_done(wake, None).unwrap();
+        }
+    })
+    .await
+    .unwrap();
+    run
+}
+
+fn admit_provider_build(brain: &mut Brain, run: RunId) -> Vec<crate::coordinator::Effect> {
+    use crate::context::{Built, tools};
+    use crate::coordinator::{ContextBuilt, Effect, StoreOp};
+
     let effects = brain.handle(Input::TurnStored { run }).unwrap();
     let key = effects
         .iter()
@@ -2438,7 +2455,7 @@ async fn started_provider_recheck(brain: &mut Brain, base: &Base) -> RunId {
     request.tools = tools(Origin::Kumo);
     let mut snapshot = brain.snapshot(Origin::Kumo);
     snapshot.choice.clone_from(&request.choice);
-    let effects = brain
+    brain
         .handle(Input::ContextBuilt(ContextBuilt {
             key,
             snapshot: Some(snapshot),
@@ -2447,18 +2464,83 @@ async fn started_provider_recheck(brain: &mut Brain, base: &Base) -> RunId {
                 sources: Vec::new(),
             }),
         }))
+        .unwrap()
+}
+
+#[tokio::test]
+async fn parsed_provider_failure_survives_a_deadline_with_usage_backpressured() {
+    use crate::coordinator::Effect;
+    use crate::test_support::{self, Scratch};
+
+    let name = "question-recheck-usage-backpressure";
+    let mut script = provider_failure()
+        .pre_tools(BOTH_TOOLS)
+        .post_tools(BOTH_TOOLS);
+    script.user.last_mut().unwrap()["usage"] = json!({"input_tokens": 4, "output_tokens": 2});
+    let mut rig = Rig::new(name, &script).await;
+    fs::write(rig.base.0.join("watch-stdin-eof"), b"").unwrap();
+    let scratch = Scratch::new(name);
+    let mut brain = test_support::brain(&scratch, "");
+    std::mem::swap(&mut brain.claude, &mut rig.claude);
+    brain.claude_reported(None).unwrap();
+    brain.offline(Input::Turn {
+        turn: 1,
+        thread: None,
+        text: "hi".into(),
+    });
+    let run = brain.coordinator.current_run().unwrap();
+    assert_eq!(
+        timeout(WAIT, brain.inputs.recv()).await.unwrap(),
+        Some(Input::TurnStored { run })
+    );
+    let request = admit_provider_build(&mut brain, run)
+        .into_iter()
+        .find_map(|effect| match effect {
+            Effect::StartEngine { request } => Some(request),
+            _ => None,
+        })
         .unwrap();
-    brain.apply(effects, None).unwrap();
-    drive_until(brain, || base.0.join("seed.1").is_file()).await;
-    timeout(WAIT, async {
-        while brain.claude.recheck.is_none() {
-            let wake = brain.claude.next().await;
-            brain.claude_done(wake, None).unwrap();
+    let question = brain.claude.question(&request).unwrap();
+    let gate = SendGate::new(
+        request.key,
+        Arc::clone(&brain.asks),
+        brain.inputs_tx.clone(),
+    );
+    let (events, mut received) = mpsc::channel(1);
+    let lease = events.reserve().await.unwrap();
+    let round = tokio::spawn(question.start(request, events.clone(), gate));
+    drive_until(&mut brain, || rig.base.0.join("stdin-eof.1").is_file()).await;
+    while let Ok(note) = brain.claude.notes.1.try_recv() {
+        brain.claude_done(Wake::Note(note), None).unwrap();
+    }
+    assert_eq!(events.capacity(), 0);
+    assert_eq!(received.try_recv(), Err(mpsc::error::TryRecvError::Empty));
+    assert!(!round.is_finished());
+
+    brain.offline(Input::Deadline { run });
+    let stored = timeout(WAIT, async {
+        loop {
+            let input = brain.inputs.recv().await.unwrap();
+            if matches!(input, Input::RunStored { .. }) {
+                break input;
+            }
         }
     })
     .await
     .unwrap();
-    run
+    assert_eq!(stored, Input::RunStored { run });
+    brain.offline(stored);
+    round.abort();
+    assert!(round.await.unwrap_err().is_cancelled());
+    drop(lease);
+    brain.close().await;
+    let db = rusqlite::Connection::open(scratch.db()).unwrap();
+    let outcome: (String, String) = db
+        .query_row("SELECT state, reason FROM runs", [], |row| {
+            Ok((row.get(0)?, row.get(1)?))
+        })
+        .unwrap();
+    assert_eq!(outcome, ("failed".to_owned(), "engine".to_owned()));
 }
 
 #[tokio::test]

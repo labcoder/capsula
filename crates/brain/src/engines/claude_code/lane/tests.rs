@@ -272,6 +272,9 @@ fn replay() {
             }
         }
     }
+    if base.join("watch-stdin-eof").is_file() {
+        fs::write(base.join(format!("stdin-eof.{ordinal}")), b"").expect("observed stdin close");
+    }
 }
 
 fn record(args: &[String]) {

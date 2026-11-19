@@ -171,6 +171,8 @@ pub(crate) enum Outcome {
 pub(crate) enum Note {
     /// An attempt's one terminal report.
     Ended { id: LaunchId, outcome: Outcome },
+    /// The provider's failure was parsed, even if stream delivery is backpressured.
+    ProviderObserved(BuildKey),
     /// A seeded question ended with a provider failure. Only confirmed sign-out answers.
     ProviderFailed {
         id: LaunchId,
@@ -622,10 +624,14 @@ impl Question<'_> {
         report: Report,
         (key, until): (SendKey, Instant),
     ) -> Option<Finish> {
+        let provider_failed = matches!(finish, Finish::Failed(EngineFailure::Provider));
+        if provider_failed && let SendKey::Build(build) = key {
+            self.notes.send(Note::ProviderObserved(build)).ok();
+        }
         if let Some(usage) = usage {
             self.events.send(TurnEvent::Usage(usage)).await.ok()?;
         }
-        if matches!(finish, Finish::Failed(EngineFailure::Provider)) {
+        if provider_failed {
             drop(attempt);
             if matches!(
                 tokio::time::timeout_at(until.into(), report.recheck(key, until)).await,

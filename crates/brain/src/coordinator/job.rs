@@ -18,7 +18,7 @@ use std::time::Duration;
 use kumochi_protocol::message::{ConnectionKind, EventId, RunId, ThreadId, ThreadTitle};
 
 use super::admission::origin;
-use super::{Coordinator, Effect, SendKey, Stale, StoreOp, SummaryText, Unbuilt};
+use super::{BuildKey, Coordinator, Effect, SendKey, Stale, StoreOp, SummaryText, Unbuilt};
 use crate::context::compact::COMPACT_AT;
 use crate::context::{Built, Origin, Route, RunSnapshot};
 use crate::engines::RunRequest;
@@ -139,26 +139,33 @@ impl Job {
 }
 
 impl Coordinator {
+    fn current_claude_build(&mut self, key: BuildKey) -> Option<&mut super::admission::Build> {
+        let run = self.current.as_mut().filter(|run| {
+            run.started()
+                && !run.finishing
+                && run
+                    .route
+                    .is_some_and(|route| route.kind == ConnectionKind::ClaudeCode)
+        })?;
+        run.build
+            .as_mut()
+            .filter(|build| build.key() == key && build.admitted())
+    }
+
+    pub(crate) fn claude_provider_observed(&mut self, key: BuildKey) {
+        if let Some(build) = self.current_claude_build(key) {
+            build.provider_failed = true;
+        }
+    }
+
     pub(crate) fn claude_recheck_control(
         &mut self,
         key: SendKey,
     ) -> Option<crate::recall::control::Control> {
         match key {
-            SendKey::Build(key) => {
-                let run = self.current.as_mut().filter(|run| {
-                    run.started()
-                        && !run.finishing
-                        && run
-                            .route
-                            .is_some_and(|route| route.kind == ConnectionKind::ClaudeCode)
-                })?;
-                let build = run
-                    .build
-                    .as_mut()
-                    .filter(|build| build.key() == key && build.admitted())?;
-                build.provider_failed = true;
-                Some(build.control.0.clone())
-            }
+            SendKey::Build(key) => self
+                .current_claude_build(key)
+                .map(|build| build.control.0.clone()),
             SendKey::Job(key) => {
                 let job = self.job.as_ref()?;
                 (job.key == key

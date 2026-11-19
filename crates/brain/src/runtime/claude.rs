@@ -834,7 +834,7 @@ impl Claude {
                 false
             }
             // Only the brain can authorize; dropping the reply refuses the launch.
-            Note::Bind(_) | Note::ProviderFailed { .. } => false,
+            Note::Bind(_) | Note::ProviderObserved(_) | Note::ProviderFailed { .. } => false,
         }
     }
 
@@ -1134,6 +1134,10 @@ impl Brain {
             Wake::Call(call) => return self.mcp_call(call, link),
             Wake::Note(Note::Bind(bind)) => {
                 self.mcp_bind(bind);
+                return Ok(());
+            }
+            Wake::Note(Note::ProviderObserved(key)) => {
+                self.coordinator.claude_provider_observed(key);
                 return Ok(());
             }
             Wake::Note(Note::ProviderFailed {
