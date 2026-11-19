@@ -609,6 +609,51 @@ fn a_refused_claude_code_compaction_fails_the_run() {
                 ErrorKey::ClaudeCodeBudget.into()
             ))),
         )),
-        Ok(ends_failed(Failure::Engine))
+        Ok(failed_with(ErrorKey::ClaudeCodeBudget.into()))
     );
+}
+
+/// A compaction the provider refuses fails the run with the provider's own reason, as a round's
+/// failure does: a 401 shows the rejected-key notice, not a bare failure.
+#[test]
+fn a_refused_anthropic_compaction_fails_the_run_with_its_reason() {
+    use kumochi_protocol::Secret;
+    use kumochi_protocol::message::{Action, ErrorKey, UserError};
+    use zeroize::Zeroizing;
+
+    use crate::connections::anthropic::error::{Failure as Anthropic, ProviderFailure};
+    use crate::engines::EngineFailure;
+
+    let mut core = compacting();
+    assert_eq!(core.handle(ready(2)), Ok(granted(2)));
+    let refused =
+        ProviderFailure::answered(401, Secret::new(Zeroizing::new(Vec::new()))).expect("a 401");
+    assert_eq!(
+        core.handle(engine(
+            super::engine_key(&core, R),
+            TurnEvent::Finished(Finish::Failed(EngineFailure::Anthropic(
+                Anthropic::Provider(refused)
+            ))),
+        )),
+        Ok(failed_with(
+            UserError::new(
+                ErrorKey::AnthropicKeyRejected,
+                Vec::new(),
+                vec![Action::OpenSettings]
+            )
+            .expect("one action")
+        ))
+    );
+}
+
+/// The run's failure as `ends_failed` has it, with `reason` as its notice.
+fn failed_with(reason: kumochi_protocol::message::UserError) -> Vec<Effect> {
+    let mut failed = ends_failed(Failure::Engine);
+    let Effect::Control(kumochi_protocol::message::ControlToShell::RunState { error, .. }) =
+        &mut failed[1]
+    else {
+        panic!("the run's failed state");
+    };
+    *error = Some(reason);
+    failed
 }
