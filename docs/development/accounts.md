@@ -15,9 +15,12 @@ an already running OS write cannot be recalled. After Staged has been sent, a
 missing acknowledgement leaves the save unconfirmed, not failed. A save
 acknowledgement is separate from catalog verification.
 After a lost acknowledgement, the row retains the unknown-save status through
-Check. Only a conclusive receipt for that Check on the same link unlocks paste
-or removal; a queued snapshot is not a result. Disconnect retires the request
-but keeps the unknown outcome. Once reconnected, the user can Check again.
+Check. A successful local vault read for that Check on the same link unlocks
+paste and, if a key is stored, removal of the revision it read. A queued
+snapshot can't unlock the row. An unreadable vault leaves both actions locked
+and allows another Check. The catalog's result shows separately and doesn't
+block either action once the local read succeeds. Disconnect retires the
+request but keeps the unknown outcome so the user can Check after reconnecting.
 Whenever Paste is available, the row warns that it can replace a saved key.
 A fresh shell can receive a cached Missing view while a prior adoption is
 still in flight, so Missing does not suppress the warning.

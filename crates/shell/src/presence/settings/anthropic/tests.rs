@@ -3,7 +3,8 @@ use gpui_kit::{
     WindowOptions,
 };
 use kumochi_protocol::message::{
-    ClaudeCodeView, ConnectionsView, Incarnation, KeyRemovalFailure, KeyStageId, KeyStagePlan,
+    ClaudeCodeView, ConnectionsView, Incarnation, KeyRecoveryRead, KeyRemovalFailure, KeyStageId,
+    KeyStagePlan,
 };
 
 use super::*;
@@ -327,7 +328,7 @@ fn a_lost_save_acknowledgement_replaces_the_old_status(cx: &mut TestAppContext) 
         receive_key(&mut visual, &owner, KeyView::Unconfirmed, Some(1));
         let failed = ControlToShell::AnthropicKeyReconciled {
             request: 2,
-            confirmed: false,
+            read: None,
         };
         key_event(
             &mut visual,
@@ -340,15 +341,22 @@ fn a_lost_save_acknowledgement_replaces_the_old_status(cx: &mut TestAppContext) 
         assert_unknown_save(&mut visual, &owner);
         click_recovery_check(&mut visual, &controls, 3);
 
-        receive_key(
-            &mut visual,
-            &owner,
-            reconciled,
-            (reconciled == KeyView::Ready).then_some(2),
-        );
+        let (local, revision, read) = if reconciled == KeyView::Ready {
+            (
+                KeyView::Checking,
+                Some(2),
+                KeyRecoveryRead::Present {
+                    revision: 2,
+                    rejection: None,
+                },
+            )
+        } else {
+            (KeyView::Missing, None, KeyRecoveryRead::Missing)
+        };
+        receive_key(&mut visual, &owner, local, revision);
         let done = ControlToShell::AnthropicKeyReconciled {
             request: 3,
-            confirmed: true,
+            read: Some(read),
         };
         key_event(
             &mut visual,
@@ -367,6 +375,9 @@ fn a_lost_save_acknowledgement_replaces_the_old_status(cx: &mut TestAppContext) 
                 reply: done,
             },
         );
+        if local == KeyView::Checking {
+            receive_key(&mut visual, &owner, KeyView::Ready, revision);
+        }
         visual.run_until_parked();
         visual.update(|window, cx| {
             window.draw(cx).clear(cx);
@@ -379,6 +390,89 @@ fn a_lost_save_acknowledgement_replaces_the_old_status(cx: &mut TestAppContext) 
             reconciled == KeyView::Ready
         );
     }
+}
+
+#[gpui::test]
+fn provider_uncertainty_does_not_block_managing_a_locally_read_key(cx: &mut TestAppContext) {
+    let (window, owner, controls) = isolated_row(cx);
+    let mut visual = VisualTestContext::from_window(window, cx);
+    visual.update(|_, cx| {
+        owner.update(cx, |owner, cx| {
+            owner.settings.update(cx, |state, cx| {
+                expire_staged_save(&mut state.key_paste, KeyView::Ready);
+                cx.notify();
+            });
+        });
+    });
+    click_recovery_check(&mut visual, &controls, 2);
+    receive_key(&mut visual, &owner, KeyView::Unconfirmed, Some(2));
+    key_event(
+        &mut visual,
+        &owner,
+        LinkEvent::KeyStage {
+            generation: 7,
+            reply: ControlToShell::AnthropicKeyReconciled {
+                request: 2,
+                read: None,
+            },
+        },
+    );
+    assert_unknown_save(&mut visual, &owner);
+    click_recovery_check(&mut visual, &controls, 3);
+    receive_key(&mut visual, &owner, KeyView::Checking, Some(2));
+    assert_unknown_save(&mut visual, &owner);
+    key_event(
+        &mut visual,
+        &owner,
+        LinkEvent::KeyStage {
+            generation: 7,
+            reply: ControlToShell::AnthropicKeyReconciled {
+                request: 3,
+                read: Some(KeyRecoveryRead::Present {
+                    revision: 2,
+                    rejection: None,
+                }),
+            },
+        },
+    );
+    for (view, status) in [
+        (KeyView::Checking, "anthropic-status:Checking key"),
+        (
+            KeyView::Unconfirmed,
+            "anthropic-status:Couldn't confirm the key. Try again.",
+        ),
+    ] {
+        receive_key(&mut visual, &owner, view, Some(2));
+        visual.run_until_parked();
+        visual.update(|window, cx| {
+            window.draw(cx).clear(cx);
+            assert!(
+                owner.read(cx).settings.read(cx).key_paste.can_paste(),
+                "provider failure must not lock a locally read key"
+            );
+        });
+        assert!(visual.debug_bounds(status).is_some());
+        assert!(visual.debug_bounds(UNKNOWN_SAVE).is_none());
+        assert!(visual.debug_bounds(REPLACE_WARNING).is_some());
+        assert!(visual.debug_bounds("anthropic-remove").is_some());
+        assert!(visual.debug_bounds("Key saved").is_none());
+        assert!(
+            visual
+                .debug_bounds("anthropic-status:Anthropic accepted the key")
+                .is_none()
+        );
+    }
+    click(&mut visual, "anthropic-remove");
+    click(&mut visual, "confirmation-danger");
+    assert_eq!(
+        controls.try_recv(),
+        Ok(ControlToBrain::Connection(
+            ConnectionOp::RemoveAnthropicKey {
+                revision: 2,
+                request: 4
+            }
+        ))
+    );
 }
 
 #[gpui::test]
