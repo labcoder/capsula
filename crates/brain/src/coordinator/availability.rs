@@ -72,6 +72,10 @@ impl Ready {
     }
 }
 
+/// The tag of the Anthropic key a Messages post found refused.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RefusedKey(pub(crate) ConnectionTag);
+
 /// The sign-in each connection kind had ready when a turn arrived. A run is bound to one of
 /// them at its first build, by its model choice's kind.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -218,6 +222,27 @@ impl Coordinator {
             self.fail_with(run, Failure::Engine, reason, effects)
                 .expect("the run is current");
         }
+    }
+
+    /// A Messages post found the Anthropic key under `tag` refused. A current run bound to that
+    /// key was sending on it, so it ends with the key's rejection before the route change that
+    /// follows would end it as unavailable; any other run keeps its own outcome.
+    pub(super) fn key_refused(&mut self, tag: ConnectionTag, effects: &mut Vec<Effect>) {
+        let refused = Route {
+            kind: ConnectionKind::AnthropicKey,
+            tag,
+        };
+        let Some(run) = self
+            .current
+            .as_ref()
+            .filter(|current| current.route == Some(refused))
+            .map(|current| current.id)
+        else {
+            return;
+        };
+        let rejected = crate::connections::anthropic::error::Failure::Credential.user_error();
+        self.fail_with(run, Failure::Engine, rejected, effects)
+            .expect("the run is current");
     }
 
     /// A Claude Code report to an unbound run held by [`Finding`]: `Finding` forgets any sign-in

@@ -45,7 +45,7 @@ use crate::store::{Failure, Interruption, RunEnd, SceneState};
 
 pub use admission::{BuildContext, BuildKey, ContextBuilt, Unbuilt};
 pub(crate) use availability::{Arrived, model_unavailable};
-pub use availability::{Availability, Ready};
+pub use availability::{Availability, Ready, RefusedKey};
 pub use cards::{CardRead, Cards};
 pub use hold::{HoldKey, HoldRead, HoldSnapshot};
 pub use inline::{CompactBuilt, CompactContext};
@@ -323,6 +323,8 @@ pub enum Input {
     ThreadOp(ThreadOp),
     /// Whether runs on a connection kind can be answered changed.
     Engines(kumochi_protocol::message::ConnectionKind, Availability),
+    /// A Messages post found the Anthropic key under this tag refused; its route change follows.
+    KeyRefused(RefusedKey),
     /// A `CommitCall` finished.
     CallCommitted {
         /// The call.
@@ -1057,6 +1059,7 @@ impl Coordinator {
             }
             Input::ThreadOp(op) => self.thread_op(op, &mut effects),
             Input::Engines(kind, now) => self.available(kind, now, &mut effects),
+            Input::KeyRefused(RefusedKey(tag)) => self.key_refused(tag, &mut effects),
             Input::ReadFinished(done) => self.read_finished(done, &mut effects)?,
             Input::CallCommitted { key, outcome, then } => match outcome {
                 crate::dispatch::Committed::Done => {

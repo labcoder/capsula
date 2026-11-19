@@ -37,7 +37,7 @@ use crate::platform::credential::CredentialStore;
 
 use super::connections::{ConnectionEvent, Connections};
 use super::{Brain, Full, Link, settings};
-use crate::coordinator::Input as CoreInput;
+use crate::coordinator::{Input as CoreInput, RefusedKey};
 
 pub(super) mod github;
 #[cfg(test)]
@@ -690,6 +690,10 @@ impl Brain {
     ) -> Result<(), Full> {
         let event = input.into();
         let read = matches!(event, Event::Read { .. });
+        let refused = match &event {
+            Event::Connection(ConnectionEvent::Refused { tag }) => Some(*tag),
+            _ => None,
+        };
         let sendable = self.account.sendable();
         let frames = self.account.handle(event);
         // The coordinator hears it before anything else, so a job's write is fenced at once.
@@ -705,6 +709,12 @@ impl Brain {
         }
         self.availability_changed(link.as_deref_mut())
             .map_err(|_| Full)?;
+        // The run sending on a refused key hears why before its route change ends it as unavailable.
+        if let Some(effects) =
+            refused.and_then(|tag| self.handle(CoreInput::KeyRefused(RefusedKey(tag))))
+        {
+            self.apply(effects, link.as_deref_mut()).map_err(|_| Full)?;
+        }
         self.key_route_changed(link.as_deref_mut())?;
         if read {
             self.repair_default(link.as_deref_mut())?;

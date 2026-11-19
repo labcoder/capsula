@@ -85,8 +85,13 @@ account then marks the row Unconfirmed, drops a Check still waiting on its load 
 (a pending reconcile receipt reads as unknown), and clears the models, so the next ask is refused
 as unavailable until a new Check reads the catalog and verifies the key under a new tag. A check
 that ends after the fence closed can't restore Ready, and a tag from a replaced or removed
-authority is ignored. A run shows its rejected-key notice as before; a title or compaction job
-shows nothing, but the row still changes. With spoken replies the row can change before the
+authority is ignored. The account hears the tag before the route change, and passes it on first:
+the run that sent the refused post, or any run still current on that key, including one compacting
+its context inline, ends with the rejected-key notice rather than as unavailable, whichever of the
+tag and the post's own 401 reaches it first. A run on another connection, or on the key under a
+newer tag, keeps its own outcome. A title or compaction job shows nothing, but the row still
+changes. Between the fence closing and the account handling the tag, the row can still show Ready
+for a moment; no post can go out in that window, because the fence is already closed. With spoken replies the row can change before the
 notice, which waits for the reply's audio to end.
 
 A 403, any other status, and an error typed inside a 200 stream only show their notice and leave

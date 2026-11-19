@@ -9,7 +9,7 @@ use kumochi_protocol::message::{
 use super::{BuildKey, ContextBuilt, Coordinator, Effect, Input, R, StoreOp, T, delta, draw_call};
 use crate::context::{Built, ConnectionTag, ModelRequest, Origin, Route, RunSnapshot, ToolSchema};
 use crate::coordinator::availability::{connection_needed, model_unavailable};
-use crate::coordinator::{Availability, JobKey, Ready, RoundItems, SendKey};
+use crate::coordinator::{Availability, JobKey, Ready, RefusedKey, RoundItems, SendKey};
 use crate::engines::{EngineFailure, Finish, TurnEvent};
 use crate::store::{Failure, RunEnd};
 
@@ -779,6 +779,81 @@ fn a_new_tag_on_a_bound_non_chatgpt_run_ends_it_with_open_settings() {
             "{kind:?}"
         );
     }
+}
+
+/// OSC-840: the account's word that the key under the run's tag was refused ends a run bound to
+/// that key with the rejected-key notice, whether it or the post's own 401 comes first, and the
+/// route change after it is quiet. A run on another kind, or on the key under another tag, keeps
+/// going.
+#[test]
+fn a_refused_key_ends_the_run_sending_on_it_with_the_rejected_key_notice() {
+    use kumochi_protocol::Secret;
+    use zeroize::Zeroizing;
+
+    use crate::connections::anthropic::error::{Failure as Anthropic, ProviderFailure};
+
+    let key = kumochi_protocol::message::ConnectionKind::AnthropicKey;
+    let gone = || Input::Engines(key, Availability::Unavailable(model_unavailable()));
+    let rejected = || -> Result<Vec<Effect>, super::Stale> {
+        Ok(failed(Some(open(ErrorKey::AnthropicKeyRejected))))
+    };
+    for engine_first in [false, true] {
+        let (mut core, effects) = turn_on(key, vec![chatgpt_signed_out(), kind_ready(key, 5)]);
+        assert!(started(&effects));
+        let refused =
+            ProviderFailure::answered(401, Secret::new(Zeroizing::new(Vec::new()))).expect("a 401");
+        let post = super::engine(
+            super::engine_key(&core, R),
+            TurnEvent::Finished(Finish::Failed(EngineFailure::Anthropic(
+                Anthropic::Provider(refused),
+            ))),
+        );
+        let told = Input::KeyRefused(RefusedKey(ConnectionTag(5)));
+        let steps = if engine_first {
+            [
+                (post, rejected()),
+                (told, Ok(Vec::new())),
+                (gone(), Ok(Vec::new())),
+            ]
+        } else {
+            [
+                (told, rejected()),
+                (gone(), Ok(Vec::new())),
+                (post, Err(super::Stale)),
+            ]
+        };
+        for (input, expected) in steps {
+            assert_eq!(core.handle(input), expected, "engine first: {engine_first}");
+        }
+    }
+
+    let (mut core, effects) = turn_on(
+        CLAUDE,
+        vec![
+            chatgpt_signed_out(),
+            kind_ready(key, 5),
+            kind_ready(CLAUDE, 5),
+        ],
+    );
+    assert!(started(&effects));
+    assert_eq!(
+        core.handle(Input::KeyRefused(RefusedKey(ConnectionTag(5)))),
+        Ok(Vec::new())
+    );
+    assert_eq!(core.handle(gone()), Ok(Vec::new()));
+    assert_eq!(route(&core), on(CLAUDE, 5), "a run on another kind");
+
+    let (mut core, effects) = turn_on(key, vec![chatgpt_signed_out(), kind_ready(key, 6)]);
+    assert!(started(&effects));
+    assert_eq!(
+        core.handle(Input::KeyRefused(RefusedKey(ConnectionTag(5)))),
+        Ok(Vec::new())
+    );
+    assert_eq!(
+        route(&core),
+        on(key, 6),
+        "a run on the key under a newer tag"
+    );
 }
 
 /// A turn typed on haiku over `kind` after `before`, and what its first build did.
