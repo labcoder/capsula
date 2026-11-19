@@ -46,7 +46,7 @@ payloads it assembles.
 
 ## One attempt
 
-The dormant runtime transport uses the same fixed TLS host for catalog checks and
+The runtime transport uses the same fixed TLS host for catalog checks and
 Messages. Catalog checks have a 15-second deadline including connection, headers
 and body; an absent transport sends nothing. Catalog and Messages have separate
 process-local allowances checked before connecting. Finite allowances apply only
@@ -55,7 +55,8 @@ transport cap. A supervisor must account for any cap across restarts. Each live
 authority has a revocation fence; a Messages offer on another tag is refused before
 it reaches admission. The fence orders revocation with connect and I/O polls, so
 no new transport start or byte acceptance on the retired key can occur after the cut.
-Already accepted bytes cannot be recalled. The production engine remains unserved.
+Already accepted bytes cannot be recalled. The production brain serves this engine for a chosen
+Anthropic model.
 
 The caller supplies its validated body, key, admission future and shared run/live budgets.
 After admission, the transport reserves the run budget then the live budget before connecting.
@@ -119,7 +120,7 @@ offline. No owner credential, live API behavior or macOS behavior has been verif
 interleaved synthetic parsing measurement is recorded in the pull request body; it is not
 provider latency or end-to-end throughput.
 
-## Bounded mapper (not yet activated)
+## Bounded mapper
 
 `engines::anthropic::Mapper` consumes the reader's events for one round. It requires a
 message start, unique block indices and tool ids, matching delta kinds, and one stop per
@@ -151,7 +152,7 @@ consumer during delivery can still replace the semantic failure with a delivery 
 There is no usage persistence, retry loop, key access, runtime router or replay contract
 in A3a. Those integration decisions belong to A3b.
 
-## The request body (not yet activated)
+## The request body
 
 `engines::anthropic::encode::body` turns the store's `ModelRequest` into a `MessagesBody`, whose
 envelope check (`MessagesBody::from_json`) runs on the exact bytes it sends, and the run's

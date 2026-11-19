@@ -35,7 +35,7 @@ The key never crosses the pipe or enters a file, log, command line or environmen
 Only keys connected inside Kumochi are used; live checks must read the same Kumochi-owned
 credential, never another app's key.
 
-The dormant key-chat transport gives each verified authority a nonzero random tag.
+The key-chat transport gives each verified authority a nonzero random tag.
 Without the transport, a readable saved key reports Unconfirmed; startup, Check
 and successful adoption send no catalog request. There is no alternate client.
 An ordinary check of the same verified revision keeps its tag. Adoption and removal

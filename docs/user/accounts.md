@@ -106,16 +106,25 @@ the Anthropic Console, then choose **Paste and check key**. Kumochi reads only t
 clipboard and saves the key in Windows Credential Manager. It checks the key with Anthropic when
 you paste it and each time Kumochi starts. Anthropic bills your account for model usage.
 
-Once Anthropic accepts the key, its models appear under **Model** in Settings → General, and
-choosing one sends Kumo's and your tasks' messages to Anthropic with that key. **Check again**
-rechecks the saved key. **Retry** checks again when the saved state is unknown. Pasting replaces
-any saved key before Anthropic checks the new one. If a paste is refused, the row says why: for
-example, a Claude subscription token, an admin key or a key that needs a workspace header.
+Once Anthropic accepts the key, the row says so and the key's models that Kumochi knows how to
+use appear under **Model** in Settings → General. A model Kumochi doesn't know yet isn't listed,
+so if Anthropic offers none Kumochi knows, the row still says Anthropic accepted the key and
+**Model** lists no Anthropic model. Choosing one makes it the default for Kumo and every task
+without a model of its own, and their messages go to Anthropic with that key. Anthropic models
+are never sent the screen: a hold to talk with one says the screen wasn't included.
+
+**Check again** rechecks the saved key. **Retry** checks again when the saved state is unknown.
+Pasting replaces any saved key before Anthropic checks the new one. Kumochi refuses some pastes
+before saving anything, and the row says why: a Claude subscription token, an admin key or text
+that isn't an Anthropic API key. If Anthropic declines a saved key when it checks it, for example
+a key that needs a workspace header, the row says that instead.
 
 One reply makes at most 17 requests to Anthropic, counting its tool rounds, any shortening of a
-long conversation and the follow-up work after it. A reply that reaches that limit stops with an
-error instead of sending more. If only the follow-up work would go past it, such as naming the
-task or shortening its history, that work is skipped and tried again after a later reply.
+long conversation and the follow-up work after it. The 17th request can still finish the reply; a
+reply that needs another one stops with an error instead. Follow-up work that would go past the
+limit, such as naming the task or shortening its history, is skipped. Nothing retries it: a later
+reply can run it if that reply leaves room, so until then a task can keep the title taken from
+its first words and its history can stay unshortened.
 
 **Remove key…** asks first. Confirming removes the key from Kumochi; it doesn't revoke the key at
 Anthropic. Removing the key or replacing it stops a reply that is still using it. Tasks and
