@@ -13,6 +13,7 @@ use std::iter;
 use std::os::windows::ffi::OsStrExt as _;
 use std::os::windows::io::{AsRawHandle, FromRawHandle as _, OwnedHandle};
 use std::path::Path;
+use std::time::Duration;
 
 use windows_sys::Win32::Foundation::{
     FALSE, HANDLE, HANDLE_FLAG_INHERIT, SetHandleInformation, TRUE,
@@ -117,6 +118,23 @@ struct ChildEnds {
 /// without regard to case, or a value holding NUL; otherwise the OS's error creating the pipes or
 /// the process, or a refusal when a job in `jobs` was shut down.
 pub fn spawn(launch: &Launch<'_>) -> io::Result<Spawned> {
+    spawn_checked(launch, None)
+}
+
+/// A bounded start: checks the remaining budget while waiting and after taking the spawn lock.
+pub(crate) fn spawn_if(
+    launch: &Launch<'_>,
+    remaining: &dyn Fn() -> Option<Duration>,
+) -> io::Result<Spawned> {
+    spawn_checked(launch, Some(remaining))
+}
+
+fn spawn_checked(
+    launch: &Launch<'_>,
+    remaining: Option<&dyn Fn() -> Option<Duration>>,
+) -> io::Result<Spawned> {
+    #[cfg(test)]
+    let probe = SPAWN_PROBE.take();
     let mut command_line = command_line(launch.exe, launch.args)?;
     let environment = environment_block(launch.env)?;
     let application = absolute(launch.exe)?;
@@ -151,7 +169,15 @@ pub fn spawn(launch: &Launch<'_>) -> io::Result<Spawned> {
     };
     let mut info = PROCESS_INFORMATION::default();
     let created = {
-        let _spawning = crate::platform::spawn_lock();
+        #[cfg(test)]
+        if let Some(probe) = &probe {
+            probe.send(SpawnEdge::Lock).ok();
+        }
+        let _spawning = if let Some(remaining) = remaining {
+            crate::platform::spawn_lock_until(remaining)?
+        } else {
+            crate::platform::spawn_lock()
+        };
         let created = Job::admit(launch.jobs)
             .and_then(|()| {
                 inherited
@@ -188,6 +214,10 @@ pub fn spawn(launch: &Launch<'_>) -> io::Result<Spawned> {
         created
     };
     created?;
+    #[cfg(test)]
+    if let Some(probe) = probe {
+        probe.send(SpawnEdge::Started).ok();
+    }
     // SAFETY: CreateProcessW returned both handles, owned only here; the thread one closes now.
     drop(unsafe { OwnedHandle::from_raw_handle(info.hThread) });
     // SAFETY: as above.
@@ -198,6 +228,24 @@ pub fn spawn(launch: &Launch<'_>) -> io::Result<Spawned> {
         stdout,
         stderr,
     })
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SpawnEdge {
+    Lock,
+    Started,
+}
+
+#[cfg(test)]
+thread_local! {
+    static SPAWN_PROBE: std::cell::Cell<Option<tokio::sync::mpsc::UnboundedSender<SpawnEdge>>> =
+        const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+pub(crate) fn observe_next_spawn(probe: tokio::sync::mpsc::UnboundedSender<SpawnEdge>) {
+    SPAWN_PROBE.set(Some(probe));
 }
 
 /// The child's ends of its standard handles and the brain's ends of its pipes.

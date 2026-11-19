@@ -11,16 +11,18 @@ use kumochi_protocol::message::{
     ConnectionsView, ControlToShell, DataToShell, Effort, ErrorKey, ModelChoice, ModelInfo,
     ModelName, ModelSlug, ThreadId, Unsupported, UserError,
 };
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 
 use super::{Brain, Ended, Full, Link};
 use crate::bridge::LaunchId;
 use crate::bridge::listener::McpCall;
 use crate::connections::model::budget::Budget;
 use crate::context::ConnectionTag;
-use crate::coordinator::{Availability, Input, Ready, SendKey, StoreOp, model_unavailable};
+use crate::coordinator::{
+    Availability, BuildKey, Input, Ready, SendKey, StoreOp, model_unavailable,
+};
 use crate::engines::claude_code::install::FindError;
-use crate::engines::claude_code::lane::{self, Done, Failure, Lane, Outcome, Work};
+use crate::engines::claude_code::lane::{self, Done, Failure, Lane, Outcome, Recheck, Work};
 use crate::engines::claude_code::launch::{
     self, Attempt, ClaudeQuestion, Clock, LaunchSnapshot, Note, Offer, Refresh, Report, WARM,
 };
@@ -28,7 +30,8 @@ use crate::engines::claude_code::policy::{self, Reviewed};
 use crate::engines::claude_code::supervisor::{
     self, Control, Launch, LaunchRefused, MAX_LAUNCH, Question,
 };
-use crate::engines::{EngineFailure, RunRequest};
+use crate::engines::{EngineFailure, Finish, RunRequest, TurnEvent};
+use crate::recall::control::Control as Lifetime;
 
 /// Where Claude Code's sign-in may be kept, which owner call 1 decided.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -62,6 +65,8 @@ pub(crate) struct Claude {
     view: ClaudeCodeView,
     /// The job of this generation that's out, if one is.
     out: Option<Work>,
+    /// The failed question waiting for positive sign-out evidence from its Status.
+    recheck: Option<StatusRecheck>,
     /// A Find was asked for while it was.
     again: bool,
     /// A Disconnect is still to finish.
@@ -103,6 +108,13 @@ pub(crate) struct Claude {
 struct Epoch {
     tag: u64,
     version: ClaudeVersion,
+}
+
+#[derive(Debug)]
+struct StatusRecheck {
+    key: SendKey,
+    guard: Recheck,
+    signed_out: oneshot::Sender<()>,
 }
 
 /// One admitted launch, as the core tracks it.
@@ -160,6 +172,7 @@ impl Claude {
             generation: 0,
             view,
             out: None,
+            recheck: None,
             again: false,
             cleaning: false,
             cancelled: None,
@@ -210,6 +223,7 @@ impl Claude {
         };
         self.generation += 1;
         lane.fence(self.generation);
+        self.recheck = None;
         // A bound launch's authority ends with the generation it was bound under.
         for held in self.launches.iter().filter(|held| held.bound) {
             held.control.withdraw();
@@ -239,11 +253,11 @@ impl Claude {
     }
 
     /// Finds the install again, or retries a deletion still to finish; after the job that's out,
-    /// if one is.
+    /// if one is. A fresh find supersedes a failure's automatic status check.
     fn find(&mut self) {
         // shortcut: a pending deletion is retried here and at each start, not on a timer; add one
         // if locked files turn out to outlive a session.
-        if self.out.is_some() {
+        if self.out.is_some() && self.recheck.is_none() {
             self.again = true;
             return;
         }
@@ -330,10 +344,25 @@ impl Claude {
         }
     }
 
-    /// A lane result; true when the view may have changed.
-    pub(crate) fn done(&mut self, Done { generation, result }: Done) -> bool {
+    /// A lane result: whether the view may have changed and a build to end as Provider
+    /// before publishing a late sign-out.
+    fn done(&mut self, Done { generation, result }: Done) -> (bool, Option<BuildKey>) {
         if generation != self.generation || self.out.is_none() {
-            return false;
+            return (false, None);
+        }
+        let recheck = self.recheck.take();
+        let automatic = recheck.is_some();
+        let mut late = None;
+        if let Some(recheck) = recheck {
+            if !self.confirmed_sign_out(&result) {
+                self.out = None;
+                return (false, None);
+            }
+            if recheck.guard.check().is_ok() {
+                recheck.signed_out.send(()).ok();
+            } else if let SendKey::Build(key) = recheck.key {
+                late = Some(key);
+            }
         }
         if let Some(held) = &mut self.quarantine
             && self.out == Some(Work::Quarantine(held.version))
@@ -356,7 +385,8 @@ impl Claude {
         // The Version and Status after a Cancel: unless the Status is signed in, or the lane
         // couldn't run the call (Busy, Refused), the sign-in may have left Claude Code's file in
         // Kumochi's folder, and only a Disconnect removes it.
-        let leftover = self.cancelled == Some(generation)
+        let leftover = !automatic
+            && self.cancelled == Some(generation)
             && matches!(self.out, Some(Work::Version | Work::Status))
             && !matches!(
                 result,
@@ -368,7 +398,7 @@ impl Claude {
         match result {
             Ok(Outcome::Version(_) | Outcome::LoginEnded) => {
                 if self.submit(Work::Status) {
-                    return false;
+                    return (false, None);
                 }
             }
             Ok(Outcome::Status { .. }) if let Some(held) = self.quarantine => {
@@ -423,7 +453,7 @@ impl Claude {
         if self.out.is_none() && !matches!(self.view, ClaudeCodeView::Ready { .. }) {
             self.revoke_all();
         }
-        true
+        (true, late)
     }
 
     /// Queues a question launch behind whatever the lane is doing. Its deadline is fixed now.
@@ -804,8 +834,60 @@ impl Claude {
                 false
             }
             // Only the brain can authorize; dropping the reply refuses the launch.
-            Note::Bind(_) => false,
+            Note::Bind(_) | Note::ProviderObserved(_) | Note::ProviderFailed { .. } => false,
         }
+    }
+
+    fn recheck_failed(
+        &mut self,
+        id: LaunchId,
+        key: SendKey,
+        lifetime: Option<Lifetime>,
+        signed_out: oneshot::Sender<()>,
+    ) {
+        self.prune();
+        let Some(held) = self
+            .launches
+            .iter_mut()
+            .find(|held| held.id == id && held.due)
+        else {
+            return;
+        };
+        held.due = false;
+        let Some(control) = lifetime else {
+            return;
+        };
+        let guard = Recheck {
+            control,
+            clock: self.clock.clone(),
+        };
+        if held.replaced
+            || held.generation != self.generation
+            || signed_out.is_closed()
+            || guard.check().is_err()
+            || self.out.is_some()
+            || self.full
+            || self.admitted().is_none()
+        {
+            return;
+        }
+        if self
+            .lane
+            .as_ref()
+            .is_some_and(|lane| lane.recheck(self.generation, guard.clone()))
+        {
+            self.out = Some(Work::Status);
+            self.recheck = Some(StatusRecheck {
+                key,
+                guard,
+                signed_out,
+            });
+        }
+    }
+
+    fn confirmed_sign_out(&self, result: &Result<Outcome, Failure>) -> bool {
+        matches!(result, Ok(Outcome::Status { version, signed_in: false })
+            if self.admitted().is_some_and(|(current, _)| current == *version))
     }
 
     /// An attempt's one report: an audit failure quarantines its version, and a sign-out shows.
@@ -930,7 +1012,7 @@ impl Claude {
     /// What woke it; true when the view may have changed.
     pub(crate) fn wake(&mut self, wake: Wake) -> bool {
         match wake {
-            Wake::Lane(done) => self.done(done),
+            Wake::Lane(done) => self.done(done).0,
             Wake::Note(note) => self.note(note),
             Wake::Expired => {
                 let now = self.clock.now();
@@ -956,6 +1038,12 @@ impl Claude {
         match &mut self.lane {
             Some(lane) => lane.close(deadline).await,
             None => true,
+        }
+    }
+
+    pub(super) fn stop(&mut self) {
+        if let Some(lane) = &mut self.lane {
+            lane.stop();
         }
     }
 }
@@ -1042,17 +1130,45 @@ impl Brain {
         wake: Wake,
         mut link: Option<&mut Link<'_, '_>>,
     ) -> Result<(), Full> {
-        let wake = match wake {
+        let (changed, late) = match wake {
             Wake::Call(call) => return self.mcp_call(call, link),
             Wake::Note(Note::Bind(bind)) => {
                 self.mcp_bind(bind);
                 return Ok(());
             }
-            wake => wake,
+            Wake::Note(Note::ProviderObserved(key)) => {
+                self.coordinator.claude_provider_observed(key);
+                return Ok(());
+            }
+            Wake::Note(Note::ProviderFailed {
+                id,
+                key,
+                until,
+                signed_out,
+            }) => {
+                let lifetime = self.coordinator.claude_recheck_control(key);
+                self.claude
+                    .recheck_failed(id, key, lifetime.map(|l| l.until(until)), signed_out);
+                (false, None)
+            }
+            Wake::Lane(done) => self.claude.done(done),
+            wake => (self.claude.wake(wake), None),
         };
-        let changed = self.claude.wake(wake);
-        self.claude_reported(link.as_deref_mut())
-            .map_err(|_| Full)?;
+        let terminal = if let Some(key) = late
+            && let Some(effects) = self.handle(Input::Engine {
+                key,
+                event: TurnEvent::Finished(Finish::Failed(EngineFailure::Provider)),
+            }) {
+            self.apply(effects, link.as_deref_mut())
+        } else {
+            Ok(())
+        };
+        let reported = self.claude_reported(if terminal.is_ok() {
+            link.as_deref_mut()
+        } else {
+            None
+        });
+        terminal.and(reported).map_err(|_| Full)?;
         self.repair_default(link.as_deref_mut())?;
         let Some(link) = link else {
             return Ok(());

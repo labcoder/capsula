@@ -20,9 +20,11 @@ use tokio::sync::{Notify, mpsc, oneshot};
 
 use super::auth::{self, StatusFailure};
 use super::install::{self, FindError};
+use super::launch::Clock;
 use super::policy::{self, EntryPoint, LaunchPolicy, OwnedFolders};
 use super::supervisor::{self, Ready, Start, Teardown};
 use crate::platform::{self, Job, Launch, ManagedPresence, Presence, SessionLock, Stdio};
+use crate::recall::{Error as ControlError, control::Control};
 
 /// Writes `version`'s quarantine marker in `base`, durably; one already there is kept.
 pub(crate) fn mark_quarantined(base: &Path, version: ClaudeVersion) -> Result<(), Failure> {
@@ -154,9 +156,27 @@ pub(crate) struct Done {
     pub(crate) result: Result<Outcome, Failure>,
 }
 
+#[derive(Clone, Debug)]
+pub(crate) struct Recheck {
+    pub(crate) control: Control,
+    pub(crate) clock: Clock,
+}
+
+impl Recheck {
+    pub(crate) fn check(&self) -> Result<(), Failure> {
+        if self.clock.now() >= self.control.end {
+            return Err(Failure::Deadline);
+        }
+        self.control.check().map_err(|error| match error {
+            ControlError::Timeout => Failure::Deadline,
+            _ => Failure::Refused,
+        })
+    }
+}
+
 /// What the lane's queue holds.
 enum Queued {
-    Call(u64, Work),
+    Call(u64, Work, Option<Recheck>),
     Launch(Box<Start>),
 }
 
@@ -205,8 +225,8 @@ impl Lane {
                         left = Some(item);
                         break;
                     }
-                    let (generation, work) = match item {
-                        Queued::Call(generation, work) => (generation, work),
+                    let (generation, work, recheck) = match item {
+                        Queued::Call(generation, work, recheck) => (generation, work, recheck),
                         Queued::Launch(start) => {
                             worker.launch(*start);
                             continue;
@@ -216,7 +236,7 @@ impl Lane {
                     if generation != worker.current.load(Ordering::Acquire) {
                         continue;
                     }
-                    let result = worker.run(generation, work);
+                    let result = worker.run(generation, work, recheck.as_ref());
                     // A call a newer generation ended, or one that finished as it came, says
                     // nothing.
                     if generation != worker.current.load(Ordering::Acquire) {
@@ -271,7 +291,14 @@ impl Lane {
     pub(crate) fn submit(&self, generation: u64, work: Work) -> bool {
         self.jobs
             .as_ref()
-            .is_some_and(|jobs| jobs.try_send(Queued::Call(generation, work)).is_ok())
+            .is_some_and(|jobs| jobs.try_send(Queued::Call(generation, work, None)).is_ok())
+    }
+
+    pub(crate) fn recheck(&self, generation: u64, recheck: Recheck) -> bool {
+        self.jobs.as_ref().is_some_and(|jobs| {
+            jobs.try_send(Queued::Call(generation, Work::Status, Some(recheck)))
+                .is_ok()
+        })
     }
 
     /// Queues a question without waiting, behind the calls already queued; false when the lane
@@ -290,11 +317,15 @@ impl Lane {
         }
     }
 
-    /// Takes no more work and ends the call running, then waits for the thread by `deadline`.
-    /// True only when every call's processes were confirmed ended and the lock was let go.
-    pub(crate) async fn close(&mut self, deadline: tokio::time::Instant) -> bool {
+    /// Takes no more work and ends the call running.
+    pub(crate) fn stop(&mut self) {
         self.closing.store(true, Ordering::Release);
         self.jobs = None;
+    }
+
+    /// Waits for the stopped thread by `deadline`. True only when every call's processes ended.
+    pub(crate) async fn close(&mut self, deadline: tokio::time::Instant) -> bool {
+        self.stop();
         let Some(ended) = self.ended.take() else {
             return false;
         };
@@ -330,12 +361,21 @@ pub(super) struct Folders {
 }
 
 impl Worker {
-    fn run(&mut self, generation: u64, work: Work) -> Result<Outcome, Failure> {
+    fn run(
+        &mut self,
+        generation: u64,
+        work: Work,
+        recheck: Option<&Recheck>,
+    ) -> Result<Outcome, Failure> {
+        if let Some(recheck) = recheck {
+            recheck.check()?;
+        }
         let piped = |cap| Call {
             generation,
             stdio: Stdio::Piped,
             cap,
             deadline: DEADLINE,
+            recheck,
         };
         match work {
             Work::Quarantine(version) => {
@@ -344,7 +384,7 @@ impl Worker {
                     platform::hold_chain(&self.host.base).map_err(|_| Failure::Quarantine)?;
                 self.hold()?;
                 mark_quarantined(&self.host.base, version)?;
-                self.run(generation, Work::Version)
+                self.run(generation, Work::Version, None)
             }
             Work::Version => {
                 self.found = None;
@@ -389,6 +429,7 @@ impl Worker {
                     stdio: self.host.console,
                     cap: 0,
                     deadline: LOGIN_DEADLINE,
+                    recheck: None,
                 };
                 match self.call(&program, &folders.paths, &EntryPoint::Login, login) {
                     Err(Failure::Refused) => Err(Failure::Refused),
@@ -566,33 +607,64 @@ impl Worker {
         program: &Program,
         folders: &OwnedFolders,
         entry: &EntryPoint<'_>,
-        how: Call,
+        how: Call<'_>,
     ) -> Result<(u32, Vec<u8>), Failure> {
         let system = platform::system_env().map_err(|_| Failure::Spawn)?;
         let data = policy::launch_data(folders, &system, entry);
         let args: Vec<OsString> = program.prefix.iter().cloned().chain(data.args).collect();
         let job = Job::new().map_err(|_| Failure::Spawn)?;
-        let mut spawned = platform::spawn(&Launch {
+        let live = || {
+            !self.closing.load(Ordering::Acquire)
+                && self.current.load(Ordering::Acquire) == how.generation
+        };
+        if !live() {
+            return Err(Failure::Refused);
+        }
+        if let Some(recheck) = how.recheck {
+            recheck.check()?;
+        }
+        let launch = Launch {
             exe: &program.exe,
             args: &args,
             cwd: &folders.work,
             env: &data.env,
             stdio: how.stdio,
             jobs: &[&self.host.brain_job, &job],
-        })
-        .map_err(|_| Failure::Spawn)?;
+        };
+        let mut spawned = if let Some(recheck) = how.recheck {
+            platform::spawn_if(&launch, &|| {
+                (live() && recheck.check().is_ok())
+                    .then(|| {
+                        recheck
+                            .control
+                            .end
+                            .saturating_duration_since(Instant::now())
+                    })
+                    .filter(|left| !left.is_zero())
+            })
+            .map_err(|error| match error.kind() {
+                io::ErrorKind::Interrupted => Failure::Refused,
+                _ => Failure::Spawn,
+            })
+        } else {
+            platform::spawn(&launch).map_err(|_| Failure::Spawn)
+        }?;
         drop(spawned.stdin.take());
         let stdout = spawned.stdout.take().map(|pipe| drain(pipe, how.cap));
         let stderr = spawned.stderr.take().map(|pipe| drain(pipe, STDERR_CAP));
         let deadline = Instant::now() + how.deadline;
+        let deadline = how
+            .recheck
+            .map_or(deadline, |r| deadline.min(r.control.end));
         let exited = loop {
-            if self.closing.load(Ordering::Acquire)
-                || self.current.load(Ordering::Acquire) != how.generation
-                || Instant::now() >= deadline
+            let left = deadline.saturating_duration_since(Instant::now());
+            if !live()
+                || left.is_zero()
+                || how.recheck.is_some_and(|recheck| recheck.check().is_err())
             {
                 break false;
             }
-            match spawned.process.exits_within(POLL) {
+            match spawned.process.exits_within(POLL.min(left)) {
                 Ok(true) => break true,
                 Ok(false) => {}
                 Err(_) => break false,
@@ -605,9 +677,13 @@ impl Worker {
             tracing::warn!("a claude call's processes didn't end; Claude Code stays closed");
             return Err(Failure::Refused);
         }
-        let remaining = deadline
-            .saturating_duration_since(Instant::now())
-            .max(PIPE_GRACE);
+        let remaining = if exited || how.recheck.is_none() {
+            deadline
+                .saturating_duration_since(Instant::now())
+                .max(PIPE_GRACE)
+        } else {
+            PIPE_GRACE
+        };
         // A console call has no pipes to wait for.
         let ended = |pipe: Option<std_mpsc::Receiver<Drained>>, wait| match pipe {
             Some(pipe) => pipe.recv_timeout(wait).ok(),
@@ -622,13 +698,14 @@ impl Worker {
 
 /// How one call runs.
 #[derive(Clone, Copy)]
-struct Call {
+struct Call<'a> {
     /// The generation it runs for; a newer one ends it.
     generation: u64,
     stdio: Stdio,
     /// stdout's cap.
     cap: usize,
     deadline: Duration,
+    recheck: Option<&'a Recheck>,
 }
 
 /// The reviewed row's policy for `version`, which every call after `--version` needs.

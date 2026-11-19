@@ -513,6 +513,20 @@ hears the current list if it isn't empty, and nothing before Claude Code's first
   launches alone, so an attempt can outlive its generation; its audit failure still quarantines
   the version, and its sign-out changes nothing. A seeded launch's `analytics_disabled`, init's value over initialize's, sets
   `analytics_on` only while the view is `Ready` at the attempt's generation.
+- **Provider failure is not a sign-out verdict.** If a seeded question returns
+  `Failed(Provider)`, record the failure before waiting for usage delivery, then
+  retire its launch and ask the same lane for one `auth status --json`. The lane
+  uses the earlier of the question and its owning build or job's deadline, and
+  stops on cancellation or Quit. The same deadline bounds the Windows process-start
+  lock's wait, and the lane rechecks admission inside it. A confirmed signed-out
+  result for the current connection generation settles the account like ordinary
+  status, even if delivered late. It does not run the cleanup reserved for a
+  cancelled sign-in. Only the still-current question within its deadline can be
+  reclassified as `ClaudeCodeSignedOut`. Otherwise its provider failure stands,
+  including at the turn deadline. If the shell is full when the terminal is sent,
+  sign-out still clears the offered models before reconnect. A new Find or
+  Disconnect supersedes the recheck. The question is never retried. Audit refusals,
+  transport failures and turn-cap results do not recheck.
 
 ```mermaid
 sequenceDiagram

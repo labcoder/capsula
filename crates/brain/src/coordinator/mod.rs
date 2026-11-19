@@ -1030,6 +1030,12 @@ impl Coordinator {
                 if current.finding == Some(availability::Finding::Waiting) {
                     let reason = model_unavailable();
                     self.fail_with(run, Failure::Engine, reason, &mut effects)?;
+                } else if current
+                    .build
+                    .as_ref()
+                    .is_some_and(|build| build.admitted() && build.provider_failed)
+                {
+                    self.fail(run, Failure::Engine, &mut effects)?;
                 } else {
                     let current = self.take(run)?;
                     let over = RunEnd::Failed(Failure::Budget);

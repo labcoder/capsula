@@ -112,6 +112,7 @@ pub(super) struct Build {
     /// A voided build's rebuild waits until these deletes are answered.
     blocked: BTreeSet<ThreadId>,
     admitted: bool,
+    pub(super) provider_failed: bool,
     /// The admitted request offered the draw tool, or the dev fixture answers (D13-H2).
     offers_draw: bool,
     /// The dispatcher's tools the admitted request offered.
@@ -135,6 +136,7 @@ impl Build {
             exposed,
             blocked: BTreeSet::new(),
             admitted: false,
+            provider_failed: false,
             offers_draw: false,
             offered: Vec::new(),
             sources: Vec::new(),

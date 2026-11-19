@@ -52,14 +52,33 @@ pub(crate) fn raw_stdout() -> std::io::Result<std::fs::File> {
     Ok(std::io::stdout().as_fd().try_clone_to_owned()?.into())
 }
 
+static SPAWN: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// Serializes every process start that can inherit handles. A handle made inheritable for one
 /// child leaks into any other child created while it is, so std `Command` and dependencies that
 /// spawn (the browser launch) take this guard too.
 pub fn spawn_lock() -> std::sync::MutexGuard<'static, ()> {
-    static SPAWN: std::sync::Mutex<()> = std::sync::Mutex::new(());
     SPAWN
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+#[cfg(windows)]
+pub(crate) fn spawn_lock_until(
+    remaining: &dyn Fn() -> Option<std::time::Duration>,
+) -> std::io::Result<std::sync::MutexGuard<'static, ()>> {
+    loop {
+        let guard = match SPAWN.try_lock() {
+            Ok(guard) => Some(guard),
+            Err(std::sync::TryLockError::Poisoned(error)) => Some(error.into_inner()),
+            Err(std::sync::TryLockError::WouldBlock) => None,
+        };
+        let left = remaining().ok_or(std::io::ErrorKind::Interrupted)?;
+        if let Some(guard) = guard {
+            return Ok(guard);
+        }
+        std::thread::sleep(left.min(std::time::Duration::from_millis(5)));
+    }
 }
 
 #[cfg(windows)]
@@ -77,6 +96,8 @@ pub(crate) use windows::qpc_now;
 #[cfg(all(windows, debug_assertions))]
 pub use windows::raise_access_violation;
 #[cfg(windows)]
+pub(crate) use windows::spawn_if;
+#[cfg(windows)]
 pub use windows::{
     ChildPipes, Helper, Instance, Job, PipeServer, client_image, client_process, config_dir,
     create_owner_only, data_dir, detached_command, free_space, has_exited, launch_detached,
@@ -89,6 +110,8 @@ pub(crate) use windows::{
 };
 #[cfg(windows)]
 pub use windows::{Launch, Spawned, Stdio, spawn};
+#[cfg(all(test, windows))]
+pub(crate) use windows::{SpawnEdge, observe_next_spawn};
 #[cfg(windows)]
 pub(crate) use windows::{
     Untrusted, check_model_final, create_model_dir, create_model_write, discard_model, hold_chain,

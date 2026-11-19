@@ -171,6 +171,15 @@ pub(crate) enum Outcome {
 pub(crate) enum Note {
     /// An attempt's one terminal report.
     Ended { id: LaunchId, outcome: Outcome },
+    /// The provider's failure was parsed, even if stream delivery is backpressured.
+    ProviderObserved(BuildKey),
+    /// A seeded question ended with a provider failure. Only confirmed sign-out answers.
+    ProviderFailed {
+        id: LaunchId,
+        key: SendKey,
+        until: Instant,
+        signed_out: oneshot::Sender<()>,
+    },
     /// A seeded launch's analytics, once its init passed.
     Analytics { id: LaunchId, on: bool },
     /// A round whose warm attempt expired before bind wants a fresh one.
@@ -212,6 +221,21 @@ impl Report {
 
     pub(crate) fn report(mut self, outcome: Outcome) {
         self.send(outcome);
+    }
+
+    fn recheck(mut self, key: SendKey, until: Instant) -> oneshot::Receiver<()> {
+        let (signed_out, reply) = oneshot::channel();
+        if let Some((id, notes)) = self.0.take() {
+            notes
+                .send(Note::ProviderFailed {
+                    id,
+                    key,
+                    until,
+                    signed_out,
+                })
+                .ok();
+        }
+        reply
     }
 
     fn send(&mut self, outcome: Outcome) {
@@ -580,10 +604,8 @@ impl Question<'_> {
         match read {
             Ok((usage, finish)) => {
                 writer.end();
-                if let Some(usage) = usage {
-                    self.events.send(TurnEvent::Usage(usage)).await.ok()?;
-                }
-                Some(finish)
+                self.finish_answer(usage, finish, attempt, report, (request.key, until))
+                    .await
             }
             Err(outcome) => {
                 logged(outcome, "after the seed");
@@ -592,6 +614,33 @@ impl Question<'_> {
                 Some(failed(outcome))
             }
         }
+    }
+
+    async fn finish_answer(
+        &self,
+        usage: Option<crate::engines::Usage>,
+        finish: Finish,
+        attempt: Attempt,
+        report: Report,
+        (key, until): (SendKey, Instant),
+    ) -> Option<Finish> {
+        let provider_failed = matches!(finish, Finish::Failed(EngineFailure::Provider));
+        if provider_failed && let SendKey::Build(build) = key {
+            self.notes.send(Note::ProviderObserved(build)).ok();
+        }
+        if let Some(usage) = usage {
+            self.events.send(TurnEvent::Usage(usage)).await.ok()?;
+        }
+        if provider_failed {
+            drop(attempt);
+            if matches!(
+                tokio::time::timeout_at(until.into(), report.recheck(key, until)).await,
+                Ok(Ok(()))
+            ) {
+                return Some(claude(ErrorKey::ClaudeCodeSignedOut));
+            }
+        }
+        Some(finish)
     }
 
     /// Binds the attempt's launch to `request`'s build when it offers tools, else to none, and has
