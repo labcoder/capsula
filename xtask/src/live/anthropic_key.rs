@@ -322,7 +322,7 @@ fn no_strangers(
         };
         match helper.role {
             Some(role) if helper.in_job && helper.image == image && !roles.contains(&role) => {
-                roles.push(role)
+                roles.push(role);
             }
             _ => return Ok(false),
         }
