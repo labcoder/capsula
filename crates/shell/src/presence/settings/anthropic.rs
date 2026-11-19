@@ -182,12 +182,11 @@ impl SettingsView {
 #[cfg(test)]
 fn clipboard_text(item: Option<ClipboardItem>) -> Option<Zeroizing<String>> {
     let item = item?;
-    let single = item.entries().len() == 1;
     let mut value = None;
     for entry in item.into_entries() {
         if let ClipboardEntry::String(text) = entry {
             let text = Zeroizing::new(text.into_text());
-            if single {
+            if value.is_none() {
                 value = Some(text);
             }
         }

@@ -3,12 +3,14 @@
 ## Anthropic API key
 
 The Settings → Accounts key row is wired but hidden until key chat is activated.
-Its explicit Paste action uses a row-only Windows adapter off the UI thread.
-It reads one logical text value without reading non-text payloads, logging
-formats, or writing to the clipboard. The adapter strictly decodes UTF-16 and
-bounds the raw UTF-8 result to 2,048 bytes before trim. Other platforms refuse
-the read. A validated paste stays in a zeroizing buffer until the brain replies
-with a one-use staging plan; only its trimmed byte length describes the key on the pipe.
+At the explicit Paste click, the UI thread samples the clipboard sequence number
+as metadata. A row-only Windows adapter reads the payload off the UI thread:
+it takes only Unicode text when present, never queries, reads or names any
+other format, and never writes to the clipboard. The adapter strictly decodes
+the terminated UTF-16 text and bounds the raw UTF-8 result to 2,048 bytes before
+trim. Other platforms refuse the read. A validated paste stays in a zeroizing
+buffer until the brain replies with a one-use staging plan; only its trimmed
+byte length describes the key on the pipe.
 The shell-core writer puts chunks in Credential Manager at those authority-owned
 names in the background, then the shell sends `AnthropicKeyStaged { plan }`.
 One 30-second deadline starts at the click and includes the read, the write and

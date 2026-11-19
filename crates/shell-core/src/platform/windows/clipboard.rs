@@ -6,13 +6,10 @@ use std::time::Instant;
 
 use windows::Win32::Foundation::HGLOBAL;
 use windows::Win32::System::DataExchange::{
-    CloseClipboard, GetClipboardData, GetClipboardSequenceNumber, GetPriorityClipboardFormat,
-    OpenClipboard,
+    CloseClipboard, GetClipboardData, GetClipboardSequenceNumber, OpenClipboard,
 };
 use windows::Win32::System::Memory::{GlobalLock, GlobalSize, GlobalUnlock};
-use windows::Win32::System::Ole::{
-    CF_BITMAP, CF_DIB, CF_DIBV5, CF_ENHMETAFILE, CF_HDROP, CF_METAFILEPICT, CF_UNICODETEXT,
-};
+use windows::Win32::System::Ole::CF_UNICODETEXT;
 use zeroize::Zeroizing;
 
 use super::super::clipboard::{ClipboardRefusal, KeyClipboardResult, MAX_KEY_CLIPBOARD_BYTES};
@@ -65,19 +62,6 @@ pub(in crate::platform) fn read(
     let _open = Open;
     if sequence() != expected {
         return Err(ClipboardRefusal::Changed);
-    }
-    let mixed = [
-        CF_BITMAP,
-        CF_DIB,
-        CF_DIBV5,
-        CF_ENHMETAFILE,
-        CF_HDROP,
-        CF_METAFILEPICT,
-    ]
-    .map(|format| u32::from(format.0));
-    // SAFETY: the format list is valid; the query does not read payloads or format names.
-    if unsafe { GetPriorityClipboardFormat(&mixed) } > 0 {
-        return Err(ClipboardRefusal::Invalid);
     }
     if !live() {
         return Err(ClipboardRefusal::Unavailable);
