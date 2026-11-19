@@ -555,9 +555,10 @@ impl OutputOwner {
             .unwrap_or_else(PoisonError::into_inner) = Some(hook);
     }
 
-    /// The link thread ends `session`, first in teardown: claims stop matching, a bound
-    /// microphone is cancelled, and the speaker's queue and the abort are let go here. Pending
-    /// tails stay in the ledger; the inhibit stays for the next session.
+    /// Ends `session`, from [`LinkHandle::end`] or first in the link thread's teardown, whichever
+    /// comes first: claims stop matching, a bound microphone is cancelled, and the speaker's queue
+    /// and the abort are let go here. Pending tails stay in the ledger; the inhibit stays for the
+    /// next session.
     pub(super) fn end(&self, session: u64) {
         let mut state = self.lock();
         if state.session != Some(session) {

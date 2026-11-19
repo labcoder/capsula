@@ -1356,8 +1356,78 @@ fn a_refused_brain_stop_keeps_the_speaker_from_resuming(cx: &mut TestAppContext)
         controls
     });
     assert_eq!(heard(&commands), [Command::Pause(1)], "held until the end");
+    // The link thread's own teardown never comes here, as when it is late.
     cx.run_until_parked();
     owner.read_with(cx, |owner, _| {
         assert_eq!(owner.voice.gates.held(G1), None, "retired after the end");
     });
+    assert_eq!(heard(&commands), [], "the old speaker is never resumed");
+    successor_works(&owner, cx);
+}
+
+#[gpui::test]
+fn an_exhausted_speaker_stop_never_resumes_its_ended_speaker(cx: &mut TestAppContext) {
+    let (owner, _data, _controls) = ready(cx);
+    let (commands, _tail) = answering(&owner, cx);
+    hold(&owner, 1, cx);
+    // Esc's speaker stop finds the owner busy at every offer; the link thread's teardown never
+    // comes here, as when it is late.
+    end_and_escape(&owner, 10, cx);
+    for _ in 0..12 {
+        cx.background_executor
+            .advance_clock(Duration::from_millis(1));
+        cx.run_until_parked();
+    }
+    owner.read_with(cx, |owner, _| {
+        let session = owner.session.as_ref().expect("the ended session");
+        assert!(!session.open(), "the stop's tries ran out");
+        assert!(owner.pending_stops.is_empty(), "and the queue went on");
+        assert_eq!(owner.voice.gates.held(G1), None, "retired after the end");
+    });
+    assert_eq!(
+        heard(&commands),
+        [Command::Pause(1)],
+        "the old speaker is never resumed"
+    );
+    successor_works(&owner, cx);
+}
+
+/// Session 2 replaces the ended one, and its speaker is paused for a hold and resumed after.
+fn successor_works(owner: &Entity<Presence>, cx: &mut TestAppContext) {
+    use kumochi_protocol::message::Incarnation;
+    let _controls = owner.update(cx, |owner, _| {
+        let controls = owner.link.record_controls();
+        owner.session = Some(crate::link::Session::detached(2, Incarnation(2)));
+        owner.runs.met(Incarnation(2));
+        owner.runs.connected(2);
+        owner.runs.settings(ThreadId(1));
+        // Hold 1's owed microphone stop is replayed there and acknowledged.
+        owner.link.replay_recorded_microphone_stop(2);
+        owner.link.accept_recorded_microphone_stop(2, G1);
+        assert!(!owner.link.voice_stop_pending(), "acknowledged");
+        controls
+    });
+    let (commands, tail) = owner.update(cx, |owner, _| owner.link.output().scripted(2));
+    quiet(&tail, 0);
+    hold(owner, 2, cx);
+    owner.update(cx, |owner, cx| {
+        let stamp = owner.voice.pending.as_ref().expect("hold 2").stamp;
+        owner.voice_intent(
+            Intent::End {
+                gesture: G2,
+                cancelled: true,
+            },
+            stamp,
+            0,
+            None,
+            TalkHeld::default(),
+            cx,
+        );
+    });
+    cx.run_until_parked();
+    assert_eq!(
+        heard(&commands),
+        [Command::Pause(2), Command::Resume(2)],
+        "the successor is paused and resumed"
+    );
 }

@@ -760,7 +760,8 @@ impl LinkHandle {
     }
 
     /// Ends `session`'s connection, as a malformed frame does, so the link reconnects. Nothing
-    /// happens once that connection has ended. Never blocks.
+    /// happens once that connection has ended. Never blocks. On return its speaker takes no
+    /// further command, however late the link thread's teardown is.
     pub fn end(&self, session: &Session) {
         #[cfg(any(test, feature = "test-support"))]
         if let Some(recording) = &self.control_recording
@@ -771,6 +772,7 @@ impl LinkHandle {
         self.shared
             .connection(session, |outbox| outbox.pipe.abort());
         self.shared.lose(&session.alive);
+        self.shared.output.end(session.generation);
     }
 
     /// Queues a typed turn or a page request for `session`'s brain, like

@@ -1001,8 +1001,10 @@ never started (the gate is its one discard, and `VoiceHoldStopped` follows as be
 `Retired` once the physical receipt came or the generation finished. A started microphone waits
 for its receipt, even after its hold is gone. A busy retire retries on its own. No retirement
 resumes speech ahead of its stop: each waits while a speaker stop is pending, an Esc is undecided,
-or a session whose brain refused a stop is still ending. A refused proof keeps the token and
-speech paused, and shows `hold-unconfirmed` once no hold is pending.
+or a session whose brain refused a stop is still ending. A session ends from the shell by
+withdrawing its speaker's commands, so a late link-thread teardown can't let a Resume reach the old
+speaker. A refused proof keeps the token and speech paused, and shows `hold-unconfirmed` once no
+hold is pending.
 
 ### Held words after a lost brain
 
