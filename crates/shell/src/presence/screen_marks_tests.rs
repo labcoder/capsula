@@ -816,6 +816,13 @@ fn an_older_failed_send_cannot_revoke_the_successors_watch_or_exclusion(cx: &mut
         let hold = owner.voice.pending.as_ref().expect("the first hold");
         hold.token.discard_unstarted().expect("never started");
         owner.voice.gates.received(&hold.token);
+        let session = owner.session.as_ref().expect("connected");
+        let stopped = ControlToBrain::VoiceHoldStopped {
+            gesture: GestureId(1),
+        };
+        assert!(owner.link.send_control(session, stopped));
+        owner.link.accept_recorded_microphone_stop(1, GestureId(1));
+        assert!(!owner.link.voice_stop_pending());
         owner.capture_finished(1, CaptureFor::Gesture(GestureId(1)), cx);
     });
     state(&watching, RUN, Phase::Answering, HOLD, cx);
