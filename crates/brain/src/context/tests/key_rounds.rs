@@ -956,11 +956,12 @@ fn a_key_write_refuses_unpaired_calls_before_appending_any_row() {
 
 #[tokio::test]
 async fn a_run_allowance_outlives_its_owner_and_refuses_the_next_attempt_unsent() {
-    use crate::engines::anthropic::live::{Allowance, RUN_ATTEMPTS};
+    use crate::engines::anthropic::live::Allowance;
+    const ALLOWED: u32 = 17;
 
     let mut world = world("key-round-allowance");
     let run = world.start("ask");
-    let spent = usize::try_from(RUN_ATTEMPTS).expect("small");
+    let spent = usize::try_from(ALLOWED).expect("small");
     let peer = Peer::new(
         std::iter::once(calling())
             .chain(std::iter::repeat_with(answering).take(spent))
@@ -1003,10 +1004,10 @@ async fn a_run_allowance_outlives_its_owner_and_refuses_the_next_attempt_unsent(
         serial: 1,
     });
     job.request.tools.clear();
-    for _ in 3..RUN_ATTEMPTS {
+    for _ in 3..ALLOWED {
         assert_eq!(peer.play(&rebuilt, &job, Answer::Grant).await.0, done);
     }
-    assert_eq!(allowance.spent(run), Some(RUN_ATTEMPTS));
+    assert_eq!(allowance.spent(run), Some(ALLOWED));
     let starts = peer.script.lock().expect("script").starts;
     assert_eq!(starts, spent);
     assert_eq!(
@@ -1021,12 +1022,18 @@ async fn a_run_allowance_outlives_its_owner_and_refuses_the_next_attempt_unsent(
     );
     assert_eq!(peer.script.lock().expect("script").starts, starts);
 
-    let next = RunId(run.0 + 1);
-    let other = Live::new(allowance.of(next).expect("a later run's own allowance"));
+    let next = world.start("again");
+    let first = request(&world, next, 1);
+    assert_eq!(first.run, next);
+    let other = Live::new(
+        allowance
+            .of(first.run)
+            .expect("a later run's own allowance"),
+    );
     assert_eq!(allowance.spent(next), Some(0));
     assert!(allowance.of(run).is_none(), "an earlier run has none");
     let peer = Peer::new(vec![answering()]);
-    assert_eq!(peer.play(&other, &job, Answer::Grant).await.0, done);
+    assert_eq!(peer.play(&other, &first, Answer::Grant).await.0, done);
     assert_eq!(peer.script.lock().expect("script").starts, 1);
     assert_eq!(allowance.spent(next), Some(1));
 }
