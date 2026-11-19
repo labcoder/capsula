@@ -605,6 +605,13 @@ After the click's receipt, the runner waits up to 250 ms for the fixture's root 
 front, because activation completes asynchronously. An empty front or another window of the
 fixture's own process keeps it waiting; a foreign foreground, any input or a moved pointer ends
 the wait at once and refuses. `opener.txt` records the wait as `root_wait_ms`.
+If the confirmation that ends the wait refuses, it names its readings, each against its condition:
+`look` is `calm` or the first obstruction's word, `pointer_offset` and `receipt_offset` are the
+pointer's and the receipt's offsets from the click point in pixels (`none` with no receipt),
+`receipts` is the EDIT's receipt count, and `foreground` says what held the front against the
+root (`fixture_root`, `fixture_other_window`, `foreign` or `nothing`). The refusal also gives
+the wait's `root_wait_ms` and the foreground window's class and executable basename, read at
+the confirmation. It reports no titles, window text, handles or absolute coordinates.
 
 The native fixture must acknowledge the tagged click and be the exact foreground window with
 its EDIT focused before publishing Ready. The click changes the last-input tick, so only its
