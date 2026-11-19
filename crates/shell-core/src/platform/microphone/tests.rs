@@ -1141,7 +1141,9 @@ fn the_speaker_writes_exact_pcm16_and_float_frames_and_no_other_format() {
         sample,
     };
     let write = |sample, channels, mono: &[i16]| {
-        let render = format(sample, channels).render().expect("a speaker format");
+        let render = format(sample, channels)
+            .render(0)
+            .expect("a speaker format");
         let mut out = vec![0xaa; mono.len() * render.frame()];
         render.write(mono, &mut out);
         out
@@ -1154,6 +1156,6 @@ fn the_speaker_writes_exact_pcm16_and_float_frames_and_no_other_format() {
         [0x00, 0x00, 0x00, 0x3f, 0x00, 0x00, 0x00, 0x3f]
     );
     for sample in [Sample::U8, Sample::I24, Sample::I32] {
-        assert_eq!(format(sample, 2).render(), None, "{sample:?}");
+        assert_eq!(format(sample, 2).render(0), None, "{sample:?}");
     }
 }

@@ -137,12 +137,16 @@ pub(in crate::platform) fn teardown_error(code: HRESULT) -> MicError {
 }
 
 pub(super) fn read_format(mix: &Mix) -> Result<Format, MicError> {
+    read_mix(mix)?.0.check()
+}
+
+pub(super) fn read_mix(mix: &Mix) -> Result<(Format, u32), MicError> {
     if mix.0.is_null() {
         return Err(MicError::Format);
     }
     // SAFETY: GetMixFormat returns at least WAVEFORMATEX; read_unaligned handles packed layout.
     let wave = unsafe { mix.0.read_unaligned() };
-    let (tag, valid) = if wave.wFormatTag == 0xfffe {
+    let (tag, valid, mask) = if wave.wFormatTag == 0xfffe {
         if usize::from(wave.cbSize) < size_of::<WAVEFORMATEXTENSIBLE>() - size_of::<WAVEFORMATEX>()
         {
             return Err(MicError::Format);
@@ -159,9 +163,9 @@ pub(super) fn read_format(mix: &Mix) -> Result<Format, MicError> {
         } else {
             return Err(MicError::Format);
         };
-        (tag, valid)
+        (tag, valid, ext.dwChannelMask)
     } else {
-        (wave.wFormatTag, wave.wBitsPerSample)
+        (wave.wFormatTag, wave.wBitsPerSample, 0)
     };
     if valid != wave.wBitsPerSample {
         return Err(MicError::Format);
@@ -178,8 +182,7 @@ pub(super) fn read_format(mix: &Mix) -> Result<Format, MicError> {
         rate: wave.nSamplesPerSec,
         channels: wave.nChannels,
         sample,
-    }
-    .check()?;
+    };
     let align = format.bytes() * usize::from(format.channels);
     if usize::from(wave.nBlockAlign) != align
         || u64::from(wave.nAvgBytesPerSec)
@@ -187,7 +190,7 @@ pub(super) fn read_format(mix: &Mix) -> Result<Format, MicError> {
     {
         return Err(MicError::Format);
     }
-    Ok(format)
+    Ok((format, mask))
 }
 
 fn live(token: &Generation, session: &AtomicBool) -> Result<(), MicError> {

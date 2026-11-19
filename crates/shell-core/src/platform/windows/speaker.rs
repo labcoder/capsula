@@ -19,11 +19,14 @@ use windows::Win32::System::Threading::{CreateEventW, WaitForSingleObject};
 use windows::core::{Interface, PCWSTR};
 use zeroize::Zeroize;
 
-use super::microphone::{Apartment, Mix, read_format};
+use super::microphone::{Apartment, Mix, read_mix};
 use crate::platform::microphone::Render;
 use crate::speaker::{
     Device, Engine, Fault, Observation, Outlet, Release, Speaker, Staged, Worker, launch, serve,
 };
+
+#[cfg(test)]
+mod render_format_tests;
 
 /// The longest wait for the device's event; each pass also takes commands and data.
 const WAIT_MS: u32 = 20;
@@ -130,8 +133,8 @@ impl Stream {
         let client: IAudioClient = unsafe { device.Activate(CLSCTX_ALL, None) }.ok()?;
         // SAFETY: client is live; Mix frees the allocation on every path.
         let mix = Mix(unsafe { client.GetMixFormat() }.ok()?);
-        let format = read_format(&mix).ok()?;
-        let writer = format.render()?;
+        let (format, mask) = read_mix(&mix).ok()?;
+        let writer = format.render(mask)?;
         // SAFETY: the validated mix format is live; event-driven shared mode at the engine's own
         // buffer and period, with no rate conversion and no loopback.
         unsafe {
