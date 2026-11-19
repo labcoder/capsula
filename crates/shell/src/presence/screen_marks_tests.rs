@@ -593,15 +593,19 @@ fn a_reset_before_recognition_delivery_retires_only_that_unstarted_generation(
     open.send(()).unwrap();
     until(cx, |cx| {
         owner.read_with(cx, |owner, _| {
-            owner.voice.pending.as_ref().is_some_and(|hold| {
-                hold.token.gesture() == GestureId(2) && hold.collected
-            })
+            owner
+                .voice
+                .pending
+                .as_ref()
+                .is_some_and(|hold| hold.token.gesture() == GestureId(2) && hold.collected)
         })
     });
     samples.recv_timeout(Duration::from_secs(3)).unwrap();
     deliver(Event::Reset, after(at, 1_302));
     finish.send(()).unwrap();
-    until(cx, |cx| owner.read_with(cx, |owner, _| owner.voice.pending.is_none()));
+    until(cx, |cx| {
+        owner.read_with(cx, |owner, _| owner.voice.pending.is_none())
+    });
 }
 
 #[gpui::test]
