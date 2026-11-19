@@ -296,6 +296,8 @@ pub fn batch(first: LinkEvent, rest: &Receiver<LinkEvent>) -> Batch {
 #[derive(Clone, Debug)]
 pub struct Session {
     alive: Arc<AtomicBool>,
+    /// Set once its end is under way elsewhere: nothing more is sent on it.
+    closing: Arc<AtomicBool>,
     /// Counts connections in this shell; the brain's incarnation can't, since the same brain may
     /// be reconnected to.
     generation: u64,
@@ -307,6 +309,16 @@ pub struct Session {
 impl Session {
     pub fn alive(&self) -> Arc<AtomicBool> {
         Arc::clone(&self.alive)
+    }
+
+    /// Refuses every later send on this connection at once, without waiting, while its end runs
+    /// elsewhere.
+    pub fn close(&self) {
+        self.closing.store(true, Ordering::Release);
+    }
+
+    fn open(&self) -> bool {
+        self.alive.load(Ordering::Acquire) && !self.closing.load(Ordering::Acquire)
     }
 
     pub fn generation(&self) -> u64 {
@@ -679,7 +691,7 @@ impl LinkHandle {
         {
             return retained;
         }
-        if !session.alive.load(Ordering::Acquire) {
+        if !session.open() {
             return false;
         }
         let shared = &self.shared;
@@ -750,7 +762,7 @@ impl LinkHandle {
     /// connection instead.
     pub fn send_data(&self, session: &Session, message: DataToBrain) -> bool {
         let out = DataOut::Submit(message);
-        if !session.alive.load(Ordering::Acquire) {
+        if !session.open() {
             return false;
         }
         #[cfg(any(test, feature = "test-support"))]
@@ -828,6 +840,7 @@ impl Session {
         let (wake, _sleeping) = async_channel::bounded::<DataOut>(1);
         Self {
             alive: Arc::new(AtomicBool::new(true)),
+            closing: Arc::default(),
             generation,
             credit: Arc::new(Credit {
                 bytes: AtomicU32::new(0),
@@ -1081,6 +1094,7 @@ impl Link {
         let open = events
             .send_blocking(LinkEvent::Connected(Session {
                 alive: Arc::clone(&ended.alive),
+                closing: Arc::default(),
                 generation,
                 credit: Arc::clone(&credit),
                 issue_origin,

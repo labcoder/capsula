@@ -685,7 +685,7 @@ impl Presence {
 
     /// Queues `message` for the brain. A run's `Stop` or `StopScenes` then stops its speech, and
     /// only once the brain's is queued, so speech never stops for a stop the brain wasn't told;
-    /// a refused one ends the session instead. The speaker's `Stop` waits behind any earlier
+    /// a refused one ends the session instead ([`Presence::end_session`]). The speaker's `Stop` waits behind any earlier
     /// one a busy owner hasn't taken.
     pub(super) fn send_stop(
         &mut self,
@@ -700,7 +700,7 @@ impl Presence {
         let sent = self.link.send_control(session, message);
         // A stop the brain wasn't told can't be undone locally, so that session ends.
         if !sent && run.is_some() {
-            self.link.end(session);
+            self.end_session(session, cx).detach();
         }
         if sent && let Some(run) = run {
             self.pending_stops
@@ -714,9 +714,8 @@ impl Presence {
 
     /// Offers the pending speaker stops to the owner in order. A busy owner is offered the front
     /// one again after [`STOP_RETRY`], with later ones behind it. Once its tries run out, its
-    /// session ends off the UI thread, since that end takes the same lock, and the queue waits
-    /// for that end.
-    fn drain_stops(&mut self, cx: &mut Context<'_, Self>) {
+    /// session ends ([`Presence::end_session`]), and the queue waits for that end.
+    pub(super) fn drain_stops(&mut self, cx: &mut Context<'_, Self>) {
         while let Some((session, run, tries)) = self.pending_stops.front_mut() {
             let task = match self.link.output().stop(session.generation(), *run) {
                 Err(Denied::Busy) if *tries > 1 => {
@@ -728,10 +727,8 @@ impl Presence {
                 }
                 Err(Denied::Busy) => {
                     *tries = 0;
-                    let (link, session) = (self.link.clone(), session.clone());
-                    let end = cx
-                        .background_executor()
-                        .spawn(async move { link.end(&session) });
+                    let session = session.clone();
+                    let end = self.end_session(&session, cx);
                     cx.spawn(async move |this, cx| {
                         end.await;
                         Self::after_stop(&this, cx);
@@ -746,6 +743,15 @@ impl Presence {
             self.stop_retry = Some(task);
             return;
         }
+    }
+
+    /// Ends `session` without waiting: nothing more is sent on it from now, and the pipe abort and
+    /// the owner's barrier, which takes the owner's lock, finish on the background executor.
+    fn end_session(&self, session: &Session, cx: &mut Context<'_, Self>) -> gpui_kit::Task<()> {
+        session.close();
+        let (link, session) = (self.link.clone(), session.clone());
+        cx.background_executor()
+            .spawn(async move { link.end(&session) })
     }
 
     /// Goes on with the pending stops, past a front one with no tries left, whose session has

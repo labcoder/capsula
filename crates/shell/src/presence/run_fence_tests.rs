@@ -248,6 +248,7 @@ fn a_refused_stop_ends_the_session_and_never_stops_the_speaker(cx: &mut TestAppC
     let (commands, _tail) = answering(&owner, SPOKEN, cx);
     let _full = full(&owner, cx);
     escape(&owner, cx);
+    cx.run_until_parked();
     owner.update(cx, |owner, _| {
         let alive = owner
             .session
@@ -268,10 +269,16 @@ fn a_refused_stop_ends_the_session_and_never_stops_the_speaker(cx: &mut TestAppC
         };
         assert!(!owner.send_stop(&session, scenes, cx), "refused");
         assert!(
-            !session.alive().load(std::sync::atomic::Ordering::Acquire),
-            "the session ended"
+            session.alive().load(std::sync::atomic::Ordering::Acquire),
+            "the end runs off the UI thread"
+        );
+        assert!(
+            !owner.link.send_control(&session, brain_stop(6)),
+            "but nothing more is sent at once"
         );
     });
+    cx.run_until_parked();
+    assert!(!alive(&owner, cx), "the session ended");
     assert_eq!(stops(&commands), [], "no speaker Stop");
 }
 
@@ -366,4 +373,38 @@ fn a_speaker_stop_is_offered_ten_times_and_then_its_session_ends(cx: &mut TestAp
     retries(1, cx);
     assert!(!alive(&owner, cx), "the session ended");
     assert_eq!(stops(&commands), [], "no speaker Stop");
+}
+
+#[gpui::test]
+fn an_exhausted_stop_refuses_the_old_session_at_once_and_a_replacement_works(
+    cx: &mut TestAppContext,
+) {
+    let (owner, _data, _controls) = ready(cx);
+    let (_commands, _tail) = answering(&owner, SPOKEN, cx);
+    stop_busy(&owner, 10, &[5], cx);
+    retries(8, cx);
+    owner.update(cx, |owner, cx| {
+        let old = owner.session.clone().expect("connected");
+        owner.stop_retry = None;
+        owner.drain_stops(cx);
+        assert!(
+            old.alive().load(std::sync::atomic::Ordering::Acquire),
+            "the end hasn't run yet"
+        );
+        assert!(!owner.link.send_control(&old, brain_stop(7)), "no control");
+        assert!(
+            !owner.link.send_data(
+                &old,
+                kumochi_protocol::message::DataToBrain::Credit { bytes: 1 }
+            ),
+            "no data"
+        );
+    });
+    cx.run_until_parked();
+    assert!(!alive(&owner, cx), "the session ended");
+    owner.update(cx, |owner, _| {
+        let replacement =
+            crate::link::Session::detached(2, kumochi_protocol::message::Incarnation(2));
+        assert!(owner.link.send_control(&replacement, brain_stop(8)));
+    });
 }
