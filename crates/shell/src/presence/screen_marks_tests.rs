@@ -16,6 +16,7 @@ use kumochi_scene::{
     record::ScreenDisplay, screen, text::Bounded,
 };
 use kumochi_shell_core::platform::screen_watch::{Changed, Sources};
+use kumochi_shell_core::speaker::Command;
 
 use super::super::Presence;
 use super::super::overlay_visibility::Visibility;
@@ -25,7 +26,7 @@ use super::super::screen_hold_tests::{
 };
 use super::super::voice_wiring_tests::status;
 use super::Source;
-use super::tests::{after, chord, listen, native, until};
+use super::tests::{after, chord, listen, native, source, until};
 use crate::input::{Edge, Event, Key, TalkHeld};
 use crate::link::{LinkEvent, LinkState};
 use crate::platform::input::{Button, input};
@@ -465,7 +466,15 @@ fn a_reset_before_recognition_delivery_retires_only_that_unstarted_generation(
     cx: &mut TestAppContext,
 ) {
     let watching = watch(true, cx);
-    let deliver = native(&watching.ready.owner, cx);
+    let owner = &watching.ready.owner;
+    let (commands, speaker) = std::sync::mpsc::channel();
+    owner.update(cx, |owner, _| {
+        owner.link.output().witness(Box::new(move |command| {
+            let _seen = commands.send(*command);
+        }));
+    });
+    let (open, finish, started, samples) = source(owner, cx, None);
+    let deliver = native(owner, cx);
     let at = Instant::now();
     cx.update(|_| {
         chord(&deliver, Edge::Down, at);
@@ -480,7 +489,7 @@ fn a_reset_before_recognition_delivery_retires_only_that_unstarted_generation(
                 ControlToBrain::ScreenHoldRecognized { .. } | ControlToBrain::ScreenRelease { .. }
             )
     )));
-    watching.ready.owner.read_with(cx, |owner, _| {
+    owner.read_with(cx, |owner, _| {
         assert_eq!(owner.link.microphone_gate().latest(), 1);
         assert!(owner.voice.pending.is_none());
     });
@@ -497,10 +506,27 @@ fn a_reset_before_recognition_delivery_retires_only_that_unstarted_generation(
             })
             .collect::<Vec<_>>(),
         [GestureId(2)],
-        "the first generation must not occupy the next hold's gate"
+        "only the second hold reaches recognition"
     );
+    assert_eq!(
+        speaker.try_iter().collect::<Vec<_>>(),
+        [Command::Pause(1), Command::Resume(1), Command::Pause(2)],
+        "the skipped hold resumes output before the successor takes the inhibit"
+    );
+    status(owner, 1, 2, HoldStatus::Admitted, cx);
+    started.recv_timeout(Duration::from_secs(3)).unwrap();
+    open.send(()).unwrap();
+    until(cx, |cx| {
+        owner.read_with(cx, |owner, _| {
+            owner.voice.pending.as_ref().is_some_and(|hold| {
+                hold.token.gesture() == GestureId(2) && hold.collected
+            })
+        })
+    });
+    samples.recv_timeout(Duration::from_secs(3)).unwrap();
     deliver(Event::Reset, after(at, 1_302));
-    cx.run_until_parked();
+    finish.send(()).unwrap();
+    until(cx, |cx| owner.read_with(cx, |owner, _| owner.voice.pending.is_none()));
 }
 
 #[gpui::test]
