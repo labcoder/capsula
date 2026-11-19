@@ -67,39 +67,54 @@ impl fmt::Debug for Clock {
 
 /// The tools a launch offers, frozen with it: the launch's allow list, its audit's expected set
 /// and its seed all read this one value.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub(crate) enum Offer {
     /// No tools: a text answer.
     Nothing,
-    /// The authorized tools, out of the MCP subset of the origin's model offers.
-    Mcp(Origin, Vec<ToolName>),
+    /// The authorized names and their canonical schemas, shared with the listener.
+    Mcp(Origin, Vec<ToolName>, Arc<[ToolSchema]>),
 }
 
 impl Offer {
     /// What a build's launch may offer: the tools its built request offers that `origin` may
     /// also call over MCP, or nothing when there are none.
     pub(crate) fn authorized(origin: Origin, offered: &[ToolSchema]) -> Self {
-        let tools: Vec<ToolName> = crate::dispatch::mcp_schemas(origin)
-            .iter()
+        let (tools, schemas): (Vec<_>, Vec<_>) = crate::dispatch::mcp_schemas(origin)
+            .into_iter()
             .filter(|schema| offered.iter().any(|tool| tool.name == schema.name))
-            .filter_map(|schema| crate::dispatch::named(schema.name))
-            .collect();
+            .filter_map(|schema| crate::dispatch::named(schema.name).map(|name| (name, schema)))
+            .unzip();
         if tools.is_empty() {
             Self::Nothing
         } else {
-            Self::Mcp(origin, tools)
+            Self::Mcp(origin, tools, schemas.into())
         }
     }
 
-    pub(crate) fn schemas(&self) -> Vec<ToolSchema> {
+    pub(crate) fn schemas(&self) -> &[ToolSchema] {
         match self {
-            Self::Nothing => Vec::new(),
-            Self::Mcp(origin, tools) => crate::dispatch::mcp_schemas(*origin)
-                .into_iter()
-                .filter(|schema| {
-                    crate::dispatch::named(schema.name).is_some_and(|name| tools.contains(&name))
-                })
-                .collect(),
+            Self::Nothing => &[],
+            Self::Mcp(_, _, schemas) => schemas,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_tests(origin: Origin, tools: Vec<ToolName>) -> Self {
+        let schemas: Vec<_> = crate::dispatch::mcp_schemas(origin)
+            .into_iter()
+            .filter(|schema| {
+                crate::dispatch::named(schema.name).is_some_and(|name| tools.contains(&name))
+            })
+            .collect();
+        Self::Mcp(origin, tools, schemas.into())
+    }
+}
+
+impl fmt::Debug for Offer {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Nothing => f.write_str("Nothing"),
+            Self::Mcp(origin, tools, _) => f.debug_tuple("Mcp").field(origin).field(tools).finish(),
         }
     }
 }
@@ -542,7 +557,7 @@ impl Question<'_> {
             report.report(Outcome::Launch);
             return Some(Finish::Failed(EngineFailure::Provider));
         }
-        let seed = seed::encode(&request.request, &attempt.snapshot.offer.schemas());
+        let seed = seed::encode(&request.request, attempt.snapshot.offer.schemas());
         match writer.seed(&seed, until).await {
             Ok(()) => {}
             Err(StdinRefused::Deadline) => return Some(expired(launch, report)),

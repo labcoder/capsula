@@ -1510,7 +1510,7 @@ fn a_set_model_that_cancels_a_held_run_fails_its_launchs_gate_at_once() {
     let bind = crate::engines::claude_code::launch::Bind {
         build: engine_key(&core, R),
         launch: crate::bridge::LaunchId(1),
-        offer: crate::engines::claude_code::launch::Offer::Mcp(Origin::Task(T), Vec::new()),
+        offer: crate::engines::claude_code::launch::Offer::for_tests(Origin::Task(T), Vec::new()),
         until: std::time::Instant::now() + std::time::Duration::from_secs(60),
         reply: tokio::sync::oneshot::channel().0,
     };

@@ -753,7 +753,10 @@ impl Claude {
             thread: snapshot.thread,
             model: snapshot.model.clone(),
             effort: snapshot.effort.clone(),
-            tools: snapshot.offer.schemas(),
+            tools: match &snapshot.offer {
+                Offer::Nothing => Arc::default(),
+                Offer::Mcp(_, _, schemas) => Arc::clone(schemas),
+            },
             lifetime: MAX_LAUNCH,
             calls: Some(self.calls.0.clone()),
         })?;

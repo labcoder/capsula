@@ -200,7 +200,7 @@ impl Rig {
                 ThreadId(1),
                 "claude-test".to_owned(),
                 None,
-                Offer::Mcp(Origin::Kumo, vec![crate::engines::ToolName::Draw]),
+                Offer::for_tests(Origin::Kumo, vec![crate::engines::ToolName::Draw]),
             )
             .expect("ready")
     }
@@ -829,7 +829,7 @@ async fn any_change_to_the_snapshot_replaces_the_warm_launch() {
         ("effort", |s| s.effort = Some("high".to_owned())),
         ("thread", |s| s.thread = ThreadId(2)),
         ("offer", |s| {
-            s.offer = Offer::Mcp(
+            s.offer = Offer::for_tests(
                 Origin::Task(ThreadId(1)),
                 vec![crate::engines::ToolName::Draw],
             );
@@ -1319,7 +1319,7 @@ fn a_snapshots_debug_shows_no_model_or_effort_text() {
         model: marker.to_owned(),
         effort: Some(marker.to_owned()),
         account: 3,
-        offer: Offer::Mcp(Origin::Kumo, vec![crate::engines::ToolName::Draw]),
+        offer: Offer::for_tests(Origin::Kumo, vec![crate::engines::ToolName::Draw]),
         version: V,
     };
     let text = format!("{snapshot:?}");
@@ -1714,7 +1714,7 @@ fn refuses(claude: &mut Claude, what: &str) {
             ThreadId(1),
             "claude-test".to_owned(),
             None,
-            Offer::Mcp(Origin::Kumo, vec![crate::engines::ToolName::Draw]),
+            Offer::for_tests(Origin::Kumo, vec![crate::engines::ToolName::Draw]),
         )
         .expect("the view still reads Ready");
     assert!(

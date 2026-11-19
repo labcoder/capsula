@@ -647,6 +647,9 @@ sequenceDiagram
     B-->>L: McpReply { text, error }
 ```
 
+- **One schema set.** The foreground offer builds the trusted tool schemas once. The launch's
+  listener, audit and seed all read that same immutable set; binding still checks the offered
+  tool names against the admitted build.
 - **Overlay only.** The Claude seed and MCP list offer the overlay schema and prompt. An MCP call
   containing a screen begin or a box target is refused before handing anything to the drawing
   system. The refusal stays in memory for that key, with no call row or scene write.

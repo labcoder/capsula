@@ -29,14 +29,35 @@ use crate::test_support::Scratch;
 const THREAD: ThreadId = ThreadId(2);
 
 #[test]
+fn a_cloned_offer_reuses_the_canonical_schema_set_without_copying() {
+    let request = [ToolSchema {
+        name: "draw",
+        description: "untrusted request description",
+        parameters: json!({"type":"untrusted"}),
+    }];
+    let offer = Offer::authorized(Origin::Kumo, &request);
+    let copy = offer.clone();
+    let [schema] = offer.schemas() else {
+        panic!("exactly one canonical schema");
+    };
+    assert_eq!(schema.name, "draw");
+    assert_eq!(
+        schema.parameters["$defs"]["Surface"],
+        json!({"type":"string","const":"overlay"})
+    );
+    assert_ne!(schema.description, request[0].description);
+    assert!(std::ptr::eq(offer.schemas(), copy.schemas()));
+}
+
+#[test]
 fn a_launch_offers_only_what_its_build_offers_and_mcp_permits() {
     let kumo = crate::context::tools(Origin::Kumo);
     assert_eq!(
         Offer::authorized(Origin::Kumo, &kumo),
-        Offer::Mcp(Origin::Kumo, vec![ToolName::Draw])
+        Offer::for_tests(Origin::Kumo, vec![ToolName::Draw])
     );
     assert_eq!(
-        Offer::Mcp(Origin::Kumo, vec![ToolName::Draw])
+        Offer::for_tests(Origin::Kumo, vec![ToolName::Draw])
             .schemas()
             .iter()
             .map(|tool| tool.name)
@@ -112,7 +133,7 @@ fn seeded(brain: &mut Brain) -> (Start, Launch) {
         thread: THREAD,
         model: "claude-test".to_owned(),
         effort: None,
-        tools: Vec::new(),
+        tools: std::sync::Arc::default(),
         lifetime: Duration::from_secs(60),
         calls: None,
     })
@@ -145,7 +166,7 @@ fn bind_until(brain: &mut Brain, build: BuildKey, launch: LaunchId, until: Insta
     brain.mcp_bind(Bind {
         build,
         launch,
-        offer: Offer::Mcp(Origin::Task(THREAD), vec![ToolName::Probe]),
+        offer: Offer::for_tests(Origin::Task(THREAD), vec![ToolName::Probe]),
         until,
         reply,
     });
