@@ -96,7 +96,9 @@ fn copy_and_decode(source: NonNull<c_void>, units: usize) -> KeyClipboardResult 
     let mut copied = 0;
     // SAFETY: this returns the pseudo-handle for this process and needs no inputs.
     let process = unsafe { GetCurrentProcess() };
-    // SAFETY: Windows checks the source range in this process; Rust never dereferences it.
+    // SAFETY: the clipboard caller bounds the source range by GlobalSize and keeps
+    // the clipboard open and the handle locked throughout this call.
+    // Windows checks the source range in this process; Rust never dereferences it.
     // The destination is writable for the requested byte count, and copied is a separate output.
     unsafe {
         ReadProcessMemory(
