@@ -281,7 +281,9 @@ fn pair(rate: u32, channels: usize) -> (Submit, Playback) {
 impl Submit {
     fn clear_available(&mut self) {
         self.converter = None;
-        self.mono.zeroize();
+        if !self.mono.is_empty() {
+            self.mono.zeroize();
+        }
         for block in &mut self.blocks {
             if let Some(block) = Arc::get_mut(block) {
                 block.clear();

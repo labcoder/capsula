@@ -1,0 +1,210 @@
+//! Dormant source queue and playback state; no worker or device is started here.
+
+use std::collections::VecDeque;
+use std::fmt;
+
+use kumochi_protocol::message::{
+    MAX_AHEAD_SEGMENTS, MAX_SEGMENTS_PER_RUN, MAX_UNPLAYED_SECONDS, RunId, SegmentId, SpeechPcm,
+};
+use zeroize::Zeroize as _;
+
+mod timeline;
+
+#[cfg(test)]
+mod tests;
+
+const RATE: u32 = 24_000;
+const CAPACITY: usize = 480_000;
+const _: () = assert!(
+    RATE * MAX_UNPLAYED_SECONDS == 480_000,
+    "capacity follows the wire source window"
+);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Credit {
+    origin: u64,
+    bytes: u32,
+}
+
+struct Packet {
+    credit: Credit,
+    pcm: SpeechPcm,
+}
+
+impl fmt::Debug for Packet {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Packet")
+            .field("credit", &self.credit)
+            .field("pcm", &self.pcm)
+            .finish()
+    }
+}
+
+impl Drop for Packet {
+    fn drop(&mut self) {
+        self.pcm.samples.zeroize();
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Admission {
+    Return(Credit),
+    Held,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Fault {
+    Order,
+    Size,
+}
+
+struct Segment {
+    id: SegmentId,
+    first: u64,
+    samples: u32,
+    next_seq: u32,
+    ended: bool,
+}
+
+impl Segment {
+    fn end(&self) -> u64 {
+        self.first + u64::from(self.samples)
+    }
+}
+
+struct Queue {
+    run: RunId,
+    stopped: bool,
+    retired: u64,
+    received: u64,
+    next_segment: u32,
+    completed: u32,
+    samples: VecDeque<i16>,
+    segments: VecDeque<Segment>,
+    held: Option<Packet>,
+}
+
+impl Queue {
+    fn new(run: RunId) -> Self {
+        Self {
+            run,
+            stopped: false,
+            retired: 0,
+            received: 0,
+            next_segment: 0,
+            completed: 0,
+            samples: VecDeque::with_capacity(CAPACITY),
+            segments: VecDeque::new(),
+            held: None,
+        }
+    }
+
+    fn offer(&mut self, packet: Packet) -> Result<Admission, Fault> {
+        if self.stopped || packet.pcm.run < self.run {
+            return Ok(Admission::Return(packet.credit));
+        }
+        if packet.pcm.run != self.run || self.held.is_some() {
+            return Err(Fault::Order);
+        }
+        let pcm = &packet.pcm;
+        pcm.check(RATE).map_err(|_| Fault::Size)?;
+        let continuing = self.segments.back().filter(|segment| !segment.ended);
+        let (samples, next_seq) = if let Some(segment) = continuing {
+            if segment.id != pcm.segment {
+                return Err(Fault::Order);
+            }
+            (segment.samples, segment.next_seq)
+        } else {
+            if pcm.segment.0 != self.next_segment || self.next_segment >= MAX_SEGMENTS_PER_RUN {
+                return Err(Fault::Order);
+            }
+            (0, 0)
+        };
+        if pcm.seq != next_seq {
+            return Err(Fault::Order);
+        }
+        let count = u32::try_from(pcm.samples.len()).map_err(|_| Fault::Size)?;
+        let total = samples.checked_add(count).ok_or(Fault::Size)?;
+        if total > RATE * kumochi_protocol::message::MAX_SEGMENT_SECONDS
+            || pcm.last.is_some_and(|last| last != total)
+        {
+            return Err(Fault::Size);
+        }
+        let ahead = u32::try_from(self.segments.len()).map_err(|_| Fault::Size)?;
+        if self.samples.len() + pcm.samples.len() > CAPACITY
+            || continuing.is_none() && ahead > MAX_AHEAD_SEGMENTS
+        {
+            self.held = Some(packet);
+            return Ok(Admission::Held);
+        }
+        if continuing.is_none() {
+            self.segments.push_back(Segment {
+                id: pcm.segment,
+                first: self.received,
+                samples: 0,
+                next_seq: 0,
+                ended: false,
+            });
+            self.next_segment += 1;
+        }
+        let segment = self.segments.back_mut().ok_or(Fault::Order)?;
+        segment.samples = total;
+        segment.next_seq = next_seq.checked_add(1).ok_or(Fault::Size)?;
+        segment.ended = pcm.last.is_some();
+        self.received += u64::from(count);
+        self.samples.extend(pcm.samples.iter().copied());
+        self.complete_segments();
+        Ok(Admission::Return(packet.credit))
+    }
+
+    fn retry(&mut self) -> Result<Option<Credit>, Fault> {
+        let Some(packet) = self.held.take() else {
+            return Ok(None);
+        };
+        match self.offer(packet)? {
+            Admission::Return(credit) => Ok(Some(credit)),
+            Admission::Held => Ok(None),
+        }
+    }
+
+    fn retire(&mut self, count: usize) -> usize {
+        let count = count.min(self.samples.len());
+        for sample in self.samples.range_mut(..count) {
+            sample.zeroize();
+        }
+        self.samples.drain(..count);
+        self.retired += u64::try_from(count).expect("bounded source queue");
+        self.complete_segments();
+        count
+    }
+
+    fn complete_segments(&mut self) {
+        while self
+            .segments
+            .front()
+            .is_some_and(|segment| segment.ended && segment.end() <= self.retired)
+        {
+            self.segments.pop_front();
+            self.completed += 1;
+        }
+    }
+
+    fn stop(&mut self) -> (usize, Option<Credit>) {
+        self.stopped = true;
+        let discarded = self.samples.len();
+        for sample in &mut self.samples {
+            sample.zeroize();
+        }
+        self.samples.clear();
+        self.segments.clear();
+        (discarded, self.held.take().map(|packet| packet.credit))
+    }
+}
+
+impl Drop for Queue {
+    fn drop(&mut self) {
+        for sample in &mut self.samples {
+            sample.zeroize();
+        }
+    }
+}

@@ -243,6 +243,7 @@ fn retained_wrapper(path: DropPath) {
     super::CLEAR_OBSERVER.set(Some(|pointer| allocation::handoff(pointer, 0, 0)));
     let _clear_probe = ClearProbe;
     let (sender, receiver) = mpsc::sync_channel(1);
+    let notices = std::sync::Arc::clone(&submit.shared);
     let wrapper = OwnedStream {
         stream: (),
         owner: Owner::new(submit, Permit::claim(busy).unwrap(), sender),
@@ -277,6 +278,11 @@ fn retained_wrapper(path: DropPath) {
         callback_events.is_empty(),
         "the callback must neither clear nor free a block"
     );
+    assert!(!parked.acknowledged());
+    let ((), late_scrub) = allocation::requests(64, || assert!(!parked.poll_retirement()));
+    assert!(parked.submit.blocks[1].samples.is_empty());
+    assert!(Permit::claim(busy).is_none());
+    drop(notices);
     assert!(parked.acknowledged());
 
     let ((), freed) = allocation::requests(64, || drop(parked));
@@ -284,6 +290,7 @@ fn retained_wrapper(path: DropPath) {
         assert_eq!(
             closing
                 .iter()
+                .chain(&late_scrub)
                 .chain(&freed)
                 .filter(|e| e.action == 4 && e.pointer == pointer)
                 .count(),

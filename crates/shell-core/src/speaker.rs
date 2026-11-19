@@ -11,6 +11,11 @@ mod clock;
 mod engine;
 #[cfg(test)]
 pub(crate) mod fake;
+#[expect(
+    dead_code,
+    reason = "the replacement queue stays dormant until the opener switch"
+)]
+mod queued;
 mod tail;
 #[cfg(test)]
 #[path = "speaker_tests.rs"]

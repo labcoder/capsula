@@ -11,9 +11,16 @@ starts after cancellation writes silence. Worker-side retirement retains the poo
 until the backend actually destroys its callback closures, then wipes and frees them off
 the audio thread. At most one pool may be live or awaiting retirement; if a backend never
 releases its closures, that pool stays retained and new opens are refused. The worker clears
-its unshared PCM and converter history while waiting. Route notifications go back to the
-worker. This seam still has no route recovery, speech receipts, mic admission or production
-opener.
+converter history at close and scrubs blocks as they become exclusively owned while waiting.
+Route notifications go back to the worker.
+
+The dormant `speaker::queued` state keeps one bounded source queue and returns ingress byte
+credit on admission or stale discard. It retires source capacity only on consumption or
+discard. A fake clock drives prime, refill, idle and virtual pacing; a fake device supplies
+source spans and estimated presentation times. Virtual or uncertain consumption ends the
+contiguous heard prefix, even if later audio is presented. Stop finality with a physical
+tail waits for a matching known timestamp. No production worker connects this state to cpal,
+and no wire message, hold admission or opener changes here.
 
 `kumochi_shell_core::speaker` owns one connection's output device: it keeps the run's queued
 speech, writes it to the device, and decides from the device's own clock which samples played.

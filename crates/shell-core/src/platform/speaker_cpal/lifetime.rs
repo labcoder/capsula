@@ -36,6 +36,14 @@ impl Retired {
     pub(super) fn acknowledged(&mut self) -> bool {
         Arc::get_mut(&mut self.submit.shared).is_some()
     }
+
+    pub(super) fn poll_retirement(&mut self) -> bool {
+        if self.acknowledged() {
+            return true;
+        }
+        self.submit.clear_available();
+        false
+    }
 }
 
 pub(super) struct Owner {
@@ -120,8 +128,9 @@ pub(super) fn cleanup_sender() -> Option<SyncSender<Retired>> {
                     while let Ok(mut retained) = receiver.recv() {
                         // Wait for the backend's closures, not its public handle. A stuck
                         // backend retains at most one pool (8 blocks, at most 4 MiB of PCM);
-                        // the closing owner wiped the blocks it could exclusively access.
-                        while !retained.acknowledged() {
+                        // Each poll wipes newly exclusive blocks. Blocks still held by the
+                        // callback or a ready slot stay pinned; late callbacks cannot play them.
+                        while !retained.poll_retirement() {
                             std::thread::sleep(Duration::from_millis(100));
                         }
                     }
