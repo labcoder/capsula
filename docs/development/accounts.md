@@ -107,7 +107,10 @@ A 403, any other status, and an error typed inside a 200 stream only show their 
 the row as it is: a 403 can concern one model, and retiring the key for it would make the row flip
 between Ready and Unconfirmed with every Check.
 Every saved-key check or replacement fences late worker/HTTP replies
-by generation and clears the old catalog. Catalog checks do not authorize inference or
+by generation. A replacement, a removal, a refused Check or a Messages 401 clears the old catalog.
+A Check that ends inconclusive keeps the last verified catalog, which sends are still granted on,
+and a shell that connects later is offered that same catalog; once a 401 has closed the key's
+fence, it is offered nothing. Catalog checks do not authorize inference or
 automatic fallback to another connection. Fixtures are synthetic API-reference examples;
 no live provider call is part of the tests.
 

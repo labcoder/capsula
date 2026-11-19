@@ -321,7 +321,10 @@ impl Connections {
     }
 
     pub(super) fn connected(&mut self) -> ControlToShell {
-        self.unsent |= self.view.anthropic == KeyView::Ready;
+        self.unsent |= self
+            .verified
+            .as_ref()
+            .is_some_and(|verified| verified.fence.open());
         ControlToShell::Connections(self.view)
     }
 
