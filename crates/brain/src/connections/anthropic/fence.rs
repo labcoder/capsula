@@ -22,6 +22,10 @@ struct Cut {
 }
 
 impl Fence {
+    pub(super) fn same_cut(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+
     pub(crate) fn revoke(&self) {
         *self.0.closed.lock().unwrap_or_else(PoisonError::into_inner) = true;
         self.0.changed.notify_waiters();

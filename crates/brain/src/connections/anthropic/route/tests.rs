@@ -163,6 +163,35 @@ async fn catalog_and_messages_spend_only_their_own_budget_before_connect() {
 }
 
 #[tokio::test]
+async fn an_aliased_run_and_credential_fence_is_refused_before_admission() {
+    let peer = Scripted::default();
+    let route = Transport::offline(peer.clone(), 0, 1);
+    let authority = Verified::from_entropy(1, key(), Some(801)).expect("nonzero");
+    let aliased = authority.fence.clone();
+    let body = body();
+    let budget = Budget::limited(Some(1));
+    let mut attempt = pin!(route.messages(
+        &authority,
+        Offer {
+            tag: authority.tag,
+            body: &body,
+            fence: &aliased,
+            budget: &budget,
+        },
+        pending::<Option<()>>(),
+        Capture::Nothing,
+        |_: &SseEvent| {},
+    ));
+    assert!(matches!(
+        poll_fn(|cx| Poll::Ready(attempt.as_mut().poll(cx))).await,
+        Poll::Ready(Err(Failure::Credential))
+    ));
+    let script = peer.0.lock().expect("peer");
+    assert_eq!(script.starts, 0);
+    assert_eq!(script.requests, Vec::<Vec<u8>>::new());
+}
+
+#[tokio::test]
 async fn queued_catalog_and_unused_messages_grants_cannot_start_after_revocation() {
     let peer = Scripted::default();
     let route = Transport::offline(peer.clone(), 1, 1);

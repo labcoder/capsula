@@ -124,20 +124,37 @@ async fn revocation_wakes_pending_uploads_and_refuses_further_writes_or_flushes(
             fence.clone(),
         );
         let mut io = client.connect().await.expect("offline peer");
-        {
-            let mut attempt = pin!(fence.while_open(async {
-                io.write_all(b"body").await?;
-                io.flush().await
-            }));
-            assert!(poll_once(attempt.as_mut()).is_pending());
-            assert_eq!(probe.bytes.load(SeqCst), accepted);
-            assert_eq!(probe.flushes.load(SeqCst), usize::from(accepted == 4));
-            fence.revoke();
-            let stopped = timeout(Duration::from_secs(1), attempt)
+        let (registered, pending) = tokio::sync::oneshot::channel();
+        let mut registered = Some(registered);
+        let cut = fence.clone();
+        let task = tokio::spawn(async move {
+            let stopped = {
+                let mut attempt = pin!(cut.while_open(async {
+                    io.write_all(b"body").await?;
+                    io.flush().await
+                }));
+                poll_fn(|cx| {
+                    let result = attempt.as_mut().poll(cx);
+                    if result.is_pending()
+                        && let Some(registered) = registered.take()
+                    {
+                        registered.send(()).expect("pending upload observed");
+                    }
+                    result
+                })
                 .await
-                .expect("woken by revocation");
+            };
             assert!(stopped.is_none());
-        }
+            io
+        });
+        pending.await.expect("upload registered its task waker");
+        assert_eq!(probe.bytes.load(SeqCst), accepted);
+        assert_eq!(probe.flushes.load(SeqCst), usize::from(accepted == 4));
+        fence.revoke();
+        let mut io = timeout(Duration::from_secs(1), task)
+            .await
+            .expect("revocation wakes the upload without another I/O event")
+            .expect("upload task");
         assert_eq!(
             io.write(b"late").await.expect_err("closed").kind(),
             io::ErrorKind::Interrupted

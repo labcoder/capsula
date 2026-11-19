@@ -85,7 +85,7 @@ impl Transport {
         capture: Capture,
         out: impl Events + Send,
     ) -> Result<StopReason, Failure> {
-        if offer.tag != authority.tag {
+        if offer.tag != authority.tag || offer.fence.same_cut(&authority.fence) {
             return Err(Failure::Credential);
         }
         let client = ModelClient::new(Fenced(
