@@ -705,6 +705,27 @@ fn seed_task_for_a_screen_hold(scratch: &Scratch) -> ThreadId {
     task
 }
 
+async fn commit_hold_model(
+    shell: &mut Shell<tokio::io::DuplexStream>,
+    thread: ThreadId,
+    choice: &ModelChoice,
+) {
+    shell
+        .send(&ControlToBrain::ThreadOp(ThreadOp::SetModel {
+            thread,
+            choice: choice.clone(),
+        }))
+        .await;
+    assert_eq!(
+        shell.control().await,
+        Some(ControlToShell::ThreadModelSet {
+            thread,
+            choice: choice.clone(),
+            applied: true,
+        })
+    );
+}
+
 async fn recognize_screen_recipient(
     shell: &mut Shell<tokio::io::DuplexStream>,
     task: Option<ThreadId>,
@@ -712,20 +733,7 @@ async fn recognize_screen_recipient(
 ) {
     opened(shell).await;
     if let Some(thread) = task {
-        shell
-            .send(&ControlToBrain::ThreadOp(ThreadOp::SetModel {
-                thread,
-                choice: choice.clone(),
-            }))
-            .await;
-        assert_eq!(
-            shell.control().await,
-            Some(ControlToShell::ThreadModelSet {
-                thread,
-                choice: choice.clone(),
-                applied: true,
-            })
-        );
+        commit_hold_model(shell, thread, choice).await;
     }
     shell
         .send(&ControlToBrain::ScreenHoldRecognized {
@@ -850,6 +858,80 @@ async fn a_screen_holds_picture_then_its_words_reach_the_run_together() {
 
 #[path = "screen_sent_tests.rs"]
 mod sent;
+
+#[tokio::test]
+async fn a_voice_hold_uses_the_committed_task_model_and_effort() {
+    use crate::context::InputItem;
+    use crate::runtime::hold::tests::screen_hold::image_recipients;
+    use kumochi_protocol::message::Phase;
+
+    let scratch = Scratch::new("hold-voice-pin");
+    let task = seed_task_for_a_screen_hold(&scratch);
+    let (mut brain, release, mut decoded, _fetch) =
+        input(&scratch, vec![105, -5], "new spoken words").await;
+    let (_, choice) = image_recipients(&mut brain);
+    assert!(brain.account.takes_images(&choice));
+    let (send, mut requests) = mpsc::unbounded_channel();
+    brain.engine = Box::new(Requested(send));
+    let ((control, data), mut shell) = duplex();
+    let mut tap = Tap::from_env();
+    let client = async {
+        opened(&mut shell).await;
+        commit_hold_model(&mut shell, task, &choice).await;
+        shell
+            .send(&ControlToBrain::VoiceHoldRecognized {
+                gesture: G,
+                thread: Some(task),
+                selection: 1,
+            })
+            .await;
+        status(&mut shell, HoldStatus::Admitted).await;
+        packet(&mut shell, 16_000, 0, true, vec![105, -5]).await;
+        release_source(&mut shell, 1).await;
+        status(&mut shell, HoldStatus::Transcribing).await;
+        assert_eq!(decoded.recv().await, Some(()));
+        release.send(()).unwrap();
+        let (run, phase) = shell.state().await;
+        assert_eq!(phase, Phase::Thinking);
+        assert!(matches!(shell.data().await, DataToShell::Models { .. }));
+        shell.held(G, "new spoken words").await;
+        assert_eq!(shell.read_to_end(run).await, "selected answer".len());
+        assert_eq!(shell.state().await, (run, Phase::Answering));
+        assert_eq!(shell.state().await, (run, Phase::Done));
+        drop(shell);
+    };
+    let (ended, ()) = tokio::time::timeout(super::PATIENCE, async {
+        tokio::join!(brain.serve(control, data, &mut tap), client)
+    })
+    .await
+    .unwrap();
+    assert_eq!(ended, Ended::Lost);
+    let request = requests.try_recv().unwrap();
+    assert_eq!(request.thread, task);
+    assert_eq!(request.request.choice, Some(choice));
+    assert!(
+        !request
+            .request
+            .input
+            .iter()
+            .any(|item| matches!(item, InputItem::Image(_)))
+    );
+    let words = sent_users(&request);
+    let [earlier, current] = words.as_slice() else {
+        panic!("expected two user turns");
+    };
+    assert_eq!(*earlier, "earlier words");
+    let (minute, drawings) = current
+        .strip_prefix("new spoken words\n\nLocal time: ")
+        .unwrap()
+        .split_once("\nDrawings on screen: ")
+        .unwrap();
+    super::asks::assert_minute(minute);
+    assert_eq!(drawings, "[]");
+    assert!(requests.is_empty());
+    brain.close().await;
+    assert_eq!(users(&scratch), ["earlier words", "new spoken words"]);
+}
 
 #[tokio::test]
 async fn quiet_audio_or_blank_transcript_store_and_send_nothing() {
