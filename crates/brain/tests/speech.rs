@@ -3,6 +3,7 @@
 //! `cl` run can't overlap a worker spawn in another binary's tests.
 #![cfg(all(windows, debug_assertions))]
 
+#[cfg(test)]
 #[path = "../../../tests/support/scratch.rs"]
 mod scratch;
 

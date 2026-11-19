@@ -2,6 +2,7 @@
 //! while another test spawned a worker could inherit that worker's pipe ends.
 #![cfg(all(windows, debug_assertions))]
 
+#[cfg(test)]
 #[path = "../../../tests/support/scratch.rs"]
 mod scratch;
 
