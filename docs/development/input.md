@@ -70,7 +70,9 @@ sequenceDiagram
   Right Ctrl (E0 0x1D) and AltGr's right Alt (E0 0x38) are other keys, so AltGr cancels instead of
   firing. AltGr's synthetic left Ctrl can't be told from a real one by its flags; the right Alt
   that follows still cancels. Pause (E1) resets, because it has no dependable key-up. A keyboard
-  overrun resets. A key with no make code is named through `MapVirtualKeyW`.
+  overrun resets. A missing make code falls back to `MapVirtualKeyW` only when its result
+  preserves the record's prefix evidence and doesn't guess a modifier side. An unsided
+  modifier VK or conflicting prefix is loss of coverage, not a left-key make or break.
   The adapter hands the reducer semantic left Ctrl, left Alt, Escape or other-key events.
   Escape remains distinguishable from the registered Escape event, and bounded opaque
   slots track live physical makes and breaks for up to two keyboards with keys down. A second
@@ -103,9 +105,12 @@ sequenceDiagram
   more than 50 ms past an armed deadline logs the thread's message queue status once per gesture.
 - **Resets.** An unreadable Raw Input record resets the gesture; a record known to be
   non-keyboard input does not. Device changes, observed keyboard-layout changes, session
-  changes, desktop switches, suspend, overruns and Pause also reset it. The proxy samples
-  the foreground layout at modifier edges and checks it again before a release acts; it
-  can't observe a foreign layout change that changes back between samples. After coverage loss,
+  changes, desktop switches, suspend, overruns and Pause also reset it. On every decoded
+  left Ctrl or left Alt record (make, repeat, or break), the proxy calls
+  `GetForegroundWindow`, `GetWindowThreadProcessId`, and `GetKeyboardLayout` for the
+  foreground thread, if it can identify one. The deferred release checks sample again,
+  so a layout change that changes back between samples can escape detection. The decoded
+  tracker uses fixed storage; that doesn't bound the cost of the native queries. After coverage loss,
   overflow or registered Escape, shell-core clears the remembered keys and blocks recognition.
   An eligible new modifier make can try once. Windows reads left Ctrl and left Alt before and
   after a bounded `GetAsyncKeyState` sweep, using only the down bit; another down keyboard VK
@@ -116,7 +121,7 @@ sequenceDiagram
   access can change mid-sweep (zero means up or failure), two physical keys can share one VK,
   and firmware-only keys without a VK aren't visible. A stuck or remapped extra key vetoes for
   as long as Windows reports it down. The scan and behavior with elevated foreground windows,
-  a secure desktop, AltGr or two keyboards are unmeasured on Rez. OS bits don't give a device
+  a secure desktop, AltGr or two keyboards remain unmeasured. OS bits don't give a device
   identity or a watch exemption. A desktop switch arrives via
   an out-of-context WinEvent, not a keyboard hook. If the session or desktop watcher can't
   be registered, arming fails and undoes what it registered.
