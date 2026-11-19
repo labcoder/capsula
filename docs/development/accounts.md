@@ -2,17 +2,38 @@
 
 ## Anthropic API key
 
-The shell validates a pasted API key and asks the brain for a one-use staging
-plan using only its trimmed byte length. A background writer puts its chunks
-in Credential Manager at those authority-owned names, then sends
-`AnthropicKeyStaged { plan }`. The Accounts UI wiring lands separately.
+The Settings → Accounts key row is wired but hidden until key chat is activated.
+Its Paste action consumes one string from the GPUI clipboard and rejects more
+than 2,048 raw bytes before retaining the paste. It does not write to the
+clipboard. A validated paste stays in a zeroizing buffer until the brain replies
+with a one-use staging plan; only its trimmed byte length describes the key on the pipe.
+The shell-core writer puts chunks in Credential Manager at those authority-owned
+names in the background, then the shell sends `AnthropicKeyStaged { plan }`.
+Disconnect or the 30-second monotonic deadline prevents late replies or writes
+from triggering adoption. A queued writer will not start after the deadline, but
+an already running OS write cannot be recalled. After Staged has been sent, a
+missing acknowledgement leaves the save unconfirmed, not failed. A save
+acknowledgement is separate from catalog verification.
+After a lost acknowledgement, the row retains the unknown-save status through
+Check. A successful local vault read for that Check on the same link unlocks
+paste and, if a key is stored, removal of the revision it read. A queued
+snapshot can't unlock the row. An unreadable vault leaves both actions locked
+and allows another Check. The catalog's result shows separately and doesn't
+block either action once the local read succeeds. Disconnect retires the
+request but keeps the unknown outcome so the user can Check after reconnecting.
+Whenever Paste is available, the row warns that it can replace a saved key.
+A fresh shell can receive a cached Missing view while a prior adoption is
+still in flight, so Missing does not suppress the warning.
 The key never crosses the pipe or enters a file, log, command line or environment variable.
 Only keys connected inside Kumochi are used; live checks must read the same Kumochi-owned
 credential, never another app's key.
 
 The saved key is the [credential authority](#credential-authority)'s `anthropic` record: Check
-reads its current generation, and Remove commits the removal first, then sweeps the names, so a
-removed key is never read again even while Credential Manager still serves it.
+reads its current generation, and a removal confirmation applies only to the
+revision shown when the dialog opened. The worker compares that revision before
+committing, then sweeps the names, so a stale confirmation can't delete a
+replacement and a removed key is never read again even while Credential Manager
+still serves it.
 Neither the legacy `anthropic-key-staged.{service}` target nor the old
 `anthropic-key.{service}` record is read. All work runs on the credential worker under the
 vault's session lock, one job at a time and in order, so a Remove sent while a Check's native
@@ -20,8 +41,11 @@ read is blocked runs after it, and the runtime generation guard drops the stale 
 A cancelled waiter never interrupts an in-flight call.
 
 A failed key removal remains pending in this brain process; Check/Retry retries
-Remove, and staging requests/notifications are refused without adoption.
-Unconfirmed is not confirmation of removal. Until the removal transaction commits,
+the same revision, and staging requests/notifications are refused without adoption.
+A changed revision ends the old removal and reloads the current key, so removing
+the replacement requires a new confirmation. The row waits for its own removal
+receipt before offering Retry; queued connection snapshots don't count as receipts.
+Until the removal transaction commits,
 quitting or restarting loses that in-memory
 intent and the next startup may load and check the still-current key; retry removal until it
 succeeds. A paste refused while removal is pending requires a new explicit paste;
@@ -78,8 +102,8 @@ A lost notification or failed operation leaves Pending until another begin
 or the next open retires it. Startup never resumes a paste. A shell write can
 outlive a brain restart, including the later lifetime that marks its generation
 Swept. Such late chunks can remain physically orphaned but cannot authorize a
-key: cleanup is not a physical-erasure guarantee. No Settings paste control
-is enabled by this backend/stager prerequisite.
+key: cleanup is not a physical-erasure guarantee. Removal from Kumochi does
+not revoke the key at Anthropic.
 
 ## Stored namespaces and credential names
 

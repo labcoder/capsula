@@ -1,6 +1,7 @@
 //! Settings window state and shared frame, with one module per tab.
 
 pub(super) mod accounts;
+mod anthropic;
 pub(super) mod claude;
 mod general;
 mod github;
@@ -27,6 +28,8 @@ use crate::settings::{Error, Field, Settings};
 use crate::strings::{Strings, Text};
 
 gpui_kit::actions!(settings, [NextTab, PreviousTab]);
+
+const SHOW_ANTHROPIC_KEY_ROW: bool = false;
 
 pub(super) struct SettingsView {
     pub(super) model: Entity<Settings>,
@@ -393,6 +396,10 @@ impl Render for SettingsView {
                             .children((self.tab == 0).then(|| self.general(window, cx)))
                             .children((self.tab == 1).then(|| self.accounts(cx)))
                             .children((self.tab == 1).then(|| self.claude(cx)))
+                            .children(
+                                (self.tab == 1 && SHOW_ANTHROPIC_KEY_ROW)
+                                    .then(|| self.anthropic(cx)),
+                            )
                             .children((self.tab == 1).then(|| self.github(cx)))
                             .children((self.tab == 2).then(|| self.voice(cx)))
                             .children((self.tab == 3).then(|| self.privacy(cx))),
