@@ -89,6 +89,7 @@ impl OutputEvent {
 }
 
 /// One stream and its worker-side converter. Keep them on the owning audio worker.
+/// Field order drops the stream before the worker's PCM references.
 pub struct Output {
     stream: cpal::Stream,
     submit: Submit,
@@ -184,10 +185,16 @@ impl Output {
     }
 }
 
+struct ReadyBlock {
+    index: usize,
+    pcm: Arc<Block>,
+}
+
 struct Submit {
-    free: Consumer<Block>,
-    ready: Producer<Block>,
-    spare: Option<Block>,
+    free: Consumer<usize>,
+    ready: Producer<ReadyBlock>,
+    blocks: [Arc<Block>; BLOCKS],
+    spare: Option<usize>,
     rate: u32,
     channels: usize,
     converter: Option<Resampler>,
@@ -195,22 +202,24 @@ struct Submit {
 }
 
 struct Playback {
-    free: Producer<Block>,
-    ready: Consumer<Block>,
-    current: Option<Block>,
+    free: Producer<usize>,
+    ready: Consumer<ReadyBlock>,
+    current: Option<ReadyBlock>,
+    recycle: Option<usize>,
     offset: usize,
 }
 
 fn pair(rate: u32, channels: usize) -> (Submit, Playback) {
     let (mut recycle, free) = handoff::pair();
     let (ready, render) = handoff::pair();
-    for _ in 0..BLOCKS {
-        let block = Zeroizing::new(Vec::with_capacity(MAX_FRAMES * channels));
-        assert!(recycle.push(block).is_ok(), "one allocation per slot");
-    }
+    let blocks = std::array::from_fn(|index| {
+        assert!(recycle.push(index).is_ok(), "one allocation per slot");
+        Arc::new(Zeroizing::new(Vec::with_capacity(MAX_FRAMES * channels)))
+    });
     let submit = Submit {
         free,
         ready,
+        blocks,
         spare: None,
         rate,
         channels,
@@ -221,6 +230,7 @@ fn pair(rate: u32, channels: usize) -> (Submit, Playback) {
         free: recycle,
         ready: render,
         current: None,
+        recycle: None,
         offset: 0,
     };
     (submit, playback)
@@ -234,11 +244,12 @@ impl Submit {
         if samples.is_empty() && (kind == PacketKind::More || self.converter.is_none()) {
             return Ok(());
         }
-        let mut block = self
+        let index = self
             .spare
             .take()
             .or_else(|| self.free.pop())
             .ok_or(OutputError::Full)?;
+        let block = Arc::get_mut(&mut self.blocks[index]).ok_or(OutputError::Unavailable)?;
         block.zeroize();
         let mut input = Zeroizing::new([0.0; PACKET_SAMPLES]);
         for (out, &sample) in input.iter_mut().zip(samples) {
@@ -271,33 +282,44 @@ impl Submit {
         }
         self.mono.zeroize();
         if block.is_empty() {
-            self.spare = Some(block);
+            self.spare = Some(index);
             return Ok(());
         }
-        self.ready.push(block).map_err(|_| OutputError::Unavailable)
+        let ready = ReadyBlock {
+            index,
+            pcm: Arc::clone(&self.blocks[index]),
+        };
+        self.ready.push(ready).map_err(|_| OutputError::Unavailable)
     }
 }
 
 impl Playback {
     fn fill(&mut self, mut out: &mut [f32]) {
-        while !out.is_empty() {
+        loop {
+            if let Some(index) = self.recycle.take()
+                && let Err(index) = self.free.push(index)
+            {
+                self.recycle = Some(index);
+                break;
+            }
+            if out.is_empty() {
+                break;
+            }
             if self.current.is_none() {
                 self.current = self.ready.pop();
                 self.offset = 0;
             }
-            let Some(block) = self.current.take() else {
+            let Some(block) = self.current.as_ref() else {
                 break;
             };
-            let len = out.len().min(block.len() - self.offset);
+            let len = out.len().min(block.pcm.len() - self.offset);
             let (head, rest) = out.split_at_mut(len);
-            head.copy_from_slice(&block[self.offset..self.offset + len]);
+            head.copy_from_slice(&block.pcm[self.offset..self.offset + len]);
             self.offset += len;
             out = rest;
-            if self.offset != block.len() {
-                self.current = Some(block);
-            } else if let Err(block) = self.free.push(block) {
-                self.current = Some(block);
-                break;
+            if self.offset == block.pcm.len() {
+                self.recycle = Some(block.index);
+                self.current = None;
             }
         }
         out.fill(0.0);

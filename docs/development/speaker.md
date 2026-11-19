@@ -5,8 +5,9 @@ worker can open a paused float stream at the default endpoint rate and feed boun
 mono packets. It converts on the worker through `kumochi-audio`, which also serves brain
 speech and microphone input, then fills a preallocated pool of device-format blocks. The
 callback takes only atomically published blocks and fills silence without waiting for the
-worker. The fixed single-producer/single-consumer rings also return blocks for reuse.
-Route notifications go back to the worker. This seam does not yet implement route recovery,
+worker. The fixed single-producer/single-consumer rings return slot IDs for reuse. The worker
+retains the PCM allocations until the stream has destroyed its callback, then wipes and frees
+them off the audio thread. Route notifications go back to the worker. This seam does not yet implement route recovery,
 speech receipts or mic admission, and neither the shell link nor the UI opens it.
 
 `kumochi_shell_core::speaker` owns one connection's output device: it keeps the run's queued

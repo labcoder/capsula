@@ -1,6 +1,6 @@
 use super::{
     AtomicU8, BLOCKS, ErrorKind, MAX_FRAMES, MAX_RATE, OutputError, OutputEvent, PACKET_SAMPLES,
-    PacketKind, SOURCE_RATE, pair,
+    PacketKind, ReadyBlock, SOURCE_RATE, pair,
 };
 
 #[test]
@@ -100,9 +100,9 @@ fn maximum_rate_full_final_packet_does_not_grow_the_prepared_buffers() {
         .unwrap();
     let first = render.ready.pop().unwrap();
     let final_block = render.ready.pop().unwrap();
-    assert_eq!(first.len() + final_block.len(), 15_360);
-    assert_eq!(first.capacity(), MAX_FRAMES * 2);
-    assert_eq!(final_block.capacity(), MAX_FRAMES * 2);
+    assert_eq!(first.pcm.len() + final_block.pcm.len(), 15_360);
+    assert_eq!(first.pcm.capacity(), MAX_FRAMES * 2);
+    assert_eq!(final_block.pcm.capacity(), MAX_FRAMES * 2);
     assert_eq!(submit.mono.capacity(), MAX_FRAMES);
 }
 
@@ -120,11 +120,17 @@ fn a_late_xrun_cannot_hide_stream_loss() {
 #[test]
 fn an_unpublished_block_is_silent_until_the_next_callback() {
     let (mut submit, mut playback) = pair(SOURCE_RATE, 2);
-    let mut block = submit.free.pop().unwrap();
-    block.extend([0.5; 4]);
+    let index = submit.free.pop().unwrap();
+    std::sync::Arc::get_mut(&mut submit.blocks[index])
+        .unwrap()
+        .extend([0.5; 4]);
+    let ready = ReadyBlock {
+        index,
+        pcm: std::sync::Arc::clone(&submit.blocks[index]),
+    };
 
     let mut pending = [99.0; 4];
-    let result = submit.ready.push_before_publish(block, || {
+    let result = submit.ready.push_before_publish(ready, || {
         assert!(playback.ready.pop().is_none(), "unpublished is empty");
         playback.fill(&mut pending);
     });
@@ -134,4 +140,42 @@ fn an_unpublished_block_is_silent_until_the_next_callback() {
     let mut published = [99.0; 4];
     playback.fill(&mut published);
     assert_eq!(published.map(f32::to_bits), [0.5f32.to_bits(); 4]);
+}
+
+#[test]
+fn dropping_partial_playback_leaves_pcm_for_worker_teardown() {
+    let (mut submit, mut playback) = pair(SOURCE_RATE, 2);
+    submit.packet(&[16_384, i16::MIN], PacketKind::End).unwrap();
+    let mut one_frame = [99.0; 2];
+    playback.fill(&mut one_frame);
+    assert_eq!(one_frame.map(f32::to_bits), [0.5f32.to_bits(); 2]);
+
+    let index = playback.current.as_ref().unwrap().index;
+    let ((), callback_activity) = crate::allocation::activity(|| drop(playback));
+    assert_eq!(
+        callback_activity,
+        [0, 0],
+        "callback teardown must not free PCM"
+    );
+    assert_eq!(std::sync::Arc::strong_count(&submit.blocks[index]), 1);
+    assert_eq!(
+        submit.blocks[index]
+            .iter()
+            .map(|sample| sample.to_bits())
+            .collect::<Vec<_>>(),
+        [0.5f32, 0.5, -1.0, -1.0].map(f32::to_bits),
+        "the callback must leave the worker's zeroizing block intact"
+    );
+
+    let target = submit.blocks[index].as_ptr().addr();
+    let bytes = MAX_FRAMES * 2 * size_of::<f32>();
+    let ((), releases) = crate::allocation::requests(64, || drop(submit));
+    let pcm_releases = releases
+        .iter()
+        .filter(|event| event.action == 1 && event.size == bytes);
+    assert_eq!(pcm_releases.clone().count(), BLOCKS);
+    assert_eq!(
+        pcm_releases.filter(|event| event.pointer == target).count(),
+        1
+    );
 }
