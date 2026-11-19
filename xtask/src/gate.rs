@@ -23,7 +23,9 @@ use windows::Win32::Foundation::{POINT, RECT};
 use crate::hermetic::{self, Folders, Profile, Run};
 use crate::platform::{
     self, gate_capture,
-    input_session::{self as native, FixtureEscMode, Registry, Session, Window, WindowKind},
+    input_session::{
+        self as native, FixtureEscMode, FixturePlacement, Registry, Session, Window, WindowKind,
+    },
 };
 use crate::session::{self, Counts, Diagnostics, Mark, Phase, PhaseContext};
 use capture::Capture;
@@ -225,14 +227,18 @@ pub(crate) fn cold(args: impl Iterator<Item = String>) -> Result<()> {
 }
 
 pub(crate) fn run(args: impl Iterator<Item = String>) -> Result<()> {
-    session_run(args, ("feel-ready", feel), &TRIALS)
+    session_run(
+        args,
+        ("feel-ready", feel, FixturePlacement::Default),
+        &TRIALS,
+    )
 }
 
 /// The hover phase alone, opened by the owner's away rule instead of a Ready press.
 pub(crate) fn hover(args: impl Iterator<Item = String>) -> Result<()> {
     session_run(
         args,
-        ("idle-open", idle_open),
+        ("idle-open", idle_open, FixturePlacement::AwayFromCursor),
         &[Trial::Input(Phase::Hover, FixtureEscMode::Free)],
     )
 }
@@ -241,7 +247,7 @@ type Opener = fn(&mut Session, &Images, &Path, Instant) -> Result<()>;
 
 fn session_run(
     args: impl Iterator<Item = String>,
-    opener: (&str, Opener),
+    opener: (&str, Opener, FixturePlacement),
     trials: &[Trial],
 ) -> Result<()> {
     retained_run(args, |output, run| {
@@ -252,7 +258,7 @@ fn session_run(
 fn run_session(
     output: &Path,
     images: &Images,
-    (opener, open): (&str, Opener),
+    (opener, open, placement): (&str, Opener, FixturePlacement),
     trials: &[Trial],
 ) -> Result<()> {
     let started = Instant::now();
@@ -270,7 +276,7 @@ fn run_session(
         output.join("phases.tsv"),
         "phase\tstatus\twall_s\tattempts\taccepted_sequences\tbehavior_pass\tbehavior_fail\n",
     )?;
-    let mut fixture = native::spawn_fixture(&exe, SESSION_LIMIT)?;
+    let mut fixture = native::spawn_fixture(&exe, SESSION_LIMIT, placement)?;
     let mut fixture_window = None;
     let mut session = None;
     let result = (|| {
@@ -303,6 +309,7 @@ fn run_session(
                 .restore_cursor()
                 .map(|status| println!("final_cursor_restore={status}"))
         } else {
+            println!("final_cursor_restore=skipped_session_or_cleanup_failed");
             Ok(())
         };
         session::combine([release, uncovered, cursor])
@@ -392,7 +399,15 @@ fn feel(session: &mut Session, images: &Images, output: &Path, end: Instant) -> 
 
 /// Every measured phase without the feel opener, opened by the owner's away rule.
 pub(crate) fn measure(args: impl Iterator<Item = String>) -> Result<()> {
-    session_run(args, ("idle-open-measure", measure_open), &TRIALS)
+    session_run(
+        args,
+        (
+            "idle-open-measure",
+            measure_open,
+            FixturePlacement::AwayFromCursor,
+        ),
+        &TRIALS,
+    )
 }
 
 // shortcut: the idle opener reserves time for one phase, so an open late in the hour fails later phases on their deadlines; reserve every phase's budget if runs start before the owner is away.

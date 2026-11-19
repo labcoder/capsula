@@ -309,7 +309,18 @@ pub(crate) fn discover(child: &mut Child, kind: WindowKind) -> Result<Window> {
     let end = Instant::now() + Duration::from_secs(3);
     loop {
         let found = native::owned_window(child, kind);
-        if found.is_ok() || Instant::now() >= end || child.try_wait()?.is_some() {
+        if found.is_ok() {
+            return found;
+        }
+        if let Some(status) = child.try_wait()? {
+            let code = native::FIXTURE_PLACEMENT_REFUSED;
+            ensure!(
+                !matches!(kind, WindowKind::Fixture) || status.code() != Some(code),
+                "fixture startup refused (exit code {code}): no verified frame clear of the cursor"
+            );
+            return found;
+        }
+        if Instant::now() >= end {
             return found;
         }
         sleep(Duration::from_millis(10));

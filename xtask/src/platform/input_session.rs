@@ -12,6 +12,7 @@ use windows::Win32::Foundation::{
     ERROR_SUCCESS, ERROR_TIMEOUT, GetLastError, HANDLE, HWND, LPARAM, POINT, RECT, SetLastError,
     WIN32_ERROR, WPARAM,
 };
+use windows::Win32::Graphics::Gdi::{GetMonitorInfoW, HMONITOR, MONITORINFO};
 use windows::Win32::System::StationsAndDesktops::{
     CloseDesktop, DESKTOP_CONTROL_FLAGS, DESKTOP_READOBJECTS, GetThreadDesktop,
     GetUserObjectInformationW, OpenInputDesktop, UOI_NAME,
@@ -228,21 +229,49 @@ pub(crate) enum WindowKind {
     ProductProxy,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FixturePlacement {
+    Default,
+    AwayFromCursor,
+}
+
+pub(super) const AWAY_FROM_CURSOR: &str = "--away-from-cursor";
+pub(crate) const FIXTURE_PLACEMENT_REFUSED: i32 = 13;
+
 /// Starts the fixture, which closes itself after `lifetime` (at most an hour). It shows the feel
 /// verdicts and Ready, and arms nothing until the owner physically clicks Ready.
-pub(crate) fn spawn_fixture(exe: &Path, lifetime: Duration) -> Result<Child> {
+pub(crate) fn spawn_fixture(
+    exe: &Path,
+    lifetime: Duration,
+    placement: FixturePlacement,
+) -> Result<Child> {
     ensure!(
         (Duration::from_secs(1)..=MAX_LIFETIME).contains(&lifetime),
         "fixture lifetime must be 1 s to 1 h"
     );
-    Ok(Command::new(exe)
-        .arg("input-fixture")
+    let mut command = Command::new(exe);
+    command.arg("input-fixture");
+    if placement == FixturePlacement::AwayFromCursor {
+        command.arg(AWAY_FROM_CURSOR);
+    }
+    Ok(command
         .arg(format!("--lifetime-secs={}", lifetime.as_secs()))
         .creation_flags(NORMAL_PRIORITY_CLASS.0)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()?)
+}
+
+fn monitor_work_area(monitor: HMONITOR) -> Result<RECT> {
+    let mut info = MONITORINFO {
+        cbSize: size::<MONITORINFO>(),
+        ..Default::default()
+    };
+    // SAFETY: info has its documented writable size; the caller obtained the monitor from Win32.
+    let found = unsafe { GetMonitorInfoW(monitor, &raw mut info) };
+    ensure!(found.as_bool(), "cannot read fixture monitor work area");
+    Ok(info.rcWork)
 }
 
 fn size<T>() -> u32 {
@@ -401,6 +430,12 @@ fn request_result(message: u32, reply: std::result::Result<usize, WIN32_ERROR>) 
         }
     };
     if message == PREPARE_IDLE && response != 1 {
+        if let Some((code, mask)) = IdleRefusal::queue_mask(response) {
+            let reason = IdleRefusal::message(code);
+            bail!(
+                "fixture request {message:#x} refused (fixture code {code}): {reason}; queue_mask={mask:#06x}"
+            );
+        }
         let reason = IdleRefusal::message(response);
         bail!("fixture request {message:#x} refused (fixture code {response}): {reason}");
     }
@@ -558,6 +593,16 @@ mod tests {
             );
         }
         assert_eq!(request_result(PREPARE_IDLE, Ok(1)).unwrap(), 1);
+    }
+
+    #[test]
+    fn queued_input_keeps_fixture_code_nine_and_names_the_high_word_mask() {
+        assert_eq!(
+            request_result(PREPARE_IDLE, Ok(0x0004_0209))
+                .unwrap_err()
+                .to_string(),
+            "fixture request 0x8019 refused (fixture code 9): the fixture had queued input; queue_mask=0x0402"
+        );
     }
 
     #[test]

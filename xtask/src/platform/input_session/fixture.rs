@@ -7,7 +7,7 @@ use std::time::Duration;
 use anyhow::{Context as _, Result, ensure};
 use kumochi_protocol::constants::{DISPLAY_NAME, OBJECT_PREFIX};
 use windows::Win32::Foundation::{HANDLE, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
-use windows::Win32::Graphics::Gdi::ClientToScreen;
+use windows::Win32::Graphics::Gdi::{ClientToScreen, MONITOR_DEFAULTTONEAREST, MonitorFromPoint};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Performance::QueryPerformanceCounter;
 use windows::Win32::System::RemoteDesktop::{
@@ -26,15 +26,15 @@ use windows::Win32::UI::Shell::{DefSubclassProc, SetWindowSubclass};
 use windows::Win32::UI::WindowsAndMessaging::{
     BS_PUSHBUTTON, CB_ADDSTRING, CB_GETCURSEL, CB_SETCURSEL, CBN_SELCHANGE, CBS_DROPDOWNLIST,
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GWL_EXSTYLE, GWL_STYLE,
-    GetClientRect, GetForegroundWindow, GetMessageExtraInfo, GetMessageTime, GetMessageW, GetPropW,
-    GetQueueStatus, GetWindowLongPtrW, HWND_NOTOPMOST, HWND_TOPMOST, ISMEX_NOSEND, InSendMessageEx,
-    IsWindow, MSG, MoveWindow, PostQuitMessage, QS_INPUT, RegisterClassW, SW_HIDE, SW_SHOWNA,
-    SW_SHOWNOACTIVATE, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER,
-    SendMessageW, SetPropW, SetTimer, SetWindowLongPtrW, SetWindowPos, ShowWindow,
-    TranslateMessage, WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_CLOSE, WM_COMMAND, WM_DESTROY,
-    WM_INPUT, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_SETFOCUS, WM_TIMER,
-    WM_WTSSESSION_CHANGE, WNDCLASSW, WS_BORDER, WS_CHILD, WS_EX_TOPMOST, WS_OVERLAPPEDWINDOW,
-    WS_POPUP, WS_VISIBLE, WS_VSCROLL, WTS_SESSION_LOCK,
+    GetClientRect, GetCursorPos, GetForegroundWindow, GetMessageExtraInfo, GetMessageTime,
+    GetMessageW, GetPropW, GetQueueStatus, GetWindowLongPtrW, GetWindowRect, HWND_NOTOPMOST,
+    HWND_TOPMOST, ISMEX_NOSEND, InSendMessageEx, IsWindow, MSG, MoveWindow, PostQuitMessage,
+    QS_INPUT, RegisterClassW, SW_HIDE, SW_SHOWNA, SW_SHOWNOACTIVATE, SWP_FRAMECHANGED,
+    SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SendMessageW, SetPropW, SetTimer,
+    SetWindowLongPtrW, SetWindowPos, ShowWindow, TranslateMessage, WINDOW_EX_STYLE, WINDOW_STYLE,
+    WM_APP, WM_CLOSE, WM_COMMAND, WM_DESTROY, WM_INPUT, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP,
+    WM_SETFOCUS, WM_TIMER, WM_WTSSESSION_CHANGE, WNDCLASSW, WS_BORDER, WS_CHILD, WS_EX_TOPMOST,
+    WS_OVERLAPPEDWINDOW, WS_POPUP, WS_VISIBLE, WS_VSCROLL, WTS_SESSION_LOCK,
 };
 use windows::core::{HSTRING, PCWSTR, w};
 
@@ -43,7 +43,8 @@ use super::gate::{Feel, MouseSnapshot, Origin, Press, Verdict};
 use super::guard::{self, StopCause, physical_input};
 use super::switch_window;
 use super::{
-    FixtureEscMode, MARKER, MAX_COVER, MAX_LIFETIME, desktop_rect, last_input, pack, size, unpack,
+    AWAY_FROM_CURSOR, FIXTURE_PLACEMENT_REFUSED, FixtureEscMode, FixturePlacement, MARKER,
+    MAX_COVER, MAX_LIFETIME, desktop_rect, last_input, monitor_work_area, pack, size, unpack,
 };
 
 pub(super) const ABORT: PCWSTR = w!("InputSessionAbort");
@@ -75,20 +76,36 @@ pub(super) const PREPARE_IDLE: u32 = WM_APP + 25;
 pub(super) const FINALIZE_IDLE: u32 = WM_APP + 28;
 
 #[derive(Clone, Copy, Debug)]
-pub(super) struct IdleRefusal(u8);
+pub(super) struct IdleRefusal(u8, u16);
 
 impl IdleRefusal {
-    const ALREADY_USED: Self = Self(2);
-    const DESKTOP: Self = Self(3);
-    const LAST_INPUT: Self = Self(4);
-    const AWAY_DURATION: Self = Self(5);
-    const REGISTER_GUARDS: Self = Self(6);
-    const INPUT_CHANGED: Self = Self(7);
-    const NOT_IDLE: Self = Self(8);
-    const QUEUED_INPUT: Self = Self(9);
-    const ACTIVATION_MARKER: Self = Self(10);
-    const TOPMOST: Self = Self(11);
-    const ABORT_MARKER: Self = Self(12);
+    const ALREADY_USED: Self = Self(2, 0);
+    const DESKTOP: Self = Self(3, 0);
+    const LAST_INPUT: Self = Self(4, 0);
+    const AWAY_DURATION: Self = Self(5, 0);
+    const REGISTER_GUARDS: Self = Self(6, 0);
+    const INPUT_CHANGED: Self = Self(7, 0);
+    const NOT_IDLE: Self = Self(8, 0);
+    const QUEUED_INPUT: u8 = 9;
+    const ACTIVATION_MARKER: Self = Self(10, 0);
+    const TOPMOST: Self = Self(11, 0);
+    const ABORT_MARKER: Self = Self(12, 0);
+
+    fn reply(self) -> isize {
+        let [low, high] = self.1.to_le_bytes();
+        isize::from(self.0) | (isize::from(low) << 8) | (isize::from(high) << 16)
+    }
+
+    pub(super) fn queue_mask(reply: usize) -> Option<(usize, u16)> {
+        let code = usize::from(Self::QUEUED_INPUT);
+        if reply & 0xff != code {
+            return None;
+        }
+        u16::try_from(reply >> 8)
+            .ok()
+            .filter(|mask| *mask != 0)
+            .map(|mask| (code, mask))
+    }
 
     pub(super) fn message(reply: usize) -> &'static str {
         [
@@ -139,6 +156,7 @@ thread_local! {
     static PRESS: Cell<Press> = Cell::new(Press::default());
     static ESCAPE_TOGGLES: Cell<u32> = const { Cell::new(0) };
     static WAS_TOPMOST: Cell<Option<bool>> = const { Cell::new(None) };
+    static START_FRAME: Cell<[i32; 4]> = const { Cell::new(FRAME) };
 }
 
 pub(super) fn class_name() -> String {
@@ -315,7 +333,8 @@ fn prepare_idle(root: HWND, away_ms: usize) -> Result<()> {
             IdleRefusal::INPUT_CHANGED
         }
     );
-    ensure!(!queued_messages(), IdleRefusal::QUEUED_INPUT);
+    let queue = queued_input();
+    ensure!(queue == 0, IdleRefusal(IdleRefusal::QUEUED_INPUT, queue));
     set_property(root, ACTIVATION, 1).context(IdleRefusal::ACTIVATION_MARKER)?;
     // SAFETY: reads this thread's own window's extended style.
     let style = unsafe { GetWindowLongPtrW(root, GWL_EXSTYLE) };
@@ -413,8 +432,17 @@ fn rearm(root: HWND) -> Result<()> {
 }
 
 fn queued_messages() -> bool {
+    queued_input() != 0
+}
+
+fn queued_input() -> u16 {
     // SAFETY: reads this fixture thread's queue status; no message is removed.
-    (unsafe { GetQueueStatus(QS_INPUT) }) >> 16 != 0
+    current_queue_categories(unsafe { GetQueueStatus(QS_INPUT) })
+}
+
+fn current_queue_categories(status: u32) -> u16 {
+    let [_, _, low, high] = status.to_le_bytes();
+    u16::from_le_bytes([low, high])
 }
 
 fn open_gate(root: HWND, input: usize) -> Result<usize> {
@@ -550,7 +578,7 @@ unsafe extern "system" fn fixture_proc(
                 |error| {
                     error
                         .downcast::<IdleRefusal>()
-                        .map_or(0, |reason| isize::from(reason.0))
+                        .map_or(0, IdleRefusal::reply)
                 },
                 |()| 1,
             );
@@ -703,7 +731,7 @@ fn cover(root: HWND, wp: WPARAM, lp: LPARAM) -> Result<()> {
 
 fn uncover(root: HWND) -> Result<()> {
     let controls = controls()?;
-    place(root, WS_OVERLAPPEDWINDOW | WS_VISIBLE, FRAME)?;
+    place(root, WS_OVERLAPPEDWINDOW | WS_VISIBLE, START_FRAME.get())?;
     let [x, y, width, height] = EDIT_FRAME;
     // SAFETY: puts this thread's own EDIT back in its framed place.
     unsafe { MoveWindow(controls.edit, x, y, width, height, true) }?;
@@ -714,7 +742,68 @@ fn uncover(root: HWND) -> Result<()> {
     Ok(())
 }
 
+fn contains(rect: RECT, point: POINT) -> bool {
+    point.x >= rect.left && point.x < rect.right && point.y >= rect.top && point.y < rect.bottom
+}
+
+fn off_cursor_frame(work: RECT, cursor: POINT) -> Option<[i32; 4]> {
+    let [left, top, width, height] = FRAME;
+    let max_left = work.right.checked_sub(width)?;
+    let max_top = work.bottom.checked_sub(height)?;
+    if max_left < work.left || max_top < work.top {
+        return None;
+    }
+    let left = left.clamp(work.left, max_left);
+    let top = top.clamp(work.top, max_top);
+    [
+        [left, top],
+        [max_left, top],
+        [work.left, top],
+        [left, max_top],
+        [left, work.top],
+    ]
+    .into_iter()
+    .find_map(|[x, y]| {
+        let rect = RECT {
+            left: x,
+            top: y,
+            right: x + width,
+            bottom: y + height,
+        };
+        (!contains(rect, cursor)).then_some([x, y, width, height])
+    })
+}
+
+fn cursor_position() -> Result<POINT> {
+    let mut cursor = POINT::default();
+    // SAFETY: cursor is a writable output; this call doesn't move it.
+    unsafe { GetCursorPos(&raw mut cursor) }?;
+    Ok(cursor)
+}
+
+#[derive(Debug)]
+struct PlacementRefused;
+
+impl std::fmt::Display for PlacementRefused {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("no verified fixture frame clear of the cursor")
+    }
+}
+
+impl std::error::Error for PlacementRefused {}
+
 pub(crate) fn fixture() -> Result<()> {
+    let result = open_fixture();
+    if result
+        .as_ref()
+        .is_err_and(anyhow::Error::is::<PlacementRefused>)
+    {
+        std::process::exit(FIXTURE_PLACEMENT_REFUSED);
+    }
+    result
+}
+
+fn open_fixture() -> Result<()> {
     let lifetime = std::env::args()
         .find_map(|arg| arg.strip_prefix("--lifetime-secs=").map(str::parse::<u64>))
         .context("the fixture needs --lifetime-secs")??;
@@ -722,6 +811,24 @@ pub(crate) fn fixture() -> Result<()> {
         (1..=MAX_LIFETIME.as_secs()).contains(&lifetime),
         "fixture lifetime must be 1 s to 1 h"
     );
+    let placement = if std::env::args().any(|arg| arg == AWAY_FROM_CURSOR) {
+        FixturePlacement::AwayFromCursor
+    } else {
+        FixturePlacement::Default
+    };
+    let frame = if placement == FixturePlacement::AwayFromCursor {
+        let preferred = POINT {
+            x: FRAME[0],
+            y: FRAME[1],
+        };
+        // SAFETY: reads only which monitor contains or is nearest the preferred fixture origin.
+        let monitor = unsafe { MonitorFromPoint(preferred, MONITOR_DEFAULTTONEAREST) };
+        off_cursor_frame(monitor_work_area(monitor)?, cursor_position()?)
+            .context(PlacementRefused)?
+    } else {
+        FRAME
+    };
+    START_FRAME.set(frame);
     // SAFETY: this obtains the fixture executable's own loaded module.
     let instance: HINSTANCE = unsafe { GetModuleHandleW(None) }?.into();
     let class_name = HSTRING::from(class_name());
@@ -736,7 +843,7 @@ pub(crate) fn fixture() -> Result<()> {
     ensure!(atom != 0, "fixture class registration failed");
     switch_window::register(instance)?;
     let title = HSTRING::from(format!("{DISPLAY_NAME} input fixture"));
-    let [x, y, width, height] = FRAME;
+    let [x, y, width, height] = frame;
     // SAFETY: the registered class has a static callback; there is no borrowed creation data.
     let root = unsafe {
         CreateWindowExW(
@@ -755,7 +862,7 @@ pub(crate) fn fixture() -> Result<()> {
         )
     }?;
     let result = match (
-        run_fixture(root, instance, u32::try_from(lifetime * 1000)?),
+        run_fixture(root, instance, u32::try_from(lifetime * 1000)?, placement),
         switch_window::cleanup(),
     ) {
         (Ok(()), Ok(())) => Ok(()),
@@ -841,7 +948,12 @@ fn verdict_box(index: usize, gesture: &str, root: HWND, instance: HINSTANCE) -> 
     Ok(combo)
 }
 
-fn run_fixture(root: HWND, instance: HINSTANCE, lifetime_ms: u32) -> Result<()> {
+fn run_fixture(
+    root: HWND,
+    instance: HINSTANCE,
+    lifetime_ms: u32,
+    placement: FixturePlacement,
+) -> Result<()> {
     let edit = child(
         w!("EDIT"),
         &HSTRING::new(),
@@ -888,6 +1000,12 @@ fn run_fixture(root: HWND, instance: HINSTANCE, lifetime_ms: u32) -> Result<()> 
     // SAFETY: this window owns timer 1 and the callback is delivered through its message loop.
     let timer = unsafe { SetTimer(Some(root), 1, lifetime_ms, None) };
     ensure!(timer != 0, "fixture autoexit timer failed");
+    if placement == FixturePlacement::AwayFromCursor {
+        let mut rect = RECT::default();
+        // SAFETY: reads only the layout of this thread's own still-hidden fixture.
+        unsafe { GetWindowRect(root, &raw mut rect) }?;
+        ensure!(!contains(rect, cursor_position()?), PlacementRefused);
+    }
     // SAFETY: shows only our fixture without activating it. False means previously hidden.
     let _was_visible = unsafe { ShowWindow(root, SW_SHOWNOACTIVATE) };
     let mut message = MSG::default();
@@ -923,6 +1041,7 @@ fn focus_edit() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use super::{FRAME, IdleRefusal, POINT, RECT, current_queue_categories, off_cursor_frame};
     use windows::Win32::UI::Input::{
         MOUSE_MOVE_ABSOLUTE, MOUSE_MOVE_NOCOALESCE, RAWINPUT, RAWKEYBOARD, RAWMOUSE, RAWMOUSE_0,
         RIM_TYPEHID, RIM_TYPEKEYBOARD, RIM_TYPEMOUSE,
@@ -930,6 +1049,61 @@ mod tests {
 
     use super::super::guard::{InputClass, PhysicalInput, physical_event};
     use kumochi_protocol::constants::FOCUS_INPUT_MARKER;
+
+    #[test]
+    fn only_current_queue_categories_cross_the_prepare_refusal_reply() {
+        assert_eq!(current_queue_categories(0x0000_1c07), 0);
+        let mask = current_queue_categories(0x0402_1c07);
+        assert_eq!(mask, 0x0402);
+        let refusal = IdleRefusal(IdleRefusal::QUEUED_INPUT, mask);
+        let reply = usize::try_from(refusal.reply()).unwrap();
+        assert_eq!(reply, 0x0004_0209);
+        assert_eq!(IdleRefusal::queue_mask(reply), Some((9, 0x0402)));
+        assert_eq!(IdleRefusal::queue_mask(0x0004_0208), None);
+        assert_eq!(IdleRefusal::queue_mask(9), None);
+    }
+
+    #[test]
+    fn unattended_frame_keeps_its_normal_position_unless_it_covers_the_cursor() {
+        let work = RECT {
+            left: 0,
+            top: 0,
+            right: 2560,
+            bottom: 1400,
+        };
+        assert_eq!(
+            off_cursor_frame(work, POINT { x: 720, y: 325 }),
+            Some(FRAME)
+        );
+        assert_eq!(
+            off_cursor_frame(work, POINT { x: 400, y: 325 }),
+            Some([1920, 80, 640, 490])
+        );
+    }
+
+    #[test]
+    fn unattended_frame_uses_vertical_space_and_refuses_if_it_cannot_avoid_the_cursor() {
+        let work = RECT {
+            left: 0,
+            top: 0,
+            right: 640,
+            bottom: 1000,
+        };
+        assert_eq!(
+            off_cursor_frame(work, POINT { x: 400, y: 325 }),
+            Some([0, 510, 640, 490])
+        );
+        assert_eq!(
+            off_cursor_frame(
+                RECT {
+                    bottom: 490,
+                    ..work
+                },
+                POINT { x: 400, y: 325 }
+            ),
+            None
+        );
+    }
 
     fn mouse_event(mouse: RAWMOUSE) -> RAWINPUT {
         let mut raw = RAWINPUT::default();
