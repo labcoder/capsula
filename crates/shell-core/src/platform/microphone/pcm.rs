@@ -24,13 +24,14 @@ pub(crate) struct Format {
 
 impl Format {
     pub(crate) fn check(self) -> Result<Self, MicError> {
-        if !(MIN_RATE..=MAX_RATE).contains(&self.rate)
-            || !self.rate.is_multiple_of(50)
-            || !(1..=2).contains(&self.channels)
-        {
+        if !self.valid_rate() || !(1..=2).contains(&self.channels) {
             return Err(MicError::Format);
         }
         Ok(self)
+    }
+
+    fn valid_rate(self) -> bool {
+        (MIN_RATE..=MAX_RATE).contains(&self.rate) && self.rate.is_multiple_of(50)
     }
 
     pub(crate) fn bytes(self) -> usize {
@@ -78,7 +79,19 @@ impl Format {
     }
 
     /// The speaker's writer for this format, which takes PCM16 or float only.
-    pub(crate) fn render(self) -> Option<Render> {
+    pub(crate) fn render(self, mask: u32) -> Option<Render> {
+        let layout = match self.channels {
+            1 | 2 => true,
+            3..=8 => {
+                mask & !0x0003_ffff == 0
+                    && mask & 3 == 3
+                    && mask.count_ones() == u32::from(self.channels)
+            }
+            _ => false,
+        };
+        if !self.valid_rate() || !layout {
+            return None;
+        }
         let float = match self.sample {
             Sample::I16 => false,
             Sample::F32 => true,
@@ -104,8 +117,16 @@ impl Render {
         self.width() * usize::from(self.channels)
     }
 
-    /// Writes mono samples as frames, the same sample in every channel.
+    /// Writes mono into every lane of mono/stereo, or the front pair of a surround frame.
     pub(crate) fn write(self, mono: &[i16], out: &mut [u8]) {
+        if self.channels > 2 {
+            self.write_frames::<true>(mono, out);
+        } else {
+            self.write_frames::<false>(mono, out);
+        }
+    }
+
+    fn write_frames<const SURROUND: bool>(self, mono: &[i16], out: &mut [u8]) {
         let width = self.width();
         for (frame, &sample) in out.chunks_exact_mut(self.frame()).zip(mono) {
             let bytes = if self.float {
@@ -114,7 +135,14 @@ impl Render {
                 let [low, high] = sample.to_le_bytes();
                 [low, high, 0, 0]
             };
-            for channel in frame.chunks_exact_mut(width) {
+            let front = if SURROUND {
+                let (front, rest) = frame.split_at_mut(2 * width);
+                rest.fill(0);
+                front
+            } else {
+                frame
+            };
+            for channel in front.chunks_exact_mut(width) {
                 channel.copy_from_slice(&bytes[..width]);
             }
         }

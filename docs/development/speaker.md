@@ -341,9 +341,14 @@ whether a session has an output and whether an earlier generation still owes aud
 `platform/windows/speaker.rs` is the only Windows piece: one event-driven, shared-mode WASAPI
 stream on the default output, on its own thread with its own COM apartment.
 
-- **Format.** It writes the engine's mix format with no conversion and takes only 16-bit PCM or
-  float, mono or stereo. It reuses the microphone's mix reader, so a mix rate that isn't a
-  multiple of 50 Hz, such as 11,025 Hz, is refused and the connection gets no output.
+- **Format.** It writes the engine's mix format without resampling: 16-bit PCM or 32-bit float,
+  one to eight channels. Its WAVE parser is shared with the microphone, but capture still
+  accepts only one or two channels and doesn't use the speaker mask. Mono and stereo receive
+  the same sample in every lane as before. Larger layouts need a consistent extensible mask
+  with front left and right. Those two lanes receive the sample, and all others stay zero.
+  A mix rate that isn't a multiple of 50 Hz, such as 11,025 Hz, still gets no output. The adapter
+  sizes its byte buffer from the device's frame width at open; every clock and stop count is
+  still in frames, regardless of how many lanes each frame has.
 - **Passes.** The stream is the adapter's `Device`, run by the shared `serve` loop. Each pass reads the padding and the clock, observes, then tops the device up to
   two periods. Samples are staged, written into the adapter's own byte buffer, then copied into
   the native buffer between `GetBuffer` and `ReleaseBuffer`, so no Rust slice is ever made
