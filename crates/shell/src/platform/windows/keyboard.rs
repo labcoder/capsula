@@ -17,7 +17,8 @@ use windows::Win32::UI::Accessibility::{HWINEVENTHOOK, SetWinEventHook, UnhookWi
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetAsyncKeyState, GetKeyboardLayout, HKL, HOT_KEY_MODIFIERS, MAPVK_VK_TO_VSC_EX, MOD_ALT,
     MOD_CONTROL, MOD_NOREPEAT, MapVirtualKeyW, RegisterHotKey, UnregisterHotKey, VK_CONTROL,
-    VK_ESCAPE, VK_LCONTROL, VK_LMENU, VK_MENU,
+    VK_ESCAPE, VK_LCONTROL, VK_LMENU, VK_LSHIFT, VK_LWIN, VK_MENU, VK_RCONTROL, VK_RMENU,
+    VK_RSHIFT, VK_RWIN, VK_SHIFT,
 };
 use windows::Win32::UI::Input::{
     GetRawInputData, HRAWINPUT, RAWINPUT, RAWINPUTDEVICE, RAWINPUTHEADER, RAWKEYBOARD, RID_INPUT,
@@ -670,23 +671,58 @@ fn read_key(lparam: LPARAM) -> Result<Option<RawKey>, ()> {
         return Err(());
     }
     // SAFETY: the header says this record is a keyboard one.
-    let mut keyboard = unsafe { raw.data.keyboard };
-    if keyboard.MakeCode == 0 {
+    let keyboard = unsafe { raw.data.keyboard };
+    let keyboard = normalize_keyboard(keyboard, |vk| {
         // SAFETY: a pure table lookup in the current layout.
-        let scan = unsafe { MapVirtualKeyW(u32::from(keyboard.VKey), MAPVK_VK_TO_VSC_EX) };
-        keyboard.MakeCode = u16::try_from(scan & 0xFF).unwrap_or(0);
-        let prefix = match scan >> 8 {
-            0xE0 => RI_KEY_E0,
-            0xE1 => RI_KEY_E1,
-            _ => 0,
-        };
-        keyboard.Flags =
-            u16::try_from((u32::from(keyboard.Flags) & RI_KEY_BREAK) | prefix).unwrap_or(0);
-        if keyboard.MakeCode == 0 {
-            return Err(());
-        }
-    }
+        unsafe { MapVirtualKeyW(u32::from(vk), MAPVK_VK_TO_VSC_EX) }
+    })?;
     Ok(Some((raw.header.hDevice, keyboard)))
+}
+
+fn normalize_keyboard(
+    mut keyboard: RAWKEYBOARD,
+    map: impl FnOnce(u16) -> u32,
+) -> Result<RAWKEYBOARD, ()> {
+    if keyboard.MakeCode != 0 {
+        return Ok(keyboard);
+    }
+    let vk = keyboard.VKey;
+    if [VK_CONTROL.0, VK_MENU.0, VK_SHIFT.0].contains(&vk) {
+        return Err(());
+    }
+    let scan = map(vk);
+    let prefix = match scan >> 8 {
+        0 => 0,
+        0xE0 => RI_KEY_E0,
+        0xE1 => RI_KEY_E1,
+        _ => return Err(()),
+    };
+    let flags = u32::from(keyboard.Flags);
+    let observed = flags & (RI_KEY_E0 | RI_KEY_E1);
+    if observed != 0 && observed != prefix {
+        return Err(());
+    }
+    let make = u16::try_from(scan & 0xFF).map_err(|_| ())?;
+    let sides = [
+        (VK_LCONTROL, 0x1D, 0),
+        (VK_RCONTROL, 0x1D, RI_KEY_E0),
+        (VK_LMENU, 0x38, 0),
+        (VK_RMENU, 0x38, RI_KEY_E0),
+        (VK_LSHIFT, 0x2A, 0),
+        (VK_RSHIFT, 0x36, 0),
+        (VK_LWIN, 0x5B, RI_KEY_E0),
+        (VK_RWIN, 0x5C, RI_KEY_E0),
+    ];
+    if make == 0
+        || sides
+            .into_iter()
+            .any(|(side, code, flags)| (vk == side.0) != (make == code && prefix == flags))
+    {
+        return Err(());
+    }
+    keyboard.MakeCode = make;
+    keyboard.Flags = u16::try_from(flags | prefix).map_err(|_| ())?;
+    Ok(keyboard)
 }
 
 fn read_chord(_: Instant) -> Option<Instant> {
@@ -1121,6 +1157,44 @@ mod tests {
     }
 
     #[test]
+    fn zero_make_code_preserves_prefix_evidence_and_never_guesses_a_modifier_side() {
+        use super::{
+            RAWKEYBOARD, RI_KEY_BREAK, RI_KEY_E0, RI_KEY_E1, VK_CONTROL, VK_LCONTROL, VK_LMENU,
+            VK_MENU, VK_RCONTROL, VK_RMENU, normalize_keyboard,
+        };
+
+        for (generic, left, right, scan) in [
+            (VK_CONTROL, VK_LCONTROL, VK_RCONTROL, 0x1D),
+            (VK_MENU, VK_LMENU, VK_RMENU, 0x38),
+        ] {
+            let raw = |vk, flags| RAWKEYBOARD {
+                VKey: vk,
+                Flags: u16::try_from(flags).unwrap(),
+                ..Default::default()
+            };
+            for flags in [0, RI_KEY_E0, RI_KEY_E1] {
+                assert!(normalize_keyboard(raw(generic.0, flags), |_| u32::from(scan)).is_err());
+            }
+            assert!(normalize_keyboard(raw(left.0, RI_KEY_E0), |_| u32::from(scan)).is_err());
+            assert!(
+                normalize_keyboard(raw(right.0, RI_KEY_E1), |_| 0xE000 | u32::from(scan)).is_err()
+            );
+            assert!(normalize_keyboard(raw(right.0, 0), |_| u32::from(scan)).is_err());
+            assert!(normalize_keyboard(raw(right.0, 0), |_| 0x1E).is_err());
+            for (vk, prefix, code) in [
+                (left, 0, u32::from(scan)),
+                (right, RI_KEY_E0, 0xE000 | u32::from(scan)),
+            ] {
+                let key = normalize_keyboard(raw(vk.0, prefix | RI_KEY_BREAK), |_| code).unwrap();
+                assert_eq!(
+                    (key.MakeCode, u32::from(key.Flags)),
+                    (scan, prefix | RI_KEY_BREAK)
+                );
+            }
+        }
+    }
+
+    #[test]
     #[expect(
         clippy::too_many_lines,
         reason = "one recovery assertion matrix across native loss sources"
@@ -1134,7 +1208,7 @@ mod tests {
         use crate::platform::microphone::CollectionGate;
         use kumochi_protocol::message::GestureId;
 
-        for loss in 0..6 {
+        for loss in 0..8 {
             let keys = super::Keys::default();
             let state = Rc::new(RefCell::new((
                 Fence::new(CollectionGate::default()),
@@ -1204,7 +1278,7 @@ mod tests {
                     input(2, 0x24, 0, 0);
                     input(3, 0x2A, 0, 1);
                 }
-                _ => {
+                4 | 5 => {
                     let lease = if loss == 4 {
                         EscapeHotkey::register(hwnd, &keys).unwrap()
                     } else {
@@ -1216,6 +1290,33 @@ mod tests {
                         WPARAM(usize::try_from(lease.1).unwrap()),
                         LPARAM(0)
                     ));
+                }
+                _ => {
+                    let (vk, scan, mate) = if loss == 6 {
+                        (super::VK_CONTROL, 0x1D, 0x38)
+                    } else {
+                        (super::VK_MENU, 0x38, 0x1D)
+                    };
+                    input(1, mate, 0, 0);
+                    let mut at = super::EventTime::new(now + Duration::from_millis(1));
+                    let record = super::normalize_keyboard(
+                        super::RAWKEYBOARD {
+                            VKey: vk.0,
+                            Flags: u16::try_from(super::RI_KEY_E0).unwrap(),
+                            ..Default::default()
+                        },
+                        |_| scan,
+                    );
+                    let (event, _) = keys
+                        .input(
+                            record.map(|key| {
+                                Some((super::HANDLE(std::ptr::without_provenance_mut(1)), key))
+                            }),
+                            &mut at,
+                            || Some(super::HKL(std::ptr::without_provenance_mut(1))),
+                        )
+                        .unwrap();
+                    deliver(event, at);
                 }
             }
             let up = super::RI_KEY_BREAK;
