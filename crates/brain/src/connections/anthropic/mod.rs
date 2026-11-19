@@ -1,10 +1,12 @@
 //! The user's own Anthropic key, staged and kept only in Credential Manager.
 
 pub mod error;
+pub(crate) mod fence;
 pub mod key;
 pub mod messages;
 pub mod models;
 pub mod request;
+pub(crate) mod route;
 pub mod sse_map;
 pub mod tls;
 

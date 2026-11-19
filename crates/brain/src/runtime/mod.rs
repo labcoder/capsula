@@ -268,6 +268,7 @@ impl Brain {
         mut account: Accounts,
     ) -> std::io::Result<Self> {
         account.github.restore_default(config.github_default());
+        account.connections.configure_transport();
         #[cfg(any(test, debug_assertions))]
         let (engine, access, fixture) = match engine {
             Selected::Fixture(engine) => (engine, mpsc::unbounded_channel().1, true),

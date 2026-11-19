@@ -3,6 +3,152 @@ use kumochi_protocol::constants::{generation_hex, generation_target};
 
 mod fold;
 
+#[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one fake vault across both authority mutations"
+)]
+async fn routed_adoption_and_removal_revoke_at_the_worker_handoff() {
+    use crate::connections::anthropic::tls::{Script, Scripted};
+
+    let scratch = Scratch::new("routed-key-authority");
+    let (mut account, store, legacy) = keyed(&scratch).await;
+    let catalog = r#"{"data":[],"has_more":false}"#;
+    let response = format!(
+        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{catalog}",
+        catalog.len()
+    )
+    .into_bytes();
+    let peer = Scripted(Arc::new(std::sync::Mutex::new(Script {
+        responses: [
+            response.clone(),
+            response.clone(),
+            response.clone(),
+            response,
+        ]
+        .into(),
+        ..Script::default()
+    })));
+    account.connections.transport = Some(Transport::offline(peer.clone(), 4, 0));
+    account.connection_event(ConnectionEvent::Op(ConnectionOp::CheckAnthropicKey));
+    settle(&mut account).await;
+    let first = Arc::clone(account.connections.verified.as_ref().expect("verified"));
+    assert_eq!(first.revision, 1);
+    assert_ne!(first.tag.0, 0);
+    account.connection_event(ConnectionEvent::Op(ConnectionOp::CheckAnthropicKey));
+    settle(&mut account).await;
+    assert!(Arc::ptr_eq(
+        &first,
+        account
+            .connections
+            .verified
+            .as_ref()
+            .expect("verified again")
+    ));
+    let plan = begin(&mut account, 1, 16).await;
+    account.connection_event(ConnectionEvent::Op(ConnectionOp::CheckAnthropicKey));
+    let loaded = next(&mut account).await;
+    account.handle(loaded);
+    let metadata = account.connections.route_input().expect("route configured");
+    assert!(matches!(
+        &metadata,
+        Input::Engines(ConnectionKind::AnthropicKey, Availability::Ready(ready))
+            if ready.connection == first.tag && ready.models.is_empty()
+    ));
+    assert!(!format!("{metadata:?}").contains("sk-ant-"));
+    let queued_catalog = account
+        .connections
+        .checking
+        .clone()
+        .expect("catalog queued");
+    let observing_cut = |authority: Fence, catalog: Option<Fence>| -> Box<dyn Fn() + Send + Sync> {
+        Box::new(move || {
+            assert!(
+                !authority.open(),
+                "the old authority is closed at worker handoff"
+            );
+            assert!(
+                catalog.as_ref().is_none_or(|read| !read.open()),
+                "the read is closed at worker handoff"
+            );
+        })
+    };
+    account.connections.before_key_mutation = Some(observing_cut(
+        first.fence.clone(),
+        Some(queued_catalog.clone()),
+    ));
+
+    assert_eq!(
+        account.stage_op(1, ConnectionOp::AnthropicKeyStaged { plan: plan.id }),
+        vec![]
+    );
+    assert!(!first.fence.open());
+    assert!(!queued_catalog.open());
+    assert!(matches!(
+        account.connections.route_input(),
+        Some(Input::Engines(
+            ConnectionKind::AnthropicKey,
+            Availability::Unavailable(_)
+        ))
+    ));
+    let failed = next(&mut account).await;
+    assert!(matches!(
+        failed,
+        Event::Connection(ConnectionEvent::StageDone { result: Err(_), .. })
+    ));
+    account.handle(failed);
+    settle(&mut account).await;
+    let recovered = Arc::clone(
+        account
+            .connections
+            .verified
+            .as_ref()
+            .expect("old revision re-proven"),
+    );
+    assert_eq!(recovered.revision, 1);
+    assert_ne!(recovered.tag, first.tag);
+    assert!(!first.fence.open());
+    assert_eq!(peer.0.lock().expect("peer").starts, 3);
+
+    let replacement = "sk-ant-api-synthetic-replacement";
+    let plan = begin(
+        &mut account,
+        2,
+        u16::try_from(replacement.len()).expect("bounded"),
+    )
+    .await;
+    plant(&store, plan, replacement);
+    account.connections.before_key_mutation = Some(observing_cut(recovered.fence.clone(), None));
+    account.stage_op(1, ConnectionOp::AnthropicKeyStaged { plan: plan.id });
+    assert!(!recovered.fence.open());
+    let adopted = next(&mut account).await;
+    assert!(matches!(
+        adopted,
+        Event::Connection(ConnectionEvent::StageDone {
+            result: Ok((2, _)),
+            ..
+        })
+    ));
+    account.handle(adopted);
+    settle(&mut account).await;
+    let new = Arc::clone(account.connections.verified.as_ref().expect("replacement"));
+    assert_ne!(new.tag, recovered.tag);
+    account.connections.before_key_mutation = Some(observing_cut(new.fence.clone(), None));
+    account.connection_event(ConnectionEvent::Op(ConnectionOp::RemoveAnthropicKey {
+        revision: 2,
+        request: 3,
+    }));
+    assert!(!new.fence.open());
+    settle(&mut account).await;
+    assert_eq!(account.connections.view.anthropic, KeyView::Missing);
+    assert!(account.connections.verified.is_none());
+    assert_eq!(legacy.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert_eq!(peer.0.lock().expect("peer").starts, 4);
+    account
+        .close(tokio::time::Instant::now(), tokio::time::Instant::now())
+        .await;
+}
+
 #[test]
 fn the_staging_worker_does_not_print_the_key_length() {
     for len in [127, 128] {

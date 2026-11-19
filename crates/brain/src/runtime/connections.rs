@@ -1,6 +1,7 @@
 //! Anthropic connection work shares the account worker without entering its token state machine.
 
 use std::fmt;
+use std::sync::Arc;
 
 use kumochi_protocol::Secret;
 use kumochi_protocol::message::{
@@ -12,9 +13,12 @@ use tokio::time::{Duration, timeout};
 
 use crate::connections::anthropic::{
     KeyError, KeyOp, KeyResult,
+    fence::Fence,
     key::AnthropicKey,
     models::{self, CatalogModel, CheckError},
+    route::{Transport, Verified},
 };
+use crate::coordinator::{Availability, Input, Ready, model_unavailable};
 
 use super::account::{Accounts, Event, Work};
 use super::{Brain, Full, Link};
@@ -141,6 +145,13 @@ impl fmt::Debug for ConnectionEvent {
 pub(super) struct Connections {
     generation: u64,
     key: Option<Secret<AnthropicKey>>,
+    transport: Option<Transport>,
+    verified: Option<Arc<Verified>>,
+    checking: Option<Fence>,
+    adopting: Option<(u64, Option<u64>)>,
+    recovering: Option<u64>,
+    #[cfg(test)]
+    before_key_mutation: Option<Box<dyn Fn() + Send + Sync>>,
     view: ConnectionsView,
     models: Vec<CatalogModel>,
     unsent: bool,
@@ -162,6 +173,13 @@ impl Default for Connections {
         Self {
             generation: 0,
             key: None,
+            transport: None,
+            verified: None,
+            checking: None,
+            adopting: None,
+            recovering: None,
+            #[cfg(test)]
+            before_key_mutation: None,
             view: ConnectionsView {
                 anthropic: KeyView::Missing,
                 anthropic_revision: None,
@@ -192,6 +210,50 @@ impl fmt::Debug for Connections {
 }
 
 impl Connections {
+    pub(super) fn configure_transport(&mut self) {
+        if self.transport.is_none() {
+            self.transport = Transport::native();
+        }
+    }
+
+    fn route_input(&self) -> Option<Input> {
+        self.transport.as_ref()?;
+        let availability = self.verified.as_ref().map_or_else(
+            || Availability::Unavailable(model_unavailable()),
+            |verified| {
+                Availability::Ready(Ready {
+                    connection: verified.tag,
+                    models: self.models.iter().map(|model| model.info.clone()).collect(),
+                    #[cfg(any(test, debug_assertions))]
+                    trusted_draw: false,
+                })
+            },
+        );
+        Some(Input::Engines(ConnectionKind::AnthropicKey, availability))
+    }
+
+    fn retire(&mut self) {
+        if let Some(verified) = self.verified.take() {
+            verified.fence.revoke();
+        }
+        self.cancel();
+    }
+
+    fn verify(&mut self) -> bool {
+        if self.transport.is_none() {
+            return true;
+        }
+        let key = self.key.take();
+        if self.verified.is_some() {
+            return true;
+        }
+        let (Some(revision), Some(key)) = (self.view.anthropic_revision, key) else {
+            return false;
+        };
+        self.verified = Verified::new(revision, key).map(Arc::new);
+        self.verified.is_some()
+    }
+
     pub(super) fn stage_session(&mut self, epoch: Option<u64>) {
         self.stage_link = epoch;
         self.stage_request = None;
@@ -199,8 +261,21 @@ impl Connections {
         self.check_request = None;
     }
     pub(super) fn cancel(&mut self) {
+        if let Some(checking) = self.checking.take() {
+            checking.revoke();
+        }
         if let Some(read) = self.read.take() {
             read.abort();
+        }
+    }
+
+    pub(super) fn close(&mut self) {
+        if self.transport.is_some() {
+            self.retire();
+            self.advance();
+            self.loading = false;
+        } else {
+            self.cancel();
         }
     }
 
@@ -232,23 +307,47 @@ impl Connections {
             .checked_add(1)
             .expect("key generation cannot exhaust u64 in one process");
         self.key = None;
-        self.unsent |= !self.models.is_empty() || self.view.anthropic == KeyView::Ready;
-        self.models.clear();
+        self.adopting = None;
+        self.recovering = None;
+        if self.verified.is_none() {
+            self.unsent |= !self.models.is_empty() || self.view.anthropic == KeyView::Ready;
+            self.models.clear();
+        }
         self.generation
     }
 }
 
 impl Drop for Connections {
     fn drop(&mut self) {
-        self.cancel();
+        self.retire();
     }
 }
 
 impl Accounts {
+    fn send_key_work(&self, work: Work) -> bool {
+        let Some(jobs) = &self.jobs else {
+            return false;
+        };
+        #[cfg(test)]
+        if matches!(
+            work,
+            Work::Stage(StageWork::Adopt { .. })
+                | Work::Key {
+                    op: KeyOp::Remove(_),
+                    ..
+                }
+        ) && let Some(observe) = &self.connections.before_key_mutation
+        {
+            observe();
+        }
+        jobs.send(work).is_ok()
+    }
+
     pub(super) fn stage_op(&mut self, epoch: u64, op: ConnectionOp) -> Vec<ControlToShell> {
         let work = match op {
             ConnectionOp::BeginAnthropicKeyStage { request, len } => {
                 if self.connections.removing.is_some()
+                    || self.connections.adopting.is_some()
                     || self.connections.check_request.is_some()
                     || self.connections.stage_link != Some(epoch)
                 {
@@ -267,6 +366,7 @@ impl Accounts {
             }
             ConnectionOp::AnthropicKeyStaged { plan } => {
                 if self.connections.removing.is_some()
+                    || self.connections.adopting.is_some()
                     || self.connections.check_request.is_some()
                     || self.connections.stage_link != Some(epoch)
                     || self.connections.stage_admission != Some(plan)
@@ -277,6 +377,18 @@ impl Accounts {
                     }];
                 }
                 self.connections.stage_admission = None;
+                if self.connections.transport.is_some() {
+                    let base = self
+                        .connections
+                        .verified
+                        .as_ref()
+                        .map(|key| key.revision)
+                        .or(self.connections.view.anthropic_revision);
+                    self.connections.retire();
+                    let generation = self.connections.advance();
+                    self.connections.adopting = Some((generation, base));
+                    self.connections.view.anthropic = KeyView::Checking;
+                }
                 StageWork::Adopt {
                     epoch,
                     generation: self.connections.generation,
@@ -285,11 +397,7 @@ impl Accounts {
             }
             _ => return Vec::new(),
         };
-        if self
-            .jobs
-            .as_ref()
-            .is_none_or(|jobs| jobs.send(Work::Stage(work)).is_err())
-        {
+        if !self.send_key_work(Work::Stage(work)) {
             return match op {
                 ConnectionOp::BeginAnthropicKeyStage { request, .. } => {
                     vec![ControlToShell::AnthropicKeyStage {
@@ -298,6 +406,9 @@ impl Accounts {
                     }]
                 }
                 ConnectionOp::AnthropicKeyStaged { plan } => {
+                    if self.connections.adopting.take().is_some() {
+                        self.connections.view.anthropic = KeyView::Unconfirmed;
+                    }
                     vec![ControlToShell::AnthropicKeyStageDone {
                         plan,
                         result: Err(KeyStageFailure::Unavailable),
@@ -325,16 +436,15 @@ impl Accounts {
     }
 
     pub(super) fn load_key(&mut self, op: KeyOp) {
+        if matches!(op, KeyOp::Remove(_)) {
+            self.connections.retire();
+        }
         let generation = self.connections.advance();
         self.connections.view.anthropic = KeyView::Checking;
         self.connections.view.anthropic_revision = None;
         self.connections.loading = true;
         let work = Work::Key { generation, op };
-        if self
-            .jobs
-            .as_ref()
-            .is_none_or(|jobs| jobs.send(work).is_err())
-        {
+        if !self.send_key_work(work) {
             self.connections.view.anthropic = KeyView::Unconfirmed;
             self.connections.loading = false;
         }
@@ -354,7 +464,10 @@ impl Accounts {
             request,
             read: None,
         };
-        if self.connections.removing.is_some() || self.connections.check_request.is_some() {
+        if self.connections.removing.is_some()
+            || self.connections.adopting.is_some()
+            || self.connections.check_request.is_some()
+        {
             return vec![refused];
         }
         self.load_key(KeyOp::Load);
@@ -398,6 +511,10 @@ impl Accounts {
         plan: KeyStageId,
         result: Result<(u64, Secret<AnthropicKey>), KeyStageFailure>,
     ) -> Vec<ControlToShell> {
+        let adopted = self
+            .connections
+            .adopting
+            .take_if(|(expected, _)| *expected == generation);
         let outcome = match result {
             Ok((revision, key)) => {
                 if generation == self.connections.generation {
@@ -405,7 +522,18 @@ impl Accounts {
                 }
                 Ok(())
             }
-            Err(error) => Err(error),
+            Err(error) => {
+                if let Some((_, base)) = adopted {
+                    self.connections.view.anthropic = KeyView::Unconfirmed;
+                    if self.connections.removing.is_none()
+                        && let Some(base) = base
+                    {
+                        self.load_key(KeyOp::Load);
+                        self.connections.recovering = Some(base);
+                    }
+                }
+                Err(error)
+            }
         };
         if self.connections.stage_link != Some(epoch) {
             return Vec::new();
@@ -443,13 +571,38 @@ impl Accounts {
         } else {
             revision
         };
+        if let Some(old) = &self.connections.verified
+            && (revision != Some(old.revision) || !matches!(result, Ok(Some(_))))
+        {
+            self.connections.retire();
+            self.connections.unsent = true;
+            self.connections.models.clear();
+        }
+        if self.connections.transport.is_some()
+            && (self.connections.removing.is_some()
+                || (revision.is_none() && matches!(result, Ok(Some(_))))
+                || self
+                    .connections
+                    .recovering
+                    .take()
+                    .is_some_and(|base| revision != Some(base)))
+        {
+            self.connections.view.anthropic = KeyView::Unconfirmed;
+            return removal;
+        }
         match result {
             Ok(Some(key)) => {
                 self.connections.key = Some(key.clone());
+                let transport = self.connections.transport.clone();
+                let checking = Fence::default();
+                self.connections.checking = transport.as_ref().map(|_| checking.clone());
                 let http = std::sync::Arc::clone(&self.net.http);
                 let events = self.reads_tx.clone();
                 self.connections.read = Some(tokio::spawn(async move {
                     let result = timeout(Duration::from_secs(15), async {
+                        if let Some(transport) = transport {
+                            return transport.catalog(&checking, &key).await;
+                        }
                         let http = tokio::task::spawn_blocking(move || http())
                             .await
                             .map_err(|_| CheckError::Unconfirmed)?
@@ -501,7 +654,7 @@ impl Accounts {
             }
             _ => return Vec::new(),
         }
-        if in_flight {
+        if in_flight || self.connections.adopting.is_some() && self.connections.removing.is_none() {
             return Vec::new();
         }
         let abandoned = self
@@ -568,13 +721,25 @@ impl Accounts {
                 self.connections.cancel();
                 match result {
                     Ok(models) => {
-                        self.connections.models = models;
-                        self.connections.view.anthropic = KeyView::Ready;
+                        if self.connections.verify() {
+                            self.connections.models = models;
+                            self.connections.view.anthropic = KeyView::Ready;
+                        } else {
+                            self.connections.view.anthropic = KeyView::Unconfirmed;
+                        }
                     }
                     Err(CheckError::Rejected(reason)) => {
+                        if self.connections.transport.is_some() {
+                            self.connections.retire();
+                            self.connections.key = None;
+                            self.connections.models.clear();
+                        }
                         self.connections.view.anthropic = KeyView::Rejected(reason);
                     }
                     Err(CheckError::Unconfirmed) => {
+                        if self.connections.transport.is_some() {
+                            self.connections.key = None;
+                        }
                         self.connections.view.anthropic = KeyView::Unconfirmed;
                     }
                 }
@@ -592,6 +757,21 @@ impl Accounts {
 mod tests;
 
 impl Brain {
+    pub(super) fn key_route_changed(
+        &mut self,
+        link: Option<&mut Link<'_, '_>>,
+    ) -> Result<(), Full> {
+        let Some(input) = self.account.connections.route_input() else {
+            return Ok(());
+        };
+        self.hold_fence(&input);
+        let effects = self
+            .coordinator
+            .handle(input)
+            .expect("availability is never stale");
+        self.apply(effects, link).map_err(|_| Full)
+    }
+
     pub(super) fn connection_op(
         &mut self,
         op: ConnectionOp,
@@ -608,10 +788,9 @@ impl Brain {
                     self.account.connections.stage_session(None);
                     return Ok(());
                 };
-                self.account
-                    .stage_op(self.epoch, op)
-                    .iter()
-                    .try_for_each(|frame| link.control(frame))
+                let frames = self.account.stage_op(self.epoch, op);
+                self.key_route_changed(Some(link))?;
+                frames.iter().try_for_each(|frame| link.control(frame))
             }
             ConnectionOp::ReconcileAnthropicKey { .. } if link.is_none() => Ok(()),
             ConnectionOp::CheckAnthropicKey

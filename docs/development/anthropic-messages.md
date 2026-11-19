@@ -46,6 +46,13 @@ payloads it assembles.
 
 ## One attempt
 
+The dormant runtime transport uses the same fixed TLS host for catalog checks and
+Messages, with separate request allowances checked before connecting. Each live
+authority has a revocation fence; a Messages offer on another tag is refused before
+it reaches admission. The fence orders revocation with connect and I/O polls, so
+no new transport start or byte acceptance on the retired key can occur after the cut.
+Already accepted bytes cannot be recalled. The production engine remains unserved.
+
 The caller supplies its validated body, key, admission future and shared run/live budgets.
 After admission, the transport reserves the run budget then the live budget before connecting.
 A live-cap refusal can conservatively spend the run reservation; nothing refunds a failed,

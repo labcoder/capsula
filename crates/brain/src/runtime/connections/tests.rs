@@ -12,6 +12,54 @@ use zeroize::Zeroizing;
 
 mod staging;
 
+#[tokio::test]
+async fn production_key_dispatch_is_unserved_without_asking_to_send() {
+    use crate::context::{ModelRequest, Origin};
+    use crate::coordinator::{BuildKey, SendKey};
+    use crate::engines::{Asks, EngineFailure, Finish, RunRequest, SendGate, TurnEvent};
+    use kumochi_protocol::message::{Effort, ModelChoice, ModelSlug, RunId, ThreadId};
+
+    let scratch = Scratch::new("dormant-key-transport");
+    let mut brain = test_support::brain(&scratch, "");
+    assert!(brain.account.connections.route_input().is_none());
+    let key = SendKey::Build(BuildKey {
+        run: RunId(1),
+        round: 1,
+        attempt: 1,
+    });
+    let request = RunRequest {
+        key,
+        run: RunId(1),
+        thread: ThreadId(1),
+        origin: Origin::Kumo,
+        request: ModelRequest {
+            choice: Some(ModelChoice {
+                connection: ConnectionKind::AnthropicKey,
+                model: ModelSlug::new("claude-sonnet-5-5").expect("model"),
+                effort: Effort::Medium,
+            }),
+            instructions: String::new(),
+            input: Vec::new(),
+            tools: Vec::new(),
+        },
+    };
+    let (events, mut seen) = tokio::sync::mpsc::channel(1);
+    let (inputs, mut asks) = tokio::sync::mpsc::unbounded_channel();
+    brain
+        .owned_engine(&request)
+        .expect("owned refusal")
+        .start(request, events, SendGate::new(key, Asks::default(), inputs))
+        .await;
+    assert_eq!(
+        seen.recv().await,
+        Some(TurnEvent::Finished(Finish::Failed(EngineFailure::Access(
+            Some(model_unavailable())
+        ))))
+    );
+    assert_eq!(asks.recv().await, None);
+    brain.close().await;
+}
+
 fn key() -> Secret<AnthropicKey> {
     AnthropicKey::parse(Secret::new(Zeroizing::new(
         b"sk-ant-api-zqxsentinellabel".to_vec(),
