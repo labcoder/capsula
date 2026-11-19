@@ -38,6 +38,9 @@ pub struct OutputOwner {
     /// check and the owner's.
     #[cfg(any(test, feature = "test-support"))]
     before_opened: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    /// A test's contention: this many more non-waiting calls find the owner busy.
+    #[cfg(any(test, feature = "test-support"))]
+    refusals: std::sync::atomic::AtomicU32,
 }
 
 impl Default for OutputOwner {
@@ -49,6 +52,8 @@ impl Default for OutputOwner {
             changes,
             #[cfg(any(test, feature = "test-support"))]
             before_opened: Mutex::default(),
+            #[cfg(any(test, feature = "test-support"))]
+            refusals: std::sync::atomic::AtomicU32::default(),
         }
     }
 }
@@ -370,6 +375,16 @@ impl OutputOwner {
     }
 
     fn try_lock(&self) -> Result<MutexGuard<'_, State>, Denied> {
+        #[cfg(any(test, feature = "test-support"))]
+        if self
+            .refusals
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |left| {
+                left.checked_sub(1)
+            })
+            .is_ok()
+        {
+            return Err(Denied::Busy);
+        }
         let mut state = match self.state.try_lock() {
             Ok(state) => state,
             Err(TryLockError::Poisoned(state)) => state.into_inner(),
@@ -732,18 +747,31 @@ impl OutputOwner {
     }
 
     /// Queues the speaker's `Stop` of `run` on `session` only, after the brain accepted its
-    /// own stop. False when `session` isn't current, or the speaker couldn't take it, which ends
-    /// the session.
-    pub fn stop(&self, session: u64, run: RunId) -> bool {
-        let mut state = self.lock();
+    /// own stop. Never waits: [`Denied::Busy`] leaves the stop to the caller to offer again.
+    ///
+    /// # Errors
+    /// [`Denied::Busy`] on contention, [`Denied::Stale`] when `session` isn't current, and
+    /// [`Denied::Lost`] when the speaker couldn't take it, which ends the session.
+    pub fn stop(&self, session: u64, run: RunId) -> Result<(), Denied> {
+        let mut state = self.try_lock()?;
         if state.session != Some(session) {
-            return false;
+            return Err(Denied::Stale);
         }
         let abort = state.command(Command::Stop(run));
         drop(state);
-        let stopped = abort.is_none();
+        let stopped = if abort.is_none() {
+            Ok(())
+        } else {
+            Err(Denied::Lost)
+        };
         self.after(abort);
         stopped
+    }
+
+    /// Makes the next `calls` non-waiting calls find the owner busy.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn refuse(&self, calls: u32) {
+        self.refusals.store(calls, Ordering::Release);
     }
 
     /// Talk-back off: a live speaker is withdrawn, an opening one when it opens, and later

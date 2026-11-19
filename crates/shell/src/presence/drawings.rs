@@ -111,8 +111,8 @@ impl Presence {
                 Effect::Control(message) => {
                     let sent = self
                         .session
-                        .as_ref()
-                        .is_some_and(|session| self.send_stop(session, message));
+                        .clone()
+                        .is_some_and(|session| self.send_stop(&session, message, cx));
                     if !sent {
                         tracing::warn!("scene control queue unavailable; ending the connection");
                         self.end_scene_connection();
@@ -241,7 +241,7 @@ impl Presence {
             let effects = self.presenter.stop(run, now);
             self.scene_effects(effects, cx);
         } else {
-            self.tell(message);
+            self.tell(message, cx);
         }
     }
 }

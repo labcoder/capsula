@@ -260,13 +260,13 @@ fn a_refused_stop_ends_the_session_and_never_stops_the_speaker(cx: &mut TestAppC
     let (owner, _data, _controls) = ready(cx);
     let (commands, _tail) = answering(&owner, SPOKEN, cx);
     let _full = full(&owner, cx);
-    owner.update(cx, |owner, _| {
+    owner.update(cx, |owner, cx| {
         let session = owner.session.clone().expect("connected");
         let scenes = ControlToBrain::StopScenes {
             run: RunId(5),
             cuts: kumochi_protocol::message::SceneCuts::default(),
         };
-        assert!(!owner.send_stop(&session, scenes), "refused");
+        assert!(!owner.send_stop(&session, scenes, cx), "refused");
         assert!(
             !session.alive().load(std::sync::atomic::Ordering::Acquire),
             "the session ended"
@@ -290,4 +290,80 @@ fn recognition_stops_a_spoken_run_the_gesture_s_pause_drained(cx: &mut TestAppCo
     hold(&owner, 1, cx);
     assert_eq!(brain_stops(&controls), [RunId(5)]);
     assert_eq!(stops(&commands), [RunId(5)]);
+}
+
+fn brain_stop(run: u64) -> ControlToBrain {
+    ControlToBrain::Stop {
+        run: RunId(run),
+        revealed: Vec::new(),
+    }
+}
+
+/// Queues the brain's and then the speaker's stop of each run in turn, after the owner has
+/// refused the next `busy` offers.
+fn stop_busy(owner: &Entity<Presence>, busy: u32, runs: &[u64], cx: &mut TestAppContext) {
+    owner.update(cx, |owner, cx| {
+        owner.link.output().refuse(busy);
+        let session = owner.session.clone().expect("connected");
+        for run in runs {
+            assert!(owner.send_stop(&session, brain_stop(*run), cx), "sent");
+        }
+    });
+}
+
+/// Lets the stop retry timer fire `times` times.
+fn retries(times: u32, cx: &mut TestAppContext) {
+    for _ in 0..times {
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(1));
+        cx.run_until_parked();
+    }
+}
+
+fn alive(owner: &Entity<Presence>, cx: &mut TestAppContext) -> bool {
+    owner.update(cx, |owner, _| {
+        owner
+            .session
+            .as_ref()
+            .is_some_and(|session| session.alive().load(std::sync::atomic::Ordering::Acquire))
+    })
+}
+
+#[gpui::test]
+fn a_busy_owner_s_speaker_stop_is_offered_again_and_a_later_one_waits_behind_it(
+    cx: &mut TestAppContext,
+) {
+    let (owner, _data, controls) = ready(cx);
+    let (_commands, _tail) = answering(&owner, SPOKEN, cx);
+    let seen = witness(&owner, &controls, cx);
+    stop_busy(&owner, 1, &[5, 6], cx);
+    retries(1, cx);
+    assert_eq!(
+        order(&seen, &controls),
+        [
+            ("brain", RunId(5)),
+            ("brain", RunId(6)),
+            ("speaker", RunId(5)),
+            ("speaker", RunId(6))
+        ]
+    );
+}
+
+#[gpui::test]
+fn a_speaker_stop_is_offered_ten_times_and_then_its_session_ends(cx: &mut TestAppContext) {
+    let (owner, _data, _controls) = ready(cx);
+    let (commands, _tail) = answering(&owner, SPOKEN, cx);
+    stop_busy(&owner, 9, &[5], cx);
+    retries(9, cx);
+    assert_eq!(stops(&commands), [RunId(5)], "taken at the tenth offer");
+    assert!(alive(&owner, cx));
+
+    let (owner, _data, _controls) = ready(cx);
+    let (commands, _tail) = answering(&owner, SPOKEN, cx);
+    stop_busy(&owner, 10, &[5], cx);
+    retries(8, cx);
+    assert!(alive(&owner, cx), "one offer left");
+    retries(1, cx);
+    assert!(!alive(&owner, cx), "the session ended");
+    assert_eq!(stops(&commands), [], "no speaker Stop");
 }

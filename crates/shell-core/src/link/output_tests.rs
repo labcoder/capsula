@@ -275,7 +275,7 @@ fn the_responder_answers_a_revoke_from_before_quiet_and_one_after_retirement() {
     let owner = OutputOwner::default();
     let rig = rig(&owner, 1);
     rig.short(480);
-    assert!(owner.stop(1, RunId(1)), "queued");
+    assert_eq!(owner.stop(1, RunId(1)), Ok(()), "queued");
     rig.passes();
     let answered = ControlToBrain::SpeechStopped {
         run: RunId(1),
@@ -295,7 +295,7 @@ fn the_responder_answers_a_revoke_from_before_quiet_and_one_after_retirement() {
     }
     until("answered once played", || rig.heard(&answered));
     until("retired", || retired(&owner));
-    assert!(owner.stop(1, RunId(2)), "queued on the responder");
+    assert_eq!(owner.stop(1, RunId(2)), Ok(()), "queued on the responder");
     let later = ControlToBrain::SpeechStopped {
         run: RunId(2),
         cursor: None,
@@ -861,7 +861,7 @@ fn a_pause_the_speaker_cannot_take_ends_the_session_and_denies_the_gesture() {
     rig.script().frozen = true;
     until("parked", || rig.script().parked);
     for run in 1..=16 {
-        assert!(owner.stop(1, RunId(run)), "queued");
+        assert_eq!(owner.stop(1, RunId(run)), Ok(()), "queued");
     }
     assert!(!rig.aborted.load(Ordering::SeqCst), "not yet");
     assert_eq!(

@@ -174,6 +174,10 @@ struct Presence {
     paint_notice: Rc<overlay::PaintNotice>,
     scene_timer: Option<Task<()>>,
     scene_deadline: Option<Instant>,
+    /// Speaker stops a busy owner hasn't taken yet, oldest first, each with its tries left.
+    pending_stops: std::collections::VecDeque<(Session, kumochi_protocol::message::RunId, u8)>,
+    /// The next offer of the front pending stop, or the end of its session.
+    stop_retry: Option<Task<()>>,
     escape_hold: EscapeHold<EscapeHotkey>,
     /// Esc with the talk keys down, held only while a hold's keys are.
     talk_escape: TalkEscape<EscapeHotkey>,
@@ -1055,6 +1059,8 @@ pub(crate) fn open(
             paint_notice: Rc::default(),
             scene_timer: None,
             scene_deadline: None,
+            pending_stops: std::collections::VecDeque::new(),
+            stop_retry: None,
             escape_hold: EscapeHold::default(),
             talk_escape: TalkEscape::default(),
             escape_fixture: flags.escape_fixture,
