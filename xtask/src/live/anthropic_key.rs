@@ -286,23 +286,36 @@ const WORKERS: usize = crate::session::ROLES.len() - 2;
 
 /// Whether `running` holds this launch's brain and shell, `[brain, shell]`, and besides `me`
 /// nothing [`no_strangers`] refuses.
-fn only_ours(running: &[platform::Entry], me: u32, ours: [u32; 2]) -> bool {
-    ours.iter()
+fn only_ours(
+    running: &[platform::Entry],
+    me: u32,
+    ours: [u32; 2],
+    image: &Path,
+    identify: impl Fn(u32) -> Result<Option<platform::Helper>>,
+) -> Result<bool> {
+    Ok(ours
+        .iter()
         .all(|&pid| running.iter().any(|entry| entry.pid == pid))
-        && no_strangers(running, me, ours)
+        && no_strangers(running, me, ours, image, identify)?)
 }
 
 /// Whether every product process in `running` besides `me` is this launch's brain or shell, or a
 /// worker of that brain. The brain starts its screen and speech workers from its own executable
 /// and nothing else under that name, so a worker is a child of the brain under the brain's name,
 /// one per role at most.
-fn no_strangers(running: &[platform::Entry], me: u32, [brain, shell]: [u32; 2]) -> bool {
+fn no_strangers(
+    running: &[platform::Entry],
+    me: u32,
+    [brain, shell]: [u32; 2],
+    _image: &Path,
+    _identify: impl Fn(u32) -> Result<Option<platform::Helper>>,
+) -> Result<bool> {
     let worker = |entry: &&platform::Entry| !entry.shell && entry.parent == brain;
-    running.iter().filter(worker).count() <= WORKERS
+    Ok(running.iter().filter(worker).count() <= WORKERS
         && running
             .iter()
             .filter(|entry| !worker(entry))
-            .all(|entry| [me, brain, shell].contains(&entry.pid))
+            .all(|entry| [me, brain, shell].contains(&entry.pid)))
 }
 
 /// Where the ledger lives: beside the gate's run lock, so cleaning or moving build output can't
@@ -343,6 +356,7 @@ impl Ledger {
 /// brain instead of starting one; runs the steps, then closes the shell and waits for every product
 /// process to exit.
 fn supervise(mut brain: Command, mut shell: Command, tap: &Path, steps: &[Step]) -> Result<()> {
+    let image = std::fs::canonicalize(brain.get_program()).context("the gate brain's image")?;
     let mut brain = brain.spawn().context("starting the gate brain")?;
     let pipe = Pipe::Control.name(platform::gate_pipe::session_id()?);
     let listen = Instant::now() + LISTEN;
@@ -363,7 +377,7 @@ fn supervise(mut brain: Command, mut shell: Command, tap: &Path, steps: &[Step])
     let mut state = State::default();
     let stepped = steps
         .iter()
-        .try_for_each(|step| watch(ours, tap, step, &mut state, &mut cursor));
+        .try_for_each(|step| watch(ours, &image, tap, step, &mut state, &mut cursor));
     if let Err(error) = stepped {
         return crate::session::combine([
             Err(error),
@@ -379,18 +393,19 @@ fn supervise(mut brain: Command, mut shell: Command, tap: &Path, steps: &[Step])
         if running.iter().all(|entry| entry.pid == me) {
             break;
         }
-        let error = if !no_strangers(&running, me, ours) {
-            anyhow!(
+        let error = match no_strangers(&running, me, ours, &image, platform::helper) {
+            Err(error) => error,
+            Ok(false) => anyhow!(
                 "another product process started while the launch quit; the shell and brain were ended"
-            )
-        } else if Instant::now() >= deadline {
-            anyhow!(
+            ),
+            Ok(true) if Instant::now() >= deadline => anyhow!(
                 "the launch didn't exit in {QUIT:?} after the shell's window closed; the shell and \
                  brain were ended"
-            )
-        } else {
-            thread::sleep(POLL);
-            continue;
+            ),
+            Ok(true) => {
+                thread::sleep(POLL);
+                continue;
+            }
         };
         return crate::session::combine([
             Err(error),
@@ -411,6 +426,7 @@ fn supervise(mut brain: Command, mut shell: Command, tap: &Path, steps: &[Step])
 /// Waits for `step` against the tap from `cursor` on, leaving `cursor` after the frame that met it.
 fn watch(
     ours: [u32; 2],
+    image: &Path,
     tap: &Path,
     step: &Step,
     state: &mut State,
@@ -427,7 +443,13 @@ fn watch(
     let started = Instant::now();
     loop {
         ensure!(
-            only_ours(&platform::processes()?, std::process::id(), ours),
+            only_ours(
+                &platform::processes()?,
+                std::process::id(),
+                ours,
+                image,
+                platform::helper
+            )?,
             "the gate brain or shell exited, or a product process other than them and the brain's \
              workers started; nothing it starts can send on the key route, and the check stops"
         );
@@ -711,61 +733,113 @@ mod tests {
             .collect()
     }
 
+    /// The gate brain's image in the fixtures.
+    const IMAGE: &str = r"C:\gate\debug\kumochid.exe";
+
+    /// What the check reads of each fixture child: 30 and 50 name the screen worker and 40 the
+    /// speech worker under the gate image, 60 names no role, 70 names the screen worker under
+    /// another image, 80 exited before it was read, and anything else can't be read.
+    fn identify(pid: u32) -> Result<Option<platform::Helper>> {
+        let helper = |image: &str, role| {
+            Ok(Some(platform::Helper {
+                image: std::path::PathBuf::from(image),
+                role,
+            }))
+        };
+        match pid {
+            30 | 50 => helper(IMAGE, Some("screen-worker")),
+            40 => helper(IMAGE, Some("speech-worker")),
+            60 => helper(IMAGE, None),
+            70 => helper(r"C:\other\kumochid.exe", Some("screen-worker")),
+            80 => Ok(None),
+            _ => bail!("unreadable fixture child"),
+        }
+    }
+
     /// The check is xtask 1; its brain is 10 and its shell 20.
     #[test]
-    fn a_launch_is_its_brain_its_shell_and_the_brains_workers_only() {
+    fn a_launch_is_its_brain_its_shell_and_the_brains_identified_workers_only() {
         let (me, ours) = (1, [10, 20]);
         let with = |extra: &[(u32, u32, bool)]| {
             let mut list = vec![(1, 0, false), (20, 1, true), (10, 1, false)];
             list.extend_from_slice(extra);
-            only_ours(&entries(&list), me, ours)
+            only_ours(&entries(&list), me, ours, Path::new(IMAGE), identify)
+                .expect("every fixture child is read")
         };
-        assert!(with(&[]));
+        assert!(with(&[]), "no worker yet");
         assert!(with(&[(30, 10, false), (40, 10, false)]), "both workers");
         assert!(
             with(&[(30, 10, false)]),
-            "one worker, the other not started or replaced"
+            "one worker, the other not started"
+        );
+        assert!(with(&[(40, 10, false)]), "the other worker alone");
+        assert!(
+            with(&[(30, 10, false), (80, 10, false)]),
+            "a child gone before it was read counts for nothing"
         );
         assert!(
-            !with(&[(30, 10, false), (40, 10, false), (50, 10, false)]),
-            "more workers than the brain has roles"
+            !with(&[(30, 10, false), (50, 10, false)]),
+            "two children naming one role"
+        );
+        assert!(
+            !with(&[(60, 10, false)]),
+            "a brain-named child with no role"
+        );
+        assert!(
+            !with(&[(70, 10, false)]),
+            "a worker role under another image"
         );
         assert!(!with(&[(30, 20, false)]), "a brain the shell started");
         assert!(!with(&[(30, 10, true)]), "a shell the brain relaunched");
         assert!(!with(&[(30, 99, false)]), "another brain's worker");
         assert!(!with(&[(30, 1, false)]), "a second brain beside ours");
-        assert!(!only_ours(
-            &entries(&[(1, 0, false), (10, 1, false), (30, 10, false)]),
-            me,
-            ours
-        ));
-        assert!(!only_ours(
-            &entries(&[(1, 0, false), (20, 1, true), (30, 10, false)]),
-            me,
-            ours
-        ));
+        let (list, image) = (
+            entries(&[
+                (1, 0, false),
+                (20, 1, true),
+                (10, 1, false),
+                (90, 10, false),
+            ]),
+            Path::new(IMAGE),
+        );
+        assert!(
+            only_ours(&list, me, ours, image, identify).is_err(),
+            "a live child that can't be read stops the check"
+        );
+        for list in [
+            [(1, 0, false), (10, 1, false), (30, 10, false)],
+            [(1, 0, false), (20, 1, true), (30, 10, false)],
+        ] {
+            assert!(
+                !only_ours(&entries(&list), me, ours, image, identify).expect("read"),
+                "the brain or the shell gone"
+            );
+        }
     }
 
     /// While a launch quits, its brain, shell and workers may still be running in any mix, but
     /// nothing else may start.
     #[test]
     fn a_quitting_launch_leaves_only_its_own_processes() {
-        let (me, ours) = (1, [10, 20]);
-        assert!(no_strangers(&entries(&[(1, 0, false)]), me, ours));
+        let (me, ours, image) = (1, [10, 20], Path::new(IMAGE));
+        let quits = |list: &[(u32, u32, bool)]| {
+            no_strangers(&entries(list), me, ours, image, identify).expect("read")
+        };
+        assert!(quits(&[(1, 0, false)]));
         assert!(
-            no_strangers(
-                &entries(&[(1, 0, false), (30, 10, false), (40, 10, false)]),
-                me,
-                ours
-            ),
+            quits(&[(1, 0, false), (30, 10, false), (40, 10, false)]),
             "the workers outliving the brain for a moment"
         );
         assert!(
-            !no_strangers(&entries(&[(1, 0, false), (30, 20, false)]), me, ours),
+            !quits(&[(1, 0, false), (60, 10, false)]),
+            "a brain-named child with no role"
+        );
+        assert!(
+            !quits(&[(1, 0, false), (30, 20, false)]),
             "a brain the shell started"
         );
         assert!(
-            !no_strangers(&entries(&[(1, 0, false), (30, 10, true)]), me, ours),
+            !quits(&[(1, 0, false), (30, 10, true)]),
             "a shell the brain relaunched"
         );
     }
