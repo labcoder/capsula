@@ -917,3 +917,75 @@ async fn a_refusal_settles_a_waiting_reconcile_and_ignores_other_tags() {
         .close(tokio::time::Instant::now(), tokio::time::Instant::now())
         .await;
 }
+
+const TWO_MODELS: &str = r#"{"data":[{"type":"model","id":"claude-haiku-5-5","display_name":"Kept model"},{"type":"model","id":"claude-sonnet-5-5","display_name":"Second model"}],"has_more":false}"#;
+
+/// A Check that ends inconclusive keeps the verified catalog, so a shell that connects afterwards
+/// is offered the models a send is still granted on. A 401 withdraws them and replays nothing,
+/// from the moment the post closes the key's fence, before the account has heard the tag.
+#[tokio::test]
+async fn a_reconnect_is_offered_the_catalog_a_send_is_still_granted_on() {
+    for (case, withdrawn) in [("kept", false), ("refused", true), ("fence closed", true)] {
+        let scratch = Scratch::new(&format!("key-reconnect-offer-{}", case.replace(' ', "-")));
+        let peer = Scripted(Arc::new(std::sync::Mutex::new(Script {
+            responses: [wire(200, TWO_MODELS), wire(500, "{}")].into(),
+            ..Script::default()
+        })));
+        let (mut accounts, tag) = ready_then_checking(&scratch, peer.clone()).await;
+        settle(&mut accounts).await;
+        assert_eq!(accounts.connections.view.anthropic, KeyView::Unconfirmed);
+        assert_eq!(
+            starts(&peer),
+            2,
+            "the startup read and the inconclusive Check"
+        );
+        match case {
+            "refused" => {
+                accounts.connection_event(ConnectionEvent::Refused { tag });
+            }
+            "fence closed" => accounts
+                .connections
+                .verified
+                .as_ref()
+                .expect("verified")
+                .fence
+                .revoke(),
+            _ => {}
+        }
+        assert!(
+            accounts.connections.models_unsent().is_some(),
+            "the connected shell takes its update"
+        );
+        accounts.connections.connected();
+        let offered = accounts
+            .connections
+            .models_unsent()
+            .map(|models| match models {
+                DataToShell::Models { connection, models } => (
+                    connection,
+                    models
+                        .iter()
+                        .map(|model| {
+                            (
+                                model.slug.as_str().to_owned(),
+                                model.display_name.as_str().to_owned(),
+                            )
+                        })
+                        .collect::<Vec<_>>(),
+                ),
+                _ => panic!("only the key's models"),
+            });
+        let kept = [
+            ("claude-haiku-5-5".to_owned(), "Kept model".to_owned()),
+            ("claude-sonnet-5-5".to_owned(), "Second model".to_owned()),
+        ];
+        assert_eq!(
+            offered,
+            (!withdrawn).then(|| (ConnectionKind::AnthropicKey, kept.to_vec())),
+            "{case}"
+        );
+        accounts
+            .close(tokio::time::Instant::now(), tokio::time::Instant::now())
+            .await;
+    }
+}
