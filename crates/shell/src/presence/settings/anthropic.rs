@@ -79,7 +79,6 @@ impl SettingsView {
             .children(
                 (state.saved()
                     && state.removal() == Removal::None
-                    && state.failure() != Some(PasteFailure::Unconfirmed)
                     && matches!(state.view(), Some(KeyView::Checking | KeyView::Unconfirmed)))
                 .then(|| {
                     let text = strings.get(Text::AnthropicSaved);
@@ -273,6 +272,10 @@ impl Presence {
         }
         let job = self.settings.update(cx, |state, cx| {
             let job = match reply {
+                ControlToShell::AnthropicKeyReconciled { .. } => {
+                    state.key_paste.reconciled(reply);
+                    None
+                }
                 ControlToShell::AnthropicKeyRemoved { .. } => {
                     state.key_paste.removed(reply);
                     None

@@ -14,6 +14,10 @@ from triggering adoption. A queued writer will not start after the deadline, but
 an already running OS write cannot be recalled. After Staged has been sent, a
 missing acknowledgement leaves the save unconfirmed, not failed. A save
 acknowledgement is separate from catalog verification.
+After a lost acknowledgement, the row retains the unknown-save status through
+Check. Only a conclusive receipt for that Check on the same link unlocks paste
+or removal; a queued snapshot is not a result. Disconnect retires the request
+but keeps the unknown outcome. Once reconnected, the user can Check again.
 The key never crosses the pipe or enters a file, log, command line or environment variable.
 Only keys connected inside Kumochi are used; live checks must read the same Kumochi-owned
 credential, never another app's key.

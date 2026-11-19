@@ -2,10 +2,12 @@ use gpui_kit::{
     AnyWindowHandle, AppContext as _, Entity, Render, TestAppContext, VisualTestContext,
     WindowOptions,
 };
-use kumochi_protocol::message::{Incarnation, KeyRemovalFailure, KeyStageId, KeyStagePlan};
+use kumochi_protocol::message::{
+    ClaudeCodeView, ConnectionsView, Incarnation, KeyRemovalFailure, KeyStageId, KeyStagePlan,
+};
 
 use super::*;
-use crate::link::Session;
+use crate::link::{Batch, LinkEvent, Session};
 use crate::presence::test_fixture;
 
 const SYNTHETIC: &str = "sk-ant-api-only-for-the-test-clipboard";
@@ -145,14 +147,115 @@ fn a_fresh_unconfirmed_view_warns_that_paste_can_replace_a_key(cx: &mut TestAppC
     assert!(visual.debug_bounds(warning).is_some());
 }
 
+fn expire_staged_save(key: &mut KeyPaste, old: KeyView) {
+    *key = KeyPaste::default();
+    key.receive(old, (old == KeyView::Ready).then_some(1));
+    let now = Instant::now();
+    let at = key
+        .begin(Some(Zeroizing::new(SYNTHETIC.into())), 7, now, |_| true)
+        .expect("begin");
+    let id = KeyStageId([4; 16]);
+    let write = key
+        .planned(
+            7,
+            &ControlToShell::AnthropicKeyStage {
+                request: at.request,
+                result: Ok(KeyStagePlan {
+                    id,
+                    len: u16::try_from(SYNTHETIC.len()).expect("bounded"),
+                }),
+            },
+            now,
+        )
+        .expect("stage plan")
+        .simulate_write(now);
+    key.written(&write, now, |op| {
+        assert_eq!(op, ConnectionOp::AnthropicKeyStaged { plan: id });
+        true
+    });
+    assert!(key.expire(at, at.deadline));
+}
+
+fn receive_key(
+    visual: &mut VisualTestContext,
+    owner: &Entity<Presence>,
+    view: KeyView,
+    revision: Option<u64>,
+) {
+    key_event(
+        visual,
+        owner,
+        LinkEvent::Connections {
+            generation: 7,
+            view: ConnectionsView {
+                anthropic: view,
+                anthropic_revision: revision,
+                claude_code: ClaudeCodeView::NotFound,
+            },
+        },
+    );
+}
+
+fn key_event(visual: &mut VisualTestContext, owner: &Entity<Presence>, event: LinkEvent) {
+    visual.update(|_, cx| {
+        owner.update(cx, |owner, cx| {
+            owner
+                .link_events(Batch::Plain(vec![event]), cx)
+                .expect("link event");
+        });
+    });
+}
+
+const UNKNOWN_SAVE: &str =
+    "anthropic-status:Couldn’t confirm the save. Check the key before pasting again.";
+
+fn assert_unknown_save(visual: &mut VisualTestContext, owner: &Entity<Presence>) {
+    visual.run_until_parked();
+    visual.update(|window, cx| {
+        window.draw(cx).clear(cx);
+        assert!(!owner.read(cx).settings.read(cx).key_paste.can_paste());
+    });
+    assert!(
+        visual.debug_bounds(UNKNOWN_SAVE).is_some(),
+        "an old snapshot is not the Check result"
+    );
+    for stale in [
+        "anthropic-status:No key saved",
+        "anthropic-status:Checking key",
+        "anthropic-status:Anthropic accepted the key",
+        "Key saved",
+        "anthropic-remove",
+    ] {
+        assert!(visual.debug_bounds(stale).is_none(), "{stale}");
+    }
+}
+
+fn click_recovery_check(
+    visual: &mut VisualTestContext,
+    controls: &async_channel::Receiver<ControlToBrain>,
+    request: u64,
+) {
+    click(visual, "anthropic-check");
+    assert_eq!(
+        controls.try_recv(),
+        Ok(ControlToBrain::Connection(
+            ConnectionOp::ReconcileAnthropicKey { request }
+        ))
+    );
+}
+
 #[gpui::test]
 fn a_lost_save_acknowledgement_replaces_the_old_status(cx: &mut TestAppContext) {
-    let (window, owner, _) = isolated_row(cx);
+    let (window, owner, controls) = isolated_row(cx);
     let mut visual = VisualTestContext::from_window(window, cx);
-    let unknown = "anthropic-status:Couldn’t confirm the save. Check the key before pasting again.";
-    for (old, old_status) in [
-        (KeyView::Missing, "anthropic-status:No key saved"),
+    for (old, reconciled, status) in [
         (
+            KeyView::Missing,
+            KeyView::Missing,
+            "anthropic-status:No key saved",
+        ),
+        (
+            KeyView::Ready,
             KeyView::Ready,
             "anthropic-status:Anthropic accepted the key",
         ),
@@ -160,44 +263,79 @@ fn a_lost_save_acknowledgement_replaces_the_old_status(cx: &mut TestAppContext) 
         visual.update(|_, cx| {
             owner.update(cx, |owner, cx| {
                 owner.settings.update(cx, |state, cx| {
-                    let key = &mut state.key_paste;
-                    *key = KeyPaste::default();
-                    key.receive(old, (old == KeyView::Ready).then_some(1));
-                    let now = Instant::now();
-                    let at = key
-                        .begin(Some(Zeroizing::new(SYNTHETIC.into())), 7, now, |_| true)
-                        .expect("begin");
-                    let id = KeyStageId([4; 16]);
-                    let write = key
-                        .planned(
-                            7,
-                            &ControlToShell::AnthropicKeyStage {
-                                request: at.request,
-                                result: Ok(KeyStagePlan {
-                                    id,
-                                    len: u16::try_from(SYNTHETIC.len()).expect("bounded"),
-                                }),
-                            },
-                            now,
-                        )
-                        .expect("stage plan")
-                        .simulate_write(now);
-                    key.written(&write, now, |op| {
-                        assert_eq!(op, ConnectionOp::AnthropicKeyStaged { plan: id });
-                        true
-                    });
-                    assert!(key.expire(at, at.deadline));
+                    expire_staged_save(&mut state.key_paste, old);
                     cx.notify();
                 });
             });
         });
+        assert_unknown_save(&mut visual, &owner);
+
+        click_recovery_check(&mut visual, &controls, 2);
+        assert_unknown_save(&mut visual, &owner);
+        assert!(visual.debug_bounds("anthropic-check").is_none());
+        for (view, revision) in [
+            (KeyView::Checking, None),
+            (KeyView::Missing, None),
+            (KeyView::Ready, Some(1)),
+        ] {
+            receive_key(&mut visual, &owner, view, revision);
+            assert_unknown_save(&mut visual, &owner);
+        }
+
+        receive_key(&mut visual, &owner, KeyView::Unconfirmed, Some(1));
+        let failed = ControlToShell::AnthropicKeyReconciled {
+            request: 2,
+            confirmed: false,
+        };
+        key_event(
+            &mut visual,
+            &owner,
+            LinkEvent::KeyStage {
+                generation: 7,
+                reply: failed,
+            },
+        );
+        assert_unknown_save(&mut visual, &owner);
+        click_recovery_check(&mut visual, &controls, 3);
+
+        receive_key(
+            &mut visual,
+            &owner,
+            reconciled,
+            (reconciled == KeyView::Ready).then_some(2),
+        );
+        let done = ControlToShell::AnthropicKeyReconciled {
+            request: 3,
+            confirmed: true,
+        };
+        key_event(
+            &mut visual,
+            &owner,
+            LinkEvent::KeyStage {
+                generation: 6,
+                reply: done.clone(),
+            },
+        );
+        assert_unknown_save(&mut visual, &owner);
+        key_event(
+            &mut visual,
+            &owner,
+            LinkEvent::KeyStage {
+                generation: 7,
+                reply: done,
+            },
+        );
         visual.run_until_parked();
-        visual.update(|window, cx| window.draw(cx).clear(cx));
-        assert!(visual.debug_bounds(unknown).is_some());
-        assert!(visual.debug_bounds(old_status).is_none());
-        assert!(visual.debug_bounds("Key saved").is_none());
-        assert!(visual.debug_bounds("anthropic-check").is_some());
-        assert!(visual.debug_bounds("anthropic-remove").is_none());
+        visual.update(|window, cx| {
+            window.draw(cx).clear(cx);
+            assert!(owner.read(cx).settings.read(cx).key_paste.can_paste());
+        });
+        assert!(visual.debug_bounds(UNKNOWN_SAVE).is_none());
+        assert!(visual.debug_bounds(status).is_some());
+        assert_eq!(
+            visual.debug_bounds("anthropic-remove").is_some(),
+            reconciled == KeyView::Ready
+        );
     }
 }
 
