@@ -67,7 +67,9 @@ owner keeps what the run has spent. Every key send of the run charges it before 
 foreground rounds, continuations, inline compactions and the job the run's end starts. Every key
 job is attributable, because the coordinator grants a job only for the run it names. A later run
 gets a fresh allowance, and an earlier run's late send gets none. The attempt after the last is
-refused as `Spent` without a connection, which ends the run with the existing failure text.
+refused as `Spent` without a connection. A refused foreground round ends the run with the
+existing failure text, a refused inline compaction fails it through the generic engine-failure
+path, and a refused background job leaves the run's `Done` as it was.
 
 Seventeen is a spending policy for a pay-per-use key, not a proof that every legitimate run fits.
 It is the allowance for an ordinary run at the coordinator's limits:
@@ -90,13 +92,12 @@ Some schedules can need more:
 - **A second inline compaction after a rebuild.** The one-per-round check holds only since the
   round's last normal admission.
 
-When the allowance runs out, a refused background job is skipped and the finished foreground run
-stays Done. A refused foreground send ends the run with the existing failure text. A skipped job
-is offered again at a later run's end. The title job reads the task's first ask while the task
-still has its first-words title, so a skipped title is asked for at the task's next Done.
-Compaction runs at every Done after the title job ends, or at once for Kumo, and its read still
-finds the uncovered backlog, so a skipped summary is tried again at a later Done. The process
-allowance still applies after this one.
+Nothing queues a retry of a skipped job. It is eligible again on a later successful run if the
+thread, route and job conditions still allow it: a later run must end `Done`, with no newer run
+current and the route ready. The title job asks while the task still has its first-words title,
+and compaction reads whatever backlog is still uncovered. Without such a run, a task can keep its
+first-words title and its history can stay unsummarized. The process allowance still applies
+after this one.
 
 The attempt accepts only `AnthropicConnect`, fixes `POST /v1/messages`, sensitive Bearer bytes
 and API version `2023-06-01`, and uses no proxy, redirect or fallback. Request bytes are wiped
