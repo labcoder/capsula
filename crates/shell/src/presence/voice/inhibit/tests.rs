@@ -864,7 +864,7 @@ fn an_esc_waiting_for_a_busy_owner_holds_the_resume_until_it_is_decided(cx: &mut
 
 #[gpui::test]
 fn a_release_before_the_owner_accepts_collection_is_a_cancel(cx: &mut TestAppContext) {
-    use crate::presence::screen_hold_tests::{luna, on, recognize, release, screen_ready};
+    use crate::presence::screen_hold_tests::{DOWN, luna, on, recognize, release, screen_ready};
     let ready = screen_ready(Some(on(&luna())), cx);
     let owner = &ready.owner;
     let (open, finish, started, samples) = source(owner, cx, None);
@@ -888,7 +888,7 @@ fn a_release_before_the_owner_accepts_collection_is_a_cancel(cx: &mut TestAppCon
             "not listening while collection is barred"
         );
     });
-    release(owner, 1, None, cx);
+    release(owner, 1, Some(DOWN), cx);
     cx.background_executor.advance_clock(super::RECHECK);
     finish.send(()).expect("drains");
     until(cx, |_| token.finished());
