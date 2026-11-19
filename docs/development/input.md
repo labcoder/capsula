@@ -628,7 +628,12 @@ with exit code 13 without showing the window. Physical Ready uses the original f
 unattended opener still refuses all queued input during arming; the refusal now records only
 the high-word category mask from `GetQueueStatus(QS_INPUT)`. There is no cursor restoration at
 activation. At session end the existing guarded restore moves only to a freshly verified owned
-point; if it skips the restore, it logs a fixed status.
+point, and only after a successful session and cleanup; otherwise it leaves the pointer where it
+is. Because the fixture starts clear of the cursor, the starting point is usually not owned, so
+the restore usually skips. Once a session exists, its `final_cursor_restore` line names the restore
+outcome (`failed` if the restore itself erred) and `pointer_left` says whether the session's own
+moves left the pointer away from where it started. Every gate session then ends with
+`final_cursor=x,y`, the pointer's position after the fixture closed, or `unread`.
 
 ## Voice hold authority
 

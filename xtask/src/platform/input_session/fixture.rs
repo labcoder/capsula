@@ -790,7 +790,7 @@ pub(super) fn frame_name([x, y]: [i32; 2]) -> &'static str {
     }
 }
 
-fn cursor_position() -> Result<POINT> {
+pub(crate) fn cursor_position() -> Result<POINT> {
     let mut cursor = POINT::default();
     // SAFETY: cursor is a writable output; this call doesn't move it.
     unsafe { GetCursorPos(&raw mut cursor) }?;

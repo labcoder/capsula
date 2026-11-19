@@ -251,7 +251,14 @@ fn session_run(
     trials: &[Trial],
 ) -> Result<()> {
     retained_run(args, |output, run| {
-        Images::build(run).and_then(|images| run_session(output, &images, opener, trials))
+        let result =
+            Images::build(run).and_then(|images| run_session(output, &images, opener, trials));
+        let cursor = native::cursor_position();
+        println!(
+            "final_cursor={}",
+            cursor.map_or_else(|_| "unread".to_owned(), |at| format!("{},{}", at.x, at.y))
+        );
+        result
     })
 }
 
@@ -305,13 +312,16 @@ fn run_session(
         let release = session.release_injected();
         let uncovered = session.uncover();
         let cursor = if result.is_ok() && release.is_ok() && uncovered.is_ok() {
-            session
-                .restore_cursor()
-                .map(|status| println!("final_cursor_restore={status}"))
+            session.restore_cursor()
         } else {
-            println!("final_cursor_restore=skipped_session_or_cleanup_failed");
-            Ok(())
+            Ok("skipped_session_or_cleanup_failed")
         };
+        println!(
+            "final_cursor_restore={} pointer_left={}",
+            cursor.as_ref().copied().unwrap_or("failed"),
+            session.pointer_left()
+        );
+        let cursor = cursor.map(|_| ());
         session::combine([release, uncovered, cursor])
     } else {
         Ok(())
