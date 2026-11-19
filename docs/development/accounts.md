@@ -3,14 +3,19 @@
 ## Anthropic API key
 
 The Settings → Accounts key row is wired but hidden until key chat is activated.
-Its Paste action consumes one string from the GPUI clipboard and rejects more
-than 2,048 raw bytes before retaining the paste. It does not write to the
-clipboard. A validated paste stays in a zeroizing buffer until the brain replies
+Its explicit Paste action uses a row-only Windows adapter off the UI thread.
+It reads one logical text value without reading non-text payloads, logging
+formats, or writing to the clipboard. The adapter bounds strict UTF-8 decoding
+to 2,048 raw bytes before trim; other platforms refuse the read. A validated
+paste stays in a zeroizing buffer until the brain replies
 with a one-use staging plan; only its trimmed byte length describes the key on the pipe.
 The shell-core writer puts chunks in Credential Manager at those authority-owned
 names in the background, then the shell sends `AnthropicKeyStaged { plan }`.
-Disconnect or the 30-second monotonic deadline prevents late replies or writes
-from triggering adoption. A queued writer will not start after the deadline, but
+One 30-second deadline starts at the click and includes the read, the write and
+the save reply. Disconnect or expiry discards the read and prevents late
+replies or writes from triggering adoption. One native clipboard read can be
+in flight; a timed-out read holds that slot until the OS call returns, with
+no retry or UI wait. A queued writer won't start after the deadline, but
 an already running OS write cannot be recalled. After Staged has been sent, a
 missing acknowledgement leaves the save unconfirmed, not failed. A save
 acknowledgement is separate from catalog verification.

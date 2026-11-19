@@ -4,14 +4,19 @@ use std::time::Instant;
 
 use gpui_kit::component::button::Button;
 use gpui_kit::component::{ActiveTheme as _, Disableable as _};
+#[cfg(test)]
+use gpui_kit::{ClipboardEntry, ClipboardItem};
 use gpui_kit::{
-    ClipboardEntry, ClipboardItem, Context, InteractiveElement as _, IntoElement,
-    ParentElement as _, Styled as _, Window, div,
+    Context, InteractiveElement as _, IntoElement, ParentElement as _, Styled as _, Window, div,
 };
 use kumochi_protocol::message::{
     ConnectionOp, ControlToBrain, ControlToShell, KeyRejection, KeyView,
 };
-use kumochi_shell_core::key_paste::{KeyPaste, PasteFailure, Removal};
+use kumochi_shell_core::key_paste::{ClipboardAttempt, KeyPaste, PasteFailure, Removal};
+use kumochi_shell_core::platform::clipboard::ClipboardRefusal;
+#[cfg(not(test))]
+use kumochi_shell_core::platform::clipboard::KeyClipboardRead;
+#[cfg(test)]
 use zeroize::Zeroizing;
 
 use super::SettingsView;
@@ -102,15 +107,39 @@ impl SettingsView {
     }
 
     fn paste_key(&self, cx: &mut Context<'_, Self>) {
-        if !self.model.read(cx).key_paste.can_paste() {
+        let Ok(Some(pending)) = self.owner.update(cx, |owner, cx| owner.start_key_paste(cx)) else {
             return;
-        }
-        // shortcut: GPUI materializes the clipboard and may log an unsupported format's name
-        // before we bound retained text; revisit with NativeShell.
-        let text = clipboard_text(cx.read_from_clipboard());
-        let _gone = self
-            .owner
-            .update(cx, |owner, cx| owner.begin_key_paste(text, cx));
+        };
+        let at = pending.attempt();
+        #[cfg(not(test))]
+        let read = KeyClipboardRead::capture();
+        #[cfg(test)]
+        let read = clipboard_text(cx.read_from_clipboard()).ok_or(ClipboardRefusal::Invalid);
+        let worker = cx.background_executor().spawn(async move {
+            if !pending.is_current() || Instant::now() >= at.deadline {
+                return Err(ClipboardRefusal::Unavailable);
+            }
+            #[cfg(not(test))]
+            {
+                read?.read(at.deadline, || pending.is_current())
+            }
+            #[cfg(test)]
+            {
+                read
+            }
+        });
+        let owner = self.owner.clone();
+        cx.spawn(async move |_, cx| {
+            let result = worker.await;
+            let _gone = owner.update(cx, |owner, cx| {
+                owner.with_key_session(cx, |state, session, send| {
+                    if session == at.session {
+                        state.clipboard_read(at, result, Instant::now(), send);
+                    }
+                });
+            });
+        })
+        .detach();
     }
 
     fn confirm_remove_key(&self, window: &mut Window, cx: &mut Context<'_, Self>) {
@@ -150,6 +179,7 @@ impl SettingsView {
     }
 }
 
+#[cfg(test)]
 fn clipboard_text(item: Option<ClipboardItem>) -> Option<Zeroizing<String>> {
     let item = item?;
     let single = item.entries().len() == 1;
@@ -232,27 +262,27 @@ impl Presence {
         }))
     }
 
-    fn begin_key_paste(&self, text: Option<Zeroizing<String>>, cx: &mut Context<'_, Self>) {
-        let at = self
-            .with_key_session(cx, |state, session, send| {
-                state.begin(text, session, Instant::now(), send)
+    fn start_key_paste(&self, cx: &mut Context<'_, Self>) -> Option<ClipboardAttempt> {
+        let pending = self
+            .with_key_session(cx, |state, session, _| {
+                state.start_read(session, Instant::now())
             })
-            .flatten();
-        if let Some(at) = at {
-            cx.spawn(async move |owner, cx| {
-                cx.background_executor()
-                    .timer(at.deadline.saturating_duration_since(Instant::now()))
-                    .await;
-                let _gone = owner.update(cx, |owner, cx| {
-                    owner.settings.update(cx, |state, cx| {
-                        if state.key_paste.expire(at, Instant::now()) {
-                            cx.notify();
-                        }
-                    });
+            .flatten()?;
+        let at = pending.attempt();
+        cx.spawn(async move |owner, cx| {
+            cx.background_executor()
+                .timer(at.deadline.saturating_duration_since(Instant::now()))
+                .await;
+            let _gone = owner.update(cx, |owner, cx| {
+                owner.settings.update(cx, |state, cx| {
+                    if state.key_paste.expire(at, Instant::now()) {
+                        cx.notify();
+                    }
                 });
-            })
-            .detach();
-        }
+            });
+        })
+        .detach();
+        Some(pending)
     }
 
     pub(in crate::presence) fn key_reply(

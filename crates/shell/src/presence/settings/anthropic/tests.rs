@@ -117,7 +117,7 @@ fn the_row_pastes_only_from_the_test_clipboard_and_never_writes_it(cx: &mut Test
         controls.try_recv(),
         Ok(ControlToBrain::Connection(
             ConnectionOp::BeginAnthropicKeyStage {
-                request: 1,
+                request: 2,
                 len: u16::try_from(SYNTHETIC.len()).expect("bounded"),
             }
         ))

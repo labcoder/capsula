@@ -1,5 +1,6 @@
 //! Win32 implementations of the core's platform functions.
 
+pub(super) mod clipboard;
 mod credential;
 mod folders;
 pub(super) mod microphone;
