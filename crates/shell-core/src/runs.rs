@@ -45,7 +45,8 @@ pub enum RunDisposition {
 }
 
 struct PendingStop {
-    thread: ThreadId,
+    /// `None` until the run's first `RunState`, for a run the presenter showed first.
+    thread: Option<ThreadId>,
     control_closed: bool,
     data_ended: bool,
 }
@@ -457,7 +458,7 @@ impl Runs {
             self.pending_stops.insert(
                 tail.run,
                 PendingStop {
-                    thread: tail.thread,
+                    thread: Some(tail.thread),
                     control_closed: tail.control_closed,
                     data_ended: tail.data_ended,
                 },
@@ -485,20 +486,29 @@ impl Runs {
     }
 
     /// A recognized hold talking over `run`: fences that run alone, while it is still the
-    /// stoppable one, and returns its `Stop`. Until both its endings are in, it stays stopped,
-    /// so a late scene commit of it is skipped. Unlike [`Runs::stop`], turns and the hold stay.
+    /// stoppable one or one whose first `RunState` hasn't come yet, as when the presenter showed
+    /// it first, and returns its `Stop`. Until both its endings are in, it stays stopped, so a
+    /// late scene commit or `RunState` of it shows nothing. Unlike [`Runs::stop`], turns and the
+    /// hold stay.
     pub fn fence_run(&mut self, run: RunId) -> Option<ControlToBrain> {
-        let live = self.live.filter(|_| self.stoppable() == Some(run))?;
-        self.fence = run;
-        if !live.state_ended || !live.data_ended {
-            self.pending_stops.insert(
-                run,
-                PendingStop {
-                    thread: live.thread,
-                    control_closed: live.state_ended,
-                    data_ended: live.data_ended,
-                },
-            );
+        let stop = if let Some(live) = self.live.filter(|_| self.stoppable() == Some(run)) {
+            self.fence = run;
+            (!live.state_ended || !live.data_ended).then_some(PendingStop {
+                thread: Some(live.thread),
+                control_closed: live.state_ended,
+                data_ended: live.data_ended,
+            })
+        } else if run > self.answered && run > self.fence {
+            Some(PendingStop {
+                thread: None,
+                control_closed: false,
+                data_ended: false,
+            })
+        } else {
+            return None;
+        };
+        if let Some(stop) = stop {
+            self.pending_stops.insert(run, stop);
         }
         Some(ControlToBrain::Stop {
             run,
@@ -677,7 +687,7 @@ impl Runs {
             return 0;
         }
         self.pending_stops.retain(|_, pending| {
-            pending.control_closed |= pending.thread == thread;
+            pending.control_closed |= pending.thread == Some(thread);
             !pending.control_closed || !pending.data_ended
         });
         if self.pending_stops.is_empty() {
@@ -929,6 +939,9 @@ impl Runs {
                     self.recovery = Some((run, submitted));
                 }
             }
+        }
+        if let Some(pending) = self.pending_stops.get_mut(&run) {
+            pending.thread.get_or_insert(thread);
         }
         if matches!(phase, Phase::Done | Phase::Interrupted | Phase::Failed)
             && let Some(pending) = self.pending_stops.get_mut(&run)

@@ -408,3 +408,153 @@ fn an_exhausted_stop_refuses_the_old_session_at_once_and_a_replacement_works(
         assert!(owner.link.send_control(&replacement, brain_stop(8)));
     });
 }
+
+/// The pipe bytes of each step commit [`scene_step`] delivers.
+const STEP_BYTES: u32 = 100;
+
+/// Scene `scene` begins and run `run` commits its first step to it, as the data reader delivers
+/// them, whether or not a `RunState` of that run was applied.
+fn scene_step(owner: &Entity<Presence>, run: u64, scene: u64, cx: &mut TestAppContext) {
+    use kumochi_protocol::message::{DataToShell, SceneHeader, SceneId};
+    use kumochi_scene::{Record, deferred::Deferred, parse_record};
+    let begin =
+        format!(r#"{{"begin":{{"v":1,"scene":"s{scene}","surface":"overlay","alt":"test"}}}}"#);
+    let Ok(Record::Begin(begin)) = parse_record(begin.as_bytes()) else {
+        panic!("a begin record");
+    };
+    let step =
+        br#"{"step":{"id":"s","put":[{"shape":{"id":"box","kind":"rect","box":[0,0,20,20]}}]}}"#;
+    let Ok(Record::Step(step)) = parse_record(step) else {
+        panic!("a step record");
+    };
+    let frames = [
+        (
+            0,
+            DataToShell::SceneBegin {
+                scene: SceneId(scene),
+                header: SceneHeader {
+                    begin,
+                    layout_version: 2,
+                },
+            },
+        ),
+        (
+            STEP_BYTES,
+            DataToShell::SceneStepCommit {
+                run: RunId(run),
+                scene: SceneId(scene),
+                index: 0,
+                step,
+            },
+        ),
+    ];
+    for (bytes, frame) in frames {
+        let event = crate::link::LinkEvent::SceneData {
+            generation: 1,
+            frame: Deferred::new(frame, bytes as usize),
+            bytes,
+        };
+        owner
+            .update(cx, |owner, cx| {
+                owner.link_events(crate::link::Batch::Plain(vec![event]), cx)
+            })
+            .expect("received");
+    }
+}
+
+#[gpui::test]
+fn recognition_fences_a_spoken_run_the_presenter_saw_before_its_run_state(cx: &mut TestAppContext) {
+    kumochi_scene::deferred::start().expect("the dropper starts");
+    let (owner, _data, controls) = ready(cx);
+    let _kept = owner.update(cx, |owner, _| {
+        owner.presenter.connected(1);
+        owner
+            .presenter
+            .described(
+                1,
+                &kumochi_scene::text::Bounded::default(),
+                std::time::Instant::now(),
+            )
+            .expect("empty membership");
+        let (commands, tail) = owner.link.output().scripted(1);
+        tail.publish(&Snapshot {
+            spoken: 6,
+            ..SPOKEN
+        });
+        (commands, tail)
+    });
+    scene_step(&owner, 6, 1, cx);
+    owner.update(cx, |owner, _| {
+        assert_eq!(owner.runs.stoppable(), None, "no RunState of run 6 yet");
+        assert_eq!(
+            owner.moving_run(std::time::Instant::now()),
+            Some(RunId(6)),
+            "the presenter's"
+        );
+    });
+    warm(&owner, 1, cx);
+    owner.update(cx, |owner, _| {
+        assert_eq!(
+            owner.voice.spoken,
+            Some((GestureId(1), 1, RunId(6))),
+            "captured"
+        );
+    });
+    hold(&owner, 1, cx);
+    cx.run_until_parked();
+    std::iter::from_fn(|| controls.try_recv().ok()).for_each(drop);
+    let granted = owner.update(cx, |owner, _| {
+        owner.session.as_ref().expect("connected").granted()
+    });
+    scene_step(&owner, 6, 2, cx);
+    cx.run_until_parked();
+    owner.update(cx, |owner, _| {
+        assert_eq!(
+            owner.runs.owned_disposition(RunId(6)),
+            crate::runs::RunDisposition::Stopped
+        );
+        assert_eq!(
+            owner.presenter.stoppable_run(),
+            None,
+            "late run 6 is skipped"
+        );
+        let applied = owner
+            .runs
+            .apply_state(RunId(6), ThreadId(1), Phase::Answering, None);
+        assert!(!applied.visible, "its late RunState shows nothing");
+    });
+    let told: Vec<_> = std::iter::from_fn(|| controls.try_recv().ok()).collect();
+    assert_eq!(
+        told,
+        [ControlToBrain::StepFailed {
+            run: RunId(6),
+            scene: kumochi_protocol::message::SceneId(2),
+            index: 0,
+            reason: kumochi_protocol::message::SceneFailure::Cancelled,
+            cut: kumochi_scene::StopCut {
+                activated: 0,
+                revealed: kumochi_scene::text::Bounded::default(),
+            },
+        }],
+        "skipped"
+    );
+    owner.update(cx, |owner, _| {
+        assert_eq!(
+            owner.session.as_ref().expect("connected").granted() - granted,
+            STEP_BYTES,
+            "and credited"
+        );
+    });
+    scene_step(&owner, 7, 3, cx);
+    owner.update(cx, |owner, _| {
+        assert_eq!(
+            owner.runs.owned_disposition(RunId(7)),
+            crate::runs::RunDisposition::Live
+        );
+        assert_eq!(
+            owner.presenter.stoppable_run(),
+            Some(RunId(7)),
+            "run 7 stays eligible"
+        );
+    });
+}
