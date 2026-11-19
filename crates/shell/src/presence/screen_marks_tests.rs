@@ -16,7 +16,7 @@ use kumochi_scene::{
     record::ScreenDisplay, screen, text::Bounded,
 };
 use kumochi_shell_core::platform::screen_watch::{Changed, Sources};
-use kumochi_shell_core::speaker::Command;
+use kumochi_shell_core::speaker::{Command, Snapshot};
 
 use super::super::Presence;
 use super::super::overlay_visibility::Visibility;
@@ -324,6 +324,81 @@ fn the_watch_starts_before_the_release_is_written_and_an_unwritten_release_drops
     watching.ready.owner.read_with(cx, |owner, _| {
         assert!(owner.voice.watched.is_none());
     });
+}
+
+#[gpui::test]
+fn talk_escape_refusal_still_stops_the_spoken_run_in_order(cx: &mut TestAppContext) {
+    let watching = watch(true, cx);
+    let owner = &watching.ready.owner;
+    state(&watching, RUN, Phase::Answering, None, cx);
+    let controls = watching.ready.controls.clone();
+    let (sent, stopped) = std::sync::mpsc::channel();
+    let mic_starts = Rc::new(Cell::new(0));
+    let starts = Rc::clone(&mic_starts);
+    let (_commands, _tail) = owner.update(cx, |owner, _| {
+        assert_eq!(owner.runs.stoppable(), Some(RunId(RUN)));
+        let (commands, tail) = owner.link.output().scripted(1);
+        tail.publish(&Snapshot {
+            exposed: 480,
+            played: 0,
+            flight: 0,
+            quiet: 0,
+            flags: 0,
+            spoken: RUN,
+        });
+        owner.link.output().witness(Box::new(move |command| {
+            if let Command::Stop(run) = command {
+                let prior = std::iter::from_fn(|| controls.try_recv().ok()).collect::<Vec<_>>();
+                let _seen = sent.send((prior, *run));
+            }
+        }));
+        owner.native.refuse_talk_escape_for_test();
+        owner.voice.start = Some(Box::new(move |_, _| {
+            starts.set(starts.get() + 1);
+            Err(crate::platform::microphone::MicError::Unavailable)
+        }));
+        (commands, tail)
+    });
+    let deliver = native(owner, cx);
+    let at = Instant::now();
+    chord(&deliver, Edge::Down, at);
+    deliver(Event::Deadline, after(at, 301));
+    cx.run_until_parked();
+    status(owner, 1, 1, HoldStatus::Admitted, cx);
+    chord(&deliver, Edge::Up, at + Duration::from_millis(302));
+    cx.run_until_parked();
+
+    let [(before_speaker, run)]: [_; 1] = stopped
+        .try_iter()
+        .collect::<Vec<_>>()
+        .try_into()
+        .expect("exactly one speaker stop");
+    assert_eq!(run, RunId(RUN));
+    assert_eq!(
+        before_speaker
+            .iter()
+            .filter_map(|message| match message {
+                ControlToBrain::Stop { run, .. } => Some(*run),
+                _ => None,
+            })
+            .collect::<Vec<_>>(),
+        [RunId(RUN)],
+        "the brain stop was already queued when the speaker stopped"
+    );
+    assert_eq!(mic_starts.get(), 0);
+    let events = before_speaker
+        .into_iter()
+        .map(Told::Sent)
+        .chain(told(&watching));
+    assert!(events.into_iter().all(|message| !matches!(
+        message,
+        Told::Start(..)
+            | Told::Sent(
+                ControlToBrain::VoiceHoldRecognized { .. }
+                    | ControlToBrain::ScreenHoldRecognized { .. }
+                    | ControlToBrain::ScreenRelease { .. }
+            )
+    )));
 }
 
 #[gpui::test]
