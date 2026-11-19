@@ -61,6 +61,9 @@ The caller supplies its validated body, key, admission future and shared run/liv
 After admission, the transport reserves the run budget then the live budget before connecting.
 A live-cap refusal can conservatively spend the run reservation; nothing refunds a failed,
 cancelled or uncertain attempt. Retrying requires another admission and consumes another unit.
+On the key route the run budget is `Live`'s own and unlimited by default, so the eight
+foreground rounds and sixteen tool starts are not a cap on HTTP attempts per run; an attempt is
+charged only against a configured process allowance, inline and job sends included.
 
 The attempt accepts only `AnthropicConnect`, fixes `POST /v1/messages`, sensitive Bearer bytes
 and API version `2023-06-01`, and uses no proxy, redirect or fallback. Request bytes are wiped

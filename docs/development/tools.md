@@ -405,8 +405,10 @@ way: its start, records, completion and result carry the round's key, so a later
 drawing under a reused id is a new drawing with its own result, while the same round's id
 still joins the call it started. The same model offer and
 retry argument checks apply, and each accepted model call start still charges
-the run's 16-call budget. The durable ledger stores a fixed-size digest of round
-and id without changing its schema; the typed round keeps the provider's id for replay.
+the run's 16-call budget. The sixteen tool starts and eight foreground rounds are not a cap on
+HTTP attempts per run: `Live`'s own budget is unlimited by default, and an attempt is charged
+only against a configured process allowance, inline and job sends included.
+The durable ledger stores a fixed-size digest of round and id without changing its schema; the typed round keeps the provider's id for replay.
 
 ## Results
 
