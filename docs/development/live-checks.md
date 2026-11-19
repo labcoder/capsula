@@ -581,9 +581,9 @@ The check watches the brain's pipe tap, which keeps only content-free control fr
 - a run that fails, is interrupted or ends with an error, outside the step that expects the refusal;
 - a second run in a step, a run in another thread, or a refused submit outside its step;
 - an `Error`, `CaptureDone`, `HoldScreen`, `ScreenHoldRecognized` or `BuildMismatch` frame;
-- the brain or the shell exiting, or any other product process starting, during a step; a step that takes more than 10 minutes; or the shell still running 60 seconds after its window is closed.
+- the brain or the shell exiting during a step, or any product process starting that is neither of them nor a worker of that brain; a step that takes more than 10 minutes; any such process starting while the launch quits; or the launch still running 60 seconds after the shell's window is closed.
 
-The process checks are for diagnosis and abort, not for the allowance, which holds without them. During a step the check looks at the running product processes every 250 ms. A process that starts and exits between two looks isn't seen. After the window is closed, the check waits up to 60 seconds for every `kumochi.exe` and `kumochid.exe` to exit without checking which ones are its own, so a replacement that starts and is closed in that minute isn't reported either. A replacement this run started can't send a key request, because its slice is zero.
+The process checks are for diagnosis and abort, not for the allowance, which holds without them. The brain starts its screen and speech workers from its own executable, so each runs as `kumochid.exe` with the brain as its parent; the check accepts those, one per role at most, and nothing else. A worker has no key route. During a step the check looks at the running product processes every 250 ms. A process that starts and exits between two looks isn't seen. After the window is closed, the check waits up to 60 seconds for the shell, the brain and its workers to exit, and stops at once if any other product process appears. A replacement this run started can't send a key request, because its slice is zero.
 
 ### What it can't see
 

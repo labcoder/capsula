@@ -256,17 +256,28 @@ fn clean(exe: &Path, folders: &Folders) -> Command {
     command
 }
 
-/// Whether `running` holds exactly this launch's brain and shell besides `me`.
+/// The brain's worker roles: every role but the shell's and the brain's own.
+const WORKERS: usize = crate::session::ROLES.len() - 2;
+
+/// Whether `running` holds this launch's brain and shell, `[brain, shell]`, and besides `me`
+/// nothing [`no_strangers`] refuses.
 fn only_ours(running: &[platform::Entry], me: u32, ours: [u32; 2]) -> bool {
-    let mut others: Vec<u32> = running
-        .iter()
-        .map(|entry| entry.pid)
-        .filter(|&pid| pid != me)
-        .collect();
-    others.sort_unstable();
-    let mut ours = ours;
-    ours.sort_unstable();
-    others == ours
+    ours.iter()
+        .all(|&pid| running.iter().any(|entry| entry.pid == pid))
+        && no_strangers(running, me, ours)
+}
+
+/// Whether every product process in `running` besides `me` is this launch's brain or shell, or a
+/// worker of that brain. The brain starts its screen and speech workers from its own executable
+/// and nothing else under that name, so a worker is a child of the brain under the brain's name,
+/// one per role at most.
+fn no_strangers(running: &[platform::Entry], me: u32, [brain, shell]: [u32; 2]) -> bool {
+    let worker = |entry: &&platform::Entry| !entry.shell && entry.parent == brain;
+    running.iter().filter(worker).count() <= WORKERS
+        && running
+            .iter()
+            .filter(|entry| !worker(entry))
+            .all(|entry| [me, brain, shell].contains(&entry.pid))
 }
 
 /// Where the ledger lives: beside the gate's run lock, so cleaning or moving build output can't
@@ -336,21 +347,31 @@ fn supervise(mut brain: Command, mut shell: Command, tap: &Path, steps: &[Step])
         ]);
     }
     platform::close_shell_window(&mut child).context("closing the gate shell")?;
+    let me = std::process::id();
     let deadline = Instant::now() + QUIT;
-    while !platform::processes()?
-        .iter()
-        .all(|entry| entry.pid == std::process::id())
-    {
-        if Instant::now() >= deadline {
-            return crate::session::combine([
-                Err(anyhow!(
-                    "the gate shell didn't exit in {QUIT:?} after its window closed; it was ended"
-                )),
-                crate::live::end(&mut child),
-                crate::live::end(&mut brain),
-            ]);
+    loop {
+        let running = platform::processes()?;
+        if running.iter().all(|entry| entry.pid == me) {
+            break;
         }
-        thread::sleep(POLL);
+        let error = if !no_strangers(&running, me, ours) {
+            anyhow!(
+                "another product process started while the launch quit; the shell and brain were ended"
+            )
+        } else if Instant::now() >= deadline {
+            anyhow!(
+                "the launch didn't exit in {QUIT:?} after the shell's window closed; the shell and \
+                 brain were ended"
+            )
+        } else {
+            thread::sleep(POLL);
+            continue;
+        };
+        return crate::session::combine([
+            Err(error),
+            crate::live::end(&mut child),
+            crate::live::end(&mut brain),
+        ]);
     }
     let after = &read(tap)?[cursor..];
     ensure!(
@@ -382,8 +403,8 @@ fn watch(
     loop {
         ensure!(
             only_ours(&platform::processes()?, std::process::id(), ours),
-            "the gate brain or shell exited, or another product process started; nothing it starts \
-             can send on the key route, and the check stops"
+            "the gate brain or shell exited, or a product process other than them and the brain's \
+             workers started; nothing it starts can send on the key route, and the check stops"
         );
         let seen = read(tap)?;
         while let Some(event) = seen.get(*cursor) {
@@ -698,6 +719,30 @@ mod tests {
             me,
             ours
         ));
+    }
+
+    /// While a launch quits, its brain, shell and workers may still be running in any mix, but
+    /// nothing else may start.
+    #[test]
+    fn a_quitting_launch_leaves_only_its_own_processes() {
+        let (me, ours) = (1, [10, 20]);
+        assert!(no_strangers(&entries(&[(1, 0, false)]), me, ours));
+        assert!(
+            no_strangers(
+                &entries(&[(1, 0, false), (30, 10, false), (40, 10, false)]),
+                me,
+                ours
+            ),
+            "the workers outliving the brain for a moment"
+        );
+        assert!(
+            !no_strangers(&entries(&[(1, 0, false), (30, 20, false)]), me, ours),
+            "a brain the shell started"
+        );
+        assert!(
+            !no_strangers(&entries(&[(1, 0, false), (30, 10, true)]), me, ours),
+            "a shell the brain relaunched"
+        );
     }
 
     #[test]
