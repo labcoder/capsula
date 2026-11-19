@@ -1248,6 +1248,45 @@ fn a_release_s_hide_opens_the_next_host_only_after_its_stamp(cx: &mut gpui_kit::
 }
 
 #[gpui::test]
+fn a_line_s_hide_leaves_no_overlay_window_behind(cx: &mut gpui_kit::TestAppContext) {
+    use crate::presence::overlay_visibility::Visibility;
+    use crate::presence::screen_hold_tests::{
+        detached, held, luna, on, release, screen_ready, tick,
+    };
+    use kumochi_protocol::geometry::PhysicalPoint;
+    use kumochi_protocol::message::ControlToBrain;
+
+    let at = PhysicalPoint([900, 320]);
+    let ready = screen_ready(Some(on(&luna())), cx);
+    let shown = detached(&ready, cx);
+    ready.owner.update(cx, |owner, _| {
+        owner.presenter.frames().borrow_mut().shown = true;
+        owner.overlay = Visibility::Shown(shown);
+        owner.counter_fixture = Some(Rc::new(|| 9_001));
+    });
+    held(&ready, 1, cx);
+    tick(at, cx);
+    // Only the hide is scripted: opening a window would ask the host to configure it.
+    let script = HostGuard::install(&[Step(Operation::Hide, Outcome::Success)]);
+    release(&ready.owner, 1, Some(at), cx);
+    cx.run_until_parked();
+    script.finish();
+    assert!(matches!(
+        ready.controls.try_recv(),
+        Ok(ControlToBrain::ScreenRelease {
+            excluded_qpc: 9_001,
+            ..
+        })
+    ));
+    ready.owner.read_with(cx, |owner, _| {
+        assert!(
+            matches!(owner.overlay, Visibility::Closed),
+            "an idle presence holds no overlay window; the next show opens one"
+        );
+    });
+}
+
+#[gpui::test]
 fn an_unpainted_static_successor_sleeps_until_the_original_expiry(
     cx: &mut gpui_kit::TestAppContext,
 ) {
