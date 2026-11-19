@@ -503,11 +503,10 @@ fn the_line_follows_the_pointer_and_one_release_takes_the_lease_its_stamp_and_th
     assert_eq!(ready.fixture.borrow().affinities(), COVERED);
     assert_eq!(line(&ready, cx), None);
 
-    // The gesture asks once: a second delivery of the keys coming up ends the hold as a
-    // cancel, with no second lease and no second release.
+    // The gesture asks once: a duplicate release neither cancels the first nor takes a lease.
     release(&ready.owner, 1, Some(ACROSS), cx);
     tick(ORIGIN, cx);
-    assert_eq!(sent(&ready), stopped(1));
+    assert_eq!(sent(&ready), []);
     assert_eq!(sampled(&ready, cx), None);
     assert_eq!(lease(&ready, cx), (1, true));
 }

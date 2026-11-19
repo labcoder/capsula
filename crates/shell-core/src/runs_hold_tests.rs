@@ -624,7 +624,7 @@ fn a_hold_refused_its_lease_says_the_screen_wasnt_ready_until_it_ends() {
     assert_eq!(runs.hold_screen_line(), None);
     recognized(&mut runs, 1);
     runs.hold_screen_refused(GestureId(2));
-    assert_eq!(runs.hold_screen_line(), Some(ScreenLine::WillSee));
+    assert_eq!(runs.hold_screen_line(), None);
     runs.hold_screen_refused(GestureId(1));
     let line = Some(ScreenLine::NotIncluded(ScreenClass::NotReady));
     assert_eq!(runs.hold_screen_line(), line);
