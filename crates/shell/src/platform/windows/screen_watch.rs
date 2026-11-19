@@ -19,7 +19,7 @@ use windows::Win32::System::Threading::GetCurrentProcessId;
 use windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
 
 use super::presence::{PresenceEvent, process_of, send};
-use crate::input::{Edge, Event, Key, TalkHeld};
+use crate::input::{Edge, Event, PhysicalKey, TalkHeld};
 
 mod sources;
 
@@ -50,35 +50,21 @@ impl Ui {
         }
     }
 
-    fn held(&mut self, key: Key) -> Option<&mut bool> {
-        match key {
-            Key::LeftControl => Some(&mut self.held.control),
-            Key::LeftAlt => Some(&mut self.held.alt),
-            Key::Escape(_) | Key::Other(_) => None,
-        }
-    }
-
     /// One keyboard or lifecycle event, as the adapter reduced it: a talk key or another key,
     /// down or up, or a reset. `foreign` says whether the window in front is another
     /// process's. A key going down there counts, unless it is a repeat of a talk key the
     /// released hold still had down.
-    fn key(&mut self, event: Event, foreign: impl FnOnce() -> bool) {
+    fn key(&mut self, event: Event, modifier: Option<PhysicalKey>, foreign: impl FnOnce() -> bool) {
         match event {
             // Before anything is asked about the window in front, so a talk key that comes up
             // over Kumochi leaves no stale bit.
-            Event::Key {
-                key,
-                edge: Edge::Up,
-            } => {
-                if let Some(held) = self.held(key) {
-                    *held = false;
+            Event::Key { edge: Edge::Up, .. } => {
+                if let Some(id) = modifier {
+                    self.held.release(id);
                 }
             }
-            Event::Key {
-                key,
-                edge: Edge::Down,
-            } => {
-                let repeat = self.held(key).is_some_and(|held| *held);
+            Event::Key { edge: Edge::Down, .. } => {
+                let repeat = modifier.is_some_and(|id| self.held.contains(id));
                 if !repeat && self.armed.is_some() && foreign() {
                     self.change();
                 }
@@ -94,9 +80,9 @@ impl Ui {
 }
 
 /// A keyboard or lifecycle event the proxy heard, already reduced by the keyboard adapter.
-pub(super) fn heard(event: Event) {
+pub(super) fn heard(event: Event, modifier: Option<PhysicalKey>) {
     UI.with_borrow_mut(|ui| {
-        ui.key(event, || {
+        ui.key(event, modifier, || {
             // SAFETY: a plain query with no arguments.
             let front = unsafe { GetForegroundWindow() };
             foreign(front)
@@ -107,7 +93,16 @@ pub(super) fn heard(event: Event) {
 /// `heard`, with another process's window in front.
 #[cfg(test)]
 fn heard_for_test(event: Event) {
-    UI.with_borrow_mut(|ui| ui.key(event, || true));
+    UI.with_borrow_mut(|ui| ui.key(event, fixture_modifier(event), || true));
+}
+
+#[cfg(test)]
+fn fixture_modifier(event: Event) -> Option<PhysicalKey> {
+    match event {
+        Event::Key { key: crate::input::Key::LeftControl, .. } => PhysicalKey::new(0x1D),
+        Event::Key { key: crate::input::Key::LeftAlt, .. } => PhysicalKey::new(0x38),
+        _ => None,
+    }
 }
 
 /// The display or its scaling changed, or an input record couldn't be read: an answer a
@@ -142,8 +137,8 @@ mod tests {
     use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
     use windows::Win32::UI::WindowsAndMessaging::{WM_INPUT, WM_WTSSESSION_CHANGE};
 
-    use super::{PresenceEvent, UI, arm, changed, disarm};
-    use crate::input::{Edge, Event, Key, TalkHeld};
+    use super::{PresenceEvent, UI, arm, changed, disarm, fixture_modifier, heard_for_test};
+    use crate::input::{Edge, Event, Key, PhysicalKey, TalkHeld};
 
     const OTHER: Key = Key::Other(crate::input::PhysicalKey::new(0x1E).unwrap());
 
@@ -156,7 +151,7 @@ mod tests {
 
     /// Hears one key with another app's window in front.
     fn key(key: Key, edge: Edge) {
-        UI.with_borrow_mut(|ui| ui.key(Event::Key { key, edge }, || true));
+        heard_for_test(Event::Key { key, edge });
     }
 
     /// The wakes queued so far, and whether the bit is set. The bit is asked by setting it,
@@ -175,16 +170,16 @@ mod tests {
         for (held, key_held, key_free) in [
             (
                 TalkHeld {
-                    control: true,
-                    alt: false,
+                    control: crate::input::PhysicalKey::new(0x1D),
+                    alt: None,
                 },
                 Key::LeftControl,
                 Key::LeftAlt,
             ),
             (
                 TalkHeld {
-                    control: false,
-                    alt: true,
+                    control: None,
+                    alt: crate::input::PhysicalKey::new(0x38),
                 },
                 Key::LeftAlt,
                 Key::LeftControl,
@@ -209,19 +204,14 @@ mod tests {
     #[test]
     fn a_talk_key_that_comes_up_over_kumochi_leaves_no_stale_bit() {
         let (bit, wakes) = watch(TalkHeld {
-            control: true,
-            alt: true,
+            control: crate::input::PhysicalKey::new(0x1D),
+            alt: crate::input::PhysicalKey::new(0x38),
         });
         // Kumochi is in front for both key-ups, which is never asked.
         UI.with_borrow_mut(|ui| {
             for key in [Key::LeftAlt, Key::LeftControl] {
-                ui.key(
-                    Event::Key {
-                        key,
-                        edge: Edge::Up,
-                    },
-                    || panic!("a key-up doesn't ask what is in front"),
-                );
+                let event = Event::Key { key, edge: Edge::Up };
+                ui.key(event, fixture_modifier(event), || panic!("a key-up doesn't ask what is in front"));
             }
         });
         assert_eq!(wakes.len(), 0);
@@ -238,7 +228,7 @@ mod tests {
             key: OTHER,
             edge: Edge::Down,
         };
-        UI.with_borrow_mut(|ui| ui.key(typed, || false));
+        UI.with_borrow_mut(|ui| ui.key(typed, None, || false));
         key(OTHER, Edge::Up);
         assert_eq!(wakes.len(), 0, "typed into Kumochi, and a key-up elsewhere");
         key(OTHER, Edge::Down);
@@ -251,10 +241,10 @@ mod tests {
     #[test]
     fn a_reset_and_a_display_change_count_whatever_is_in_front() {
         let (bit, wakes) = watch(TalkHeld {
-            control: true,
-            alt: false,
+            control: crate::input::PhysicalKey::new(0x1D),
+            alt: None,
         });
-        UI.with_borrow_mut(|ui| ui.key(Event::Reset, || panic!("a reset asks nothing")));
+        UI.with_borrow_mut(|ui| ui.key(Event::Reset, None, || panic!("a reset asks nothing")));
         assert_eq!(seen(&bit, &wakes), (1, true));
 
         // The reset also gave the held key back: its next press is a fresh one.
@@ -267,8 +257,8 @@ mod tests {
         let (bit, wakes) = watch(TalkHeld::default());
         changed();
         assert_eq!(seen(&bit, &wakes), (1, true));
-        UI.with_borrow_mut(|ui| ui.key(Event::Deadline, || panic!("not a key")));
-        UI.with_borrow_mut(|ui| ui.key(Event::Escape, || panic!("not a key")));
+        UI.with_borrow_mut(|ui| ui.key(Event::Deadline, None, || panic!("not a key")));
+        UI.with_borrow_mut(|ui| ui.key(Event::Escape, None, || panic!("not a key")));
         assert_eq!(wakes.len(), 0);
         disarm();
     }
@@ -291,8 +281,8 @@ mod tests {
     #[test]
     fn a_stopped_watch_hears_nothing_and_the_next_takes_its_own_keys_and_bit() {
         let (first, first_wakes) = watch(TalkHeld {
-            control: true,
-            alt: false,
+            control: crate::input::PhysicalKey::new(0x1D),
+            alt: None,
         });
         disarm();
         UI.with_borrow_mut(|ui| {
@@ -301,11 +291,12 @@ mod tests {
                     key: OTHER,
                     edge: Edge::Down,
                 },
+                None,
                 || panic!("a stopped watch doesn't ask what is in front"),
             );
         });
         changed();
-        UI.with_borrow_mut(|ui| ui.key(Event::Reset, || true));
+        UI.with_borrow_mut(|ui| ui.key(Event::Reset, None, || true));
         assert_eq!(first_wakes.len(), 0);
 
         // The new release had no key down, so the old watch's held key is a fresh press now.
@@ -314,5 +305,21 @@ mod tests {
         assert_eq!(seen(&second, &second_wakes), (1, true));
         assert_eq!(seen(&first, &first_wakes), (0, false));
         disarm();
+    }
+
+    #[test]
+    fn a_foreign_keyboard_and_an_unknown_key_cannot_borrow_the_held_modifier_exemption() {
+        let own = PhysicalKey::new(0x1D);
+        let held = TalkHeld { control: own, alt: None };
+        let event = Event::Key { key: Key::LeftControl, edge: Edge::Down };
+        for other in [PhysicalKey::new(512 + 0x1D), None] {
+            let (bit, wakes) = watch(held);
+            UI.with_borrow_mut(|ui| {
+                ui.key(event, own, || panic!("retained physical repeat asks nothing"));
+                ui.key(event, other, || true);
+            });
+            assert_eq!(seen(&bit, &wakes), (1, true));
+            disarm();
+        }
     }
 }

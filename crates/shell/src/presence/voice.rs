@@ -13,6 +13,8 @@ use gpui_kit::Window;
 use super::ink::Sampler;
 use super::overlay_visibility::Visibility;
 use super::{Context, Presence, Session};
+use super::gesture::ReleaseInput;
+#[cfg(test)]
 use crate::input::TalkHeld;
 use crate::input::hold::Intent;
 use crate::input::path::PathRecorder;
@@ -609,10 +611,15 @@ impl Presence {
         session: &Session,
         t_qpc: u64,
         pointer: Option<PhysicalPoint>,
-        held: TalkHeld,
+        stamp: Stamp,
+        input: Option<&ReleaseInput>,
         cx: &mut Context<'_, Self>,
     ) {
         let sampler = self.stop_line(cx);
+        let Some(input) = input.filter(|input| self.release_current(gesture, stamp, input)) else {
+            self.runs.hold_screen_refused(gesture);
+            return;
+        };
         let (own_model, default) = self.screen_inputs(cx);
         if !self.runs.releases_screen(gesture, own_model, default) {
             return;
@@ -625,7 +632,7 @@ impl Presence {
         // The pointer picks the display, so a release that couldn't read it shows none.
         let Some(pointer) = pointer else {
             tracing::debug!(stage = ?FailureStage::Release, reason = ?FailureReason::PointerUnread, "screen release refused; voice only");
-            self.runs.hold_screen_refused();
+            self.runs.hold_screen_refused(gesture);
             return;
         };
         #[cfg(test)]
@@ -640,7 +647,7 @@ impl Presence {
             Ok(stamped) => stamped,
             Err(reason) => {
                 tracing::debug!(stage = ?FailureStage::Release, ?reason, "screen release refused; voice only");
-                self.runs.hold_screen_refused();
+                self.runs.hold_screen_refused(gesture);
                 return;
             }
         };
@@ -668,19 +675,40 @@ impl Presence {
             .runs
             .screen_release(gesture, own_model, default, release);
         let sent = message.is_some_and(|message| {
+            if self.presenter.watches_screen() {
+                self.show_display(cx);
+            }
+            if !self.release_current(gesture, stamp, input) || !self.exclusion.live(lease) {
+                return false;
+            }
             // The watch starts before the message is written: the brain takes the picture only
             // once it reads it, so the sources are listening before the picture exists.
-            self.marks_released(gesture, held, cx);
-            self.link.send_control(session, message)
+            self.marks_released(gesture, input.held(), cx);
+            self.release_current(gesture, stamp, input)
+                && self.exclusion.live(lease)
+                && self.link.send_control(session, message)
         });
         if sent {
             self.screen_lease = Some(lease);
         } else {
             tracing::warn!(stage = ?FailureStage::Release, reason = ?FailureReason::ScreenReleaseSend, "held speech input failed");
-            self.marks_dropped(gesture, cx);
-            // The brain never saw this lease, so releasing it is no lapse.
-            self.revoke_exclusion(cx);
+            self.screen_release_failed(gesture, lease, cx);
         }
+    }
+
+    fn release_current(&self, gesture: GestureId, stamp: Stamp, input: &ReleaseInput) -> bool {
+        input.continuous() && self.voice_current(stamp) && self.link.input_is(gesture)
+    }
+
+    fn screen_release_failed(
+        &mut self,
+        gesture: GestureId,
+        lease: LeaseGeneration,
+        cx: &mut Context<'_, Self>,
+    ) {
+        self.runs.hold_screen_refused(gesture);
+        self.marks_dropped(gesture, cx);
+        self.revoke_exclusion_generation(lease, cx);
     }
 
     /// Follows the current hold's line in the status panel, and says once in the conversation
@@ -718,15 +746,14 @@ impl Presence {
         }
     }
 
-    /// `pointer` is where the pointer was when the native callback recognized a hold or saw its
-    /// keys come up, and `keys` the talk keys still down then.
-    pub(super) fn voice_intent(
+    /// `pointer` is the position at recognition or release, and `input` is release authority.
+    pub(super) fn voice_delivery(
         &mut self,
         intent: Intent,
         stamp: Stamp,
         qpc: u64,
         pointer: Option<PhysicalPoint>,
-        keys: TalkHeld,
+        input: Option<&ReleaseInput>,
         cx: &mut Context<'_, Self>,
     ) {
         match intent {
@@ -775,7 +802,8 @@ impl Presence {
                     .voice
                     .pending
                     .as_mut()
-                    .filter(|hold| hold.token.gesture() == gesture)
+                    .filter(|hold| hold.token.gesture() == gesture && hold.terminal.is_none()
+                        && (cancelled || hold.released.is_none()))
                 else {
                     tracing::debug!(stage = ?FailureStage::Release, reason = ?FailureReason::NoPendingHold, "held speech input refused");
                     return;
@@ -792,10 +820,13 @@ impl Presence {
                     hold.released = Some(qpc);
                     if std::mem::take(&mut hold.screen) {
                         let session = hold.session.clone();
-                        self.release_screen(gesture, &session, qpc, pointer, keys, cx);
+                        let input = input.filter(|_| hold.stamp == stamp);
+                        self.release_screen(gesture, &session, qpc, pointer, stamp, input, cx);
                     }
-                    self.voice_notice(Text::HoldStopping, cx);
-                    self.finish_voice();
+                    if self.voice.pending.as_ref().is_some_and(|hold| hold.token.gesture() == gesture && hold.terminal.is_none()) {
+                        self.voice_notice(Text::HoldStopping, cx);
+                        self.finish_voice();
+                    }
                 }
             }
             Intent::Unavailable => {
@@ -804,6 +835,14 @@ impl Presence {
                 self.voice_notice(Text::HoldFailed, cx);
             }
         }
+    }
+
+    #[cfg(test)]
+    pub(super) fn voice_intent(
+        &mut self, intent: Intent, stamp: Stamp, qpc: u64, pointer: Option<PhysicalPoint>,
+        held: TalkHeld, cx: &mut Context<'_, Self>,
+    ) {
+        self.voice_delivery(intent, stamp, qpc, pointer, Some(&ReleaseInput::fixture(held)), cx);
     }
 
     #[expect(

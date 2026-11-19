@@ -302,8 +302,8 @@ fn the_watch_starts_before_the_release_is_written_and_an_unwritten_release_drops
         "recognition starts nothing"
     );
     let held = TalkHeld {
-        control: true,
-        alt: false,
+        control: crate::input::PhysicalKey::new(0x1D),
+        alt: None,
     };
     release_holding(&watching.ready.owner, 1, Some(DOWN), held, cx);
     assert_eq!(

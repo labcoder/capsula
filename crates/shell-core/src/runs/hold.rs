@@ -181,9 +181,10 @@ impl Runs {
     /// The current hold was to show the screen and couldn't take what its capture needs (the
     /// lease, or the pointer at release), so it went on voice only: its line says the screen
     /// wasn't ready, as a lease that lapses before its frame does.
-    pub fn hold_screen_refused(&mut self) {
-        if let Some(hold) = &mut self.hold {
+    pub fn hold_screen_refused(&mut self, gesture: GestureId) {
+        if let Some(hold) = self.hold.as_mut().filter(|hold| hold.gesture == gesture) {
             hold.screen = Some(ScreenLine::NotIncluded(ScreenClass::NotReady));
+            hold.release_due = false;
         }
     }
 

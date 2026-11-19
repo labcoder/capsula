@@ -63,7 +63,6 @@ impl Presence {
         if !self.presenter.watches_screen() {
             return;
         }
-        self.show_display(cx);
         let after = self.runs.newest_run();
         let effects = self.presenter.screen_released(after, held, Instant::now());
         self.voice.watched = Some(Watched { gesture, run: None });

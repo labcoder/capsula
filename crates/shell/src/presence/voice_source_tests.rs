@@ -216,14 +216,12 @@ fn blocked_hold_chords_and_refused_collection_arms_log_no_key_codes(cx: &mut Tes
             key: Key::Other(crate::input::PhysicalKey::new(42).unwrap()),
             edge: Edge::Down,
         },
-        EventTime { instant: at },
+        EventTime::new(at),
     );
     chord(&deliver, Edge::Down, at);
     deliver(
         Event::Deadline,
-        EventTime {
-            instant: at + Duration::from_millis(301),
-        },
+        EventTime::new(at + Duration::from_millis(301)),
     );
     cx.run_until_parked();
     assert!(controls.is_empty());
@@ -236,9 +234,7 @@ fn blocked_hold_chords_and_refused_collection_arms_log_no_key_codes(cx: &mut Tes
     chord(&deliver, Edge::Down, at);
     deliver(
         Event::Deadline,
-        EventTime {
-            instant: at + Duration::from_millis(301),
-        },
+        EventTime::new(at + Duration::from_millis(301)),
     );
     cx.run_until_parked();
     assert!(matches!(
@@ -356,7 +352,7 @@ pub(super) fn native(owner: &Entity<Presence>, cx: &mut TestAppContext) -> Deliv
 
 pub(super) fn chord(deliver: &Deliver, edge: Edge, at: Instant) {
     for key in [Key::LeftControl, Key::LeftAlt] {
-        deliver(Event::Key { key, edge }, EventTime { instant: at });
+        deliver(Event::Key { key, edge }, EventTime::new(at));
     }
 }
 
@@ -407,9 +403,7 @@ fn a_successful_drawing_and_focus_keep_the_next_native_hold_admissible(cx: &mut 
     chord(&deliver, Edge::Down, at);
     deliver(
         Event::Deadline,
-        EventTime {
-            instant: at + Duration::from_millis(301),
-        },
+        EventTime::new(at + Duration::from_millis(301)),
     );
     cx.run_until_parked();
     owner.read_with(cx, |owner, _| {
@@ -697,9 +691,7 @@ fn rejected_speech_states_preserve_typing_recovery_and_local_notices(cx: &mut Te
             chord(&deliver, Edge::Down, at);
             deliver(
                 Event::Deadline,
-                EventTime {
-                    instant: at + Duration::from_millis(300),
-                },
+                EventTime::new(at + Duration::from_millis(300)),
             );
         });
         cx.run_until_parked();
@@ -781,9 +773,7 @@ fn hold_to_talk_off_keeps_typing_and_never_warms_or_opens_a_source(cx: &mut Test
         chord(&deliver, Edge::Down, at);
         deliver(
             Event::Deadline,
-            EventTime {
-                instant: at + Duration::from_millis(300),
-            },
+            EventTime::new(at + Duration::from_millis(300)),
         );
     });
     cx.run_until_parked();
@@ -817,9 +807,7 @@ fn stale_deferred_typing_cannot_take_over_a_new_native_hold(cx: &mut TestAppCont
         chord(&deliver, Edge::Down, at + Duration::from_millis(40));
         deliver(
             Event::Deadline,
-            EventTime {
-                instant: at + Duration::from_millis(340),
-            },
+            EventTime::new(at + Duration::from_millis(340)),
         );
     });
     cx.run_until_parked();
@@ -849,9 +837,7 @@ fn stale_deferred_escape_cannot_cancel_a_new_native_hold(cx: &mut TestAppContext
         chord(&deliver, Edge::Down, at);
         deliver(
             Event::Deadline,
-            EventTime {
-                instant: at + Duration::from_millis(300),
-            },
+            EventTime::new(at + Duration::from_millis(300)),
         );
     });
     cx.run_until_parked();
@@ -879,32 +865,24 @@ fn stale_deferred_escape_cannot_cancel_a_new_native_hold(cx: &mut TestAppContext
                 key: Key::Escape(crate::input::PhysicalKey::new(1).unwrap()),
                 edge: Edge::Down,
             },
-            EventTime {
-                instant: at + Duration::from_millis(310),
-            },
+            EventTime::new(at + Duration::from_millis(310)),
         );
         deliver(
             Event::Escape,
-            EventTime {
-                instant: at + Duration::from_millis(311),
-            },
+            EventTime::new(at + Duration::from_millis(311)),
         );
         deliver(
             Event::Key {
                 key: Key::Escape(crate::input::PhysicalKey::new(1).unwrap()),
                 edge: Edge::Up,
             },
-            EventTime {
-                instant: at + Duration::from_millis(312),
-            },
+            EventTime::new(at + Duration::from_millis(312)),
         );
         chord(&deliver, Edge::Up, at + Duration::from_millis(320));
         chord(&deliver, Edge::Down, at + Duration::from_millis(330));
         deliver(
             Event::Deadline,
-            EventTime {
-                instant: at + Duration::from_millis(630),
-            },
+            EventTime::new(at + Duration::from_millis(630)),
         );
     });
     cx.run_until_parked();
@@ -1061,9 +1039,7 @@ fn stale_deferred_escape_marker_ends_on_raw_key_up_without_a_hotkey(cx: &mut Tes
         chord(&deliver, Edge::Down, at);
         deliver(
             Event::Deadline,
-            EventTime {
-                instant: at + Duration::from_millis(300),
-            },
+            EventTime::new(at + Duration::from_millis(300)),
         );
     });
     cx.run_until_parked();
@@ -1083,18 +1059,14 @@ fn stale_deferred_escape_marker_ends_on_raw_key_up_without_a_hotkey(cx: &mut Tes
                 key: Key::Escape(crate::input::PhysicalKey::new(1).unwrap()),
                 edge: Edge::Down,
             },
-            EventTime {
-                instant: at + Duration::from_millis(310),
-            },
+            EventTime::new(at + Duration::from_millis(310)),
         );
         deliver(
             Event::Key {
                 key: Key::Escape(crate::input::PhysicalKey::new(1).unwrap()),
                 edge: Edge::Up,
             },
-            EventTime {
-                instant: at + Duration::from_millis(312),
-            },
+            EventTime::new(at + Duration::from_millis(312)),
         );
         chord(&deliver, Edge::Up, at + Duration::from_millis(320));
     });
@@ -1119,9 +1091,7 @@ fn stale_deferred_escape_marker_ends_on_raw_key_up_without_a_hotkey(cx: &mut Tes
     cx.update(|_| {
         deliver(
             Event::Escape,
-            EventTime {
-                instant: at + Duration::from_millis(640),
-            },
+            EventTime::new(at + Duration::from_millis(640)),
         );
     });
     cx.run_until_parked();
@@ -1585,9 +1555,7 @@ fn accepted(owner: &Entity<Presence>, gesture: u32, cx: &mut TestAppContext) {
 }
 
 pub(super) fn after(at: Instant, millis: u64) -> EventTime {
-    EventTime {
-        instant: at + Duration::from_millis(millis),
-    }
+    EventTime::new(at + Duration::from_millis(millis))
 }
 
 pub(super) fn listen(

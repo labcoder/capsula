@@ -34,13 +34,39 @@ struct Pending {
     qpc: u64,
     /// Where the pointer was when this delivery recognized a hold or saw its keys come up.
     pointer: Option<PhysicalPoint>,
-    /// The talk keys still down as this delivery was reduced: a hold ends at its first
-    /// key-up, and the screen watch must know which key may still repeat.
-    held: TalkHeld,
+    input: ReleaseInput,
     cancelled: Option<GestureId>,
     /// An Esc press: every retirement waits until this delivery is decided.
     escape: Option<Rc<HoldBack>>,
     collection: u64,
+}
+
+#[derive(Clone)]
+pub(super) struct ReleaseInput {
+    current: Rc<Cell<(u64, u64)>>,
+    stamp: (u64, u64),
+    at: EventTime,
+}
+
+impl ReleaseInput {
+    fn uninterrupted(&self) -> bool {
+        self.stamp.1 != u64::MAX && self.stamp.1 == self.current.get().1
+    }
+
+    pub(super) fn continuous(&self) -> bool {
+        self.stamp.0 != u64::MAX && self.stamp == self.current.get() && self.at.layout_current()
+    }
+
+    pub(super) fn held(&self) -> TalkHeld {
+        self.at.held
+    }
+
+    #[cfg(test)]
+    pub(super) fn fixture(held: TalkHeld) -> Self {
+        let mut at = EventTime::new(Instant::now());
+        at.held = held;
+        Self { current: Rc::default(), stamp: (0, 0), at }
+    }
 }
 
 /// How long a busy app is waited for between retries.
@@ -96,9 +122,17 @@ pub(super) fn deliver(
     let fence = std::cell::RefCell::new(Fence::new(link.microphone_gate()));
     let escaped = Cell::new(None);
     let escape_down = Cell::new(false);
+    let input = Rc::new(Cell::new((0_u64, 0_u64)));
     let reduce: Rc<Reduce> = Rc::new(move |event, at| {
+        let (serial, reset) = input.get();
+        if event == Event::Reset {
+            input.set((serial.saturating_add(1), reset.saturating_add(1)));
+        } else if matches!(event, Event::Escape | Event::Key { .. }) && !at.repeated_modifier {
+            input.set((serial.saturating_add(1), reset));
+        }
         let Ok(qpc) = u64::try_from(performance_counter()) else {
             tracing::warn!(stage = ?InputStage::Delivery, reason = ?InputReason::ClockUnavailable, "held speech input failed");
+            input.set((serial.saturating_add(1), reset.saturating_add(1)));
             link.cancel_input();
             let mut state = gesture.get();
             let _cancelled =
@@ -209,7 +243,7 @@ pub(super) fn deliver(
             delivery,
             qpc,
             pointer,
-            held: state.talk_held(),
+            input: ReleaseInput { current: Rc::clone(&input), stamp: input.get(), at },
             cancelled,
             escape: escape.then(|| gates.hold_back()),
             collection: link.microphone_gate().latest(),
@@ -278,12 +312,7 @@ fn schedule(
             return;
         }
         scheduled.set((serial, None));
-        let next = reduce(
-            Event::Scheduled,
-            EventTime {
-                instant: executor.now(),
-            },
-        );
+        let next = reduce(Event::Scheduled, EventTime::new(executor.now()));
         schedule(&reduce, &scheduled, next, cx);
     })
     .detach();
@@ -304,15 +333,19 @@ fn apply(
     pending: &Pending,
 ) -> Applied {
     let result = cx.update_window(dock, |_, window, app| {
+        let uninterrupted = pending.input.uninterrupted();
+        let continuous = pending.delivery.intents.iter().any(|intent| {
+            matches!(intent, Some(Intent::End { cancelled: false, .. }))
+        }) && pending.input.continuous();
         let applied = owner.update(app, |this, cx| {
             if pending.escape.is_some()
-                && stale_hold_escape(this, pending.cancelled, pending.stamp.session)
+                && (!uninterrupted || stale_hold_escape(this, pending.cancelled, pending.stamp.session))
             {
                 return false;
             }
             let mut effects = pending.delivery.effects;
             if effects.contains(&Some(crate::input::Effect::OpenInput)) {
-                if this.link.microphone_gate().latest() == pending.collection {
+                if uninterrupted && this.link.microphone_gate().latest() == pending.collection {
                     if let Some(gesture) = pending.cancelled {
                         this.cancel_voice_gesture(gesture, cx);
                     }
@@ -330,16 +363,25 @@ fn apply(
         {
             let (owner, intents) = (owner.clone(), pending.delivery.intents.clone());
             let (stamp, qpc, pointer) = (pending.stamp, pending.qpc, pending.pointer);
-            let held = pending.held;
+            let input = pending.input.clone();
             let (escaping, cancelled) = (pending.escape.clone(), pending.cancelled);
             let escape = escaping.is_some();
             let intents = move |app: &mut App| {
                 let _gone = owner.update(app, |this, cx| {
-                    if escape && stale_hold_escape(this, cancelled, stamp.session) {
+                    let uninterrupted = uninterrupted && input.uninterrupted();
+                    if escape && (!uninterrupted || stale_hold_escape(this, cancelled, stamp.session)) {
                         return;
                     }
-                    for intent in intents.into_iter().flatten() {
-                        this.voice_intent(intent, stamp, qpc, pointer, held, cx);
+                    let release = (continuous && input.continuous()).then_some(&input);
+                    for mut intent in intents.into_iter().flatten() {
+                        if !uninterrupted {
+                            if let Intent::End { cancelled, .. } = &mut intent {
+                                *cancelled = true;
+                            } else {
+                                continue;
+                            }
+                        }
+                        this.voice_delivery(intent, stamp, qpc, pointer, release, cx);
                     }
                     if escape && this.native_escape(cancelled, cx).is_err() {
                         tracing::error!("can't apply native Escape");
@@ -385,7 +427,7 @@ pub(super) fn deliver_intent(
         stamp,
         qpc,
         pointer,
-        held,
+        input: ReleaseInput::fixture(held),
         cancelled: None,
         escape: None,
         collection: 0,

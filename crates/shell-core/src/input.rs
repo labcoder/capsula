@@ -82,12 +82,26 @@ pub enum Effect {
     OpenInput,
 }
 
-/// Which talk keys are still down when a hold ends. The screen watch's sources take it with
-/// the release, so a held key's repeats aren't read as typing. It prints neither.
+/// The physical modifiers that stayed down through release, redacted in diagnostics.
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
 pub struct TalkHeld {
-    pub control: bool,
-    pub alt: bool,
+    pub control: Option<PhysicalKey>,
+    pub alt: Option<PhysicalKey>,
+}
+
+impl TalkHeld {
+    pub fn contains(self, key: PhysicalKey) -> bool {
+        self.control == Some(key) || self.alt == Some(key)
+    }
+
+    pub fn release(&mut self, key: PhysicalKey) {
+        if self.control == Some(key) {
+            self.control = None;
+        }
+        if self.alt == Some(key) {
+            self.alt = None;
+        }
+    }
 }
 
 impl std::fmt::Debug for TalkHeld {
@@ -134,14 +148,6 @@ impl Gesture {
     )]
     pub(crate) fn holding(&self) -> bool {
         matches!(self.timing.phase, Phase::Active { holding: true, .. })
-    }
-
-    /// The talk keys still down. A hold ends at its first key-up, so the other may be.
-    pub fn talk_held(&self) -> TalkHeld {
-        TalkHeld {
-            control: self.down[0],
-            alt: self.down[1],
-        }
     }
 
     pub fn deadline(&self) -> Option<Instant> {
@@ -342,28 +348,14 @@ mod tests {
     }
 
     #[test]
-    fn talk_held_names_the_key_still_down_when_a_hold_ends_and_prints_neither() {
+    fn the_other_modifier_stays_down_until_its_own_break() {
         let now = Instant::now();
         for (released, other, held) in [
-            (
-                Key::LeftControl,
-                Key::LeftAlt,
-                TalkHeld {
-                    control: false,
-                    alt: true,
-                },
-            ),
-            (
-                Key::LeftAlt,
-                Key::LeftControl,
-                TalkHeld {
-                    control: true,
-                    alt: false,
-                },
-            ),
+            (Key::LeftControl, Key::LeftAlt, [false, true]),
+            (Key::LeftAlt, Key::LeftControl, [true, false]),
         ] {
             let mut gesture = Gesture::default();
-            assert_eq!(gesture.talk_held(), TalkHeld::default());
+            assert_eq!(gesture.down, [false; 2]);
             chord(&mut gesture, now);
             assert_eq!(
                 gesture.handle(Event::Deadline, now + WINDOW),
@@ -373,22 +365,26 @@ mod tests {
                 key(&mut gesture, released, Edge::Up, now + WINDOW),
                 [None, Some(Effect::HoldEnded), Some(Effect::Resting)]
             );
-            assert_eq!(gesture.talk_held(), held);
+            assert_eq!(gesture.down, held);
             // The held key repeats, then comes up.
             key(&mut gesture, other, Edge::Down, now + WINDOW);
-            assert_eq!(gesture.talk_held(), held);
+            assert_eq!(gesture.down, held);
             key(&mut gesture, other, Edge::Up, now + WINDOW);
-            assert_eq!(gesture.talk_held(), TalkHeld::default());
+            assert_eq!(gesture.down, [false; 2]);
         }
         let mut gesture = Gesture::default();
         chord(&mut gesture, now);
-        let both = TalkHeld {
-            control: true,
-            alt: true,
-        };
-        assert_eq!(gesture.talk_held(), both);
+        assert_eq!(gesture.down, [true; 2]);
         gesture.handle(Event::Reset, now);
-        assert_eq!(gesture.talk_held(), TalkHeld::default());
+        assert_eq!(gesture.down, [false; 2]);
+    }
+
+    #[test]
+    fn held_physical_modifiers_are_redacted() {
+        let both = TalkHeld {
+            control: PhysicalKey::new(7),
+            alt: PhysicalKey::new(511),
+        };
         assert_eq!(format!("{both:?}"), "TalkHeld { .. }");
         assert_eq!(format!("{:?}", TalkHeld::default()), "TalkHeld { .. }");
     }

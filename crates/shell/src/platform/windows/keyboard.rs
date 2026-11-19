@@ -5,32 +5,36 @@
 //! switches (Ctrl+Alt+Del's secure desktop) and suspend reset the gesture, because the key-ups
 //! they hide would otherwise leave keys held.
 
-use std::cell::{Cell, OnceCell};
+use std::cell::{Cell, OnceCell, RefCell};
 use std::time::{Duration, Instant};
 
-use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
+use windows::Win32::Foundation::{HANDLE, HWND, LPARAM, WPARAM};
 use windows::Win32::System::RemoteDesktop::{
     NOTIFY_FOR_THIS_SESSION, WTSRegisterSessionNotification, WTSUnRegisterSessionNotification,
 };
 use windows::Win32::UI::Accessibility::{HWINEVENTHOOK, SetWinEventHook, UnhookWinEvent};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    HOT_KEY_MODIFIERS, MAPVK_VK_TO_VSC_EX, MOD_ALT, MOD_CONTROL, MOD_NOREPEAT, MapVirtualKeyW,
-    RegisterHotKey, UnregisterHotKey, VK_ESCAPE,
+    GetKeyboardLayout, HKL, HOT_KEY_MODIFIERS, MAPVK_VK_TO_VSC_EX, MOD_ALT, MOD_CONTROL,
+    MOD_NOREPEAT, MapVirtualKeyW, RegisterHotKey, UnregisterHotKey, VK_ESCAPE,
 };
 use windows::Win32::UI::Input::{
-    GetRawInputData, HRAWINPUT, RAWINPUT, RAWINPUTDEVICE, RAWINPUTHEADER, RID_INPUT,
+    GetRawInputData, HRAWINPUT, RAWINPUT, RAWINPUTDEVICE, RAWINPUTHEADER, RAWKEYBOARD, RID_INPUT,
     RIDEV_DEVNOTIFY, RIDEV_INPUTSINK, RIDEV_REMOVE, RIM_TYPEKEYBOARD, RegisterRawInputDevices,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    EVENT_SYSTEM_DESKTOPSWITCH, GIDC_REMOVAL, GetQueueStatus, KillTimer, PBT_APMSUSPEND,
+    EVENT_SYSTEM_DESKTOPSWITCH, GIDC_REMOVAL, GetForegroundWindow, GetQueueStatus,
+    GetWindowThreadProcessId, KillTimer, PBT_APMSUSPEND,
     PostMessageW, QS_ALLINPUT, RI_KEY_BREAK, RI_KEY_E0, RI_KEY_E1, SetTimer, WINEVENT_OUTOFCONTEXT,
-    WM_APP, WM_HOTKEY, WM_INPUT, WM_INPUT_DEVICE_CHANGE, WM_NCDESTROY, WM_POWERBROADCAST, WM_TIMER,
+    WM_APP, WM_HOTKEY, WM_INPUT, WM_INPUTLANGCHANGE, WM_INPUT_DEVICE_CHANGE, WM_NCDESTROY, WM_POWERBROADCAST, WM_TIMER,
     WM_WTSSESSION_CHANGE,
 };
 
 use super::presence::{PresenceError, struct_size};
 use crate::input::hold::{InputReason, InputStage};
-use crate::input::{Edge, Event, Key, PhysicalKey};
+use crate::input::{Edge, Event, Key, PhysicalKey, TalkHeld};
+
+mod physical;
+use physical::Physical;
 
 /// The proxy's only timer: the gesture's next one-shot deadline.
 const DEADLINE_TIMER: usize = 1;
@@ -55,9 +59,22 @@ thread_local! {
 }
 
 /// When the native callback that carried an event began, for gesture timing.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy)]
 pub(crate) struct EventTime {
     pub(crate) instant: Instant,
+    pub(crate) held: TalkHeld,
+    pub(crate) repeated_modifier: bool,
+    layout: Option<HKL>,
+}
+
+impl EventTime {
+    pub(crate) fn new(instant: Instant) -> Self {
+        Self { instant, held: TalkHeld::default(), repeated_modifier: false, layout: None }
+    }
+
+    pub(crate) fn layout_current(self) -> bool {
+        self.layout.is_none_or(|layout| foreground_layout() == Some(layout))
+    }
 }
 
 /// Reduces one gesture event at its callback time and returns the next deadline to arm.
@@ -73,6 +90,8 @@ pub(super) struct Keys {
     overdue: Cell<Option<Instant>>,
     sessions: Cell<bool>,
     desktop: Cell<Option<HWINEVENTHOOK>>,
+    physical: RefCell<Physical>,
+    layout: Cell<Option<HKL>>,
 }
 
 impl Keys {
@@ -86,9 +105,8 @@ impl Keys {
         lparam: LPARAM,
     ) -> bool {
         // Stamped first, so gesture timing starts at callback entry.
-        let at = EventTime {
-            instant: Instant::now(),
-        };
+        let mut at = EventTime::new(Instant::now());
+        let mut id = None;
         let event = match message {
             _ if EscapeHotkey::fired(message, wparam) => Event::Escape,
             // Raw Input doesn't report a press a hotkey took, so this message is the whole
@@ -105,10 +123,13 @@ impl Keys {
                 }
                 escape(Edge::Up)
             }
-            WM_INPUT => match read_key(lparam) {
-                Some(event) => event,
-                None => return false,
-            },
+            WM_INPUT => {
+                let Some((event, physical)) = self.input(read_key(lparam), &mut at) else {
+                    return false;
+                };
+                id = physical;
+                event
+            }
             // A stale or early WM_TIMER is harmless: the gesture ignores a deadline it hasn't
             // reached and returns the remaining one, which is armed again below.
             WM_TIMER if wparam.0 == DEADLINE_TIMER => {
@@ -116,17 +137,23 @@ impl Keys {
                 self.disarm(hwnd);
                 Event::Deadline
             }
-            WM_INPUT_DEVICE_CHANGE if wparam.0 == usize::try_from(GIDC_REMOVAL).unwrap_or(0) => {
-                Event::Reset
+            WM_INPUT_DEVICE_CHANGE => {
+                if wparam.0 == usize::try_from(GIDC_REMOVAL).unwrap_or(0) {
+                    self.physical.borrow_mut().remove(HANDLE(std::ptr::with_exposed_provenance_mut(lparam.0.cast_unsigned())));
+                }
+                self.physical.borrow_mut().lose()
             }
-            WM_WTSSESSION_CHANGE | DESKTOP_SWITCHED | WM_NCDESTROY => Event::Reset,
+            WM_INPUTLANGCHANGE | WM_WTSSESSION_CHANGE | DESKTOP_SWITCHED | WM_NCDESTROY => {
+                self.layout.set(None);
+                self.physical.borrow_mut().lose()
+            }
             WM_POWERBROADCAST if wparam.0 == usize::try_from(PBT_APMSUSPEND).unwrap_or(0) => {
-                Event::Reset
+                self.physical.borrow_mut().lose()
             }
             _ => return false,
         };
         // The screen watch hears what the gesture hears: a talk key or another key, or a reset.
-        super::screen_watch::heard(event);
+        super::screen_watch::heard(event, id);
         if self.overdue(event, at.instant) {
             // SAFETY: reads only this thread's own message queue state.
             let queue = unsafe { GetQueueStatus(QS_ALLINPUT) };
@@ -149,6 +176,31 @@ impl Keys {
         message == WM_TIMER
             || message == DESKTOP_SWITCHED
             || (message == WM_HOTKEY && self.deliver.get().is_some())
+    }
+
+    fn input(&self, raw: Result<Option<RawKey>, ()>, at: &mut EventTime) -> Option<(Event, Option<PhysicalKey>)> {
+        let mut physical = self.physical.borrow_mut();
+        let raw = match raw {
+            Ok(raw) => raw?,
+            Err(()) => return Some((physical.lose(), None)),
+        };
+        let event = key_event(raw.make, raw.flags);
+        let slot = raw.make | (u16::from(u32::from(raw.flags) & RI_KEY_E0 != 0) << 8);
+        if matches!(event, Event::Key { key: Key::LeftControl | Key::LeftAlt, .. }) {
+            let Some(layout) = foreground_layout() else {
+                return Some((physical.lose(), None));
+            };
+            if self.layout.replace(Some(layout)).is_some_and(|old| old != layout) {
+                let reset = physical.lose();
+                let _ = physical.key(raw.device, slot, event);
+                return Some((reset, None));
+            }
+            at.layout = Some(layout);
+        }
+        let (event, id, repeated) = physical.key(raw.device, slot, event)?;
+        at.held = physical.held();
+        at.repeated_modifier = repeated;
+        Some((event, id))
     }
 
     /// True once per armed deadline, when a chord key arrives more than `OVERDUE` after it.
@@ -264,9 +316,7 @@ pub(super) fn disarm(hwnd: HWND, keys: &Keys) {
     if let Some(deliver) = keys.deliver.get() {
         deliver(
             Event::Reset,
-            EventTime {
-                instant: Instant::now(),
-            },
+            EventTime::new(Instant::now()),
         );
     }
     keys.disarm(hwnd);
@@ -368,8 +418,27 @@ unsafe extern "system" fn desktop_switched(
     }
 }
 
-/// Reads one keyboard record; mouse and HID records, and unreadable ones, are ignored.
-fn read_key(lparam: LPARAM) -> Option<Event> {
+fn foreground_layout() -> Option<HKL> {
+    // SAFETY: a read-only query of the current foreground.
+    let window = unsafe { GetForegroundWindow() };
+    // SAFETY: no output pointer; an invalid window returns zero.
+    let thread = unsafe { GetWindowThreadProcessId(window, None) };
+    if thread == 0 {
+        return None;
+    }
+    // SAFETY: looks up a layout by thread ID without writing to either process.
+    let layout = unsafe { GetKeyboardLayout(thread) };
+    (!layout.is_invalid()).then_some(layout)
+}
+
+struct RawKey {
+    device: HANDLE,
+    make: u16,
+    flags: u16,
+}
+
+/// A non-keyboard record has no effect. An unreadable record invalidates input authority.
+fn read_key(lparam: LPARAM) -> Result<Option<RawKey>, ()> {
     let handle = HRAWINPUT(std::ptr::with_exposed_provenance_mut(
         lparam.0.cast_unsigned(),
     ));
@@ -385,19 +454,20 @@ fn read_key(lparam: LPARAM) -> Option<Event> {
             struct_size::<RAWINPUTHEADER>(),
         )
     };
-    if read == u32::MAX {
+    if read == u32::MAX || read < struct_size::<RAWINPUTHEADER>() || raw.header.dwSize != read {
         tracing::warn!(stage = ?InputStage::Native, reason = ?InputReason::RawInputRead, "held speech input failed");
-        // A key that can't be read may have been typed anywhere.
-        super::screen_watch::changed();
-        return None;
+        return Err(());
     }
     if raw.header.dwType != RIM_TYPEKEYBOARD.0 {
-        return None;
+        return Ok(None);
+    }
+    if read < struct_size::<RAWINPUTHEADER>() + struct_size::<RAWKEYBOARD>() {
+        return Err(());
     }
     // SAFETY: the header says this record is a keyboard one.
     let keyboard = unsafe { raw.data.keyboard };
     if keyboard.MakeCode != 0 {
-        return Some(key_event(keyboard.MakeCode, keyboard.Flags));
+        return Ok(Some(RawKey { device: raw.header.hDevice, make: keyboard.MakeCode, flags: keyboard.Flags }));
     }
     // Some media and vendor keys report no make code; their virtual key still names one.
     // SAFETY: a pure table lookup in the current layout.
@@ -408,10 +478,11 @@ fn read_key(lparam: LPARAM) -> Option<Event> {
         _ => 0,
     };
     let flags = (u32::from(keyboard.Flags) & RI_KEY_BREAK) | prefix;
-    Some(key_event(
-        u16::try_from(scan & 0xFF).unwrap_or(0),
-        u16::try_from(flags).unwrap_or(0),
-    ))
+    let make = u16::try_from(scan & 0xFF).unwrap_or(0);
+    if make == 0 {
+        return Err(());
+    }
+    Ok(Some(RawKey { device: raw.header.hDevice, make, flags: u16::try_from(flags).unwrap_or(0) }))
 }
 
 /// Names a key by make code and E0 prefix. Only unprefixed 0x1D and 0x38 are the left keys,

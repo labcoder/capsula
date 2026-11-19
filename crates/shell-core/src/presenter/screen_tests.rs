@@ -1020,15 +1020,15 @@ fn each_release_hands_the_sources_the_talk_keys_still_down() {
         (
             AFTER,
             TalkHeld {
-                control: true,
-                alt: false,
+                control: crate::input::PhysicalKey::new(0x1D),
+                alt: None,
             },
         ),
         (
             RUN,
             TalkHeld {
-                control: false,
-                alt: true,
+                control: None,
+                alt: crate::input::PhysicalKey::new(0x38),
             },
         ),
         (OTHER, TalkHeld::default()),
