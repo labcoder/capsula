@@ -252,7 +252,7 @@ impl<H: Http> Http for Counted<H> {
             Endpoint::Token | Endpoint::Discovery | Endpoint::Jwks(_) | Endpoint::Revocation(_) => {
                 (&self.auth, 0)
             }
-            Endpoint::AnthropicModels(_) | Endpoint::GitHub(_) => return Err(HttpError::Request),
+            Endpoint::GitHub(_) => return Err(HttpError::Request),
         };
         sent.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| {
             (n < cap).then_some(n + 1)

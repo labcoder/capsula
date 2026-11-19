@@ -12,7 +12,6 @@ use time::{Date, Month};
 use zeroize::Zeroizing;
 
 use super::{Counted, Counts, Outcome, capture, dev_names, output_path, scrub, usable, write};
-use crate::connections::anthropic::key::AnthropicKey;
 use crate::connections::catalog;
 use crate::connections::github::{GitHubEndpoint, GitHubToken};
 use crate::connections::http_client::{
@@ -214,17 +213,12 @@ async fn the_wrapper_lets_one_catalog_request_through_and_no_other() {
         Err(HttpError::Request)
     );
     let issuer = |path: &str| IssuerUrl::parse(&format!("https://auth.openai.com/{path}"));
-    let key = AnthropicKey::parse(Secret::new(Zeroizing::new(
-        b"sk-ant-api-fake-only".to_vec(),
-    )))
-    .expect("synthetic API key");
     let token = GitHubToken::new(Zeroizing::new("ghu_fake".to_owned())).expect("synthetic token");
     for endpoint in [
         Endpoint::Token,
         Endpoint::Discovery,
         Endpoint::Jwks(issuer("jwks").expect("issuer URL")),
         Endpoint::Revocation(issuer("revoke").expect("issuer URL")),
-        Endpoint::AnthropicModels(key),
         Endpoint::GitHub(GitHubEndpoint::User {
             token: Secret::new(token),
         }),

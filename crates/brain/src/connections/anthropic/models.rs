@@ -7,7 +7,6 @@
 //! <https://platform.claude.com/docs/en/build-with-claude/effort>.
 //! Unknown ids stay disabled; streaming support requires eager input streaming on the tool.
 
-use std::time::Duration;
 use zeroize::Zeroizing;
 
 use kumochi_protocol::Secret;
@@ -15,7 +14,13 @@ use kumochi_protocol::message::{KeyRejection, ModelInfo, ModelName, ModelSlug};
 use serde::Deserialize;
 
 use super::key::AnthropicKey;
-use crate::connections::http_client::{Endpoint, Http, MAX_BODY_BYTES, Request};
+use super::tls::{AnthropicConnect, HOST};
+use crate::connections::http_client::MAX_BODY_BYTES;
+use crate::connections::model::{
+    IDLE,
+    conn::{ModelConn, Upload},
+    wire::Body as WireBody,
+};
 
 /// Brain-local support flags, false until support has been established.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -80,33 +85,67 @@ struct ProviderError {
     message: Secret<Zeroizing<String>>,
 }
 
-/// Read one complete catalog, with a 15-second whole-request deadline and a 64-model cap.
-///
-/// # Errors
-/// 401/403 reject the key; a narrowly recognized 400 requires an unsupported workspace header.
-/// All other failures leave it unconfirmed.
-pub async fn read(
-    http: &impl Http,
-    key: Secret<AnthropicKey>,
+pub(super) async fn read_fenced(
+    connect: &impl AnthropicConnect,
+    key: &Secret<AnthropicKey>,
 ) -> Result<Vec<CatalogModel>, CheckError> {
-    let response = tokio::time::timeout(
-        Duration::from_secs(15),
-        http.execute(Request {
-            endpoint: Endpoint::AnthropicModels(key),
-            fields: Vec::new(),
-        }),
-    )
-    .await
-    .map_err(|_| CheckError::Unconfirmed)?
-    .map_err(|_| CheckError::Unconfirmed)?;
-    if response.body.expose().len() > MAX_BODY_BYTES {
+    let head =
+        format!("GET /v1/models?limit=65 HTTP/1.1\r\nHost: {HOST}\r\nAuthorization: Bearer ");
+    let parts: [&[u8]; 3] = [
+        head.as_bytes(),
+        key.expose().as_str().as_bytes(),
+        b"\r\nanthropic-version: 2023-06-01\r\nAccept: application/json\r\n\
+          Accept-Encoding: identity\r\nConnection: close\r\n\r\n",
+    ];
+    let mut request = Zeroizing::new(Vec::with_capacity(
+        parts.iter().map(|part| part.len()).sum(),
+    ));
+    for part in parts {
+        request.extend_from_slice(part);
+    }
+    let mut conn = ModelConn::new(
+        connect
+            .connect()
+            .await
+            .map_err(|_| CheckError::Unconfirmed)?,
+    );
+    let head = match conn
+        .upload(&request)
+        .await
+        .map_err(|_| CheckError::Unconfirmed)?
+    {
+        Upload::Flushed => conn.head(IDLE).await.map_err(|_| CheckError::Unconfirmed)?,
+        Upload::Refused(head) => head,
+    };
+    drop(request);
+    if !matches!(head.status, 200 | 400) {
+        return catalog(head.status, &[]);
+    }
+    let mut wire = WireBody::new(head.framing);
+    let mut bytes = Zeroizing::new(Vec::new());
+    while let Some(len) = conn
+        .next(&mut wire, IDLE)
+        .await
+        .map_err(|_| CheckError::Unconfirmed)?
+    {
+        if len > MAX_BODY_BYTES - bytes.len() {
+            return Err(CheckError::Unconfirmed);
+        }
+        bytes.extend_from_slice(&conn.buf[..len]);
+        conn.buf.drain(..len);
+    }
+    catalog(head.status, &bytes)
+}
+
+fn catalog(status: u16, bytes: &[u8]) -> Result<Vec<CatalogModel>, CheckError> {
+    if bytes.len() > MAX_BODY_BYTES {
         return Err(CheckError::Unconfirmed);
     }
-    match response.status {
+    match status {
         200 => {}
         401 | 403 => return Err(CheckError::Rejected(KeyRejection::Refused)),
         400 => {
-            if serde_json::from_slice::<ErrorBody>(response.body.expose()).is_ok_and(|body| {
+            if serde_json::from_slice::<ErrorBody>(bytes).is_ok_and(|body| {
                 body.error.kind == "invalid_request_error"
                     && body
                         .error
@@ -121,8 +160,7 @@ pub async fn read(
         }
         _ => return Err(CheckError::Unconfirmed),
     }
-    let body: Body =
-        serde_json::from_slice(response.body.expose()).map_err(|_| CheckError::Unconfirmed)?;
+    let body: Body = serde_json::from_slice(bytes).map_err(|_| CheckError::Unconfirmed)?;
     if body.has_more || body.data.len() > 64 {
         return Err(CheckError::Unconfirmed);
     }

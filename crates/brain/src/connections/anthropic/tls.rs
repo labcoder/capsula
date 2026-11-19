@@ -59,6 +59,37 @@ impl Connect for AnthropicTls {
 impl sealed::Sealed for AnthropicTls {}
 impl AnthropicConnect for AnthropicTls {}
 
+#[derive(Clone)]
+pub(crate) enum RouteConnector {
+    Native(Option<Arc<AnthropicTls>>),
+    #[cfg(test)]
+    Offline(Scripted),
+}
+
+pub(crate) trait RouteIo:
+    tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send
+{
+}
+impl<I: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send> RouteIo for I {}
+
+impl Connect for RouteConnector {
+    type Io = Box<dyn RouteIo>;
+
+    async fn connect(&self) -> io::Result<Self::Io> {
+        match self {
+            Self::Native(tls) => {
+                let tls = tls.as_ref().ok_or(io::ErrorKind::NotConnected)?;
+                Ok(Box::new(tls.connect().await?))
+            }
+            #[cfg(test)]
+            Self::Offline(script) => Ok(Box::new(script.connect().await?)),
+        }
+    }
+}
+
+impl sealed::Sealed for RouteConnector {}
+impl AnthropicConnect for RouteConnector {}
+
 /// An in-memory Anthropic peer: each connection answers with the next scripted response and
 /// keeps the bytes it was sent. No socket.
 #[cfg(test)]
@@ -66,14 +97,29 @@ impl AnthropicConnect for AnthropicTls {}
 pub(crate) struct Scripted(pub(crate) Arc<std::sync::Mutex<Script>>);
 
 #[cfg(test)]
+type ScriptReader = Box<dyn tokio::io::AsyncRead + Unpin + Send>;
+
+#[cfg(test)]
 #[derive(Default)]
 pub(crate) struct Script {
     pub(crate) responses: std::collections::VecDeque<Vec<u8>>,
     pub(crate) requests: Vec<Vec<u8>>,
+    pub(crate) starts: usize,
+    pub(crate) drops: usize,
+    pub(crate) reader: Option<ScriptReader>,
+    pub(crate) entered: Option<Arc<tokio::sync::Notify>>,
+    pub(crate) connect_gate: Option<Arc<tokio::sync::Notify>>,
 }
 
 #[cfg(test)]
-pub(crate) struct Sent(Arc<std::sync::Mutex<Script>>);
+pub(crate) struct Sent(Arc<std::sync::Mutex<Script>>, usize);
+
+#[cfg(test)]
+impl Drop for Sent {
+    fn drop(&mut self) {
+        self.0.lock().expect("script").drops += 1;
+    }
+}
 
 #[cfg(test)]
 impl tokio::io::AsyncWrite for Sent {
@@ -83,11 +129,7 @@ impl tokio::io::AsyncWrite for Sent {
         bytes: &[u8],
     ) -> std::task::Poll<io::Result<usize>> {
         let mut script = self.0.lock().expect("script");
-        script
-            .requests
-            .last_mut()
-            .expect("a connection")
-            .extend_from_slice(bytes);
+        script.requests[self.1].extend_from_slice(bytes);
         std::task::Poll::Ready(Ok(bytes.len()))
     }
 
@@ -108,18 +150,32 @@ impl tokio::io::AsyncWrite for Sent {
 
 #[cfg(test)]
 impl Connect for Scripted {
-    type Io = tokio::io::Join<io::Cursor<Vec<u8>>, Sent>;
+    type Io = tokio::io::Join<ScriptReader, Sent>;
 
     fn connect(&self) -> impl Future<Output = io::Result<Self::Io>> + Send {
         let mut script = self.0.lock().expect("script");
-        let io = script
-            .responses
-            .pop_front()
-            .map(|response| tokio::io::join(io::Cursor::new(response), Sent(Arc::clone(&self.0))));
+        script.starts += 1;
+        if let Some(entered) = &script.entered {
+            entered.notify_one();
+        }
+        let connect_gate = script.connect_gate.clone();
+        let index = script.requests.len();
+        let reader = script.reader.take().or_else(|| {
+            script
+                .responses
+                .pop_front()
+                .map(|response| -> ScriptReader { Box::new(io::Cursor::new(response)) })
+        });
+        let io = reader.map(|reader| tokio::io::join(reader, Sent(Arc::clone(&self.0), index)));
         if io.is_some() {
             script.requests.push(Vec::new());
         }
-        std::future::ready(io.ok_or_else(|| io::ErrorKind::ConnectionRefused.into()))
+        async move {
+            if let Some(gate) = connect_gate {
+                gate.notified().await;
+            }
+            io.ok_or_else(|| io::ErrorKind::ConnectionRefused.into())
+        }
     }
 }
 

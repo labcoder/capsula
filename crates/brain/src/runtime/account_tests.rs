@@ -384,7 +384,6 @@ impl Http for SlowCheck {
             | Endpoint::Jwks(_)
             | Endpoint::Revocation(_)
             | Endpoint::Models(_)
-            | Endpoint::AnthropicModels(_)
             | Endpoint::GitHub(_) => {
                 self.0.fetch_add(20, Ordering::SeqCst);
                 (503, Vec::new())
@@ -463,7 +462,6 @@ impl Http for Rotating {
             | Endpoint::Jwks(_)
             | Endpoint::Revocation(_)
             | Endpoint::Models(_)
-            | Endpoint::AnthropicModels(_)
             | Endpoint::GitHub(_) => (503, Vec::new()),
         };
         std::future::ready(Ok(Response {

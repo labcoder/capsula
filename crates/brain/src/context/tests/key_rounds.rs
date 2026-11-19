@@ -141,6 +141,8 @@ impl Peer {
         let script = Arc::new(Mutex::new(Script {
             responses: responses.into(),
             requests: Vec::new(),
+            starts: 0,
+            ..Script::default()
         }));
         Self {
             client: ModelClient::new(Scripted(Arc::clone(&script))),

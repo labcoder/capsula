@@ -3,6 +3,150 @@ use kumochi_protocol::constants::{generation_hex, generation_target};
 
 mod fold;
 
+#[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one fake vault across both authority mutations"
+)]
+async fn routed_adoption_and_removal_revoke_at_the_worker_handoff() {
+    let scratch = Scratch::new("routed-key-authority");
+    let (mut account, store, initial_peer) = keyed(&scratch).await;
+    let catalog = r#"{"data":[],"has_more":false}"#;
+    let response = format!(
+        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{catalog}",
+        catalog.len()
+    )
+    .into_bytes();
+    let peer = Scripted(Arc::new(std::sync::Mutex::new(Script {
+        responses: [
+            response.clone(),
+            response.clone(),
+            response.clone(),
+            response,
+        ]
+        .into(),
+        ..Script::default()
+    })));
+    account.connections.transport = Some(Transport::offline(peer.clone(), 4, 0));
+    account.connection_event(ConnectionEvent::Op(ConnectionOp::CheckAnthropicKey));
+    settle(&mut account).await;
+    let first = Arc::clone(account.connections.verified.as_ref().expect("verified"));
+    assert_eq!(first.revision, 1);
+    assert_ne!(first.tag.0, 0);
+    account.connection_event(ConnectionEvent::Op(ConnectionOp::CheckAnthropicKey));
+    settle(&mut account).await;
+    assert!(Arc::ptr_eq(
+        &first,
+        account
+            .connections
+            .verified
+            .as_ref()
+            .expect("verified again")
+    ));
+    let plan = begin(&mut account, 1, 16).await;
+    account.connection_event(ConnectionEvent::Op(ConnectionOp::CheckAnthropicKey));
+    let loaded = next(&mut account).await;
+    account.handle(loaded);
+    let metadata = account.connections.route_input().expect("route configured");
+    assert!(matches!(
+        &metadata,
+        Input::Engines(ConnectionKind::AnthropicKey, Availability::Ready(ready))
+            if ready.connection == first.tag && ready.models.is_empty()
+    ));
+    assert!(!format!("{metadata:?}").contains("sk-ant-"));
+    let queued_catalog = account
+        .connections
+        .checking
+        .clone()
+        .expect("catalog queued");
+    let observing_cut = |authority: Fence, catalog: Option<Fence>| -> Box<dyn Fn() + Send + Sync> {
+        Box::new(move || {
+            assert!(
+                !authority.open(),
+                "the old authority is closed at worker handoff"
+            );
+            assert!(
+                catalog.as_ref().is_none_or(|read| !read.open()),
+                "the read is closed at worker handoff"
+            );
+        })
+    };
+    account.connections.before_key_mutation = Some(observing_cut(
+        first.fence.clone(),
+        Some(queued_catalog.clone()),
+    ));
+
+    assert_eq!(
+        account.stage_op(1, ConnectionOp::AnthropicKeyStaged { plan: plan.id }),
+        vec![]
+    );
+    assert!(!first.fence.open());
+    assert!(!queued_catalog.open());
+    assert!(matches!(
+        account.connections.route_input(),
+        Some(Input::Engines(
+            ConnectionKind::AnthropicKey,
+            Availability::Unavailable(_)
+        ))
+    ));
+    let failed = next(&mut account).await;
+    assert!(matches!(
+        failed,
+        Event::Connection(ConnectionEvent::StageDone { result: Err(_), .. })
+    ));
+    account.handle(failed);
+    settle(&mut account).await;
+    let recovered = Arc::clone(
+        account
+            .connections
+            .verified
+            .as_ref()
+            .expect("old revision re-proven"),
+    );
+    assert_eq!(recovered.revision, 1);
+    assert_ne!(recovered.tag, first.tag);
+    assert!(!first.fence.open());
+    assert_eq!(peer.0.lock().expect("peer").starts, 3);
+
+    let replacement = "sk-ant-api-synthetic-replacement";
+    let plan = begin(
+        &mut account,
+        2,
+        u16::try_from(replacement.len()).expect("bounded"),
+    )
+    .await;
+    plant(&store, plan, replacement);
+    account.connections.before_key_mutation = Some(observing_cut(recovered.fence.clone(), None));
+    account.stage_op(1, ConnectionOp::AnthropicKeyStaged { plan: plan.id });
+    assert!(!recovered.fence.open());
+    let adopted = next(&mut account).await;
+    assert!(matches!(
+        adopted,
+        Event::Connection(ConnectionEvent::StageDone {
+            result: Ok((2, _)),
+            ..
+        })
+    ));
+    account.handle(adopted);
+    settle(&mut account).await;
+    let new = Arc::clone(account.connections.verified.as_ref().expect("replacement"));
+    assert_ne!(new.tag, recovered.tag);
+    account.connections.before_key_mutation = Some(observing_cut(new.fence.clone(), None));
+    account.connection_event(ConnectionEvent::Op(ConnectionOp::RemoveAnthropicKey {
+        revision: 2,
+        request: 3,
+    }));
+    assert!(!new.fence.open());
+    settle(&mut account).await;
+    assert_eq!(account.connections.view.anthropic, KeyView::Missing);
+    assert!(account.connections.verified.is_none());
+    assert_eq!(starts(&initial_peer), 1);
+    assert_eq!(peer.0.lock().expect("peer").starts, 4);
+    account
+        .close(tokio::time::Instant::now(), tokio::time::Instant::now())
+        .await;
+}
+
 #[test]
 fn the_staging_worker_does_not_print_the_key_length() {
     for len in [127, 128] {
@@ -42,16 +186,9 @@ async fn a_duplicate_notification_never_queues_or_rechecks_a_committed_key() {
         }]
     );
     settle(&mut account).await;
-    assert_eq!(
-        account
-            .connections
-            .key
-            .as_ref()
-            .map(|key| key.expose().as_str()),
-        Some(text)
-    );
+    assert_eq!(retained_key(&account.connections), Some(text));
     assert_eq!(account.connections.view.anthropic, KeyView::Ready);
-    assert_eq!(requests.load(std::sync::atomic::Ordering::SeqCst), 2);
+    assert_eq!(starts(&requests), 2);
     let (sender, queued) = std::sync::mpsc::channel();
     account.jobs = Some(sender);
     assert_eq!(
@@ -135,19 +272,23 @@ async fn stale_begin_replies_and_failed_queue_cannot_admit_a_paste() {
     account.connections.stage_admission = Some(plan.id);
     assert_eq!(
         account.stage_op(1, ConnectionOp::AnthropicKeyStaged { plan: plan.id }),
-        vec![ControlToShell::AnthropicKeyStageDone {
-            plan: plan.id,
-            result: Err(KeyStageFailure::Unavailable)
-        }]
+        [
+            view_frame(KeyView::Unconfirmed, Some(1)),
+            ControlToShell::AnthropicKeyStageDone {
+                plan: plan.id,
+                result: Err(KeyStageFailure::Unavailable),
+            },
+        ]
     );
     assert_eq!(account.connections.stage_admission, None);
-    ready_old(&account);
+    assert!(account.connections.verified.is_none());
+    assert_eq!(account.connections.view.anthropic, KeyView::Unconfirmed);
     account
         .close(tokio::time::Instant::now(), tokio::time::Instant::now())
         .await;
 }
 
-async fn keyed(scratch: &Scratch) -> (Accounts, FakeStore, Arc<std::sync::atomic::AtomicUsize>) {
+async fn keyed(scratch: &Scratch) -> (Accounts, FakeStore, Scripted) {
     let store = FakeStore::default();
     let lock = scratch.db().with_file_name("key-test.lock");
     save_key(&store, &lock);
@@ -156,25 +297,13 @@ async fn keyed(scratch: &Scratch) -> (Accounts, FakeStore, Arc<std::sync::atomic
         Box::new(move || Vault::with_service(owned.clone(), "key-test", &lock)),
         Arc::new(FixedClock(0)),
     );
-    let requests = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let counted = Arc::clone(&requests);
-    let mut account = Accounts::spawn_unconfigured(
-        worker,
-        Net {
-            http: Arc::new(move || Ok(SharedHttp::new(CountedCatalog(Arc::clone(&counted))))),
-            ..test_support::net()
-        },
-    )
-    .expect("worker");
+    let requests = peer(KEPT_CATALOG);
+    let mut account = with_transport(
+        Accounts::spawn_unconfigured(worker, test_support::net()).expect("worker"),
+        requests.clone(),
+        8,
+    );
     settle(&mut account).await;
-    account.connections.models = vec![models::CatalogModel {
-        info: kumochi_protocol::message::ModelInfo {
-            slug: kumochi_protocol::message::ModelSlug::new("kept-model").expect("slug"),
-            display_name: kumochi_protocol::message::ModelName::new("Kept model").expect("name"),
-            supported_efforts: None,
-        },
-        capabilities: models::Capabilities::default(),
-    }];
     account.connections.stage_session(Some(1));
     (account, store, requests)
 }
@@ -224,11 +353,7 @@ fn plant(store: &FakeStore, plan: KeyStagePlan, text: &str) {
 fn ready_old(account: &Accounts) {
     assert_eq!(account.connections.view.anthropic, KeyView::Ready);
     assert_eq!(
-        account
-            .connections
-            .key
-            .as_ref()
-            .map(|key| key.expose().as_str()),
+        retained_key(&account.connections),
         Some("sk-ant-api-fake-saved-value")
     );
     assert_eq!(account.connections.models.len(), 1);
@@ -244,28 +369,43 @@ fn ready_old(account: &Accounts) {
     assert!(account.connections.read.is_none());
 }
 
+fn view_frame(anthropic: KeyView, anthropic_revision: Option<u64>) -> ControlToShell {
+    ControlToShell::Connections(ConnectionsView {
+        anthropic,
+        anthropic_revision,
+        claude_code: ClaudeCodeView::NotFound,
+    })
+}
+
 #[tokio::test]
 async fn failed_or_superseded_paste_keeps_the_working_key_and_catalog() {
     let scratch = Scratch::new("stage-runtime-failed");
     let (mut account, store, requests) = keyed(&scratch).await;
     let plan = begin(&mut account, 1, 16).await;
     let generation = account.connections.generation;
+    let revision = account.connections.anthropic_revision();
     assert_eq!(
         account.stage_op(1, ConnectionOp::AnthropicKeyStaged { plan: plan.id }),
         vec![]
     );
-    ready_old(&account);
-    assert_eq!(requests.load(std::sync::atomic::Ordering::SeqCst), 1);
-    assert_eq!(account.connections.generation, generation);
+    assert_eq!(account.connections.view.anthropic, KeyView::Checking);
+    assert!(account.connections.verified.is_none());
+    assert_eq!(starts(&requests), 1);
+    assert_eq!(account.connections.generation, generation + 1);
     let event = next(&mut account).await;
     assert_eq!(
         account.handle(event),
-        vec![ControlToShell::AnthropicKeyStageDone {
-            plan: plan.id,
-            result: Err(KeyStageFailure::Unavailable)
-        }]
+        [
+            view_frame(KeyView::Checking, None),
+            ControlToShell::AnthropicKeyStageDone {
+                plan: plan.id,
+                result: Err(KeyStageFailure::Unavailable),
+            },
+        ]
     );
+    settle(&mut account).await;
     ready_old(&account);
+    assert_eq!(account.connections.anthropic_revision(), revision);
     let first = begin(&mut account, 2, 16).await;
     assert_eq!(
         account.stage_op(
@@ -303,24 +443,111 @@ async fn failed_or_superseded_paste_keeps_the_working_key_and_catalog() {
         account.stage_op(1, ConnectionOp::AnthropicKeyStaged { plan: current.id }),
         vec![]
     );
-    ready_old(&account);
+    assert_eq!(account.connections.view.anthropic, KeyView::Checking);
+    assert!(account.connections.verified.is_none());
     let event = next(&mut account).await;
+    store.0.lock().expect("fake").refusing = false;
     assert_eq!(
         account.handle(event),
-        vec![ControlToShell::AnthropicKeyStageDone {
-            plan: current.id,
-            result: Err(KeyStageFailure::Unavailable)
-        }]
+        [
+            view_frame(KeyView::Checking, None),
+            ControlToShell::AnthropicKeyStageDone {
+                plan: current.id,
+                result: Err(KeyStageFailure::Unavailable),
+            },
+        ]
     );
-    store.0.lock().expect("fake").refusing = false;
+    settle(&mut account).await;
     ready_old(&account);
-    assert_eq!(requests.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert_eq!(account.connections.anthropic_revision(), revision);
+    assert_eq!(starts(&requests), 3);
     assert!(
         store
             .names()
             .iter()
             .all(|name| !name.contains("anthropic-key-staged"))
     );
+    account
+        .close(tokio::time::Instant::now(), tokio::time::Instant::now())
+        .await;
+}
+
+#[tokio::test]
+async fn failed_first_paste_updates_the_reconnected_shell_without_an_old_receipt() {
+    let scratch = Scratch::new("stage-failed-first");
+    let store = FakeStore::default();
+    let lock = scratch.db().with_file_name("key-test.lock");
+    let (entered, at_gate) = std::sync::mpsc::channel();
+    let (resume, held) = std::sync::mpsc::channel();
+    let armed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let mut held_store = Some(HeldStore {
+        armed: Arc::clone(&armed),
+        store: store.clone(),
+        entered,
+        resume: std::sync::Mutex::new(Some(held)),
+    });
+    let worker = Worker::new(
+        Box::new(move || {
+            Vault::with_service(held_store.take().expect("one open"), "key-test", &lock)
+        }),
+        Arc::new(FixedClock(0)),
+    );
+    let peer = peer(EMPTY_CATALOG);
+    let mut account = with_transport(
+        Accounts::spawn_unconfigured(worker, test_support::net()).expect("worker"),
+        peer.clone(),
+        1,
+    );
+    account.connections.stage_session(Some(1));
+    assert_eq!(
+        account.connections.connected(),
+        view_frame(KeyView::Missing, None)
+    );
+    let plan = begin(&mut account, 1, 16).await;
+    plant(&store, plan, "sk-ant-api123456");
+    armed.store(true, std::sync::atomic::Ordering::SeqCst);
+    assert_eq!(
+        account.stage_op(1, ConnectionOp::AnthropicKeyStaged { plan: plan.id }),
+        []
+    );
+    at_gate
+        .recv_timeout(Duration::from_secs(5))
+        .expect("adoption waiting on the staged chunk");
+    store.0.lock().expect("fake").denied_read = Some(generation_target(
+        "key-test",
+        "anthropic",
+        &generation_hex(&plan.id.0),
+        0,
+    ));
+    account.connections.stage_session(None);
+    account.connections.stage_session(Some(2));
+    assert_eq!(
+        account.connections.connected(),
+        view_frame(KeyView::Checking, None)
+    );
+    resume.send(()).expect("release denied read");
+    let failed = next(&mut account).await;
+    assert!(matches!(
+        &failed,
+        Event::Connection(ConnectionEvent::StageDone {
+            epoch: 1,
+            result: Err(KeyStageFailure::Unavailable),
+            ..
+        })
+    ));
+    assert_eq!(
+        account.handle(failed),
+        [view_frame(KeyView::Unconfirmed, None)]
+    );
+    assert!(!account.connections.loading);
+    assert!(matches!(
+        account.connections.route_input(),
+        Some(Input::Engines(
+            ConnectionKind::AnthropicKey,
+            Availability::Unavailable(_)
+        ))
+    ));
+    assert_eq!(starts(&peer), 0);
     account
         .close(tokio::time::Instant::now(), tokio::time::Instant::now())
         .await;
@@ -337,21 +564,15 @@ async fn committed_paste_survives_disconnect_but_its_reply_does_not_cross_links(
         account.stage_op(1, ConnectionOp::AnthropicKeyStaged { plan: plan.id }),
         vec![]
     );
-    ready_old(&account);
+    assert_eq!(account.connections.view.anthropic, KeyView::Checking);
+    assert!(account.connections.verified.is_none());
     account.connections.stage_session(None);
     account.connections.stage_session(Some(2));
     let event = next(&mut account).await;
     assert_eq!(account.handle(event), vec![]);
     assert_eq!(account.connections.view.anthropic, KeyView::Checking);
     settle(&mut account).await;
-    assert_eq!(
-        account
-            .connections
-            .key
-            .as_ref()
-            .map(|key| key.expose().as_str()),
-        Some(text)
-    );
+    assert_eq!(retained_key(&account.connections), Some(text));
     assert_eq!(account.connections.view.anthropic, KeyView::Ready);
     assert_eq!(
         account.stage_op(2, ConnectionOp::AnthropicKeyStaged { plan: plan.id }),
@@ -375,26 +596,6 @@ async fn recovery_local_read_does_not_wait_for_a_rate_limited_catalog() {
     recovery_with_unavailable_catalog(Some(429)).await;
 }
 
-struct UnavailableCatalog {
-    status: Option<u16>,
-    entered: Arc<Notify>,
-}
-
-impl Http for UnavailableCatalog {
-    async fn execute(&self, _: Request) -> Result<Response, HttpError> {
-        self.entered.notify_one();
-        let Some(status) = self.status else {
-            return std::future::pending().await;
-        };
-        Ok(Response {
-            status,
-            request_id: None,
-            meta: crate::connections::http_client::ResponseMeta::default(),
-            body: Secret::new(Zeroizing::new(Vec::new())),
-        })
-    }
-}
-
 async fn recovery_with_unavailable_catalog(status: Option<u16>) {
     let scratch = Scratch::new("key-recovery-unavailable-catalog");
     let (mut account, store, _) = keyed(&scratch).await;
@@ -404,13 +605,13 @@ async fn recovery_with_unavailable_catalog(status: Option<u16>) {
         .find(|name| name.starts_with("key-test/gen/anthropic/"))
         .expect("stored key chunk");
     let entered = Arc::new(Notify::new());
-    let notify = Arc::clone(&entered);
-    account.net.http = Arc::new(move || {
-        Ok(SharedHttp::new(UnavailableCatalog {
-            status,
-            entered: Arc::clone(&notify),
-        }))
-    });
+    let peer = Scripted(Arc::new(std::sync::Mutex::new(Script {
+        entered: Some(Arc::clone(&entered)),
+        connect_gate: status.is_none().then(|| Arc::new(Notify::new())),
+        responses: status.into_iter().map(|status| wire(status, "")).collect(),
+        ..Script::default()
+    })));
+    account.connections.transport = Some(Transport::offline(peer, 1, 0));
     let snapshot = |anthropic| {
         ControlToShell::Connections(ConnectionsView {
             anthropic,
@@ -513,14 +714,7 @@ async fn a_recovery_check_reads_after_adoption_and_replies_only_on_its_link() {
     );
     let checked = next(&mut account).await;
     assert_eq!(account.handle(checked), [snapshot(KeyView::Ready, Some(2))]);
-    assert_eq!(
-        account
-            .connections
-            .key
-            .as_ref()
-            .map(|key| key.expose().as_str()),
-        Some(replacement)
-    );
+    assert_eq!(retained_key(&account.connections), Some(replacement));
 
     assert_eq!(
         account.connection_event(ConnectionEvent::Op(ConnectionOp::ReconcileAnthropicKey {
@@ -570,14 +764,11 @@ async fn removal_confirmed_on_the_next_link_cannot_delete_an_earlier_links_adopt
         }),
         Arc::new(FixedClock(0)),
     );
-    let mut account = Accounts::spawn_unconfigured(
-        worker,
-        Net {
-            http: Arc::new(|| Ok(SharedHttp::new(EmptyCatalog))),
-            ..test_support::net()
-        },
-    )
-    .expect("worker");
+    let mut account = with_transport(
+        Accounts::spawn_unconfigured(worker, test_support::net()).expect("worker"),
+        peer(EMPTY_CATALOG),
+        8,
+    );
     settle(&mut account).await;
     account.connections.stage_session(Some(1));
     let replacement = "sk-ant-api123456";
@@ -596,12 +787,12 @@ async fn removal_confirmed_on_the_next_link_cannot_delete_an_earlier_links_adopt
     account.connections.stage_session(None);
     account.connections.stage_session(Some(2));
     let ControlToShell::Connections(ConnectionsView {
-        anthropic: KeyView::Ready,
+        anthropic: KeyView::Checking,
         anthropic_revision: Some(revision),
         ..
     }) = account.connections.connected()
     else {
-        panic!("the next link still sees the old Ready key");
+        panic!("the next link sees adoption in flight and its old revision");
     };
     let remove = ConnectionOp::RemoveAnthropicKey {
         revision,
@@ -634,14 +825,7 @@ async fn removal_confirmed_on_the_next_link_cannot_delete_an_earlier_links_adopt
             account.connections.view.anthropic_revision,
             Some(revision + 1)
         );
-        assert_eq!(
-            account
-                .connections
-                .key
-                .as_ref()
-                .map(|key| key.expose().as_str()),
-            Some(replacement)
-        );
+        assert_eq!(retained_key(&account.connections), Some(replacement));
     }
     account
         .close(tokio::time::Instant::now(), tokio::time::Instant::now())

@@ -588,7 +588,7 @@ impl Accounts {
             listener.abort();
         }
         self.catalog.cancel();
-        self.connections.cancel();
+        self.connections.close();
         let settled = tokio::time::timeout_at(refresh_by, async {
             while self.state.refresh_out() || self.github.rotating() {
                 let input = self.next().await;
@@ -705,6 +705,7 @@ impl Brain {
         }
         self.availability_changed(link.as_deref_mut())
             .map_err(|_| Full)?;
+        self.key_route_changed(link.as_deref_mut())?;
         if read {
             self.repair_default(link.as_deref_mut())?;
         }

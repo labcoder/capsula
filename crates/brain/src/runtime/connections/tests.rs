@@ -1,5 +1,6 @@
 use super::*;
 use crate::connections::account::Worker;
+use crate::connections::anthropic::tls::{Script, Scripted};
 use crate::connections::clock::FixedClock;
 use crate::connections::http_client::{Http, HttpError, Request, Response, SharedHttp};
 use crate::connections::vault::{Vault, fake::FakeStore};
@@ -8,9 +9,58 @@ use crate::runtime::account::Net;
 use crate::test_support::{self, Scratch};
 use std::sync::Arc;
 use tokio::sync::Notify;
+use tokio::time::{Duration, timeout};
 use zeroize::Zeroizing;
 
 mod staging;
+
+#[tokio::test]
+async fn production_key_dispatch_is_unserved_without_asking_to_send() {
+    use crate::context::{ModelRequest, Origin};
+    use crate::coordinator::{BuildKey, SendKey};
+    use crate::engines::{Asks, EngineFailure, Finish, RunRequest, SendGate, TurnEvent};
+    use kumochi_protocol::message::{Effort, ModelChoice, ModelSlug, RunId, ThreadId};
+
+    let scratch = Scratch::new("dormant-key-transport");
+    let mut brain = test_support::brain(&scratch, "");
+    assert!(brain.account.connections.route_input().is_none());
+    let key = SendKey::Build(BuildKey {
+        run: RunId(1),
+        round: 1,
+        attempt: 1,
+    });
+    let request = RunRequest {
+        key,
+        run: RunId(1),
+        thread: ThreadId(1),
+        origin: Origin::Kumo,
+        request: ModelRequest {
+            choice: Some(ModelChoice {
+                connection: ConnectionKind::AnthropicKey,
+                model: ModelSlug::new("claude-sonnet-5-5").expect("model"),
+                effort: Effort::Medium,
+            }),
+            instructions: String::new(),
+            input: Vec::new(),
+            tools: Vec::new(),
+        },
+    };
+    let (events, mut seen) = tokio::sync::mpsc::channel(1);
+    let (inputs, mut asks) = tokio::sync::mpsc::unbounded_channel();
+    brain
+        .owned_engine(&request)
+        .expect("owned refusal")
+        .start(request, events, SendGate::new(key, Asks::default(), inputs))
+        .await;
+    assert_eq!(
+        seen.recv().await,
+        Some(TurnEvent::Finished(Finish::Failed(EngineFailure::Access(
+            Some(model_unavailable())
+        ))))
+    );
+    assert_eq!(asks.recv().await, None);
+    brain.close().await;
+}
 
 fn key() -> Secret<AnthropicKey> {
     AnthropicKey::parse(Secret::new(Zeroizing::new(
@@ -19,51 +69,61 @@ fn key() -> Secret<AnthropicKey> {
     .expect("fake key")
 }
 
-fn accounts(scratch: &Scratch, http: SharedHttp) -> Accounts {
+fn with_transport(mut accounts: Accounts, peer: Scripted, cap: u32) -> Accounts {
+    accounts.connections.transport = Some(Transport::offline(peer, cap, 0));
+    accounts
+}
+
+pub(in crate::runtime) fn with_empty_catalog(accounts: Accounts) -> Accounts {
+    with_transport(accounts, peer(EMPTY_CATALOG), 8)
+}
+
+fn accounts(scratch: &Scratch, peer: Scripted) -> Accounts {
     let store = FakeStore::default();
     let lock = scratch.db().with_file_name("key-test.lock");
     let worker = Worker::new(
         Box::new(move || Vault::with_service(store.clone(), "key-test", &lock)),
         Arc::new(FixedClock(0)),
     );
-    let mut accounts = Accounts::spawn_unconfigured(
-        worker,
-        Net {
-            http: Arc::new(move || Ok(http.clone())),
-            ..test_support::net()
-        },
-    )
-    .expect("account worker");
+    let mut accounts = with_transport(
+        Accounts::spawn_unconfigured(worker, test_support::net()).expect("worker"),
+        peer,
+        8,
+    );
     accounts.connections.loading = true;
     accounts.connections.view.anthropic = KeyView::Checking;
     accounts
 }
 
-struct Held(Arc<Notify>);
-
-impl Http for Held {
-    async fn execute(&self, _: Request) -> Result<Response, HttpError> {
-        self.0.notified().await;
-        Ok(Response {
-            status: 200,
-            request_id: None,
-            meta: crate::connections::http_client::ResponseMeta::default(),
-            body: Secret::new(Zeroizing::new(br#"{"data":[],"has_more":false}"#.to_vec())),
-        })
-    }
+fn wire(status: u16, body: &str) -> Vec<u8> {
+    format!(
+        "HTTP/1.1 {status} Synthetic\r\nContent-Length: {}\r\n\r\n{body}",
+        body.len()
+    )
+    .into_bytes()
 }
 
-struct EmptyCatalog;
+const EMPTY_CATALOG: &str = r#"{"data":[],"has_more":false}"#;
+const KEPT_CATALOG: &str =
+    r#"{"data":[{"type":"model","id":"kept-model","display_name":"Kept model"}],"has_more":false}"#;
 
-impl Http for EmptyCatalog {
-    fn execute(&self, _: Request) -> impl Future<Output = Result<Response, HttpError>> {
-        std::future::ready(Ok(Response {
-            status: 200,
-            request_id: None,
-            meta: crate::connections::http_client::ResponseMeta::default(),
-            body: Secret::new(Zeroizing::new(br#"{"data":[],"has_more":false}"#.to_vec())),
-        }))
-    }
+fn peer(body: &str) -> Scripted {
+    Scripted(Arc::new(std::sync::Mutex::new(Script {
+        responses: std::iter::repeat_with(|| wire(200, body)).take(8).collect(),
+        ..Script::default()
+    })))
+}
+
+fn starts(peer: &Scripted) -> usize {
+    peer.0.lock().expect("catalog peer").starts
+}
+
+fn retained_key(connections: &Connections) -> Option<&str> {
+    connections
+        .verified
+        .as_ref()
+        .map(|key| key.test_key())
+        .or_else(|| connections.key.as_ref().map(|key| key.expose().as_str()))
 }
 
 fn save_key(store: &FakeStore, lock: &std::path::Path) {
@@ -84,6 +144,68 @@ async fn settle(accounts: &mut Accounts) {
     .expect("the key settles");
 }
 
+#[derive(Default)]
+struct NoNetwork {
+    factories: std::sync::atomic::AtomicUsize,
+    requests: std::sync::atomic::AtomicUsize,
+}
+
+impl Http for Arc<NoNetwork> {
+    fn execute(&self, _: Request) -> impl Future<Output = Result<Response, HttpError>> {
+        self.requests
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        std::future::ready(Err(HttpError::Connect))
+    }
+}
+
+#[tokio::test]
+async fn saved_key_startup_and_check_never_send_without_a_catalog_allowance() {
+    use std::sync::atomic::Ordering::SeqCst;
+
+    for configured in [false, true] {
+        let scratch = Scratch::new("key-dormant-startup");
+        let store = FakeStore::default();
+        let lock = scratch.db().with_file_name("key-test.lock");
+        save_key(&store, &lock);
+        let worker = Worker::new(
+            Box::new(move || Vault::with_service(store.clone(), "key-test", &lock)),
+            Arc::new(FixedClock(0)),
+        );
+        let network = Arc::new(NoNetwork::default());
+        let counted = Arc::clone(&network);
+        let net = Net {
+            http: Arc::new(move || {
+                counted.factories.fetch_add(1, SeqCst);
+                Ok(SharedHttp::new(Arc::clone(&counted)))
+            }),
+            ..test_support::net()
+        };
+        let mut accounts = Accounts::spawn_unconfigured(worker, net).expect("worker");
+        assert_eq!(accounts.connections.view.anthropic, KeyView::Checking);
+        let peer = peer(EMPTY_CATALOG);
+        if configured {
+            accounts = with_transport(accounts, peer.clone(), 0);
+        }
+        for check in [false, true] {
+            if check {
+                accounts.connection_event(ConnectionEvent::Op(ConnectionOp::CheckAnthropicKey));
+            }
+            settle(&mut accounts).await;
+            assert_eq!(accounts.connections.view.anthropic, KeyView::Unconfirmed);
+            assert_eq!(accounts.connections.anthropic_revision(), Some(1));
+            assert_eq!(retained_key(&accounts.connections), None);
+            assert_eq!(network.factories.load(SeqCst), 0);
+            assert_eq!(network.requests.load(SeqCst), 0);
+            let script = peer.0.lock().expect("offline peer");
+            assert_eq!(script.starts, 0);
+            assert_eq!(script.requests, Vec::<Vec<u8>>::new());
+        }
+        accounts
+            .close(tokio::time::Instant::now(), tokio::time::Instant::now())
+            .await;
+    }
+}
+
 #[tokio::test]
 async fn a_staged_paste_is_refused_and_the_saved_key_still_checks_out() {
     let scratch = Scratch::new("key-staged-refused");
@@ -95,14 +217,11 @@ async fn a_staged_paste_is_refused_and_the_saved_key_still_checks_out() {
         Box::new(move || Vault::with_service(owned.clone(), "key-test", &lock)),
         Arc::new(FixedClock(0)),
     );
-    let mut accounts = Accounts::spawn_unconfigured(
-        worker,
-        Net {
-            http: Arc::new(|| Ok(SharedHttp::new(EmptyCatalog))),
-            ..test_support::net()
-        },
-    )
-    .expect("worker");
+    let mut accounts = with_transport(
+        Accounts::spawn_unconfigured(worker, test_support::net()).expect("worker"),
+        peer(EMPTY_CATALOG),
+        8,
+    );
     settle(&mut accounts).await;
     assert_eq!(accounts.connections.view.anthropic, KeyView::Ready);
     let paste = Secret::new(Zeroizing::new(b"sk-ant-api-fake-staged-value".to_vec()));
@@ -130,11 +249,7 @@ async fn a_staged_paste_is_refused_and_the_saved_key_still_checks_out() {
     settle(&mut accounts).await;
     assert_eq!(accounts.connections.view.anthropic, KeyView::Ready);
     assert_eq!(
-        accounts
-            .connections
-            .key
-            .as_ref()
-            .map(|key| key.expose().as_str()),
+        retained_key(&accounts.connections),
         Some("sk-ant-api-fake-saved-value")
     );
     assert_eq!(
@@ -146,11 +261,7 @@ async fn a_staged_paste_is_refused_and_the_saved_key_still_checks_out() {
     settle(&mut accounts).await;
     assert_eq!(accounts.connections.view.anthropic, KeyView::Ready);
     assert_eq!(
-        accounts
-            .connections
-            .key
-            .as_ref()
-            .map(|key| key.expose().as_str()),
+        retained_key(&accounts.connections),
         Some("sk-ant-api-fake-saved-value")
     );
     accounts
@@ -261,21 +372,6 @@ async fn a_remove_sent_while_a_native_read_is_blocked_wins() {
     );
 }
 
-/// Counts catalog requests, the only authenticated work a key admits.
-struct CountedCatalog(Arc<std::sync::atomic::AtomicUsize>);
-
-impl Http for CountedCatalog {
-    fn execute(&self, _: Request) -> impl Future<Output = Result<Response, HttpError>> {
-        self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        std::future::ready(Ok(Response {
-            status: 200,
-            request_id: None,
-            meta: crate::connections::http_client::ResponseMeta::default(),
-            body: Secret::new(Zeroizing::new(br#"{"data":[],"has_more":false}"#.to_vec())),
-        }))
-    }
-}
-
 fn authority_sql(lock: &std::path::Path, sql: &str) {
     rusqlite::Connection::open(lock.with_file_name(crate::connections::authority::FILE))
         .expect("authority file")
@@ -317,24 +413,20 @@ async fn a_failed_removal_stays_pending_until_a_retry_commits_it() {
     let store = FakeStore::default();
     let lock = scratch.db().with_file_name("key-test.lock");
     save_key(&store, &lock);
-    let requests = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let counted = Arc::clone(&requests);
+    let requests = peer(EMPTY_CATALOG);
     let (owned, worker_lock) = (store.clone(), lock.clone());
     let worker = Worker::new(
         Box::new(move || Vault::with_service(owned.clone(), "key-test", &worker_lock)),
         Arc::new(FixedClock(0)),
     );
-    let mut accounts = Accounts::spawn_unconfigured(
-        worker,
-        Net {
-            http: Arc::new(move || Ok(SharedHttp::new(CountedCatalog(Arc::clone(&counted))))),
-            ..test_support::net()
-        },
-    )
-    .expect("worker");
+    let mut accounts = with_transport(
+        Accounts::spawn_unconfigured(worker, test_support::net()).expect("worker"),
+        requests.clone(),
+        8,
+    );
     settle(&mut accounts).await;
     assert_eq!(accounts.connections.view.anthropic, KeyView::Ready);
-    let sent = || requests.load(std::sync::atomic::Ordering::SeqCst);
+    let sent = || starts(&requests);
     assert_eq!(sent(), 1);
     authority_sql(&lock, REFUSE_HEADS);
     accounts.connections.stage_session(Some(1));
@@ -402,7 +494,7 @@ async fn a_failed_removal_stays_pending_until_a_retry_commits_it() {
 #[tokio::test]
 async fn changed_or_removed_keys_ignore_late_worker_and_check_results() {
     let scratch = Scratch::new("key-generation");
-    let mut accounts = accounts(&scratch, SharedHttp::new(Held(Arc::new(Notify::new()))));
+    let mut accounts = accounts(&scratch, Scripted::default());
     let first = accounts.connections.generation;
     accounts.connection_event(ConnectionEvent::Op(ConnectionOp::RemoveAnthropicKey {
         revision: 1,
@@ -447,7 +539,12 @@ async fn changed_or_removed_keys_ignore_late_worker_and_check_results() {
 #[tokio::test(start_paused = true)]
 async fn held_check_expires_and_valid_input_cannot_rescue_a_failed_attempt() {
     let scratch = Scratch::new("key-deadline");
-    let mut accounts = accounts(&scratch, SharedHttp::new(Held(Arc::new(Notify::new()))));
+    let (reader, _writer) = tokio::io::duplex(256);
+    let peer = Scripted(Arc::new(std::sync::Mutex::new(Script {
+        reader: Some(Box::new(reader)),
+        ..Script::default()
+    })));
+    let mut accounts = accounts(&scratch, peer.clone());
     let generation = accounts.connections.generation;
     accounts.connection_event(ConnectionEvent::Loaded {
         generation,
@@ -462,14 +559,9 @@ async fn held_check_expires_and_valid_input_cannot_rescue_a_failed_attempt() {
         }
     }
     assert_eq!(accounts.connections.view.anthropic, KeyView::Unconfirmed);
-    assert_eq!(
-        accounts
-            .connections
-            .key
-            .as_ref()
-            .map(|key| key.expose().as_str()),
-        Some("sk-ant-api-zqxsentinellabel")
-    );
+    assert_eq!(accounts.connections.anthropic_revision(), Some(1));
+    assert_eq!(retained_key(&accounts.connections), None);
+    assert_eq!(starts(&peer), 1);
     assert_eq!(
         accounts.connection_event(ConnectionEvent::Checked {
             generation,
@@ -486,19 +578,13 @@ async fn held_check_expires_and_valid_input_cannot_rescue_a_failed_attempt() {
 #[tokio::test(start_paused = true)]
 async fn key_deadline_also_covers_a_held_client_factory() {
     let scratch = Scratch::new("key-factory-deadline");
-    let mut accounts = accounts(&scratch, SharedHttp::new(Held(Arc::new(Notify::new()))));
     let entered = Arc::new(Notify::new());
-    let notify = Arc::clone(&entered);
-    let (resume, hold) = std::sync::mpsc::channel();
-    let hold = std::sync::Mutex::new(hold);
-    accounts.net.http = Arc::new(move || {
-        notify.notify_one();
-        hold.lock()
-            .expect("factory gate")
-            .recv_timeout(std::time::Duration::from_secs(5))
-            .expect("factory released");
-        Err(HttpError::Configuration)
-    });
+    let peer = Scripted(Arc::new(std::sync::Mutex::new(Script {
+        entered: Some(Arc::clone(&entered)),
+        connect_gate: Some(Arc::new(Notify::new())),
+        ..Script::default()
+    })));
+    let mut accounts = accounts(&scratch, peer.clone());
     let generation = accounts.connections.generation;
     let started = tokio::time::Instant::now();
     accounts.connection_event(ConnectionEvent::Loaded {
@@ -515,8 +601,9 @@ async fn key_deadline_also_covers_a_held_client_factory() {
         event = accounts.next() => Some(event),
         () = std::future::ready(()) => None,
     };
-    resume.send(()).expect("release factory");
-    let event = event.expect("the deadline reports while the client factory is still held");
+    assert_eq!(starts(&peer), 1);
+    assert!(peer.0.lock().expect("peer").requests.is_empty());
+    let event = event.expect("the deadline reports while the connection is still held");
     accounts.handle(event);
     let elapsed = started.elapsed();
     assert_eq!(elapsed, Duration::from_secs(15));
@@ -529,7 +616,7 @@ async fn key_deadline_also_covers_a_held_client_factory() {
 #[tokio::test]
 async fn connection_replay_is_tagged_and_outer_carriers_redact_the_key() {
     let scratch = Scratch::new("key-replay");
-    let mut accounts = accounts(&scratch, SharedHttp::new(Held(Arc::new(Notify::new()))));
+    let mut accounts = accounts(&scratch, Scripted::default());
     let generation = accounts.connections.generation;
     let event = ConnectionEvent::Loaded {
         generation,

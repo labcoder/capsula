@@ -293,6 +293,10 @@ pub const SCREEN_FAULT_ENV: &str = "KUMOCHI_SCREEN_FAULT";
 /// Dev builds only: the most model requests the brain may send, set by `cargo xtask live`.
 /// A value that isn't a count allows none.
 pub const LIVE_BUDGET_ENV: &str = "KUMOCHI_LIVE_BUDGET";
+/// The debug allowance for Anthropic catalog requests in one process.
+pub const LIVE_KEY_CATALOG_BUDGET_ENV: &str = "KUMOCHI_LIVE_KEY_CATALOG_BUDGET";
+/// The debug allowance for Anthropic Messages requests in one process.
+pub const LIVE_KEY_MESSAGES_BUDGET_ENV: &str = "KUMOCHI_LIVE_KEY_MESSAGES_BUDGET";
 
 /// Enables content-free `ChatGPT` attempt stamps in a copied Dev brain.
 pub const LIVE_CHATGPT_TEXT_ENV: &str = "KUMOCHI_LIVE_CHATGPT_TEXT";
