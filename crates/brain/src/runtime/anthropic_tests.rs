@@ -1,6 +1,6 @@
 use std::sync::{Arc, Mutex};
 
-use kumochi_protocol::message::{KeyView, ScreenChoice};
+use kumochi_protocol::message::{Action, ErrorKey, KeyView, ScreenChoice};
 use serde_json::{Value, json};
 
 use super::*;
@@ -412,14 +412,27 @@ async fn a_title_takes_the_last_attempt_and_its_compaction_is_refused_unsent() {
     );
 }
 
-/// A 401 on a Messages post leaves the key Unconfirmed, so Check again comes back and the next ask
-/// is refused here instead of sending another refused request. A 403 only fails its run: it can
+/// A 401 on a Messages post fails its run with the rejected-key notice and leaves the key
+/// Unconfirmed, so Check again comes back and the next ask is refused here as unavailable instead
+/// of sending another refused request. A 403 only fails its run, with the same notice: it can
 /// concern one model, so the key stays Ready and the next ask sends.
 #[tokio::test]
 async fn a_refused_post_leaves_the_key_unconfirmed_and_the_next_ask_unsent() {
-    for (status, kind, view, starts) in [
-        (401, "authentication_error", KeyView::Unconfirmed, 2),
-        (403, "permission_error", KeyView::Ready, 3),
+    for (status, kind, view, starts, next) in [
+        (
+            401,
+            "authentication_error",
+            KeyView::Unconfirmed,
+            2,
+            ErrorKey::ModelUnavailable,
+        ),
+        (
+            403,
+            "permission_error",
+            KeyView::Ready,
+            3,
+            ErrorKey::AnthropicKeyRejected,
+        ),
     ] {
         let scratch = Scratch::new(&format!("offline-key-refused-post-{status}"));
         let store = FakeStore::default();
@@ -482,9 +495,10 @@ async fn a_refused_post_leaves_the_key_unconfirmed_and_the_next_ask_unsent() {
                 let frame = frame::encode(&message, Pipe::Data).expect("encodes");
                 shell.data_out.write_all(&frame).await.expect("submitted");
                 loop {
-                    let (_, phase) = shell.state().await;
+                    let (_, phase, error) = shell.notice().await;
                     if !matches!(phase, Phase::Thinking | Phase::Answering) {
-                        ended.push(phase);
+                        let notice = error.map(|error| (error.key(), error.actions().to_vec()));
+                        ended.push((phase, notice));
                         break;
                     }
                 }
@@ -492,13 +506,24 @@ async fn a_refused_post_leaves_the_key_unconfirmed_and_the_next_ask_unsent() {
             drop(shell);
             ended
         };
-        let (ended, phases) = timeout(PATIENCE, async {
+        let (ended, outcomes) = timeout(PATIENCE, async {
             tokio::join!(brain.serve(control, data, &mut tap), client)
         })
         .await
         .expect("routed runtime finishes");
         assert_eq!(ended, Ended::Lost);
-        assert_eq!(phases, [Phase::Failed, Phase::Failed]);
+        let open = vec![Action::OpenSettings];
+        assert_eq!(
+            outcomes,
+            [
+                (
+                    Phase::Failed,
+                    Some((ErrorKey::AnthropicKeyRejected, open.clone()))
+                ),
+                (Phase::Failed, Some((next, open))),
+            ],
+            "{status}: the refused ask, then the next one"
+        );
         assert_eq!(brain.account.connections.anthropic(), view, "{status}");
         brain.close().await;
         let script = peer.0.lock().expect("peer");

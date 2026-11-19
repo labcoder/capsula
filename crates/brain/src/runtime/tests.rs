@@ -499,14 +499,24 @@ impl<S: AsyncRead + AsyncWrite> Shell<S> {
 
     /// The next run state, answering pings on the way.
     async fn state(&mut self) -> (RunId, Phase) {
+        let (run, phase, _) = self.notice().await;
+        (run, phase)
+    }
+
+    /// The next run state and the notice it carries, answering pings on the way.
+    async fn notice(&mut self) -> (RunId, Phase, Option<kumochi_protocol::message::UserError>) {
         loop {
             let message = self.next_control().await.expect("readable").expect("open");
             match message {
                 ControlToShell::RunState {
-                    run, thread, phase, ..
+                    run,
+                    thread,
+                    phase,
+                    error,
+                    ..
                 } => {
                     self.thread = Some(thread);
-                    return (run, phase);
+                    return (run, phase, error);
                 }
                 ControlToShell::Ping => {
                     let pong =
