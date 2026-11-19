@@ -1,4 +1,4 @@
-use windows::Win32::Foundation::HANDLE;
+use windows::Win32::Foundation::{HANDLE, INVALID_HANDLE_VALUE};
 
 use crate::input::{Edge, Event, Key, PhysicalKey, TalkHeld};
 
@@ -7,7 +7,7 @@ const ALT: u16 = 0x38;
 
 #[derive(Default)]
 struct Device {
-    handle: HANDLE,
+    handle: Option<HANDLE>,
     down: [u64; 8],
 }
 
@@ -53,9 +53,10 @@ impl Physical {
         let Event::Key { key, edge } = event else {
             return reset(self);
         };
-        if handle.is_invalid() {
+        if handle == INVALID_HANDLE_VALUE {
             return reset(self);
         }
+        let handle = Some(handle);
         let Some(bank) = self
             .devices
             .iter()

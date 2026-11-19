@@ -1131,6 +1131,144 @@ mod tests {
     }
 
     #[test]
+    fn null_device_can_hold_release_and_double_tap() {
+        use std::cell::Cell;
+        use std::time::{Duration, Instant};
+
+        use crate::input::hold::{Fence, Intent};
+        use crate::input::{Effect, Gesture};
+        use crate::platform::microphone::CollectionGate;
+        use kumochi_protocol::message::GestureId;
+
+        let keys = super::Keys::default();
+        let mut fence = Fence::new(CollectionGate::default());
+        let mut gesture = Gesture::default();
+        let start = Instant::now();
+        let mut send = |event, ms| {
+            fence.reduce(
+                &mut gesture,
+                event,
+                start + Duration::from_millis(ms),
+                &Cell::new(false),
+            )
+        };
+        let key = |scan, flags| raw(&keys, 0, scan, flags).unwrap().0;
+        let up = super::RI_KEY_BREAK;
+        send(key(0x1D, 0), 0);
+        assert!(matches!(
+            send(key(0x38, 0), 1).intents,
+            [Some(Intent::Warm(GestureId(1))), None, None]
+        ));
+        assert!(matches!(
+            send(Event::Deadline, 301).intents,
+            [
+                Some(Intent::Recognized {
+                    gesture: GestureId(1),
+                    generation: Ok(_),
+                }),
+                None,
+                None
+            ]
+        ));
+        assert!(matches!(
+            send(key(0x38, up), 400).intents,
+            [
+                None,
+                Some(Intent::End {
+                    gesture: GestureId(1),
+                    cancelled: false,
+                }),
+                None
+            ]
+        ));
+        send(key(0x1D, up), 401);
+
+        for (start, expected) in [(500, None), (600, Some(Effect::OpenInput))] {
+            send(key(0x1D, 0), start);
+            send(key(0x38, 0), start + 1);
+            assert_eq!(
+                send(key(0x38, up), start + 50).effects,
+                [Some(Effect::Resting), expected, None]
+            );
+            send(key(0x1D, up), start + 51);
+        }
+    }
+
+    #[test]
+    fn null_device_break_during_a_physical_hold_matches_a_second_keyboard() {
+        use std::cell::Cell;
+        use std::time::{Duration, Instant};
+
+        use crate::input::hold::{Fence, Intent};
+        use crate::input::{Effect, Gesture};
+        use crate::platform::microphone::CollectionGate;
+        use kumochi_protocol::message::GestureId;
+
+        for other in [2, 0] {
+            let keys = super::Keys::default();
+            let mut fence = Fence::new(CollectionGate::default());
+            let mut gesture = Gesture::default();
+            let start = Instant::now();
+            let mut send = |event, ms| {
+                fence.reduce(
+                    &mut gesture,
+                    event,
+                    start + Duration::from_millis(ms),
+                    &Cell::new(false),
+                )
+            };
+            let key = |source, scan, flags| raw(&keys, source, scan, flags).unwrap().0;
+            let up = super::RI_KEY_BREAK;
+            send(key(1, 0x1D, 0), 0);
+            send(key(1, 0x38, 0), 1);
+            assert!(matches!(
+                send(Event::Deadline, 301).intents[0],
+                Some(Intent::Recognized {
+                    gesture: GestureId(1),
+                    generation: Ok(_),
+                })
+            ));
+            let unrelated_break = send(key(other, 0x25, up), 350);
+            assert!(unrelated_break.intents.iter().all(Option::is_none));
+            assert_eq!(unrelated_break.effects, [None; 3]);
+            let release = send(key(1, 0x38, up), 400);
+            assert!(matches!(
+                release.intents[1],
+                Some(Intent::End {
+                    gesture: GestureId(1),
+                    cancelled: false,
+                })
+            ));
+            assert_eq!(release.effects, [None, None, Some(Effect::Resting)]);
+        }
+    }
+
+    #[test]
+    fn null_and_physical_devices_cannot_repeat_or_release_each_others_modifiers() {
+        use crate::input::TalkHeld;
+
+        for (owner, other) in [(0, 1), (1, 0)] {
+            for (scan, key) in [(0x1D, Key::LeftControl), (0x38, Key::LeftAlt)] {
+                for flags in [0, super::RI_KEY_BREAK] {
+                    let keys = super::Keys::default();
+                    let (event, at) = raw(&keys, owner, scan, 0).unwrap();
+                    assert_eq!(
+                        event,
+                        Event::Key {
+                            key,
+                            edge: Edge::Down
+                        }
+                    );
+                    assert!(!at.repeated_modifier);
+                    assert!(raw(&keys, owner, scan, 0).unwrap().1.repeated_modifier);
+                    assert_eq!(raw(&keys, other, scan, flags).unwrap().0, Event::Reset);
+                    assert_eq!(keys.physical.borrow().held(), TalkHeld::default());
+                }
+            }
+        }
+    }
+
+    #[test]
     fn os_read_uses_side_specific_keys_without_aliases_and_rechecks_the_pair() {
         use super::{VK_LCONTROL, VK_LMENU, exact_chord};
 
@@ -1208,7 +1346,7 @@ mod tests {
         use crate::platform::microphone::CollectionGate;
         use kumochi_protocol::message::GestureId;
 
-        for loss in 0..8 {
+        for loss in 0..9 {
             let keys = super::Keys::default();
             let state = Rc::new(RefCell::new((
                 Fence::new(CollectionGate::default()),
@@ -1262,7 +1400,7 @@ mod tests {
             };
             let hwnd = HWND::default();
             match loss {
-                0 => {
+                0 | 8 => {
                     unreadable(1);
                 }
                 1 => {
@@ -1320,6 +1458,7 @@ mod tests {
                 }
             }
             let up = super::RI_KEY_BREAK;
+            let device = if loss == 8 { 0 } else { 1 };
             let attempts = [
                 (false, false, 0),
                 (true, true, 0x1B),
@@ -1329,12 +1468,12 @@ mod tests {
             for (n, snapshot) in attempts.into_iter().enumerate() {
                 reads.set(snapshot);
                 let ms = 100 + u64::try_from(n).unwrap() * 500;
-                input(1, 0x1D, 0, ms);
-                input(1, 0x1D, 0, ms + 1);
-                input(1, 0x38, 0, ms + 2);
+                input(device, 0x1D, 0, ms);
+                input(device, 0x1D, 0, ms + 1);
+                input(device, 0x38, 0, ms + 2);
                 send(Event::Deadline, ms + 305);
-                input(1, 0x38, up, ms + 306);
-                input(1, 0x1D, up, ms + 307);
+                input(device, 0x38, up, ms + 306);
+                input(device, 0x1D, up, ms + 307);
             }
             let ineligible = |delivery: &Delivery| {
                 delivery.intents.iter().all(Option::is_none)
@@ -1345,8 +1484,8 @@ mod tests {
                 "loss {loss} admitted a dirty or blind attempt"
             );
             reads.set((true, true, 0));
-            input(1, 0x1D, 0, 2_200);
-            input(1, 0x38, 0, 2_201);
+            input(device, 0x1D, 0, 2_200);
+            input(device, 0x38, 0, 2_201);
             send(Event::Deadline, 2_500);
             let results = results.borrow();
             assert!(
