@@ -658,28 +658,43 @@ mod tests {
         fs::remove_dir_all(dir).expect("cleanup");
     }
 
+    /// Product processes as (pid, parent, shell).
+    fn entries(list: &[(u32, u32, bool)]) -> Vec<platform::Entry> {
+        list.iter()
+            .map(|&(pid, parent, shell)| platform::Entry { pid, parent, shell })
+            .collect()
+    }
+
+    /// The check is xtask 1; its brain is 10 and its shell 20.
     #[test]
-    fn a_launch_is_ours_only_while_its_brain_and_shell_are_the_only_product_processes() {
-        let entry = |pid, parent| platform::Entry {
-            pid,
-            parent,
-            shell: false,
-        };
+    fn a_launch_is_its_brain_its_shell_and_the_brains_workers_only() {
         let (me, ours) = (1, [10, 20]);
-        assert!(only_ours(
-            &[entry(1, 0), entry(20, 1), entry(10, 1)],
+        let with = |extra: &[(u32, u32, bool)]| {
+            let mut list = vec![(1, 0, false), (20, 1, true), (10, 1, false)];
+            list.extend_from_slice(extra);
+            only_ours(&entries(&list), me, ours)
+        };
+        assert!(with(&[]));
+        assert!(with(&[(30, 10, false), (40, 10, false)]), "both workers");
+        assert!(
+            with(&[(30, 10, false)]),
+            "one worker, the other not started or replaced"
+        );
+        assert!(
+            !with(&[(30, 10, false), (40, 10, false), (50, 10, false)]),
+            "more workers than the brain has roles"
+        );
+        assert!(!with(&[(30, 20, false)]), "a brain the shell started");
+        assert!(!with(&[(30, 10, true)]), "a shell the brain relaunched");
+        assert!(!with(&[(30, 99, false)]), "another brain's worker");
+        assert!(!with(&[(30, 1, false)]), "a second brain beside ours");
+        assert!(!only_ours(
+            &entries(&[(1, 0, false), (10, 1, false), (30, 10, false)]),
             me,
             ours
         ));
-        assert!(!only_ours(&[entry(1, 0), entry(10, 1)], me, ours));
-        assert!(!only_ours(&[entry(1, 0), entry(20, 1)], me, ours));
         assert!(!only_ours(
-            &[entry(1, 0), entry(20, 1), entry(30, 20)],
-            me,
-            ours
-        ));
-        assert!(!only_ours(
-            &[entry(1, 0), entry(10, 1), entry(20, 1), entry(30, 10)],
+            &entries(&[(1, 0, false), (20, 1, true), (30, 10, false)]),
             me,
             ours
         ));
