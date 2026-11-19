@@ -16,19 +16,22 @@ Route notifications go back to the worker.
 
 The dormant `speaker::queued` state keeps one bounded source queue. Admission or stale
 discard returns ingress byte credit once; consumption or discard frees source capacity.
-An old logical output generation cannot take a sequence slot. Timed commands settle the
-prior playback interval before changing eligibility: Pause keeps fractional virtual time,
-and Stop settles only due evidence before discarding and never admits more input.
+An old logical output generation returns its credit before run-order checks and cannot take
+a sequence slot. Timed commands settle the prior playback interval before changing
+eligibility: Pause keeps fractional virtual time, and Stop settles only due evidence before
+discarding and never admits more input. Stale open results do not settle the clock.
 
 Only contiguous, generation-matched observations on a live route can extend the heard
 prefix. Loss keeps the last settled prefix; delivery time cannot prove pending estimates.
 The handed-off uncertain interval is consumed as unheard, leaving app-only PCM queued.
-A gap or observation overflow requests the same recovery using the real callback handoff
-boundary; stale observations do not. Virtual pacing never crosses the first unheard gap
-in heard history. Stop waits for all applicable generation-specific tail proofs and the
-latest known deadline. Two unresolved device tails refuse another physical open, but
-virtual pacing continues. No production worker connects this state to cpal, and no wire
-message, hold admission or opener changes here.
+A gap or observation overflow immediately fences further staging and presentation on that
+route, including across timed commands. The owner can then retire it with the real callback
+handoff boundary, or Stop can discard the queue without the handoff boundary. Stale
+observations don't request recovery. Virtual pacing never crosses the first unheard gap
+in heard history. Finality after Stop still requires every applicable generation-specific
+tail proof and the latest known deadline. Two unresolved device tails refuse another
+physical open, but virtual pacing continues. No production worker connects this state to
+cpal, and no wire message, hold admission or opener changes here.
 
 `kumochi_shell_core::speaker` owns one connection's output device: it keeps the run's queued
 speech, writes it to the device, and decides from the device's own clock which samples played.

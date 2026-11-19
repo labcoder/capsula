@@ -67,6 +67,7 @@ pub(super) struct Engine {
     pub(super) phase: Phase,
     pub(super) offered: u64,
     physical: Option<u64>,
+    recovering: bool,
     pending_open: Option<u64>,
     generation: u64,
     inhibit: Option<(u64, bool)>,
@@ -88,6 +89,7 @@ impl Engine {
             phase: Phase::Idle,
             offered: 0,
             physical: None,
+            recovering: false,
             pending_open: None,
             generation: 0,
             inhibit: None,
@@ -134,10 +136,10 @@ impl Engine {
     }
 
     pub(super) fn opened(&mut self, generation: u64, outcome: Opened, now: Duration) -> bool {
-        self.settle(now);
         if self.pending_open != Some(generation) {
             return false;
         }
+        self.settle(now);
         self.pending_open = None;
         if self.queue.stopped {
             return false;
@@ -145,6 +147,7 @@ impl Engine {
         if outcome == Opened::Physical {
             self.last_anchor_at = None;
             self.physical = Some(generation);
+            self.recovering = false;
             self.offered = self.progress.consumed;
             self.rebase(now);
         }
@@ -186,12 +189,16 @@ impl Engine {
     }
 
     pub(super) fn staged(&mut self, through: u64) {
-        if self.physical.is_some() && !self.inhibited() && self.phase == Phase::Running {
+        if self.physical.is_some()
+            && !self.recovering
+            && !self.inhibited()
+            && self.phase == Phase::Running
+        {
             self.offered = self.offered.max(through.min(self.queue.received));
         }
     }
 
-    /// Recover means retire the route with its handed-off boundary before the next tick.
+    /// Recover fences presentation until the owner retires the route or stops.
     pub(super) fn observe(&mut self, anchor: Anchor) -> Observation {
         let previous = self
             .anchors
@@ -204,7 +211,8 @@ impl Engine {
         {
             return Observation::Stale;
         }
-        if anchor.first != previous
+        if self.recovering
+            || anchor.first != previous
             || anchor.through <= anchor.first
             || anchor.through > self.offered
             || self.anchors.len() == ANCHORS
@@ -215,6 +223,7 @@ impl Engine {
                     && anchor.through <= segment.end()
             })
         {
+            self.recovering = true;
             return Observation::Recover;
         }
         self.last_anchor_at = Some(anchor.at);
@@ -311,7 +320,9 @@ impl Engine {
 
     fn settle(&mut self, now: Duration) {
         if self.physical.is_some() {
-            self.present_due(now);
+            if !self.recovering {
+                self.present_due(now);
+            }
         } else if !self.inhibited() && self.phase == Phase::Running {
             let elapsed = now.saturating_sub(self.virtual_at).as_nanos();
             self.virtual_at = self.virtual_at.max(now);

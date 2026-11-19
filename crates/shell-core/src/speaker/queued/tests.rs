@@ -301,8 +301,7 @@ fn stop_does_not_mark_discarded_pcm_as_completed() {
     assert_eq!(engine.progress.heard, 0);
 }
 
-#[test]
-fn only_contiguous_observations_can_advance_device_presentation() {
+fn observation_engine() -> (Engine, u64) {
     let mut engine = Engine::new(RUN, LOGICAL);
     engine.expect(ms(0));
     let generation = engine.request(ms(0)).unwrap();
@@ -312,32 +311,50 @@ fn only_contiguous_observations_can_advance_device_presentation() {
         Ok(Admission::Return(_))
     ));
     engine.staged(480);
-    assert_eq!(
-        engine.observe(presented(generation, 0, 1, 480, 10)),
-        Observation::Recover
-    );
+    (engine, generation)
+}
+
+#[test]
+fn contiguous_observations_advance_device_presentation_after_their_deadline() {
+    let (mut engine, generation) = observation_engine();
     for end in 1..=16 {
         assert_eq!(
             engine.observe(presented(generation, 0, end - 1, end, end)),
             Observation::Accepted
         );
     }
-    assert_eq!(
-        engine.observe(presented(generation, 0, 16, 17, 17)),
-        Observation::Recover
-    );
     assert_eq!(engine.tick(ms(16)), Ok(None));
     assert_eq!(engine.progress.heard, 16);
-    assert_eq!(
-        engine.observe(presented(generation, 0, 16, 17, 15)),
-        Observation::Recover
-    );
     assert_eq!(
         engine.observe(presented(generation, 0, 16, 17, 17)),
         Observation::Accepted
     );
     assert_eq!(engine.tick(ms(17)), Ok(None));
     assert_eq!(engine.progress.heard, 17);
+}
+
+#[test]
+fn a_gap_or_backwards_time_requires_recovery() {
+    let (mut gap, generation) = observation_engine();
+    assert_eq!(
+        gap.observe(presented(generation, 0, 1, 480, 10)),
+        Observation::Recover
+    );
+    assert_eq!(
+        gap.observe(presented(generation, 0, 0, 16, 10)),
+        Observation::Recover
+    );
+
+    let (mut backwards, generation) = observation_engine();
+    assert_eq!(
+        backwards.observe(presented(generation, 0, 0, 16, 16)),
+        Observation::Accepted
+    );
+    assert_eq!(backwards.tick(ms(16)), Ok(None));
+    assert_eq!(
+        backwards.observe(presented(generation, 0, 16, 17, 15)),
+        Observation::Recover
+    );
 }
 
 #[test]
@@ -701,4 +718,149 @@ fn stale_ingress_does_not_itself_advance_virtual_playback() {
     assert_eq!(engine.queue.samples.len(), 480);
     assert_eq!(engine.tick(ms(20)), Ok(None));
     assert_eq!(engine.progress.consumed, 480);
+}
+
+#[test]
+fn retired_output_is_stale_before_successor_order() {
+    let current = OutputGeneration(2);
+    let mut engine = Engine::new(RUN, current);
+    let packet = usize::try_from(RATE / 10).unwrap();
+    let count = u32::try_from(CAPACITY / packet).unwrap();
+    for seq in 0..count {
+        let mut current_frame = frame(seq, packet, None, 1);
+        current_frame.pcm.output_generation = current;
+        assert!(matches!(
+            engine.offer(current_frame, ms(0)),
+            Ok(Admission::Return(_))
+        ));
+    }
+    let mut held = frame(count, 1, None, 2);
+    held.pcm.output_generation = current;
+    assert_eq!(engine.offer(held, ms(0)), Ok(Admission::Held));
+
+    let mut stale = frame(0, 1, None, 3);
+    stale.pcm.run = RunId(18);
+    assert_eq!(
+        engine.offer(stale, ms(1)),
+        Ok(Admission::Return(Credit {
+            origin: 3,
+            bytes: 50
+        }))
+    );
+    assert_eq!(engine.queue.samples.len(), CAPACITY);
+    assert_eq!(engine.progress.consumed, 0);
+    assert_eq!(engine.queue.held.as_ref().unwrap().pcm.seq, count);
+    assert_eq!(
+        engine.tick(ms(1)),
+        Ok(Some(Credit {
+            origin: 2,
+            bytes: 50
+        }))
+    );
+    assert_eq!(engine.queue.segments.back().unwrap().next_seq, count + 1);
+    assert_eq!(engine.tick(ms(1)), Ok(None));
+}
+
+fn recovery_with_held_ingress() -> (Engine, u64) {
+    let mut engine = Engine::new(RUN, LOGICAL);
+    engine.expect(ms(0));
+    let generation = engine.request(ms(0)).unwrap();
+    assert!(engine.opened(generation, Opened::Physical, ms(0)));
+    let size = usize::try_from(RATE / 10).unwrap();
+    let count = u32::try_from(CAPACITY / size).unwrap();
+    for seq in 0..count {
+        assert!(matches!(
+            engine.offer(frame(seq, size, None, 1), ms(0)),
+            Ok(Admission::Return(_))
+        ));
+    }
+    engine.staged(480);
+    assert_eq!(
+        engine.observe(presented(generation, 0, 0, 24, 1)),
+        Observation::Accepted
+    );
+    assert_eq!(engine.tick(ms(1)), Ok(None));
+    assert_eq!(
+        engine.offer(frame(count, 25, None, 2), ms(1)),
+        Ok(Admission::Held)
+    );
+    for end in 25..=40 {
+        assert_eq!(
+            engine.observe(presented(generation, 0, end - 1, end, 20)),
+            Observation::Accepted
+        );
+    }
+    assert_eq!(
+        engine.observe(presented(generation, 0, 40, 41, 20)),
+        Observation::Recover
+    );
+    (engine, generation)
+}
+
+#[test]
+fn recovery_before_stop_fences_pending_presentation_and_returns_held_credit() {
+    let (mut engine, generation) = recovery_with_held_ingress();
+    let (discarded, credit) = engine.stop(ms(30));
+    assert_eq!(engine.progress.heard, 24);
+    assert_eq!(engine.progress.consumed, 24);
+    assert_eq!(discarded, CAPACITY - 24);
+    assert_eq!(
+        credit,
+        Some(Credit {
+            origin: 2,
+            bytes: 50
+        })
+    );
+    assert!(!engine.lost(generation, 41, ms(31)));
+    assert_eq!(engine.stop(ms(32)), (0, None));
+    assert_eq!(engine.tail(), Tail::Unknown);
+}
+
+#[test]
+fn recovery_before_pause_keeps_credit_held_until_actual_handoff_is_retired() {
+    let (mut engine, generation) = recovery_with_held_ingress();
+    engine.pause(9, ms(30));
+    assert_eq!(engine.progress.heard, 24);
+    assert_eq!(engine.progress.consumed, 24);
+    assert_eq!(engine.tick(ms(30)), Ok(None));
+    assert_eq!(
+        engine.queue.held.as_ref().unwrap().credit,
+        Credit {
+            origin: 2,
+            bytes: 50
+        }
+    );
+    engine.resume(9, ms(31));
+    engine.staged(481);
+    assert_eq!(engine.offered, 480);
+    assert!(engine.lost(generation, 41, ms(31)));
+    assert_eq!(engine.progress.heard, 24);
+    assert_eq!(engine.progress.consumed, 41);
+    assert_eq!(engine.progress.first_gap, Some(24));
+    assert_eq!(
+        engine.tick(ms(31)),
+        Ok(Some(Credit {
+            origin: 2,
+            bytes: 50
+        }))
+    );
+    assert_eq!(engine.tick(ms(32)), Ok(None));
+    assert_eq!(engine.progress.consumed, 65);
+    assert_eq!(engine.progress.heard, 24);
+    assert_eq!(engine.progress.first_gap, Some(24));
+}
+
+#[test]
+fn a_stale_open_result_cannot_advance_the_virtual_clock() {
+    let mut engine = Engine::new(RUN, LOGICAL);
+    engine.expect(ms(0));
+    let request = engine.request(ms(0)).unwrap();
+    assert!(matches!(
+        engine.offer(segment(0, 480), ms(0)),
+        Ok(Admission::Return(_))
+    ));
+    assert!(!engine.opened(request + 1, Opened::Physical, ms(10)));
+    assert_eq!(engine.progress.consumed, 0);
+    assert_eq!(engine.tick(ms(10)), Ok(None));
+    assert_eq!(engine.progress.consumed, 240);
 }

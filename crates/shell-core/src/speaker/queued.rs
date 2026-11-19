@@ -107,10 +107,13 @@ impl Queue {
     }
 
     fn offer(&mut self, packet: Packet) -> Result<Admission, Fault> {
+        if packet.pcm.output_generation != self.logical {
+            return Ok(Admission::Return(packet.credit));
+        }
         if packet.pcm.run > self.run {
             return Err(Fault::Order);
         }
-        if !self.current(&packet.pcm) {
+        if self.stopped || packet.pcm.run < self.run {
             return Ok(Admission::Return(packet.credit));
         }
         if self.held.is_some() {
