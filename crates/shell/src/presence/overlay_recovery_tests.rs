@@ -1270,7 +1270,12 @@ fn a_cold_overlay_show_that_can_t_join_a_sent_lease_tells_the_brain_before_anyth
                 .clone()
                 .expect("the hold's surfaces")
         });
-        fixture.borrow_mut().set_failure = refused.then_some(Slot::Drawing as usize);
+        #[expect(
+            clippy::as_conversions,
+            reason = "fixed slot discriminants index the fixture's eight surfaces"
+        )]
+        let drawing = Slot::Drawing as usize;
+        fixture.borrow_mut().set_failure = refused.then_some(drawing);
         // A refused cover allows no native Show: the window is configured, and the drawing's
         // recovery hides it.
         let script = if refused {
