@@ -382,7 +382,11 @@ impl Coordinator {
             .filter(|job| job.key == key)
             .filter(|job| self.refusal(job.route).is_none())
             .and_then(|job| match &job.stage {
-                Stage::Sending { sources, .. } if !job.voided(sources) => Some(sources.clone()),
+                Stage::Sending { sources, model, .. }
+                    if !job.voided(sources) && self.offered(job.route, model.as_deref()) =>
+                {
+                    Some(sources.clone())
+                }
                 _ => None,
             });
         match sources {

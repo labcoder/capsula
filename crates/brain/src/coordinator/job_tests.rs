@@ -966,6 +966,16 @@ fn ready_on(kind: ConnectionKind, tag: u64) -> Input {
 /// Takes a turn in `thread` (a new task when `None`) on haiku over Claude Code and runs it to a
 /// stored `Done`; what that stored outcome did.
 fn claude_run_done(core: &mut Coordinator, thread: Option<ThreadId>, run: RunId) -> Vec<Effect> {
+    run_done_on(core, thread, run, haiku())
+}
+
+/// [`claude_run_done`] on `choice`.
+fn run_done_on(
+    core: &mut Coordinator,
+    thread: Option<ThreadId>,
+    run: RunId,
+    choice: ModelChoice,
+) -> Vec<Effect> {
     core.handle(Input::Turn {
         turn: 1,
         thread,
@@ -990,7 +1000,7 @@ fn claude_run_done(core: &mut Coordinator, thread: Option<ThreadId>, run: RunId)
             origin: Origin::Task(T),
             assistant: AssistantName::new("Kumo").expect("name"),
             user: None,
-            choice: Some(haiku()),
+            choice: Some(choice),
             connection: ConnectionTag(7),
         }),
         result: Ok(Built {
@@ -1014,6 +1024,54 @@ fn claude_reading() -> Coordinator {
     core.handle(ready_on(CLAUDE, 7)).expect("never stale");
     assert_eq!(claude_run_done(&mut core, None, R), done_starting(R, 2));
     core
+}
+
+/// A key job is granted only while the key's checked catalog still offers its model: a same-key
+/// refresh that drops it between the job's start and its grant ends the job unsent.
+#[test]
+fn a_key_job_whose_model_a_refresh_dropped_ends_unsent_at_the_grant() {
+    let on_key = ModelChoice {
+        connection: ConnectionKind::AnthropicKey,
+        ..haiku()
+    };
+    for (refreshed, grants) in [(&["haiku"][..], true), (&[][..], false)] {
+        let mut core = Coordinator::new(MAIN, ThreadId(3), RunId(9), Vec::new());
+        core.handle(ready_on(ConnectionKind::AnthropicKey, 7))
+            .expect("never stale");
+        assert_eq!(
+            run_done_on(&mut core, None, R, on_key.clone()),
+            done_starting(R, 2)
+        );
+        assert_eq!(
+            core.handle(job_built_on(key(2), Some(on_key.clone()))),
+            Ok(vec![start_job_on(key(2), R, Some(on_key.clone()))])
+        );
+        core.handle(Input::Engines(
+            ConnectionKind::AnthropicKey,
+            Availability::Ready(Ready {
+                connection: ConnectionTag(7),
+                models: refreshed
+                    .iter()
+                    .map(|slug| ModelInfo {
+                        slug: ModelSlug::new(slug).expect("slug"),
+                        display_name: ModelName::new("Haiku").expect("name"),
+                        supported_efforts: None,
+                    })
+                    .collect(),
+                trusted_draw: false,
+            }),
+        ))
+        .expect("the same key's refreshed catalog");
+        let expected = if grants {
+            granted(lease(key(2), 1))
+        } else {
+            vec![
+                Effect::Rebuild(SendKey::Job(key(2))),
+                Effect::CancelJob(key(2)),
+            ]
+        };
+        assert_eq!(core.handle(ready(key(2))), Ok(expected), "{refreshed:?}");
+    }
 }
 
 /// Job `key`'s read, finished, on a request naming `choice`.
