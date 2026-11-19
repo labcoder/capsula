@@ -814,8 +814,9 @@ async fn a_title_never_posts_to_a_saved_model_the_catalog_does_not_offer() {
 )]
 async fn a_refused_check_racing_a_refused_post_keeps_the_rejected_key_notice() {
     let refused = || {
-        let body = json!({"type":"error","error":{"type":"authentication_error","message":"synthetic"}})
-            .to_string();
+        let body =
+            json!({"type":"error","error":{"type":"authentication_error","message":"synthetic"}})
+                .to_string();
         format!(
             "HTTP/1.1 401 Refused\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
             body.len()
