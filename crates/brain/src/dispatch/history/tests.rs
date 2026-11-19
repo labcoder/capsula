@@ -166,6 +166,7 @@ fn reading_joins_canonical_retries_and_refusal_cancels_without_revival() {
         reach: Origin::Task(ThreadId(2)),
         offered: &[ToolName::SearchHistory],
         mcp: None,
+        mcp_draft_offered: false,
         ledger: &mut ledger,
     };
     let Step::Read(read) = dispatch::call(

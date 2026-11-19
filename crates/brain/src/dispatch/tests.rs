@@ -107,6 +107,7 @@ fn ctx(ledger: &mut Ledger, reach: Origin, mcp: Option<LaunchId>) -> RunCtx<'_> 
         reach,
         offered: OFFERED,
         mcp,
+        mcp_draft_offered: false,
         ledger,
     }
 }

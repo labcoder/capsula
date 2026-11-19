@@ -503,6 +503,7 @@ mod tests {
                     reach: crate::context::Origin::Kumo,
                     offered: &[ToolName::Draw],
                     mcp: None,
+                    mcp_draft_offered: false,
                     ledger: &mut ledger,
                 };
                 let Step::Screen {

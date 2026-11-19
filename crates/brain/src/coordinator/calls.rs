@@ -413,6 +413,11 @@ impl Coordinator {
             reach,
             offered: build.offered(),
             mcp: run.mcp,
+            #[cfg(test)]
+            mcp_draft_offered: run
+                .mcp_authority
+                .as_ref()
+                .is_some_and(|authority| authority.tools.contains(&ToolName::DraftIssue)),
             ledger: &mut run.ledger,
         };
         match dispatch::call(&mut ctx, caller, tool, input) {

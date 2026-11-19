@@ -38,7 +38,7 @@ mod jobs;
 #[path = "lease_tests.rs"]
 mod leases;
 #[path = "mcp_tests.rs"]
-mod mcp;
+pub(super) mod mcp;
 #[path = "route_tests.rs"]
 mod routes;
 #[path = "scene_tests.rs"]
