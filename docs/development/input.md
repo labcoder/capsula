@@ -564,6 +564,22 @@ CPU rows have no main input trace. Normal completion stops only this harness's u
 ETW session earlier. The trace is
 finished and validated even if the trial fails, before the owned product exits and flushes its
 observer close/end records. A fresh PID requires a fresh warm validation.
+
+### Offline drawing timing
+
+`xtask draw-timing <transcript-session.txt> <shell-sha256> <brain-sha256>` uses adjacent,
+prebuilt Debug GATE binaries and this gate's isolated profile, guards and PresentMon
+capture. It starts no build and uses no provider connection or sign-in. The recorded
+Responses plot is followed by three labeled synthetic steps in the same drawing. The
+typing window is dismissed before the offline turn is sent to keep its swapchain out of
+the draw match.
+
+The shell's opt-in observer marks readiness, activation and a successful first overlay
+paint by run, scene and index. The existing proxy completion bounds the PresentMon match
+for that paint. The report separates paint, actual Present and display feedback; a missing,
+dropped, ambiguous, reused or reconstructed PresentMon candidate is unmatched, not a
+display. The synthetic narration overlap is an estimate from the prior segment and
+entrance lengths, not a measurement of live model or speech latency.
 Immediately after the main trace starts, the input deadline is tightened to the earlier of the
 product cutoff and two seconds before that phase's trace bound. Acknowledged downs are
 released and the EDIT is uncovered before any potentially slow trace-finish wait, on both

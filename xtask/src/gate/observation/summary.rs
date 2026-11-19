@@ -258,7 +258,7 @@ fn sample(
     Ok(None)
 }
 
-fn milliseconds(ticks: i64, frequency: i64) -> Result<String> {
+pub(in crate::gate) fn milliseconds(ticks: i64, frequency: i64) -> Result<String> {
     ensure!(ticks >= 0 && frequency > 0, "invalid latency clock");
     let nanos = (u128::try_from(ticks)? * 1_000_000_000) / u128::try_from(frequency)?;
     Ok(format!("{}.{:06}", nanos / 1_000_000, nanos % 1_000_000))

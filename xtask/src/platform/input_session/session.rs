@@ -63,6 +63,7 @@ const GPUI_WINDOW: &str = "Zed::Window";
 enum Aim {
     Move(POINT, Target),
     Click(POINT, Target),
+    Typing(Window),
 }
 
 #[derive(Debug)]
@@ -504,7 +505,7 @@ impl Session {
         self.guard()
     }
 
-    /// Checks who owns `point` now, and for a click that the pointer is already there.
+    /// Checks the input destination, and for a click that the pointer is already there.
     fn aim(&self, aim: Aim) -> Result<()> {
         let (point, target) = match aim {
             Aim::Move(point, target) => (point, target),
@@ -514,6 +515,14 @@ impl Session {
                 unsafe { GetCursorPos(&raw mut cursor) }?;
                 ensure!(cursor == point, "the pointer is not at the click point");
                 (point, target)
+            }
+            Aim::Typing(window) => {
+                let front = self.typing_window()?;
+                ensure!(
+                    front.hwnd == window.hwnd && front.pid == window.pid && window.is_visible()?,
+                    "the verified typing window is no longer foreground and visible"
+                );
+                return Ok(());
             }
         };
         if let Some(cover) = self.covered {
@@ -574,16 +583,21 @@ impl Session {
                 .then_some(())
                 .context("destination snapshot went stale before sending"),
         )?;
-        // SAFETY: only the PID is inspected; the NULL grace never covers sending.
-        let foreground = pid(unsafe { GetForegroundWindow() });
+        // SAFETY: reads the foreground HWND without changing it; the NULL grace never covers sending.
+        let window = unsafe { GetForegroundWindow() };
+        let foreground = pid(window);
         self.or_abort(
-            self.lease
-                .get()
-                .owns(foreground)
-                .then_some(())
-                .with_context(|| {
-                    format!("no owned window in front to send to (foreground_pid={foreground})")
-                }),
+            (self.lease.get().owns(foreground)
+                && match aim {
+                    Some(Aim::Typing(expected)) => {
+                        window == expected.hwnd && foreground == expected.pid
+                    }
+                    _ => true,
+                })
+            .then_some(())
+            .with_context(|| {
+                format!("no owned window in front to send to (foreground_pid={foreground})")
+            }),
         )?;
         self.first_qpc.get_or_insert(qpc);
         self.last_qpc = Some(qpc);
@@ -637,13 +651,21 @@ impl Session {
     }
 
     pub(crate) fn tap(&mut self, scan: u16) -> Result<()> {
+        self.tap_at(scan, None)
+    }
+
+    pub(crate) fn tap_typing(&mut self, scan: u16, window: Window) -> Result<()> {
+        self.tap_at(scan, Some(Aim::Typing(window)))
+    }
+
+    fn tap_at(&mut self, scan: u16, aim: Option<Aim>) -> Result<()> {
         ensure!(scan < 512, "unsupported session scan code");
         self.send(
             &[
                 scan_input(scan, InputEdge::Down),
                 scan_input(scan, InputEdge::Up),
             ],
-            None,
+            aim,
         )
     }
 

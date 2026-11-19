@@ -66,7 +66,7 @@ pub(super) fn read(path: &Path, expected_pid: u32) -> Result<PresentRows> {
     )
 }
 
-fn parse(text: &str, expected_pid: u32) -> Result<PresentRows> {
+pub(super) fn parse(text: &str, expected_pid: u32) -> Result<PresentRows> {
     ensure!(expected_pid > 0, "invalid expected PresentMon PID");
     ensure!(text.ends_with('\n'), "empty or truncated PresentMon CSV");
     let mut lines = text.strip_prefix('\u{feff}').unwrap_or(text).lines();
