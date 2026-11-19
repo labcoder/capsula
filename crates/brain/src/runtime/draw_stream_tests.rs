@@ -445,7 +445,7 @@ async fn unspoken_line_and_step_survive_a_crash_before_the_write_receipt_is_appl
         events
             .into_iter()
             .filter(|event| event.kind == PageEventKind::AssistantText)
-            .map(|event| event.text.to_string())
+            .map(|event| event.text)
             .collect::<Vec<_>>(),
         ["\n\nOne Chat line.\n\n"]
     );
