@@ -75,9 +75,12 @@ sequenceDiagram
   modifier VK or conflicting prefix is loss of coverage, not a left-key make or break.
   The adapter hands the reducer semantic left Ctrl, left Alt, Escape or other-key events.
   Escape remains distinguishable from the registered Escape event, and bounded opaque
-  slots track live physical makes and breaks for up to two keyboards with keys down. A second
-  device holding the same left modifier makes its identity ambiguous and resets input.
-  If both banks are occupied, another device invalidates coverage rather than growing a list.
+  slots track makes and breaks from up to two sources with keys down. Readable keyboard
+  records with a null Raw Input device handle, as can occur with injected input, share one
+  source distinct from every non-null handle. They follow the same shortcut and recovery
+  rules as any keyboard. A second source sending a make or break for a left modifier still
+  held by another source makes its identity ambiguous and resets input. If both banks are
+  occupied, another source invalidates coverage rather than growing a list.
   The reducer doesn't decode Windows scan codes; diagnostics don't print devices, slots,
   layout identifiers or edge values.
 - **Same callback.** The gesture lives in an `Rc<Cell<Gesture>>` shared by the native callback
