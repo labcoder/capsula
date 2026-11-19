@@ -561,6 +561,8 @@ Run it only with the owner present and their approval for that run, at a head wh
 | 2 | 2 GETs, 3 POSTs | The saved key is checked at start. In Kumo's chat, a prompt that asks for `list_tasks` ends `Done`. The owner pastes B, and it is accepted. A second prompt in the same chat ends `Done`. The owner removes the key, and a third prompt is refused. |
 | 3 | 0 GETs, 0 POSTs | It starts with no key and stays that way for 30 seconds: no check and no run. |
 
+`live anthropic-key quiet` runs launch 3 alone, through the same run setup, process watch and quit wait, to prove them on the real images before a paid run. It sends nothing, so it needs no approval for spend and neither needs nor touches the ledger. It still opens the gate shell's window for about a minute, so run it only when the desktop is free and its owner has agreed.
+
 The prompts go to Kumo's chat, not a task. A task's first `Done` starts a title job, which would take a Messages request. Kumo's compaction finds nothing to summarize in a thread this short, so it sends nothing. `list_tasks` reads only the store and takes no screenshot.
 
 ### The allowance
@@ -581,9 +583,9 @@ The check watches the brain's pipe tap, which keeps only content-free control fr
 - a run that fails, is interrupted or ends with an error, outside the step that expects the refusal;
 - a second run in a step, a run in another thread, or a refused submit outside its step;
 - an `Error`, `CaptureDone`, `HoldScreen`, `ScreenHoldRecognized` or `BuildMismatch` frame;
-- the brain or the shell exiting, or any other product process starting, during a step; a step that takes more than 10 minutes; or the shell still running 60 seconds after its window is closed.
+- the brain or the shell exiting during a step, or any product process starting that is neither of them nor a worker of that brain; a step that takes more than 10 minutes; any such process starting while the launch quits; or the launch still running 60 seconds after the shell's window is closed.
 
-The process checks are for diagnosis and abort, not for the allowance, which holds without them. During a step the check looks at the running product processes every 250 ms. A process that starts and exits between two looks isn't seen. After the window is closed, the check waits up to 60 seconds for every `kumochi.exe` and `kumochid.exe` to exit without checking which ones are its own, so a replacement that starts and is closed in that minute isn't reported either. A replacement this run started can't send a key request, because its slice is zero.
+The process checks are for diagnosis and abort, not for the allowance, which holds without them. The brain starts its screen and speech workers from its own executable, so each runs as `kumochid.exe` with the brain as its parent. The check takes each process's parent from the process list, then reads the rest through one handle to that process: it counts a child of the launch's brain as a worker only when that process is in the run's job, its image is the gate brain image and its arguments name exactly one worker role, `--screen` or `--speech`, with at most one child per role; anything else stops it. A child that exits before the check reads it counts for nothing until the next look, and a live child it can't read stops it. A worker has no key route. During a step the check looks at the running product processes every 250 ms. A process that starts and exits between two looks isn't seen. After the window is closed, the check waits up to 60 seconds for the shell, the brain and its workers to exit, and stops at once if any other product process appears. A replacement this run started can't send a key request, because its slice is zero.
 
 ### What it can't see
 

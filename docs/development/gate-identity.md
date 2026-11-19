@@ -58,8 +58,9 @@ cargo build --release --package kumochi-shell --package kumochi-brain \
 ./target/release/xtask.exe gate-session "$transcript"
 ```
 
-The tool's own build drops the `CARGO_MANIFEST_DIR` that `cargo run` sets, so `cargo run` finds the
-prebuilt images up to date too. Prebuild after the last commit or checkout: the build id follows
+The tool's own build drops the `CARGO_MANIFEST_*` and `CARGO_PKG_*` variables that `cargo run` sets,
+because ring's build script reruns when they change. That removes this one rebuild trigger; a
+change to the build's real inputs still rebuilds. Prebuild after the last commit or checkout: the build id follows
 HEAD's reflog, so either rebuilds them.
 
 ## What a run does

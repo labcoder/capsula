@@ -157,6 +157,16 @@ const PLAN: [Launch; 3] = [
     },
 ];
 
+/// The plan's last launch alone: no key and both slices zero, so it spends nothing; it proves the
+/// launch's process watch and quit on the real images before a paid run.
+const LAST: &[Launch] = std::slice::from_ref(&PLAN[PLAN.len() - 1]);
+
+/// Whether any launch in `plan` holds a slice, which the ledger must grant before it starts.
+fn spends(plan: &[Launch]) -> bool {
+    plan.iter()
+        .any(|launch| launch.slice.catalog > 0 || launch.slice.messages > 0)
+}
+
 // The slices add up to the approval, and the final restart has none.
 const _: () = {
     let (mut catalog, mut messages, mut index) = (0, 0, 0);
@@ -176,7 +186,17 @@ const _: () = {
     );
 };
 
+/// The whole check.
 pub(super) fn run() -> Result<()> {
+    run_plan(&PLAN)
+}
+
+/// Only [`LAST`]: the real launch's setup, watch and quit, spending nothing.
+pub(super) fn quiet() -> Result<()> {
+    run_plan(LAST)
+}
+
+fn run_plan(plan: &[Launch]) -> Result<()> {
     let live = std::env::current_exe()?
         .parent()
         .and_then(Path::parent)
@@ -195,10 +215,15 @@ pub(super) fn run() -> Result<()> {
             .parent()
             .context("a launch folder has a parent")?
             .to_owned();
-        let mut ledger = Ledger::create(&ledger_path()?)?;
-        for (index, launch) in PLAN.iter().enumerate() {
+        // A run that spends nothing neither needs nor touches the ledger.
+        let mut ledger = spends(plan)
+            .then(|| ledger_path().and_then(|path| Ledger::create(&path)))
+            .transpose()?;
+        for (index, launch) in plan.iter().enumerate() {
             let number = index + 1;
-            ledger.grant(number, launch.slice)?;
+            if let Some(ledger) = &mut ledger {
+                ledger.grant(number, launch.slice)?;
+            }
             println!(
                 "launch {number}: {} model-list and {} Messages requests at most",
                 launch.slice.catalog, launch.slice.messages
@@ -209,6 +234,7 @@ pub(super) fn run() -> Result<()> {
                 shell_command(&debug.join(SHELL_EXE), &folders),
                 &tap,
                 launch.steps,
+                run.job(),
             )
             .with_context(|| format!("launch {number}"))?;
         }
@@ -256,17 +282,52 @@ fn clean(exe: &Path, folders: &Folders) -> Command {
     command
 }
 
-/// Whether `running` holds exactly this launch's brain and shell besides `me`.
-fn only_ours(running: &[platform::Entry], me: u32, ours: [u32; 2]) -> bool {
-    let mut others: Vec<u32> = running
+/// Whether `running` holds this launch's brain and shell, `[brain, shell]`, and besides `me`
+/// nothing [`no_strangers`] refuses.
+fn only_ours(
+    running: &[platform::Entry],
+    me: u32,
+    ours: [u32; 2],
+    image: &Path,
+    identify: impl Fn(u32) -> Result<Option<platform::Helper>>,
+) -> Result<bool> {
+    Ok(ours
         .iter()
-        .map(|entry| entry.pid)
-        .filter(|&pid| pid != me)
-        .collect();
-    others.sort_unstable();
-    let mut ours = ours;
-    ours.sort_unstable();
-    others == ours
+        .all(|&pid| running.iter().any(|entry| entry.pid == pid))
+        && no_strangers(running, me, ours, image, identify)?)
+}
+
+/// Whether every product process in `running` besides `me` is this launch's brain or shell, or a
+/// worker of that brain: a child of it in the run's job whose image is the gate brain's, `image`,
+/// and whose arguments name exactly one worker role, one child per role at most, all read through
+/// one handle to it. A child that has exited before `identify` reads it counts for nothing, and the
+/// next look samples again; a live child that can't be read fails.
+fn no_strangers(
+    running: &[platform::Entry],
+    me: u32,
+    [brain, shell]: [u32; 2],
+    image: &Path,
+    identify: impl Fn(u32) -> Result<Option<platform::Helper>>,
+) -> Result<bool> {
+    let mut roles = Vec::new();
+    for entry in running
+        .iter()
+        .filter(|entry| ![me, brain, shell].contains(&entry.pid))
+    {
+        if entry.shell || entry.parent != brain {
+            return Ok(false);
+        }
+        let Some(helper) = identify(entry.pid)? else {
+            continue;
+        };
+        match helper.role {
+            Some(role) if helper.in_job && helper.image == image && !roles.contains(&role) => {
+                roles.push(role);
+            }
+            _ => return Ok(false),
+        }
+    }
+    Ok(true)
 }
 
 /// Where the ledger lives: beside the gate's run lock, so cleaning or moving build output can't
@@ -306,7 +367,14 @@ impl Ledger {
 /// Starts the launch's brain, then its shell once the brain listens, so the shell connects to that
 /// brain instead of starting one; runs the steps, then closes the shell and waits for every product
 /// process to exit.
-fn supervise(mut brain: Command, mut shell: Command, tap: &Path, steps: &[Step]) -> Result<()> {
+fn supervise(
+    mut brain: Command,
+    mut shell: Command,
+    tap: &Path,
+    steps: &[Step],
+    job: platform::Held,
+) -> Result<()> {
+    let image = std::fs::canonicalize(brain.get_program()).context("the gate brain's image")?;
     let mut brain = brain.spawn().context("starting the gate brain")?;
     let pipe = Pipe::Control.name(platform::gate_pipe::session_id()?);
     let listen = Instant::now() + LISTEN;
@@ -327,7 +395,7 @@ fn supervise(mut brain: Command, mut shell: Command, tap: &Path, steps: &[Step])
     let mut state = State::default();
     let stepped = steps
         .iter()
-        .try_for_each(|step| watch(ours, tap, step, &mut state, &mut cursor));
+        .try_for_each(|step| watch(ours, &image, job, tap, step, &mut state, &mut cursor));
     if let Err(error) = stepped {
         return crate::session::combine([
             Err(error),
@@ -336,21 +404,33 @@ fn supervise(mut brain: Command, mut shell: Command, tap: &Path, steps: &[Step])
         ]);
     }
     platform::close_shell_window(&mut child).context("closing the gate shell")?;
+    let me = std::process::id();
     let deadline = Instant::now() + QUIT;
-    while !platform::processes()?
-        .iter()
-        .all(|entry| entry.pid == std::process::id())
-    {
-        if Instant::now() >= deadline {
-            return crate::session::combine([
-                Err(anyhow!(
-                    "the gate shell didn't exit in {QUIT:?} after its window closed; it was ended"
-                )),
-                crate::live::end(&mut child),
-                crate::live::end(&mut brain),
-            ]);
+    loop {
+        let running = platform::processes()?;
+        if running.iter().all(|entry| entry.pid == me) {
+            break;
         }
-        thread::sleep(POLL);
+        let error = match no_strangers(&running, me, ours, &image, |pid| platform::helper(pid, job))
+        {
+            Err(error) => error,
+            Ok(false) => anyhow!(
+                "another product process started while the launch quit; the shell and brain were ended"
+            ),
+            Ok(true) if Instant::now() >= deadline => anyhow!(
+                "the launch didn't exit in {QUIT:?} after the shell's window closed; the shell and \
+                 brain were ended"
+            ),
+            Ok(true) => {
+                thread::sleep(POLL);
+                continue;
+            }
+        };
+        return crate::session::combine([
+            Err(error),
+            crate::live::end(&mut child),
+            crate::live::end(&mut brain),
+        ]);
     }
     let after = &read(tap)?[cursor..];
     ensure!(
@@ -365,6 +445,8 @@ fn supervise(mut brain: Command, mut shell: Command, tap: &Path, steps: &[Step])
 /// Waits for `step` against the tap from `cursor` on, leaving `cursor` after the frame that met it.
 fn watch(
     ours: [u32; 2],
+    image: &Path,
+    job: platform::Held,
     tap: &Path,
     step: &Step,
     state: &mut State,
@@ -381,9 +463,15 @@ fn watch(
     let started = Instant::now();
     loop {
         ensure!(
-            only_ours(&platform::processes()?, std::process::id(), ours),
-            "the gate brain or shell exited, or another product process started; nothing it starts \
-             can send on the key route, and the check stops"
+            only_ours(
+                &platform::processes()?,
+                std::process::id(),
+                ours,
+                image,
+                |pid| platform::helper(pid, job)
+            )?,
+            "the gate brain or shell exited, or a product process other than them and the brain's \
+             workers started; nothing it starts can send on the key route, and the check stops"
         );
         let seen = read(tap)?;
         while let Some(event) = seen.get(*cursor) {
@@ -658,31 +746,143 @@ mod tests {
         fs::remove_dir_all(dir).expect("cleanup");
     }
 
-    #[test]
-    fn a_launch_is_ours_only_while_its_brain_and_shell_are_the_only_product_processes() {
-        let entry = |pid, parent| platform::Entry {
-            pid,
-            parent,
-            shell: false,
+    /// Product processes as (pid, parent, shell).
+    fn entries(list: &[(u32, u32, bool)]) -> Vec<platform::Entry> {
+        list.iter()
+            .map(|&(pid, parent, shell)| platform::Entry { pid, parent, shell })
+            .collect()
+    }
+
+    /// The gate brain's image in the fixtures.
+    const IMAGE: &str = r"C:\gate\debug\kumochid.exe";
+
+    /// What the check reads of each fixture child, all in the run's job but 75: 30 and 50 name the
+    /// screen worker and 40 the speech worker under the gate image, 60 names no role, 70 names the
+    /// screen worker under another image, 75 names the screen worker under the gate image outside
+    /// the job, 80 exited before it was read, and anything else can't be read.
+    fn identify(pid: u32) -> Result<Option<platform::Helper>> {
+        let helper = |image: &str, role, in_job| {
+            Ok(Some(platform::Helper {
+                image: std::path::PathBuf::from(image),
+                role,
+                in_job,
+            }))
         };
+        match pid {
+            30 | 50 => helper(IMAGE, Some("screen-worker"), true),
+            40 => helper(IMAGE, Some("speech-worker"), true),
+            60 => helper(IMAGE, None, true),
+            70 => helper(r"C:\other\kumochid.exe", Some("screen-worker"), true),
+            75 => helper(IMAGE, Some("screen-worker"), false),
+            80 => Ok(None),
+            _ => bail!("unreadable fixture child"),
+        }
+    }
+
+    /// The check is xtask 1; its brain is 10 and its shell 20.
+    #[test]
+    fn a_launch_is_its_brain_its_shell_and_the_brains_identified_workers_only() {
         let (me, ours) = (1, [10, 20]);
-        assert!(only_ours(
-            &[entry(1, 0), entry(20, 1), entry(10, 1)],
-            me,
-            ours
-        ));
-        assert!(!only_ours(&[entry(1, 0), entry(10, 1)], me, ours));
-        assert!(!only_ours(&[entry(1, 0), entry(20, 1)], me, ours));
-        assert!(!only_ours(
-            &[entry(1, 0), entry(20, 1), entry(30, 20)],
-            me,
-            ours
-        ));
-        assert!(!only_ours(
-            &[entry(1, 0), entry(10, 1), entry(20, 1), entry(30, 10)],
-            me,
-            ours
-        ));
+        let with = |extra: &[(u32, u32, bool)]| {
+            let mut list = vec![(1, 0, false), (20, 1, true), (10, 1, false)];
+            list.extend_from_slice(extra);
+            only_ours(&entries(&list), me, ours, Path::new(IMAGE), identify)
+                .expect("every fixture child is read")
+        };
+        assert!(with(&[]), "no worker yet");
+        assert!(with(&[(30, 10, false), (40, 10, false)]), "both workers");
+        assert!(
+            with(&[(30, 10, false)]),
+            "one worker, the other not started"
+        );
+        assert!(with(&[(40, 10, false)]), "the other worker alone");
+        assert!(
+            with(&[(30, 10, false), (80, 10, false)]),
+            "a child gone before it was read counts for nothing"
+        );
+        assert!(
+            !with(&[(30, 10, false), (50, 10, false)]),
+            "two children naming one role"
+        );
+        assert!(
+            !with(&[(60, 10, false)]),
+            "a brain-named child with no role"
+        );
+        assert!(
+            !with(&[(70, 10, false)]),
+            "a worker role under another image"
+        );
+        assert!(!with(&[(75, 10, false)]), "a worker outside the run's job");
+        assert!(!with(&[(30, 20, false)]), "a brain the shell started");
+        assert!(!with(&[(30, 10, true)]), "a shell the brain relaunched");
+        assert!(!with(&[(30, 99, false)]), "another brain's worker");
+        assert!(!with(&[(30, 1, false)]), "a second brain beside ours");
+        let (list, image) = (
+            entries(&[
+                (1, 0, false),
+                (20, 1, true),
+                (10, 1, false),
+                (90, 10, false),
+            ]),
+            Path::new(IMAGE),
+        );
+        assert!(
+            only_ours(&list, me, ours, image, identify).is_err(),
+            "a live child that can't be read stops the check"
+        );
+        for list in [
+            [(1, 0, false), (10, 1, false), (30, 10, false)],
+            [(1, 0, false), (20, 1, true), (30, 10, false)],
+        ] {
+            assert!(
+                !only_ours(&entries(&list), me, ours, image, identify).expect("read"),
+                "the brain or the shell gone"
+            );
+        }
+    }
+
+    /// While a launch quits, its brain, shell and workers may still be running in any mix, but
+    /// nothing else may start.
+    #[test]
+    fn a_quitting_launch_leaves_only_its_own_processes() {
+        let (me, ours, image) = (1, [10, 20], Path::new(IMAGE));
+        let quits = |list: &[(u32, u32, bool)]| {
+            no_strangers(&entries(list), me, ours, image, identify).expect("read")
+        };
+        assert!(quits(&[(1, 0, false)]));
+        assert!(
+            quits(&[(1, 0, false), (30, 10, false), (40, 10, false)]),
+            "the workers outliving the brain for a moment"
+        );
+        assert!(
+            !quits(&[(1, 0, false), (60, 10, false)]),
+            "a brain-named child with no role"
+        );
+        assert!(
+            !quits(&[(1, 0, false), (30, 20, false)]),
+            "a brain the shell started"
+        );
+        assert!(
+            !quits(&[(1, 0, false), (30, 10, true)]),
+            "a shell the brain relaunched"
+        );
+    }
+
+    #[test]
+    fn quiet_is_the_last_launch_alone_and_spends_nothing() {
+        let quiet = LAST;
+        assert_eq!(quiet.len(), 1);
+        assert_eq!(
+            quiet[0].slice,
+            Slice {
+                catalog: 0,
+                messages: 0
+            }
+        );
+        let expects: Vec<Expect> = quiet[0].steps.iter().map(|step| step.expect).collect();
+        assert_eq!(expects, [Expect::Quiet]);
+        assert!(!spends(quiet));
+        assert!(spends(&PLAN));
     }
 
     #[test]

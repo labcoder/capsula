@@ -54,6 +54,12 @@ impl Job {
         Ok(())
     }
 
+    /// The job as a [`Held`] that doesn't hold this process, for checking membership.
+    #[cfg(test)]
+    pub(crate) fn held(&self) -> Held {
+        Held(self.raw())
+    }
+
     /// Puts this process in the job and keeps the handle open until the process exits, so
     /// everything it starts afterwards ends with it.
     pub(crate) fn hold_self(self) -> Result<Held> {
@@ -79,6 +85,11 @@ impl Held {
     /// they're gone.
     pub(crate) fn end_others(self, limit: Duration) -> Result<()> {
         end_all(self.0, std::process::id(), limit)
+    }
+
+    /// Whether `process` is in the job.
+    pub(crate) fn holds(self, process: &super::Process) -> Result<bool> {
+        member(self.0, HANDLE(process.handle.as_raw_handle()))
     }
 }
 
@@ -160,14 +171,19 @@ fn terminate(job: HANDLE, pid: u32) -> Result<()> {
     // SAFETY: the call returned a valid handle that nothing else owns.
     let process = unsafe { OwnedHandle::from_raw_handle(raw.0) };
     let process = HANDLE(process.as_raw_handle());
-    let mut member = BOOL::default();
-    // SAFETY: both handles are open for the call and `member` is writable.
-    unsafe { IsProcessInJob(process, Some(job), &raw mut member) }?;
-    if member.as_bool() {
+    if member(job, process)? {
         // SAFETY: the handle is open with terminate access for the call.
         unsafe { TerminateProcess(process, 1) }?;
     }
     Ok(())
+}
+
+/// Whether `process` is in `job`.
+fn member(job: HANDLE, process: HANDLE) -> Result<bool> {
+    let mut member = BOOL::default();
+    // SAFETY: both handles are open for the call and `member` is writable.
+    unsafe { IsProcessInJob(process, Some(job), &raw mut member) }?;
+    Ok(member.as_bool())
 }
 
 #[cfg(test)]

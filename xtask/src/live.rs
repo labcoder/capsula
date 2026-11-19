@@ -55,6 +55,9 @@ pub(crate) fn run(args: impl Iterator<Item = String>) -> Result<()> {
     if args == ["anthropic-key"] {
         return anthropic_key::run();
     }
+    if args == ["anthropic-key", "quiet"] {
+        return anthropic_key::quiet();
+    }
     match entry(ProductIdentity::ACTIVE, &args)? {
         Entry::Prepare(check) => prepare(check),
         Entry::Inner(Check::Account) => signin::harness(signin::inspect),

@@ -16,8 +16,8 @@ use anyhow::{Context as _, Result, bail};
 use kumochi_protocol::constants::{BRAIN_EXE, SHELL_EXE};
 use windows::Wdk::System::Threading::{NtQueryInformationProcess, ProcessCommandLineInformation};
 use windows::Win32::Foundation::{
-    ERROR_NO_MORE_FILES, FILETIME, HANDLE, HLOCAL, HWND, LPARAM, LocalFree, UNICODE_STRING,
-    WAIT_OBJECT_0, WAIT_TIMEOUT, WPARAM,
+    ERROR_INVALID_PARAMETER, ERROR_NO_MORE_FILES, FILETIME, HANDLE, HLOCAL, HWND, LPARAM,
+    LocalFree, UNICODE_STRING, WAIT_OBJECT_0, WAIT_TIMEOUT, WPARAM,
 };
 use windows::Win32::System::Com::CoTaskMemFree;
 use windows::Win32::System::Diagnostics::ToolHelp::{
@@ -26,8 +26,8 @@ use windows::Win32::System::Diagnostics::ToolHelp::{
 use windows::Win32::System::ProcessStatus::{GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS_EX};
 use windows::Win32::System::Threading::{
     CREATE_NO_WINDOW, GetCurrentThread, GetExitCodeProcess, GetProcessTimes, NORMAL_PRIORITY_CLASS,
-    OpenProcess, PROCESS_QUERY_INFORMATION, PROCESS_SYNCHRONIZE, PROCESS_VM_READ,
-    WaitForSingleObject,
+    OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_INFORMATION, PROCESS_SYNCHRONIZE,
+    PROCESS_VM_READ, QueryFullProcessImageNameW, WaitForSingleObject,
 };
 use windows::Win32::System::WindowsProgramming::{QueryProcessCycleTime, QueryThreadCycleTime};
 use windows::Win32::UI::Shell::{
@@ -36,7 +36,7 @@ use windows::Win32::UI::Shell::{
 use windows::Win32::UI::WindowsAndMessaging::{
     EnumWindows, GetWindowThreadProcessId, IsWindowVisible, PostMessageW, WM_CLOSE,
 };
-use windows::core::{BOOL, PCWSTR};
+use windows::core::{BOOL, PCWSTR, PWSTR};
 
 use crate::hermetic::Folders;
 
@@ -167,7 +167,47 @@ pub(crate) fn helper_role(pid: u32) -> Result<&'static str> {
 }
 
 fn process_command_line(pid: u32) -> Result<Vec<u16>> {
-    let process = Process::open(pid)?;
+    command_line(&Process::open(pid)?)
+}
+
+/// A child of a launch's brain as the key check reads it through one handle: its image's canonical
+/// path, the worker role its arguments name when they name exactly one, and whether it is in the
+/// run's job.
+#[derive(Debug)]
+pub(crate) struct Helper {
+    pub(crate) image: PathBuf,
+    pub(crate) role: Option<&'static str>,
+    pub(crate) in_job: bool,
+}
+
+/// `pid`'s image, role and membership of `job`, or `None` once it has exited or no longer exists.
+pub(crate) fn helper(pid: u32, job: Held) -> Result<Option<Helper>> {
+    let process = match Process::open(pid) {
+        Ok(process) => process,
+        Err(error)
+            if error
+                .downcast_ref::<windows::core::Error>()
+                .is_some_and(|error| error.code() == ERROR_INVALID_PARAMETER.to_hresult()) =>
+        {
+            return Ok(None);
+        }
+        Err(error) => return Err(error),
+    };
+    let read = process
+        .image()
+        .and_then(|image| Ok((image, command_line(&process)?, job.holds(&process)?)));
+    if process.exit_code()?.is_some() {
+        return Ok(None);
+    }
+    let (image, line, in_job) = read?;
+    Ok(Some(Helper {
+        image: std::fs::canonicalize(image)?,
+        role: command_role(&line).ok(),
+        in_job,
+    }))
+}
+
+fn command_line(process: &Process) -> Result<Vec<u16>> {
     anyhow::ensure!(
         process.exit_code()?.is_none(),
         "product helper already exited"
@@ -349,6 +389,25 @@ impl Process {
         // SAFETY: OpenProcess succeeded and ownership of its unique handle is transferred.
         let handle = unsafe { OwnedHandle::from_raw_handle(raw.0) };
         Ok(Self { pid, handle })
+    }
+
+    /// The process's image as a Win32 path.
+    pub(crate) fn image(&self) -> Result<PathBuf> {
+        let mut image = vec![0u16; 32_768];
+        let mut length = u32::try_from(image.len())?;
+        // SAFETY: the live handle has query access and image/length describe the writable buffer.
+        unsafe {
+            QueryFullProcessImageNameW(
+                HANDLE(self.handle.as_raw_handle()),
+                PROCESS_NAME_WIN32,
+                PWSTR(image.as_mut_ptr()),
+                &raw mut length,
+            )
+        }?;
+        let image = image
+            .get(..usize::try_from(length)?)
+            .context("process image length exceeds its buffer")?;
+        Ok(PathBuf::from(OsString::from_wide(image)))
     }
 
     pub(crate) fn exit_code(&self) -> Result<Option<u32>> {
