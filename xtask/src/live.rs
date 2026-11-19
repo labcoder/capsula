@@ -12,6 +12,7 @@
     reason = "the harness's progress and the account's state are its output"
 )]
 
+mod anthropic_key;
 mod catalog;
 mod chatgpt_text;
 mod claude_question;
@@ -50,7 +51,11 @@ const EXIT: Duration = Duration::from_secs(15);
 const POLL: Duration = Duration::from_millis(50);
 
 pub(crate) fn run(args: impl Iterator<Item = String>) -> Result<()> {
-    match entry(ProductIdentity::ACTIVE, &args.collect::<Vec<_>>())? {
+    let args: Vec<String> = args.collect();
+    if args == ["anthropic-key"] {
+        return anthropic_key::run();
+    }
+    match entry(ProductIdentity::ACTIVE, &args)? {
         Entry::Prepare(check) => prepare(check),
         Entry::Inner(Check::Account) => signin::harness(signin::inspect),
         Entry::Inner(Check::SignIn) => signin::inner(),

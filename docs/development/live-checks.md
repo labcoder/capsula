@@ -4,8 +4,9 @@
 over its real pipes with the slice 2 gate's client (see [the slice 2 gate](slice2-gate.md)). Live
 checks run on Rez, never in CI, and only with the owner present or in a session the Captain
 approved. The checks are `account`, `signin`, `claude-signin`, `claude-question`,
-`catalog-provenance`, `image`, and `chatgpt-text first-text`. Catalog provenance and image run
-the brain alone, with no client (see their sections).
+`catalog-provenance`, `image`, `chatgpt-text first-text` and `anthropic-key`. Catalog provenance
+and image run the brain alone, with no client, and `anthropic-key` runs the real gate shell (see
+their sections).
 
 ## How it runs
 
@@ -543,6 +544,54 @@ marks check: stopped, exit 20 (requests: at most 12)
 Exits 10–17 mean the same as the catalog capture's and send nothing; 18 means a picture or body
 couldn't be built; 20 means the session went stale or a line couldn't be written, and 21 that
 the provider refused the account, each with the rest unspent.
+
+## `anthropic-key`
+
+Runs Anthropic API key chat end to end on two keys the owner enters, A and B. Unlike the other checks it runs as the gate identity (see [the gate identity](gate-identity.md)), so neither key is saved under the dev or the installed credential names. It also launches the real gate shell rather than a client, because the owner pastes both keys into the real Anthropic API key row and types the prompts it prints. The check never reads the clipboard, types or pastes.
+
+```bash
+cargo run --release --package xtask --features kumochi-protocol/gate-identity -- live anthropic-key
+```
+
+Run it only on the Captain's go, with the owner present, at a head where the key row and the key route are on. It builds debug gate images of the shell and the brain, because the transport's budget variables bind only in a debug build. All three launches share one folder set under `target/live/anthropic-key/<time>/key`, and the default model is set to `claude-haiku-5-5` at low effort.
+
+| Launch | Allowance | Steps |
+| --- | --- | --- |
+| 1 | 1 model-list GET, 0 Messages POSTs | The owner pastes A, and it is staged, checked and accepted. |
+| 2 | 2 GETs, 3 POSTs | The saved key is checked at start. In Kumo's chat, a prompt that asks for `list_tasks` ends `Done`. The owner pastes B, and it is accepted. A second prompt in the same chat ends `Done`. The owner removes the key, and a third prompt is refused. |
+| 3 | 0 GETs, 0 POSTs | It starts with no key and stays that way for 30 seconds: no check and no run. |
+
+The prompts go to Kumo's chat, not a task. A task's first `Done` starts a title job, which would take a Messages request. Kumo's compaction finds nothing to summarize in a thread this short, so it sends nothing. `list_tasks` reads only the store and takes no screenshot.
+
+### The allowance
+
+The approval is six requests: three GETs and three POSTs, with no retries.
+- Each launch's brain gets exactly its slice through `KUMOCHI_LIVE_KEY_CATALOG_BUDGET` and `KUMOCHI_LIVE_KEY_MESSAGES_BUDGET`. A request past its slice is refused before connecting. Every other `KUMOCHI_` variable is removed from the launch's environment.
+- Before each launch, the check appends that launch's slice to `target/live/anthropic-key.ledger` and flushes it.
+- The check refuses to start while that file exists, so a slice is never refunded: an interrupted or failed run can't be resumed or rerun. The file is deleted by hand, and only after a new approval.
+
+The slices add up to the approval, and the last one is zero, both checked at compile time.
+
+### What stops it
+
+The check watches the brain's pipe tap, which keeps only content-free control frames. It stops at the first of these and cleans up:
+- the key reported as refused or unconfirmed, which includes a check that the budget refused;
+- a run that fails, is interrupted or ends with an error, outside the step that expects the refusal;
+- a second run in a step, a run in another thread, or a refused submit outside its step;
+- an `Error`, `CaptureDone`, `HoldScreen`, `ScreenHoldRecognized` or `BuildMismatch` frame;
+- the shell exiting during a step, a step that takes more than 10 minutes, or the shell still running 60 seconds after its window is closed.
+
+### What it can't see
+
+The tap carries no attempts, HTTP statuses or tool names. A request that a budget refuses shows up only through its effect. A refused check leaves the key unconfirmed and a refused answer fails the run, and both stop the check. A refused background job surfaces nowhere, but it sent nothing and cost nothing.
+
+The check also can't tell whether the model called `list_tasks`. It can't confirm that the first answer took a tool round and a continuation, only that the run ended `Done`.
+
+None of these gaps can send a paid request beyond the plan, because each launch's brain refuses anything past its slice before connecting.
+
+### Cleanup
+
+Every exit, including a stop, ends the shell and its brain and then runs the gate cleanup. That cleanup deletes the gate service's staged and saved key names, every generation the launch's credential authority records, the gate instance entry and the gate folders. Cleanup sends nothing. The check prints step names, counts and closed state words, never a key, a body, a header or model text.
 
 ## Bounds
 

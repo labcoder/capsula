@@ -12,8 +12,8 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result, anyhow, bail, ensure};
 use kumochi_protocol::constants::{
-    ACCOUNT_MAX_CHUNKS, AUTHORITY_FILE, CONFIG_FILE, ProductIdentity, generation_hex,
-    generation_target, instance_target,
+    ACCOUNT_MAX_CHUNKS, AUTHORITY_FILE, CONFIG_FILE, ProductIdentity, anthropic_key_target,
+    anthropic_staging_target, generation_hex, generation_target, instance_target,
 };
 use rusqlite::{Connection, OpenFlags};
 
@@ -126,6 +126,17 @@ impl Folders {
         fs::write(
             self.roaming.join(GATE.data_dir).join(CONFIG_FILE),
             OWING_ONBOARDING,
+        )
+        .context("writing the gate settings")
+    }
+
+    /// Makes `model` on `connection` the default, at low effort.
+    pub(crate) fn choose_model(&self, connection: &str, model: &str) -> Result<()> {
+        fs::write(
+            self.roaming.join(GATE.data_dir).join(CONFIG_FILE),
+            format!(
+                "default_model = {{ connection = \"{connection}\", model = \"{model}\", effort = \"Low\" }}\n{SETTINGS}"
+            ),
         )
         .context("writing the gate settings")
     }
@@ -337,6 +348,13 @@ impl Credentials for CredentialManager {
 /// fails keeps its folder, and the others still run. A folder whose authority can't be read keeps
 /// its entries too, since nothing else can say which entries are its own.
 fn remove_entries(root: &Path, store: &mut impl Credentials, keep: Keep) -> Result<()> {
+    // The shell stages a pasted key under a fixed gate name that no authority records.
+    for target in [
+        anthropic_staging_target(GATE.credential_service),
+        anthropic_key_target(GATE.credential_service),
+    ] {
+        store.delete(&target)?;
+    }
     let mut kept = Vec::new();
     for launch in fs::read_dir(root)? {
         let launch = launch?.path();
@@ -464,6 +482,14 @@ mod tests {
                 ("LOCALAPPDATA".as_ref(), Some(local.as_os_str())),
             ]
         );
+        folders
+            .choose_model("AnthropicKey", "claude-haiku-5-5")
+            .expect("a default model");
+        assert_eq!(
+            fs::read_to_string(dir.join("roaming/Kumochi Gate/config.toml")).expect("settings"),
+            "default_model = { connection = \"AnthropicKey\", model = \"claude-haiku-5-5\", \
+             effort = \"Low\" }\nonboarded = true\n\n[claude_code]\nenabled = false\n"
+        );
         folders.owe_onboarding().expect("owing onboarding");
         assert_eq!(
             fs::read_to_string(dir.join("roaming/Kumochi Gate/config.toml")).expect("settings"),
@@ -498,12 +524,19 @@ mod tests {
             "Kumochi Dev/gen/host/07070707070707070707070707070707/0",
             "Kumochi/gen/host/07070707070707070707070707070707/0",
             "Kumochi Gate/gen/host/07070707070707070707070707070707/64",
+            "anthropic-key-staged.Kumochi Dev",
+            "anthropic-key.Kumochi",
         ];
         let mut store = Fake(
-            [format!("{ours}/0"), format!("{ours}/63")]
-                .into_iter()
-                .chain(others.map(str::to_owned))
-                .collect(),
+            [
+                format!("{ours}/0"),
+                format!("{ours}/63"),
+                "anthropic-key-staged.Kumochi Gate".to_owned(),
+                "anthropic-key.Kumochi Gate".to_owned(),
+            ]
+            .into_iter()
+            .chain(others.map(str::to_owned))
+            .collect(),
         );
         remove_entries(&root, &mut store, Keep::Nothing).expect("cleaned up");
         assert_eq!(store.0, others.map(str::to_owned).into());
@@ -514,8 +547,13 @@ mod tests {
     fn a_failed_run_deletes_its_entries_but_keeps_its_folders() {
         let root = scratch::dir("gate-failed");
         authority(&root.join("app"), &[[0x07; 16]]);
-        let mut store =
-            Fake(["Kumochi Gate/gen/host/07070707070707070707070707070707/0".to_owned()].into());
+        let mut store = Fake(
+            [
+                "Kumochi Gate/gen/host/07070707070707070707070707070707/0".to_owned(),
+                "anthropic-key-staged.Kumochi Gate".to_owned(),
+            ]
+            .into(),
+        );
         remove_entries(&root, &mut store, Keep::Folders).expect("entries deleted");
         assert_eq!(store.0, BTreeSet::new());
         assert!(
