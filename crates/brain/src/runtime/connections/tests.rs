@@ -989,3 +989,45 @@ async fn a_reconnect_is_offered_the_catalog_a_send_is_still_granted_on() {
             .await;
     }
 }
+
+/// A catalog update still pending when a 401 closes the key's fence carries no models, on the
+/// current link and on a reconnect alike, before the account has heard the refused tag.
+#[tokio::test]
+async fn a_pending_catalog_update_offers_no_models_once_the_fence_is_closed() {
+    for reconnect in [true, false] {
+        let scratch = Scratch::new(&format!("key-pending-offer-closed-{reconnect}"));
+        let peer = Scripted(Arc::new(std::sync::Mutex::new(Script {
+            responses: [wire(200, TWO_MODELS), wire(500, "{}")].into(),
+            ..Script::default()
+        })));
+        let (mut accounts, _) = ready_then_checking(&scratch, peer.clone()).await;
+        settle(&mut accounts).await;
+        assert_eq!(accounts.connections.view.anthropic, KeyView::Unconfirmed);
+        accounts
+            .connections
+            .verified
+            .as_ref()
+            .expect("verified")
+            .fence
+            .revoke();
+        if reconnect {
+            accounts.connections.connected();
+        }
+        assert_eq!(
+            accounts.connections.models_unsent(),
+            Some(DataToShell::Models {
+                connection: ConnectionKind::AnthropicKey,
+                models: Vec::new(),
+            }),
+            "reconnect: {reconnect}"
+        );
+        assert_eq!(
+            accounts.connections.models_unsent(),
+            None,
+            "reconnect: {reconnect}"
+        );
+        accounts
+            .close(tokio::time::Instant::now(), tokio::time::Instant::now())
+            .await;
+    }
+}
