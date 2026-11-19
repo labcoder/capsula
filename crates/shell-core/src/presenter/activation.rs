@@ -1,9 +1,9 @@
-//! Dormant synthetic activation state; paint records numbers and delivery stays outside paint.
+//! Step activation state; paint records numbers and delivery stays outside paint.
 
 use std::time::{Duration, Instant};
 
 use kumochi_protocol::message::{DataToShell, MAX_VISIBLE_SCENES, RunId, SceneFailure, SceneId};
-use kumochi_scene::{SceneState, limits::MAX_STEPS, motion::synthetic_duration_ms, record::Start};
+use kumochi_scene::{SceneState, limits::MAX_STEPS, record::Start};
 
 use super::{Broken, Cut, Effect, Out, Presenter, window::ConsumeError};
 
@@ -196,9 +196,7 @@ impl Presenter {
             Ok(_) => {}
             Err(reason) => return self.fail(id, run, index, reason, now, out),
         }
-        let segment =
-            synthetic_duration_ms(scene.state.view().step(index).and_then(|s| s.say.as_ref()));
-        match self.consume_ready(id, index, now, time, segment) {
+        match self.consume_ready(id, index, now, time, 0) {
             Ok(consumed) => {
                 let super::window::Consumed {
                     step,

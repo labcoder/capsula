@@ -8,8 +8,9 @@ It keeps surrounding text, but does not reconstruct the picture there. This mess
 not mean a drawing still visible on screen has failed, and reading history does not change it.
 
 When Kumochi draws a 2D diagram, each step appears on screen once it is prepared, and its parts
-draw or fade in one after another unless the drawing times them itself. Drawings that were on
-screen come back after Kumochi reconnects. If you stop a drawing, the parts that
+draw or fade in one after another unless the drawing times them itself. When a step's narration
+isn't queued for speech, its words appear in Chat and the drawing doesn't wait for them.
+Drawings that were on screen come back after Kumochi reconnects. If you stop a drawing, the parts that
 had already finished appearing stay on screen.
 
 Asking for a change to the same subject continues its drawing. A new subject normally

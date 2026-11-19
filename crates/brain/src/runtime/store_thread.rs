@@ -561,6 +561,34 @@ fn serve_op(store: &mut Store, purger: &mut Purger, acks: &UnboundedSender<Input
             answer(acks, Input::DrawingWritten { serial, reply });
             purger.op_arrived(store);
         }
+        StoreOp::DrawingSay {
+            thread,
+            run,
+            step,
+            text,
+        } => {
+            purger.op_arriving();
+            let body = serde_json::json!({
+                "scene": step.scene.0,
+                "revision": step.index + 1,
+            })
+            .to_string();
+            let event = NewEvent {
+                kind: EventKind::AssistantText,
+                text: Some(&text),
+                body: Some(&body),
+            };
+            if store
+                .reconnect()
+                .and_then(|()| store.append(thread, run, &[event]))
+                .is_ok()
+            {
+                answer(acks, Input::DrawingSayStored { run, text });
+            } else {
+                tracing::warn!("a drawing Chat line wasn't stored");
+            }
+            purger.op_arrived(store);
+        }
         StoreOp::ReadPage { .. }
         | StoreOp::ReadCall(_)
         | StoreOp::ReadHold(_)

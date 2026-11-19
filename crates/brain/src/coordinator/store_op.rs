@@ -2,7 +2,7 @@
 
 use kumochi_protocol::message::{
     Content, DataToShell, Deleted, EventId, HeldScreen, ModelChoice, PageOf, RunId, SceneId, Step,
-    ThreadId, ThreadTitle,
+    StepRef, ThreadId, ThreadTitle,
 };
 
 use std::fmt;
@@ -28,6 +28,17 @@ pub enum StoreOp {
         serial: u64,
         /// Typed data with content-free diagnostics.
         write: crate::drawing::Write,
+    },
+    /// One Chat line for an unassigned live step. Success comes back as `DrawingSayStored`.
+    DrawingSay {
+        /// The conversation that owns the step.
+        thread: ThreadId,
+        /// The run that published it.
+        run: RunId,
+        /// The scene and lifetime index of the step.
+        step: StepRef,
+        /// The original narration text.
+        text: Content,
     },
     /// A bounded read that neither stops nor postpones a purge.
     ReadPage {
@@ -192,6 +203,7 @@ impl StoreOp {
             }
             | Self::BeginTurn { run, .. }
             | Self::CommitStep { run, .. }
+            | Self::DrawingSay { run, .. }
             | Self::EndRun { run, .. } => Some(*run),
             Self::CommitCall(call) => Some(call.key.run),
             Self::RoundItems(round) => Some(round.run),
@@ -294,7 +306,10 @@ impl StoreOp {
                 choice: choice.clone(),
                 applied: false,
             },
-            Self::Heard { .. } | Self::WithdrawScreen { .. } | Self::ForgetScreen { .. } => {
+            Self::DrawingSay { .. }
+            | Self::Heard { .. }
+            | Self::WithdrawScreen { .. }
+            | Self::ForgetScreen { .. } => {
                 return None;
             }
         })

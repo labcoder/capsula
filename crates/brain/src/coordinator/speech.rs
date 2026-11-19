@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use kumochi_protocol::message::{ControlToShell, DataToShell, OutputGeneration, RunId, StepRef};
 
-use super::{Coordinator, Effect, Input, Notify, Run, Stale};
+use super::{Coordinator, Effect, Input, Notify, Run, Stale, StoreOp};
 use crate::store::{Interruption, RunEnd};
 use crate::voice::reply::{Failure, Reply, Revoker, Speech};
 
@@ -68,14 +68,29 @@ impl Coordinator {
         Ok(())
     }
 
-    /// A committed step's `say` joins its run's speech.
+    /// A live committed step's `say` joins its run's speech or is saved to Chat.
     pub(super) fn say(&mut self, run: RunId, step: StepRef, say: &str, effects: &mut Vec<Effect>) {
-        if let Ok(current) = self.current(run)
-            && let Some(reply) = &mut current.reply
-        {
+        let Ok(current) = self.current(run) else {
+            return;
+        };
+        if let Some(reply) = &mut current.reply {
             let mut out = Vec::new();
             reply.say(step, say, &mut out);
+            let assigned = out.iter().any(|item| {
+                matches!(item, Speech::Queued { step: Some(assigned), .. } if *assigned == step)
+            });
             carry(current, out, effects);
+            if assigned {
+                return;
+            }
+        }
+        if !say.trim().is_empty() {
+            effects.push(Effect::Store(StoreOp::DrawingSay {
+                thread: current.thread,
+                run,
+                step,
+                text: say.into(),
+            }));
         }
     }
 

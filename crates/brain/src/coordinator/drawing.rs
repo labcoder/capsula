@@ -328,6 +328,24 @@ impl Coordinator {
         }
     }
 
+    pub(super) fn drawing_say_stored(&self, run: RunId, text: &str, effects: &mut Vec<Effect>) {
+        if run >= self.session_start
+            && (self.current_run() == Some(run)
+                || self.ending.iter().any(|held| {
+                    held.id == run
+                        && held.ending.as_ref().is_some_and(|ending| {
+                            ending.notify == super::Notify::Shell
+                                && ending.outcome == crate::store::RunEnd::Done
+                        })
+                }))
+        {
+            effects.push(Effect::Data(DataToShell::AssistantText {
+                run,
+                delta: format!("\n\n{text}\n\n").into(),
+            }));
+        }
+    }
+
     pub(super) fn drawing_closed(&mut self, run: RunId, loss: Loss, effects: &mut Vec<Effect>) {
         if let Ok(output) = self.drawing.handle(Input::RunClosed { run, loss }) {
             self.drawing_output(output, effects);

@@ -3,8 +3,8 @@ use std::time::Duration;
 
 use kumochi_protocol::frame::{self, Pipe};
 use kumochi_protocol::message::{
-    ConnectionKind, DataToShell, Effort, ModelChoice, ModelInfo, ModelName, ModelSlug, SceneId,
-    SettingsOp,
+    ConnectionKind, ControlToShell, DataToShell, Effort, ModelChoice, ModelInfo, ModelName,
+    ModelSlug, OutputGeneration, PageEvent, PageEventKind, PageOf, SceneId, SettingsOp, ThreadId,
 };
 use serde_json::json;
 use tokio::sync::{Notify, mpsc};
@@ -130,6 +130,20 @@ async fn settled(brain: &mut Brain, link: &mut Link<'_, '_>) {
 }
 
 fn frames(queue: &RefCell<DataQueue>) -> Vec<DataToShell> {
+    all_frames(queue)
+        .into_iter()
+        .filter(|message| {
+            matches!(
+                message,
+                DataToShell::SceneBegin { .. }
+                    | DataToShell::SceneStepCommit { .. }
+                    | DataToShell::SceneEnd { .. }
+            )
+        })
+        .collect()
+}
+
+fn all_frames(queue: &RefCell<DataQueue>) -> Vec<DataToShell> {
     let mut queue = queue.borrow_mut();
     let mut messages = Vec::new();
     while let Some(bytes) = queue.pop(std::time::Instant::now()) {
@@ -137,14 +151,7 @@ fn frames(queue: &RefCell<DataQueue>) -> Vec<DataToShell> {
             .expect("data frame")
             .expect("whole data frame");
         queue.wrote();
-        if matches!(
-            message,
-            DataToShell::SceneBegin { .. }
-                | DataToShell::SceneStepCommit { .. }
-                | DataToShell::SceneEnd { .. }
-        ) {
-            messages.push(message);
-        }
+        messages.push(message);
     }
     messages
 }
@@ -166,6 +173,170 @@ fn delta(bytes: &str) -> TurnEvent {
         call: CallId::new("provider-draw").expect("call id"),
         delta: bytes.to_owned(),
     }
+}
+
+async fn staged_say(brain: &mut Brain, narration: [&str; 2], expected: &[&str], segments: &[u32]) {
+    let (out, mut controls) = mpsc::channel(64);
+    let ready = Notify::new();
+    let mut tap = Tap::from_env();
+    let queue = RefCell::new(DataQueue::new(window()));
+    let mut link = Link::new(&out, &queue, &ready, &mut tap);
+    link.recovery = brain.describe(&mut link).expect("initial membership");
+    let key = start(brain, &mut link).await;
+    let thread = loop {
+        let bytes = controls.try_recv().expect("the staged run is named");
+        if let Some(ControlToShell::RunState { run, thread, .. }) =
+            frame::read(&mut bytes.as_slice(), Pipe::Control).expect("control frame")
+            && run == key.run
+        {
+            break thread;
+        }
+    };
+    apply(
+        brain,
+        &mut link,
+        Input::Engine {
+            key,
+            event: TurnEvent::ToolCallStarted {
+                call: CallId::new("provider-draw").expect("call id"),
+                name: ToolName::Draw,
+            },
+        },
+    );
+    let mut prefix = FIRST.split_once(",{\"step\"").expect("first record").0;
+    for (index, say) in narration.into_iter().chain([" \t "]).enumerate() {
+        let record = json!({"step":{
+            "id": format!("s{index}"), "say": say,
+            "put": [{"shape":{"id":format!("r{index}"),"kind":"rect","box":[index * 20,0,10,10]}}]
+        }});
+        let args = format!("{prefix},{record}");
+        prefix = "";
+        apply(
+            brain,
+            &mut link,
+            Input::Engine {
+                key,
+                event: delta(&args),
+            },
+        );
+        step_landed(brain, &mut link).await;
+    }
+    let messages = all_frames(&queue);
+    let live: Vec<_> = messages
+        .iter()
+        .filter_map(|frame| match frame {
+            DataToShell::AssistantText { run, delta } if *run == key.run => Some(delta.trim()),
+            _ => None,
+        })
+        .collect();
+    let assigned: Vec<_> = messages
+        .iter()
+        .filter_map(|frame| match frame {
+            DataToShell::SegmentQueued {
+                run,
+                step: Some(step),
+                ..
+            } if *run == key.run => Some(step.index),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(assigned, segments);
+    assert_eq!(live, expected, "Chat lines from the live steps");
+
+    brain.offline(Input::ShellLost);
+    settled(brain, &mut link).await;
+    let queue = RefCell::new(DataQueue::new(window()));
+    brain.coordinator.begin_session();
+    let mut link = Link::new(&out, &queue, &ready, &mut tap);
+    link.recovery = brain.describe(&mut link).expect("reconnect membership");
+    brain.queue_recovery(&mut link).expect("snapshot");
+    let snapshots = all_frames(&queue);
+    assert!(matches!(
+        snapshots.as_slice(),
+        [DataToShell::SceneSnapshotV1 { .. }]
+    ));
+    let lines = read_chat_page(brain, &mut link, thread, 1).await;
+    assert_eq!(
+        lines
+            .iter()
+            .map(|event| event.text.as_str())
+            .collect::<Vec<_>>(),
+        expected,
+    );
+    assert!(lines.iter().all(|event| event.run == Some(key.run)));
+    assert_eq!(read_chat_page(brain, &mut link, thread, 2).await, lines);
+}
+
+async fn read_chat_page(
+    brain: &mut Brain,
+    link: &mut Link<'_, '_>,
+    thread: ThreadId,
+    request: u32,
+) -> Vec<PageEvent> {
+    let key = link
+        .queue
+        .borrow_mut()
+        .admit_page(1, request)
+        .expect("admit");
+    apply(
+        brain,
+        link,
+        Input::ReadPage {
+            key,
+            page: PageOf::Events {
+                thread,
+                before: None,
+            },
+        },
+    );
+    let input = reply(brain).await;
+    apply(brain, link, input);
+    let mut page = all_frames(link.queue);
+    assert_eq!(page.len(), 1);
+    let DataToShell::Page {
+        request: got,
+        thread: of,
+        events,
+        before: None,
+    } = page.pop().expect("page")
+    else {
+        panic!("expected one complete history page");
+    };
+    assert_eq!((got, of), (request, thread));
+    events
+        .into_iter()
+        .rev()
+        .filter(|event| event.kind == PageEventKind::AssistantText)
+        .collect()
+}
+
+#[tokio::test]
+async fn unspoken_text_drawing_lines_appear_once_in_chat_and_history() {
+    let scratch = Scratch::new("drawing-text-say");
+    let mut brain = brain(&scratch);
+    let lines = ["Name the input.", "Mark the output."];
+    staged_say(&mut brain, lines, &lines, &[]).await;
+    brain.close().await;
+}
+
+#[tokio::test]
+async fn unspoken_lines_in_a_spoken_drawing_exclude_assigned_and_blank_say() {
+    let scratch = Scratch::new("drawing-spoken-say");
+    let mut brain = brain(&scratch);
+    brain.offline(Input::SpokenReplies { loaded: true });
+    brain.offline(Input::AudioOutput {
+        rate: 24_000,
+        generation: OutputGeneration(1),
+    });
+    let unassigned = "界".repeat(350);
+    staged_say(
+        &mut brain,
+        ["Name the input.", &unassigned],
+        &[&unassigned],
+        &[0],
+    )
+    .await;
+    brain.close().await;
 }
 
 #[tokio::test]

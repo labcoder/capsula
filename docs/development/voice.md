@@ -293,9 +293,11 @@ sequenceDiagram
   C->>C: final? end Done
 ```
 
-- **Feeding the reply.** Text deltas, and a drawn step's `say` when the store commits the step,
-  feed the run's reply. A failed scene drops that scene's say segments. Speech frames for the
-  shell wait behind a pending step, as the run's text does.
+- **Feeding the reply.** Text deltas and a newly published drawing step's `say` feed the run's
+  reply. If no speech segment is assigned for nonblank `say`, the brain saves those words once
+  as ordinary Chat text, even within a spoken run. The same stored line serves history after
+  reconnect; it isn't read from the recovered drawing. A failed scene drops its say segments.
+  Speech frames for the shell wait behind a pending step, as the run's text does.
 - **The pump** is owned by the core loop and read only while the data queue has room. With no
   pump, a Speak fails as if TTS weren't loaded, and the run's remaining segments end empty.
 - **Draining.** When the engine finishes, the reply closes. The run ends `done` only once its

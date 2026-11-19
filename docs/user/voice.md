@@ -37,6 +37,8 @@ Tab and Shift+Tab reach the labeled controls; Enter or Space activates a focused
 These are explicit Settings actions; opening the tab or reconnecting does not start setup.
 The tab does not remove models, open the microphone or control spoken replies.
 
+When Kumochi draws and doesn't queue a step's narration for speech, those words appear in Chat.
+
 ## Hold to speak
 
 **Hold to talk** starts on. Turn it off in **Settings → Voice** to disable this gesture and

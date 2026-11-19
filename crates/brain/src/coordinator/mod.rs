@@ -103,6 +103,13 @@ pub enum Input {
         /// A typed result, or a content-free failure.
         reply: Result<crate::drawing::Reply, ()>,
     },
+    /// An unassigned live step's Chat line is durable.
+    DrawingSayStored {
+        /// The run that published the step.
+        run: RunId,
+        /// The saved narration text.
+        text: Content,
+    },
     /// Read a page for one shell connection, without changing any run.
     ReadPage {
         /// The admitted read.
@@ -901,6 +908,9 @@ impl Coordinator {
                     crate::drawing::Input::Written { serial, reply },
                     &mut effects,
                 )?;
+            }
+            Input::DrawingSayStored { run, text } => {
+                self.drawing_say_stored(run, &text, &mut effects);
             }
             Input::ReadPage { key, page } => {
                 let op = StoreOp::ReadPage { key, page };
