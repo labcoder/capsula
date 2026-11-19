@@ -989,9 +989,9 @@ once at admission (2 s, a guess). Each wake rechecks the hold's session, setting
 then asks the owner for a claim; `Opening` and `NotQuiet` wait for the next wake, and the claim
 reserves the start. Wakes never refill the rechecks or move the deadline, and the deadline stops
 applying once the start is reserved. The started worker's `Running` receipt is accepted under
-that claim with its copies still closed; the hold records the acceptance and shows Listening, and
-only then does `collect` check the claim again and open the copies. Listening is published in
-that update and painted on the next frame, so the order is one of state, not of pixels. A release
+that claim with its copies still closed; the hold records the acceptance and publishes the
+Listening state, and only then does `collect` check the claim again and open the copies. Its
+painting follows and isn't awaited, so the order is one of state, not of pixels. A release
 or end in between wins and nothing is copied; a refusal stops and drains that worker, and nothing
 reopens. Acceptance also refuses a generation no longer running, so a key-up native input took
 before it cancels the hold without Listening, however late presence gets that key-up.
