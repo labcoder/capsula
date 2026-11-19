@@ -609,6 +609,10 @@ transcript, evidence directory, fixture, guards and PresentMon bounds, behind `h
 idle opener. It has no Ready and no feel verdicts: it prints that, and its `owner-feel.txt`
 says `not_part_of_this_run`. The physical Ready in `gate-session` stays the only handoff for
 the owner's feel verdicts; the measured phases may also run unattended after ten idle minutes.
+Fixture requests distinguish a send failure, a Windows-reported timeout, and a delivered
+refusal. The unattended prepare refusal records the fixture's numeric code and a fixed reason,
+such as a non-Default input desktop, guard registration failure, insufficient idle time or input
+arriving during arming. These diagnostics neither retry a refusal nor change input admission.
 
 ## Voice hold authority
 

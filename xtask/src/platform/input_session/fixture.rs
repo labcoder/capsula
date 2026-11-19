@@ -74,6 +74,50 @@ pub(super) const PREPARE_IDLE: u32 = WM_APP + 25;
 /// Ends the idle activation; `wparam` is 1 when the driver confirmed its click.
 pub(super) const FINALIZE_IDLE: u32 = WM_APP + 28;
 
+#[derive(Clone, Copy, Debug)]
+pub(super) struct IdleRefusal(u8);
+
+impl IdleRefusal {
+    const ALREADY_USED: Self = Self(2);
+    const DESKTOP: Self = Self(3);
+    const LAST_INPUT: Self = Self(4);
+    const AWAY_DURATION: Self = Self(5);
+    const REGISTER_GUARDS: Self = Self(6);
+    const INPUT_CHANGED: Self = Self(7);
+    const NOT_IDLE: Self = Self(8);
+    const QUEUED_INPUT: Self = Self(9);
+    const ACTIVATION_MARKER: Self = Self(10);
+    const TOPMOST: Self = Self(11);
+    const ABORT_MARKER: Self = Self(12);
+
+    pub(super) fn message(reply: usize) -> &'static str {
+        [
+            "fixture was already used or armed",
+            "input desktop is not this session's Default desktop",
+            "could not read last input",
+            "invalid away duration",
+            "could not register input guards",
+            "input changed while the guard armed",
+            "idle duration was too short",
+            "the fixture had queued input",
+            "could not update the activation marker",
+            "could not raise the fixture without activation",
+            "could not mark the fixture aborted",
+        ]
+        .get(reply.wrapping_sub(usize::from(Self::ALREADY_USED.0)))
+        .copied()
+        .unwrap_or("unknown prepare-idle refusal")
+    }
+}
+
+impl std::fmt::Display for IdleRefusal {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(Self::message(usize::from(self.0)))
+    }
+}
+
+impl std::error::Error for IdleRefusal {}
+
 /// How often one fixture may take or give back its Esc reservation.
 const MAX_ESCAPE_TOGGLES: u32 = 64;
 
@@ -247,32 +291,37 @@ fn arm(root: HWND, up_time: u32, feel: usize) -> Result<()> {
 /// fixture topmost, without activating it, for the driver's one tagged click.
 fn prepare_idle(root: HWND, away_ms: usize) -> Result<()> {
     let unused = property(root, ACTIVATION) == 0;
-    set_property(root, ACTIVATION, 2)?;
+    set_property(root, ACTIVATION, 2).context(IdleRefusal::ACTIVATION_MARKER)?;
     ensure!(
         unused
             && property(root, READY) == 0
             && property(root, OPEN) == 0
             && property(root, ABORT) == 0,
-        "only an unused, unarmed fixture may prepare its activation"
+        IdleRefusal::ALREADY_USED
     );
-    ensure!(
-        super::desktop_ours(),
-        "the input desktop isn't this session's Default desktop"
-    );
-    let input = last_input()?;
+    ensure!(super::desktop_ours(), IdleRefusal::DESKTOP);
+    let input = last_input().context(IdleRefusal::LAST_INPUT)?;
     // SAFETY: reads the system tick count only.
     let now = unsafe { GetTickCount() };
-    let away_for = Duration::from_millis(u64::try_from(away_ms)?);
-    register_guards(root)?;
+    let away_for =
+        Duration::from_millis(u64::try_from(away_ms).context(IdleRefusal::AWAY_DURATION)?);
+    register_guards(root).context(IdleRefusal::REGISTER_GUARDS)?;
+    let guarded = last_input().context(IdleRefusal::LAST_INPUT)?;
     ensure!(
-        away_across_guard(input, last_input()?, now, away_for) && !queued_messages(),
-        "Rez wasn't idle long enough, or input arrived while the guard armed"
+        away_across_guard(input, guarded, now, away_for),
+        if guarded == input {
+            IdleRefusal::NOT_IDLE
+        } else {
+            IdleRefusal::INPUT_CHANGED
+        }
     );
-    set_property(root, ACTIVATION, 1)?;
+    ensure!(!queued_messages(), IdleRefusal::QUEUED_INPUT);
+    set_property(root, ACTIVATION, 1).context(IdleRefusal::ACTIVATION_MARKER)?;
     // SAFETY: reads this thread's own window's extended style.
     let style = unsafe { GetWindowLongPtrW(root, GWL_EXSTYLE) };
-    WAS_TOPMOST.set(Some((style & isize::try_from(WS_EX_TOPMOST.0)?) != 0));
-    band(root, HWND_TOPMOST)
+    let topmost = isize::try_from(WS_EX_TOPMOST.0).context(IdleRefusal::TOPMOST)?;
+    WAS_TOPMOST.set(Some((style & topmost) != 0));
+    band(root, HWND_TOPMOST).context(IdleRefusal::TOPMOST)
 }
 
 /// Ends the idle activation, used either way, back in the fixture's earlier band. Only a pending
@@ -305,7 +354,7 @@ fn finalize_idle(root: HWND, confirmed: usize) -> Result<()> {
 /// Any idle activation failure stops the fixture for good.
 fn sticky(root: HWND, result: Result<()>) -> Result<()> {
     if result.is_err() {
-        set_property(root, ABORT, 1)?;
+        set_property(root, ABORT, 1).context(IdleRefusal::ABORT_MARKER)?;
     }
     result
 }
@@ -496,7 +545,17 @@ unsafe extern "system" fn fixture_proc(
         COVER => return answer(cover(window, wp, lp)),
         UNCOVER => return answer(uncover(window)),
         REARM => return answer(rearm(window)),
-        PREPARE_IDLE => return answer(sticky(window, prepare_idle(window, wp.0))),
+        PREPARE_IDLE => {
+            let reply = sticky(window, prepare_idle(window, wp.0)).map_or_else(
+                |error| {
+                    error
+                        .downcast::<IdleRefusal>()
+                        .map_or(0, |reason| isize::from(reason.0))
+                },
+                |()| 1,
+            );
+            return LRESULT(reply);
+        }
         FINALIZE_IDLE => return answer(sticky(window, finalize_idle(window, wp.0))),
         OPEN_GATE => {
             return open_gate(window, wp.0)
