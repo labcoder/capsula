@@ -311,8 +311,8 @@ fn arm(root: HWND, up_time: u32, feel: usize) -> Result<()> {
 
 /// The owner's away rule, used up by its first call: once nobody has touched Rez for `away_ms`,
 /// arms the raw-input guard, under which any foreign input is terminal, then raises only the
-/// fixture topmost, without activating it, for the driver's one tagged click. `SetWindowPos` can
-/// succeed without making the window topmost, so the raise is read back and refused if it didn't.
+/// fixture topmost, without activating it, for the driver's one tagged click. The raise's return
+/// value isn't trusted: the style is read back and the prepare refuses unless it's topmost.
 fn prepare_idle(root: HWND, away_ms: usize) -> Result<()> {
     let unused = property(root, ACTIVATION) == 0;
     set_property(root, ACTIVATION, 2).context(IdleRefusal::ACTIVATION_MARKER)?;
