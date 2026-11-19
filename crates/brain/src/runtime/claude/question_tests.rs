@@ -2364,6 +2364,75 @@ fn brain_on(rig: &mut Rig, name: &str) -> Brain {
 }
 
 #[tokio::test]
+async fn a_turn_deadline_during_recheck_keeps_the_observed_provider_failure() {
+    use crate::context::{Built, tools};
+    use crate::coordinator::{ContextBuilt, Effect, StoreOp};
+    use crate::store::{Failure as RunFailure, RunEnd};
+
+    let script = provider_failure()
+        .pre_tools(BOTH_TOOLS)
+        .post_tools(BOTH_TOOLS);
+    let mut rig = Rig::new("question-recheck-turn-deadline", &script).await;
+    let mut brain = brain_on(&mut rig, "question-recheck-turn-deadline");
+    brain.claude_reported(None).expect("no shell");
+    let started = brain
+        .handle(Input::Turn {
+            turn: 1,
+            thread: None,
+            text: "hi".into(),
+        })
+        .unwrap();
+    let run = brain.coordinator.current_run().unwrap();
+    assert!(
+        started
+            .iter()
+            .any(|effect| matches!(effect, Effect::ArmDeadline { run: id, .. } if *id == run))
+    );
+    let effects = brain.handle(Input::TurnStored { run }).unwrap();
+    let key = effects
+        .iter()
+        .find_map(|effect| match effect {
+            Effect::Store(StoreOp::BuildContext(build)) => Some(build.key),
+            _ => None,
+        })
+        .unwrap();
+    let mut request = choosing("haiku", Effort::Low, ConnectionKind::ClaudeCode).request;
+    request.tools = tools(Origin::Kumo);
+    let mut snapshot = brain.snapshot(Origin::Kumo);
+    snapshot.choice.clone_from(&request.choice);
+    let effects = brain
+        .handle(Input::ContextBuilt(ContextBuilt {
+            key,
+            snapshot: Some(snapshot),
+            result: Ok(Built {
+                request,
+                sources: Vec::new(),
+            }),
+        }))
+        .unwrap();
+    brain.apply(effects, None).unwrap();
+    drive_until(&mut brain, || rig.base.0.join("seed.1").is_file()).await;
+    timeout(WAIT, async {
+        while brain.claude.recheck.is_none() {
+            let wake = brain.claude.next().await;
+            brain.claude_done(wake, None).unwrap();
+        }
+    })
+    .await
+    .unwrap();
+    let effects = brain.handle(Input::Deadline { run }).unwrap();
+    assert_eq!(
+        effects.iter().find_map(|effect| match effect {
+            Effect::Store(StoreOp::EndRun { run: id, end, .. }) if *id == run => Some(*end),
+            _ => None,
+        }),
+        Some(RunEnd::Failed(RunFailure::Engine))
+    );
+    brain.apply(effects, None).unwrap();
+    assert!(brain.claude.close(soon()).await);
+}
+
+#[tokio::test]
 async fn an_admitted_foreground_offer_binds_before_seeding() {
     use crate::context::{Built, tools};
     use crate::coordinator::{ContextBuilt, Effect, StoreOp};

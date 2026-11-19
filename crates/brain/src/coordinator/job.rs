@@ -140,21 +140,24 @@ impl Job {
 
 impl Coordinator {
     pub(crate) fn claude_recheck_control(
-        &self,
+        &mut self,
         key: SendKey,
     ) -> Option<crate::recall::control::Control> {
         match key {
             SendKey::Build(key) => {
-                let run = self.current.as_ref()?;
-                let build = run.build.as_ref()?;
-                (build.key() == key
-                    && build.admitted()
-                    && run.started()
+                let run = self.current.as_mut().filter(|run| {
+                    run.started()
                     && !run.finishing
                     && run
                         .route
-                        .is_some_and(|route| route.kind == ConnectionKind::ClaudeCode))
-                .then(|| build.control.0.clone())
+                        .is_some_and(|route| route.kind == ConnectionKind::ClaudeCode)
+                })?;
+                let build = run
+                    .build
+                    .as_mut()
+                    .filter(|build| build.key() == key && build.admitted())?;
+                build.provider_failed = true;
+                Some(build.control.0.clone())
             }
             SendKey::Job(key) => {
                 let job = self.job.as_ref()?;
