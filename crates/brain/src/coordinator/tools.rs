@@ -5,7 +5,7 @@
 
 use std::fmt;
 
-use kumochi_protocol::message::{Content, RunId, ThreadId};
+use kumochi_protocol::message::{ConnectionKind, Content, RunId, ThreadId};
 
 use super::{Coordinator, Effect, Stale, StoreOp, unstored};
 use crate::context::{BOUND, Route};
@@ -230,10 +230,21 @@ impl Coordinator {
                 .filter(|open| open.provider.is_none())
                 .map(|open| (open.call.clone(), open.name, open.args.clone()))
                 .collect();
+            let key = current
+                .route
+                .is_some_and(|route| route.kind == ConnectionKind::AnthropicKey);
             for (call, name, args) in calls {
-                let caller = Caller::Model {
-                    run,
-                    call: call.clone(),
+                let caller = if key {
+                    Caller::ModelRound {
+                        run,
+                        round,
+                        call: call.clone(),
+                    }
+                } else {
+                    Caller::Model {
+                        run,
+                        call: call.clone(),
+                    }
                 };
                 let args = args.unwrap_or_default();
                 let dispatch = self.tool_call(caller, name, args.as_bytes(), effects);

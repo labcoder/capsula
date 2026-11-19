@@ -398,6 +398,12 @@ is refused without a charge, so stale work never ends a run on its budget. The s
 (see [the store](store.md)). Recovery fails a run that was active, so nothing resumes a call from
 its row.
 
+Anthropic key calls use the provider's id within their own round. An id can recur
+in a later round without repeating an earlier result. The same model offer and
+retry argument checks apply, and each accepted model call start still charges
+the run's 16-call budget. The durable ledger stores a fixed-size digest of round
+and id without changing its schema; the typed round keeps the provider's id for replay.
+
 ## Results
 
 `ToolOutput` stores tagged `text`, legacy `history` ranges, `recall` selectors or a fixed `error`.

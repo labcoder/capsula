@@ -1136,6 +1136,45 @@ fn admitted_key_round(sources: Vec<ThreadId>) -> Coordinator {
 }
 
 #[test]
+fn a_granted_key_round_retires_on_withdrawal_before_the_delete_can_write() {
+    let mut core = admitted_key_round(vec![T, B]);
+    let key = super::engine_key(&core, R);
+    let effects = core
+        .handle(Input::SendReady {
+            key: crate::coordinator::SendKey::Build(key),
+            hold: None,
+        })
+        .expect("send granted");
+    let lease = effects
+        .iter()
+        .find_map(|effect| match effect {
+            Effect::Grant(lease) => Some(*lease),
+            _ => None,
+        })
+        .expect("one lease");
+    let effects = core
+        .handle(Input::Delete {
+            thread: B,
+            after_turns: 1,
+            resend: false,
+        })
+        .expect("delete accepted");
+    assert!(effects.contains(&Effect::CancelEngine { run: R }));
+    assert!(!effects.contains(&Effect::Store(StoreOp::Delete { thread: B })));
+    assert_eq!(
+        core.handle(Input::Engine {
+            key,
+            event: TurnEvent::TextDelta("late".into())
+        }),
+        Err(Stale)
+    );
+    let settled = core
+        .handle(Input::SendSettled { lease })
+        .expect("retired send settles");
+    assert!(settled.contains(&Effect::Store(StoreOp::Delete { thread: B })));
+}
+
+#[test]
 fn a_key_rebuild_stores_only_calls_from_the_replacement_round() {
     use crate::engines::anthropic::encode::ToolUse;
 

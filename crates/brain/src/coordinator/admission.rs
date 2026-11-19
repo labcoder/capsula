@@ -9,7 +9,8 @@ use kumochi_protocol::message::{ConnectionKind, RunId, ThreadId};
 
 use super::inline::Inline;
 use super::{Coordinator, Effect, SendKey, Stale, StoreOp};
-use crate::context::{Built, Origin, RunSnapshot};
+use crate::context::{Built, ConnectionTag, Origin, RunSnapshot};
+use crate::engines::anthropic::live::Motion;
 use crate::engines::{DRAW, RunRequest, ToolName};
 use crate::store::Failure;
 
@@ -179,6 +180,33 @@ impl Build {
 }
 
 impl Coordinator {
+    pub(crate) fn key_motion(&self, request: &RunRequest) -> Option<(ConnectionTag, Motion)> {
+        let (route, motion) = match request.key {
+            SendKey::Build(key) => {
+                let run = self.current.as_ref()?;
+                let build = run.build.as_ref()?;
+                if run.id != request.run
+                    || run.thread != request.thread
+                    || build.key != key
+                    || !build.admitted
+                {
+                    return None;
+                }
+                let motion = if build.inline.is_some() {
+                    Motion::Standalone
+                } else if key.round == 1 {
+                    Motion::First
+                } else {
+                    Motion::Continue
+                };
+                (run.route?, motion)
+            }
+            SendKey::Job(key) => (self.key_job_route(key, request)?, Motion::Standalone),
+        };
+        (route.kind == ConnectionKind::AnthropicKey && self.refusal(route).is_none())
+            .then_some((route.tag, motion))
+    }
+
     /// Starts a new build attempt of the current run's `round`.
     pub(super) fn build(&mut self, run: RunId, round: u32, effects: &mut Vec<Effect>) {
         self.attempts += 1;

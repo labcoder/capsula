@@ -139,6 +139,18 @@ impl Job {
 }
 
 impl Coordinator {
+    pub(super) fn key_job_route(&self, key: JobKey, request: &RunRequest) -> Option<Route> {
+        self.job
+            .as_ref()
+            .filter(|job| {
+                job.key == key
+                    && job.run == request.run
+                    && key.thread == request.thread
+                    && matches!(job.stage, Stage::Sending { .. })
+            })
+            .map(|job| job.route)
+    }
+
     /// `run` in `thread` ended `Done` on `route`: a task's title job starts, or Kumo's compaction.
     pub(super) fn after_run(
         &mut self,

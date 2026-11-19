@@ -44,7 +44,8 @@ use crate::context::{ConnectionTag, Origin, RunSnapshot};
 #[cfg(any(test, debug_assertions))]
 use crate::coordinator::{Availability, Ready};
 use crate::coordinator::{
-    BuildContext, Coordinator, Effect, Input, JobKey, JobKind, LeaseId, StoreOp, Synthesized,
+    BuildContext, BuildKey, Coordinator, Effect, Input, JobKey, JobKind, LeaseId, SendKey, StoreOp,
+    Synthesized,
 };
 use crate::engines::responses::AccessAsk;
 use crate::engines::{self, Answer, Asks, Cancel, Engine, SendGate, SendLease};
@@ -165,6 +166,7 @@ pub(crate) struct Brain {
     engine_events: mpsc::Receiver<Input>,
     /// The current run's round, aborted when its `Cancel` drops.
     round: Option<(RunId, Cancel)>,
+    key_round: Option<(BuildKey, Arc<engines::anthropic::live::Live>)>,
     /// The background job's request, aborted the same way.
     job: Option<(JobKey, Cancel)>,
     /// The uncovered backlog, in estimated tokens, at which a thread compacts after a run.
@@ -309,6 +311,7 @@ impl Brain {
             engine_tx,
             engine_events,
             round: None,
+            key_round: None,
             job: None,
             compact_at: crate::jobs::compact_at(),
             asks: Asks::default(),
@@ -1103,9 +1106,10 @@ impl Brain {
                 Ok(question) => Box::new(question),
                 Err(refused) => Box::new(engines::Unserved(self.claude.refused(refused))),
             }),
-            Some(ConnectionKind::AnthropicKey) => {
-                Some(Box::new(engines::Unserved::model_unavailable()))
-            }
+            Some(ConnectionKind::AnthropicKey) => Some(
+                self.key_engine(request)
+                    .unwrap_or_else(|| Box::new(engines::Unserved::model_unavailable())),
+            ),
         }
     }
 
@@ -1276,7 +1280,17 @@ impl Brain {
                     let granted = SendLease::new(lease, self.inputs_tx.clone());
                     engines::answer(&self.asks, lease.key, Answer::Grant(granted));
                 }
-                Effect::Rebuild(key) => engines::answer(&self.asks, key, Answer::Rebuild),
+                Effect::Rebuild(key) => {
+                    if let SendKey::Build(build) = key
+                        && self
+                            .key_round
+                            .as_ref()
+                            .is_some_and(|(owner, _)| *owner == build)
+                    {
+                        self.retire_key_run(build.run);
+                    }
+                    engines::answer(&self.asks, key, Answer::Rebuild);
+                }
                 Effect::ArmSendDeadline { lease, after } => {
                     self.send_deadlines.push((lease, Instant::now() + after));
                 }
@@ -1306,6 +1320,7 @@ impl Brain {
                     }
                 }
                 Effect::CancelEngine { run } => {
+                    self.retire_key_run(run);
                     if self.round.as_ref().is_some_and(|(round, _)| *round == run) {
                         self.round = None;
                     }

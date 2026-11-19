@@ -132,7 +132,7 @@ impl Store {
                 run,
                 thread,
                 call.key.route.column(),
-                &*call.key.call,
+                call.key.stored_call().as_ref(),
                 call.tool,
                 &call.hash[..],
                 call.output.stored(),

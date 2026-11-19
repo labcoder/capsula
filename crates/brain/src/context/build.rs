@@ -307,8 +307,8 @@ pub(super) fn render(
 }
 
 /// Whether a run's stored rounds replay natively on `kind` and `tag`: at least one native item,
-/// every one from that route, no call made twice, and each result answering a call made before it,
-/// once. The key route also requires each call group to be answered before another group or text;
+/// every one from that route, and each result answering a call made before it, once. The key
+/// route requires typed calls unique within each group, and a complete group before more text;
 /// `ChatGPT` keeps unfinished rounds as before. A foreign or unpaired row makes the whole run text.
 fn replayable(kind: ConnectionKind, tag: ConnectionTag, items: &[Item]) -> bool {
     let key_route = kind == ConnectionKind::AnthropicKey;
@@ -323,14 +323,24 @@ fn replayable(kind: ConnectionKind, tag: ConnectionTag, items: &[Item]) -> bool 
                 connection,
                 item,
             } => {
-                if key_route && in_results && answered.len() != calls.len() {
+                if *made != Some(kind) || *connection != tag {
                     return false;
+                }
+                if key_route && in_results {
+                    if answered.len() != calls.len() {
+                        return false;
+                    }
+                    calls.clear();
+                    answered.clear();
                 }
                 in_results = false;
                 natives = true;
-                *made == Some(kind)
-                    && *connection == tag
-                    && called(kind, item).is_none_or(|call| calls.insert(call))
+                if key_route {
+                    ToolUse::stored(item.bytes())
+                        .is_some_and(|call| calls.insert(call.id().to_owned()))
+                } else {
+                    called(item).is_none_or(|call| calls.insert(call))
+                }
             }
             Body::Result { call, .. } | Body::Recall { call, .. } => {
                 in_results = true;
@@ -346,10 +356,7 @@ fn replayable(kind: ConnectionKind, tag: ConnectionTag, items: &[Item]) -> bool 
 }
 
 /// The call a stored item of `kind` makes, if it makes one.
-fn called(kind: ConnectionKind, item: &Opaque) -> Option<String> {
-    if kind == ConnectionKind::AnthropicKey {
-        return ToolUse::stored(item.bytes()).map(|call| call.id().to_owned());
-    }
+fn called(item: &Opaque) -> Option<String> {
     let item: Value = serde_json::from_slice(item.bytes()).ok()?;
     let call = item["call_id"]
         .as_str()

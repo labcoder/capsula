@@ -205,8 +205,8 @@ Signed thinking lives in the run's memory only. It isn't stored, and a later run
 earlier ones' text and call pairs without it. Anthropic allows this: prior turns' thinking may
 be left out outside an open tool call, as long as no block is left out between two that are
 kept. The next model loses that reasoning, as it loses tool details the answer never stated.
-A reply without a call, a call without exactly one result, or an id that was already called
-builds nothing.
+A reply without a call, a call without exactly one result, or a repeated id within one
+call group builds nothing. A later completed group may reuse an id.
 
 ### The live owner
 
@@ -229,8 +229,12 @@ results the rebuilt request ends with: those right after the round's own stored 
 one for each held call, in call order. A missing, repeated or extra result, or stored calls other
 than the held ones, refuse the round locally; nothing else of the rebuilt request is sent. A
 later round with nothing to continue fails with a local refusal before anything is sent: after a
-rebuild answer, a refused send, another run's round, or with no reply kept at all. A job or a
-compaction offers no tools and is built afresh. A key run whose next build no longer has a source
-an earlier round sent, such as a deleted task, ends instead. Stop drops a round in flight with
-the continuation it took. One a run left between rounds stays until the next round starts, which
-drops it unsent.
+rebuild answer, a refused send, another run's round, or with no reply kept at all. The coordinator
+identifies jobs and inline compaction explicitly; they build afresh and do not take the held reply.
+Once a key run has a send grant, withdrawal of a carried history source or screen ends the run
+and closes its fence. Rebuild, Stop, link loss, credential mutation and terminal completion retire
+the owner, including any reply it held between rounds. A late task cannot put one back.
+
+Later turns replay only complete typed groups under the same connection tag. If the tag changed
+on replacement or restart, or a group is malformed, the transcript text remains usable without
+any of those native items. Production still resolves the key route to Unserved.

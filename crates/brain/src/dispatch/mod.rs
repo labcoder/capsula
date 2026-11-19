@@ -40,6 +40,11 @@ pub(crate) const MAX_OUTPUT: usize = 64 * 1024;
 pub(crate) enum Caller {
     /// The model's function call in a run's round.
     Model { run: RunId, call: CallId },
+    ModelRound {
+        run: RunId,
+        round: u32,
+        call: CallId,
+    },
     /// An MCP `tools/call` from the launch bound to the run.
     Mcp {
         run: RunId,
@@ -51,7 +56,7 @@ pub(crate) enum Caller {
 impl Caller {
     pub(crate) fn run(&self) -> RunId {
         match self {
-            Self::Model { run, .. } | Self::Mcp { run, .. } => *run,
+            Self::Model { run, .. } | Self::ModelRound { run, .. } | Self::Mcp { run, .. } => *run,
         }
     }
 
@@ -61,6 +66,11 @@ impl Caller {
             Self::Model { run, call } => LedgerKey {
                 run: *run,
                 route: Route::Model,
+                call: call.as_str().into(),
+            },
+            Self::ModelRound { run, round, call } => LedgerKey {
+                run: *run,
+                route: Route::ModelRound(*round),
                 call: call.as_str().into(),
             },
             Self::Mcp { run, launch, key } => LedgerKey {
@@ -76,7 +86,7 @@ impl Caller {
 impl fmt::Debug for Caller {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let (kind, run) = match self {
-            Self::Model { run, .. } => ("Model", run),
+            Self::Model { run, .. } | Self::ModelRound { run, .. } => ("Model", run),
             Self::Mcp { run, .. } => ("Mcp", run),
         };
         f.debug_struct(kind)
@@ -89,6 +99,7 @@ impl fmt::Debug for Caller {
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum Route {
     Model,
+    ModelRound(u32),
     Mcp(LaunchId),
 }
 
@@ -96,7 +107,7 @@ impl Route {
     /// The ledger table's `route` column.
     pub(crate) fn column(self) -> String {
         match self {
-            Self::Model => "model".to_owned(),
+            Self::Model | Self::ModelRound(_) => "model".to_owned(),
             Self::Mcp(launch) => format!("mcp:{}", launch.hex()),
         }
     }
@@ -105,7 +116,7 @@ impl Route {
 impl fmt::Debug for Route {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
-            Self::Model => "Model",
+            Self::Model | Self::ModelRound(_) => "Model",
             Self::Mcp(_) => "Mcp",
         })
     }
@@ -117,6 +128,24 @@ pub struct LedgerKey {
     pub(crate) run: RunId,
     pub(crate) route: Route,
     pub(crate) call: Box<str>,
+}
+
+impl LedgerKey {
+    pub(crate) fn stored_call(&self) -> std::borrow::Cow<'_, str> {
+        use std::fmt::Write as _;
+
+        let Route::ModelRound(round) = self.route else {
+            return std::borrow::Cow::Borrowed(&self.call);
+        };
+        let mut digest = Sha256::new();
+        digest.update(round.to_le_bytes());
+        digest.update(self.call.as_bytes());
+        let mut key = String::with_capacity(64);
+        for byte in digest.finalize() {
+            write!(key, "{byte:02x}").expect("a String takes writes");
+        }
+        std::borrow::Cow::Owned(key)
+    }
 }
 
 impl fmt::Debug for LedgerKey {
@@ -692,7 +721,7 @@ pub(crate) fn call<'a>(
 fn permitted(run: &RunCtx<'_>, route: Route, name: ToolName) -> Result<&'static Tool, ToolError> {
     let tool = tool(name).ok_or(ToolError::Unknown)?;
     let offered = match route {
-        Route::Model => run.offered.contains(&name),
+        Route::Model | Route::ModelRound(_) => run.offered.contains(&name),
         Route::Mcp(_) => {
             let allowed = tool.mcp;
             #[cfg(test)]

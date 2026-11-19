@@ -10,7 +10,7 @@ use kumochi_protocol::message::{
 };
 
 use super::{Coordinator, Effect, Ending, Input, Notify, Stale, StoreOp};
-use crate::store::{Interruption, RunEnd};
+use crate::store::{Failure, Interruption, RunEnd};
 
 /// Deletes in flight before another is refused: those that outlived earlier connections, whose
 /// shells may have restarted and forgotten them, and the current shell's.
@@ -198,6 +198,14 @@ impl Coordinator {
         {
             let deleted = RunEnd::Interrupted(Interruption::Deleted);
             self.end(current, deleted, None, Notify::Shell, effects);
+        }
+        if let Some(current) = self
+            .current
+            .as_ref()
+            .filter(|current| current.key_granted && current.sent.contains(&thread))
+        {
+            self.fail(current.id, Failure::Engine, effects)
+                .expect("the run is current");
         }
         let held = self.leased().contains(&thread);
         self.deleting.push(Deleting {

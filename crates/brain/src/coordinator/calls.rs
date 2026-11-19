@@ -48,6 +48,19 @@ enum Standing {
 }
 
 impl Coordinator {
+    fn current_call(&mut self, key: &LedgerKey) -> Result<&mut Run, Stale> {
+        let run = self.current(key.run)?;
+        if let dispatch::Route::ModelRound(round) = key.route
+            && run
+                .build
+                .as_ref()
+                .is_none_or(|build| build.key().round != round)
+        {
+            return Err(Stale);
+        }
+        Ok(run)
+    }
+
     pub(super) fn read_finished(
         &mut self,
         done: crate::dispatch::ReadFinished,
@@ -477,7 +490,7 @@ impl Coordinator {
         then: Option<Then>,
         effects: &mut Vec<Effect>,
     ) -> Result<(), Stale> {
-        let run = self.current(key.run)?;
+        let run = self.current_call(key)?;
         if let Some(answers) = run.ledger.committed(key) {
             deliver(run, answers);
             if let Some(
@@ -508,7 +521,7 @@ impl Coordinator {
         error: ToolError,
         effects: &mut Vec<Effect>,
     ) -> Result<(), Stale> {
-        let run = self.current(key.run)?;
+        let run = self.current_call(key)?;
         let answers = run
             .ledger
             .refused(key, error)
@@ -528,7 +541,7 @@ impl Coordinator {
         key: &LedgerKey,
         effects: &mut Vec<Effect>,
     ) -> Result<(), Stale> {
-        self.current(key.run)?.ledger.failed(key);
+        self.current_call(key)?.ledger.failed(key);
         self.fail(key.run, Failure::Store, effects)
     }
 }
@@ -551,8 +564,16 @@ fn deliver(run: &mut Run, answers: Vec<(Caller, ToolOutput)>) {
         }
         let taken = match &caller {
             Caller::Model { call, .. } => run.tools.answer(call, output.clone()),
+            Caller::ModelRound { round, call, .. }
+                if run
+                    .build
+                    .as_ref()
+                    .is_some_and(|build| build.key().round == *round) =>
+            {
+                run.tools.answer(call, output.clone())
+            }
             Caller::Mcp { launch, .. } if run.mcp == Some(*launch) => false,
-            Caller::Mcp { .. } => continue,
+            Caller::ModelRound { .. } | Caller::Mcp { .. } => continue,
         };
         if !taken {
             run.answered.push((caller, output));
