@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 use kumochi_protocol::frame::{self, Pipe};
 use kumochi_protocol::message::ThreadId;
 use serde_json::{Value, json};
+use sha2::{Digest as _, Sha256};
 use tokio::io::AsyncWriteExt as _;
 use tokio::sync::oneshot;
 use tokio::sync::oneshot::error::TryRecvError;
@@ -45,7 +46,17 @@ fn a_cloned_offer_reuses_the_canonical_schema_set_without_copying() {
         schema.parameters["$defs"]["Surface"],
         json!({"type":"string","const":"overlay"})
     );
-    assert_ne!(schema.description, request[0].description);
+    let description_digest: [u8; 32] =
+        Sha256::digest(schema.description.replace("\r\n", "\n")).into();
+    assert_eq!(
+        description_digest,
+        [
+            0x5c, 0x06, 0xcf, 0xaf, 0x46, 0x9a, 0x75, 0x5c, 0xf1, 0xa1, 0xe1, 0xf9, 0x34, 0xdb,
+            0x0b, 0xac, 0x85, 0xfa, 0x98, 0x6c, 0x4d, 0x63, 0x76, 0xc0, 0x08, 0xee, 0xa1, 0x21,
+            0xdf, 0x63, 0x76, 0xb5,
+        ],
+        "canonical overlay description, with LF line endings"
+    );
     assert!(std::ptr::eq(offer.schemas(), copy.schemas()));
 }
 
