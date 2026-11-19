@@ -451,7 +451,7 @@ fn scene_step(owner: &Entity<Presence>, run: u64, scene: u64, cx: &mut TestAppCo
     for (bytes, frame) in frames {
         let event = crate::link::LinkEvent::SceneData {
             generation: 1,
-            frame: Deferred::new(frame, bytes as usize),
+            frame: Deferred::new(frame, usize::try_from(bytes).expect("a few bytes")),
             bytes,
         };
         owner
