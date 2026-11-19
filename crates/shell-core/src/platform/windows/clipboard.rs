@@ -1,5 +1,6 @@
 //! Win32 reader for the Accounts key row, separate from general clipboard handling.
 
+use std::ptr::NonNull;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
@@ -97,30 +98,44 @@ pub(in crate::platform) fn read(
         return Err(ClipboardRefusal::Invalid);
     }
     // SAFETY: the clipboard owns this live handle until Open closes it.
-    let ptr = unsafe { GlobalLock(text) }.cast::<u16>();
-    if ptr.is_null() {
-        return Err(ClipboardRefusal::Unavailable);
-    }
+    let ptr = NonNull::new(unsafe { GlobalLock(text) }.cast::<u16>())
+        .ok_or(ClipboardRefusal::Unavailable)?;
     let _locked = Locked(text);
-    // SAFETY: GlobalLock returns aligned memory; units derives from the allocation size.
-    let bounded =
-        unsafe { std::slice::from_raw_parts(ptr, units.min(MAX_KEY_CLIPBOARD_BYTES + 1)) };
-    decode(bounded)
+    // SAFETY: units comes from GlobalSize and bounds the reads to the allocation.
+    // CF_UNICODETEXT initializes the string through its NUL, not its trailing capacity.
+    // GlobalLock provides alignment for u16.
+    // The clipboard is open and the guard holds the allocation locked until decoding returns.
+    unsafe { decode_locked(ptr, units) }
+}
+
+/// # Safety
+/// The pointer must be aligned and readable for `units` u16s while this runs.
+/// The units through the first NUL, or the whole scanned bound if none, must be initialized.
+unsafe fn decode_locked(ptr: NonNull<u16>, units: usize) -> KeyClipboardResult {
+    let bound = units.min(MAX_KEY_CLIPBOARD_BYTES + 1);
+    for end in 0..bound {
+        // SAFETY: the bound is within the allocation and all earlier units were nonzero,
+        // so this aligned u16 is part of the initialized prefix and is still readable.
+        if unsafe { ptr.as_ptr().wrapping_add(end).read() } == 0 {
+            // SAFETY: end is within the allocation; each preceding aligned u16 was read.
+            // The resulting slice exists only for decoding, while the allocation is locked.
+            let initialized = unsafe { std::slice::from_raw_parts(ptr.as_ptr(), end) };
+            return decode(initialized);
+        }
+    }
+    Err(if units > MAX_KEY_CLIPBOARD_BYTES {
+        ClipboardRefusal::TooLong
+    } else {
+        ClipboardRefusal::Invalid
+    })
 }
 
 fn decode(units: &[u16]) -> KeyClipboardResult {
-    let end = units.iter().position(|&unit| unit == 0).ok_or({
-        if units.len() > MAX_KEY_CLIPBOARD_BYTES {
-            ClipboardRefusal::TooLong
-        } else {
-            ClipboardRefusal::Invalid
-        }
-    })?;
-    if end == 0 {
+    if units.is_empty() {
         return Err(ClipboardRefusal::Invalid);
     }
     let mut text = Zeroizing::new(String::with_capacity(MAX_KEY_CLIPBOARD_BYTES));
-    for scalar in char::decode_utf16(units[..end].iter().copied()) {
+    for scalar in char::decode_utf16(units.iter().copied()) {
         let scalar = scalar.map_err(|_| ClipboardRefusal::Invalid)?;
         if text.len() + scalar.len_utf8() > MAX_KEY_CLIPBOARD_BYTES {
             return Err(ClipboardRefusal::TooLong);
@@ -132,28 +147,55 @@ fn decode(units: &[u16]) -> KeyClipboardResult {
 
 #[cfg(test)]
 mod tests {
+    use std::mem::MaybeUninit;
+
     use super::*;
+
+    fn decode_block(units: &[u16]) -> KeyClipboardResult {
+        // SAFETY: the borrowed slice is aligned, initialized and live for this call.
+        unsafe { decode_locked(NonNull::from(units).cast(), units.len()) }
+    }
+
+    #[test]
+    fn clipboard_stops_before_uninitialized_padding() {
+        let block = [
+            MaybeUninit::new(u16::from(b'x')),
+            MaybeUninit::new(0),
+            MaybeUninit::uninit(),
+        ];
+        // SAFETY: the live array is aligned for u16 and initialized through the first NUL.
+        let text = unsafe { decode_locked(NonNull::from(&block).cast(), block.len()) };
+        assert_eq!(text.expect("short text").as_str(), "x");
+    }
 
     #[test]
     fn clipboard_limits_raw_utf8_before_trimming() {
         let mut exact = "é".repeat(1023);
         exact.push_str("  ");
         let full = exact.encode_utf16().chain([0]).collect::<Vec<_>>();
-        assert_eq!(decode(&full).expect("fits").as_str(), exact);
+        assert_eq!(decode_block(&full).expect("fits").as_str(), exact);
         exact.push(' ');
         let over = exact.encode_utf16().chain([0]).collect::<Vec<_>>();
-        assert_eq!(decode(&over), Err(ClipboardRefusal::TooLong));
+        assert_eq!(decode_block(&over), Err(ClipboardRefusal::TooLong));
+        let mut ascii = [u16::from(b'x'); MAX_KEY_CLIPBOARD_BYTES + 2];
+        assert_eq!(decode_block(&ascii), Err(ClipboardRefusal::TooLong));
+        ascii[MAX_KEY_CLIPBOARD_BYTES + 1] = 0;
+        assert_eq!(decode_block(&ascii), Err(ClipboardRefusal::TooLong));
+        ascii[MAX_KEY_CLIPBOARD_BYTES] = 0;
         assert_eq!(
-            decode(&[u16::from(b'x'); 2049]),
-            Err(ClipboardRefusal::TooLong)
+            decode_block(&ascii).expect("fits").as_str(),
+            "x".repeat(MAX_KEY_CLIPBOARD_BYTES)
         );
     }
 
     #[test]
     fn clipboard_requires_terminated_nonempty_valid_unicode() {
         for units in [&[][..], &[0], &[0xD800, 0], &[u16::from(b'x')]] {
-            assert_eq!(decode(units), Err(ClipboardRefusal::Invalid));
+            assert_eq!(decode_block(units), Err(ClipboardRefusal::Invalid));
         }
-        assert_eq!(decode(&[0xD83D, 0xDE00, 0]).expect("pair").as_str(), "😀");
+        assert_eq!(
+            decode_block(&[0xD83D, 0xDE00, 0]).expect("pair").as_str(),
+            "😀"
+        );
     }
 }
