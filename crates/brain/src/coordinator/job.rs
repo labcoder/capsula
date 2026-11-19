@@ -147,10 +147,10 @@ impl Coordinator {
             SendKey::Build(key) => {
                 let run = self.current.as_mut().filter(|run| {
                     run.started()
-                    && !run.finishing
-                    && run
-                        .route
-                        .is_some_and(|route| route.kind == ConnectionKind::ClaudeCode)
+                        && !run.finishing
+                        && run
+                            .route
+                            .is_some_and(|route| route.kind == ConnectionKind::ClaudeCode)
                 })?;
                 let build = run
                     .build

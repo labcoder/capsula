@@ -18,7 +18,9 @@ use crate::bridge::LaunchId;
 use crate::bridge::listener::McpCall;
 use crate::connections::model::budget::Budget;
 use crate::context::ConnectionTag;
-use crate::coordinator::{Availability, Input, Ready, SendKey, StoreOp, model_unavailable};
+use crate::coordinator::{
+    Availability, BuildKey, Input, Ready, SendKey, StoreOp, model_unavailable,
+};
 use crate::engines::claude_code::install::FindError;
 use crate::engines::claude_code::lane::{self, Done, Failure, Lane, Outcome, Recheck, Work};
 use crate::engines::claude_code::launch::{
@@ -28,7 +30,7 @@ use crate::engines::claude_code::policy::{self, Reviewed};
 use crate::engines::claude_code::supervisor::{
     self, Control, Launch, LaunchRefused, MAX_LAUNCH, Question,
 };
-use crate::engines::{EngineFailure, RunRequest};
+use crate::engines::{EngineFailure, Finish, RunRequest, TurnEvent};
 use crate::recall::control::Control as Lifetime;
 
 /// Where Claude Code's sign-in may be kept, which owner call 1 decided.
@@ -110,6 +112,7 @@ struct Epoch {
 
 #[derive(Debug)]
 struct StatusRecheck {
+    key: SendKey,
     guard: Recheck,
     signed_out: oneshot::Sender<()>,
 }
@@ -341,13 +344,25 @@ impl Claude {
         }
     }
 
-    /// A lane result; true when the view may have changed.
-    pub(crate) fn done(&mut self, Done { generation, result }: Done) -> bool {
+    /// A lane result: whether the view may have changed and a build to end as Provider
+    /// before publishing a late sign-out.
+    fn done(&mut self, Done { generation, result }: Done) -> (bool, Option<BuildKey>) {
         if generation != self.generation || self.out.is_none() {
-            return false;
+            return (false, None);
         }
-        if let Some(recheck) = self.recheck.take() {
-            return self.status_rechecked(recheck, result);
+        let recheck = self.recheck.take();
+        let automatic = recheck.is_some();
+        let mut late = None;
+        if let Some(recheck) = recheck {
+            if !self.confirmed_sign_out(&result) {
+                self.out = None;
+                return (false, None);
+            }
+            if recheck.guard.check().is_ok() {
+                recheck.signed_out.send(()).ok();
+            } else if let SendKey::Build(key) = recheck.key {
+                late = Some(key);
+            }
         }
         if let Some(held) = &mut self.quarantine
             && self.out == Some(Work::Quarantine(held.version))
@@ -370,7 +385,8 @@ impl Claude {
         // The Version and Status after a Cancel: unless the Status is signed in, or the lane
         // couldn't run the call (Busy, Refused), the sign-in may have left Claude Code's file in
         // Kumochi's folder, and only a Disconnect removes it.
-        let leftover = self.cancelled == Some(generation)
+        let leftover = !automatic
+            && self.cancelled == Some(generation)
             && matches!(self.out, Some(Work::Version | Work::Status))
             && !matches!(
                 result,
@@ -382,7 +398,7 @@ impl Claude {
         match result {
             Ok(Outcome::Version(_) | Outcome::LoginEnded) => {
                 if self.submit(Work::Status) {
-                    return false;
+                    return (false, None);
                 }
             }
             Ok(Outcome::Status { .. }) if let Some(held) = self.quarantine => {
@@ -437,7 +453,7 @@ impl Claude {
         if self.out.is_none() && !matches!(self.view, ClaudeCodeView::Ready { .. }) {
             self.revoke_all();
         }
-        true
+        (true, late)
     }
 
     /// Queues a question launch behind whatever the lane is doing. Its deadline is fixed now.
@@ -825,6 +841,7 @@ impl Claude {
     fn recheck_failed(
         &mut self,
         id: LaunchId,
+        key: SendKey,
         lifetime: Option<Lifetime>,
         signed_out: oneshot::Sender<()>,
     ) {
@@ -860,31 +877,17 @@ impl Claude {
             .is_some_and(|lane| lane.recheck(self.generation, guard.clone()))
         {
             self.out = Some(Work::Status);
-            self.recheck = Some(StatusRecheck { guard, signed_out });
+            self.recheck = Some(StatusRecheck {
+                key,
+                guard,
+                signed_out,
+            });
         }
     }
 
-    fn status_rechecked(
-        &mut self,
-        recheck: StatusRecheck,
-        result: Result<Outcome, Failure>,
-    ) -> bool {
-        self.out = None;
-        if let Ok(Outcome::Status {
-            version,
-            signed_in: false,
-        }) = result
-            && self
-                .admitted()
-                .is_some_and(|(current, _)| current == version)
-            && recheck.guard.check().is_ok()
-            && recheck.signed_out.send(()).is_ok()
-        {
-            self.view = ClaudeCodeView::SignedOut { version };
-            self.revoke_all();
-            return true;
-        }
-        false
+    fn confirmed_sign_out(&self, result: &Result<Outcome, Failure>) -> bool {
+        matches!(result, Ok(Outcome::Status { version, signed_in: false })
+            if self.admitted().is_some_and(|(current, _)| current == *version))
     }
 
     /// An attempt's one report: an audit failure quarantines its version, and a sign-out shows.
@@ -1009,7 +1012,7 @@ impl Claude {
     /// What woke it; true when the view may have changed.
     pub(crate) fn wake(&mut self, wake: Wake) -> bool {
         match wake {
-            Wake::Lane(done) => self.done(done),
+            Wake::Lane(done) => self.done(done).0,
             Wake::Note(note) => self.note(note),
             Wake::Expired => {
                 let now = self.clock.now();
@@ -1127,7 +1130,7 @@ impl Brain {
         wake: Wake,
         mut link: Option<&mut Link<'_, '_>>,
     ) -> Result<(), Full> {
-        let changed = match wake {
+        let (changed, late) = match wake {
             Wake::Call(call) => return self.mcp_call(call, link),
             Wake::Note(Note::Bind(bind)) => {
                 self.mcp_bind(bind);
@@ -1141,11 +1144,20 @@ impl Brain {
             }) => {
                 let lifetime = self.coordinator.claude_recheck_control(key);
                 self.claude
-                    .recheck_failed(id, lifetime.map(|l| l.until(until)), signed_out);
-                false
+                    .recheck_failed(id, key, lifetime.map(|l| l.until(until)), signed_out);
+                (false, None)
             }
-            wake => self.claude.wake(wake),
+            Wake::Lane(done) => self.claude.done(done),
+            wake => (self.claude.wake(wake), None),
         };
+        if let Some(key) = late
+            && let Some(effects) = self.handle(Input::Engine {
+                key,
+                event: TurnEvent::Finished(Finish::Failed(EngineFailure::Provider)),
+            })
+        {
+            self.apply(effects, link.as_deref_mut()).map_err(|_| Full)?;
+        }
         self.claude_reported(link.as_deref_mut())
             .map_err(|_| Full)?;
         self.repair_default(link.as_deref_mut())?;

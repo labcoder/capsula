@@ -236,13 +236,13 @@ impl Rig {
     fn wake(&mut self, wake: Wake) {
         if let Wake::Note(Note::ProviderFailed {
             id,
+            key,
             until,
             signed_out,
-            ..
         }) = wake
         {
             self.claude
-                .recheck_failed(id, Some(Lifetime::new(until)), signed_out);
+                .recheck_failed(id, key, Some(Lifetime::new(until)), signed_out);
             return;
         }
         if let Wake::Note(Note::Bind(bind)) = wake {
@@ -581,6 +581,9 @@ async fn a_provider_failed_question_checks_status_once_and_only_confirmed_sign_o
         ),
     ] {
         let mut rig = Rig::new(&format!("question-provider-{case}"), &provider_failure()).await;
+        if matches!(view, ClaudeCodeView::SignedOut { .. }) {
+            rig.claude.cancelled = Some(rig.claude.generation);
+        }
         if let Some(mut status) = status {
             status["configDirectory"] = json!(rig.base.owned().join("config"));
             fs::write(rig.base.0.join("replay-auth-status"), status.to_string()).unwrap();
@@ -641,7 +644,7 @@ async fn a_new_find_does_not_take_an_old_questions_provider_recheck() {
 }
 
 #[tokio::test]
-async fn a_provider_recheck_answer_after_the_deadline_does_not_sign_out() {
+async fn a_late_provider_recheck_updates_the_account_without_relabeling_the_question() {
     let mut rig = Rig::new("question-provider-recheck-deadline", &provider_failure()).await;
     fs::write(
         rig.base.0.join("replay-auth-status"),
@@ -680,12 +683,54 @@ async fn a_provider_recheck_answer_after_the_deadline_does_not_sign_out() {
         rig.drive(played.events()).await,
         [TurnEvent::Finished(Finish::Failed(EngineFailure::Provider))]
     );
+    assert_eq!(rig.claude.view(), ClaudeCodeView::SignedOut { version: V });
+    rig.close().await;
+}
+
+#[tokio::test]
+async fn a_new_find_after_recheck_submission_ignores_the_old_answer() {
+    let mut rig = Rig::new("question-find-after-recheck", &provider_failure()).await;
+    let status = rig.base.0.join("replay-auth-status");
+    fs::write(
+        &status,
+        json!({
+            "loggedIn": false,
+            "configDirectory": rig.base.owned().join("config")
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let question = rig.claude.take(&rig.snapshot()).expect("taken");
+    let mut played = play(&question);
+    let lease = played.lease();
+    rig.drive(played.asked(lease)).await;
+    let failure = provider_failed(&mut rig).await;
+    rig.wake(Wake::Note(failure));
+    let old = timeout(WAIT, rig.claude.lane.as_mut().unwrap().next())
+        .await
+        .unwrap();
     assert_eq!(
-        rig.claude.view(),
-        ClaudeCodeView::Ready {
+        old.result,
+        Ok(Outcome::Status {
             version: V,
-            analytics_on: true
-        }
+            signed_in: false
+        })
+    );
+    fs::remove_file(status).unwrap();
+    rig.claude.op(ConnectionOp::FindClaudeCode);
+    let generation = rig.claude.generation;
+    assert_ne!(generation, old.generation);
+    rig.wake(Wake::Lane(old));
+    assert_eq!(rig.claude.out, Some(Work::Version));
+    assert_eq!(
+        rig.drive(played.events()).await,
+        [TurnEvent::Finished(Finish::Failed(EngineFailure::Provider))]
+    );
+    rig.settle().await;
+    assert_eq!(rig.claude.view(), READY);
+    assert_eq!(
+        &rig.base.calls()[3..],
+        ["auth status --json", "--version", "auth status --json"]
     );
     rig.close().await;
 }
@@ -2363,17 +2408,10 @@ fn brain_on(rig: &mut Rig, name: &str) -> Brain {
     brain
 }
 
-#[tokio::test]
-async fn a_turn_deadline_during_recheck_keeps_the_observed_provider_failure() {
+async fn started_provider_recheck(brain: &mut Brain, base: &Base) -> RunId {
     use crate::context::{Built, tools};
     use crate::coordinator::{ContextBuilt, Effect, StoreOp};
-    use crate::store::{Failure as RunFailure, RunEnd};
 
-    let script = provider_failure()
-        .pre_tools(BOTH_TOOLS)
-        .post_tools(BOTH_TOOLS);
-    let mut rig = Rig::new("question-recheck-turn-deadline", &script).await;
-    let mut brain = brain_on(&mut rig, "question-recheck-turn-deadline");
     brain.claude_reported(None).expect("no shell");
     let started = brain
         .handle(Input::Turn {
@@ -2411,7 +2449,7 @@ async fn a_turn_deadline_during_recheck_keeps_the_observed_provider_failure() {
         }))
         .unwrap();
     brain.apply(effects, None).unwrap();
-    drive_until(&mut brain, || rig.base.0.join("seed.1").is_file()).await;
+    drive_until(brain, || base.0.join("seed.1").is_file()).await;
     timeout(WAIT, async {
         while brain.claude.recheck.is_none() {
             let wake = brain.claude.next().await;
@@ -2420,6 +2458,21 @@ async fn a_turn_deadline_during_recheck_keeps_the_observed_provider_failure() {
     })
     .await
     .unwrap();
+    run
+}
+
+#[tokio::test]
+async fn a_turn_deadline_during_recheck_keeps_the_observed_provider_failure() {
+    use crate::coordinator::{Effect, StoreOp};
+    use crate::store::{Failure as RunFailure, RunEnd};
+
+    let name = "question-recheck-turn-deadline";
+    let script = provider_failure()
+        .pre_tools(BOTH_TOOLS)
+        .post_tools(BOTH_TOOLS);
+    let mut rig = Rig::new(name, &script).await;
+    let mut brain = brain_on(&mut rig, name);
+    let run = started_provider_recheck(&mut brain, &rig.base).await;
     let effects = brain.handle(Input::Deadline { run }).unwrap();
     assert_eq!(
         effects.iter().find_map(|effect| match effect {
@@ -2429,6 +2482,57 @@ async fn a_turn_deadline_during_recheck_keeps_the_observed_provider_failure() {
         Some(RunEnd::Failed(RunFailure::Engine))
     );
     brain.apply(effects, None).unwrap();
+    assert!(brain.claude.close(soon()).await);
+}
+
+#[tokio::test]
+async fn stop_beats_the_recheck_reply_but_does_not_hide_confirmed_account_status() {
+    use crate::coordinator::{Effect, StoreOp};
+    use crate::store::{Interruption, RunEnd};
+
+    let name = "question-recheck-after-stop";
+    let script = provider_failure()
+        .pre_tools(BOTH_TOOLS)
+        .post_tools(BOTH_TOOLS);
+    let mut rig = Rig::new(name, &script).await;
+    fs::write(
+        rig.base.0.join("replay-auth-status"),
+        json!({ "loggedIn": false, "configDirectory": rig.base.owned().join("config") })
+            .to_string(),
+    )
+    .unwrap();
+    let mut brain = brain_on(&mut rig, name);
+    let run = started_provider_recheck(&mut brain, &rig.base).await;
+    let done = timeout(WAIT, brain.claude.lane.as_mut().unwrap().next())
+        .await
+        .unwrap();
+    assert_eq!(
+        done.result,
+        Ok(Outcome::Status {
+            version: V,
+            signed_in: false
+        })
+    );
+
+    let (send, mut reply) = oneshot::channel();
+    brain.claude.recheck.as_mut().unwrap().signed_out = send;
+    let stopped = brain
+        .handle(Input::Stop {
+            run,
+            revealed: Vec::new(),
+        })
+        .unwrap();
+    assert!(stopped.iter().any(|effect| matches!(
+        effect, Effect::Store(StoreOp::EndRun { run: id, end: RunEnd::Interrupted(Interruption::Stop), .. }) if *id == run
+    )));
+    brain.apply(stopped, None).unwrap();
+    brain.claude_done(Wake::Lane(done), None).unwrap();
+    assert_eq!(reply.try_recv(), Err(oneshot::error::TryRecvError::Closed));
+    assert_eq!(brain.coordinator.current_run(), None);
+    assert_eq!(
+        brain.claude.view(),
+        ClaudeCodeView::SignedOut { version: V }
+    );
     assert!(brain.claude.close(soon()).await);
 }
 

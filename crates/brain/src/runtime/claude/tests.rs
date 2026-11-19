@@ -358,7 +358,11 @@ async fn a_status_from_before_a_disconnect_cant_show_it_ready() {
             signed_in: true,
         }),
     };
-    assert!(!claude.done(late), "dropped by its generation");
+    assert_eq!(
+        claude.done(late),
+        (false, None),
+        "dropped by its generation"
+    );
     assert_eq!(claude.view(), ClaudeCodeView::CleanupPending);
     settle(&mut claude).await;
     assert!(claude.close(soon()).await);
@@ -849,20 +853,26 @@ mod launches {
         let _pipes = pipes(&mut launch).await;
         claude.op(ConnectionOp::FindClaudeCode);
         let generation = claude.generation;
-        assert!(!claude.done(Done {
-            generation,
-            result: Ok(Outcome::Version(V)),
-        }));
+        assert_eq!(
+            claude.done(Done {
+                generation,
+                result: Ok(Outcome::Version(V)),
+            }),
+            (false, None)
+        );
         tokio::time::sleep(Duration::from_millis(300)).await;
         assert!(!control.is_ended(), "a Version and a Status in progress");
         assert_eq!(claude.view(), READY);
-        assert!(claude.done(Done {
-            generation,
-            result: Ok(Outcome::Status {
-                version: V,
-                signed_in: false,
+        assert_eq!(
+            claude.done(Done {
+                generation,
+                result: Ok(Outcome::Status {
+                    version: V,
+                    signed_in: false,
+                }),
             }),
-        }));
+            (true, None)
+        );
         until("signed out ends it", || control.is_ended()).await;
         assert_eq!(end(launch).await, Teardown::Done);
         assert!(claude.close(soon()).await);
