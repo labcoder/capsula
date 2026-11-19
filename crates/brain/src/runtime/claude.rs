@@ -1154,16 +1154,22 @@ impl Brain {
             Wake::Lane(done) => self.claude.done(done),
             wake => (self.claude.wake(wake), None),
         };
-        if let Some(key) = late
+        let terminal = if let Some(key) = late
             && let Some(effects) = self.handle(Input::Engine {
                 key,
                 event: TurnEvent::Finished(Finish::Failed(EngineFailure::Provider)),
             })
         {
-            self.apply(effects, link.as_deref_mut()).map_err(|_| Full)?;
-        }
-        self.claude_reported(link.as_deref_mut())
-            .map_err(|_| Full)?;
+            self.apply(effects, link.as_deref_mut())
+        } else {
+            Ok(())
+        };
+        let reported = self.claude_reported(if terminal.is_ok() {
+            link.as_deref_mut()
+        } else {
+            None
+        });
+        terminal.and(reported).map_err(|_| Full)?;
         self.repair_default(link.as_deref_mut())?;
         let Some(link) = link else {
             return Ok(());

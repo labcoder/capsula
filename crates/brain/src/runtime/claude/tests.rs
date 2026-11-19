@@ -1016,20 +1016,20 @@ async fn a_cancel_whose_version_fails_removes_claude_codes_folder() {
 }
 
 /// The pipe a test shell reads: control frames go unread, data frames wait in the queue.
-struct Pipe {
+pub(super) struct Pipe {
     out: tokio::sync::mpsc::Sender<Vec<u8>>,
-    _control: tokio::sync::mpsc::Receiver<Vec<u8>>,
+    pub(super) control: tokio::sync::mpsc::Receiver<Vec<u8>>,
     queue: std::cell::RefCell<crate::runtime::data::DataQueue>,
     ready: tokio::sync::Notify,
     tap: crate::tap::Tap,
 }
 
 impl Pipe {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         let (out, control) = tokio::sync::mpsc::channel(256);
         Self {
             out,
-            _control: control,
+            control,
             queue: std::cell::RefCell::new(crate::runtime::data::DataQueue::new(
                 crate::runtime::window(),
             )),
@@ -1038,12 +1038,12 @@ impl Pipe {
         }
     }
 
-    fn link(&mut self) -> Link<'_, '_> {
+    pub(super) fn link(&mut self) -> Link<'_, '_> {
         Link::new(&self.out, &self.queue, &self.ready, &mut self.tap)
     }
 
     /// Claude Code's model lists the shell heard since the last look, oldest first.
-    fn heard(&self) -> Vec<Vec<ModelInfo>> {
+    pub(super) fn heard(&self) -> Vec<Vec<ModelInfo>> {
         let mut queue = self.queue.borrow_mut();
         queue.grant(u32::MAX);
         std::iter::from_fn(|| queue.pop(Instant::now()))
@@ -1063,7 +1063,7 @@ impl Pipe {
 }
 
 /// The reviewed row's models, in its order, as the picker shows them.
-fn row() -> Vec<ModelInfo> {
+pub(super) fn row() -> Vec<ModelInfo> {
     [
         ("sonnet", "Sonnet"),
         ("opus", "Opus"),

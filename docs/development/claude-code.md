@@ -522,7 +522,9 @@ hears the current list if it isn't empty, and nothing before Claude Code's first
   like ordinary status, even if delivered late. It does not run the cleanup
   reserved for a cancelled sign-in. Only the still-current question within its
   deadline can be reclassified as `ClaudeCodeSignedOut`. Otherwise its provider
-  failure stands, including at the turn deadline. A new Find or Disconnect
+  failure stands, including at the turn deadline. If the shell is full when the
+  terminal is sent, sign-out still clears the offered models before reconnect.
+  A new Find or Disconnect
   supersedes the recheck. The question is never retried. Audit refusals,
   transport failures and turn-cap results do not recheck.
 

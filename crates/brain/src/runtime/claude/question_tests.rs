@@ -2619,6 +2619,89 @@ async fn stop_beats_the_recheck_reply_but_does_not_hide_confirmed_account_status
 }
 
 #[tokio::test]
+async fn full_provider_terminal_does_not_replay_signed_out_models_on_reconnect() {
+    use std::cell::RefCell;
+
+    use kumochi_protocol::frame;
+    use tokio::sync::Notify;
+
+    use super::super::{Seen, data::DataQueue, window};
+    use super::tests::{Pipe, row};
+    use crate::coordinator::StoreOp;
+    use crate::store::{Failure as RunFailure, RunEnd};
+    use crate::tap::Tap;
+    use crate::test_support::{self, Scratch};
+
+    let name = "question-recheck-full-terminal";
+    let script = provider_failure()
+        .pre_tools(BOTH_TOOLS)
+        .post_tools(BOTH_TOOLS);
+    let mut rig = Rig::new(name, &script).await;
+    fs::write(
+        rig.base.0.join("replay-auth-status"),
+        json!({ "loggedIn": false, "configDirectory": rig.base.owned().join("config") })
+            .to_string(),
+    )
+    .unwrap();
+    let scratch = Scratch::new(name);
+    let mut brain = test_support::brain(&scratch, "");
+    std::mem::swap(&mut brain.claude, &mut rig.claude);
+    let run = started_provider_recheck(&mut brain, &rig.base).await;
+    let mut first_shell = Pipe::new();
+    brain.claude_models(&mut first_shell.link()).unwrap();
+    assert_eq!(first_shell.heard(), [row()]);
+    let done = timeout(WAIT, brain.claude.lane.as_mut().unwrap().next())
+        .await
+        .unwrap();
+    assert_eq!(
+        done.result,
+        Ok(Outcome::Status {
+            version: V,
+            signed_in: false
+        })
+    );
+    rig.at(MAX_LAUNCH);
+
+    let mut observed = brain.observe();
+    let (out, mut unread) = mpsc::channel(1);
+    out.try_send(Vec::new())
+        .expect("fill the old control queue");
+    let queue = RefCell::new(DataQueue::new(window()));
+    let (ready, mut tap) = (Notify::new(), Tap::from_env());
+    let mut link = Link::new(&out, &queue, &ready, &mut tap);
+    assert!(
+        brain
+            .claude_done(Wake::Lane(done), Some(&mut link))
+            .is_err()
+    );
+    assert_eq!(unread.try_recv(), Ok(Vec::new()));
+    assert!(matches!(
+        observed.try_recv(),
+        Ok(Seen::StoreOpQueued(StoreOp::EndRun {
+            run: id, end: RunEnd::Failed(RunFailure::Engine), ..
+        })) if run == id
+    ));
+
+    let mut reconnect = Pipe::new();
+    brain.open(&mut reconnect.link()).unwrap();
+    let mut observed_view = None;
+    while let Ok(bytes) = reconnect.control.try_recv() {
+        if let ControlToShell::Connections(view) =
+            frame::decode(&bytes[frame::HEADER_LEN..]).unwrap()
+        {
+            observed_view = Some(view.claude_code);
+        }
+    }
+    assert_eq!(
+        observed_view,
+        Some(ClaudeCodeView::SignedOut { version: V })
+    );
+    assert_eq!(reconnect.heard(), [Vec::<ModelInfo>::new()]);
+    assert!(brain.claude.epoch.is_none());
+    brain.close().await;
+}
+
+#[tokio::test]
 async fn an_admitted_foreground_offer_binds_before_seeding() {
     use crate::context::{Built, tools};
     use crate::coordinator::{ContextBuilt, Effect, StoreOp};
