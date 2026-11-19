@@ -813,17 +813,13 @@ fn stale_releases_cannot_arm_or_send_at_either_delivery_boundary(cx: &mut TestAp
 fn an_older_failed_send_cannot_revoke_the_successors_watch_or_exclusion(cx: &mut TestAppContext) {
     let watching = released(true, cx);
     watching.ready.owner.update(cx, |owner, cx| {
-        owner
-            .voice
-            .pending
-            .as_ref()
-            .unwrap()
-            .token
-            .discard_unstarted()
-            .unwrap();
+        let hold = owner.voice.pending.as_ref().expect("the first hold");
+        hold.token.discard_unstarted().expect("never started");
+        owner.voice.gates.received(&hold.token);
         owner.capture_finished(1, CaptureFor::Gesture(GestureId(1)), cx);
     });
     state(&watching, RUN, Phase::Answering, HOLD, cx);
+    cx.run_until_parked();
     hold(&watching, 2, cx);
     release(&watching.ready.owner, 2, Some(DOWN), cx);
     let second = told(&watching);
