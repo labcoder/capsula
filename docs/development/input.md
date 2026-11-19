@@ -576,7 +576,8 @@ the refusal also says what the look hit instead: its class and executable basena
 was nothing, the fixture's root, another fixture child or window, or someone else's window, and
 whether the fixture root is visible, topmost and at the frame it chose, and which frame that was
 (`preferred`, `right`, `left`, `lower`, `upper` or `shifted`). It also says whether the hit's
-top-level window is topmost, whether the root and the EDIT are `layered`, `transparent`, both or
+top-level window is topmost, whether DWM cloaks the root (`no`, `app`, `shell`, `inherited`,
+`mixed` or `unread`), whether the root and the EDIT are `layered`, `transparent`, both or
 `opaque`, and whether the EDIT is visible and enabled. These are read straight after the look
 without another hit test. A target that goes stale after admission
 and an OS `SendInput` refusal keep their own existing messages. The surrounding refusal still names

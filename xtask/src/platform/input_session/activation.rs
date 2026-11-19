@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use anyhow::{Context as _, Result, ensure};
 use windows::Win32::Foundation::POINT;
+use windows::Win32::Graphics::Dwm::{DWM_CLOAKED_APP, DWM_CLOAKED_INHERITED, DWM_CLOAKED_SHELL};
 use windows::Win32::UI::WindowsAndMessaging::{WINDOW_EX_STYLE, WS_EX_LAYERED, WS_EX_TRANSPARENT};
 
 use super::Receipt;
@@ -51,6 +52,18 @@ pub(crate) fn see_through(style: isize) -> &'static str {
         (true, false) => "layered",
         (false, true) => "transparent",
         (true, true) => "layered_transparent",
+    }
+}
+
+/// Who cloaks a window, from its `DWMWA_CLOAKED` value, or `unread` when DWM didn't say.
+pub(crate) fn cloak(value: Option<u32>) -> &'static str {
+    match value {
+        None => "unread",
+        Some(0) => "no",
+        Some(DWM_CLOAKED_APP) => "app",
+        Some(DWM_CLOAKED_SHELL) => "shell",
+        Some(DWM_CLOAKED_INHERITED) => "inherited",
+        Some(_) => "mixed",
     }
 }
 
@@ -492,6 +505,16 @@ mod tests {
             see_through(style(WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOPMOST)),
             "layered_transparent"
         );
+    }
+
+    #[test]
+    fn each_cloak_value_has_its_own_word() {
+        assert_eq!(cloak(None), "unread");
+        assert_eq!(cloak(Some(0)), "no");
+        assert_eq!(cloak(Some(DWM_CLOAKED_APP)), "app");
+        assert_eq!(cloak(Some(DWM_CLOAKED_SHELL)), "shell");
+        assert_eq!(cloak(Some(DWM_CLOAKED_INHERITED)), "inherited");
+        assert_eq!(cloak(Some(DWM_CLOAKED_SHELL | DWM_CLOAKED_APP)), "mixed");
     }
 
     #[test]

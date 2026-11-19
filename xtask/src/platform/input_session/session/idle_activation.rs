@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result, bail, ensure};
 use windows::Win32::Foundation::{HWND, LPARAM, POINT, RECT, WPARAM};
+use windows::Win32::Graphics::Dwm::{DWMWA_CLOAKED, DwmGetWindowAttribute};
 use windows::Win32::System::SystemInformation::GetTickCount;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetAsyncKeyState, INPUT, IsWindowEnabled, MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_LEFTUP,
@@ -17,7 +18,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     GetGUIThreadInfo, GetWindowLongPtrW, IsWindowVisible, WS_EX_TOPMOST, WindowFromPoint,
 };
 
-use super::super::activation::{Idle, Look, has_ex, missed_hit, see_through};
+use super::super::activation::{Idle, Look, cloak, has_ex, missed_hit, see_through};
 use super::super::fixture::{
     ABORT, ARMED_INPUT, FINALIZE_IDLE, FRAME, FRAME_ORIGIN, PREPARE_IDLE, READY, frame_name,
 };
@@ -230,6 +231,16 @@ impl Session {
         let ex = |window| unsafe { GetWindowLongPtrW(window, GWL_EXSTYLE) };
         // SAFETY: reads only a window's visibility; a stale handle reads false.
         let visible = |window| unsafe { IsWindowVisible(window) }.as_bool();
+        let mut cloaked = 0u32;
+        // SAFETY: cloaked is a writable u32 of the size passed; reads only the root's cloak state.
+        let cloak_read = unsafe {
+            DwmGetWindowAttribute(
+                root,
+                DWMWA_CLOAKED,
+                (&raw mut cloaked).cast(),
+                size::<u32>(),
+            )
+        };
         let edit = self.edit;
         // SAFETY: reads only whether the fixture EDIT takes input.
         let edit_enabled = unsafe { IsWindowEnabled(edit) }.as_bool();
@@ -249,13 +260,14 @@ impl Session {
             bottom: y + height,
         };
         format!(
-            "hit_class={:?} hit_process={:?} hit={} hit_topmost={hit_topmost} root_visible={} \
+            "hit_class={:?} hit_process={:?} hit={} hit_topmost={hit_topmost} root_visible={} root_cloaked={} \
              root_topmost={} root_at_frame={} frame={} root_style={} edit_style={} \
              edit_visible={} edit_enabled={edit_enabled}",
             (!hit.is_invalid()).then(|| class_name(hit)),
             foreground_process_name(look.at_point.pid).ok(),
             missed_hit(look.at_point, hit_root.0.addr(), owner(root)),
             visible(root),
+            cloak(cloak_read.ok().map(|()| cloaked)),
             has_ex(ex(root), WS_EX_TOPMOST),
             self.fixture.rect().is_ok_and(|rect| rect == asked),
             frame_name([x, y]),
