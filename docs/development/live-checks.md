@@ -553,7 +553,7 @@ Runs Anthropic API key chat end to end on two keys the owner enters, A and B. Un
 cargo run --release --package xtask --features kumochi-protocol/gate-identity -- live anthropic-key
 ```
 
-Run it only on the Captain's go, with the owner present, at a head where the key row and the key route are on. It builds debug gate images of the shell and the brain, because the transport's budget variables bind only in a debug build. All three launches share one folder set under `target/live/anthropic-key/<time>/key`, and the default model is set to `claude-haiku-5-5` at low effort.
+Run it only with the owner present and their approval for that run, at a head where the key row and the key route are on. It builds debug gate images of the shell and the brain, because the transport's budget variables bind only in a debug build. All three launches share one folder set under `target/live/anthropic-key/<time>/key`, and the default model is set to `claude-haiku-5-5` at low effort.
 
 | Launch | Allowance | Steps |
 | --- | --- | --- |
@@ -565,12 +565,12 @@ The prompts go to Kumo's chat, not a task. A task's first `Done` starts a title 
 
 ### The allowance
 
-The approval is six requests: three GETs and three POSTs, with no retries.
+The owner's approval is six requests: three GETs and three POSTs, with no retries.
 - The check starts each launch's brain itself, with exactly its slice in `KUMOCHI_LIVE_KEY_CATALOG_BUDGET` and `KUMOCHI_LIVE_KEY_MESSAGES_BUDGET`, and waits for its pipe. A request past the slice is refused before connecting. Only then does it start the shell, with both variables at 0, so the shell connects to that brain. Every other `KUMOCHI_` variable is removed from both environments.
 - No other brain gets a slice. A brain the shell starts, such as one replacing a brain that died, inherits the shell's zeros. A shell the brain relaunches after the shell died gets both variables at 0 from the brain, because a debug brain that has either key budget sets both to 0 for every shell it starts ([processes.md](processes.md)). So a brain that relaunched shell starts has zeros too, however many times the shell and the brain die and come back. Each zero is refused before connecting.
 - So under any crash or restart the check sends at most three model-list GETs and at most three Messages POSTs. That is a ceiling, not a count the run must reach: only the brain the check starts for each launch holds a slice, and each slice is refused past its count before connecting.
 - Before each launch, the check appends that launch's slice to `%LOCALAPPDATA%\kumochi-gate-anthropic-key.ledger`, beside the gate's run lock, and flushes it. Cleaning or moving build output doesn't touch it, and gate cleanup leaves it. The check creates it only while it holds the run lock, so a second run started at the same time refuses before it reaches the ledger.
-- The check refuses to start while that file exists, so a slice is never refunded: an interrupted or failed run can't be resumed or rerun. The file is deleted by hand, and only after a new approval.
+- The check refuses to start while that file exists, so a slice is never refunded: an interrupted or failed run can't be resumed or rerun. The file is deleted by hand, and only after the owner approves a new run.
 
 The slices add up to the approval, and the last one is zero, both checked at compile time.
 
