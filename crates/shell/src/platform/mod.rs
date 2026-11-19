@@ -93,6 +93,8 @@ mod windows;
 pub(crate) use kumochi_shell_core::platform::{data_dir, session_id};
 #[cfg(windows)]
 pub(crate) use windows::ScreenSources;
+#[cfg(all(test, windows))]
+pub(crate) use windows::with_raw_modifiers;
 #[cfg(windows)]
 pub(crate) use windows::{
     Affinity, Deliver, EscapeHotkey, EventTime, Foreground, HostWatch, MaskUpdate, OverlayWindows,

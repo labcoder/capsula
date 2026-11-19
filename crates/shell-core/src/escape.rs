@@ -131,6 +131,10 @@ pub struct TalkEscape<H> {
     refused: bool,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+#[error("the talk Escape lease is unavailable")]
+pub struct TalkEscapeRefused;
+
 impl<H> Default for TalkEscape<H> {
     fn default() -> Self {
         Self {
@@ -141,18 +145,19 @@ impl<H> Default for TalkEscape<H> {
 }
 
 impl<H> TalkEscape<H> {
-    /// Holds the chord for the hold whose keys are down, asking Windows once. A refusal is
-    /// logged once for that hold, without key or text content, and isn't retried.
-    pub fn acquire<E: std::fmt::Display>(&mut self, register: impl FnOnce() -> Result<H, E>) {
-        if self.hotkey.is_some() || self.refused {
-            return;
+    /// Tries once for the hold. Refusal leaves it without any cancellation lease.
+    pub fn acquire<E>(
+        &mut self,
+        register: impl FnOnce() -> Result<H, E>,
+    ) -> Result<(), TalkEscapeRefused> {
+        if self.hotkey.is_none() && !self.refused {
+            self.hotkey = register().ok();
+            self.refused = self.hotkey.is_none();
         }
-        match register() {
-            Ok(hotkey) => self.hotkey = Some(hotkey),
-            Err(error) => {
-                tracing::warn!(%error, "can't hold Esc with the talk keys down; Esc may not cancel this hold");
-                self.refused = true;
-            }
+        if self.refused {
+            Err(TalkEscapeRefused)
+        } else {
+            Ok(())
         }
     }
 
@@ -167,6 +172,11 @@ impl<H> TalkEscape<H> {
     pub fn refused(&self) -> bool {
         self.refused
     }
+
+    #[cfg(feature = "test-support")]
+    pub fn held(&self) -> bool {
+        self.hotkey.is_some()
+    }
 }
 
 #[cfg(test)]
@@ -174,7 +184,7 @@ mod tests {
     use std::cell::Cell;
     use std::rc::Rc;
 
-    use super::{Activity, Escape, EscapeHold, Panel, TalkEscape, decide};
+    use super::{Activity, Escape, EscapeHold, Panel, TalkEscape, TalkEscapeRefused, decide};
 
     #[test]
     fn onboarding_cancels_an_edit_or_dismisses_only_after_pull_stop_and_clear() {
@@ -400,13 +410,13 @@ mod tests {
         let mut chord = TalkEscape::default();
         chord.release();
         assert_eq!((asked.get(), freed.get()), (0, 0), "no hold");
-        chord.acquire(register);
-        chord.acquire(register);
+        chord.acquire(register).unwrap();
+        chord.acquire(register).unwrap();
         assert_eq!((asked.get(), freed.get()), (1, 0), "one hold");
         assert!(!chord.refused());
         chord.release();
         assert_eq!((asked.get(), freed.get()), (1, 1), "its keys are up");
-        chord.acquire(register);
+        chord.acquire(register).unwrap();
         assert_eq!((asked.get(), freed.get()), (2, 1), "the next hold");
     }
 
@@ -418,13 +428,13 @@ mod tests {
             Err::<(), _>("taken")
         };
         let mut chord = TalkEscape::default();
-        chord.acquire(register);
-        chord.acquire(register);
+        assert_eq!(chord.acquire(register), Err(TalkEscapeRefused));
+        assert_eq!(chord.acquire(register), Err(TalkEscapeRefused));
         assert_eq!(asked.get(), 1);
         assert!(chord.refused());
         chord.release();
         assert!(!chord.refused());
-        chord.acquire(register);
+        assert_eq!(chord.acquire(register), Err(TalkEscapeRefused));
         assert_eq!(asked.get(), 2);
         assert!(chord.refused());
     }

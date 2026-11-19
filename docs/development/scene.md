@@ -2108,25 +2108,28 @@ stateDiagram-v2
     Passing --> Expecting: screen_released
 ```
 
-- **Release.** The shell calls `screen_released(after, held, now)` when a hold's keys come
-  up, before it writes that hold's `ScreenRelease` to the pipe, with the newest run named so
-  far and the talk keys still down. That order is what makes the watch whole. The brain
+- **Release.** The shell calls `screen_released(after, held, now)` only if the release
+  still owns its input and exclusion lease, before it writes that hold's `ScreenRelease`
+  to the pipe. The watch receives the newest run named so far and the physical talk
+  modifiers still down. That order is what makes the watch whole. The brain
   takes the hold's picture only after it reads `ScreenRelease`: a recognized screen hold is
   only armed, and `hold_release` (`crates/brain/src/runtime/hold/screen.rs`) starts the one
   capture, in a session of its own. So the sources listen before the picture exists. An
   event between the start and the picture sets the bit and at worst skips a mark; one before
   the start is older than the picture, and the watch guards only the time after it. No
-  event is dated. A `ScreenRelease` that isn't sent after all is reported with
-  `screen_dropped`.
+  event is dated. If the shell arms a watch but doesn't send `ScreenRelease`, only that
+  hold's watch and exclusion lease are dropped.
 - **What a release starts.** Any screen scene still up is cleared, and the sources are
   stopped if they were listening and started again on a new bit. A hold's recognition has
   already called `screen_changed`, which stops them, so a release starts them from stopped;
   only a release with no recognition before it, as in tests, finds them listening. Each
   watch has a bit of its own: a wake still queued from the watch before, or a handler of it
   still running, reads or sets a bit nothing uses.
-  `held` (`TalkHeld`, from `Gesture::talk_held`) is two bits and prints nothing: a hold ends
-  at its first key-up, so the other talk key can still be down and repeating, and the
-  sources leave that key's repeats out until it comes up. Without sources, or when `start`
+  `held` carries up to two opaque physical modifier slots and prints no identities.
+  A hold ends at its first key-up, so the other modifier may still repeat. Only that
+  continuously held physical key is exempt; its break clears the exemption before the
+  foreground lookup. A re-press or the same modifier from a different device isn't
+  exempt. Without sources, or when `start`
   says no, the watch counts as changed at once: nothing could say the screen stayed as it
   was.
 - **The first mark** is a screen scene's first `SceneStepCommit`. It is judged as its frame
@@ -2207,7 +2210,7 @@ changes nothing the second time; the release is made once, immediately before it
 |---|---|---|
 | `screen_changed` | `recognize_voice` (`voice.rs`); `escape` (`escape.rs`) | Every recognized hold, once the brain was told of it; every press of Esc, before anything else that press does. When the marks it takes are a running answer's, the same press stops that answer too, after it cancels a pull or ends a selection. The hotkey's press (`native_escape`) goes through `escape` whenever marks are up, so a hold that is still pending when its first mark shows loses its marks at the press that cancels it |
 | `set_display` | `show_display`, at each release and from `display_changed` (`stage.rs`) | The primary display's origin, size and DPI in physical pixels, as a hold's line reads them |
-| `screen_released` | `release_screen` (`voice.rs`) | Only when sources are installed: without them a release reports nothing, reads no display and sets no watchdog. Before that hold's `ScreenRelease` is written, with `Runs::newest_run` and the talk keys still down as the gesture reduced the key-up (`gesture.rs`) |
+| `screen_released` | `release_screen` (`voice.rs`) | Only when sources are installed and the release still owns its input and lease. Before that hold's `ScreenRelease` is written, with `Runs::newest_run` and the physical talk modifiers still down at key-up (`gesture.rs`) |
 | `screen_dropped` | `release_screen`; `HoldScreen` in `link.rs`; `end_voice`; `run_state` | The `ScreenRelease` couldn't be written; the brain's outcome is anything but `Screen`; the hold ended with no run; a state of the hold's run arrives fenced off by Esc or a delete |
 | `screen_run` | `run_state` (`link.rs`) | The first `RunState` whose origin is the watched hold |
 | `run_ended` | After `run_state` and after `RunEnd` | Once, when `Runs::take_ended` gives the run whose terminal state and `RunEnd` are both in |

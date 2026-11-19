@@ -504,13 +504,14 @@ line frames: a frame is shown only if its time to Present and its GPU work fit t
 pickup point together ([The present budget](frame-rate.md#the-present-budget)), so the
 `shortcut:` at the build, keeping the triangles between paints, wouldn't be enough alone.
 
-**At release** (`release_screen`), in order: the line stops; `Runs::releases_screen` is asked,
-once; the pointer read with the release delivery picks the display, and a release without one
-sends nothing; `acquire_stamped` takes the lease and the stamp; `Runs::screen_release` builds
-the one `ScreenRelease`, which is sent at once. `KeyUp` follows as before. Whatever stops this
-short leaves the hold voice-only, and its line says the screen wasn't ready. A lease whose
-release couldn't be built or sent is given back at once and tells no lapse. A release while the
-capture before it still holds its lease is refused the same way. A successful hide never opens
+**At release** (`release_screen`), the line stops. If the release still owns its input,
+`Runs::releases_screen` checks consent and the pointer read with the release picks the
+display. A release without a pointer sends nothing. `acquire_stamped` takes the lease and
+the stamp; `Runs::screen_release` builds the one `ScreenRelease`. The owner checks input and
+lease ownership again before starting the watch and again before sending the message.
+`KeyUp` follows for an uncancelled hold. A stale release leaves the hold voice-only; a
+reset cancels it. Cleanup drops only the failed release's watch and lease. A release
+while the preceding capture still owns its lease is refused. A successful hide never opens
 a replacement: the next overlay window opens with its show. A release can still open one in one
 case: when the overlay isn't showing as the line stops (its line never drew, or its show
 failed), the line's stop (`stop_line`) resamples the drawings, and a different timed drawing

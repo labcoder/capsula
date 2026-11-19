@@ -1019,18 +1019,9 @@ fn each_release_hands_the_sources_the_talk_keys_still_down() {
     for (after, held) in [
         (
             AFTER,
-            TalkHeld {
-                control: crate::input::PhysicalKey::new(0x1D),
-                alt: None,
-            },
+            TalkHeld([crate::input::PhysicalKey::new(0x1D), None]),
         ),
-        (
-            RUN,
-            TalkHeld {
-                control: None,
-                alt: crate::input::PhysicalKey::new(0x38),
-            },
-        ),
+        (RUN, TalkHeld([None, crate::input::PhysicalKey::new(0x38)])),
         (OTHER, TalkHeld::default()),
     ] {
         presenter

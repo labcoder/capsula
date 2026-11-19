@@ -65,7 +65,11 @@ impl ReleaseInput {
     pub(super) fn fixture(held: TalkHeld) -> Self {
         let mut at = EventTime::new(Instant::now());
         at.held = held;
-        Self { current: Rc::default(), stamp: (0, 0), at }
+        Self {
+            current: Rc::default(),
+            stamp: (0, 0),
+            at,
+        }
     }
 }
 
@@ -243,7 +247,11 @@ pub(super) fn deliver(
             delivery,
             qpc,
             pointer,
-            input: ReleaseInput { current: Rc::clone(&input), stamp: input.get(), at },
+            input: ReleaseInput {
+                current: Rc::clone(&input),
+                stamp: input.get(),
+                at,
+            },
             cancelled,
             escape: escape.then(|| gates.hold_back()),
             collection: link.microphone_gate().latest(),
@@ -335,17 +343,27 @@ fn apply(
     let result = cx.update_window(dock, |_, window, app| {
         let uninterrupted = pending.input.uninterrupted();
         let continuous = pending.delivery.intents.iter().any(|intent| {
-            matches!(intent, Some(Intent::End { cancelled: false, .. }))
+            matches!(
+                intent,
+                Some(Intent::End {
+                    cancelled: false,
+                    ..
+                })
+            )
         }) && pending.input.continuous();
         let applied = owner.update(app, |this, cx| {
             if pending.escape.is_some()
-                && (!uninterrupted || stale_hold_escape(this, pending.cancelled, pending.stamp.session))
+                && (!uninterrupted
+                    || stale_hold_escape(this, pending.cancelled, pending.stamp.session))
             {
                 return false;
             }
             let mut effects = pending.delivery.effects;
             if effects.contains(&Some(crate::input::Effect::OpenInput)) {
-                if uninterrupted && this.link.microphone_gate().latest() == pending.collection {
+                if uninterrupted
+                    && this.native.escape_trusted()
+                    && this.link.microphone_gate().latest() == pending.collection
+                {
                     if let Some(gesture) = pending.cancelled {
                         this.cancel_voice_gesture(gesture, cx);
                     }
@@ -367,14 +385,20 @@ fn apply(
             let (escaping, cancelled) = (pending.escape.clone(), pending.cancelled);
             let escape = escaping.is_some();
             let intents = move |app: &mut App| {
+                #[cfg(test)]
+                if continuous && let Some(advance) = BEFORE_DEFERRED_RELEASE.take() {
+                    advance();
+                }
                 let _gone = owner.update(app, |this, cx| {
                     let uninterrupted = uninterrupted && input.uninterrupted();
-                    if escape && (!uninterrupted || stale_hold_escape(this, cancelled, stamp.session)) {
+                    if escape
+                        && (!uninterrupted || stale_hold_escape(this, cancelled, stamp.session))
+                    {
                         return;
                     }
                     let release = (continuous && input.continuous()).then_some(&input);
                     for mut intent in intents.into_iter().flatten() {
-                        if !uninterrupted {
+                        if !uninterrupted || !this.native.escape_trusted() {
                             if let Intent::End { cancelled, .. } = &mut intent {
                                 *cancelled = true;
                             } else {
@@ -401,6 +425,20 @@ fn apply(
         Err(_) if owner.upgrade().is_none() => Applied::Gone,
         Err(_) => Applied::Busy,
     }
+}
+
+#[cfg(test)]
+thread_local! {
+    static BEFORE_DEFERRED_RELEASE: Cell<Option<Box<dyn FnOnce()>>> = const { Cell::new(None) };
+}
+
+#[cfg(test)]
+pub(super) fn before_deferred_release(advance: impl FnOnce() + 'static) {
+    assert!(
+        BEFORE_DEFERRED_RELEASE
+            .replace(Some(Box::new(advance)))
+            .is_none()
+    );
 }
 
 /// Delivers one intent the way the native callback does, and says whether it applied.

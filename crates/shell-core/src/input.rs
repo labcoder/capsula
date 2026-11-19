@@ -84,25 +84,7 @@ pub enum Effect {
 
 /// The physical modifiers that stayed down through release, redacted in diagnostics.
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
-pub struct TalkHeld {
-    pub control: Option<PhysicalKey>,
-    pub alt: Option<PhysicalKey>,
-}
-
-impl TalkHeld {
-    pub fn contains(self, key: PhysicalKey) -> bool {
-        self.control == Some(key) || self.alt == Some(key)
-    }
-
-    pub fn release(&mut self, key: PhysicalKey) {
-        if self.control == Some(key) {
-            self.control = None;
-        }
-        if self.alt == Some(key) {
-            self.alt = None;
-        }
-    }
-}
+pub struct TalkHeld(pub [Option<PhysicalKey>; 2]);
 
 impl std::fmt::Debug for TalkHeld {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -381,10 +363,7 @@ mod tests {
 
     #[test]
     fn held_physical_modifiers_are_redacted() {
-        let both = TalkHeld {
-            control: PhysicalKey::new(7),
-            alt: PhysicalKey::new(511),
-        };
+        let both = TalkHeld([PhysicalKey::new(7), PhysicalKey::new(511)]);
         assert_eq!(format!("{both:?}"), "TalkHeld { .. }");
         assert_eq!(format!("{:?}", TalkHeld::default()), "TalkHeld { .. }");
     }

@@ -73,8 +73,10 @@ sequenceDiagram
   overrun resets. A key with no make code is named through `MapVirtualKeyW`.
   The adapter hands the reducer semantic left Ctrl, left Alt, Escape or other-key events.
   Escape remains distinguishable from the registered Escape event, and bounded opaque
-  slots track the other physical makes and breaks. The reducer doesn't decode Windows
-  scan codes; diagnostics don't print slots or edge values.
+  slots track physical makes and breaks for at most two keyboards with keys down. A second
+  device holding the same left modifier makes its identity ambiguous and resets input.
+  The reducer doesn't decode Windows scan codes; diagnostics don't print devices, slots,
+  layout identifiers or edge values.
 - **Same callback.** The gesture lives in an `Rc<Cell<Gesture>>` shared by the native callback
   and the owner. The callback installs the shared hold fence and revokes collection before
   deferring anything. Voice intents capture the target revision, session generation, choice
@@ -98,13 +100,15 @@ sequenceDiagram
   that comes only after the keyboard's repeat delay. The recognition line logs whether the native
   deadline, the scheduled one, a repeat or the release reached the threshold, and a chord key
   more than 50 ms past an armed deadline logs the thread's message queue status once per gesture.
-- **Resets.** Device removal, any session change (lock or unlock), a desktop switch such as
-  Ctrl+Alt+Del's secure desktop, suspend, an overrun and Pause all reset the gesture. Keys
-  released while Kumochi couldn't see them would otherwise stay held. A desktop switch arrives
-  through an out-of-context WinEvent, not a keyboard hook. If the session or desktop watcher
-  can't be registered, arming fails and undoes what it registered, rather than running without
-  a reset source. Delivery isn't guaranteed in every
-  case, so a missed key-up can still leave a modifier held until that key is pressed again.
+- **Resets.** An unreadable Raw Input record resets the gesture; a record known to be
+  non-keyboard input does not. Device changes, observed keyboard-layout changes, session
+  changes, desktop switches, suspend, overruns and Pause also reset it. The proxy samples
+  the foreground layout at modifier edges and checks it again before a release acts; it
+  can't observe a foreign layout change that changes back between samples. After a reset,
+  input stays inert until the adapter observes both legacy modifiers down on one keyboard
+  and every tracked key up. This cycle grants no shortcut. A desktop switch arrives via
+  an out-of-context WinEvent, not a keyboard hook. If the session or desktop watcher can't
+  be registered, arming fails and undoes what it registered.
 
 ## What each effect does
 
@@ -126,12 +130,16 @@ and native key-up rendezvous once before KeyUp is sent, regardless of UI deliver
 Committed PCM may drain after native retirement; logical input/session/choice fences still
 discard stale packets. Typed submissions remain text-only
 (`ScreenChoice::None`). A recognized hold whose [standing notice](ipc.md#screen-holds) is on
-goes out as `ScreenHoldRecognized`, and its release takes the
+goes out as `ScreenHoldRecognized`, and a release that still owns its input takes the
 [exclusion lease](screen.md#local-shell-exclusion) and goes out as `ScreenRelease`
 ([presence](presence.md#a-screen-holds-pointer-line)). The native callback samples the pointer
 when its delivery carries a recognition or a release that isn't a cancel. So the line starts
 where the pointer was at recognition, and the picture is of the display it was on at release,
 however late the UI thread applies the delivery. `input/hold.rs` never sees the pointer.
+The shell checks the release's input stamp at both GPUI delivery boundaries and again
+before arming its watch and sending `ScreenRelease`. An intervening edge other than a
+proven modifier repeat makes the release voice-only; a reset cancels it. Cleanup for a
+refused or failed release can clear only its own hold, watch and exclusion lease.
 
 ## The typing panel
 
@@ -259,9 +267,11 @@ other key going down cancels the hold, and the chord is never held outside a hol
 - Raw Input doesn't report a press a hotkey took. The proxy delivers this hotkey's message as
   the Esc key going down and up, so the hold cancels as it does for any other key and the press
   does nothing else: it stops no run and clears no drawing.
-- Windows is asked once per hold. If another app already holds the chord, the refusal is logged
-  once for that hold, without key or text content, and that app gets the press: Esc then
-  doesn't cancel the hold, and any other key still does.
+- Windows is asked once per hold, before voice admission. If it refuses the registration,
+  the typed refusal prevents microphone admission and screen context for that hold. The
+  proxy accepts only active hotkey IDs and doesn't reuse retired IDs, so a queued message
+  can't cancel a later hold. An uncertain unregister leaves input inert until the proxy
+  is recreated. The plain Esc lease is separate.
 - A second ignored fixture, `cargo test -p kumochi-shell -- --ignored talk_keys_escape`,
   registers the chord beside plain Esc on a hidden window, sees a second registration refused,
   and sees dropping the chord free it and leave plain Esc held. Run it only in an approved

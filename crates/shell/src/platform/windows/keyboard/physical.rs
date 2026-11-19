@@ -89,7 +89,11 @@ impl Physical {
             Key::Other(_) => Key::Other(id),
             _ => key,
         };
-        Some((Event::Key { key, edge }, modifier.then_some(id), modifier && repeated && edge == Edge::Down))
+        Some((
+            Event::Key { key, edge },
+            modifier.then_some(id),
+            modifier && repeated && edge == Edge::Down,
+        ))
     }
 
     pub(super) fn held(&self) -> TalkHeld {
@@ -99,10 +103,7 @@ impl Physical {
                 .position(|device| device.held(slot))
                 .map(|bank| identity(bank, slot))
         };
-        TalkHeld {
-            control: down(CONTROL),
-            alt: down(ALT),
-        }
+        TalkHeld([down(CONTROL), down(ALT)])
     }
 }
 

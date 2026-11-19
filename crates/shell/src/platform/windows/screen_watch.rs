@@ -60,11 +60,17 @@ impl Ui {
             // over Kumochi leaves no stale bit.
             Event::Key { edge: Edge::Up, .. } => {
                 if let Some(id) = modifier {
-                    self.held.release(id);
+                    for key in &mut self.held.0 {
+                        if *key == Some(id) {
+                            *key = None;
+                        }
+                    }
                 }
             }
-            Event::Key { edge: Edge::Down, .. } => {
-                let repeat = modifier.is_some_and(|id| self.held.contains(id));
+            Event::Key {
+                edge: Edge::Down, ..
+            } => {
+                let repeat = modifier.is_some() && self.held.0.contains(&modifier);
                 if !repeat && self.armed.is_some() && foreign() {
                     self.change();
                 }
@@ -99,8 +105,14 @@ fn heard_for_test(event: Event) {
 #[cfg(test)]
 fn fixture_modifier(event: Event) -> Option<PhysicalKey> {
     match event {
-        Event::Key { key: crate::input::Key::LeftControl, .. } => PhysicalKey::new(0x1D),
-        Event::Key { key: crate::input::Key::LeftAlt, .. } => PhysicalKey::new(0x38),
+        Event::Key {
+            key: crate::input::Key::LeftControl,
+            ..
+        } => PhysicalKey::new(0x1D),
+        Event::Key {
+            key: crate::input::Key::LeftAlt,
+            ..
+        } => PhysicalKey::new(0x38),
         _ => None,
     }
 }
@@ -169,18 +181,12 @@ mod tests {
     fn a_held_talk_key_s_repeats_are_the_hold_s_until_it_comes_up() {
         for (held, key_held, key_free) in [
             (
-                TalkHeld {
-                    control: crate::input::PhysicalKey::new(0x1D),
-                    alt: None,
-                },
+                TalkHeld([crate::input::PhysicalKey::new(0x1D), None]),
                 Key::LeftControl,
                 Key::LeftAlt,
             ),
             (
-                TalkHeld {
-                    control: None,
-                    alt: crate::input::PhysicalKey::new(0x38),
-                },
+                TalkHeld([None, crate::input::PhysicalKey::new(0x38)]),
                 Key::LeftAlt,
                 Key::LeftControl,
             ),
@@ -203,15 +209,20 @@ mod tests {
 
     #[test]
     fn a_talk_key_that_comes_up_over_kumochi_leaves_no_stale_bit() {
-        let (bit, wakes) = watch(TalkHeld {
-            control: crate::input::PhysicalKey::new(0x1D),
-            alt: crate::input::PhysicalKey::new(0x38),
-        });
+        let (bit, wakes) = watch(TalkHeld([
+            crate::input::PhysicalKey::new(0x1D),
+            crate::input::PhysicalKey::new(0x38),
+        ]));
         // Kumochi is in front for both key-ups, which is never asked.
         UI.with_borrow_mut(|ui| {
             for key in [Key::LeftAlt, Key::LeftControl] {
-                let event = Event::Key { key, edge: Edge::Up };
-                ui.key(event, fixture_modifier(event), || panic!("a key-up doesn't ask what is in front"));
+                let event = Event::Key {
+                    key,
+                    edge: Edge::Up,
+                };
+                ui.key(event, fixture_modifier(event), || {
+                    panic!("a key-up doesn't ask what is in front")
+                });
             }
         });
         assert_eq!(wakes.len(), 0);
@@ -240,10 +251,7 @@ mod tests {
 
     #[test]
     fn a_reset_and_a_display_change_count_whatever_is_in_front() {
-        let (bit, wakes) = watch(TalkHeld {
-            control: crate::input::PhysicalKey::new(0x1D),
-            alt: None,
-        });
+        let (bit, wakes) = watch(TalkHeld([crate::input::PhysicalKey::new(0x1D), None]));
         UI.with_borrow_mut(|ui| ui.key(Event::Reset, None, || panic!("a reset asks nothing")));
         assert_eq!(seen(&bit, &wakes), (1, true));
 
@@ -280,10 +288,7 @@ mod tests {
 
     #[test]
     fn a_stopped_watch_hears_nothing_and_the_next_takes_its_own_keys_and_bit() {
-        let (first, first_wakes) = watch(TalkHeld {
-            control: crate::input::PhysicalKey::new(0x1D),
-            alt: None,
-        });
+        let (first, first_wakes) = watch(TalkHeld([crate::input::PhysicalKey::new(0x1D), None]));
         disarm();
         UI.with_borrow_mut(|ui| {
             ui.key(
@@ -310,12 +315,17 @@ mod tests {
     #[test]
     fn a_foreign_keyboard_and_an_unknown_key_cannot_borrow_the_held_modifier_exemption() {
         let own = PhysicalKey::new(0x1D);
-        let held = TalkHeld { control: own, alt: None };
-        let event = Event::Key { key: Key::LeftControl, edge: Edge::Down };
+        let held = TalkHeld([own, None]);
+        let event = Event::Key {
+            key: Key::LeftControl,
+            edge: Edge::Down,
+        };
         for other in [PhysicalKey::new(512 + 0x1D), None] {
             let (bit, wakes) = watch(held);
             UI.with_borrow_mut(|ui| {
-                ui.key(event, own, || panic!("retained physical repeat asks nothing"));
+                ui.key(event, own, || {
+                    panic!("retained physical repeat asks nothing")
+                });
                 ui.key(event, other, || true);
             });
             assert_eq!(seen(&bit, &wakes), (1, true));

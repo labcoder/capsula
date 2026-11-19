@@ -199,7 +199,9 @@ impl<R> Exclusion<R> {
     }
 
     pub fn owns(&self, generation: LeaseGeneration) -> bool {
-        self.lease.as_ref().is_some_and(|lease| lease.key.generation == generation)
+        self.lease
+            .as_ref()
+            .is_some_and(|lease| lease.key.generation == generation)
     }
 
     /// When the lease in force ends, for its owner's timer.

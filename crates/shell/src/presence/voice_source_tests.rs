@@ -1806,9 +1806,7 @@ fn esc_during_listening_cancels_that_hold_and_the_next_hold_listens(cx: &mut Tes
 fn esc_with_the_talk_keys_is_asked_for_only_while_a_hold_s_keys_are_down(cx: &mut TestAppContext) {
     let (owner, _data, _controls) = ready(cx);
     let deliver = native(&owner, cx);
-    // The test proxy is no window, so every ask is refused, and `refused` reads as "asked".
-    let asked =
-        |cx: &mut TestAppContext| owner.read_with(cx, |owner, _| owner.talk_escape.refused());
+    let asked = |cx: &mut TestAppContext| owner.read_with(cx, |owner, _| owner.talk_escape.held());
     assert!(!asked(cx), "no hold yet");
     let at = Instant::now();
     let finish = listen(&owner, &deliver, 1, at, cx);
@@ -1840,7 +1838,7 @@ fn esc_with_the_talk_keys_is_asked_for_only_while_a_hold_s_keys_are_down(cx: &mu
     );
     owner.read_with(cx, |owner, _| {
         assert!(owner.voice_working(), "the released hold still owns Esc");
-        assert!(!owner.talk_escape.refused(), "but its keys are up");
+        assert!(!owner.talk_escape.held(), "but its keys are up");
     });
 }
 
