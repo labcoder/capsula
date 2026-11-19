@@ -71,7 +71,7 @@ pub(crate) fn cloak(value: Option<u32>) -> &'static str {
 const Z_WALK: usize = 4096;
 
 /// Where the fixture's `root` sits against the `foreground` window, from the top-level windows
-/// `top_down` lists from the top of the Z order, or `unread` when the walk finds neither.
+/// `top_down` lists from the top of the Z order, or `unread` unless the walk sees both of them.
 pub(crate) fn z_order(
     root: usize,
     foreground: usize,
@@ -83,17 +83,23 @@ pub(crate) fn z_order(
     if foreground == root {
         return "is_foreground";
     }
-    top_down
-        .into_iter()
-        .take(Z_WALK)
-        .find_map(|window| {
-            if window == root {
-                Some("above_foreground")
+    let (mut root_at, mut front_at) = (None, None);
+    for (at, window) in top_down.into_iter().take(Z_WALK).enumerate() {
+        if window == root {
+            root_at.get_or_insert(at);
+        }
+        if window == foreground {
+            front_at.get_or_insert(at);
+        }
+        if let (Some(root_at), Some(front_at)) = (root_at, front_at) {
+            return if root_at < front_at {
+                "above_foreground"
             } else {
-                (window == foreground).then_some("below_foreground")
-            }
-        })
-        .unwrap_or("unread")
+                "below_foreground"
+            };
+        }
+    }
+    "unread"
 }
 
 /// A window by handle value, and its process.
@@ -564,15 +570,31 @@ mod tests {
     }
 
     #[test]
+    fn z_order_with_only_the_root_is_unread() {
+        assert_eq!(
+            z_order(ROOT.window, FOREIGN.window, [0x10, ROOT.window, 0x20]),
+            "unread"
+        );
+    }
+
+    #[test]
+    fn z_order_with_only_the_foreground_is_unread() {
+        assert_eq!(
+            z_order(ROOT.window, FOREIGN.window, [FOREIGN.window, 0x10]),
+            "unread"
+        );
+    }
+
+    #[test]
     fn z_order_stops_after_its_bound() {
-        let filler = || std::iter::repeat_n(0x10, Z_WALK - 1);
+        let filler = |count| std::iter::repeat_n(0x10, count);
         let (root, front) = (ROOT.window, FOREIGN.window);
         assert_eq!(
-            z_order(root, front, filler().chain([front])),
+            z_order(root, front, filler(Z_WALK - 2).chain([front, root])),
             "below_foreground"
         );
         assert_eq!(
-            z_order(root, front, filler().chain([0x10, front])),
+            z_order(root, front, filler(Z_WALK - 1).chain([front, root])),
             "unread"
         );
         assert_eq!(z_order(root, front, std::iter::repeat(0x10)), "unread");
