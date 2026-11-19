@@ -283,15 +283,17 @@ whether a session has an output and whether an earlier generation still owes aud
   run was queued (`send_stop`), so speech never stops for a stop the brain wasn't told; a refused
   brain send ends that session and stops no speech. Presence keeps the stops a busy owner refused
   in order and offers the front one again every millisecond, up to ten offers in all (a policy,
-  not a measured bound); a later stop waits behind it. When the offers run out, that session ends
-  on the background executor, since ending takes the same lock.
+  not a measured bound); a later stop waits behind it. When the offers run out, that session
+  ends. Both ends close the session at once (`Session::close`), so nothing more is sent on it,
+  and finish the pipe abort and the owner's barrier on the background executor, since that
+  barrier takes the owner's lock.
 - **Spoken runs.** `spoken(session)` reads the live output's tail without waiting and returns its
   `spoken` run: positive evidence the run is speaking, even after the device drained, since a
   pause can drain it while the run still has unwritten speech. A busy owner or a tail
   mid-publish is no evidence, and with no opener no run is ever spoken. A hold takes the spoken
   run when its `Warm` is applied and, at recognition, stops it if it is still the run Esc would
   stop: fenced locally, kept stopped until both its endings are in so its late scenes are
-  skipped, the brain's `Stop` queued, then the speaker's. A refused brain send ends the
+  skipped (a run the presenter showed before its first `RunState` included), the brain's `Stop` queued, then the speaker's. A refused brain send ends the
   connection and opens no hold. The control reader names runs with `Name` as before and takes
   no owner lock.
 - **The capture inhibit.** One per link, held by a voice gesture so the microphone never records
