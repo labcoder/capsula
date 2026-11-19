@@ -6,22 +6,26 @@ use std::thread::sleep;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result, bail, ensure};
-use windows::Win32::Foundation::{LPARAM, POINT, WPARAM};
+use windows::Win32::Foundation::{HWND, LPARAM, POINT, WPARAM};
+use windows::Win32::Graphics::Dwm::{DWMWA_CLOAKED, DwmGetWindowAttribute};
 use windows::Win32::System::SystemInformation::GetTickCount;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetAsyncKeyState, INPUT, MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MOVE,
-    MOUSEEVENTF_VIRTUALDESK, SendInput,
+    GetAsyncKeyState, INPUT, IsWindowEnabled, MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_LEFTUP,
+    MOUSEEVENTF_MOVE, MOUSEEVENTF_VIRTUALDESK, SendInput,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    GUITHREADINFO, GetCursorPos, GetForegroundWindow, GetGUIThreadInfo, WindowFromPoint,
+    GA_ROOT, GUITHREADINFO, GWL_EXSTYLE, GetAncestor, GetCursorPos, GetForegroundWindow,
+    GetGUIThreadInfo, GetWindowLongPtrW, IsWindowVisible, WS_EX_TOPMOST, WindowFromPoint,
 };
 
-use super::super::activation::{Idle, Look};
-use super::super::fixture::{ABORT, ARMED_INPUT, FINALIZE_IDLE, PREPARE_IDLE, READY};
+use super::super::activation::{Idle, Look, cloak, has_ex, missed_hit, see_through};
+use super::super::fixture::{
+    ABORT, ARMED_INPUT, FINALIZE_IDLE, FRAME_ORIGIN, PREPARE_IDLE, READY, published_frame,
+};
 use super::super::gate::Gate;
 use super::super::{
-    Receipt, desktop_ours, desktop_rect, last_input, mouse_and_keyboard_only, normalized, property,
-    request, size,
+    Receipt, class_name, desktop_ours, desktop_rect, foreground_process_name, last_input,
+    mouse_and_keyboard_only, normalized, pid, property, request, size,
 };
 use super::{FRESH, Session, click_inputs, mouse_input, owner};
 
@@ -116,7 +120,14 @@ impl Session {
         mouse_and_keyboard_only()?;
         let snapshot = Instant::now();
         let look = self.look(end, point)?;
-        self.activation.may_move(look)?;
+        let missed = self.activation.misses_edit(look);
+        if let Err(error) = self.activation.may_move(look) {
+            return Err(if missed {
+                error.context(self.missed_edit(look))
+            } else {
+                error
+            });
+        }
         ensure!(
             snapshot.elapsed() <= FRESH,
             "activation move target went stale"
@@ -207,6 +218,65 @@ impl Session {
             capture: (!info.hwndCapture.is_invalid()).then(|| owner(info.hwndCapture)),
             age: taken.elapsed(),
         })
+    }
+
+    /// Fixed facts about the window `look` hit instead of the EDIT, read at once without another
+    /// hit test: no title, text, handle or coordinate.
+    fn missed_edit(&self, look: Look) -> String {
+        let hit = HWND(std::ptr::with_exposed_provenance_mut(look.at_point.window));
+        let (root, edit) = (self.fixture.hwnd, self.edit);
+        // SAFETY: reads the hit's top-level ancestor; a stale or null handle yields null.
+        let hit_root = unsafe { GetAncestor(hit, GA_ROOT) };
+        let ours = |window| pid(window) == self.fixture.pid;
+        let (root_live, edit_live, hit_live) = (ours(root), ours(edit), pid(hit_root) != 0);
+        let ex = |window, live: bool| {
+            // SAFETY: reads only a live window's extended style.
+            live.then(|| unsafe { GetWindowLongPtrW(window, GWL_EXSTYLE) })
+        };
+        let visible = |window, live: bool| {
+            // SAFETY: reads only a live window's visibility.
+            live.then(|| unsafe { IsWindowVisible(window) }.as_bool())
+        };
+        let flag = |known: Option<bool>| match known {
+            Some(true) => "true",
+            Some(false) => "false",
+            None => "unread",
+        };
+        let mut cloaked = 0u32;
+        // SAFETY: cloaked is a writable u32 of the size passed; reads only the root's cloak state.
+        let cloak_read = unsafe {
+            DwmGetWindowAttribute(
+                root,
+                DWMWA_CLOAKED,
+                (&raw mut cloaked).cast(),
+                size::<u32>(),
+            )
+        };
+        // SAFETY: reads only whether the live fixture EDIT takes input.
+        let edit_enabled = edit_live.then(|| unsafe { IsWindowEnabled(edit) }.as_bool());
+        let asked = published_frame(property(root, FRAME_ORIGIN));
+        let at_frame =
+            asked.and_then(|(rect, _)| self.fixture.rect().ok().map(|actual| actual == rect));
+        format!(
+            "hit_class={:?} hit_process={:?} hit={} hit_topmost={} root_visible={} root_cloaked={} \
+             root_topmost={} root_at_frame={} frame={} root_style={} edit_style={} \
+             edit_visible={} edit_enabled={}",
+            (!hit.is_invalid())
+                .then(|| class_name(hit))
+                .filter(|class| !class.is_empty()),
+            foreground_process_name(look.at_point.pid).ok(),
+            missed_hit(look.at_point, hit_root.0.addr(), owner(root)),
+            flag(ex(hit_root, hit_live).map(|style| has_ex(style, WS_EX_TOPMOST))),
+            flag(visible(root, root_live)),
+            cloak(cloak_read.ok().map(|()| cloaked)),
+            flag(ex(root, root_live).map(|style| has_ex(style, WS_EX_TOPMOST))),
+            flag(at_frame),
+            asked.map_or("unread", |(_, name)| name),
+            ex(root, root_live).map_or("unread", see_through),
+            ex(edit, edit_live).map_or("unread", see_through),
+            flag(visible(edit, edit_live)),
+            flag(edit_enabled),
+        )
     }
 
     /// Polls every millisecond until `landed`, for at most [`SETTLE`] and never past `end`,

@@ -2,6 +2,7 @@
 //! physical-input/session guards, click receipts, Esc lease and cover placement.
 
 use std::cell::Cell;
+use std::cmp::Ordering;
 use std::time::Duration;
 
 use anyhow::{Context as _, Result, ensure};
@@ -62,6 +63,8 @@ pub(super) const ESC_HELD: PCWSTR = w!("InputSessionEscHeld");
 pub(super) const CLICKS: PCWSTR = w!("InputSessionClicks");
 pub(super) const CLICK_QPC: PCWSTR = w!("InputSessionClickQpc");
 pub(super) const CLICK_POINT: PCWSTR = w!("InputSessionClickPoint");
+/// The frame origin the fixture chose at startup, packed as x then y.
+pub(super) const FRAME_ORIGIN: PCWSTR = w!("InputSessionFrame");
 /// The idle activation: 0 unused, 1 pending, 2 used, whatever its outcome.
 const ACTIVATION: PCWSTR = w!("InputSessionActivation");
 
@@ -774,7 +777,34 @@ fn off_cursor_frame(work: RECT, cursor: POINT) -> Option<[i32; 4]> {
     })
 }
 
-fn cursor_position() -> Result<POINT> {
+/// Which of `off_cursor_frame`'s placements starts at `origin`, named by its side of `FRAME`.
+fn frame_name([x, y]: [i32; 2]) -> &'static str {
+    let [left, top, ..] = FRAME;
+    match (x.cmp(&left), y.cmp(&top)) {
+        (Ordering::Equal, Ordering::Equal) => "preferred",
+        (Ordering::Greater, Ordering::Equal) => "right",
+        (Ordering::Less, Ordering::Equal) => "left",
+        (Ordering::Equal, Ordering::Greater) => "lower",
+        (Ordering::Equal, Ordering::Less) => "upper",
+        _ => "shifted",
+    }
+}
+
+/// The frame a fixture published as `FRAME_ORIGIN`, with its name, or `None` when the value is
+/// missing, zero or can't be a frame's rectangle.
+pub(super) fn published_frame(origin: usize) -> Option<(RECT, &'static str)> {
+    let [x, y] = unpack(u64::try_from(origin).ok().filter(|origin| *origin != 0)?);
+    let [_, _, width, height] = FRAME;
+    let rect = RECT {
+        left: x,
+        top: y,
+        right: x.checked_add(width)?,
+        bottom: y.checked_add(height)?,
+    };
+    Some((rect, frame_name([x, y])))
+}
+
+pub(crate) fn cursor_position() -> Result<POINT> {
     let mut cursor = POINT::default();
     // SAFETY: cursor is a writable output; this call doesn't move it.
     unsafe { GetCursorPos(&raw mut cursor) }?;
@@ -954,6 +984,10 @@ fn run_fixture(
     lifetime_ms: u32,
     placement: FixturePlacement,
 ) -> Result<()> {
+    let [x, y, ..] = START_FRAME.get();
+    // Only the missed-hit diagnostic reads the origin, so a failed publication never stops startup.
+    let _published = usize::try_from(pack(x, y))
+        .is_ok_and(|origin| set_property(root, FRAME_ORIGIN, origin).is_ok());
     let edit = child(
         w!("EDIT"),
         &HSTRING::new(),
@@ -1041,7 +1075,10 @@ fn focus_edit() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{FRAME, IdleRefusal, POINT, RECT, current_queue_categories, off_cursor_frame};
+    use super::{
+        FRAME, IdleRefusal, POINT, RECT, current_queue_categories, frame_name, off_cursor_frame,
+        pack, published_frame,
+    };
     use windows::Win32::UI::Input::{
         MOUSE_MOVE_ABSOLUTE, MOUSE_MOVE_NOCOALESCE, RAWINPUT, RAWKEYBOARD, RAWMOUSE, RAWMOUSE_0,
         RIM_TYPEHID, RIM_TYPEKEYBOARD, RIM_TYPEMOUSE,
@@ -1102,6 +1139,60 @@ mod tests {
                 POINT { x: 400, y: 325 }
             ),
             None
+        );
+    }
+
+    #[test]
+    fn each_unattended_frame_is_named_by_its_side_of_the_preferred_one() {
+        let work = RECT {
+            left: 0,
+            top: 0,
+            right: 2560,
+            bottom: 1400,
+        };
+        let name = |x, y| {
+            let [left, top, ..] = off_cursor_frame(work, POINT { x, y }).unwrap();
+            frame_name([left, top])
+        };
+        assert_eq!(name(2240, 325), "preferred");
+        assert_eq!(name(400, 325), "right");
+        assert_eq!(frame_name([0, 80]), "left");
+        assert_eq!(frame_name([80, 510]), "lower");
+        assert_eq!(frame_name([80, 0]), "upper");
+        assert_eq!(frame_name([0, 0]), "shifted");
+    }
+
+    #[test]
+    fn only_a_published_origin_that_fits_a_frame_reads_back() {
+        let origin = |x, y| usize::try_from(pack(x, y)).unwrap();
+        let frame = |left, top| RECT {
+            left,
+            top,
+            right: left + 640,
+            bottom: top + 490,
+        };
+        assert_eq!(
+            published_frame(origin(80, 80)),
+            Some((frame(80, 80), "preferred"))
+        );
+        assert_eq!(
+            published_frame(origin(1920, 80)),
+            Some((frame(1920, 80), "right"))
+        );
+        assert_eq!(
+            published_frame(origin(-560, 80)),
+            Some((frame(-560, 80), "left"))
+        );
+        assert_eq!(published_frame(0), None);
+        assert_eq!(
+            published_frame(origin(i32::MAX - 640, 80)).map(|(rect, _)| rect.right),
+            Some(i32::MAX)
+        );
+        assert_eq!(published_frame(origin(i32::MAX - 639, 80)), None);
+        assert_eq!(published_frame(origin(80, i32::MAX - 489)), None);
+        assert_eq!(
+            published_frame(origin(i32::MIN, i32::MIN)).map(|(_, name)| name),
+            Some("shifted")
         );
     }
 

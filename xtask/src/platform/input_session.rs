@@ -40,6 +40,7 @@ mod registry;
 mod session;
 mod switch_window;
 
+pub(crate) use fixture::cursor_position;
 pub(crate) use fixture::fixture;
 use fixture::{
     CHANGES, CLICK_POINT, CLICK_QPC, CLICKS, ESCAPES, IdleRefusal, PREPARE_IDLE, property,
@@ -331,7 +332,8 @@ fn class_name(window: HWND) -> String {
     let mut name = [0u16; 128];
     // SAFETY: name is a writable class-name buffer; no window text is read.
     let length = unsafe { GetClassNameW(window, &mut name) };
-    String::from_utf16_lossy(&name[..usize::try_from(length).unwrap_or(0)])
+    let length = usize::try_from(length).unwrap_or(0);
+    String::from_utf16_lossy(name.get(..length).unwrap_or_default())
 }
 
 /// Finds the child's one session window: the fixture by its class, before or after Ready, or

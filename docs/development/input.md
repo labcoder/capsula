@@ -571,7 +571,17 @@ It chooses a harmless point inside the fixture EDIT and checks both the exact wi
 process with `WindowFromPoint` immediately before moving the pointer and again before clicking.
 A stale snapshot, wrong point, foreign capture/menu or interrupted admission stops the run.
 If pre-move admission is refused, a fixed reason names its first failed check without reporting
-key identities, window handles or pointer coordinates. A target that goes stale after admission
+key identities, window handles or pointer coordinates. When that check is `edit_not_at_point`,
+the refusal also says what the look hit instead: its class and executable basename, whether it
+was nothing, the fixture's root, another fixture child or window, or someone else's window, and
+whether the fixture root is visible, topmost and at the frame it chose, and which frame that was
+(`preferred`, `right`, `left`, `lower`, `upper` or `shifted`). It also says whether the hit's
+top-level window is topmost, whether DWM cloaks the root (`no`, `app`, `shell`, `inherited`,
+`mixed` or `unread`), whether the root and the EDIT are `layered`, `transparent`, both or
+`opaque`, and whether the EDIT is visible and enabled. These are read straight after the look
+without another hit test. Any fact that can't be read, including a frame origin the fixture
+couldn't publish or that isn't a valid frame, reads `unread`. Publishing the origin is best-effort
+and never stops the fixture. A target that goes stale after admission
 and an OS `SendInput` refusal keep their own existing messages. The surrounding refusal still names
 the foreground executable and its PID, as before. The refusal remains terminal.
 Only tagged mouse input is allowed at this stage: no Alt-key trick, `AttachThreadInput`, or
@@ -623,7 +633,13 @@ with exit code 13 without showing the window. Physical Ready uses the original f
 unattended opener still refuses all queued input during arming; the refusal now records only
 the high-word category mask from `GetQueueStatus(QS_INPUT)`. There is no cursor restoration at
 activation. At session end the existing guarded restore moves only to a freshly verified owned
-point; if it skips the restore, it logs a fixed status.
+point, and only after a successful session and cleanup; otherwise it leaves the pointer where it
+is. Because the fixture starts clear of the cursor, the starting point is usually not owned, so
+the restore usually skips. Once a session exists, its `final_cursor_restore` line names the restore
+outcome (`failed` if the restore itself erred). `pointer_left` says whether Windows accepted a
+move of the session's own with no completed restore after it; it is not a measured displacement.
+Every gate session then ends with `final_cursor=x,y`, sampled after the attempt to close the
+fixture and wait for it (not a confirmed close), or `unread`.
 
 ## Voice hold authority
 

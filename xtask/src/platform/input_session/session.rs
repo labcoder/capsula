@@ -707,6 +707,11 @@ impl Session {
         self.send(&click_inputs(dx, dy), Some(Aim::Click(point, target)))
     }
 
+    /// Whether the session moved the pointer and hasn't put it back.
+    pub(crate) fn pointer_left(&self) -> bool {
+        self.pointer_moved
+    }
+
     pub(crate) fn restore_cursor(&mut self) -> Result<&'static str> {
         let Some(original) = self.original_cursor.filter(|_| self.pointer_moved) else {
             return Ok("unchanged");

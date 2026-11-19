@@ -6,6 +6,8 @@ use std::time::Duration;
 
 use anyhow::{Context as _, Result, ensure};
 use windows::Win32::Foundation::POINT;
+use windows::Win32::Graphics::Dwm::{DWM_CLOAKED_APP, DWM_CLOAKED_INHERITED, DWM_CLOAKED_SHELL};
+use windows::Win32::UI::WindowsAndMessaging::{WINDOW_EX_STYLE, WS_EX_LAYERED, WS_EX_TRANSPARENT};
 
 use super::Receipt;
 use super::gate::away;
@@ -15,6 +17,54 @@ use super::session::FRESH;
 /// registering it is the same tick, at least `away_for` before `now`.
 pub(crate) fn away_across_guard(before: u32, after: u32, now: u32, away_for: Duration) -> bool {
     before == after && away(before, now, away_for)
+}
+
+const EDIT_NOT_AT_POINT: &str = "edit_not_at_point";
+
+/// What `WindowFromPoint` hit instead of the EDIT, relative to the fixture's `root`; `hit_root`
+/// is the hit's top-level ancestor.
+pub(crate) fn missed_hit(hit: Owner, hit_root: usize, root: Owner) -> &'static str {
+    if hit.window == 0 {
+        "nothing"
+    } else if hit == root {
+        "fixture_root"
+    } else if hit.pid != root.pid {
+        "foreign"
+    } else if hit_root == root.window {
+        "fixture_child"
+    } else {
+        "fixture_other_window"
+    }
+}
+
+/// Whether the extended style `style`, as `GWL_EXSTYLE` reads it, carries `flag`.
+pub(crate) fn has_ex(style: isize, flag: WINDOW_EX_STYLE) -> bool {
+    isize::try_from(flag.0).is_ok_and(|bit| style & bit != 0)
+}
+
+/// The hit-test-relevant extended style bits of a window, as fixed words.
+pub(crate) fn see_through(style: isize) -> &'static str {
+    match (
+        has_ex(style, WS_EX_LAYERED),
+        has_ex(style, WS_EX_TRANSPARENT),
+    ) {
+        (false, false) => "opaque",
+        (true, false) => "layered",
+        (false, true) => "transparent",
+        (true, true) => "layered_transparent",
+    }
+}
+
+/// Who cloaks a window, from its `DWMWA_CLOAKED` value, or `unread` when DWM didn't say.
+pub(crate) fn cloak(value: Option<u32>) -> &'static str {
+    match value {
+        None => "unread",
+        Some(0) => "no",
+        Some(DWM_CLOAKED_APP) => "app",
+        Some(DWM_CLOAKED_SHELL) => "shell",
+        Some(DWM_CLOAKED_INHERITED) => "inherited",
+        Some(_) => "mixed",
+    }
 }
 
 /// A window by handle value, and its process.
@@ -106,6 +156,11 @@ impl Activation {
             })
     }
 
+    /// Whether `may_move` would refuse `look` for `edit_not_at_point`, and for nothing earlier.
+    pub(crate) fn misses_edit(&self, look: Look) -> bool {
+        self.stage == Stage::Prepared && self.obstruction(look) == Some(EDIT_NOT_AT_POINT)
+    }
+
     /// Authorizes the one down/up batch, with the pointer exactly on the point.
     pub(crate) fn may_click(&mut self, look: Look) -> Result<()> {
         let ready = self.calm(look) && look.cursor == self.point;
@@ -168,7 +223,7 @@ impl Activation {
         } else if look.age > FRESH {
             Some("stale_look")
         } else if look.at_point != self.edit {
-            Some("edit_not_at_point")
+            Some(EDIT_NOT_AT_POINT)
         } else if look.capture.is_some() {
             Some("mouse_capture")
         } else {
@@ -192,6 +247,7 @@ impl Activation {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use windows::Win32::UI::WindowsAndMessaging::{WS_EX_NOACTIVATE, WS_EX_TOPMOST};
 
     const ROOT: Owner = Owner {
         window: 0x100,
@@ -396,6 +452,69 @@ mod tests {
                 assert_refused(stage, look, "a mouse capture");
             }
         }
+    }
+
+    #[test]
+    fn only_a_prepared_move_refused_for_the_edit_reports_its_hit() {
+        let missed = Look {
+            at_point: FOREIGN,
+            ..CALM
+        };
+        let activation = upto(0);
+        assert!(activation.misses_edit(missed));
+        assert!(!activation.misses_edit(CALM));
+        assert!(!activation.misses_edit(Look {
+            foreign: Some("held_input"),
+            ..missed
+        }));
+        assert!(!activation.misses_edit(Look {
+            capture: Some(EDIT),
+            ..CALM
+        }));
+        assert!(!upto(1).misses_edit(missed));
+        let mut refused = upto(0);
+        refused.may_move(missed).unwrap_err();
+        assert!(!refused.misses_edit(missed));
+    }
+
+    #[test]
+    fn a_missed_hit_is_named_relative_to_the_fixture() {
+        let child = Owner {
+            window: 0x400,
+            pid: 40,
+        };
+        let none = Owner { window: 0, pid: 0 };
+        assert_eq!(missed_hit(none, 0, ROOT), "nothing");
+        assert_eq!(missed_hit(ROOT, ROOT.window, ROOT), "fixture_root");
+        assert_eq!(missed_hit(child, ROOT.window, ROOT), "fixture_child");
+        assert_eq!(missed_hit(child, 0x500, ROOT), "fixture_other_window");
+        assert_eq!(missed_hit(FOREIGN, ROOT.window, ROOT), "foreign");
+    }
+
+    #[test]
+    fn only_the_layered_and_transparent_bits_name_a_see_through_window() {
+        let style = |flags: WINDOW_EX_STYLE| isize::try_from(flags.0).unwrap();
+        assert_eq!(see_through(0), "opaque");
+        assert_eq!(
+            see_through(style(WS_EX_TOPMOST | WS_EX_NOACTIVATE)),
+            "opaque"
+        );
+        assert_eq!(see_through(style(WS_EX_LAYERED)), "layered");
+        assert_eq!(see_through(style(WS_EX_TRANSPARENT)), "transparent");
+        assert_eq!(
+            see_through(style(WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOPMOST)),
+            "layered_transparent"
+        );
+    }
+
+    #[test]
+    fn each_cloak_value_has_its_own_word() {
+        assert_eq!(cloak(None), "unread");
+        assert_eq!(cloak(Some(0)), "no");
+        assert_eq!(cloak(Some(DWM_CLOAKED_APP)), "app");
+        assert_eq!(cloak(Some(DWM_CLOAKED_SHELL)), "shell");
+        assert_eq!(cloak(Some(DWM_CLOAKED_INHERITED)), "inherited");
+        assert_eq!(cloak(Some(DWM_CLOAKED_SHELL | DWM_CLOAKED_APP)), "mixed");
     }
 
     #[test]
