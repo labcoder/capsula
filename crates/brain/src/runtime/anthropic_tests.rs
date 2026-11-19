@@ -512,6 +512,10 @@ async fn a_refused_post_leaves_the_key_unconfirmed_and_the_next_ask_unsent() {
 /// A title job's 401 retires the key as a run's does: the row turns Unconfirmed with no run left
 /// to report it, and the next ask is refused here without connecting.
 #[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one real shell session through a refused title and the next ask"
+)]
 async fn a_title_jobs_refused_post_leaves_the_next_ask_unsent() {
     let scratch = Scratch::new("offline-key-refused-title");
     let task = {
