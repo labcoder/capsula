@@ -40,8 +40,11 @@ display's refresh divides evenly, so motion stays steady, and Settings shows tha
 75–119 Hz display that's about half the refresh; choose 120 or 144 there for smoother motion.
 
 **Model** lists the models your connected accounts offer: ChatGPT's, Claude Code's and the
-models Kumochi knows from a checked Anthropic API key. Picking one makes it the default. It says **Saving…** until the background process answers; a refused save
-returns the saved model and explains why at the top of the page. Kumo and every task without a
+models Kumochi knows from a checked Anthropic API key. Picking one makes it the default. A saved
+default that no account offers any more stays selected, shown by its id, until you pick another,
+and messages that would use it are refused as unavailable. **Model** says **Saving…** until the
+background process answers; a refused save returns the saved model and explains why at the top of
+the page. Kumo and every task without a
 model of its own use the new default from their next message; a reply already under way finishes
 on its model, and a hold to talk in progress is cancelled.
 

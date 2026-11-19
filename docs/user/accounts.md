@@ -109,9 +109,11 @@ you paste it and each time Kumochi starts. Anthropic bills your account for mode
 Once Anthropic accepts the key, the row says so and the key's models that Kumochi knows how to
 use appear under **Model** in Settings → General. A model Kumochi doesn't know yet isn't listed,
 so if Anthropic offers none Kumochi knows, the row still says Anthropic accepted the key and
-**Model** lists no Anthropic model. Choosing one makes it the default for Kumo and every task
-without a model of its own, and their messages go to Anthropic with that key. Anthropic models
-are never sent the screen: a hold to talk with one says the screen wasn't included.
+**Model** offers no Anthropic model to choose. A saved default the key doesn't offer stays
+selected by its id, as in Settings → General, and replies that would use it are refused.
+Choosing a listed model makes it the default for Kumo and every task without a model of its own,
+and their messages go to Anthropic with that key. Anthropic models are never sent the screen: a
+hold to talk with one says the screen wasn't included.
 
 **Check again** rechecks the saved key. **Retry** checks again when the saved state is unknown.
 Pasting replaces any saved key before Anthropic checks the new one. Kumochi refuses some pastes
