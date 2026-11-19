@@ -83,9 +83,7 @@ fn heard(commands: &Receiver<Command>) -> Vec<Command> {
 }
 
 fn at(start: Instant, millis: u64) -> EventTime {
-    EventTime {
-        instant: start + Duration::from_millis(millis),
-    }
+    EventTime::new(start + Duration::from_millis(millis))
 }
 
 fn deadline(deliver: &Deliver, start: Instant, millis: u64) {
@@ -842,12 +840,7 @@ fn an_esc_waiting_for_a_busy_owner_holds_the_resume_until_it_is_decided(cx: &mut
                     .store(false, std::sync::atomic::Ordering::Release);
             }
             // The owner is busy here, so the press waits in the delivery queue.
-            deliver(
-                Event::Escape,
-                EventTime {
-                    instant: Instant::now(),
-                },
-            );
+            deliver(Event::Escape, EventTime::new(Instant::now()));
             // The dispatcher's wake comes before the queued press is retried.
             owner.dispatch(cx);
         });
