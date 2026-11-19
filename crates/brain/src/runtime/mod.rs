@@ -167,6 +167,8 @@ pub(crate) struct Brain {
     /// The current run's round, aborted when its `Cancel` drops.
     round: Option<(RunId, Cancel)>,
     key_round: Option<(BuildKey, Arc<engines::anthropic::live::Live>)>,
+    /// The key attempts the newest run may still start, kept across its rebuilds.
+    key_allowance: engines::anthropic::live::Allowance,
     /// The background job's request, aborted the same way.
     job: Option<(JobKey, Cancel)>,
     /// The uncovered backlog, in estimated tokens, at which a thread compacts after a run.
@@ -312,6 +314,7 @@ impl Brain {
             engine_events,
             round: None,
             key_round: None,
+            key_allowance: engines::anthropic::live::Allowance::default(),
             job: None,
             compact_at: crate::jobs::compact_at(),
             asks: Asks::default(),

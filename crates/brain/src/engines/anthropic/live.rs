@@ -4,7 +4,7 @@
 
 use std::fmt;
 use std::ops::ControlFlow;
-use std::sync::{Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use kumochi_protocol::message::RunId;
 use tokio::sync::mpsc;
@@ -50,14 +50,46 @@ struct Held {
     calls: Vec<CallId>,
 }
 
+/// Messages attempts one run may start: each foreground round, one inline compaction per round
+/// and the job its end may start (docs/development/anthropic-messages.md, "One attempt").
+pub(crate) const RUN_ATTEMPTS: u32 = 2 * crate::coordinator::MAX_ROUNDS + 1;
+
+/// The newest run's allowance, shared by every `Live` its sends use, so a rebuild that replaces
+/// the owner keeps what the run has spent.
+#[derive(Debug, Default)]
+pub(crate) struct Allowance(Option<(RunId, Arc<Budget>)>);
+
+impl Allowance {
+    /// `run`'s allowance: the same one for each of its sends, a fresh one for a later run and
+    /// none for an earlier run.
+    pub(crate) fn of(&mut self, run: RunId) -> Option<Arc<Budget>> {
+        match &self.0 {
+            Some((held, budget)) if *held == run => return Some(Arc::clone(budget)),
+            Some((held, _)) if *held > run => return None,
+            _ => {}
+        }
+        let budget = Arc::new(Budget::limited(Some(RUN_ATTEMPTS)));
+        self.0 = Some((run, Arc::clone(&budget)));
+        Some(budget)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn spent(&self, run: RunId) -> Option<u32> {
+        self.0
+            .as_ref()
+            .filter(|(held, _)| *held == run)
+            .map(|(_, budget)| budget.spent())
+    }
+}
+
 /// Owns each key round from body to ending. Only the next round of the same run takes the
 /// continuation, once: a rebuild, a refused send or any other start finds none and refuses
 /// locally, so a continuation is never rebuilt.
-#[derive(Default)]
+#[cfg_attr(test, derive(Default))]
 pub(crate) struct Live {
     held: Mutex<Option<Held>>,
     fence: Fence,
-    budget: Budget,
+    budget: Arc<Budget>,
 }
 
 impl fmt::Debug for Live {
@@ -68,6 +100,15 @@ impl fmt::Debug for Live {
 }
 
 impl Live {
+    /// An owner whose sends charge `budget`, its run's allowance.
+    pub(crate) fn new(budget: Arc<Budget>) -> Self {
+        Self {
+            held: Mutex::default(),
+            fence: Fence::default(),
+            budget,
+        }
+    }
+
     fn held(&self) -> MutexGuard<'_, Option<Held>> {
         self.held.lock().unwrap_or_else(PoisonError::into_inner)
     }

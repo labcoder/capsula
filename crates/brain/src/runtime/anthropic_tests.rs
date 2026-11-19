@@ -141,6 +141,12 @@ async fn play(
     .expect("routed runtime finishes");
     assert_eq!(ended, Ended::Lost);
     assert!(brain.key_round.is_none());
+    let last = RunId(turns[turns.len() - 1].1);
+    assert_eq!(
+        brain.key_allowance.spent(last),
+        Some(1),
+        "the last run's one send charged its allowance"
+    );
     for marker in [KEY, SIG_1, SIG_2] {
         assert!(!format!("{brain:?}").contains(marker));
     }

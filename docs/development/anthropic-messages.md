@@ -61,9 +61,27 @@ The caller supplies its validated body, key, admission future and shared run/liv
 After admission, the transport reserves the run budget then the live budget before connecting.
 A live-cap refusal can conservatively spend the run reservation; nothing refunds a failed,
 cancelled or uncertain attempt. Retrying requires another admission and consumes another unit.
-On the key route the run budget is `Live`'s own and unlimited by default, so the eight
-foreground rounds and sixteen tool starts are not a cap on HTTP attempts per run; an attempt is
-charged only against a configured process allowance, inline and job sends included.
+On the key route the run budget is the run's attempt allowance: 17 Messages attempts, kept in
+the runtime per run and shared by every `Live` the run's sends use, so a rebuild that replaces the
+owner keeps what the run has spent. Every key send of the run charges it before connecting:
+foreground rounds, continuations, inline compactions and the job the run's end starts. Every key
+job is attributable, because the coordinator grants a job only for the run it names. A later run
+gets a fresh allowance, and an earlier run's late send gets none. The attempt after the last is
+refused as `Spent` without a connection, which ends the run with the existing failure text.
+
+The number is the coordinator's maximum for one run, with no margin:
+
+| Sends | Bound | Why |
+| --- | ---: | --- |
+| Foreground rounds, continuations included | 8 | `MAX_ROUNDS`; a round that still calls at the eighth fails as `Budget` |
+| Inline compactions | 8 | at most one per round; a second for the same round fails as `Budget` |
+| The job the run's end starts | 1 | a title or Kumo compaction, one request, no retry |
+| Rebuild resends | 0 | a rebuild before the grant sends nothing; after a key grant, a withdrawn sent source or screen fails the run |
+| **Total** | **17** | `RUN_ATTEMPTS = 2 * MAX_ROUNDS + 1` |
+
+There is no margin because a legitimate run can't exceed the table, and reaching the allowance
+means a path the table misses, which should fail closed on a pay-per-use key. A new send path
+changes the table and the constant together. The process allowance still applies after this one.
 
 The attempt accepts only `AnthropicConnect`, fixes `POST /v1/messages`, sensitive Bearer bytes
 and API version `2023-06-01`, and uses no proxy, redirect or fallback. Request bytes are wiped
