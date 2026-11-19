@@ -11,9 +11,9 @@ mod taskbar;
 
 pub(crate) use hit_mask::MaskUpdate;
 pub(crate) use host::{HostWatch, host_at, watch_host};
-#[cfg(test)]
-pub(crate) use keyboard::with_raw_modifiers;
 pub(crate) use keyboard::{Deliver, EscapeHotkey, EventTime};
+#[cfg(test)]
+pub(crate) use keyboard::{with_raw_keys, with_raw_modifiers};
 pub(crate) use observer::{
     ProxyHandle, ProxyNote, client_origin, performance_frequency, window_handle,
 };

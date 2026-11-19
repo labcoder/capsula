@@ -146,10 +146,6 @@ impl Gesture {
         self.recognize(event, now, |_| {})
     }
 
-    fn reset(&mut self) {
-        *self = Self::default();
-    }
-
     fn recognize(
         &mut self,
         event: Event,
@@ -161,7 +157,11 @@ impl Gesture {
                 report(hold::InputReason::Reset);
             }
             let effects = self.timing.cancel();
-            self.reset();
+            if event == Event::Reset {
+                *self = Self::default();
+            } else if self.down == [false; 2] && self.other == [0; 16] {
+                self.timing.phase = Phase::Ready;
+            }
             return effects;
         }
         let Event::Key { key, edge } = event else {

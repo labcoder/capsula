@@ -29,7 +29,7 @@ use super::tests::{after, chord, listen, native, until};
 use crate::input::{Edge, Event, Key, TalkHeld};
 use crate::link::{LinkEvent, LinkState};
 use crate::platform::input::{Button, input};
-use crate::platform::{Deliver, PresenceEvent, with_raw_modifiers};
+use crate::platform::{Deliver, PresenceEvent, with_raw_keys, with_raw_modifiers};
 use crate::presence::kumo::{Motion, v2};
 use crate::presence::pulling::{Grab, PullSpace};
 use crate::strings::Text;
@@ -500,6 +500,108 @@ fn a_reset_before_recognition_delivery_retires_only_that_unstarted_generation(
         "the first generation must not occupy the next hold's gate"
     );
     deliver(Event::Reset, after(at, 1_302));
+    cx.run_until_parked();
+}
+
+#[gpui::test]
+fn overflow_keeps_the_third_key_down_until_its_own_break(cx: &mut TestAppContext) {
+    needs_neutral(NeutralLoss::Overflow, cx);
+}
+
+#[gpui::test]
+fn registered_escape_keeps_a_known_key_down_until_its_break(cx: &mut TestAppContext) {
+    needs_neutral(NeutralLoss::Escape, cx);
+    needs_neutral(NeutralLoss::NeutralEscape, cx);
+}
+
+#[gpui::test]
+fn a_repeat_after_reset_is_not_neutral_and_the_first_fresh_chord_works(cx: &mut TestAppContext) {
+    needs_neutral(NeutralLoss::Reset, cx);
+}
+
+#[derive(Clone, Copy, Debug)]
+enum NeutralLoss {
+    Overflow,
+    Escape,
+    NeutralEscape,
+    Reset,
+}
+
+fn needs_neutral(loss: NeutralLoss, cx: &mut TestAppContext) {
+    let watching = watch(true, cx);
+    let deliver = native(&watching.ready.owner, cx);
+    let raw = with_raw_keys(&deliver);
+    let at = Instant::now();
+    let key = |device, make, edge, ms| raw(device, make, edge, after(at, ms));
+    let chord = |edge, ms| {
+        key(1, 0x1D, edge, ms);
+        key(1, 0x38, edge, ms + 1);
+    };
+    let unrelated = match loss {
+        NeutralLoss::Overflow => {
+            key(1, 0x25, Edge::Down, 0);
+            key(2, 0x24, Edge::Down, 1);
+            key(3, 0x2A, Edge::Down, 2);
+            key(1, 0x25, Edge::Up, 3);
+            key(2, 0x24, Edge::Up, 4);
+            Some((3, 0x2A))
+        }
+        NeutralLoss::Escape => {
+            key(1, 0x25, Edge::Down, 0);
+            deliver(Event::Escape, after(at, 1));
+            Some((1, 0x25))
+        }
+        NeutralLoss::NeutralEscape => {
+            deliver(Event::Escape, after(at, 1));
+            None
+        }
+        NeutralLoss::Reset => {
+            key(1, 0x1D, Edge::Down, 0);
+            key(1, 0xFF, Edge::Down, 1);
+            key(1, 0x1D, Edge::Down, 2);
+            key(1, 0x1D, Edge::Down, 3);
+            key(1, 0x1D, Edge::Up, 4);
+            None
+        }
+    };
+    if let Some((device, make)) = unrelated {
+        chord(Edge::Down, 20);
+        chord(Edge::Up, 30);
+        chord(Edge::Down, 700);
+        deliver(Event::Deadline, after(at, 1_002));
+        chord(Edge::Up, 1_010);
+        cx.run_until_parked();
+        assert!(
+            told(&watching).iter().all(|message| !matches!(
+                message,
+                Told::Start(..)
+                    | Told::Sent(
+                        ControlToBrain::KeyDown { .. }
+                            | ControlToBrain::VoiceHoldRecognized { .. }
+                            | ControlToBrain::ScreenHoldRecognized { .. }
+                            | ControlToBrain::ScreenRelease { .. }
+                    )
+            )),
+            "{loss:?}: never warm, recognize, arm or send before the last break"
+        );
+        key(device, make, Edge::Up, 1_020);
+    }
+    cx.run_until_parked();
+    chord(Edge::Down, 2_000);
+    deliver(Event::Deadline, after(at, 2_302));
+    cx.run_until_parked();
+    assert_eq!(
+        told(&watching)
+            .into_iter()
+            .filter_map(|message| match message {
+                Told::Sent(ControlToBrain::ScreenHoldRecognized { gesture, .. }) => Some(gesture),
+                _ => None,
+            })
+            .collect::<Vec<_>>(),
+        [GestureId(1)],
+        "{loss:?}: the first fresh chord after observed breaks is eligible"
+    );
+    key(1, 0xFF, Edge::Down, 2_303);
     cx.run_until_parked();
 }
 

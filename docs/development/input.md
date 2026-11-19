@@ -73,8 +73,9 @@ sequenceDiagram
   overrun resets. A key with no make code is named through `MapVirtualKeyW`.
   The adapter hands the reducer semantic left Ctrl, left Alt, Escape or other-key events.
   Escape remains distinguishable from the registered Escape event, and bounded opaque
-  slots track physical makes and breaks for at most two keyboards with keys down. A second
+  slots track live physical makes and breaks for up to two keyboards with keys down. A second
   device holding the same left modifier makes its identity ambiguous and resets input.
+  If both banks are occupied, any additional held device is tracked only for recovery.
   The reducer doesn't decode Windows scan codes; diagnostics don't print devices, slots,
   layout identifiers or edge values.
 - **Same callback.** The gesture lives in an `Rc<Cell<Gesture>>` shared by the native callback
@@ -85,7 +86,7 @@ sequenceDiagram
   only tries to borrow GPUI. If GPUI is already borrowed, because a nested message loop
   dispatched the callback, the effects wait in an ordered queue with their original times, and
   a foreground task retries them every millisecond until they apply or the owner is gone.
-  Later effects queue behind them. Nothing panics and no key is lost.
+  Queued effects retain their order.
 - **Deadlines.** The gesture returns at most one deadline: the 300 ms hold or the double-tap
   window. The proxy arms it with `SetTimer` after delivery, for the time left from then, rounded
   up to whole milliseconds, so slow delivery never lengthens the hold, and disarms it
@@ -105,8 +106,10 @@ sequenceDiagram
   changes, desktop switches, suspend, overruns and Pause also reset it. The proxy samples
   the foreground layout at modifier edges and checks it again before a release acts; it
   can't observe a foreign layout change that changes back between samples. After a reset,
-  input stays inert until the adapter observes both legacy modifiers down on one keyboard
-  and every tracked key up. This cycle grants no shortcut. A desktop switch arrives via
+  capacity overflow or registered Escape, every observed held key must break before the
+  next chord can start. Only a matching break observed after the loss or removal of its
+  device clears a held key. A repeat never clears one; the first fresh chord after the last
+  break can be admitted. This doesn't infer an unobserved break. A desktop switch arrives via
   an out-of-context WinEvent, not a keyboard hook. If the session or desktop watcher can't
   be registered, arming fails and undoes what it registered.
 

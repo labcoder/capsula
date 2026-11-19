@@ -128,6 +128,33 @@ pub(crate) fn with_raw_modifiers(deliver: Deliver) -> Deliver {
     })
 }
 
+#[cfg(test)]
+pub(crate) fn with_raw_keys(deliver: &Deliver) -> impl Fn(usize, u16, Edge, EventTime) + '_ {
+    let keys = Keys::default();
+    move |device, make, edge, mut at| {
+        let raw = RAWKEYBOARD {
+            MakeCode: make,
+            Flags: if edge == Edge::Up {
+                u16::try_from(RI_KEY_BREAK).unwrap()
+            } else {
+                0
+            },
+            ..Default::default()
+        };
+        if let Some((event, _)) = keys.input(
+            Ok(Some((
+                HANDLE(std::ptr::without_provenance_mut(device)),
+                raw,
+            ))),
+            &mut at,
+            || Some(HKL(std::ptr::without_provenance_mut(1))),
+        ) {
+            at.layout = None;
+            deliver(event, at);
+        }
+    }
+}
+
 /// The proxy's keyboard state. Only the UI thread touches it.
 #[derive(Default)]
 pub(super) struct Keys {
@@ -257,19 +284,13 @@ impl Keys {
                 ..
             }
         ) {
-            let Some(layout) = layout() else {
-                return Some((physical.lose(), None));
-            };
-            if self
-                .layout
-                .replace(Some(layout))
-                .is_some_and(|old| old != layout)
-            {
-                let reset = physical.lose();
+            let layout = layout();
+            let previous = self.layout.replace(layout);
+            if layout.is_none() || previous.is_some_and(|old| Some(old) != layout) {
                 let _ = physical.key(device, slot, event);
-                return Some((reset, None));
+                return Some((physical.lose(), None));
             }
-            at.layout = Some(layout);
+            at.layout = layout;
         }
         let (event, id, repeated) = physical.key(device, slot, event)?;
         if id.is_some() && matches!(event, Event::Key { edge: Edge::Up, .. }) {
@@ -884,9 +905,7 @@ mod tests {
             raw_in_layout(&keys, 1, 0x38, up, 2).unwrap().0,
             Event::Reset
         );
-        for (code, flags) in [(0x1D, up), (0x1D, 0), (0x38, 0), (0x1D, up), (0x38, up)] {
-            assert!(raw_in_layout(&keys, 1, code, flags, 2).is_none());
-        }
+        assert!(raw_in_layout(&keys, 1, 0x1D, up, 2).is_none());
         assert!(matches!(
             raw_in_layout(&keys, 1, 0x1D, 0, 2),
             Some((
@@ -900,7 +919,7 @@ mod tests {
     }
 
     #[test]
-    fn lost_raw_input_requires_an_unadmitted_chord_and_all_tracked_breaks() {
+    fn lost_raw_input_discards_keys_until_all_tracked_breaks() {
         let keys = super::Keys::default();
         let mut time = super::EventTime::new(std::time::Instant::now());
         assert!(raw(&keys, 1, 0x1D, 0).is_some());
@@ -918,13 +937,42 @@ mod tests {
         for (code, flags) in [(0x1D, 0), (0x38, 0), (0x38, up), (0x1D, up)] {
             assert!(
                 raw(&keys, 1, code, flags).is_none(),
-                "the neutral witness cannot reach the fence"
+                "a break, not a repeat, resolves the tracked key"
             );
         }
         assert!(
             raw(&keys, 1, 0x1D, 0).is_some(),
             "a fresh make can reach it"
         );
+    }
+
+    #[test]
+    fn removing_an_overflow_device_clears_only_that_devices_held_keys() {
+        let keys = super::Keys::default();
+        let up = super::RI_KEY_BREAK;
+        assert!(raw(&keys, 1, 0x25, 0).is_some());
+        assert!(raw(&keys, 2, 0x24, 0).is_some());
+        assert_eq!(raw(&keys, 3, 0x2A, 0).unwrap().0, Event::Reset);
+        assert!(!keys.on_message(
+            HWND::default(),
+            super::WM_INPUT_DEVICE_CHANGE,
+            WPARAM(usize::try_from(super::GIDC_REMOVAL).unwrap()),
+            LPARAM(3),
+        ));
+        assert!(raw(&keys, 4, 0x1D, 0).is_none());
+        assert!(raw(&keys, 4, 0x1D, up).is_none());
+        assert!(raw(&keys, 1, 0x25, up).is_none());
+        assert!(raw(&keys, 2, 0x24, up).is_none());
+        assert!(matches!(
+            raw(&keys, 4, 0x1D, 0),
+            Some((
+                Event::Key {
+                    key: crate::input::Key::LeftControl,
+                    ..
+                },
+                _
+            ))
+        ));
     }
 
     #[test]

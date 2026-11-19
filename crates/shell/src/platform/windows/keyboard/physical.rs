@@ -19,26 +19,44 @@ impl Device {
     fn held(&self, slot: u16) -> bool {
         self.down[usize::from(slot / 64)] & (1 << (slot % 64)) != 0
     }
+
+    fn apply(&mut self, slot: u16, edge: Edge) -> bool {
+        let bit = 1 << (slot % 64);
+        let word = &mut self.down[usize::from(slot / 64)];
+        let was_down = *word & bit != 0;
+        match edge {
+            Edge::Down => *word |= bit,
+            Edge::Up => *word &= !bit,
+        }
+        was_down
+    }
 }
 
 #[derive(Default)]
 pub(super) struct Physical {
     devices: [Device; 2],
+    overflow: Vec<Device>,
     inert: bool,
-    witnessed_chord: bool,
 }
 
 impl Physical {
     pub(super) fn lose(&mut self) -> Event {
-        self.inert = true;
-        self.witnessed_chord = false;
+        self.wait_for_breaks();
         Event::Reset
+    }
+
+    fn wait_for_breaks(&mut self) {
+        self.inert = !self.overflow.is_empty() || self.devices.iter().any(|d| !d.neutral());
+        if !self.inert {
+            self.overflow = Vec::new();
+        }
     }
 
     pub(super) fn remove(&mut self, handle: HANDLE) {
         if let Some(device) = self.devices.iter_mut().find(|d| d.handle == handle) {
             *device = Device::default();
         }
+        self.overflow.retain(|device| device.handle != handle);
     }
 
     pub(super) fn key(
@@ -54,33 +72,43 @@ impl Physical {
         if handle.is_invalid() {
             return reset(self);
         }
+        if self.inert
+            && let Some(index) = self.overflow.iter().position(|d| d.handle == handle)
+        {
+            let device = &mut self.overflow[index];
+            device.apply(slot, edge);
+            if device.neutral() {
+                self.overflow.swap_remove(index);
+                self.wait_for_breaks();
+            }
+            return None;
+        }
         let Some(bank) = self
             .devices
             .iter()
             .position(|d| d.handle == handle)
             .or_else(|| self.devices.iter().position(Device::neutral))
         else {
-            return reset(self);
+            if edge == Edge::Down {
+                let mut device = Device {
+                    handle,
+                    ..Device::default()
+                };
+                device.apply(slot, edge);
+                self.overflow.push(device);
+            }
+            return if self.inert { None } else { reset(self) };
         };
         let other_held = self.devices[1 - bank].held(slot);
         let device = &mut self.devices[bank];
         device.handle = handle;
-        let repeated = device.held(slot);
-        let bit = 1 << (slot % 64);
-        let word = &mut device.down[usize::from(slot / 64)];
-        match edge {
-            Edge::Down => *word |= bit,
-            Edge::Up => *word &= !bit,
-        }
+        let repeated = device.apply(slot, edge);
         let modifier = matches!(key, Key::LeftControl | Key::LeftAlt);
         if modifier && other_held && (edge == Edge::Down || !repeated) && !self.inert {
             return reset(self);
         }
         if self.inert {
-            self.witnessed_chord |= device.held(CONTROL) && device.held(ALT);
-            if self.witnessed_chord && self.devices.iter().all(Device::neutral) {
-                self.inert = false;
-            }
+            self.wait_for_breaks();
             return None;
         }
         let id = identity(bank, slot);
