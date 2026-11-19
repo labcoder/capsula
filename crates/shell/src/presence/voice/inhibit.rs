@@ -10,7 +10,7 @@ use kumochi_protocol::message::{ControlToBrain, GestureId, RunId};
 use kumochi_shell_core::link::output::{Claim, Denied, InhibitToken, OutputOwner, Retirement};
 
 use super::{Context, FailureReason, FailureStage, Presence, Session, Source};
-use crate::platform::microphone::{Generation, MicOwner, Mode, Reserved, Running};
+use crate::platform::microphone::{Generation, Mode, Reserved};
 use crate::strings::Text;
 
 #[cfg(test)]
@@ -335,17 +335,15 @@ impl Gates {
         true
     }
 
-    /// Lets `mic` collect on `running` under `gesture`'s claim.
+    /// Runs one owner call under `gesture`'s claim: the receipt's acceptance or its copies.
     ///
     /// # Errors
     /// `Busy` while a recheck is left: offer the same receipt again after [`RECHECK`]. Any other
     /// refusal, or a busy owner with no recheck left, is final.
-    pub(super) fn collect(
+    pub(super) fn claimed(
         &self,
-        output: &OutputOwner,
         gesture: GestureId,
-        mic: &MicOwner,
-        running: Running,
+        call: impl FnOnce(&Claim) -> Result<(), Denied>,
     ) -> Result<(), Denied> {
         let mut gates = self.list.borrow_mut();
         let Some(gate) = gates.iter_mut().find(|gate| gate.gesture == gesture) else {
@@ -357,7 +355,7 @@ impl Gates {
         else {
             return Err(Denied::Stale);
         };
-        match output.collect(claim, mic, running) {
+        match call(claim) {
             Err(Denied::Busy) => {
                 tracing::debug!(stage = ?FailureStage::Inhibit, left = gate.rechecks, "held speech input owner busy");
                 gate.rechecks = gate.rechecks.checked_sub(1).ok_or(Denied::Overflow)?;

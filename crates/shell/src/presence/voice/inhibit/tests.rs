@@ -1054,3 +1054,82 @@ fn turning_hold_to_talk_off_reaches_the_next_press_at_once(cx: &mut TestAppConte
     });
     assert_eq!(heard(&commands), [], "nothing paused");
 }
+
+#[gpui::test]
+fn copies_open_only_once_listening_is_published(cx: &mut TestAppContext) {
+    let (owner, _data, _controls) = ready(cx);
+    let (open, finish, started, samples) = source(&owner, cx, None);
+    let samples = std::rc::Rc::new(samples);
+    let early = std::rc::Rc::new(std::cell::Cell::new(None));
+    let (seen, waiting) = (std::rc::Rc::clone(&early), std::rc::Rc::clone(&samples));
+    owner.update(cx, |owner, _| {
+        // The publication is held while the worker tries to copy.
+        owner.voice.publish = Some(Box::new(move || {
+            seen.set(Some(
+                waiting.recv_timeout(Duration::from_millis(300)).is_ok(),
+            ));
+        }));
+    });
+    let (token, _) = hold(&owner, 1, cx);
+    status(&owner, 1, 1, HoldStatus::Admitted, cx);
+    started
+        .recv_timeout(Duration::from_secs(3))
+        .expect("started");
+    open.send(()).expect("opens");
+    until(cx, |_| early.get().is_some());
+    assert_eq!(early.get(), Some(false), "nothing copied before Listening");
+    until(cx, |cx| {
+        owner.read_with(cx, |owner, _| {
+            owner.voice.status == Some(Text::HoldListening)
+        })
+    });
+    samples
+        .recv_timeout(Duration::from_secs(3))
+        .expect("copied after Listening");
+    finish.send(()).expect("finishes");
+    drop(token);
+}
+
+#[gpui::test]
+fn a_release_while_the_copies_wait_wins_and_copies_nothing(cx: &mut TestAppContext) {
+    let (owner, _data, _controls) = ready(cx);
+    let (open, finish, started, samples) = source(&owner, cx, None);
+    owner.update(cx, |owner, _| {
+        let link = owner.link.clone();
+        // Listening is up, and the owner is busy for the copies.
+        owner.voice.publish = Some(Box::new(move || link.output().refuse(1)));
+    });
+    let (token, _) = hold(&owner, 1, cx);
+    status(&owner, 1, 1, HoldStatus::Admitted, cx);
+    started
+        .recv_timeout(Duration::from_secs(3))
+        .expect("started");
+    open.send(()).expect("opens");
+    until(cx, |cx| {
+        owner.read_with(cx, |owner, _| owner.voice.gates.rechecks(G1) == Some(2))
+    });
+    owner.update(cx, |owner, cx| {
+        assert_eq!(owner.voice.status, Some(Text::HoldListening));
+        let stamp = owner.voice.pending.as_ref().expect("hold 1").stamp;
+        owner.voice_intent(
+            Intent::End {
+                gesture: G1,
+                cancelled: false,
+            },
+            stamp,
+            0,
+            None,
+            TalkHeld::default(),
+            cx,
+        );
+    });
+    cx.background_executor.advance_clock(super::RECHECK);
+    finish.send(()).expect("drains");
+    until(cx, |_| token.finished());
+    cx.run_until_parked();
+    assert!(samples.try_recv().is_err(), "no sample copied");
+    owner.read_with(cx, |owner, _| {
+        assert!(owner.voice.pending.is_none(), "ended");
+        assert_eq!(owner.voice.gates.held(G1), None, "retired");
+    });
+}

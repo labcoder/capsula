@@ -988,8 +988,10 @@ An admitted hold doesn't open the microphone at once: its gate waits, with a qui
 once at admission (2 s, a guess). Each wake rechecks the hold's session, settings, input and mode,
 then asks the owner for a claim; `Opening` and `NotQuiet` wait for the next wake, and the claim
 reserves the start. Wakes never refill the rechecks or move the deadline, and the deadline stops
-applying once the start is reserved. The started worker's `Running` receipt is offered to the
-owner's `collect` under that claim; a refusal stops and drains that worker, and nothing reopens.
+applying once the start is reserved. The started worker's `Running` receipt is accepted under
+that claim with its copies still closed; the hold records the acceptance and shows Listening, and
+only then does `collect` check the claim again and open the copies. A release or end in between
+wins and nothing is copied; a refusal stops and drains that worker, and nothing reopens.
 
 Retirement needs proof: `NoMic` with no microphone bound, `Unstarted` for a generation that
 never started (the gate is its one discard, and `VoiceHoldStopped` follows as before), and
@@ -1056,7 +1058,8 @@ and explicit typing still act on the current input immediately.
 
 Preparing/loading, Listening, stopping, transcribing and thinking reuse the existing dock,
 status and text views, with localized accessible status text. Only matching live Admitted
-opens the source; Listening precedes acceptance of that source's Running receipt. Thinking
+opens the source; Listening follows the owner's acceptance of that source's Running receipt
+and precedes any copy, which opens only afterwards under the same claim. Thinking
 opens the ordinary answer panel without activation or injected focus input, and re-places a
 resting drawing clear of it before the next paint. Answering hands off to ordinary Runs. Only a
 run's first state carries its origin, so the hold remembers the run that state named and matches

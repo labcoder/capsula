@@ -158,6 +158,9 @@ pub(super) struct Voice {
     pub(super) gates: Gates,
     #[cfg(test)]
     pub(super) start: Option<Start>,
+    /// Runs as Listening is published, before the source's copies open.
+    #[cfg(test)]
+    pub(super) publish: Option<Box<dyn FnMut()>>,
 }
 
 #[cfg(test)]

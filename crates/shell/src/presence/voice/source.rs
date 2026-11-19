@@ -67,25 +67,33 @@ impl Presence {
         cx.spawn(async move |this, cx| {
             let mut refused = false;
             if let Ok(running) = mic.running.recv().await {
+                let mut accepted = false;
                 // The same receipt and worker through every recheck: collected, or drained.
                 loop {
                     let collected = this.update(cx, |this, cx| {
                         if !this.voice_current(stamp) || !this.link.input_is(token.gesture()) {
                             return Err(Denied::Stale);
                         }
-                        let output = this.link.output();
-                        let collected =
-                            this.voice
-                                .gates
-                                .collect(output, token.gesture(), &mic, running);
-                        // Listening shows in the update the owner accepts it, before any copy.
-                        if collected.is_ok()
-                            && let Some(hold) = this.voice.pending.as_mut()
-                        {
+                        let (gates, owner) = (this.voice.gates.clone(), this.link.clone());
+                        let (output, gesture) = (owner.output(), token.gesture());
+                        if !accepted {
+                            gates.claimed(gesture, |claim| output.accept(claim, &mic, running))?;
+                            accepted = true;
+                            let hold = this.voice.pending.as_mut().ok_or(Denied::Stale)?;
                             hold.collected = true;
+                            #[cfg(test)]
+                            if let Some(publish) = this.voice.publish.as_mut() {
+                                publish();
+                            }
                             this.voice_notice(Text::HoldListening, cx);
+                        } else if this.voice.pending.as_ref().is_none_or(|hold| {
+                            hold.released.is_some() || hold.terminal.is_some()
+                        }) {
+                            // A release or an end while the copies waited wins: none open.
+                            return Err(Denied::Stale);
                         }
-                        collected
+                        // Copies open only once Listening is up, under the same claim.
+                        gates.claimed(gesture, |claim| output.collect(claim, &mic, running))
                     });
                     if !matches!(collected, Ok(Err(Denied::Busy))) {
                         refused = !matches!(collected, Ok(Ok(())));

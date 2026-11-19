@@ -687,7 +687,17 @@ impl OutputOwner {
             .map_err(|_| Denied::Stale)
     }
 
-    /// Checks `claim` and, in the same step, lets `mic` collect on its running receipt, only
+    /// Accepts `mic`'s running receipt under `claim`, with its copies still closed: the caller
+    /// publishes the hold's state, then opens them with [`Self::collect`].
+    ///
+    /// # Errors
+    /// `Busy`, what the check refuses, or `Stale` for another microphone or another gesture's
+    /// receipt.
+    pub fn accept(&self, claim: &Claim, mic: &MicOwner, running: Running) -> Result<(), Denied> {
+        Self::runs_bound(&*self.try_lock()?, claim, mic, running)
+    }
+
+    /// Checks `claim` again and, in the same step, opens copies on the accepted receipt, only
     /// when `mic` runs the bound generation itself.
     ///
     /// # Errors
@@ -695,6 +705,16 @@ impl OutputOwner {
     /// receipt or a generation that can't collect.
     pub fn collect(&self, claim: &Claim, mic: &MicOwner, running: Running) -> Result<(), Denied> {
         let state = self.try_lock()?;
+        Self::runs_bound(&state, claim, mic, running)?;
+        mic.accept_running(running).map_err(|_| Denied::Stale)
+    }
+
+    fn runs_bound(
+        state: &State,
+        claim: &Claim,
+        mic: &MicOwner,
+        running: Running,
+    ) -> Result<(), Denied> {
         state.check(claim)?;
         let bound = state
             .inhibit
@@ -704,7 +724,7 @@ impl OutputOwner {
         if !mic.runs(bound) || running.gesture != claim.owner.gesture {
             return Err(Denied::Stale);
         }
-        mic.accept_running(running).map_err(|_| Denied::Stale)
+        Ok(())
     }
 
     /// Lets go of the inhibit on a proof the owner checks on the bound microphone, and resumes
