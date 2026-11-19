@@ -11,10 +11,13 @@ use anyhow::{Context as _, Result, ensure};
 
 /// The crates the core may depend on directly, dev-dependencies included. A change that gives
 /// the core a dependency adds it here, so the new line is reviewed.
-const DEPENDENCIES: [&str; 13] = [
+const DEPENDENCIES: [&str; 16] = [
     "async-channel",
+    "cpal",
+    "crossbeam-queue",
     "fluent-bundle",
     "keyring",
+    "kumochi-audio",
     "kumochi-brain",
     "kumochi-protocol",
     "kumochi-scene",

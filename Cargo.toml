@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/protocol", "crates/scene", "crates/brain", "crates/shell-core", "crates/shell", "xtask"]
+members = ["crates/audio", "crates/protocol", "crates/scene", "crates/brain", "crates/shell-core", "crates/shell", "xtask"]
 # Vendored third-party crates build as dependencies, not members, so workspace lints skip them.
 exclude = ["vendor"]
 
@@ -12,6 +12,7 @@ license = "AGPL-3.0-only"
 publish = false
 
 [workspace.dependencies]
+kumochi-audio = { path = "crates/audio" }
 kumochi-protocol = { path = "crates/protocol" }
 kumochi-scene = { path = "crates/scene" }
 kumochi-shell-core = { path = "crates/shell-core" }

@@ -1,12 +1,12 @@
-//! Streaming windowed-sinc resampling of mono audio between any two rates: TTS makes 24 kHz and
-//! the shell plays at its output device's rate. Each output sample sits at its exact rational
-//! position in the input, so lengths and timing never drift, and it waits for the input it
-//! needs on both sides, so there's no delay to trim.
+//! Streaming windowed-sinc resampling for mono speech and capture. Each output sample sits at
+//! its exact rational position, so timing does not drift. The kernel waits for input on both
+//! sides, so there is no delay to trim from the output.
 
 #[cfg(test)]
 mod tests;
 
 use std::f64::consts::PI;
+use std::fmt;
 use std::sync::LazyLock;
 use zeroize::Zeroize;
 
@@ -34,8 +34,8 @@ static TABLE: LazyLock<Vec<f64>> = LazyLock::new(|| {
         .collect()
 });
 
-/// One stream's resampler; a Speak owns one.
-pub(crate) struct Resampler {
+/// A resampler for one finite stream of mono PCM.
+pub struct Resampler {
     from: u64,
     to: u64,
     /// The cutoff relative to the input's Nyquist.
@@ -50,6 +50,16 @@ pub(crate) struct Resampler {
     made: u64,
 }
 
+impl fmt::Debug for Resampler {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Resampler")
+            .field("input_rate", &self.from)
+            .field("output_rate", &self.to)
+            .field("buffered_samples", &self.history.len())
+            .finish_non_exhaustive()
+    }
+}
+
 impl Drop for Resampler {
     fn drop(&mut self) {
         self.history.zeroize();
@@ -57,16 +67,20 @@ impl Drop for Resampler {
 }
 
 impl Resampler {
-    /// From `from` Hz to `to` Hz; both are checked rates, so neither is 0.
-    pub(crate) fn new(from: u32, to: u32) -> Self {
+    /// Convert between rates in 8–192 kHz, inclusive. Returns `None` outside that range.
+    pub fn new(from: u32, to: u32) -> Option<Self> {
+        let rates = 8_000..=192_000;
+        if !rates.contains(&from) || !rates.contains(&to) {
+            return None;
+        }
         let (from, to) = (u64::from(from), u64::from(to));
         let (rolloff, of) = ROLLOFF;
         let lower = from.min(to);
         let reach = (u64::from(ZEROS) * of * from).div_ceil(rolloff * lower);
-        let reach = u32::try_from(reach).expect("at most 16 * 20 / 19 * 192 kHz / 8 kHz");
-        let cutoff = f64::from(u32::try_from(rolloff * lower).expect("under 192 kHz * 19"))
-            / f64::from(u32::try_from(of * from).expect("under 192 kHz * 20"));
-        Self {
+        let reach = u32::try_from(reach).ok()?;
+        let cutoff = f64::from(u32::try_from(rolloff * lower).ok()?)
+            / f64::from(u32::try_from(of * from).ok()?);
+        Some(Self {
             from,
             to,
             cutoff,
@@ -75,17 +89,20 @@ impl Resampler {
             dropped: 0,
             taken: 0,
             made: 0,
-        }
+        })
     }
 
     /// Reserves a whole packet and retained kernel before the first private sample.
-    pub(crate) fn reserve_input(&mut self, maximum: usize) {
-        let reach = usize::try_from(self.reach).expect("a bounded kernel");
-        self.history.reserve(maximum + reach);
+    ///
+    /// # Panics
+    /// The requested reservation exceeds the addressable vector capacity.
+    pub fn reserve_input(&mut self, maximum: usize) {
+        let reach = usize::try_from(self.reach).unwrap_or_default();
+        self.history.reserve(maximum.saturating_add(reach));
     }
 
     /// Takes more input and appends every output sample it completes.
-    pub(crate) fn push(&mut self, input: &[f32], out: &mut Vec<f32>) {
+    pub fn push(&mut self, input: &[f32], out: &mut Vec<f32>) {
         if self.from == self.to {
             out.extend_from_slice(input);
             return;
@@ -95,8 +112,9 @@ impl Resampler {
         self.emit(out);
     }
 
-    /// The input ended: appends the rest, which is silence past the last input sample.
-    pub(crate) fn finish(&mut self, out: &mut Vec<f32>) {
+    /// Finish the stream. Treat input beyond its end as silence and append its final output.
+    /// Do not push more input to this resampler afterwards.
+    pub fn finish(&mut self, out: &mut Vec<f32>) {
         if self.from == self.to {
             return;
         }

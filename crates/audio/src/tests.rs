@@ -6,7 +6,7 @@ use super::Resampler;
 fn held_maximum_packets_and_final_padding_keep_the_reserved_history_allocation() {
     use kumochi_protocol::message::MAX_MIC_SAMPLES;
     for (rate, expected) in [(48_000, 1286), (192_000, 1282)] {
-        let mut resampler = Resampler::new(rate, 16_000);
+        let mut resampler = Resampler::new(rate, 16_000).unwrap();
         resampler.reserve_input(MAX_MIC_SAMPLES);
         let capacity = resampler.history.capacity();
         let allocation = resampler.history.as_ptr();
@@ -41,7 +41,7 @@ fn tone(hz: f64, rate: u32, samples: usize) -> Vec<f32> {
 }
 
 fn all(from: u32, to: u32, input: &[f32], pieces: &[usize]) -> Vec<f32> {
-    let mut resampler = Resampler::new(from, to);
+    let mut resampler = Resampler::new(from, to).unwrap();
     let mut out = Vec::new();
     let mut rest = input;
     for &piece in pieces.iter().cycle() {
@@ -114,4 +114,27 @@ fn a_tone_above_the_output_nyquist_is_removed() {
         .iter()
         .fold(0.0f32, |peak, sample| peak.max(sample.abs()));
     assert!(peak < 5e-3, "{peak}");
+}
+
+#[test]
+fn rate_limits_include_both_edges_and_reject_invalid_values() {
+    for rate in [0, 7_999, 192_001, u32::MAX] {
+        assert!(Resampler::new(rate, 24_000).is_none());
+        assert!(Resampler::new(24_000, rate).is_none());
+    }
+    assert_eq!(all(192_000, 8_000, &[0.0; 48], &[48]), [0.0; 2]);
+    assert_eq!(all(8_000, 192_000, &[0.0; 2], &[2]), [0.0; 48]);
+}
+
+#[test]
+fn debug_does_not_include_pcm() {
+    let mut resampler = Resampler::new(24_000, 48_000).unwrap();
+    let samples = [123.25, -456.75];
+    resampler.push(&samples, &mut Vec::new());
+    let bytes: Vec<u8> = samples.into_iter().flat_map(f32::to_ne_bytes).collect();
+    let debug = format!("{resampler:?}");
+    assert!(!debug.contains("123.25"));
+    assert!(!debug.contains("-456.75"));
+    assert!(!debug.contains(&format!("{bytes:?}")));
+    assert!(debug.contains("buffered_samples:"));
 }

@@ -7,6 +7,8 @@ pub mod host;
 pub mod input;
 pub mod microphone;
 pub mod screen_watch;
+#[cfg(any(windows, target_os = "macos"))]
+pub mod speaker_cpal;
 
 #[cfg(windows)]
 #[expect(

@@ -5,7 +5,6 @@ pub(crate) mod download;
 pub(crate) mod installer;
 pub(crate) mod pump;
 pub(crate) mod reply;
-pub(crate) mod resample;
 pub(crate) mod segment;
 pub(crate) mod stt;
 pub(crate) mod tts;

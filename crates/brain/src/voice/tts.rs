@@ -19,8 +19,8 @@ use tokio::runtime::Handle;
 use tokio::sync::mpsc::{self, error::TrySendError};
 use tokio::sync::watch;
 
-use super::resample::Resampler;
 use super::{LoadEvent, Reports};
+use kumochi_audio::Resampler;
 use kumochi_protocol::message::MAX_SEGMENT_SECONDS;
 
 pub(crate) const SAMPLE_RATE: u32 = 24_000;
@@ -394,7 +394,8 @@ impl Owner {
             }
         };
         let most = usize::try_from(rate * MAX_SEGMENT_SECONDS).unwrap_or(usize::MAX);
-        let mut resampler = Resampler::new(SAMPLE_RATE, rate);
+        let mut resampler =
+            Resampler::new(SAMPLE_RATE, rate).expect("TTS and output rates are checked");
         let (mut total, mut audio) = (0usize, Vec::new());
         loop {
             if self.moved(mine) || out.is_closed() {

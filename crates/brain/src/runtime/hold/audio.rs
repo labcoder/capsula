@@ -1,7 +1,6 @@
+use kumochi_audio::Resampler;
 use kumochi_protocol::message::{HoldFailure, MAX_HOLD_CHUNKS, MAX_MIC_SAMPLES, MicPcm};
 use zeroize::{Zeroize as _, Zeroizing};
-
-use crate::voice::resample::Resampler;
 
 pub(super) const RATE: u32 = 16_000;
 const SAMPLES: usize = 960_000;
@@ -70,7 +69,8 @@ impl Audio {
         if self.rate.is_none() {
             self.rate = Some(chunk.rate);
             self.resampler = (chunk.rate != RATE).then(|| {
-                let mut resampler = Resampler::new(chunk.rate, RATE);
+                let mut resampler =
+                    Resampler::new(chunk.rate, RATE).expect("capture rate is checked");
                 resampler.reserve_input(MAX_MIC_SAMPLES);
                 resampler
             });
