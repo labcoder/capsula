@@ -110,8 +110,7 @@ fn wire(status: u16, body: &str) -> Vec<u8> {
 }
 
 const EMPTY_CATALOG: &str = r#"{"data":[],"has_more":false}"#;
-const KEPT_CATALOG: &str =
-    r#"{"data":[{"type":"model","id":"kept-model","display_name":"Kept model"}],"has_more":false}"#;
+const KEPT_CATALOG: &str = r#"{"data":[{"type":"model","id":"claude-haiku-5-5","display_name":"Kept model"}],"has_more":false}"#;
 
 fn peer(body: &str) -> Scripted {
     Scripted(Arc::new(std::sync::Mutex::new(Script {

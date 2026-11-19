@@ -60,12 +60,13 @@ fn body(data: Vec<Value>) -> String {
 }
 
 #[tokio::test]
-async fn complete_catalog_preserves_names_order_and_conservative_capabilities() {
+async fn complete_catalog_preserves_names_and_order_of_known_models() {
     let catalog = check(
         200,
         &body(vec![
-            model("claude-unknown-1", "First \"model\""),
-            model("claude-unknown-2", "Second model"),
+            model("claude-sonnet-5-5", "First \"model\""),
+            model("claude-unknown-1", "Not offered"),
+            model("claude-haiku-5-5", "Second model"),
         ]),
     )
     .await
@@ -80,24 +81,24 @@ async fn complete_catalog_preserves_names_order_and_conservative_capabilities() 
             )
         })
         .collect();
-    let disabled = Capabilities {
+    let supported = Capabilities {
         images: false,
-        pdfs: false,
-        tool_argument_streaming: false,
-        effort: false,
+        pdfs: true,
+        tool_argument_streaming: true,
+        effort: true,
     };
     assert_eq!(
         kept,
         [
-            ("claude-unknown-1", "First \"model\"", disabled),
-            ("claude-unknown-2", "Second model", disabled),
+            ("claude-sonnet-5-5", "First \"model\"", supported),
+            ("claude-haiku-5-5", "Second model", supported),
         ]
     );
     assert_eq!(check(200, &body(Vec::new())).await, Ok(Vec::new()));
 }
 
 #[tokio::test]
-async fn only_documented_exact_models_receive_capability_facts() {
+async fn only_documented_exact_models_are_offered() {
     let catalog = check(
         200,
         &body(
@@ -116,26 +117,21 @@ async fn only_documented_exact_models_receive_capability_facts() {
     )
     .await
     .expect("valid models");
-    let flags: Vec<_> = catalog
-        .into_iter()
-        .map(|model| model.capabilities)
+    let offered: Vec<_> = catalog
+        .iter()
+        .map(|model| model.info.slug.as_str())
         .collect();
-    let supported = Capabilities {
-        images: false,
-        pdfs: true,
-        tool_argument_streaming: true,
-        effort: true,
-    };
-    let unknown = Capabilities {
-        images: false,
-        pdfs: false,
-        tool_argument_streaming: false,
-        effort: false,
-    };
     assert_eq!(
-        flags,
-        [supported, supported, supported, supported, unknown, unknown]
+        offered,
+        [
+            "claude-fable-5-1",
+            "claude-opus-5-5",
+            "claude-sonnet-5-5",
+            "claude-haiku-5-5"
+        ]
     );
+    let unknown_only = body(vec![model("claude-unknown-9", "Model")]);
+    assert_eq!(check(200, &unknown_only).await, Ok(Vec::new()));
 }
 
 #[tokio::test]
@@ -169,20 +165,12 @@ async fn only_an_entrys_literal_true_image_input_says_it_takes_pictures() {
         let flags: Vec<_> = catalog.iter().map(|model| model.capabilities).collect();
         assert_eq!(
             flags,
-            [
-                Capabilities {
-                    images,
-                    pdfs: true,
-                    tool_argument_streaming: true,
-                    effort: true,
-                },
-                Capabilities {
-                    images,
-                    pdfs: false,
-                    tool_argument_streaming: false,
-                    effort: false,
-                },
-            ],
+            [Capabilities {
+                images,
+                pdfs: true,
+                tool_argument_streaming: true,
+                effort: true,
+            }],
             "case {index}",
         );
     }
@@ -191,8 +179,8 @@ async fn only_an_entrys_literal_true_image_input_says_it_takes_pictures() {
 #[tokio::test]
 async fn count_id_and_name_limits_accept_exact_and_refuse_one_over() {
     let entries = |count| {
-        (0..count)
-            .map(|n| model(&format!("m-{n}"), "Model"))
+        std::iter::once(model("claude-haiku-5-5", "Model"))
+            .chain((1..count).map(|n| model(&format!("m-{n}"), "Model")))
             .collect()
     };
     let catalog = check(200, &body(entries(64)))
@@ -202,18 +190,20 @@ async fn count_id_and_name_limits_accept_exact_and_refuse_one_over() {
         .iter()
         .map(|model| model.info.slug.as_str())
         .collect();
-    let expected: Vec<_> = (0..64).map(|n| format!("m-{n}")).collect();
-    assert_eq!(ids, expected);
+    assert_eq!(ids, ["claude-haiku-5-5"]);
     assert_eq!(
         check(200, &body(entries(65))).await,
         Err(CheckError::Unconfirmed)
     );
     let exact_id = "a".repeat(64);
+    assert_eq!(
+        check(200, &body(vec![model(&exact_id, "Model")])).await,
+        Ok(Vec::new())
+    );
     let exact_name = "界".repeat(80);
-    let catalog = check(200, &body(vec![model(&exact_id, &exact_name)]))
+    let catalog = check(200, &body(vec![model("claude-haiku-5-5", &exact_name)]))
         .await
         .expect("exact text caps");
-    assert_eq!(catalog[0].info.slug.as_str(), exact_id);
     assert_eq!(catalog[0].info.display_name.as_str(), exact_name);
     for entry in [
         model(&"a".repeat(65), "Model"),

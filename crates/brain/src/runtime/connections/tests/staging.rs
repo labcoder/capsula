@@ -359,7 +359,7 @@ fn ready_old(account: &Accounts) {
     assert_eq!(account.connections.models.len(), 1);
     assert_eq!(
         account.connections.models[0].info.slug.as_str(),
-        "kept-model"
+        "claude-haiku-5-5"
     );
     assert_eq!(
         account.connections.models[0].info.display_name.as_str(),
