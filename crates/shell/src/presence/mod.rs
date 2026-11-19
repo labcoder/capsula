@@ -1090,7 +1090,6 @@ pub(crate) fn open(
     let position = flags.position();
     owner.update(cx, |this, cx| this.position(position, cx))?;
     owner.update(cx, |this, cx| this.observe(position, cx))?;
-    owner.update(cx, Presence::prepare_overlay);
     let (link, target, paused, gates) = {
         let this = owner.read(cx);
         (

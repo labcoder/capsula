@@ -484,13 +484,19 @@ That last stop is the gesture's one ask about its release, so the release sends 
 if the notice comes back, and the hold's line says why.
 
 The overlay shows while a drawing is visible or the line has points (`sync_overlay`), so a line
-alone shows it and a line's end hides it when no drawing is up. Its hidden window is opened
-when the presence starts and again after every hide (`prepare_overlay`), so a line only shows
-it: opening a window takes about 20 ms on Rez, and about 230 ms in a build with debug
-assertions, where the window backend compiles its shaders at run time. A hide closes its
-window, and the next one opens once the update that hid it is over, so a release takes its
-lease and its stamp and sends before that open, not after it. If an open fails, the next show
-opens its own. Both strokes are rebuilt on
+alone shows it and a line's end hides it when no drawing is up. The show opens the overlay's
+window and every hide closes it, so no overlay window exists while nothing is drawn. A line's
+first show waits for that open, about 20 ms on Rez and about 230 ms in a build with debug
+assertions, where the window backend compiles its shaders at run time; until the overlay
+shows, the line's frames are the dock's. If an open fails, the next show tries again.
+
+The overlay's window was once opened hidden at launch and again after every hide, to save that
+wait. Kept open hidden, it made the UI thread use a full core while the app was idle, mostly in
+kernel time, with nothing painting. The Windows-level reason was never found. Don't open the
+overlay ahead of a show again without an idle measurement (`cargo xtask bench idle`) that shows
+the idle CPU stays near zero.
+
+Both strokes are rebuilt on
 every overlay paint, about 1.2 ms at the 2,048-point cap on Rez. That isn't what costs a long
 line frames: a frame is shown only if its time to Present and its GPU work fit the compositor's
 pickup point together ([The present budget](frame-rate.md#the-present-budget)), so the
@@ -502,9 +508,9 @@ sends nothing; `acquire_stamped` takes the lease and the stamp; `Runs::screen_re
 the one `ScreenRelease`, which is sent at once. `KeyUp` follows as before. Whatever stops this
 short leaves the hold voice-only, and its line says the screen wasn't ready. A lease whose
 release couldn't be built or sent is given back at once and tells no lapse. A release while the
-capture before it still holds its lease is refused the same way. The overlay's next hidden
-window opens after the send, so the lease covers the surfaces that exist then; a window opened
-under a held lease joins it before it is shown, as every late surface does.
+capture before it still holds its lease is refused the same way. A release opens no window: the
+next overlay window opens with its show, and a window opened under a held lease joins it before
+it is shown, as every late surface does.
 
 The line is drawn on the primary display only, like every drawing. A release with the pointer
 on another display sends that display's picture with an empty path: what the model gets never

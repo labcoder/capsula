@@ -442,24 +442,9 @@ impl Presence {
         if sample.visible && self.overlay.window().is_some() {
             self.protect_surface(super::exclusion::Slot::Drawing, cx)?;
         }
-        let open = self.overlay.window().is_some();
         self.reach_overlay(cx, |overlay, surface, frames| {
             overlay.sync(surface, frames, sample)
-        })?;
-        if open && matches!(self.overlay, Visibility::Closed) {
-            // A hide closed its window. The next one opens once this update is over, so a
-            // release takes its stamp and sends before the open, not after it.
-            Self::after_frame(cx, Self::prepare_overlay);
-        }
-        Ok(())
-    }
-
-    /// Opens the overlay's hidden window ahead of its next show. Opening a window takes far
-    /// longer than showing one, and a hold's first line is shown while the pointer moves.
-    pub(super) fn prepare_overlay(&mut self, cx: &mut Context<'_, Self>) {
-        if let Err(error) = self.reach_overlay(cx, |overlay, surface, _| overlay.prepare(surface)) {
-            tracing::warn!(%error, "the drawing overlay will open when it is next shown");
-        }
+        })
     }
 
     /// Runs `step` on the overlay's visibility, with its windows as GPUI opens and closes them.
