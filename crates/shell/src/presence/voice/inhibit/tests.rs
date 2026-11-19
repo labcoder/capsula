@@ -1031,3 +1031,26 @@ fn a_stale_press_dropped_while_acquiring_leaves_the_next_press_usable(cx: &mut T
         assert_eq!(heard(&commands), [Command::Pause(1)], "{recognized}");
     }
 }
+
+#[gpui::test]
+fn turning_hold_to_talk_off_reaches_the_next_press_at_once(cx: &mut TestAppContext) {
+    let (owner, _data, _controls) = ready(cx);
+    let (commands, _tail) = answering(&owner, cx);
+    owner.update(cx, |owner, cx| {
+        owner.follow_voice_input(cx);
+        assert!(owner.voice.gates.on.get(), "on before the save");
+        assert!(owner.save_hold_to_talk(false, cx), "saved");
+        // A press before the next link batch.
+        owner.voice.gates.warm(
+            owner.link.output(),
+            G1,
+            owner.link.link_generation(),
+            owner.link.choice_revision(),
+        );
+    });
+    cx.run_until_parked();
+    owner.read_with(cx, |owner, _| {
+        assert_eq!(owner.voice.gates.held(G1), None, "no gate");
+    });
+    assert_eq!(heard(&commands), [], "nothing paused");
+}
