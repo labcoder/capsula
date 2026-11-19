@@ -438,9 +438,9 @@ after every op and wake; while it's being found that's `Finding`, which reads as
   ([engines](engines.md#background-jobs)).
 - **The engine follows the connection.** A request on `ChatGPT`'s choice, or on none, starts the
   `ChatGPT` engine. One on Claude Code's choice takes a one-launch engine from
-  `Claude::question` ([claude-code.md](claude-code.md#a-question)), with overlay Draw only if the
-  foreground build offered Draw. A refusal starts `Unserved` with Claude Code's reason, or the
-  refusal's own. A connection with no engine yet starts `Unserved`, whose round fails with
+  `Claude::question`, which offers the foreground build's
+  [MCP tools](claude-code.md#a-question). A refusal starts `Unserved` with Claude Code's reason, or
+  the refusal's own. A connection with no engine yet starts `Unserved`, whose round fails with
   `ModelUnavailable` (`Brain::owned_engine`, which a job's request takes too).
 - **A turn nothing can answer** fails at its first build with the reason of its choice's own
   kind (`Coordinator::route_for`). On `ChatGPT`'s choice, or none, that's `ChatGPT`'s reason and
