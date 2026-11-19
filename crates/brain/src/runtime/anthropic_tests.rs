@@ -411,3 +411,212 @@ async fn a_title_takes_the_last_attempt_and_its_compaction_is_refused_unsent() {
         1
     );
 }
+
+/// A Messages post refused for its key leaves the key Unconfirmed, so Check again comes back and
+/// the next ask is refused here instead of sending another refused request.
+#[tokio::test]
+async fn a_refused_post_leaves_the_key_unconfirmed_and_the_next_ask_unsent() {
+    let scratch = Scratch::new("offline-key-refused-post");
+    let store = FakeStore::default();
+    let lock = scratch.db().with_file_name("offline-key-runtime.lock");
+    Vault::with_service(store.clone(), "offline-key-runtime", &lock)
+        .expect("fake vault")
+        .save_anthropic_key(KEY.as_bytes())
+        .expect("synthetic key");
+    std::fs::write(
+        scratch.db().with_file_name(kumochi_protocol::constants::CONFIG_FILE),
+        format!("default_model = {{ connection = \"AnthropicKey\", model = \"{MODEL}\", effort = \"Medium\" }}\n"),
+    ).expect("settings");
+    let catalog = json!({"data":[{"type":"model","id":MODEL,"display_name":"Synthetic model"}],"has_more":false});
+    let body =
+        json!({"type":"error","error":{"type":"authentication_error","message":"synthetic"}})
+            .to_string();
+    let refused = format!(
+        "HTTP/1.1 401 Unauthorized\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+        body.len()
+    )
+    .into_bytes();
+    let peer = Scripted(Arc::new(Mutex::new(Script {
+        responses: [
+            http("application/json", &catalog.to_string()),
+            refused.clone(),
+            refused,
+        ]
+        .into(),
+        ..Script::default()
+    })));
+    let worker = Worker::new(
+        Box::new(move || Vault::with_service(store.clone(), "offline-key-runtime", &lock)),
+        Arc::new(FixedClock(0)),
+    );
+    let mut accounts = Accounts::spawn_unconfigured(worker, test_support::net()).expect("worker");
+    accounts
+        .connections
+        .use_test_transport(Transport::offline(peer.clone(), 1, 2));
+    let mut brain = test_support::brain_with(&scratch, "", accounts);
+    let ((control, data), mut shell) = duplex();
+    let mut tap = Tap::from_env();
+    let client = async {
+        loop {
+            if matches!(shell.next_control().await.expect("control"),
+                Some(ControlToShell::Connections(view)) if view.anthropic == KeyView::Ready)
+            {
+                break;
+            }
+        }
+        let DataToShell::Models { .. } = shell.data().await else {
+            panic!("the verified catalog did not arrive");
+        };
+        let mut ended = Vec::new();
+        for turn in 1..=2 {
+            let message = DataToBrain::TextSubmit {
+                turn,
+                screen: ScreenChoice::None,
+                thread: None,
+                text: "ask".into(),
+            };
+            let frame = frame::encode(&message, Pipe::Data).expect("encodes");
+            shell.data_out.write_all(&frame).await.expect("submitted");
+            loop {
+                let (_, phase) = shell.state().await;
+                if !matches!(phase, Phase::Thinking | Phase::Answering) {
+                    ended.push(phase);
+                    break;
+                }
+            }
+        }
+        drop(shell);
+        ended
+    };
+    let (ended, phases) = timeout(PATIENCE, async {
+        tokio::join!(brain.serve(control, data, &mut tap), client)
+    })
+    .await
+    .expect("routed runtime finishes");
+    assert_eq!(ended, Ended::Lost);
+    assert_eq!(phases, [Phase::Failed, Phase::Failed]);
+    assert_eq!(brain.account.connections.anthropic(), KeyView::Unconfirmed);
+    brain.close().await;
+    let script = peer.0.lock().expect("peer");
+    assert_eq!(
+        script.starts, 2,
+        "the catalog read and the one refused post"
+    );
+}
+
+/// A title job's 401 retires the key as a run's does: the row turns Unconfirmed with no run left
+/// to report it, and the next ask is refused here without connecting.
+#[tokio::test]
+async fn a_title_jobs_refused_post_leaves_the_next_ask_unsent() {
+    let scratch = Scratch::new("offline-key-refused-title");
+    let task = {
+        let mut store = Store::open(&scratch.db()).expect("store");
+        store.recover().expect("recover");
+        let (high_thread, high_run) = store.high_water().expect("ids");
+        let task = kumochi_protocol::message::ThreadId(high_thread.0 + 1);
+        let run = RunId(high_run.0 + 1);
+        store
+            .begin_turn(task, Some("zqxoldask"), run, "zqxoldask")
+            .expect("turn");
+        store
+            .end_run(task, run, &[], crate::store::RunEnd::Done)
+            .expect("ended");
+        task
+    };
+    let store = FakeStore::default();
+    let lock = scratch.db().with_file_name("offline-key-runtime.lock");
+    Vault::with_service(store.clone(), "offline-key-runtime", &lock)
+        .expect("fake vault")
+        .save_anthropic_key(KEY.as_bytes())
+        .expect("synthetic key");
+    std::fs::write(
+        scratch.db().with_file_name(kumochi_protocol::constants::CONFIG_FILE),
+        format!("default_model = {{ connection = \"AnthropicKey\", model = \"{MODEL}\", effort = \"Medium\" }}\n"),
+    ).expect("settings");
+    let catalog = json!({"data":[{"type":"model","id":MODEL,"display_name":"Synthetic model"}],"has_more":false});
+    let body =
+        json!({"type":"error","error":{"type":"authentication_error","message":"synthetic"}})
+            .to_string();
+    let refused = format!(
+        "HTTP/1.1 401 Unauthorized\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+        body.len()
+    )
+    .into_bytes();
+    let peer = Scripted(Arc::new(Mutex::new(Script {
+        responses: [
+            http("application/json", &catalog.to_string()),
+            answers("Done."),
+            refused,
+        ]
+        .into(),
+        ..Script::default()
+    })));
+    let worker = Worker::new(
+        Box::new(move || Vault::with_service(store.clone(), "offline-key-runtime", &lock)),
+        Arc::new(FixedClock(0)),
+    );
+    let mut accounts = Accounts::spawn_unconfigured(worker, test_support::net()).expect("worker");
+    accounts
+        .connections
+        .use_test_transport(Transport::offline(peer.clone(), 1, 3));
+    let mut brain = test_support::brain_with(&scratch, "", accounts);
+    brain.compact_at = u64::MAX;
+    let ((control, data), mut shell) = duplex();
+    let mut tap = Tap::from_env();
+    let client = async {
+        loop {
+            if matches!(shell.next_control().await.expect("control"),
+                Some(ControlToShell::Connections(view)) if view.anthropic == KeyView::Ready)
+            {
+                break;
+            }
+        }
+        let DataToShell::Models { .. } = shell.data().await else {
+            panic!("the verified catalog did not arrive");
+        };
+        let mut ended = Vec::new();
+        for turn in 1..=2 {
+            let message = DataToBrain::TextSubmit {
+                turn,
+                screen: ScreenChoice::None,
+                thread: Some(task),
+                text: "ask".into(),
+            };
+            let frame = frame::encode(&message, Pipe::Data).expect("encodes");
+            shell.data_out.write_all(&frame).await.expect("submitted");
+            let run = loop {
+                let (run, phase) = shell.state().await;
+                if !matches!(phase, Phase::Thinking | Phase::Answering) {
+                    ended.push(phase);
+                    break run;
+                }
+            };
+            if turn == 1 {
+                assert!(shell.read_to_end(run).await > 0);
+                timeout(Duration::from_secs(10), async {
+                    while !matches!(shell.next_control().await.expect("control"),
+                        Some(ControlToShell::Connections(view)) if view.anthropic == KeyView::Unconfirmed)
+                    {}
+                })
+                .await
+                .expect("the title job's refusal reaches the row");
+            }
+        }
+        drop(shell);
+        ended
+    };
+    let (ended, phases) = timeout(PATIENCE, async {
+        tokio::join!(brain.serve(control, data, &mut tap), client)
+    })
+    .await
+    .expect("routed runtime finishes");
+    assert_eq!(ended, Ended::Lost);
+    assert_eq!(phases, [Phase::Done, Phase::Failed]);
+    assert_eq!(brain.account.connections.anthropic(), KeyView::Unconfirmed);
+    brain.close().await;
+    let script = peer.0.lock().expect("peer");
+    assert_eq!(
+        script.starts, 3,
+        "the catalog read, the answer and the refused title"
+    );
+}

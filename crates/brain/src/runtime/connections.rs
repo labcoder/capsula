@@ -17,6 +17,7 @@ use crate::connections::anthropic::{
     models::{CatalogModel, CheckError},
     route::{Transport, Verified},
 };
+use crate::context::ConnectionTag;
 use crate::coordinator::{Availability, Input, Ready, SendKey, model_unavailable};
 use crate::engines::anthropic::live::Live;
 use crate::engines::{Engine, RunRequest};
@@ -46,6 +47,10 @@ pub(crate) enum ConnectionEvent {
     Checked {
         generation: u64,
         result: Result<Vec<CatalogModel>, CheckError>,
+    },
+    /// A Messages post on the authority tagged `tag` got a 401; its fence is already closed.
+    Refused {
+        tag: ConnectionTag,
     },
 }
 
@@ -252,8 +257,9 @@ impl Connections {
             return false;
         }
         let key = self.key.take();
-        if self.verified.is_some() {
-            return true;
+        if let Some(verified) = &self.verified {
+            // A post already found it refused; the account hears that next and retires it.
+            return verified.fence.open();
         }
         let (Some(revision), Some(key)) = (self.view.anthropic_revision, key) else {
             return false;
@@ -749,6 +755,33 @@ impl Accounts {
                 self.connections.unsent = true;
                 None
             }
+            ConnectionEvent::Refused { tag } => {
+                let Some(revision) = self
+                    .connections
+                    .verified
+                    .as_ref()
+                    .filter(|verified| verified.tag == tag)
+                    .map(|verified| verified.revision)
+                else {
+                    return Vec::new();
+                };
+                // A Check waiting on its load had cleared the revision; the saved key is unchanged.
+                self.connections.view.anthropic_revision = Some(revision);
+                let abandoned = self.connections.check_request.take().map(|(_, request)| {
+                    ControlToShell::AnthropicKeyReconciled {
+                        request,
+                        read: None,
+                    }
+                });
+                self.connections.retire();
+                self.connections.models.clear();
+                // A Check already waiting on its load or its catalog read can't bring the key back.
+                self.connections.advance();
+                self.connections.loading = false;
+                self.connections.view.anthropic = KeyView::Unconfirmed;
+                self.connections.unsent = true;
+                abandoned
+            }
         };
         std::iter::once(ControlToShell::Connections(self.connections.view))
             .chain(reply)
@@ -771,6 +804,14 @@ impl Brain {
         }
         let authority = Arc::clone(authority);
         let allowance = self.key_allowance.of(request.run)?;
+        let account = self.account.reads_tx.clone();
+        // Unbounded: one event per refused post, which can't follow on a closed fence, and a send
+        // to an account that has gone only returns an error.
+        let transport = transport.telling(Arc::new(move |tag| {
+            account
+                .send(Event::Connection(ConnectionEvent::Refused { tag }))
+                .ok();
+        }));
         let live = if let SendKey::Build(key) = request.key {
             if let Some((_, old)) = self.key_round.take_if(|(build, _)| build.run != key.run) {
                 old.retire();

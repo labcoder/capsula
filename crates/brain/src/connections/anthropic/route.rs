@@ -20,11 +20,15 @@ use crate::context::ConnectionTag;
 
 const SERVE_ANTHROPIC_KEY: bool = false;
 
+/// Hears the tag of an authority a Messages post found refused with a 401.
+pub(crate) type Refused = Arc<dyn Fn(ConnectionTag) + Send + Sync>;
+
 #[derive(Clone)]
 pub(crate) struct Transport {
     connector: RouteConnector,
     catalog: Arc<Budget>,
     messages: Arc<Budget>,
+    refused: Option<Refused>,
 }
 
 impl Transport {
@@ -36,6 +40,7 @@ impl Transport {
             connector: RouteConnector::Native(AnthropicTls::build().ok().map(Arc::new)),
             catalog: Arc::new(Budget::from_var(LIVE_KEY_CATALOG_BUDGET_ENV)),
             messages: Arc::new(Budget::from_var(LIVE_KEY_MESSAGES_BUDGET_ENV)),
+            refused: None,
         })
     }
 
@@ -45,7 +50,14 @@ impl Transport {
             connector: RouteConnector::Offline(peer),
             catalog: Arc::new(Budget::limited(Some(catalog))),
             messages: Arc::new(Budget::limited(Some(messages))),
+            refused: None,
         }
+    }
+
+    /// This transport, telling `refused` about each authority a Messages post finds refused.
+    pub(crate) fn telling(mut self, refused: Refused) -> Self {
+        self.refused = Some(refused);
+        self
     }
 
     pub(crate) async fn catalog(
@@ -84,7 +96,7 @@ impl Transport {
             Fenced(self.connector.clone(), offer.fence.clone()),
             authority.fence.clone(),
         ));
-        authority
+        let result = authority
             .fence
             .while_open(offer.fence.while_open(messages::stream(
                 &client,
@@ -98,7 +110,18 @@ impl Transport {
             )))
             .await
             .flatten()
-            .unwrap_or(Err(Failure::Transport))
+            .unwrap_or(Err(Failure::Transport));
+        // A 401 refuses the key itself: no later send may go out on it, whatever becomes of the
+        // run, its shell or a job, and the account hears it from here.
+        if let Err(Failure::Provider(failure)) = &result
+            && failure.status() == 401
+        {
+            authority.fence.revoke();
+            if let Some(refused) = &self.refused {
+                refused(authority.tag);
+            }
+        }
+        result
     }
 }
 

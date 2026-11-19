@@ -698,3 +698,27 @@ async fn early_provider_refusal_closes_before_lease_and_recovery_stays_closed() 
         assert!(!logged.contains(format!("{:?}", marker.as_bytes()).trim_matches(['[', ']'])));
     }
 }
+
+/// A 401 is the key's own refusal whatever its body does: one cut short still reports it, at the
+/// early refusal and at the final head alike.
+#[tokio::test]
+async fn a_401_head_with_a_cut_body_is_still_the_keys_refusal() {
+    for early in [false, true] {
+        let mut cut = response(
+            401,
+            br#"{"type":"error","error":{"type":"authentication_error","message":"SYNTHETIC"}}"#,
+        );
+        cut.truncate(cut.len() - 10);
+        let harness = Harness::new(cut);
+        harness.state.lock().expect("peer state").early = early;
+        let Err(Failure::Provider(error)) =
+            harness.call(&Budget::default(), &Budget::default()).await
+        else {
+            panic!("expected the key's refusal");
+        };
+        assert_eq!(
+            (error.status(), error.kind()),
+            (401, super::super::error::Kind::Authentication)
+        );
+    }
+}

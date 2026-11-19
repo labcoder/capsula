@@ -170,6 +170,10 @@ where
     if head.status < 400 {
         return Err(Failure::Protocol);
     }
+    // The status alone decides a 401, so a cut body can't hide it; the body would only travel.
+    if head.status == 401 {
+        return ProviderFailure::answered(401, Secret::new(Zeroizing::new(Vec::new())));
+    }
     timeout(ERROR_BODY_DEADLINE, async {
         let mut body = Body::new(head.framing);
         let mut bytes = Zeroizing::new(Vec::new());
