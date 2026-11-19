@@ -141,6 +141,12 @@ async fn play(
     .expect("routed runtime finishes");
     assert_eq!(ended, Ended::Lost);
     assert!(brain.key_round.is_none());
+    let last = RunId(turns[turns.len() - 1].1);
+    assert_eq!(
+        brain.key_allowance.spent(last),
+        Some(1),
+        "the last run's one send charged its allowance"
+    );
     for marker in [KEY, SIG_1, SIG_2] {
         assert!(!format!("{brain:?}").contains(marker));
     }
@@ -241,4 +247,167 @@ async fn routed_key_rounds_continue_once_and_replay_only_under_the_verified_tag(
     for omitted in [CALL, SIG_1, SIG_2] {
         assert!(!restarted[0].contains(omitted));
     }
+}
+
+/// A task's end takes the run's last attempt for its title; the title write hands over to the same
+/// run's compaction, which is refused as spent: no connection, no summary, and the run stays Done.
+#[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one real shell session through a title and its compaction"
+)]
+async fn a_title_takes_the_last_attempt_and_its_compaction_is_refused_unsent() {
+    const ALLOWED: u32 = 17;
+    let scratch = Scratch::new("offline-key-allowance-jobs");
+    let (task, run) = {
+        let mut store = Store::open(&scratch.db()).expect("store");
+        store.recover().expect("recover");
+        let (high_thread, high_run) = store.high_water().expect("ids");
+        let task = kumochi_protocol::message::ThreadId(high_thread.0 + 1);
+        for n in 1..=9 {
+            let run = RunId(high_run.0 + n);
+            let title = (n == 1).then_some("zqxoldask");
+            store
+                .begin_turn(task, title, run, &format!("zqxoldask {n}"))
+                .expect("turn");
+            store
+                .end_run(task, run, &[], crate::store::RunEnd::Done)
+                .expect("ended");
+        }
+        (task, RunId(high_run.0 + 10))
+    };
+    let store = FakeStore::default();
+    let lock = scratch.db().with_file_name("offline-key-runtime.lock");
+    Vault::with_service(store.clone(), "offline-key-runtime", &lock)
+        .expect("fake vault")
+        .save_anthropic_key(KEY.as_bytes())
+        .expect("synthetic key");
+    std::fs::write(
+        scratch.db().with_file_name(kumochi_protocol::constants::CONFIG_FILE),
+        format!("default_model = {{ connection = \"AnthropicKey\", model = \"{MODEL}\", effort = \"Medium\" }}\n"),
+    ).expect("settings");
+    let catalog = json!({"data":[{"type":"model","id":MODEL,"display_name":"Synthetic model"}],"has_more":false});
+    let peer = Scripted(Arc::new(Mutex::new(Script {
+        responses: [
+            http("application/json", &catalog.to_string()),
+            answers("Done."),
+            answers("Synthetic title"),
+            answers("Synthetic summary."),
+        ]
+        .into(),
+        ..Script::default()
+    })));
+    let worker = Worker::new(
+        Box::new(move || Vault::with_service(store.clone(), "offline-key-runtime", &lock)),
+        Arc::new(FixedClock(0)),
+    );
+    let mut accounts = Accounts::spawn_unconfigured(worker, test_support::net()).expect("worker");
+    accounts
+        .connections
+        .use_test_transport(Transport::offline(peer.clone(), 1, 3));
+    let mut brain = test_support::brain_with(&scratch, "", accounts);
+    brain.compact_at = 1;
+    let earlier = brain.key_allowance.of(run).expect("the run's allowance");
+    for _ in 0..ALLOWED - 2 {
+        assert!(
+            earlier.reserve(),
+            "the run's earlier rounds and inline sends"
+        );
+    }
+    drop(earlier);
+    let mut seen = brain.observe();
+    let ((control, data), mut shell) = duplex();
+    let mut tap = Tap::from_env();
+    let client = async {
+        loop {
+            if matches!(shell.next_control().await.expect("control"),
+                Some(ControlToShell::Connections(view)) if view.anthropic == KeyView::Ready)
+            {
+                break;
+            }
+        }
+        let DataToShell::Models { .. } = shell.data().await else {
+            panic!("the verified catalog did not arrive");
+        };
+        let message = DataToBrain::TextSubmit {
+            turn: 1,
+            screen: ScreenChoice::None,
+            thread: Some(task),
+            text: "start".into(),
+        };
+        let frame = frame::encode(&message, Pipe::Data).expect("encodes");
+        shell.data_out.write_all(&frame).await.expect("submitted");
+        loop {
+            let (actual, phase) = shell.state().await;
+            assert_eq!(actual, run);
+            match phase {
+                Phase::Done => break,
+                Phase::Thinking | Phase::Answering => {}
+                _ => panic!("unexpected phase {phase:?}"),
+            }
+        }
+        assert!(shell.read_to_end(run).await > 0);
+        let mut titled = false;
+        timeout(PATIENCE, async {
+            loop {
+                match seen.recv().await.expect("the brain reports") {
+                    crate::runtime::Seen::StoreOpQueued(
+                        crate::coordinator::StoreOp::SetTitle { .. },
+                    ) => titled = true,
+                    crate::runtime::Seen::StoreOpQueued(crate::coordinator::StoreOp::ReadJob(
+                        crate::coordinator::ReadJob {
+                            kind: crate::coordinator::JobKind::Compact,
+                            ..
+                        },
+                    )) if titled => return,
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .expect("the title write hands over to compaction");
+        let summary = timeout(Duration::from_secs(3), async {
+            loop {
+                if let crate::runtime::Seen::StoreOpQueued(
+                    crate::coordinator::StoreOp::StoreSummary { .. },
+                ) = seen.recv().await.expect("the brain reports")
+                {
+                    return;
+                }
+            }
+        })
+        .await;
+        assert!(summary.is_err(), "the refused compaction writes no summary");
+        drop(shell);
+    };
+    let (ended, ()) = timeout(PATIENCE, async {
+        tokio::join!(brain.serve(control, data, &mut tap), client)
+    })
+    .await
+    .expect("routed runtime finishes");
+    assert_eq!(ended, Ended::Lost);
+    assert_eq!(brain.key_allowance.spent(run), Some(ALLOWED));
+    brain.close().await;
+    let script = peer.0.lock().expect("peer");
+    assert_eq!(script.starts, 3, "catalog, the run's round and its title");
+    assert_eq!(script.responses.len(), 1, "the compaction never connected");
+    drop(script);
+    let db = Store::open(&scratch.db()).expect("persistent store");
+    let count = |sql: &str| -> i64 {
+        db.conn_for_tests()
+            .query_row(sql, [], |row| row.get(0))
+            .expect("count")
+    };
+    assert_eq!(count("SELECT COUNT(*) FROM summaries"), 0);
+    assert_eq!(
+        count("SELECT COUNT(*) FROM threads WHERE title = 'Synthetic title'"),
+        1
+    );
+    assert_eq!(
+        count(&format!(
+            "SELECT COUNT(*) FROM runs WHERE id = {} AND state = 'done'",
+            run.0
+        )),
+        1
+    );
 }

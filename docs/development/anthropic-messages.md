@@ -61,9 +61,43 @@ The caller supplies its validated body, key, admission future and shared run/liv
 After admission, the transport reserves the run budget then the live budget before connecting.
 A live-cap refusal can conservatively spend the run reservation; nothing refunds a failed,
 cancelled or uncertain attempt. Retrying requires another admission and consumes another unit.
-On the key route the run budget is `Live`'s own and unlimited by default, so the eight
-foreground rounds and sixteen tool starts are not a cap on HTTP attempts per run; an attempt is
-charged only against a configured process allowance, inline and job sends included.
+On the key route the run budget is the run's attempt allowance: 17 Messages attempts, kept in
+the runtime per run and shared by every `Live` the run's sends use, so a rebuild that replaces the
+owner keeps what the run has spent. Every key send of the run charges it before connecting:
+foreground rounds, continuations, inline compactions and the job the run's end starts. Every key
+job is attributable, because the coordinator grants a job only for the run it names. A later run
+gets a fresh allowance, and an earlier run's late send gets none. The attempt after the last is
+refused as `Spent` without a connection. A refused foreground round ends the run with the
+existing failure text, a refused inline compaction fails it through the generic engine-failure
+path, and a refused background job leaves the run's `Done` as it was.
+
+Seventeen is a spending policy for a pay-per-use key, not a proof that every legitimate run fits.
+It is the allowance for an ordinary run at the coordinator's limits:
+
+| Sends | Count | Limit |
+| --- | ---: | --- |
+| Foreground rounds, continuations included | 8 | `MAX_ROUNDS`; a round that still calls at the eighth fails as `Budget` |
+| Inline compactions | 8 | one per round since its last normal admission |
+| The job the run's end starts | 1 | a title, or Kumo's compaction |
+| **Total** | **17** | `RUN_ATTEMPTS = 2 * MAX_ROUNDS + 1` |
+
+Some schedules can need more:
+
+- **A task's title, then its compaction.** A successful title write hands over to the same run's
+  compaction, so a task's end can start two jobs.
+- **A voided round one rebuilt after a deletion race.** A history tool reads a task outside the
+  sent sources, the task is deleted before the read settles, and the coordinator voids the result
+  and builds the same round again with a fresh body. The sent-source check doesn't cover that
+  task, so a run can repeat this up to its 16 tool starts.
+- **A second inline compaction after a rebuild.** The one-per-round check holds only since the
+  round's last normal admission.
+
+Nothing queues a retry of a skipped job. It is eligible again on a later successful run if the
+thread, route and job conditions still allow it: a later run must end `Done`, with no newer run
+current and the route ready. The title job asks while the task still has its first-words title,
+and compaction reads whatever backlog is still uncovered. Without such a run, a task can keep its
+first-words title and its history can stay unsummarized. The process allowance still applies
+after this one.
 
 The attempt accepts only `AnthropicConnect`, fixes `POST /v1/messages`, sensitive Bearer bytes
 and API version `2023-06-01`, and uses no proxy, redirect or fallback. Request bytes are wiped

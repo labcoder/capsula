@@ -770,17 +770,18 @@ impl Brain {
             return None;
         }
         let authority = Arc::clone(authority);
+        let allowance = self.key_allowance.of(request.run)?;
         let live = if let SendKey::Build(key) = request.key {
             if let Some((_, old)) = self.key_round.take_if(|(build, _)| build.run != key.run) {
                 old.retire();
             }
             let (owned, live) = self
                 .key_round
-                .get_or_insert_with(|| (key, Arc::new(Live::default())));
+                .get_or_insert_with(|| (key, Arc::new(Live::new(allowance))));
             *owned = key;
             Arc::clone(live)
         } else {
-            Arc::new(Live::default())
+            Arc::new(Live::new(allowance))
         };
         Some(Box::new(question::Question {
             transport,

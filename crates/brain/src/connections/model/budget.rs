@@ -36,6 +36,11 @@ impl Budget {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn spent(&self) -> u32 {
+        self.used.load(Ordering::SeqCst)
+    }
+
     /// Takes one request from the budget; `false` once it's spent.
     pub fn reserve(&self) -> bool {
         let Some(limit) = self.limit else {

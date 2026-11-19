@@ -161,6 +161,22 @@ impl Peer {
         request: &RunRequest,
         answer_with: fn(SendLease) -> Answer,
     ) -> (Option<Finish>, Vec<TurnEvent>) {
+        let motion = match request.key {
+            SendKey::Build(key) if key.round == 1 => Motion::First,
+            SendKey::Build(_) => Motion::Continue,
+            SendKey::Job(_) => Motion::Standalone,
+        };
+        self.play_as(live, request, motion, answer_with).await
+    }
+
+    /// [`Peer::play`] with the motion the coordinator chose, such as an inline compaction's.
+    async fn play_as(
+        &self,
+        live: &Live,
+        request: &RunRequest,
+        motion: Motion,
+        answer_with: fn(SendLease) -> Answer,
+    ) -> (Option<Finish>, Vec<TurnEvent>) {
         let (inputs_tx, mut inputs) = mpsc::unbounded_channel();
         let asks = Asks::default();
         let gate = SendGate::new(request.key, Arc::clone(&asks), inputs_tx.clone());
@@ -169,11 +185,7 @@ impl Peer {
             transport: &self.transport,
             authority: &self.authority,
             tag: ConnectionTag(TAG),
-            motion: match request.key {
-                SendKey::Build(key) if key.round == 1 => Motion::First,
-                SendKey::Build(_) => Motion::Continue,
-                SendKey::Job(_) => Motion::Standalone,
-            },
+            motion,
         };
         let finish = {
             let round = live.round(request, sending, &events_tx, &gate);
@@ -940,4 +952,88 @@ fn a_key_write_refuses_unpaired_calls_before_appending_any_row() {
         );
         assert_eq!(stored(&world), before);
     }
+}
+
+#[tokio::test]
+async fn a_run_allowance_outlives_its_owner_and_refuses_the_next_attempt_unsent() {
+    use crate::engines::anthropic::live::Allowance;
+    const ALLOWED: u32 = 17;
+
+    let mut world = world("key-round-allowance");
+    let run = world.start("ask");
+    let spent = usize::try_from(ALLOWED).expect("small");
+    let peer = Peer::new(
+        std::iter::once(calling())
+            .chain(std::iter::repeat_with(answering).take(spent))
+            .collect(),
+    );
+    let mut allowance = Allowance::default();
+    let live = Live::new(allowance.of(run).expect("the run's allowance"));
+    let done = Some(Finish::Completed);
+    assert_eq!(
+        peer.play(&live, &request(&world, run, 1), Answer::Grant)
+            .await
+            .0,
+        done
+    );
+    keep_round(&mut world, run);
+    assert_eq!(
+        peer.play(&live, &request(&world, run, 2), Answer::Grant)
+            .await
+            .0,
+        done,
+        "the continuation"
+    );
+    live.retire();
+    let rebuilt = Live::new(allowance.of(run).expect("the same run's allowance"));
+    assert_eq!(
+        peer.play_as(
+            &rebuilt,
+            &request(&world, run, 2),
+            Motion::Standalone,
+            Answer::Grant
+        )
+        .await
+        .0,
+        done,
+        "an inline send after the rebuild"
+    );
+    let mut job = request(&world, run, 1);
+    job.key = SendKey::Job(crate::coordinator::JobKey {
+        thread: world.main,
+        serial: 1,
+    });
+    job.request.tools.clear();
+    for _ in 3..ALLOWED {
+        assert_eq!(peer.play(&rebuilt, &job, Answer::Grant).await.0, done);
+    }
+    assert_eq!(allowance.spent(run), Some(ALLOWED));
+    let starts = peer.script.lock().expect("script").starts;
+    assert_eq!(starts, spent);
+    assert_eq!(
+        peer.play(&rebuilt, &job, Answer::Grant).await,
+        (
+            Some(Finish::Failed(crate::engines::EngineFailure::Anthropic(
+                crate::connections::anthropic::error::Failure::Spent,
+            ))),
+            Vec::new()
+        ),
+        "the attempt after the last"
+    );
+    assert_eq!(peer.script.lock().expect("script").starts, starts);
+
+    let next = world.start("again");
+    let first = request(&world, next, 1);
+    assert_eq!(first.run, next);
+    let other = Live::new(
+        allowance
+            .of(first.run)
+            .expect("a later run's own allowance"),
+    );
+    assert_eq!(allowance.spent(next), Some(0));
+    assert!(allowance.of(run).is_none(), "an earlier run has none");
+    let peer = Peer::new(vec![answering()]);
+    assert_eq!(peer.play(&other, &first, Answer::Grant).await.0, done);
+    assert_eq!(peer.script.lock().expect("script").starts, 1);
+    assert_eq!(allowance.spent(next), Some(1));
 }
