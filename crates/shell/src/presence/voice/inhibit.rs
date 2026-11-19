@@ -18,6 +18,7 @@ mod tests;
 
 /// Rechecks a busy owner gets per operation: an attempt budget, not a latency promise.
 const RECHECKS: u8 = 3;
+/// The fallback wake after a busy owner; any earlier wake retries first.
 pub(super) const RECHECK: Duration = Duration::from_millis(10);
 /// How long an admitted hold waits for the output to go quiet [guess].
 const QUIET_WAIT: Duration = Duration::from_secs(2);
@@ -90,7 +91,7 @@ impl Gate {
             .is_some_and(|held| held.gesture() == mic.gesture())
     }
 
-    /// Spends one recheck and arms its wake; false once the budget is spent.
+    /// Spends one recheck and arms its fallback wake; false once the budget is spent.
     fn recheck(&mut self, gates: &Gates, executor: &BackgroundExecutor) -> bool {
         tracing::debug!(stage = ?FailureStage::Inhibit, left = self.rechecks, "held speech input owner busy");
         let Some(left) = self.rechecks.checked_sub(1) else {

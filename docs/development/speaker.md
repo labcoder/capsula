@@ -332,7 +332,8 @@ whether a session has an output and whether an earlier generation still owes aud
 - **Wakes.** `changes()` is a capacity-1 channel; workers and the owner wake it on every change,
   and the speaker thread's final wake guarantees a settled tail is seen without polling. A live
   claim that reads its tail mid-publish gets `Busy`, and no later wake is promised for it: D2
-  rechecks it a bounded number of times or denies the gesture.
+  rechecks it within an attempt budget of three, with a 10 ms timer as the fallback wake, or
+  denies the gesture.
   `view()` gives the key, why there's none, and whether a tail is still retiring or terminal.
 
 ## Windows

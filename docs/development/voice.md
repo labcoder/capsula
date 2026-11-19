@@ -981,7 +981,8 @@ stateDiagram-v2
 One dispatcher task per presence makes every UI-side acquire, bind and retirement. The native
 callback, the owner's change hints, the receipt task and its own timers wake it through one
 bounded channel, and it runs after the delivery that woke it, so an Esc's speaker `Stop` is
-queued before any `Resume`. A busy owner gets three rechecks 10 ms apart.
+queued before any `Resume`. A busy owner gets an attempt budget of three: any wake retries, and a
+10 ms timer is only the fallback wake.
 
 An admitted hold doesn't open the microphone at once: its gate waits, with a quiet deadline set
 once at admission (2 s, a guess). Each wake rechecks the hold's session, settings, input and mode,
