@@ -111,6 +111,13 @@ pub(crate) fn fake(args: Vec<OsString>) -> i32 {
         }
         _ => {}
     }
+    if kind == "replay"
+        && let Ok(json) = fs::read(base_dir().join("replay-auth-status"))
+    {
+        stdout.write_all(&json).expect("stdout");
+        stdout.flush().expect("stdout");
+        return 0;
+    }
     let signed_in = kind == "in" || kind == "replay" || token.exists();
     let method = if signed_in { "claude.ai" } else { "none" };
     let mut json = format!(

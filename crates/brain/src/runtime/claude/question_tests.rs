@@ -451,9 +451,165 @@ async fn a_taken_question_is_audited_seeded_and_answered_with_one_report() {
     assert_eq!(rig.binds, [id], "authorized before its seed");
     assert_eq!(rig.reported(id).await, [launch::Outcome::Clean]);
     assert_eq!(
+        rig.base
+            .calls()
+            .iter()
+            .filter(|call| *call == "auth status --json")
+            .count(),
+        1,
+        "a successful question does not recheck status"
+    );
+    assert_eq!(
         rig.claude.view(),
         READY,
         "init's analytics_disabled is true"
+    );
+    rig.close().await;
+}
+
+fn provider_failure() -> Script {
+    let mut script = synthetic_signed_in().init(|init| init["analytics_disabled"] = json!(false));
+    script.user.truncate(1);
+    script
+        .user
+        .push(json!({"type": "result", "subtype": "provider_error", "is_error": true}));
+    script
+}
+
+#[tokio::test]
+async fn a_provider_failed_question_checks_status_once_and_only_confirmed_sign_out_changes_it() {
+    for (case, status, expected, view) in [
+        (
+            "out",
+            Some(json!({"loggedIn": false})),
+            claude_failed(ErrorKey::ClaudeCodeSignedOut),
+            ClaudeCodeView::SignedOut { version: V },
+        ),
+        (
+            "in",
+            None,
+            TurnEvent::Finished(Finish::Failed(EngineFailure::Provider)),
+            ClaudeCodeView::Ready {
+                version: V,
+                analytics_on: true,
+            },
+        ),
+        (
+            "malformed",
+            Some(json!({"loggedIn": 42})),
+            TurnEvent::Finished(Finish::Failed(EngineFailure::Provider)),
+            ClaudeCodeView::Ready {
+                version: V,
+                analytics_on: true,
+            },
+        ),
+    ] {
+        let mut rig = Rig::new(&format!("question-provider-{case}"), &provider_failure()).await;
+        if let Some(mut status) = status {
+            status["configDirectory"] = json!(rig.base.owned().join("config"));
+            fs::write(rig.base.0.join("replay-auth-status"), status.to_string()).unwrap();
+        }
+        let question = rig.claude.take(&rig.snapshot()).expect("taken");
+        let mut played = play(&question);
+        let lease = played.lease();
+        rig.drive(played.asked(lease)).await;
+        assert_eq!(rig.drive(played.events()).await, [expected]);
+        assert_eq!(rig.claude.view(), view);
+        let calls = rig.base.calls();
+        let [version, discovery, question, recheck] = calls.as_slice() else {
+            panic!("exactly discovery, one question and one status recheck: {calls:?}");
+        };
+        assert_eq!(version, "--version");
+        assert_eq!(discovery, "auth status --json");
+        assert!(question.starts_with("-p "));
+        assert_eq!(recheck, "auth status --json");
+        assert_eq!(
+            fs::read_dir(rig.base.owned().join(ENGINE_DIR))
+                .unwrap()
+                .count(),
+            0
+        );
+        rig.close().await;
+    }
+}
+
+#[tokio::test]
+async fn a_new_find_does_not_take_an_old_questions_provider_recheck() {
+    let mut rig = Rig::new("question-provider-replaced", &provider_failure()).await;
+    let question = rig.claude.take(&rig.snapshot()).expect("taken");
+    let mut played = play(&question);
+    let lease = played.lease();
+    rig.drive(played.asked(lease)).await;
+    let failure = timeout(WAIT, async {
+        loop {
+            let note = rig.claude.notes.1.recv().await.unwrap();
+            if matches!(note, Note::ProviderFailed { .. }) {
+                break note;
+            }
+            rig.wake(Wake::Note(note));
+        }
+    })
+    .await
+    .unwrap();
+    rig.claude.op(ConnectionOp::FindClaudeCode);
+    rig.wake(Wake::Note(failure));
+    assert_eq!(
+        rig.drive(played.events()).await,
+        [TurnEvent::Finished(Finish::Failed(EngineFailure::Provider))]
+    );
+    rig.settle().await;
+    let calls = rig.base.calls();
+    assert_eq!(&calls[3..], ["--version", "auth status --json"]);
+    assert_eq!(rig.claude.view(), READY);
+    rig.close().await;
+}
+
+#[tokio::test]
+async fn a_provider_recheck_answer_after_the_deadline_does_not_sign_out() {
+    let mut rig = Rig::new("question-provider-recheck-deadline", &provider_failure()).await;
+    fs::write(
+        rig.base.0.join("replay-auth-status"),
+        json!({
+            "loggedIn": false,
+            "configDirectory": rig.base.owned().join("config")
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let question = rig.claude.take(&rig.snapshot()).expect("taken");
+    let mut played = play(&question);
+    let lease = played.lease();
+    rig.drive(played.asked(lease)).await;
+    let done = timeout(WAIT, async {
+        loop {
+            let wake = rig.claude.next().await;
+            if let Wake::Lane(done) = wake {
+                break done;
+            }
+            rig.wake(wake);
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        done.result,
+        Ok(Outcome::Status {
+            version: V,
+            signed_in: false
+        })
+    );
+    rig.at(MAX_LAUNCH);
+    rig.wake(Wake::Lane(done));
+    assert_eq!(
+        rig.drive(played.events()).await,
+        [TurnEvent::Finished(Finish::Failed(EngineFailure::Provider))]
+    );
+    assert_eq!(
+        rig.claude.view(),
+        ClaudeCodeView::Ready {
+            version: V,
+            analytics_on: true
+        }
     );
     rig.close().await;
 }

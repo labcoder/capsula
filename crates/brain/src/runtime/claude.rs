@@ -11,7 +11,7 @@ use kumochi_protocol::message::{
     ConnectionsView, ControlToShell, DataToShell, Effort, ErrorKey, ModelChoice, ModelInfo,
     ModelName, ModelSlug, ThreadId, Unsupported, UserError,
 };
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 
 use super::{Brain, Ended, Full, Link};
 use crate::bridge::LaunchId;
@@ -62,6 +62,8 @@ pub(crate) struct Claude {
     view: ClaudeCodeView,
     /// The job of this generation that's out, if one is.
     out: Option<Work>,
+    /// The failed question waiting for positive sign-out evidence from its Status.
+    recheck: Option<StatusRecheck>,
     /// A Find was asked for while it was.
     again: bool,
     /// A Disconnect is still to finish.
@@ -103,6 +105,12 @@ pub(crate) struct Claude {
 struct Epoch {
     tag: u64,
     version: ClaudeVersion,
+}
+
+#[derive(Debug)]
+struct StatusRecheck {
+    until: Instant,
+    signed_out: oneshot::Sender<()>,
 }
 
 /// One admitted launch, as the core tracks it.
@@ -160,6 +168,7 @@ impl Claude {
             generation: 0,
             view,
             out: None,
+            recheck: None,
             again: false,
             cleaning: false,
             cancelled: None,
@@ -210,6 +219,7 @@ impl Claude {
         };
         self.generation += 1;
         lane.fence(self.generation);
+        self.recheck = None;
         // A bound launch's authority ends with the generation it was bound under.
         for held in self.launches.iter().filter(|held| held.bound) {
             held.control.withdraw();
@@ -239,11 +249,11 @@ impl Claude {
     }
 
     /// Finds the install again, or retries a deletion still to finish; after the job that's out,
-    /// if one is.
+    /// if one is. A fresh find supersedes a failure's automatic status check.
     fn find(&mut self) {
         // shortcut: a pending deletion is retried here and at each start, not on a timer; add one
         // if locked files turn out to outlive a session.
-        if self.out.is_some() {
+        if self.out.is_some() && self.recheck.is_none() {
             self.again = true;
             return;
         }
@@ -334,6 +344,9 @@ impl Claude {
     pub(crate) fn done(&mut self, Done { generation, result }: Done) -> bool {
         if generation != self.generation || self.out.is_none() {
             return false;
+        }
+        if let Some(recheck) = self.recheck.take() {
+            return self.status_rechecked(recheck, result);
         }
         if let Some(held) = &mut self.quarantine
             && self.out == Some(Work::Quarantine(held.version))
@@ -787,6 +800,14 @@ impl Claude {
         self.prune();
         match note {
             Note::Ended { id, outcome } => self.ended(id, outcome),
+            Note::ProviderFailed {
+                id,
+                until,
+                signed_out,
+            } => {
+                self.recheck_failed(id, StatusRecheck { until, signed_out });
+                false
+            }
             Note::Analytics { id, on } => {
                 let current = self.launches.iter().any(|held| {
                     held.id == id && !held.replaced && held.generation == self.generation
@@ -806,6 +827,58 @@ impl Claude {
             // Only the brain can authorize; dropping the reply refuses the launch.
             Note::Bind(_) => false,
         }
+    }
+
+    fn recheck_failed(&mut self, id: LaunchId, recheck: StatusRecheck) {
+        let Some(held) = self
+            .launches
+            .iter_mut()
+            .find(|held| held.id == id && held.due)
+        else {
+            return;
+        };
+        held.due = false;
+        if held.replaced
+            || held.generation != self.generation
+            || recheck.signed_out.is_closed()
+            || self.clock.now() >= recheck.until
+            || self.out.is_some()
+            || self.full
+            || self.admitted().is_none()
+        {
+            return;
+        }
+        if self
+            .lane
+            .as_ref()
+            .is_some_and(|lane| lane.submit(self.generation, Work::Status))
+        {
+            self.out = Some(Work::Status);
+            self.recheck = Some(recheck);
+        }
+    }
+
+    fn status_rechecked(
+        &mut self,
+        recheck: StatusRecheck,
+        result: Result<Outcome, Failure>,
+    ) -> bool {
+        self.out = None;
+        if let Ok(Outcome::Status {
+            version,
+            signed_in: false,
+        }) = result
+            && self
+                .admitted()
+                .is_some_and(|(current, _)| current == version)
+            && self.clock.now() < recheck.until
+            && recheck.signed_out.send(()).is_ok()
+        {
+            self.view = ClaudeCodeView::SignedOut { version };
+            self.revoke_all();
+            return true;
+        }
+        false
     }
 
     /// An attempt's one report: an audit failure quarantines its version, and a sign-out shows.

@@ -513,6 +513,14 @@ hears the current list if it isn't empty, and nothing before Claude Code's first
   launches alone, so an attempt can outlive its generation; its audit failure still quarantines
   the version, and its sign-out changes nothing. A seeded launch's `analytics_disabled`, init's value over initialize's, sets
   `analytics_on` only while the view is `Ready` at the attempt's generation.
+- **Provider failure is not a sign-out verdict.** If a seeded question returns
+  `Failed(Provider)`, retire its launch and ask the same lane for one
+  `auth status --json` within the question's remaining deadline. A current,
+  confirmed signed-out result changes the view to `SignedOut` and ends the
+  question with `ClaudeCodeSignedOut`. A signed-in, unusable, busy, or stale
+  result leaves the original failure; there is no retry of the question.
+  A new Find or Disconnect supersedes the recheck. Audit refusals, transport
+  failures and turn-cap results have their own paths and don't recheck.
 
 ```mermaid
 sequenceDiagram
