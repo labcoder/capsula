@@ -39,7 +39,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 use windows::core::{HSTRING, PCWSTR, w};
 
-use super::activation::away_across_guard;
+use super::activation::{away_across_guard, has_ex};
 use super::gate::{Feel, MouseSnapshot, Origin, Press, Verdict};
 use super::guard::{self, StopCause, physical_input};
 use super::switch_window;
@@ -93,6 +93,7 @@ impl IdleRefusal {
     const ACTIVATION_MARKER: Self = Self(10, 0);
     const TOPMOST: Self = Self(11, 0);
     const ABORT_MARKER: Self = Self(12, 0);
+    const NOT_RAISED: Self = Self(13, 0);
 
     fn reply(self) -> isize {
         let [low, high] = self.1.to_le_bytes();
@@ -123,6 +124,7 @@ impl IdleRefusal {
             "could not update the activation marker",
             "could not raise the fixture without activation",
             "could not mark the fixture aborted",
+            "the fixture was not topmost after the raise",
         ]
         .get(reply.wrapping_sub(usize::from(Self::ALREADY_USED.0)))
         .copied()
@@ -309,7 +311,8 @@ fn arm(root: HWND, up_time: u32, feel: usize) -> Result<()> {
 
 /// The owner's away rule, used up by its first call: once nobody has touched Rez for `away_ms`,
 /// arms the raw-input guard, under which any foreign input is terminal, then raises only the
-/// fixture topmost, without activating it, for the driver's one tagged click.
+/// fixture topmost, without activating it, for the driver's one tagged click. The raise's return
+/// value isn't trusted: the style is read back and the prepare refuses unless it's topmost.
 fn prepare_idle(root: HWND, away_ms: usize) -> Result<()> {
     let unused = property(root, ACTIVATION) == 0;
     set_property(root, ACTIVATION, 2).context(IdleRefusal::ACTIVATION_MARKER)?;
@@ -343,7 +346,11 @@ fn prepare_idle(root: HWND, away_ms: usize) -> Result<()> {
     let style = unsafe { GetWindowLongPtrW(root, GWL_EXSTYLE) };
     let topmost = isize::try_from(WS_EX_TOPMOST.0).context(IdleRefusal::TOPMOST)?;
     WAS_TOPMOST.set(Some((style & topmost) != 0));
-    band(root, HWND_TOPMOST).context(IdleRefusal::TOPMOST)
+    band(root, HWND_TOPMOST).context(IdleRefusal::TOPMOST)?;
+    // SAFETY: reads back this thread's own window's extended style; a failed read is zero.
+    let raised = unsafe { GetWindowLongPtrW(root, GWL_EXSTYLE) };
+    ensure!(has_ex(raised, WS_EX_TOPMOST), IdleRefusal::NOT_RAISED);
+    Ok(())
 }
 
 /// Ends the idle activation, used either way, back in the fixture's earlier band. Only a pending

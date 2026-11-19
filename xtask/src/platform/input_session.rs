@@ -583,8 +583,9 @@ mod tests {
             (10, "could not update the activation marker"),
             (11, "could not raise the fixture without activation"),
             (12, "could not mark the fixture aborted"),
+            (13, "the fixture was not topmost after the raise"),
             (0, "unknown prepare-idle refusal"),
-            (13, "unknown prepare-idle refusal"),
+            (14, "unknown prepare-idle refusal"),
             (usize::MAX, "unknown prepare-idle refusal"),
         ] {
             assert_eq!(
