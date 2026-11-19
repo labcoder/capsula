@@ -1,7 +1,7 @@
 # The gate identity
 
-The gate tools (`cold-start`, `gate-session`, `hover-gate`, `measure-gate`, `bench idle` and
-`slice2-gate`) start real
+The gate tools (`cold-start`, `gate-session`, `hover-gate`, `measure-gate`, `bench idle`,
+`slice2-gate` and `live anthropic-key`) start real
 Kumochi processes on the developer's machine. A throwaway `%LOCALAPPDATA%` isolates files only:
 anything named by the product identity (the pipes, the instance capability, Credential Manager
 names and the folder the system reports for Local AppData) follows the build, not the environment.
@@ -85,7 +85,15 @@ flowchart TD
    brain runs no `claude.exe` and reads no Claude Code policy. It also says `onboarded = true`: a
    gate launch isn't a first-run test, and onboarding's window would take the foreground. The brain logs `Claude Code
    setting enabled=false` at start, so the run's own brain log shows it.
-4. **Cleanup.** At the end, success or failure, and only once no product process is left, the run:
+4. **Cleanup.** At the end, success or failure, the run first ends every process still in its job,
+   by the job's own list of process ids, whichever process started it, and waits up to 10 s for
+   them to exit. A product process outside the job, such as the owner's own Kumochi, is never
+   touched. If one of the run's processes still runs after that, the run deletes nothing and says
+   so, naming the processes; they end with the job when xtask exits, and the next gate run deletes
+   what they left. Otherwise the run:
+   - deletes the gate's staged and saved Anthropic key names, `anthropic-key-staged.Kumochi Gate`
+     and `anthropic-key.Kumochi Gate`. A failure on one doesn't skip the other; it's named, and
+     the run's folder stays so the next run tries again;
    - reads each launch's own `credentials.db` and deletes the `Kumochi Gate/gen/<kind>/<generation>/<n>`
      names (chunks 0 to 63) of every generation recorded there, then, after a success, that
      launch's folders. A failed run keeps its folders, with the product logs, until the next run.
@@ -96,8 +104,8 @@ flowchart TD
 
 A run creates its root folder, which must not exist yet, writes a new random run id into its
 `gate-run` file, and names both in the lock file, as one line ending in a newline, until it has
-cleaned up. If a run is interrupted (Ctrl-C, a killed xtask, a panic, or a product process still
-running at the end), the next gate run cleans up that folder as above before it starts, so
+cleaned up. If a run is interrupted (Ctrl-C, a killed xtask, a panic, or one of its processes
+still running after cleanup ended it), the next gate run cleans up that folder as above before it starts, so
 rerunning any gate tool clears an interrupted one. The instance entry and the real `Kumochi Gate`
 folder go at the end of that next run. Recovery starts only when the lock's line is whole and the
 folder's `gate-run` holds the same id. Anything else, such as a lock cut short or a folder without

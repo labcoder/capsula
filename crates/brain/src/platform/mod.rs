@@ -79,9 +79,9 @@ pub use windows::raise_access_violation;
 #[cfg(windows)]
 pub use windows::{
     ChildPipes, Helper, Instance, Job, PipeServer, client_image, client_process, config_dir,
-    create_owner_only, data_dir, free_space, has_exited, launch_detached, links_unsupported,
-    process_image, quiet_failures, replace_file, server_image, session_id, session_lock_path,
-    trust_roots,
+    create_owner_only, data_dir, detached_command, free_space, has_exited, launch_detached,
+    links_unsupported, process_image, quiet_failures, replace_file, server_image, session_id,
+    session_lock_path, trust_roots,
 };
 #[cfg(all(test, windows))]
 pub(crate) use windows::{

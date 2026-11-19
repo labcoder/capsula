@@ -86,6 +86,13 @@ tasks:
                     capped in code; no ChatGPT or Anthropic key model request; prints
                     counts, lengths and yes or no only; refuses while any product
                     process runs; run only when the Captain starts it
+  live anthropic-key
+                    the Anthropic API key end to end on the owner's two keys, as the gate
+                    identity: the owner pastes both keys and types the printed prompts; at most
+                    three model-list GETs and three Messages POSTs in fixed per-launch slices
+                    that are never refunded; stops at the first unexpected state; run only on
+                    the Captain's go with the owner present (cargo run --release --package xtask
+                    --features kumochi-protocol/gate-identity -- live anthropic-key)
   live catalog-provenance
                     one model-list request with the dev account's saved session, never
                     renewing it; writes target\\live\\<time>\\catalog-provenance.json with

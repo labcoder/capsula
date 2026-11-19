@@ -163,6 +163,38 @@ async fn catalog_and_messages_spend_only_their_own_budget_before_connect() {
 }
 
 #[tokio::test]
+async fn a_zero_slice_refuses_both_endpoints_before_any_connect() {
+    let peer = Scripted(Arc::new(std::sync::Mutex::new(Script::default())));
+    let route = Transport::offline(peer.clone(), 0, 0);
+    let authority = Verified::from_entropy(1, key(), Some(803)).expect("nonzero");
+    let fence = Fence::default();
+    let body = body();
+    let budget = Budget::limited(Some(17));
+    assert_eq!(
+        route.catalog(&fence, &key()).await,
+        Err(CheckError::Unconfirmed)
+    );
+    let sent = route
+        .messages(
+            &authority,
+            Offer {
+                tag: authority.tag,
+                body: &body,
+                fence: &fence,
+                budget: &budget,
+            },
+            ready(Some(())),
+            Capture::Nothing,
+            |_: &SseEvent| {},
+        )
+        .await;
+    assert!(matches!(sent, Err(Failure::Spent)));
+    let script = peer.0.lock().expect("peer");
+    assert_eq!(script.starts, 0);
+    assert!(script.requests.is_empty());
+}
+
+#[tokio::test]
 async fn an_aliased_run_and_credential_fence_is_refused_before_admission() {
     let peer = Scripted::default();
     let route = Transport::offline(peer.clone(), 0, 1);

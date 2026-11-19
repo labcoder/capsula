@@ -12,8 +12,8 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result, anyhow, bail, ensure};
 use kumochi_protocol::constants::{
-    ACCOUNT_MAX_CHUNKS, AUTHORITY_FILE, CONFIG_FILE, ProductIdentity, generation_hex,
-    generation_target, instance_target,
+    ACCOUNT_MAX_CHUNKS, AUTHORITY_FILE, CONFIG_FILE, ProductIdentity, anthropic_key_target,
+    anthropic_staging_target, generation_hex, generation_target, instance_target,
 };
 use rusqlite::{Connection, OpenFlags};
 
@@ -34,6 +34,8 @@ const SETTINGS: &str = "onboarded = true\n\n[claude_code]\nenabled = false\n";
 const OWING_ONBOARDING: &str = "[claude_code]\nenabled = false\n";
 /// How long building the images may take [guess: a cold release shell build on Rez].
 const BUILD_LIMIT: Duration = Duration::from_mins(40);
+/// How long the run's surviving processes get to exit once they're ended.
+const END_LIMIT: Duration = Duration::from_secs(10);
 
 /// Fails unless `active` is the gate identity.
 pub(crate) fn require_gate(active: ProductIdentity) -> Result<()> {
@@ -130,12 +132,29 @@ impl Folders {
         .context("writing the gate settings")
     }
 
+    /// Makes `model` on `connection` the default, at low effort.
+    pub(crate) fn choose_model(&self, connection: &str, model: &str) -> Result<()> {
+        fs::write(
+            self.roaming.join(GATE.data_dir).join(CONFIG_FILE),
+            format!(
+                "default_model = {{ connection = \"{connection}\", model = \"{model}\", effort = \"Low\" }}\n{SETTINGS}"
+            ),
+        )
+        .context("writing the gate settings")
+    }
+
     /// Points `command`'s data and settings folders here.
     pub(crate) fn apply<'a>(&self, command: &'a mut Command) -> &'a mut Command {
         command
             .env("LOCALAPPDATA", &self.local)
             .env("APPDATA", &self.roaming)
     }
+}
+
+/// The gate's own file `name` beside its run lock, in the real `LocalAppData`: no build moves or
+/// deletes it, and gate cleanup leaves it.
+pub(crate) fn gate_file(name: &str) -> Result<PathBuf> {
+    Ok(platform::local_app_data()?.join(format!("{}-{name}", GATE.object_prefix)))
 }
 
 /// One gate run, alone, with its launches' folders under a root it created.
@@ -145,6 +164,8 @@ pub(crate) struct Run {
     /// Held until the run ends, so another run fails to take it; it names this run's root until
     /// the run has cleaned up, so the next run can clean up after an interrupted one.
     alone: File,
+    /// The kill-on-close job holding this process and everything it started.
+    job: platform::Held,
 }
 
 impl Run {
@@ -153,27 +174,36 @@ impl Run {
     /// away from it; cleans up after an interrupted run; and creates `root`, which must be new.
     pub(crate) fn begin(root: PathBuf) -> Result<Self> {
         require_gate(ProductIdentity::ACTIVE)?;
-        let lock = platform::local_app_data()?.join(format!("{}-run.lock", GATE.object_prefix));
+        let lock = gate_file("run.lock")?;
         let mut alone = take(&lock)?;
         live::refuse_running(&platform::processes()?, std::process::id())?;
-        platform::Job::kill_on_close()
+        let job = platform::Job::kill_on_close()
             .and_then(platform::Job::hold_self)
             .context("putting the run in a job")?;
         claim(&mut alone, &lock, &root, &mut CredentialManager)?;
-        Ok(Self { root, alone })
+        Ok(Self { root, alone, job })
     }
 
     pub(crate) fn folders(&self, name: &str) -> Result<Folders> {
         Folders::create(&self.root.join(name))
     }
 
-    /// Ends the run with `result`. Once no product process is left: deletes what each launch's
-    /// own authority names in Credential Manager, then the gate's instance entry for this session
-    /// and the gate's folder in the real `LocalAppData`. After a success it also deletes the
-    /// run's folders; after a failure it keeps them, with the product logs, until the next run.
+    /// Ends the run with `result`. First ends every process the run started that is still
+    /// running, whichever started it; once they're gone, deletes the gate's two key entries and
+    /// what each launch's own authority names in Credential Manager, then the gate's instance
+    /// entry for this session and the gate's folder in the real `LocalAppData`. After a success
+    /// it also deletes the run's folders; after a failure it keeps them, with the product logs,
+    /// until the next run.
     pub(crate) fn finish(self, result: Result<()>) -> Result<()> {
-        if let Err(running) = live::refuse_running(&platform::processes()?, std::process::id()) {
-            return crate::session::combine([result, Err(running.context(kept(&self.root)))]);
+        if let Err(running) = self.job.end_others(END_LIMIT) {
+            return crate::session::combine([
+                result,
+                Err(anyhow!(
+                    "{running:#}; so nothing was deleted: the gate's key entries may stay in \
+                     Credential Manager until the next gate run deletes them, and {}",
+                    kept(&self.root)
+                )),
+            ]);
         }
         let mut store = CredentialManager;
         let ended = end(&self.root, &self.alone, result, &mut store);
@@ -338,6 +368,15 @@ impl Credentials for CredentialManager {
 /// its entries too, since nothing else can say which entries are its own.
 fn remove_entries(root: &Path, store: &mut impl Credentials, keep: Keep) -> Result<()> {
     let mut kept = Vec::new();
+    // The shell stages a pasted key under a fixed gate name that no authority records.
+    for target in [
+        anthropic_staging_target(GATE.credential_service),
+        anthropic_key_target(GATE.credential_service),
+    ] {
+        if let Err(error) = store.delete(&target) {
+            kept.push(format!("{error:#}"));
+        }
+    }
     for launch in fs::read_dir(root)? {
         let launch = launch?.path();
         if launch.file_name() == Some(MARKER.as_ref()) {
@@ -427,6 +466,20 @@ mod tests {
         }
     }
 
+    /// Refuses to delete one target, as a locked Credential Manager entry would.
+    struct Refusing(BTreeSet<String>, &'static str);
+
+    impl Credentials for Refusing {
+        fn delete(&mut self, target: &str) -> Result<()> {
+            ensure!(
+                target != self.1,
+                "couldn't delete {target} from Credential Manager"
+            );
+            self.0.remove(target);
+            Ok(())
+        }
+    }
+
     const REFUSAL: &str = "a gate tool runs only as the gate identity: cargo run --release \
                            --package xtask --features kumochi-protocol/gate-identity -- <task>";
 
@@ -464,6 +517,14 @@ mod tests {
                 ("LOCALAPPDATA".as_ref(), Some(local.as_os_str())),
             ]
         );
+        folders
+            .choose_model("AnthropicKey", "claude-haiku-5-5")
+            .expect("a default model");
+        assert_eq!(
+            fs::read_to_string(dir.join("roaming/Kumochi Gate/config.toml")).expect("settings"),
+            "default_model = { connection = \"AnthropicKey\", model = \"claude-haiku-5-5\", \
+             effort = \"Low\" }\nonboarded = true\n\n[claude_code]\nenabled = false\n"
+        );
         folders.owe_onboarding().expect("owing onboarding");
         assert_eq!(
             fs::read_to_string(dir.join("roaming/Kumochi Gate/config.toml")).expect("settings"),
@@ -498,12 +559,19 @@ mod tests {
             "Kumochi Dev/gen/host/07070707070707070707070707070707/0",
             "Kumochi/gen/host/07070707070707070707070707070707/0",
             "Kumochi Gate/gen/host/07070707070707070707070707070707/64",
+            "anthropic-key-staged.Kumochi Dev",
+            "anthropic-key.Kumochi",
         ];
         let mut store = Fake(
-            [format!("{ours}/0"), format!("{ours}/63")]
-                .into_iter()
-                .chain(others.map(str::to_owned))
-                .collect(),
+            [
+                format!("{ours}/0"),
+                format!("{ours}/63"),
+                "anthropic-key-staged.Kumochi Gate".to_owned(),
+                "anthropic-key.Kumochi Gate".to_owned(),
+            ]
+            .into_iter()
+            .chain(others.map(str::to_owned))
+            .collect(),
         );
         remove_entries(&root, &mut store, Keep::Nothing).expect("cleaned up");
         assert_eq!(store.0, others.map(str::to_owned).into());
@@ -511,11 +579,38 @@ mod tests {
     }
 
     #[test]
+    fn a_failed_staging_delete_still_deletes_the_saved_key_and_names_what_is_left() {
+        let root = scratch::dir("gate-refused-delete");
+        Folders::create(&root.join("app")).expect("a launch that stored nothing");
+        let staged = "anthropic-key-staged.Kumochi Gate";
+        let mut store = Refusing(
+            [staged.to_owned(), "anthropic-key.Kumochi Gate".to_owned()].into(),
+            staged,
+        );
+        let error = remove_entries(&root, &mut store, Keep::Nothing).expect_err("one is left");
+        assert_eq!(store.0, [staged.to_owned()].into());
+        assert_eq!(
+            format!("{error:#}"),
+            "kept for a manual cleanup: couldn't delete anthropic-key-staged.Kumochi Gate from \
+             Credential Manager"
+        );
+        assert!(
+            root.is_dir(),
+            "the root stays, so the next run deletes what is left"
+        );
+    }
+
+    #[test]
     fn a_failed_run_deletes_its_entries_but_keeps_its_folders() {
         let root = scratch::dir("gate-failed");
         authority(&root.join("app"), &[[0x07; 16]]);
-        let mut store =
-            Fake(["Kumochi Gate/gen/host/07070707070707070707070707070707/0".to_owned()].into());
+        let mut store = Fake(
+            [
+                "Kumochi Gate/gen/host/07070707070707070707070707070707/0".to_owned(),
+                "anthropic-key-staged.Kumochi Gate".to_owned(),
+            ]
+            .into(),
+        );
         remove_entries(&root, &mut store, Keep::Folders).expect("entries deleted");
         assert_eq!(store.0, BTreeSet::new());
         assert!(

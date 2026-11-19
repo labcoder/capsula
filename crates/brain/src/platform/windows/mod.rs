@@ -50,7 +50,7 @@ pub use pipe::{
 #[cfg(test)]
 pub(crate) use pipe::{PipeClient, test_pair};
 pub use policy::{managed_presence, system_env};
-pub use process::launch_detached;
+pub use process::{detached_command, launch_detached};
 #[cfg(test)]
 pub(super) use protected::final_path_matches;
 #[cfg(test)]

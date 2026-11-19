@@ -2,7 +2,9 @@
 
 use std::sync::atomic::{AtomicU32, Ordering};
 
-use kumochi_protocol::constants::LIVE_BUDGET_ENV;
+use kumochi_protocol::constants::{
+    LIVE_BUDGET_ENV, LIVE_KEY_CATALOG_BUDGET_ENV, LIVE_KEY_MESSAGES_BUDGET_ENV,
+};
 
 /// The model requests this process may still send.
 #[derive(Debug, Default)]
@@ -51,6 +53,23 @@ impl Budget {
                 (used < limit).then_some(used + 1)
             })
             .is_ok()
+    }
+}
+
+/// The key budgets a shell this brain starts must carry, given which variables this brain has.
+/// While this debug brain has either key budget, both are zero for the shell, so a brain that
+/// shell starts gets no slice of its own; zero, not removal, since an absent variable means no cap.
+/// Anything else, and every release brain, hands on nothing.
+#[must_use]
+pub fn handed_on(present: impl Fn(&str) -> bool) -> &'static [(&'static str, &'static str)] {
+    const SPENT: [(&str, &str); 2] = [
+        (LIVE_KEY_CATALOG_BUDGET_ENV, "0"),
+        (LIVE_KEY_MESSAGES_BUDGET_ENV, "0"),
+    ];
+    if cfg!(debug_assertions) && SPENT.iter().any(|&(name, _)| present(name)) {
+        &SPENT
+    } else {
+        &[]
     }
 }
 
