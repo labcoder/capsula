@@ -96,7 +96,9 @@ authority is ignored. The account hears the tag before the route change, and pas
 the run that sent the refused post, or any run still current on that key, including one compacting
 its context inline, ends with the rejected-key notice rather than as unavailable, whichever of the
 tag and the post's own 401 reaches it first. A run on another connection, or on the key under a
-newer tag, keeps its own outcome. A title or compaction job shows nothing, but the row still
+newer tag, keeps its own outcome. A Check whose catalog read is refused retires the key the same
+way and passes its tag on first too, so a run still current on the key ends with the rejected-key
+notice whichever refusal the account handles first; asks after it are refused as unavailable. A title or compaction job shows nothing, but the row still
 changes. Between the fence closing and the account handling the tag, the row can still show Ready
 for a moment; no post can go out in that window, because the fence is already closed. With spoken replies the row can change before the
 notice, which waits for the reply's audio to end.

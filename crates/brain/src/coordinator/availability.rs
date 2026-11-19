@@ -149,7 +149,7 @@ impl PictureRoutes {
     }
 }
 
-/// The tag of the Anthropic key a Messages post found refused.
+/// The tag of the Anthropic key a Messages post or a Check found refused.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RefusedKey(pub(crate) ConnectionTag);
 
@@ -361,8 +361,8 @@ impl Coordinator {
         }
     }
 
-    /// A Messages post found the Anthropic key under `tag` refused. A current run bound to that
-    /// key was sending on it, so it ends with the key's rejection before the route change that
+    /// A Messages post or a Check found the Anthropic key under `tag` refused. A current run bound
+    /// to that key was sending on it, so it ends with the key's rejection before the route change that
     /// follows would end it as unavailable; any other run keeps its own outcome.
     pub(super) fn key_refused(&mut self, tag: ConnectionTag, effects: &mut Vec<Effect>) {
         let refused = Route {

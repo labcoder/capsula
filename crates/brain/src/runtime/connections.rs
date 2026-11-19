@@ -168,6 +168,8 @@ pub(super) struct Connections {
     // the next conclusive Check.
     fresh: bool,
     unsent: bool,
+    /// The tag of the authority a refusal just retired, for the coordinator to hear first.
+    refused: Option<ConnectionTag>,
     read: Option<JoinHandle<()>>,
     loading: bool,
     /// A Remove is admitted but hasn't committed (design §5): every key op retries it.
@@ -201,6 +203,7 @@ impl Default for Connections {
             models: Vec::new(),
             fresh: false,
             unsent: false,
+            refused: None,
             read: None,
             loading: false,
             removing: None,
@@ -327,6 +330,10 @@ impl Connections {
             connection: ConnectionKind::AnthropicKey,
             models: self.models.iter().map(|model| model.info.clone()).collect(),
         })
+    }
+
+    pub(super) fn take_refused(&mut self) -> Option<ConnectionTag> {
+        self.refused.take()
     }
 
     fn advance(&mut self) -> u64 {
@@ -758,6 +765,11 @@ impl Accounts {
                     }
                     Err(CheckError::Rejected(reason)) => {
                         if self.connections.transport.is_some() {
+                            self.connections.refused = self
+                                .connections
+                                .verified
+                                .as_ref()
+                                .map(|verified| verified.tag);
                             self.connections.retire();
                             self.connections.key = None;
                             self.connections.models.clear();
@@ -792,6 +804,7 @@ impl Accounts {
                         read: None,
                     }
                 });
+                self.connections.refused = Some(tag);
                 self.connections.retire();
                 self.connections.models.clear();
                 // A Check already waiting on its load or its catalog read can't bring the key back.

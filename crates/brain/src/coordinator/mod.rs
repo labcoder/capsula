@@ -325,7 +325,8 @@ pub enum Input {
     ThreadOp(ThreadOp),
     /// Whether runs on a connection kind can be answered changed.
     Engines(kumochi_protocol::message::ConnectionKind, Availability),
-    /// A Messages post found the Anthropic key under this tag refused; its route change follows.
+    /// A Messages post or a Check found the Anthropic key under this tag refused; its route change
+    /// follows.
     KeyRefused(RefusedKey),
     /// A `CommitCall` finished.
     CallCommitted {

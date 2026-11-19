@@ -691,10 +691,6 @@ impl Brain {
     ) -> Result<(), Full> {
         let event = input.into();
         let read = matches!(event, Event::Read { .. });
-        let refused = match &event {
-            Event::Connection(ConnectionEvent::Refused { tag }) => Some(*tag),
-            _ => None,
-        };
         let sendable = self.account.sendable();
         let frames = self.account.handle(event);
         // The coordinator hears it before anything else, so a job's write is fenced at once.
@@ -711,8 +707,11 @@ impl Brain {
         self.availability_changed(link.as_deref_mut())
             .map_err(|_| Full)?;
         // The run sending on a refused key hears why before its route change ends it as unavailable.
-        if let Some(effects) =
-            refused.and_then(|tag| self.handle(CoreInput::KeyRefused(RefusedKey(tag))))
+        if let Some(effects) = self
+            .account
+            .connections
+            .take_refused()
+            .and_then(|tag| self.handle(CoreInput::KeyRefused(RefusedKey(tag))))
         {
             self.apply(effects, link.as_deref_mut()).map_err(|_| Full)?;
         }
