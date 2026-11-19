@@ -311,6 +311,10 @@ pub const LIVE_CHATGPT_TEXT_STAMPS_FILE: &str = "chatgpt-text.stamps";
 /// count allows none.
 pub const CLAUDE_QUESTIONS_ENV: &str = "KUMOCHI_CLAUDE_QUESTIONS";
 
+/// Dev builds only: presence denies issue filing and recovery before either can start a job.
+#[cfg(debug_assertions)]
+pub const LIVE_NO_FILING_ENV: &str = "KUMOCHI_LIVE_NO_FILING";
+
 /// Dev builds only: the brain's one-shot catalog provenance capture, which
 /// `cargo xtask live catalog-provenance` runs. A brain built without it exits 10.
 pub const CATALOG_PROVENANCE_ARG: &str = "--catalog-provenance";

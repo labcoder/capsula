@@ -328,7 +328,7 @@ impl Brain {
             settings_ops: VecDeque::new(),
             config_write: None,
             account,
-            filing: issues::Filing::default(),
+            filing: issues::Filing::new(),
             claude: claude::Claude::default(),
             #[cfg(test)]
             config_gate: None,
@@ -661,6 +661,8 @@ impl Brain {
         self.account.connections.stage_session(Some(self.epoch));
         self.account.github_session(Some(self.epoch));
         self.crashes.begin_session();
+        #[cfg(debug_assertions)]
+        self.filing.report_live_block();
         let (mut control_in, mut control_out) = tokio::io::split(control);
         let (mut data_in, mut data_out) = tokio::io::split(data);
         let (controls_tx, mut controls) = mpsc::channel(64);

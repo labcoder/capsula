@@ -43,6 +43,8 @@ pub(super) struct Filing {
     rearms: Vec<Rearm>,
     job: Option<Job>,
     replies: Vec<Reply>,
+    #[cfg(debug_assertions)]
+    live_block: FilingBlock,
 }
 
 struct Reply {
@@ -51,6 +53,26 @@ struct Reply {
     request: u64,
     draft: DraftId,
     forced: Option<IssueRefused>,
+}
+
+#[cfg(debug_assertions)]
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+enum FilingBlock {
+    #[default]
+    Off,
+    Armed,
+    Attempted,
+}
+
+#[cfg(debug_assertions)]
+impl FilingBlock {
+    fn from_flag(flag: Option<&std::ffi::OsStr>) -> Self {
+        if flag.is_some() {
+            Self::Armed
+        } else {
+            Self::Off
+        }
+    }
 }
 
 impl fmt::Debug for Filing {
@@ -117,6 +139,53 @@ impl fmt::Debug for Event {
 }
 
 impl Filing {
+    pub(super) fn new() -> Self {
+        Self {
+            #[cfg(debug_assertions)]
+            live_block: FilingBlock::from_flag(
+                std::env::var_os(kumochi_protocol::constants::LIVE_NO_FILING_ENV).as_deref(),
+            ),
+            ..Self::default()
+        }
+    }
+
+    #[cfg(debug_assertions)]
+    pub(super) fn report_live_block(&self) {
+        if self.live_block != FilingBlock::Off
+            && let Some(session) = self.session
+        {
+            tracing::info!(
+                build = kumochi_protocol::BUILD_ID,
+                pid = std::process::id(),
+                incarnation = session.incarnation.0,
+                issue_epoch = session.epoch,
+                attempted = self.live_block == FilingBlock::Attempted,
+                "live filing block armed"
+            );
+        }
+    }
+
+    #[cfg(debug_assertions)]
+    fn note_filing_attempt(&mut self) {
+        if self.live_block == FilingBlock::Armed {
+            self.live_block = FilingBlock::Attempted;
+            if let Some(session) = self.session {
+                tracing::warn!(
+                    build = kumochi_protocol::BUILD_ID,
+                    pid = std::process::id(),
+                    incarnation = session.incarnation.0,
+                    issue_epoch = session.epoch,
+                    "live filing attempt blocked"
+                );
+            }
+        }
+    }
+
+    #[cfg(all(test, debug_assertions))]
+    pub(super) fn set_live_block_for_test(&mut self, flag: Option<&std::ffi::OsStr>) {
+        self.live_block = FilingBlock::from_flag(flag);
+    }
+
     fn serial(&mut self) -> u64 {
         self.next = self
             .next
@@ -229,6 +298,16 @@ impl Brain {
         op: &IssueOp,
         epoch: Option<u64>,
     ) -> Option<Vec<Effect>> {
+        #[cfg(debug_assertions)]
+        if matches!(
+            op,
+            IssueOp::Consent {
+                decision: Decision::File | Decision::FileAnyway,
+                ..
+            } | IssueOp::CheckAgain { .. }
+        ) {
+            self.filing.note_filing_attempt();
+        }
         let draft = match op {
             IssueOp::Consent { draft, .. }
             | IssueOp::CheckAgain { draft }
@@ -273,6 +352,8 @@ impl Brain {
             _ => {}
         }
         let available = epoch == Some(self.epoch) && self.filing.job.is_none();
+        #[cfg(debug_assertions)]
+        let available = available && self.filing.live_block == FilingBlock::Off;
         let (write, start, forced) = match op {
             IssueOp::Consent {
                 draft,

@@ -429,3 +429,22 @@ purge clears their old copies, edited-away text included, as it does events'.
 The lookup that resolves Unknown is a heuristic: another client, or a second draft under the same
 account, can create a matching issue after the mark. Nothing here proves which request created
 an issue.
+
+## Dev acceptance filing block
+
+When the fresh Debug brain starts with `KUMOCHI_LIVE_NO_FILING` present in its own environment,
+it denies File and Check again before either can reserve a job, get an issue token or construct
+an HTTP client. This blocks filing-worker GETs as well as POSTs. The value is ignored, including
+empty or non-Unicode values; release has no flag. Don't put the flag in global settings or a
+child's environment.
+
+A matching blocked File still consumes the approval and saves a new revision, without changing
+the card's destination, content or stage. A blocked Check again leaves the lookup unchanged.
+Drafting, Rearm and Cancel are still local. Ordinary account verification and repository-list
+refresh aren't filing traffic and aren't blocked.
+
+For a separately authorized acceptance session, verify the exact executable and the armed
+indication's build, PID, incarnation and issue epoch before the question. The first attempted
+File or Check again latches a content-free indication, even when refused before admission.
+An attempt or a replaced connection fails the check. The indication contains no card content
+or authorization data, and an armed flag does not authorize a live question.
