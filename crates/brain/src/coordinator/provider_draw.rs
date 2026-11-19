@@ -195,7 +195,7 @@ impl Coordinator {
             })
     }
 
-    pub(super) fn provider_delta(
+    pub(super) fn provider_delta<const REPLAY: bool>(
         &mut self,
         run: RunId,
         call: &CallId,
@@ -217,9 +217,15 @@ impl Coordinator {
             let next = {
                 let current = self.current(run)?;
                 let p = current.provider_draw(call)?;
-                p.tokenizer
-                    .next(&mut rest)
-                    .map(|record| record.map(|record| (record.index, record.bytes.to_vec())))
+                p.tokenizer.next(&mut rest).map(|record| {
+                    record.map(|record| {
+                        #[cfg(all(windows, debug_assertions))]
+                        if REPLAY {
+                            mark_close(run, record.index, record.bytes.len());
+                        }
+                        (record.index, record.bytes.to_vec())
+                    })
+                })
             };
             let (index, bytes) = match next {
                 Ok(Some(record)) => record,
@@ -544,5 +550,23 @@ impl Coordinator {
                 }
             }
         }
+    }
+}
+
+#[cfg(all(windows, debug_assertions))]
+fn mark_close(run: RunId, index: u32, bytes: usize) {
+    use crate::connections::model::text_observation::{DrawStage, Observation, REPLAY_STEPS};
+
+    if let Some(observation) = Observation::drawing()
+        && let Some(record) = usize::try_from(index)
+            .ok()
+            .and_then(|index| index.checked_sub(1))
+        && record < REPLAY_STEPS.len()
+    {
+        observation.mark_draw(
+            run,
+            crate::platform::qpc_now(),
+            DrawStage::Close { record, bytes },
+        );
     }
 }

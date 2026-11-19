@@ -29,6 +29,71 @@ const SECOND: &str =
 const THIRD: &str =
     r#",{"step":{"id":"s3","put":[{"shape":{"id":"c","kind":"rect","box":[40,0,10,10]}}]}}"#;
 
+#[cfg(all(windows, debug_assertions))]
+#[tokio::test]
+async fn offline_sse_replay_commits_the_recorded_step_and_the_three_paced_steps() {
+    use crate::connections::model::text_observation::{Observation, REPLAY_STEPS};
+    use crate::engines::responses::replay::{MODEL, Replay};
+    use crate::runtime::Selected;
+    use kumochi_protocol::constants::CONFIG_FILE;
+
+    let scratch = Scratch::new("offline-draw-replay");
+    std::fs::create_dir(scratch.dir()).unwrap();
+    std::fs::write(
+        scratch.dir().join(CONFIG_FILE),
+        format!("default_model = {{ model = \"{MODEL}\", effort = \"Low\", connection = \"ChatGpt\" }}\n"),
+    ).unwrap();
+    let replay = Replay::new(&Observation::draw_fixture()).unwrap();
+    let mut brain = test_support::brain_on(
+        &scratch,
+        Selected::DrawReplay(Box::new(replay)),
+        test_support::accounts(&scratch),
+    );
+    let (out, _controls) = mpsc::channel(64);
+    let queue = RefCell::new(DataQueue::new(window()));
+    let ready = Notify::new();
+    let mut tap = Tap::from_env();
+    let mut link = Link::new(&out, &queue, &ready, &mut tap);
+    link.recovery = brain.describe(&mut link).expect("initial membership");
+    let run = start(&mut brain, &mut link).await.run;
+    let commits = timeout(WAIT, async {
+        let mut commits = Vec::new();
+        while commits.len() < REPLAY_STEPS.len() {
+            let input = tokio::select! {
+                input = brain.inputs.recv() => input,
+                input = brain.engine_events.recv() => input,
+            }
+            .expect("the real brain's input pumps are live");
+            apply(&mut brain, &mut link, input);
+            for frame in frames(&queue) {
+                if let DataToShell::SceneStepCommit {
+                    run: owner,
+                    scene,
+                    index,
+                    step,
+                } = frame
+                {
+                    assert_eq!(owner, run);
+                    commits.push((scene, index, step.id.as_str().to_owned()));
+                }
+            }
+        }
+        commits
+    })
+    .await
+    .expect("offline Responses replay commits within the fixture deadline");
+    let scene = commits[0].0;
+    assert_eq!(
+        commits,
+        REPLAY_STEPS
+            .into_iter()
+            .zip(0..)
+            .map(|(id, index)| (scene, index, id.to_owned()))
+            .collect::<Vec<_>>()
+    );
+    brain.close().await;
+}
+
 fn brain(scratch: &Scratch) -> Brain {
     let mut brain = test_support::brain(scratch, "60000 text never");
     let slug = ModelSlug::new("offline-model").expect("model slug");

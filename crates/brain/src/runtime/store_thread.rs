@@ -555,6 +555,23 @@ fn serve_op(store: &mut Store, purger: &mut Purger, acks: &UnboundedSender<Input
                 .reconnect()
                 .and_then(|()| store.drawing_write(&write))
                 .map_err(|_| ());
+            #[cfg(all(windows, debug_assertions))]
+            if let (
+                Ok(crate::drawing::Reply::Step(scene)),
+                crate::drawing::Write::Step { run, step, .. },
+            ) = (&reply, &write)
+                && let Some(observation) =
+                    crate::connections::model::text_observation::Observation::drawing()
+            {
+                observation.mark_draw(
+                    *run,
+                    crate::platform::qpc_now(),
+                    crate::connections::model::text_observation::DrawStage::Durable {
+                        scene: *scene,
+                        step: step.id.as_str(),
+                    },
+                );
+            }
             if reply.is_err() {
                 tracing::warn!("a drawing store operation failed");
             }

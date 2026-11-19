@@ -6,6 +6,8 @@
 mod engine;
 #[cfg(test)]
 mod engine_tests;
+#[cfg(all(windows, debug_assertions))]
+pub(crate) mod replay;
 #[cfg(test)]
 mod tests;
 

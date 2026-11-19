@@ -12,6 +12,9 @@ use kumochi_protocol::constants::{
 };
 use kumochi_protocol::message::Effort;
 
+mod drawing;
+pub(crate) use drawing::{DrawStage, REPLAY_CALL, REPLAY_STEPS};
+
 use crate::connections::catalog::DEFAULT_SLUG;
 use crate::connections::http_client::Endpoint;
 use crate::coordinator::SendKey;
@@ -26,6 +29,7 @@ pub(crate) struct Observation {
     ceiling: u32,
     invalid: AtomicBool,
     counts: Mutex<Counts>,
+    draw: Option<Mutex<drawing::DrawReceipt>>,
 }
 
 struct Counts {
@@ -41,7 +45,10 @@ fn opening(
     budget: &str,
     exe: &Path,
 ) -> Option<(u32, PathBuf)> {
-    if identity != ProductIdentity::DEV || opt_in != "1" {
+    if !matches!(
+        (identity, opt_in),
+        (ProductIdentity::DEV, "1") | (ProductIdentity::GATE, "draw")
+    ) {
         return None;
     }
     let ceiling = budget.parse().ok()?;
@@ -49,6 +56,7 @@ fn opening(
     let run = bin.parent()?;
     let number = run.file_name()?.to_str()?;
     if !(1..=60).contains(&ceiling)
+        || (opt_in == "draw" && ceiling != 1)
         || exe.file_name()? != BRAIN_EXE
         || bin.file_name()? != LIVE_RUN_BIN_DIR
         || !number.bytes().all(|byte| byte.is_ascii_digit())
@@ -66,21 +74,49 @@ impl Observation {
     }
 
     pub(crate) fn active() -> Option<&'static Arc<Self>> {
+        Self::current().filter(|record| record.draw.is_none())
+    }
+
+    pub(crate) fn current() -> Option<&'static Arc<Self>> {
         OBSERVATION.get().and_then(Option::as_ref)
+    }
+
+    pub(crate) fn drawing() -> Option<&'static Arc<Self>> {
+        Self::current().filter(|record| record.draw.is_some())
     }
 
     fn open(exe: &Path) -> Option<Arc<Self>> {
         let opt_in = std::env::var(LIVE_CHATGPT_TEXT_ENV).ok()?;
         let budget = std::env::var(LIVE_BUDGET_ENV).ok()?;
         let (ceiling, path) = opening(ProductIdentity::ACTIVE, &opt_in, &budget, exe)?;
-        Self::create(&path, ceiling)
+        Self::start_mode(
+            File::create_new(&path).ok()?,
+            ceiling,
+            (opt_in == "draw").then(drawing::DrawReceipt::default),
+        )
     }
 
+    #[cfg(test)]
     fn create(path: &Path, ceiling: u32) -> Option<Arc<Self>> {
         Self::start(File::create_new(path).ok()?, ceiling)
     }
 
-    fn start(mut out: impl Write + Send + 'static, ceiling: u32) -> Option<Arc<Self>> {
+    #[cfg(test)]
+    fn start(out: impl Write + Send + 'static, ceiling: u32) -> Option<Arc<Self>> {
+        Self::start_mode(out, ceiling, None)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn draw_fixture() -> Arc<Self> {
+        Self::start_mode(io::sink(), 1, Some(drawing::DrawReceipt::default()))
+            .expect("a fixture can open an in-memory drawing receipt")
+    }
+
+    fn start_mode(
+        mut out: impl Write + Send + 'static,
+        ceiling: u32,
+        draw: Option<drawing::DrawReceipt>,
+    ) -> Option<Arc<Self>> {
         let pid = std::process::id();
         writeln!(out, "ready {pid} {ceiling} {}", qpc_now()?).ok()?;
         Some(Arc::new(Self {
@@ -93,6 +129,7 @@ impl Observation {
                 aux: 0,
                 rows: Vec::with_capacity(usize::try_from(3 * ceiling + MAX_AUX).ok()?),
             }),
+            draw: draw.map(Mutex::new),
         }))
     }
 
@@ -126,6 +163,10 @@ impl Observation {
             .iter()
             .try_for_each(|row| row.write(pid, &mut out));
         if result.is_ok()
+            && self.draw.as_ref().is_none_or(|draw| {
+                draw.lock()
+                    .is_ok_and(|draw| draw.write(pid, &mut out).is_ok())
+            })
             && !self.invalid.load(Ordering::Acquire)
             && let Some(at) = qpc_now()
         {
@@ -380,6 +421,19 @@ mod tests {
     use super::{Event, Observation, opening};
     use crate::connections::http_client::Endpoint;
     use crate::test_support::Scratch;
+
+    #[test]
+    fn drawing_observation_admits_only_the_one_gate_fixture() {
+        let run = Path::new(LIVE_RUNS_DIR).join("42");
+        let exe = run.join(LIVE_RUN_BIN_DIR).join(BRAIN_EXE);
+        assert_eq!(
+            opening(ProductIdentity::GATE, "draw", "1", &exe),
+            Some((1, run.join(LIVE_CHATGPT_TEXT_STAMPS_FILE)))
+        );
+        assert_eq!(opening(ProductIdentity::DEV, "draw", "1", &exe), None);
+        assert_eq!(opening(ProductIdentity::GATE, "1", "1", &exe), None);
+        assert_eq!(opening(ProductIdentity::GATE, "draw", "2", &exe), None);
+    }
 
     #[test]
     fn observation_opening_checks_the_opt_in_budget_and_copy_layout() {

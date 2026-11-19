@@ -50,6 +50,23 @@ pub struct Ready {
 }
 
 impl Ready {
+    #[cfg(all(windows, debug_assertions))]
+    pub(crate) fn draw_replay() -> Self {
+        use kumochi_protocol::message::{EffortSet, ModelName, ModelSlug};
+
+        Self {
+            connection: ConnectionTag(0),
+            models: vec![ModelInfo {
+                slug: ModelSlug::new(crate::engines::responses::replay::MODEL)
+                    .expect("the replay model has a valid slug"),
+                display_name: ModelName::new("Drawing replay")
+                    .expect("the replay model has a valid name"),
+                supported_efforts: EffortSet::new([Effort::Low]),
+            }],
+            trusted_draw: false,
+        }
+    }
+
     /// The dev fixture is selected: it answers every run, with no account or catalog.
     #[cfg(any(test, debug_assertions))]
     pub(crate) fn fixture() -> Self {

@@ -139,6 +139,8 @@ pub(crate) enum Selected {
     /// The dev fixture answers every run, with no account; a release build can't pick it.
     #[cfg(any(test, debug_assertions))]
     Fixture(Box<dyn Engine>),
+    #[cfg(all(windows, debug_assertions))]
+    DrawReplay(Box<dyn Engine>),
     /// The account's engine answers, so runs need a usable account. Its rounds ask for the
     /// bearer on `asks`.
     Account {
@@ -157,7 +159,7 @@ pub(crate) struct Brain {
     engine: Box<dyn Engine>,
     /// The dev fixture was picked, so runs never wait on the account.
     #[cfg(any(test, debug_assertions))]
-    fixture: bool,
+    fixture: Option<Ready>,
     /// Store replies, never paused.
     inputs_tx: mpsc::UnboundedSender<Input>,
     inputs: mpsc::UnboundedReceiver<Input>,
@@ -275,8 +277,16 @@ impl Brain {
         account.connections.configure_transport();
         #[cfg(any(test, debug_assertions))]
         let (engine, access, fixture) = match engine {
-            Selected::Fixture(engine) => (engine, mpsc::unbounded_channel().1, true),
-            Selected::Account { engine, asks } => (engine, asks, false),
+            Selected::Fixture(engine) => {
+                (engine, mpsc::unbounded_channel().1, Some(Ready::fixture()))
+            }
+            #[cfg(all(windows, debug_assertions))]
+            Selected::DrawReplay(engine) => (
+                engine,
+                mpsc::unbounded_channel().1,
+                Some(Ready::draw_replay()),
+            ),
+            Selected::Account { engine, asks } => (engine, asks, None),
         };
         #[cfg(not(any(test, debug_assertions)))]
         let Selected::Account {
@@ -370,11 +380,10 @@ impl Brain {
     /// nothing.
     fn availability_changed(&mut self, link: Option<&mut Link<'_, '_>>) -> Result<(), Ended> {
         #[cfg(any(test, debug_assertions))]
-        let now = if self.fixture {
-            Availability::Ready(Ready::fixture())
-        } else {
-            self.account.availability()
-        };
+        let now = self
+            .fixture
+            .clone()
+            .map_or_else(|| self.account.availability(), Availability::Ready);
         #[cfg(not(any(test, debug_assertions)))]
         let now = self.account.availability();
         let input = Input::Engines(kumochi_protocol::message::ConnectionKind::ChatGpt, now);
@@ -1702,6 +1711,26 @@ impl<'a, 't> Link<'a, 't> {
             self.queue.borrow_mut().push_review(frame)?;
         } else {
             self.queue.borrow_mut().push(owner, frame);
+        }
+        #[cfg(all(windows, debug_assertions))]
+        if let DataToShell::SceneStepCommit {
+            run,
+            scene,
+            index,
+            step,
+        } = message
+            && let Some(observation) =
+                crate::connections::model::text_observation::Observation::drawing()
+        {
+            observation.mark_draw(
+                *run,
+                crate::platform::qpc_now(),
+                crate::connections::model::text_observation::DrawStage::Pipe {
+                    scene: *scene,
+                    index: *index,
+                    step: step.id.as_str(),
+                },
+            );
         }
         self.ready.notify_one();
         Ok(())

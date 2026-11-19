@@ -133,7 +133,11 @@ impl Coordinator {
                     .iter()
                     .any(|open| open.call == call && open.provider.is_some()) =>
             {
-                self.provider_delta(run, &call, &delta, effects)?;
+                self.provider_delta::<false>(run, &call, &delta, effects)?;
+            }
+            #[cfg(all(windows, debug_assertions))]
+            TurnEvent::ReplayDrawDelta { call, delta } => {
+                self.provider_delta::<true>(run, &call, &delta, effects)?;
             }
             TurnEvent::ToolArgsDelta { call, .. } if current.tools.takes(&call) => {}
             TurnEvent::ToolArgsDelta { call, delta } => {
