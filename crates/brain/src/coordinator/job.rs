@@ -108,7 +108,7 @@ impl fmt::Debug for JobOutput {
 /// The job in the slot.
 #[derive(Debug)]
 pub(super) struct Job {
-    _control: crate::recall::control::CancelOnDrop,
+    control: crate::recall::control::CancelOnDrop,
     pub(super) key: JobKey,
     kind: JobKind,
     /// The run whose end started it.
@@ -139,6 +139,33 @@ impl Job {
 }
 
 impl Coordinator {
+    pub(crate) fn claude_recheck_control(
+        &self,
+        key: SendKey,
+    ) -> Option<crate::recall::control::Control> {
+        match key {
+            SendKey::Build(key) => {
+                let run = self.current.as_ref()?;
+                let build = run.build.as_ref()?;
+                (build.key() == key
+                    && build.admitted()
+                    && run.started()
+                    && !run.finishing
+                    && run
+                        .route
+                        .is_some_and(|route| route.kind == ConnectionKind::ClaudeCode))
+                .then(|| build.control.0.clone())
+            }
+            SendKey::Job(key) => {
+                let job = self.job.as_ref()?;
+                (job.key == key
+                    && matches!(job.stage, Stage::Sending { .. })
+                    && job.route.kind == ConnectionKind::ClaudeCode)
+                    .then(|| job.control.0.clone())
+            }
+        }
+    }
+
     pub(super) fn key_job_route(&self, key: JobKey, request: &RunRequest) -> Option<Route> {
         self.job
             .as_ref()
@@ -199,7 +226,7 @@ impl Coordinator {
         let control =
             crate::recall::control::Control::new(std::time::Instant::now() + super::WALL_CLOCK);
         self.job = Some(Job {
-            _control: crate::recall::control::CancelOnDrop(control.clone()),
+            control: crate::recall::control::CancelOnDrop(control.clone()),
             key,
             kind,
             run,

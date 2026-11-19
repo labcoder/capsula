@@ -431,6 +431,7 @@ impl Brain {
     /// complete quit; otherwise the scenes, or a thread whose delete didn't commit, come back at
     /// the next start, as after a crash.
     pub(crate) async fn quit(mut self, deadline: Instant) -> Quit {
+        self.claude.stop();
         self.offline(Input::ShellLost);
         self.voice_quit();
         self.pump_settings_offline();
@@ -727,6 +728,9 @@ impl Brain {
                     () = &mut grace => break,
                 }
             }
+        }
+        if quit.get().is_some() {
+            self.claude.stop();
         }
         // The reader may have forwarded controls in the same poll that saw the pipe end.
         while let Ok((message, len)) = controls.try_recv() {

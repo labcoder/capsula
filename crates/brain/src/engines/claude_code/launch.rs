@@ -174,6 +174,7 @@ pub(crate) enum Note {
     /// A seeded question ended with a provider failure. Only confirmed sign-out answers.
     ProviderFailed {
         id: LaunchId,
+        key: SendKey,
         until: Instant,
         signed_out: oneshot::Sender<()>,
     },
@@ -220,12 +221,13 @@ impl Report {
         self.send(outcome);
     }
 
-    fn recheck(mut self, until: Instant) -> oneshot::Receiver<()> {
+    fn recheck(mut self, key: SendKey, until: Instant) -> oneshot::Receiver<()> {
         let (signed_out, reply) = oneshot::channel();
         if let Some((id, notes)) = self.0.take() {
             notes
                 .send(Note::ProviderFailed {
                     id,
+                    key,
                     until,
                     signed_out,
                 })
@@ -600,7 +602,7 @@ impl Question<'_> {
         match read {
             Ok((usage, finish)) => {
                 writer.end();
-                self.finish_answer(usage, finish, attempt, report, until)
+                self.finish_answer(usage, finish, attempt, report, (request.key, until))
                     .await
             }
             Err(outcome) => {
@@ -618,7 +620,7 @@ impl Question<'_> {
         finish: Finish,
         attempt: Attempt,
         report: Report,
-        until: Instant,
+        (key, until): (SendKey, Instant),
     ) -> Option<Finish> {
         if let Some(usage) = usage {
             self.events.send(TurnEvent::Usage(usage)).await.ok()?;
@@ -626,7 +628,7 @@ impl Question<'_> {
         if matches!(finish, Finish::Failed(EngineFailure::Provider)) {
             drop(attempt);
             if matches!(
-                tokio::time::timeout_at(until.into(), report.recheck(until)).await,
+                tokio::time::timeout_at(until.into(), report.recheck(key, until)).await,
                 Ok(Ok(()))
             ) {
                 return Some(claude(ErrorKey::ClaudeCodeSignedOut));

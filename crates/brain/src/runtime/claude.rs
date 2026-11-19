@@ -20,7 +20,7 @@ use crate::connections::model::budget::Budget;
 use crate::context::ConnectionTag;
 use crate::coordinator::{Availability, Input, Ready, SendKey, StoreOp, model_unavailable};
 use crate::engines::claude_code::install::FindError;
-use crate::engines::claude_code::lane::{self, Done, Failure, Lane, Outcome, Work};
+use crate::engines::claude_code::lane::{self, Done, Failure, Lane, Outcome, Recheck, Work};
 use crate::engines::claude_code::launch::{
     self, Attempt, ClaudeQuestion, Clock, LaunchSnapshot, Note, Offer, Refresh, Report, WARM,
 };
@@ -29,6 +29,7 @@ use crate::engines::claude_code::supervisor::{
     self, Control, Launch, LaunchRefused, MAX_LAUNCH, Question,
 };
 use crate::engines::{EngineFailure, RunRequest};
+use crate::recall::control::Control as Lifetime;
 
 /// Where Claude Code's sign-in may be kept, which owner call 1 decided.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -109,7 +110,7 @@ struct Epoch {
 
 #[derive(Debug)]
 struct StatusRecheck {
-    until: Instant,
+    guard: Recheck,
     signed_out: oneshot::Sender<()>,
 }
 
@@ -800,14 +801,6 @@ impl Claude {
         self.prune();
         match note {
             Note::Ended { id, outcome } => self.ended(id, outcome),
-            Note::ProviderFailed {
-                id,
-                until,
-                signed_out,
-            } => {
-                self.recheck_failed(id, StatusRecheck { until, signed_out });
-                false
-            }
             Note::Analytics { id, on } => {
                 let current = self.launches.iter().any(|held| {
                     held.id == id && !held.replaced && held.generation == self.generation
@@ -825,11 +818,17 @@ impl Claude {
                 false
             }
             // Only the brain can authorize; dropping the reply refuses the launch.
-            Note::Bind(_) => false,
+            Note::Bind(_) | Note::ProviderFailed { .. } => false,
         }
     }
 
-    fn recheck_failed(&mut self, id: LaunchId, recheck: StatusRecheck) {
+    fn recheck_failed(
+        &mut self,
+        id: LaunchId,
+        lifetime: Option<Lifetime>,
+        signed_out: oneshot::Sender<()>,
+    ) {
+        self.prune();
         let Some(held) = self
             .launches
             .iter_mut()
@@ -838,10 +837,17 @@ impl Claude {
             return;
         };
         held.due = false;
+        let Some(control) = lifetime else {
+            return;
+        };
+        let guard = Recheck {
+            control,
+            clock: self.clock.clone(),
+        };
         if held.replaced
             || held.generation != self.generation
-            || recheck.signed_out.is_closed()
-            || self.clock.now() >= recheck.until
+            || signed_out.is_closed()
+            || guard.check().is_err()
             || self.out.is_some()
             || self.full
             || self.admitted().is_none()
@@ -851,10 +857,10 @@ impl Claude {
         if self
             .lane
             .as_ref()
-            .is_some_and(|lane| lane.submit(self.generation, Work::Status))
+            .is_some_and(|lane| lane.recheck(self.generation, guard.clone()))
         {
             self.out = Some(Work::Status);
-            self.recheck = Some(recheck);
+            self.recheck = Some(StatusRecheck { guard, signed_out });
         }
     }
 
@@ -871,7 +877,7 @@ impl Claude {
             && self
                 .admitted()
                 .is_some_and(|(current, _)| current == version)
-            && self.clock.now() < recheck.until
+            && recheck.guard.check().is_ok()
             && recheck.signed_out.send(()).is_ok()
         {
             self.view = ClaudeCodeView::SignedOut { version };
@@ -1031,6 +1037,12 @@ impl Claude {
             None => true,
         }
     }
+
+    pub(super) fn stop(&mut self) {
+        if let Some(lane) = &mut self.lane {
+            lane.stop();
+        }
+    }
 }
 
 /// Why a full lane queue refused something: it drains by itself, so Retry.
@@ -1115,15 +1127,25 @@ impl Brain {
         wake: Wake,
         mut link: Option<&mut Link<'_, '_>>,
     ) -> Result<(), Full> {
-        let wake = match wake {
+        let changed = match wake {
             Wake::Call(call) => return self.mcp_call(call, link),
             Wake::Note(Note::Bind(bind)) => {
                 self.mcp_bind(bind);
                 return Ok(());
             }
-            wake => wake,
+            Wake::Note(Note::ProviderFailed {
+                id,
+                key,
+                until,
+                signed_out,
+            }) => {
+                let lifetime = self.coordinator.claude_recheck_control(key);
+                self.claude
+                    .recheck_failed(id, lifetime.map(|l| l.until(until)), signed_out);
+                false
+            }
+            wake => self.claude.wake(wake),
         };
-        let changed = self.claude.wake(wake);
         self.claude_reported(link.as_deref_mut())
             .map_err(|_| Full)?;
         self.repair_default(link.as_deref_mut())?;

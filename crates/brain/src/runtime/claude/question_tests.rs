@@ -234,6 +234,17 @@ impl Rig {
     }
 
     fn wake(&mut self, wake: Wake) {
+        if let Wake::Note(Note::ProviderFailed {
+            id,
+            until,
+            signed_out,
+            ..
+        }) = wake
+        {
+            self.claude
+                .recheck_failed(id, Some(Lifetime::new(until)), signed_out);
+            return;
+        }
         if let Wake::Note(Note::Bind(bind)) = wake {
             self.binds.push(bind.launch);
             bind.reply.send(Some(bind.until)).expect("the round waits");
@@ -474,6 +485,71 @@ fn provider_failure() -> Script {
         .user
         .push(json!({"type": "result", "subtype": "provider_error", "is_error": true}));
     script
+}
+
+async fn provider_failed(rig: &mut Rig) -> Note {
+    timeout(WAIT, async {
+        loop {
+            let note = rig.claude.notes.1.recv().await.unwrap();
+            if matches!(note, Note::ProviderFailed { .. }) {
+                return note;
+            }
+            rig.wake(Wake::Note(note));
+        }
+    })
+    .await
+    .unwrap()
+}
+
+#[tokio::test]
+async fn a_recheck_that_expires_in_preflight_never_starts_status() {
+    let armed = Arc::new(AtomicBool::new(false));
+    let hold = Arc::clone(&armed);
+    let (reached, mut waiting) = mpsc::unbounded_channel();
+    let (release, blocked) = std::sync::mpsc::channel();
+    let mut rig = Rig::with(
+        "question-recheck-no-late-spawn",
+        &provider_failure(),
+        |host| {
+            let managed = std::mem::replace(
+                &mut host.managed,
+                Box::new(|| unreachable!("replaced below")),
+            );
+            host.managed = Box::new(move || {
+                if hold.swap(false, Ordering::SeqCst) {
+                    reached.send(()).unwrap();
+                    blocked.recv_timeout(WAIT).unwrap();
+                }
+                managed()
+            });
+        },
+    )
+    .await;
+    let question = rig.claude.take(&rig.snapshot()).expect("taken");
+    let mut played = play(&question);
+    let lease = played.lease();
+    rig.drive(played.asked(lease)).await;
+    let failure = provider_failed(&mut rig).await;
+    armed.store(true, Ordering::SeqCst);
+    rig.wake(Wake::Note(failure));
+    assert_eq!(timeout(WAIT, waiting.recv()).await.unwrap(), Some(()));
+    rig.at(MAX_LAUNCH);
+    release.send(()).unwrap();
+    rig.settle().await;
+    assert_eq!(
+        rig.drive(played.events()).await,
+        [TurnEvent::Finished(Finish::Failed(EngineFailure::Provider))]
+    );
+    assert_eq!(
+        rig.base
+            .calls()
+            .iter()
+            .filter(|call| *call == "auth status --json")
+            .count(),
+        1,
+        "only discovery started status"
+    );
+    rig.close().await;
 }
 
 #[tokio::test]
