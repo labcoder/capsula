@@ -259,6 +259,23 @@ async fn routed_key_rounds_continue_once_and_replay_only_under_the_verified_tag(
 async fn a_title_takes_the_last_attempt_and_its_compaction_is_refused_unsent() {
     const ALLOWED: u32 = 17;
     let scratch = Scratch::new("offline-key-allowance-jobs");
+    let (task, run) = {
+        let mut store = Store::open(&scratch.db()).expect("store");
+        store.recover().expect("recover");
+        let (high_thread, high_run) = store.high_water().expect("ids");
+        let task = kumochi_protocol::message::ThreadId(high_thread.0 + 1);
+        for n in 1..=9 {
+            let run = RunId(high_run.0 + n);
+            let title = (n == 1).then_some("zqxoldask");
+            store
+                .begin_turn(task, title, run, &format!("zqxoldask {n}"))
+                .expect("turn");
+            store
+                .end_run(task, run, &[], crate::store::RunEnd::Done)
+                .expect("ended");
+        }
+        (task, RunId(high_run.0 + 10))
+    };
     let store = FakeStore::default();
     let lock = scratch.db().with_file_name("offline-key-runtime.lock");
     Vault::with_service(store.clone(), "offline-key-runtime", &lock)
@@ -290,7 +307,6 @@ async fn a_title_takes_the_last_attempt_and_its_compaction_is_refused_unsent() {
         .use_test_transport(Transport::offline(peer.clone(), 1, 3));
     let mut brain = test_support::brain_with(&scratch, "", accounts);
     brain.compact_at = 1;
-    let run = RunId(1);
     let earlier = brain.key_allowance.of(run).expect("the run's allowance");
     for _ in 0..ALLOWED - 2 {
         assert!(
@@ -316,7 +332,7 @@ async fn a_title_takes_the_last_attempt_and_its_compaction_is_refused_unsent() {
         let message = DataToBrain::TextSubmit {
             turn: 1,
             screen: ScreenChoice::None,
-            thread: None,
+            thread: Some(task),
             text: "start".into(),
         };
         let frame = frame::encode(&message, Pipe::Data).expect("encodes");
@@ -388,7 +404,10 @@ async fn a_title_takes_the_last_attempt_and_its_compaction_is_refused_unsent() {
         1
     );
     assert_eq!(
-        count("SELECT COUNT(*) FROM runs WHERE id = 1 AND state = 'done'"),
+        count(&format!(
+            "SELECT COUNT(*) FROM runs WHERE id = {} AND state = 'done'",
+            run.0
+        )),
         1
     );
 }
