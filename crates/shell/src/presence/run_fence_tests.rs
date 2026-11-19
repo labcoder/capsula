@@ -261,13 +261,15 @@ fn a_refused_stop_ends_the_session_and_never_stops_the_speaker(cx: &mut TestAppC
     let (owner, _data, _controls) = ready(cx);
     let (commands, _tail) = answering(&owner, SPOKEN, cx);
     let _full = full(&owner, cx);
-    owner.update(cx, |owner, cx| {
+    let session = owner.update(cx, |owner, cx| {
         let session = owner.session.clone().expect("connected");
         let scenes = ControlToBrain::StopScenes {
             run: RunId(5),
             cuts: kumochi_protocol::message::SceneCuts::default(),
         };
-        assert!(!owner.send_stop(&session, scenes, cx), "refused");
+        let effects = vec![crate::presenter::Effect::Control(scenes)];
+        owner.scene_effects_at(Ok(effects), std::time::Instant::now(), cx);
+        assert!(owner.session.is_none(), "the session is forgotten at once");
         assert!(
             session.alive().load(std::sync::atomic::Ordering::Acquire),
             "the end runs off the UI thread"
@@ -276,9 +278,13 @@ fn a_refused_stop_ends_the_session_and_never_stops_the_speaker(cx: &mut TestAppC
             !owner.link.send_control(&session, brain_stop(6)),
             "but nothing more is sent at once"
         );
+        session
     });
     cx.run_until_parked();
-    assert!(!alive(&owner, cx), "the session ended");
+    assert!(
+        !session.alive().load(std::sync::atomic::Ordering::Acquire),
+        "the session ended"
+    );
     assert_eq!(stops(&commands), [], "no speaker Stop");
 }
 
