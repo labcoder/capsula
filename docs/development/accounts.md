@@ -77,8 +77,8 @@ Begin replies are tied to the requesting link and request number. Disconnect
 clears admission, and offline notifications cannot mint or adopt. Check retains
 a pending paste, so a Check during Begin still gets
 a plan reply and a Check after its reply does not discard the paste's admission.
-Remove cancels an outstanding Begin reply before its plan can be forwarded,
-as well as consuming any issued admission.
+Remove consumes issued admission. If a still-current Begin returns a plan for
+the revision being removed, the shell gets Unavailable instead of a permit.
 The serialized worker consumes an identified permit once; an unknown/superseded/consumed id
 is Changed, not an empty-key Format rejection. One two-second settle budget
 covers all staged reads; only complete present bytes are validated.

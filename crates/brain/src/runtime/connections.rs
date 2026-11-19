@@ -536,7 +536,10 @@ impl Accounts {
                 }
                 self.connections.stage_request = None;
                 if matches!(result, Ok((base, _)) if self.connections.removing == Some(base)) {
-                    return Vec::new();
+                    return vec![ControlToShell::AnthropicKeyStage {
+                        request,
+                        result: Err(KeyStageFailure::Unavailable),
+                    }];
                 }
                 let result = result.map(|(_, plan)| plan);
                 self.connections.stage_admission = result.as_ref().ok().map(|plan| plan.id);

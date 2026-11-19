@@ -169,6 +169,8 @@ read unlocks paste or removal. The catalog reports its own outcome separately.
 
 The runtime binds Begin replies/admission to the authenticated shell epoch,
 clears admission on disconnect and refuses staging controls in offline drain.
+A current Begin whose plan races removal of its base gets Unavailable, not a
+permit or a silent timeout.
 The credential worker has no link epoch: its FIFO and one-use ids govern
 durable work. A committed adoption updates the brain-wide key by generation
 even after disconnect, while its paste reply cannot cross to a new shell.
