@@ -458,6 +458,8 @@ pub(crate) struct RunCtx<'a> {
     pub(crate) offered: &'a [ToolName],
     /// The launch authorized for the run now, if any.
     pub(crate) mcp: Option<LaunchId>,
+    #[cfg(test)]
+    pub(crate) mcp_draft_offered: bool,
     pub(crate) ledger: &'a mut Ledger,
 }
 
@@ -602,7 +604,7 @@ pub(crate) fn call<'a>(
             if !matches!(caller, Caller::Model { .. }) || name != ToolName::Draw {
                 return Step::Answer(ToolOutput::Error(ToolError::NotHere));
             }
-            if let Err(error) = permitted(run, &caller, name)
+            if let Err(error) = permitted(run, Route::Model, name)
                 .and_then(|_| run.control.check().map_err(ToolError::from))
             {
                 return Step::Answer(ToolOutput::Error(error));
@@ -619,7 +621,7 @@ pub(crate) fn call<'a>(
             return Step::Answer(ToolOutput::Error(error.into()));
         }
         if run.ledger.has(&caller.key())
-            && let Err(error) = permitted(run, &caller, name)
+            && let Err(error) = permitted(run, Route::Mcp(*launch), name)
         {
             return Step::Answer(ToolOutput::Error(error));
         }
@@ -628,7 +630,7 @@ pub(crate) fn call<'a>(
     if let Some(step) = run.ledger.retry(&key, caller.clone(), name, args) {
         return step;
     }
-    match first(run, &caller, name, args) {
+    match first(run, key.route, name, args) {
         Err(error) => {
             run.ledger.refuse(&key, error);
             Step::Answer(ToolOutput::Error(error))
@@ -687,15 +689,16 @@ pub(crate) fn call<'a>(
 }
 
 /// A key's first call: every check before its effect.
-fn permitted(
-    run: &RunCtx<'_>,
-    caller: &Caller,
-    name: ToolName,
-) -> Result<&'static Tool, ToolError> {
+fn permitted(run: &RunCtx<'_>, route: Route, name: ToolName) -> Result<&'static Tool, ToolError> {
     let tool = tool(name).ok_or(ToolError::Unknown)?;
-    let offered = match caller {
-        Caller::Model { .. } => run.offered.contains(&name),
-        Caller::Mcp { .. } => tool.mcp && run.offered.contains(&name),
+    let offered = match route {
+        Route::Model => run.offered.contains(&name),
+        Route::Mcp(_) => {
+            let allowed = tool.mcp;
+            #[cfg(test)]
+            let allowed = allowed || (name == ToolName::DraftIssue && run.mcp_draft_offered);
+            allowed && run.offered.contains(&name)
+        }
     };
     if !offered || (tool.kumo_only && run.reach != Origin::Kumo) {
         return Err(ToolError::NotHere);
@@ -705,18 +708,18 @@ fn permitted(
 
 fn first(
     run: &RunCtx<'_>,
-    caller: &Caller,
+    route: Route,
     name: ToolName,
     args: &[u8],
 ) -> Result<(&'static Tool, Prepared), ToolError> {
-    let tool = permitted(run, caller, name)?;
+    let tool = permitted(run, route, name)?;
     if args.len() > MAX_ARGS {
         return Err(ToolError::TooLarge);
     }
-    let prepared = if name == ToolName::Draw && matches!(caller, Caller::Mcp { .. }) {
+    let prepared = if name == ToolName::Draw && matches!(route, Route::Mcp(_)) {
         draw::prepare_overlay(args)
     } else {
-        (tool.prepare)(args)?
+        prepare(tool, route, args)?
     };
     if let Prepared::Local { write, output, .. } = &prepared {
         if let (Origin::Task(_), LocalWrite::Focus(target)) = (run.reach, write)
@@ -734,12 +737,20 @@ fn first(
     Ok((tool, prepared))
 }
 
+fn prepare(tool: &Tool, route: Route, args: &[u8]) -> Result<Prepared, ToolError> {
+    if tool.name == ToolName::DraftIssue && matches!(route, Route::Mcp(_)) {
+        draft_issue::prepare_mcp(args)
+    } else {
+        (tool.prepare)(args)
+    }
+}
+
 /// The hash a retry of an existing entry is compared with; a retry that doesn't parse can't
 /// be the same call.
-fn rehash(name: ToolName, args: &[u8]) -> Option<[u8; 32]> {
+fn rehash(route: Route, name: ToolName, args: &[u8]) -> Option<[u8; 32]> {
     let tool = tool(name)?;
     (args.len() <= MAX_ARGS)
-        .then(|| (tool.prepare)(args).ok())
+        .then(|| prepare(tool, route, args).ok())
         .flatten()
         .and_then(|prepared| match prepared {
             Prepared::Local { hash, .. } | Prepared::Read { hash, .. } => Some(hash),

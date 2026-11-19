@@ -27,6 +27,8 @@ use zeroize::Zeroizing;
 mod authority;
 #[path = "tests/lifecycle.rs"]
 mod lifecycle;
+#[path = "tests/mcp_draft.rs"]
+mod mcp_draft;
 #[path = "tests/reconnect.rs"]
 mod reconnect;
 #[path = "tests/rename.rs"]

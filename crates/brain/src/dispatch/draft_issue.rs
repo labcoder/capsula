@@ -19,9 +19,30 @@ struct DraftIssueArgs {
     repo: Option<String>,
 }
 
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct McpArgs {
+    title: String,
+    body: String,
+}
+
 fn prepare(args: &[u8]) -> Result<Prepared, ToolError> {
-    let (draft, hash) = parse::<DraftIssueArgs>("draft_issue", args)?;
-    if draft.title.chars().chain(draft.body.chars()).any(|c| {
+    let (draft, hash) = parse::<DraftIssueArgs>(DRAFT_ISSUE.wire, args)?;
+    checked(&draft.title, &draft.body, draft.repo.as_deref(), hash)
+}
+
+pub(super) fn prepare_mcp(args: &[u8]) -> Result<Prepared, ToolError> {
+    let (draft, hash) = parse::<McpArgs>(DRAFT_ISSUE.wire, args)?;
+    checked(&draft.title, &draft.body, None, hash)
+}
+
+fn checked(
+    title: &str,
+    body: &str,
+    repo: Option<&str>,
+    hash: [u8; 32],
+) -> Result<Prepared, ToolError> {
+    if title.chars().chain(body.chars()).any(|c| {
         matches!(c,
             '\u{00ad}' | '\u{034f}' | '\u{0600}'..='\u{0605}' | '\u{061c}'
             | '\u{06dd}' | '\u{070f}' | '\u{0890}'..='\u{0891}' | '\u{08e2}'
@@ -36,11 +57,9 @@ fn prepare(args: &[u8]) -> Result<Prepared, ToolError> {
     }) {
         return Err(ToolError::Invalid);
     }
-    let title = IssueTitle::new(&draft.title).map_err(|_| ToolError::Invalid)?;
-    let body = IssueBody::new(&draft.body).map_err(|_| ToolError::Invalid)?;
-    let repo = draft
-        .repo
-        .as_deref()
+    let title = IssueTitle::new(title).map_err(|_| ToolError::Invalid)?;
+    let body = IssueBody::new(body).map_err(|_| ToolError::Invalid)?;
+    let repo = repo
         .map(RepoName::new)
         .transpose()
         .map_err(|_| ToolError::Invalid)?;

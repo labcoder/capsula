@@ -462,7 +462,8 @@ hears the current list if it isn't empty, and nothing before Claude Code's first
   `Offer::authorized` keeps those of the built request's tools that the origin may also call over
   MCP) and the version. A foreground build that offers `draw` can call it on the overlay. Jobs
   and tool-free builds, including inline compaction, offer `Nothing`.
-  Model-only history schemas do not enter the MCP listener, launch audit or seed.
+  Model-only history schemas and the dormant `draft_issue` do not enter the MCP listener,
+  launch audits or seed.
   `Claude::snapshot` makes one only while the view is `Ready`. A snapshot is current only while
   the view is `Ready` at its version and its generation is Claude Code's current one; `warm`,
   `take` and every reuse of the warm attempt check that first. A stale snapshot is refused as

@@ -27,6 +27,8 @@ mod speech;
 mod store_op;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+pub(crate) use tests::mcp::draft::draft_launch;
 mod thread_op;
 mod tools;
 

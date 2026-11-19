@@ -102,13 +102,13 @@ impl Ledger {
                 waiting.push(caller);
                 Step::Join
             }
-            Entry::Reading { call, .. } if rehash(name, args) != Some(call.hash) => {
+            Entry::Reading { call, .. } if rehash(key.route, name, args) != Some(call.hash) => {
                 Step::Answer(ToolOutput::Error(ToolError::Reused))
             }
             Entry::Drawing { hash, .. }
             | Entry::Running { hash, .. }
             | Entry::Done { hash, .. }
-                if rehash(name, args) != Some(*hash) =>
+                if rehash(key.route, name, args) != Some(*hash) =>
             {
                 Step::Answer(ToolOutput::Error(ToolError::Reused))
             }

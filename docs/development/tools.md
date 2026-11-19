@@ -17,6 +17,12 @@ result commit atomically; only then does the model receive the fixed local-draft
 durable draft still refreshes history if its model run ended while the acknowledgment was in
 flight. It grants no consent or HTTP authority; [issue actions](issues.md) describes the limits.
 
+MCP drafting remains unoffered. Its dormant dispatcher path uses a separate, closed title/body
+envelope for first calls and retries; the direct model keeps its optional repository. Both routes
+share the run's 16-call budget: at most 16 new drafts per run, fewer if other calls use the budget.
+A retry uses no additional call or card. If the launch loses authority while a draft write is
+in flight, an already committed card may refresh history but the old launch gets no result.
+
 ## History reads
 
 History calls enter `Reading` while the stamped reader selects bounded references. Completion

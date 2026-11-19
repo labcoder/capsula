@@ -19,6 +19,9 @@ use crate::engines::{CallId, Finish, ToolName, TurnEvent};
 use crate::store::{Failure, Store};
 use crate::test_support::Scratch;
 
+#[path = "mcp_tests/draft.rs"]
+pub(in crate::coordinator) mod draft;
+
 const L1: LaunchId = LaunchId(1);
 const L2: LaunchId = LaunchId(2);
 const PROBE: &[u8] = br#"{"word":"hi"}"#;
