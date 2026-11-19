@@ -21,14 +21,15 @@ async fn remove_during_begin_never_forwards_the_discarded_plan_or_leaves_staged_
         request: 1,
     }));
     let planned = next(&mut account).await;
-    assert!(matches!(
-        planned,
-        Event::Connection(ConnectionEvent::StagePlan {
-            request: 41,
-            result: Ok((1, KeyStagePlan { len: 16, .. })),
-            ..
-        })
-    ));
+    let Event::Connection(ConnectionEvent::StagePlan {
+        request: 41,
+        result: Ok((1, KeyStagePlan { len: 16, id })),
+        ..
+    }) = &planned
+    else {
+        panic!("expected a blocked plan for the original revision");
+    };
+    let plan = *id;
     let removed = next(&mut account).await;
     assert!(matches!(
         removed,
@@ -47,8 +48,18 @@ async fn remove_during_begin_never_forwards_the_discarded_plan_or_leaves_staged_
     );
     assert_eq!(
         account.handle(planned),
-        vec![],
-        "Remove must not forward a discarded plan"
+        [ControlToShell::AnthropicKeyStage {
+            request: 41,
+            result: Err(KeyStageFailure::Unavailable),
+        }],
+        "Remove must refuse the current Begin instead of forwarding its discarded plan"
+    );
+    assert_eq!(
+        account.stage_op(1, ConnectionOp::AnthropicKeyStaged { plan }),
+        [ControlToShell::AnthropicKeyStageDone {
+            plan,
+            result: Err(KeyStageFailure::Changed),
+        }]
     );
     account.handle(removed);
     assert_eq!(account.connections.stage_request, None);

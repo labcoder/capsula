@@ -118,11 +118,17 @@ enum RemovalAttempt {
     Retry { revision: u64 },
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RemovalConfirmation {
+    authority_revision: u64,
+    epoch: u64,
+}
+
 #[derive(Default)]
 pub struct KeyPaste {
     stage: Stage,
     request: u64,
-    revision: u64,
+    confirmation_epoch: u64,
     authority_revision: Option<u64>,
     view: Option<KeyView>,
     saved: bool,
@@ -145,7 +151,8 @@ impl fmt::Debug for KeyPaste {
 
 impl KeyPaste {
     pub fn receive(&mut self, view: KeyView, authority_revision: Option<u64>) -> bool {
-        let changed = self.view != Some(view) || self.authority_revision != authority_revision;
+        let authority_changed = self.authority_revision != authority_revision;
+        let changed = self.view != Some(view) || authority_changed;
         self.recovery_read &= !changed && view == KeyView::Checking;
         self.view = Some(view);
         self.authority_revision = authority_revision;
@@ -154,8 +161,8 @@ impl KeyPaste {
         } else if matches!(view, KeyView::Ready | KeyView::Rejected(_)) {
             self.saved = true;
         }
-        if changed {
-            self.revision = self.revision.wrapping_add(1);
+        if authority_changed {
+            self.confirmation_epoch = self.confirmation_epoch.wrapping_add(1);
         }
         changed
     }
@@ -165,7 +172,7 @@ impl KeyPaste {
             || matches!(self.stage, Stage::Saving(..));
         *self = Self {
             request: self.request,
-            revision: self.revision.wrapping_add(1),
+            confirmation_epoch: self.confirmation_epoch.wrapping_add(1),
             failure: unknown.then_some(PasteFailure::Unconfirmed),
             ..Self::default()
         };
@@ -212,7 +219,7 @@ impl KeyPaste {
         if !self.can_paste() {
             return None;
         }
-        self.revision = self.revision.wrapping_add(1);
+        self.confirmation_epoch = self.confirmation_epoch.wrapping_add(1);
         self.failure = None;
         let Some(text) = text.filter(|text| !text.is_empty()) else {
             self.failure = Some(PasteFailure::Clipboard);
@@ -413,22 +420,26 @@ impl KeyPaste {
         }
     }
 
-    pub fn remove_revision(&self) -> Option<u64> {
-        (self.can_paste()
-            && self.view != Some(KeyView::Missing)
-            && self.authority_revision.is_some())
-        .then_some(self.revision)
+    pub fn removal_confirmation(&self) -> Option<RemovalConfirmation> {
+        if !self.can_paste() || self.view == Some(KeyView::Missing) {
+            return None;
+        }
+        Some(RemovalConfirmation {
+            authority_revision: self.authority_revision?,
+            epoch: self.confirmation_epoch,
+        })
     }
 
-    pub fn remove(&mut self, revision: u64, send: impl FnOnce(ConnectionOp) -> bool) {
-        if self.remove_revision() != Some(revision) {
+    pub fn remove(
+        &mut self,
+        confirmation: RemovalConfirmation,
+        send: impl FnOnce(ConnectionOp) -> bool,
+    ) {
+        if self.removal_confirmation() != Some(confirmation) {
             return;
         }
-        let Some(authority_revision) = self.authority_revision else {
-            return;
-        };
-        self.revision = self.revision.wrapping_add(1);
-        self.send_remove(authority_revision, send);
+        self.confirmation_epoch = self.confirmation_epoch.wrapping_add(1);
+        self.send_remove(confirmation.authority_revision, send);
     }
 
     fn send_remove(&mut self, revision: u64, send: impl FnOnce(ConnectionOp) -> bool) {

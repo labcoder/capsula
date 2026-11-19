@@ -30,7 +30,8 @@ credential, never another app's key.
 
 The saved key is the [credential authority](#credential-authority)'s `anthropic` record: Check
 reads its current generation, and a removal confirmation applies only to the
-revision shown when the dialog opened. The worker compares that revision before
+authority revision shown when the dialog opened. A catalog result for that
+revision doesn't invalidate confirmation. The worker compares that revision before
 committing, then sweeps the names, so a stale confirmation can't delete a
 replacement and a removed key is never read again even while Credential Manager
 still serves it.
@@ -76,14 +77,15 @@ Begin replies are tied to the requesting link and request number. Disconnect
 clears admission, and offline notifications cannot mint or adopt. Check retains
 a pending paste, so a Check during Begin still gets
 a plan reply and a Check after its reply does not discard the paste's admission.
-Remove cancels an outstanding Begin reply before its plan can be forwarded,
-as well as consuming any issued admission.
+Remove consumes issued admission. If a still-current Begin returns a plan for
+the revision being removed, the shell gets Unavailable instead of a permit.
 The serialized worker consumes an identified permit once; an unknown/superseded/consumed id
 is Changed, not an empty-key Format rejection. One two-second settle budget
 covers all staged reads; only complete present bytes are validated.
 
 Adoption copies a valid paste into fresh names, verifies the writes, then
-activates with the captured revision's compare-and-swap. Read, validation,
+activates with the captured revision's compare-and-swap. The worker returns
+the revision read inside the successful commit. Read, validation,
 write or commit failure preserves both the saved key and the runtime key/view/
 catalog. A successful commit enters the normal catalog-check path even if its
 shell disconnected; generation, not link epoch, fences this brain-wide result.

@@ -422,7 +422,7 @@ impl Authority {
         &mut self,
         verified: Verified,
         marker: Option<SignOutMarker>,
-    ) -> Result<ActiveRef, AuthorityError> {
+    ) -> Result<(ActiveRef, u64), AuthorityError> {
         let plan = verified.into_plan();
         let tx = self
             .conn
@@ -450,12 +450,16 @@ impl Authority {
         if let Some(marker) = marker {
             write_marker(&tx, marker)?;
         }
+        let revision = head_revision(&tx, plan.kind)?;
         tx.commit()?;
-        Ok(ActiveRef {
-            kind: plan.kind,
-            generation: plan.generation,
-            layout: plan.layout,
-        })
+        Ok((
+            ActiveRef {
+                kind: plan.kind,
+                generation: plan.generation,
+                layout: plan.layout,
+            },
+            revision,
+        ))
     }
 
     /// Removes every Active and Pending generation of these kinds, for good, with the marker, if
@@ -648,14 +652,7 @@ impl Authority {
 }
 
 fn current(conn: &Connection, kind: Kind) -> Result<Current, AuthorityError> {
-    let revision: i64 = conn
-        .query_row(
-            "SELECT revision FROM heads WHERE kind = ?1",
-            [kind.label()],
-            |row| row.get(0),
-        )
-        .optional()?
-        .ok_or(AuthorityError::Corrupt)?;
+    let revision = head_revision(conn, kind)?;
     let active = conn
         .query_row(
             "SELECT generation, chunks, bytes FROM generations WHERE kind = ?1 AND state = 'active'",
@@ -677,10 +674,19 @@ fn current(conn: &Connection, kind: Kind) -> Result<Current, AuthorityError> {
             })
         })
         .transpose()?;
-    Ok(Current {
-        revision: u64::try_from(revision).map_err(|_| AuthorityError::Corrupt)?,
-        active,
-    })
+    Ok(Current { revision, active })
+}
+
+fn head_revision(conn: &Connection, kind: Kind) -> Result<u64, AuthorityError> {
+    let revision: i64 = conn
+        .query_row(
+            "SELECT revision FROM heads WHERE kind = ?1",
+            [kind.label()],
+            |row| row.get(0),
+        )
+        .optional()?
+        .ok_or(AuthorityError::Corrupt)?;
+    u64::try_from(revision).map_err(|_| AuthorityError::Corrupt)
 }
 
 fn bump(conn: &Connection, kind: Kind) -> Result<(), AuthorityError> {

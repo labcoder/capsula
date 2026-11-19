@@ -492,9 +492,7 @@ fn a_stale_or_cancelled_confirmation_cannot_remove_a_key(cx: &mut TestAppContext
     visual.update(|_, cx| {
         owner.update(cx, |owner, cx| {
             owner.settings.update(cx, |state, cx| {
-                state
-                    .key_paste
-                    .receive(KeyView::Rejected(KeyRejection::Refused), Some(2));
+                state.key_paste.receive(KeyView::Ready, Some(3));
                 cx.notify();
             });
         });
@@ -507,11 +505,55 @@ fn a_stale_or_cancelled_confirmation_cannot_remove_a_key(cx: &mut TestAppContext
         controls.try_recv(),
         Ok(ControlToBrain::Connection(
             ConnectionOp::RemoveAnthropicKey {
-                revision: 2,
+                revision: 3,
                 request: 1
             }
         ))
     );
+}
+
+#[gpui::test]
+fn a_catalog_completion_does_not_stale_an_open_remove_confirmation(cx: &mut TestAppContext) {
+    for view in [KeyView::Unconfirmed, KeyView::Ready] {
+        let (window, owner, controls) = isolated_row(cx);
+        let mut visual = VisualTestContext::from_window(window, cx);
+        visual.update(|_, cx| {
+            owner.update(cx, |owner, cx| {
+                owner.settings.update(cx, |state, cx| {
+                    expire_staged_save(&mut state.key_paste, KeyView::Ready);
+                    cx.notify();
+                });
+            });
+        });
+        click_recovery_check(&mut visual, &controls, 2);
+        receive_key(&mut visual, &owner, KeyView::Checking, Some(2));
+        key_event(
+            &mut visual,
+            &owner,
+            LinkEvent::KeyStage {
+                generation: 7,
+                reply: ControlToShell::AnthropicKeyReconciled {
+                    request: 2,
+                    read: Some(KeyRecoveryRead::Present {
+                        revision: 2,
+                        rejection: None,
+                    }),
+                },
+            },
+        );
+        click(&mut visual, "anthropic-remove");
+        receive_key(&mut visual, &owner, view, Some(2));
+        click(&mut visual, "confirmation-danger");
+        assert_eq!(
+            controls.try_recv(),
+            Ok(ControlToBrain::Connection(
+                ConnectionOp::RemoveAnthropicKey {
+                    revision: 2,
+                    request: 3
+                }
+            ))
+        );
+    }
 }
 
 #[gpui::test]

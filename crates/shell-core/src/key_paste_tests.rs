@@ -355,12 +355,12 @@ fn the_deadline_holds_before_the_timer_callback_in_each_phase() {
 #[test]
 fn a_ready_to_ready_replacement_invalidates_the_open_confirmation() {
     let mut state = model(KeyView::Ready);
-    let old = state.remove_revision().expect("old confirmation");
+    let old = state.removal_confirmation().expect("old confirmation");
     assert!(state.receive(KeyView::Ready, Some(2)));
     state.remove(old, |_| {
         panic!("confirmation was for the previous authority revision")
     });
-    let current = state.remove_revision().expect("new confirmation");
+    let current = state.removal_confirmation().expect("new confirmation");
     state.remove(current, |op| {
         assert_eq!(
             op,
@@ -377,7 +377,9 @@ fn a_ready_to_ready_replacement_invalidates_the_open_confirmation() {
 #[test]
 fn failed_adoption_preserves_a_key_but_catalog_rejection_is_removable() {
     let mut state = model(KeyView::Ready);
-    let old_revision = state.remove_revision().expect("old removal confirmation");
+    let old_revision = state
+        .removal_confirmation()
+        .expect("old removal confirmation");
     let at = begin(&mut state, KEY);
     let result = fake_success(&mut state, at);
     state.written(&result, Instant::now(), |_| true);
@@ -398,7 +400,7 @@ fn failed_adoption_preserves_a_key_but_catalog_rejection_is_removable() {
     state.receive(KeyView::Rejected(KeyRejection::Refused), Some(1));
     assert!(state.saved());
     let revision = state
-        .remove_revision()
+        .removal_confirmation()
         .expect("saved rejected key can be removed");
     state.remove(revision, |op| {
         assert_eq!(
@@ -471,7 +473,7 @@ fn disconnect_retires_the_check_without_releasing_an_admitted_save() {
     assert_eq!(state.failure(), Some(PasteFailure::Unconfirmed));
     assert!(!state.saved());
     assert!(!state.can_paste());
-    assert_eq!(state.remove_revision(), None);
+    assert_eq!(state.removal_confirmation(), None);
     state.reconciled(&ControlToShell::AnthropicKeyReconciled {
         request: 3,
         read: None,
@@ -501,7 +503,7 @@ fn a_local_recovery_read_only_unlocks_its_revision_during_catalog_checking() {
     assert_eq!(state.view(), Some(KeyView::Checking));
     assert!(!state.saved());
     assert!(state.can_paste());
-    assert!(state.remove_revision().is_some());
+    assert!(state.removal_confirmation().is_some());
     state.reconciled(&ControlToShell::AnthropicKeyReconciled {
         request: 2,
         read: Some(KeyRecoveryRead::Missing),
@@ -511,7 +513,7 @@ fn a_local_recovery_read_only_unlocks_its_revision_during_catalog_checking() {
     assert!(state.can_paste());
     state.receive(KeyView::Checking, Some(3));
     assert!(!state.can_paste());
-    assert_eq!(state.remove_revision(), None);
+    assert_eq!(state.removal_confirmation(), None);
 }
 
 #[test]
