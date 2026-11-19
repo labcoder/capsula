@@ -93,14 +93,7 @@ async fn adopt_and_check_cleanup(account: &mut Accounts, store: &FakeStore, plan
         }]
     );
     settle(account).await;
-    assert_eq!(
-        account
-            .connections
-            .key
-            .as_ref()
-            .map(|key| key.expose().as_str()),
-        Some("sk-ant-api123456")
-    );
+    assert_eq!(retained_key(&account.connections), Some("sk-ant-api123456"));
     assert_eq!(account.connections.view.anthropic, KeyView::Ready);
     assert!(
         store
@@ -191,8 +184,9 @@ async fn runtime_distinguishes_invalid_lengths_and_rejected_present_bytes() {
             result: Err(KeyStageFailure::Rejected(KeyRejection::SubscriptionToken))
         }]
     );
+    settle(&mut account).await;
     ready_old(&account);
-    assert_eq!(requests.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert_eq!(starts(&requests), 2);
     account
         .close(tokio::time::Instant::now(), tokio::time::Instant::now())
         .await;

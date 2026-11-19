@@ -36,6 +36,8 @@ Only keys connected inside Kumochi are used; live checks must read the same Kumo
 credential, never another app's key.
 
 The dormant key-chat transport gives each verified authority a nonzero random tag.
+Without the transport, a readable saved key reports Unconfirmed; startup, Check
+and successful adoption send no catalog request. There is no alternate client.
 An ordinary check of the same verified revision keeps its tag. Adoption and removal
 close both the authority's send fence and any queued catalog check before sending
 work to the credential thread. If adoption fails, only a new local read proving the

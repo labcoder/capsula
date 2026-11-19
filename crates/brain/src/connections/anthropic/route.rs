@@ -57,16 +57,20 @@ impl Transport {
         fence: &Fence,
         key: &Secret<AnthropicKey>,
     ) -> Result<Vec<CatalogModel>, CheckError> {
-        fence
-            .while_open(async {
+        tokio::time::timeout(
+            std::time::Duration::from_secs(15),
+            fence.while_open(async {
                 if !self.catalog.reserve() {
                     return Err(CheckError::Unconfirmed);
                 }
                 let connect = Fenced(self.connector.clone(), fence.clone());
                 models::read_fenced(&connect, key).await
-            })
-            .await
-            .unwrap_or(Err(CheckError::Unconfirmed))
+            }),
+        )
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or(Err(CheckError::Unconfirmed))
     }
 
     #[cfg_attr(
@@ -129,6 +133,11 @@ pub(crate) struct Verified {
 }
 
 impl Verified {
+    #[cfg(test)]
+    pub(crate) fn test_key(&self) -> &str {
+        self.key.expose().as_str()
+    }
+
     pub(crate) fn new(revision: u64, key: Secret<AnthropicKey>) -> Option<Self> {
         Self::from_entropy(revision, key, getrandom::u64().ok())
     }

@@ -47,7 +47,11 @@ payloads it assembles.
 ## One attempt
 
 The dormant runtime transport uses the same fixed TLS host for catalog checks and
-Messages, with separate request allowances checked before connecting. Each live
+Messages. Catalog checks have a 15-second deadline including connection, headers
+and body; an absent transport sends nothing. Catalog and Messages have separate
+process-local allowances checked before connecting. Finite allowances apply only
+when configured in a debug build; an unset allowance or a release build has no
+transport cap. A supervisor must account for any cap across restarts. Each live
 authority has a revocation fence; a Messages offer on another tag is refused before
 it reaches admission. The fence orders revocation with connect and I/O polls, so
 no new transport start or byte acceptance on the retired key can occur after the cut.

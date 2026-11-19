@@ -7,7 +7,6 @@
 //! <https://platform.claude.com/docs/en/build-with-claude/effort>.
 //! Unknown ids stay disabled; streaming support requires eager input streaming on the tool.
 
-use std::time::Duration;
 use zeroize::Zeroizing;
 
 use kumochi_protocol::Secret;
@@ -16,7 +15,7 @@ use serde::Deserialize;
 
 use super::key::AnthropicKey;
 use super::tls::{AnthropicConnect, HOST};
-use crate::connections::http_client::{Endpoint, Http, MAX_BODY_BYTES, Request};
+use crate::connections::http_client::MAX_BODY_BYTES;
 use crate::connections::model::{
     IDLE,
     conn::{ModelConn, Upload},
@@ -84,28 +83,6 @@ struct ProviderError {
     #[serde(rename = "type")]
     kind: String,
     message: Secret<Zeroizing<String>>,
-}
-
-/// Read one complete catalog, with a 15-second whole-request deadline and a 64-model cap.
-///
-/// # Errors
-/// 401/403 reject the key; a narrowly recognized 400 requires an unsupported workspace header.
-/// All other failures leave it unconfirmed.
-pub async fn read(
-    http: &impl Http,
-    key: Secret<AnthropicKey>,
-) -> Result<Vec<CatalogModel>, CheckError> {
-    let response = tokio::time::timeout(
-        Duration::from_secs(15),
-        http.execute(Request {
-            endpoint: Endpoint::AnthropicModels(key),
-            fields: Vec::new(),
-        }),
-    )
-    .await
-    .map_err(|_| CheckError::Unconfirmed)?
-    .map_err(|_| CheckError::Unconfirmed)?;
-    catalog(response.status, response.body.expose())
 }
 
 pub(super) async fn read_fenced(

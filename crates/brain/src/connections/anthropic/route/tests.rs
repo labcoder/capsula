@@ -147,9 +147,14 @@ async fn catalog_and_messages_spend_only_their_own_budget_before_connect() {
     let script = peer.0.lock().expect("peer");
     assert_eq!(script.starts, 2);
     assert_eq!(script.requests.len(), 2);
-    assert!(
-        script.requests[0]
-            .starts_with(b"GET /v1/models?limit=65 HTTP/1.1\r\nHost: api.anthropic.com\r\n")
+    assert_eq!(
+        script.requests[0],
+        format!(
+            "GET /v1/models?limit=65 HTTP/1.1\r\nHost: api.anthropic.com\r\n\
+             Authorization: Bearer {KEY}\r\nanthropic-version: 2023-06-01\r\n\
+             Accept: application/json\r\nAccept-Encoding: identity\r\nConnection: close\r\n\r\n"
+        )
+        .into_bytes()
     );
     assert!(
         script.requests[1]

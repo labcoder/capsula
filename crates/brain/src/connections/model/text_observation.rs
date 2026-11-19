@@ -145,7 +145,7 @@ impl Observation {
             Endpoint::Jwks(_) => 3,
             Endpoint::Revocation(_) => 4,
             Endpoint::Models(_) => 5,
-            Endpoint::AnthropicModels(_) | Endpoint::GitHub(_) => 0,
+            Endpoint::GitHub(_) => 0,
         };
         self.record(at, |counts, at| {
             let ordinal = counts.aux + 1;

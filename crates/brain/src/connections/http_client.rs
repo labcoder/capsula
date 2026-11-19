@@ -15,7 +15,6 @@ use rustls::pki_types::CertificateDer;
 use url::Url;
 use zeroize::Zeroizing;
 
-use super::anthropic::key::AnthropicKey;
 use super::github::GitHubEndpoint;
 
 /// The issuer from the public `OpenAI` discovery document.
@@ -85,7 +84,7 @@ impl IssuerUrl {
 }
 
 /// The only account destinations: `OpenAI`'s code exchange, identity verification, revocation and
-/// model list, Anthropic's model list, and the typed GitHub operations.
+/// model list, and the typed GitHub operations.
 pub enum Endpoint {
     /// The documented form-token endpoint, one of the two accepting form credentials.
     Token,
@@ -97,8 +96,6 @@ pub enum Endpoint {
     Revocation(IssuerUrl),
     /// The account's model list, the only destination given the bearer.
     Models(Secret<Zeroizing<String>>),
-    /// The fixed Anthropic Models destination, the only destination given the API key.
-    AnthropicModels(Secret<AnthropicKey>),
     /// A typed GitHub operation with its own method, credential and payload.
     GitHub(GitHubEndpoint),
 }
@@ -110,7 +107,6 @@ impl Endpoint {
             Self::Discovery => "https://auth.openai.com/.well-known/openid-configuration",
             Self::Jwks(url) | Self::Revocation(url) => url.0.expose(),
             Self::Models(_) => "https://api.openai.com/v1/models",
-            Self::AnthropicModels(_) => "https://api.anthropic.com/v1/models?limit=65",
             Self::GitHub(endpoint) => return endpoint.url().map(|url| Cow::Owned(url.into())),
         }))
     }
@@ -124,7 +120,6 @@ impl fmt::Debug for Endpoint {
             Self::Jwks(_) => "Endpoint::Jwks",
             Self::Revocation(_) => "Endpoint::Revocation",
             Self::Models(_) => "Endpoint::Models",
-            Self::AnthropicModels(_) => "Endpoint::AnthropicModels",
             Self::GitHub(endpoint) => return endpoint.fmt(f),
         })
     }
@@ -443,7 +438,6 @@ impl Client {
                     .0
                     .get(url)
                     .header(reqwest::header::AUTHORIZATION, bearer(token.expose())?),
-                Endpoint::AnthropicModels(key) => anthropic_request(&self.0, url, key)?,
                 _ => self.0.get(url).timeout(Duration::from_secs(10)),
             }
         };
@@ -461,21 +455,6 @@ impl Client {
         };
         read_response(response, github).await
     }
-}
-
-fn anthropic_request(
-    client: &reqwest::Client,
-    url: &str,
-    key: &Secret<AnthropicKey>,
-) -> Result<reqwest::RequestBuilder, HttpError> {
-    Ok(client
-        .get(url)
-        .header(
-            reqwest::header::AUTHORIZATION,
-            bearer(key.expose().as_str())?,
-        )
-        .header("anthropic-version", "2023-06-01")
-        .timeout(Duration::from_secs(15)))
 }
 
 fn bearer(token: &str) -> Result<reqwest::header::HeaderValue, HttpError> {

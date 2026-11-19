@@ -3,23 +3,20 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
-use kumochi_protocol::Secret;
 use kumochi_protocol::message::KeyView;
 use tokio::time::timeout;
-use zeroize::Zeroizing;
 
 use super::*;
 use crate::connections::account::Worker;
 use crate::connections::clock::FixedClock;
-use crate::connections::http_client::{Http, HttpError, Request, Response, SharedHttp};
 use crate::connections::vault::{Vault, fake::FakeStore};
 use crate::engines::claude_code::lane::LANE_QUEUE;
 use crate::engines::claude_code::lane::tests::{
     Base, V, host, host_finding, locked, marked, soon, started,
 };
 use crate::platform::Job;
-use crate::runtime::account::{Accounts, Net};
-use crate::runtime::connections::ConnectionEvent;
+use crate::runtime::account::Accounts;
+use crate::runtime::connections::{ConnectionEvent, with_empty_catalog};
 use crate::test_support::{self, Scratch};
 
 pub(in crate::runtime) const READY: ClaudeCodeView = ClaudeCodeView::Ready {
@@ -183,19 +180,6 @@ fn attaching_claude_code_reports_it_at_once() {
     );
 }
 
-struct EmptyCatalog;
-
-impl Http for EmptyCatalog {
-    fn execute(&self, _: Request) -> impl Future<Output = Result<Response, HttpError>> {
-        std::future::ready(Ok(Response {
-            status: 200,
-            request_id: None,
-            meta: crate::connections::http_client::ResponseMeta::default(),
-            body: Secret::new(Zeroizing::new(br#"{"data":[],"has_more":false}"#.to_vec())),
-        }))
-    }
-}
-
 /// A brain with a saved Anthropic key, so `CheckAnthropicKey` takes it to Ready.
 pub(in crate::runtime) fn brain_with_a_saved_key(scratch: &Scratch) -> Brain {
     let store = FakeStore::default();
@@ -208,14 +192,9 @@ pub(in crate::runtime) fn brain_with_a_saved_key(scratch: &Scratch) -> Brain {
         Box::new(move || Vault::with_service(store.clone(), "key-test", &lock)),
         Arc::new(FixedClock(0)),
     );
-    let accounts = Accounts::spawn_unconfigured(
-        worker,
-        Net {
-            http: Arc::new(|| Ok(SharedHttp::new(EmptyCatalog))),
-            ..test_support::net()
-        },
-    )
-    .expect("account worker");
+    let accounts = with_empty_catalog(
+        Accounts::spawn_unconfigured(worker, test_support::net()).expect("account worker"),
+    );
     test_support::brain_with(scratch, "", accounts)
 }
 

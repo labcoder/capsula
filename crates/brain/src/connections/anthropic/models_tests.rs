@@ -1,52 +1,53 @@
 //! Synthetic responses built from the public Models API reference, not live recordings.
 
-use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use kumochi_protocol::Secret;
 use kumochi_protocol::message::KeyRejection;
 use serde_json::{Value, json};
+use tokio::io::AsyncWriteExt as _;
 use zeroize::Zeroizing;
 
-use super::{Capabilities, CatalogModel, CheckError, read};
+use super::{Capabilities, CatalogModel, CheckError};
+use crate::connections::anthropic::fence::Fence;
 use crate::connections::anthropic::key::AnthropicKey;
-use crate::connections::http_client::{Http, HttpError, MAX_BODY_BYTES, Request, Response};
+use crate::connections::anthropic::route::Transport;
+use crate::connections::anthropic::tls::{Script, Scripted};
+use crate::connections::http_client::MAX_BODY_BYTES;
 use crate::test_support::Captured;
 
-struct Once(Mutex<Option<Result<Response, HttpError>>>);
-
-impl Http for Once {
-    fn execute(
-        &self,
-        _: Request,
-    ) -> impl std::future::Future<Output = Result<Response, HttpError>> + Send {
-        std::future::ready(self.0.lock().expect("response").take().expect("one check"))
-    }
-}
+const CATALOG_FIXTURE_KEY: &str = "sk-ant-api-fake-only";
 
 fn key() -> Secret<AnthropicKey> {
     AnthropicKey::parse(Secret::new(Zeroizing::new(
-        b"sk-ant-api-fake-only".to_vec(),
+        CATALOG_FIXTURE_KEY.as_bytes().to_vec(),
     )))
     .expect("synthetic API key")
 }
 
-fn response(status: u16, bytes: Vec<u8>) -> Response {
-    Response {
-        status,
-        request_id: None,
-        meta: crate::connections::http_client::ResponseMeta::default(),
-        body: Secret::new(Zeroizing::new(bytes)),
-    }
+fn wire(status: u16, bytes: &[u8]) -> Vec<u8> {
+    let mut response = format!(
+        "HTTP/1.1 {status} Synthetic\r\nContent-Length: {}\r\n\r\n",
+        bytes.len()
+    )
+    .into_bytes();
+    response.extend_from_slice(bytes);
+    response
 }
 
 async fn check(status: u16, body: &str) -> Result<Vec<CatalogModel>, CheckError> {
-    let http = Once(Mutex::new(Some(Ok(response(
-        status,
-        body.as_bytes().to_vec(),
-    )))));
-    read(&http, key()).await
+    raw(wire(status, body.as_bytes())).await
+}
+
+async fn raw(response: Vec<u8>) -> Result<Vec<CatalogModel>, CheckError> {
+    let peer = Scripted(Arc::new(Mutex::new(Script {
+        responses: [response].into(),
+        ..Script::default()
+    })));
+    Transport::offline(peer, 1, 0)
+        .catalog(&Fence::default(), &key())
+        .await
 }
 
 fn model(id: &str, name: &str) -> Value {
@@ -213,11 +214,7 @@ async fn invalid_or_incomplete_lists_never_publish_partial_models() {
         check(200, &page.to_string()).await,
         Err(CheckError::Unconfirmed)
     );
-    let invalid_utf8 = Once(Mutex::new(Some(Ok(response(200, vec![0xff])))));
-    assert_eq!(
-        read(&invalid_utf8, key()).await,
-        Err(CheckError::Unconfirmed)
-    );
+    assert_eq!(raw(wire(200, &[0xff])).await, Err(CheckError::Unconfirmed));
 }
 
 #[tokio::test]
@@ -317,108 +314,93 @@ async fn only_auth_refusals_reject_and_neither_provider_errors_nor_content_are_l
             "error text is redacted"
         );
     }
-    for error in [
-        HttpError::TrustStoreUnavailable,
-        HttpError::Configuration,
-        HttpError::Endpoint,
-        HttpError::Request,
-        HttpError::Redirect,
-        HttpError::Timeout,
-        HttpError::Connect,
-        HttpError::Transport,
-        HttpError::BodyTooLarge,
+    for bytes in [
+        b"not HTTP".to_vec(),
+        b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nx".to_vec(),
     ] {
-        assert_eq!(
-            read(&Once(Mutex::new(Some(Err(error)))), key()).await,
-            Err(CheckError::Unconfirmed)
-        );
+        assert_eq!(raw(bytes).await, Err(CheckError::Unconfirmed));
     }
+    let unavailable = Transport::offline(Scripted::default(), 1, 0);
+    assert_eq!(
+        unavailable.catalog(&Fence::default(), &key()).await,
+        Err(CheckError::Unconfirmed)
+    );
     let catalog = check(200, &body(vec![model(marker, marker)]))
         .await
         .expect("valid sentinel catalog");
-    let printed = format!("{:?}", Some(Ok::<_, CheckError>(catalog)));
+    let printed = format!("{:?} {:?}", Some(Ok::<_, CheckError>(catalog)), key());
     let logs = captured.text();
     assert!(logs.contains("capture-control"), "capture active");
     for output in [printed, logs] {
-        assert!(!output.contains(marker), "provider text is redacted");
-        assert!(
-            !output.contains(&format!("{:?}", marker.as_bytes())),
-            "provider bytes are redacted"
+        for secret in [marker, CATALOG_FIXTURE_KEY] {
+            assert!(!output.contains(secret), "content text is redacted");
+            assert!(
+                !output.contains(&format!("{:?}", secret.as_bytes())),
+                "content bytes are redacted"
+            );
+        }
+    }
+}
+
+async fn delayed(headers: u64, body: u64) -> Result<Vec<CatalogModel>, CheckError> {
+    let (reader, mut writer) = tokio::io::duplex(256);
+    let task = tokio::spawn(async move {
+        let body_text = br#"{"data":[],"has_more":false}"#;
+        let headers_text = format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n",
+            body_text.len()
         );
+        tokio::time::sleep(Duration::from_secs(headers)).await;
+        if writer.write_all(headers_text.as_bytes()).await.is_ok() {
+            tokio::time::sleep(Duration::from_secs(body)).await;
+            writer.write_all(body_text).await.ok();
+        }
+    });
+    let peer = Scripted(Arc::new(Mutex::new(Script {
+        reader: Some(Box::new(reader)),
+        ..Script::default()
+    })));
+    let result = Transport::offline(peer, 1, 0)
+        .catalog(&Fence::default(), &key())
+        .await;
+    task.abort();
+    if let Err(error) = task.await {
+        assert!(error.is_cancelled(), "synthetic peer must not panic");
     }
-}
-
-struct Delayed {
-    headers: Duration,
-    body: Duration,
-}
-
-impl Http for Delayed {
-    async fn execute(&self, _: Request) -> Result<Response, HttpError> {
-        tokio::time::sleep(self.headers).await;
-        tokio::time::sleep(self.body).await;
-        Ok(response(200, b"{\"data\":[],\"has_more\":false}".to_vec()))
-    }
+    result
 }
 
 #[tokio::test(start_paused = true)]
 async fn whole_deadline_includes_headers_and_body_for_every_transport() {
     for (headers, body) in [(16, 0), (0, 16), (10, 10)] {
         let started = tokio::time::Instant::now();
-        let result = read(
-            &Delayed {
-                headers: Duration::from_secs(headers),
-                body: Duration::from_secs(body),
-            },
-            key(),
-        )
-        .await;
-        assert_eq!(result, Err(CheckError::Unconfirmed));
+        assert_eq!(delayed(headers, body).await, Err(CheckError::Unconfirmed));
         assert_eq!(started.elapsed(), Duration::from_secs(15));
     }
-    assert_eq!(
-        read(
-            &Delayed {
-                headers: Duration::from_secs(7),
-                body: Duration::from_secs(7)
-            },
-            key()
-        )
-        .await,
-        Ok(Vec::new())
-    );
-}
-
-struct Held(AtomicBool);
-
-struct Dropped<'a>(&'a AtomicBool);
-
-impl Drop for Dropped<'_> {
-    fn drop(&mut self) {
-        self.0.store(true, Ordering::SeqCst);
-    }
-}
-
-impl Http for Held {
-    async fn execute(&self, _: Request) -> Result<Response, HttpError> {
-        let _in_flight = Dropped(&self.0);
-        std::future::pending().await
-    }
+    assert_eq!(delayed(7, 7).await, Ok(Vec::new()));
 }
 
 #[tokio::test]
 async fn dropping_a_catalog_check_drops_its_held_transport() {
-    let http = Held(AtomicBool::new(false));
-    let mut check = Box::pin(read(&http, key()));
+    let (reader, _writer) = tokio::io::duplex(256);
+    let peer = Scripted(Arc::new(Mutex::new(Script {
+        reader: Some(Box::new(reader)),
+        ..Script::default()
+    })));
+    let transport = Transport::offline(peer.clone(), 1, 0);
+    let fence = Fence::default();
+    let key = key();
+    let mut check = Box::pin(transport.catalog(&fence, &key));
     tokio::select! {
         biased;
         _ = &mut check => panic!("held transport cannot complete"),
         () = tokio::task::yield_now() => {}
     }
-    assert!(!http.0.load(Ordering::SeqCst), "transport is held");
+    assert_eq!(peer.0.lock().expect("peer").drops, 0);
     drop(check);
-    assert!(
-        http.0.load(Ordering::SeqCst),
+    assert_eq!(
+        peer.0.lock().expect("peer").drops,
+        1,
         "cancel drops transport immediately"
     );
 }

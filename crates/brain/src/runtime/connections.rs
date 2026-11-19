@@ -9,13 +9,12 @@ use kumochi_protocol::message::{
     KeyRecoveryRead, KeyRemovalFailure, KeyStageFailure, KeyStageId, KeyStagePlan, KeyView,
 };
 use tokio::task::JoinHandle;
-use tokio::time::{Duration, timeout};
 
 use crate::connections::anthropic::{
     KeyError, KeyOp, KeyResult,
     fence::Fence,
     key::AnthropicKey,
-    models::{self, CatalogModel, CheckError},
+    models::{CatalogModel, CheckError},
     route::{Transport, Verified},
 };
 use crate::coordinator::{Availability, Input, Ready, model_unavailable};
@@ -241,7 +240,7 @@ impl Connections {
 
     fn verify(&mut self) -> bool {
         if self.transport.is_none() {
-            return true;
+            return false;
         }
         let key = self.key.take();
         if self.verified.is_some() {
@@ -347,7 +346,6 @@ impl Accounts {
         let work = match op {
             ConnectionOp::BeginAnthropicKeyStage { request, len } => {
                 if self.connections.removing.is_some()
-                    || self.connections.adopting.is_some()
                     || self.connections.check_request.is_some()
                     || self.connections.stage_link != Some(epoch)
                 {
@@ -464,10 +462,7 @@ impl Accounts {
             request,
             read: None,
         };
-        if self.connections.removing.is_some()
-            || self.connections.adopting.is_some()
-            || self.connections.check_request.is_some()
-        {
+        if self.connections.removing.is_some() || self.connections.check_request.is_some() {
             return vec![refused];
         }
         self.load_key(KeyOp::Load);
@@ -592,25 +587,16 @@ impl Accounts {
         }
         match result {
             Ok(Some(key)) => {
+                let Some(transport) = self.connections.transport.clone() else {
+                    self.connections.view.anthropic = KeyView::Unconfirmed;
+                    return removal;
+                };
                 self.connections.key = Some(key.clone());
-                let transport = self.connections.transport.clone();
                 let checking = Fence::default();
-                self.connections.checking = transport.as_ref().map(|_| checking.clone());
-                let http = std::sync::Arc::clone(&self.net.http);
+                self.connections.checking = Some(checking.clone());
                 let events = self.reads_tx.clone();
                 self.connections.read = Some(tokio::spawn(async move {
-                    let result = timeout(Duration::from_secs(15), async {
-                        if let Some(transport) = transport {
-                            return transport.catalog(&checking, &key).await;
-                        }
-                        let http = tokio::task::spawn_blocking(move || http())
-                            .await
-                            .map_err(|_| CheckError::Unconfirmed)?
-                            .map_err(|_| CheckError::Unconfirmed)?;
-                        models::read(&http, key).await
-                    })
-                    .await
-                    .unwrap_or(Err(CheckError::Unconfirmed));
+                    let result = transport.catalog(&checking, &key).await;
                     events
                         .send(Event::Connection(ConnectionEvent::Checked {
                             generation,
@@ -654,7 +640,7 @@ impl Accounts {
             }
             _ => return Vec::new(),
         }
-        if in_flight || self.connections.adopting.is_some() && self.connections.removing.is_none() {
+        if in_flight {
             return Vec::new();
         }
         let abandoned = self
@@ -755,6 +741,8 @@ impl Accounts {
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+pub(super) use tests::with_empty_catalog;
 
 impl Brain {
     pub(super) fn key_route_changed(
