@@ -6,8 +6,7 @@ use anyhow::{Context as _, Result, ensure};
 use kumochi_protocol::constants::{DISPLAY_NAME, OBJECT_PREFIX};
 use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
-    COLOR_WINDOW, GetMonitorInfoW, GetSysColorBrush, MONITOR_DEFAULTTONEAREST, MONITORINFO,
-    MonitorFromWindow,
+    COLOR_WINDOW, GetSysColorBrush, MONITOR_DEFAULTTONEAREST, MonitorFromWindow,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -18,7 +17,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use windows::core::{HSTRING, PCWSTR, w};
 
 use super::fixture::{ABORT, OPEN, set_property};
-use super::{Window, class_name, fixture, pack, property, request, size, unpack};
+use super::{Window, class_name, fixture, monitor_work_area, pack, property, request, unpack};
 
 pub(super) const CREATE: u32 = WM_APP + 26;
 pub(super) const CLOSE: u32 = WM_APP + 27;
@@ -58,14 +57,7 @@ pub(super) fn register(instance: HINSTANCE) -> Result<()> {
 fn work_area(window: HWND) -> Result<RECT> {
     // SAFETY: obtains only monitor geometry for the supplied window, without reading content.
     let monitor = unsafe { MonitorFromWindow(window, MONITOR_DEFAULTTONEAREST) };
-    let mut info = MONITORINFO {
-        cbSize: size::<MONITORINFO>(),
-        ..Default::default()
-    };
-    // SAFETY: info has the documented writable size and monitor came from MonitorFromWindow.
-    let found = unsafe { GetMonitorInfoW(monitor, &raw mut info) };
-    ensure!(found.as_bool(), "cannot read fixture monitor work area");
-    Ok(info.rcWork)
+    monitor_work_area(monitor)
 }
 
 fn overlaps(a: RECT, b: RECT) -> bool {

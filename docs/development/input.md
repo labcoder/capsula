@@ -609,6 +609,17 @@ transcript, evidence directory, fixture, guards and PresentMon bounds, behind `h
 idle opener. It has no Ready and no feel verdicts: it prints that, and its `owner-feel.txt`
 says `not_part_of_this_run`. The physical Ready in `gate-session` stays the only handoff for
 the owner's feel verdicts; the measured phases may also run unattended after ten idle minutes.
+Fixture requests distinguish a send failure, a Windows-reported timeout, and a delivered
+refusal. The unattended prepare refusal records the fixture's numeric code and a fixed reason,
+such as a non-Default input desktop, guard registration failure, insufficient idle time or input
+arriving during arming. These diagnostics neither retry a refusal nor change input admission.
+The unattended fixture starts clear of the cursor and returns to that frame after a cover phase.
+If no placement avoids the cursor or the still-hidden frame is already under it, startup refuses
+with exit code 13 without showing the window. Physical Ready uses the original frame. The
+unattended opener still refuses all queued input during arming; the refusal now records only
+the high-word category mask from `GetQueueStatus(QS_INPUT)`. There is no cursor restoration at
+activation. At session end the existing guarded restore moves only to a freshly verified owned
+point; if it skips the restore, it logs a fixed status.
 
 ## Voice hold authority
 

@@ -6,9 +6,13 @@ use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
-use anyhow::{Context as _, Result, ensure};
+use anyhow::{Context as _, Result, bail, ensure};
 use kumochi_protocol::constants::{INPUT_SESSION_MARKER, OBSERVER_REPAINT_MESSAGE};
-use windows::Win32::Foundation::{HANDLE, HWND, LPARAM, POINT, RECT, WPARAM};
+use windows::Win32::Foundation::{
+    ERROR_SUCCESS, ERROR_TIMEOUT, GetLastError, HANDLE, HWND, LPARAM, POINT, RECT, SetLastError,
+    WIN32_ERROR, WPARAM,
+};
+use windows::Win32::Graphics::Gdi::{GetMonitorInfoW, HMONITOR, MONITORINFO};
 use windows::Win32::System::StationsAndDesktops::{
     CloseDesktop, DESKTOP_CONTROL_FLAGS, DESKTOP_READOBJECTS, GetThreadDesktop,
     GetUserObjectInformationW, OpenInputDesktop, UOI_NAME,
@@ -37,7 +41,9 @@ mod session;
 mod switch_window;
 
 pub(crate) use fixture::fixture;
-use fixture::{CHANGES, CLICK_POINT, CLICK_QPC, CLICKS, ESCAPES, property};
+use fixture::{
+    CHANGES, CLICK_POINT, CLICK_QPC, CLICKS, ESCAPES, IdleRefusal, PREPARE_IDLE, property,
+};
 pub(crate) use quiet::quiet;
 pub(crate) use registry::Registry;
 pub(crate) use session::{Session, Target};
@@ -223,21 +229,49 @@ pub(crate) enum WindowKind {
     ProductProxy,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FixturePlacement {
+    Default,
+    AwayFromCursor,
+}
+
+pub(super) const AWAY_FROM_CURSOR: &str = "--away-from-cursor";
+pub(crate) const FIXTURE_PLACEMENT_REFUSED: i32 = 13;
+
 /// Starts the fixture, which closes itself after `lifetime` (at most an hour). It shows the feel
 /// verdicts and Ready, and arms nothing until the owner physically clicks Ready.
-pub(crate) fn spawn_fixture(exe: &Path, lifetime: Duration) -> Result<Child> {
+pub(crate) fn spawn_fixture(
+    exe: &Path,
+    lifetime: Duration,
+    placement: FixturePlacement,
+) -> Result<Child> {
     ensure!(
         (Duration::from_secs(1)..=MAX_LIFETIME).contains(&lifetime),
         "fixture lifetime must be 1 s to 1 h"
     );
-    Ok(Command::new(exe)
-        .arg("input-fixture")
+    let mut command = Command::new(exe);
+    command.arg("input-fixture");
+    if placement == FixturePlacement::AwayFromCursor {
+        command.arg(AWAY_FROM_CURSOR);
+    }
+    Ok(command
         .arg(format!("--lifetime-secs={}", lifetime.as_secs()))
         .creation_flags(NORMAL_PRIORITY_CLASS.0)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()?)
+}
+
+fn monitor_work_area(monitor: HMONITOR) -> Result<RECT> {
+    let mut info = MONITORINFO {
+        cbSize: size::<MONITORINFO>(),
+        ..Default::default()
+    };
+    // SAFETY: info has its documented writable size; the caller obtained the monitor from Win32.
+    let found = unsafe { GetMonitorInfoW(monitor, &raw mut info) };
+    ensure!(found.as_bool(), "cannot read fixture monitor work area");
+    Ok(info.rcWork)
 }
 
 fn size<T>() -> u32 {
@@ -355,12 +389,16 @@ pub(crate) fn owned_window(child: &mut Child, kind: WindowKind) -> Result<Window
     })
 }
 
-/// Sends the fixture one numeric command; fails unless it answers nonzero within a second.
+/// Sends the fixture one numeric command; fails unless it accepts within a second.
 fn request(fixture: Window, message: u32, wparam: WPARAM, lparam: LPARAM) -> Result<usize> {
-    fixture.validate()?;
+    fixture
+        .validate()
+        .with_context(|| format!("fixture request {message:#x} send failed"))?;
     let mut response = 0usize;
+    // SAFETY: clears this thread's error slot; the send can fail without setting it.
+    unsafe { SetLastError(ERROR_SUCCESS) };
     // SAFETY: the owned fixture accepts fixed numeric commands, never cross-process pointers.
-    let delivered = unsafe {
+    let sent = unsafe {
         SendMessageTimeoutW(
             fixture.hwnd,
             message,
@@ -371,10 +409,39 @@ fn request(fixture: Window, message: u32, wparam: WPARAM, lparam: LPARAM) -> Res
             Some(&raw mut response),
         )
     };
-    ensure!(
-        delivered.0 != 0 && response != 0,
-        "fixture request {message:#x} failed or timed out"
-    );
+    let reply = if sent.0 != 0 {
+        Ok(response)
+    } else {
+        // SAFETY: reads this thread's slot immediately after the failed send.
+        Err(unsafe { GetLastError() })
+    };
+    request_result(message, reply)
+}
+
+fn request_result(message: u32, reply: std::result::Result<usize, WIN32_ERROR>) -> Result<usize> {
+    let response = match reply {
+        Ok(response) => response,
+        Err(ERROR_TIMEOUT) => bail!("fixture request {message:#x} timed out"),
+        Err(error) => {
+            bail!(
+                "fixture request {message:#x} send failed (Win32 code {})",
+                error.0
+            );
+        }
+    };
+    if message == PREPARE_IDLE && response != 1 {
+        if let Some((code, mask)) = IdleRefusal::queue_mask(response) {
+            let reason = IdleRefusal::message(code);
+            bail!(
+                "fixture request {message:#x} refused (fixture code {code}): {reason}; queue_mask={mask:#06x}"
+            );
+        }
+        let reason = IdleRefusal::message(response);
+        bail!("fixture request {message:#x} refused (fixture code {response}): {reason}");
+    }
+    if response == 0 {
+        bail!("fixture request {message:#x} refused (fixture code {response})");
+    }
     Ok(response)
 }
 
@@ -471,7 +538,72 @@ fn desktop_rect() -> [i32; 4] {
 
 #[cfg(test)]
 mod tests {
-    use super::{desktop_is_default, digitizer_free, normalized, pack, process_basename, unpack};
+    use super::fixture::OPEN_GATE;
+    use super::{
+        ERROR_SUCCESS, ERROR_TIMEOUT, PREPARE_IDLE, desktop_is_default, digitizer_free, normalized,
+        pack, process_basename, request_result, unpack,
+    };
+    use windows::Win32::Foundation::ERROR_ACCESS_DENIED;
+
+    #[test]
+    fn fixture_request_distinguishes_failed_sends_from_timeouts_and_refusals() {
+        let error = |reply| request_result(OPEN_GATE, reply).unwrap_err().to_string();
+        assert_eq!(
+            error(Err(ERROR_TIMEOUT)),
+            "fixture request 0x8017 timed out"
+        );
+        assert_eq!(
+            error(Err(ERROR_ACCESS_DENIED)),
+            "fixture request 0x8017 send failed (Win32 code 5)"
+        );
+        assert_eq!(
+            error(Err(ERROR_SUCCESS)),
+            "fixture request 0x8017 send failed (Win32 code 0)"
+        );
+        assert_eq!(
+            error(Ok(0)),
+            "fixture request 0x8017 refused (fixture code 0)"
+        );
+        assert_eq!(request_result(OPEN_GATE, Ok(2)).unwrap(), 2);
+    }
+
+    #[test]
+    fn only_prepared_is_accepted_for_prepare_idle() {
+        for (reply, label) in [
+            (2, "fixture was already used or armed"),
+            (3, "input desktop is not this session's Default desktop"),
+            (4, "could not read last input"),
+            (5, "invalid away duration"),
+            (6, "could not register input guards"),
+            (7, "input changed while the guard armed"),
+            (8, "idle duration was too short"),
+            (9, "the fixture had queued input"),
+            (10, "could not update the activation marker"),
+            (11, "could not raise the fixture without activation"),
+            (12, "could not mark the fixture aborted"),
+            (0, "unknown prepare-idle refusal"),
+            (13, "unknown prepare-idle refusal"),
+            (usize::MAX, "unknown prepare-idle refusal"),
+        ] {
+            assert_eq!(
+                request_result(PREPARE_IDLE, Ok(reply))
+                    .unwrap_err()
+                    .to_string(),
+                format!("fixture request 0x8019 refused (fixture code {reply}): {label}"),
+            );
+        }
+        assert_eq!(request_result(PREPARE_IDLE, Ok(1)).unwrap(), 1);
+    }
+
+    #[test]
+    fn queued_input_keeps_fixture_code_nine_and_names_the_high_word_mask() {
+        assert_eq!(
+            request_result(PREPARE_IDLE, Ok(0x0004_0209))
+                .unwrap_err()
+                .to_string(),
+            "fixture request 0x8019 refused (fixture code 9): the fixture had queued input; queue_mask=0x0402"
+        );
+    }
 
     #[test]
     fn foreground_diagnostic_keeps_only_the_executable_basename() {
