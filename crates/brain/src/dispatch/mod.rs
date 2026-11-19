@@ -571,7 +571,14 @@ fn mcp_schema(tool: &Tool) -> ToolSchema {
     match tool.name {
         ToolName::Draw => draw::overlay(),
         ToolName::DraftIssue => draft_issue::mcp_schema(),
-        _ => model_schema(tool),
+        ToolName::Focus
+        | ToolName::CreateTask
+        | ToolName::SearchHistory
+        | ToolName::ReadHistory
+        | ToolName::ListTasks
+        | ToolName::Unknown => model_schema(tool),
+        #[cfg(test)]
+        ToolName::Probe | ToolName::Recall => model_schema(tool),
     }
 }
 
