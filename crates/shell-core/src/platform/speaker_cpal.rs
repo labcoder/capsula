@@ -6,14 +6,21 @@ use std::sync::atomic::{AtomicU8, Ordering};
 
 use cpal::traits::{DeviceTrait as _, HostTrait as _, StreamTrait as _};
 use cpal::{BufferSize, ErrorKind, StreamConfig};
-use crossbeam_queue::ArrayQueue;
 use kumochi_audio::Resampler;
 use kumochi_protocol::message::{MAX_RATE, MIN_RATE};
 use thiserror::Error;
 use zeroize::{Zeroize as _, Zeroizing};
 
+#[expect(
+    unsafe_code,
+    reason = "fixed SPSC slots transfer ownership by atomic publication"
+)]
+mod handoff;
+
 #[cfg(test)]
 mod tests;
+
+use handoff::{Consumer, Producer};
 
 const SOURCE_RATE: u32 = 24_000;
 const PACKET_SAMPLES: usize = 480;
@@ -177,13 +184,10 @@ impl Output {
     }
 }
 
-struct Buffers {
-    free: ArrayQueue<Block>,
-    ready: ArrayQueue<Block>,
-}
-
 struct Submit {
-    buffers: Arc<Buffers>,
+    free: Consumer<Block>,
+    ready: Producer<Block>,
+    spare: Option<Block>,
     rate: u32,
     channels: usize,
     converter: Option<Resampler>,
@@ -191,29 +195,31 @@ struct Submit {
 }
 
 struct Playback {
-    buffers: Arc<Buffers>,
+    free: Producer<Block>,
+    ready: Consumer<Block>,
     current: Option<Block>,
     offset: usize,
 }
 
 fn pair(rate: u32, channels: usize) -> (Submit, Playback) {
-    let buffers = Arc::new(Buffers {
-        free: ArrayQueue::new(BLOCKS),
-        ready: ArrayQueue::new(BLOCKS),
-    });
+    let (mut recycle, free) = handoff::pair();
+    let (ready, render) = handoff::pair();
     for _ in 0..BLOCKS {
         let block = Zeroizing::new(Vec::with_capacity(MAX_FRAMES * channels));
-        assert!(buffers.free.push(block).is_ok(), "one allocation per slot");
+        assert!(recycle.push(block).is_ok(), "one allocation per slot");
     }
     let submit = Submit {
-        buffers: Arc::clone(&buffers),
+        free,
+        ready,
+        spare: None,
         rate,
         channels,
         converter: None,
         mono: Zeroizing::new(Vec::with_capacity(MAX_FRAMES)),
     };
     let playback = Playback {
-        buffers,
+        free: recycle,
+        ready: render,
         current: None,
         offset: 0,
     };
@@ -228,7 +234,11 @@ impl Submit {
         if samples.is_empty() && (kind == PacketKind::More || self.converter.is_none()) {
             return Ok(());
         }
-        let mut block = self.buffers.free.pop().ok_or(OutputError::Full)?;
+        let mut block = self
+            .spare
+            .take()
+            .or_else(|| self.free.pop())
+            .ok_or(OutputError::Full)?;
         block.zeroize();
         let mut input = Zeroizing::new([0.0; PACKET_SAMPLES]);
         for (out, &sample) in input.iter_mut().zip(samples) {
@@ -260,12 +270,11 @@ impl Submit {
             }
         }
         self.mono.zeroize();
-        let queue = if block.is_empty() {
-            &self.buffers.free
-        } else {
-            &self.buffers.ready
-        };
-        queue.push(block).map_err(|_| OutputError::Unavailable)
+        if block.is_empty() {
+            self.spare = Some(block);
+            return Ok(());
+        }
+        self.ready.push(block).map_err(|_| OutputError::Unavailable)
     }
 }
 
@@ -273,7 +282,7 @@ impl Playback {
     fn fill(&mut self, mut out: &mut [f32]) {
         while !out.is_empty() {
             if self.current.is_none() {
-                self.current = self.buffers.ready.pop();
+                self.current = self.ready.pop();
                 self.offset = 0;
             }
             let Some(block) = self.current.take() else {
@@ -286,7 +295,7 @@ impl Playback {
             out = rest;
             if self.offset != block.len() {
                 self.current = Some(block);
-            } else if let Err(block) = self.buffers.free.push(block) {
+            } else if let Err(block) = self.free.push(block) {
                 self.current = Some(block);
                 break;
             }

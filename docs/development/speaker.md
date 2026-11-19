@@ -4,9 +4,10 @@ The dormant cpal seam does not change normal startup or the legacy test opener. 
 worker can open a paused float stream at the default endpoint rate and feed bounded 24 kHz
 mono packets. It converts on the worker through `kumochi-audio`, which also serves brain
 speech and microphone input, then fills a preallocated pool of device-format blocks. The
-callback copies those blocks and fills an underrun with silence. Route notifications go
-back to the worker; this seam does not yet implement route recovery, speech receipts or
-mic admission, and neither the shell link nor the UI opens it.
+callback takes only atomically published blocks and fills silence without waiting for the
+worker. The fixed single-producer/single-consumer rings also return blocks for reuse.
+Route notifications go back to the worker. This seam does not yet implement route recovery,
+speech receipts or mic admission, and neither the shell link nor the UI opens it.
 
 `kumochi_shell_core::speaker` owns one connection's output device: it keeps the run's queued
 speech, writes it to the device, and decides from the device's own clock which samples played.

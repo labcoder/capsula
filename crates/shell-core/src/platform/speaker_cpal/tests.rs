@@ -11,7 +11,7 @@ fn render_copies_prepared_stereo_frames_across_callback_boundaries_and_fills_sil
     let mut first = [99.0; 2];
     render.fill(&mut first);
     assert_eq!(first.map(f32::to_bits), [-1.0, -1.0].map(f32::to_bits));
-    assert_eq!(submit.buffers.free.len(), BLOCKS - 1);
+    assert_eq!(submit.free.len(), BLOCKS - 1);
 
     let mut second = [99.0; 4];
     render.fill(&mut second);
@@ -19,7 +19,7 @@ fn render_copies_prepared_stereo_frames_across_callback_boundaries_and_fills_sil
         second.map(f32::to_bits),
         [0.5, 0.5, 0.0, 0.0].map(f32::to_bits)
     );
-    assert_eq!(submit.buffers.free.len(), BLOCKS);
+    assert_eq!(submit.free.len(), BLOCKS);
 
     let (mut submit, mut render) = pair(SOURCE_RATE, 8);
     submit.packet(&[16_384], PacketKind::End).unwrap();
@@ -91,15 +91,15 @@ fn backpressure_preserves_refused_packets_and_the_size_limit_is_exact() {
 
 #[test]
 fn maximum_rate_full_final_packet_does_not_grow_the_prepared_buffers() {
-    let (mut submit, _) = pair(MAX_RATE, 2);
+    let (mut submit, mut render) = pair(MAX_RATE, 2);
     submit
         .packet(&[16_384; PACKET_SAMPLES], PacketKind::More)
         .unwrap();
     submit
         .packet(&[16_384; PACKET_SAMPLES], PacketKind::End)
         .unwrap();
-    let first = submit.buffers.ready.pop().unwrap();
-    let final_block = submit.buffers.ready.pop().unwrap();
+    let first = render.ready.pop().unwrap();
+    let final_block = render.ready.pop().unwrap();
     assert_eq!(first.len() + final_block.len(), 15_360);
     assert_eq!(first.capacity(), MAX_FRAMES * 2);
     assert_eq!(final_block.capacity(), MAX_FRAMES * 2);
@@ -115,4 +115,23 @@ fn a_late_xrun_cannot_hide_stream_loss() {
     OutputEvent::latch(&pending, ErrorKind::Xrun);
     assert_eq!(OutputEvent::take(&pending), Some(OutputEvent::Lost));
     assert_eq!(OutputEvent::take(&pending), None);
+}
+
+#[test]
+fn an_unpublished_block_is_silent_until_the_next_callback() {
+    let (mut submit, mut playback) = pair(SOURCE_RATE, 2);
+    let mut block = submit.free.pop().unwrap();
+    block.extend([0.5; 4]);
+
+    let mut pending = [99.0; 4];
+    let result = submit.ready.push_before_publish(block, || {
+        assert!(playback.ready.pop().is_none(), "unpublished is empty");
+        playback.fill(&mut pending);
+    });
+    assert!(result.is_ok(), "the reserved slot must publish");
+    assert_eq!(pending.map(f32::to_bits), [0; 4]);
+
+    let mut published = [99.0; 4];
+    playback.fill(&mut published);
+    assert_eq!(published.map(f32::to_bits), [0.5f32.to_bits(); 4]);
 }

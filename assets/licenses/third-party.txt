@@ -15092,7 +15092,6 @@ SOFTWARE.
 crossbeam-channel 0.5.17
 crossbeam-deque 0.8.8
 crossbeam-epoch 0.9.21
-crossbeam-queue 0.3.13
 crossbeam-utils 0.8.23
 
 The MIT License (MIT)

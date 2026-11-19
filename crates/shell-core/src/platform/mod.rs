@@ -13,7 +13,7 @@ pub mod speaker_cpal;
 #[cfg(windows)]
 #[expect(
     unsafe_code,
-    reason = "Win32 calls; the core's only shipped unsafe code lives here"
+    reason = "Win32 calls are isolated to this platform adapter"
 )]
 mod windows;
 

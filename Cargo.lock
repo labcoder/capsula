@@ -4005,7 +4005,6 @@ version = "0.1.2"
 dependencies = [
  "async-channel",
  "cpal",
- "crossbeam-queue",
  "fluent-bundle",
  "keyring",
  "kumochi-audio",
