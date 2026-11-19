@@ -803,3 +803,153 @@ async fn a_title_never_posts_to_a_saved_model_the_catalog_does_not_offer() {
     );
     assert_eq!(script.responses.len(), 1, "the title never connected");
 }
+
+/// A Check's catalog read and a Messages post can both be refused on the same key. Whichever
+/// refusal the account handles first retires the key, the run that was sending on it ends with
+/// the rejected-key notice, and the next ask is refused here as unavailable without a post.
+#[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one real shell session per order through a held post, a Check and the next ask"
+)]
+async fn a_refused_check_racing_a_refused_post_keeps_the_rejected_key_notice() {
+    let refused = || {
+        let body = json!({"type":"error","error":{"type":"authentication_error","message":"synthetic"}})
+            .to_string();
+        format!(
+            "HTTP/1.1 401 Refused\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        )
+        .into_bytes()
+    };
+    for catalog_first in [true, false] {
+        let scratch = Scratch::new(&format!("offline-key-refused-race-{catalog_first}"));
+        let store = FakeStore::default();
+        let lock = scratch.db().with_file_name("offline-key-runtime.lock");
+        Vault::with_service(store.clone(), "offline-key-runtime", &lock)
+            .expect("fake vault")
+            .save_anthropic_key(KEY.as_bytes())
+            .expect("synthetic key");
+        std::fs::write(
+            scratch.db().with_file_name(kumochi_protocol::constants::CONFIG_FILE),
+            format!("default_model = {{ connection = \"AnthropicKey\", model = \"{MODEL}\", effort = \"Medium\" }}\n"),
+        ).expect("settings");
+        let catalog = json!({"data":[{"type":"model","id":MODEL,"display_name":"Synthetic model"}],"has_more":false});
+        let peer = Scripted(Arc::new(Mutex::new(Script {
+            responses: [http("application/json", &catalog.to_string())].into(),
+            ..Script::default()
+        })));
+        let worker = Worker::new(
+            Box::new(move || Vault::with_service(store.clone(), "offline-key-runtime", &lock)),
+            Arc::new(FixedClock(0)),
+        );
+        let mut accounts =
+            Accounts::spawn_unconfigured(worker, test_support::net()).expect("worker");
+        accounts
+            .connections
+            .use_test_transport(Transport::offline(peer.clone(), 2, 2));
+        let mut brain = test_support::brain_with(&scratch, "", accounts);
+        let ((control, data), mut shell) = duplex();
+        let mut tap = Tap::from_env();
+        let connected = |count: usize| {
+            let peer = peer.clone();
+            async move {
+                while peer.0.lock().expect("peer").starts < count {
+                    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                }
+            }
+        };
+        let ask = |turn| {
+            let message = DataToBrain::TextSubmit {
+                turn,
+                screen: ScreenChoice::None,
+                thread: None,
+                text: "ask".into(),
+            };
+            frame::encode(&message, Pipe::Data).expect("encodes")
+        };
+        let client = async {
+            loop {
+                if matches!(shell.next_control().await.expect("control"),
+                Some(ControlToShell::Connections(view)) if view.anthropic == KeyView::Ready)
+                {
+                    break;
+                }
+            }
+            let DataToShell::Models { .. } = shell.data().await else {
+                panic!("the verified catalog did not arrive");
+            };
+            let (post, mut post_reply) = tokio::io::duplex(4096);
+            peer.0.lock().expect("peer").reader = Some(Box::new(post));
+            shell.data_out.write_all(&ask(1)).await.expect("submitted");
+            connected(2).await;
+            let (read, catalog_reply) = tokio::io::duplex(4096);
+            {
+                let mut script = peer.0.lock().expect("peer");
+                if catalog_first {
+                    script.responses.push_back(refused());
+                } else {
+                    script.reader = Some(Box::new(read));
+                }
+            }
+            shell
+                .send(&ControlToBrain::Connection(
+                    kumochi_protocol::message::ConnectionOp::CheckAnthropicKey,
+                ))
+                .await;
+            connected(3).await;
+            if !catalog_first {
+                post_reply
+                    .write_all(&refused())
+                    .await
+                    .expect("the post's refusal");
+            }
+            let mut ended = Vec::new();
+            for turn in 1..=2 {
+                if turn == 2 {
+                    shell.data_out.write_all(&ask(2)).await.expect("submitted");
+                }
+                loop {
+                    let (_, phase, error) = shell.notice().await;
+                    if !matches!(phase, Phase::Thinking | Phase::Answering) {
+                        let notice = error.map(|error| (error.key(), error.actions().to_vec()));
+                        ended.push((phase, notice));
+                        break;
+                    }
+                }
+            }
+            drop((post_reply, catalog_reply, shell));
+            ended
+        };
+        let (ended, outcomes) = timeout(PATIENCE, async {
+            tokio::join!(brain.serve(control, data, &mut tap), client)
+        })
+        .await
+        .expect("routed runtime finishes");
+        assert_eq!(ended, Ended::Lost);
+        let open = vec![Action::OpenSettings];
+        assert_eq!(
+            outcomes,
+            [
+                (
+                    Phase::Failed,
+                    Some((ErrorKey::AnthropicKeyRejected, open.clone()))
+                ),
+                (Phase::Failed, Some((ErrorKey::ModelUnavailable, open))),
+            ],
+            "catalog refusal handled first: {catalog_first}"
+        );
+        brain.close().await;
+        let script = peer.0.lock().expect("peer");
+        let posts = script
+            .requests
+            .iter()
+            .filter(|request| request.starts_with(b"POST "))
+            .count();
+        assert_eq!(
+            (script.starts, posts),
+            (3, 1),
+            "catalog refusal handled first: {catalog_first}: two catalog reads and the one post"
+        );
+    }
+}
