@@ -7,7 +7,7 @@ use kumochi_scene::{TokenError, Tokenizer};
 use sha2::{Digest as _, Sha256};
 
 use super::{BuildKey, Coordinator, Effect, Stale};
-use crate::dispatch::{CallInput, Caller, Dispatch, DrawAction, DrawEnd, LedgerKey, ToolOutput};
+use crate::dispatch::{CallInput, Dispatch, DrawAction, DrawEnd, LedgerKey, ToolOutput};
 use crate::drawing::{CallEnd, CallError, Input};
 use crate::engines::{CallId, ToolName};
 
@@ -130,15 +130,13 @@ impl Coordinator {
         if !run.tools.open(call.clone(), ToolName::Draw) {
             return self.fail(build.run, crate::store::Failure::Engine, effects);
         }
-        if !run.provider_calls.contains(call) {
-            run.provider_calls.push(call.clone());
+        let caller = run.model_caller(call.clone());
+        if !run.provider_calls.contains(&caller.key()) {
+            run.provider_calls.push(caller.key());
         }
         let before = run.draw_calls.len();
         let dispatch = self.tool_input(
-            Caller::Model {
-                run: build.run,
-                call: call.clone(),
-            },
+            caller,
             ToolName::Draw,
             CallInput::Draw(DrawAction::Start),
             effects,
@@ -256,11 +254,9 @@ impl Coordinator {
                 })
             };
             if handoff {
+                let caller = self.current(run)?.model_caller(call.clone());
                 if let Dispatch::Answered(_) = self.tool_input(
-                    Caller::Model {
-                        run,
-                        call: call.clone(),
-                    },
+                    caller,
                     ToolName::Draw,
                     CallInput::Draw(DrawAction::Record { index, bytes }),
                     effects,
@@ -335,15 +331,8 @@ impl Coordinator {
                         .and_then(|open| open.provider.as_mut())
                         .ok_or(Stale)?
                         .registered = true;
-                    let answer = self.tool_call(
-                        Caller::Model {
-                            run,
-                            call: call.clone(),
-                        },
-                        ToolName::Draw,
-                        args.as_bytes(),
-                        effects,
-                    );
+                    let caller = self.current(run)?.model_caller(call.clone());
+                    let answer = self.tool_call(caller, ToolName::Draw, args.as_bytes(), effects);
                     if let Dispatch::Answered(output) = answer {
                         self.current(run)?.tools.answer(call, output);
                     }
@@ -395,15 +384,8 @@ impl Coordinator {
                 return Ok(());
             }
             self.current(run)?.provider_draw(call)?.registered = true;
-            let dispatch = self.tool_call(
-                Caller::Model {
-                    run,
-                    call: call.clone(),
-                },
-                ToolName::Draw,
-                b"",
-                effects,
-            );
+            let caller = self.current(run)?.model_caller(call.clone());
+            let dispatch = self.tool_call(caller, ToolName::Draw, b"", effects);
             if !self.is_provider(run, call) {
                 return Ok(());
             }
@@ -482,11 +464,9 @@ impl Coordinator {
                 continue;
             }
             association.finished = true;
+            let caller = self.current(run)?.model_caller(call.clone());
             if let Dispatch::Answered(_) = self.tool_input(
-                Caller::Model {
-                    run,
-                    call: call.clone(),
-                },
+                caller,
                 ToolName::Draw,
                 CallInput::Draw(DrawAction::Finish(
                     after_records.then_some(CallError::Token(TokenError::AfterRecords)),

@@ -152,6 +152,17 @@ impl Coordinator {
                 _ => effects.push(Effect::Store(StoreOp::WithdrawScreen { run: run.id })),
             }
         }
+        if let Some(run) = self.current.as_ref().filter(|run| {
+            run.key_granted && matches!(run.screen, Some(crate::context::Screen::Withdrawn))
+        }) {
+            self.fail_with(
+                run.id,
+                crate::store::Failure::Engine,
+                kumochi_protocol::message::ErrorKey::ScreenUnavailable.into(),
+                effects,
+            )
+            .expect("the run is current");
+        }
     }
 
     /// Captures the sign-in each kind has ready, without allocating a run or a new thread.

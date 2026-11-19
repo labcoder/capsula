@@ -612,6 +612,7 @@ struct Run {
     route: Option<crate::context::Route>,
     /// The sources of the builds admitted since its first round's, which a key round carries on.
     sent: Vec<ThreadId>,
+    key_granted: bool,
     /// A typed turn that arrived while Claude Code was being found, until it binds or is released.
     finding: Option<availability::Finding>,
     /// The round that compacted inline since the run's last admitted build.
@@ -619,7 +620,7 @@ struct Run {
     /// The draw call the engine's steps stream in, once it starts.
     draw: Option<run::DrawArgs>,
     draw_calls: Vec<provider_draw::DrawCall>,
-    provider_calls: Vec<crate::engines::CallId>,
+    provider_calls: Vec<crate::dispatch::LedgerKey>,
     /// Why the run failed, for the shell.
     error: Option<UserError>,
     /// The run's tool calls, one entry per key.
@@ -1296,6 +1297,7 @@ impl Coordinator {
             arrived,
             route: None,
             sent: Vec::new(),
+            key_granted: false,
             finding,
             compacted: None,
             draw: None,
@@ -1462,7 +1464,12 @@ impl Coordinator {
         };
         self.drawing_closed(run.id, loss, effects);
         run.tools.drop_round();
-        if run.turn_stored && outcome != RunEnd::Done {
+        if run.turn_stored
+            && (outcome != RunEnd::Done
+                || run.route.is_some_and(|route| {
+                    route.kind == kumochi_protocol::message::ConnectionKind::AnthropicKey
+                }))
+        {
             effects.push(Effect::CancelEngine { run: run.id });
         }
         // Steps waiting for the scene's id were never sent, so no ack is owed for them.

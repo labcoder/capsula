@@ -6,7 +6,7 @@ use std::sync::Arc;
 use kumochi_protocol::Secret;
 use kumochi_protocol::message::{
     ClaudeCodeView, ConnectionKind, ConnectionOp, ConnectionsView, ControlToShell, DataToShell,
-    KeyRecoveryRead, KeyRemovalFailure, KeyStageFailure, KeyStageId, KeyStagePlan, KeyView,
+    KeyRecoveryRead, KeyRemovalFailure, KeyStageFailure, KeyStageId, KeyStagePlan, KeyView, RunId,
 };
 use tokio::task::JoinHandle;
 
@@ -17,10 +17,14 @@ use crate::connections::anthropic::{
     models::{CatalogModel, CheckError},
     route::{Transport, Verified},
 };
-use crate::coordinator::{Availability, Input, Ready, model_unavailable};
+use crate::coordinator::{Availability, Input, Ready, SendKey, model_unavailable};
+use crate::engines::anthropic::live::Live;
+use crate::engines::{Engine, RunRequest};
 
 use super::account::{Accounts, Event, Work};
 use super::{Brain, Full, Link};
+
+mod question;
 
 pub(crate) enum ConnectionEvent {
     Op(ConnectionOp),
@@ -209,6 +213,11 @@ impl fmt::Debug for Connections {
 }
 
 impl Connections {
+    #[cfg(test)]
+    pub(super) fn use_test_transport(&mut self, transport: Transport) {
+        self.transport = Some(transport);
+    }
+
     pub(super) fn configure_transport(&mut self) {
         if self.transport.is_none() {
             self.transport = Transport::native();
@@ -753,6 +762,41 @@ mod tests;
 pub(super) use tests::with_empty_catalog;
 
 impl Brain {
+    pub(super) fn key_engine(&mut self, request: &RunRequest) -> Option<Box<dyn Engine>> {
+        let transport = self.account.connections.transport.clone()?;
+        let (tag, motion) = self.coordinator.key_motion(request)?;
+        let authority = self.account.connections.verified.as_ref()?;
+        if authority.tag != tag {
+            return None;
+        }
+        let authority = Arc::clone(authority);
+        let live = if let SendKey::Build(key) = request.key {
+            if let Some((_, old)) = self.key_round.take_if(|(build, _)| build.run != key.run) {
+                old.retire();
+            }
+            let (owned, live) = self
+                .key_round
+                .get_or_insert_with(|| (key, Arc::new(Live::default())));
+            *owned = key;
+            Arc::clone(live)
+        } else {
+            Arc::new(Live::default())
+        };
+        Some(Box::new(question::Question {
+            transport,
+            authority,
+            live,
+            tag,
+            motion,
+        }))
+    }
+
+    pub(super) fn retire_key_run(&mut self, run: RunId) {
+        if let Some((_, live)) = self.key_round.take_if(|(held, _)| held.run == run) {
+            live.retire();
+        }
+    }
+
     pub(super) fn key_route_changed(
         &mut self,
         link: Option<&mut Link<'_, '_>>,

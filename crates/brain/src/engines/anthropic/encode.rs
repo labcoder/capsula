@@ -413,9 +413,8 @@ fn fields(text: &str) -> Option<Vec<(String, &str)>> {
 }
 
 /// Each assistant message's calls are answered exactly once, by the results that open the next
-/// message, which must be the user's; no id is called twice and no result stands elsewhere.
+/// message, which must be the user's. An id is unique in its group; no result stands elsewhere.
 fn paired(messages: &[Value]) -> Result<(), BodyError> {
-    let mut called = BTreeSet::new();
     let mut open: Vec<&str> = Vec::new();
     for message in messages {
         let blocks = message["content"].as_array().ok_or(BodyError::Pairing)?;
@@ -433,6 +432,7 @@ fn paired(messages: &[Value]) -> Result<(), BodyError> {
             return Err(BodyError::Pairing);
         }
         open.clear();
+        let mut called = BTreeSet::new();
         for block in &blocks[results..] {
             match block["type"].as_str() {
                 Some("tool_result") => return Err(BodyError::Pairing),

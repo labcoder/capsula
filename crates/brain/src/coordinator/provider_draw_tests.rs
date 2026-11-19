@@ -1707,3 +1707,183 @@ fn a_streamed_inline_begin_is_refused_before_lookup_or_scene_work_and_overlay_re
     );
     assert_prefix(&store, &["s1"]);
 }
+
+fn key_build(core: &mut Coordinator, key: BuildKey, snapshot: Option<RunSnapshot>) -> Vec<Effect> {
+    let Input::ContextBuilt(mut built) = super::built(key, vec![T]) else {
+        panic!("a build");
+    };
+    built.snapshot = snapshot;
+    core.handle(Input::ContextBuilt(built))
+        .expect("current build")
+}
+
+fn key_offered() -> Coordinator {
+    use crate::coordinator::{Availability, Ready};
+    use kumochi_protocol::message::{
+        ConnectionKind, Effort, ModelChoice, ModelInfo, ModelName, ModelSlug,
+    };
+
+    let mut core = super::super::fresh();
+    let model = ModelSlug::new("claude-sonnet-5-5").expect("slug");
+    core.handle(Input::Engines(
+        ConnectionKind::AnthropicKey,
+        Availability::Ready(Ready {
+            connection: ConnectionTag(41),
+            models: vec![ModelInfo {
+                slug: model.clone(),
+                display_name: ModelName::new("Sonnet").expect("name"),
+                supported_efforts: None,
+            }],
+            trusted_draw: false,
+        }),
+    ))
+    .expect("never stale");
+    core.handle(Input::Turn {
+        turn: 1,
+        thread: None,
+        text: "hi".into(),
+    })
+    .expect("turn");
+    let effects = core
+        .handle(Input::TurnStored { run: R })
+        .expect("turn stored");
+    let key = effects
+        .iter()
+        .find_map(|effect| match effect {
+            Effect::Store(StoreOp::BuildContext(build)) => Some(build.key),
+            _ => None,
+        })
+        .expect("build");
+    let started = key_build(
+        &mut core,
+        key,
+        Some(RunSnapshot {
+            origin: Origin::Task(T),
+            assistant: AssistantName::new("Kumo").expect("name"),
+            user: None,
+            choice: Some(ModelChoice {
+                connection: ConnectionKind::AnthropicKey,
+                model,
+                effort: Effort::Low,
+            }),
+            connection: ConnectionTag(41),
+        }),
+    );
+    assert!(
+        started
+            .iter()
+            .any(|effect| matches!(effect, Effect::StartEngine { .. })),
+        "the key round starts: {started:?}"
+    );
+    if let crate::coordinator::Availability::Ready(ready) = &mut core.availability {
+        ready.trusted_draw = false;
+    }
+    assert!(
+        !core.trusted_draw(),
+        "the offered draw takes the provider stream"
+    );
+    core
+}
+
+/// Streams one draw call under the reused id and ends the round; acknowledging its stored result
+/// stores the round.
+fn key_draw_round(
+    core: &mut Coordinator,
+    store: &mut Store,
+    bytes: &str,
+    expected: &ToolOutput,
+) -> Vec<Effect> {
+    start(core, "reused");
+    let mut streamed = delta(core, "reused", bytes);
+    streamed.extend(ready(core, "reused", bytes));
+    let mut effects = drain(core, store, streamed);
+    effects.extend(send(core, TurnEvent::Finished(Finish::Completed)));
+    let result = result(&effects);
+    assert_eq!(result.output, *expected);
+    assert_eq!(
+        store.commit_call(&result).expect("real result INSERT"),
+        Committed::Done
+    );
+    core.handle(Input::CallCommitted {
+        key: result.key.clone(),
+        outcome: Committed::Done,
+        then: None,
+    })
+    .expect("result acknowledgement")
+}
+
+fn round_calls(effects: &[Effect]) -> Vec<(CallId, ToolOutput)> {
+    let rounds: Vec<_> = effects
+        .iter()
+        .filter_map(|effect| match effect {
+            Effect::Store(StoreOp::RoundItems(round)) => Some(round.calls.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(rounds.len(), 1, "one stored round: {effects:?}");
+    rounds[0].clone()
+}
+
+#[test]
+fn key_rounds_reusing_a_draw_id_draw_twice_and_a_same_round_retry_draws_once() {
+    let scratch = Scratch::new("provider-draw-key-rounds");
+    let mut store = store(&scratch);
+    let mut core = key_offered();
+    let first = String::from_utf8(args(None)).expect("JSON fixture");
+    let first_drawn = ToolOutput::Text("drawn: [s1, s2]".into());
+    let ended = key_draw_round(&mut core, &mut store, &first, &first_drawn);
+    assert_eq!(round_calls(&ended), [(id("reused"), first_drawn)]);
+
+    let effects = core
+        .handle(Input::RoundStored { run: R, round: 1 })
+        .expect("current");
+    let [Effect::Store(StoreOp::BuildContext(build))] = effects.as_slice() else {
+        panic!("one build, not {effects:?}");
+    };
+    assert_eq!(build.key.round, 2);
+    let started = key_build(&mut core, build.key, None);
+    assert!(
+        started
+            .iter()
+            .any(|effect| matches!(effect, Effect::StartEngine { .. })),
+        "round 2 starts: {started:?}"
+    );
+
+    let second = r#"{"records":[{"begin":{"v":1,"scene":"diagram","surface":"overlay","alt":"second"}},{"step":{"id":"t1","put":[{"shape":{"id":"c","kind":"rect","box":[40,0,10,10]}}]}},{"end":{}}]}"#;
+    let second_drawn = ToolOutput::Text("drawn: [t1]".into());
+    let ended = key_draw_round(&mut core, &mut store, second, &second_drawn);
+    assert_eq!(round_calls(&ended), [(id("reused"), second_drawn.clone())]);
+    let mut retried = Vec::new();
+    let again = core.tool_call(
+        Caller::ModelRound {
+            run: R,
+            round: 2,
+            call: id("reused"),
+        },
+        crate::engines::ToolName::Draw,
+        second.as_bytes(),
+        &mut retried,
+    );
+    assert_eq!(
+        (again, retried),
+        (Dispatch::Answered(second_drawn.clone()), Vec::new())
+    );
+
+    let steps: Vec<_> = store
+        .drawing_scenes()
+        .expect("real durable scenes")
+        .scenes
+        .iter()
+        .flat_map(|scene| scene.log.iter())
+        .map(|event| match event {
+            kumochi_scene::SceneEvent::Step { step, .. } => step.id.as_str().to_owned(),
+            kumochi_scene::SceneEvent::Stop(_) => panic!("no cut was requested"),
+        })
+        .collect();
+    assert_eq!(steps, ["s1", "s2", "t1"]);
+    let db = rusqlite::Connection::open(scratch.db()).expect("read result rows");
+    let rows: u32 = db
+        .query_row("SELECT count(*) FROM tool_calls", [], |row| row.get(0))
+        .expect("result row count");
+    assert_eq!(rows, 2);
+}

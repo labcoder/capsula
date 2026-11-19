@@ -27,6 +27,8 @@ use crate::test_support::{self, Scratch};
 
 #[path = "account_tests.rs"]
 mod accounts;
+#[path = "anthropic_tests.rs"]
+mod anthropic;
 #[path = "ask_tests.rs"]
 mod asks;
 #[path = "claude_publish_tests.rs"]

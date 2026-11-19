@@ -294,6 +294,38 @@ async fn body_limit_is_enforced_even_for_injected_transports() {
     assert_eq!(check(200, &text).await, Err(CheckError::Unconfirmed));
 }
 
+#[tokio::test(start_paused = true)]
+async fn oversized_catalog_drops_the_transport_while_the_body_is_still_open() {
+    let (reader, mut writer) = tokio::io::duplex(16 * 1024);
+    let peer = Scripted(Arc::new(Mutex::new(Script {
+        reader: Some(Box::new(reader)),
+        ..Script::default()
+    })));
+    let transport = Transport::offline(peer.clone(), 1, 0);
+    let fence = Fence::default();
+    let key = key();
+    let feed = async {
+        let mut bytes = body(Vec::new()).into_bytes();
+        bytes.resize(MAX_BODY_BYTES + 1, b' ');
+        writer
+            .write_all(b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n")
+            .await
+            .expect("close-delimited headers");
+        writer
+            .write_all(&bytes)
+            .await
+            .expect("one byte over the cap");
+    };
+    let read = transport.catalog(&fence, &key);
+    let ((), result) =
+        tokio::time::timeout(Duration::from_secs(1), async { tokio::join!(feed, read) })
+            .await
+            .expect("oversized body drops before EOF or the catalog deadline");
+    assert_eq!(result, Err(CheckError::Unconfirmed));
+    assert_eq!(peer.0.lock().expect("peer").drops, 1);
+    drop(writer);
+}
+
 #[tokio::test]
 async fn only_auth_refusals_reject_and_neither_provider_errors_nor_content_are_logged() {
     let captured = Captured::default();

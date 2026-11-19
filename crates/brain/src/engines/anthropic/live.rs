@@ -6,21 +6,19 @@ use std::fmt;
 use std::ops::ControlFlow;
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
-use kumochi_protocol::Secret;
 use kumochi_protocol::message::RunId;
 use tokio::sync::mpsc;
 
 use super::encode::{self, Conversation, ToolUse};
 use super::{Mapper, Reply};
 use crate::connections::anthropic::error::Failure;
-use crate::connections::anthropic::key::AnthropicKey;
-use crate::connections::anthropic::messages::{MessagesBody, stream};
+use crate::connections::anthropic::fence::Fence;
+use crate::connections::anthropic::messages::MessagesBody;
 use crate::connections::anthropic::request::members;
+use crate::connections::anthropic::route::{Offer, Transport, Verified};
 use crate::connections::anthropic::sse_map::StopReason;
-use crate::connections::anthropic::tls::AnthropicConnect;
 use crate::connections::model::Events;
 use crate::connections::model::budget::Budget;
-use crate::connections::model::conn::ModelClient;
 use crate::connections::model::sse::{Progress, SseEvent};
 use crate::context::{ConnectionTag, InputItem};
 use crate::coordinator::SendKey;
@@ -29,10 +27,17 @@ use crate::engines::{Answer, CallId, EngineFailure, Finish, RunRequest, SendGate
 /// What a round sends on: the key, the tag it became Ready with, and the run's and the
 /// process's request budgets.
 pub(crate) struct Sending<'a> {
-    pub(crate) key: &'a Secret<AnthropicKey>,
+    pub(crate) transport: &'a Transport,
+    pub(crate) authority: &'a Verified,
     pub(crate) tag: ConnectionTag,
-    pub(crate) run: &'a Budget,
-    pub(crate) live: &'a Budget,
+    pub(crate) motion: Motion,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Motion {
+    First,
+    Continue,
+    Standalone,
 }
 
 /// A run's tool loop between two rounds: the request last sent, the reply that answered it and
@@ -49,7 +54,11 @@ struct Held {
 /// continuation, once: a rebuild, a refused send or any other start finds none and refuses
 /// locally, so a continuation is never rebuilt.
 #[derive(Default)]
-pub(crate) struct Live(Mutex<Option<Held>>);
+pub(crate) struct Live {
+    held: Mutex<Option<Held>>,
+    fence: Fence,
+    budget: Budget,
+}
 
 impl fmt::Debug for Live {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -60,23 +69,28 @@ impl fmt::Debug for Live {
 
 impl Live {
     fn held(&self) -> MutexGuard<'_, Option<Held>> {
-        self.0.lock().unwrap_or_else(PoisonError::into_inner)
+        self.held.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    pub(crate) fn retire(&self) {
+        let mut held = self.held();
+        self.fence.revoke();
+        *held = None;
     }
 
     /// Plays one round of `request` and returns its ending; `None` when the coordinator said
     /// rebuild, so nothing was sent, or nobody listens any more. Each read's events go out before
     /// the next read, except items: once the round completed, each call goes out as its stored
     /// `tool_use` item, and the reply stays here for the next round. Signed thinking never leaves.
-    pub(crate) async fn round<C: AnthropicConnect>(
+    pub(crate) async fn round(
         &self,
-        client: &ModelClient<C>,
         request: &RunRequest,
         sending: Sending<'_>,
         events: &mpsc::Sender<TurnEvent>,
         gate: &SendGate,
     ) -> Option<Finish> {
         let failed = |failure| Some(Finish::Failed(EngineFailure::Anthropic(failure)));
-        let Ok((body, conversation)) = self.body(request, sending.tag) else {
+        let Ok((body, conversation)) = self.body(request, sending.tag, sending.motion) else {
             return failed(Failure::Request);
         };
         let mut state = State {
@@ -95,17 +109,21 @@ impl Live {
             state: &mut state,
             events,
         };
-        let read = stream(
-            client,
-            &body,
-            sending.key,
-            ask,
-            sending.run,
-            sending.live,
-            capture,
-            out,
-        )
-        .await;
+        let read = sending
+            .transport
+            .messages(
+                sending.authority,
+                Offer {
+                    tag: sending.tag,
+                    body: &body,
+                    fence: &self.fence,
+                    budget: &self.budget,
+                },
+                ask,
+                capture,
+                out,
+            )
+            .await;
         drop(body);
         if matches!(read, Err(Failure::Rebuild)) {
             return None;
@@ -139,19 +157,32 @@ impl Live {
         else {
             return failed(Failure::Protocol);
         };
+        if sending.motion == Motion::Standalone {
+            return failed(Failure::Protocol);
+        }
+        let SendKey::Build(key) = request.key else {
+            return failed(Failure::Protocol);
+        };
         for (index, call) in stored {
             events.send(TurnEvent::KeyCall { index, call }).await.ok()?;
         }
-        if let SendKey::Build(key) = request.key {
-            *self.held() = Some(Held {
-                run: request.run,
-                round: key.round,
-                conversation,
-                reply,
-                calls: state.calls,
-            });
-        }
-        Some(finish)
+        let mut held = self.held();
+        sending
+            .authority
+            .fence
+            .with(|| {
+                self.fence.open().then(|| {
+                    *held = Some(Held {
+                        run: request.run,
+                        round: key.round,
+                        conversation,
+                        reply,
+                        calls: state.calls,
+                    });
+                    finish
+                })
+            })
+            .ok()?
     }
 
     /// The body to send. A run's first round, a job and a compaction are built from the
@@ -162,19 +193,19 @@ impl Live {
         &self,
         request: &RunRequest,
         tag: ConnectionTag,
+        motion: Motion,
     ) -> Result<(MessagesBody, Conversation), ()> {
         let fresh = || encode::body(&request.request, tag).map_err(drop);
-        // A job and a compaction offer no tools, so neither is a tool round.
-        let SendKey::Build(key) = request.key else {
-            return fresh();
-        };
-        if request.request.tools.is_empty() {
+        if motion == Motion::Standalone {
             return fresh();
         }
         let held = self.held().take();
-        if key.round == 1 {
+        if motion == Motion::First {
             return fresh();
         }
+        let SendKey::Build(key) = request.key else {
+            return Err(());
+        };
         let held = held
             .filter(|held| held.run == request.run && held.round + 1 == key.round)
             .ok_or(())?;

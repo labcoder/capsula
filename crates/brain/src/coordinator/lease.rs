@@ -12,7 +12,7 @@
 use std::collections::BTreeSet;
 use std::time::Duration;
 
-use kumochi_protocol::message::{Deleted, HeldScreen, RunId, ThreadId};
+use kumochi_protocol::message::{ConnectionKind, Deleted, HeldScreen, RunId, ThreadId};
 
 use super::availability::sign_in_needed;
 use super::{BuildKey, Coordinator, Effect, HoldKey, JobKey, Stale, StoreOp};
@@ -143,6 +143,13 @@ impl Coordinator {
         let sources = build.sources().to_vec();
         // Only a normal build adds the hold's screen; an inline compaction's request is text.
         let carries_screen = build.inline.is_none();
+        if let Some(run) = self.current.as_mut()
+            && run
+                .route
+                .is_some_and(|route| route.kind == ConnectionKind::AnthropicKey)
+        {
+            run.key_granted = true;
+        }
         let screen = self
             .current
             .as_mut()

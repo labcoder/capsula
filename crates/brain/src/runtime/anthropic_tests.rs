@@ -1,0 +1,244 @@
+use std::sync::{Arc, Mutex};
+
+use kumochi_protocol::message::{KeyView, ScreenChoice};
+use serde_json::{Value, json};
+
+use super::*;
+use crate::connections::account::Worker;
+use crate::connections::anthropic::route::Transport;
+use crate::connections::anthropic::tls::{Script, Scripted};
+use crate::connections::clock::FixedClock;
+use crate::connections::vault::{Vault, fake::FakeStore};
+use crate::runtime::account::Accounts;
+
+const KEY: &str = "sk-ant-api-synthetic-runtime";
+const SIG_1: &str = "SYNTHETIC-SIGNATURE-ONE";
+const SIG_2: &str = "SYNTHETIC-SIGNATURE-TWO";
+const CALL: &str = "toolu_reused";
+const MODEL: &str = "claude-sonnet-5-5";
+
+fn http(media: &str, body: &str) -> Vec<u8> {
+    format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: {media}\r\nContent-Length: {}\r\n\r\n{body}",
+        body.len()
+    )
+    .into_bytes()
+}
+
+fn sse(events: &[Value]) -> Vec<u8> {
+    use std::fmt::Write as _;
+
+    let mut body = String::new();
+    for event in events {
+        write!(body, "data: {event}\n\n").expect("writes to String");
+    }
+    http("text/event-stream", &body)
+}
+
+fn calls(signature: &str, query: &str) -> Vec<u8> {
+    sse(&[
+        json!({"type":"message_start","message":{"usage":{"input_tokens":5}}}),
+        json!({"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":"","signature":""}}),
+        json!({"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"synthetic thinking"}}),
+        json!({"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":signature}}),
+        json!({"type":"content_block_stop","index":0}),
+        json!({"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":CALL,"name":"search_history","input":{"query":query}}}),
+        json!({"type":"content_block_stop","index":1}),
+        json!({"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{"output_tokens":9}}),
+        json!({"type":"message_stop"}),
+    ])
+}
+
+fn answers(text: &str) -> Vec<u8> {
+    sse(&[
+        json!({"type":"message_start","message":{"usage":{"input_tokens":5}}}),
+        json!({"type":"content_block_start","index":0,"content_block":{"type":"text","text":text}}),
+        json!({"type":"content_block_stop","index":0}),
+        json!({"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":2}}),
+        json!({"type":"message_stop"}),
+    ])
+}
+
+#[expect(
+    clippy::too_many_lines,
+    reason = "one real shell session from catalog to transcript"
+)]
+async fn play(
+    scratch: &Scratch,
+    store: FakeStore,
+    turns: &[(u32, u64, &str)],
+    responses: Vec<Vec<u8>>,
+) -> Vec<String> {
+    let catalog = json!({"data":[{"type":"model","id":MODEL,"display_name":"Synthetic model"}],"has_more":false});
+    let count = u32::try_from(responses.len()).expect("small");
+    let peer = Scripted(Arc::new(Mutex::new(Script {
+        responses: std::iter::once(http("application/json", &catalog.to_string()))
+            .chain(responses)
+            .collect(),
+        ..Script::default()
+    })));
+    let lock = scratch.db().with_file_name("offline-key-runtime.lock");
+    let worker = Worker::new(
+        Box::new(move || Vault::with_service(store.clone(), "offline-key-runtime", &lock)),
+        Arc::new(FixedClock(0)),
+    );
+    let mut accounts = Accounts::spawn_unconfigured(worker, test_support::net()).expect("worker");
+    accounts
+        .connections
+        .use_test_transport(Transport::offline(peer.clone(), 1, count));
+    let mut brain = test_support::brain_with(scratch, "", accounts);
+    brain.compact_at = u64::MAX;
+    let ((control, data), mut shell) = duplex();
+    let recording = scratch
+        .db()
+        .with_file_name(format!("offline-key-{}.tap", turns[0].1));
+    let file = std::fs::File::create_new(&recording).expect("test tap");
+    let mut tap = Tap::to_file(file);
+    let client = async {
+        loop {
+            if matches!(shell.next_control().await.expect("control"),
+                Some(ControlToShell::Connections(view)) if view.anthropic == KeyView::Ready)
+            {
+                break;
+            }
+        }
+        let DataToShell::Models { connection, models } = shell.data().await else {
+            panic!("the verified catalog did not arrive");
+        };
+        assert_eq!(
+            connection,
+            kumochi_protocol::message::ConnectionKind::AnthropicKey
+        );
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].slug.as_str(), MODEL);
+        for &(turn, id, text) in turns {
+            let run = RunId(id);
+            let message = DataToBrain::TextSubmit {
+                turn,
+                screen: ScreenChoice::None,
+                thread: Some(ThreadId(1)),
+                text: text.into(),
+            };
+            let frame = frame::encode(&message, Pipe::Data).expect("encodes");
+            shell.data_out.write_all(&frame).await.expect("submitted");
+            loop {
+                let (actual, phase) = shell.state().await;
+                assert_eq!(actual, run);
+                match phase {
+                    Phase::Done => break,
+                    Phase::Thinking | Phase::Answering => {}
+                    _ => panic!("unexpected phase {phase:?}"),
+                }
+            }
+            assert!(shell.read_to_end(run).await > 0);
+        }
+        drop(shell);
+    };
+    let (ended, ()) = timeout(PATIENCE, async {
+        tokio::join!(brain.serve(control, data, &mut tap), client)
+    })
+    .await
+    .expect("routed runtime finishes");
+    assert_eq!(ended, Ended::Lost);
+    assert!(brain.key_round.is_none());
+    for marker in [KEY, SIG_1, SIG_2] {
+        assert!(!format!("{brain:?}").contains(marker));
+    }
+    brain.close().await;
+    drop(tap);
+    let bytes = std::fs::read(recording).expect("tap");
+    for marker in [KEY, SIG_1, SIG_2] {
+        assert!(
+            !bytes
+                .windows(marker.len())
+                .any(|bytes| bytes == marker.as_bytes())
+        );
+    }
+    let script = peer.0.lock().expect("peer");
+    assert_eq!(script.starts, usize::try_from(count).expect("small") + 1);
+    assert!(script.requests[0].starts_with(b"GET /v1/models?limit=65 "));
+    script.requests[1..]
+        .iter()
+        .map(|request| {
+            assert!(request.starts_with(b"POST /v1/messages "));
+            let at = request
+                .windows(4)
+                .position(|bytes| bytes == b"\r\n\r\n")
+                .expect("head");
+            std::str::from_utf8(&request[at + 4..])
+                .expect("synthetic body")
+                .to_owned()
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn routed_key_rounds_continue_once_and_replay_only_under_the_verified_tag() {
+    let scratch = Scratch::new("offline-key-round-owner");
+    let store = FakeStore::default();
+    let lock = scratch.db().with_file_name("offline-key-runtime.lock");
+    Vault::with_service(store.clone(), "offline-key-runtime", &lock)
+        .expect("fake vault")
+        .save_anthropic_key(KEY.as_bytes())
+        .expect("synthetic key");
+    std::fs::write(
+        scratch.db().with_file_name(kumochi_protocol::constants::CONFIG_FILE),
+        format!("default_model = {{ connection = \"AnthropicKey\", model = \"{MODEL}\", effort = \"Medium\" }}\n"),
+    ).expect("settings");
+    let sent = Box::pin(play(
+        &scratch,
+        store.clone(),
+        &[(1, 1, "start"), (2, 2, "again")],
+        vec![
+            calls(SIG_1, "synthetic-first"),
+            calls(SIG_2, "synthetic-second"),
+            answers("Done."),
+            answers("Again."),
+        ],
+    ))
+    .await;
+    assert!(!sent[0].contains(SIG_1));
+    assert!(sent[1].contains(SIG_1));
+    assert!(!sent[1].contains(SIG_2));
+    assert!(sent[2].contains(SIG_1) && sent[2].contains(SIG_2));
+    assert!(!sent[3].contains(SIG_1) && !sent[3].contains(SIG_2));
+    for body in [&sent[2], &sent[3]] {
+        assert_eq!(body.matches("\"id\":\"toolu_reused\"").count(), 2);
+        assert_eq!(body.matches("\"tool_use_id\":\"toolu_reused\"").count(), 2);
+    }
+    let db = Store::open(&scratch.db()).expect("persistent store");
+    let stored: String = db
+        .conn_for_tests()
+        .query_row(
+            "SELECT group_concat(COALESCE(text, '') || COALESCE(body, '')) FROM events",
+            [],
+            |row| row.get(0),
+        )
+        .expect("stored events");
+    assert!(stored.contains(CALL) && stored.contains("Done."));
+    for marker in [KEY, SIG_1, SIG_2] {
+        assert!(!stored.contains(marker));
+    }
+    let calls: i64 = db
+        .conn_for_tests()
+        .query_row(
+            "SELECT COUNT(DISTINCT call) FROM tool_calls WHERE run = 1 AND tool = 'search_history'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("committed calls");
+    assert_eq!(calls, 2);
+    drop(db);
+
+    let restarted = Box::pin(play(
+        &scratch,
+        store,
+        &[(1, 3, "after restart")],
+        vec![answers("Restarted.")],
+    ))
+    .await;
+    assert!(restarted[0].contains("Done.") && restarted[0].contains("Again."));
+    for omitted in [CALL, SIG_1, SIG_2] {
+        assert!(!restarted[0].contains(omitted));
+    }
+}

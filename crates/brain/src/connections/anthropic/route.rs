@@ -24,10 +24,6 @@ const SERVE_ANTHROPIC_KEY: bool = false;
 pub(crate) struct Transport {
     connector: RouteConnector,
     catalog: Arc<Budget>,
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "used at the next layer's engine dispatch")
-    )]
     messages: Arc<Budget>,
 }
 
@@ -73,10 +69,6 @@ impl Transport {
         .unwrap_or(Err(CheckError::Unconfirmed))
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "the route is not yet dispatched in production")
-    )]
     pub(crate) async fn messages<L: Send>(
         &self,
         authority: &Verified,
@@ -110,10 +102,6 @@ impl Transport {
     }
 }
 
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the route is not yet dispatched in production")
-)]
 pub(crate) struct Offer<'a> {
     pub(crate) tag: ConnectionTag,
     pub(crate) body: &'a MessagesBody,
@@ -123,10 +111,6 @@ pub(crate) struct Offer<'a> {
 
 pub(crate) struct Verified {
     pub(crate) revision: u64,
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "used at the next layer's engine dispatch")
-    )]
     key: Secret<AnthropicKey>,
     pub(crate) tag: ConnectionTag,
     pub(crate) fence: Fence,
@@ -140,6 +124,11 @@ impl Verified {
 
     pub(crate) fn new(revision: u64, key: Secret<AnthropicKey>) -> Option<Self> {
         Self::from_entropy(revision, key, getrandom::u64().ok())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn synthetic(key: Secret<AnthropicKey>, tag: u64) -> Option<Self> {
+        Self::from_entropy(1, key, Some(tag))
     }
 
     fn from_entropy(

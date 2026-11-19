@@ -11,13 +11,12 @@ use zeroize::Zeroizing;
 
 use super::*;
 use crate::connections::anthropic::key::AnthropicKey;
+use crate::connections::anthropic::route::{Transport, Verified};
 use crate::connections::anthropic::tls::{Script, Scripted};
-use crate::connections::model::budget::Budget;
-use crate::connections::model::conn::ModelClient;
 use crate::coordinator::{BuildKey, Input, LeaseId, SendKey};
 use crate::dispatch::ToolOutput;
 use crate::engines::anthropic::encode::ToolUse;
-use crate::engines::anthropic::live::{Live, Sending};
+use crate::engines::anthropic::live::{Live, Motion, Sending};
 use crate::engines::{Answer, Asks, Finish, RunRequest, SendGate, SendLease, TurnEvent, answer};
 
 const TAG: u64 = 41;
@@ -131,9 +130,8 @@ fn answering() -> Vec<u8> {
 
 struct Peer {
     script: Arc<Mutex<Script>>,
-    client: ModelClient<Scripted>,
-    key: Secret<AnthropicKey>,
-    budget: Budget,
+    transport: Transport,
+    authority: Verified,
 }
 
 impl Peer {
@@ -144,14 +142,14 @@ impl Peer {
             starts: 0,
             ..Script::default()
         }));
+        let key = AnthropicKey::parse(Secret::new(Zeroizing::new(
+            b"sk-ant-api-fake-only".to_vec(),
+        )))
+        .expect("synthetic key");
         Self {
-            client: ModelClient::new(Scripted(Arc::clone(&script))),
+            transport: Transport::offline(Scripted(Arc::clone(&script)), 0, u32::MAX),
             script,
-            key: AnthropicKey::parse(Secret::new(Zeroizing::new(
-                b"sk-ant-api-fake-only".to_vec(),
-            )))
-            .expect("synthetic key"),
-            budget: Budget::limited(None),
+            authority: Verified::synthetic(key, TAG).expect("nonzero"),
         }
     }
 
@@ -168,13 +166,17 @@ impl Peer {
         let gate = SendGate::new(request.key, Arc::clone(&asks), inputs_tx.clone());
         let (events_tx, mut events) = mpsc::channel(64);
         let sending = Sending {
-            key: &self.key,
+            transport: &self.transport,
+            authority: &self.authority,
             tag: ConnectionTag(TAG),
-            run: &self.budget,
-            live: &self.budget,
+            motion: match request.key {
+                SendKey::Build(key) if key.round == 1 => Motion::First,
+                SendKey::Build(_) => Motion::Continue,
+                SendKey::Job(_) => Motion::Standalone,
+            },
         };
         let finish = {
-            let round = live.round(&self.client, request, sending, &events_tx, &gate);
+            let round = live.round(request, sending, &events_tx, &gate);
             tokio::pin!(round);
             loop {
                 tokio::select! {
@@ -377,6 +379,41 @@ async fn a_signed_key_round_goes_on_from_memory_and_only_its_call_is_stored() {
 }
 
 #[tokio::test]
+async fn a_standalone_key_job_does_not_take_the_held_reply() {
+    let mut world = world("key-round-with-standalone");
+    let run = world.start("ask");
+    let peer = Peer::new(vec![calling(), answering(), answering()]);
+    let live = Live::default();
+    let first = request(&world, run, 1);
+    let (finish, events) = peer.play(&live, &first, Answer::Grant).await;
+    assert_eq!(finish, Some(Finish::Completed));
+    let shown = format!("{live:?} {events:?}");
+    for marker in ["SIG-SENTINEL", "THOUGHT-SENTINEL", "CALL-SIG-SENTINEL"] {
+        assert!(!shown.contains(marker));
+        assert!(!shown.contains(&format!("{:?}", marker.as_bytes())));
+    }
+
+    let mut job = request(&world, run, 1);
+    job.key = SendKey::Job(crate::coordinator::JobKey {
+        thread: world.main,
+        serial: 1,
+    });
+    job.request.tools.clear();
+    let (finish, _) = peer.play(&live, &job, Answer::Grant).await;
+    assert_eq!(finish, Some(Finish::Completed));
+
+    keep_round(&mut world, run);
+    let (finish, _) = peer
+        .play(&live, &request(&world, run, 2), Answer::Grant)
+        .await;
+    assert_eq!(finish, Some(Finish::Completed));
+    let bodies = peer.sent();
+    assert_eq!(bodies.len(), 3);
+    assert!(!bodies[1].contains("SIG-SENTINEL"));
+    assert!(bodies[2].contains("SIG-SENTINEL"));
+}
+
+#[tokio::test]
 async fn a_later_round_without_its_continuation_is_refused_unsent() {
     let mut world = world("key-round-refused");
     let run = world.start("ask");
@@ -411,6 +448,42 @@ async fn a_later_round_without_its_continuation_is_refused_unsent() {
         "a continuation a rebuild dropped is never rebuilt"
     );
     assert_eq!(peer.bodies().len(), 1);
+}
+
+#[test]
+fn a_malformed_key_item_falls_back_to_transcript_even_on_the_same_tag() {
+    let mut world = world("key-round-malformed");
+    let main = world.main;
+    let first = world.start("ask");
+    let body = format!(
+        r#"{{"connection":{TAG},"kind":"anthropic_key","item":{{"type":"thinking","signature":"untrusted-marker"}}}}"#
+    );
+    world
+        .store
+        .append(
+            main,
+            first,
+            &[NewEvent {
+                kind: EventKind::OutputItem,
+                text: None,
+                body: Some(&body),
+            }],
+        )
+        .expect("malformed historical row");
+    world.reply(first, "Still readable.");
+    let next = world.start("continue");
+    let built = world
+        .build(&on_key(TAG), (main, next), Supplied::default(), BOUND)
+        .expect("built");
+    assert_eq!(
+        built.request.input[1..built.request.input.len() - 1],
+        [InputItem::Message {
+            role: Role::Assistant,
+            text: "Still readable.".into()
+        }]
+    );
+    crate::engines::anthropic::encode::body(&built.request, ConnectionTag(TAG))
+        .expect("transcript is encodable");
 }
 
 #[test]
