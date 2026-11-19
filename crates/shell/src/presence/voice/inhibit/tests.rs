@@ -1133,3 +1133,61 @@ fn a_release_while_the_copies_wait_wins_and_copies_nothing(cx: &mut TestAppConte
         assert_eq!(owner.voice.gates.held(G1), None, "retired");
     });
 }
+
+#[gpui::test]
+fn a_lost_screen_hold_owes_its_stop_to_the_next_connection(cx: &mut TestAppContext) {
+    use crate::presence::screen_hold_tests::{luna, on, recognize, screen_ready};
+    use kumochi_protocol::message::Incarnation;
+    let ready = screen_ready(Some(on(&luna())), cx);
+    let owner = &ready.owner;
+    let (_commands, tail) = speaker(owner, cx);
+    quiet(&tail, 0);
+    recognize(owner, 1, cx);
+    assert!(
+        std::iter::from_fn(|| ready.controls.try_recv().ok())
+            .any(|message| matches!(message, ControlToBrain::ScreenHoldRecognized { .. })),
+        "a screen hold"
+    );
+    status(owner, 1, 1, HoldStatus::Admitted, cx);
+    owner.update(cx, |owner, cx| {
+        assert!(owner.voice.pending.is_some(), "admitted, waiting for quiet");
+        // The connection is lost, as the link's state event tears it down.
+        let lost = owner.session.take().expect("connected");
+        lost.close();
+        owner.cancel_voice(cx);
+    });
+    cx.run_until_parked();
+    let controls = owner.update(cx, |owner, _| {
+        let controls = owner.link.record_controls();
+        owner.session = Some(crate::link::Session::detached(2, Incarnation(2)));
+        controls
+    });
+    owner.update(cx, |owner, _| {
+        owner.runs.met(Incarnation(2));
+        owner.runs.connected(2);
+        owner.runs.settings(ThreadId(1));
+        owner.link.replay_recorded_microphone_stop(2);
+    });
+    let told = |controls: &async_channel::Receiver<ControlToBrain>| {
+        std::iter::from_fn(|| controls.try_recv().ok())
+            .filter(|message| *message == stopped(G1))
+            .count()
+    };
+    assert_eq!(told(&ready.controls) + told(&controls), 1, "owed once");
+    owner.update(cx, |owner, _| {
+        owner.link.accept_recorded_microphone_stop(2, G1);
+        assert!(!owner.link.voice_stop_pending(), "acknowledged");
+    });
+    hold(owner, 2, cx);
+    owner.read_with(cx, |owner, _| {
+        assert_eq!(
+            owner
+                .voice
+                .pending
+                .as_ref()
+                .map(|hold| hold.token.gesture()),
+            Some(G2),
+            "the next hold is admitted"
+        );
+    });
+}

@@ -37,7 +37,8 @@ impl Shared {
         message: ControlToBrain,
     ) -> bool {
         let (ControlToBrain::VoiceHoldRecognized { gesture, .. }
-        | ControlToBrain::HoldRecognized { gesture, .. }) = &message
+        | ControlToBrain::HoldRecognized { gesture, .. }
+        | ControlToBrain::ScreenHoldRecognized { gesture, .. }) = &message
         else {
             return out.try_send(message).is_ok();
         };
