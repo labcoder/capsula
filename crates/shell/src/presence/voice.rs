@@ -464,7 +464,7 @@ impl Presence {
         cx: &mut Context<'_, Self>,
     ) -> Option<(PhysicalRect, f32)> {
         // The overlay sits on the primary display, so its scale is that display's; the dock may
-        // be on another one, and stands in only until the overlay first opens.
+        // be on another one, and stands in while no overlay window is open.
         let window = self
             .overlay
             .window()

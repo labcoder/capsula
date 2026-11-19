@@ -187,7 +187,7 @@ impl Presence {
     /// before that capture ended: its timer, a surface that couldn't be covered, or any other
     /// revoke, even one that leaves restoration debt. A lease the brain never saw tells nothing,
     /// and neither does one released by its capture's own answer.
-    fn exclusion_lapsed(&mut self) {
+    pub(super) fn exclusion_lapsed(&mut self) {
         let Some(lease) = self
             .screen_lease
             .take_if(|lease| !self.exclusion.live(*lease))

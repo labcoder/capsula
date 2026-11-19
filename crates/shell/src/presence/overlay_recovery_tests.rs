@@ -435,7 +435,6 @@ fn episode(outer: &mut gpui_kit::TestAppContext, case: Case) {
             Step(Operation::Configure, Outcome::Success),
             Step(Operation::Show, Outcome::Success),
             Step(Operation::Hide, Outcome::Success),
-            Step(Operation::Configure, Outcome::Success),
         ]),
     };
     let target = Arc::new(super::labels::Target::default());
@@ -635,18 +634,10 @@ fn episode(outer: &mut gpui_kit::TestAppContext, case: Case) {
                 assert_eq!(host.window, h1);
                 assert!(!host.painting.get());
             }
-            Case::A | Case::B | Case::D => {
-                let Visibility::Hidden(host) = &this.overlay else {
-                    panic!("the old host must become a fresh hidden H2");
-                };
-                assert_ne!(host.window, h1);
-                assert!(!host.painting.get());
-                host.window
-                    .update(cx, |_, window, _| {
-                        assert_eq!(window.scale_factor().to_bits(), 2.0_f32.to_bits());
-                    })
-                    .expect("the fresh hidden H2 keeps its declared default scale");
-            }
+            Case::A | Case::B | Case::D => assert!(
+                matches!(this.overlay, Visibility::Closed),
+                "the old host closes, and no hidden host replaces it"
+            ),
         }
     });
     let held = charges[0].semantic
@@ -838,11 +829,11 @@ fn episode(outer: &mut gpui_kit::TestAppContext, case: Case) {
     // allocation): two in the kept Scene (rest and view) and four in the recovered-scenes buffer.
     // They also include the screen unit each step's preparation carries (8 bytes, never retained).
     let bound = match case {
-        // A recreated host's root also holds its handle to a hold's line: 8 bytes, kept.
-        Case::A => [390, 131_289, 167, 65_702],
-        Case::B => [392, 130_153, 169, 64_566],
+        // No case opens a host: a closed one is replaced only by the next show.
+        Case::A => [150, 46_140, 21, 8_432],
+        Case::B => [159, 46_268, 30, 8_560],
         Case::C | Case::E => [149, 46_108, 65, 19_394],
-        Case::D => [395, 131_217, 172, 65_630],
+        Case::D => [162, 47_332, 33, 9_624],
     };
     assert!(
         allocations <= bound[0]
@@ -954,8 +945,8 @@ fn the_recovery_episodes_pass_in_fresh_processes() {
         .expect("a crate-qualified module path")
         .1;
     for episode in [
-        "accepting_the_last_failed_scene_recreates_a_hidden_host",
-        "refusing_the_last_failed_scene_disconnects_and_recreates",
+        "accepting_the_last_failed_scene_closes_its_host",
+        "refusing_the_last_failed_scene_disconnects_and_closes_its_host",
         "accepting_one_failed_scene_keeps_the_real_survivor_host",
         "refusing_one_failed_scene_disconnects_its_survivor",
         "a_refused_hide_leaves_the_real_host_disabled_without_retry",
@@ -975,13 +966,15 @@ fn the_recovery_episodes_pass_in_fresh_processes() {
 
 #[gpui::test]
 #[ignore = "runs in its own process from the_recovery_episodes_pass_in_fresh_processes"]
-fn accepting_the_last_failed_scene_recreates_a_hidden_host(cx: &mut gpui_kit::TestAppContext) {
+fn accepting_the_last_failed_scene_closes_its_host(cx: &mut gpui_kit::TestAppContext) {
     episode(cx, Case::A);
 }
 
 #[gpui::test]
 #[ignore = "runs in its own process from the_recovery_episodes_pass_in_fresh_processes"]
-fn refusing_the_last_failed_scene_disconnects_and_recreates(cx: &mut gpui_kit::TestAppContext) {
+fn refusing_the_last_failed_scene_disconnects_and_closes_its_host(
+    cx: &mut gpui_kit::TestAppContext,
+) {
     episode(cx, Case::B);
 }
 
@@ -1009,26 +1002,20 @@ fn first_paint_control_refusal_ends_the_real_owner_and_cancels_its_scene_wake(
 ) {
     let (owner, window, controls) = super::owned_static_canvas(cx);
     assert!(controls.close());
-    let script = HostGuard::install(&[
-        Step(Operation::Hide, Outcome::Success),
-        Step(Operation::Configure, Outcome::Success),
-    ]);
+    let script = HostGuard::install(&[Step(Operation::Hide, Outcome::Success)]);
     let mut visual = gpui_kit::VisualTestContext::from_window(window, cx);
     visual.update(|window, cx| window.draw(cx).clear(cx));
     script.finish();
-    owner.update(&mut visual, |this, cx| {
+    owner.update(&mut visual, |this, _| {
         assert!(this.session.is_none());
         assert!(!this.presenter.holds_scenes());
         assert_eq!(this.presenter.stoppable_run(), None);
         assert_eq!(this.scene_deadline, None);
         assert!(!this.paint_notice.pending.get());
-        this.overlay
-            .window()
-            .expect("replacement hidden host")
-            .window
-            .update(cx, |_, window, _| window.remove_window())
-            .expect("close fixture host");
-        this.overlay = crate::presence::overlay_visibility::Visibility::Closed;
+        assert!(matches!(
+            this.overlay,
+            crate::presence::overlay_visibility::Visibility::Closed
+        ));
     });
     assert_eq!(
         controls.try_recv(),
@@ -1130,10 +1117,7 @@ fn deleting_a_thread_resynchronizes_idle_retiring_ink_only_on_success(
             })
         );
         let script = HostGuard::install(if terminal {
-            &[
-                Step(Operation::Hide, Outcome::Success),
-                Step(Operation::Configure, Outcome::Success),
-            ]
+            &[Step(Operation::Hide, Outcome::Success)]
         } else {
             &[]
         });
@@ -1158,7 +1142,7 @@ fn deleting_a_thread_resynchronizes_idle_retiring_ink_only_on_success(
             assert_eq!(this.scene_deadline, Some(expires));
             this.thread_deleted(ThreadId(99), outcome, None, cx);
             if terminal {
-                // The hide closed its host; the next one opens once this update is over.
+                // The hide closed its host, and none opens until the next show.
                 assert!(matches!(&this.overlay, Visibility::Closed));
                 assert!(!this.presenter.frames().borrow().shown);
                 assert!(!this.presenter.drawn());
@@ -1180,11 +1164,7 @@ fn deleting_a_thread_resynchronizes_idle_retiring_ink_only_on_success(
         });
         if terminal {
             owner.read_with(&visual, |this, _| {
-                assert!(matches!(&this.overlay, Visibility::Hidden(_)));
-                assert_ne!(
-                    this.overlay.window().expect("fresh hidden host").window,
-                    window
-                );
+                assert!(matches!(&this.overlay, Visibility::Closed));
             });
         }
         script.finish();
@@ -1193,7 +1173,7 @@ fn deleting_a_thread_resynchronizes_idle_retiring_ink_only_on_success(
 }
 
 #[gpui::test]
-fn a_release_s_hide_opens_the_next_host_only_after_its_stamp(cx: &mut gpui_kit::TestAppContext) {
+fn a_line_s_hide_leaves_no_overlay_window_behind(cx: &mut gpui_kit::TestAppContext) {
     use crate::presence::overlay_visibility::Visibility;
     use crate::presence::screen_hold_tests::{
         detached, held, luna, on, release, screen_ready, tick,
@@ -1204,29 +1184,23 @@ fn a_release_s_hide_opens_the_next_host_only_after_its_stamp(cx: &mut gpui_kit::
     let at = PhysicalPoint([900, 320]);
     let ready = screen_ready(Some(on(&luna())), cx);
     let shown = detached(&ready, cx);
-    let first = shown.window;
     ready.owner.update(cx, |owner, _| {
         owner.presenter.frames().borrow_mut().shown = true;
         owner.overlay = Visibility::Shown(shown);
     });
     held(&ready, 1, cx);
     tick(at, cx);
-    let script = HostGuard::install(&[
-        Step(Operation::Hide, Outcome::Success),
-        Step(Operation::Configure, Outcome::Success),
-    ]);
+    // Only the hide is scripted: opening a window would ask the host to configure it.
+    let script = HostGuard::install(&[Step(Operation::Hide, Outcome::Success)]);
     ready.owner.update(cx, |owner, _| {
         owner.counter_fixture = Some(Rc::new(|| {
             let used = HOST.with(|host| host.borrow().as_ref().map(|script| script.used));
-            assert_eq!(
-                used,
-                Some(1),
-                "the stamp follows the hide, and no host is open yet"
-            );
+            assert_eq!(used, Some(1), "the stamp follows the hide");
             9_001
         }));
     });
     release(&ready.owner, 1, Some(at), cx);
+    cx.run_until_parked();
     script.finish();
     assert!(matches!(
         ready.controls.try_recv(),
@@ -1235,16 +1209,116 @@ fn a_release_s_hide_opens_the_next_host_only_after_its_stamp(cx: &mut gpui_kit::
             ..
         })
     ));
-    ready.owner.update(cx, |owner, cx| {
-        let Visibility::Hidden(next) = &owner.overlay else {
-            panic!("the next host is open and hidden once the release's update is over");
-        };
-        assert_ne!(next.window, first);
-        next.window
-            .update(cx, |_, window, _| window.remove_window())
-            .expect("close fixture host");
-        owner.overlay = Visibility::Closed;
+    ready.owner.read_with(cx, |owner, _| {
+        assert!(
+            matches!(owner.overlay, Visibility::Closed),
+            "an idle presence holds no overlay window; the next show opens one"
+        );
     });
+}
+
+#[gpui::test]
+fn a_cold_overlay_show_that_can_t_join_a_sent_lease_tells_the_brain_before_anything_else(
+    cx: &mut gpui_kit::TestAppContext,
+) {
+    use crate::presence::exclusion::Slot;
+    use crate::presence::overlay_visibility::Visibility;
+    use crate::presence::screen_hold_tests::{
+        DOWN, held, luna, on, release, screen_ready, screen_release,
+    };
+    use kumochi_protocol::message::{ControlToBrain, LeaseGeneration};
+    use kumochi_shell_core::presence::exclusion::machine::fixture::PRIOR;
+
+    let lapsed = ControlToBrain::ExclusionLapsed {
+        lease: LeaseGeneration(1),
+    };
+    for refused in [true, false] {
+        let ready = screen_ready(Some(on(&luna())), cx);
+        held(&ready, 1, cx);
+        release(&ready.owner, 1, Some(DOWN), cx);
+        assert_eq!(
+            ready.controls.try_recv(),
+            Ok(screen_release(1, 1, DOWN, &[]))
+        );
+        // A drawing comes due before the capture answers or the lease's timer fires.
+        let fixture = ready.owner.update(cx, |owner, _| {
+            assert!(matches!(owner.overlay, Visibility::Closed));
+            let generation = owner
+                .session
+                .as_ref()
+                .expect("a connected presence")
+                .generation();
+            let stage = super::super::super::paint_cache::Stager::new(&owner.paint_scratch);
+            let (mut presenter, now, job) =
+                crate::presenter::tests::preparing_for(generation, Box::new(stage));
+            presenter
+                .completed(job.run(&mut crate::presenter::tests::Shaper), now)
+                .expect("a prepared drawing");
+            let consumed = crate::presenter::tests::consume_ready(
+                &mut presenter,
+                crate::presenter::tests::LIVE,
+                0,
+                now,
+                0,
+                0,
+            )
+            .expect("the drawing becomes current");
+            assert!(consumed.effects.expect("a current drawing").is_empty());
+            owner.presenter = presenter;
+            owner
+                .exclusion_fixture
+                .clone()
+                .expect("the hold's surfaces")
+        });
+        #[expect(
+            clippy::as_conversions,
+            reason = "fixed slot discriminants index the fixture's eight surfaces"
+        )]
+        let drawing = Slot::Drawing as usize;
+        fixture.borrow_mut().set_failure = refused.then_some(drawing);
+        // A refused cover allows no native Show: the window is configured, and the drawing's
+        // recovery hides it.
+        let script = if refused {
+            HostGuard::install(&[
+                Step(Operation::Configure, Outcome::Success),
+                Step(Operation::Hide, Outcome::Success),
+            ])
+        } else {
+            HostGuard::install(&[
+                Step(Operation::Configure, Outcome::Success),
+                Step(Operation::Show, Outcome::Success),
+            ])
+        };
+        ready
+            .owner
+            .update(cx, crate::presence::Presence::draw_changed);
+        script.finish();
+        let sent: Vec<_> = std::iter::from_fn(|| ready.controls.try_recv().ok()).collect();
+        ready.owner.read_with(cx, |owner, _| {
+            assert_eq!(owner.presenter.frames().borrow().shown, !refused);
+            assert_eq!(owner.exclusion.live(LeaseGeneration(1)), !refused);
+        });
+        if refused {
+            assert_eq!(
+                sent.first(),
+                Some(&lapsed),
+                "the lapse precedes the drawing's recovery"
+            );
+            assert_eq!(sent.iter().filter(|control| **control == lapsed).count(), 1);
+            assert_eq!(
+                fixture.borrow().affinities(),
+                PRIOR,
+                "the other windows came back"
+            );
+        } else {
+            // Only the shown drawing's own acknowledgement: no lapse.
+            assert!(matches!(
+                sent.as_slice(),
+                [ControlToBrain::StepShown { .. }]
+            ));
+            fixture.borrow().assert_excluded(Slot::Drawing);
+        }
+    }
 }
 
 #[gpui::test]
@@ -1316,10 +1390,7 @@ fn escape_before_a_successor_run_is_known_discards_ink_without_fabricating_a_sto
             index: 0,
         })
     );
-    let script = HostGuard::install(&[
-        Step(Operation::Hide, Outcome::Success),
-        Step(Operation::Configure, Outcome::Success),
-    ]);
+    let script = HostGuard::install(&[Step(Operation::Hide, Outcome::Success)]);
     owner.update(&mut visual, |this, cx| {
         let now = std::time::Instant::now();
         let effects = this.presenter.data(
@@ -1367,7 +1438,6 @@ fn a_refused_host_show_reports_a_scene_failure_instead_of_a_user_clear(
         Step(Operation::Configure, Outcome::Success),
         Step(Operation::Show, Outcome::NotWin32),
         Step(Operation::Hide, Outcome::Success),
-        Step(Operation::Configure, Outcome::Success),
     ]);
     owner.update(cx, |this, cx| {
         assert!(!this.draw_changed_at(now, cx));
@@ -1389,10 +1459,7 @@ fn a_failure_after_success_is_drained_before_any_paint_acknowledgement(
 ) {
     use kumochi_protocol::message::{ControlToBrain, SceneId};
     let (owner, window, controls) = super::owned_static_canvas(cx);
-    let script = HostGuard::install(&[
-        Step(Operation::Hide, Outcome::Success),
-        Step(Operation::Configure, Outcome::Success),
-    ]);
+    let script = HostGuard::install(&[Step(Operation::Hide, Outcome::Success)]);
     let mut visual = gpui_kit::VisualTestContext::from_window(window, cx);
     visual.update(|window, cx| {
         window.draw(cx).clear(cx);
@@ -1412,20 +1479,17 @@ fn a_failure_after_success_is_drained_before_any_paint_acknowledgement(
         Ok(ControlToBrain::SceneFailed { scene: SceneId(1) })
     );
     assert_eq!(controls.try_recv(), Err(async_channel::TryRecvError::Empty));
-    owner.update(&mut visual, |this, cx| {
+    owner.update(&mut visual, |this, _| {
         assert!(!this.presenter.holds_scenes());
         assert_eq!(
             this.session.as_ref().map(crate::link::Session::generation),
             Some(1)
         );
         assert!(!this.paint_notice.pending.get());
-        this.overlay
-            .window()
-            .expect("hidden replacement")
-            .window
-            .update(cx, |_, window, _| window.remove_window())
-            .expect("close fixture host");
-        this.overlay = crate::presence::overlay_visibility::Visibility::Closed;
+        assert!(matches!(
+            this.overlay,
+            crate::presence::overlay_visibility::Visibility::Closed
+        ));
     });
 }
 
@@ -1533,10 +1597,7 @@ fn provider_done_with_a_shown_rest_and_a_future_step_stops_then_clears(
             index: 0,
         })
     );
-    let script = HostGuard::install(&[
-        Step(Operation::Hide, Outcome::Success),
-        Step(Operation::Configure, Outcome::Success),
-    ]);
+    let script = HostGuard::install(&[Step(Operation::Hide, Outcome::Success)]);
     owner.update(&mut visual, |this, cx| {
         super::prepare_canvas_step(&mut this.presenter, 1,
             br#"{"step":{"id":"future","start":{"after":"static","ms":2200},"put":[{"shape":{"id":"later","kind":"rect","box":[30,0,20,20],"enter":"none"}}]}}"#);
@@ -1561,17 +1622,14 @@ fn provider_done_with_a_shown_rest_and_a_future_step_stops_then_clears(
         this.text.as_mut().expect("typing panel").typing.open();
         this.escape(cx).expect("second Esc clears before cut acknowledgement");
         assert!(!this.presenter.holds_scenes());
-        // The hide closed its host; the replacement opens once this update is over.
+        // The hide closed its host, and none opens until the next show.
         assert!(matches!(this.overlay, crate::presence::overlay_visibility::Visibility::Closed));
     });
-    owner.update(&mut visual, |this, cx| {
-        this.overlay
-            .window()
-            .expect("hidden replacement")
-            .window
-            .update(cx, |_, window, _| window.remove_window())
-            .expect("close fixture host");
-        this.overlay = crate::presence::overlay_visibility::Visibility::Closed;
+    owner.read_with(&visual, |this, _| {
+        assert!(matches!(
+            this.overlay,
+            crate::presence::overlay_visibility::Visibility::Closed
+        ));
     });
     script.finish();
     let ControlToBrain::StopScenes { run, cuts } = controls.try_recv().expect("StopScenes") else {
@@ -2021,10 +2079,7 @@ fn a_failed_stop_placement_ends_the_connection_without_a_manual_retry(
     removed
         .update(cx, |_, window, _| window.remove_window())
         .expect("remove fixture placement handle");
-    let script = HostGuard::install(&[
-        Step(Operation::Hide, Outcome::Success),
-        Step(Operation::Configure, Outcome::Success),
-    ]);
+    let script = HostGuard::install(&[Step(Operation::Hide, Outcome::Success)]);
     owner.update(cx, |this, cx| {
         this.panel_window = removed;
         assert!(this.runs_changed(cx).is_err());
@@ -2090,7 +2145,6 @@ fn persistent_stop_configuration_refusal_retires_motion_with_an_actionable_notic
         Step(Operation::Configure, Outcome::Success),
         Step(Operation::Show, Outcome::Success),
         Step(Operation::Hide, Outcome::Success),
-        Step(Operation::Configure, Outcome::Success),
     ]);
     dock.update(cx, |_, window, cx| {
         owner.update(cx, |this, cx| {
@@ -2108,7 +2162,7 @@ fn persistent_stop_configuration_refusal_retires_motion_with_an_actionable_notic
             assert_eq!(this.panel_visibility, PanelVisibility::Hidden);
             assert!(!this.escape_hold.shows_stop());
             assert!(!this.panel.read(cx).stop);
-            // The hide closed its host; the next one opens once the dock's update is over.
+            // The hide closed its host, and none opens until the next show.
             assert!(matches!(
                 this.overlay,
                 crate::presence::overlay_visibility::Visibility::Closed
@@ -2122,7 +2176,7 @@ fn persistent_stop_configuration_refusal_retires_motion_with_an_actionable_notic
     owner.read_with(cx, |this, _| {
         assert!(matches!(
             this.overlay,
-            crate::presence::overlay_visibility::Visibility::Hidden(_)
+            crate::presence::overlay_visibility::Visibility::Closed
         ));
     });
     script.finish();
