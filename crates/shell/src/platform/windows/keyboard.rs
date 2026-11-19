@@ -1458,7 +1458,7 @@ mod tests {
                 }
             }
             let up = super::RI_KEY_BREAK;
-            let device = if loss == 8 { 0 } else { 1 };
+            let device = usize::from(loss != 8);
             let attempts = [
                 (false, false, 0),
                 (true, true, 0x1B),
