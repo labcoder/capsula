@@ -338,8 +338,8 @@ fn run_session(
         format!("guard_stop phase={phase} metadata={metadata:?}\n")
     });
     print!("{guard_report}");
-    let clean = result.is_ok() && released.is_ok();
-    let exited = end_fixture(&mut fixture, fixture_window, clean, end);
+    let clean = (result.is_ok() && released.is_ok()).then_some(end);
+    let exited = end_fixture(&mut fixture, fixture_window, clean);
     let environment = gate_capture::desktop_metadata().and_then(|metadata| {
         fs::write(output.join("environment-after.txt"), metadata).map_err(anyhow::Error::from)
     });
@@ -354,17 +354,13 @@ fn run_session(
     final_result
 }
 
-/// Ends the fixture. After a clean session it closes the window and waits for the fixture until
-/// the session deadline. After any failure a known window gets [`CLOSE_GRACE`] to close and the
-/// fixture is then terminated, so a fixture born topmost never outlives a failed session for long.
-fn end_fixture(
-    fixture: &mut Child,
-    window: Option<Window>,
-    clean: bool,
-    end: Instant,
-) -> Result<()> {
+/// Ends the fixture. After a clean session, given its deadline, it closes the window and waits for
+/// the fixture until that deadline. After any failure a known window gets [`CLOSE_GRACE`] to close
+/// and the fixture is then terminated, so a fixture born topmost never outlives a failed session
+/// for long.
+fn end_fixture(fixture: &mut Child, window: Option<Window>, clean: Option<Instant>) -> Result<()> {
     let closed = window.map_or(Ok(()), Window::close);
-    let exited = if clean && closed.is_ok() {
+    let exited = if let Some(end) = clean.filter(|_| closed.is_ok()) {
         session::wait_child(fixture, end)
     } else {
         let grace = if window.is_some() {
@@ -881,7 +877,7 @@ mod tests {
     fn a_failed_session_ends_a_fixture_it_never_found_within_a_second() {
         let mut fixture = late_fixture();
         let started = Instant::now();
-        let ended = end_fixture(&mut fixture, None, false, started + Duration::from_secs(10));
+        let ended = end_fixture(&mut fixture, None, None);
         let took = started.elapsed();
         let gone = fixture.try_wait().expect("the child can be read").is_some();
         if !gone {
