@@ -64,5 +64,8 @@ pub(crate) use protected::{
     remove_tree, unmark, validate_model_path,
 };
 pub use root_store::trust_roots;
+pub(crate) use spawn::spawn_if;
 pub use spawn::{Launch, Spawned, Stdio, spawn};
+#[cfg(test)]
+pub(crate) use spawn::{SpawnEdge, observe_next_spawn};
 pub(crate) use window::unchanged as window_unchanged;

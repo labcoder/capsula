@@ -1158,8 +1158,7 @@ impl Brain {
             && let Some(effects) = self.handle(Input::Engine {
                 key,
                 event: TurnEvent::Finished(Finish::Failed(EngineFailure::Provider)),
-            })
-        {
+            }) {
             self.apply(effects, link.as_deref_mut())
         } else {
             Ok(())

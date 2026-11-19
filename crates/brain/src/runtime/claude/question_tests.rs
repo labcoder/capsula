@@ -553,6 +553,62 @@ async fn a_recheck_that_expires_in_preflight_never_starts_status() {
 }
 
 #[tokio::test]
+async fn a_recheck_expiring_at_the_windows_spawn_lock_never_creates_a_process() {
+    use crate::platform::{self, SpawnEdge};
+
+    let armed = Arc::new(AtomicBool::new(false));
+    let watch = Arc::clone(&armed);
+    let (probe, mut spawn) = mpsc::unbounded_channel();
+    let mut rig = Rig::with(
+        "question-recheck-held-spawn-lock",
+        &provider_failure(),
+        |host| {
+            let managed = std::mem::replace(
+                &mut host.managed,
+                Box::new(|| unreachable!("replaced below")),
+            );
+            host.managed = Box::new(move || {
+                if watch.swap(false, Ordering::SeqCst) {
+                    platform::observe_next_spawn(probe.clone());
+                }
+                managed()
+            });
+        },
+    )
+    .await;
+    let question = rig.claude.take(&rig.snapshot()).expect("taken");
+    let mut played = play(&question);
+    let lease = played.lease();
+    rig.drive(played.asked(lease)).await;
+    let failure = provider_failed(&mut rig).await;
+    let (held, locked) = oneshot::channel();
+    let (release, blocked) = std::sync::mpsc::channel();
+    let holder = std::thread::spawn(move || {
+        let _guard = platform::spawn_lock();
+        held.send(()).unwrap();
+        blocked.recv_timeout(WAIT).unwrap();
+    });
+    timeout(WAIT, locked).await.unwrap().unwrap();
+    armed.store(true, Ordering::SeqCst);
+    rig.wake(Wake::Note(failure));
+    assert_eq!(
+        timeout(WAIT, spawn.recv()).await.unwrap(),
+        Some(SpawnEdge::Lock)
+    );
+    rig.at(MAX_LAUNCH);
+    release.send(()).unwrap();
+    holder.join().unwrap();
+    rig.settle().await;
+
+    assert_eq!(spawn.try_recv(), Err(mpsc::error::TryRecvError::Empty));
+    assert_eq!(
+        rig.drive(played.events()).await,
+        [TurnEvent::Finished(Finish::Failed(EngineFailure::Provider))]
+    );
+    rig.close().await;
+}
+
+#[tokio::test]
 async fn a_provider_failed_question_checks_status_once_and_only_confirmed_sign_out_changes_it() {
     for (case, status, expected, view) in [
         (
@@ -2568,57 +2624,6 @@ async fn a_turn_deadline_during_recheck_keeps_the_observed_provider_failure() {
 }
 
 #[tokio::test]
-async fn stop_beats_the_recheck_reply_but_does_not_hide_confirmed_account_status() {
-    use crate::coordinator::{Effect, StoreOp};
-    use crate::store::{Interruption, RunEnd};
-
-    let name = "question-recheck-after-stop";
-    let script = provider_failure()
-        .pre_tools(BOTH_TOOLS)
-        .post_tools(BOTH_TOOLS);
-    let mut rig = Rig::new(name, &script).await;
-    fs::write(
-        rig.base.0.join("replay-auth-status"),
-        json!({ "loggedIn": false, "configDirectory": rig.base.owned().join("config") })
-            .to_string(),
-    )
-    .unwrap();
-    let mut brain = brain_on(&mut rig, name);
-    let run = started_provider_recheck(&mut brain, &rig.base).await;
-    let done = timeout(WAIT, brain.claude.lane.as_mut().unwrap().next())
-        .await
-        .unwrap();
-    assert_eq!(
-        done.result,
-        Ok(Outcome::Status {
-            version: V,
-            signed_in: false
-        })
-    );
-
-    let (send, mut reply) = oneshot::channel();
-    brain.claude.recheck.as_mut().unwrap().signed_out = send;
-    let stopped = brain
-        .handle(Input::Stop {
-            run,
-            revealed: Vec::new(),
-        })
-        .unwrap();
-    assert!(stopped.iter().any(|effect| matches!(
-        effect, Effect::Store(StoreOp::EndRun { run: id, end: RunEnd::Interrupted(Interruption::Stop), .. }) if *id == run
-    )));
-    brain.apply(stopped, None).unwrap();
-    brain.claude_done(Wake::Lane(done), None).unwrap();
-    assert_eq!(reply.try_recv(), Err(oneshot::error::TryRecvError::Closed));
-    assert_eq!(brain.coordinator.current_run(), None);
-    assert_eq!(
-        brain.claude.view(),
-        ClaudeCodeView::SignedOut { version: V }
-    );
-    assert!(brain.claude.close(soon()).await);
-}
-
-#[tokio::test]
 async fn full_provider_terminal_does_not_replay_signed_out_models_on_reconnect() {
     use std::cell::RefCell;
 
@@ -2696,9 +2701,60 @@ async fn full_provider_terminal_does_not_replay_signed_out_models_on_reconnect()
         observed_view,
         Some(ClaudeCodeView::SignedOut { version: V })
     );
-    assert_eq!(reconnect.heard(), [Vec::<ModelInfo>::new()]);
+    assert_eq!(reconnect.heard(), Vec::<Vec<ModelInfo>>::new());
     assert!(brain.claude.epoch.is_none());
     brain.close().await;
+}
+
+#[tokio::test]
+async fn stop_beats_the_recheck_reply_but_does_not_hide_confirmed_account_status() {
+    use crate::coordinator::{Effect, StoreOp};
+    use crate::store::{Interruption, RunEnd};
+
+    let name = "question-recheck-after-stop";
+    let script = provider_failure()
+        .pre_tools(BOTH_TOOLS)
+        .post_tools(BOTH_TOOLS);
+    let mut rig = Rig::new(name, &script).await;
+    fs::write(
+        rig.base.0.join("replay-auth-status"),
+        json!({ "loggedIn": false, "configDirectory": rig.base.owned().join("config") })
+            .to_string(),
+    )
+    .unwrap();
+    let mut brain = brain_on(&mut rig, name);
+    let run = started_provider_recheck(&mut brain, &rig.base).await;
+    let done = timeout(WAIT, brain.claude.lane.as_mut().unwrap().next())
+        .await
+        .unwrap();
+    assert_eq!(
+        done.result,
+        Ok(Outcome::Status {
+            version: V,
+            signed_in: false
+        })
+    );
+
+    let (send, mut reply) = oneshot::channel();
+    brain.claude.recheck.as_mut().unwrap().signed_out = send;
+    let stopped = brain
+        .handle(Input::Stop {
+            run,
+            revealed: Vec::new(),
+        })
+        .unwrap();
+    assert!(stopped.iter().any(|effect| matches!(
+        effect, Effect::Store(StoreOp::EndRun { run: id, end: RunEnd::Interrupted(Interruption::Stop), .. }) if *id == run
+    )));
+    brain.apply(stopped, None).unwrap();
+    brain.claude_done(Wake::Lane(done), None).unwrap();
+    assert_eq!(reply.try_recv(), Err(oneshot::error::TryRecvError::Closed));
+    assert_eq!(brain.coordinator.current_run(), None);
+    assert_eq!(
+        brain.claude.view(),
+        ClaudeCodeView::SignedOut { version: V }
+    );
+    assert!(brain.claude.close(soon()).await);
 }
 
 #[tokio::test]

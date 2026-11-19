@@ -710,10 +710,14 @@ impl Brain {
                 ended = core => ended,
             }
         };
+        let quitting = quit.get().is_some();
+        if quitting {
+            self.claude.stop();
+        }
         self.holds.lost();
         self.filing.cancel();
         queue.borrow_mut().end_reads();
-        if reading && quit.get().is_none() {
+        if reading && !quitting {
             #[cfg(test)]
             self.observer.send(Seen::Grace).ok();
             let grace = tokio::time::sleep(QUIT_GRACE);
@@ -729,7 +733,7 @@ impl Brain {
                 }
             }
         }
-        if quit.get().is_some() {
+        if !quitting && quit.get().is_some() {
             self.claude.stop();
         }
         // The reader may have forwarded controls in the same poll that saw the pipe end.

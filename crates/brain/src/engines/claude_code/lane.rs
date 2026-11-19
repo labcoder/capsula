@@ -613,23 +613,42 @@ impl Worker {
         let data = policy::launch_data(folders, &system, entry);
         let args: Vec<OsString> = program.prefix.iter().cloned().chain(data.args).collect();
         let job = Job::new().map_err(|_| Failure::Spawn)?;
-        if self.closing.load(Ordering::Acquire)
-            || self.current.load(Ordering::Acquire) != how.generation
-        {
+        let live = || {
+            !self.closing.load(Ordering::Acquire)
+                && self.current.load(Ordering::Acquire) == how.generation
+        };
+        if !live() {
             return Err(Failure::Refused);
         }
         if let Some(recheck) = how.recheck {
             recheck.check()?;
         }
-        let mut spawned = platform::spawn(&Launch {
+        let launch = Launch {
             exe: &program.exe,
             args: &args,
             cwd: &folders.work,
             env: &data.env,
             stdio: how.stdio,
             jobs: &[&self.host.brain_job, &job],
-        })
-        .map_err(|_| Failure::Spawn)?;
+        };
+        let mut spawned = if let Some(recheck) = how.recheck {
+            platform::spawn_if(&launch, &|| {
+                (live() && recheck.check().is_ok())
+                    .then(|| {
+                        recheck
+                            .control
+                            .end
+                            .saturating_duration_since(Instant::now())
+                    })
+                    .filter(|left| !left.is_zero())
+            })
+            .map_err(|error| match error.kind() {
+                io::ErrorKind::Interrupted => Failure::Refused,
+                _ => Failure::Spawn,
+            })
+        } else {
+            platform::spawn(&launch).map_err(|_| Failure::Spawn)
+        }?;
         drop(spawned.stdin.take());
         let stdout = spawned.stdout.take().map(|pipe| drain(pipe, how.cap));
         let stderr = spawned.stderr.take().map(|pipe| drain(pipe, STDERR_CAP));
@@ -639,8 +658,7 @@ impl Worker {
             .map_or(deadline, |r| deadline.min(r.control.end));
         let exited = loop {
             let left = deadline.saturating_duration_since(Instant::now());
-            if self.closing.load(Ordering::Acquire)
-                || self.current.load(Ordering::Acquire) != how.generation
+            if !live()
                 || left.is_zero()
                 || how.recheck.is_some_and(|recheck| recheck.check().is_err())
             {
