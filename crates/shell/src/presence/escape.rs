@@ -123,11 +123,7 @@ impl Presence {
         if scenes {
             return true;
         }
-        let sent = message.is_none_or(|message| self.send_stop(session, message));
-        if !sent {
-            self.link.end(session);
-        }
-        sent
+        message.is_none_or(|message| self.send_stop(session, message))
     }
 
     /// The run Esc's stop would stop at `now`: the moving run, else the one whose drawing still

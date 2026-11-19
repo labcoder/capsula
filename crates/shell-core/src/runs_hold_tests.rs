@@ -1255,3 +1255,21 @@ fn a_hold_that_ended_before_its_release_builds_no_screen_release() {
         None
     );
 }
+
+#[test]
+fn a_recognition_fence_keeps_turns_and_the_hold_and_holds_back_its_runs_late_work() {
+    let mut runs = ready();
+    runs.apply_state(RunId(5), ThreadId(1), Phase::Answering, None);
+    runs.submit("pending typed words", |_| true)
+        .expect("queued");
+    recognized(&mut runs, 1);
+    assert_eq!(runs.fence_run(RunId(4)), None, "not the stoppable run");
+    assert_eq!(runs.fence_run(RunId(5)), stop(5));
+    assert_eq!(runs.submitted.len(), 1, "the turn stays");
+    assert_eq!(runs.take_hold_cancel(), None, "the hold stays");
+    assert_eq!(runs.owned_disposition(RunId(5)), RunDisposition::Stopped);
+    assert_eq!(runs.owned_disposition(RunId(6)), RunDisposition::Live);
+    runs.apply_data(DataToShell::RunEnd { run: RunId(5) }, 4);
+    runs.apply_state(RunId(5), ThreadId(1), Phase::Done, None);
+    assert!(runs.pending_stops.is_empty(), "both endings retire it");
+}

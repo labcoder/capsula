@@ -1,8 +1,8 @@
 //! A hold recognized over a spoken run stops that run, the brain's `Stop` first and the
 //! speaker's only once it is queued; Esc keeps the same order. The speaker is scripted.
 
-use std::sync::Arc;
 use std::sync::mpsc::Receiver;
+use std::sync::{Arc, Mutex};
 
 use gpui_kit::{Entity, TestAppContext};
 use kumochi_protocol::message::{ControlToBrain, GestureId, Phase, RunId, ThreadId};
@@ -55,6 +55,38 @@ fn warm(owner: &Entity<Presence>, gesture: u32, cx: &mut TestAppContext) {
     });
 }
 
+/// Brain and speaker stops in the order they were queued: the witness drains the brain's
+/// queue each time the speaker takes a command, and `order` drains what came after.
+type Order = Arc<Mutex<Vec<(&'static str, RunId)>>>;
+
+fn witness(
+    owner: &Entity<Presence>,
+    controls: &async_channel::Receiver<ControlToBrain>,
+    cx: &mut TestAppContext,
+) -> Order {
+    let seen = Order::default();
+    let (log, brain) = (Arc::clone(&seen), controls.clone());
+    owner.update(cx, |owner, _| {
+        owner.link.output().witness(Box::new(move |command| {
+            let mut log = log.lock().expect("unpoisoned");
+            log.extend(brain_stops(&brain).into_iter().map(|run| ("brain", run)));
+            if let Command::Stop(run) = command {
+                log.push(("speaker", *run));
+            }
+        }));
+    });
+    seen
+}
+
+fn order(
+    seen: &Order,
+    controls: &async_channel::Receiver<ControlToBrain>,
+) -> Vec<(&'static str, RunId)> {
+    let mut log = seen.lock().expect("unpoisoned");
+    log.extend(brain_stops(controls).into_iter().map(|run| ("brain", run)));
+    std::mem::take(&mut *log)
+}
+
 fn stops(commands: &Receiver<Command>) -> Vec<RunId> {
     commands
         .try_iter()
@@ -77,10 +109,10 @@ fn brain_stops(controls: &async_channel::Receiver<ControlToBrain>) -> Vec<RunId>
 #[gpui::test]
 fn recognition_stops_the_run_spoken_at_key_down_once(cx: &mut TestAppContext) {
     let (owner, _data, controls) = ready(cx);
-    let (commands, _tail) = answering(&owner, 480, cx);
+    let (_commands, _tail) = answering(&owner, 480, cx);
+    let seen = witness(&owner, &controls, cx);
     warm(&owner, 1, cx);
     owner.update(cx, |owner, _| {
-        assert_eq!(owner.link.output().spoken(1), Some(RunId(5)), "spoken");
         assert_eq!(
             owner.voice.spoken,
             Some((GestureId(1), 1, RunId(5))),
@@ -88,8 +120,11 @@ fn recognition_stops_the_run_spoken_at_key_down_once(cx: &mut TestAppContext) {
         );
     });
     hold(&owner, 1, cx);
-    assert_eq!(brain_stops(&controls), [RunId(5)], "the brain's Stop");
-    assert_eq!(stops(&commands), [RunId(5)], "then the speaker's");
+    assert_eq!(
+        order(&seen, &controls),
+        [("brain", RunId(5)), ("speaker", RunId(5))],
+        "the brain's Stop, then the speaker's"
+    );
 }
 
 #[gpui::test]
@@ -152,22 +187,77 @@ fn a_run_replaced_after_key_down_is_not_stopped(cx: &mut TestAppContext) {
 #[gpui::test]
 fn escape_stops_the_speaker_after_the_brain_and_never_without_it(cx: &mut TestAppContext) {
     let (owner, _data, controls) = ready(cx);
-    let (commands, _tail) = answering(&owner, 480, cx);
-    owner.update(cx, |owner, cx| {
-        owner.activity =
-            Presence::activity(&owner.runs, super::EscapePanel::Closed, &owner.presenter);
-        owner.escape(cx).expect("Esc");
-    });
-    assert_eq!(brain_stops(&controls), [RunId(5)]);
-    assert_eq!(stops(&commands), [RunId(5)]);
+    let (_commands, _tail) = answering(&owner, 480, cx);
+    let seen = witness(&owner, &controls, cx);
+    escape(&owner, cx);
+    assert_eq!(
+        order(&seen, &controls),
+        [("brain", RunId(5)), ("speaker", RunId(5))]
+    );
 
     let (owner, _data, controls) = ready(cx);
     let (commands, _tail) = answering(&owner, 480, cx);
     drop(controls);
+    escape(&owner, cx);
+    assert_eq!(stops(&commands), [], "the brain wasn't told");
+}
+
+fn escape(owner: &Entity<Presence>, cx: &mut TestAppContext) {
     owner.update(cx, |owner, cx| {
         owner.activity =
             Presence::activity(&owner.runs, super::EscapePanel::Closed, &owner.presenter);
         owner.escape(cx).expect("Esc");
     });
-    assert_eq!(stops(&commands), [], "the brain wasn't told");
+}
+
+/// A brain queue that is full but still read.
+fn full(
+    owner: &Entity<Presence>,
+    cx: &mut TestAppContext,
+) -> async_channel::Receiver<ControlToBrain> {
+    owner.update(cx, |owner, _| {
+        let controls = owner.link.record_controls_bounded();
+        let session = owner.session.clone().expect("connected");
+        while owner.link.send_control(
+            &session,
+            ControlToBrain::Stop {
+                run: RunId(1),
+                revealed: Vec::new(),
+            },
+        ) {}
+        controls
+    })
+}
+
+#[gpui::test]
+fn a_refused_stop_ends_the_session_and_never_stops_the_speaker(cx: &mut TestAppContext) {
+    let (owner, _data, _controls) = ready(cx);
+    let (commands, _tail) = answering(&owner, 480, cx);
+    let _full = full(&owner, cx);
+    escape(&owner, cx);
+    owner.update(cx, |owner, _| {
+        let alive = owner
+            .session
+            .as_ref()
+            .is_some_and(|session| session.alive().load(std::sync::atomic::Ordering::Acquire));
+        assert!(!alive, "the session ended");
+    });
+    assert_eq!(stops(&commands), [], "no speaker Stop");
+
+    let (owner, _data, _controls) = ready(cx);
+    let (commands, _tail) = answering(&owner, 480, cx);
+    let _full = full(&owner, cx);
+    owner.update(cx, |owner, _| {
+        let session = owner.session.clone().expect("connected");
+        let scenes = ControlToBrain::StopScenes {
+            run: RunId(5),
+            cuts: kumochi_protocol::message::SceneCuts::default(),
+        };
+        assert!(!owner.send_stop(&session, scenes), "refused");
+        assert!(
+            !session.alive().load(std::sync::atomic::Ordering::Acquire),
+            "the session ended"
+        );
+    });
+    assert_eq!(stops(&commands), [], "no speaker Stop");
 }

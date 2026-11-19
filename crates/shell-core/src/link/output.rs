@@ -25,6 +25,10 @@ const LEDGER: usize = 4;
 /// Aborts one session's pipes.
 pub type Abort = Arc<dyn Fn() + Send + Sync>;
 
+/// A test's view of each speaker command as it is queued.
+#[cfg(any(test, feature = "test-support"))]
+pub type Witness = Box<dyn FnMut(&Command) + Send>;
+
 /// The owner of a link's outputs and its capture inhibit.
 pub struct OutputOwner {
     state: Mutex<State>,
@@ -65,6 +69,9 @@ struct State {
     inhibit: Option<Inhibit>,
     named: Option<Named>,
     off: bool,
+    /// Sees each speaker command as it is queued: a test's point to check what came before.
+    #[cfg(any(test, feature = "test-support"))]
+    witness: Option<Witness>,
     generations: u32,
     serials: u32,
     epochs: u64,
@@ -284,6 +291,10 @@ impl State {
     /// Queues a command on the speaker. A failed enqueue drops the output and hands back the
     /// session's abort.
     fn command(&mut self, command: Command) -> Option<Abort> {
+        #[cfg(any(test, feature = "test-support"))]
+        if let Some(witness) = self.witness.as_mut() {
+            witness(&command);
+        }
         if self.commands.as_ref()?.try_send(command).is_ok() {
             return None;
         }
@@ -717,9 +728,6 @@ impl OutputOwner {
         Ok(())
     }
 
-    /// Queues the speaker's `Stop` of `run` on `session` only, after the brain accepted its
-    /// own stop. False when `session` isn't current, or the speaker couldn't take it, which ends
-    /// the session.
     /// The link thread names `run` to the live speaker. The command goes under the lock, so
     /// [`OutputOwner::spoken`] knows what that output had exposed before it; a tail
     /// mid-publish leaves no evidence. False when the speaker couldn't take it.
@@ -753,6 +761,9 @@ impl OutputOwner {
         (now.exposed > named.exposed).then_some(named.run)
     }
 
+    /// Queues the speaker's `Stop` of `run` on `session` only, after the brain accepted its
+    /// own stop. False when `session` isn't current, or the speaker couldn't take it, which ends
+    /// the session.
     pub fn stop(&self, session: u64, run: RunId) -> bool {
         let mut state = self.lock();
         if state.session != Some(session) {
@@ -794,6 +805,12 @@ impl OutputOwner {
                 .any(|entry| !entry.terminal && Some(entry.generation) != state.live()),
             terminal: entries.any(|entry| entry.terminal),
         }
+    }
+
+    /// Runs `witness` on each speaker command as it is queued.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn witness(&self, witness: Witness) {
+        self.lock().witness = Some(witness);
     }
 
     /// Makes `session`'s output a live generation with no speaker behind it and names `run` to

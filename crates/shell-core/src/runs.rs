@@ -485,14 +485,24 @@ impl Runs {
     }
 
     /// A recognized hold talking over `run`: fences that run alone, while it is still the
-    /// stoppable one, and returns its `Stop`. Unlike [`Runs::stop`], turns and the hold stay.
+    /// stoppable one, and returns its `Stop`. Until both its endings are in, it stays stopped,
+    /// so a late scene commit of it is skipped. Unlike [`Runs::stop`], turns and the hold stay.
     pub fn fence_run(&mut self, run: RunId) -> Option<ControlToBrain> {
-        (self.stoppable() == Some(run)).then(|| {
-            self.fence = run;
-            ControlToBrain::Stop {
+        let live = self.live.filter(|_| self.stoppable() == Some(run))?;
+        self.fence = run;
+        if !live.state_ended || !live.data_ended {
+            self.pending_stops.insert(
                 run,
-                revealed: self.drawing.revealed(run),
-            }
+                PendingStop {
+                    thread: live.thread,
+                    control_closed: live.state_ended,
+                    data_ended: live.data_ended,
+                },
+            );
+        }
+        Some(ControlToBrain::Stop {
+            run,
+            revealed: self.drawing.revealed(run),
         })
     }
 

@@ -677,13 +677,18 @@ impl Presence {
     }
 
     /// Queues `message` for the brain. A run's `Stop` or `StopScenes` then stops its speech, and
-    /// only once the brain's is queued, so speech never stops for a stop the brain wasn't told.
+    /// only once the brain's is queued, so speech never stops for a stop the brain wasn't told;
+    /// a refused one ends the session instead.
     pub(super) fn send_stop(&self, session: &Session, message: ControlToBrain) -> bool {
         let run = match &message {
             ControlToBrain::Stop { run, .. } | ControlToBrain::StopScenes { run, .. } => Some(*run),
             _ => None,
         };
         let sent = self.link.send_control(session, message);
+        // A stop the brain wasn't told can't be undone locally, so that session ends.
+        if !sent && run.is_some() {
+            self.link.end(session);
+        }
         // A speaker that can't take the `Stop` already ended the session through the owner.
         if sent
             && let Some(run) = run
