@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 use kumochi_protocol::frame::{self, Pipe};
 use kumochi_protocol::message::ThreadId;
 use serde_json::{Value, json};
+use sha2::{Digest as _, Sha256};
 use tokio::io::AsyncWriteExt as _;
 use tokio::sync::oneshot;
 use tokio::sync::oneshot::error::TryRecvError;
@@ -29,14 +30,45 @@ use crate::test_support::Scratch;
 const THREAD: ThreadId = ThreadId(2);
 
 #[test]
+fn a_cloned_offer_reuses_the_canonical_schema_set_without_copying() {
+    let request = [ToolSchema {
+        name: "draw",
+        description: "untrusted request description",
+        parameters: json!({"type":"untrusted"}),
+    }];
+    let offer = Offer::authorized(Origin::Kumo, &request);
+    let copy = offer.clone();
+    let [schema] = offer.schemas() else {
+        panic!("exactly one canonical schema");
+    };
+    assert_eq!(schema.name, "draw");
+    assert_eq!(
+        schema.parameters["$defs"]["Surface"],
+        json!({"type":"string","const":"overlay"})
+    );
+    let description_digest: [u8; 32] =
+        Sha256::digest(schema.description.replace("\r\n", "\n")).into();
+    assert_eq!(
+        description_digest,
+        [
+            0x5c, 0x06, 0xcf, 0xaf, 0x46, 0x9a, 0x75, 0x5c, 0xf1, 0xa1, 0xe1, 0xf9, 0x34, 0xdb,
+            0x0b, 0xac, 0x85, 0xfa, 0x98, 0x6c, 0x4d, 0x63, 0x76, 0xc0, 0x08, 0xee, 0xa1, 0x21,
+            0xdf, 0x63, 0x76, 0xb5,
+        ],
+        "canonical overlay description, with LF line endings"
+    );
+    assert!(std::ptr::eq(offer.schemas(), copy.schemas()));
+}
+
+#[test]
 fn a_launch_offers_only_what_its_build_offers_and_mcp_permits() {
     let kumo = crate::context::tools(Origin::Kumo);
     assert_eq!(
         Offer::authorized(Origin::Kumo, &kumo),
-        Offer::Mcp(Origin::Kumo, vec![ToolName::Draw])
+        Offer::for_tests(Origin::Kumo, vec![ToolName::Draw])
     );
     assert_eq!(
-        Offer::Mcp(Origin::Kumo, vec![ToolName::Draw])
+        Offer::for_tests(Origin::Kumo, vec![ToolName::Draw])
             .schemas()
             .iter()
             .map(|tool| tool.name)
@@ -112,7 +144,7 @@ fn seeded(brain: &mut Brain) -> (Start, Launch) {
         thread: THREAD,
         model: "claude-test".to_owned(),
         effort: None,
-        tools: Vec::new(),
+        tools: std::sync::Arc::default(),
         lifetime: Duration::from_secs(60),
         calls: None,
     })
@@ -145,7 +177,7 @@ fn bind_until(brain: &mut Brain, build: BuildKey, launch: LaunchId, until: Insta
     brain.mcp_bind(Bind {
         build,
         launch,
-        offer: Offer::Mcp(Origin::Task(THREAD), vec![ToolName::Probe]),
+        offer: Offer::for_tests(Origin::Task(THREAD), vec![ToolName::Probe]),
         until,
         reply,
     });

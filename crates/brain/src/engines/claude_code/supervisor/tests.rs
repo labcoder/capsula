@@ -138,7 +138,7 @@ pub(crate) fn question(lifetime: Duration) -> Question {
         thread: ThreadId(1),
         model: "claude-test".to_owned(),
         effort: None,
-        tools: Vec::new(),
+        tools: Arc::default(),
         lifetime,
         calls: None,
     }

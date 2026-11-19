@@ -61,7 +61,7 @@ pub(crate) struct Question {
     pub(crate) model: String,
     pub(crate) effort: Option<String>,
     /// The tools frozen with the launch.
-    pub(crate) tools: Vec<ToolSchema>,
+    pub(crate) tools: Arc<[ToolSchema]>,
     /// How long it may live from admission; at most [`MAX_LAUNCH`].
     pub(crate) lifetime: Duration,
     /// Where its listener hands admitted calls.
@@ -853,7 +853,7 @@ struct Context {
     job: Arc<Job>,
     brain_exe: PathBuf,
     deadline: Instant,
-    tools: Vec<ToolSchema>,
+    tools: Arc<[ToolSchema]>,
     gate: AuditGate,
     binding: Binding,
     calls: Option<mpsc::Sender<McpCall>>,

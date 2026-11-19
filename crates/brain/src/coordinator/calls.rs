@@ -127,7 +127,7 @@ impl Coordinator {
         gate: AuditGate,
     ) -> Option<Instant> {
         let main = self.main_thread;
-        let Offer::Mcp(asked, tools) = &bind.offer else {
+        let Offer::Mcp(asked, tools, _) = &bind.offer else {
             return None;
         };
         let run = self.current(bind.build.run).ok()?;

@@ -172,7 +172,7 @@ fn bound(core: &mut Coordinator, build: BuildKey, launch: LaunchId) -> bool {
     binds(
         core,
         (build, launch, T),
-        Offer::Mcp(Origin::Task(T), tools),
+        Offer::for_tests(Origin::Task(T), tools),
         passed(),
     )
 }
@@ -255,7 +255,7 @@ fn a_build_authorizes_one_launch_and_its_next_build_withdraws_it() {
         ..build
     };
     assert!(!bound(&mut core, stale, L1), "not the current build");
-    let draw = |origin| Offer::Mcp(origin, vec![ToolName::Draw]);
+    let draw = |origin| Offer::for_tests(origin, vec![ToolName::Draw]);
     assert!(
         !binds(&mut core, (build, L1, T), draw(Origin::Kumo), passed()),
         "another origin"
@@ -380,7 +380,7 @@ fn only_tools_the_build_offers_run_over_mcp_and_a_refusal_stays() {
         !binds(
             &mut core,
             (build, L1, T),
-            Offer::Mcp(Origin::Task(T), vec![ToolName::Probe]),
+            Offer::for_tests(Origin::Task(T), vec![ToolName::Probe]),
             passed()
         ),
         "a launch offering a tool its build doesn't"
@@ -476,7 +476,7 @@ async fn a_forwarded_draw_returns_its_committed_prefix_under_the_original_id() {
 
     let (mut core, build) = offering(drawing());
     let (gate, until) = passed();
-    let offer = Offer::Mcp(Origin::Task(T), vec![ToolName::Draw]);
+    let offer = Offer::for_tests(Origin::Task(T), vec![ToolName::Draw]);
     assert!(binds(
         &mut core,
         (build, L1, T),
@@ -491,7 +491,7 @@ async fn a_forwarded_draw_returns_its_committed_prefix_under_the_original_id() {
         job: &job,
         brain_exe: &exe,
         deadline: until.into(),
-        tools: &tools,
+        tools,
         gate,
         binding: Binding::default(),
         calls: Some(calls),
@@ -1020,7 +1020,7 @@ fn a_launch_that_loses_its_authority_with_its_build_current_issues_no_further_st
         let (gate, _) = passed();
         let left = Duration::from_millis(if case == "expired" { 1_000 } else { 3_600_000 });
         let until = Instant::now() + left;
-        let draw = Offer::Mcp(Origin::Task(T), vec![ToolName::Draw]);
+        let draw = Offer::for_tests(Origin::Task(T), vec![ToolName::Draw]);
         assert!(binds(
             &mut core,
             (build, L1, T),
@@ -1067,7 +1067,7 @@ async fn losing_only_the_authenticated_client_revokes_a_draw_with_a_step_in_the_
     let exe = std::env::current_exe().expect("test executable");
     let (mut core, build) = offering(drawing());
     let (gate, until) = passed();
-    let offer = Offer::Mcp(Origin::Task(T), vec![ToolName::Draw]);
+    let offer = Offer::for_tests(Origin::Task(T), vec![ToolName::Draw]);
     assert!(binds(
         &mut core,
         (build, launch, T),
@@ -1080,7 +1080,7 @@ async fn losing_only_the_authenticated_client_revokes_a_draw_with_a_step_in_the_
         job: &job,
         brain_exe: &exe,
         deadline: until.into(),
-        tools: &tools,
+        tools,
         gate: gate.clone(),
         binding: Binding::default(),
         calls: Some(calls),
@@ -1226,7 +1226,7 @@ fn a_rebuild_blocked_on_a_pending_delete_issues_no_further_step_of_its_launch() 
 #[test]
 fn a_tool_its_launch_doesnt_offer_is_refused_before_any_charge_or_replay() {
     let (mut core, build) = offering(probing());
-    let draw_only = Offer::Mcp(Origin::Task(T), vec![ToolName::Draw]);
+    let draw_only = Offer::for_tests(Origin::Task(T), vec![ToolName::Draw]);
     assert!(binds(&mut core, (build, L1, T), draw_only, passed()));
     let over = vec![b' '; crate::dispatch::MAX_ARGS + 1];
     let too_large = Dispatch::Answered(ToolOutput::Error(ToolError::TooLarge));
@@ -1270,7 +1270,7 @@ fn a_transition_that_ends_a_binding_fails_its_gate_before_the_next_input() {
         let mut store = store(&scratch);
         let (mut core, build) = offering_from(drawing(), vec![T, OTHER]);
         let (gate, until) = passed();
-        let draw = Offer::Mcp(Origin::Task(T), vec![ToolName::Draw]);
+        let draw = Offer::for_tests(Origin::Task(T), vec![ToolName::Draw]);
         assert!(
             binds(&mut core, (build, L1, T), draw, (gate.clone(), until)),
             "{case}"
@@ -1313,7 +1313,7 @@ fn at_the_limit_a_fresh_key_after_a_lost_authority_is_refused_uncharged() {
         let (mut core, build) = offering(probing());
         let (gate, _) = passed();
         let left = Duration::from_millis(if case == "expired" { 1_000 } else { 3_600_000 });
-        let probe_only = Offer::Mcp(Origin::Task(T), vec![ToolName::Probe]);
+        let probe_only = Offer::for_tests(Origin::Task(T), vec![ToolName::Probe]);
         let bound = (gate.clone(), Instant::now() + left);
         assert!(binds(&mut core, (build, L1, T), probe_only, bound));
         for n in 1..=16 {
@@ -1342,7 +1342,7 @@ fn at_the_limit_a_fresh_key_after_a_lost_authority_is_refused_uncharged() {
 /// A binding releases by the earliest of its launch's, its question's and its build's deadlines.
 #[test]
 fn a_binding_releases_by_the_earliest_of_its_deadlines() {
-    let draw = Offer::Mcp(Origin::Task(T), vec![ToolName::Draw]);
+    let draw = Offer::for_tests(Origin::Task(T), vec![ToolName::Draw]);
     let (mut core, build) = offering(probing());
     let end = core
         .current
@@ -1374,7 +1374,7 @@ fn a_run_draining_its_speech_after_it_finished_fails_its_gate_at_once() {
     let mut core = super::spoken();
     let (gate, until) = passed();
     let build = super::engine_key(&core, R);
-    let offer = Offer::Mcp(Origin::Task(T), Vec::new());
+    let offer = Offer::for_tests(Origin::Task(T), Vec::new());
     assert!(binds(
         &mut core,
         (build, L1, T),
