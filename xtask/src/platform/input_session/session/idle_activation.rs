@@ -146,7 +146,7 @@ impl Session {
             return Err(error.context(context));
         }
         self.settle(end, point, |look, receipt| {
-            receipt.count != 0 && !look.foreign && look.capture.is_none()
+            receipt.count != 0 && look.foreign.is_none() && look.capture.is_none()
         })?;
         // Activation hands the front over asynchronously, so the root may arrive a little later.
         let waited = Instant::now();
@@ -189,10 +189,17 @@ impl Session {
         // SAFETY: resolves ownership at the point without sending input.
         let at_point = owner(unsafe { WindowFromPoint(point) });
         Ok(Look {
-            foreign: held
-                || property(self.fixture.hwnd, ABORT) != 0
-                || !info.hwndMenuOwner.is_invalid()
-                || !info.hwndMoveSize.is_invalid(),
+            foreign: if held {
+                Some("held_input")
+            } else if property(self.fixture.hwnd, ABORT) != 0 {
+                Some("guard_aborted")
+            } else if !info.hwndMenuOwner.is_invalid() {
+                Some("foreground_menu")
+            } else if !info.hwndMoveSize.is_invalid() {
+                Some("foreground_move_size")
+            } else {
+                None
+            },
             desktop: desktop_ours(),
             in_time: Instant::now() < end,
             at_point,
