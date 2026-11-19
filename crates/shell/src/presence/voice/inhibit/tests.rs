@@ -963,3 +963,71 @@ fn an_admission_before_a_busy_bind_still_starts_the_hold(cx: &mut TestAppContext
     assert_eq!(started.get(), 1, "bound, then started");
 }
 
+#[gpui::test]
+fn a_stale_press_dropped_while_acquiring_leaves_the_next_press_usable(cx: &mut TestAppContext) {
+    use kumochi_protocol::message::SettingsOp;
+    use kumochi_protocol::voice::VoicePart;
+    for recognized in [false, true] {
+        let (owner, _data, controls) = ready(cx);
+        let (commands, _tail) = answering(&owner, cx);
+        owner.update(cx, |owner, cx| {
+            owner.link.output().refuse(1);
+            key_down(owner, 1, cx);
+            if recognized {
+                owner.voice.gates.recognized(G1, true);
+                let token = owner.link.microphone_gate().arm(G1).expect("fresh hold");
+                owner.link.track_input(G1);
+                let stamp = crate::presence::voice::Stamp {
+                    target: owner.voice.target.get(),
+                    session: 1,
+                    choice: owner.link.choice_revision(),
+                };
+                owner.voice_intent(
+                    Intent::Recognized {
+                        gesture: G1,
+                        generation: Ok(token),
+                    },
+                    stamp,
+                    0,
+                    None,
+                    TalkHeld::default(),
+                    cx,
+                );
+            }
+            // The choice rotates while gesture 1 still waits for its inhibit.
+            let session = owner.session.clone().expect("connected");
+            assert!(owner.link.send_control(
+                &session,
+                ControlToBrain::Settings(SettingsOp::RemoveVoice(VoicePart::SpeechInput)),
+            ));
+        });
+        cx.background_executor.advance_clock(super::RECHECK);
+        cx.run_until_parked();
+        owner.read_with(cx, |owner, _| {
+            assert_eq!(owner.voice.gates.held(G1), None, "dropped: {recognized}");
+        });
+        assert_eq!(heard(&commands), [], "never paused: {recognized}");
+        if recognized {
+            status(&owner, 1, 1, HoldStatus::Cancelled, cx);
+            cx.run_until_parked();
+            assert!(sent(&controls).contains(&stopped(G1)), "told once ended");
+            owner.update(cx, |owner, _| {
+                owner.link.accept_recorded_microphone_stop(1, G1);
+            });
+        }
+        hold(&owner, 2, cx);
+        cx.run_until_parked();
+        owner.read_with(cx, |owner, _| {
+            assert_eq!(owner.voice.gates.held(G2), Some(true), "{recognized}");
+            assert_eq!(
+                owner
+                    .voice
+                    .pending
+                    .as_ref()
+                    .map(|hold| hold.token.gesture()),
+                Some(G2)
+            );
+        });
+        assert_eq!(heard(&commands), [Command::Pause(1)], "{recognized}");
+    }
+}
