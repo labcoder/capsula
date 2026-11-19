@@ -298,10 +298,10 @@ fn only_ours(
 }
 
 /// Whether every product process in `running` besides `me` is this launch's brain or shell, or a
-/// worker of that brain: a child of it whose image is the gate brain's, `image`, and whose
-/// arguments name exactly one worker role, one child per role at most. A child that has exited
-/// before `identify` reads it counts for nothing, and the next look samples again; a live child
-/// that can't be read fails.
+/// worker of that brain: a child of it in the run's job whose image is the gate brain's, `image`,
+/// and whose arguments name exactly one worker role, one child per role at most, all read through
+/// one handle to it. A child that has exited before `identify` reads it counts for nothing, and the
+/// next look samples again; a live child that can't be read fails.
 fn no_strangers(
     running: &[platform::Entry],
     me: u32,
@@ -321,7 +321,7 @@ fn no_strangers(
             continue;
         };
         match helper.role {
-            Some(role) if helper.image == image && !roles.contains(&role) => {
+            Some(role) if helper.in_job && helper.image == image && !roles.contains(&role) => {
                 roles.push(role)
             }
             _ => return Ok(false),
