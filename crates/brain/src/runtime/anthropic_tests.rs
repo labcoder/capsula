@@ -417,6 +417,10 @@ async fn a_title_takes_the_last_attempt_and_its_compaction_is_refused_unsent() {
 /// of sending another refused request. A 403 only fails its run, with the same notice: it can
 /// concern one model, so the key stays Ready and the next ask sends.
 #[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one real shell session per status through a refused ask and the next one"
+)]
 async fn a_refused_post_leaves_the_key_unconfirmed_and_the_next_ask_unsent() {
     for (status, kind, view, starts, next) in [
         (
