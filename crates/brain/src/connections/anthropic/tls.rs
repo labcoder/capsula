@@ -49,6 +49,10 @@ impl Connect for AnthropicTls {
     type Io = TlsStream<TcpStream>;
 
     async fn connect(&self) -> io::Result<Self::Io> {
+        // Tests never reach the network, so the only socket the route opens refuses in one.
+        if cfg!(test) {
+            return Err(io::ErrorKind::PermissionDenied.into());
+        }
         let tcp = TcpStream::connect((HOST, 443)).await?;
         tcp.set_nodelay(true)?;
         let name = server_name()?;
@@ -78,10 +82,6 @@ impl Connect for RouteConnector {
     async fn connect(&self) -> io::Result<Self::Io> {
         match self {
             Self::Native(tls) => {
-                // Tests never reach the network, so the production connector never dials in one.
-                if cfg!(test) {
-                    return Err(io::ErrorKind::NotConnected.into());
-                }
                 let tls = tls.as_ref().ok_or(io::ErrorKind::NotConnected)?;
                 Ok(Box::new(tls.connect().await?))
             }

@@ -62,6 +62,16 @@ async fn unavailable_tls_has_no_fallback_and_a_failed_start_is_not_refunded() {
             .kind(),
         std::io::ErrorKind::NotConnected
     );
+    let tls = AnthropicTls::build().expect("the OS has trust roots");
+    assert_eq!(
+        RouteConnector::Native(Some(Arc::new(tls)))
+            .connect()
+            .await
+            .err()
+            .expect("tests never dial")
+            .kind(),
+        std::io::ErrorKind::PermissionDenied
+    );
     let peer = Scripted::default();
     let transport = Transport::offline(peer.clone(), 0, 1);
     let authority = Verified::from_entropy(1, key(), Some(801)).expect("nonzero");
