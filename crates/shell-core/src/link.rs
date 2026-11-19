@@ -522,8 +522,8 @@ impl Shared {
         Some(gesture)
     }
 
-    /// Uses the outbox to send on `session`: only while it is open, closing or not. Every send
-    /// on a session's connection passes here.
+    /// Uses the outbox to send on `session`, only while it is open (alive and not closing). Every
+    /// send on a session's connection passes here.
     fn outbox<T>(&self, session: &Session, use_it: impl FnOnce(&Outbox) -> T) -> Option<T> {
         if !session.open() {
             return None;

@@ -284,16 +284,19 @@ whether a session has an output and whether an earlier generation still owes aud
   brain send ends that session and stops no speech. Presence keeps the stops a busy owner refused
   in order and offers the front one again every millisecond, up to ten offers in all (a policy,
   not a measured bound); a later stop waits behind it. When the offers run out, that session
-  ends. Both ends go through one path (`end_session`), as does any refused drawing control
-  (`StopScenes`, `StepFailed`, `SceneFailed`, `ClearDrawing`): it closes the session at once
-  (`Session::close`), then finishes the pipe abort and the owner's barrier on the background
-  executor, since that barrier takes the owner's lock. Closing is session-scoped: no send made
-  through that session (controls, data, held deletes, credit) goes out after it, an owed
-  `VoiceHoldStopped` stays owed and is replayed on the next connection, and nothing received
-  for it can open the microphone. Three link-wide sends don't take a session and skip the check:
-  Quit (`tell_quit`, since a brain never told Quit relaunches the shell), the gesture cancel
-  (`cancel_input_gesture`), and the replay of an owed stop on a new connection. Work already
-  queued to the writers before the close is not recalled.
+  ends. Both ends go through one path (`end_session`), as does any refused drawing control (for
+  example `StopScenes`, `StepFailed`, `SceneFailed`, `SceneSkipped` or `ClearDrawing`): it
+  closes the session at once (`Session::close`), then finishes the pipe abort and the owner's
+  barrier on the background executor, since that barrier takes the owner's lock; that is one
+  logical end, though a speaker `Stop` already queued may still reach `end_session` again,
+  harmlessly. Closing is session-scoped: a send made through that session (controls, data, held
+  deletes, credit) that checks after the close is refused, an owed `VoiceHoldStopped` stays owed
+  and is replayed on the next connection, and nothing received for it can open the microphone.
+  It is a check, not a barrier: a send already past its check still goes out, and work already
+  queued to the writers is not recalled. Three link-wide sends don't take a session and skip the
+  check: Quit (`tell_quit`, which also tries the held deletes first, since a brain never told
+  Quit relaunches the shell), the gesture cancel (`cancel_input_gesture`), and the replay of an
+  owed stop on a new connection.
 - **Spoken runs.** `spoken(session)` reads the live output's tail without waiting and returns its
   `spoken` run: positive evidence the run is speaking, even after the device drained, since a
   pause can drain it while the run still has unwritten speech. A busy owner or a tail
