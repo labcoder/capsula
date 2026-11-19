@@ -1218,6 +1218,101 @@ fn a_line_s_hide_leaves_no_overlay_window_behind(cx: &mut gpui_kit::TestAppConte
 }
 
 #[gpui::test]
+fn a_cold_overlay_show_that_can_t_join_a_sent_lease_tells_the_brain_before_anything_else(
+    cx: &mut gpui_kit::TestAppContext,
+) {
+    use crate::presence::exclusion::Slot;
+    use crate::presence::overlay_visibility::Visibility;
+    use crate::presence::screen_hold_tests::{
+        DOWN, held, luna, on, release, screen_ready, screen_release,
+    };
+    use kumochi_protocol::message::{ControlToBrain, LeaseGeneration};
+    use kumochi_shell_core::presence::exclusion::machine::fixture::PRIOR;
+
+    let lapsed = ControlToBrain::ExclusionLapsed {
+        lease: LeaseGeneration(1),
+    };
+    for refused in [true, false] {
+        let ready = screen_ready(Some(on(&luna())), cx);
+        held(&ready, 1, cx);
+        release(&ready.owner, 1, Some(DOWN), cx);
+        assert_eq!(
+            ready.controls.try_recv(),
+            Ok(screen_release(1, 1, DOWN, &[]))
+        );
+        // A drawing comes due before the capture answers or the lease's timer fires.
+        let fixture = ready.owner.update(cx, |owner, _| {
+            assert!(matches!(owner.overlay, Visibility::Closed));
+            let generation = owner
+                .session
+                .as_ref()
+                .expect("a connected presence")
+                .generation();
+            let stage = super::super::super::paint_cache::Stager::new(&owner.paint_scratch);
+            let (mut presenter, now, job) =
+                crate::presenter::tests::preparing_for(generation, Box::new(stage));
+            presenter
+                .completed(job.run(&mut crate::presenter::tests::Shaper), now)
+                .expect("a prepared drawing");
+            let consumed = crate::presenter::tests::consume_ready(
+                &mut presenter,
+                crate::presenter::tests::LIVE,
+                0,
+                now,
+                0,
+                0,
+            )
+            .expect("the drawing becomes current");
+            assert!(consumed.effects.expect("a current drawing").is_empty());
+            owner.presenter = presenter;
+            owner
+                .exclusion_fixture
+                .clone()
+                .expect("the hold's surfaces")
+        });
+        fixture.borrow_mut().set_failure = refused.then_some(Slot::Drawing as usize);
+        // A refused cover allows no native Show: the window is configured, and the drawing's
+        // recovery hides it.
+        let script = if refused {
+            HostGuard::install(&[
+                Step(Operation::Configure, Outcome::Success),
+                Step(Operation::Hide, Outcome::Success),
+            ])
+        } else {
+            HostGuard::install(&[
+                Step(Operation::Configure, Outcome::Success),
+                Step(Operation::Show, Outcome::Success),
+            ])
+        };
+        ready
+            .owner
+            .update(cx, crate::presence::Presence::draw_changed);
+        script.finish();
+        let sent: Vec<_> = std::iter::from_fn(|| ready.controls.try_recv().ok()).collect();
+        ready.owner.read_with(cx, |owner, _| {
+            assert_eq!(owner.presenter.frames().borrow().shown, !refused);
+            assert_eq!(owner.exclusion.live(LeaseGeneration(1)), !refused);
+        });
+        if refused {
+            assert_eq!(
+                sent.first(),
+                Some(&lapsed),
+                "the lapse precedes the drawing's recovery"
+            );
+            assert_eq!(sent.iter().filter(|control| **control == lapsed).count(), 1);
+            assert_eq!(
+                fixture.borrow().affinities(),
+                PRIOR,
+                "the other windows came back"
+            );
+        } else {
+            assert_eq!(sent, []);
+            fixture.borrow().assert_excluded(Slot::Drawing);
+        }
+    }
+}
+
+#[gpui::test]
 fn an_unpainted_static_successor_sleeps_until_the_original_expiry(
     cx: &mut gpui_kit::TestAppContext,
 ) {

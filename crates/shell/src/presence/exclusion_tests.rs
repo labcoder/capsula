@@ -300,48 +300,6 @@ fn actual_replacement_and_state_keep_old_debt_without_matching_new_sessions(
 }
 
 #[gpui::test]
-fn actual_lazy_overlay_protects_before_show_and_keeps_failed_surface_hidden(
-    cx: &mut gpui_kit::TestAppContext,
-) {
-    for fail in [false, true] {
-        let (owner, fixture) = presence_fixture(cx);
-        acquire_presence(&owner, CaptureFor::Turn(7), cx);
-        hidden_drawing(&owner, cx);
-        if fail {
-            fixture.borrow_mut().set_failure = Some(Slot::Drawing as usize);
-            fixture.borrow_mut().restore_failure = 1 << Slot::Drawing as usize;
-        }
-        owner.update(cx, |this, cx| {
-            let (sample, effects) = crate::presenter::tests::sample(&mut this.presenter, 0);
-            assert!(effects.is_empty());
-            assert!(sample.visible);
-            let result = this.sync_overlay(sample, cx);
-            if fail {
-                assert!(matches!(
-                    result,
-                    Err(super::super::OpenError::Exclusion(Error::Surface))
-                ));
-                assert!(!this.presenter.frames().borrow().shown);
-                assert!(this.overlay.window().is_some());
-                assert!(this.exclusion.lease().unwrap().revoked());
-                assert!(this.exclusion.lease().unwrap().holds(Slot::Drawing));
-            } else {
-                result.expect("actual overlay show");
-                assert!(this.presenter.frames().borrow().shown);
-                assert!(!this.exclusion.lease().unwrap().revoked());
-            }
-            assert_eq!(
-                fixture.borrow().surfaces[Slot::Drawing as usize]
-                    .as_ref()
-                    .unwrap()
-                    .affinity,
-                EXCLUDED
-            );
-        });
-    }
-}
-
-#[gpui::test]
 fn actual_shown_overlay_can_clear_or_disconnect_while_restoration_debt_blocks_show(
     cx: &mut gpui_kit::TestAppContext,
 ) {
