@@ -1161,12 +1161,10 @@ mod tests {
             )
         }
         .unwrap();
-        // SAFETY: reads this thread's own window's extended style.
         let topmost = || {
-            has_ex(
-                unsafe { GetWindowLongPtrW(root, GWL_EXSTYLE) },
-                WS_EX_TOPMOST,
-            )
+            // SAFETY: reads this thread's own window's extended style.
+            let style = unsafe { GetWindowLongPtrW(root, GWL_EXSTYLE) };
+            has_ex(style, WS_EX_TOPMOST)
         };
         raise(root).unwrap();
         assert!(topmost());
