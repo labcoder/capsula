@@ -234,6 +234,7 @@ fn run_plan(plan: &[Launch]) -> Result<()> {
                 shell_command(&debug.join(SHELL_EXE), &folders),
                 &tap,
                 launch.steps,
+                run.job(),
             )
             .with_context(|| format!("launch {number}"))?;
         }
@@ -320,7 +321,9 @@ fn no_strangers(
             continue;
         };
         match helper.role {
-            Some(role) if helper.image == image && !roles.contains(&role) => roles.push(role),
+            Some(role) if helper.image == image && !roles.contains(&role) => {
+                roles.push(role)
+            }
             _ => return Ok(false),
         }
     }
@@ -364,7 +367,13 @@ impl Ledger {
 /// Starts the launch's brain, then its shell once the brain listens, so the shell connects to that
 /// brain instead of starting one; runs the steps, then closes the shell and waits for every product
 /// process to exit.
-fn supervise(mut brain: Command, mut shell: Command, tap: &Path, steps: &[Step]) -> Result<()> {
+fn supervise(
+    mut brain: Command,
+    mut shell: Command,
+    tap: &Path,
+    steps: &[Step],
+    job: platform::Held,
+) -> Result<()> {
     let image = std::fs::canonicalize(brain.get_program()).context("the gate brain's image")?;
     let mut brain = brain.spawn().context("starting the gate brain")?;
     let pipe = Pipe::Control.name(platform::gate_pipe::session_id()?);
@@ -386,7 +395,7 @@ fn supervise(mut brain: Command, mut shell: Command, tap: &Path, steps: &[Step])
     let mut state = State::default();
     let stepped = steps
         .iter()
-        .try_for_each(|step| watch(ours, &image, tap, step, &mut state, &mut cursor));
+        .try_for_each(|step| watch(ours, &image, job, tap, step, &mut state, &mut cursor));
     if let Err(error) = stepped {
         return crate::session::combine([
             Err(error),
@@ -402,7 +411,8 @@ fn supervise(mut brain: Command, mut shell: Command, tap: &Path, steps: &[Step])
         if running.iter().all(|entry| entry.pid == me) {
             break;
         }
-        let error = match no_strangers(&running, me, ours, &image, platform::helper) {
+        let error = match no_strangers(&running, me, ours, &image, |pid| platform::helper(pid, job))
+        {
             Err(error) => error,
             Ok(false) => anyhow!(
                 "another product process started while the launch quit; the shell and brain were ended"
@@ -436,6 +446,7 @@ fn supervise(mut brain: Command, mut shell: Command, tap: &Path, steps: &[Step])
 fn watch(
     ours: [u32; 2],
     image: &Path,
+    job: platform::Held,
     tap: &Path,
     step: &Step,
     state: &mut State,
@@ -457,7 +468,7 @@ fn watch(
                 std::process::id(),
                 ours,
                 image,
-                platform::helper
+                |pid| platform::helper(pid, job)
             )?,
             "the gate brain or shell exited, or a product process other than them and the brain's \
              workers started; nothing it starts can send on the key route, and the check stops"
@@ -745,21 +756,24 @@ mod tests {
     /// The gate brain's image in the fixtures.
     const IMAGE: &str = r"C:\gate\debug\kumochid.exe";
 
-    /// What the check reads of each fixture child: 30 and 50 name the screen worker and 40 the
-    /// speech worker under the gate image, 60 names no role, 70 names the screen worker under
-    /// another image, 80 exited before it was read, and anything else can't be read.
+    /// What the check reads of each fixture child, all in the run's job but 75: 30 and 50 name the
+    /// screen worker and 40 the speech worker under the gate image, 60 names no role, 70 names the
+    /// screen worker under another image, 75 names the screen worker under the gate image outside
+    /// the job, 80 exited before it was read, and anything else can't be read.
     fn identify(pid: u32) -> Result<Option<platform::Helper>> {
-        let helper = |image: &str, role| {
+        let helper = |image: &str, role, in_job| {
             Ok(Some(platform::Helper {
                 image: std::path::PathBuf::from(image),
                 role,
+                in_job,
             }))
         };
         match pid {
-            30 | 50 => helper(IMAGE, Some("screen-worker")),
-            40 => helper(IMAGE, Some("speech-worker")),
-            60 => helper(IMAGE, None),
-            70 => helper(r"C:\other\kumochid.exe", Some("screen-worker")),
+            30 | 50 => helper(IMAGE, Some("screen-worker"), true),
+            40 => helper(IMAGE, Some("speech-worker"), true),
+            60 => helper(IMAGE, None, true),
+            70 => helper(r"C:\other\kumochid.exe", Some("screen-worker"), true),
+            75 => helper(IMAGE, Some("screen-worker"), false),
             80 => Ok(None),
             _ => bail!("unreadable fixture child"),
         }
@@ -798,6 +812,7 @@ mod tests {
             !with(&[(70, 10, false)]),
             "a worker role under another image"
         );
+        assert!(!with(&[(75, 10, false)]), "a worker outside the run's job");
         assert!(!with(&[(30, 20, false)]), "a brain the shell started");
         assert!(!with(&[(30, 10, true)]), "a shell the brain relaunched");
         assert!(!with(&[(30, 99, false)]), "another brain's worker");

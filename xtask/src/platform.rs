@@ -170,16 +170,18 @@ fn process_command_line(pid: u32) -> Result<Vec<u16>> {
     command_line(&Process::open(pid)?)
 }
 
-/// A child of a launch's brain as the key check reads it: its image's canonical path and the
-/// worker role its arguments name, when they name exactly one.
+/// A child of a launch's brain as the key check reads it through one handle: its image's canonical
+/// path, the worker role its arguments name when they name exactly one, and whether it is in the
+/// run's job.
 #[derive(Debug)]
 pub(crate) struct Helper {
     pub(crate) image: PathBuf,
     pub(crate) role: Option<&'static str>,
+    pub(crate) in_job: bool,
 }
 
-/// `pid`'s image and role, or `None` once it has exited or no longer exists.
-pub(crate) fn helper(pid: u32) -> Result<Option<Helper>> {
+/// `pid`'s image, role and membership of `job`, or `None` once it has exited or no longer exists.
+pub(crate) fn helper(pid: u32, job: Held) -> Result<Option<Helper>> {
     let process = match Process::open(pid) {
         Ok(process) => process,
         Err(error)
@@ -193,14 +195,15 @@ pub(crate) fn helper(pid: u32) -> Result<Option<Helper>> {
     };
     let read = process
         .image()
-        .and_then(|image| Ok((image, command_line(&process)?)));
+        .and_then(|image| Ok((image, command_line(&process)?, job.holds(&process)?)));
     if process.exit_code()?.is_some() {
         return Ok(None);
     }
-    let (image, line) = read?;
+    let (image, line, in_job) = read?;
     Ok(Some(Helper {
         image: std::fs::canonicalize(image)?,
         role: command_role(&line).ok(),
+        in_job,
     }))
 }
 

@@ -2,7 +2,7 @@ use std::os::windows::process::CommandExt as _;
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
 
-use super::{CREATE_NO_WINDOW, command_role, helper, helper_role, process_command_line};
+use super::{CREATE_NO_WINDOW, Job, command_role, helper, helper_role, process_command_line};
 
 #[derive(Debug)]
 struct WaitingChild(Child);
@@ -96,7 +96,7 @@ fn native_command_lines_identify_exact_roles_and_refuse_unknown_or_exited_childr
 }
 
 #[test]
-fn a_native_helper_reads_as_its_canonical_image_and_role_and_is_gone_once_it_exits() {
+fn a_native_helper_reads_as_its_canonical_image_role_and_job_and_is_gone_once_it_exits() {
     let root = std::env::var_os("SystemRoot").expect("Windows folder");
     let image = Path::new(&root).join("System32/findstr.exe");
     let mut child = WaitingChild(
@@ -109,9 +109,16 @@ fn a_native_helper_reads_as_its_canonical_image_and_role_and_is_gone_once_it_exi
             .spawn()
             .expect("harmless child waiting on stdin"),
     );
-    let read = helper(child.0.id())
+    let job = Job::kill_on_close().expect("a job");
+    let outside = helper(child.0.id(), job.held())
         .expect("a live child is read")
         .expect("a live child is there");
+    assert!(!outside.in_job, "a child outside the job reads as outside");
+    job.assign(&child.0).expect("the child joins the job");
+    let read = helper(child.0.id(), job.held())
+        .expect("a live child is read")
+        .expect("a live child is there");
+    assert!(read.in_job, "a child in the job reads as in it");
     assert_eq!(
         read.image,
         std::fs::canonicalize(&image).expect("the image's canonical path")
@@ -120,10 +127,13 @@ fn a_native_helper_reads_as_its_canonical_image_and_role_and_is_gone_once_it_exi
     child.0.kill().expect("end fixture child");
     child.0.wait().expect("confirm child exited");
     assert!(
-        helper(child.0.id())
+        helper(child.0.id(), job.held())
             .expect("an exited child reads")
             .is_none(),
         "an exited child is gone, never identified"
     );
-    assert!(helper(4).is_err(), "a live process it can't read fails");
+    assert!(
+        helper(4, job.held()).is_err(),
+        "a live process it can't read fails"
+    );
 }

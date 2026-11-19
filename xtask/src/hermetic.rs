@@ -195,6 +195,11 @@ impl Run {
         Ok(Self { root, alone, job })
     }
 
+    /// The job this run holds itself and everything it starts in.
+    pub(crate) fn job(&self) -> platform::Held {
+        self.job
+    }
+
     pub(crate) fn folders(&self, name: &str) -> Result<Folders> {
         Folders::create(&self.root.join(name))
     }
