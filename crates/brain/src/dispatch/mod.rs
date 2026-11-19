@@ -487,8 +487,6 @@ pub(crate) struct RunCtx<'a> {
     pub(crate) offered: &'a [ToolName],
     /// The launch authorized for the run now, if any.
     pub(crate) mcp: Option<LaunchId>,
-    #[cfg(test)]
-    pub(crate) mcp_draft_offered: bool,
     pub(crate) ledger: &'a mut Ledger,
 }
 
@@ -547,51 +545,59 @@ pub(crate) fn named(wire: &str) -> Option<ToolName> {
         .map(|tool| tool.name)
 }
 
-/// The schemas a run with `reach` is offered on `route`.
-pub(crate) fn schemas(reach: Origin, route: Route) -> Vec<ToolSchema> {
+fn visible_tools(reach: Origin) -> impl Iterator<Item = &'static Tool> {
     TOOLS
         .iter()
-        .filter(|tool| {
-            (!tool.kumo_only || reach == Origin::Kumo) && (tool.mcp || route == Route::Model)
-        })
-        .map(|tool| ToolSchema {
-            name: tool.wire,
-            description: tool.description,
-            parameters: (tool.parameters)(),
-        })
-        .collect()
+        .filter(move |tool| !tool.kumo_only || reach == Origin::Kumo)
+}
+
+const MODEL_OFFERED: &[ToolName] = &[
+    ToolName::Draw,
+    ToolName::DraftIssue,
+    ToolName::SearchHistory,
+    ToolName::ReadHistory,
+    ToolName::ListTasks,
+];
+
+fn model_schema(tool: &Tool) -> ToolSchema {
+    ToolSchema {
+        name: tool.wire,
+        description: tool.description,
+        parameters: (tool.parameters)(),
+    }
+}
+
+fn mcp_schema(tool: &Tool) -> ToolSchema {
+    match tool.name {
+        ToolName::Draw => draw::overlay(),
+        ToolName::DraftIssue => draft_issue::mcp_schema(),
+        _ => model_schema(tool),
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn schemas(reach: Origin, route: Route) -> Vec<ToolSchema> {
+    match route {
+        Route::Model | Route::ModelRound(_) => visible_tools(reach).map(model_schema).collect(),
+        Route::Mcp(_) => visible_tools(reach)
+            .filter(|tool| tool.mcp)
+            .map(mcp_schema)
+            .collect(),
+    }
 }
 
 pub(crate) fn model_schemas(origin: Origin) -> Vec<ToolSchema> {
-    const OFFERED: &[ToolName] = &[
-        ToolName::Draw,
-        ToolName::DraftIssue,
-        ToolName::SearchHistory,
-        ToolName::ReadHistory,
-        ToolName::ListTasks,
-    ];
-    schemas(origin, Route::Model)
-        .into_iter()
-        .filter(|schema| named(schema.name).is_some_and(|name| OFFERED.contains(&name)))
+    visible_tools(origin)
+        .filter(|tool| MODEL_OFFERED.contains(&tool.name))
+        .map(model_schema)
         .collect()
 }
 
-/// Only model offers that the dispatcher also permits through MCP, `draw` on the overlay alone.
+/// Trusted MCP schemas for the available model tools, with each route's own argument contract.
 pub(crate) fn mcp_schemas(origin: Origin) -> Vec<ToolSchema> {
-    model_schemas(origin)
-        .into_iter()
-        .filter(|schema| {
-            named(schema.name)
-                .and_then(tool)
-                .is_some_and(|tool| tool.mcp)
-        })
-        .map(|schema| {
-            if schema.name == draw::DRAW.wire {
-                draw::overlay()
-            } else {
-                schema
-            }
-        })
+    visible_tools(origin)
+        .filter(|tool| tool.mcp && MODEL_OFFERED.contains(&tool.name))
+        .map(mcp_schema)
         .collect()
 }
 
@@ -724,12 +730,7 @@ fn permitted(run: &RunCtx<'_>, route: Route, name: ToolName) -> Result<&'static 
     let tool = tool(name).ok_or(ToolError::Unknown)?;
     let offered = match route {
         Route::Model | Route::ModelRound(_) => run.offered.contains(&name),
-        Route::Mcp(_) => {
-            let allowed = tool.mcp;
-            #[cfg(test)]
-            let allowed = allowed || (name == ToolName::DraftIssue && run.mcp_draft_offered);
-            allowed && run.offered.contains(&name)
-        }
+        Route::Mcp(_) => tool.mcp && run.offered.contains(&name),
     };
     if !offered || (tool.kumo_only && run.reach != Origin::Kumo) {
         return Err(ToolError::NotHere);

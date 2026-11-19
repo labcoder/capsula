@@ -63,31 +63,28 @@ fn a_cloned_offer_reuses_the_canonical_schema_set_without_copying() {
 #[test]
 fn a_launch_offers_only_what_its_build_offers_and_mcp_permits() {
     let kumo = crate::context::tools(Origin::Kumo);
-    assert_eq!(
-        Offer::authorized(Origin::Kumo, &kumo),
-        Offer::for_tests(Origin::Kumo, vec![ToolName::Draw])
-    );
-    assert_eq!(
-        Offer::for_tests(Origin::Kumo, vec![ToolName::Draw])
-            .schemas()
+    for (without, expected) in [
+        (&[][..], &["draw", "draft_issue"][..]),
+        (&["draw"][..], &["draft_issue"][..]),
+        (&["draft_issue"][..], &["draw"][..]),
+        (&["draw", "draft_issue"][..], &[][..]),
+    ] {
+        let built: Vec<_> = kumo
             .iter()
-            .map(|tool| tool.name)
-            .collect::<Vec<_>>(),
-        ["draw"]
-    );
-    let without_draw: Vec<_> = kumo
-        .into_iter()
-        .filter(|tool| tool.name != "draw")
-        .collect();
-    assert!(
-        !without_draw.is_empty(),
-        "history and drafts are still offered"
-    );
-    assert_eq!(
-        Offer::authorized(Origin::Kumo, &without_draw),
-        Offer::Nothing
-    );
-    assert_eq!(Offer::authorized(Origin::Kumo, &[]), Offer::Nothing);
+            .filter(|tool| !without.contains(&tool.name))
+            .cloned()
+            .collect();
+        let offer = Offer::authorized(Origin::Kumo, &built);
+        assert_eq!(
+            offer
+                .schemas()
+                .iter()
+                .map(|tool| tool.name)
+                .collect::<Vec<_>>(),
+            expected
+        );
+        assert_eq!(offer == Offer::Nothing, expected.is_empty());
+    }
 }
 
 /// Starts a turn and admits its build, offering every tool; the build's key.

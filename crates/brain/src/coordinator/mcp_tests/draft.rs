@@ -6,20 +6,21 @@ const PROPOSAL: &[u8] = br#"{"title":"Local draft","body":"first\r\nsecond"}"#;
 const REORDERED: &[u8] = br#" { "body": "first\r\nsecond", "title": "Local draft" } "#;
 const SAVED: &str = "Saved a local issue draft for user review. Nothing was filed on GitHub.";
 
-fn test_offer() -> Offer {
-    Offer::for_tests(Origin::Task(T), vec![ToolName::DraftIssue])
-}
-
-pub(crate) fn draft_launch() -> (Coordinator, BuildKey, LaunchId, AuditGate, ThreadId) {
-    let (mut core, build) = offering(drawing());
+pub(crate) fn draft_launch(
+    names: &[&str],
+) -> (Coordinator, BuildKey, LaunchId, AuditGate, ThreadId, Offer) {
+    let mut tools = drawing();
+    tools.retain(|tool| names.contains(&tool.name));
+    let offer = Offer::authorized(Origin::Task(T), &tools);
+    let (mut core, build) = offering(tools);
     let (gate, until) = passed();
     assert!(binds(
         &mut core,
         (build, L1, T),
-        test_offer(),
+        offer.clone(),
         (gate.clone(), until),
     ));
-    (core, build, L1, gate, T)
+    (core, build, L1, gate, T, offer)
 }
 
 fn draft(
@@ -46,7 +47,7 @@ fn proposal(core: &mut Coordinator, at: (BuildKey, LaunchId, u32), args: &[u8]) 
 
 #[test]
 fn mcp_draft_uses_a_closed_envelope_and_a_route_specific_retry_hash() {
-    let (mut core, build, launch, _, _) = draft_launch();
+    let (mut core, build, launch, _, _, _) = draft_launch(&["draft_issue"]);
     for (i, args) in [
         br#"{"title":"a","body":"b","repo":"owner/repo"}"#.as_slice(),
         br#"{"title":"a","body":"b","repo":"owner/unlisted"}"#,
@@ -118,7 +119,7 @@ fn mcp_draft_uses_a_closed_envelope_and_a_route_specific_retry_hash() {
 #[test]
 fn mcp_drafts_share_the_run_limit_and_replays_do_not_charge() {
     for direct in [0, 1] {
-        let (mut core, build, launch, _, _) = draft_launch();
+        let (mut core, build, launch, _, _, _) = draft_launch(&["draft_issue"]);
         if direct == 1 {
             assert_eq!(
                 streamed(
@@ -149,7 +150,7 @@ fn mcp_drafts_share_the_run_limit_and_replays_do_not_charge() {
 #[test]
 fn a_different_mcp_tool_cannot_replay_a_cached_draw_refusal() {
     let (mut core, build) = offering(drawing());
-    let offer = Offer::for_tests(Origin::Task(T), vec![ToolName::Draw, ToolName::DraftIssue]);
+    let offer = Offer::authorized(Origin::Task(T), &drawing());
     assert!(binds(&mut core, (build, L1, T), offer, passed()));
     let at = (build, L1, 1);
     let origin = McpOrigin {
@@ -192,7 +193,7 @@ fn revoking_an_mcp_draft_launch_drops_its_reply_but_not_its_committed_card() {
     for stop in ["esc", "rebuild", "bridge"] {
         let scratch = Scratch::new(stop);
         let mut store = store(&scratch);
-        let (mut core, build, launch, gate, thread) = draft_launch();
+        let (mut core, build, launch, gate, thread, offer) = draft_launch(&["draft_issue"]);
         let at = (build, launch, 1);
         let call = proposal(&mut core, at, PROPOSAL);
         match stop {
@@ -243,7 +244,7 @@ fn revoking_an_mcp_draft_launch_drops_its_reply_but_not_its_committed_card() {
         assert_eq!(card.thread, thread);
         assert_eq!(card.title.as_str(), "Local draft");
         if stop == "bridge" {
-            assert!(binds(&mut core, (build, L2, T), test_offer(), passed()));
+            assert!(binds(&mut core, (build, L2, T), offer, passed()));
             let next = proposal(&mut core, (build, L2, 1), PROPOSAL);
             assert_eq!(next.key.route, Route::Mcp(L2));
             assert_eq!(core.take_mcp_answer(build, L2, &key(1)), Ok(None));

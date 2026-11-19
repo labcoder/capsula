@@ -176,6 +176,10 @@ pub(crate) enum Input {
 
 #[cfg(test)]
 impl Input {
+    pub(crate) fn from_test_line(line: &[u8]) -> Self {
+        Self::Line(Line::Text(line.to_vec()))
+    }
+
     pub(crate) fn from_test_json(value: &serde_json::Value) -> Self {
         Self::Line(Line::Text(value.to_string().into_bytes()))
     }

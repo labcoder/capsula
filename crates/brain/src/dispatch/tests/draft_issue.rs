@@ -107,10 +107,15 @@ fn malformed_draft_content_and_the_existing_whole_call_cap_are_refused() {
 }
 
 #[test]
-fn drafting_is_model_only_and_has_to_be_offered_to_that_run() {
+fn drafting_has_to_be_offered_to_the_run_on_either_route() {
     let mut ledger = Ledger::default();
     assert_step(
-        &draft(&mut ledger, mcp(L1, "draft"), ARGS),
+        &call(
+            &mut ctx(&mut ledger, Origin::Task(T), Some(L1)),
+            mcp(L1, "draft"),
+            ToolName::DraftIssue,
+            br#"{"title":"Local","body":"Draft"}"#,
+        ),
         &error(ToolError::NotHere),
     );
     assert_step(
@@ -125,11 +130,8 @@ fn drafting_is_model_only_and_has_to_be_offered_to_that_run() {
     for origin in [Origin::Kumo, Origin::Task(T)] {
         let model = crate::dispatch::model_schemas(origin);
         assert!(model.iter().any(|schema| schema.name == "draft_issue"));
-        assert!(
-            !crate::dispatch::mcp_schemas(origin)
-                .iter()
-                .any(|schema| schema.name == "draft_issue")
-        );
+        let mcp = crate::dispatch::mcp_schemas(origin);
+        assert!(mcp.iter().any(|schema| schema.name == "draft_issue"));
     }
 }
 

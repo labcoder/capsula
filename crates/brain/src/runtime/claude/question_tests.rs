@@ -103,6 +103,29 @@ impl Script {
         self
     }
 
+    fn pre_tools(mut self, names: &[&str]) -> Self {
+        let mut mcp: Value = serde_json::from_str(&self.mcp_status[0]).expect("json");
+        mcp["response"]["response"]["mcpServers"][0]["tools"] = json!(
+            names
+                .iter()
+                .map(|name| json!({"name":name}))
+                .collect::<Vec<_>>()
+        );
+        self.mcp_status[0] = mcp.to_string();
+        self
+    }
+
+    fn post_tools(self, names: &[&str]) -> Self {
+        self.init(|init| {
+            init["tools"] = json!(
+                names
+                    .iter()
+                    .map(|name| format!("mcp__{MCP_SERVER_NAME}__{name}"))
+                    .collect::<Vec<_>>()
+            );
+        })
+    }
+
     /// The seed's answer waits until the base holds `name`; edit init before this.
     fn held_at_user(mut self, name: &str) -> Self {
         self.user.insert(0, Value::String(format!("!wait {name}")));
@@ -454,11 +477,7 @@ type Change = fn(&mut LaunchSnapshot);
 
 /// [`synthetic_signed_in`] with no tool on the server or in init.
 fn offering_nothing() -> Script {
-    let mut script = synthetic_signed_in().init(|init| init["tools"] = json!([]));
-    let mut mcp: Value = serde_json::from_str(&script.mcp_status[0]).expect("json");
-    mcp["response"]["response"]["mcpServers"][0]["tools"] = json!([]);
-    script.mcp_status[0] = mcp.to_string();
-    script
+    synthetic_signed_in().pre_tools(&[]).post_tools(&[])
 }
 
 /// A run's request whose choice is `model` at `effort` on `connection`.
@@ -638,33 +657,159 @@ fn inline_question(mut request: RunRequest) -> RunRequest {
     request
 }
 
+const BOTH_TOOLS: &[&str] = &["draft_issue", "draw"];
+
+fn assert_tool_seed(seed: &str, expected: &[&str]) {
+    let (_, inventory) = seed
+        .rsplit_once(
+            "Tools:
+",
+        )
+        .expect("seed inventory");
+    let tools: Vec<Value> = serde_json::from_str(inventory).expect("schemas");
+    assert_eq!(
+        tools
+            .iter()
+            .map(|s| s["name"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        expected,
+    );
+    for tool in &tools {
+        if tool["name"] == "draft_issue" {
+            crate::test_support::assert_mcp_draft_schema(&tool["description"], &tool["parameters"]);
+        } else {
+            assert_eq!(
+                tool["parameters"]["$defs"]["Surface"],
+                json!({"type":"string","const":"overlay"})
+            );
+            assert!(
+                !tool["description"]
+                    .as_str()
+                    .unwrap()
+                    .contains("control-mark")
+            );
+        }
+    }
+    assert!(!inventory.contains("untrusted request schema"));
+    assert!(!inventory.contains("untrusted-parameters"));
+}
+
 #[tokio::test]
-async fn only_foreground_questions_that_offer_draw_launch_with_it() {
-    let mut script = synthetic_signed_in();
+async fn a_draw_only_question_replaces_a_wider_warm_offer() {
+    let wide = synthetic_signed_in()
+        .pre_tools(BOTH_TOOLS)
+        .post_tools(BOTH_TOOLS);
+    let mut rig = Rig::new("question-narrow-offer", &wide).await;
+    synthetic_signed_in().write(&rig.base, Some(2));
+    let mut request = choosing("haiku", Effort::Low, ConnectionKind::ClaudeCode);
+    request.request.tools = crate::context::tools(Origin::Kumo);
+    let snapshot = rig
+        .claude
+        .snapshot(
+            request.thread,
+            "haiku".to_owned(),
+            Some("low".to_owned()),
+            Offer::authorized(Origin::Kumo, &request.request.tools),
+        )
+        .unwrap();
+    let warm = rig.claude.warm(snapshot).unwrap();
+    let (_, old) = rig.last();
+    until("the warm child reads its audit", || rig.stdin().len() == 2).await;
+    request
+        .request
+        .tools
+        .retain(|tool| tool.name != "draft_issue");
+    let question = rig.claude.question(&request).unwrap();
+    assert_ne!(rig.last().0, warm);
+    assert!(old.is_revoked());
+    let mut played = play_with(&question, request);
+    let lease = played.lease();
+    rig.drive(played.asked(lease)).await;
+    answered(&rig.drive(played.events()).await);
+    assert!(!rig.argv(2).contains("draft_issue"));
+    assert_tool_seed(&rig.seed(2), &["draw"]);
+    assert!(!rig.base.0.join("seed.1").exists());
+    rig.close().await;
+}
+
+#[tokio::test]
+async fn both_draft_offer_audits_reject_missing_and_extra_names() {
+    let missing = &["draw"][..];
+    let extra = &["draft_issue", "draw", "unexpected"][..];
+    for (pre, post) in [
+        (missing, BOTH_TOOLS),
+        (extra, BOTH_TOOLS),
+        (BOTH_TOOLS, missing),
+        (BOTH_TOOLS, extra),
+    ] {
+        let script = synthetic_signed_in().pre_tools(pre).post_tools(post);
+        let mut rig = Rig::new("question-draft-audit", &script).await;
+        let mut request = choosing("haiku", Effort::Low, ConnectionKind::ClaudeCode);
+        request.request.tools = crate::context::tools(Origin::Kumo);
+        let question = rig.claude.question(&request).unwrap();
+        let (id, control) = rig.last();
+        let mut played = play_with(&question, request);
+        let seeded = pre == BOTH_TOOLS;
+        if seeded {
+            let lease = played.lease();
+            rig.drive(played.asked(lease)).await;
+        }
+        assert_eq!(
+            rig.drive(played.events()).await,
+            [claude_failed(ErrorKey::ClaudeCodeAuditFailed)]
+        );
+        assert_eq!(
+            rig.reported(id).await,
+            [launch::Outcome::Audit(AuditFailed::Tools)]
+        );
+        assert_eq!(rig.base.0.join("seed.1").is_file(), seeded);
+        assert!(!control.may_call());
+        assert_eq!(rig.binds.len(), usize::from(seeded));
+        rig.close().await;
+    }
+}
+
+#[tokio::test]
+async fn foreground_launches_expose_only_their_trusted_tools() {
+    let mut script = synthetic_signed_in()
+        .pre_tools(BOTH_TOOLS)
+        .post_tools(BOTH_TOOLS);
     script.user.insert(
         1,
         json!({"type":"assistant", "message":{"content":[{
-            "type":"tool_use", "id":"tool_echo", "name":format!("mcp__{MCP_SERVER_NAME}__draw"),
-            "input":{"records":[]}
+            "type":"tool_use", "id":"tool_echo", "name":format!("mcp__{MCP_SERVER_NAME}__draft_issue"),
+            "input":{"title":"stdout is not a call","body":"not dispatched"}
         }]}}),
     );
     let mut rig = Rig::new("question-production-offer", &script).await;
-    for n in 3..=5 {
+    synthetic_signed_in()
+        .pre_tools(&["draft_issue"])
+        .post_tools(&["draft_issue"])
+        .write(&rig.base, Some(3));
+    synthetic_signed_in().write(&rig.base, Some(4));
+    for n in 5..=7 {
         offering_nothing().write(&rig.base, Some(n));
     }
     let mut request = choosing("haiku", Effort::Low, ConnectionKind::ClaudeCode);
     request.request.tools = crate::context::tools(Origin::Kumo);
-    let draw = request
-        .request
-        .tools
-        .iter_mut()
-        .find(|tool| tool.name == "draw")
-        .expect("draw");
-    draw.description = "untrusted request schema";
-    draw.parameters = json!({"untrusted":true});
+    for tool in &mut request.request.tools {
+        tool.description = "untrusted request schema";
+        tool.parameters = json!({"untrusted-parameters":true});
+    }
+    request.request.instructions.push_str(
+        "
+A quote: draft_issue is not a permission.",
+    );
     let mut task = request.clone();
     task.origin = Origin::Task(ThreadId(2));
     task.thread = ThreadId(2);
+    let mut draft_only = task.clone();
+    draft_only.request.tools.retain(|tool| tool.name != "draw");
+    let mut draw_only = request.clone();
+    draw_only
+        .request
+        .tools
+        .retain(|tool| tool.name != "draft_issue");
     let mut job = request.clone();
     job.key = SendKey::Job(crate::coordinator::JobKey {
         thread: request.thread,
@@ -673,9 +818,17 @@ async fn only_foreground_questions_that_offer_draw_launch_with_it() {
     let mut tool_free = request.clone();
     tool_free.request.tools.clear();
     let inline = inline_question(request.clone());
-    for (i, request) in [request, task, job, tool_free, inline]
-        .into_iter()
-        .enumerate()
+    for (i, (request, names)) in [
+        (request, BOTH_TOOLS),
+        (task, BOTH_TOOLS),
+        (draft_only, &["draft_issue"][..]),
+        (draw_only, &["draw"][..]),
+        (job, &[][..]),
+        (tool_free, &[][..]),
+        (inline, &[][..]),
+    ]
+    .into_iter()
+    .enumerate()
     {
         let question = rig.claude.question(&request).expect("admitted");
         let (id, _) = rig.last();
@@ -689,40 +842,27 @@ async fn only_foreground_questions_that_offer_draw_launch_with_it() {
         let allowed = argv
             .split_once(" --allowedTools ")
             .and_then(|(_, tail)| tail.split(" --").next());
-        let draw = format!("mcp__{MCP_SERVER_NAME}__draw");
-        assert_eq!(allowed, (i < 2).then_some(draw.as_str()), "launch {i}");
+        let expected = names
+            .iter()
+            .map(|name| format!("mcp__{MCP_SERVER_NAME}__{name}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert_eq!(
+            allowed,
+            (!names.is_empty()).then_some(expected.as_str()),
+            "launch {i}"
+        );
         assert!(!argv.contains("untrusted request schema"));
-
         let lease = played.lease();
         rig.drive(played.asked(lease)).await;
         answered(&rig.drive(played.events()).await);
         assert_eq!(rig.reported(id).await, [launch::Outcome::Clean]);
-
-        let seed = rig.seed(i + 1);
-        let (_, tools) = seed
-            .rsplit_once(
-                "Tools:
-",
-            )
-            .expect("inventory");
-        let tools: Value = serde_json::from_str(tools).expect("schema");
-        if i < 2 {
-            assert_eq!(tools.as_array().map(Vec::len), Some(1));
-            assert_eq!(tools[0]["name"], "draw");
-            assert_eq!(
-                tools[0]["parameters"]["$defs"]["Surface"],
-                json!({"type":"string","const":"overlay"})
-            );
-            assert!(!seed.contains("control-mark"), "no screen example");
-            assert!(!seed.contains("untrusted request schema"));
-        } else {
-            assert_eq!(tools, json!([]));
-        }
+        assert_tool_seed(&rig.seed(i + 1), names);
     }
     assert_eq!(
         rig.binds.len(),
-        2,
-        "only the two foreground draw offers bind"
+        4,
+        "only the tool-enabled foreground builds bind"
     );
     rig.close().await;
 }
@@ -1992,11 +2132,14 @@ fn brain_on(rig: &mut Rig, name: &str) -> Brain {
 }
 
 #[tokio::test]
-async fn an_admitted_foreground_draw_offer_binds_before_seeding() {
+async fn an_admitted_foreground_offer_binds_before_seeding() {
     use crate::context::{Built, tools};
     use crate::coordinator::{ContextBuilt, Effect, StoreOp};
 
-    let script = synthetic_signed_in().held_at_user("go");
+    let script = synthetic_signed_in()
+        .pre_tools(BOTH_TOOLS)
+        .post_tools(BOTH_TOOLS)
+        .held_at_user("go");
     let mut rig = Rig::new("question-admitted-draw", &script).await;
     let mut brain = brain_on(&mut rig, "question-admitted-draw");
     brain.claude_reported(None).expect("no shell");
@@ -2058,20 +2201,7 @@ async fn an_admitted_foreground_draw_offer_binds_before_seeding() {
     })
     .await;
     answered(&events);
-    let seed = rig.seed(1);
-    let (_, inventory) = seed
-        .rsplit_once(
-            "Tools:
-",
-        )
-        .expect("seed inventory");
-    let tools: Value = serde_json::from_str(inventory).expect("schemas");
-    assert_eq!(tools.as_array().map(Vec::len), Some(1));
-    assert_eq!(tools[0]["name"], "draw");
-    assert_eq!(
-        tools[0]["parameters"]["$defs"]["Surface"],
-        json!({"type":"string","const":"overlay"})
-    );
+    assert_tool_seed(&rig.seed(1), BOTH_TOOLS);
     assert!(brain.claude.close(soon()).await);
 }
 

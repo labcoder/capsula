@@ -107,7 +107,6 @@ fn ctx(ledger: &mut Ledger, reach: Origin, mcp: Option<LaunchId>) -> RunCtx<'_> 
         reach,
         offered: OFFERED,
         mcp,
-        mcp_draft_offered: false,
         ledger,
     }
 }
@@ -512,7 +511,10 @@ fn history_is_kumo_only_and_model_only() {
             "recall"
         ]
     );
-    assert_eq!(names(Origin::Kumo, Route::Mcp(L1)), ["draw", "probe"]);
+    assert_eq!(
+        names(Origin::Kumo, Route::Mcp(L1)),
+        ["draw", "draft_issue", "probe"]
+    );
     assert_eq!(
         names(Origin::Task(T), Route::Model),
         [

@@ -5,6 +5,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use super::{LocalWrite, Prepared, Tool, ToolError, ToolOutput, parameters, parse};
+use crate::context::ToolSchema;
 use crate::engines::ToolName;
 
 #[derive(Deserialize, Serialize, JsonSchema)]
@@ -19,11 +20,23 @@ struct DraftIssueArgs {
     repo: Option<String>,
 }
 
-#[derive(Deserialize, Serialize)]
+#[derive(Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct McpArgs {
     title: String,
     body: String,
+}
+
+pub(super) fn mcp_schema() -> ToolSchema {
+    ToolSchema {
+        name: DRAFT_ISSUE.wire,
+        description: "Save a local issue draft for user review when asked to file, open or report a GitHub issue. \
+                      Supply only a nonblank title on one line (at most 256 Unicode characters) and a literal \
+                      Markdown body. Keep all serialized arguments within 16 KiB, including JSON escaping. \
+                      Do not include hidden format characters. This tool cannot select a repository, file an \
+                      issue, authorize filing or contact GitHub.",
+        parameters: parameters::<McpArgs>(),
+    }
 }
 
 fn prepare(args: &[u8]) -> Result<Prepared, ToolError> {
@@ -87,7 +100,7 @@ pub(super) const DRAFT_ISSUE: Tool = Tool {
                   or direction controls, joiners, fillers or variation selectors. Preview text is \
                   literal; GitHub interprets visible mentions, links and Markdown if later filed.",
     kumo_only: false,
-    mcp: false,
+    mcp: true,
     parameters: parameters::<DraftIssueArgs>,
     prepare,
 };

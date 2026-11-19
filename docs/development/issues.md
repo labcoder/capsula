@@ -3,13 +3,14 @@
 The model's `draft_issue` tool creates a local draft for user review. Its checked arguments
 contain only a title, body and optional repository; the dispatcher supplies the caller's
 conversation and any account metadata. There is no model-supplied thread, account or approval,
-and MCP drafting is not enabled. Creating a draft grants no consent and sends no HTTP request.
+and creating a draft grants no consent and sends no HTTP request.
 The instructions tell a model that has the tool to call it when asked to file an issue.
 
-The dormant MCP parser accepts only title and body, even on a retry. The caller cannot probe a
-repository by proposing it, and cannot supply a draft identity or approval. If enabled in a later
-change, it can use only the user's committed same-account default; with no usable default the
-draft stays unbound. Nothing about a draft's launch authorizes the separate human review.
+An admitted Claude Code foreground build can offer `draft_issue` over MCP. Its parser accepts
+only title and body, even on a retry. The caller cannot probe a repository by proposing it or
+supply a draft identity or approval. It can use only the user's committed same-account default;
+with no usable default the draft stays unbound. Nothing about a draft's launch authorizes the
+separate human review.
 
 Before the store write, the account owner supplies binding metadata only while its verified
 numeric user, access lifetime and complete repository listing remain current. An explicit
