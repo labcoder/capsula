@@ -36,6 +36,7 @@ fn quit_admission_is_single_use_for_a_connected_transport() {
         data,
         pipe: Arc::new(pipe),
         submits: std::sync::atomic::AtomicU32::new(0),
+        closing: Arc::default(),
     });
     assert!(link.begin_quit());
     assert!(link.shared.tell_quit());

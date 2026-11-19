@@ -1,4 +1,6 @@
-use super::{ControlToBrain, GestureId, LinkHandle, PoisonError, Sender, Shared};
+use std::sync::atomic::Ordering;
+
+use super::{ControlToBrain, GestureId, LinkHandle, PoisonError, Sender, Session, Shared};
 
 #[derive(Debug)]
 pub(super) enum Stop {
@@ -96,7 +98,13 @@ impl LinkHandle {
             .is_some()
     }
 
-    pub(super) fn retain_microphone_stop(&self, gesture: GestureId) -> Option<bool> {
+    /// Keeps the stop of `gesture`'s hold owed until the brain answers it, and queues it on the
+    /// current connection unless that connection is closing; the next one replays it.
+    pub(super) fn retain_microphone_stop(
+        &self,
+        session: &Session,
+        gesture: GestureId,
+    ) -> Option<bool> {
         let outbox = self
             .shared
             .outbox
@@ -125,9 +133,13 @@ impl LinkHandle {
         }
         #[cfg(any(test, feature = "test-support"))]
         if let Some(recording) = &self.control_recording {
-            return Some(stop.queue(recording, self.link_generation()));
+            return Some(
+                session.closing.load(Ordering::Acquire)
+                    || stop.queue(recording, self.link_generation()),
+            );
         }
         if let Some(outbox) = outbox.as_ref()
+            && !outbox.closing.load(Ordering::Acquire)
             && !stop.queue(&outbox.control, outbox.generation)
         {
             outbox.pipe.abort();
