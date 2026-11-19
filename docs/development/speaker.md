@@ -284,7 +284,9 @@ whether a session has an output and whether an earlier generation still owes aud
   brain send ends that session and stops no speech. Presence keeps the stops a busy owner refused
   in order and offers the front one again every millisecond, up to ten offers in all (a policy,
   not a measured bound); a later stop waits behind it. When the offers run out, that session
-  ends. Both ends close the session at once (`Session::close`), so nothing more is sent on it,
+  ends. Both ends close the session at once (`Session::close`), so nothing more is sent on it
+  and nothing received for it can open the microphone (capture admission requires an open
+  session),
   and finish the pipe abort and the owner's barrier on the background executor, since that
   barrier takes the owner's lock.
 - **Spoken runs.** `spoken(session)` reads the live output's tail without waiting and returns its

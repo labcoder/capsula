@@ -317,7 +317,8 @@ impl Session {
         self.closing.store(true, Ordering::Release);
     }
 
-    fn open(&self) -> bool {
+    /// Alive and not closing: what sends and capture admission require.
+    pub fn open(&self) -> bool {
         self.alive.load(Ordering::Acquire) && !self.closing.load(Ordering::Acquire)
     }
 

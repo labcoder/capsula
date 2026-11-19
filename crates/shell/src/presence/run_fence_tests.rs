@@ -558,3 +558,90 @@ fn recognition_fences_a_spoken_run_the_presenter_saw_before_its_run_state(cx: &m
         );
     });
 }
+
+/// Counts the microphones `owner` starts from now; each one fails to open.
+fn starts(owner: &Entity<Presence>, cx: &mut TestAppContext) -> std::rc::Rc<std::cell::Cell<u32>> {
+    let started = std::rc::Rc::<std::cell::Cell<u32>>::default();
+    let count = std::rc::Rc::clone(&started);
+    owner.update(cx, |owner, _| {
+        owner.voice.start = Some(Box::new(move |_, _| {
+            count.set(count.get() + 1);
+            Err(crate::platform::microphone::MicError::Unavailable)
+        }));
+    });
+    started
+}
+
+#[gpui::test]
+fn a_hold_admitted_after_its_session_closed_never_opens_the_microphone(cx: &mut TestAppContext) {
+    use kumochi_protocol::message::{HoldStatus, Incarnation};
+    for refused in [false, true] {
+        let (owner, _data, _controls) = ready(cx);
+        let (_commands, _tail) = answering(&owner, SPOKEN, cx);
+        hold(&owner, 1, cx);
+        let controls = if refused {
+            Some(full(&owner, cx))
+        } else {
+            stop_busy(&owner, 10, &[5], cx);
+            retries(8, cx);
+            None
+        };
+        let started = starts(&owner, cx);
+        owner.update(cx, |owner, cx| {
+            let old = owner.session.clone().expect("connected");
+            if refused {
+                let scenes = ControlToBrain::StopScenes {
+                    run: RunId(5),
+                    cuts: kumochi_protocol::message::SceneCuts::default(),
+                };
+                assert!(!owner.send_stop(&old, scenes, cx), "refused");
+            } else {
+                owner.stop_retry = None;
+                owner.drain_stops(cx);
+            }
+            assert!(
+                old.alive().load(std::sync::atomic::Ordering::Acquire),
+                "the end hasn't run yet"
+            );
+            owner
+                .link_events(
+                    crate::link::Batch::Plain(vec![crate::link::LinkEvent::VoiceHold {
+                        generation: 1,
+                        gesture: GestureId(1),
+                        status: HoldStatus::Admitted,
+                    }]),
+                    cx,
+                )
+                .expect("voice status batch");
+        });
+        assert_eq!(started.get(), 0, "no microphone for the closed session");
+        cx.run_until_parked();
+        assert!(!alive(&owner, cx), "the session ended");
+
+        drop(controls);
+        let _controls = owner.update(cx, |owner, _| {
+            let controls = owner.link.record_controls();
+            owner.session = Some(crate::link::Session::detached(2, Incarnation(2)));
+            owner.runs.met(Incarnation(2));
+            owner.runs.connected(2);
+            owner.runs.settings(ThreadId(1));
+            let replacement = owner.session.clone().expect("reconnected");
+            let replay = ControlToBrain::VoiceHoldStopped {
+                gesture: GestureId(1),
+            };
+            assert!(
+                owner.link.send_control(&replacement, replay),
+                "the old receipt replays"
+            );
+            let sent_on = owner.link.link_generation();
+            owner
+                .link
+                .accept_recorded_microphone_stop(sent_on, GestureId(1));
+            controls
+        });
+        hold(&owner, 2, cx);
+        let started = starts(&owner, cx);
+        super::voice_wiring_tests::status(&owner, 2, 2, HoldStatus::Admitted, cx);
+        assert_eq!(started.get(), 1, "the replacement's hold opens it");
+    }
+}

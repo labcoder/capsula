@@ -1,6 +1,5 @@
 use std::cell::Cell;
 use std::rc::Rc;
-use std::sync::atomic::Ordering;
 use std::time::Instant;
 
 use kumochi_protocol::geometry::{PhysicalPoint, PhysicalRect, PointerPath};
@@ -275,9 +274,10 @@ impl Presence {
     fn voice_current(&self, stamp: Stamp) -> bool {
         stamp.target == (self.runs.thread(), self.runs.revision())
             && stamp.choice == self.link.choice_revision()
-            && self.session.as_ref().is_some_and(|s| {
-                s.generation() == stamp.session && s.alive().load(Ordering::Acquire)
-            })
+            && self
+                .session
+                .as_ref()
+                .is_some_and(|s| s.generation() == stamp.session && s.open())
     }
 
     fn voice_notice(&mut self, text: Text, cx: &mut Context<'_, Self>) {
