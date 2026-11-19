@@ -438,7 +438,7 @@ impl<S: CredentialStore> Vault<S> {
         marker: Option<SignOutMarker>,
     ) -> Result<(), VaultError> {
         let revision = self.authority.current(kind)?.revision;
-        self.write_expected(kind, revision, bytes, marker)
+        self.write_expected(kind, revision, bytes, marker).map(drop)
     }
 
     fn write_expected(
@@ -447,17 +447,16 @@ impl<S: CredentialStore> Vault<S> {
         revision: u64,
         bytes: &SecretBytes,
         marker: Option<SignOutMarker>,
-    ) -> Result<(), VaultError> {
+    ) -> Result<u64, VaultError> {
         let plan = self.authority.begin(kind, revision, bytes.expose().len())?;
         let candidate = (plan.generation(), plan.layout());
         let result = generation::write(&self.store, &self.service, plan, bytes)
             .and_then(|verified| self.authority.activate(verified, marker));
-        if let Err(error) = result {
+        let (_, revision) = result.inspect_err(|_| {
             generation::delete_pending(&self.store, &self.service, kind, candidate.0, candidate.1);
-            return Err(error.into());
-        }
+        })?;
         self.sweep();
-        Ok(())
+        Ok(revision)
     }
 
     fn remove(&mut self, kinds: &[Kind], marker: Option<SignOutMarker>) -> Result<(), VaultError> {

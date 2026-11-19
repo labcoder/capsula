@@ -79,6 +79,27 @@ fn paste_bounds_preserve_the_current_key_and_mint_distinct_names() {
 }
 
 #[test]
+fn adoption_returns_the_revision_written_by_the_authority_transaction() {
+    let (_scratch, path, service, store) = setup("paste-committed-revision");
+    let mut vault = open(&store, &service, &path);
+    vault.save_anthropic_key(OLD.as_bytes()).expect("old key");
+    let plan = vault.begin_anthropic_paste(NEW.len()).expect("plan");
+    plant(&store, &service, &plan, NEW.as_bytes());
+    raw(&path)
+        .execute_batch(
+            "CREATE TRIGGER test_revision AFTER UPDATE OF revision ON heads
+             WHEN NEW.kind = 'anthropic' AND NEW.revision = 2
+             BEGIN
+                 UPDATE heads SET revision = 9 WHERE kind = NEW.kind;
+             END;",
+        )
+        .expect("vary the committed revision in this test database");
+    let (adopted, _) = vault.adopt_anthropic_paste(plan.generation).expect("adopt");
+    assert_eq!(vault.anthropic_revision(), 9);
+    assert_eq!(adopted, 9);
+}
+
+#[test]
 fn paste_adoption_copies_to_fresh_active_names_and_is_single_use() {
     let (_scratch, path, service, store) = setup("paste-commit");
     let mut vault = open(&store, &service, &path);

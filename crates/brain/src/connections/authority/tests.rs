@@ -69,7 +69,7 @@ impl Setup {
             .begin(kind, revision, secret.expose().len())
             .expect("begin");
         let verified = io::write(&self.store, SERVICE, plan, secret).expect("write");
-        authority.activate(verified, None).expect("activate")
+        authority.activate(verified, None).expect("activate").0
     }
 }
 
@@ -788,7 +788,7 @@ fn debug_output_names_no_generation_or_value() {
     let shown = format!("{plan:?} {authority:?}");
     assert!(!shown.contains(&hex), "no generation in Debug");
     let verified = io::write(&setup.store, SERVICE, plan, &secret(b'S', 4)).expect("write");
-    let active = authority.activate(verified, None).expect("activate");
+    let (active, _) = authority.activate(verified, None).expect("activate");
     let shown = format!("{active:?} {:?}", authority.retired(16).expect("retired"));
     assert!(
         !shown.contains(&hex) && !shown.contains("SSSS"),

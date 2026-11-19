@@ -95,16 +95,18 @@ impl<S: CredentialStore> Vault<S> {
             }
         };
         let bytes = Secret::new(Zeroizing::new(key.expose().as_str().as_bytes().to_vec()));
-        if let Err(error) = self.write_expected(Kind::AnthropicKey, plan.base(), &bytes, None) {
-            generation::delete_pending(
-                &self.store,
-                &self.service,
-                Kind::AnthropicKey,
-                plan.generation(),
-                plan.layout(),
-            );
-            return Err(KeyError::from(error).into());
-        }
-        Ok((plan.base() + 1, key))
+        let revision = self
+            .write_expected(Kind::AnthropicKey, plan.base(), &bytes, None)
+            .inspect_err(|_| {
+                generation::delete_pending(
+                    &self.store,
+                    &self.service,
+                    Kind::AnthropicKey,
+                    plan.generation(),
+                    plan.layout(),
+                );
+            })
+            .map_err(KeyError::from)?;
+        Ok((revision, key))
     }
 }

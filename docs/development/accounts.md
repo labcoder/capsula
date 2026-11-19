@@ -84,7 +84,8 @@ is Changed, not an empty-key Format rejection. One two-second settle budget
 covers all staged reads; only complete present bytes are validated.
 
 Adoption copies a valid paste into fresh names, verifies the writes, then
-activates with the captured revision's compare-and-swap. Read, validation,
+activates with the captured revision's compare-and-swap. The worker returns
+the revision read inside the successful commit. Read, validation,
 write or commit failure preserves both the saved key and the runtime key/view/
 catalog. A successful commit enters the normal catalog-check path even if its
 shell disconnected; generation, not link epoch, fences this brain-wide result.
