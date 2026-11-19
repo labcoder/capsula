@@ -77,7 +77,7 @@ pub(super) fn hold(
         owner.link.track_input(gesture);
         let stamp = Stamp {
             target: owner.voice.target.get(),
-            session: 1,
+            session: owner.session.as_ref().map_or(1, Session::generation),
             choice: owner.link.choice_revision(),
         };
         owner.voice_intent(

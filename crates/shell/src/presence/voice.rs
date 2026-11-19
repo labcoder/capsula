@@ -1,6 +1,5 @@
 use std::cell::Cell;
 use std::rc::Rc;
-use std::sync::atomic::Ordering;
 use std::time::Instant;
 
 use kumochi_protocol::geometry::{PhysicalPoint, PhysicalRect, PointerPath};
@@ -52,6 +51,7 @@ enum FailureReason {
     DismissPanels,
     CancelDrain,
     RecognitionSend,
+    FenceSend,
     PacketCountMismatch,
     RunBeforeStop,
     NoSession,
@@ -147,6 +147,9 @@ pub(super) struct Voice {
     pub(super) ended: Option<(GestureId, Option<RunTail>)>,
     /// What a lost brain did with the held words; reconnecting doesn't clear it.
     pub(super) lost: Option<Text>,
+    /// The run speaking when a gesture's `Warm` was applied, and that session: what its
+    /// recognition stops. Taken once; Esc drops it.
+    pub(super) spoken: Option<(GestureId, u64, RunId)>,
     #[cfg(test)]
     pub(super) start: Option<Start>,
 }
@@ -271,9 +274,10 @@ impl Presence {
     fn voice_current(&self, stamp: Stamp) -> bool {
         stamp.target == (self.runs.thread(), self.runs.revision())
             && stamp.choice == self.link.choice_revision()
-            && self.session.as_ref().is_some_and(|s| {
-                s.generation() == stamp.session && s.alive().load(Ordering::Acquire)
-            })
+            && self
+                .session
+                .as_ref()
+                .is_some_and(|s| s.generation() == stamp.session && s.open())
     }
 
     fn voice_notice(&mut self, text: Text, cx: &mut Context<'_, Self>) {
@@ -714,6 +718,11 @@ impl Presence {
                     .as_ref()
                     .filter(|s| s.generation() == stamp.session)
                 {
+                    self.voice.spoken = self
+                        .link
+                        .output()
+                        .spoken(stamp.session)
+                        .map(|run| (gesture, stamp.session, run));
                     if !self.link.send_control(
                         session,
                         ControlToBrain::KeyDown {
@@ -846,6 +855,24 @@ impl Presence {
         if let Some(reason) = refused {
             tracing::debug!(stage = ?FailureStage::Admission, ?reason, "held speech input refused");
             self.unused_voice(&token, &session);
+            self.link.clear_input(gesture);
+            self.voice_notice(Text::HoldFailed, cx);
+            return;
+        }
+        // The run speaking at key-down stops before this hold starts. If the brain's queue
+        // refused its `Stop`, the connection ends and no microphone opens.
+        let spoken = self
+            .voice
+            .spoken
+            .take()
+            .filter(|(held, at, _)| *held == gesture && *at == stamp.session);
+        if let Some((_, _, run)) = spoken
+            && !self.fence_spoken(run, &session, cx)
+        {
+            tracing::warn!(stage = ?FailureStage::Admission, reason = ?FailureReason::FenceSend, "held speech input failed");
+            if token.discard_unstarted().is_err() {
+                self.link.microphone_gate().cancel(gesture);
+            }
             self.link.clear_input(gesture);
             self.voice_notice(Text::HoldFailed, cx);
             return;

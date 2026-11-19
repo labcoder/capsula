@@ -111,11 +111,12 @@ impl Presence {
                 Effect::Control(message) => {
                     let sent = self
                         .session
-                        .as_ref()
-                        .is_some_and(|session| self.link.send_control(session, message));
+                        .clone()
+                        .is_some_and(|session| self.send_stop(&session, message, cx));
                     if !sent {
+                        // A refused control already ended the session (`send_stop`), off this thread.
                         tracing::warn!("scene control queue unavailable; ending the connection");
-                        self.end_scene_connection();
+                        self.forget_scene_connection();
                         return self.draw_changed_at(now, cx);
                     }
                 }
@@ -220,9 +221,15 @@ impl Presence {
     }
 
     pub(super) fn end_scene_connection(&mut self) {
-        if let Some(session) = self.session.take() {
-            self.link.end(&session);
+        if let Some(session) = &self.session {
+            self.link.end(session);
         }
+        self.forget_scene_connection();
+    }
+
+    /// Forgets the session and its drawings at once, without ending it.
+    fn forget_scene_connection(&mut self) {
+        self.session = None;
         self.presenter.disconnected();
         self.scene_timer = None;
         self.scene_deadline = None;
@@ -241,7 +248,7 @@ impl Presence {
             let effects = self.presenter.stop(run, now);
             self.scene_effects(effects, cx);
         } else {
-            self.tell(message);
+            self.tell(message, cx);
         }
     }
 }

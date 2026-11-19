@@ -261,6 +261,7 @@ fn lapse_notification_is_only_session_fenced_bounded_queue_acceptance() {
         data,
         pipe: Arc::new(pipe),
         submits: std::sync::atomic::AtomicU32::new(0),
+        closing: Arc::default(),
     });
     assert!(link.send_control(&session, ControlToBrain::Pong));
     assert!(!link.send_control(
@@ -580,6 +581,43 @@ fn ending_a_session_closes_its_real_pipes_and_retires_control_admission() {
     assert!(link.link.join().expect("the aborted session joins"));
     assert!(!link.handle.send_control(&session, ControlToBrain::Pong));
     assert!(link.handle.shared.outbox.lock().unwrap().is_none());
+}
+
+#[test]
+fn a_closing_session_sends_no_held_delete_credit_or_owed_microphone_stop() {
+    use super::microphone::Stop;
+    use kumochi_protocol::message::GestureId;
+    let link = attended("closing-session-sends");
+    let events = patient(link.events);
+    let session = connected(next(&events));
+    let handle = &link.handle;
+    *handle.shared.microphone_stop.lock().unwrap() = Some(Stop::Awaiting(GestureId(1)));
+    session.close();
+    handle.delete(ThreadId(9));
+    assert!(!handle.send_deletes(&session), "no held delete");
+    session.grant(7);
+    assert_eq!(session.granted(), 0, "no credit");
+    assert!(
+        handle.send_control(
+            &session,
+            ControlToBrain::VoiceHoldStopped {
+                gesture: GestureId(1)
+            }
+        ),
+        "the stop is kept for the next connection"
+    );
+    assert!(
+        matches!(
+            *handle.shared.microphone_stop.lock().unwrap(),
+            Some(Stop::Received {
+                gesture: GestureId(1),
+                sent_on: None
+            })
+        ),
+        "but not sent on this one"
+    );
+    handle.end(&session);
+    assert!(link.link.join().expect("the aborted session joins"));
 }
 
 #[test]

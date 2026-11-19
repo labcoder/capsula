@@ -275,7 +275,7 @@ fn the_responder_answers_a_revoke_from_before_quiet_and_one_after_retirement() {
     let owner = OutputOwner::default();
     let rig = rig(&owner, 1);
     rig.short(480);
-    assert!(owner.stop(1, RunId(1)), "queued");
+    assert_eq!(owner.stop(1, RunId(1)), Ok(()), "queued");
     rig.passes();
     let answered = ControlToBrain::SpeechStopped {
         run: RunId(1),
@@ -295,7 +295,7 @@ fn the_responder_answers_a_revoke_from_before_quiet_and_one_after_retirement() {
     }
     until("answered once played", || rig.heard(&answered));
     until("retired", || retired(&owner));
-    assert!(owner.stop(1, RunId(2)), "queued on the responder");
+    assert_eq!(owner.stop(1, RunId(2)), Ok(()), "queued on the responder");
     let later = ControlToBrain::SpeechStopped {
         run: RunId(2),
         cursor: None,
@@ -861,7 +861,7 @@ fn a_pause_the_speaker_cannot_take_ends_the_session_and_denies_the_gesture() {
     rig.script().frozen = true;
     until("parked", || rig.script().parked);
     for run in 1..=16 {
-        assert!(owner.stop(1, RunId(run)), "queued");
+        assert_eq!(owner.stop(1, RunId(run)), Ok(()), "queued");
     }
     assert!(!rig.aborted.load(Ordering::SeqCst), "not yet");
     assert_eq!(
@@ -875,4 +875,63 @@ fn a_pause_the_speaker_cannot_take_ends_the_session_and_denies_the_gesture() {
     );
     assert_eq!(owner.view().key, None, "no output");
     rig.script().frozen = false;
+}
+
+#[test]
+fn the_spoken_run_is_the_committed_one_even_once_the_device_drains() {
+    let owner = OutputOwner::default();
+    let (_commands, tail) = owner.scripted(1);
+    assert_eq!(owner.spoken(1), None, "nothing committed");
+    let now = Snapshot {
+        exposed: 480,
+        spoken: 5,
+        ..Snapshot::default()
+    };
+    tail.publish(&now);
+    assert_eq!(owner.spoken(1), Some(RunId(5)));
+    assert_eq!(owner.spoken(2), None, "another session's");
+    tail.publish(&Snapshot { played: 480, ..now });
+    assert_eq!(
+        owner.spoken(1),
+        Some(RunId(5)),
+        "a drained device isn't an ended run"
+    );
+    let held = state(&owner);
+    assert_eq!(owner.spoken(1), None, "a busy owner is no evidence");
+    drop(held);
+    tail.publish(&Snapshot { spoken: 0, ..now });
+    assert_eq!(owner.spoken(1), None, "cleared");
+}
+
+#[test]
+fn without_an_opener_no_run_is_spoken() {
+    let owner = OutputOwner::default();
+    assert!(owner.begin(1, None).is_none(), "no opener");
+    assert_eq!(owner.spoken(1), None);
+}
+
+#[test]
+fn a_name_and_a_stop_queued_while_content_is_staged_apply_after_its_commit() {
+    let owner = OutputOwner::default();
+    let rig = rig(&owner, 1);
+    rig.script().hold = true;
+    rig.speak(RunId(5), vec![1; 480]);
+    until("a content release waits", || rig.script().holding);
+    assert_eq!(owner.spoken(1), None, "a flight isn't a run");
+    let speaker = rig.speaker.as_ref().expect("held");
+    assert!(speaker.command(Command::Name(RunId(6))));
+    assert!(speaker.command(Command::Stop(RunId(5))));
+    rig.script().frozen = true;
+    rig.script().hold = false;
+    until("the worker parks after the commit", || rig.script().parked);
+    assert_eq!(owner.spoken(1), Some(RunId(5)), "the commit is run 5's");
+    let mut script = rig.script();
+    // The device keeps playing, so no stall seals the output and clears it instead.
+    script.play_to = u64::MAX;
+    script.frozen = false;
+    drop(script);
+    until("the stop clears it", || {
+        rig.snapshot().is_some_and(|now| now.spoken == 0)
+    });
+    assert_eq!(rig.coherent().flags, 0, "cleared by the stop alone");
 }

@@ -25,6 +25,10 @@ const LEDGER: usize = 4;
 /// Aborts one session's pipes.
 pub type Abort = Arc<dyn Fn() + Send + Sync>;
 
+/// A test's view of each speaker command as it is queued.
+#[cfg(any(test, feature = "test-support"))]
+pub type Witness = Box<dyn FnMut(&Command) + Send>;
+
 /// The owner of a link's outputs and its capture inhibit.
 pub struct OutputOwner {
     state: Mutex<State>,
@@ -34,6 +38,9 @@ pub struct OutputOwner {
     /// check and the owner's.
     #[cfg(any(test, feature = "test-support"))]
     before_opened: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    /// A test's contention: this many more non-waiting calls find the owner busy.
+    #[cfg(any(test, feature = "test-support"))]
+    refusals: std::sync::atomic::AtomicU32,
 }
 
 impl Default for OutputOwner {
@@ -45,6 +52,8 @@ impl Default for OutputOwner {
             changes,
             #[cfg(any(test, feature = "test-support"))]
             before_opened: Mutex::default(),
+            #[cfg(any(test, feature = "test-support"))]
+            refusals: std::sync::atomic::AtomicU32::default(),
         }
     }
 }
@@ -64,6 +73,9 @@ struct State {
     ledger: [Option<Entry>; LEDGER],
     inhibit: Option<Inhibit>,
     off: bool,
+    /// Sees each speaker command as it is queued: a test's point to check what came before.
+    #[cfg(any(test, feature = "test-support"))]
+    witness: Option<Witness>,
     generations: u32,
     serials: u32,
     epochs: u64,
@@ -275,6 +287,10 @@ impl State {
     /// Queues a command on the speaker. A failed enqueue drops the output and hands back the
     /// session's abort.
     fn command(&mut self, command: Command) -> Option<Abort> {
+        #[cfg(any(test, feature = "test-support"))]
+        if let Some(witness) = self.witness.as_mut() {
+            witness(&command);
+        }
         if self.commands.as_ref()?.try_send(command).is_ok() {
             return None;
         }
@@ -302,6 +318,14 @@ impl State {
         }
     }
 
+    fn tail(&self, generation: OutputGeneration) -> Option<&Arc<Tail>> {
+        self.ledger
+            .iter()
+            .flatten()
+            .find(|entry| entry.generation == generation)
+            .map(|entry| &entry.tail)
+    }
+
     /// Everything a claim needs, now.
     fn check(&self, claim: &Claim) -> Result<(), Denied> {
         if self.session != Some(claim.session) {
@@ -326,12 +350,8 @@ impl State {
             (OutputKey::NoOutput(key), Output::Quiet { epoch, .. }) if key == epoch => Ok(()),
             (OutputKey::Generation(key), Output::Live(generation)) if key == generation => {
                 let now = self
-                    .ledger
-                    .iter()
-                    .flatten()
-                    .find(|entry| entry.generation == generation)
+                    .tail(generation)
                     .ok_or(Denied::Stale)?
-                    .tail
                     .read()
                     .ok_or(Denied::Busy)?;
                 if now.exposed > 0 || now.flags & UNKNOWN != 0 {
@@ -355,6 +375,16 @@ impl OutputOwner {
     }
 
     fn try_lock(&self) -> Result<MutexGuard<'_, State>, Denied> {
+        #[cfg(any(test, feature = "test-support"))]
+        if self
+            .refusals
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |left| {
+                left.checked_sub(1)
+            })
+            .is_ok()
+        {
+            return Err(Denied::Busy);
+        }
         let mut state = match self.state.try_lock() {
             Ok(state) => state,
             Err(TryLockError::Poisoned(state)) => state.into_inner(),
@@ -704,19 +734,44 @@ impl OutputOwner {
         Ok(())
     }
 
-    /// Queues the speaker's `Stop` of `run` on `session` only, after the brain accepted its
-    /// own stop. False when `session` isn't current, or the speaker couldn't take it, which ends
-    /// the session.
-    pub fn stop(&self, session: u64, run: RunId) -> bool {
-        let mut state = self.lock();
+    /// The run whose content `session`'s live output committed last and hasn't been stopped:
+    /// positive evidence that it is speaking, even once the device has drained. Never waits: a
+    /// busy owner or a tail mid-publish is no evidence.
+    pub fn spoken(&self, session: u64) -> Option<RunId> {
+        let state = self.try_lock().ok()?;
         if state.session != Some(session) {
-            return false;
+            return None;
+        }
+        let now = state.tail(state.live()?)?.read()?;
+        (now.spoken != 0).then_some(RunId(now.spoken))
+    }
+
+    /// Queues the speaker's `Stop` of `run` on `session` only, after the brain accepted its
+    /// own stop. Never waits: [`Denied::Busy`] leaves the stop to the caller to offer again.
+    ///
+    /// # Errors
+    /// [`Denied::Busy`] on contention, [`Denied::Stale`] when `session` isn't current, and
+    /// [`Denied::Lost`] when the speaker couldn't take it, which ends the session.
+    pub fn stop(&self, session: u64, run: RunId) -> Result<(), Denied> {
+        let mut state = self.try_lock()?;
+        if state.session != Some(session) {
+            return Err(Denied::Stale);
         }
         let abort = state.command(Command::Stop(run));
         drop(state);
-        let stopped = abort.is_none();
+        let stopped = if abort.is_none() {
+            Ok(())
+        } else {
+            Err(Denied::Lost)
+        };
         self.after(abort);
         stopped
+    }
+
+    /// Makes the next `calls` non-waiting calls find the owner busy.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn refuse(&self, calls: u32) {
+        self.refusals.store(calls, Ordering::Release);
     }
 
     /// Talk-back off: a live speaker is withdrawn, an opening one when it opens, and later
@@ -748,5 +803,37 @@ impl OutputOwner {
                 .any(|entry| !entry.terminal && Some(entry.generation) != state.live()),
             terminal: entries.any(|entry| entry.terminal),
         }
+    }
+
+    /// Runs `witness` on each speaker command as it is queued.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn witness(&self, witness: Witness) {
+        self.lock().witness = Some(witness);
+    }
+
+    /// Makes `session`'s output a live generation with no speaker behind it: its commands come
+    /// out of the receiver, and the test publishes its tail.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn scripted(&self, session: u64) -> (std::sync::mpsc::Receiver<Command>, Arc<Tail>) {
+        let (commands, receiver) = std::sync::mpsc::sync_channel(64);
+        let tail = Arc::<Tail>::default();
+        let mut state = self.lock();
+        let generation = OutputGeneration(state.generations + 1);
+        state.generations = generation.0;
+        let free = state
+            .ledger
+            .iter()
+            .position(Option::is_none)
+            .expect("a free slot");
+        state.ledger[free] = Some(Entry {
+            generation,
+            tail: Arc::clone(&tail),
+            terminal: false,
+        });
+        state.session = Some(session);
+        state.output = Output::Live(generation);
+        state.commands = Some(commands);
+        drop(state);
+        (receiver, tail)
     }
 }

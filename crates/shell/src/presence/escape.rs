@@ -1,7 +1,7 @@
 //! Local Esc routing for the focused surface.
 
 use super::drag::Event;
-use super::{Activity, Context, Escape, EscapePanel, OpenError, Presence, diagnostics};
+use super::{Activity, Context, Escape, EscapePanel, OpenError, Presence, Session, diagnostics};
 use crate::escape;
 use kumochi_protocol::message::{GestureId, RunId};
 
@@ -11,6 +11,7 @@ impl Presence {
         gesture: Option<GestureId>,
         cx: &mut Context<'_, Self>,
     ) -> Result<(), OpenError> {
+        self.voice.spoken = None;
         // This press revoked the input of a hold that is already torn down: by its cancelled
         // `End`, in this delivery or at the raw Esc-down before it, or by the brain's reply or
         // the hold's own run, applied while the press waited. It is that hold's press only.
@@ -63,7 +64,7 @@ impl Presence {
                     && valid
                     && let Some(message) = message
                 {
-                    self.tell(message);
+                    self.tell(message, cx);
                 }
             }
             return self.runs_changed(cx);
@@ -78,6 +79,51 @@ impl Presence {
             return Ok(());
         }
         self.escape(cx)
+    }
+
+    /// Stops `run`, which was speaking when a hold's keys went down, before that hold starts:
+    /// fenced here with Esc's priorities, then its `Stop`, or its scenes' `StopScenes`, queued
+    /// for the brain, and the speaker's `Stop` only after that (`send_stop`). A run that has
+    /// already ended or been replaced stops nothing. False when the brain's queue refused it,
+    /// which ends the connection.
+    pub(super) fn fence_spoken(
+        &mut self,
+        run: RunId,
+        session: &Session,
+        cx: &mut Context<'_, Self>,
+    ) -> bool {
+        let now = std::time::Instant::now();
+        if self.moving_run(now) != Some(run) {
+            return true;
+        }
+        let scenes = self.presenter.holds_scenes() || self.presenter.live_work(now);
+        let message = self.runs.fence_run(run);
+        let effects = self.presenter.stop_owned(run, now).map(|mut effects| {
+            if !scenes {
+                effects.retain(|effect| {
+                    !matches!(
+                        effect,
+                        crate::presenter::Effect::Control(
+                            kumochi_protocol::message::ControlToBrain::StopScenes { .. }
+                        )
+                    )
+                });
+            }
+            effects
+        });
+        self.scene_effects(effects, cx);
+        // A refused scene control already ended the connection and took the session.
+        if self
+            .session
+            .as_ref()
+            .is_none_or(|current| current.generation() != session.generation())
+        {
+            return false;
+        }
+        if scenes {
+            return true;
+        }
+        message.is_none_or(|message| self.send_stop(session, message, cx))
     }
 
     /// The run Esc's stop would stop at `now`: the moving run, else the one whose drawing still
@@ -123,6 +169,7 @@ impl Presence {
         reason = "one Esc press keeps its local decision and every effect of it in order"
     )]
     pub(super) fn escape(&mut self, cx: &mut Context<'_, Self>) -> Result<(), OpenError> {
+        self.voice.spoken = None;
         // Esc is a key like any other to screen marks: they go at the first press, whatever
         // else that press stops. When they are a running answer's, the same press stops that
         // answer too, whatever else it does here.

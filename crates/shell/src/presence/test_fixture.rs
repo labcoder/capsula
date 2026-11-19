@@ -110,6 +110,8 @@ pub(super) fn presence(cx: &mut TestAppContext) -> Entity<Presence> {
             ),
             scene_timer: None,
             scene_deadline: None,
+            pending_stops: std::collections::VecDeque::new(),
+            stop_retry: None,
             escape_hold: EscapeHold::default(),
             talk_escape: TalkEscape::default(),
             escape_fixture: false,

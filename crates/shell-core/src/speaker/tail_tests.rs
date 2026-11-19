@@ -11,6 +11,7 @@ fn snapshot(n: u64) -> Snapshot {
         flight: n + 1,
         quiet: 1,
         flags: FAULT,
+        spoken: n + 2,
     }
 }
 

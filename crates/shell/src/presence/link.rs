@@ -3,7 +3,7 @@
 #[cfg(test)]
 mod github_tests;
 
-use super::{Context, OpenError, Presence, diagnostics};
+use super::{Context, OpenError, Presence, Session, diagnostics};
 use crate::chat_notice::Source;
 use crate::drawing::{Broken, Chunk, Effect};
 use crate::link::{Batch, LinkEvent, LinkState};
@@ -13,7 +13,14 @@ use kumochi_protocol::message::{
     ScreenHolds, ScreenOff, SettingsView, ThreadId, UserError,
 };
 use kumochi_scene::deferred::Deferred;
-use std::time::Instant;
+use kumochi_shell_core::link::output::Denied;
+use std::time::{Duration, Instant};
+
+/// How many times a speaker `Stop` is offered to a busy owner before its session ends: a
+/// policy, not a measured bound.
+const STOP_TRIES: u8 = 10;
+/// The wait between those offers.
+const STOP_RETRY: Duration = Duration::from_millis(1);
 
 impl Presence {
     /// Applies what the link reported, in order, then follows the runs once. Each event leaves
@@ -149,7 +156,7 @@ impl Presence {
                 } => self.scene_data(generation, frame, bytes, cx),
                 LinkEvent::Scenes(scenes) => match self.runs.apply_scenes(&scenes) {
                     Ok(effect) => {
-                        self.effect(effect);
+                        self.effect(effect, cx);
                         if let Some(session) = &self.session {
                             let effects = self.presenter.described(
                                 session.generation(),
@@ -676,22 +683,113 @@ impl Presence {
         self.sync_taskbar(cx);
     }
 
+    /// Queues a stop or scene control for the brain. A run's `Stop` or `StopScenes` then stops its
+    /// speech, and only once the brain's is queued, so speech never stops for a stop the brain
+    /// wasn't told. Any refused one ends the session instead ([`Presence::end_session`]), once.
+    /// The speaker's `Stop` waits behind any earlier one a busy owner hasn't taken.
+    pub(super) fn send_stop(
+        &mut self,
+        session: &Session,
+        message: ControlToBrain,
+        cx: &mut Context<'_, Self>,
+    ) -> bool {
+        let run = match &message {
+            ControlToBrain::Stop { run, .. } | ControlToBrain::StopScenes { run, .. } => Some(*run),
+            _ => None,
+        };
+        let sent = self.link.send_control(session, message);
+        // A control the brain wasn't told can't be undone locally, so that session ends; one
+        // already ending isn't ended again.
+        if !sent && session.open() {
+            self.end_session(session, cx).detach();
+        }
+        if sent && let Some(run) = run {
+            self.pending_stops
+                .push_back((session.clone(), run, STOP_TRIES));
+            if self.stop_retry.is_none() {
+                self.drain_stops(cx);
+            }
+        }
+        sent
+    }
+
+    /// Offers the pending speaker stops to the owner in order. A busy owner is offered the front
+    /// one again after [`STOP_RETRY`], with later ones behind it. Once its tries run out, its
+    /// session ends ([`Presence::end_session`]), and the queue waits for that end.
+    pub(super) fn drain_stops(&mut self, cx: &mut Context<'_, Self>) {
+        while let Some((session, run, tries)) = self.pending_stops.front_mut() {
+            let task = match self.link.output().stop(session.generation(), *run) {
+                Err(Denied::Busy) if *tries > 1 => {
+                    *tries -= 1;
+                    cx.spawn(async move |this, cx| {
+                        cx.background_executor().timer(STOP_RETRY).await;
+                        Self::after_stop(&this, cx);
+                    })
+                }
+                Err(Denied::Busy) => {
+                    *tries = 0;
+                    let session = session.clone();
+                    let end = self.end_session(&session, cx);
+                    cx.spawn(async move |this, cx| {
+                        end.await;
+                        Self::after_stop(&this, cx);
+                    })
+                }
+                // Queued, or its session is gone or ending already.
+                Ok(()) | Err(_) => {
+                    self.pending_stops.pop_front();
+                    continue;
+                }
+            };
+            self.stop_retry = Some(task);
+            return;
+        }
+    }
+
+    /// Ends `session` without waiting: nothing more is sent on it from now, and the pipe abort and
+    /// the owner's barrier, which takes the owner's lock, finish on the background executor.
+    fn end_session(&self, session: &Session, cx: &mut Context<'_, Self>) -> gpui_kit::Task<()> {
+        session.close();
+        let (link, session) = (self.link.clone(), session.clone());
+        cx.background_executor()
+            .spawn(async move { link.end(&session) })
+    }
+
+    /// Goes on with the pending stops, past a front one with no tries left, whose session has
+    /// ended.
+    fn after_stop(this: &gpui_kit::WeakEntity<Self>, cx: &mut gpui_kit::AsyncApp) {
+        let updated = this.update(cx, |this, cx| {
+            this.stop_retry = None;
+            if this
+                .pending_stops
+                .front()
+                .is_some_and(|(.., tries)| *tries == 0)
+            {
+                this.pending_stops.pop_front();
+            }
+            this.drain_stops(cx);
+        });
+        if updated.is_err() {
+            tracing::debug!("presence closed with a speaker stop pending");
+        }
+    }
+
     /// Queues a `Stop` or `ClearDrawing` for the brain; its local effect has already happened.
-    pub(super) fn tell(&self, message: ControlToBrain) {
+    pub(super) fn tell(&mut self, message: ControlToBrain, cx: &mut Context<'_, Self>) {
         let sent = self
             .session
-            .as_ref()
-            .is_some_and(|session| self.link.send_control(session, message));
+            .clone()
+            .is_some_and(|session| self.send_stop(&session, message, cx));
         if !sent {
             tracing::warn!("the brain isn't connected or isn't reading; nothing to tell");
         }
     }
 
     /// Grants a drawing change's credit, then queues its `ClearDrawing`.
-    pub(super) fn effect(&self, effect: Effect) {
+    pub(super) fn effect(&mut self, effect: Effect, cx: &mut Context<'_, Self>) {
         self.grant(effect.credit);
         if let Some(clear) = effect.clear {
-            self.tell(clear);
+            self.tell(clear, cx);
         }
     }
 

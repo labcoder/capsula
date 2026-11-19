@@ -82,6 +82,8 @@ struct Next {
     staged: u32,
     read: usize,
     consumed: usize,
+    /// The run whose content the buffer holds; `None` for filler only.
+    run: Option<RunId>,
 }
 
 /// How a device buffer holding staged frames goes back to the device.
@@ -191,6 +193,7 @@ impl Staged<'_> {
         engine.staged = next.staged;
         engine.read = next.read;
         engine.queued -= next.consumed;
+        engine.spoken = next.run.or(engine.spoken);
         engine.publish();
         Ok(())
     }
@@ -228,6 +231,9 @@ pub struct Engine {
     answered: [Option<RunId>; ANSWERED],
     answers: usize,
     withdrawn: bool,
+    /// The run whose content committed last, until a stop of it or a newer run, the seal or the
+    /// release: what [`Tail`] publishes as spoken.
+    spoken: Option<RunId>,
     /// A report found the queue full: the brain isn't reading, so the speaker ends.
     backlogged: bool,
     /// Set once the link lets go, from its thread; nothing more is staged as content.
@@ -299,6 +305,7 @@ impl Engine {
             answered: [None; ANSWERED],
             answers: 0,
             withdrawn: false,
+            spoken: None,
             backlogged: false,
             revoked,
             tail,
@@ -336,6 +343,7 @@ impl Engine {
             staged: self.staged,
             read: self.read,
             consumed: 0,
+            run: None,
         };
         let live = !self.revoked.load(Ordering::Acquire) && !self.withdrawn;
         let mut at = 0;
@@ -367,6 +375,7 @@ impl Engine {
         }
         if let Some(end) = lease.content() {
             self.flight = end;
+            next.run = self.run;
             self.publish();
         }
         Ok(Staged {
@@ -413,6 +422,7 @@ impl Engine {
     /// content and later frames are stale. What was verified played stays, and the clock runs
     /// on, so a stop is still answered once what was written has played.
     pub fn withdraw(&mut self) {
+        self.spoken = None;
         if !self.withdrawn {
             self.withdrawn = true;
             self.discard();
@@ -438,6 +448,7 @@ impl Engine {
     /// The stream was stopped and let go, so nothing more can be released.
     pub fn released(&mut self) {
         self.released = true;
+        self.spoken = None;
         self.publish();
     }
 
@@ -454,6 +465,7 @@ impl Engine {
             played: self.clock.frontier(),
             flight: self.flight,
             quiet: self.quiet.unwrap_or(0),
+            spoken: self.spoken.map_or(0, |run| run.0),
             flags: flags
                 .into_iter()
                 .filter_map(|(set, flag)| set.then_some(flag))
@@ -529,6 +541,9 @@ impl Engine {
     /// order, so an older run's first one still is.
     pub fn stop(&mut self, run: RunId) {
         self.fence = self.fence.max(Some(run));
+        if self.spoken.is_some_and(|spoken| spoken <= run) {
+            self.spoken = None;
+        }
         if self.answered.contains(&Some(run)) {
             return;
         }

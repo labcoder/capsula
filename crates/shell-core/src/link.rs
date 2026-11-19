@@ -296,6 +296,8 @@ pub fn batch(first: LinkEvent, rest: &Receiver<LinkEvent>) -> Batch {
 #[derive(Clone, Debug)]
 pub struct Session {
     alive: Arc<AtomicBool>,
+    /// Set once its end is under way elsewhere: nothing more is sent on it.
+    closing: Arc<AtomicBool>,
     /// Counts connections in this shell; the brain's incarnation can't, since the same brain may
     /// be reconnected to.
     generation: u64,
@@ -307,6 +309,17 @@ pub struct Session {
 impl Session {
     pub fn alive(&self) -> Arc<AtomicBool> {
         Arc::clone(&self.alive)
+    }
+
+    /// Refuses every later send on this connection at once, without waiting, while its end runs
+    /// elsewhere.
+    pub fn close(&self) {
+        self.closing.store(true, Ordering::Release);
+    }
+
+    /// Alive and not closing: what sends and capture admission require.
+    pub fn open(&self) -> bool {
+        self.alive.load(Ordering::Acquire) && !self.closing.load(Ordering::Acquire)
     }
 
     pub fn generation(&self) -> u64 {
@@ -324,7 +337,9 @@ impl Session {
     /// Grants this connection's brain `bytes` more of data frames, once the UI has taken a frame
     /// that size. Grants add up until the data writer sends them. Never blocks or locks.
     pub fn grant(&self, bytes: u32) {
-        self.credit.grant(bytes);
+        if self.open() {
+            self.credit.grant(bytes);
+        }
     }
 }
 
@@ -424,6 +439,8 @@ struct Outbox {
     pipe: Arc<PipeClient>,
     /// The `TextSubmit`s queued on this connection, which a delete's `after_turns` counts.
     submits: AtomicU32,
+    /// Its session's [`Session::close`].
+    closing: Arc<AtomicBool>,
 }
 
 /// A delete the user confirmed, until the brain answers it.
@@ -505,8 +522,17 @@ impl Shared {
         Some(gesture)
     }
 
-    /// Uses the outbox if it's still `session`'s connection's.
+    /// Uses the outbox to send on `session`, only while it is open (alive and not closing). Every
+    /// send on a session's connection passes here.
     fn outbox<T>(&self, session: &Session, use_it: impl FnOnce(&Outbox) -> T) -> Option<T> {
+        if !session.open() {
+            return None;
+        }
+        self.connection(session, use_it)
+    }
+
+    /// Uses the outbox if it's still `session`'s connection's, closing or not.
+    fn connection<T>(&self, session: &Session, use_it: impl FnOnce(&Outbox) -> T) -> Option<T> {
         self.outbox
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
@@ -525,6 +551,7 @@ impl Shared {
     /// user confirmed reaches the brain before Quit. False when there's no connection or its
     /// control queue is full.
     fn tell_quit(&self) -> bool {
+        // The one send that skips the closed check: a brain never told Quit relaunches the shell.
         let outbox = self.outbox.lock().unwrap_or_else(PoisonError::into_inner);
         let Some(outbox) = outbox.as_ref() else {
             return false;
@@ -675,11 +702,11 @@ impl LinkHandle {
     /// when the brain has stopped reading. Never blocks.
     pub fn send_control(&self, session: &Session, message: ControlToBrain) -> bool {
         if let ControlToBrain::VoiceHoldStopped { gesture } = &message
-            && let Some(retained) = self.retain_microphone_stop(*gesture)
+            && let Some(retained) = self.retain_microphone_stop(session, *gesture)
         {
             return retained;
         }
-        if !session.alive.load(Ordering::Acquire) {
+        if !session.open() {
             return false;
         }
         let shared = &self.shared;
@@ -741,7 +768,8 @@ impl LinkHandle {
         {
             recording.close();
         }
-        self.shared.outbox(session, |outbox| outbox.pipe.abort());
+        self.shared
+            .connection(session, |outbox| outbox.pipe.abort());
         self.shared.lose(&session.alive);
     }
 
@@ -750,7 +778,7 @@ impl LinkHandle {
     /// connection instead.
     pub fn send_data(&self, session: &Session, message: DataToBrain) -> bool {
         let out = DataOut::Submit(message);
-        if !session.alive.load(Ordering::Acquire) {
+        if !session.open() {
             return false;
         }
         #[cfg(any(test, feature = "test-support"))]
@@ -828,6 +856,7 @@ impl Session {
         let (wake, _sleeping) = async_channel::bounded::<DataOut>(1);
         Self {
             alive: Arc::new(AtomicBool::new(true)),
+            closing: Arc::default(),
             generation,
             credit: Arc::new(Credit {
                 bytes: AtomicU32::new(0),
@@ -1050,6 +1079,7 @@ impl Link {
             .control
             .lock()
             .unwrap_or_else(PoisonError::into_inner) = Some(Arc::clone(&control));
+        let closing = Arc::<AtomicBool>::default();
         *self
             .shared
             .outbox
@@ -1060,6 +1090,7 @@ impl Link {
             data: data_out,
             pipe: Arc::clone(&control),
             submits: AtomicU32::new(0),
+            closing: Arc::clone(&closing),
         });
         self.shared.replay_microphone_stop();
         // Quit may have come while connecting, when there was no pipe to send it on; held
@@ -1081,6 +1112,7 @@ impl Link {
         let open = events
             .send_blocking(LinkEvent::Connected(Session {
                 alive: Arc::clone(&ended.alive),
+                closing,
                 generation,
                 credit: Arc::clone(&credit),
                 issue_origin,

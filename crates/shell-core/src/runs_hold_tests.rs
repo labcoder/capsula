@@ -1255,3 +1255,57 @@ fn a_hold_that_ended_before_its_release_builds_no_screen_release() {
         None
     );
 }
+
+#[test]
+fn a_recognition_fence_keeps_turns_and_the_hold_and_holds_back_its_runs_late_work() {
+    let mut runs = ready();
+    runs.apply_state(RunId(5), ThreadId(1), Phase::Answering, None);
+    runs.submit("pending typed words", |_| true)
+        .expect("queued");
+    recognized(&mut runs, 1);
+    assert_eq!(runs.fence_run(RunId(4)), None, "not the stoppable run");
+    assert_eq!(runs.fence_run(RunId(5)), stop(5));
+    assert_eq!(runs.submitted.len(), 1, "the turn stays");
+    assert_eq!(runs.take_hold_cancel(), None, "the hold stays");
+    assert_eq!(runs.owned_disposition(RunId(5)), RunDisposition::Stopped);
+    assert_eq!(runs.owned_disposition(RunId(6)), RunDisposition::Live);
+    runs.apply_data(DataToShell::RunEnd { run: RunId(5) }, 4);
+    runs.apply_state(RunId(5), ThreadId(1), Phase::Done, None);
+    assert!(runs.pending_stops.is_empty(), "both endings retire it");
+}
+
+#[test]
+fn a_run_fenced_before_its_run_state_takes_its_thread_from_it() {
+    let mut runs = ready();
+    recognized(&mut runs, 1);
+    assert_eq!(runs.fence_run(RunId(6)), stop(6), "no RunState yet");
+    assert_eq!(runs.owned_disposition(RunId(6)), RunDisposition::Stopped);
+    assert_eq!(runs.owned_disposition(RunId(7)), RunDisposition::Live);
+    let applied = runs.apply_state(RunId(6), ThreadId(2), Phase::Answering, None);
+    assert!(!applied.visible, "its late RunState shows nothing");
+    runs.apply_data(DataToShell::RunEnd { run: RunId(6) }, 4);
+    assert!(runs.confirm_delete(ThreadId(2)));
+    runs.deleted(ThreadId(2), Deleted::Hidden, None);
+    assert!(
+        runs.pending_stops.is_empty(),
+        "its thread's delete closed it"
+    );
+}
+
+#[test]
+fn presenter_first_runs_retire_their_stops_whichever_ending_comes_first() {
+    let mut runs = ready();
+    for (run, end_first) in [(6, true), (7, false), (8, true), (9, false)] {
+        let run = RunId(run);
+        if end_first {
+            runs.apply_data(DataToShell::RunEnd { run }, 4);
+        }
+        assert_eq!(runs.fence_run(run), stop(run.0), "no RunState yet");
+        if !end_first {
+            runs.apply_data(DataToShell::RunEnd { run }, 4);
+        }
+        assert_eq!(runs.owned_disposition(run), RunDisposition::Stopped);
+        runs.apply_state(run, ThreadId(1), Phase::Done, None);
+        assert!(runs.pending_stops.is_empty(), "run {} retired", run.0);
+    }
+}

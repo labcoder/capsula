@@ -993,3 +993,86 @@ fn the_tail_tells_releases_that_exposed_nothing_from_one_that_cannot_be_placed()
         "a failed release may have exposed its content: {now:?}"
     );
 }
+
+#[test]
+fn a_committed_run_is_spoken_through_filler_until_its_own_stop() {
+    let mut engine = ten_written();
+    assert_eq!(engine.published.spoken, R.0);
+    write(&mut engine, 4);
+    assert_eq!(engine.published.spoken, R.0, "filler keeps it");
+    engine.stop(RunId(6));
+    engine.publish();
+    assert_eq!(engine.published.spoken, R.0, "an older stop leaves it");
+    engine.stop(R);
+    engine.publish();
+    assert_eq!(engine.published.spoken, 0);
+}
+
+#[test]
+fn an_older_stop_leaves_a_newer_committed_run_spoken() {
+    let mut engine = engine_with(1);
+    feed(&mut engine, 0, 0, vec![1, 2, 3], Some(3)).expect("kept");
+    write(&mut engine, 3);
+    play(&mut engine, 3, 10).expect("plays");
+    engine.name(RunId(8));
+    assert_eq!(engine.data(&queued(RunId(8), 0)), Ok(Taken::Kept));
+    assert_eq!(
+        engine.data(&pcm(RunId(8), 0, 0, vec![5, 6], Some(2))),
+        Ok(Taken::Kept)
+    );
+    assert_eq!(write(&mut engine, 2), [5, 6]);
+    assert_eq!(engine.published.spoken, 8);
+    engine.stop(R);
+    engine.publish();
+    assert_eq!(engine.published.spoken, 8);
+}
+
+#[test]
+fn only_a_committed_content_release_makes_its_run_spoken() {
+    let revoked = Arc::<AtomicBool>::default();
+    let tail = Arc::<Tail>::default();
+    let mut engine = Engine::new(RATE, GEN, QPC, Arc::clone(&revoked), Arc::clone(&tail));
+    engine.begin(FREQ, ORIGIN).expect("begins");
+    engine.name(R);
+    queue(&mut engine, 0);
+    feed(&mut engine, 0, 0, vec![4; 10], None).expect("kept");
+    let now = || tail.read().expect("published");
+    let mut out = [0; 2];
+    let staged = engine.stage(&mut out, HELD).expect("stages");
+    assert_ne!(now().flight, 0, "in flight");
+    assert_eq!(now().spoken, 0, "a flight isn't a run");
+    staged.abandon();
+    assert_eq!(now().spoken, 0, "abandoned");
+    let staged = engine.stage(&mut out, HELD).expect("stages");
+    revoked.store(true, Ordering::Release);
+    staged
+        .release(|_| Ok(Duration::ZERO), || Some(HELD))
+        .expect("released as silence");
+    assert_eq!(now().spoken, 0, "released as silence");
+
+    let mut engine = engine_with(1);
+    feed(&mut engine, 0, 0, vec![4; 10], None).expect("kept");
+    let staged = engine.stage(&mut out, HELD).expect("stages");
+    assert_eq!(
+        staged.release(|_| Err(Fault::Lost), || None),
+        Err(Fault::Lost)
+    );
+    assert_eq!(engine.published.spoken, 0, "a failed release");
+}
+
+#[test]
+fn the_seal_a_fault_and_the_release_clear_the_spoken_run() {
+    let ends: [fn(&mut Engine); 3] = [
+        Engine::withdraw,
+        |engine| {
+            engine.fail(Fault::Lost);
+        },
+        Engine::released,
+    ];
+    for end in ends {
+        let mut engine = ten_written();
+        assert_eq!(engine.published.spoken, R.0);
+        end(&mut engine);
+        assert_eq!(engine.published.spoken, 0);
+    }
+}
