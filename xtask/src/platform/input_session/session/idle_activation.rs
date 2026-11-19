@@ -14,11 +14,12 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     MOUSEEVENTF_MOVE, MOUSEEVENTF_VIRTUALDESK, SendInput,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    GA_ROOT, GUITHREADINFO, GWL_EXSTYLE, GetAncestor, GetCursorPos, GetForegroundWindow,
-    GetGUIThreadInfo, GetWindowLongPtrW, IsWindowVisible, WS_EX_TOPMOST, WindowFromPoint,
+    GA_ROOT, GUITHREADINFO, GW_HWNDNEXT, GWL_EXSTYLE, GetAncestor, GetCursorPos,
+    GetForegroundWindow, GetGUIThreadInfo, GetTopWindow, GetWindow, GetWindowLongPtrW,
+    IsWindowVisible, WS_EX_TOPMOST, WindowFromPoint,
 };
 
-use super::super::activation::{Idle, Look, cloak, has_ex, missed_hit, see_through};
+use super::super::activation::{Idle, Look, cloak, has_ex, missed_hit, see_through, z_order};
 use super::super::fixture::{
     ABORT, ARMED_INPUT, FINALIZE_IDLE, FRAME_ORIGIN, PREPARE_IDLE, READY, published_frame,
 };
@@ -31,6 +32,14 @@ use super::{FRESH, Session, click_inputs, mouse_input, owner};
 
 /// How long the idle activation waits for its own move or click to land.
 const SETTLE: Duration = Duration::from_millis(250);
+
+fn flag(known: Option<bool>) -> &'static str {
+    match known {
+        Some(true) => "true",
+        Some(false) => "false",
+        None => "unread",
+    }
+}
 
 impl Session {
     /// The single-use idle activation; the fixture's armed input stamp once it publishes Ready.
@@ -71,14 +80,16 @@ impl Session {
         unsafe { GetCursorPos(&raw mut cursor) }?;
         self.original_cursor = Some(cursor);
         self.activation.prepare(idle, point)?;
+        let before = self.before_prepare();
         let clicked = request(self.fixture, PREPARE_IDLE, away_ms, LPARAM(0))
+            .with_context(|| before.clone())
             .and_then(|_| {
                 let mut out = stdout().lock();
                 writeln!(out, "activation_native_guard=armed")?;
                 out.flush()?;
                 Ok(())
             })
-            .and_then(|()| self.click_edit(end, point));
+            .and_then(|()| self.click_edit(end, point, &before));
         if clicked.is_err() {
             self.activation.abort();
         }
@@ -101,8 +112,9 @@ impl Session {
     }
 
     /// One tagged move and down/up batch at `point` on the topmost fixture's EDIT, each only
-    /// after a fresh look, then its own receipt and the fixture root foreground.
-    fn click_edit(&mut self, end: Instant, point: POINT) -> Result<()> {
+    /// after a fresh look, then its own receipt and the fixture root foreground. A missed hit
+    /// also reports `before`, the read taken before the prepare.
+    fn click_edit(&mut self, end: Instant, point: POINT, before: &str) -> Result<()> {
         let [left, top, width, height] = desktop_rect();
         let (Some(dx), Some(dy)) = (
             normalized(point.x, left, width),
@@ -123,7 +135,7 @@ impl Session {
         let missed = self.activation.misses_edit(look);
         if let Err(error) = self.activation.may_move(look) {
             return Err(if missed {
-                error.context(self.missed_edit(look))
+                error.context(format!("{} {before}", self.missed_edit(look)))
             } else {
                 error
             });
@@ -237,11 +249,6 @@ impl Session {
             // SAFETY: reads only a live window's visibility.
             live.then(|| unsafe { IsWindowVisible(window) }.as_bool())
         };
-        let flag = |known: Option<bool>| match known {
-            Some(true) => "true",
-            Some(false) => "false",
-            None => "unread",
-        };
         let mut cloaked = 0u32;
         // SAFETY: cloaked is a writable u32 of the size passed; reads only the root's cloak state.
         let cloak_read = unsafe {
@@ -259,7 +266,7 @@ impl Session {
             asked.and_then(|(rect, _)| self.fixture.rect().ok().map(|actual| actual == rect));
         format!(
             "hit_class={:?} hit_process={:?} hit={} hit_topmost={} root_visible={} root_cloaked={} \
-             root_topmost={} root_at_frame={} frame={} root_style={} edit_style={} \
+             root_topmost={} root_z={} root_at_frame={} frame={} root_style={} edit_style={} \
              edit_visible={} edit_enabled={}",
             (!hit.is_invalid())
                 .then(|| class_name(hit))
@@ -270,12 +277,50 @@ impl Session {
             flag(visible(root, root_live)),
             cloak(cloak_read.ok().map(|()| cloaked)),
             flag(ex(root, root_live).map(|style| has_ex(style, WS_EX_TOPMOST))),
+            self.root_z(),
             flag(at_frame),
             asked.map_or("unread", |(_, name)| name),
             ex(root, root_live).map_or("unread", see_through),
             ex(edit, edit_live).map_or("unread", see_through),
             flag(visible(edit, edit_live)),
             flag(edit_enabled),
+        )
+    }
+
+    /// Fixed facts about the fixture root read just before the prepare is sent, changing
+    /// nothing: whether it's visible and topmost, where it sits against the foreground window,
+    /// and how many milliseconds ago the driver found it.
+    fn before_prepare(&self) -> String {
+        let root = self.fixture.hwnd;
+        let live = pid(root) == self.fixture.pid;
+        // SAFETY: reads only the live root's visibility.
+        let visible = live.then(|| unsafe { IsWindowVisible(root) }.as_bool());
+        // SAFETY: reads only the live root's extended style.
+        let style = live.then(|| unsafe { GetWindowLongPtrW(root, GWL_EXSTYLE) });
+        format!(
+            "before_prepare root_visible={} root_topmost={} root_z={} found_ms={}",
+            flag(visible),
+            flag(style.map(|style| has_ex(style, WS_EX_TOPMOST))),
+            self.root_z(),
+            self.found.elapsed().as_millis(),
+        )
+    }
+
+    /// Where the fixture root sits against the foreground window in the Z order, read top down
+    /// without changing either.
+    fn root_z(&self) -> &'static str {
+        // SAFETY: reads the foreground HWND only.
+        let foreground = unsafe { GetForegroundWindow() };
+        // SAFETY: reads the top-level window at the top of the Z order only.
+        let top = unsafe { GetTopWindow(None) }.ok();
+        let top_down = std::iter::successors(top, |&window| {
+            // SAFETY: reads the next top-level window down; a stale handle ends the walk.
+            unsafe { GetWindow(window, GW_HWNDNEXT) }.ok()
+        });
+        z_order(
+            self.fixture.hwnd.0.addr(),
+            foreground.0.addr(),
+            top_down.map(|window| window.0.addr()),
         )
     }
 

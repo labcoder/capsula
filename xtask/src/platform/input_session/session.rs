@@ -86,6 +86,8 @@ pub(crate) struct Session {
     pointer_moved: bool,
     /// How long the idle activation's confirm waited for the fixture's root to come to the front.
     pub(crate) root_wait: Duration,
+    /// When the driver found the fixture root: the session is made as discovery returns it.
+    found: Instant,
     pub(crate) batches: u32,
     pub(crate) first_qpc: Option<i64>,
     /// QPC just before the last batch's `SendInput`; `None` if that batch never reached it.
@@ -100,6 +102,7 @@ pub(crate) struct Session {
 impl Session {
     /// A session on `fixture`, closed to injection until Ready and the quiet second.
     pub(crate) fn new(fixture: Window, end: Instant) -> Result<Self> {
+        let found = Instant::now();
         fixture.validate()?;
         mouse_and_keyboard_only()?;
         // SAFETY: only a standard EDIT child under the PID-validated fixture is searched.
@@ -125,6 +128,7 @@ impl Session {
             original_cursor: None,
             pointer_moved: false,
             root_wait: Duration::ZERO,
+            found,
             batches: 0,
             first_qpc: None,
             last_qpc: None,

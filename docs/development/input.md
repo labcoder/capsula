@@ -578,8 +578,10 @@ whether the fixture root is visible, topmost and at the frame it chose, and whic
 (`preferred`, `right`, `left`, `lower`, `upper` or `shifted`). It also says whether the hit's
 top-level window is topmost, whether DWM cloaks the root (`no`, `app`, `shell`, `inherited`,
 `mixed` or `unread`), whether the root and the EDIT are `layered`, `transparent`, both or
-`opaque`, and whether the EDIT is visible and enabled. These are read straight after the look
-without another hit test. Any fact that can't be read, including a frame origin the fixture
+`opaque`, whether the EDIT is visible and enabled, and where the root sits against the
+foreground window in the Z order (`above_foreground`, `below_foreground`, `is_foreground`,
+`no_foreground` or `unread`). These are read straight after the look without another hit
+test. Any fact that can't be read, including a frame origin the fixture
 couldn't publish or that isn't a valid frame, reads `unread`. Publishing the origin is best-effort
 and never stops the fixture. A target that goes stale after admission
 and an OS `SendInput` refusal keep their own existing messages. The surrounding refusal still names
@@ -587,7 +589,11 @@ the foreground executable and its PID, as before. The refusal remains terminal.
 Only tagged mouse input is allowed at this stage: no Alt-key trick, `AttachThreadInput`, or
 message/input to another app is used. The prepare doesn't trust the raise's return value: it
 reads the fixture's extended style back and, if the fixture isn't topmost, refuses with its own
-fixed code, before the guard is announced armed and before any hit test. Finalization restores the fixture's prior topmost state.
+fixed code, before the guard is announced armed and before any hit test. Just before the prepare
+is sent, the runner reads, changing nothing, whether the root is visible and topmost, its Z-order
+word against the foreground window and the milliseconds since the runner found the root. Only a
+failed prepare and an `edit_not_at_point` refusal report that read. Finalization restores the
+fixture's prior topmost state.
 If that request fails or cannot arrive, the run refuses and closes its owned fixture instead.
 
 After the click's receipt, the runner waits up to 250 ms for the fixture's root to come to the

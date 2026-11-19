@@ -67,6 +67,35 @@ pub(crate) fn cloak(value: Option<u32>) -> &'static str {
     }
 }
 
+/// How many top-level windows the Z-order read walks before it gives up.
+const Z_WALK: usize = 4096;
+
+/// Where the fixture's `root` sits against the `foreground` window, from the top-level windows
+/// `top_down` lists from the top of the Z order, or `unread` when the walk finds neither.
+pub(crate) fn z_order(
+    root: usize,
+    foreground: usize,
+    top_down: impl IntoIterator<Item = usize>,
+) -> &'static str {
+    if foreground == 0 {
+        return "no_foreground";
+    }
+    if foreground == root {
+        return "is_foreground";
+    }
+    top_down
+        .into_iter()
+        .take(Z_WALK)
+        .find_map(|window| {
+            if window == root {
+                Some("above_foreground")
+            } else {
+                (window == foreground).then_some("below_foreground")
+            }
+        })
+        .unwrap_or("unread")
+}
+
 /// A window by handle value, and its process.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Owner {
@@ -515,6 +544,38 @@ mod tests {
         assert_eq!(cloak(Some(DWM_CLOAKED_SHELL)), "shell");
         assert_eq!(cloak(Some(DWM_CLOAKED_INHERITED)), "inherited");
         assert_eq!(cloak(Some(DWM_CLOAKED_SHELL | DWM_CLOAKED_APP)), "mixed");
+    }
+
+    #[test]
+    fn z_order_places_the_root_by_whichever_of_it_and_the_foreground_comes_first() {
+        let (root, front) = (ROOT.window, FOREIGN.window);
+        assert_eq!(
+            z_order(root, front, [0x10, root, 0x20, front]),
+            "above_foreground"
+        );
+        assert_eq!(
+            z_order(root, front, [front, 0x10, root]),
+            "below_foreground"
+        );
+        assert_eq!(z_order(root, root, [0x10, root]), "is_foreground");
+        assert_eq!(z_order(root, 0, [root]), "no_foreground");
+        assert_eq!(z_order(root, front, [0x10, 0x20]), "unread");
+        assert_eq!(z_order(root, front, []), "unread");
+    }
+
+    #[test]
+    fn z_order_stops_after_its_bound() {
+        let filler = || std::iter::repeat_n(0x10, Z_WALK - 1);
+        let (root, front) = (ROOT.window, FOREIGN.window);
+        assert_eq!(
+            z_order(root, front, filler().chain([front])),
+            "below_foreground"
+        );
+        assert_eq!(
+            z_order(root, front, filler().chain([0x10, front])),
+            "unread"
+        );
+        assert_eq!(z_order(root, front, std::iter::repeat(0x10)), "unread");
     }
 
     #[test]
