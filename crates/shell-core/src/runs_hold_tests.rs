@@ -1291,3 +1291,21 @@ fn a_run_fenced_before_its_run_state_takes_its_thread_from_it() {
         "its thread's delete closed it"
     );
 }
+
+#[test]
+fn presenter_first_runs_retire_their_stops_whichever_ending_comes_first() {
+    let mut runs = ready();
+    for (run, end_first) in [(6, true), (7, false), (8, true), (9, false)] {
+        let run = RunId(run);
+        if end_first {
+            runs.apply_data(DataToShell::RunEnd { run }, 4);
+        }
+        assert_eq!(runs.fence_run(run), stop(run.0), "no RunState yet");
+        if !end_first {
+            runs.apply_data(DataToShell::RunEnd { run }, 4);
+        }
+        assert_eq!(runs.owned_disposition(run), RunDisposition::Stopped);
+        runs.apply_state(run, ThreadId(1), Phase::Done, None);
+        assert!(runs.pending_stops.is_empty(), "run {} retired", run.0);
+    }
+}

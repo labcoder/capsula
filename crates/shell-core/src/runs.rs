@@ -502,7 +502,10 @@ impl Runs {
             Some(PendingStop {
                 thread: None,
                 control_closed: false,
-                data_ended: false,
+                // Its `RunEnd` may already be held for its first `RunState`.
+                data_ended: self.held.iter().any(
+                    |(message, _)| matches!(message, DataToShell::RunEnd { run: ended } if *ended == run),
+                ),
             })
         } else {
             return None;
