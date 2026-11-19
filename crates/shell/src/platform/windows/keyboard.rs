@@ -191,6 +191,7 @@ impl Keys {
             // press: Esc down here and up below cancel the hold as any other key does, and
             // nothing else.
             _ if hotkey(message, wparam, self.escapes.talk.get()) => {
+                self.retire_talk(hwnd);
                 let id = PhysicalKey::new(ESCAPE_MAKE_CODE).expect("Escape has a bounded slot");
                 let escape = |edge| Event::Key {
                     key: Key::Escape(id),
@@ -235,6 +236,34 @@ impl Keys {
             }
             _ => return false,
         };
+        self.forward(hwnd, event, id, at);
+        message == WM_TIMER
+            || message == DESKTOP_SWITCHED
+            || (message == WM_HOTKEY && self.deliver.get().is_some())
+    }
+
+    fn forward(&self, hwnd: HWND, mut event: Event, mut id: Option<PhysicalKey>, at: EventTime) {
+        if self.escapes.talk.get() != 0
+            && matches!(
+                event,
+                Event::Reset
+                    | Event::Escape
+                    | Event::Key {
+                        key: Key::LeftControl | Key::LeftAlt,
+                        edge: Edge::Up,
+                    }
+                    | Event::Key {
+                        key: Key::Other(_) | Key::Escape(_),
+                        edge: Edge::Down,
+                    }
+            )
+        {
+            self.retire_talk(hwnd);
+            if !self.escape_trusted() && event != Event::Escape {
+                event = Event::Reset;
+                id = None;
+            }
+        }
         // The screen watch hears what the gesture hears: a talk key or another key, or a reset.
         super::screen_watch::heard(event, id);
         if self.overdue(event, at.instant) {
@@ -256,9 +285,11 @@ impl Keys {
         ) {
             tracing::warn!(stage = ?InputStage::Native, reason = ?InputReason::CallbackMissing, "held speech input failed");
         }
-        message == WM_TIMER
-            || message == DESKTOP_SWITCHED
-            || (message == WM_HOTKEY && self.deliver.get().is_some())
+    }
+
+    fn retire_talk(&self, hwnd: HWND) {
+        self.escapes
+            .unregister(hwnd, EscapeKind::Talk, self.escapes.talk.get());
     }
 
     fn input(
@@ -418,6 +449,7 @@ fn watch(hwnd: HWND, keys: &Keys) -> Result<(), PresenceError> {
 
 /// Stops what `arm` started, before the proxy window goes away.
 pub(super) fn disarm(hwnd: HWND, keys: &Keys) {
+    keys.retire_talk(hwnd);
     if let Some(deliver) = keys.deliver.get() {
         deliver(Event::Reset, EventTime::new(Instant::now()));
     }
@@ -471,6 +503,27 @@ impl Escapes {
             EscapeKind::Plain => &self.plain,
             EscapeKind::Talk => &self.talk,
         }
+    }
+
+    fn retire(&self, kind: EscapeKind, id: i32, release: impl FnOnce() -> bool) {
+        let slot = self.slot(kind);
+        if id != 0 && slot.get() == id {
+            slot.set(0);
+            if !release() {
+                self.uncertain.set(true);
+            }
+        }
+    }
+
+    fn unregister(&self, hwnd: HWND, kind: EscapeKind, id: i32) {
+        self.retire(kind, id, || {
+            #[cfg(test)]
+            if hwnd.is_invalid() {
+                return true;
+            }
+            // SAFETY: this is the id registered on the proxy's owning thread.
+            unsafe { UnregisterHotKey(Some(hwnd), id) }.is_ok()
+        });
     }
 }
 
@@ -530,16 +583,6 @@ impl EscapeHotkey {
         slot.set(id);
         Ok(Self(hwnd, id, Rc::clone(&keys.escapes), kind))
     }
-
-    fn retire(&self, release: impl FnOnce() -> bool) {
-        let slot = self.2.slot(self.3);
-        if slot.get() == self.1 {
-            slot.set(0);
-            if !release() {
-                self.2.uncertain.set(true);
-            }
-        }
-    }
 }
 
 /// Whether `message` is the proxy's hotkey `id` firing.
@@ -549,14 +592,7 @@ fn hotkey(message: u32, wparam: WPARAM, id: i32) -> bool {
 
 impl Drop for EscapeHotkey {
     fn drop(&mut self) {
-        self.retire(|| {
-            #[cfg(test)]
-            if self.0.is_invalid() {
-                return true;
-            }
-            // SAFETY: releases the id this value registered on its window's thread.
-            unsafe { UnregisterHotKey(Some(self.0), self.1) }.is_ok()
-        });
+        self.2.unregister(self.0, self.3, self.1);
     }
 }
 
@@ -844,16 +880,69 @@ mod tests {
     }
 
     #[test]
+    fn native_end_returns_talk_escape_before_the_next_chord() {
+        for reset in [false, true] {
+            let hwnd = HWND::default();
+            let keys = super::Keys::default();
+            let seen = Rc::new(RefCell::new(Vec::new()));
+            let events = Rc::clone(&seen);
+            assert!(
+                keys.deliver
+                    .set(Box::new(move |event, _| {
+                        events.borrow_mut().push(event);
+                        None
+                    }))
+                    .is_ok()
+            );
+            for make in [0x1D, 0x38] {
+                let (event, at) = raw(&keys, 1, make, 0).unwrap();
+                keys.forward(hwnd, event, None, at);
+            }
+            let first = EscapeHotkey::register_with_talk_keys(hwnd, &keys).unwrap();
+            let plain = EscapeHotkey::register(hwnd, &keys).unwrap();
+            if reset {
+                assert!(!keys.on_message(hwnd, super::WM_WTSSESSION_CHANGE, WPARAM(0), LPARAM(0)));
+            } else {
+                let (event, at) = raw(&keys, 1, 0x38, super::RI_KEY_BREAK).unwrap();
+                keys.forward(hwnd, event, None, at);
+                let (event, at) = raw(&keys, 1, 0x38, 0).unwrap();
+                keys.forward(hwnd, event, None, at);
+            }
+            let queued = seen.borrow().len();
+            assert!(
+                !keys.on_message(
+                    hwnd,
+                    WM_HOTKEY,
+                    WPARAM(usize::try_from(first.1).unwrap()),
+                    LPARAM(0),
+                ),
+                "the native terminal edge returns the old registration before the UI applies End"
+            );
+            assert_eq!(seen.borrow().len(), queued);
+            assert!(keys.plain_escape(WM_HOTKEY, WPARAM(usize::try_from(plain.1).unwrap())));
+            let next = EscapeHotkey::register_with_talk_keys(hwnd, &keys).unwrap();
+            drop(first);
+            assert_eq!(
+                keys.escapes.talk.get(),
+                next.1,
+                "late UI cleanup cannot retire the successor"
+            );
+        }
+    }
+
+    #[test]
     fn an_uncertain_escape_release_rejects_its_message_and_next_lease() {
         let keys = super::Keys::default();
         let lease = EscapeHotkey::register_with_talk_keys(HWND::default(), &keys).unwrap();
         let id = usize::try_from(lease.1).unwrap();
         let attempts = std::cell::Cell::new(0);
-        lease.retire(|| {
+        keys.escapes.retire(lease.3, lease.1, || {
             attempts.set(attempts.get() + 1);
             false
         });
-        lease.retire(|| panic!("the same lease can only be retired once"));
+        keys.escapes.retire(lease.3, lease.1, || {
+            panic!("the same lease can only be retired once")
+        });
         assert_eq!(attempts.get(), 1);
         assert!(!keys.escape_trusted());
         assert!(!keys.on_message(HWND::default(), WM_HOTKEY, WPARAM(id), LPARAM(0)));

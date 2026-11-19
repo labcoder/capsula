@@ -272,9 +272,11 @@ other key going down cancels the hold, and the chord is never held outside a hol
   does nothing else: it stops no run and clears no drawing.
 - Windows is asked once per hold, before voice admission. If it refuses the registration,
   the typed refusal prevents microphone admission and screen context for that hold. The
-  proxy accepts only active hotkey IDs and doesn't reuse retired IDs, so a queued message
-  can't cancel a later hold. An uncertain unregister leaves input inert until the proxy
-  is recreated. The plain Esc lease is separate.
+  proxy retires the talk lease on the native terminal edge or reset, before deferred UI
+  delivery. It doesn't reuse retired hotkey IDs, so neither a queued message nor late
+  cleanup can reach a later hold. An uncertain unregister leaves input inert until the
+  proxy is recreated; dropping the ID locally does not prove Windows released it.
+  The plain Esc lease is separate.
 - A second ignored fixture, `cargo test -p kumochi-shell -- --ignored talk_keys_escape`,
   registers the chord beside plain Esc on a hidden window, sees a second registration refused,
   and sees dropping the chord free it and leave plain Esc held. Run it only in an approved
