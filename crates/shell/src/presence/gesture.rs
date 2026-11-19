@@ -425,7 +425,7 @@ fn apply(
                                     gesture,
                                     generation: Ok(token),
                                 } = intent
-                                    && token.discard_unstarted().is_ok()
+                                    && this.voice.gates.skip_recognition(token)
                                 {
                                     this.link.clear_input(gesture);
                                 }
