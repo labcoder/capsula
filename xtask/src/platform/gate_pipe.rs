@@ -16,7 +16,7 @@ use windows::Win32::Storage::FileSystem::{
     SECURITY_IDENTIFICATION, SECURITY_SQOS_PRESENT, WriteFile,
 };
 use windows::Win32::System::IO::{CancelIoEx, GetOverlappedResult, OVERLAPPED};
-use windows::Win32::System::Pipes::GetNamedPipeServerProcessId;
+use windows::Win32::System::Pipes::{GetNamedPipeServerProcessId, WaitNamedPipeW};
 use windows::Win32::System::RemoteDesktop::ProcessIdToSessionId;
 use windows::Win32::System::Threading::{CreateEventW, INFINITE, WaitForSingleObject};
 use windows::core::{HSTRING, PCWSTR};
@@ -192,6 +192,13 @@ impl Write for &PipeClient {
     fn flush(&mut self) -> io::Result<()> {
         Ok(())
     }
+}
+
+/// Whether a server is listening on the pipe `name`, checked without connecting to it.
+pub(crate) fn listening(name: &str) -> bool {
+    let wide = HSTRING::from(name);
+    // SAFETY: `wide` is NUL-terminated and outlives the call.
+    unsafe { WaitNamedPipeW(&wide, 1) }.as_bool()
 }
 
 /// The Windows session this process runs in.

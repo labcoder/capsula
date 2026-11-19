@@ -4,9 +4,10 @@
 //! reads the clipboard, types or pastes.
 //!
 //! The approval is six requests: three model-list GETs and three Messages POSTs, no retries. They
-//! are fixed slices, one per launch of the real gate shell, and each launch's debug brain gets
-//! exactly its slice through the transport's budget variables, so a request past it is refused
-//! before connecting. The ledger records each slice before its launch and is never rewritten: a
+//! are fixed slices, one per launch of the real gate shell. The supervisor starts each launch's
+//! debug brain itself with exactly its slice in the transport's budget variables, so a request
+//! past it is refused before connecting, and starts the shell with both at zero, so any brain the
+//! shell starts, a replacement for one that died included, can't connect at all. The ledger records each slice before its launch and is never rewritten: a
 //! run refuses to start while an earlier run's ledger exists, so a restart never gets a slice back.
 //! The supervisor watches the brain's pipe tap, which keeps only content-free control frames, and
 //! stops at the first state the plan doesn't expect. See `docs/development/live-checks.md`.
@@ -14,14 +15,14 @@
 use std::fs::File;
 use std::io::{BufReader, ErrorKind, Write as _};
 use std::path::Path;
-use std::process::{Child, Command};
+use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context as _, Result, anyhow, bail, ensure};
 use kumochi_protocol::constants::{
-    LIVE_KEY_CATALOG_BUDGET_ENV, LIVE_KEY_MESSAGES_BUDGET_ENV, LIVE_RUNS_DIR, PIPE_TAP_ENV,
-    SHELL_EXE,
+    BRAIN_EXE, LIVE_KEY_CATALOG_BUDGET_ENV, LIVE_KEY_MESSAGES_BUDGET_ENV, LIVE_RUNS_DIR,
+    PIPE_TAP_ENV, SHELL_EXE,
 };
 use kumochi_protocol::frame::{Pipe, decode};
 use kumochi_protocol::message::{ConnectionsView, ControlToShell, KeyView, Phase, RunId, ThreadId};
@@ -45,6 +46,8 @@ const STEP: Duration = Duration::from_mins(10);
 const QUIET: Duration = Duration::from_secs(30);
 /// How long the shell gets to exit after its window is closed.
 const QUIT: Duration = Duration::from_secs(60);
+/// How long the brain gets to open its pipe before the shell starts.
+const LISTEN: Duration = Duration::from_secs(30);
 const POLL: Duration = Duration::from_millis(250);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -200,7 +203,8 @@ pub(super) fn run() -> Result<()> {
             );
             let tap = taps.join(format!("tap-{number}.bin"));
             supervise(
-                command(&debug.join(SHELL_EXE), &folders, &tap, launch.slice),
+                brain_command(&debug.join(BRAIN_EXE), &folders, &tap, launch.slice),
+                shell_command(&debug.join(SHELL_EXE), &folders),
                 &tap,
                 launch.steps,
             )
@@ -215,21 +219,52 @@ pub(super) fn run() -> Result<()> {
     run.finish(checked)
 }
 
-/// The gate shell with exactly `slice` as its brain's transport budgets and a new tap, and no
-/// other Kumochi variable from this environment.
-fn command(shell: &Path, folders: &Folders, tap: &Path, slice: Slice) -> Command {
-    let mut command = Command::new(shell);
+/// The launch's one brain, which the supervisor starts itself: exactly `slice` as its transport
+/// budgets and a new tap, and no other Kumochi variable from this environment.
+fn brain_command(brain: &Path, folders: &Folders, tap: &Path, slice: Slice) -> Command {
+    let mut command = clean(brain, folders);
+    command
+        .env(LIVE_KEY_CATALOG_BUDGET_ENV, slice.catalog.to_string())
+        .env(LIVE_KEY_MESSAGES_BUDGET_ENV, slice.messages.to_string())
+        .env(PIPE_TAP_ENV, tap)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    command
+}
+
+/// The gate shell, with both key budgets at zero: a brain it starts, such as one replacing a
+/// brain that died, inherits them and can't open a single key connection.
+fn shell_command(shell: &Path, folders: &Folders) -> Command {
+    let mut command = clean(shell, folders);
+    command
+        .env(LIVE_KEY_CATALOG_BUDGET_ENV, "0")
+        .env(LIVE_KEY_MESSAGES_BUDGET_ENV, "0");
+    command
+}
+
+fn clean(exe: &Path, folders: &Folders) -> Command {
+    let mut command = Command::new(exe);
     for (name, _) in std::env::vars_os() {
         if name.to_string_lossy().starts_with("KUMOCHI_") {
             command.env_remove(name);
         }
     }
-    folders
-        .apply(&mut command)
-        .env(LIVE_KEY_CATALOG_BUDGET_ENV, slice.catalog.to_string())
-        .env(LIVE_KEY_MESSAGES_BUDGET_ENV, slice.messages.to_string())
-        .env(PIPE_TAP_ENV, tap);
+    folders.apply(&mut command);
     command
+}
+
+/// Whether `running` holds exactly this launch's brain and shell besides `me`.
+fn only_ours(running: &[platform::Entry], me: u32, ours: [u32; 2]) -> bool {
+    let mut others: Vec<u32> = running
+        .iter()
+        .map(|entry| entry.pid)
+        .filter(|&pid| pid != me)
+        .collect();
+    others.sort_unstable();
+    let mut ours = ours;
+    ours.sort_unstable();
+    others == ours
 }
 
 /// Grants each launch its slice, in order, before it starts; never reopened or rewritten.
@@ -260,19 +295,37 @@ impl Ledger {
     }
 }
 
-/// Runs one launch's steps, then closes the shell and waits for every product process to exit.
-fn supervise(mut command: Command, tap: &Path, steps: &[Step]) -> Result<()> {
-    let mut child = command.spawn().context("starting the gate shell")?;
+/// Starts the launch's brain, then its shell once the brain listens, so the shell connects to that
+/// brain instead of starting one; runs the steps, then closes the shell and waits for every product
+/// process to exit.
+fn supervise(mut brain: Command, mut shell: Command, tap: &Path, steps: &[Step]) -> Result<()> {
+    let mut brain = brain.spawn().context("starting the gate brain")?;
+    let pipe = Pipe::Control.name(platform::gate_pipe::session_id()?);
+    let listen = Instant::now() + LISTEN;
+    while !platform::gate_pipe::listening(&pipe) {
+        ensure!(
+            brain.try_wait()?.is_none(),
+            "the gate brain exited before it listened"
+        );
+        ensure!(
+            Instant::now() < listen,
+            "the gate brain didn't listen in {LISTEN:?}"
+        );
+        thread::sleep(POLL);
+    }
+    let mut child = shell.spawn().context("starting the gate shell")?;
+    let ours = [brain.id(), child.id()];
     let mut cursor = 0;
     let mut state = State::default();
     let stepped = steps
         .iter()
-        .try_for_each(|step| watch(&mut child, tap, step, &mut state, &mut cursor));
+        .try_for_each(|step| watch(ours, tap, step, &mut state, &mut cursor));
     if let Err(error) = stepped {
-        return Err(match crate::live::end(&mut child) {
-            Ok(()) => error,
-            Err(cleanup) => anyhow!("{error:#}; ending the shell also failed: {cleanup:#}"),
-        });
+        return crate::session::combine([
+            Err(error),
+            crate::live::end(&mut child),
+            crate::live::end(&mut brain),
+        ]);
     }
     platform::close_shell_window(&mut child).context("closing the gate shell")?;
     let deadline = Instant::now() + QUIT;
@@ -281,8 +334,13 @@ fn supervise(mut command: Command, tap: &Path, steps: &[Step]) -> Result<()> {
         .all(|entry| entry.pid == std::process::id())
     {
         if Instant::now() >= deadline {
-            crate::live::end(&mut child)?;
-            bail!("the gate shell didn't exit in {QUIT:?} after its window closed; it was ended");
+            return crate::session::combine([
+                Err(anyhow!(
+                    "the gate shell didn't exit in {QUIT:?} after its window closed; it was ended"
+                )),
+                crate::live::end(&mut child),
+                crate::live::end(&mut brain),
+            ]);
         }
         thread::sleep(POLL);
     }
@@ -298,7 +356,7 @@ fn supervise(mut command: Command, tap: &Path, steps: &[Step]) -> Result<()> {
 
 /// Waits for `step` against the tap from `cursor` on, leaving `cursor` after the frame that met it.
 fn watch(
-    child: &mut Child,
+    ours: [u32; 2],
     tap: &Path,
     step: &Step,
     state: &mut State,
@@ -315,8 +373,9 @@ fn watch(
     let started = Instant::now();
     loop {
         ensure!(
-            child.try_wait()?.is_none(),
-            "the gate shell exited during the step"
+            only_ours(&platform::processes()?, std::process::id(), ours),
+            "the gate brain or shell exited, or another product process started; nothing it starts \
+             can send on the key route, and the check stops"
         );
         let seen = read(tap)?;
         while let Some(event) = seen.get(*cursor) {
@@ -542,7 +601,7 @@ mod tests {
         let folders = Folders::create(&dir).expect("folders");
         for launch in &PLAN {
             let tap = dir.join("tap.bin");
-            let command = command(Path::new("kumochi.exe"), &folders, &tap, launch.slice);
+            let command = brain_command(Path::new("kumochid.exe"), &folders, &tap, launch.slice);
             let set = |name: &str| {
                 command
                     .get_envs()
@@ -565,6 +624,57 @@ mod tests {
             );
         }
         fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    #[test]
+    fn the_shell_and_any_brain_it_starts_get_no_key_budget_or_tap() {
+        let dir = scratch::dir("anthropic-key-shell");
+        let folders = Folders::create(&dir).expect("folders");
+        let command = shell_command(Path::new("kumochi.exe"), &folders);
+        let set = |name: &str| {
+            command
+                .get_envs()
+                .find(|(key, _)| *key == OsStr::new(name))
+                .map(|(_, value)| value.map(|value| value.to_string_lossy().into_owned()))
+        };
+        assert_eq!(set(LIVE_KEY_CATALOG_BUDGET_ENV), Some(Some("0".to_owned())));
+        assert_eq!(
+            set(LIVE_KEY_MESSAGES_BUDGET_ENV),
+            Some(Some("0".to_owned()))
+        );
+        assert!(matches!(set(PIPE_TAP_ENV), None | Some(None)));
+        assert_eq!(
+            set("LOCALAPPDATA"),
+            Some(Some(folders.local.to_string_lossy().into_owned()))
+        );
+        fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    #[test]
+    fn a_launch_is_ours_only_while_its_brain_and_shell_are_the_only_product_processes() {
+        let entry = |pid, parent| platform::Entry {
+            pid,
+            parent,
+            shell: false,
+        };
+        let (me, ours) = (1, [10, 20]);
+        assert!(only_ours(
+            &[entry(1, 0), entry(20, 1), entry(10, 1)],
+            me,
+            ours
+        ));
+        assert!(!only_ours(&[entry(1, 0), entry(10, 1)], me, ours));
+        assert!(!only_ours(&[entry(1, 0), entry(20, 1)], me, ours));
+        assert!(!only_ours(
+            &[entry(1, 0), entry(20, 1), entry(30, 20)],
+            me,
+            ours
+        ));
+        assert!(!only_ours(
+            &[entry(1, 0), entry(10, 1), entry(20, 1), entry(30, 10)],
+            me,
+            ours
+        ));
     }
 
     #[test]

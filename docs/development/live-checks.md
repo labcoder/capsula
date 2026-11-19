@@ -566,7 +566,9 @@ The prompts go to Kumo's chat, not a task. A task's first `Done` starts a title 
 ### The allowance
 
 The approval is six requests: three GETs and three POSTs, with no retries.
-- Each launch's brain gets exactly its slice through `KUMOCHI_LIVE_KEY_CATALOG_BUDGET` and `KUMOCHI_LIVE_KEY_MESSAGES_BUDGET`. A request past its slice is refused before connecting. Every other `KUMOCHI_` variable is removed from the launch's environment.
+- The check starts each launch's brain itself, with exactly its slice in `KUMOCHI_LIVE_KEY_CATALOG_BUDGET` and `KUMOCHI_LIVE_KEY_MESSAGES_BUDGET`, and waits for its pipe. A request past the slice is refused before connecting. Only then does it start the shell, with both variables at 0, so the shell connects to that brain. A brain the shell starts, such as one replacing a brain that died, inherits the zeros and can't open a key connection. Every other `KUMOCHI_` variable is removed from both environments.
+- A new brain sends no Messages request on its own. Its store marks the run that was under way as failed when it starts, and a title or compaction job starts only after a run of that brain's own ends `Done`, which takes a submit.
+- One case can pass a slice on. If the shell dies, the brain starts a new shell 200 ms later, and that shell inherits the brain's slice. If the brain then dies too, before the check's next look at the processes (every 250 ms), the new shell's brain gets a fresh slice and checks the saved key as it starts: one model-list GET past the plan. The check sees the extra process at that look, stops as failed and ends them all. That is the only way the count can reach seven, and no Messages request can follow it, because a send needs a submit from the owner.
 - Before each launch, the check appends that launch's slice to `target/live/anthropic-key.ledger` and flushes it.
 - The check refuses to start while that file exists, so a slice is never refunded: an interrupted or failed run can't be resumed or rerun. The file is deleted by hand, and only after a new approval.
 
@@ -579,7 +581,7 @@ The check watches the brain's pipe tap, which keeps only content-free control fr
 - a run that fails, is interrupted or ends with an error, outside the step that expects the refusal;
 - a second run in a step, a run in another thread, or a refused submit outside its step;
 - an `Error`, `CaptureDone`, `HoldScreen`, `ScreenHoldRecognized` or `BuildMismatch` frame;
-- the shell exiting during a step, a step that takes more than 10 minutes, or the shell still running 60 seconds after its window is closed.
+- the brain or the shell exiting, or any other product process starting, during a step; a step that takes more than 10 minutes; or the shell still running 60 seconds after its window is closed.
 
 ### What it can't see
 
@@ -587,7 +589,7 @@ The tap carries no attempts, HTTP statuses or tool names. A request that a budge
 
 The check also can't tell whether the model called `list_tasks`. It can't confirm that the first answer took a tool round and a continuation, only that the run ended `Done`.
 
-None of these gaps can send a paid request beyond the plan, because each launch's brain refuses anything past its slice before connecting.
+None of these gaps can send a paid request beyond the plan, because each launch's brain refuses anything past its slice before connecting and any other brain has no slice, apart from the one case above.
 
 ### Cleanup
 
