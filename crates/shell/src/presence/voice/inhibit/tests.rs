@@ -1135,6 +1135,62 @@ fn a_release_while_the_copies_wait_wins_and_copies_nothing(cx: &mut TestAppConte
 }
 
 #[gpui::test]
+fn a_cancel_while_the_copies_wait_copies_nothing(cx: &mut TestAppContext) {
+    let (owner, _data, _controls) = ready(cx);
+    let (open, finish, started, samples) = source(&owner, cx, None);
+    owner.update(cx, |owner, _| {
+        let link = owner.link.clone();
+        // Listening is up, and the owner is busy for the copies.
+        owner.voice.publish = Some(Box::new(move || link.output().refuse(1)));
+    });
+    let (token, _) = hold(&owner, 1, cx);
+    status(&owner, 1, 1, HoldStatus::Admitted, cx);
+    started
+        .recv_timeout(Duration::from_secs(3))
+        .expect("started");
+    open.send(()).expect("opens");
+    until(cx, |cx| {
+        owner.read_with(cx, |owner, _| owner.voice.gates.rechecks(G1) == Some(2))
+    });
+    owner.update(cx, |owner, cx| {
+        assert_eq!(owner.voice.status, Some(Text::HoldListening));
+        let stamp = owner.voice.pending.as_ref().expect("hold 1").stamp;
+        owner.voice_intent(
+            Intent::End {
+                gesture: G1,
+                cancelled: true,
+            },
+            stamp,
+            0,
+            None,
+            TalkHeld::default(),
+            cx,
+        );
+    });
+    cx.background_executor.advance_clock(super::RECHECK);
+    cx.run_until_parked();
+    owner.read_with(cx, |owner, _| {
+        let hold = owner.voice.pending.as_ref().expect("draining");
+        assert_eq!(hold.terminal, Some(Text::HoldCancelled), "cancelled");
+        assert_eq!(owner.voice.status, Some(Text::HoldStopping));
+    });
+    assert_eq!(
+        token.mode(&std::sync::atomic::AtomicBool::new(true), Instant::now()),
+        Err(MicError::Cancelled),
+        "the source is stopped"
+    );
+    assert!(samples.try_recv().is_err(), "no copy opened");
+    finish.send(()).expect("drains");
+    until(cx, |_| token.finished());
+    cx.run_until_parked();
+    assert!(samples.try_recv().is_err(), "no sample copied");
+    owner.read_with(cx, |owner, _| {
+        assert!(owner.voice.pending.is_none(), "ended");
+        assert_eq!(owner.voice.gates.held(G1), None, "retired");
+    });
+}
+
+#[gpui::test]
 fn a_lost_screen_hold_owes_its_stop_to_the_next_connection(cx: &mut TestAppContext) {
     use crate::presence::screen_hold_tests::{luna, on, recognize, screen_ready};
     use kumochi_protocol::message::Incarnation;
