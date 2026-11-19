@@ -4,7 +4,8 @@ use std::collections::VecDeque;
 use std::fmt;
 
 use kumochi_protocol::message::{
-    MAX_AHEAD_SEGMENTS, MAX_SEGMENTS_PER_RUN, MAX_UNPLAYED_SECONDS, RunId, SegmentId, SpeechPcm,
+    MAX_AHEAD_SEGMENTS, MAX_SEGMENTS_PER_RUN, MAX_UNPLAYED_SECONDS, OutputGeneration, RunId,
+    SegmentId, SpeechPcm,
 };
 use zeroize::Zeroize as _;
 
@@ -74,6 +75,7 @@ impl Segment {
 
 struct Queue {
     run: RunId,
+    logical: OutputGeneration,
     stopped: bool,
     retired: u64,
     received: u64,
@@ -85,9 +87,10 @@ struct Queue {
 }
 
 impl Queue {
-    fn new(run: RunId) -> Self {
+    fn new(run: RunId, logical: OutputGeneration) -> Self {
         Self {
             run,
+            logical,
             stopped: false,
             retired: 0,
             received: 0,
@@ -99,11 +102,18 @@ impl Queue {
         }
     }
 
+    fn current(&self, pcm: &SpeechPcm) -> bool {
+        !self.stopped && pcm.run == self.run && pcm.output_generation == self.logical
+    }
+
     fn offer(&mut self, packet: Packet) -> Result<Admission, Fault> {
-        if self.stopped || packet.pcm.run < self.run {
+        if packet.pcm.run > self.run {
+            return Err(Fault::Order);
+        }
+        if !self.current(&packet.pcm) {
             return Ok(Admission::Return(packet.credit));
         }
-        if packet.pcm.run != self.run || self.held.is_some() {
+        if self.held.is_some() {
             return Err(Fault::Order);
         }
         let pcm = &packet.pcm;

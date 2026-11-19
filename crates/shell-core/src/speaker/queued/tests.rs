@@ -2,6 +2,7 @@ use super::{Admission, CAPACITY, Credit, Fault, Packet, Queue, RATE};
 use kumochi_protocol::message::{OutputGeneration, RunId, SegmentId, SpeechPcm};
 
 const RUN: RunId = RunId(17);
+const LOGICAL: OutputGeneration = OutputGeneration(1);
 
 fn frame(seq: u32, count: usize, last: Option<u32>, origin: u64) -> Packet {
     Packet {
@@ -9,7 +10,7 @@ fn frame(seq: u32, count: usize, last: Option<u32>, origin: u64) -> Packet {
         pcm: SpeechPcm {
             run: RUN,
             segment: SegmentId(0),
-            output_generation: OutputGeneration(1),
+            output_generation: LOGICAL,
             seq,
             last,
             samples: vec![16_384; count],
@@ -19,7 +20,7 @@ fn frame(seq: u32, count: usize, last: Option<u32>, origin: u64) -> Packet {
 
 #[test]
 fn stop_fences_and_credits_held_ingress_without_consuming_it() {
-    let mut queue = Queue::new(RUN);
+    let mut queue = Queue::new(RUN, LOGICAL);
     let packet = usize::try_from(RATE / 10).unwrap();
     let count = u32::try_from(CAPACITY / packet).unwrap();
     for seq in 0..count {
@@ -58,7 +59,7 @@ fn stop_fences_and_credits_held_ingress_without_consuming_it() {
 
 #[test]
 fn malformed_order_and_size_are_refused_even_when_full() {
-    let mut queue = Queue::new(RUN);
+    let mut queue = Queue::new(RUN, LOGICAL);
     let packet = usize::try_from(RATE / 10).unwrap();
     let count = u32::try_from(CAPACITY / packet).unwrap();
     for seq in 0..count {
@@ -77,7 +78,7 @@ fn malformed_order_and_size_are_refused_even_when_full() {
 
 #[test]
 fn releasing_canonical_space_admits_the_held_frame_only_once() {
-    let mut queue = Queue::new(RUN);
+    let mut queue = Queue::new(RUN, LOGICAL);
     let packet = usize::try_from(RATE / 10).unwrap();
     let count = u32::try_from(CAPACITY / packet).unwrap();
     for seq in 0..count {
@@ -100,7 +101,7 @@ fn releasing_canonical_space_admits_the_held_frame_only_once() {
     assert_eq!(queue.samples.len(), CAPACITY);
 }
 
-use super::timeline::{Anchor, Engine, Opened, Phase, Tail};
+use super::timeline::{Anchor, Engine, Observation, Opened, Phase, Tail};
 use std::time::Duration;
 
 fn ms(n: u64) -> Duration {
@@ -126,7 +127,7 @@ fn presented(generation: u64, segment: u32, first: u64, through: u64, at: u64) -
 
 #[test]
 fn audible_virtual_audible_stop_cannot_bridge_the_heard_gap() {
-    let mut engine = Engine::new(RUN);
+    let mut engine = Engine::new(RUN, LOGICAL);
     engine.expect(ms(0));
     let a = engine.request(ms(0)).unwrap();
     assert!(engine.opened(a, Opened::Physical, ms(0)));
@@ -135,7 +136,10 @@ fn audible_virtual_audible_stop_cannot_bridge_the_heard_gap() {
         Ok(Admission::Return(_))
     ));
     engine.staged(480);
-    assert!(engine.observe(presented(a, 0, 0, 480, 20)));
+    assert_eq!(
+        engine.observe(presented(a, 0, 0, 480, 20)),
+        Observation::Accepted
+    );
     assert_eq!(engine.tick(ms(20)), Ok(None));
     assert_eq!(engine.progress.heard, 480);
 
@@ -157,17 +161,30 @@ fn audible_virtual_audible_stop_cannot_bridge_the_heard_gap() {
     ));
     assert_eq!(engine.offered, 960, "never replay B");
     engine.staged(1440);
-    assert!(engine.observe(presented(c, 2, 960, 1440, 1040)));
+    assert_eq!(
+        engine.observe(presented(a, 2, 960, 1440, 1040)),
+        Observation::Stale
+    );
+    assert_eq!(
+        engine.observe(presented(c, 2, 960, 1440, 1040)),
+        Observation::Accepted
+    );
     assert_eq!(engine.tick(ms(1040)), Ok(None));
     assert_eq!(engine.stop(ms(1040)), (0, None));
-    assert!(!engine.observe(presented(a, 1, 480, 960, 1041)));
+    assert_eq!(
+        engine.observe(presented(a, 1, 480, 960, 1041)),
+        Observation::Stale
+    );
     assert_eq!(engine.tick(ms(1060)), Ok(None));
     assert_eq!(engine.progress.consumed, 1440);
     assert_eq!(engine.progress.heard, 480);
-    assert_eq!(engine.tail, Tail::Unknown);
+    assert_eq!(engine.tail(), Tail::Unknown);
     assert!(!engine.final_at(ms(1060)));
     assert!(engine.acknowledge(c, Some(ms(1060))));
-    assert_eq!(engine.tail, Tail::At(ms(1060)));
+    assert!(!engine.final_at(ms(1060)));
+    assert_eq!(engine.tail(), Tail::Unknown);
+    assert!(engine.acknowledge(a, Some(ms(1050))));
+    assert_eq!(engine.tail(), Tail::At(ms(1060)));
     assert!(!engine.final_at(ms(1059)));
     assert!(engine.final_at(ms(1060)));
     assert_eq!(engine.queue.completed, 3);
@@ -176,7 +193,7 @@ fn audible_virtual_audible_stop_cannot_bridge_the_heard_gap() {
 
 #[test]
 fn virtual_clock_retires_full_queue_and_rebases_after_matching_resume() {
-    let mut engine = Engine::new(RUN);
+    let mut engine = Engine::new(RUN, LOGICAL);
     engine.expect(ms(0));
     let g = engine.request(ms(0)).unwrap();
     assert!(engine.opened(g, Opened::Unavailable, ms(0)));
@@ -211,7 +228,7 @@ fn virtual_clock_retires_full_queue_and_rebases_after_matching_resume() {
 
 #[test]
 fn rebuild_preserves_app_only_pcm_and_idle_uses_no_route_timer() {
-    let mut engine = Engine::new(RUN);
+    let mut engine = Engine::new(RUN, LOGICAL);
     assert_eq!(engine.request(ms(0)), None);
     engine.expect(ms(0));
     let g = engine.request(ms(0)).unwrap();
@@ -222,15 +239,25 @@ fn rebuild_preserves_app_only_pcm_and_idle_uses_no_route_timer() {
         Ok(Admission::Return(_))
     ));
     engine.staged(1440);
-    assert!(engine.observe(presented(g, 0, 0, 480, 10)));
-    assert!(engine.observe(presented(g, 0, 480, 720, 40)));
+    assert_eq!(
+        engine.observe(presented(g, 0, 0, 480, 10)),
+        Observation::Accepted
+    );
+    assert_eq!(
+        engine.observe(presented(g, 0, 480, 720, 40)),
+        Observation::Accepted
+    );
+    assert_eq!(engine.tick(ms(10)), Ok(None));
     assert!(engine.lost(g, 720, ms(20)));
     assert_eq!(engine.progress.heard, 480);
     assert_eq!(engine.progress.first_gap, Some(480));
     assert_eq!(engine.progress.consumed, 720);
     assert_eq!(engine.queue.samples.len(), 1200);
     assert_eq!(engine.offered, 720);
-    assert!(!engine.observe(presented(g, 0, 720, 1440, 30)));
+    assert_eq!(
+        engine.observe(presented(g, 0, 720, 1440, 30)),
+        Observation::Stale
+    );
     assert_eq!(engine.tick(ms(80)), Ok(None));
     assert_eq!(engine.progress.consumed, 1920);
     assert_eq!(engine.tick(ms(1580)), Ok(None));
@@ -240,7 +267,7 @@ fn rebuild_preserves_app_only_pcm_and_idle_uses_no_route_timer() {
 
 #[test]
 fn a_pending_open_cannot_submit_audio_while_inhibited() {
-    let mut engine = Engine::new(RUN);
+    let mut engine = Engine::new(RUN, LOGICAL);
     engine.expect(ms(0));
     let request = engine.request(ms(0)).unwrap();
     engine.pause(12, ms(1));
@@ -263,7 +290,7 @@ fn a_pending_open_cannot_submit_audio_while_inhibited() {
 
 #[test]
 fn stop_does_not_mark_discarded_pcm_as_completed() {
-    let mut engine = Engine::new(RUN);
+    let mut engine = Engine::new(RUN, LOGICAL);
     assert!(matches!(
         engine.offer(segment(0, 480), ms(0)),
         Ok(Admission::Return(_))
@@ -276,7 +303,7 @@ fn stop_does_not_mark_discarded_pcm_as_completed() {
 
 #[test]
 fn only_contiguous_observations_can_advance_device_presentation() {
-    let mut engine = Engine::new(RUN);
+    let mut engine = Engine::new(RUN, LOGICAL);
     engine.expect(ms(0));
     let generation = engine.request(ms(0)).unwrap();
     assert!(engine.opened(generation, Opened::Physical, ms(0)));
@@ -285,22 +312,37 @@ fn only_contiguous_observations_can_advance_device_presentation() {
         Ok(Admission::Return(_))
     ));
     engine.staged(480);
-    assert!(!engine.observe(presented(generation, 0, 1, 480, 10)));
+    assert_eq!(
+        engine.observe(presented(generation, 0, 1, 480, 10)),
+        Observation::Recover
+    );
     for end in 1..=16 {
-        assert!(engine.observe(presented(generation, 0, end - 1, end, end)));
+        assert_eq!(
+            engine.observe(presented(generation, 0, end - 1, end, end)),
+            Observation::Accepted
+        );
     }
-    assert!(!engine.observe(presented(generation, 0, 16, 17, 17)));
+    assert_eq!(
+        engine.observe(presented(generation, 0, 16, 17, 17)),
+        Observation::Recover
+    );
     assert_eq!(engine.tick(ms(16)), Ok(None));
     assert_eq!(engine.progress.heard, 16);
-    assert!(!engine.observe(presented(generation, 0, 16, 17, 15)));
-    assert!(engine.observe(presented(generation, 0, 16, 17, 17)));
+    assert_eq!(
+        engine.observe(presented(generation, 0, 16, 17, 15)),
+        Observation::Recover
+    );
+    assert_eq!(
+        engine.observe(presented(generation, 0, 16, 17, 17)),
+        Observation::Accepted
+    );
     assert_eq!(engine.tick(ms(17)), Ok(None));
     assert_eq!(engine.progress.heard, 17);
 }
 
 #[test]
 fn a_failed_open_does_not_rebase_the_running_virtual_clock() {
-    let mut engine = Engine::new(RUN);
+    let mut engine = Engine::new(RUN, LOGICAL);
     engine.expect(ms(0));
     let generation = engine.request(ms(0)).unwrap();
     assert!(matches!(
@@ -312,4 +354,351 @@ fn a_failed_open_does_not_rebase_the_running_virtual_clock() {
     assert_eq!(engine.tick(ms(20)), Ok(None));
     assert_eq!(engine.progress.consumed, 480);
     assert_eq!(engine.progress.heard, 0);
+}
+
+fn losing_a() -> (Engine, u64) {
+    let mut engine = Engine::new(RUN, LOGICAL);
+    engine.expect(ms(0));
+    let a = engine.request(ms(0)).unwrap();
+    assert!(engine.opened(a, Opened::Physical, ms(0)));
+    assert!(matches!(
+        engine.offer(segment(0, 480), ms(0)),
+        Ok(Admission::Return(_))
+    ));
+    engine.staged(480);
+    assert_eq!(
+        engine.observe(presented(a, 0, 0, 480, 20)),
+        Observation::Accepted
+    );
+    assert!(engine.lost(a, 480, ms(10)));
+    (engine, a)
+}
+
+fn stop_b(engine: &mut Engine) -> u64 {
+    let b = engine.request(ms(1000)).unwrap();
+    assert!(engine.opened(b, Opened::Physical, ms(1000)));
+    assert!(matches!(
+        engine.offer(segment(1, 480), ms(1000)),
+        Ok(Admission::Return(_))
+    ));
+    engine.staged(960);
+    assert_eq!(
+        engine.observe(presented(b, 1, 480, 960, 1020)),
+        Observation::Accepted
+    );
+    engine.stop(ms(1020));
+    assert!(engine.acknowledge(b, Some(ms(1040))));
+    b
+}
+
+#[test]
+fn review_b_cannot_settle_a_unknown_tail() {
+    let (mut engine, a) = losing_a();
+    assert!(engine.acknowledge(a, None));
+    let b = stop_b(&mut engine);
+    assert!(!engine.final_at(ms(1040)));
+    assert!(engine.acknowledge(a, Some(ms(1060))));
+    assert!(!engine.final_at(ms(1059)));
+    assert!(engine.final_at(ms(1060)));
+    assert!(!engine.lost(b, 960, ms(1061)));
+    assert!(!engine.acknowledge(b, Some(ms(9999))));
+    assert_eq!(
+        engine.observe(presented(b, 1, 480, 960, 1061)),
+        Observation::Stale
+    );
+    assert!(engine.final_at(ms(1061)));
+}
+
+#[test]
+fn review_b_cannot_shorten_a_later_known_tail() {
+    let (mut engine, a) = losing_a();
+    assert!(engine.acknowledge(a, Some(ms(1080))));
+    stop_b(&mut engine);
+    assert!(!engine.final_at(ms(1079)));
+    assert!(engine.final_at(ms(1080)));
+}
+
+#[test]
+fn review_successful_open_settles_virtual_time_without_a_tick() {
+    for tick_first in [false, true] {
+        let mut engine = Engine::new(RUN, LOGICAL);
+        engine.expect(ms(0));
+        let g = engine.request(ms(0)).unwrap();
+        assert!(matches!(
+            engine.offer(segment(0, 480), ms(0)),
+            Ok(Admission::Return(_))
+        ));
+        if tick_first {
+            assert_eq!(engine.tick(ms(20)), Ok(None));
+        }
+        assert!(engine.opened(g, Opened::Physical, ms(20)));
+        assert_eq!(engine.progress.consumed, 480);
+        assert_eq!(engine.progress.heard, 0);
+        assert_eq!(engine.offered, 480);
+        assert!(engine.queue.samples.is_empty());
+    }
+}
+
+#[test]
+fn review_pause_settles_elapsed_time_and_keeps_the_fraction() {
+    for tick_first in [false, true] {
+        let mut engine = Engine::new(RUN, LOGICAL);
+        assert!(matches!(
+            engine.offer(segment(0, 480), ms(0)),
+            Ok(Admission::Return(_))
+        ));
+        let before = Duration::from_micros(10_030);
+        if tick_first {
+            assert_eq!(engine.tick(before), Ok(None));
+        }
+        engine.pause(1, before);
+        assert_eq!(engine.progress.consumed, 240);
+        engine.resume(1, ms(100));
+        assert_eq!(engine.tick(Duration::from_micros(100_012)), Ok(None));
+        assert_eq!(engine.progress.consumed, 241);
+    }
+}
+
+#[test]
+fn review_new_pcm_cannot_spend_time_from_before_admission() {
+    let mut engine = Engine::new(RUN, LOGICAL);
+    assert!(matches!(
+        engine.offer(segment(0, 480), ms(0)),
+        Ok(Admission::Return(_))
+    ));
+    assert!(matches!(
+        engine.offer(segment(1, 480), ms(40)),
+        Ok(Admission::Return(_))
+    ));
+    assert_eq!(engine.tick(ms(40)), Ok(None));
+    assert_eq!(engine.progress.consumed, 480);
+    assert_eq!(engine.queue.samples.len(), 480);
+}
+
+#[test]
+fn review_stop_applies_due_but_not_future_presentation_without_a_tick() {
+    for tick_first in [false, true] {
+        let mut engine = Engine::new(RUN, LOGICAL);
+        engine.expect(ms(0));
+        let g = engine.request(ms(0)).unwrap();
+        assert!(engine.opened(g, Opened::Physical, ms(0)));
+        assert!(matches!(
+            engine.offer(segment(0, 960), ms(0)),
+            Ok(Admission::Return(_))
+        ));
+        engine.staged(960);
+        assert_eq!(
+            engine.observe(presented(g, 0, 0, 480, 20)),
+            Observation::Accepted
+        );
+        assert_eq!(
+            engine.observe(presented(g, 0, 480, 960, 22)),
+            Observation::Accepted
+        );
+        if tick_first {
+            assert_eq!(engine.tick(ms(21)), Ok(None));
+        }
+        assert_eq!(engine.stop(ms(21)), (480, None));
+        assert_eq!(engine.progress.consumed, 480);
+        assert_eq!(engine.progress.heard, 480);
+        assert_eq!(engine.queue.completed, 0);
+    }
+}
+
+#[test]
+fn review_stale_logical_generation_returns_credit_without_taking_sequence() {
+    let mut queue = Queue::new(RUN, LOGICAL);
+    let mut stale = frame(0, 1, None, 2);
+    stale.pcm.output_generation = OutputGeneration(2);
+    assert_eq!(
+        queue.offer(stale),
+        Ok(Admission::Return(Credit {
+            origin: 2,
+            bytes: 50
+        }))
+    );
+    assert!(queue.samples.is_empty());
+    assert_eq!(
+        queue.offer(frame(0, 1, None, 1)),
+        Ok(Admission::Return(Credit {
+            origin: 1,
+            bytes: 50
+        }))
+    );
+    assert_eq!(queue.samples.len(), 1);
+    queue.stop();
+    let mut successor = frame(0, 1, None, 3);
+    successor.pcm.run = RunId(RUN.0 + 1);
+    assert_eq!(queue.offer(successor), Err(Fault::Order));
+}
+
+#[test]
+fn review_delayed_loss_does_not_confirm_an_estimate_that_was_pending() {
+    let mut engine = Engine::new(RUN, LOGICAL);
+    engine.expect(ms(0));
+    let g = engine.request(ms(0)).unwrap();
+    assert!(engine.opened(g, Opened::Physical, ms(0)));
+    assert!(matches!(
+        engine.offer(segment(0, 960), ms(0)),
+        Ok(Admission::Return(_))
+    ));
+    engine.staged(960);
+    assert_eq!(
+        engine.observe(presented(g, 0, 0, 240, 10)),
+        Observation::Accepted
+    );
+    assert_eq!(engine.tick(ms(10)), Ok(None));
+    assert_eq!(
+        engine.observe(presented(g, 0, 240, 480, 20)),
+        Observation::Accepted
+    );
+    assert!(engine.lost(g, 480, ms(30)));
+    assert_eq!(engine.progress.heard, 240);
+    assert_eq!(engine.progress.first_gap, Some(240));
+    assert_eq!(engine.progress.consumed, 480);
+    assert_eq!(engine.queue.samples.len(), 480);
+}
+
+#[test]
+fn review_observation_overflow_recovers_through_virtual_without_laundering_the_gap() {
+    let mut engine = Engine::new(RUN, LOGICAL);
+    engine.expect(ms(0));
+    let g = engine.request(ms(0)).unwrap();
+    assert!(engine.opened(g, Opened::Physical, ms(0)));
+    assert!(matches!(
+        engine.offer(segment(0, 480), ms(0)),
+        Ok(Admission::Return(_))
+    ));
+    engine.staged(480);
+    assert_eq!(
+        engine.observe(presented(g, 0, 0, 24, 1)),
+        Observation::Accepted
+    );
+    assert_eq!(engine.tick(ms(1)), Ok(None));
+    for end in 25..=40 {
+        assert_eq!(
+            engine.observe(presented(g, 0, end - 1, end, 20)),
+            Observation::Accepted
+        );
+    }
+    assert_eq!(
+        engine.observe(presented(g, 0, 40, 41, 20)),
+        Observation::Recover
+    );
+    assert!(engine.lost(g, 41, ms(30)));
+    assert_eq!(engine.progress.consumed, 41);
+    assert_eq!(engine.progress.heard, 24);
+    assert_eq!(engine.progress.first_gap, Some(24));
+    assert_eq!(engine.tick(ms(50)), Ok(None));
+    assert_eq!(engine.progress.consumed, 480);
+    assert_eq!(engine.progress.heard, 24);
+    assert_eq!(engine.queue.completed, 1);
+}
+
+#[test]
+fn review_virtual_open_at_full_queue_returns_held_credit_once() {
+    for tick_first in [false, true] {
+        let mut engine = Engine::new(RUN, LOGICAL);
+        engine.expect(ms(0));
+        let g = engine.request(ms(0)).unwrap();
+        let packet = usize::try_from(RATE / 10).unwrap();
+        let count = u32::try_from(CAPACITY / packet).unwrap();
+        for seq in 0..count {
+            assert!(matches!(
+                engine.offer(frame(seq, packet, None, 1), ms(0)),
+                Ok(Admission::Return(_))
+            ));
+        }
+        assert_eq!(
+            engine.offer(frame(count, 1, None, 2), ms(0)),
+            Ok(Admission::Held)
+        );
+        let expected = Ok(Some(Credit {
+            origin: 2,
+            bytes: 50,
+        }));
+        if tick_first {
+            assert_eq!(engine.tick(ms(1)), expected);
+        }
+        assert!(engine.opened(g, Opened::Physical, ms(1)));
+        assert_eq!(engine.progress.consumed, 24);
+        assert_eq!(
+            engine.tick(ms(1)),
+            if tick_first { Ok(None) } else { expected }
+        );
+        assert_eq!(engine.tick(ms(1)), Ok(None));
+    }
+}
+
+#[test]
+fn review_prime_and_refill_targets_have_exact_open_segment_boundaries() {
+    let mut engine = Engine::new(RUN, LOGICAL);
+    assert!(matches!(
+        engine.offer(frame(0, 1439, None, 1), ms(0)),
+        Ok(Admission::Return(_))
+    ));
+    assert_eq!(engine.phase, Phase::Buffering(1440));
+    assert!(matches!(
+        engine.offer(frame(1, 1, None, 1), ms(0)),
+        Ok(Admission::Return(_))
+    ));
+    assert_eq!(engine.phase, Phase::Running);
+    assert_eq!(engine.tick(ms(60)), Ok(None));
+    assert_eq!(engine.phase, Phase::Buffering(960));
+    assert!(matches!(
+        engine.offer(frame(2, 959, None, 1), ms(60)),
+        Ok(Admission::Return(_))
+    ));
+    assert_eq!(engine.phase, Phase::Buffering(960));
+    assert!(matches!(
+        engine.offer(frame(3, 1, None, 1), ms(60)),
+        Ok(Admission::Return(_))
+    ));
+    assert_eq!(engine.phase, Phase::Running);
+}
+
+#[test]
+fn an_unresolved_predecessor_and_replacement_bound_further_opens() {
+    let (mut engine, a) = losing_a();
+    let b = engine.request(ms(1000)).unwrap();
+    assert!(engine.opened(b, Opened::Physical, ms(1000)));
+    assert!(matches!(
+        engine.offer(segment(1, 480), ms(1000)),
+        Ok(Admission::Return(_))
+    ));
+    engine.staged(960);
+    assert_eq!(
+        engine.observe(presented(b, 1, 480, 960, 1040)),
+        Observation::Accepted
+    );
+    assert!(engine.lost(b, 960, ms(1020)));
+    assert!(matches!(
+        engine.offer(segment(2, 480), ms(1020)),
+        Ok(Admission::Return(_))
+    ));
+    assert_eq!(engine.tick(ms(1040)), Ok(None));
+    assert_eq!(engine.progress.consumed, 1440);
+    assert_eq!(engine.request(ms(2000)), None);
+    assert!(engine.acknowledge(a, Some(ms(1080))));
+    assert!(engine.request(ms(2000)).is_some());
+    assert_eq!(engine.tail(), Tail::Unknown);
+}
+
+#[test]
+fn stale_ingress_does_not_itself_advance_virtual_playback() {
+    let mut engine = Engine::new(RUN, LOGICAL);
+    assert!(matches!(
+        engine.offer(segment(0, 480), ms(0)),
+        Ok(Admission::Return(_))
+    ));
+    let mut stale = segment(1, 480);
+    stale.pcm.output_generation = OutputGeneration(2);
+    assert!(matches!(
+        engine.offer(stale, ms(20)),
+        Ok(Admission::Return(_))
+    ));
+    assert_eq!(engine.progress.consumed, 0);
+    assert_eq!(engine.queue.samples.len(), 480);
+    assert_eq!(engine.tick(ms(20)), Ok(None));
+    assert_eq!(engine.progress.consumed, 480);
 }

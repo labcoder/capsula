@@ -14,13 +14,21 @@ releases its closures, that pool stays retained and new opens are refused. The w
 converter history at close and scrubs blocks as they become exclusively owned while waiting.
 Route notifications go back to the worker.
 
-The dormant `speaker::queued` state keeps one bounded source queue and returns ingress byte
-credit on admission or stale discard. It retires source capacity only on consumption or
-discard. A fake clock drives prime, refill, idle and virtual pacing; a fake device supplies
-source spans and estimated presentation times. Virtual or uncertain consumption ends the
-contiguous heard prefix, even if later audio is presented. Stop finality with a physical
-tail waits for a matching known timestamp. No production worker connects this state to cpal,
-and no wire message, hold admission or opener changes here.
+The dormant `speaker::queued` state keeps one bounded source queue. Admission or stale
+discard returns ingress byte credit once; consumption or discard frees source capacity.
+An old logical output generation cannot take a sequence slot. Timed commands settle the
+prior playback interval before changing eligibility: Pause keeps fractional virtual time,
+and Stop settles only due evidence before discarding and never admits more input.
+
+Only contiguous, generation-matched observations on a live route can extend the heard
+prefix. Loss keeps the last settled prefix; delivery time cannot prove pending estimates.
+The handed-off uncertain interval is consumed as unheard, leaving app-only PCM queued.
+A gap or observation overflow requests the same recovery using the real callback handoff
+boundary; stale observations do not. Virtual pacing never crosses the first unheard gap
+in heard history. Stop waits for all applicable generation-specific tail proofs and the
+latest known deadline. Two unresolved device tails refuse another physical open, but
+virtual pacing continues. No production worker connects this state to cpal, and no wire
+message, hold admission or opener changes here.
 
 `kumochi_shell_core::speaker` owns one connection's output device: it keeps the run's queued
 speech, writes it to the device, and decides from the device's own clock which samples played.

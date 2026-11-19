@@ -1,7 +1,7 @@
 use std::collections::VecDeque;
 use std::time::Duration;
 
-use kumochi_protocol::message::{RunId, SegmentId};
+use kumochi_protocol::message::{OutputGeneration, RunId, SegmentId};
 
 use super::{Admission, Credit, Fault, Packet, Queue, RATE};
 
@@ -22,6 +22,14 @@ pub(super) enum Phase {
 pub(super) enum Tail {
     Unknown,
     At(Duration),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[must_use]
+pub(super) enum Observation {
+    Accepted,
+    Stale,
+    Recover,
 }
 
 #[derive(Clone, Copy)]
@@ -58,12 +66,12 @@ pub(super) struct Engine {
     pub(super) progress: Progress,
     pub(super) phase: Phase,
     pub(super) offered: u64,
-    pub(super) tail: Tail,
     physical: Option<u64>,
     pending_open: Option<u64>,
     generation: u64,
     inhibit: Option<(u64, bool)>,
-    tail_generation: Option<u64>,
+    unresolved: [Option<u64>; 2],
+    quiet_at: Duration,
     anchors: VecDeque<Anchor>,
     last_anchor_at: Option<Duration>,
     retry_at: Duration,
@@ -73,18 +81,18 @@ pub(super) struct Engine {
 }
 
 impl Engine {
-    pub(super) fn new(run: RunId) -> Self {
+    pub(super) fn new(run: RunId, logical: OutputGeneration) -> Self {
         Self {
-            queue: Queue::new(run),
+            queue: Queue::new(run, logical),
             progress: Progress::default(),
             phase: Phase::Idle,
             offered: 0,
-            tail: Tail::At(Duration::ZERO),
             physical: None,
             pending_open: None,
             generation: 0,
             inhibit: None,
-            tail_generation: None,
+            unresolved: [None; 2],
+            quiet_at: Duration::ZERO,
             anchors: VecDeque::with_capacity(ANCHORS),
             last_anchor_at: None,
             retry_at: Duration::ZERO,
@@ -95,6 +103,11 @@ impl Engine {
     }
 
     pub(super) fn expect(&mut self, now: Duration) {
+        self.settle(now);
+        self.warm(now);
+    }
+
+    fn warm(&mut self, now: Duration) {
         if !self.queue.stopped && self.phase == Phase::Idle {
             self.phase = Phase::Buffering(PRIME);
             self.active_at = now;
@@ -103,10 +116,12 @@ impl Engine {
     }
 
     pub(super) fn request(&mut self, now: Duration) -> Option<u64> {
+        self.settle(now);
         if self.phase == Phase::Idle
             || self.queue.stopped
             || self.physical.is_some()
             || self.pending_open.is_some()
+            || self.unresolved.iter().all(Option::is_some)
             || self.inhibited()
             || now < self.retry_at
         {
@@ -119,6 +134,7 @@ impl Engine {
     }
 
     pub(super) fn opened(&mut self, generation: u64, outcome: Opened, now: Duration) -> bool {
+        self.settle(now);
         if self.pending_open != Some(generation) {
             return false;
         }
@@ -136,16 +152,18 @@ impl Engine {
     }
 
     pub(super) fn pause(&mut self, serial: u64, now: Duration) {
+        self.settle(now);
         if self.inhibit.is_none_or(|(previous, _)| serial > previous) {
             self.inhibit = Some((serial, true));
-            self.rebase(now);
+            self.virtual_at = self.virtual_at.max(now);
         }
     }
 
     pub(super) fn resume(&mut self, serial: u64, now: Duration) {
+        self.settle(now);
         if self.inhibit == Some((serial, true)) {
             self.inhibit = Some((serial, false));
-            self.rebase(now);
+            self.virtual_at = self.virtual_at.max(now);
         }
     }
 
@@ -154,10 +172,13 @@ impl Engine {
     }
 
     pub(super) fn offer(&mut self, packet: Packet, now: Duration) -> Result<Admission, Fault> {
-        let valid = packet.pcm.run == self.queue.run && !self.queue.stopped;
+        let valid = self.queue.current(&packet.pcm);
+        if valid {
+            self.settle(now);
+        }
         let admission = self.queue.offer(packet)?;
         if valid && matches!(admission, Admission::Return(_)) {
-            self.expect(now);
+            self.warm(now);
             self.active_at = now;
             self.ready(now);
         }
@@ -170,7 +191,8 @@ impl Engine {
         }
     }
 
-    pub(super) fn observe(&mut self, anchor: Anchor) -> bool {
+    /// Recover means retire the route with its handed-off boundary before the next tick.
+    pub(super) fn observe(&mut self, anchor: Anchor) -> Observation {
         let previous = self
             .anchors
             .back()
@@ -178,7 +200,11 @@ impl Engine {
         if self.queue.stopped
             || anchor.run != self.queue.run
             || self.physical != Some(anchor.generation)
-            || anchor.first != previous
+            || anchor.through <= previous
+        {
+            return Observation::Stale;
+        }
+        if anchor.first != previous
             || anchor.through <= anchor.first
             || anchor.through > self.offered
             || self.anchors.len() == ANCHORS
@@ -189,26 +215,25 @@ impl Engine {
                     && anchor.through <= segment.end()
             })
         {
-            return false;
+            return Observation::Recover;
         }
         self.last_anchor_at = Some(anchor.at);
         self.anchors.push_back(anchor);
-        true
+        Observation::Accepted
     }
 
+    /// Delivery time cannot confirm a pending prediction on a route already lost.
     pub(super) fn lost(&mut self, generation: u64, handed: u64, now: Duration) -> bool {
         if self.physical != Some(generation) {
             return false;
         }
-        self.present_due(now);
         let handed = self
             .anchors
             .back()
             .map_or(handed, |anchor| handed.max(anchor.through));
         self.anchors.clear();
         self.physical = None;
-        self.tail = Tail::Unknown;
-        self.tail_generation = Some(generation);
+        self.wait_for_tail(generation);
         if !self.queue.stopped {
             self.consume(handed.min(self.offered), Evidence::Unheard, now);
             self.offered = self.progress.consumed;
@@ -219,36 +244,72 @@ impl Engine {
         true
     }
 
+    fn wait_for_tail(&mut self, generation: u64) {
+        let slot = self
+            .unresolved
+            .iter_mut()
+            .find(|slot| slot.is_none())
+            .expect("a physical open reserves a tail slot");
+        *slot = Some(generation);
+    }
+
     pub(super) fn acknowledge(&mut self, generation: u64, at: Option<Duration>) -> bool {
-        if self.tail_generation != Some(generation) {
+        let Some(slot) = self
+            .unresolved
+            .iter_mut()
+            .find(|slot| **slot == Some(generation))
+        else {
             return false;
+        };
+        if let Some(at) = at {
+            *slot = None;
+            self.quiet_at = self.quiet_at.max(at);
         }
-        self.tail_generation = None;
-        self.tail = at.map_or(Tail::Unknown, Tail::At);
         true
     }
 
     pub(super) fn stop(&mut self, now: Duration) -> (usize, Option<Credit>) {
-        if !self.queue.stopped {
-            if let Some(generation) = self.physical {
-                self.tail_generation = Some(generation);
-                self.tail = Tail::Unknown;
-            }
-            self.phase = Phase::Idle;
-            self.anchors.clear();
-            self.rebase(now);
+        if self.queue.stopped {
+            return (0, None);
         }
+        self.queue.stopped = true;
+        self.settle(now);
+        if let Some(generation) = self.physical.take() {
+            self.wait_for_tail(generation);
+        }
+        self.phase = Phase::Idle;
+        self.anchors.clear();
+        self.rebase(now);
         self.queue.stop()
     }
 
+    pub(super) fn tail(&self) -> Tail {
+        if self.unresolved.iter().any(Option::is_some) {
+            Tail::Unknown
+        } else {
+            Tail::At(self.quiet_at)
+        }
+    }
+
     pub(super) fn final_at(&self, now: Duration) -> bool {
-        self.queue.stopped && matches!(self.tail, Tail::At(at) if at <= now)
+        self.queue.stopped && matches!(self.tail(), Tail::At(at) if at <= now)
     }
 
     pub(super) fn tick(&mut self, now: Duration) -> Result<Option<Credit>, Fault> {
         if self.queue.stopped {
             return Ok(None);
         }
+        self.settle(now);
+        let credit = self.queue.retry()?;
+        if credit.is_some() && !self.queue.samples.is_empty() {
+            self.warm(now);
+            self.active_at = now;
+        }
+        self.ready(now);
+        Ok(credit)
+    }
+
+    fn settle(&mut self, now: Duration) {
         if self.physical.is_some() {
             self.present_due(now);
         } else if !self.inhibited() && self.phase == Phase::Running {
@@ -264,16 +325,13 @@ impl Engine {
                 .min(self.queue.received);
             self.consume(through, Evidence::Unheard, now);
         }
-        let credit = self.queue.retry()?;
         if self.phase == Phase::Running && self.queue.samples.is_empty() {
             self.phase = Phase::Buffering(REFILL);
             self.rebase(now);
         }
-        self.ready(now);
         if self.queue.samples.is_empty() && now.saturating_sub(self.active_at) >= IDLE {
             self.phase = Phase::Idle;
         }
-        Ok(credit)
     }
 
     fn ready(&mut self, now: Duration) {
