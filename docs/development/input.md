@@ -575,8 +575,10 @@ key identities, window handles or pointer coordinates. When that check is `edit_
 the refusal also says what the look hit instead: its class and executable basename, whether it
 was nothing, the fixture's root, another fixture child or window, or someone else's window, and
 whether the fixture root is visible, topmost and at the frame it chose, and which frame that was
-(`preferred`, `right`, `left`, `lower`, `upper` or `shifted`). These are read straight after the
-look without another hit test. A target that goes stale after admission
+(`preferred`, `right`, `left`, `lower`, `upper` or `shifted`). It also says whether the hit's
+top-level window is topmost, whether the root and the EDIT are `layered`, `transparent`, both or
+`opaque`, and whether the EDIT is visible and enabled. These are read straight after the look
+without another hit test. A target that goes stale after admission
 and an OS `SendInput` refusal keep their own existing messages. The surrounding refusal still names
 the foreground executable and its PID, as before. The refusal remains terminal.
 Only tagged mouse input is allowed at this stage: no Alt-key trick, `AttachThreadInput`, or

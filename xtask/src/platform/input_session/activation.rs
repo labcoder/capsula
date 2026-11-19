@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use anyhow::{Context as _, Result, ensure};
 use windows::Win32::Foundation::POINT;
+use windows::Win32::UI::WindowsAndMessaging::{WINDOW_EX_STYLE, WS_EX_LAYERED, WS_EX_TRANSPARENT};
 
 use super::Receipt;
 use super::gate::away;
@@ -32,6 +33,24 @@ pub(crate) fn missed_hit(hit: Owner, hit_root: usize, root: Owner) -> &'static s
         "fixture_child"
     } else {
         "fixture_other_window"
+    }
+}
+
+/// Whether the extended style `style`, as `GWL_EXSTYLE` reads it, carries `flag`.
+pub(crate) fn has_ex(style: isize, flag: WINDOW_EX_STYLE) -> bool {
+    isize::try_from(flag.0).is_ok_and(|bit| style & bit != 0)
+}
+
+/// The hit-test-relevant extended style bits of a window, as fixed words.
+pub(crate) fn see_through(style: isize) -> &'static str {
+    match (
+        has_ex(style, WS_EX_LAYERED),
+        has_ex(style, WS_EX_TRANSPARENT),
+    ) {
+        (false, false) => "opaque",
+        (true, false) => "layered",
+        (false, true) => "transparent",
+        (true, true) => "layered_transparent",
     }
 }
 
@@ -215,6 +234,7 @@ impl Activation {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use windows::Win32::UI::WindowsAndMessaging::{WS_EX_NOACTIVATE, WS_EX_TOPMOST};
 
     const ROOT: Owner = Owner {
         window: 0x100,
@@ -456,6 +476,22 @@ mod tests {
         assert_eq!(missed_hit(child, ROOT.window, ROOT), "fixture_child");
         assert_eq!(missed_hit(child, 0x500, ROOT), "fixture_other_window");
         assert_eq!(missed_hit(FOREIGN, ROOT.window, ROOT), "foreign");
+    }
+
+    #[test]
+    fn only_the_layered_and_transparent_bits_name_a_see_through_window() {
+        let style = |flags: WINDOW_EX_STYLE| isize::try_from(flags.0).unwrap();
+        assert_eq!(see_through(0), "opaque");
+        assert_eq!(
+            see_through(style(WS_EX_TOPMOST | WS_EX_NOACTIVATE)),
+            "opaque"
+        );
+        assert_eq!(see_through(style(WS_EX_LAYERED)), "layered");
+        assert_eq!(see_through(style(WS_EX_TRANSPARENT)), "transparent");
+        assert_eq!(
+            see_through(style(WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOPMOST)),
+            "layered_transparent"
+        );
     }
 
     #[test]

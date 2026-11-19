@@ -9,15 +9,15 @@ use anyhow::{Context as _, Result, bail, ensure};
 use windows::Win32::Foundation::{HWND, LPARAM, POINT, RECT, WPARAM};
 use windows::Win32::System::SystemInformation::GetTickCount;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetAsyncKeyState, INPUT, MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MOVE,
-    MOUSEEVENTF_VIRTUALDESK, SendInput,
+    GetAsyncKeyState, INPUT, IsWindowEnabled, MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_LEFTUP,
+    MOUSEEVENTF_MOVE, MOUSEEVENTF_VIRTUALDESK, SendInput,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     GA_ROOT, GUITHREADINFO, GWL_EXSTYLE, GetAncestor, GetCursorPos, GetForegroundWindow,
     GetGUIThreadInfo, GetWindowLongPtrW, IsWindowVisible, WS_EX_TOPMOST, WindowFromPoint,
 };
 
-use super::super::activation::{Idle, Look, missed_hit};
+use super::super::activation::{Idle, Look, has_ex, missed_hit, see_through};
 use super::super::fixture::{
     ABORT, ARMED_INPUT, FINALIZE_IDLE, FRAME, FRAME_ORIGIN, PREPARE_IDLE, READY, frame_name,
 };
@@ -226,11 +226,20 @@ impl Session {
         let root = self.fixture.hwnd;
         // SAFETY: reads the hit's top-level ancestor; a stale or null handle yields null.
         let hit_root = unsafe { GetAncestor(hit, GA_ROOT) };
-        // SAFETY: reads only the fixture root's visibility.
-        let visible = unsafe { IsWindowVisible(root) }.as_bool();
-        // SAFETY: reads only the fixture root's extended style.
-        let style = unsafe { GetWindowLongPtrW(root, GWL_EXSTYLE) };
-        let topmost = isize::try_from(WS_EX_TOPMOST.0).is_ok_and(|bit| style & bit != 0);
+        // SAFETY: reads only a window's extended style; a stale or null handle reads zero.
+        let ex = |window| unsafe { GetWindowLongPtrW(window, GWL_EXSTYLE) };
+        // SAFETY: reads only a window's visibility; a stale handle reads false.
+        let visible = |window| unsafe { IsWindowVisible(window) }.as_bool();
+        let edit = self.edit;
+        // SAFETY: reads only whether the fixture EDIT takes input.
+        let edit_enabled = unsafe { IsWindowEnabled(edit) }.as_bool();
+        let hit_topmost = if hit_root.is_invalid() {
+            "unread"
+        } else if has_ex(ex(hit_root), WS_EX_TOPMOST) {
+            "true"
+        } else {
+            "false"
+        };
         let [x, y] = unpack(u64::try_from(property(root, FRAME_ORIGIN)).unwrap_or_default());
         let [_, _, width, height] = FRAME;
         let asked = RECT {
@@ -240,13 +249,19 @@ impl Session {
             bottom: y + height,
         };
         format!(
-            "hit_class={:?} hit_process={:?} hit={} root_visible={visible} root_topmost={topmost} \
-             root_at_frame={} frame={}",
+            "hit_class={:?} hit_process={:?} hit={} hit_topmost={hit_topmost} root_visible={} \
+             root_topmost={} root_at_frame={} frame={} root_style={} edit_style={} \
+             edit_visible={} edit_enabled={edit_enabled}",
             (!hit.is_invalid()).then(|| class_name(hit)),
             foreground_process_name(look.at_point.pid).ok(),
             missed_hit(look.at_point, hit_root.0.addr(), owner(root)),
+            visible(root),
+            has_ex(ex(root), WS_EX_TOPMOST),
             self.fixture.rect().is_ok_and(|rect| rect == asked),
             frame_name([x, y]),
+            see_through(ex(root)),
+            see_through(ex(edit)),
+            visible(edit),
         )
     }
 
