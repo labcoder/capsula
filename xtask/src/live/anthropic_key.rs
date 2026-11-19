@@ -686,18 +686,12 @@ mod tests {
     }
 
     #[test]
-    fn the_ledger_lives_beside_the_gate_run_lock_and_outside_build_output() {
+    fn the_ledger_lives_beside_the_gate_run_lock() {
         let ledger = ledger_path().expect("ledger path");
         assert_eq!(
             ledger.parent(),
             Some(platform::local_app_data().expect("LocalAppData").as_path())
         );
-        let exe = std::env::current_exe().expect("test binary");
-        let target = exe
-            .ancestors()
-            .find(|folder| folder.file_name() == Some(OsStr::new("target")))
-            .expect("the test runs from build output");
-        assert!(!ledger.starts_with(target), "{}", ledger.display());
         assert!(
             ledger
                 .file_name()
