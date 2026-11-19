@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 use kumochi_protocol::message::{DataToShell, MAX_VISIBLE_SCENES, RunId, SceneFailure, SceneId};
 use kumochi_scene::{SceneState, limits::MAX_STEPS, record::Start};
 
-use super::{Broken, Cut, Effect, Out, Presenter, window::ConsumeError};
+use super::{Broken, Cut, DrawKey, DrawTiming, Effect, Out, Presenter, window::ConsumeError};
 
 pub(super) struct Activation {
     origin: Instant,
@@ -287,6 +287,16 @@ impl Presenter {
                 && frames.acknowledge(*id, painted)
             {
                 installed.acknowledged = true;
+                if let Some(observe) = self.draw_timing.as_mut() {
+                    observe(DrawTiming::Shown {
+                        key: DrawKey {
+                            run: installed.run,
+                            scene: *id,
+                            index: installed.index,
+                        },
+                        epoch: painted.epoch,
+                    });
+                }
                 *place = Some(Shown {
                     generation,
                     run: installed.run,

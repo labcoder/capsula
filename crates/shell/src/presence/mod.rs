@@ -866,6 +866,10 @@ pub(crate) enum OpenError {
     ObserverDeadline,
     #[error("--receipt-fixture needs --gate-observer and comes at most once")]
     ReceiptFixture,
+    #[error(
+        "--draw-timing requires --gate-observer, cannot accompany --receipt-fixture, and comes at most once"
+    )]
+    DrawTiming,
     #[error("--accounts-fixture needs a debug build, one fixed state and a quit deadline")]
     AccountsFixture,
     #[error("the scene dropper thread couldn't start")]
@@ -1009,6 +1013,9 @@ pub(crate) fn open(
         )),
     );
     presenter.input = input;
+    if cx.has_global::<Observer>() {
+        cx.global::<Observer>().observe_draw_timing(&mut presenter);
+    }
     #[cfg(windows)]
     presenter.watch_sources(Box::new(platform::ScreenSources::new(events.clone())));
     let (threads, chat) = Threads::pair();

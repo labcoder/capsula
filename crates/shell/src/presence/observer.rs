@@ -7,11 +7,12 @@
 //! [`ROW_CAP`] or a failed post is counted in the close record, and any of them makes the run
 //! invalid for the gate. Records carry geometry and times, never text or another app's content.
 
+mod draw_timing;
+
 use std::cell::Cell;
 use std::fmt;
 use std::fs::File;
 use std::io::{self, BufWriter, Write};
-use std::path::Path;
 use std::rc::Rc;
 use std::thread::JoinHandle;
 
@@ -19,6 +20,10 @@ use async_channel::{Receiver, Sender};
 use gpui_kit::{App, Bounds, Global, Pixels, ScaledPixels, Window, px};
 use kumochi_protocol::constants::{INPUT_SESSION_MARKER, OBSERVER_REPAINT_MESSAGE};
 
+pub(super) use draw_timing::overlay_painted;
+use draw_timing::{DrawRecord, PaintReceipts};
+
+use super::Launch;
 use super::geometry::{PanelVisibility, Position};
 use super::line::LineFrame;
 use crate::platform::{
@@ -222,6 +227,7 @@ impl fmt::Display for Commit {
 pub(super) enum Surface {
     Dock,
     Panel,
+    Overlay,
 }
 
 impl fmt::Display for Surface {
@@ -229,6 +235,7 @@ impl fmt::Display for Surface {
         f.write_str(match self {
             Self::Dock => "dock",
             Self::Panel => "panel",
+            Self::Overlay => "overlay",
         })
     }
 }
@@ -287,6 +294,7 @@ enum Record {
         drawn: Drawn,
         mask_epoch: u64,
     },
+    DrawTiming(DrawRecord),
     Hover {
         id: u64,
         qpc: i64,
@@ -323,6 +331,7 @@ struct Shared {
     dropped: Cell<u64>,
     /// Cleared at Quit before the final counts are taken, so nothing lands after them.
     active: Cell<bool>,
+    draw_timing: Option<Box<PaintReceipts>>,
 }
 
 impl Shared {
@@ -332,6 +341,7 @@ impl Shared {
             epoch: Cell::new(0),
             dropped: Cell::new(0),
             active: Cell::new(true),
+            draw_timing: None,
         }
     }
 
@@ -391,13 +401,21 @@ pub(crate) struct Observer {
 impl Global for Observer {}
 
 impl Observer {
-    /// Creates or truncates `path`, allocates the queue and starts the writer thread. Called
+    #[cfg(debug_assertions)]
+    pub(super) fn draw_timing_enabled(cx: &App) -> bool {
+        kumochi_protocol::constants::ProductIdentity::ACTIVE
+            == kumochi_protocol::constants::ProductIdentity::GATE
+            && cx.has_global::<Observer>()
+            && cx.global::<Observer>().shared.draw_timing.is_some()
+    }
+
+    /// Creates the launch's observer file, allocates the queue and starts the writer thread. Called
     /// before GPUI starts, so the UI thread never touches the disk.
     ///
     /// # Errors
     /// Fails when the file can't be created or the thread can't start.
-    pub(crate) fn prepare(path: Option<&Path>) -> io::Result<Option<Self>> {
-        let Some(path) = path else {
+    pub(crate) fn prepare(launch: &Launch) -> io::Result<Option<Self>> {
+        let Some(path) = launch.observer.as_deref() else {
             return Ok(None);
         };
         let file = File::create_new(path)?;
@@ -414,8 +432,12 @@ impl Observer {
                 let returns = returns.clone();
                 move || write(&receiver, &returns, file)
             })?;
+        let mut shared = Shared::new(sender);
+        if launch.draw_timing {
+            shared.draw_timing = Some(Box::default());
+        }
         Ok(Some(Self {
-            shared: Rc::new(Shared::new(sender)),
+            shared: Rc::new(shared),
             writer: Some(writer),
             proxy: None,
             ledger: Ledger::new(),
@@ -531,30 +553,36 @@ pub(super) fn painted(cx: &mut App, surface: Surface, drawn: Drawn) {
         return;
     }
     let qpc = platform::performance_counter();
-    let observer = cx.global_mut::<Observer>();
-    observer.totals.frames += 1;
-    let frame = observer.totals.frames;
-    let hover = match surface {
-        Surface::Dock => 0,
-        Surface::Panel => observer.hover,
-    };
-    observer.shared.send(Record::Paint {
-        frame,
-        qpc,
-        surface,
-        hover,
-        drawn,
-        mask_epoch: observer.shared.epoch.get(),
-    });
-    let Some(proxy) = observer.proxy else {
-        match observer.pending.iter_mut().find(|slot| slot.is_none()) {
-            Some(slot) => *slot = Some((surface, frame)),
-            None => observer.totals.post_failed += 1,
+    cx.global_mut::<Observer>().paint(surface, drawn, qpc);
+}
+
+impl Observer {
+    fn paint(&mut self, surface: Surface, drawn: Drawn, qpc: i64) -> u64 {
+        self.totals.frames += 1;
+        let frame = self.totals.frames;
+        self.shared.send(Record::Paint {
+            frame,
+            qpc,
+            surface,
+            hover: if surface == Surface::Panel {
+                self.hover
+            } else {
+                0
+            },
+            drawn,
+            mask_epoch: self.shared.epoch.get(),
+        });
+        if let Some(proxy) = self.proxy {
+            if proxy.post_drawn(frame).is_err() {
+                self.totals.post_failed += 1;
+            }
+        } else {
+            match self.pending.iter_mut().find(|slot| slot.is_none()) {
+                Some(slot) => *slot = Some((surface, frame)),
+                None => self.totals.post_failed += 1,
+            }
         }
-        return;
-    };
-    if proxy.post_drawn(frame).is_err() {
-        observer.totals.post_failed += 1;
+        frame
     }
 }
 
@@ -798,6 +826,7 @@ fn line(out: &mut impl Write, record: &Record) -> io::Result<()> {
              mask_epoch={mask_epoch}",
             drawn.epoch, drawn.geometry
         ),
+        Record::DrawTiming(timing) => writeln!(out, "{timing}"),
         Record::Hover {
             id,
             qpc,
@@ -1198,7 +1227,10 @@ mod tests {
         let mut file = std::fs::File::create_new(&path).unwrap();
         std::io::Write::write_all(&mut file, b"old evidence").unwrap();
         drop(file);
-        let result = Observer::prepare(Some(&path));
+        let result = Observer::prepare(&super::Launch {
+            observer: Some(path.clone()),
+            ..super::Launch::default()
+        });
         let kept = std::fs::read(&path).unwrap();
         assert_eq!(
             result.unwrap_err().kind(),

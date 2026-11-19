@@ -38,6 +38,7 @@ mod scene;
 mod screen;
 mod snapshot;
 mod swap;
+mod timing;
 mod watch;
 mod window;
 
@@ -76,6 +77,7 @@ use recovery::Phase;
 use scene::{Cut, Out, Ready, Running, Scene, Ticket};
 use screen::{left, on_screen};
 use snapshot::Assembler;
+pub use timing::{DrawKey, DrawTiming};
 use watch::Watch;
 
 use crate::platform::screen_watch::{Changed, Sources};
@@ -139,6 +141,7 @@ pub enum Effect {
 
 /// Every v1 scene the shell mirrors, and the work preparing them.
 pub struct Presenter {
+    draw_timing: Option<Box<dyn FnMut(DrawTiming)>>,
     pub input: overlay_input::OverlayOwner,
     surface: SurfaceGeometry,
     drawing_stage: Option<kumochi_scene::geom::Rect>,
@@ -193,6 +196,7 @@ pub struct Presenter {
 impl Presenter {
     pub fn new(surface: SurfaceGeometry, theme: Arc<Theme>, stage: Box<dyn Stage>) -> Self {
         Self {
+            draw_timing: None,
             input: overlay_input::OverlayOwner::default(),
             surface,
             drawing_stage: None,
@@ -224,6 +228,11 @@ impl Presenter {
             #[cfg(any(test, feature = "test-support"))]
             dropper: None,
         }
+    }
+
+    /// Installs a startup-only observer of accepted step transitions; it never schedules work.
+    pub fn observe_draw_timing(&mut self, observe: impl FnMut(DrawTiming) + 'static) {
+        self.draw_timing = Some(Box::new(observe));
     }
 
     /// A new connection preserves clear intent because stored scene ids survive brain restarts.
@@ -1187,6 +1196,13 @@ impl Presenter {
                     scene: id,
                     index: running.index,
                 });
+                if let Some(observe) = self.draw_timing.as_mut() {
+                    observe(DrawTiming::Ready(DrawKey {
+                        run: running.run,
+                        scene: id,
+                        index: running.index,
+                    }));
+                }
             }
             Err(reason) => self.fail(id, running.run, running.index, reason, now, out)?,
         }

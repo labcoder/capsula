@@ -339,6 +339,13 @@ impl Presence {
             return Ok(());
         };
         let draft = text.input.read(cx).value();
+        #[cfg(debug_assertions)]
+        let draw_timing = super::observer::Observer::draw_timing_enabled(cx);
+        #[cfg(not(debug_assertions))]
+        let draw_timing = false;
+        if draw_timing {
+            self.dismiss_text(cx)?;
+        }
         let (link, session) = (&self.link, &self.session);
         let result = self.runs.submit(&draft, |turn| {
             session
@@ -353,7 +360,10 @@ impl Presence {
             self.settings.update(cx, |state, _| state.clear_notice());
         }
         self.notices_changed(&previous, cx);
-        if result.is_ok() {
+        if result.is_ok()
+            && !draw_timing
+            && let Some(text) = &self.text
+        {
             let input = text.input.clone();
             text.window
                 .update(cx, |_, window, cx| {

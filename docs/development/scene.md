@@ -2377,6 +2377,12 @@ reallocation, including an instrumentation sanity test; it observes only the
 calling test thread. Main had no drawing tokenizer, so the before baseline is
 “none,” not an invented speedup.
 
+The [offline drawing timing gate](input.md#offline-drawing-timing) measures a
+separate path through the presenter. Its opt-in observer can see when prep enters
+the ready window, when the activated view and cache are installed, and which
+scene epoch the presenter accepted as shown. It also reports the narration and
+entrance lengths separately; those observations do not change which clock wins.
+
 Build the release tests below normal priority before acquiring the shared
 measurement lock. On Rez, after 30 seconds without cargo/rustc, run at normal
 priority with the lock held:
