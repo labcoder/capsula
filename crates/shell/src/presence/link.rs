@@ -683,10 +683,10 @@ impl Presence {
         self.sync_taskbar(cx);
     }
 
-    /// Queues `message` for the brain. A run's `Stop` or `StopScenes` then stops its speech, and
-    /// only once the brain's is queued, so speech never stops for a stop the brain wasn't told;
-    /// a refused one ends the session instead ([`Presence::end_session`]). The speaker's `Stop` waits behind any earlier
-    /// one a busy owner hasn't taken.
+    /// Queues a stop or scene control for the brain. A run's `Stop` or `StopScenes` then stops its
+    /// speech, and only once the brain's is queued, so speech never stops for a stop the brain
+    /// wasn't told. Any refused one ends the session instead ([`Presence::end_session`]), once.
+    /// The speaker's `Stop` waits behind any earlier one a busy owner hasn't taken.
     pub(super) fn send_stop(
         &mut self,
         session: &Session,
@@ -698,8 +698,9 @@ impl Presence {
             _ => None,
         };
         let sent = self.link.send_control(session, message);
-        // A stop the brain wasn't told can't be undone locally, so that session ends.
-        if !sent && run.is_some() {
+        // A control the brain wasn't told can't be undone locally, so that session ends; one
+        // already ending isn't ended again.
+        if !sent && session.open() {
             self.end_session(session, cx).detach();
         }
         if sent && let Some(run) = run {

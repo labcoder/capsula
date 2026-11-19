@@ -114,7 +114,7 @@ impl Presence {
                         .clone()
                         .is_some_and(|session| self.send_stop(&session, message, cx));
                     if !sent {
-                        // A refused stop already ended the session (`send_stop`), off this thread.
+                        // A refused control already ended the session (`send_stop`), off this thread.
                         tracing::warn!("scene control queue unavailable; ending the connection");
                         self.forget_scene_connection();
                         return self.draw_changed_at(now, cx);

@@ -651,3 +651,41 @@ fn a_hold_admitted_after_its_session_closed_never_opens_the_microphone(cx: &mut 
         assert_eq!(started.get(), 1, "the replacement's hold opens it");
     }
 }
+
+#[gpui::test]
+fn a_refused_scene_control_of_any_kind_ends_its_session_once_and_a_replacement_works(
+    cx: &mut TestAppContext,
+) {
+    let (owner, _data, _controls) = ready(cx);
+    let controls = full(&owner, cx);
+    let session = owner.update(cx, |owner, cx| {
+        let session = owner.session.clone().expect("connected");
+        let failed = ControlToBrain::SceneFailed {
+            scene: kumochi_protocol::message::SceneId(3),
+        };
+        let effects = vec![crate::presenter::Effect::Control(failed)];
+        owner.scene_effects_at(Ok(effects), std::time::Instant::now(), cx);
+        assert!(owner.session.is_none(), "the session is forgotten at once");
+        assert!(
+            session.alive().load(std::sync::atomic::Ordering::Acquire),
+            "the end runs off the UI thread"
+        );
+        while controls.try_recv().is_ok() {}
+        assert!(
+            !owner.link.send_control(&session, brain_stop(6)),
+            "nothing more is sent, even with room"
+        );
+        session
+    });
+    cx.run_until_parked();
+    assert!(
+        !session.alive().load(std::sync::atomic::Ordering::Acquire),
+        "the session ended"
+    );
+    owner.update(cx, |owner, _| {
+        let _controls = owner.link.record_controls();
+        let replacement =
+            crate::link::Session::detached(2, kumochi_protocol::message::Incarnation(2));
+        assert!(owner.link.send_control(&replacement, brain_stop(8)));
+    });
+}
