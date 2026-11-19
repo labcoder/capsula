@@ -620,7 +620,7 @@ struct Run {
     /// The draw call the engine's steps stream in, once it starts.
     draw: Option<run::DrawArgs>,
     draw_calls: Vec<provider_draw::DrawCall>,
-    provider_calls: Vec<crate::engines::CallId>,
+    provider_calls: Vec<crate::dispatch::LedgerKey>,
     /// Why the run failed, for the shell.
     error: Option<UserError>,
     /// The run's tool calls, one entry per key.

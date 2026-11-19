@@ -370,8 +370,9 @@ answer: at once for a refusal or a finished call, on `CallCommitted` for a new o
 write holds one result per call, tagged as in [Results](#results), and the next round is built
 from the store.
 
-- **Ids.** A round refuses a second call with an id it already has, which fails the run. The same
-  id in a later round is the same ledger key: identical arguments get the stored answer with no
+- **Ids.** A round refuses a second call with an id it already has, which fails the run. Except on
+  the Anthropic key route (see [the ledger](#the-ledger)), the same id in a later round is the same
+  ledger key: identical arguments get the stored answer with no
   second write, and others get `Reused`.
 - **A voided build.** When the first call finds that a delete reached a thread the build rendered,
   the round's calls, items and unstored text are dropped, and the round is built again. Steps the
@@ -399,7 +400,10 @@ is refused without a charge, so stale work never ends a run on its budget. The s
 its row.
 
 Anthropic key calls use the provider's id within their own round. An id can recur
-in a later round without repeating an earlier result. The same model offer and
+in a later round without repeating an earlier result. A streamed `draw` is keyed the same
+way: its start, records, completion and result carry the round's key, so a later round's
+drawing under a reused id is a new drawing with its own result, while the same round's id
+still joins the call it started. The same model offer and
 retry argument checks apply, and each accepted model call start still charges
 the run's 16-call budget. The durable ledger stores a fixed-size digest of round
 and id without changing its schema; the typed round keeps the provider's id for replay.

@@ -630,7 +630,9 @@ pub(crate) fn call<'a>(
     let args = match input.into() {
         CallInput::Complete(args) => args,
         CallInput::Draw(action) => {
-            if !matches!(caller, Caller::Model { .. }) || name != ToolName::Draw {
+            if !matches!(caller, Caller::Model { .. } | Caller::ModelRound { .. })
+                || name != ToolName::Draw
+            {
                 return Step::Answer(ToolOutput::Error(ToolError::NotHere));
             }
             if let Err(error) = permitted(run, Route::Model, name)

@@ -551,8 +551,8 @@ impl Coordinator {
 /// whose launch is no longer the authorized one gets nothing.
 fn deliver(run: &mut Run, answers: Vec<(Caller, ToolOutput)>) {
     for (caller, output) in answers {
-        if let Caller::Model { call, .. } = &caller
-            && run.provider_calls.contains(call)
+        if let Caller::Model { call, .. } | Caller::ModelRound { call, .. } = &caller
+            && run.provider_calls.contains(&caller.key())
         {
             if run
                 .tools

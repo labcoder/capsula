@@ -202,6 +202,23 @@ impl Loop {
     }
 }
 
+impl super::Run {
+    /// The admitted build's model call: on the key route its identity carries the logical round,
+    /// so an id a later round reuses is a new call; every other route keeps one identity per run.
+    pub(super) fn model_caller(&self, call: CallId) -> Caller {
+        let run = self.id;
+        if self
+            .route
+            .is_some_and(|route| route.kind == ConnectionKind::AnthropicKey)
+        {
+            let round = self.build.as_ref().map_or(1, |build| build.key().round);
+            Caller::ModelRound { run, round, call }
+        } else {
+            Caller::Model { run, call }
+        }
+    }
+}
+
 impl Coordinator {
     /// The current run's round completed and its steps are stored: a round with calls is stored
     /// with their results unless it was the run's last allowed round, a round with only native
@@ -228,24 +245,12 @@ impl Coordinator {
                 .open
                 .iter()
                 .filter(|open| open.provider.is_none())
-                .map(|open| (open.call.clone(), open.name, open.args.clone()))
+                .map(|open| {
+                    let caller = current.model_caller(open.call.clone());
+                    (caller, open.call.clone(), open.name, open.args.clone())
+                })
                 .collect();
-            let key = current
-                .route
-                .is_some_and(|route| route.kind == ConnectionKind::AnthropicKey);
-            for (call, name, args) in calls {
-                let caller = if key {
-                    Caller::ModelRound {
-                        run,
-                        round,
-                        call: call.clone(),
-                    }
-                } else {
-                    Caller::Model {
-                        run,
-                        call: call.clone(),
-                    }
-                };
+            for (caller, call, name, args) in calls {
                 let args = args.unwrap_or_default();
                 let dispatch = self.tool_call(caller, name, args.as_bytes(), effects);
                 let current = self.current(run)?;
