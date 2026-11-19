@@ -485,7 +485,9 @@ if the notice comes back, and the hold's line says why.
 
 The overlay shows while a drawing is visible or the line has points (`sync_overlay`), so a line
 alone shows it and a line's end hides it when no drawing is up. The show opens the overlay's
-window and every hide closes it, so no overlay window exists while nothing is drawn. A line's
+window and a successful hide closes it, so after a successful hide no overlay window exists
+until the next show. As before, a refused show keeps its window until a hide or the next show
+retires it, and a refused hide keeps its window until the next show replaces it. A line's
 first show waits for that open, about 20 ms on Rez and about 230 ms in a build with debug
 assertions, where the window backend compiles its shaders at run time; until the overlay
 shows, the line's frames are the dock's. If an open fails, the next show tries again.
@@ -508,15 +510,25 @@ sends nothing; `acquire_stamped` takes the lease and the stamp; `Runs::screen_re
 the one `ScreenRelease`, which is sent at once. `KeyUp` follows as before. Whatever stops this
 short leaves the hold voice-only, and its line says the screen wasn't ready. A lease whose
 release couldn't be built or sent is given back at once and tells no lapse. A release while the
-capture before it still holds its lease is refused the same way. A release opens no window: the
-next overlay window opens with its show, and a window opened under a held lease joins it before
-it is shown, as every late surface does. A new window's show covers it itself, so `reach_overlay`
-checks the lease after every show and hide: if the cover was refused and revoked a sent lease,
-the brain hears `ExclusionLapsed` before the drawing's own recovery runs.
+capture before it still holds its lease is refused the same way. A successful hide never opens
+a replacement: the next overlay window opens with its show. A release can still open one in one
+case: when the overlay isn't showing as the line stops (its line never drew, or its show
+failed), the line's stop (`stop_line`) resamples the drawings, and a different timed drawing
+that comes due at that instant opens its window before `acquire_stamped`, which then covers
+it. A window opened under a held lease joins it before it is shown, as every late surface does.
+A new window's show covers it itself, so `reach_overlay` checks the lease after every show and
+hide: if the cover was refused and revoked a sent lease, the brain hears `ExclusionLapsed`
+before the drawing's own recovery runs.
 
 The line is drawn on the primary display only, like every drawing. A release with the pointer
 on another display sends that display's picture with an empty path: what the model gets never
 shows a line the user didn't see on it.
+
+The line and the screen marks take the primary display's scale from the overlay's window when
+one is open, and from the dock's otherwise (`line_display`). The line's recorder keeps the scale
+it took at recognition for the line's geometry; the marks take theirs again at release. With no
+overlay window open, either can be the dock's, which is wrong when the dock sits on a display
+whose scale differs from the primary's. Rez has one display, so that case is untested.
 
 `measure_the_hold_line`, an ignored test beside the code, times building both paths for lines
 of 2, 256 and 2,048 points, and a sampler's worst case of a new point on every frame.
