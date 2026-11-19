@@ -7,7 +7,7 @@ const REORDERED: &[u8] = br#" { "body": "first\r\nsecond", "title": "Local draft
 const SAVED: &str = "Saved a local issue draft for user review. Nothing was filed on GitHub.";
 
 fn test_offer() -> Offer {
-    Offer::Mcp(Origin::Task(T), vec![ToolName::DraftIssue])
+    Offer::for_tests(Origin::Task(T), vec![ToolName::DraftIssue])
 }
 
 pub(crate) fn draft_launch() -> (Coordinator, BuildKey, LaunchId, AuditGate, ThreadId) {
@@ -149,7 +149,7 @@ fn mcp_drafts_share_the_run_limit_and_replays_do_not_charge() {
 #[test]
 fn a_different_mcp_tool_cannot_replay_a_cached_draw_refusal() {
     let (mut core, build) = offering(drawing());
-    let offer = Offer::Mcp(Origin::Task(T), vec![ToolName::Draw, ToolName::DraftIssue]);
+    let offer = Offer::for_tests(Origin::Task(T), vec![ToolName::Draw, ToolName::DraftIssue]);
     assert!(binds(&mut core, (build, L1, T), offer, passed()));
     let at = (build, L1, 1);
     let origin = McpOrigin {
