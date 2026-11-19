@@ -25,7 +25,7 @@ use super::super::screen_hold_tests::{
 };
 use super::super::voice_wiring_tests::status;
 use super::Source;
-use super::tests::{after, listen, native, until};
+use super::tests::{after, chord, listen, native, until};
 use crate::input::{Edge, Event, Key, TalkHeld};
 use crate::link::{LinkEvent, LinkState};
 use crate::platform::input::{Button, input};
@@ -458,6 +458,49 @@ fn the_native_callback_hands_over_the_talk_key_still_down(cx: &mut TestAppContex
     cx.run_until_parked();
     assert_eq!(sources(&watching), [Told::Start(true, false)]);
     finish.send(()).expect("the fake microphone ends");
+}
+
+#[gpui::test]
+fn a_reset_before_recognition_delivery_retires_only_that_unstarted_generation(
+    cx: &mut TestAppContext,
+) {
+    let watching = watch(true, cx);
+    let deliver = native(&watching.ready.owner, cx);
+    let at = Instant::now();
+    cx.update(|_| {
+        chord(&deliver, Edge::Down, at);
+        deliver(Event::Deadline, after(at, 301));
+        deliver(Event::Reset, after(at, 302));
+    });
+    cx.run_until_parked();
+    assert!(told(&watching).iter().all(|message| !matches!(
+        message,
+        Told::Start(..)
+            | Told::Sent(
+                ControlToBrain::ScreenHoldRecognized { .. } | ControlToBrain::ScreenRelease { .. }
+            )
+    )));
+    watching.ready.owner.read_with(cx, |owner, _| {
+        assert_eq!(owner.link.microphone_gate().latest(), 1);
+        assert!(owner.voice.pending.is_none());
+    });
+
+    chord(&deliver, Edge::Down, at + Duration::from_secs(1));
+    deliver(Event::Deadline, after(at, 1_301));
+    cx.run_until_parked();
+    assert_eq!(
+        told(&watching)
+            .into_iter()
+            .filter_map(|message| match message {
+                Told::Sent(ControlToBrain::ScreenHoldRecognized { gesture, .. }) => Some(gesture),
+                _ => None,
+            })
+            .collect::<Vec<_>>(),
+        [GestureId(2)],
+        "the first generation must not occupy the next hold's gate"
+    );
+    deliver(Event::Reset, after(at, 1_302));
+    cx.run_until_parked();
 }
 
 #[gpui::test]

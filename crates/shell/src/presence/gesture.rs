@@ -402,6 +402,14 @@ fn apply(
                             if let Intent::End { cancelled, .. } = &mut intent {
                                 *cancelled = true;
                             } else {
+                                if let Intent::Recognized {
+                                    gesture,
+                                    generation: Ok(token),
+                                } = intent
+                                    && token.discard_unstarted().is_ok()
+                                {
+                                    this.link.clear_input(gesture);
+                                }
                                 continue;
                             }
                         }
