@@ -280,6 +280,7 @@ settings-max-frame-rate = Max frame rate
 settings-frame-rate-automatic = Automatic
 settings-frame-rate-now = Drawing at { $fps } frames a second on this display.
 settings-default-model = Model
+settings-model-on-connection = { $model } ({ $connection })
 settings-models-not-listed = No models listed yet. Connect an account to choose one.
 settings-saving = Saving…
 settings-offline = Reconnect to change settings.

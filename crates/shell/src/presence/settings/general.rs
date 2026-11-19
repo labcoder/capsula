@@ -249,11 +249,11 @@ impl SettingsView {
         let selected = choices
             .iter()
             .position(|(connection, slug, _)| is(*connection, slug));
-        let radios: Vec<_> = choices
-            .iter()
+        let radios: Vec<_> = labels(&choices, strings)
+            .into_iter()
             .enumerate()
-            .map(|(ix, (_, _, name))| {
-                let radio = Radio::new(("default-model", ix)).label(name.clone());
+            .map(|(ix, label)| {
+                let radio = Radio::new(("default-model", ix)).label(label);
                 #[cfg(test)]
                 let radio = radio.debug_selector(move || format!("default-model-{ix}"));
                 radio
@@ -341,6 +341,28 @@ impl SettingsView {
 
 /// The radio showing the newest choice, queued or saved: Kit gives a checked radio no click
 /// handler, so showing the saved cap while a new one is queued would swallow a quick reversal.
+/// Each row's label: its model's name, and its connection's too when another connection offers a
+/// model of the same name, so a billed key's model is never mistaken for another's.
+fn labels(choices: &[(ConnectionKind, ModelSlug, String)], strings: &Strings) -> Vec<String> {
+    choices
+        .iter()
+        .map(|(connection, _, name)| {
+            let shared = choices
+                .iter()
+                .any(|(other, _, other_name)| other != connection && other_name == name);
+            if !shared {
+                return name.clone();
+            }
+            let provider = strings.get(match connection {
+                ConnectionKind::ChatGpt => Text::AccountProvider,
+                ConnectionKind::AnthropicKey => Text::AnthropicTitle,
+                ConnectionKind::ClaudeCode => Text::ClaudeProvider,
+            });
+            strings.model_on(name, &provider)
+        })
+        .collect()
+}
+
 fn choice_index(model: &Settings) -> usize {
     model
         .max_frame_rate_choice()
@@ -378,9 +400,36 @@ pub(super) mod tests {
     };
     use kumochi_protocol::message::{AssistantName, MaxFrameRate, SettingsView, ThreadId};
 
-    use super::{choice_index, dock_choice_index, rate_at};
+    use super::{choice_index, dock_choice_index, labels, rate_at};
     use crate::settings::{Settings, Update};
     use crate::strings::Strings;
+
+    #[test]
+    fn a_shared_model_name_says_which_connection_offers_it() {
+        use kumochi_protocol::message::ConnectionKind::{AnthropicKey, ChatGpt, ClaudeCode};
+        let row = |connection, slug: &str, name: &str| {
+            (
+                connection,
+                kumochi_protocol::message::ModelSlug::new(slug).expect("slug"),
+                name.to_owned(),
+            )
+        };
+        let choices = [
+            row(ChatGpt, "m-0", "GPT Luna"),
+            row(AnthropicKey, "claude-haiku-5-5", "Claude Haiku 5.5"),
+            row(AnthropicKey, "claude-opus-5-5", "Claude Opus 5.5"),
+            row(ClaudeCode, "haiku", "Claude Haiku 5.5"),
+        ];
+        assert_eq!(
+            labels(&choices, &Strings::english()),
+            [
+                "GPT Luna",
+                "Claude Haiku 5.5 (Anthropic API key)",
+                "Claude Opus 5.5",
+                "Claude Haiku 5.5 (Claude Code)",
+            ]
+        );
+    }
 
     #[gpui::test]
     fn the_copy_control_copies_the_running_build(cx: &mut TestAppContext) {
