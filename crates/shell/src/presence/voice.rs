@@ -955,20 +955,21 @@ impl Presence {
         } else {
             None
         };
-        if let Some(reason) = refused {
-            tracing::debug!(stage = ?FailureStage::Admission, ?reason, "held speech input refused");
-            self.unused_voice(&token, Some(&session));
-            self.link.clear_input(gesture);
-            self.voice_notice(Text::HoldFailed, cx);
-            return;
-        }
-        // The run speaking at key-down stops before this hold starts. If the brain's queue
-        // refused its `Stop`, the connection ends and no microphone opens.
-        if let Some((_, run)) = spoken.filter(|(at, _)| *at == stamp.session)
+        // A valid recognition still stops the earlier spoken run if Windows refused its Esc
+        // hotkey. A refused brain stop ends the connection before any microphone can open.
+        if matches!(refused, None | Some(FailureReason::EscapeLease))
+            && let Some((_, run)) = spoken.filter(|(at, _)| *at == stamp.session)
             && !self.fence_spoken(run, &session, cx)
         {
             tracing::warn!(stage = ?FailureStage::Admission, reason = ?FailureReason::FenceSend, "held speech input failed");
             self.unused_voice(&token, None);
+            self.link.clear_input(gesture);
+            self.voice_notice(Text::HoldFailed, cx);
+            return;
+        }
+        if let Some(reason) = refused {
+            tracing::debug!(stage = ?FailureStage::Admission, ?reason, "held speech input refused");
+            self.unused_voice(&token, Some(&session));
             self.link.clear_input(gesture);
             self.voice_notice(Text::HoldFailed, cx);
             return;

@@ -287,8 +287,9 @@ other key going down cancels the hold, and the chord is never held outside a hol
   It stops no run and clears no drawing. Plain registered Esc does its usual work and also
   invalidates coverage.
 - Windows is asked once per hold, before voice admission. If it refuses the registration,
-  the typed refusal prevents microphone admission and screen context for that hold. The
-  proxy retires the talk ID and revokes collection and stale watch authority before it calls
+  the typed refusal prevents microphone admission and screen context for that hold. A valid
+  recognition still stops the run that was speaking at key-down, brain first and then the
+  speaker. The proxy retires the talk ID and revokes collection and stale watch authority before it calls
   `UnregisterHotKey` on the window's thread. Terminal UI effects wait until after that call.
   It doesn't reuse retired hotkey IDs, so neither a queued message nor late
   cleanup can reach a later hold. An uncertain unregister leaves input inert until the
