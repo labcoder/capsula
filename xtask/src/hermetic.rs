@@ -83,15 +83,7 @@ pub(crate) fn build(
         cargo.args(["--package", package]);
     }
     cargo.arg("--target-dir").arg(&target);
-    // `cargo run` gives xtask its package's variables, and ring's build script reruns when any of
-    // them changes, so keeping them would rebuild a prebuilt image inside a timed run.
-    for (name, _) in std::env::vars_os() {
-        if name.to_str().is_some_and(|name| {
-            name.starts_with("CARGO_PKG_") || name.starts_with("CARGO_MANIFEST_")
-        }) {
-            cargo.env_remove(name);
-        }
-    }
+    drop_run_variables(&mut cargo, std::env::vars_os().map(|(name, _)| name));
     if profile == Profile::Release {
         cargo.arg("--release");
     }
@@ -108,6 +100,19 @@ pub(crate) fn build(
         Profile::Release => "release",
     };
     Ok((target.join(profile), started.elapsed()))
+}
+
+/// Removes from `cargo` each of `names` that `cargo run` gives xtask about its own package:
+/// ring's build script reruns when any of them changes, so keeping them would rebuild a prebuilt
+/// image inside a timed run.
+fn drop_run_variables(cargo: &mut Command, names: impl IntoIterator<Item = std::ffi::OsString>) {
+    for name in names {
+        if name.to_str().is_some_and(|name| {
+            name.starts_with("CARGO_PKG_") || name.starts_with("CARGO_MANIFEST_")
+        }) {
+            cargo.env_remove(name);
+        }
+    }
 }
 
 /// One launch's own `%LOCALAPPDATA%` and `%APPDATA%`, with Claude Code off in its settings.
@@ -462,6 +467,42 @@ mod tests {
 
     use super::*;
     use crate::scratch;
+
+    #[test]
+    fn the_gate_build_drops_only_what_cargo_run_says_about_xtask() {
+        let mut cargo = Command::new("cargo");
+        drop_run_variables(
+            &mut cargo,
+            [
+                "CARGO_PKG_NAME",
+                "CARGO_PKG_VERSION_MAJOR",
+                "CARGO_MANIFEST_DIR",
+                "CARGO_MANIFEST_PATH",
+                "CARGO_HOME",
+                "CARGO_TARGET_DIR",
+                "CARGO",
+                "PATH",
+            ]
+            .map(std::ffi::OsString::from),
+        );
+        let mut dropped: Vec<String> = cargo
+            .get_envs()
+            .map(|(name, value)| {
+                assert_eq!(value, None, "only removals");
+                name.to_string_lossy().into_owned()
+            })
+            .collect();
+        dropped.sort_unstable();
+        assert_eq!(
+            dropped,
+            [
+                "CARGO_MANIFEST_DIR",
+                "CARGO_MANIFEST_PATH",
+                "CARGO_PKG_NAME",
+                "CARGO_PKG_VERSION_MAJOR"
+            ]
+        );
+    }
 
     struct Fake(BTreeSet<String>);
 
