@@ -82,6 +82,8 @@ impl Presence {
             sent
         });
         if sent && !on {
+            // The next press reads the mirror before any link batch refreshes it.
+            self.follow_voice_input(cx);
             self.cancel_voice(cx);
         }
         sent

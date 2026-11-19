@@ -9,7 +9,7 @@ use kumochi_protocol::message::{ControlToBrain, GestureId, Phase, RunId, ThreadI
 
 use super::Presence;
 use super::voice::Stamp;
-use super::voice_wiring_tests::{hold, ready};
+use super::voice_wiring_tests::{gate, hold, key_down, ready};
 use crate::input::TalkHeld;
 use crate::input::hold::Intent;
 use crate::strings::Text;
@@ -45,6 +45,7 @@ fn answering(
 
 fn warm(owner: &Entity<Presence>, gesture: u32, cx: &mut TestAppContext) {
     owner.update(cx, |owner, cx| {
+        key_down(owner, gesture, cx);
         let stamp = Stamp {
             target: owner.voice.target.get(),
             session: 1,
@@ -120,8 +121,8 @@ fn recognition_stops_the_run_spoken_at_key_down_once(cx: &mut TestAppContext) {
     warm(&owner, 1, cx);
     owner.update(cx, |owner, _| {
         assert_eq!(
-            owner.voice.spoken,
-            Some((GestureId(1), 1, RunId(5))),
+            owner.voice.gates.run(GestureId(1)),
+            Some((1, RunId(5))),
             "captured"
         );
     });
@@ -141,6 +142,7 @@ fn a_refused_brain_stop_never_stops_the_speaker_and_opens_no_hold(cx: &mut TestA
     drop(controls);
     owner.update(cx, |owner, cx| {
         let gesture = GestureId(1);
+        gate(owner, 1, cx);
         let token = owner.link.microphone_gate().arm(gesture).expect("fresh");
         owner.link.track_input(gesture);
         let stamp = Stamp {
@@ -501,8 +503,8 @@ fn recognition_fences_a_spoken_run_the_presenter_saw_before_its_run_state(cx: &m
     warm(&owner, 1, cx);
     owner.update(cx, |owner, _| {
         assert_eq!(
-            owner.voice.spoken,
-            Some((GestureId(1), 1, RunId(6))),
+            owner.voice.gates.run(GestureId(1)),
+            Some((1, RunId(6))),
             "captured"
         );
     });
@@ -583,7 +585,7 @@ fn a_hold_admitted_after_its_session_closed_never_opens_the_microphone(cx: &mut 
     use kumochi_protocol::message::{HoldStatus, Incarnation};
     for refused in [false, true] {
         let (owner, _data, _controls) = ready(cx);
-        let (_commands, _tail) = answering(&owner, SPOKEN, cx);
+        let (_commands, tail) = answering(&owner, SPOKEN, cx);
         hold(&owner, 1, cx);
         let controls = if refused {
             Some(full(&owner, cx))
@@ -631,6 +633,14 @@ fn a_hold_admitted_after_its_session_closed_never_opens_the_microphone(cx: &mut 
             owner.runs.met(Incarnation(2));
             owner.runs.connected(2);
             owner.runs.settings(ThreadId(1));
+            // Session 1's speaker played out and released; the link thread opens session 2's
+            // output with no speaker, as a reconnect does.
+            tail.publish(&Snapshot {
+                played: 480,
+                flags: kumochi_shell_core::speaker::RELEASED,
+                ..SPOKEN
+            });
+            owner.link.output().begin_quiet(2);
             let replacement = owner.session.clone().expect("reconnected");
             let replay = ControlToBrain::VoiceHoldStopped {
                 gesture: GestureId(1),

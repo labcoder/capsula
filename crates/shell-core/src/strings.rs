@@ -196,6 +196,7 @@ texts! {
     HoldCancelled => "hold-cancelled",
     HoldUnavailable => "hold-unavailable",
     HoldMicrophoneUnavailable => "hold-microphone-unavailable",
+    HoldUnconfirmed => "hold-unconfirmed",
     HoldFailed => "hold-failed",
     HoldLost => "hold-lost",
     HoldLostRestored => "hold-lost-restored",

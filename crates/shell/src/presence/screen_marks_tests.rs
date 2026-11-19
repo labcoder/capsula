@@ -616,10 +616,22 @@ fn esc_the_next_hold_and_the_setting_end_the_watch(cx: &mut TestAppContext) {
     watching.ready.owner.read_with(cx, |owner, _| {
         let hold = owner.voice.pending.as_ref().expect("the hold");
         hold.token.discard_unstarted().expect("never started");
+        owner.voice.gates.received(&hold.token);
     });
     state(&watching, RUN, Phase::Thinking, HOLD, cx);
     state(&watching, RUN, Phase::Answering, None, cx);
     assert_eq!(told(&watching), []);
+    cx.run_until_parked();
+    // The scripted source never ran, so its microphone stop is told here and acknowledged.
+    watching.ready.owner.read_with(cx, |owner, _| {
+        let session = owner.session.as_ref().expect("connected");
+        let stopped = ControlToBrain::VoiceHoldStopped {
+            gesture: GestureId(1),
+        };
+        assert!(owner.link.send_control(session, stopped.clone()));
+        assert_eq!(told(&watching), [Told::Sent(stopped)]);
+        owner.link.accept_recorded_microphone_stop(1, GestureId(1));
+    });
     recognize(&watching.ready.owner, 2, cx);
     assert_eq!(told(&watching), [Told::Sent(screen_hold(2)), Told::Stop]);
 
@@ -1593,6 +1605,9 @@ fn automatic_hold_stop_keeps_newer_voice_ownership_and_folds_a_prebind_raw_end(
     cx.run_until_parked();
     told(&watching);
     end(&watching, RUN, cx);
+    watching.ready.owner.read_with(cx, |owner, _| {
+        owner.link.accept_recorded_microphone_stop(1, GestureId(1));
+    });
     hold(&watching, 2, cx);
     release(&watching.ready.owner, 2, Some(DOWN), cx);
     watching.ready.owner.update(cx, |owner, _| {
@@ -2065,6 +2080,9 @@ fn a_cancel_marker_left_behind_takes_no_other_press_and_cancels_no_other_hold(
     let watching = watch(true, cx);
     drawn(&watching, cx);
     let _native = ended_by_esc_down(&watching, cx);
+    watching.ready.owner.read_with(cx, |owner, _| {
+        owner.link.accept_recorded_microphone_stop(1, GestureId(1));
+    });
     hold(&watching, 2, cx);
     watching.ready.owner.update(cx, |owner, cx| {
         owner.native_escape(Some(GestureId(1)), cx).expect("escape");

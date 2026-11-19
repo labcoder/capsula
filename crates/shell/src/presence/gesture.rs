@@ -15,7 +15,10 @@ use std::time::{Duration, Instant};
 
 use gpui_kit::{AnyWindowHandle, App, AppContext as _, AsyncApp, WeakEntity};
 
-use super::{Presence, voice::Stamp};
+use super::{
+    Presence,
+    voice::{Gates, HoldBack, Stamp},
+};
 use crate::input::{
     Edge, Event, Gesture, Key, TalkHeld,
     hold::{Delivery, Fence, InputReason, InputStage, Intent},
@@ -35,7 +38,8 @@ struct Pending {
     /// key-up, and the screen watch must know which key may still repeat.
     held: TalkHeld,
     cancelled: Option<GestureId>,
-    escape: bool,
+    /// An Esc press: every retirement waits until this delivery is decided.
+    escape: Option<Rc<HoldBack>>,
     collection: u64,
 }
 
@@ -53,6 +57,10 @@ enum Applied {
     clippy::too_many_lines,
     reason = "native revocation and ordered deferred delivery share one owner"
 )]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "one argument for each thing the native callback shares with presence"
+)]
 pub(super) fn deliver(
     gesture: Rc<Cell<Gesture>>,
     dock: AnyWindowHandle,
@@ -60,6 +68,7 @@ pub(super) fn deliver(
     link: LinkHandle,
     target: Rc<Cell<(Option<ThreadId>, u64)>>,
     paused: Rc<Cell<bool>>,
+    gates: Gates,
     cx: &mut App,
 ) -> Deliver {
     let (deferred, pending) = async_channel::unbounded::<Pending>();
@@ -97,6 +106,9 @@ pub(super) fn deliver(
                     .borrow_mut()
                     .reduce(&mut state, Event::Reset, at.instant, &paused);
             gesture.set(state);
+            if !state.engaged() {
+                gates.disengaged();
+            }
             return None;
         };
         if event == Event::Reset {
@@ -128,13 +140,24 @@ pub(super) fn deliver(
         gesture.set(state);
         for intent in delivery.intents.iter().flatten() {
             match intent {
+                // Key-down takes the capture inhibit here, never waiting; nothing retires here.
+                Intent::Warm(warm) => {
+                    gates.warm(
+                        link.output(),
+                        *warm,
+                        link.link_generation(),
+                        link.choice_revision(),
+                    );
+                }
                 Intent::Recognized {
                     gesture,
-                    generation: Ok(_),
-                    ..
+                    generation,
                 } => {
-                    link.cancel_input();
-                    link.track_input(*gesture);
+                    if generation.is_ok() {
+                        link.cancel_input();
+                        link.track_input(*gesture);
+                    }
+                    gates.recognized(*gesture, generation.is_ok());
                 }
                 Intent::End {
                     cancelled: true, ..
@@ -143,6 +166,9 @@ pub(super) fn deliver(
                 }
                 _ => {}
             }
+        }
+        if !state.engaged() {
+            gates.disengaged();
         }
         if delivery
             .effects
@@ -185,7 +211,7 @@ pub(super) fn deliver(
             pointer,
             held: state.talk_held(),
             cancelled,
-            escape,
+            escape: escape.then(|| gates.hold_back()),
             collection: link.microphone_gate().latest(),
             stamp: Stamp {
                 target: target.get(),
@@ -279,7 +305,9 @@ fn apply(
 ) -> Applied {
     let result = cx.update_window(dock, |_, window, app| {
         let applied = owner.update(app, |this, cx| {
-            if pending.escape && stale_hold_escape(this, pending.cancelled, pending.stamp.session) {
+            if pending.escape.is_some()
+                && stale_hold_escape(this, pending.cancelled, pending.stamp.session)
+            {
                 return false;
             }
             let mut effects = pending.delivery.effects;
@@ -298,12 +326,13 @@ fn apply(
             true
         });
         if applied.as_ref().is_ok_and(|apply| *apply)
-            && (pending.escape || pending.delivery.intents.iter().any(Option::is_some))
+            && (pending.escape.is_some() || pending.delivery.intents.iter().any(Option::is_some))
         {
             let (owner, intents) = (owner.clone(), pending.delivery.intents.clone());
             let (stamp, qpc, pointer) = (pending.stamp, pending.qpc, pending.pointer);
             let held = pending.held;
-            let (escape, cancelled) = (pending.escape, pending.cancelled);
+            let (escaping, cancelled) = (pending.escape.clone(), pending.cancelled);
+            let escape = escaping.is_some();
             let intents = move |app: &mut App| {
                 let _gone = owner.update(app, |this, cx| {
                     if escape && stale_hold_escape(this, cancelled, stamp.session) {
@@ -316,6 +345,8 @@ fn apply(
                         tracing::error!("can't apply native Escape");
                     }
                 });
+                // The Esc is decided, stop or not: retirement may go on.
+                drop(escaping);
             };
             // Deferred to the end of this update, where the dock is back in GPUI's window table.
             app.defer(intents);
@@ -356,7 +387,7 @@ pub(super) fn deliver_intent(
         pointer,
         held,
         cancelled: None,
-        escape: false,
+        escape: None,
         collection: 0,
     };
     matches!(apply(cx, dock, owner, &pending), Applied::Yes)

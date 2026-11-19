@@ -57,9 +57,32 @@ pub(super) fn ready(
         owner.runs.connected(1);
         owner.runs.settings(ThreadId(1));
         owner.refresh_conversation(cx);
+        owner.follow_voice_input(cx);
+        owner.forward_changes(cx);
         (data, controls)
     });
     (owner, data, controls)
+}
+
+/// Takes gesture `id`'s capture inhibit as the native callback does at key-down, unless it has a
+/// gate already, then marks its hold recognized, as the callback does before the deferred
+/// delivery.
+pub(super) fn gate(owner: &Presence, id: u32, cx: &gpui_kit::App) {
+    key_down(owner, id, cx);
+    owner.voice.gates.recognized(GestureId(id), true);
+}
+
+/// Gesture `id`'s key-down in the native callback, unless it has a gate already.
+pub(super) fn key_down(owner: &Presence, id: u32, cx: &gpui_kit::App) {
+    owner.follow_voice_input(cx);
+    if owner.voice.gates.held(GestureId(id)).is_none() {
+        owner.voice.gates.warm(
+            owner.link.output(),
+            GestureId(id),
+            owner.link.link_generation(),
+            owner.link.choice_revision(),
+        );
+    }
 }
 
 pub(super) fn hold(
@@ -69,6 +92,7 @@ pub(super) fn hold(
 ) -> (Generation, Stamp) {
     owner.update(cx, |owner, cx| {
         let gesture = GestureId(id);
+        gate(owner, id, cx);
         let token = owner
             .link
             .microphone_gate()
@@ -123,6 +147,7 @@ fn a_pre_run_failure_clears_only_its_matching_hold(cx: &mut TestAppContext) {
     let (owner, _data, _controls) = ready(cx);
     let (token, _) = hold(&owner, 1, cx);
     status(&owner, 1, 1, HoldStatus::Failed(HoldFailure::Busy), cx);
+    cx.run_until_parked();
     owner.update(cx, |owner, cx| {
         assert!(owner.voice.pending.is_none());
         assert_eq!(owner.voice.status, Some(Text::TurnBusy));
@@ -203,9 +228,10 @@ fn stale_session_and_gesture_status_cannot_retarget_or_finish_input(cx: &mut Tes
 fn a_captured_target_or_session_cannot_be_rebound_at_delivery(cx: &mut TestAppContext) {
     for (target, session) in [((Some(ThreadId(1)), 1), 1), ((Some(ThreadId(9)), 2), 2)] {
         let (owner, _data, _controls) = ready(cx);
-        owner.update(cx, |owner, cx| {
+        let token = owner.update(cx, |owner, cx| {
             assert!(owner.runs.select_thread(Some(ThreadId(9))));
             owner.refresh_conversation(cx);
+            gate(owner, 1, cx);
             let token = owner
                 .link
                 .microphone_gate()
@@ -228,6 +254,10 @@ fn a_captured_target_or_session_cannot_be_rebound_at_delivery(cx: &mut TestAppCo
                 cx,
             );
             assert!(owner.voice.pending.is_none());
+            token
+        });
+        cx.run_until_parked();
+        owner.update(cx, |owner, _| {
             assert!(token.retired());
             assert!(!owner.link.input_is(GestureId(1)));
             assert_eq!(owner.voice.target.get(), (Some(ThreadId(9)), 2));
@@ -244,6 +274,7 @@ fn late_status_and_release_cannot_cancel_a_newer_held_input(cx: &mut TestAppCont
     let (owner, _data, _controls) = ready(cx);
     let (old, old_stamp) = hold(&owner, 1, cx);
     owner.update(cx, Presence::cancel_voice);
+    cx.run_until_parked();
     owner.read_with(cx, |owner, _| {
         assert!(old.retired());
         owner.link.accept_recorded_microphone_stop(1, GestureId(1));
@@ -294,6 +325,9 @@ fn one_typed_send_cancels_and_drains_a_hold_before_submitting(cx: &mut TestAppCo
         owner.submit(cx).expect("one Send");
         assert!(owner.voice.pending.is_none());
         assert_eq!(owner.runs.take_hold_cancel(), None);
+    });
+    cx.run_until_parked();
+    owner.update(cx, |owner, cx| {
         assert!(token.retired());
         assert!(!owner.link.input_is(GestureId(1)));
         assert_eq!(

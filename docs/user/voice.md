@@ -43,7 +43,8 @@ The tab does not remove models, open the microphone or control spoken replies.
 its key-down model reloads; changing the idle-unload preference does not turn it back on.
 
 Hold **left Ctrl + left Alt** and wait for **Listening** before speaking. Preparing or loading
-is not recording permission. Releasing either key stops collection, transcribes locally and
+is not recording permission: Kumochi enables audio collection after it sets the hold to
+**Listening**. Releasing either key stops collection, transcribes locally and
 sends nonblank words once through normal chat, using the captured target, model and connection.
 An installed but idle-unloaded speech model can reload while the same hold is still down.
 Missing models, an unavailable connection or an already-busy turn are refused before recording.

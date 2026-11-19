@@ -301,6 +301,7 @@ impl Presence {
             applied = true;
         }
         events.attribute(events.capacity() * size_of::<LinkEvent>());
+        self.follow_voice_input(cx);
         if applied {
             self.screen_changed(cx);
             self.runs_changed(cx)
@@ -701,7 +702,14 @@ impl Presence {
         // A control the brain wasn't told can't be undone locally, so that session ends; one
         // already ending isn't ended again.
         if !sent && session.open() {
-            self.end_session(session, cx).detach();
+            let end = self.end_session(session, cx);
+            // Its speaker got no stop, so no resume may reach it before that end has run.
+            let held = self.voice.gates.hold_back();
+            cx.spawn(async move |_, _| {
+                end.await;
+                drop(held);
+            })
+            .detach();
         }
         if sent && let Some(run) = run {
             self.pending_stops
@@ -744,11 +752,17 @@ impl Presence {
             self.stop_retry = Some(task);
             return;
         }
+        // A retirement waiting on these stops may resume now.
+        self.voice.gates.poke();
     }
 
     /// Ends `session` without waiting: nothing more is sent on it from now, and the pipe abort and
     /// the owner's barrier, which takes the owner's lock, finish on the background executor.
-    fn end_session(&self, session: &Session, cx: &mut Context<'_, Self>) -> gpui_kit::Task<()> {
+    pub(super) fn end_session(
+        &self,
+        session: &Session,
+        cx: &mut Context<'_, Self>,
+    ) -> gpui_kit::Task<()> {
         session.close();
         let (link, session) = (self.link.clone(), session.clone());
         cx.background_executor()

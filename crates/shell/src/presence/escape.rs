@@ -11,7 +11,7 @@ impl Presence {
         gesture: Option<GestureId>,
         cx: &mut Context<'_, Self>,
     ) -> Result<(), OpenError> {
-        self.voice.spoken = None;
+        self.voice.gates.forget_runs();
         // This press revoked the input of a hold that is already torn down: by its cancelled
         // `End`, in this delivery or at the raw Esc-down before it, or by the brain's reply or
         // the hold's own run, applied while the press waited. It is that hold's press only.
@@ -169,7 +169,7 @@ impl Presence {
         reason = "one Esc press keeps its local decision and every effect of it in order"
     )]
     pub(super) fn escape(&mut self, cx: &mut Context<'_, Self>) -> Result<(), OpenError> {
-        self.voice.spoken = None;
+        self.voice.gates.forget_runs();
         // Esc is a key like any other to screen marks: they go at the first press, whatever
         // else that press stops. When they are a running answer's, the same press stops that
         // answer too, whatever else it does here.

@@ -8,7 +8,7 @@ only reports what played and when its output is quiet.
 **Dormant.** Nothing opens a speaker in a normal launch. `link::prepare` attaches no
 `Opener`, so no connection sends `AudioOutput` and no run gets a reply; link tests pin that.
 Every link has an output owner, but without an opener each session is `Quiet { NoOpener }`,
-and nothing outside tests takes the capture inhibit or claims a microphone.
+so a held gesture's capture inhibit pauses nothing, and nothing claims a microphone yet.
 Slice 7's half-duplex change (D) enables output.
 
 ## Pieces
@@ -309,7 +309,7 @@ whether a session has an output and whether an earlier generation still owes aud
   no owner lock.
 - **The capture inhibit.** One per link, held by a voice gesture so the microphone never records
   the speaker. `acquire(gesture)` takes it and pauses a live speaker under a fresh serial; it
-  never waits, so contention is `Busy` and the gesture gets nothing. `transfer` moves it to a
+  never waits, so contention is `Busy` and the gesture's gate retries ([voice.md](voice.md)). `transfer` moves it to a
   new gesture before a microphone is bound; `bind_mic` binds it, once, to that gesture's
   microphone generation. `end` cancels a bound microphone; the inhibit outlives the session.
 - **Claims.** `claim(token, session)` names the session's current `OutputKey` and checks it.
@@ -324,14 +324,16 @@ whether a session has an output and whether an earlier generation still owes aud
 - **Retiring the inhibit.** `retire(token, how)` needs proof on the bound generation: `NoMic`
   when none was bound, `Unstarted` when it never started (the owner discards it), `Retired` when
   its gate shows it finished. A refused proof hands the token back, so a later valid one still
-  retires it. Retiring resumes the speaker.
+  retires it. Retiring resumes the speaker. Only the voice dispatcher retires, and never while a
+  speaker `Stop` is still pending, so a resume can't overtake it.
 - **Never blocking.** Each section under the owner's lock is short. Opens, joins, pipe aborts and a
   speaker's last drop happen after it. A command the speaker's queue refuses drops the output to
   `Lost` and aborts the session's pipes, after the lock.
 - **Wakes.** `changes()` is a capacity-1 channel; workers and the owner wake it on every change,
   and the speaker thread's final wake guarantees a settled tail is seen without polling. A live
   claim that reads its tail mid-publish gets `Busy`, and no later wake is promised for it: D2
-  rechecks it a bounded number of times or denies the gesture.
+  rechecks it within an attempt budget of three, with a 10 ms timer as the fallback wake, or
+  denies the gesture.
   `view()` gives the key, why there's none, and whether a tail is still retiring or terminal.
 
 ## Windows

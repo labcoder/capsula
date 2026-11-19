@@ -1,11 +1,13 @@
 use std::sync::atomic::Ordering;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use kumochi_protocol::message::{ControlToBrain, DataToBrain, HOLD_DRAIN_TIMEOUT_MS};
+use kumochi_shell_core::link::output::Denied;
 use zeroize::Zeroize as _;
 
+use super::inhibit::RECHECK;
 use super::{Context, FailureReason, FailureStage, Presence, Source};
-use crate::platform::microphone::{Finalization, MicOwner, Mode, StopReason};
+use crate::platform::microphone::{Finalization, MicOwner, Mode, Reserved, StopReason};
 use crate::strings::Text;
 
 impl Presence {
@@ -13,24 +15,17 @@ impl Presence {
         clippy::too_many_lines,
         reason = "one source keeps acceptance, forwarding and physical completion together"
     )]
-    pub(super) fn open_microphone(&mut self, cx: &mut Context<'_, Self>) {
+    /// Starts the admitted hold's microphone on the start its waiter reserved and checked.
+    pub(super) fn open_microphone(&mut self, reserved: Reserved, cx: &mut Context<'_, Self>) {
         let hold = self.voice.pending.as_ref().expect("admitted hold");
-        if !self.voice_current(hold.stamp)
-            || !self.link.input_is(hold.token.gesture())
-            || hold.token.mode(&hold.session.alive(), Instant::now()) != Ok(Mode::Preparing)
-        {
-            tracing::debug!(stage = ?FailureStage::CaptureStart, reason = ?FailureReason::StaleContext, "held speech input refused");
-            self.end_voice(Text::HoldCancelled, cx);
-            return;
-        }
         let (token, session, stamp) = (hold.token.clone(), hold.session.clone(), hold.stamp);
         #[cfg(test)]
         let source = match self.voice.start.take() {
-            Some(start) => start(token.clone(), session.alive()),
-            None => MicOwner::start(token.clone(), session.alive()),
+            Some(start) => start(reserved, session.alive()),
+            None => MicOwner::start_reserved(reserved, session.alive()),
         };
         #[cfg(not(test))]
-        let source = MicOwner::start(token.clone(), session.alive());
+        let source = MicOwner::start_reserved(reserved, session.alive());
         let mut mic = match source {
             Ok(mic) => mic,
             Err(reason) => {
@@ -40,7 +35,7 @@ impl Presence {
             }
         };
         self.voice.pending.as_mut().expect("admitted hold").source = Source::Recording;
-        let link = self.link.clone();
+        let (link, gates) = (self.link.clone(), self.voice.gates.clone());
         let (watch, alive) = (token.clone(), session.alive());
         cx.spawn(async move |this, cx| {
             while !watch.retired() {
@@ -70,18 +65,44 @@ impl Presence {
         })
         .detach();
         cx.spawn(async move |this, cx| {
-            let running = mic.running.recv().await;
-            let accepted = running.as_ref().is_ok_and(|_| {
-                this.update(cx, |this, cx| {
-                    if !this.voice_current(stamp) || !this.link.input_is(token.gesture()) {
-                        return false;
+            let mut refused = false;
+            if let Ok(running) = mic.running.recv().await {
+                let mut accepted = false;
+                // The same receipt and worker through every recheck: collected, or drained.
+                loop {
+                    let collected = this.update(cx, |this, cx| {
+                        if !this.voice_current(stamp) || !this.link.input_is(token.gesture()) {
+                            return Err(Denied::Stale);
+                        }
+                        let (gates, owner) = (this.voice.gates.clone(), this.link.clone());
+                        let (output, gesture) = (owner.output(), token.gesture());
+                        if !accepted {
+                            gates.claimed(gesture, |claim| output.accept(claim, &mic, running))?;
+                            accepted = true;
+                            let hold = this.voice.pending.as_mut().ok_or(Denied::Stale)?;
+                            hold.collected = true;
+                            #[cfg(test)]
+                            if let Some(publish) = this.voice.publish.as_mut() {
+                                publish();
+                            }
+                            this.voice_notice(Text::HoldListening, cx);
+                        } else if this.voice.pending.as_ref().is_none_or(|hold| {
+                            hold.released.is_some() || hold.terminal.is_some()
+                        }) {
+                            // A release or an end while the copies waited wins: none open.
+                            return Err(Denied::Stale);
+                        }
+                        // Copies open only once Listening is up, under the same claim.
+                        gates.claimed(gesture, |claim| output.collect(claim, &mic, running))
+                    });
+                    if !matches!(collected, Ok(Err(Denied::Busy))) {
+                        refused = !matches!(collected, Ok(Ok(())));
+                        break;
                     }
-                    this.voice_notice(Text::HoldListening, cx);
-                    true
-                })
-                .unwrap_or(false)
-            });
-            if running.is_ok_and(|running| !accepted || mic.accept_running(running).is_err()) {
+                    cx.background_executor().timer(RECHECK).await;
+                }
+            }
+            if refused {
                 tracing::debug!(stage = ?FailureStage::CaptureStart, reason = ?FailureReason::RunningRejected, "held speech input refused");
                 mic.stop(StopReason::Cancel);
                 let _applied = this.update(cx, |this, cx| {
@@ -123,6 +144,8 @@ impl Presence {
                 count
             });
             let receipt = mic.receipt().await;
+            // The physical proof reaches the gate first, even once the hold is gone.
+            gates.received(&token);
             let count = if receipt.is_ok() {
                 forwarded.await
             } else {

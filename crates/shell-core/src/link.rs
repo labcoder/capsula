@@ -760,7 +760,9 @@ impl LinkHandle {
     }
 
     /// Ends `session`'s connection, as a malformed frame does, so the link reconnects. Nothing
-    /// happens once that connection has ended. Never blocks.
+    /// happens once that connection has ended. It waits on no I/O or join, only briefly on the
+    /// output owner's mutex. On return the output owner holds no command sender for that
+    /// generation's speaker, however late the link thread's teardown is.
     pub fn end(&self, session: &Session) {
         #[cfg(any(test, feature = "test-support"))]
         if let Some(recording) = &self.control_recording
@@ -771,6 +773,7 @@ impl LinkHandle {
         self.shared
             .connection(session, |outbox| outbox.pipe.abort());
         self.shared.lose(&session.alive);
+        self.shared.output.end(session.generation);
     }
 
     /// Queues a typed turn or a page request for `session`'s brain, like
@@ -833,6 +836,8 @@ impl LinkHandle {
         let mut link = Self::detached();
         link.recording = Some(recording);
         link.shared.generations.store(1, Ordering::Release);
+        // Session 1's output, as a normal launch has it: none, so a hold's claim can be granted.
+        link.shared.output.begin(1, None);
         (link, requests)
     }
 

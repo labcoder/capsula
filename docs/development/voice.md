@@ -957,6 +957,55 @@ have room. A closed gate ends that hold once as Busy without storing words or
 starting a provider. PCM ingress, control processing and credit remain live;
 there is no second queue of recognized words waiting for capacity.
 
+### The capture inhibit
+
+Each held gesture has a gate (`presence/voice/inhibit.rs`) from key-down until its retirement
+is proved. The native callback takes the inhibit at key-down without waiting: a double tap's
+second press moves the first tap's token, any other press acquires, and a busy owner or an older
+gate not yet retired leaves the gate acquiring. With hold-to-talk off a press takes nothing. A
+gesture that stops being engaged before recognition ends its gate. Recognition binds the token to
+the hold's microphone generation; a gesture with no token gets no hold and leaves a pending one
+alone.
+
+```mermaid
+stateDiagram-v2
+    [*] --> Native: key-down
+    Native --> Recognized: recognized with a generation
+    Native --> Ending: released, reset or superseded
+    Recognized --> Admitted: the brain admits the hold
+    Recognized --> Ending: the hold ends, or its receipt comes
+    Admitted --> Ending: deadline, refusal, the hold ends, or its receipt comes
+    Ending --> [*]: retired on its proof
+```
+
+One dispatcher task per presence makes every UI-side acquire, bind and retirement. The native
+callback, the owner's change hints, the receipt task and its own timers wake it through one
+bounded channel, and it runs after the delivery that woke it, so an Esc's speaker `Stop` is
+queued before any `Resume`. A busy owner gets an attempt budget of three: any wake retries, and a
+10 ms timer is only the fallback wake.
+
+An admitted hold doesn't open the microphone at once: its gate waits, with a quiet deadline set
+once at admission (2 s, a guess). Each wake rechecks the hold's session, settings, input and mode,
+then asks the owner for a claim; `Opening` and `NotQuiet` wait for the next wake, and the claim
+reserves the start. Wakes never refill the rechecks or move the deadline, and the deadline stops
+applying once the start is reserved. The started worker's `Running` receipt is accepted under
+that claim with its copies still closed; the hold records the acceptance and publishes the
+Listening state, and only then does `collect` check the claim again and open the copies. Its
+painting follows and isn't awaited, so the order is one of state, not of pixels. A release
+or end in between wins and nothing is copied; a terminal refusal or exhausted Busy stops and drains that worker, and nothing
+reopens. Acceptance also refuses a generation no longer running, so a key-up native input took
+before it cancels the hold without Listening, however late presence gets that key-up.
+
+Retirement needs proof: `NoMic` with no microphone bound, `Unstarted` for a generation that
+never started (the gate is its one discard, and `VoiceHoldStopped` follows as before), and
+`Retired` once the physical receipt came or the generation finished. A started microphone waits
+for its receipt, even after its hold is gone. A busy retire retries on its own. No retirement
+resumes speech ahead of its stop: each waits while a speaker stop is pending, an Esc is undecided,
+or a session whose brain refused a stop is still ending. A session ends from the shell by
+withdrawing its speaker's commands, so a late link-thread teardown can't let a Resume reach the old
+speaker. A refused proof keeps the token and speech paused, and shows `hold-unconfirmed` once no
+hold is pending.
+
 ### Held words after a lost brain
 
 Recognized words exist only in the brain until their turn is stored, so a brain lost in
@@ -1016,7 +1065,8 @@ and explicit typing still act on the current input immediately.
 
 Preparing/loading, Listening, stopping, transcribing and thinking reuse the existing dock,
 status and text views, with localized accessible status text. Only matching live Admitted
-opens the source; Listening precedes acceptance of that source's Running receipt. Thinking
+opens the source; Listening follows the owner's acceptance of that source's Running receipt
+and precedes any copy, which opens only afterwards under the same claim. Thinking
 opens the ordinary answer panel without activation or injected focus input, and re-places a
 resting drawing clear of it before the next paint. Answering hands off to ordinary Runs. Only a
 run's first state carries its origin, so the hold remembers the run that state named and matches

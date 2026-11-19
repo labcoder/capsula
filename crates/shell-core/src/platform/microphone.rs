@@ -636,6 +636,11 @@ impl MicOwner {
         Arc::ptr_eq(&self.generation.startup, &generation.startup)
     }
 
+    /// Whether this worker's generation still runs uncollected: no key-up, cancel or end yet.
+    pub(crate) fn still_running(&self) -> bool {
+        self.generation.mode(&self.session, Instant::now()) == Ok(Mode::Preparing)
+    }
+
     /// Call only after accepting this running receipt and publishing matching UI state.
     pub fn accept_running(&self, running: Running) -> Result<(), MicError> {
         if running.gesture != self.generation.gesture {

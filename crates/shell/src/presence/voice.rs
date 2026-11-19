@@ -20,7 +20,10 @@ use crate::platform::microphone::{Generation, Mode};
 use crate::runs::{HoldRelease, RunTail, ScreenNotice};
 use crate::strings::{Strings, Text};
 
+mod inhibit;
 mod source;
+
+pub(super) use inhibit::{Gates, HoldBack};
 
 #[cfg(test)]
 mod recovery_tests;
@@ -36,6 +39,7 @@ pub(super) fn screen_text(strings: &Strings, text: Text, model: Option<&ModelNam
 #[derive(Debug)]
 enum FailureStage {
     Input,
+    Inhibit,
     Admission,
     CaptureStart,
     CaptureReceipt,
@@ -55,6 +59,7 @@ enum FailureReason {
     PacketCountMismatch,
     RunBeforeStop,
     NoSession,
+    NoInhibit,
     PendingHold,
     StaleContext,
     InputFence,
@@ -104,6 +109,8 @@ pub(super) struct Hold {
     stamp: Stamp,
     session: Session,
     source: Source,
+    /// The owner accepted this hold's collection: only then can its release send words.
+    pub(super) collected: bool,
     released: Option<u64>,
     /// A hold the brain was told shows the screen, until it asks for that release: once, when
     /// the keys come up or when the notice stops being `On` before they do.
@@ -147,17 +154,19 @@ pub(super) struct Voice {
     pub(super) ended: Option<(GestureId, Option<RunTail>)>,
     /// What a lost brain did with the held words; reconnecting doesn't clear it.
     pub(super) lost: Option<Text>,
-    /// The run speaking when a gesture's `Warm` was applied, and that session: what its
-    /// recognition stops. Taken once; Esc drops it.
-    pub(super) spoken: Option<(GestureId, u64, RunId)>,
+    /// Each gesture's hold on the capture inhibit, and the run its recognition fences.
+    pub(super) gates: Gates,
     #[cfg(test)]
     pub(super) start: Option<Start>,
+    /// Runs as Listening is published, before the source's copies open.
+    #[cfg(test)]
+    pub(super) publish: Option<Box<dyn FnMut()>>,
 }
 
 #[cfg(test)]
 type Start = Box<
     dyn FnOnce(
-        Generation,
+        crate::platform::microphone::Reserved,
         std::sync::Arc<std::sync::atomic::AtomicBool>,
     ) -> Result<MicOwner, crate::platform::microphone::MicError>,
 >;
@@ -304,7 +313,18 @@ impl Presence {
         }
     }
 
-    fn unused_voice(&self, token: &Generation, session: &Session) {
+    /// Discards an unstarted generation, and tells `session` the hold stopped. A gate that holds
+    /// it is the one discard authority: its dispatcher discards it through the owner.
+    fn unused_voice(&self, token: &Generation, session: Option<&Session>) {
+        if self.voice.gates.unused(token, session) {
+            return;
+        }
+        let Some(session) = session else {
+            if token.discard_unstarted().is_err() {
+                self.link.microphone_gate().cancel(token.gesture());
+            }
+            return;
+        };
         if (token.discard_unstarted().is_ok() || token.retired())
             && !self.link.send_control(
                 session,
@@ -316,6 +336,13 @@ impl Presence {
             tracing::warn!(stage = ?FailureStage::Release, reason = ?FailureReason::StopSend, "held speech input failed");
             self.link.end(session);
         }
+    }
+
+    /// Mirrors whether hold-to-talk can take a hold for the native callback.
+    pub(super) fn follow_voice_input(&self, cx: &gpui_kit::App) {
+        self.voice
+            .gates
+            .follow(self.settings.read(cx).hold_to_talk_notice().is_none());
     }
 
     fn drain_voice_cancel(&mut self) -> bool {
@@ -345,7 +372,7 @@ impl Presence {
             self.link.microphone_gate().cancel(gesture);
             self.link.clear_input(gesture);
             if matches!(hold.source, Source::Waiting) {
-                self.unused_voice(&hold.token, &hold.session);
+                self.unused_voice(&hold.token, Some(&hold.session));
             } else if matches!(hold.source, Source::Recording) {
                 let terminal = *hold.terminal.get_or_insert(text);
                 notice = if terminal == Text::HoldUnavailable || text == Text::HoldUnavailable {
@@ -718,11 +745,10 @@ impl Presence {
                     .as_ref()
                     .filter(|s| s.generation() == stamp.session)
                 {
-                    self.voice.spoken = self
-                        .link
-                        .output()
-                        .spoken(stamp.session)
-                        .map(|run| (gesture, stamp.session, run));
+                    let run = self.link.output().spoken(stamp.session);
+                    self.voice
+                        .gates
+                        .capture(gesture, run.map(|run| (stamp.session, run)));
                     if !self.link.send_control(
                         session,
                         ControlToBrain::KeyDown {
@@ -754,7 +780,13 @@ impl Presence {
                     tracing::debug!(stage = ?FailureStage::Release, reason = ?FailureReason::NoPendingHold, "held speech input refused");
                     return;
                 };
-                if cancelled || self.voice.status != Some(Text::HoldListening) {
+                // A terminal hold keeps its notice: only a cancel still ends it.
+                if hold.terminal.is_some() && !cancelled {
+                    tracing::debug!(stage = ?FailureStage::Release, reason = ?FailureReason::TerminalStatus, "held speech input refused");
+                    return;
+                }
+                // Only an accepted collection releases, and only once; anything else cancels.
+                if cancelled || !hold.collected || hold.released.is_some() {
                     self.end_voice(Text::HoldCancelled, cx);
                 } else {
                     hold.released = Some(qpc);
@@ -799,6 +831,23 @@ impl Presence {
             self.voice_notice(notice, cx);
             return;
         };
+        // A gesture holding no inhibit gets no hold, and leaves a pending one alone.
+        let Ok(spoken) = self
+            .voice
+            .gates
+            .recognize(self.link.output(), gesture, &token)
+        else {
+            tracing::debug!(stage = ?FailureStage::Admission, reason = ?FailureReason::NoInhibit, "held speech input refused");
+            if token.discard_unstarted().is_err() {
+                self.link.microphone_gate().cancel(gesture);
+            }
+            self.link.clear_input(gesture);
+            if self.voice.pending.is_none() {
+                let notice = self.settings.read(cx).hold_to_talk_notice();
+                self.voice_notice(notice.unwrap_or(Text::TurnBusy), cx);
+            }
+            return;
+        };
         if let Some(notice) = self
             .settings
             .read(cx)
@@ -806,11 +855,7 @@ impl Presence {
             .or_else(|| self.link.voice_stop_pending().then_some(Text::TurnBusy))
         {
             tracing::debug!(stage = ?FailureStage::Admission, reason = ?notice, "held speech input refused");
-            if let Some(session) = &self.session {
-                self.unused_voice(&token, session);
-            } else if token.discard_unstarted().is_err() {
-                self.link.microphone_gate().cancel(gesture);
-            }
+            self.unused_voice(&token, self.session.as_ref());
             self.link.clear_input(gesture);
             self.voice.status = Some(notice);
             self.refresh_dock(cx);
@@ -822,9 +867,7 @@ impl Presence {
         }
         let Some(session) = self.session.clone() else {
             tracing::debug!(stage = ?FailureStage::Admission, reason = ?FailureReason::NoSession, "held speech input refused");
-            if token.discard_unstarted().is_err() {
-                self.link.microphone_gate().cancel(gesture);
-            }
+            self.unused_voice(&token, None);
             self.link.clear_input(gesture);
             self.voice_notice(Text::HoldFailed, cx);
             return;
@@ -836,7 +879,7 @@ impl Presence {
             .is_err()
         {
             tracing::warn!(stage = ?FailureStage::Admission, reason = ?FailureReason::DismissPanels, "held speech input failed");
-            self.unused_voice(&token, &session);
+            self.unused_voice(&token, Some(&session));
             self.link.clear_input(gesture);
             self.voice_notice(Text::HoldFailed, cx);
             return;
@@ -854,25 +897,18 @@ impl Presence {
         };
         if let Some(reason) = refused {
             tracing::debug!(stage = ?FailureStage::Admission, ?reason, "held speech input refused");
-            self.unused_voice(&token, &session);
+            self.unused_voice(&token, Some(&session));
             self.link.clear_input(gesture);
             self.voice_notice(Text::HoldFailed, cx);
             return;
         }
         // The run speaking at key-down stops before this hold starts. If the brain's queue
         // refused its `Stop`, the connection ends and no microphone opens.
-        let spoken = self
-            .voice
-            .spoken
-            .take()
-            .filter(|(held, at, _)| *held == gesture && *at == stamp.session);
-        if let Some((_, _, run)) = spoken
+        if let Some((_, run)) = spoken.filter(|(at, _)| *at == stamp.session)
             && !self.fence_spoken(run, &session, cx)
         {
             tracing::warn!(stage = ?FailureStage::Admission, reason = ?FailureReason::FenceSend, "held speech input failed");
-            if token.discard_unstarted().is_err() {
-                self.link.microphone_gate().cancel(gesture);
-            }
+            self.unused_voice(&token, None);
             self.link.clear_input(gesture);
             self.voice_notice(Text::HoldFailed, cx);
             return;
@@ -927,6 +963,7 @@ impl Presence {
                 stamp,
                 session,
                 source: Source::Waiting,
+                collected: false,
                 released: None,
                 screen,
                 terminal: None,
@@ -937,7 +974,7 @@ impl Presence {
             self.refusal = None;
             self.voice_notice(Text::HoldPreparing, cx);
         } else {
-            self.unused_voice(&token, &session);
+            self.unused_voice(&token, Some(&session));
             self.link.clear_input(gesture);
             self.runs.cancel_hold();
             self.drain_voice_cancel();
@@ -1071,8 +1108,11 @@ impl Presence {
             return;
         }
         match status {
+            // The waiter is installed, then checked at once.
             HoldStatus::Admitted if matches!(hold.source, Source::Waiting) => {
-                self.open_microphone(cx);
+                if self.voice.gates.admit(gesture, cx.background_executor()) {
+                    self.dispatch(cx);
+                }
             }
             HoldStatus::Admitted => {}
             HoldStatus::Loading => self.voice_notice(Text::VoiceLoading, cx),
