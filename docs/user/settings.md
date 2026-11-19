@@ -41,8 +41,10 @@ display's refresh divides evenly, so motion stays steady, and Settings shows tha
 
 **Model** lists the models your connected accounts offer: ChatGPT's, Claude Code's and the
 models Kumochi knows from a checked Anthropic API key. Picking one makes it the default. A saved
-default that no account offers any more stays selected, shown by its id, until you pick another,
-and messages that would use it are refused as unavailable. **Model** says **Saving…** until the
+default that no account offers any more stays selected, shown by its id, while it remains your
+saved default, and messages that would use it are refused as unavailable. ChatGPT and Claude Code
+can replace a missing default of theirs on their own; an Anthropic API key's saved default stays
+until you pick another. **Model** says **Saving…** until the
 background process answers; a refused save returns the saved model and explains why at the top of
 the page. Kumo and every task without a
 model of its own use the new default from their next message; a reply already under way finishes
