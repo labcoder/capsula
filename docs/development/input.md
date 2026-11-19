@@ -571,7 +571,12 @@ It chooses a harmless point inside the fixture EDIT and checks both the exact wi
 process with `WindowFromPoint` immediately before moving the pointer and again before clicking.
 A stale snapshot, wrong point, foreign capture/menu or interrupted admission stops the run.
 If pre-move admission is refused, a fixed reason names its first failed check without reporting
-key identities, window handles or pointer coordinates. A target that goes stale after admission
+key identities, window handles or pointer coordinates. When that check is `edit_not_at_point`,
+the refusal also says what the look hit instead: its class and executable basename, whether it
+was nothing, the fixture's root, another fixture child or window, or someone else's window, and
+whether the fixture root is visible, topmost and at the frame it chose, and which frame that was
+(`preferred`, `right`, `left`, `lower`, `upper` or `shifted`). These are read straight after the
+look without another hit test. A target that goes stale after admission
 and an OS `SendInput` refusal keep their own existing messages. The surrounding refusal still names
 the foreground executable and its PID, as before. The refusal remains terminal.
 Only tagged mouse input is allowed at this stage: no Alt-key trick, `AttachThreadInput`, or

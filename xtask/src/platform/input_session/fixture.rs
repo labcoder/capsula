@@ -2,6 +2,7 @@
 //! physical-input/session guards, click receipts, Esc lease and cover placement.
 
 use std::cell::Cell;
+use std::cmp::Ordering;
 use std::time::Duration;
 
 use anyhow::{Context as _, Result, ensure};
@@ -62,6 +63,8 @@ pub(super) const ESC_HELD: PCWSTR = w!("InputSessionEscHeld");
 pub(super) const CLICKS: PCWSTR = w!("InputSessionClicks");
 pub(super) const CLICK_QPC: PCWSTR = w!("InputSessionClickQpc");
 pub(super) const CLICK_POINT: PCWSTR = w!("InputSessionClickPoint");
+/// The frame origin the fixture chose at startup, packed as x then y.
+pub(super) const FRAME_ORIGIN: PCWSTR = w!("InputSessionFrame");
 /// The idle activation: 0 unused, 1 pending, 2 used, whatever its outcome.
 const ACTIVATION: PCWSTR = w!("InputSessionActivation");
 
@@ -139,7 +142,7 @@ impl std::error::Error for IdleRefusal {}
 const MAX_ESCAPE_TOGGLES: u32 = 64;
 
 /// The framed window, and its EDIT inside it.
-const FRAME: [i32; 4] = [80, 80, 640, 490];
+pub(super) const FRAME: [i32; 4] = [80, 80, 640, 490];
 const EDIT_FRAME: [i32; 4] = [12, 84, 600, 260];
 
 const GESTURES: [&str; 2] = ["Hold", "Double-tap"];
@@ -774,6 +777,19 @@ fn off_cursor_frame(work: RECT, cursor: POINT) -> Option<[i32; 4]> {
     })
 }
 
+/// Which of `off_cursor_frame`'s placements starts at `origin`, named by its side of `FRAME`.
+pub(super) fn frame_name([x, y]: [i32; 2]) -> &'static str {
+    let [left, top, ..] = FRAME;
+    match (x.cmp(&left), y.cmp(&top)) {
+        (Ordering::Equal, Ordering::Equal) => "preferred",
+        (Ordering::Greater, Ordering::Equal) => "right",
+        (Ordering::Less, Ordering::Equal) => "left",
+        (Ordering::Equal, Ordering::Greater) => "lower",
+        (Ordering::Equal, Ordering::Less) => "upper",
+        _ => "shifted",
+    }
+}
+
 fn cursor_position() -> Result<POINT> {
     let mut cursor = POINT::default();
     // SAFETY: cursor is a writable output; this call doesn't move it.
@@ -954,6 +970,8 @@ fn run_fixture(
     lifetime_ms: u32,
     placement: FixturePlacement,
 ) -> Result<()> {
+    let [x, y, ..] = START_FRAME.get();
+    set_property(root, FRAME_ORIGIN, usize::try_from(pack(x, y))?)?;
     let edit = child(
         w!("EDIT"),
         &HSTRING::new(),
@@ -1041,7 +1059,9 @@ fn focus_edit() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{FRAME, IdleRefusal, POINT, RECT, current_queue_categories, off_cursor_frame};
+    use super::{
+        FRAME, IdleRefusal, POINT, RECT, current_queue_categories, frame_name, off_cursor_frame,
+    };
     use windows::Win32::UI::Input::{
         MOUSE_MOVE_ABSOLUTE, MOUSE_MOVE_NOCOALESCE, RAWINPUT, RAWKEYBOARD, RAWMOUSE, RAWMOUSE_0,
         RIM_TYPEHID, RIM_TYPEKEYBOARD, RIM_TYPEMOUSE,
@@ -1103,6 +1123,26 @@ mod tests {
             ),
             None
         );
+    }
+
+    #[test]
+    fn each_unattended_frame_is_named_by_its_side_of_the_preferred_one() {
+        let work = RECT {
+            left: 0,
+            top: 0,
+            right: 2560,
+            bottom: 1400,
+        };
+        let name = |x, y| {
+            let [left, top, ..] = off_cursor_frame(work, POINT { x, y }).unwrap();
+            frame_name([left, top])
+        };
+        assert_eq!(name(2240, 325), "preferred");
+        assert_eq!(name(400, 325), "right");
+        assert_eq!(frame_name([0, 80]), "left");
+        assert_eq!(frame_name([80, 510]), "lower");
+        assert_eq!(frame_name([80, 0]), "upper");
+        assert_eq!(frame_name([0, 0]), "shifted");
     }
 
     fn mouse_event(mouse: RAWMOUSE) -> RAWINPUT {

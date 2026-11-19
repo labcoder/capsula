@@ -17,6 +17,24 @@ pub(crate) fn away_across_guard(before: u32, after: u32, now: u32, away_for: Dur
     before == after && away(before, now, away_for)
 }
 
+const EDIT_NOT_AT_POINT: &str = "edit_not_at_point";
+
+/// What `WindowFromPoint` hit instead of the EDIT, relative to the fixture's `root`; `hit_root`
+/// is the hit's top-level ancestor.
+pub(crate) fn missed_hit(hit: Owner, hit_root: usize, root: Owner) -> &'static str {
+    if hit.window == 0 {
+        "nothing"
+    } else if hit == root {
+        "fixture_root"
+    } else if hit.pid != root.pid {
+        "foreign"
+    } else if hit_root == root.window {
+        "fixture_child"
+    } else {
+        "fixture_other_window"
+    }
+}
+
 /// A window by handle value, and its process.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Owner {
@@ -106,6 +124,11 @@ impl Activation {
             })
     }
 
+    /// Whether `may_move` would refuse `look` for `edit_not_at_point`, and for nothing earlier.
+    pub(crate) fn misses_edit(&self, look: Look) -> bool {
+        self.stage == Stage::Prepared && self.obstruction(look) == Some(EDIT_NOT_AT_POINT)
+    }
+
     /// Authorizes the one down/up batch, with the pointer exactly on the point.
     pub(crate) fn may_click(&mut self, look: Look) -> Result<()> {
         let ready = self.calm(look) && look.cursor == self.point;
@@ -168,7 +191,7 @@ impl Activation {
         } else if look.age > FRESH {
             Some("stale_look")
         } else if look.at_point != self.edit {
-            Some("edit_not_at_point")
+            Some(EDIT_NOT_AT_POINT)
         } else if look.capture.is_some() {
             Some("mouse_capture")
         } else {
@@ -396,6 +419,43 @@ mod tests {
                 assert_refused(stage, look, "a mouse capture");
             }
         }
+    }
+
+    #[test]
+    fn only_a_prepared_move_refused_for_the_edit_reports_its_hit() {
+        let missed = Look {
+            at_point: FOREIGN,
+            ..CALM
+        };
+        let activation = upto(0);
+        assert!(activation.misses_edit(missed));
+        assert!(!activation.misses_edit(CALM));
+        assert!(!activation.misses_edit(Look {
+            foreign: Some("held_input"),
+            ..missed
+        }));
+        assert!(!activation.misses_edit(Look {
+            capture: Some(EDIT),
+            ..CALM
+        }));
+        assert!(!upto(1).misses_edit(missed));
+        let mut refused = upto(0);
+        refused.may_move(missed).unwrap_err();
+        assert!(!refused.misses_edit(missed));
+    }
+
+    #[test]
+    fn a_missed_hit_is_named_relative_to_the_fixture() {
+        let child = Owner {
+            window: 0x400,
+            pid: 40,
+        };
+        let none = Owner { window: 0, pid: 0 };
+        assert_eq!(missed_hit(none, 0, ROOT), "nothing");
+        assert_eq!(missed_hit(ROOT, ROOT.window, ROOT), "fixture_root");
+        assert_eq!(missed_hit(child, ROOT.window, ROOT), "fixture_child");
+        assert_eq!(missed_hit(child, 0x500, ROOT), "fixture_other_window");
+        assert_eq!(missed_hit(FOREIGN, ROOT.window, ROOT), "foreign");
     }
 
     #[test]

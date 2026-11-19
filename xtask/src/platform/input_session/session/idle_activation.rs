@@ -6,22 +6,25 @@ use std::thread::sleep;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result, bail, ensure};
-use windows::Win32::Foundation::{LPARAM, POINT, WPARAM};
+use windows::Win32::Foundation::{HWND, LPARAM, POINT, RECT, WPARAM};
 use windows::Win32::System::SystemInformation::GetTickCount;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetAsyncKeyState, INPUT, MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MOVE,
     MOUSEEVENTF_VIRTUALDESK, SendInput,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    GUITHREADINFO, GetCursorPos, GetForegroundWindow, GetGUIThreadInfo, WindowFromPoint,
+    GA_ROOT, GUITHREADINFO, GWL_EXSTYLE, GetAncestor, GetCursorPos, GetForegroundWindow,
+    GetGUIThreadInfo, GetWindowLongPtrW, IsWindowVisible, WS_EX_TOPMOST, WindowFromPoint,
 };
 
-use super::super::activation::{Idle, Look};
-use super::super::fixture::{ABORT, ARMED_INPUT, FINALIZE_IDLE, PREPARE_IDLE, READY};
+use super::super::activation::{Idle, Look, missed_hit};
+use super::super::fixture::{
+    ABORT, ARMED_INPUT, FINALIZE_IDLE, FRAME, FRAME_ORIGIN, PREPARE_IDLE, READY, frame_name,
+};
 use super::super::gate::Gate;
 use super::super::{
-    Receipt, desktop_ours, desktop_rect, last_input, mouse_and_keyboard_only, normalized, property,
-    request, size,
+    Receipt, class_name, desktop_ours, desktop_rect, foreground_process_name, last_input,
+    mouse_and_keyboard_only, normalized, property, request, size, unpack,
 };
 use super::{FRESH, Session, click_inputs, mouse_input, owner};
 
@@ -116,7 +119,14 @@ impl Session {
         mouse_and_keyboard_only()?;
         let snapshot = Instant::now();
         let look = self.look(end, point)?;
-        self.activation.may_move(look)?;
+        let missed = self.activation.misses_edit(look);
+        if let Err(error) = self.activation.may_move(look) {
+            return Err(if missed {
+                error.context(self.missed_edit(look))
+            } else {
+                error
+            });
+        }
         ensure!(
             snapshot.elapsed() <= FRESH,
             "activation move target went stale"
@@ -207,6 +217,37 @@ impl Session {
             capture: (!info.hwndCapture.is_invalid()).then(|| owner(info.hwndCapture)),
             age: taken.elapsed(),
         })
+    }
+
+    /// Fixed facts about the window `look` hit instead of the EDIT, read at once without another
+    /// hit test: no title, text, handle or coordinate.
+    fn missed_edit(&self, look: Look) -> String {
+        let hit = HWND(std::ptr::with_exposed_provenance_mut(look.at_point.window));
+        let root = self.fixture.hwnd;
+        // SAFETY: reads the hit's top-level ancestor; a stale or null handle yields null.
+        let hit_root = unsafe { GetAncestor(hit, GA_ROOT) };
+        // SAFETY: reads only the fixture root's visibility.
+        let visible = unsafe { IsWindowVisible(root) }.as_bool();
+        // SAFETY: reads only the fixture root's extended style.
+        let style = unsafe { GetWindowLongPtrW(root, GWL_EXSTYLE) };
+        let topmost = isize::try_from(WS_EX_TOPMOST.0).is_ok_and(|bit| style & bit != 0);
+        let [x, y] = unpack(u64::try_from(property(root, FRAME_ORIGIN)).unwrap_or_default());
+        let [_, _, width, height] = FRAME;
+        let asked = RECT {
+            left: x,
+            top: y,
+            right: x + width,
+            bottom: y + height,
+        };
+        format!(
+            "hit_class={:?} hit_process={:?} hit={} root_visible={visible} root_topmost={topmost} \
+             root_at_frame={} frame={}",
+            (!hit.is_invalid()).then(|| class_name(hit)),
+            foreground_process_name(look.at_point.pid).ok(),
+            missed_hit(look.at_point, hit_root.0.addr(), owner(root)),
+            self.fixture.rect().is_ok_and(|rect| rect == asked),
+            frame_name([x, y]),
+        )
     }
 
     /// Polls every millisecond until `landed`, for at most [`SETTLE`] and never past `end`,
