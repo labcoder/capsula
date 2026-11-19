@@ -77,6 +77,26 @@ refuses the catalog. A successful catalog is tagged AnthropicKey; 401/403 reject
 as does a 400 `invalid_request_error` naming the exact `anthropic-workspace-id` token
 (`WorkspaceRequired`). No workspace id is accepted or provider message forwarded. Rate limits,
 server, transport or catalog failures keep it Unconfirmed for a later Check.
+
+A final HTTP 401 on a Messages post refuses the key itself, whichever run or job sent it. The
+transport decides it from the status at the response head, never the body, closes the sending
+authority's fence there, and tells the account the authority's tag; nothing else is sent. The
+account then marks the row Unconfirmed, drops a Check still waiting on its load or catalog read
+(a pending reconcile receipt reads as unknown), and clears the models, so the next ask is refused
+as unavailable until a new Check reads the catalog and verifies the key under a new tag. A check
+that ends after the fence closed can't restore Ready, and a tag from a replaced or removed
+authority is ignored. The account hears the tag before the route change, and passes it on first:
+the run that sent the refused post, or any run still current on that key, including one compacting
+its context inline, ends with the rejected-key notice rather than as unavailable, whichever of the
+tag and the post's own 401 reaches it first. A run on another connection, or on the key under a
+newer tag, keeps its own outcome. A title or compaction job shows nothing, but the row still
+changes. Between the fence closing and the account handling the tag, the row can still show Ready
+for a moment; no post can go out in that window, because the fence is already closed. With spoken replies the row can change before the
+notice, which waits for the reply's audio to end.
+
+A 403, any other status, and an error typed inside a 200 stream only show their notice and leave
+the row as it is: a 403 can concern one model, and retiring the key for it would make the row flip
+between Ready and Unconfirmed with every Check.
 Every saved-key check or replacement fences late worker/HTTP replies
 by generation and clears the old catalog. Catalog checks do not authorize inference or
 automatic fallback to another connection. Fixtures are synthetic API-reference examples;

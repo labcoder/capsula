@@ -497,11 +497,10 @@ fn chatgpt_inline_and_its_rebuild_use_the_same_granted_effort() {
     );
 }
 
-/// A run on Claude Code too large with its summary, whose compaction round is granted on its own
-/// route.
-fn claude_code_compacting() -> Coordinator {
+/// A run on `kind` too large with its summary, whose compaction round is granted on its own route.
+fn compacting_on(kind: kumochi_protocol::message::ConnectionKind) -> Coordinator {
     use kumochi_protocol::message::{
-        AssistantName, ConnectionKind, Effort, ModelChoice, ModelInfo, ModelName, ModelSlug, RunId,
+        AssistantName, Effort, ModelChoice, ModelInfo, ModelName, ModelSlug, RunId,
     };
 
     use crate::context::{ConnectionTag, RunSnapshot};
@@ -512,7 +511,7 @@ fn claude_code_compacting() -> Coordinator {
         assistant: AssistantName::new("Kumo").expect("name"),
         user: None,
         choice: Some(ModelChoice {
-            connection: ConnectionKind::ClaudeCode,
+            connection: kind,
             model: ModelSlug::new("haiku").expect("slug"),
             effort: Effort::Low,
         }),
@@ -520,7 +519,7 @@ fn claude_code_compacting() -> Coordinator {
     };
     let mut core = Coordinator::new(ThreadId(1), ThreadId(3), RunId(9), Vec::new());
     core.handle(Input::Engines(
-        ConnectionKind::ClaudeCode,
+        kind,
         Availability::Ready(Ready {
             connection: ConnectionTag(3),
             models: vec![ModelInfo {
@@ -543,8 +542,7 @@ fn claude_code_compacting() -> Coordinator {
         Ok(vec![{
             let mut expected = build_context(R, T, 1);
             if let Effect::Store(StoreOp::BuildContext(build)) = &mut expected {
-                build.arrived =
-                    crate::coordinator::Arrived::of(ConnectionKind::ClaudeCode, ConnectionTag(3));
+                build.arrived = crate::coordinator::Arrived::of(kind, ConnectionTag(3));
             }
             expected
         }])
@@ -572,7 +570,7 @@ fn claude_code_compacting() -> Coordinator {
 fn a_claude_code_run_compacts_inline_and_its_usage_fails_nothing() {
     use crate::engines::{Tokens, Usage};
 
-    let mut core = claude_code_compacting();
+    let mut core = compacting_on(kumochi_protocol::message::ConnectionKind::ClaudeCode);
     for event in [
         TurnEvent::TextDelta(" Short".to_owned()),
         TurnEvent::Usage(Usage {
@@ -601,7 +599,7 @@ fn a_refused_claude_code_compaction_fails_the_run() {
 
     use crate::engines::EngineFailure;
 
-    let mut core = claude_code_compacting();
+    let mut core = compacting_on(kumochi_protocol::message::ConnectionKind::ClaudeCode);
     assert_eq!(
         core.handle(engine(
             super::engine_key(&core, R),
@@ -609,6 +607,112 @@ fn a_refused_claude_code_compaction_fails_the_run() {
                 ErrorKey::ClaudeCodeBudget.into()
             ))),
         )),
-        Ok(ends_failed(Failure::Engine))
+        Ok(failed_with(ErrorKey::ClaudeCodeBudget.into()))
     );
+}
+
+/// A compaction the provider refuses fails the run with the provider's own reason, as a round's
+/// failure does: a 401 shows the rejected-key notice, not a bare failure.
+#[test]
+fn a_refused_anthropic_compaction_fails_the_run_with_its_reason() {
+    use kumochi_protocol::Secret;
+    use kumochi_protocol::message::{Action, ErrorKey, UserError};
+    use zeroize::Zeroizing;
+
+    use crate::connections::anthropic::error::{Failure as Anthropic, ProviderFailure};
+    use crate::engines::EngineFailure;
+
+    let mut core = compacting();
+    assert_eq!(core.handle(ready(2)), Ok(granted(2)));
+    let refused =
+        ProviderFailure::answered(401, Secret::new(Zeroizing::new(Vec::new()))).expect("a 401");
+    assert_eq!(
+        core.handle(engine(
+            super::engine_key(&core, R),
+            TurnEvent::Finished(Finish::Failed(EngineFailure::Anthropic(
+                Anthropic::Provider(refused)
+            ))),
+        )),
+        Ok(failed_with(
+            UserError::new(
+                ErrorKey::AnthropicKeyRejected,
+                Vec::new(),
+                vec![Action::OpenSettings]
+            )
+            .expect("one action")
+        ))
+    );
+}
+
+/// OSC-840: a key the account found refused ends the run compacting on it with the rejected-key
+/// notice, whether the account's word or the round's own 401 comes first; the route change after
+/// it is quiet.
+#[test]
+fn a_refused_keys_inline_compaction_fails_with_the_rejected_key_notice_in_either_order() {
+    use kumochi_protocol::Secret;
+    use kumochi_protocol::message::{Action, ConnectionKind, ErrorKey, UserError};
+    use zeroize::Zeroizing;
+
+    use crate::connections::anthropic::error::{Failure as Anthropic, ProviderFailure};
+    use crate::context::ConnectionTag;
+    use crate::coordinator::availability::model_unavailable;
+    use crate::coordinator::{Availability, RefusedKey};
+    use crate::engines::EngineFailure;
+
+    let rejected = || -> Result<Vec<Effect>, Stale> {
+        Ok(failed_with(
+            UserError::new(
+                ErrorKey::AnthropicKeyRejected,
+                Vec::new(),
+                vec![Action::OpenSettings],
+            )
+            .expect("one action"),
+        ))
+    };
+    let gone = || {
+        Input::Engines(
+            ConnectionKind::AnthropicKey,
+            Availability::Unavailable(model_unavailable()),
+        )
+    };
+    for engine_first in [false, true] {
+        let mut core = compacting_on(ConnectionKind::AnthropicKey);
+        let refused =
+            ProviderFailure::answered(401, Secret::new(Zeroizing::new(Vec::new()))).expect("a 401");
+        let round = engine(
+            super::engine_key(&core, R),
+            TurnEvent::Finished(Finish::Failed(EngineFailure::Anthropic(
+                Anthropic::Provider(refused),
+            ))),
+        );
+        let told = Input::KeyRefused(RefusedKey(ConnectionTag(3)));
+        let steps = if engine_first {
+            [
+                (round, rejected()),
+                (told, Ok(Vec::new())),
+                (gone(), Ok(Vec::new())),
+            ]
+        } else {
+            [
+                (told, rejected()),
+                (gone(), Ok(Vec::new())),
+                (round, Err(Stale)),
+            ]
+        };
+        for (input, expected) in steps {
+            assert_eq!(core.handle(input), expected, "engine first: {engine_first}");
+        }
+    }
+}
+
+/// The run's failure as `ends_failed` has it, with `reason` as its notice.
+fn failed_with(reason: kumochi_protocol::message::UserError) -> Vec<Effect> {
+    let mut failed = ends_failed(Failure::Engine);
+    let Effect::Control(kumochi_protocol::message::ControlToShell::RunState { error, .. }) =
+        &mut failed[1]
+    else {
+        panic!("the run's failed state");
+    };
+    *error = Some(reason);
+    failed
 }

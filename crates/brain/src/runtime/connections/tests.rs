@@ -668,3 +668,145 @@ async fn connection_replay_is_tagged_and_outer_carriers_redact_the_key() {
         .close(tokio::time::Instant::now(), tokio::time::Instant::now())
         .await;
 }
+
+/// A saved key checked Ready, then a Check whose credential load is on its way.
+async fn ready_then_checking(scratch: &Scratch, peer: Scripted) -> (Accounts, ConnectionTag) {
+    let store = FakeStore::default();
+    let lock = scratch.db().with_file_name("key-test.lock");
+    save_key(&store, &lock);
+    let worker = Worker::new(
+        Box::new(move || Vault::with_service(store.clone(), "key-test", &lock)),
+        Arc::new(FixedClock(0)),
+    );
+    let mut accounts = with_transport(
+        Accounts::spawn_unconfigured(worker, test_support::net()).expect("worker"),
+        peer,
+        8,
+    );
+    settle(&mut accounts).await;
+    assert_eq!(accounts.connections.view.anthropic, KeyView::Ready);
+    let tag = accounts
+        .connections
+        .verified
+        .as_ref()
+        .expect("verified")
+        .tag;
+    accounts.connection_event(ConnectionEvent::Op(ConnectionOp::CheckAnthropicKey));
+    assert!(accounts.connections.loading);
+    (accounts, tag)
+}
+
+async fn step(accounts: &mut Accounts) -> bool {
+    match timeout(Duration::from_millis(500), accounts.next()).await {
+        Ok(event) => {
+            accounts.handle(event);
+            true
+        }
+        Err(_) => false,
+    }
+}
+
+#[tokio::test]
+async fn a_check_waiting_on_its_load_cant_bring_a_refused_key_back() {
+    let scratch = Scratch::new("key-refused-held-load");
+    let peer = peer(EMPTY_CATALOG);
+    let (mut accounts, tag) = ready_then_checking(&scratch, peer.clone()).await;
+    accounts.connection_event(ConnectionEvent::Refused { tag });
+    while step(&mut accounts).await {}
+    assert_eq!(accounts.connections.view.anthropic, KeyView::Unconfirmed);
+    assert!(accounts.connections.verified.is_none());
+    assert_eq!(starts(&peer), 1, "only the startup check read the catalog");
+    accounts.connection_event(ConnectionEvent::Op(ConnectionOp::CheckAnthropicKey));
+    settle(&mut accounts).await;
+    assert_eq!(accounts.connections.view.anthropic, KeyView::Ready);
+    assert_ne!(
+        accounts
+            .connections
+            .verified
+            .as_ref()
+            .expect("verified")
+            .tag,
+        tag
+    );
+    assert_eq!(starts(&peer), 2);
+    accounts
+        .close(tokio::time::Instant::now(), tokio::time::Instant::now())
+        .await;
+}
+
+#[tokio::test]
+async fn a_refusal_during_a_checks_catalog_read_drops_it_and_its_key() {
+    let scratch = Scratch::new("key-refused-catalog-read");
+    let (mut accounts, tag) = ready_then_checking(&scratch, peer(EMPTY_CATALOG)).await;
+    assert!(step(&mut accounts).await, "the load");
+    assert!(
+        accounts.connections.read.is_some(),
+        "the catalog read is under way"
+    );
+    accounts.connection_event(ConnectionEvent::Refused { tag });
+    assert_eq!(retained_key(&accounts.connections), None);
+    while step(&mut accounts).await {}
+    assert_eq!(accounts.connections.view.anthropic, KeyView::Unconfirmed);
+    assert!(accounts.connections.verified.is_none());
+    accounts
+        .close(tokio::time::Instant::now(), tokio::time::Instant::now())
+        .await;
+}
+
+#[tokio::test]
+async fn a_check_ending_after_the_fence_closed_cant_bring_a_refused_key_back() {
+    let scratch = Scratch::new("key-refused-late-check");
+    let (mut accounts, tag) = ready_then_checking(&scratch, peer(EMPTY_CATALOG)).await;
+    assert!(step(&mut accounts).await, "the load");
+    assert!(
+        accounts.connections.read.is_some(),
+        "the catalog read is under way"
+    );
+    accounts
+        .connections
+        .verified
+        .as_ref()
+        .expect("verified")
+        .fence
+        .revoke();
+    assert!(step(&mut accounts).await, "the catalog read");
+    assert_eq!(accounts.connections.view.anthropic, KeyView::Unconfirmed);
+    accounts.connection_event(ConnectionEvent::Refused { tag });
+    assert_eq!(accounts.connections.view.anthropic, KeyView::Unconfirmed);
+    assert!(accounts.connections.verified.is_none());
+    accounts
+        .close(tokio::time::Instant::now(), tokio::time::Instant::now())
+        .await;
+}
+
+#[tokio::test]
+async fn a_refusal_settles_a_waiting_reconcile_and_ignores_other_tags() {
+    let scratch = Scratch::new("key-refused-reconcile");
+    let (mut accounts, tag) = ready_then_checking(&scratch, peer(EMPTY_CATALOG)).await;
+    accounts.connections.check_request = Some((accounts.connections.generation, 7));
+    assert_eq!(
+        accounts.connection_event(ConnectionEvent::Refused {
+            tag: ConnectionTag(tag.0 ^ 1)
+        }),
+        []
+    );
+    assert!(accounts.connections.loading);
+    assert_eq!(
+        accounts.connection_event(ConnectionEvent::Refused { tag }),
+        [
+            ControlToShell::Connections(ConnectionsView {
+                anthropic: KeyView::Unconfirmed,
+                anthropic_revision: Some(1),
+                claude_code: ClaudeCodeView::NotFound
+            }),
+            ControlToShell::AnthropicKeyReconciled {
+                request: 7,
+                read: None
+            }
+        ]
+    );
+    assert_eq!(accounts.connections.check_request, None);
+    accounts
+        .close(tokio::time::Instant::now(), tokio::time::Instant::now())
+        .await;
+}
