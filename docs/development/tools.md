@@ -8,8 +8,8 @@ call only after the store has acknowledged the call's write.
 Slice 3's 13b-2 tool loop and slice 8's C4b-2 MCP listener hand calls to
 `Coordinator::tool_call`. The catalog contains drawing, local writes and history reads.
 Model requests offer `draw`, `draft_issue`, `search_history` and `read_history`; Kumo also gets `list_tasks`.
-Create/focus remain unoffered. MCP gets only `draw`, the intersection of model offers and
-the catalog's MCP permissions. The test tools in `dispatch/tests.rs` exercise the rest of the path.
+Create/focus remain unoffered. Foreground MCP offers only `draw` and `draft_issue` when they
+appear in the admitted build's model offer. Jobs and tool-free builds get neither.
 
 `draft_issue` stores checked title/body and an optional repository proposal in the caller's
 conversation, not a model-supplied destination thread. Its action, event, approval and ledger
@@ -17,8 +17,8 @@ result commit atomically; only then does the model receive the fixed local-draft
 durable draft still refreshes history if its model run ended while the acknowledgment was in
 flight. It grants no consent or HTTP authority; [issue actions](issues.md) describes the limits.
 
-MCP drafting remains unoffered. Its dormant dispatcher path uses a separate, closed title/body
-envelope for first calls and retries; the direct model keeps its optional repository. Both routes
+MCP drafting uses a separate, closed title/body envelope for first calls and retries; the
+direct model keeps its optional repository. Both routes
 share the run's 16-call budget: at most 16 new drafts per run, fewer if other calls use the budget.
 A retry uses no additional call or card. If the launch loses authority while a draft write is
 in flight, an already committed card may refresh history but the old launch gets no result.

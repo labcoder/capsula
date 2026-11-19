@@ -12,8 +12,10 @@ Repository access still requires installing the app for those repositories.
 
 With a configured client, the runtime executes device sign-in, verification,
 credential settlement, repository refresh, durable default selection and sign-out.
-Draft production, issue consent reception, IssueEdit and filing remain dormant;
-this account workflow grants no permission to send an issue.
+Foreground Claude Code can save a local draft, bound only to the committed default
+repository when it belongs to the verified account and is still listed. The account
+workflow grants no permission to send an issue; filing requires the user's
+[explicit confirmation on the card](issues.md).
 
 Settings retains the session of a Connect it successfully queued, including before
 the first view arrives. Every panel dismissal cancels that interactive attempt

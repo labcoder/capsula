@@ -91,6 +91,29 @@ pub(crate) fn brain(scratch: &Scratch, script: &str) -> Brain {
     brain_with(scratch, script, accounts(scratch))
 }
 
+pub(crate) fn assert_mcp_draft_schema(description: &serde_json::Value, schema: &serde_json::Value) {
+    use serde_json::json;
+
+    assert_eq!(
+        description,
+        "Save a local issue draft for user review when asked to file, open or report a GitHub issue. Supply only a nonblank title on one line (at most 256 Unicode characters) and a literal Markdown body. Keep all serialized arguments within 16 KiB, including JSON escaping. Do not include hidden format characters. This tool cannot select a repository, file an issue, authorize filing or contact GitHub."
+    );
+    assert_eq!(schema["type"], "object");
+    assert_eq!(schema["additionalProperties"], false);
+    let mut required: Vec<_> = schema["required"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|field| field.as_str().unwrap())
+        .collect();
+    required.sort_unstable();
+    assert_eq!(required, ["body", "title"]);
+    assert_eq!(
+        schema["properties"],
+        json!({"title":{"type":"string"}, "body":{"type":"string"}})
+    );
+}
+
 /// A brain on a fresh store in `scratch`, playing `script`, on `accounts`.
 pub(crate) fn brain_with(scratch: &Scratch, script: &str, accounts: Accounts) -> Brain {
     let fixture = Fixture::parse(script).expect("script");

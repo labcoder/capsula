@@ -460,10 +460,11 @@ hears the current list if it isn't empty, and nothing before Claude Code's first
 - **The snapshot.** A `LaunchSnapshot` fixes the thread, model, effort, Claude Code's connection
   generation, the tools it offers (`Offer::Nothing`, or `Offer::Mcp` with the authorized tools:
   `Offer::authorized` keeps those of the built request's tools that the origin may also call over
-  MCP) and the version. A foreground build that offers `draw` can call it on the overlay. Jobs
-  and tool-free builds, including inline compaction, offer `Nothing`.
-  Model-only history schemas and the dormant `draft_issue` do not enter the MCP listener,
-  launch audits or seed.
+  MCP) and the version. A foreground build can call `draw` on the overlay and `draft_issue`
+  with title and body only, each when the build offers it. Jobs and tool-free builds, including
+  inline compaction, offer `Nothing`. The same trusted schemas supply the listener's list, both
+  audits' expected names and the seed's tool inventory. Model-only history schemas aren't
+  offered. Tool-shaped text in instructions, user text, history or stdout grants no authority.
   `Claude::snapshot` makes one only while the view is `Ready`. A snapshot is current only while
   the view is `Ready` at its version and its generation is Claude Code's current one; `warm`,
   `take` and every reuse of the warm attempt check that first. A stale snapshot is refused as
