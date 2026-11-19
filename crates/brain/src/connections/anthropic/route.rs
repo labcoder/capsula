@@ -18,7 +18,7 @@ use crate::connections::model::budget::Budget;
 use crate::connections::model::conn::ModelClient;
 use crate::context::ConnectionTag;
 
-const SERVE_ANTHROPIC_KEY: bool = false;
+const SERVE_ANTHROPIC_KEY: bool = true;
 
 /// Hears the tag of an authority a Messages post found refused with a 401.
 pub(crate) type Refused = Arc<dyn Fn(ConnectionTag) + Send + Sync>;

@@ -98,3 +98,24 @@ Before Kumochi sends Claude Code anything of yours, it checks how that Claude Co
 the check fails, Kumochi stops using that version of Claude Code and remembers it, even after
 Disconnect, signing in again or a restart. Installing another version doesn't clear it: Kumochi
 keeps refusing that version even if you go back to it later.
+
+## Anthropic API key
+
+Settings → Accounts also has an **Anthropic API key** row. Copy a workspace-scoped API key from
+the Anthropic Console, then choose **Paste and check key**. Kumochi reads only the text on your
+clipboard and saves the key in Windows Credential Manager. It checks the key with Anthropic when
+you paste it and each time Kumochi starts. Anthropic bills your account for model usage.
+
+Once Anthropic accepts the key, its models appear under **Model** in Settings → General, and
+choosing one sends Kumo's and your tasks' messages to Anthropic with that key. **Check again**
+rechecks the saved key. **Retry** checks again when the saved state is unknown. Pasting replaces
+any saved key before Anthropic checks the new one. If a paste is refused, the row says why: for
+example, a Claude subscription token, an admin key or a key that needs a workspace header.
+
+One reply makes at most 17 requests to Anthropic, counting its tool rounds, any shortening of a
+long conversation and the follow-up work after it. A reply that reaches that limit stops with an
+error instead of sending more.
+
+**Remove key…** asks first. Confirming removes the key from Kumochi; it doesn't revoke the key at
+Anthropic. Removing the key or replacing it stops a reply that is still using it. Tasks and
+their history stay.

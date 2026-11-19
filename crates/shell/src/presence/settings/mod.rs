@@ -29,7 +29,7 @@ use crate::strings::{Strings, Text};
 
 gpui_kit::actions!(settings, [NextTab, PreviousTab]);
 
-const SHOW_ANTHROPIC_KEY_ROW: bool = false;
+const SHOW_ANTHROPIC_KEY_ROW: bool = true;
 
 pub(super) struct SettingsView {
     pub(super) model: Entity<Settings>,

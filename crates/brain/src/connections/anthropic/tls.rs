@@ -78,6 +78,10 @@ impl Connect for RouteConnector {
     async fn connect(&self) -> io::Result<Self::Io> {
         match self {
             Self::Native(tls) => {
+                // Tests never reach the network, so the production connector never dials in one.
+                if cfg!(test) {
+                    return Err(io::ErrorKind::NotConnected.into());
+                }
                 let tls = tls.as_ref().ok_or(io::ErrorKind::NotConnected)?;
                 Ok(Box::new(tls.connect().await?))
             }

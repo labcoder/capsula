@@ -15,7 +15,7 @@ use zeroize::Zeroizing;
 mod staging;
 
 #[tokio::test]
-async fn production_key_dispatch_is_unserved_without_asking_to_send() {
+async fn production_composition_serves_the_key_route_and_refuses_unadmitted_sends_unasked() {
     use crate::context::{ModelRequest, Origin};
     use crate::coordinator::{BuildKey, SendKey};
     use crate::engines::{Asks, EngineFailure, Finish, RunRequest, SendGate, TurnEvent};
@@ -23,7 +23,13 @@ async fn production_key_dispatch_is_unserved_without_asking_to_send() {
 
     let scratch = Scratch::new("dormant-key-transport");
     let mut brain = test_support::brain(&scratch, "");
-    assert!(brain.account.connections.route_input().is_none());
+    assert!(matches!(
+        brain.account.connections.route_input(),
+        Some(Input::Engines(
+            ConnectionKind::AnthropicKey,
+            Availability::Unavailable(refusal),
+        )) if refusal == model_unavailable()
+    ));
     let key = SendKey::Build(BuildKey {
         run: RunId(1),
         round: 1,

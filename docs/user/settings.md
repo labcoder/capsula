@@ -39,7 +39,8 @@ suits your display; a higher cap is smoother and uses more power. Kumochi draws 
 display's refresh divides evenly, so motion stays steady, and Settings shows that rate. On a
 75–119 Hz display that's about half the refresh; choose 120 or 144 there for smoother motion.
 
-**Model** lists the models your connected accounts offer, ChatGPT's today, and picking one
+**Model** lists the models your connected accounts offer, ChatGPT's and those of a checked
+Anthropic API key, and picking one
 makes it the default. It says **Saving…** until the background process answers; a refused save
 returns the saved model and explains why at the top of the page. Kumo and every task without a
 model of its own use the new default from their next message; a reply already under way finishes
