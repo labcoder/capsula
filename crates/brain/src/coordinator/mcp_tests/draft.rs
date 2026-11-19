@@ -147,6 +147,47 @@ fn mcp_drafts_share_the_run_limit_and_replays_do_not_charge() {
 }
 
 #[test]
+fn a_different_mcp_tool_cannot_replay_a_cached_draw_refusal() {
+    let (mut core, build) = offering(drawing());
+    let offer = Offer::Mcp(Origin::Task(T), vec![ToolName::Draw, ToolName::DraftIssue]);
+    assert!(binds(&mut core, (build, L1, T), offer, passed()));
+    let at = (build, L1, 1);
+    let origin = McpOrigin {
+        build,
+        launch: L1,
+        key: key(1),
+    };
+    let box_target = args(Some(json!({
+        "id":"s3",
+        "put":[{"highlight":{"id":"c","target":{"box":[0,0,10,10]},"style":"box"}}]
+    })));
+    let draw_error = "drawn: []; stopped: step s3: put[0].target: scene.Unsupported; here only the overlay can be drawn on, without box targets";
+    let mut call = |tool, input: &[u8], expected| {
+        let (dispatch, effects) = mcp(&mut core, at, tool, input);
+        let Dispatch::Answered(output) = dispatch else {
+            panic!("expected an immediate refusal, got {dispatch:?}");
+        };
+        assert_eq!(effects, [], "no write or other effect");
+        let reply = core.mcp_reply(&origin, &output);
+        assert_eq!((reply.text.as_str(), reply.error), (expected, true));
+    };
+    call(ToolName::Draw, &box_target, draw_error);
+    call(
+        ToolName::DraftIssue,
+        br#"{"title":"Local draft","body":"Draft body","repo":null}"#,
+        "call id already used",
+    );
+    call(ToolName::Draw, &args(None), draw_error);
+    for n in 2..=16 {
+        proposal(&mut core, (build, L1, n), PROPOSAL);
+    }
+    assert_eq!(
+        draft(&mut core, (build, L1, 17), PROPOSAL),
+        (ended(), super::super::ends_failed(Failure::Budget)),
+    );
+}
+
+#[test]
 fn revoking_an_mcp_draft_launch_drops_its_reply_but_not_its_committed_card() {
     for stop in ["esc", "rebuild", "bridge"] {
         let scratch = Scratch::new(stop);

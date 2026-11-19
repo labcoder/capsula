@@ -3,6 +3,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::fmt;
+use std::mem;
 
 use super::{Caller, LedgerKey, ReadCall, Route, Step, ToolError, ToolOutput, rehash};
 use crate::engines::ToolName;
@@ -12,7 +13,7 @@ use crate::recall::control::CancelOnDrop;
 /// the tool loop and the MCP listener charge before dispatch.
 #[derive(Default)]
 pub(crate) struct Ledger {
-    entries: HashMap<(Route, Box<str>), Entry>,
+    entries: HashMap<(Route, Box<str>), (ToolName, Entry)>,
     /// Draw calls that stopped early, so every answer to one, replays included, is an error.
     stopped: HashSet<(Route, Box<str>)>,
 }
@@ -73,6 +74,11 @@ impl From<ToolOutput> for DrawEnd {
 }
 
 impl Ledger {
+    fn insert(&mut self, key: &LedgerKey, name: ToolName, entry: Entry) {
+        self.entries
+            .insert((key.route, key.call.clone()), (name, entry));
+    }
+
     /// The answer to a key that already has an entry, or `None` for a key seen first.
     pub(super) fn retry(
         &mut self,
@@ -81,7 +87,10 @@ impl Ledger {
         name: ToolName,
         args: &[u8],
     ) -> Option<Step> {
-        let entry = self.entries.get_mut(&(key.route, key.call.clone()))?;
+        let (owner, entry) = self.entries.get_mut(&(key.route, key.call.clone()))?;
+        if matches!(key.route, Route::Mcp(_)) && *owner != name {
+            return Some(Step::Answer(ToolOutput::Error(ToolError::Reused)));
+        }
         if let Entry::Reading { call, .. } = entry
             && let Err(error) = call.control.check()
         {
@@ -132,7 +141,7 @@ impl Ledger {
     pub(crate) fn drawing(&self, key: &LedgerKey) -> bool {
         matches!(
             self.entries.get(&(key.route, key.call.clone())),
-            Some(Entry::Reserved { .. } | Entry::Drawing { .. })
+            Some((_, Entry::Reserved { .. } | Entry::Drawing { .. }))
         )
     }
 
@@ -145,19 +154,18 @@ impl Ledger {
     pub(crate) fn refuse_stopped(&mut self, key: &LedgerKey, output: ToolOutput) {
         let id = (key.route, key.call.clone());
         self.stopped.insert(id.clone());
-        self.entries.insert(id, Entry::Refused(output));
+        self.entries
+            .insert(id, (ToolName::Draw, Entry::Refused(output)));
     }
 
-    pub(crate) fn refuse(&mut self, key: &LedgerKey, error: ToolError) {
-        self.entries.insert(
-            (key.route, key.call.clone()),
-            Entry::Refused(ToolOutput::Error(error)),
-        );
+    pub(crate) fn refuse(&mut self, key: &LedgerKey, name: ToolName, error: ToolError) {
+        self.insert(key, name, Entry::Refused(ToolOutput::Error(error)));
     }
 
     pub(super) fn reserve(&mut self, key: &LedgerKey, caller: Caller) {
-        self.entries.insert(
-            (key.route, key.call.clone()),
+        self.insert(
+            key,
+            ToolName::Draw,
             Entry::Reserved {
                 waiting: vec![caller],
             },
@@ -166,21 +174,14 @@ impl Ledger {
 
     pub(super) fn bind_draw(&mut self, key: &LedgerKey, hash: [u8; 32]) {
         let id = (key.route, key.call.clone());
-        match self.entries.remove(&id) {
-            Some(Entry::Reserved { waiting }) => {
-                self.entries.insert(
-                    id,
-                    Entry::Drawing {
-                        hash,
-                        waiting,
-                        terminal: false,
-                    },
-                );
-            }
-            Some(other) => {
-                self.entries.insert(id, other);
-            }
-            None => {}
+        if let Some((_, entry)) = self.entries.get_mut(&id)
+            && let Entry::Reserved { waiting } = entry
+        {
+            *entry = Entry::Drawing {
+                hash,
+                waiting: mem::take(waiting),
+                terminal: false,
+            };
         }
     }
 
@@ -191,9 +192,12 @@ impl Ledger {
         }
         self.entries.insert(
             id,
-            Entry::Streaming {
-                waiting: vec![caller],
-            },
+            (
+                ToolName::Draw,
+                Entry::Streaming {
+                    waiting: vec![caller],
+                },
+            ),
         );
         true
     }
@@ -204,67 +208,57 @@ impl Ledger {
     )]
     pub(crate) fn bind_stream(&mut self, key: &LedgerKey, hash: [u8; 32], canonical: bool) {
         let id = (key.route, key.call.clone());
-        match self.entries.remove(&id) {
-            Some(Entry::Streaming { waiting }) => {
-                self.entries.insert(
-                    id,
-                    Entry::Drawing {
-                        hash,
-                        waiting,
-                        terminal: !canonical,
-                    },
-                );
-            }
-            Some(other) => {
-                self.entries.insert(id, other);
-            }
-            None => {}
+        if let Some((_, entry)) = self.entries.get_mut(&id)
+            && let Entry::Streaming { waiting } = entry
+        {
+            *entry = Entry::Drawing {
+                hash,
+                waiting: mem::take(waiting),
+                terminal: !canonical,
+            };
         }
     }
 
     pub(crate) fn drawn(&mut self, key: &LedgerKey, end: DrawEnd) -> Drawn {
         let DrawEnd { output, stopped } = end;
         let id = (key.route, key.call.clone());
-        let entry = self.entries.remove(&id);
-        if stopped && matches!(entry, Some(Entry::Reserved { .. } | Entry::Drawing { .. })) {
-            self.stopped.insert(id.clone());
+        let Some((_, entry)) = self.entries.get_mut(&id) else {
+            return Drawn::Stale;
+        };
+        if stopped && matches!(entry, Entry::Reserved { .. } | Entry::Drawing { .. }) {
+            self.stopped.insert(id);
         }
         match entry {
-            Some(Entry::Reserved { waiting }) => {
-                let answers = waiting
+            Entry::Reserved { waiting } => {
+                let answers = mem::take(waiting)
                     .into_iter()
                     .map(|caller| (caller, output.clone()))
                     .collect();
-                self.entries.insert(id, Entry::Refused(output));
+                *entry = Entry::Refused(output);
                 Drawn::Refused(answers)
             }
-            Some(Entry::Drawing {
+            Entry::Drawing {
                 hash,
                 waiting,
                 terminal,
-            }) => {
-                self.entries.insert(
-                    id,
-                    Entry::Running {
-                        hash,
-                        output,
-                        waiting,
-                        terminal,
-                    },
-                );
+            } => {
+                let hash = *hash;
+                *entry = Entry::Running {
+                    hash,
+                    output,
+                    waiting: mem::take(waiting),
+                    terminal: *terminal,
+                };
                 Drawn::Commit(hash)
             }
-            Some(other) => {
-                self.entries.insert(id, other);
-                Drawn::Stale
-            }
-            None => Drawn::Stale,
+            _ => Drawn::Stale,
         }
     }
 
-    pub(super) fn reading(&mut self, call: &ReadCall, caller: Caller) {
-        self.entries.insert(
-            (call.key.route, call.key.call.clone()),
+    pub(super) fn reading(&mut self, name: ToolName, call: &ReadCall, caller: Caller) {
+        self.insert(
+            &call.key,
+            name,
             Entry::Reading {
                 call: Box::new(call.clone()),
                 waiting: vec![caller],
@@ -275,7 +269,7 @@ impl Ledger {
 
     pub(crate) fn read_call(&self, key: &LedgerKey) -> Option<&ReadCall> {
         match self.entries.get(&(key.route, key.call.clone()))? {
-            Entry::Reading { call, .. } => Some(call),
+            (_, Entry::Reading { call, .. }) => Some(call),
             _ => None,
         }
     }
@@ -286,22 +280,11 @@ impl Ledger {
         output: ToolOutput,
     ) -> Option<super::CommitCall> {
         let id = (key.route, key.call.clone());
-        if !matches!(self.entries.get(&id), Some(Entry::Reading { .. })) {
+        let (_, entry) = self.entries.get_mut(&id)?;
+        let Entry::Reading { call, waiting, .. } = entry else {
             return None;
-        }
-        let Entry::Reading { call, waiting, .. } = self.entries.remove(&id)? else {
-            unreachable!()
         };
-        self.entries.insert(
-            id,
-            Entry::Running {
-                hash: call.hash,
-                output: output.clone(),
-                waiting,
-                terminal: false,
-            },
-        );
-        Some(super::CommitCall {
+        let commit = super::CommitCall {
             key: key.clone(),
             thread: call.thread,
             tool: call.tool,
@@ -309,19 +292,28 @@ impl Ledger {
             write: super::LocalWrite::None,
             output,
             then: None,
-        })
+        };
+        *entry = Entry::Running {
+            hash: commit.hash,
+            output: commit.output.clone(),
+            waiting: mem::take(waiting),
+            terminal: false,
+        };
+        Some(commit)
     }
 
     pub(super) fn running(
         &mut self,
         key: &LedgerKey,
+        name: ToolName,
         hash: [u8; 32],
         output: ToolOutput,
         first: Caller,
     ) {
         let waiting = vec![first];
-        self.entries.insert(
-            (key.route, key.call.clone()),
+        self.insert(
+            key,
+            name,
             Entry::Running {
                 hash,
                 output,
@@ -335,62 +327,55 @@ impl Ledger {
     /// unless the key was running, so a second acknowledgement does nothing.
     pub(crate) fn committed(&mut self, key: &LedgerKey) -> Option<Vec<(Caller, ToolOutput)>> {
         let id = (key.route, key.call.clone());
-        match self.entries.remove(&id) {
-            Some(Entry::Running {
-                hash,
-                output,
-                waiting,
-                terminal,
-            }) => {
-                let answers = waiting
-                    .into_iter()
-                    .map(|caller| (caller, output.clone()))
-                    .collect();
-                self.entries.insert(
-                    id,
-                    if terminal {
-                        Entry::Refused(output)
-                    } else {
-                        Entry::Done { hash, output }
-                    },
-                );
-                Some(answers)
-            }
-            Some(other) => {
-                self.entries.insert(id, other);
-                None
-            }
-            None => None,
-        }
+        let (name, entry) = self.entries.remove(&id)?;
+        let Entry::Running {
+            hash,
+            output,
+            waiting,
+            terminal,
+        } = entry
+        else {
+            self.entries.insert(id, (name, entry));
+            return None;
+        };
+        let answers = waiting
+            .into_iter()
+            .map(|caller| (caller, output.clone()))
+            .collect();
+        let entry = if terminal {
+            Entry::Refused(output)
+        } else {
+            Entry::Done { hash, output }
+        };
+        self.entries.insert(id, (name, entry));
+        Some(answers)
     }
 
     /// The store refused `key`'s write on its own check: the key stays refused with `error`, and
     /// every caller waiting on it is returned to be answered with it.
     pub(crate) fn refused(&mut self, key: &LedgerKey, error: ToolError) -> Vec<Caller> {
         let id = (key.route, key.call.clone());
-        match self.entries.remove(&id) {
-            Some(Entry::Running { waiting, .. } | Entry::Reading { waiting, .. }) => {
-                self.entries
-                    .insert(id, Entry::Refused(ToolOutput::Error(error)));
-                waiting
-            }
-            Some(other) => {
-                self.entries.insert(id, other);
-                Vec::new()
-            }
-            None => Vec::new(),
-        }
+        let Some((_, entry)) = self.entries.get_mut(&id) else {
+            return Vec::new();
+        };
+        let (Entry::Running { waiting, .. } | Entry::Reading { waiting, .. }) = entry else {
+            return Vec::new();
+        };
+        let waiting = mem::take(waiting);
+        *entry = Entry::Refused(ToolOutput::Error(error));
+        waiting
     }
 
     /// The store refused `key`'s write: nobody is answered and the key stays refused.
     pub(crate) fn failed(&mut self, key: &LedgerKey) {
         let id = (key.route, key.call.clone());
-        if let Some(
+        if let Some((
+            _,
             entry @ (Entry::Reserved { .. }
             | Entry::Streaming { .. }
             | Entry::Drawing { .. }
             | Entry::Running { .. }),
-        ) = self.entries.get_mut(&id)
+        )) = self.entries.get_mut(&id)
         {
             *entry = Entry::Refused(ToolOutput::Error(ToolError::Ended));
         }
