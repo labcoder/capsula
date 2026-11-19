@@ -262,6 +262,13 @@ impl Connections {
         Some(Input::Engines(ConnectionKind::AnthropicKey, availability))
     }
 
+    /// A refusal retires the key, and the account hears which connection it was.
+    fn refuse(&mut self) {
+        self.refused = self.verified.as_ref().map(|verified| verified.tag);
+        self.retire();
+        self.models.clear();
+    }
+
     fn retire(&mut self) {
         self.fresh = false;
         if let Some(verified) = self.verified.take() {
@@ -768,14 +775,8 @@ impl Accounts {
                     }
                     Err(CheckError::Rejected(reason)) => {
                         if self.connections.transport.is_some() {
-                            self.connections.refused = self
-                                .connections
-                                .verified
-                                .as_ref()
-                                .map(|verified| verified.tag);
-                            self.connections.retire();
+                            self.connections.refuse();
                             self.connections.key = None;
-                            self.connections.models.clear();
                         }
                         self.connections.view.anthropic = KeyView::Rejected(reason);
                     }
@@ -807,9 +808,7 @@ impl Accounts {
                         read: None,
                     }
                 });
-                self.connections.refused = Some(tag);
-                self.connections.retire();
-                self.connections.models.clear();
+                self.connections.refuse();
                 // A Check already waiting on its load or its catalog read can't bring the key back.
                 self.connections.advance();
                 self.connections.loading = false;
