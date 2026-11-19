@@ -678,7 +678,7 @@ async fn told_at_the_grant(shell: &mut Shell<tokio::io::DuplexStream>, go: &toki
 }
 
 /// The run's history line says the picture went with it.
-fn stored_with_its_picture(scratch: &Scratch, pinned: bool) {
+fn stored_with_its_picture(scratch: &Scratch, task: Option<ThreadId>) {
     let screens: Vec<Option<String>> = Store::open(&scratch.db())
         .unwrap()
         .conn_for_tests()
@@ -688,9 +688,21 @@ fn stored_with_its_picture(scratch: &Scratch, pinned: bool) {
         .unwrap()
         .collect::<Result<_, _>>()
         .unwrap();
-    let mut expected = vec![None; usize::from(pinned)];
+    let mut expected = vec![None; usize::from(task.is_some())];
     expected.push(Some("screen".to_owned()));
     assert_eq!(screens, expected);
+}
+
+fn seed_task_for_a_screen_hold(scratch: &Scratch) -> ThreadId {
+    let mut store = Store::open(&scratch.db()).unwrap();
+    let task = ThreadId(1);
+    store
+        .begin_turn(task, Some("Task"), RunId(1), "earlier words")
+        .unwrap();
+    store
+        .end_run(task, RunId(1), &[], crate::store::RunEnd::Done)
+        .unwrap();
+    task
 }
 
 async fn recognize_screen_recipient(
@@ -732,17 +744,7 @@ async fn a_screen_hold_reaches_its_run_with_its_picture(first: First) {
     type Request = <crate::screen::Holds as crate::supervise::Kind>::Request;
     type Reply = <crate::screen::Holds as crate::supervise::Kind>::Reply;
     let scratch = Scratch::new("hold-screen-picture");
-    let task = (first == First::Picture).then(|| {
-        let mut store = Store::open(&scratch.db()).unwrap();
-        let task = ThreadId(1);
-        store
-            .begin_turn(task, Some("Task"), RunId(1), "earlier words")
-            .unwrap();
-        store
-            .end_run(task, RunId(1), &[], crate::store::RunEnd::Done)
-            .unwrap();
-        task
-    });
+    let task = (first == First::Picture).then(|| seed_task_for_a_screen_hold(&scratch));
     let choice = ModelChoice {
         model: ModelSlug::new("gpt-6-sol").unwrap(),
         effort: if task.is_some() {
@@ -830,7 +832,7 @@ async fn a_screen_hold_reaches_its_run_with_its_picture(first: First) {
     let mut expected = vec!["earlier words"; usize::from(task.is_some())];
     expected.push("words and a picture");
     assert_eq!(users(&scratch), expected);
-    stored_with_its_picture(&scratch, task.is_some());
+    stored_with_its_picture(&scratch, task);
 }
 
 #[tokio::test]
