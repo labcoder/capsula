@@ -760,8 +760,9 @@ impl LinkHandle {
     }
 
     /// Ends `session`'s connection, as a malformed frame does, so the link reconnects. Nothing
-    /// happens once that connection has ended. Never blocks. On return its speaker takes no
-    /// further command, however late the link thread's teardown is.
+    /// happens once that connection has ended. It waits on no I/O or join, only briefly on the
+    /// output owner's mutex. On return the output owner holds no command sender for that
+    /// generation's speaker, however late the link thread's teardown is.
     pub fn end(&self, session: &Session) {
         #[cfg(any(test, feature = "test-support"))]
         if let Some(recording) = &self.control_recording
