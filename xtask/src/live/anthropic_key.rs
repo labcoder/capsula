@@ -157,6 +157,16 @@ const PLAN: [Launch; 3] = [
     },
 ];
 
+/// The plan's last launch alone: no key and both slices zero, so it spends nothing; it proves the
+/// launch's process watch and quit on the real images before a paid run.
+const LAST: &[Launch] = std::slice::from_ref(&PLAN[PLAN.len() - 1]);
+
+/// Whether any launch in `plan` holds a slice, which the ledger must grant before it starts.
+fn spends(plan: &[Launch]) -> bool {
+    plan.iter()
+        .any(|launch| launch.slice.catalog > 0 || launch.slice.messages > 0)
+}
+
 // The slices add up to the approval, and the final restart has none.
 const _: () = {
     let (mut catalog, mut messages, mut index) = (0, 0, 0);
@@ -176,7 +186,17 @@ const _: () = {
     );
 };
 
+/// The whole check.
 pub(super) fn run() -> Result<()> {
+    run_plan(&PLAN)
+}
+
+/// Only [`LAST`]: the real launch's setup, watch and quit, spending nothing.
+pub(super) fn quiet() -> Result<()> {
+    run_plan(LAST)
+}
+
+fn run_plan(plan: &[Launch]) -> Result<()> {
     let live = std::env::current_exe()?
         .parent()
         .and_then(Path::parent)
@@ -195,10 +215,15 @@ pub(super) fn run() -> Result<()> {
             .parent()
             .context("a launch folder has a parent")?
             .to_owned();
-        let mut ledger = Ledger::create(&ledger_path()?)?;
-        for (index, launch) in PLAN.iter().enumerate() {
+        // A run that spends nothing neither needs nor touches the ledger.
+        let mut ledger = spends(plan)
+            .then(|| ledger_path().and_then(|path| Ledger::create(&path)))
+            .transpose()?;
+        for (index, launch) in plan.iter().enumerate() {
             let number = index + 1;
-            ledger.grant(number, launch.slice)?;
+            if let Some(ledger) = &mut ledger {
+                ledger.grant(number, launch.slice)?;
+            }
             println!(
                 "launch {number}: {} model-list and {} Messages requests at most",
                 launch.slice.catalog, launch.slice.messages
@@ -743,6 +768,23 @@ mod tests {
             !no_strangers(&entries(&[(1, 0, false), (30, 10, true)]), me, ours),
             "a shell the brain relaunched"
         );
+    }
+
+    #[test]
+    fn quiet_is_the_last_launch_alone_and_spends_nothing() {
+        let quiet = LAST;
+        assert_eq!(quiet.len(), 1);
+        assert_eq!(
+            quiet[0].slice,
+            Slice {
+                catalog: 0,
+                messages: 0
+            }
+        );
+        let expects: Vec<Expect> = quiet[0].steps.iter().map(|step| step.expect).collect();
+        assert_eq!(expects, [Expect::Quiet]);
+        assert!(!spends(quiet));
+        assert!(spends(&PLAN));
     }
 
     #[test]

@@ -93,6 +93,11 @@ tasks:
                     that are never refunded; stops at the first unexpected state; run only on
                     the Captain's go with the owner present (cargo run --release --package xtask
                     --features kumochi-protocol/gate-identity -- live anthropic-key)
+  live anthropic-key quiet
+                    only that check's last launch: the gate shell and brain with no key and
+                    both key budgets at zero, quiet for 30 seconds, then quit; sends nothing
+                    and leaves the ledger alone; still launches the gate shell, so run it only
+                    on the Captain's go
   live catalog-provenance
                     one model-list request with the dev account's saved session, never
                     renewing it; writes target\\live\\<time>\\catalog-provenance.json with
