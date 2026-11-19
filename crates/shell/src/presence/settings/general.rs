@@ -341,8 +341,6 @@ impl SettingsView {
     }
 }
 
-/// The radio showing the newest choice, queued or saved: Kit gives a checked radio no click
-/// handler, so showing the saved cap while a new one is queued would swallow a quick reversal.
 /// Each offered row's label, by [`label`] against the other offered rows.
 fn labels(choices: &[(ConnectionKind, ModelSlug, String)], strings: &Strings) -> Vec<String> {
     choices
@@ -371,6 +369,8 @@ fn label(
     strings.model_on(name, &strings.get(provider))
 }
 
+/// The radio showing the newest choice, queued or saved: Kit gives a checked radio no click
+/// handler, so showing the saved cap while a new one is queued would swallow a quick reversal.
 fn choice_index(model: &Settings) -> usize {
     model
         .max_frame_rate_choice()

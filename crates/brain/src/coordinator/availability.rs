@@ -492,9 +492,6 @@ impl Coordinator {
         }
     }
 
-    /// Why a run on `route` can't go on, if it can't: another sign-in on its kind needs a sign-in
-    /// on `ChatGPT` and offers Open Settings on another kind, since a notice's Sign in starts
-    /// `ChatGPT`'s; an unavailable kind gives its own reason.
     /// Whether a send on `route` may go to `model`: on any route but the key's, yes; on the
     /// key's, only while its checked catalog offers `model` now.
     pub(super) fn offered(&self, route: Route, model: Option<&str>) -> bool {
@@ -505,6 +502,9 @@ impl Coordinator {
             }))
     }
 
+    /// Why a run on `route` can't go on, if it can't: another sign-in on its kind needs a sign-in
+    /// on `ChatGPT` and offers Open Settings on another kind, since a notice's Sign in starts
+    /// `ChatGPT`'s; an unavailable kind gives its own reason.
     pub(super) fn refusal(&self, route: Route) -> Option<UserError> {
         match self.availability_of(route.kind) {
             Availability::Ready(ready) if ready.connection == route.tag => None,
