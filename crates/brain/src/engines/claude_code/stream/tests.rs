@@ -73,6 +73,31 @@ fn a_recorded_answer_yields_its_text_once_then_its_usage_and_end() {
 }
 
 #[test]
+fn a_fragmented_long_line_searches_each_new_byte_once_even_after_compaction() {
+    const LENGTH: usize = 64 * 1024;
+    let mut framer = LineFramer::default();
+    framer.push(b"head\r\nx").unwrap();
+    assert_eq!(framer.next_line().unwrap(), Some(b"head".as_slice()));
+    assert_eq!(framer.next_line().unwrap(), None);
+    for len in 2..=LENGTH {
+        framer.push(b"x").unwrap();
+        assert_eq!(framer.next_line().unwrap(), None);
+        assert_eq!(framer.scanned, b"head\r\n".len() + len);
+    }
+    assert_eq!(framer.next_line().unwrap(), None);
+    assert_eq!(framer.scanned, b"head\r\n".len() + LENGTH);
+    framer.push(b"\r\nnext\n").unwrap();
+    assert_eq!(
+        framer.next_line().unwrap(),
+        Some(vec![b'x'; LENGTH].as_slice())
+    );
+    assert_eq!(framer.next_line().unwrap(), Some(b"next".as_slice()));
+    assert_eq!(framer.next_line().unwrap(), None);
+    assert_eq!(framer.scanned, b"head\r\n\r\nnext\n".len() + LENGTH);
+    assert!(!framer.has_partial());
+}
+
+#[test]
 fn a_retried_request_yields_one_native_turn_and_the_answer_once() {
     // Recorded with the first stream cut mid-message: Claude Code retried it and streamed only
     // the second attempt, announced by `system:api_retry`.

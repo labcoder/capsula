@@ -478,7 +478,8 @@ on:
 
 - **`LineFramer`** charges every byte to a 16 MiB budget [guess] before framing, ignored lines
   included, and yields complete lines of at most 1 MiB [guess], line feed excluded. A partial line
-  past the bound fails at once.
+  past the bound fails at once. When more bytes arrive, newline search resumes at the first
+  unsearched byte, even after compacting away earlier complete lines.
 - **`StreamMapper::line`** maps one line to `Event` (a text delta), `End` (the question's usage
   and how it ended), `Control` (a `control_response`, for the audit before input), `Init` (the
   facts for the audit after it) or `Ignored`. Unknown types are counted and ignored.
