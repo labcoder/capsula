@@ -914,3 +914,52 @@ fn a_release_before_the_owner_accepts_collection_is_a_cancel(cx: &mut TestAppCon
     });
     assert!(samples.try_recv().is_err(), "no PCM");
 }
+
+#[gpui::test]
+fn an_admission_before_a_busy_bind_still_starts_the_hold(cx: &mut TestAppContext) {
+    let (owner, _data, _controls) = ready(cx);
+    let started = starts(&owner, cx);
+    owner.update(cx, |owner, cx| {
+        key_down(owner, 1, cx);
+        owner.voice.gates.recognized(G1, true);
+        // Recognition's bind and the admission's are both busy.
+        owner.link.output().refuse(2);
+        let token = owner.link.microphone_gate().arm(G1).expect("fresh hold");
+        owner.link.track_input(G1);
+        let stamp = crate::presence::voice::Stamp {
+            target: owner.voice.target.get(),
+            session: 1,
+            choice: owner.link.choice_revision(),
+        };
+        owner.voice_intent(
+            Intent::Recognized {
+                gesture: G1,
+                generation: Ok(token),
+            },
+            stamp,
+            0,
+            None,
+            TalkHeld::default(),
+            cx,
+        );
+        owner.voice_status(1, G1, HoldStatus::Admitted, cx);
+    });
+    owner.read_with(cx, |owner, _| {
+        let gates = owner.voice.gates.list.borrow();
+        let gate = gates
+            .iter()
+            .find(|gate| gate.gesture == G1)
+            .expect("gate 1");
+        assert!(!gate.bound, "the bind is still busy");
+        assert!(
+            matches!(gate.stage, super::Stage::Admitted { .. }),
+            "admitted"
+        );
+        assert_eq!(gate.rechecks, 2);
+    });
+    assert_eq!(started.get(), 0);
+    cx.background_executor.advance_clock(super::RECHECK);
+    cx.run_until_parked();
+    assert_eq!(started.get(), 1, "bound, then started");
+}
+
