@@ -173,7 +173,8 @@ impl<H> TalkEscape<H> {
         self.refused
     }
 
-    #[cfg(feature = "test-support")]
+    /// Whether the current hold owns its Escape registration.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn held(&self) -> bool {
         self.hotkey.is_some()
     }
