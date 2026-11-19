@@ -9,6 +9,7 @@ use kumochi_protocol::message::{
     ConnectionOp, ControlToShell, KeyRecoveryRead, KeyRejection, KeyRemovalFailure,
     KeyStageFailure, KeyStageId, KeyView,
 };
+#[cfg(any(test, feature = "test-support"))]
 use zeroize::Zeroizing;
 
 use crate::platform::clipboard::{ClipboardRefusal, KeyClipboardResult, MAX_KEY_CLIPBOARD_BYTES};
