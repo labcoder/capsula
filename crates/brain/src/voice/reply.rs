@@ -184,16 +184,52 @@ impl Reply {
         self.pump(out);
     }
 
-    /// A committed step's `say`. The text before it ends a segment first, so speech keeps the
-    /// answer's order. A `say` over [`MAX_SAY_BYTES`] or with nothing to speak stays silent.
-    pub(crate) fn say(&mut self, step: StepRef, say: &str, out: &mut Vec<Speech>) {
+    /// Reserves the next segment id for a step about to commit. The caller holds later text
+    /// until the step settles.
+    pub(crate) fn reserve_say(&mut self, say: &str, out: &mut Vec<Speech>) -> Option<SegmentId> {
         let mut cuts = Vec::new();
         self.segmenter.flush(&mut cuts);
         self.add_cuts(cuts, out);
-        if say.len() <= MAX_SAY_BYTES && !say.trim().is_empty() {
-            self.add(Source::Say(step), say.to_owned(), out);
+        let reserved = (self.synthesis == Synthesis::Open
+            && self.segments.len() < max_segments()
+            && say.len() <= MAX_SAY_BYTES
+            && !say.trim().is_empty())
+        .then(|| id(self.segments.len()));
+        if reserved.is_none() {
+            self.pump(out);
+        }
+        reserved
+    }
+
+    /// Binds a reserved segment to its durable scene before announcing it. A producer that
+    /// stopped during the write still owes an empty final, unless the run was revoked.
+    pub(crate) fn publish_say(
+        &mut self,
+        segment: SegmentId,
+        step: StepRef,
+        say: &str,
+        out: &mut Vec<Speech>,
+    ) {
+        if self.synthesis == Synthesis::Revoked {
+            return;
+        }
+        assert_eq!(
+            segment,
+            id(self.segments.len()),
+            "reply text must wait for the drawing receipt"
+        );
+        self.append(Source::Say(step), say.to_owned(), out);
+        if self.synthesis == Synthesis::Stopped {
+            self.finals(out);
         }
         self.pump(out);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn say(&mut self, step: StepRef, say: &str, out: &mut Vec<Speech>) {
+        if let Some(segment) = self.reserve_say(say, out) {
+            self.publish_say(segment, step, say, out);
+        }
     }
 
     /// The producer finished: the tail becomes the last segment.
@@ -473,6 +509,10 @@ impl Reply {
         if self.synthesis != Synthesis::Open || self.segments.len() >= max_segments() {
             return;
         }
+        self.append(source, text, out);
+    }
+
+    fn append(&mut self, source: Source, text: String, out: &mut Vec<Speech>) {
         let step = match source {
             Source::Say(step) => Some(step),
             Source::Text(_) => None,

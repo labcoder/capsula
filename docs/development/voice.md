@@ -293,11 +293,15 @@ sequenceDiagram
   C->>C: final? end Done
 ```
 
-- **Feeding the reply.** Text deltas and a newly published drawing step's `say` feed the run's
-  reply. If no speech segment is assigned for nonblank `say`, the brain saves those words once
-  as ordinary Chat text, even within a spoken run. The same stored line serves history after
-  reconnect; it isn't read from the recovered drawing. A failed scene drops its say segments.
-  Speech frames for the shell wait behind a pending step, as the run's text does.
+- **Feeding the reply.** The brain reserves a drawing step's optional speech segment before
+  writing the step. It announces a reserved segment only after the corresponding live step
+  commits. If nonblank `say` gets no reservation, the step and its Chat text share a transaction.
+  Later reply text waits behind the drawing so neither Chat nor history puts it ahead of the line.
+  Chat reads the saved event; replaying a drawing doesn't emit it again. An assigned segment
+  that later fails is not written as a new Chat line.
+- **Drawing timing.** The presenter doesn't estimate narration time for any step, assigned or
+  not. No normal launch opens a speaker here. Keep step narration off when enabling ordinary
+  spoken replies until the conductor supplies real playback timing.
 - **The pump** is owned by the core loop and read only while the data queue has room. With no
   pump, a Speak fails as if TTS weren't loaded, and the run's remaining segments end empty.
 - **Draining.** When the engine finishes, the reply closes. The run ends `done` only once its

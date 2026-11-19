@@ -184,6 +184,7 @@ fn runs(items: Vec<Item>, current: RunId) -> Result<Vec<Vec<Item>>, BuildError> 
                 Body::Call { .. } | Body::History { .. } => return Err(BuildError::InvalidCut),
                 Body::User(_)
                 | Body::Assistant(_)
+                | Body::Narration(_)
                 | Body::Native { .. }
                 | Body::Result { .. }
                 | Body::Recall { .. } => {}
@@ -214,8 +215,9 @@ fn runs(items: Vec<Item>, current: RunId) -> Result<Vec<Vec<Item>>, BuildError> 
 ///
 /// A run whose stored rounds all came from this run's route, its kind and tag, and pair up (see
 /// [`replayable`]) replays them natively, each round's items then its results, and of its text
-/// only what came after its last round, which a `ChatGPT` round's items carry (D13-M1). Any other
-/// run replays as its text only, so no call or result travels without its pair.
+/// only what came after its last round, which a `ChatGPT` round's items carry (D13-M1).
+/// With local narration, the ordered assistant rows supply the answer text instead.
+/// Any other run replays as text only, so no call or result travels without its pair.
 pub(super) fn render(
     snapshot: &Snapshot<'_>,
     run: &RunSnapshot,
@@ -230,7 +232,12 @@ pub(super) fn render(
         .map_or(ConnectionKind::ChatGpt, |choice| choice.connection);
     let native = kind != ConnectionKind::ClaudeCode && replayable(kind, run.connection, items);
     // A `ChatGPT` round's items carry its text; the key's carry only its calls, so its text stays.
-    let carried = native && kind == ConnectionKind::ChatGpt;
+    let local_narration = native
+        && kind == ConnectionKind::ChatGpt
+        && items
+            .iter()
+            .any(|item| matches!(item.body, Body::Narration(_)));
+    let carried = native && kind == ConnectionKind::ChatGpt && !local_narration;
     let after_rounds = items
         .iter()
         .rposition(|item| {
@@ -251,7 +258,7 @@ pub(super) fn render(
                     None => text.clone(),
                 },
             }),
-            Body::Assistant(text) => match input.last_mut() {
+            Body::Assistant(text) | Body::Narration(text) => match input.last_mut() {
                 Some(InputItem::Message {
                     role: Role::Assistant,
                     text: open,
@@ -282,7 +289,12 @@ pub(super) fn render(
             }
             Body::Native { item, .. } => {
                 if native {
-                    input.push(InputItem::Native(item.clone()));
+                    let item = if local_narration {
+                        without_provider_text(item)?
+                    } else {
+                        Some(item.clone())
+                    };
+                    input.extend(item.map(InputItem::Native));
                 }
             }
             Body::Result { call, output } => {
@@ -304,6 +316,31 @@ pub(super) fn render(
         }
     }
     Ok(input)
+}
+
+fn without_provider_text(
+    item: &crate::engines::Opaque,
+) -> Result<Option<crate::engines::Opaque>, StoreError> {
+    let mut value: serde_json::Value =
+        serde_json::from_slice(item.bytes()).map_err(|_| StoreError::RoundRecord)?;
+    if value["type"] != "message" || value["role"] != "assistant" {
+        return Ok(Some(item.clone()));
+    }
+    let Some(parts) = value["content"].as_array_mut() else {
+        return Ok(Some(item.clone()));
+    };
+    let before = parts.len();
+    parts.retain(|part| part["type"] != "output_text");
+    if parts.len() == before {
+        return Ok(Some(item.clone()));
+    }
+    if parts.is_empty() {
+        return Ok(None);
+    }
+    let bytes = serde_json::to_vec(&value).map_err(|_| StoreError::RoundRecord)?;
+    crate::engines::Opaque::new(bytes)
+        .map(Some)
+        .map_err(|_| StoreError::RoundRecord)
 }
 
 /// Whether a run's stored rounds replay natively on `kind` and `tag`: at least one native item,

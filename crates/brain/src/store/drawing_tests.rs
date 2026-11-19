@@ -147,6 +147,7 @@ fn write(
         target,
         revision,
         layout_version: 2,
+        chat: None,
         step,
     })
 }
@@ -184,6 +185,7 @@ fn replacement_clear_lists_are_bounded_unique_and_only_for_new_scenes() {
                 clear,
                 revision: 1,
                 layout_version: 2,
+                chat: None,
                 step: step("first"),
             }),
             Err(StoreError::Drawing)
@@ -200,6 +202,7 @@ fn replacement_clear_lists_are_bounded_unique_and_only_for_new_scenes() {
             clear: old[..4].to_vec(),
             revision: 1,
             layout_version: 2,
+            chat: None,
             step: step("first"),
         })
         .expect("four distinct victims are accepted")
@@ -243,6 +246,7 @@ fn a_selected_clear_failure_rolls_back_the_entire_replacement_transaction() {
             clear: vec![old_one, old_two],
             revision: 1,
             layout_version: 2,
+            chat: None,
             step: step("first"),
         })
         .expect_err("selected clear fails");
@@ -291,6 +295,7 @@ fn recovery_reconciles_a_committed_replacement_without_a_delivered_reply() {
             clear: vec![old_one, old_two],
             revision: 1,
             layout_version: 2,
+            chat: None,
             step: step("first"),
         })
         .expect("committed before losing delivery")

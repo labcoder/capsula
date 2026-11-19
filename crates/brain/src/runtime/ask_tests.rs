@@ -84,6 +84,7 @@ fn seed(scratch: &Scratch, [label, info, alt]: [&str; 3], choice: &ModelChoice) 
             target: Target::New(header),
             revision: 1,
             layout_version: 2,
+            chat: None,
             step: Arc::new(step),
         })
         .expect("step")

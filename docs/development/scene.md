@@ -21,6 +21,11 @@ flowchart LR
 
 ## Records
 
+The brain decides narration when a prepared step enters the store queue. If the step has
+nonblank `say` and no speech reservation, the step and its ordinary Chat line commit together.
+The live reply can show the line after that commit. Recovery restores original drawing records;
+history reads the committed Chat rows rather than turning the restored step into new text.
+
 The brain's provider path uses the existing cursor tokenizer and public 2D `parse_draw_record`
 gate for each closed record, then the drawing reducer's order/semantic admission and store FIFO.
 Complete-call/MCP typed preflight stays whole-envelope. A committed provider prefix can outlive
@@ -1333,11 +1338,10 @@ the same entrance envelope, including pivot translation inherited by descendants
 Generated position glides capture the sampled live start when activated and run for
 450 ms with InOut easing; a newer explicit position owner wins over a glide.
 
-The current presenter reserves no time for unavailable narration. Word offsets use
-integer proportional placement within the supplied duration, which is zero until
-speech drives activation. Authored delays and entrances keep their timing. The brain
-saves a newly published step's nonblank `say` to Chat when it has no speech segment.
-Recovery and history reads never make another Chat entry.
+The current presenter supplies zero narration time for every step, even if the brain
+reserved a speech segment. `at_word` adds no delay; authored delays and entrances
+keep their timing. The normal shell doesn't open a speaker. Don't enable step
+narration before the conductor can align the picture to playback.
 
 Esc during an explicit opacity fade-in on an object with `"enter":"none"` reveals its final
 opacity.

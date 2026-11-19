@@ -203,6 +203,9 @@ impl Snapshot<'_> {
             bytes = bytes.saturating_add(text.len() + stored.len());
             let body = match kind.as_str() {
                 "user" => Body::User(text),
+                "assistant_text" if !stored.is_empty() && narration(&stored) => {
+                    Body::Narration(text)
+                }
                 "assistant_text" => Body::Assistant(text),
                 "output_item" => rounds::native(&stored)?,
                 _ => rounds::result(&stored)?,
@@ -509,6 +512,14 @@ impl Snapshot<'_> {
         self.0.commit()?;
         Ok(())
     }
+}
+
+fn narration(body: &str) -> bool {
+    let Ok(body) = serde_json::from_str::<serde_json::Value>(body) else {
+        return false;
+    };
+    body["scene"].as_u64().is_some_and(|scene| scene > 0)
+        && body["revision"].as_u64().is_some_and(|rev| rev > 0)
 }
 
 /// The longest prefix of `text` within `cap` bytes that ends on a character boundary.

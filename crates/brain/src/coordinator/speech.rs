@@ -11,9 +11,11 @@
 use std::fmt;
 use std::time::Duration;
 
-use kumochi_protocol::message::{ControlToShell, DataToShell, OutputGeneration, RunId, StepRef};
+use kumochi_protocol::message::{
+    ControlToShell, DataToShell, OutputGeneration, RunId, SegmentId, StepRef,
+};
 
-use super::{Coordinator, Effect, Input, Notify, Run, Stale, StoreOp};
+use super::{Coordinator, Effect, Input, Notify, Run, Stale};
 use crate::store::{Interruption, RunEnd};
 use crate::voice::reply::{Failure, Reply, Revoker, Speech};
 
@@ -68,29 +70,28 @@ impl Coordinator {
         Ok(())
     }
 
-    /// A live committed step's `say` joins its run's speech or is saved to Chat.
-    pub(super) fn say(&mut self, run: RunId, step: StepRef, say: &str, effects: &mut Vec<Effect>) {
-        let Ok(current) = self.current(run) else {
-            return;
-        };
+    pub(super) fn reserve_say(
+        current: &mut Run,
+        say: &str,
+        effects: &mut Vec<Effect>,
+    ) -> Option<SegmentId> {
+        let mut out = Vec::new();
+        let reserved = current.reply.as_mut()?.reserve_say(say, &mut out);
+        carry(current, out, effects);
+        reserved
+    }
+
+    pub(super) fn publish_say(
+        current: &mut Run,
+        segment: SegmentId,
+        step: StepRef,
+        say: &str,
+        effects: &mut Vec<Effect>,
+    ) {
         if let Some(reply) = &mut current.reply {
             let mut out = Vec::new();
-            reply.say(step, say, &mut out);
-            let assigned = out.iter().any(|item| {
-                matches!(item, Speech::Queued { step: Some(assigned), .. } if *assigned == step)
-            });
+            reply.publish_say(segment, step, say, &mut out);
             carry(current, out, effects);
-            if assigned {
-                return;
-            }
-        }
-        if !say.trim().is_empty() {
-            effects.push(Effect::Store(StoreOp::DrawingSay {
-                thread: current.thread,
-                run,
-                step,
-                text: say.into(),
-            }));
         }
     }
 

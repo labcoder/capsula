@@ -15,7 +15,7 @@ use rusqlite::{Connection, OptionalExtension as _, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 
 use super::{EventKind, Store, StoreError, insert_event, insert_events, now_ms, row_id, sql_id};
-use crate::drawing::{LAYOUT_VERSION, Reply, StoredScene, Target, Write};
+use crate::drawing::{LAYOUT_VERSION, Reply, StepChat, StoredScene, Target, Write};
 
 pub(super) const MAX_BODY_BYTES: usize = 256 * limits::MAX_RECORD_BYTES;
 
@@ -123,12 +123,14 @@ impl Store {
                 revision,
                 layout_version,
                 step,
+                chat,
             } => write_step(
                 &tx,
                 (*thread, *run),
                 (target, clear),
                 (*revision, *layout_version),
                 step,
+                chat.as_ref(),
                 now,
             )?,
             Write::Cut {
@@ -161,6 +163,7 @@ fn write_step(
     (target, clear): (&Target, &[SceneId]),
     (revision, layout_version): (u32, u32),
     step: &Step,
+    chat: Option<&StepChat>,
     now: i64,
 ) -> Result<Reply, StoreError> {
     if clear.len() > MAX_VISIBLE_SCENES
@@ -175,6 +178,17 @@ fn write_step(
     let thread = sql_id(thread.0, StoreError::NoThread)?;
     let run = sql_id(run.0, StoreError::NoRun)?;
     insert_events(conn, thread, run, &[], now)?;
+    if let Some(before) = chat.and_then(|chat| chat.before.as_deref()) {
+        insert_event(
+            conn,
+            thread,
+            Some(run),
+            EventKind::AssistantText,
+            Some(before),
+            None,
+            now,
+        )?;
+    }
     let scene = match target {
         Target::New(header) => {
             if lookup(conn, thread, header.begin.surface, &header.begin.scene)?.is_some() {
@@ -216,6 +230,18 @@ fn write_step(
     )?;
     for &victim in clear {
         super::scenes::clear(conn, victim, now)?;
+    }
+    if let Some(chat) = chat {
+        let source = serde_json::json!({ "scene": scene.0, "revision": revision }).to_string();
+        insert_event(
+            conn,
+            thread,
+            Some(run),
+            EventKind::AssistantText,
+            Some(&chat.line),
+            Some(&source),
+            now,
+        )?;
     }
     Ok(Reply::Step(scene))
 }

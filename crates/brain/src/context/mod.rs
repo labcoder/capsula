@@ -128,6 +128,8 @@ impl fmt::Debug for Summary {
 pub(crate) enum Body {
     User(String),
     Assistant(String),
+    /// An unspoken drawing line, not part of a provider's carried message.
+    Narration(String),
     /// A tool call; its result is the next [`Body::History`] with the same id.
     Call {
         call: CallId,
@@ -162,6 +164,7 @@ impl fmt::Debug for Body {
         match self {
             Self::User(text) => f.debug_tuple("User").field(&text.len()).finish(),
             Self::Assistant(text) => f.debug_tuple("Assistant").field(&text.len()).finish(),
+            Self::Narration(text) => f.debug_tuple("Narration").field(&text.len()).finish(),
             Self::Call { call, .. } => f.debug_struct("Call").field("call", call).finish(),
             Self::History { call, refs } => f
                 .debug_struct("History")

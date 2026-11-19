@@ -16,7 +16,7 @@ use kumochi_scene::{
 use super::call::MAX_CALL_RECORDS;
 use super::{
     CallEnd, CallError, Drawing, Held, Input, Loss, MAX_QUEUED_JOBS, Output, Remaining, Reply,
-    StoredScene, Target, Write,
+    StepChat, StoredScene, Target, Write,
 };
 use crate::coordinator::{Effect, Stale, StoreOp};
 use crate::engines::CallId;
@@ -3315,6 +3315,7 @@ fn debug_and_display_never_carry_drawing_content() {
             target: Target::New(header.clone()),
             revision: 1,
             layout_version: 2,
+            chat: None,
             step: Arc::new(step),
         },
     ];
@@ -3383,6 +3384,44 @@ fn debug_and_display_never_carry_drawing_content() {
         end.tool_text().contains(SECRET),
         "the model hears its own ids"
     );
+}
+
+#[test]
+fn unspoken_chat_debug_redacts_text_and_bytes() {
+    const MARKER: &str = "private-narration";
+    let Record::Step(step) = parse_record(br#"{"step":{"id":"s","put":[]}}"#).expect("a step")
+    else {
+        panic!("expected a step");
+    };
+    let run = RunId(1);
+    let chat = StepChat {
+        before: Some(MARKER.into()),
+        line: MARKER.into(),
+    };
+    let printed = format!(
+        "{chat:?} {:?}",
+        [
+            Effect::Store(StoreOp::Drawing {
+                serial: 1,
+                write: Write::Step {
+                    thread: THREAD,
+                    run,
+                    target: Target::Existing(SceneId(1)),
+                    clear: Vec::new(),
+                    revision: 1,
+                    layout_version: 2,
+                    step: Arc::new(step),
+                    chat: Some(chat.clone()),
+                },
+            }),
+            Effect::DrawingReplyText {
+                run,
+                text: MARKER.into(),
+            },
+        ]
+    );
+    assert!(!printed.contains(MARKER));
+    assert!(!printed.contains(&format!("{:?}", MARKER.as_bytes())));
 }
 
 #[test]

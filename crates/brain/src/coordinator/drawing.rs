@@ -1,13 +1,21 @@
 //! V1 drawing effects share the coordinator's run fences, store FIFO and clear debt.
 
-use kumochi_protocol::message::{DataToShell, RunId, SceneId, StepRef, ThreadId};
+use kumochi_protocol::message::{DataToShell, RunId, SceneId, SegmentId, StepRef, ThreadId};
 
-use super::{Coordinator, Effect, Stale, StoreOp, speech};
+use super::{Coordinator, Effect, Stale, StoreOp, speech, unstored};
 use crate::context::{Geometry, NoCanvas, Screen};
 use crate::dispatch::{self, Dispatch, LedgerKey, ToolError, ToolOutput};
-use crate::drawing::{Drawing, Input, Loss, Output, ScreenMarks};
+use crate::drawing::{Drawing, Input, Loss, Output, Reply, ScreenMarks, StepChat, Write};
 
 const MAX_RESULTS: usize = 64;
+
+pub(super) struct StepReply {
+    serial: u64,
+    run: RunId,
+    revision: u32,
+    chat: Option<StepChat>,
+    segment: Option<SegmentId>,
+}
 
 impl Coordinator {
     pub(super) fn drawing_call(
@@ -239,7 +247,7 @@ impl Coordinator {
     }
 
     pub(super) fn drawing_output(&mut self, output: Output, effects: &mut Vec<Effect>) {
-        for effect in output.effects {
+        for mut effect in output.effects {
             if let Effect::Data(message) = &effect
                 && let Some(thread) = scene_id(message).and_then(|scene| self.drawing.thread(scene))
                 && self.deleting_thread(thread)
@@ -259,6 +267,13 @@ impl Coordinator {
                 self.drawing_revoke(scenes, effects);
                 continue;
             }
+            if let Effect::DrawingReplyText { run, text } = effect {
+                if self.current_run() == Some(run) {
+                    self.release_reply_text(run, &text, effects)
+                        .expect("the reply is current");
+                }
+                continue;
+            }
             if let Effect::Store(StoreOp::ClearScenes { scenes }) = &effect {
                 for scene in scenes {
                     if !self.clearing.iter().any(|(owed, _)| owed == scene) {
@@ -266,25 +281,10 @@ impl Coordinator {
                     }
                 }
             }
-            let say = match &effect {
-                Effect::Data(DataToShell::SceneStepCommit {
-                    run,
-                    scene,
-                    index,
-                    step,
-                }) => step.say.as_ref().map(|say| {
-                    let step = StepRef {
-                        scene: *scene,
-                        index: *index,
-                    };
-                    (*run, step, say.as_str().to_owned())
-                }),
-                _ => None,
-            };
-            effects.push(effect);
-            if let Some((run, step, say)) = say {
-                self.say(run, step, &say, effects);
+            if let Effect::Store(StoreOp::Drawing { serial, write }) = &mut effect {
+                self.reserve_step_reply(*serial, write, effects);
             }
+            self.forward_drawing_effect(effect, effects);
         }
         for end in output.calls {
             // Codes and schema field paths only: the model's ids stay in its tool result.
@@ -328,22 +328,91 @@ impl Coordinator {
         }
     }
 
-    pub(super) fn drawing_say_stored(&self, run: RunId, text: &str, effects: &mut Vec<Effect>) {
-        if run >= self.session_start
-            && (self.current_run() == Some(run)
-                || self.ending.iter().any(|held| {
-                    held.id == run
-                        && held.ending.as_ref().is_some_and(|ending| {
-                            ending.notify == super::Notify::Shell
-                                && ending.outcome == crate::store::RunEnd::Done
-                        })
-                }))
-        {
-            effects.push(Effect::Data(DataToShell::AssistantText {
+    fn forward_drawing_effect(&mut self, effect: Effect, effects: &mut Vec<Effect>) {
+        let staged = match &effect {
+            Effect::Data(DataToShell::SceneStepCommit {
                 run,
-                delta: format!("\n\n{text}\n\n").into(),
-            }));
+                scene,
+                index,
+                step,
+            }) => self
+                .drawing_reply
+                .take_if(|reply| reply.run == *run && reply.revision == *index + 1)
+                .map(|reply| {
+                    let say = reply
+                        .segment
+                        .and_then(|segment| step.say.clone().map(|text| (segment, text)));
+                    (
+                        reply,
+                        StepRef {
+                            scene: *scene,
+                            index: *index,
+                        },
+                        say,
+                    )
+                }),
+            _ => None,
+        };
+        effects.push(effect);
+        if let Some((reply, step, say)) = staged
+            && let Ok(current) = self.current(reply.run)
+        {
+            if let Some(chat) = reply.chat {
+                Self::carry_reply_text(current, &chat.line, effects);
+            } else if let Some((segment, say)) = say {
+                Self::publish_say(current, segment, step, say.as_str(), effects);
+            }
         }
+    }
+
+    fn reserve_step_reply(&mut self, serial: u64, write: &mut Write, effects: &mut Vec<Effect>) {
+        let Write::Step {
+            run,
+            thread,
+            revision,
+            step,
+            chat,
+            ..
+        } = write
+        else {
+            return;
+        };
+        if self.deleting_thread(*thread) {
+            return;
+        }
+        let (Some(say), Ok(current)) = (step.say.as_ref(), self.current(*run)) else {
+            return;
+        };
+        let segment = Self::reserve_say(current, say.as_str(), effects);
+        *chat = (segment.is_none() && !say.as_str().trim().is_empty()).then(|| StepChat {
+            before: unstored(current),
+            line: format!("\n\n{}\n\n", say.as_str()).into(),
+        });
+        self.drawing_reply = Some(StepReply {
+            serial,
+            run: *run,
+            revision: *revision,
+            chat: chat.clone(),
+            segment,
+        });
+    }
+
+    pub(super) fn drawing_written(
+        &mut self,
+        serial: u64,
+        reply: Result<Reply, ()>,
+        effects: &mut Vec<Effect>,
+    ) -> Result<(), Stale> {
+        if reply.is_err()
+            && let Some(held) = self.drawing_reply.take_if(|held| held.serial == serial)
+            && let Some(before) = held.chat.and_then(|chat| chat.before)
+            && let Ok(run) = self.find(held.run)
+        {
+            run.unstored.insert_str(0, &before);
+        }
+        self.drawing_input(Input::Written { serial, reply }, effects)?;
+        drop(self.drawing_reply.take_if(|held| held.serial == serial));
+        Ok(())
     }
 
     pub(super) fn drawing_closed(&mut self, run: RunId, loss: Loss, effects: &mut Vec<Effect>) {

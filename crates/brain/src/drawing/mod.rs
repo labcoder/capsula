@@ -24,7 +24,7 @@ use std::fmt;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
-use kumochi_protocol::message::{RunId, SceneCuts, SceneFailure, SceneId, ThreadId};
+use kumochi_protocol::message::{Content, RunId, SceneCuts, SceneFailure, SceneId, ThreadId};
 use kumochi_scene::display::{PaintWork, WideMeasure};
 use kumochi_scene::layout::LayoutState;
 use kumochi_scene::theme::Theme;
@@ -35,7 +35,7 @@ use crate::engines::CallId;
 
 pub use call::{CallEnd, CallError, Remaining};
 pub(crate) use digest::Digest;
-pub use io::{Reply, StoredScene, Target, Write};
+pub use io::{Reply, StepChat, StoredScene, Target, Write};
 pub use prepare::{PrepareJob, Prepared, Shared};
 pub use ready::READY_WAIT;
 pub(crate) use screen::{SCREEN_MARKS, ScreenMarks, stored_item};
@@ -252,6 +252,10 @@ struct Held {
 
 /// Work that waits for the store to answer.
 enum Job {
+    ReplyText {
+        run: RunId,
+        text: Content,
+    },
     Record {
         run: RunId,
         call: CallId,
@@ -629,10 +633,32 @@ impl Drawing {
             });
         writing
             || self.queue.iter().any(|job| {
-                matches!(job, Job::Record { run: owner, .. }
+                matches!(job, Job::ReplyText { run: owner, .. }
+                    | Job::Record { run: owner, .. }
                     | Job::Reject { run: owner, .. }
                     | Job::Finish { run: owner, .. } if *owner == run)
             })
+    }
+
+    pub(crate) fn hold_reply_text(&mut self, run: RunId, text: &str) -> Output {
+        let mut out = Output::default();
+        if let Some(Job::ReplyText {
+            run: owner,
+            text: held,
+        }) = self.queue.back_mut()
+            && *owner == run
+        {
+            held.push_str(text);
+        } else {
+            self.enqueue(
+                Job::ReplyText {
+                    run,
+                    text: text.into(),
+                },
+                &mut out,
+            );
+        }
+        out
     }
 
     /// Nothing is in the store or waiting for it.
@@ -703,6 +729,9 @@ impl Drawing {
                 return;
             };
             match job {
+                Job::ReplyText { run, text } => {
+                    out.effects.push(Effect::DrawingReplyText { run, text });
+                }
                 Job::Record { run, call, record } => self.record(run, &call, *record, out),
                 Job::Reject { run, call, error } => {
                     if let Some(at) = self.open_call(run, &call) {

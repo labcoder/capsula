@@ -46,6 +46,17 @@ impl super::Store {
     }
 }
 
+#[cfg(feature = "test-support")]
+impl super::Store {
+    /// Reads a real history response for an offline shell fixture.
+    ///
+    /// # Errors
+    /// Returns a content-free failure when the page cannot be read or encoded.
+    pub fn page_for_tests(&self, request: u32, page: PageOf) -> Result<DataToShell, StoreError> {
+        Pages(&self.conn).read_page(request, page)
+    }
+}
+
 impl Pages<'_> {
     /// Reads one page, including its continuation, within the full encoded-frame budget.
     /// A single oversized title or event is shortened at a character boundary to make progress;

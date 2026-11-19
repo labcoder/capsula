@@ -103,13 +103,6 @@ pub enum Input {
         /// A typed result, or a content-free failure.
         reply: Result<crate::drawing::Reply, ()>,
     },
-    /// An unassigned live step's Chat line is durable.
-    DrawingSayStored {
-        /// The run that published the step.
-        run: RunId,
-        /// The saved narration text.
-        text: Content,
-    },
     /// Read a page for one shell connection, without changing any run.
     ReadPage {
         /// The admitted read.
@@ -422,6 +415,13 @@ pub enum Effect {
     Control(ControlToShell),
     /// Send on the data pipe.
     Data(DataToShell),
+    /// Reply text ordered behind an in-flight drawing operation, handled by the coordinator.
+    DrawingReplyText {
+        /// The originating run.
+        run: RunId,
+        /// Text to release.
+        text: Content,
+    },
     /// Tell the shell a held recognition's turn is stored, only on the hold's own connection.
     HoldStored(HoldKey),
     /// Tell the shell what a hold's screen carried into its turn, only on the hold's own
@@ -720,6 +720,7 @@ impl Run {
 )]
 pub struct Coordinator {
     drawing: crate::drawing::Drawing,
+    drawing_reply: Option<drawing::StepReply>,
     drawing_held: Vec<(ThreadId, DataToShell, Option<RunId>)>,
     /// Whether `draw` may mark the user's screen: [`crate::drawing::SCREEN_MARKS`].
     screen_marks: crate::drawing::ScreenMarks,
@@ -812,6 +813,7 @@ impl Coordinator {
         Self {
             drawing: crate::drawing::Drawing::default(),
             drawing_held: Vec::new(),
+            drawing_reply: None,
             screen_marks: crate::drawing::SCREEN_MARKS,
             main_thread,
             last_thread,
@@ -904,13 +906,7 @@ impl Coordinator {
             Input::StopScenes { run, cuts } => self.stop_drawings(run, cuts, &mut effects)?,
             Input::Drawing(input) => self.drawing_input(input, &mut effects)?,
             Input::DrawingWritten { serial, reply } => {
-                self.drawing_input(
-                    crate::drawing::Input::Written { serial, reply },
-                    &mut effects,
-                )?;
-            }
-            Input::DrawingSayStored { run, text } => {
-                self.drawing_say_stored(run, &text, &mut effects);
+                self.drawing_written(serial, reply, &mut effects)?;
             }
             Input::ReadPage { key, page } => {
                 let op = StoreOp::ReadPage { key, page };

@@ -39,6 +39,10 @@ impl Scratch {
         Self::with_guard(scratch::dir(name))
     }
 
+    pub(crate) fn under(base: &Path, name: &str) -> Self {
+        Self::with_guard(scratch::Scratch::under(base, name))
+    }
+
     fn with_guard(guard: scratch::Scratch) -> Self {
         let case = guard.join("case");
         Self {

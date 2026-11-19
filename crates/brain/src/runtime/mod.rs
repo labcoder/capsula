@@ -1168,6 +1168,9 @@ impl Brain {
         let mut broken = None;
         for effect in effects {
             match effect {
+                Effect::DrawingReplyText { .. } => {
+                    unreachable!("drawing reply text is released by the coordinator")
+                }
                 Effect::Store(mut op) => {
                     self.claude.deleting(&op);
                     self.seed_op(&mut op);

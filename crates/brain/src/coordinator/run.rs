@@ -194,7 +194,30 @@ impl Coordinator {
             return self.fail(run, Failure::Budget, effects);
         }
         current.text_bytes += delta.len();
+        if self.drawing.pending_for(run) {
+            let output = self.drawing.hold_reply_text(run, delta);
+            self.drawing_output(output, effects);
+        } else {
+            self.release_reply_text(run, delta, effects)?;
+        }
+        Ok(())
+    }
+
+    pub(super) fn release_reply_text(
+        &mut self,
+        run: RunId,
+        delta: &str,
+        effects: &mut Vec<Effect>,
+    ) -> Result<(), Stale> {
+        let current = self.current(run)?;
         current.unstored.push_str(delta);
+        Self::carry_reply_text(current, delta, effects);
+        self.spoken_text(run, delta, effects);
+        Ok(())
+    }
+
+    pub(super) fn carry_reply_text(current: &mut Run, delta: &str, effects: &mut Vec<Effect>) {
+        let run = current.id;
         answering(current, effects);
         let mut rest = delta;
         while !rest.is_empty() {
@@ -221,8 +244,6 @@ impl Coordinator {
             }
             rest = tail;
         }
-        self.spoken_text(run, delta, effects);
-        Ok(())
     }
 
     /// Each closed line of the draw call's arguments is one step. The open line is charged

@@ -13,10 +13,10 @@ use tokio::time::timeout;
 use super::data::DataQueue;
 use super::{Brain, Link, Seen, window};
 use crate::connections::model::sse::{Progress, Reader};
-use crate::context::ConnectionTag;
+use crate::context::{ConnectionTag, InputItem, Role};
 use crate::coordinator::{Availability, BuildKey, Input, Ready, StoreOp};
 use crate::drawing::{Reply, Write};
-use crate::engines::{CallId, EngineFailure, Finish, ToolName, TurnEvent};
+use crate::engines::{CallId, EngineFailure, Finish, Opaque, ToolName, TurnEvent};
 use crate::store::Store;
 use crate::tap::Tap;
 use crate::test_support::{self, Scratch};
@@ -222,10 +222,14 @@ async fn staged_say(brain: &mut Brain, narration: [&str; 2], expected: &[&str], 
         step_landed(brain, &mut link).await;
     }
     let messages = all_frames(&queue);
+    let paragraphs = expected
+        .iter()
+        .map(|text| format!("\n\n{text}\n\n"))
+        .collect::<Vec<_>>();
     let live: Vec<_> = messages
         .iter()
         .filter_map(|frame| match frame {
-            DataToShell::AssistantText { run, delta } if *run == key.run => Some(delta.trim()),
+            DataToShell::AssistantText { run, delta } if *run == key.run => Some(delta.as_str()),
             _ => None,
         })
         .collect();
@@ -241,7 +245,7 @@ async fn staged_say(brain: &mut Brain, narration: [&str; 2], expected: &[&str], 
         })
         .collect();
     assert_eq!(assigned, segments);
-    assert_eq!(live, expected, "Chat lines from the live steps");
+    assert_eq!(live, paragraphs, "Chat lines from the live steps");
 
     brain.offline(Input::ShellLost);
     settled(brain, &mut link).await;
@@ -261,7 +265,7 @@ async fn staged_say(brain: &mut Brain, narration: [&str; 2], expected: &[&str], 
             .iter()
             .map(|event| event.text.as_str())
             .collect::<Vec<_>>(),
-        expected,
+        paragraphs,
     );
     assert!(lines.iter().all(|event| event.run == Some(key.run)));
     assert_eq!(read_chat_page(brain, &mut link, thread, 2).await, lines);
@@ -308,6 +312,375 @@ async fn read_chat_page(
         .rev()
         .filter(|event| event.kind == PageEventKind::AssistantText)
         .collect()
+}
+
+fn submit_unspoken_step(brain: &mut Brain, link: &mut Link<'_, '_>, key: BuildKey) -> String {
+    apply(
+        brain,
+        link,
+        Input::Engine {
+            key,
+            event: TurnEvent::ToolCallStarted {
+                call: CallId::new("provider-draw").expect("call id"),
+                name: ToolName::Draw,
+            },
+        },
+    );
+    let record = FIRST.replace(
+        "\"id\":\"s1\",",
+        "\"id\":\"s1\",\"say\":\"One Chat line.\",",
+    );
+    apply(
+        brain,
+        link,
+        Input::Engine {
+            key,
+            event: delta(&record),
+        },
+    );
+    record
+}
+
+async fn first_unspoken_write(brain: &mut Brain, link: &mut Link<'_, '_>) -> Input {
+    let key = start(brain, link).await;
+    submit_unspoken_step(brain, link, key);
+    loop {
+        let input = reply(brain).await;
+        if matches!(
+            input,
+            Input::DrawingWritten {
+                reply: Ok(Reply::Step(_)) | Err(()),
+                ..
+            }
+        ) {
+            return input;
+        }
+        apply(brain, link, input);
+    }
+}
+
+#[tokio::test]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the offline child is spawned under platform::spawn_lock"
+)]
+async fn unspoken_line_and_step_survive_a_crash_before_the_write_receipt_is_applied() {
+    const CHILD: &str = "KUMOCHI_TEST_UNSPOKEN_CRASH_DIR";
+    if let Some(root) = std::env::var_os(CHILD) {
+        let root = std::path::PathBuf::from(root);
+        let scratch = Scratch::under(&root, "child");
+        let mut brain = brain(&scratch);
+        let (out, _controls) = mpsc::channel(64);
+        let ready = Notify::new();
+        let mut tap = Tap::from_env();
+        let queue = RefCell::new(DataQueue::new(window()));
+        let mut link = Link::new(&out, &queue, &ready, &mut tap);
+        link.recovery = brain.describe(&mut link).expect("initial membership");
+        assert!(matches!(
+            first_unspoken_write(&mut brain, &mut link).await,
+            Input::DrawingWritten {
+                reply: Ok(Reply::Step(_)),
+                ..
+            }
+        ));
+        std::fs::write(
+            root.join("writing-marker"),
+            scratch.db().as_os_str().to_str().expect("test path"),
+        )
+        .expect("signal the committed step");
+        std::fs::rename(root.join("writing-marker"), root.join("committed"))
+            .expect("publish marker");
+        tokio::time::sleep(WAIT * 2).await;
+        return;
+    }
+    let scratch = Scratch::new("unspoken-crash-parent");
+    std::fs::create_dir_all(scratch.dir()).expect("private parent scratch");
+    let mut child = {
+        let _spawning = crate::platform::spawn_lock();
+        std::process::Command::new(std::env::current_exe().expect("test executable"))
+            .args(["--exact", "runtime::draw_stream_tests::unspoken_line_and_step_survive_a_crash_before_the_write_receipt_is_applied"])
+            .env(CHILD, scratch.dir())
+            .spawn()
+            .expect("child fixture")
+    };
+    let marker = scratch.dir().join("committed");
+    let deadline = std::time::Instant::now() + WAIT;
+    let ready = loop {
+        if marker.exists() {
+            break true;
+        }
+        if child.try_wait().expect("child status").is_some()
+            || std::time::Instant::now() >= deadline
+        {
+            break false;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    };
+    if child.try_wait().expect("child status").is_none() {
+        child.kill().expect("kill the owned fixture");
+    }
+    assert!(!child.wait().expect("reap the owned fixture").success());
+    assert!(ready, "the child reached the commit before it was killed");
+    let db = std::fs::read_to_string(marker).expect("committed store path");
+    let mut store = Store::open(std::path::Path::new(&db)).expect("reopen after crash");
+    store.recover().expect("crash recovery");
+    assert_eq!(
+        drawing_rows(store.conn_for_tests()),
+        ["scene_begin", "scene_step:s1"]
+    );
+    let DataToShell::Page { events, .. } = store
+        .pages()
+        .read_page(
+            1,
+            PageOf::Events {
+                thread: ThreadId(2),
+                before: None,
+            },
+        )
+        .expect("recovered Chat page")
+    else {
+        panic!("expected a page")
+    };
+    assert_eq!(
+        events
+            .into_iter()
+            .filter(|event| event.kind == PageEventKind::AssistantText)
+            .map(|event| event.text.to_string())
+            .collect::<Vec<_>>(),
+        ["\n\nOne Chat line.\n\n"]
+    );
+}
+
+#[tokio::test]
+async fn unspoken_line_write_failure_rolls_back_the_drawing_step() {
+    let scratch = Scratch::new("unspoken-atomic-failure");
+    let mut brain = brain(&scratch);
+    let conn = rusqlite::Connection::open(scratch.db()).expect("fixture database");
+    conn.execute_batch(
+        "CREATE TRIGGER fail_chat BEFORE INSERT ON events
+         WHEN new.kind = 'assistant_text' AND trim(new.text, char(10)) = 'One Chat line.'
+         BEGIN SELECT RAISE(ABORT, 'fixture narration failure'); END;",
+    )
+    .expect("install fault");
+    let (out, _controls) = mpsc::channel(64);
+    let ready = Notify::new();
+    let mut tap = Tap::from_env();
+    let queue = RefCell::new(DataQueue::new(window()));
+    let mut link = Link::new(&out, &queue, &ready, &mut tap);
+    link.recovery = brain.describe(&mut link).expect("initial membership");
+    let input = first_unspoken_write(&mut brain, &mut link).await;
+    let failed = matches!(input, Input::DrawingWritten { reply: Err(()), .. });
+    apply(&mut brain, &mut link, input);
+    brain.offline(Input::ShellLost);
+    brain.close().await;
+    assert!(
+        failed,
+        "the step itself must report the failed narration write"
+    );
+    assert_eq!(drawing_rows(&conn).len(), 0);
+    assert_eq!(
+        conn.query_row(
+            "SELECT count(*) FROM events WHERE kind = 'assistant_text'",
+            [],
+            |row| row.get::<_, u32>(0)
+        )
+        .expect("count"),
+        0
+    );
+}
+
+#[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one real write race covers live Chat, history and the next request"
+)]
+async fn unspoken_line_preserves_reply_order_while_the_drawing_write_is_held() {
+    let scratch = Scratch::new("unspoken-order");
+    let mut brain = brain(&scratch);
+    let mut observed = brain.observe();
+    let (out, _controls) = mpsc::channel(64);
+    let ready = Notify::new();
+    let mut tap = Tap::from_env();
+    let queue = RefCell::new(DataQueue::new(window()));
+    let mut link = Link::new(&out, &queue, &ready, &mut tap);
+    link.recovery = brain.describe(&mut link).expect("initial membership");
+    let key = start(&mut brain, &mut link).await;
+    let prefix = "Before the drawing.";
+    let suffix = "After the drawing.";
+    let expected = "Before the drawing.\n\nOne Chat line.\n\nAfter the drawing.";
+    apply(
+        &mut brain,
+        &mut link,
+        Input::Engine {
+            key,
+            event: TurnEvent::TextDelta(prefix.into()),
+        },
+    );
+    let release = brain.hold_store(|op| {
+        matches!(
+            op,
+            StoreOp::Drawing {
+                write: Write::Step { revision: 1, .. },
+                ..
+            }
+        )
+    });
+    let record = submit_unspoken_step(&mut brain, &mut link, key);
+    let input = reply(&mut brain).await;
+    assert!(matches!(
+        input,
+        Input::DrawingWritten {
+            reply: Ok(Reply::Lookup(None)),
+            ..
+        }
+    ));
+    apply(&mut brain, &mut link, input);
+    let serial = timeout(WAIT, async {
+        loop {
+            if let Seen::StoreOpStarted(StoreOp::Drawing {
+                serial,
+                write: Write::Step { revision: 1, .. },
+            }) = observed.recv().await.expect("store observation")
+            {
+                break serial;
+            }
+        }
+    })
+    .await
+    .expect("first step at the real write gate");
+    apply(
+        &mut brain,
+        &mut link,
+        Input::Engine {
+            key,
+            event: TurnEvent::TextDelta(suffix.into()),
+        },
+    );
+    let early = all_frames(&queue);
+    release.send(()).expect("release the step write");
+    let scene = step_landed(&mut brain, &mut link).await;
+    assert!(
+        brain
+            .handle(Input::DrawingWritten {
+                serial,
+                reply: Ok(Reply::Step(scene))
+            })
+            .is_none()
+    );
+    apply(
+        &mut brain,
+        &mut link,
+        Input::Drawing(crate::drawing::Input::StepReady {
+            run: key.run,
+            scene,
+            index: 0,
+        }),
+    );
+    let end = r#",{"end":{}}]}"#;
+    let args = format!("{record}{end}");
+    let provider_message = |text| json!({"type":"message","role":"assistant","content":[{"type":"output_text","text":text}]});
+    let call = CallId::new("provider-draw").expect("call id");
+    apply(
+        &mut brain,
+        &mut link,
+        Input::Engine {
+            key,
+            event: delta(end),
+        },
+    );
+    apply(
+        &mut brain,
+        &mut link,
+        Input::Engine {
+            key,
+            event: TurnEvent::ToolCallReady {
+                call,
+                args: args.clone(),
+            },
+        },
+    );
+    for (index, item) in [
+        provider_message(prefix),
+        json!({"type":"function_call","id":"item-draw","call_id":"provider-draw","name":"draw","arguments":args}),
+        json!({"type":"message","role":"assistant","content":[
+            {"type":"output_text","text":suffix},
+            {"type":"refusal","refusal":"fixture non-text output"}
+        ]}),
+    ].into_iter().enumerate() {
+        let item = Opaque::new(serde_json::to_vec(&item).expect("fixture JSON")).expect("fixture item");
+        let index = u32::try_from(index).expect("fixture index");
+        apply(&mut brain, &mut link, Input::Engine { key, event: TurnEvent::OutputItem { index, item } });
+    }
+    apply(
+        &mut brain,
+        &mut link,
+        Input::Engine {
+            key,
+            event: TurnEvent::Finished(Finish::Completed),
+        },
+    );
+    let next = timeout(WAIT, async {
+        loop {
+            let input = reply(&mut brain).await;
+            if let Input::ContextBuilt(built) = input {
+                break built.result.expect("next model context").request.input;
+            }
+            apply(&mut brain, &mut link, input);
+        }
+    })
+    .await
+    .expect("next request");
+    let live = early
+        .into_iter()
+        .chain(all_frames(&queue))
+        .filter_map(|message| match message {
+            DataToShell::AssistantText { run, delta } if run == key.run => {
+                Some(delta.into_string())
+            }
+            _ => None,
+        })
+        .collect::<String>();
+    let history = read_chat_page(&mut brain, &mut link, ThreadId(2), 1).await;
+    let stored: String = history.iter().map(|event| event.text.as_str()).collect();
+    let mut replay = String::new();
+    let mut native_calls = 0;
+    let mut native_results = 0;
+    let mut native_refusals = 0;
+    for item in next {
+        match item {
+            InputItem::Message {
+                role: Role::Assistant,
+                text,
+            } => replay.push_str(&text),
+            InputItem::Native(item) => {
+                let value: serde_json::Value =
+                    serde_json::from_slice(item.bytes()).expect("native input");
+                if value["type"] == "message" && value["role"] == "assistant" {
+                    for part in value["content"].as_array().expect("message parts") {
+                        if part["type"] == "output_text" {
+                            replay.push_str(part["text"].as_str().expect("provider text"));
+                        } else if part["refusal"] == "fixture non-text output" {
+                            native_refusals += 1;
+                        }
+                    }
+                } else if value["call_id"] == "provider-draw" {
+                    native_calls += 1;
+                }
+            }
+            InputItem::FunctionOutput { call, .. } if call.as_str() == "provider-draw" => {
+                native_results += 1;
+            }
+            _ => {}
+        }
+    }
+    brain.offline(Input::ShellLost);
+    brain.close().await;
+    assert_eq!(
+        (live.as_str(), stored.as_str(), replay.as_str()),
+        (expected, expected, expected)
+    );
+    assert_eq!((native_calls, native_results), (1, 1));
+    assert_eq!(native_refusals, 1);
 }
 
 #[tokio::test]

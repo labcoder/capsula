@@ -530,6 +530,9 @@ flowchart LR
   transaction, the text streamed since the last write, the round's native items in output order,
   then each call's result in call order. `Input::RoundStored { run, round }` answers it, and only
   then does the next round's build go out through admission, so it reads what was just stored.
+  A drawing step with unspoken narration stores its ordinary reply prefix and the narration
+  in the step's transaction. Later text waits in the drawing queue, so it can't overtake the
+  receipt or a second step that was already queued.
   The round counter is the build key's: a round that would be the 9th is refused before its build,
   so no ninth ask or send happens. A delete's rebuild keeps `(run, round)` and the counters,
   but drops the withdrawn attempt's response, including its typed key calls.
