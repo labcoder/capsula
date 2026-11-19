@@ -604,20 +604,126 @@ async fn a_refused_question_fails_with_claude_codes_reason_or_the_refusals_own()
     rig.close().await;
 }
 
-/// M1a is dormant: a production question whose built request offers `draw` still launches with
-/// no tool, and its round asks the core to authorize no launch.
+fn inline_question(mut request: RunRequest) -> RunRequest {
+    use crate::context::RunSnapshot;
+    use crate::store::context::Snapshot;
+    use crate::store::{Generation, Store};
+    use crate::test_support::Scratch;
+    use kumochi_protocol::message::{AssistantName, EventId};
+
+    let scratch = Scratch::new("question-inline-offer");
+    let mut db = Store::open(&scratch.db()).expect("store");
+    db.recover().expect("recover");
+    let thread = db.main_thread().expect("main");
+    let last = EventId(1);
+    db.begin_turn(thread, None, RunId(1), "earlier question")
+        .expect("turn");
+    assert!(
+        db.store_summary(thread, Generation(0), (last, last), "earlier summary", None)
+            .expect("summary")
+    );
+    let run = RunSnapshot {
+        origin: Origin::Kumo,
+        assistant: AssistantName::new("Kumo").expect("name"),
+        user: None,
+        choice: request.request.choice.clone(),
+        connection: ConnectionTag(1),
+    };
+    let read = Snapshot::begin(db.conn_for_tests()).expect("read");
+    let (compact, _) = crate::context::compact::rewrite(&read, &run, thread, 4096)
+        .expect("valid build")
+        .expect("rewrite");
+    read.end().expect("end read");
+    request.request = compact.built.request;
+    request
+}
+
 #[tokio::test]
-async fn a_production_question_offers_no_tool_even_when_its_request_does() {
-    let mut rig = Rig::new("question-dormant", &offering_nothing()).await;
+async fn only_foreground_questions_that_offer_draw_launch_with_it() {
+    let mut script = synthetic_signed_in();
+    script.user.insert(
+        1,
+        json!({"type":"assistant", "message":{"content":[{
+            "type":"tool_use", "id":"tool_echo", "name":format!("mcp__{MCP_SERVER_NAME}__draw"),
+            "input":{"records":[]}
+        }]}}),
+    );
+    let mut rig = Rig::new("question-production-offer", &script).await;
+    for n in 3..=5 {
+        offering_nothing().write(&rig.base, Some(n));
+    }
     let mut request = choosing("haiku", Effort::Low, ConnectionKind::ClaudeCode);
     request.request.tools = crate::context::tools(Origin::Kumo);
-    assert!(request.request.tools.iter().any(|tool| tool.name == "draw"));
-    let (events, reports) = answer(&mut rig, request).await;
-    answered(&events);
-    assert_eq!(reports, [launch::Outcome::Clean]);
-    assert!(!rig.argv(1).contains("--allowedTools"), "{}", rig.argv(1));
-    assert!(rig.seed(1).ends_with("Tools:\n[]"), "{}", rig.seed(1));
-    assert_eq!(rig.binds, Vec::<LaunchId>::new());
+    let draw = request
+        .request
+        .tools
+        .iter_mut()
+        .find(|tool| tool.name == "draw")
+        .expect("draw");
+    draw.description = "untrusted request schema";
+    draw.parameters = json!({"untrusted":true});
+    let mut task = request.clone();
+    task.origin = Origin::Task(ThreadId(2));
+    task.thread = ThreadId(2);
+    let mut job = request.clone();
+    job.key = SendKey::Job(crate::coordinator::JobKey {
+        thread: request.thread,
+        serial: 2,
+    });
+    let mut tool_free = request.clone();
+    tool_free.request.tools.clear();
+    let inline = inline_question(request.clone());
+    for (i, request) in [request, task, job, tool_free, inline]
+        .into_iter()
+        .enumerate()
+    {
+        let question = rig.claude.question(&request).expect("admitted");
+        let (id, _) = rig.last();
+        let mut played = play_with(&question, request);
+        let initialize = format!("{} initialize", i + 1);
+        until("the fake child took its first control line", || {
+            rig.stdin().contains(&initialize)
+        })
+        .await;
+        let argv = rig.argv(i + 1);
+        let allowed = argv
+            .split_once(" --allowedTools ")
+            .and_then(|(_, tail)| tail.split(" --").next());
+        let draw = format!("mcp__{MCP_SERVER_NAME}__draw");
+        assert_eq!(allowed, (i < 2).then_some(draw.as_str()), "launch {i}");
+        assert!(!argv.contains("untrusted request schema"));
+
+        let lease = played.lease();
+        rig.drive(played.asked(lease)).await;
+        answered(&rig.drive(played.events()).await);
+        assert_eq!(rig.reported(id).await, [launch::Outcome::Clean]);
+
+        let seed = rig.seed(i + 1);
+        let (_, tools) = seed
+            .rsplit_once(
+                "Tools:
+",
+            )
+            .expect("inventory");
+        let tools: Value = serde_json::from_str(tools).expect("schema");
+        if i < 2 {
+            assert_eq!(tools.as_array().map(Vec::len), Some(1));
+            assert_eq!(tools[0]["name"], "draw");
+            assert_eq!(
+                tools[0]["parameters"]["$defs"]["Surface"],
+                json!({"type":"string","const":"overlay"})
+            );
+            assert!(!seed.contains("control-mark"), "no screen example");
+            assert!(!seed.contains("untrusted request schema"));
+        } else {
+            assert_eq!(tools, json!([]));
+        }
+    }
+    assert_eq!(
+        rig.binds.len(),
+        2,
+        "only the two foreground draw offers bind"
+    );
     rig.close().await;
 }
 
@@ -1883,6 +1989,90 @@ fn brain_on(rig: &mut Rig, name: &str) -> Brain {
     let mut brain = crate::test_support::brain(&crate::test_support::Scratch::new(name), "");
     std::mem::swap(&mut brain.claude, &mut rig.claude);
     brain
+}
+
+#[tokio::test]
+async fn an_admitted_foreground_draw_offer_binds_before_seeding() {
+    use crate::context::{Built, tools};
+    use crate::coordinator::{ContextBuilt, Effect, StoreOp};
+
+    let script = synthetic_signed_in().held_at_user("go");
+    let mut rig = Rig::new("question-admitted-draw", &script).await;
+    let mut brain = brain_on(&mut rig, "question-admitted-draw");
+    brain.claude_reported(None).expect("no shell");
+    brain
+        .coordinator
+        .handle(Input::Turn {
+            turn: 1,
+            thread: None,
+            text: "hi".into(),
+        })
+        .expect("a turn");
+    let run = brain.coordinator.current_run().expect("current run");
+    let effects = brain
+        .coordinator
+        .handle(Input::TurnStored { run })
+        .expect("a stored turn");
+    let key = effects
+        .iter()
+        .find_map(|effect| match effect {
+            Effect::Store(StoreOp::BuildContext(build)) => Some(build.key),
+            _ => None,
+        })
+        .expect("a build");
+    let mut request = choosing("haiku", Effort::Low, ConnectionKind::ClaudeCode).request;
+    request.tools = tools(Origin::Kumo);
+    let mut snapshot = brain.snapshot(Origin::Kumo);
+    snapshot.choice.clone_from(&request.choice);
+    let admitted = brain
+        .coordinator
+        .handle(Input::ContextBuilt(ContextBuilt {
+            key,
+            snapshot: Some(snapshot),
+            result: Ok(Built {
+                request,
+                sources: Vec::new(),
+            }),
+        }))
+        .expect("the build is current");
+    assert!(admitted.iter().any(|effect| matches!(
+        effect,
+        Effect::StartEngine { request } if request.key == SendKey::Build(key)
+    )));
+    brain.apply(admitted, None).expect("no shell");
+    drive_until(&mut brain, || rig.base.0.join("seed.1").is_file()).await;
+    assert!(
+        brain.claude.launches.last().expect("the launch").bound,
+        "the real brain accepted the launch's offer for the admitted build"
+    );
+
+    rig.go("go");
+    let mut events = Vec::new();
+    run_brain(&mut brain, |input| match input {
+        Input::Engine { key: found, event } if key == found => {
+            let finished = matches!(event, TurnEvent::Finished(_));
+            events.push(event);
+            finished.then_some(())
+        }
+        _ => None,
+    })
+    .await;
+    answered(&events);
+    let seed = rig.seed(1);
+    let (_, inventory) = seed
+        .rsplit_once(
+            "Tools:
+",
+        )
+        .expect("seed inventory");
+    let tools: Value = serde_json::from_str(inventory).expect("schemas");
+    assert_eq!(tools.as_array().map(Vec::len), Some(1));
+    assert_eq!(tools[0]["name"], "draw");
+    assert_eq!(
+        tools[0]["parameters"]["$defs"]["Surface"],
+        json!({"type":"string","const":"overlay"})
+    );
+    assert!(brain.claude.close(soon()).await);
 }
 
 /// A title job's request on haiku at Low over Claude Code.

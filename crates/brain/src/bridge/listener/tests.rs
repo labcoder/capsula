@@ -614,7 +614,7 @@ fn start_client(test: &str, pipe: &str, mode: &str, jobs: &[&Job]) -> Spawned {
 
 /// The client's stdout once it has exited.
 #[track_caller]
-fn output(mut child: Spawned) -> String {
+pub(crate) fn output(mut child: Spawned) -> String {
     assert!(
         child
             .process
@@ -632,12 +632,24 @@ fn output(mut child: Spawned) -> String {
     text
 }
 
+pub(crate) fn bridge_with_live_cli(job: &Job) -> (LaunchId, Listener, Spawned, Spawned) {
+    let launch = unique_launch(10);
+    let listener = Listener::create(launch).expect("listener");
+    let cli = start_client(CHILD, listener.name(), "cli", &[job]);
+    let bridge = start_client(BRIDGE_CHILD, listener.name(), "bridge", &[job]);
+    (launch, listener, bridge, cli)
+}
+
 #[test]
 #[ignore = "a client process for the listener's tests; see start_client"]
 fn child_client() {
     let (Some(name), Some(mode)) = (std::env::var_os(PIPE_VAR), std::env::var_os(MODE_VAR)) else {
         return;
     };
+    if mode == "cli" {
+        assert_eq!(std::io::stdin().read(&mut [0]).expect("held CLI stdin"), 0);
+        return;
+    }
     let mut pipe = std::fs::OpenOptions::new()
         .read(true)
         .write(true)

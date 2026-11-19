@@ -467,6 +467,194 @@ fn a_semantic_failure_in_the_third_step_keeps_the_same_prefix_and_error_on_both_
     assert_eq!(core.take_mcp_answer(build, L1, &key(1)), Ok(Some(expected)));
 }
 
+#[tokio::test]
+async fn a_forwarded_draw_returns_its_committed_prefix_under_the_original_id() {
+    use crate::bridge::listener::{Binding, LaunchContext, SessionEnd, session};
+    use crate::bridge::{Input as BridgeInput, relay};
+    use tokio::sync::{mpsc, watch};
+    use tokio::time::timeout;
+
+    let (mut core, build) = offering(drawing());
+    let (gate, until) = passed();
+    let offer = Offer::Mcp(Origin::Task(T), vec![ToolName::Draw]);
+    assert!(binds(
+        &mut core,
+        (build, L1, T),
+        offer.clone(),
+        (gate.clone(), until)
+    ));
+    let tools = offer.schemas();
+    let job = crate::platform::Job::new().expect("job");
+    let exe = std::env::current_exe().expect("test binary");
+    let (calls, mut mailbox) = mpsc::channel(1);
+    let context = LaunchContext {
+        job: &job,
+        brain_exe: &exe,
+        deadline: until.into(),
+        tools: &tools,
+        gate,
+        binding: Binding::default(),
+        calls: Some(calls),
+    };
+    context
+        .binding
+        .bind(Some((build, until.into())))
+        .expect("first bind");
+
+    let (listener, bridge) = tokio::io::duplex(1 << 20);
+    let (lines, input) = mpsc::channel(4);
+    let (_stdin, stdin_end) = watch::channel(false);
+    let (out, mut written) = mpsc::channel::<Vec<u8>>(4);
+
+    let run = async move {
+        let request = |id: u32, method: &str, params: Value| {
+            BridgeInput::from_test_json(&json!({
+                "jsonrpc": "2.0", "id": id, "method": method, "params": params
+            }))
+        };
+        lines
+            .send(request(21, "tools/list", json!({})))
+            .await
+            .expect("list");
+        let listed: Value =
+            serde_json::from_slice(&written.recv().await.expect("list reply")).expect("list JSON");
+        assert_draw_list(&listed);
+        assert!(mailbox.try_recv().is_err(), "listing doesn't dispatch");
+
+        let args = args(Some(json!({"id":"s3","remove":["missing"]})));
+        let args: Value = serde_json::from_slice(&args).expect("arguments");
+        lines
+            .send(request(
+                22,
+                "tools/call",
+                json!({"name":"draw", "arguments":args}),
+            ))
+            .await
+            .expect("call");
+        let call = mailbox.recv().await.expect("listener relayed the call");
+        assert_eq!(call.origin.build, build);
+        assert_eq!(call.origin.launch, L1);
+        assert_eq!(call.origin.key, key(22));
+        assert_eq!(call.tool, ToolName::Draw);
+        commit_forwarded_draw(&mut core, call);
+        let reply: Value =
+            serde_json::from_slice(&written.recv().await.expect("call reply")).expect("reply JSON");
+        assert_eq!(
+            reply,
+            json!({
+                "jsonrpc":"2.0", "id":22, "result": {
+                    "isError":true,
+                    "content":[{"type":"text","text":format!(
+                       "drawn: [s1, s2]; stopped: step s3: remove[0]: scene.UnknownRef{DRAWN_RETRY}"
+                    )}]
+                }
+            })
+        );
+        assert!(written.try_recv().is_err());
+        lines.send(BridgeInput::End).await.expect("EOF");
+    };
+    let (end, relayed, ()) = timeout(Duration::from_secs(10), async {
+        tokio::join!(
+            session(listener, L1, &context),
+            relay(bridge, input, stdin_end, out),
+            run
+        )
+    })
+    .await
+    .expect("bounded fixture");
+    assert_eq!(end, SessionEnd::Closed);
+    assert!(relayed.is_ok(), "{relayed:?}");
+}
+
+fn assert_draw_list(listed: &Value) {
+    assert_eq!(listed["id"], 21);
+    assert_eq!(listed["result"]["tools"].as_array().map(Vec::len), Some(1));
+    let draw = &listed["result"]["tools"][0];
+    assert_eq!(draw["name"], "draw");
+    assert_eq!(
+        draw["inputSchema"]["$defs"]["Surface"],
+        json!({"type":"string","const":"overlay"})
+    );
+    assert!(
+        !draw["description"]
+            .as_str()
+            .expect("prose")
+            .contains("control-mark")
+    );
+}
+
+fn commit_forwarded_draw(core: &mut Coordinator, call: crate::bridge::listener::McpCall) {
+    let build = call.origin.build;
+    let mut effects = Vec::new();
+    assert_eq!(
+        core.mcp_call(
+            build,
+            L1,
+            call.origin.key.clone(),
+            (call.tool, call.args.as_deref().expect("draw arguments")),
+            &mut effects
+        ),
+        Dispatch::Committing
+    );
+    let scratch = Scratch::new("forwarded-draw");
+    let mut db = store(&scratch);
+    let mut shown = 0;
+    while let Some((serial, write)) = issued(&effects) {
+        assert_eq!(core.take_mcp_answer(build, L1, &key(22)), Ok(None));
+        let reply = db.drawing_write(&write).expect("durable step");
+        effects = core
+            .handle(Input::DrawingWritten {
+                serial,
+                reply: Ok(reply),
+            })
+            .expect("step acknowledgement");
+        shown += effects
+            .iter()
+            .filter(|effect| matches!(effect, Effect::Data(DataToShell::SceneStepCommit { .. })))
+            .count();
+        effects = super::prepared(core, effects);
+    }
+    assert_eq!(shown, 2);
+    assert_eq!(steps(&db), [2]);
+    let result = effects
+        .into_iter()
+        .find_map(|effect| match effect {
+            Effect::Store(StoreOp::CommitCall(result)) => Some(result),
+            _ => None,
+        })
+        .expect("the result write");
+    let outcome = db.commit_call(&result).expect("durable call row");
+    assert_eq!(outcome, Committed::Done);
+    assert_eq!(
+        core.take_mcp_answer(build, L1, &key(22)),
+        Ok(None),
+        "write alone can't release"
+    );
+    core.handle(Input::CallCommitted {
+        key: result.key,
+        outcome,
+        then: None,
+    })
+    .expect("call acknowledgement");
+    let output = core
+        .take_mcp_answer(build, L1, &key(22))
+        .expect("authorized")
+        .expect("one answer");
+    assert_eq!(core.take_mcp_answer(build, L1, &key(22)), Ok(None));
+    call.reply
+        .send(core.mcp_reply(&call.origin, &output))
+        .expect("waiting bridge");
+    let (reuse, effects) = mcp(core, (build, L1, 22), ToolName::Draw, &args(None));
+    assert_eq!(
+        reuse,
+        Dispatch::Answered(ToolOutput::Error(ToolError::Reused))
+    );
+    assert!(
+        effects.is_empty(),
+        "a different payload never replays that committed call"
+    );
+}
+
 #[test]
 fn a_structurally_invalid_third_record_writes_nothing_over_mcp_and_stays_refused() {
     let typo = args(Some(
@@ -497,6 +685,63 @@ fn a_structurally_invalid_third_record_writes_nothing_over_mcp_and_stays_refused
         mcp(&mut core, (build, L1, 1), ToolName::Draw, &args(None)).0,
         Dispatch::Answered(ToolOutput::Text(text))
     );
+}
+
+#[test]
+fn mcp_screen_and_box_target_refusals_have_no_effect_and_stay_refused() {
+    let screen = br#"{"records":[{"begin":{"scene":"forbidden","surface":"screen","alt":"screen"}},{"end":{}}]}"#;
+    let late_box = args(Some(json!({
+        "id":"s3",
+        "put":[{"highlight":{"id":"c","target":{"box":[0,0,10,10]},"style":"box"}}]
+    })));
+    let (mut core, build) = offering(drawing());
+    assert!(bound(&mut core, build, L1));
+    for (n, input, expected) in [
+        (1, screen.as_slice(), "surface: scene.Unsupported"),
+        (
+            2,
+            late_box.as_slice(),
+            "step s3: put[0].target: scene.Unsupported",
+        ),
+    ] {
+        for _ in 0..2 {
+            let (dispatch, effects) = mcp(&mut core, (build, L1, n), ToolName::Draw, input);
+            let Dispatch::Answered(output) = dispatch else {
+                panic!("a refusal before the drawing handoff: {dispatch:?}");
+            };
+            assert!(
+                effects.is_empty(),
+                "no scene, ledger or presentation effects"
+            );
+            let reply = core.mcp_reply(
+                &McpOrigin {
+                    build,
+                    launch: L1,
+                    key: key(n),
+                },
+                &output,
+            );
+            assert!(reply.error);
+            assert_eq!(
+                reply.text,
+                format!(
+                    "drawn: []; stopped: {expected}; here only the overlay can be drawn on, without box targets"
+                )
+            );
+        }
+    }
+    for n in 3..=16 {
+        assert!(
+            matches!(
+                mcp(&mut core, (build, L1, n), ToolName::Draw, screen).0,
+                Dispatch::Answered(ToolOutput::Text(_))
+            ),
+            "refusal {n} fits"
+        );
+    }
+    let (dispatch, effects) = mcp(&mut core, (build, L1, 17), ToolName::Draw, screen);
+    assert_eq!(dispatch, ended());
+    assert_eq!(effects, super::ends_failed(Failure::Budget));
 }
 
 #[test]
@@ -717,7 +962,15 @@ fn first_step_held(
 ) -> (u64, crate::drawing::Write) {
     let (dispatch, effects) = mcp(core, (build, launch, 1), ToolName::Draw, &args(None));
     assert_eq!(dispatch, Dispatch::Committing);
-    let (serial, lookup) = issued(&effects).expect("the scene's lookup");
+    hold_first_write(core, store, &effects)
+}
+
+fn hold_first_write(
+    core: &mut Coordinator,
+    store: &mut Store,
+    effects: &[Effect],
+) -> (u64, crate::drawing::Write) {
+    let (serial, lookup) = issued(effects).expect("the scene's lookup");
     let reply = store.drawing_write(&lookup).expect("durable lookup");
     let looked = core
         .handle(Input::DrawingWritten {
@@ -793,6 +1046,131 @@ fn a_launch_that_loses_its_authority_with_its_build_current_issues_no_further_st
             "{case}: the build stays current"
         );
     }
+}
+
+#[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "the live job, pipe, and held commit share one fixture"
+)]
+async fn losing_only_the_authenticated_client_revokes_a_draw_with_a_step_in_the_store() {
+    use crate::bridge::listener::{
+        Binding, LaunchContext, SessionEnd,
+        tests::{bridge_with_live_cli, output},
+    };
+    use std::io::Write as _;
+    use tokio::sync::{mpsc, oneshot};
+    use tokio::time::timeout;
+
+    let job = crate::platform::Job::new().expect("launch job");
+    let (launch, listener, mut bridge, cli) = bridge_with_live_cli(&job);
+    let exe = std::env::current_exe().expect("test executable");
+    let (mut core, build) = offering(drawing());
+    let (gate, until) = passed();
+    let offer = Offer::Mcp(Origin::Task(T), vec![ToolName::Draw]);
+    assert!(binds(
+        &mut core,
+        (build, launch, T),
+        offer.clone(),
+        (gate.clone(), until)
+    ));
+    let tools = offer.schemas();
+    let (calls, mut mailbox) = mpsc::channel(1);
+    let context = LaunchContext {
+        job: &job,
+        brain_exe: &exe,
+        deadline: until.into(),
+        tools: &tools,
+        gate: gate.clone(),
+        binding: Binding::default(),
+        calls: Some(calls),
+    };
+    context
+        .binding
+        .bind(Some((build, until.into())))
+        .expect("bound");
+    let (ended, gone) = oneshot::channel();
+    let serve = async {
+        ended.send(listener.serve(context).await).ok();
+    };
+    let drive = async {
+        let arguments: Value = serde_json::from_slice(&args(None)).expect("args");
+        let request = json!({
+            "jsonrpc":"2.0", "id":1, "method":"tools/call", "params":{"name":"draw", "arguments":arguments}
+        });
+        let mut stdin = bridge.stdin.take().expect("bridge stdin");
+        writeln!(stdin, "{request}").expect("stdio request");
+        stdin.flush().expect("flushed");
+        let call = mailbox.recv().await.expect("an admitted real client");
+        assert_eq!(call.origin.key, key(1));
+        let mut effects = Vec::new();
+        let dispatch = core.mcp_call(
+            build,
+            launch,
+            call.origin.key.clone(),
+            (call.tool, call.args.as_deref().expect("arguments")),
+            &mut effects,
+        );
+        assert_eq!(dispatch, Dispatch::Committing);
+        let scratch = Scratch::new("mcp-client-lost-held");
+        let mut store = store(&scratch);
+        let held = hold_first_write(&mut core, &mut store, &effects);
+        assert!(gate.may_call());
+        assert!(!cli.process.exits_within(Duration::ZERO).expect("check CLI"));
+        assert!(until > Instant::now());
+        bridge
+            .process
+            .terminate()
+            .expect("only the bridge is stopped");
+        assert!(
+            bridge
+                .process
+                .exits_within(Duration::from_secs(5))
+                .expect("bridge exits")
+        );
+        let end = timeout(Duration::from_secs(2), gone).await;
+
+        let settled = settle_held(&mut core, &mut store, held);
+        assert_eq!(issued(&settled), None, "no later step is submitted");
+        assert_eq!(steps(&store), [1], "the issued write settled once");
+        let frames: Vec<_> = settled
+            .iter()
+            .filter_map(|effect| match effect {
+                Effect::Data(DataToShell::SceneStepCommit { index, .. }) => Some(*index),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            frames,
+            [0],
+            "only the step issued while the client was alive"
+        );
+        assert_eq!(
+            core.take_mcp_answer(build, launch, &key(1)),
+            Err(super::Stale)
+        );
+        assert_eq!(current_build(&core), Some((build, true)));
+        assert!(
+            !cli.process
+                .exits_within(Duration::ZERO)
+                .expect("CLI still lives")
+        );
+        assert_eq!(
+            end.expect("listener noticed the loss")
+                .expect("session end"),
+            SessionEnd::Closed
+        );
+        assert!(
+            !output(bridge).contains(r#""jsonrpc""#),
+            "no tool reply reached stdout"
+        );
+        assert!(call.reply.is_closed(), "no reply waiter survives");
+    };
+    timeout(Duration::from_secs(15), async {
+        tokio::join!(serve, drive)
+    })
+    .await
+    .expect("bounded fixture");
 }
 
 #[test]

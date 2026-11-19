@@ -18,7 +18,7 @@ use crate::bridge::LaunchId;
 use crate::bridge::listener::McpCall;
 use crate::connections::model::budget::Budget;
 use crate::context::ConnectionTag;
-use crate::coordinator::{Availability, Input, Ready, StoreOp, model_unavailable};
+use crate::coordinator::{Availability, Input, Ready, SendKey, StoreOp, model_unavailable};
 use crate::engines::claude_code::install::FindError;
 use crate::engines::claude_code::lane::{self, Done, Failure, Lane, Outcome, Work};
 use crate::engines::claude_code::launch::{
@@ -563,7 +563,8 @@ impl Claude {
             .expect("one action is within the limit")
     }
 
-    /// The engine for one question on `request`'s Claude Code choice, offering no tools. The
+    /// The engine for one question on `request`'s Claude Code choice. A run's build offers the
+    /// tools its request offers that MCP may call; a job offers none. The
     /// model is the reviewed row's own alias, so only a listed one reaches the command line
     /// whatever the request names, and the effort goes by a table to the CLI's word.
     ///
@@ -594,11 +595,15 @@ impl Claude {
             Effort::XHigh => "xhigh",
             Effort::Max => "max",
         };
+        let offer = match request.key {
+            SendKey::Build(_) => Offer::authorized(request.origin, &request.request.tools),
+            SendKey::Job(_) => Offer::Nothing,
+        };
         let snapshot = self.snapshot(
             request.thread,
             model.to_owned(),
             Some(effort.to_owned()),
-            Offer::Nothing,
+            offer,
         )?;
         self.take(&snapshot)
     }

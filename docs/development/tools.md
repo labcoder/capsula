@@ -129,8 +129,9 @@ flowchart TD
 
 ## `draw`
 
-`draw { records }` offers and accepts the overlay-only scene v1 2D contract, with a 16 KiB complete-argument
-ceiling. Its description comes from `crates/brain/prompts/draw.md`. Responses sends
+`draw { records }` offers the scene v1 2D contract, with a 16 KiB complete-argument ceiling.
+The provider description comes from `crates/brain/prompts/draw.md`. Claude Code's MCP list and
+seed use the overlay schema and omit the prompt's screen paragraph and example. Responses sends
 `strict: false` specifically for this tool: optional scene fields remain optional.
 Fenced Mermaid text is not a tool call; diagrams use the Mermaid scene operation.
 
@@ -140,11 +141,13 @@ requires reviewing the request overhead. That is a review budget, not a provider
 limit, the history reread bound or the 16 KiB tool-argument ceiling.
 
 For complete calls, including MCP, the dispatcher tokenizes the entire envelope, decodes every record
-and rejects non-overlay `begin` surfaces, 3D views, solids, 3D tracks, three-component keys and any solid-only
+and rejects unsupported `begin` surfaces, 3D views, solids, 3D tracks, three-component keys and any solid-only
 `set[].info` field, including null. The first typed failure returns its code, sanitized
-path and step id, spends the existing drawing rejection/repair budget, and admits no
-scene record. Its refusal stays final for the caller's key. Semantic admission still
-runs once in the drawing reducer; a semantic failure can retain earlier committed steps.
+path and step id, and admits no scene record. The drawing reducer charges its repair budget
+on a rejected record. MCP's overlay-only refusals for a screen surface or box target are
+answered before that reducer and spend only the MCP call allowance. A refusal stays final
+for the caller's key. Semantic admission still runs once in the drawing reducer; a semantic
+failure can retain earlier committed steps.
 
 A stopped result can end with a fixed phrase saying what follows, judged from the drawing's own
 run state. After a record or envelope error, while a corrected call can still draw, it adds
