@@ -121,13 +121,19 @@ All go out on the connection's control queue, in order. The announcement comes f
 ## The tail
 
 Each output generation's engine publishes a `Tail`: a sequence lock over one
-`Snapshot { exposed, played, flight, quiet, flags }`, in device frames of its one clock epoch.
+`Snapshot { exposed, played, flight, quiet, flags, spoken }`, in device frames of its one clock epoch.
 Only the engine writes it, on the worker thread, with no lock or allocation; a reader never
 waits, and a read that overlaps a write returns nothing.
 
 - `exposed` is the end of the content committed to the device, `played` the verified frontier,
   `flight` the content end of a release under way (0 for none), and `quiet` the latest pause
   serial that went quiet.
+- `spoken` is the run whose content the last successful content release committed (0 for
+  none). The stage reads the device's run once per buffer that holds content, and only the commit
+  publishes it, so filler keeps it and a flight, an abandoned buffer or a silent or failed release
+  never sets it. A stop of that run or a newer one, the seal and the release clear it; an older
+  stop leaves it. A buffer staged for one run commits before a `Name` or `Stop` queued meanwhile
+  applies, because the staged buffer holds the engine.
 - Flags: `UNKNOWN` once content may have reached the device unplaced (a continuity gap, a failed
   padding read, a failed release), `SEALED` once withdrawn, `FAULT` once the clock froze, and
   `RELEASED` once the stream was stopped and let go, so nothing more can be released.
@@ -272,16 +278,22 @@ whether a session has an output and whether an earlier generation still owes aud
 - **Talk-back off.** `withdraw()` sends `Withdraw` to a live speaker, fences an opening one when
   it opens, and later sessions get none. The stream retires; the worker stays on without a
   device, answering stops and crediting frames, and the session goes on.
-- **Stop.** `stop(session, run)` queues a speaker `Stop` on that session only. Presence calls it
-  only after the brain's `Stop` or `StopScenes` for that run was queued (`send_stop`), so speech
-  never stops for a stop the brain wasn't told; a refused brain send stops no speech.
-- **Naming and spoken runs.** The control reader names each newer run through `name(run)`,
-  which sends `Name` under the lock and keeps what the live output had exposed by then.
-  `spoken(session)` returns that run once the same live output exposed content past it: positive
-  evidence the run is speaking. A tail mid-publish leaves no evidence, and with no opener no
-  run is ever spoken. A hold takes the spoken run when its `Warm` is applied and, at
-  recognition, stops it if it is still the run Esc would stop: fenced locally, the brain's
-  `Stop` queued, then the speaker's. A refused brain send ends the connection and opens no hold.
+- **Stop.** `stop(session, run)` queues a speaker `Stop` on that session only, and never waits:
+  contention is `Busy`. Presence calls it only after the brain's `Stop` or `StopScenes` for that
+  run was queued (`send_stop`), so speech never stops for a stop the brain wasn't told; a refused
+  brain send ends that session and stops no speech. Presence keeps the stops a busy owner refused
+  in order and offers the front one again every millisecond, up to ten offers in all (a policy,
+  not a measured bound); a later stop waits behind it. When the offers run out, that session ends
+  on the background executor, since ending takes the same lock.
+- **Spoken runs.** `spoken(session)` reads the live output's tail without waiting and returns its
+  `spoken` run: positive evidence the run is speaking, even after the device drained, since a
+  pause can drain it while the run still has unwritten speech. A busy owner or a tail
+  mid-publish is no evidence, and with no opener no run is ever spoken. A hold takes the spoken
+  run when its `Warm` is applied and, at recognition, stops it if it is still the run Esc would
+  stop: fenced locally, kept stopped until both its endings are in so its late scenes are
+  skipped, the brain's `Stop` queued, then the speaker's. A refused brain send ends the
+  connection and opens no hold. The control reader names runs with `Name` as before and takes
+  no owner lock.
 - **The capture inhibit.** One per link, held by a voice gesture so the microphone never records
   the speaker. `acquire(gesture)` takes it and pauses a live speaker under a fresh serial; it
   never waits, so contention is `Busy` and the gesture gets nothing. `transfer` moves it to a
