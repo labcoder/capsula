@@ -49,7 +49,8 @@ flowchart LR
   refuses its requests once its cap is spent.
 - Every brain a check starts, `catalog-provenance`, `image` and `marks` included, gets
   `KUMOCHI_LIVE_KEY_CATALOG_BUDGET=0` and `KUMOCHI_LIVE_KEY_MESSAGES_BUDGET=0`, so no Anthropic
-  key request can go out. `KUMOCHI_LIVE_BUDGET` doesn't cover the key route.
+  key request can go out, except `anthropic-key`, which starts each launch's brain with its slice
+  ([below](#anthropic-key)). `KUMOCHI_LIVE_BUDGET` doesn't cover the key route.
 
 ## `account`
 
