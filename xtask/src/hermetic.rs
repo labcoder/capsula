@@ -86,10 +86,9 @@ pub(crate) fn build(
     // `cargo run` gives xtask its package's variables, and ring's build script reruns when any of
     // them changes, so keeping them would rebuild a prebuilt image inside a timed run.
     for (name, _) in std::env::vars_os() {
-        if name
-            .to_str()
-            .is_some_and(|name| name.starts_with("CARGO_PKG_") || name.starts_with("CARGO_MANIFEST_"))
-        {
+        if name.to_str().is_some_and(|name| {
+            name.starts_with("CARGO_PKG_") || name.starts_with("CARGO_MANIFEST_")
+        }) {
             cargo.env_remove(name);
         }
     }
