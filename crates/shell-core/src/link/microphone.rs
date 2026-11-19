@@ -102,6 +102,13 @@ impl LinkHandle {
     /// current connection unless that connection is closing; the next one replays it.
     pub(super) fn retain_microphone_stop(
         &self,
+        #[cfg_attr(
+            not(any(test, feature = "test-support")),
+            expect(
+                unused_variables,
+                reason = "only a recording link reads the requesting session"
+            )
+        )]
         session: &Session,
         gesture: GestureId,
     ) -> Option<bool> {
