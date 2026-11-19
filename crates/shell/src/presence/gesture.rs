@@ -17,7 +17,7 @@ use gpui_kit::{AnyWindowHandle, App, AppContext as _, AsyncApp, WeakEntity};
 
 use super::{
     Presence,
-    voice::{Gates, Stamp},
+    voice::{Escaping, Gates, Stamp},
 };
 use crate::input::{
     Edge, Event, Gesture, Key, TalkHeld,
@@ -38,7 +38,8 @@ struct Pending {
     /// key-up, and the screen watch must know which key may still repeat.
     held: TalkHeld,
     cancelled: Option<GestureId>,
-    escape: bool,
+    /// An Esc press: every retirement waits until this delivery is decided.
+    escape: Option<Rc<Escaping>>,
     collection: u64,
 }
 
@@ -210,7 +211,7 @@ pub(super) fn deliver(
             pointer,
             held: state.talk_held(),
             cancelled,
-            escape,
+            escape: escape.then(|| gates.escaping()),
             collection: link.microphone_gate().latest(),
             stamp: Stamp {
                 target: target.get(),
@@ -304,7 +305,9 @@ fn apply(
 ) -> Applied {
     let result = cx.update_window(dock, |_, window, app| {
         let applied = owner.update(app, |this, cx| {
-            if pending.escape && stale_hold_escape(this, pending.cancelled, pending.stamp.session) {
+            if pending.escape.is_some()
+                && stale_hold_escape(this, pending.cancelled, pending.stamp.session)
+            {
                 return false;
             }
             let mut effects = pending.delivery.effects;
@@ -323,12 +326,13 @@ fn apply(
             true
         });
         if applied.as_ref().is_ok_and(|apply| *apply)
-            && (pending.escape || pending.delivery.intents.iter().any(Option::is_some))
+            && (pending.escape.is_some() || pending.delivery.intents.iter().any(Option::is_some))
         {
             let (owner, intents) = (owner.clone(), pending.delivery.intents.clone());
             let (stamp, qpc, pointer) = (pending.stamp, pending.qpc, pending.pointer);
             let held = pending.held;
-            let (escape, cancelled) = (pending.escape, pending.cancelled);
+            let (escaping, cancelled) = (pending.escape.clone(), pending.cancelled);
+            let escape = escaping.is_some();
             let intents = move |app: &mut App| {
                 let _gone = owner.update(app, |this, cx| {
                     if escape && stale_hold_escape(this, cancelled, stamp.session) {
@@ -341,6 +345,8 @@ fn apply(
                         tracing::error!("can't apply native Escape");
                     }
                 });
+                // The Esc is decided, stop or not: retirement may go on.
+                drop(escaping);
             };
             // Deferred to the end of this update, where the dock is back in GPUI's window table.
             app.defer(intents);
@@ -381,7 +387,7 @@ pub(super) fn deliver_intent(
         pointer,
         held,
         cancelled: None,
-        escape: false,
+        escape: None,
         collection: 0,
     };
     matches!(apply(cx, dock, owner, &pending), Applied::Yes)

@@ -108,8 +108,20 @@ pub(in crate::presence) struct Gates {
     list: Rc<RefCell<Vec<Gate>>>,
     /// Whether hold-to-talk can take a hold, mirrored from settings.
     on: Rc<Cell<bool>>,
+    /// Esc deliveries not yet decided: no gate retires while one is.
+    escapes: Rc<Cell<usize>>,
     poke: Sender<()>,
     pokes: Receiver<()>,
+}
+
+/// An Esc delivery's hold on every retirement, released once its decision is applied.
+pub(in crate::presence) struct Escaping(Gates);
+
+impl Drop for Escaping {
+    fn drop(&mut self) {
+        self.0.escapes.set(self.0.escapes.get().saturating_sub(1));
+        self.0.poke();
+    }
 }
 
 impl Default for Gates {
@@ -118,6 +130,7 @@ impl Default for Gates {
         Self {
             list: Rc::default(),
             on: Rc::default(),
+            escapes: Rc::default(),
             poke,
             pokes,
         }
@@ -131,6 +144,12 @@ impl Gates {
     )]
     pub(super) fn follow(&self, on: bool) {
         self.on.set(on);
+    }
+
+    /// Holds every retirement until the returned Esc delivery is decided, stop or not.
+    pub(in crate::presence) fn escaping(&self) -> Rc<Escaping> {
+        self.escapes.set(self.escapes.get() + 1);
+        Rc::new(Escaping(self.clone()))
     }
 
     /// Wakes the dispatcher; a full channel already holds a wake.
@@ -615,8 +634,8 @@ impl Presence {
             (Some(_), true) => Retirement::Unstarted,
             _ => Retirement::NoMic,
         };
-        // A resume never overtakes a speaker stop a busy owner hasn't taken: its drain pokes.
-        if !self.pending_stops.is_empty() {
+        // A resume never overtakes a speaker stop a busy owner hasn't taken, or an undecided Esc.
+        if !self.pending_stops.is_empty() || gates.escapes.get() > 0 {
             gate.authority = Authority::Held(token);
             return true;
         }

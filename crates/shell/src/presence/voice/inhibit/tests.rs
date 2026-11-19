@@ -803,3 +803,52 @@ fn a_discard_proved_after_a_newer_arm_still_tells_the_brain(cx: &mut TestAppCont
         .count();
     assert_eq!(told, 1, "the brain is told once");
 }
+
+#[gpui::test]
+fn an_esc_waiting_for_a_busy_owner_holds_the_resume_until_it_is_decided(cx: &mut TestAppContext) {
+    for stops in [true, false] {
+        let (owner, _data, _controls) = ready(cx);
+        let (commands, _tail) = answering(&owner, cx);
+        let deliver = native(&owner, cx);
+        hold(&owner, 1, cx);
+        owner.update(cx, |owner, cx| {
+            let stamp = owner.voice.pending.as_ref().expect("hold 1").stamp;
+            owner.voice_intent(
+                Intent::End {
+                    gesture: G1,
+                    cancelled: true,
+                },
+                stamp,
+                0,
+                None,
+                TalkHeld::default(),
+                cx,
+            );
+            owner.activity = Presence::activity(&owner.runs, EscapePanel::Closed, &owner.presenter);
+            if !stops {
+                // The hold's session is gone, so its press decides to stop nothing.
+                let session = owner.session.as_ref().expect("connected");
+                session
+                    .alive()
+                    .store(false, std::sync::atomic::Ordering::Release);
+            }
+            // The owner is busy here, so the press waits in the delivery queue.
+            deliver(
+                Event::Escape,
+                EventTime {
+                    instant: Instant::now(),
+                },
+            );
+            // The dispatcher's wake comes before the queued press is retried.
+            owner.dispatch(cx);
+        });
+        assert_eq!(heard(&commands), [Command::Pause(1)], "held for the Esc");
+        cx.run_until_parked();
+        let expected: &[Command] = if stops {
+            &[Command::Stop(RunId(5)), Command::Resume(1)]
+        } else {
+            &[Command::Resume(1)]
+        };
+        assert_eq!(heard(&commands), expected, "stops: {stops}");
+    }
+}

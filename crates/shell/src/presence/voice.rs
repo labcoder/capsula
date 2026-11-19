@@ -23,7 +23,7 @@ use crate::strings::{Strings, Text};
 mod inhibit;
 mod source;
 
-pub(super) use inhibit::Gates;
+pub(super) use inhibit::{Escaping, Gates};
 
 #[cfg(test)]
 mod recovery_tests;
