@@ -25,6 +25,9 @@ use zeroize::Zeroizing;
 
 #[path = "tests/authority.rs"]
 mod authority;
+#[cfg(debug_assertions)]
+#[path = "tests/filing_block.rs"]
+mod filing_block;
 #[path = "tests/lifecycle.rs"]
 mod lifecycle;
 #[path = "tests/mcp_draft.rs"]
