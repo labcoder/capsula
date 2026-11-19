@@ -352,7 +352,13 @@ pub(super) fn native(owner: &Entity<Presence>, cx: &mut TestAppContext) -> Deliv
 
 pub(super) fn chord(deliver: &Deliver, edge: Edge, at: Instant) {
     for key in [Key::LeftControl, Key::LeftAlt] {
-        deliver(Event::Key { key, edge }, EventTime::new(at));
+        let time = EventTime::new(at);
+        let time = if key == Key::LeftAlt && edge == Edge::Down {
+            time.with_keyboard_read(Some)
+        } else {
+            time
+        };
+        deliver(Event::Key { key, edge }, time);
     }
 }
 

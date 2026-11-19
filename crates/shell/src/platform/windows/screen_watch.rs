@@ -76,7 +76,7 @@ impl Ui {
                 }
             }
             // Keys were lost, or the session, the desktop or the power state changed.
-            Event::Reset => {
+            Event::Reset | Event::Escape => {
                 self.held = TalkHeld::default();
                 self.change();
             }

@@ -101,6 +101,7 @@ enum Phase {
         holding: bool,
     },
     Releasing,
+    Blocked,
 }
 
 #[derive(Default, Clone, Copy)]
@@ -141,6 +142,27 @@ impl Gesture {
         matches!(self.timing.phase, Phase::Active { .. }) || self.timing.first_tap.is_some()
     }
 
+    fn recover(&mut self, event: Event, read: impl FnOnce() -> Option<Instant>) -> Option<Instant> {
+        if !matches!(self.timing.phase, Phase::Blocked) {
+            return None;
+        }
+        let other = match event {
+            Event::Key {
+                key: Key::LeftControl,
+                edge: Edge::Down,
+            } => 1,
+            Event::Key {
+                key: Key::LeftAlt,
+                edge: Edge::Down,
+            } => 0,
+            _ => return None,
+        };
+        let now = read()?;
+        self.down[other] = true;
+        self.timing.phase = Phase::Ready;
+        Some(now)
+    }
+
     #[cfg(any(test, feature = "test-support"))]
     pub fn handle(&mut self, event: Event, now: Instant) -> [Option<Effect>; 3] {
         self.recognize(event, now, |_| {})
@@ -157,12 +179,13 @@ impl Gesture {
                 report(hold::InputReason::Reset);
             }
             let effects = self.timing.cancel();
-            if event == Event::Reset {
-                *self = Self::default();
-            } else if self.down == [false; 2] && self.other == [0; 16] {
-                self.timing.phase = Phase::Ready;
-            }
+            self.down = [false; 2];
+            self.other = [0; 16];
+            self.timing.phase = Phase::Blocked;
             return effects;
+        }
+        if matches!(self.timing.phase, Phase::Blocked) {
+            return [None; 3];
         }
         let Event::Key { key, edge } = event else {
             return [self.timing.advance(now), None, None];
@@ -669,7 +692,7 @@ mod tests {
             "cancelled chord stays blocked"
         );
         for held in [Key::LeftControl, Key::LeftAlt] {
-            gesture.handle(Event::Reset, now);
+            let mut gesture = Gesture::default();
             chord(&mut gesture, now);
             let tapped = if held == Key::LeftControl {
                 Key::LeftAlt
@@ -753,7 +776,17 @@ mod tests {
                 "stale timer does nothing"
             );
             if event == Event::Reset {
-                chord(&mut gesture, start + WINDOW);
+                let at = start + WINDOW;
+                let make = Event::Key {
+                    key: Key::LeftAlt,
+                    edge: Edge::Down,
+                };
+                assert_eq!(gesture.handle(make, at), [None; 3]);
+                assert_eq!(gesture.recover(make, || Some(at)), Some(at));
+                assert_eq!(
+                    gesture.handle(make, at),
+                    [Some(Effect::Listening), None, None]
+                );
             }
         }
     }

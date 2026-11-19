@@ -75,7 +75,7 @@ sequenceDiagram
   Escape remains distinguishable from the registered Escape event, and bounded opaque
   slots track live physical makes and breaks for up to two keyboards with keys down. A second
   device holding the same left modifier makes its identity ambiguous and resets input.
-  If both banks are occupied, any additional held device is tracked only for recovery.
+  If both banks are occupied, another device invalidates coverage rather than growing a list.
   The reducer doesn't decode Windows scan codes; diagnostics don't print devices, slots,
   layout identifiers or edge values.
 - **Same callback.** The gesture lives in an `Rc<Cell<Gesture>>` shared by the native callback
@@ -105,11 +105,19 @@ sequenceDiagram
   non-keyboard input does not. Device changes, observed keyboard-layout changes, session
   changes, desktop switches, suspend, overruns and Pause also reset it. The proxy samples
   the foreground layout at modifier edges and checks it again before a release acts; it
-  can't observe a foreign layout change that changes back between samples. After a reset,
-  capacity overflow or registered Escape, every observed held key must break before the
-  next chord can start. Only a matching break observed after the loss or removal of its
-  device clears a held key. A repeat never clears one; the first fresh chord after the last
-  break can be admitted. This doesn't infer an unobserved break. A desktop switch arrives via
+  can't observe a foreign layout change that changes back between samples. After coverage loss,
+  overflow or registered Escape, shell-core clears the remembered keys and blocks recognition.
+  An eligible new modifier make can try once. Windows reads left Ctrl and left Alt before and
+  after a bounded `GetAsyncKeyState` sweep, using only the down bit; another down keyboard VK
+  vetoes that attempt. Aggregate Ctrl/Alt aliases, mouse buttons and toggle state do not count.
+  The same attempt starts a fresh hold if Windows' observable virtual-key state agreed with
+  this chord. A failed read leaves the next attempt eligible; time, another reset and an empty
+  ledger cannot rearm. The scan isn't atomic: a key can go down after its slot was read,
+  access can change mid-sweep (zero means up or failure), two physical keys can share one VK,
+  and firmware-only keys without a VK aren't visible. A stuck or remapped extra key vetoes for
+  as long as Windows reports it down. The scan and behavior with elevated foreground windows,
+  a secure desktop, AltGr or two keyboards are unmeasured on Rez. OS bits don't give a device
+  identity or a watch exemption. A desktop switch arrives via
   an out-of-context WinEvent, not a keyboard hook. If the session or desktop watcher can't
   be registered, arming fails and undoes what it registered.
 
@@ -267,13 +275,14 @@ recognition until its keys come up or it ends, the proxy holds a second hotkey, 
 and Alt (`TalkEscape`). Those are the only modifiers a hold's keys can have down, since any
 other key going down cancels the hold, and the chord is never held outside a hold.
 
-- Raw Input doesn't report a press a hotkey took. The proxy delivers this hotkey's message as
-  the Esc key going down and up, so the hold cancels as it does for any other key and the press
-  does nothing else: it stops no run and clears no drawing.
+- The talk hotkey cancels the hold and invalidates coverage without inventing a key-up.
+  It stops no run and clears no drawing. Plain registered Esc does its usual work and also
+  invalidates coverage.
 - Windows is asked once per hold, before voice admission. If it refuses the registration,
   the typed refusal prevents microphone admission and screen context for that hold. The
-  proxy retires the talk lease on the native terminal edge or reset, before deferred UI
-  delivery. It doesn't reuse retired hotkey IDs, so neither a queued message nor late
+  proxy retires the talk ID and revokes collection and stale watch authority before it calls
+  `UnregisterHotKey` on the window's thread. Terminal UI effects wait until after that call.
+  It doesn't reuse retired hotkey IDs, so neither a queued message nor late
   cleanup can reach a later hold. An uncertain unregister leaves input inert until the
   proxy is recreated; dropping the ID locally does not prove Windows released it.
   The plain Esc lease is separate.

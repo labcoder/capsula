@@ -126,12 +126,13 @@ pub(super) fn deliver(
     let fence = std::cell::RefCell::new(Fence::new(link.microphone_gate()));
     let escaped = Cell::new(None);
     let escape_down = Cell::new(false);
+    let recovered_hold = Cell::new(None);
     let input = Rc::new(Cell::new((0_u64, 0_u64)));
-    let reduce: Rc<Reduce> = Rc::new(move |event, at| {
+    let reduce: Rc<Reduce> = Rc::new(move |event, mut at| {
         let (serial, reset) = input.get();
-        if event == Event::Reset {
+        if matches!(event, Event::Reset | Event::Escape) {
             input.set((serial.saturating_add(1), reset.saturating_add(1)));
-        } else if matches!(event, Event::Escape | Event::Key { .. }) && !at.repeated_modifier {
+        } else if matches!(event, Event::Key { .. }) && !at.repeated_modifier {
             input.set((serial.saturating_add(1), reset));
         }
         let Ok(qpc) = u64::try_from(performance_counter()) else {
@@ -172,14 +173,31 @@ pub(super) fn deliver(
             None
         };
         let mut state = gesture.get();
-        let delivery = fence
-            .borrow_mut()
-            .reduce(&mut state, event, at.instant, &paused);
+        let mut recovered = false;
+        let delivery = fence.borrow_mut().reduce_with_keyboard_read(
+            &mut state,
+            event,
+            at.instant,
+            &paused,
+            || {
+                let now = at.recovery_time()?;
+                recovered = true;
+                Some(now)
+            },
+        );
         gesture.set(state);
         for intent in delivery.intents.iter().flatten() {
+            if let Intent::End { gesture, .. } = intent
+                && recovered_hold.get() == Some(*gesture)
+            {
+                at.held = TalkHeld::default();
+            }
             match intent {
                 // Key-down takes the capture inhibit here, never waiting; nothing retires here.
                 Intent::Warm(warm) => {
+                    if recovered {
+                        recovered_hold.set(Some(*warm));
+                    }
                     gates.warm(
                         link.output(),
                         *warm,
@@ -261,7 +279,8 @@ pub(super) fn deliver(
                 choice: link.choice_revision(),
             },
         };
-        if backlog.get() == 0
+        if !at.defer_terminal
+            && backlog.get() == 0
             && matches!(
                 apply(&mut async_cx.clone(), dock, &owner, &pending),
                 Applied::Yes

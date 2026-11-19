@@ -15,19 +15,19 @@ use windows::Win32::System::RemoteDesktop::{
 };
 use windows::Win32::UI::Accessibility::{HWINEVENTHOOK, SetWinEventHook, UnhookWinEvent};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetKeyboardLayout, HKL, HOT_KEY_MODIFIERS, MAPVK_VK_TO_VSC_EX, MOD_ALT, MOD_CONTROL,
-    MOD_NOREPEAT, MapVirtualKeyW, RegisterHotKey, UnregisterHotKey, VK_ESCAPE,
+    GetAsyncKeyState, GetKeyboardLayout, HKL, HOT_KEY_MODIFIERS, MAPVK_VK_TO_VSC_EX, MOD_ALT,
+    MOD_CONTROL, MOD_NOREPEAT, MapVirtualKeyW, RegisterHotKey, UnregisterHotKey, VK_CONTROL,
+    VK_ESCAPE, VK_LCONTROL, VK_LMENU, VK_MENU,
 };
 use windows::Win32::UI::Input::{
     GetRawInputData, HRAWINPUT, RAWINPUT, RAWINPUTDEVICE, RAWINPUTHEADER, RAWKEYBOARD, RID_INPUT,
     RIDEV_DEVNOTIFY, RIDEV_INPUTSINK, RIDEV_REMOVE, RIM_TYPEKEYBOARD, RegisterRawInputDevices,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    EVENT_SYSTEM_DESKTOPSWITCH, GIDC_REMOVAL, GetForegroundWindow, GetQueueStatus,
-    GetWindowThreadProcessId, KillTimer, PBT_APMSUSPEND, PostMessageW, QS_ALLINPUT, RI_KEY_BREAK,
-    RI_KEY_E0, RI_KEY_E1, SetTimer, WINEVENT_OUTOFCONTEXT, WM_APP, WM_HOTKEY, WM_INPUT,
-    WM_INPUT_DEVICE_CHANGE, WM_INPUTLANGCHANGE, WM_NCDESTROY, WM_POWERBROADCAST, WM_TIMER,
-    WM_WTSSESSION_CHANGE,
+    EVENT_SYSTEM_DESKTOPSWITCH, GetForegroundWindow, GetQueueStatus, GetWindowThreadProcessId,
+    KillTimer, PBT_APMSUSPEND, PostMessageW, QS_ALLINPUT, RI_KEY_BREAK, RI_KEY_E0, RI_KEY_E1,
+    SetTimer, WINEVENT_OUTOFCONTEXT, WM_APP, WM_HOTKEY, WM_INPUT, WM_INPUT_DEVICE_CHANGE,
+    WM_INPUTLANGCHANGE, WM_NCDESTROY, WM_POWERBROADCAST, WM_TIMER, WM_WTSSESSION_CHANGE,
 };
 
 use super::presence::{PresenceError, struct_size};
@@ -62,6 +62,8 @@ pub(crate) struct EventTime {
     pub(crate) instant: Instant,
     pub(crate) held: TalkHeld,
     pub(crate) repeated_modifier: bool,
+    pub(crate) defer_terminal: bool,
+    read_chord: Option<fn(Instant) -> Option<Instant>>,
     layout: Option<HKL>,
 }
 
@@ -71,6 +73,8 @@ impl EventTime {
             instant,
             held: TalkHeld::default(),
             repeated_modifier: false,
+            defer_terminal: false,
+            read_chord: None,
             layout: None,
         }
     }
@@ -78,6 +82,17 @@ impl EventTime {
     pub(crate) fn layout_current(self) -> bool {
         self.layout
             .is_none_or(|layout| foreground_layout() == Some(layout))
+    }
+
+    pub(crate) fn recovery_time(self) -> Option<Instant> {
+        let now = self.read_chord?(self.instant)?;
+        self.layout_current().then_some(now)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_keyboard_read(mut self, read: fn(Instant) -> Option<Instant>) -> Self {
+        self.read_chord = Some(read);
+        self
     }
 }
 
@@ -186,24 +201,15 @@ impl Keys {
         let mut at = EventTime::new(Instant::now());
         let mut id = None;
         let event = match message {
-            _ if self.plain_escape(message, wparam) => Event::Escape,
-            // Raw Input doesn't report a press a hotkey took, so this message is the whole
-            // press: Esc down here and up below cancel the hold as any other key does, and
-            // nothing else.
+            _ if self.plain_escape(message, wparam) => {
+                self.physical.borrow_mut().lose();
+                Event::Escape
+            }
             _ if hotkey(message, wparam, self.escapes.talk.get()) => {
-                self.retire_talk(hwnd);
-                let id = PhysicalKey::new(ESCAPE_MAKE_CODE).expect("Escape has a bounded slot");
-                let escape = |edge| Event::Key {
-                    key: Key::Escape(id),
-                    edge,
-                };
-                super::screen_watch::heard(escape(Edge::Down), None);
-                if let Some(deliver) = self.deliver.get() {
-                    deliver(escape(Edge::Down), at);
-                }
-                escape(Edge::Up)
+                self.physical.borrow_mut().lose()
             }
             WM_INPUT => {
+                at.read_chord = Some(read_chord);
                 let Some((event, physical)) =
                     self.input(read_key(lparam), &mut at, foreground_layout)
                 else {
@@ -219,14 +225,7 @@ impl Keys {
                 self.disarm(hwnd);
                 Event::Deadline
             }
-            WM_INPUT_DEVICE_CHANGE => {
-                if wparam.0 == usize::try_from(GIDC_REMOVAL).unwrap_or(0) {
-                    self.physical.borrow_mut().remove(HANDLE(
-                        std::ptr::with_exposed_provenance_mut(lparam.0.cast_unsigned()),
-                    ));
-                }
-                self.physical.borrow_mut().lose()
-            }
+            WM_INPUT_DEVICE_CHANGE => self.physical.borrow_mut().lose(),
             WM_INPUTLANGCHANGE | WM_WTSSESSION_CHANGE | DESKTOP_SWITCHED | WM_NCDESTROY => {
                 self.layout.set(None);
                 self.physical.borrow_mut().lose()
@@ -242,8 +241,8 @@ impl Keys {
             || (message == WM_HOTKEY && self.deliver.get().is_some())
     }
 
-    fn forward(&self, hwnd: HWND, mut event: Event, mut id: Option<PhysicalKey>, at: EventTime) {
-        if self.escapes.talk.get() != 0
+    fn forward(&self, hwnd: HWND, event: Event, id: Option<PhysicalKey>, mut at: EventTime) {
+        let retiring = if self.escapes.talk.get() != 0
             && matches!(
                 event,
                 Event::Reset
@@ -256,14 +255,12 @@ impl Keys {
                         key: Key::Other(_) | Key::Escape(_),
                         edge: Edge::Down,
                     }
-            )
-        {
-            self.retire_talk(hwnd);
-            if !self.escape_trusted() && event != Event::Escape {
-                event = Event::Reset;
-                id = None;
-            }
-        }
+            ) {
+            self.escapes.talk.replace(0)
+        } else {
+            0
+        };
+        at.defer_terminal = retiring != 0;
         // The screen watch hears what the gesture hears: a talk key or another key, or a reset.
         super::screen_watch::heard(event, id);
         if self.overdue(event, at.instant) {
@@ -271,25 +268,32 @@ impl Keys {
             let queue = unsafe { GetQueueStatus(QS_ALLINPUT) };
             tracing::debug!(stage = ?InputStage::Native, reason = ?InputReason::DeadlineOverdue, queue, "held speech input boundary");
         }
-        if let Some(deliver) = self.deliver.get() {
+        let deliver = self.deliver.get();
+        let mut deadline = if let Some(deliver) = deliver {
             // `at` stays the event's time; the timer counts from now, since delivery takes time.
-            let deadline = deliver(event, at);
-            self.arm(hwnd, deadline, Instant::now());
-        } else if matches!(
-            event,
-            Event::Deadline
-                | Event::Key {
-                    key: Key::LeftControl | Key::LeftAlt,
-                    ..
-                }
-        ) {
-            tracing::warn!(stage = ?InputStage::Native, reason = ?InputReason::CallbackMissing, "held speech input failed");
+            deliver(event, at)
+        } else {
+            if matches!(
+                event,
+                Event::Deadline
+                    | Event::Key {
+                        key: Key::LeftControl | Key::LeftAlt,
+                        ..
+                    }
+            ) {
+                tracing::warn!(stage = ?InputStage::Native, reason = ?InputReason::CallbackMissing, "held speech input failed");
+            }
+            None
+        };
+        if retiring != 0 {
+            self.escapes.release_native(hwnd, retiring);
+            if !self.escape_trusted() && !matches!(event, Event::Reset | Event::Escape) {
+                let reset = self.physical.borrow_mut().lose();
+                super::screen_watch::heard(reset, None);
+                deadline = deliver.and_then(|deliver| deliver(reset, at));
+            }
         }
-    }
-
-    fn retire_talk(&self, hwnd: HWND) {
-        self.escapes
-            .unregister(hwnd, EscapeKind::Talk, self.escapes.talk.get());
+        self.arm(hwnd, deadline, Instant::now());
     }
 
     fn input(
@@ -318,16 +322,18 @@ impl Keys {
             let layout = layout();
             let previous = self.layout.replace(layout);
             if layout.is_none() || previous.is_some_and(|old| Some(old) != layout) {
-                let _ = physical.key(device, slot, event);
                 return Some((physical.lose(), None));
             }
             at.layout = layout;
         }
-        let (event, id, repeated) = physical.key(device, slot, event)?;
+        let (event, id, repeated) = physical.key(device, slot, event);
         if id.is_some() && matches!(event, Event::Key { edge: Edge::Up, .. }) {
             at.held = physical.held();
         }
         at.repeated_modifier = repeated;
+        if repeated {
+            at.read_chord = None;
+        }
         Some((event, id))
     }
 
@@ -449,11 +455,7 @@ fn watch(hwnd: HWND, keys: &Keys) -> Result<(), PresenceError> {
 
 /// Stops what `arm` started, before the proxy window goes away.
 pub(super) fn disarm(hwnd: HWND, keys: &Keys) {
-    keys.retire_talk(hwnd);
-    if let Some(deliver) = keys.deliver.get() {
-        deliver(Event::Reset, EventTime::new(Instant::now()));
-    }
-    keys.disarm(hwnd);
+    keys.forward(hwnd, Event::Reset, None, EventTime::new(Instant::now()));
     if let Some(hook) = keys.desktop.take() {
         // SAFETY: the hook was set on this thread by `arm` and is removed once.
         if !unsafe { UnhookWinEvent(hook) }.as_bool() {
@@ -516,15 +518,23 @@ impl Escapes {
     }
 
     fn unregister(&self, hwnd: HWND, kind: EscapeKind, id: i32) {
-        self.retire(kind, id, || {
-            #[cfg(test)]
-            if hwnd.is_invalid() {
-                return true;
-            }
-            // SAFETY: this is the id registered on the proxy's owning thread.
-            unsafe { UnregisterHotKey(Some(hwnd), id) }.is_ok()
-        });
+        self.retire(kind, id, || unregister_hotkey(hwnd, id));
     }
+
+    fn release_native(&self, hwnd: HWND, id: i32) {
+        if !unregister_hotkey(hwnd, id) {
+            self.uncertain.set(true);
+        }
+    }
+}
+
+fn unregister_hotkey(hwnd: HWND, id: i32) -> bool {
+    #[cfg(test)]
+    if hwnd.is_invalid() {
+        return true;
+    }
+    // SAFETY: this is the id registered on the proxy's owning thread.
+    unsafe { UnregisterHotKey(Some(hwnd), id) }.is_ok()
 }
 
 impl std::fmt::Debug for EscapeHotkey {
@@ -677,6 +687,35 @@ fn read_key(lparam: LPARAM) -> Result<Option<RawKey>, ()> {
         }
     }
     Ok(Some((raw.header.hDevice, keyboard)))
+}
+
+fn read_chord(_: Instant) -> Option<Instant> {
+    // SAFETY: queries the current foreground window without touching it.
+    let foreground = unsafe { GetForegroundWindow() };
+    let exact = exact_chord(|key| {
+        // SAFETY: queries a bounded virtual-key code without modifying input.
+        unsafe { GetAsyncKeyState(i32::from(key)) < 0 }
+    });
+    // SAFETY: rechecks the foreground without touching it.
+    (exact && foreground == unsafe { GetForegroundWindow() }).then(Instant::now)
+}
+
+fn exact_chord(mut down: impl FnMut(u16) -> bool) -> bool {
+    let left = [VK_LCONTROL.0, VK_LMENU.0];
+    if !left.into_iter().all(&mut down) {
+        return false;
+    }
+    for key in std::iter::once(0x03).chain(0x08..=0xFE) {
+        if !left.contains(&key)
+            && key != VK_CONTROL.0
+            && key != VK_MENU.0
+            && !(0xC3..=0xDA).contains(&key)
+            && down(key)
+        {
+            return false;
+        }
+    }
+    left.into_iter().all(down)
 }
 
 /// Names a key by make code and E0 prefix. Only unprefixed 0x1D and 0x38 are the left keys,
@@ -843,7 +882,7 @@ mod tests {
     }
 
     #[test]
-    fn esc_with_the_talk_keys_down_is_delivered_as_that_key_s_press_and_consumed() {
+    fn registered_talk_escape_cancels_without_inventing_a_break() {
         let keys = super::Keys::default();
         let talk = EscapeHotkey::register_with_talk_keys(HWND::default(), &keys).unwrap();
         let plain = EscapeHotkey::register(HWND::default(), &keys).unwrap();
@@ -855,16 +894,12 @@ mod tests {
         });
         assert!(keys.deliver.set(deliver).is_ok());
         let hotkey = |id| keys.on_message(HWND::default(), WM_HOTKEY, WPARAM(id), LPARAM(0));
-        let escape = |edge| Event::Key {
-            key: Key::Escape(crate::input::PhysicalKey::new(1).unwrap()),
-            edge,
-        };
         let old = usize::try_from(talk.1).unwrap();
         assert!(hotkey(old), "the chord's message is consumed");
-        assert_eq!(*seen.borrow(), [escape(Edge::Down), escape(Edge::Up)]);
+        assert_eq!(*seen.borrow(), [Event::Reset]);
         assert!(hotkey(usize::try_from(plain.1).unwrap()));
         assert_eq!(
-            seen.borrow()[2..],
+            seen.borrow()[1..],
             [Event::Escape],
             "plain Esc is unchanged"
         );
@@ -876,7 +911,7 @@ mod tests {
             !hotkey(old),
             "the successor cannot receive the retired message"
         );
-        assert_eq!(seen.borrow().len(), 3);
+        assert_eq!(seen.borrow().len(), 2);
     }
 
     #[test]
@@ -994,7 +1029,13 @@ mod tests {
             raw_in_layout(&keys, 1, 0x38, up, 2).unwrap().0,
             Event::Reset
         );
-        assert!(raw_in_layout(&keys, 1, 0x1D, up, 2).is_none());
+        assert!(matches!(
+            raw_in_layout(&keys, 1, 0x1D, up, 2).unwrap().0,
+            Event::Key {
+                key: Key::LeftControl,
+                edge: Edge::Up
+            }
+        ));
         assert!(matches!(
             raw_in_layout(&keys, 1, 0x1D, 0, 2),
             Some((
@@ -1008,7 +1049,7 @@ mod tests {
     }
 
     #[test]
-    fn lost_raw_input_discards_keys_until_all_tracked_breaks() {
+    fn lost_raw_input_clears_live_repeat_identity() {
         let keys = super::Keys::default();
         let mut time = super::EventTime::new(std::time::Instant::now());
         assert!(raw(&keys, 1, 0x1D, 0).is_some());
@@ -1022,36 +1063,16 @@ mod tests {
             Some((Event::Reset, None))
         );
 
-        let up = super::RI_KEY_BREAK;
-        for (code, flags) in [(0x1D, 0), (0x38, 0), (0x38, up), (0x1D, up)] {
-            assert!(
-                raw(&keys, 1, code, flags).is_none(),
-                "a break, not a repeat, resolves the tracked key"
-            );
-        }
-        assert!(
-            raw(&keys, 1, 0x1D, 0).is_some(),
-            "a fresh make can reach it"
-        );
+        assert!(!raw(&keys, 1, 0x1D, 0).unwrap().1.repeated_modifier);
+        assert!(raw(&keys, 1, 0x1D, 0).unwrap().1.repeated_modifier);
     }
 
     #[test]
-    fn removing_an_overflow_device_clears_only_that_devices_held_keys() {
+    fn overflow_discards_bank_occupancy_instead_of_keeping_recovery_debt() {
         let keys = super::Keys::default();
-        let up = super::RI_KEY_BREAK;
         assert!(raw(&keys, 1, 0x25, 0).is_some());
         assert!(raw(&keys, 2, 0x24, 0).is_some());
         assert_eq!(raw(&keys, 3, 0x2A, 0).unwrap().0, Event::Reset);
-        assert!(!keys.on_message(
-            HWND::default(),
-            super::WM_INPUT_DEVICE_CHANGE,
-            WPARAM(usize::try_from(super::GIDC_REMOVAL).unwrap()),
-            LPARAM(3),
-        ));
-        assert!(raw(&keys, 4, 0x1D, 0).is_none());
-        assert!(raw(&keys, 4, 0x1D, up).is_none());
-        assert!(raw(&keys, 1, 0x25, up).is_none());
-        assert!(raw(&keys, 2, 0x24, up).is_none());
         assert!(matches!(
             raw(&keys, 4, 0x1D, 0),
             Some((
@@ -1066,23 +1087,187 @@ mod tests {
 
     #[test]
     fn a_second_device_cannot_repeat_or_release_another_devices_modifier() {
-        let keys = super::Keys::default();
-        let up = super::RI_KEY_BREAK;
-        assert!(raw(&keys, 1, 0x1D, 0).is_some());
-        assert_eq!(raw(&keys, 2, 0x1D, 0).unwrap().0, Event::Reset);
-        for (device, code, flags) in [
-            (2, 0x38, 0),
-            (2, 0x38, up),
-            (2, 0x1D, up),
-            (1, 0x1D, 0),
-            (1, 0x1D, up),
-        ] {
-            assert!(
-                raw(&keys, device, code, flags).is_none(),
-                "a foreign break did not discharge the first device"
-            );
+        for flags in [0, super::RI_KEY_BREAK] {
+            let keys = super::Keys::default();
+            assert!(raw(&keys, 1, 0x1D, 0).is_some());
+            assert_eq!(raw(&keys, 2, 0x1D, flags).unwrap().0, Event::Reset);
         }
-        assert!(raw(&keys, 1, 0x1D, 0).is_some());
+    }
+
+    #[test]
+    fn os_read_uses_side_specific_keys_without_aliases_and_rechecks_the_pair() {
+        use super::{VK_LCONTROL, VK_LMENU, exact_chord};
+
+        let pair = [VK_LCONTROL.0, VK_LMENU.0];
+        let allowed = |key| pair.contains(&key) || matches!(key, 0x01 | 0x11 | 0x12);
+        assert!(
+            exact_chord(allowed),
+            "mouse and aggregate aliases aren't extras"
+        );
+        for extra in [0xA3, 0xA5, 0xA0, 0xA1, 0x1B, 0x4B] {
+            assert!(!exact_chord(|key| allowed(key) || key == extra));
+        }
+        assert!(!exact_chord(|key| matches!(key, 0xA3 | 0xA5 | 0x11 | 0x12)));
+        for released in pair {
+            let mut seen = false;
+            assert!(!exact_chord(|key| {
+                if key == released {
+                    !std::mem::replace(&mut seen, true)
+                } else {
+                    allowed(key)
+                }
+            }));
+        }
+    }
+
+    #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one recovery assertion matrix across native loss sources"
+    )]
+    fn coverage_loss_refuses_dirty_or_blind_attempts_and_admits_the_first_clean_one() {
+        use std::cell::Cell;
+        use std::time::{Duration, Instant};
+
+        use crate::input::Gesture;
+        use crate::input::hold::{Delivery, Fence, Intent};
+        use crate::platform::microphone::CollectionGate;
+        use kumochi_protocol::message::GestureId;
+
+        for loss in 0..6 {
+            let keys = super::Keys::default();
+            let state = Rc::new(RefCell::new((
+                Fence::new(CollectionGate::default()),
+                Gesture::default(),
+            )));
+            let reads = Rc::new(Cell::new((false, false, 0)));
+            let results = Rc::new(RefCell::new(Vec::new()));
+            let reduce = {
+                let (state, reads, results) =
+                    (Rc::clone(&state), Rc::clone(&reads), Rc::clone(&results));
+                move |event, at: super::EventTime| {
+                    let (fence, gesture) = &mut *state.borrow_mut();
+                    let (ctrl, alt, extra) = reads.get();
+                    let result = fence.reduce_with_keyboard_read(
+                        gesture,
+                        event,
+                        at.instant,
+                        &Cell::new(false),
+                        || {
+                            (!at.repeated_modifier
+                                && super::exact_chord(|key| match key {
+                                    0xA2 => ctrl,
+                                    0xA4 => alt,
+                                    _ => key == extra,
+                                }))
+                            .then_some(at.instant)
+                        },
+                    );
+                    results.borrow_mut().push(result);
+                    None
+                }
+            };
+            assert!(keys.deliver.set(Box::new(reduce)).is_ok());
+            let deliver = keys.deliver.get().unwrap();
+            let now = Instant::now();
+            let send = |event, ms| {
+                deliver(
+                    event,
+                    super::EventTime::new(now + Duration::from_millis(ms)),
+                )
+            };
+            let input = |device, scan, flags, ms| {
+                let (event, mut at) = raw(&keys, device, scan, flags).unwrap();
+                at.instant = now + Duration::from_millis(ms);
+                deliver(event, at);
+            };
+            let unreadable = |ms| {
+                let mut at = super::EventTime::new(now + Duration::from_millis(ms));
+                let (event, _) = keys.input(Err(()), &mut at, || unreachable!()).unwrap();
+                deliver(event, at);
+            };
+            let hwnd = HWND::default();
+            match loss {
+                0 => {
+                    unreadable(1);
+                }
+                1 => {
+                    input(1, 0x25, 0, 0);
+                    unreadable(1);
+                }
+                2 => {
+                    input(1, 0x25, 0, 0);
+                    keys.on_message(hwnd, super::WM_WTSSESSION_CHANGE, WPARAM(0), LPARAM(0));
+                }
+                3 => {
+                    input(1, 0x25, 0, 0);
+                    input(2, 0x24, 0, 0);
+                    input(3, 0x2A, 0, 1);
+                }
+                _ => {
+                    let lease = if loss == 4 {
+                        EscapeHotkey::register(hwnd, &keys).unwrap()
+                    } else {
+                        EscapeHotkey::register_with_talk_keys(hwnd, &keys).unwrap()
+                    };
+                    assert!(keys.on_message(
+                        hwnd,
+                        WM_HOTKEY,
+                        WPARAM(usize::try_from(lease.1).unwrap()),
+                        LPARAM(0)
+                    ));
+                }
+            }
+            let up = super::RI_KEY_BREAK;
+            let attempts = [
+                (false, false, 0),
+                (true, true, 0x1B),
+                (true, true, 0xA0),
+                (true, true, 0x4B),
+            ];
+            for (n, snapshot) in attempts.into_iter().enumerate() {
+                reads.set(snapshot);
+                let ms = 100 + u64::try_from(n).unwrap() * 500;
+                input(1, 0x1D, 0, ms);
+                input(1, 0x1D, 0, ms + 1);
+                input(1, 0x38, 0, ms + 2);
+                send(Event::Deadline, ms + 305);
+                input(1, 0x38, up, ms + 306);
+                input(1, 0x1D, up, ms + 307);
+            }
+            let ineligible = |delivery: &Delivery| {
+                delivery.intents.iter().all(Option::is_none)
+                    && delivery.effects.iter().all(Option::is_none)
+            };
+            assert!(
+                results.borrow().iter().all(ineligible),
+                "loss {loss} admitted a dirty or blind attempt"
+            );
+            reads.set((true, true, 0));
+            input(1, 0x1D, 0, 2_200);
+            input(1, 0x38, 0, 2_201);
+            send(Event::Deadline, 2_500);
+            let results = results.borrow();
+            assert!(
+                matches!(
+                    results[results.len() - 3].intents[0],
+                    Some(Intent::Warm(GestureId(1)))
+                ),
+                "loss {loss} must admit the same edge as its successful read"
+            );
+            assert!(
+                ineligible(&results[results.len() - 2]),
+                "the queued mate must not start the hold again"
+            );
+            assert!(matches!(
+                results[results.len() - 1].intents[0],
+                Some(Intent::Recognized {
+                    gesture: GestureId(1),
+                    generation: Ok(_),
+                    ..
+                })
+            ));
+        }
     }
 
     #[test]

@@ -504,18 +504,18 @@ fn a_reset_before_recognition_delivery_retires_only_that_unstarted_generation(
 }
 
 #[gpui::test]
-fn overflow_keeps_the_third_key_down_until_its_own_break(cx: &mut TestAppContext) {
+fn overflow_refuses_unconfirmed_chords_then_accepts_a_clean_read(cx: &mut TestAppContext) {
     needs_neutral(NeutralLoss::Overflow, cx);
 }
 
 #[gpui::test]
-fn registered_escape_keeps_a_known_key_down_until_its_break(cx: &mut TestAppContext) {
+fn registered_escape_requires_a_clean_read_even_with_no_known_key(cx: &mut TestAppContext) {
     needs_neutral(NeutralLoss::Escape, cx);
     needs_neutral(NeutralLoss::NeutralEscape, cx);
 }
 
 #[gpui::test]
-fn a_repeat_after_reset_is_not_neutral_and_the_first_fresh_chord_works(cx: &mut TestAppContext) {
+fn a_repeat_after_reset_cannot_rearm_but_the_first_clean_read_works(cx: &mut TestAppContext) {
     needs_neutral(NeutralLoss::Reset, cx);
 }
 
@@ -564,7 +564,7 @@ fn needs_neutral(loss: NeutralLoss, cx: &mut TestAppContext) {
             None
         }
     };
-    if let Some((device, make)) = unrelated {
+    {
         chord(Edge::Down, 20);
         chord(Edge::Up, 30);
         chord(Edge::Down, 700);
@@ -582,12 +582,20 @@ fn needs_neutral(loss: NeutralLoss, cx: &mut TestAppContext) {
                             | ControlToBrain::ScreenRelease { .. }
                     )
             )),
-            "{loss:?}: never warm, recognize, arm or send before the last break"
+            "{loss:?}: never warm, recognize, arm or send without a clean read"
         );
-        key(device, make, Edge::Up, 1_020);
+        if let Some((device, make)) = unrelated {
+            key(device, make, Edge::Up, 1_020);
+        }
     }
     cx.run_until_parked();
-    chord(Edge::Down, 2_000);
+    key(1, 0x1D, Edge::Down, 2_000);
+    raw(
+        1,
+        0x38,
+        Edge::Down,
+        after(at, 2_001).with_keyboard_read(Some),
+    );
     deliver(Event::Deadline, after(at, 2_302));
     cx.run_until_parked();
     assert_eq!(
@@ -599,7 +607,7 @@ fn needs_neutral(loss: NeutralLoss, cx: &mut TestAppContext) {
             })
             .collect::<Vec<_>>(),
         [GestureId(1)],
-        "{loss:?}: the first fresh chord after observed breaks is eligible"
+        "{loss:?}: the clean read admits that attempt"
     );
     key(1, 0xFF, Edge::Down, 2_303);
     cx.run_until_parked();
