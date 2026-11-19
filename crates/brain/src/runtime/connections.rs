@@ -328,18 +328,28 @@ impl Connections {
     }
 
     pub(super) fn connected(&mut self) -> ControlToShell {
-        self.unsent |= self
-            .verified
-            .as_ref()
-            .is_some_and(|verified| verified.fence.open());
+        self.unsent |= self.granted();
         ControlToShell::Connections(self.view)
     }
 
     pub(super) fn models_unsent(&mut self) -> Option<DataToShell> {
+        // A 401 closes the fence before the account hears it, so withhold the models here too.
+        let granted = self.granted();
         std::mem::take(&mut self.unsent).then(|| DataToShell::Models {
             connection: ConnectionKind::AnthropicKey,
-            models: self.models.iter().map(|model| model.info.clone()).collect(),
+            models: self
+                .models
+                .iter()
+                .filter(|_| granted)
+                .map(|model| model.info.clone())
+                .collect(),
         })
+    }
+
+    fn granted(&self) -> bool {
+        self.verified
+            .as_ref()
+            .is_some_and(|verified| verified.fence.open())
     }
 
     pub(super) fn take_refused(&mut self) -> Option<ConnectionTag> {
