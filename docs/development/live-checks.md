@@ -561,7 +561,7 @@ Run it only with the owner present and their approval for that run, at a head wh
 | 2 | 2 GETs, 3 POSTs | The saved key is checked at start. In Kumo's chat, a prompt that asks for `list_tasks` ends `Done`. The owner pastes B, and it is accepted. A second prompt in the same chat ends `Done`. The owner removes the key, and a third prompt is refused. |
 | 3 | 0 GETs, 0 POSTs | It starts with no key and stays that way for 30 seconds: no check and no run. |
 
-`live anthropic-key quiet` runs launch 3 alone, through the same run setup, process watch and quit wait, to prove them on the real images before a paid run. It sends nothing, so it needs no approval for spend and neither needs nor touches the ledger. It still launches the gate shell window for about a minute, so it runs only on the Captain's go.
+`live anthropic-key quiet` runs launch 3 alone, through the same run setup, process watch and quit wait, to prove them on the real images before a paid run. It sends nothing, so it needs no approval for spend and neither needs nor touches the ledger. It still opens the gate shell's window for about a minute, so run it only when the desktop is free and its owner has agreed.
 
 The prompts go to Kumo's chat, not a task. A task's first `Done` starts a title job, which would take a Messages request. Kumo's compaction finds nothing to summarize in a thread this short, so it sends nothing. `list_tasks` reads only the store and takes no screenshot.
 

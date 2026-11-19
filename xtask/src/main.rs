@@ -96,8 +96,8 @@ tasks:
   live anthropic-key quiet
                     only that check's last launch: the gate shell and brain with no key and
                     both key budgets at zero, quiet for 30 seconds, then quit; sends nothing
-                    and leaves the ledger alone; still launches the gate shell, so run it only
-                    on the Captain's go
+                    and leaves the ledger alone; opens the gate shell's window for about a
+                    minute, so run it only when the desktop is free and its owner has agreed
   live catalog-provenance
                     one model-list request with the dev account's saved session, never
                     renewing it; writes target\\live\\<time>\\catalog-provenance.json with
