@@ -2,17 +2,19 @@
 
 use std::fmt;
 use std::mem;
+use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
 
 use kumochi_protocol::message::{
     ConnectionOp, ControlToShell, KeyRecoveryRead, KeyRejection, KeyRemovalFailure,
     KeyStageFailure, KeyStageId, KeyView,
 };
+#[cfg(any(test, feature = "test-support"))]
 use zeroize::Zeroizing;
 
+use crate::platform::clipboard::{ClipboardRefusal, KeyClipboardResult, MAX_KEY_CLIPBOARD_BYTES};
 use crate::platform::credential::{PastedAnthropicKey, StageError, StagePermit, write_key_stage};
 
-const MAX_PASTE_BYTES: usize = 2048;
 const PASTE_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -20,6 +22,21 @@ pub struct Attempt {
     pub session: u64,
     pub request: u64,
     pub deadline: Instant,
+}
+
+pub struct ClipboardAttempt {
+    at: Attempt,
+    live: Weak<()>,
+}
+
+impl ClipboardAttempt {
+    pub fn attempt(&self) -> Attempt {
+        self.at
+    }
+
+    pub fn is_current(&self) -> bool {
+        self.live.strong_count() != 0
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -37,6 +54,10 @@ pub enum PasteFailure {
 enum Stage {
     #[default]
     Idle,
+    Reading {
+        at: Attempt,
+        _live: Arc<()>,
+    },
     Asked(Attempt, PastedAnthropicKey),
     Writing(Attempt, KeyStageId),
     Saving(Attempt, KeyStageId),
@@ -46,7 +67,10 @@ impl Stage {
     fn attempt(&self) -> Option<Attempt> {
         match self {
             Self::Idle => None,
-            Self::Asked(at, _) | Self::Writing(at, _) | Self::Saving(at, _) => Some(*at),
+            Self::Reading { at, .. }
+            | Self::Asked(at, _)
+            | Self::Writing(at, _)
+            | Self::Saving(at, _) => Some(*at),
         }
     }
 }
@@ -209,6 +233,74 @@ impl KeyPaste {
             && self.removal.is_none()
     }
 
+    pub fn start_read(&mut self, session: u64, now: Instant) -> Option<ClipboardAttempt> {
+        if !self.can_paste() {
+            return None;
+        }
+        self.confirmation_epoch = self.confirmation_epoch.wrapping_add(1);
+        self.failure = None;
+        self.request = self.request.wrapping_add(1);
+        let at = Attempt {
+            session,
+            request: self.request,
+            deadline: now + PASTE_TIMEOUT,
+        };
+        let live = Arc::new(());
+        let pending = ClipboardAttempt {
+            at,
+            live: Arc::downgrade(&live),
+        };
+        self.stage = Stage::Reading { at, _live: live };
+        Some(pending)
+    }
+
+    pub fn clipboard_read(
+        &mut self,
+        at: Attempt,
+        result: KeyClipboardResult,
+        now: Instant,
+        send: impl FnOnce(ConnectionOp) -> bool,
+    ) -> bool {
+        if !matches!(self.stage, Stage::Reading { at: reading, .. } if reading == at)
+            || self.expire(at, now)
+        {
+            return false;
+        }
+        self.stage = Stage::Idle;
+        let text = match result {
+            Ok(text) if !text.is_empty() => text,
+            Err(ClipboardRefusal::TooLong) => {
+                self.failure = Some(PasteFailure::TooLong);
+                return false;
+            }
+            _ => {
+                self.failure = Some(PasteFailure::Clipboard);
+                return false;
+            }
+        };
+        if text.len() > MAX_KEY_CLIPBOARD_BYTES {
+            self.failure = Some(PasteFailure::TooLong);
+            return false;
+        }
+        let key = match PastedAnthropicKey::new(text) {
+            Ok(key) => key,
+            Err(reason) => {
+                self.failure = Some(PasteFailure::Rejected(reason));
+                return false;
+            }
+        };
+        if !send(ConnectionOp::BeginAnthropicKeyStage {
+            request: at.request,
+            len: key.len(),
+        }) {
+            self.failure = Some(PasteFailure::Offline);
+            return false;
+        }
+        self.stage = Stage::Asked(at, key);
+        true
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
     pub fn begin(
         &mut self,
         text: Option<Zeroizing<String>>,
@@ -216,41 +308,9 @@ impl KeyPaste {
         now: Instant,
         send: impl FnOnce(ConnectionOp) -> bool,
     ) -> Option<Attempt> {
-        if !self.can_paste() {
-            return None;
-        }
-        self.confirmation_epoch = self.confirmation_epoch.wrapping_add(1);
-        self.failure = None;
-        let Some(text) = text.filter(|text| !text.is_empty()) else {
-            self.failure = Some(PasteFailure::Clipboard);
-            return None;
-        };
-        if text.len() > MAX_PASTE_BYTES {
-            self.failure = Some(PasteFailure::TooLong);
-            return None;
-        }
-        let key = match PastedAnthropicKey::new(text) {
-            Ok(key) => key,
-            Err(reason) => {
-                self.failure = Some(PasteFailure::Rejected(reason));
-                return None;
-            }
-        };
-        self.request = self.request.wrapping_add(1);
-        let at = Attempt {
-            session,
-            request: self.request,
-            deadline: now + PASTE_TIMEOUT,
-        };
-        if !send(ConnectionOp::BeginAnthropicKeyStage {
-            request: at.request,
-            len: key.len(),
-        }) {
-            self.failure = Some(PasteFailure::Offline);
-            return None;
-        }
-        self.stage = Stage::Asked(at, key);
-        Some(at)
+        let at = self.start_read(session, now)?.attempt();
+        self.clipboard_read(at, text.ok_or(ClipboardRefusal::Invalid), now, send)
+            .then_some(at)
     }
 
     pub fn planned(
@@ -348,10 +408,10 @@ impl KeyPaste {
         if now < at.deadline || self.stage.attempt() != Some(at) {
             return false;
         }
-        self.failure = Some(if matches!(self.stage, Stage::Saving(..)) {
-            PasteFailure::Unconfirmed
-        } else {
-            PasteFailure::Unsaved
+        self.failure = Some(match self.stage {
+            Stage::Reading { .. } => PasteFailure::Clipboard,
+            Stage::Saving(..) => PasteFailure::Unconfirmed,
+            _ => PasteFailure::Unsaved,
         });
         self.stage = Stage::Idle;
         true

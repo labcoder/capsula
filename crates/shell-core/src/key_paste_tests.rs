@@ -158,7 +158,7 @@ fn no_explicit_valid_text_means_no_begin_or_fallback() {
             assert_eq!(
                 op,
                 ConnectionOp::BeginAnthropicKeyStage {
-                    request: 1,
+                    request: 7,
                     len: 2048
                 }
             );
@@ -166,10 +166,66 @@ fn no_explicit_valid_text_means_no_begin_or_fallback() {
         }),
         Some(Attempt {
             session: SESSION,
-            request: 1,
+            request: 7,
             deadline: now + Duration::from_secs(30),
         })
     );
+}
+
+#[test]
+fn clipboard_and_staging_use_one_deadline_and_one_click() {
+    let mut state = model(KeyView::Missing);
+    let now = Instant::now();
+    let read = state.start_read(SESSION, now).expect("first click");
+    let at = read.attempt();
+    assert_eq!(at.deadline, now + Duration::from_secs(30));
+    assert!(state.saving() && read.is_current());
+    assert!(state.start_read(SESSION, now).is_none());
+    let text = || Ok(Zeroizing::new(KEY.into()));
+    let len = u16::try_from(KEY.len()).expect("bounded");
+    let before = at
+        .deadline
+        .checked_sub(Duration::from_millis(1))
+        .expect("before deadline");
+    assert!(state.clipboard_read(at, text(), before, |op| {
+        assert_eq!(op, ConnectionOp::BeginAnthropicKeyStage { request: 1, len });
+        true
+    }));
+    assert!(!read.is_current());
+    assert!(!state.clipboard_read(at, text(), before, |_| panic!("duplicate read sent Begin")));
+    assert!(state.planned(SESSION, &plan(1, len), at.deadline).is_none());
+    assert_eq!(state.failure(), Some(PasteFailure::Unsaved));
+}
+
+#[test]
+fn retired_clipboard_reads_cannot_start_a_new_session_or_revive_a_timed_out_click() {
+    let mut state = model(KeyView::Ready);
+    let now = Instant::now();
+    let old = state.start_read(SESSION, now).expect("first click");
+    state.disconnected();
+    assert!(!old.is_current());
+    state.receive(KeyView::Ready, Some(1));
+    let pending = state.start_read(SESSION + 1, now).expect("new click");
+    let at = pending.attempt();
+    let text = || Ok(Zeroizing::new(KEY.into()));
+    assert!(
+        !state.clipboard_read(old.attempt(), text(), now, |_| panic!(
+            "old link sent Begin"
+        ))
+    );
+    assert!(pending.is_current());
+    assert!(!state.clipboard_read(at, text(), at.deadline, |_| panic!("late read sent Begin")));
+    assert_eq!(state.failure(), Some(PasteFailure::Clipboard));
+    assert!(!pending.is_current());
+    let retry = state.start_read(SESSION + 1, at.deadline).expect("retry");
+    assert!(!state.clipboard_read(
+        retry.attempt(),
+        Err(ClipboardRefusal::Changed),
+        at.deadline,
+        |_| panic!("changed text sent Begin")
+    ));
+    assert_eq!(state.failure(), Some(PasteFailure::Clipboard));
+    assert!(!state.saving());
 }
 
 #[test]

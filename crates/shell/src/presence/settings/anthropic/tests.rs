@@ -69,20 +69,22 @@ fn click(visual: &mut VisualTestContext, selector: &'static str) {
 }
 
 #[test]
-fn clipboard_requires_one_text_entry_and_never_uses_metadata() {
+fn clipboard_takes_text_without_using_other_entries_or_metadata() {
     let item = || ClipboardItem::new_string_with_metadata(SYNTHETIC.into(), "not key text".into());
     assert_eq!(
         clipboard_text(Some(item())).as_deref().map(String::as_str),
         Some(SYNTHETIC)
     );
-    let mut ambiguous = item();
-    ambiguous.entries.extend(item().into_entries());
-    assert!(clipboard_text(Some(ambiguous)).is_none());
+    let paths = || ClipboardEntry::ExternalPaths(gpui_kit::ExternalPaths::default());
+    let mut mixed = item();
+    mixed.entries.insert(0, paths());
+    assert_eq!(
+        clipboard_text(Some(mixed)).as_deref().map(String::as_str),
+        Some(SYNTHETIC)
+    );
     assert!(
         clipboard_text(Some(ClipboardItem {
-            entries: vec![ClipboardEntry::ExternalPaths(
-                gpui_kit::ExternalPaths::default()
-            )],
+            entries: vec![paths()],
         }))
         .is_none()
     );
@@ -117,7 +119,7 @@ fn the_row_pastes_only_from_the_test_clipboard_and_never_writes_it(cx: &mut Test
         controls.try_recv(),
         Ok(ControlToBrain::Connection(
             ConnectionOp::BeginAnthropicKeyStage {
-                request: 1,
+                request: 2,
                 len: u16::try_from(SYNTHETIC.len()).expect("bounded"),
             }
         ))
