@@ -925,6 +925,13 @@ fn a_name_and_a_stop_queued_while_content_is_staged_apply_after_its_commit() {
     rig.script().hold = false;
     until("the worker parks after the commit", || rig.script().parked);
     assert_eq!(owner.spoken(1), Some(RunId(5)), "the commit is run 5's");
-    rig.script().frozen = false;
-    until("the stop clears it", || owner.spoken(1).is_none());
+    let mut script = rig.script();
+    // The device keeps playing, so no stall seals the output and clears it instead.
+    script.play_to = u64::MAX;
+    script.frozen = false;
+    drop(script);
+    until("the stop clears it", || {
+        rig.snapshot().is_some_and(|now| now.spoken == 0)
+    });
+    assert_eq!(rig.coherent().flags, 0, "cleared by the stop alone");
 }
