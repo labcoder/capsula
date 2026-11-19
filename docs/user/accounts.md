@@ -114,7 +114,8 @@ example, a Claude subscription token, an admin key or a key that needs a workspa
 
 One reply makes at most 17 requests to Anthropic, counting its tool rounds, any shortening of a
 long conversation and the follow-up work after it. A reply that reaches that limit stops with an
-error instead of sending more.
+error instead of sending more. If only the follow-up work would go past it, such as naming the
+task or shortening its history, that work is skipped and tried again after a later reply.
 
 **Remove key…** asks first. Confirming removes the key from Kumochi; it doesn't revoke the key at
 Anthropic. Removing the key or replacing it stops a reply that is still using it. Tasks and
