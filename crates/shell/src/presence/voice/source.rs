@@ -18,6 +18,7 @@ impl Presence {
         if !self.voice_current(hold.stamp)
             || !self.link.input_is(hold.token.gesture())
             || hold.token.mode(&hold.session.alive(), Instant::now()) != Ok(Mode::Preparing)
+            || !self.voice.gates.bound(&hold.token)
         {
             tracing::debug!(stage = ?FailureStage::CaptureStart, reason = ?FailureReason::StaleContext, "held speech input refused");
             self.end_voice(Text::HoldCancelled, cx);
@@ -40,7 +41,7 @@ impl Presence {
             }
         };
         self.voice.pending.as_mut().expect("admitted hold").source = Source::Recording;
-        let link = self.link.clone();
+        let (link, gates) = (self.link.clone(), self.voice.gates.clone());
         let (watch, alive) = (token.clone(), session.alive());
         cx.spawn(async move |this, cx| {
             while !watch.retired() {
@@ -123,6 +124,8 @@ impl Presence {
                 count
             });
             let receipt = mic.receipt().await;
+            // The physical proof reaches the gate first, even once the hold is gone.
+            gates.received(&token);
             let count = if receipt.is_ok() {
                 forwarded.await
             } else {

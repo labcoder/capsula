@@ -2574,7 +2574,7 @@ fn talk_back_off_while_opening_withdraws_the_late_open_before_any_speech() {
     output.withdraw();
     go.send(()).expect("opening");
     let deadline = Instant::now() + PATIENCE;
-    while output.view().why != Some(super::output::Why::Retired) {
+    while output.view().ok().and_then(|view| view.why) != Some(super::output::Why::Retired) {
         assert!(Instant::now() < deadline, "withdrawn and retired");
         thread::sleep(Duration::from_millis(5));
     }
@@ -2656,7 +2656,7 @@ fn a_late_open_announces_nothing(loss: Loss, at: At) {
         terminal: false,
     };
     let deadline = Instant::now() + PATIENCE;
-    while output.view() != settled {
+    while output.view() != Ok(settled) {
         assert!(Instant::now() < deadline, "{label}: let go, clean");
         thread::sleep(Duration::from_millis(5));
     }
@@ -2686,7 +2686,7 @@ fn a_normal_session_has_no_output_and_still_lets_a_voice_hold_start() {
     let session = connected(next(&events));
     let output = link.handle.output();
     assert_eq!(
-        output.view().why,
+        output.view().expect("uncontended").why,
         Some(super::output::Why::NoOpener),
         "no opener, no output"
     );

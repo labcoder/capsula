@@ -616,10 +616,12 @@ fn esc_the_next_hold_and_the_setting_end_the_watch(cx: &mut TestAppContext) {
     watching.ready.owner.read_with(cx, |owner, _| {
         let hold = owner.voice.pending.as_ref().expect("the hold");
         hold.token.discard_unstarted().expect("never started");
+        owner.voice.gates.received(&hold.token);
     });
     state(&watching, RUN, Phase::Thinking, HOLD, cx);
     state(&watching, RUN, Phase::Answering, None, cx);
     assert_eq!(told(&watching), []);
+    cx.run_until_parked();
     recognize(&watching.ready.owner, 2, cx);
     assert_eq!(told(&watching), [Told::Sent(screen_hold(2)), Told::Stop]);
 

@@ -132,6 +132,7 @@ pub(super) fn presence(cx: &mut TestAppContext) -> Entity<Presence> {
             refusal: None,
         });
         presence.update(cx, |this, cx| {
+            this.dispatcher(cx);
             this.text = Some(TextPanel::detached(
                 this.chat.clone(),
                 this.settings.clone(),

@@ -9,7 +9,7 @@ use kumochi_protocol::message::{ControlToBrain, GestureId, Phase, RunId, ThreadI
 
 use super::Presence;
 use super::voice::Stamp;
-use super::voice_wiring_tests::{hold, ready};
+use super::voice_wiring_tests::{gate, hold, key_down, ready};
 use crate::input::TalkHeld;
 use crate::input::hold::Intent;
 use crate::strings::Text;
@@ -45,6 +45,7 @@ fn answering(
 
 fn warm(owner: &Entity<Presence>, gesture: u32, cx: &mut TestAppContext) {
     owner.update(cx, |owner, cx| {
+        key_down(owner, gesture, cx);
         let stamp = Stamp {
             target: owner.voice.target.get(),
             session: 1,
@@ -120,8 +121,8 @@ fn recognition_stops_the_run_spoken_at_key_down_once(cx: &mut TestAppContext) {
     warm(&owner, 1, cx);
     owner.update(cx, |owner, _| {
         assert_eq!(
-            owner.voice.spoken,
-            Some((GestureId(1), 1, RunId(5))),
+            owner.voice.gates.run(GestureId(1)),
+            Some((1, RunId(5))),
             "captured"
         );
     });
@@ -141,6 +142,7 @@ fn a_refused_brain_stop_never_stops_the_speaker_and_opens_no_hold(cx: &mut TestA
     drop(controls);
     owner.update(cx, |owner, cx| {
         let gesture = GestureId(1);
+        gate(owner, 1, cx);
         let token = owner.link.microphone_gate().arm(gesture).expect("fresh");
         owner.link.track_input(gesture);
         let stamp = Stamp {
@@ -501,8 +503,8 @@ fn recognition_fences_a_spoken_run_the_presenter_saw_before_its_run_state(cx: &m
     warm(&owner, 1, cx);
     owner.update(cx, |owner, _| {
         assert_eq!(
-            owner.voice.spoken,
-            Some((GestureId(1), 1, RunId(6))),
+            owner.voice.gates.run(GestureId(1)),
+            Some((1, RunId(6))),
             "captured"
         );
     });

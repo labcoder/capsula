@@ -301,6 +301,7 @@ impl Presence {
             applied = true;
         }
         events.attribute(events.capacity() * size_of::<LinkEvent>());
+        self.follow_voice_input(cx);
         if applied {
             self.screen_changed(cx);
             self.runs_changed(cx)
@@ -744,11 +745,17 @@ impl Presence {
             self.stop_retry = Some(task);
             return;
         }
+        // A retirement waiting on these stops may resume now.
+        self.voice.gates.poke();
     }
 
     /// Ends `session` without waiting: nothing more is sent on it from now, and the pipe abort and
     /// the owner's barrier, which takes the owner's lock, finish on the background executor.
-    fn end_session(&self, session: &Session, cx: &mut Context<'_, Self>) -> gpui_kit::Task<()> {
+    pub(super) fn end_session(
+        &self,
+        session: &Session,
+        cx: &mut Context<'_, Self>,
+    ) -> gpui_kit::Task<()> {
         session.close();
         let (link, session) = (self.link.clone(), session.clone());
         cx.background_executor()

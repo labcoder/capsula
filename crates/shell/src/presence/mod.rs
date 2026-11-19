@@ -1091,14 +1091,16 @@ pub(crate) fn open(
     owner.update(cx, |this, cx| this.position(position, cx))?;
     owner.update(cx, |this, cx| this.observe(position, cx))?;
     owner.update(cx, Presence::prepare_overlay);
-    let (link, target, paused) = {
+    let (link, target, paused, gates) = {
         let this = owner.read(cx);
         (
             this.link.clone(),
             Rc::clone(&this.voice.target),
             Rc::clone(&this.voice.paused),
+            this.voice.gates.clone(),
         )
     };
+    owner.update(cx, Presence::dispatcher);
     let deliver = gesture::deliver(
         gesture,
         dock_window,
@@ -1106,6 +1108,7 @@ pub(crate) fn open(
         link,
         target,
         paused,
+        gates,
         cx,
     );
     owner.update(cx, |this, _| this.native.arm_keyboard(deliver))?;

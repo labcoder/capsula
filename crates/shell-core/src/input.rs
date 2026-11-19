@@ -148,6 +148,11 @@ impl Gesture {
         self.timing.deadline()
     }
 
+    /// The chord is down, or its first tap's window is still open.
+    pub fn engaged(&self) -> bool {
+        matches!(self.timing.phase, Phase::Active { .. }) || self.timing.first_tap.is_some()
+    }
+
     #[cfg(any(test, feature = "test-support"))]
     pub fn handle(&mut self, event: Event, now: Instant) -> [Option<Effect>; 3] {
         self.recognize(event, now, |_| {})

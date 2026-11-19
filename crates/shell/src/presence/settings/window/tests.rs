@@ -430,6 +430,7 @@ fn rejected_speech_input_keeps_the_settings_panel_open(cx: &mut TestAppContext) 
             settings.receive_speech_input(Some(1), 1, PartState::NotInstalled);
         });
         assert!(owner.settings_open());
+        crate::presence::voice_wiring_tests::gate(owner, 1, cx);
         let token = owner.link.microphone_gate().arm(GestureId(1)).unwrap();
         owner.link.track_input(GestureId(1));
         let stamp = Stamp {
@@ -905,6 +906,7 @@ fn a_hold_that_closes_settings_cancels_its_sign_in(cx: &mut TestAppContext) {
         [ControlToBrain::AccountOp(AccountOp::SignIn)]
     );
     owner.update(cx, |owner, cx| {
+        crate::presence::voice_wiring_tests::gate(owner, 1, cx);
         let token = owner.link.microphone_gate().arm(GestureId(1)).unwrap();
         owner.link.track_input(GestureId(1));
         let stamp = Stamp {

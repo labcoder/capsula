@@ -8,7 +8,9 @@ use kumochi_protocol::message::{
     ControlToBrain, Cursor, GestureId, MicPcm, OutputGeneration, RunId, SegmentId, SpeechPcm,
 };
 
-use super::{Abort, Claim, Denied, InhibitToken, OutputKey, OutputOwner, Retirement, State, Why};
+use super::{
+    Abort, Claim, Denied, InhibitToken, OutputKey, OutputOwner, OutputView, Retirement, State, Why,
+};
 use crate::platform::microphone::{
     CollectionGate, Finalization, Generation, MicError, MicOwner, Mode, Running,
 };
@@ -32,6 +34,16 @@ fn until(what: &str, mut done: impl FnMut() -> bool) {
 
 fn state(owner: &OutputOwner) -> MutexGuard<'_, State> {
     owner.state.lock().expect("unpoisoned")
+}
+
+/// The current view, asked again while the owner is busy.
+fn viewed(owner: &OutputOwner) -> OutputView {
+    let mut view = owner.view();
+    until("an uncontended view", || {
+        view = owner.view();
+        view.is_ok()
+    });
+    view.expect("uncontended")
 }
 
 /// The ledger's last snapshot of `generation`.
@@ -215,7 +227,7 @@ fn bound(owner: &OutputOwner, gesture: u32) -> (InhibitToken, CollectionGate, Ge
 }
 
 fn retired(owner: &OutputOwner) -> bool {
-    owner.view().why == Some(Why::Retired)
+    viewed(owner).why == Some(Why::Retired)
 }
 
 #[test]
@@ -240,7 +252,7 @@ fn a_clean_off_retires_the_stream_keeps_the_session_and_allows_voice_only_captur
         "quiet, but D1 qualifies no route for content it played"
     );
     assert_eq!(
-        owner.view().key,
+        viewed(&owner).key,
         Some(OutputKey::Generation(rig.generation)),
         "a live generation that caught up may still speak: not settled"
     );
@@ -326,11 +338,11 @@ fn the_stop_result_never_settles_a_tail_on_its_own() {
         }
         owner.withdraw();
         until("settled", || {
-            let view = owner.view();
+            let view = viewed(&owner);
             view.terminal || view.why == Some(Why::Retired)
         });
         assert_eq!(
-            owner.view().terminal,
+            viewed(&owner).terminal,
             terminal,
             "stop fails: {stop_fails}, one frame short: {short}"
         );
@@ -344,7 +356,7 @@ fn a_worker_that_panics_mid_release_leaves_terminal_debt() {
     let rig = rig(&owner, 1);
     rig.script().panic = true;
     rig.speak(RunId(1), vec![7; 240]);
-    until("terminal", || owner.view().terminal);
+    until("terminal", || viewed(&owner).terminal);
 }
 
 #[test]
@@ -360,7 +372,7 @@ fn a_withdrawal_plays_out_what_was_written_before_it_stops_the_stream() {
     assert!(!rig.script().stopped, "still playing out");
     rig.script().play_to = u64::MAX;
     until("retired", || retired(&owner));
-    assert!(!owner.view().terminal, "every frame written played");
+    assert!(!viewed(&owner).terminal, "every frame written played");
     assert!(rig.script().stopped, "stopped once played");
 }
 
@@ -399,7 +411,7 @@ fn a_teardown_that_plays_past_the_last_content_frame_on_silence_settles_clean() 
         480,
         "no content after the link let go"
     );
-    assert!(!owner.view().terminal, "no debt left");
+    assert!(!viewed(&owner).terminal, "no debt left");
     assert!(
         state(&owner).ledger.iter().all(Option::is_none),
         "its slot is free"
@@ -424,7 +436,7 @@ fn a_stream_that_retires_before_its_open_returns_leaves_the_session_retired() {
     until("released before the open returned", || {
         tail.read().is_some_and(|now| now.flags & RELEASED != 0)
     });
-    assert_eq!(owner.view().key, None, "still opening");
+    assert_eq!(viewed(&owner).key, None, "still opening");
     let speaker = owner
         .opened(
             generation,
@@ -434,9 +446,9 @@ fn a_stream_that_retires_before_its_open_returns_leaves_the_session_retired() {
         )
         .expect("fenced")
         .expect("kept");
-    let key = owner.view().key.expect("a key");
+    let key = viewed(&owner).key.expect("a key");
     assert_eq!(
-        (key, owner.view().why),
+        (key, viewed(&owner).why),
         (OutputKey::NoOutput(1), Some(Why::Retired)),
         "never live without its entry"
     );
@@ -508,13 +520,13 @@ fn an_old_generation_settling_late_never_clears_a_newer_ones_output() {
     let new = rig(&owner, 2);
     new.short(480);
     assert!(
-        owner.view().retiring,
+        viewed(&owner).retiring,
         "the old generation's worker is stuck"
     );
     fake::lock(&old_script).frozen = false;
-    until("the old generation settled", || !owner.view().retiring);
+    until("the old generation settled", || !viewed(&owner).retiring);
     assert_eq!(
-        owner.view().key,
+        viewed(&owner).key,
         Some(OutputKey::Generation(new.generation)),
         "the newer generation still owes"
     );
@@ -535,7 +547,7 @@ fn the_fifth_unresolved_generation_is_refused_before_it_opens() {
         owner.begin(5, Some(Arc::new(|| {}))).is_none(),
         "no slot left"
     );
-    assert_eq!(owner.view().why, Some(Why::Refused), "refused");
+    assert_eq!(viewed(&owner).why, Some(Why::Refused), "refused");
     let ledger: Vec<_> = state(&owner)
         .ledger
         .iter()
@@ -873,7 +885,7 @@ fn a_pause_the_speaker_cannot_take_ends_the_session_and_denies_the_gesture() {
         rig.aborted.load(Ordering::SeqCst),
         "the session's pipes were aborted"
     );
-    assert_eq!(owner.view().key, None, "no output");
+    assert_eq!(viewed(&owner).key, None, "no output");
     rig.script().frozen = false;
 }
 

@@ -30,6 +30,9 @@ pub type Abort = Arc<dyn Fn() + Send + Sync>;
 pub type Witness = Box<dyn FnMut(&Command) + Send>;
 
 /// The owner of a link's outputs and its capture inhibit.
+// shortcut: tokens and claims carry no owner origin, which holds while one presence keeps one
+// link and owner for its life; bind them to their owner once a presence opens a second link, or
+// replaces its handle, even in turn, while deferred timers or completions survive.
 pub struct OutputOwner {
     state: Mutex<State>,
     changed: Sender<()>,
@@ -624,12 +627,12 @@ impl OutputOwner {
         Ok(inhibit.token())
     }
 
-    /// Binds the inhibit, once, to its gesture's microphone generation.
+    /// Binds the inhibit, once, to its gesture's microphone generation. Never waits.
     ///
     /// # Errors
-    /// `Stale` for another token or gesture, `Inhibited` once bound.
+    /// `Busy`, `Stale` for another token or gesture, `Inhibited` once bound.
     pub fn bind_mic(&self, token: &InhibitToken, mic: &Generation) -> Result<(), Denied> {
-        let mut state = self.lock();
+        let mut state = self.try_lock()?;
         let inhibit = state.held(token)?;
         if inhibit.mic.is_some() {
             return Err(Denied::Inhibited);
@@ -644,10 +647,10 @@ impl OutputOwner {
     /// A claim on `session`'s current output under `token`, with the owner's key for it.
     ///
     /// # Errors
-    /// `Opening` until the open is settled: wait for a wake and claim again. Otherwise what
-    /// the check refuses.
+    /// `Busy`, or `Opening` until the open is settled: wait for a wake and claim again.
+    /// Otherwise what the check refuses.
     pub fn claim(&self, token: &InhibitToken, session: u64) -> Result<Claim, Denied> {
-        let state = self.lock();
+        let state = self.try_lock()?;
         let key = match state.output {
             Output::Live(generation) => OutputKey::Generation(generation),
             Output::Quiet { epoch, .. } => OutputKey::NoOutput(epoch),
@@ -671,9 +674,9 @@ impl OutputOwner {
     /// caller then starts it with [`MicOwner::start_reserved`].
     ///
     /// # Errors
-    /// What the check refuses, or `Stale` when the generation can't start.
+    /// `Busy`, what the check refuses, or `Stale` when the generation can't start.
     pub fn start_mic(&self, claim: &Claim) -> Result<Reserved, Denied> {
-        let state = self.lock();
+        let state = self.try_lock()?;
         state.check(claim)?;
         state
             .inhibit
@@ -688,10 +691,10 @@ impl OutputOwner {
     /// when `mic` runs the bound generation itself.
     ///
     /// # Errors
-    /// What the check refuses, or `Stale` for another microphone, another gesture's receipt or
-    /// a generation that can't collect.
+    /// `Busy`, what the check refuses, or `Stale` for another microphone, another gesture's
+    /// receipt or a generation that can't collect.
     pub fn collect(&self, claim: &Claim, mic: &MicOwner, running: Running) -> Result<(), Denied> {
-        let state = self.lock();
+        let state = self.try_lock()?;
         state.check(claim)?;
         let bound = state
             .inhibit
@@ -708,13 +711,17 @@ impl OutputOwner {
     /// the speaker. A refused proof hands `token` back, so a later one can still retire it.
     ///
     /// # Errors
-    /// `Stale` for a token that isn't current, `Inhibited` for a proof that doesn't hold.
+    /// `Busy`, `Stale` for a token that isn't current, `Inhibited` for a proof that doesn't
+    /// hold.
     pub fn retire(
         &self,
         token: InhibitToken,
         how: Retirement,
     ) -> Result<(), (InhibitToken, Denied)> {
-        let mut state = self.lock();
+        let mut state = match self.try_lock() {
+            Ok(state) => state,
+            Err(denied) => return Err((token, denied)),
+        };
         let proved = match state.held(&token) {
             Err(denied) => return Err((token, denied)),
             Ok(inhibit) => match (how, &inhibit.mic) {
@@ -786,23 +793,26 @@ impl OutputOwner {
         self.after(abort);
     }
 
-    /// The current output, settled.
-    pub fn view(&self) -> OutputView {
-        let state = self.lock();
+    /// The current output, settled. Never waits.
+    ///
+    /// # Errors
+    /// `Busy` on contention: no view, never a stale one.
+    pub fn view(&self) -> Result<OutputView, Denied> {
+        let state = self.try_lock()?;
         let (key, why) = match state.output {
             Output::Live(generation) => (Some(OutputKey::Generation(generation)), None),
             Output::Quiet { epoch, why } => (Some(OutputKey::NoOutput(epoch)), Some(why)),
             _ => (None, None),
         };
         let mut entries = state.ledger.iter().flatten();
-        OutputView {
+        Ok(OutputView {
             key,
             why,
             retiring: entries
                 .clone()
                 .any(|entry| !entry.terminal && Some(entry.generation) != state.live()),
             terminal: entries.any(|entry| entry.terminal),
-        }
+        })
     }
 
     /// Runs `witness` on each speaker command as it is queued.

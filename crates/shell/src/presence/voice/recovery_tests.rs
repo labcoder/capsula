@@ -289,7 +289,9 @@ fn a_failed_or_stopped_held_run_drops_its_words(cx: &mut TestAppContext) {
 fn a_newer_attempt_or_a_stuck_microphone_replaces_the_lost_notice(cx: &mut TestAppContext) {
     let strings = Strings::english();
     let owner = recovered(cx);
+    cx.run_until_parked();
     owner.update(cx, |owner, cx| {
+        crate::presence::voice_wiring_tests::gate(owner, 2, cx);
         let gesture = GestureId(2);
         let token = owner
             .link
@@ -408,8 +410,9 @@ fn a_captured_answer_escape_discards_its_words_before_loss(cx: &mut TestAppConte
 fn an_old_receipt_keeps_a_newer_hold_s_words_recoverable(cx: &mut TestAppContext) {
     let (owner, _data, _controls) = ready(cx);
     hold(&owner, 1, cx);
-    owner.update(cx, |owner, cx| {
-        owner.cancel_voice(cx);
+    owner.update(cx, crate::presence::Presence::cancel_voice);
+    cx.run_until_parked();
+    owner.update(cx, |owner, _| {
         owner.link.accept_recorded_microphone_stop(1, GestureId(1));
         assert!(!owner.link.voice_stop_pending());
     });

@@ -957,6 +957,36 @@ have room. A closed gate ends that hold once as Busy without storing words or
 starting a provider. PCM ingress, control processing and credit remain live;
 there is no second queue of recognized words waiting for capacity.
 
+### The capture inhibit
+
+Each held gesture has a gate (`presence/voice/inhibit.rs`) from key-down until its retirement
+is proved. The native callback takes the inhibit at key-down without waiting: a double tap's
+second press moves the first tap's token, any other press acquires, and a busy owner or an older
+gate not yet retired leaves the gate acquiring. With hold-to-talk off a press takes nothing. A
+gesture that stops being engaged before recognition ends its gate. Recognition binds the token to
+the hold's microphone generation; a gesture with no token gets no hold and leaves a pending one
+alone.
+
+```mermaid
+stateDiagram-v2
+    [*] --> Native: key-down
+    Native --> Recognized: recognized with a generation
+    Native --> Ending: released, reset or superseded
+    Recognized --> Ending: the hold ends, or its receipt comes
+    Ending --> [*]: retired on its proof
+```
+
+One dispatcher task per presence makes every UI-side acquire, bind and retirement. The native
+callback, the owner's change hints, the receipt task and its own timers wake it through one
+bounded channel, and it runs after the delivery that woke it, so an Esc's speaker `Stop` is
+queued before any `Resume`. A busy owner gets three rechecks 10 ms apart.
+
+Retirement needs proof: `NoMic` with no microphone bound, `Unstarted` for a generation that
+never started (the gate is its one discard, and `VoiceHoldStopped` follows as before), and
+`Retired` once the physical receipt came or the generation finished. A started microphone waits
+for its receipt, even after its hold is gone. A busy retire retries on its own. A refused proof
+keeps the token and speech paused, and shows `hold-unconfirmed` once no hold is pending.
+
 ### Held words after a lost brain
 
 Recognized words exist only in the brain until their turn is stored, so a brain lost in

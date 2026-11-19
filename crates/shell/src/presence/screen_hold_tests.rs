@@ -169,7 +169,8 @@ fn recognize_at(
     cx: &mut TestAppContext,
 ) {
     let gesture = GestureId(id);
-    let token = owner.update(cx, |owner, _| {
+    let token = owner.update(cx, |owner, cx| {
+        crate::presence::voice_wiring_tests::gate(owner, id, cx);
         let token = owner
             .link
             .microphone_gate()
@@ -290,10 +291,10 @@ pub(super) fn screen_release(
 
 fn stopped(id: u32) -> [ControlToBrain; 2] {
     [
-        ControlToBrain::VoiceHoldStopped {
+        ControlToBrain::GestureCancel {
             gesture: GestureId(id),
         },
-        ControlToBrain::GestureCancel {
+        ControlToBrain::VoiceHoldStopped {
             gesture: GestureId(id),
         },
     ]
@@ -312,6 +313,7 @@ fn finish(ready: &Ready, id: u32, cx: &mut TestAppContext) {
         HoldStatus::Failed(HoldFailure::Busy),
         cx,
     );
+    cx.run_until_parked();
     ready.owner.read_with(cx, |owner, _| {
         owner.link.accept_recorded_microphone_stop(1, GestureId(id));
     });
@@ -741,6 +743,7 @@ fn a_hold_that_ends_before_its_release_stops_the_line_and_takes_no_lease(cx: &mu
         assert_eq!(sampled(&ready, cx), Some(2), "{index}");
         end(&ready, cx);
         assert_eq!(sampled(&ready, cx), None, "{index}");
+        cx.run_until_parked();
         while ready.controls.try_recv().is_ok() {}
         tick(DOWN, cx);
         assert_eq!(sampled(&ready, cx), None, "{index}");

@@ -15,7 +15,10 @@ use std::time::{Duration, Instant};
 
 use gpui_kit::{AnyWindowHandle, App, AppContext as _, AsyncApp, WeakEntity};
 
-use super::{Presence, voice::Stamp};
+use super::{
+    Presence,
+    voice::{Gates, Stamp},
+};
 use crate::input::{
     Edge, Event, Gesture, Key, TalkHeld,
     hold::{Delivery, Fence, InputReason, InputStage, Intent},
@@ -53,6 +56,10 @@ enum Applied {
     clippy::too_many_lines,
     reason = "native revocation and ordered deferred delivery share one owner"
 )]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "one argument for each thing the native callback shares with presence"
+)]
 pub(super) fn deliver(
     gesture: Rc<Cell<Gesture>>,
     dock: AnyWindowHandle,
@@ -60,6 +67,7 @@ pub(super) fn deliver(
     link: LinkHandle,
     target: Rc<Cell<(Option<ThreadId>, u64)>>,
     paused: Rc<Cell<bool>>,
+    gates: Gates,
     cx: &mut App,
 ) -> Deliver {
     let (deferred, pending) = async_channel::unbounded::<Pending>();
@@ -97,6 +105,9 @@ pub(super) fn deliver(
                     .borrow_mut()
                     .reduce(&mut state, Event::Reset, at.instant, &paused);
             gesture.set(state);
+            if !state.engaged() {
+                gates.disengaged();
+            }
             return None;
         };
         if event == Event::Reset {
@@ -128,13 +139,24 @@ pub(super) fn deliver(
         gesture.set(state);
         for intent in delivery.intents.iter().flatten() {
             match intent {
+                // Key-down takes the capture inhibit here, never waiting; nothing retires here.
+                Intent::Warm(warm) => {
+                    gates.warm(
+                        link.output(),
+                        *warm,
+                        link.link_generation(),
+                        link.choice_revision(),
+                    );
+                }
                 Intent::Recognized {
                     gesture,
-                    generation: Ok(_),
-                    ..
+                    generation,
                 } => {
-                    link.cancel_input();
-                    link.track_input(*gesture);
+                    if generation.is_ok() {
+                        link.cancel_input();
+                        link.track_input(*gesture);
+                    }
+                    gates.recognized(*gesture, generation.is_ok());
                 }
                 Intent::End {
                     cancelled: true, ..
@@ -143,6 +165,9 @@ pub(super) fn deliver(
                 }
                 _ => {}
             }
+        }
+        if !state.engaged() {
+            gates.disengaged();
         }
         if delivery
             .effects

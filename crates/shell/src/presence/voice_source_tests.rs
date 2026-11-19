@@ -151,6 +151,7 @@ fn silent_hold_admission_exits_report_why_without_identifiers(cx: &mut TestAppCo
     for cut in 0..5 {
         let (owner, _data, _controls) = ready(cx);
         owner.update(cx, |owner, cx| {
+            crate::presence::voice_wiring_tests::gate(owner, 7, cx);
             let token = owner.link.microphone_gate().arm(GestureId(7)).unwrap();
             owner.link.track_input(GestureId(7));
             let mut stamp = Stamp {
@@ -347,12 +348,13 @@ pub(super) fn native(owner: &Entity<Presence>, cx: &mut TestAppContext) -> Deliv
             owner.link.clone(),
             Rc::clone(&owner.voice.target),
             Rc::clone(&owner.voice.paused),
+            owner.voice.gates.clone(),
             cx,
         )
     })
 }
 
-fn chord(deliver: &Deliver, edge: Edge, at: Instant) {
+pub(super) fn chord(deliver: &Deliver, edge: Edge, at: Instant) {
     for key in [Key::LeftControl, Key::LeftAlt] {
         deliver(Event::Key { key, edge }, EventTime { instant: at });
     }
@@ -446,22 +448,23 @@ fn microphone_stop_acceptance_wait_keeps_typing_and_does_not_open_another_source
         }
     ));
     status(&owner, 1, 1, HoldStatus::Cancelled, cx);
+    cx.run_until_parked();
     assert!(old.retired());
-    assert_eq!(
-        controls.try_recv().unwrap(),
-        ControlToBrain::VoiceHoldStopped {
-            gesture: GestureId(1)
-        }
-    );
     assert_eq!(
         controls.try_recv().unwrap(),
         ControlToBrain::GestureCancel {
             gesture: GestureId(1)
         }
     );
+    assert_eq!(
+        controls.try_recv().unwrap(),
+        ControlToBrain::VoiceHoldStopped {
+            gesture: GestureId(1)
+        }
+    );
     let starts = Rc::new(Cell::new(0));
     let attempts = Rc::clone(&starts);
-    owner.update(cx, |owner, cx| {
+    let token = owner.update(cx, |owner, cx| {
         let text = owner.text.as_mut().unwrap();
         text.typing.open();
         text.window
@@ -474,6 +477,7 @@ fn microphone_stop_acceptance_wait_keeps_typing_and_does_not_open_another_source
             attempts.set(attempts.get() + 1);
             Err(MicError::Unavailable)
         }));
+        crate::presence::voice_wiring_tests::gate(owner, 2, cx);
         let token = owner.link.microphone_gate().arm(GestureId(2)).unwrap();
         owner.link.track_input(GestureId(2));
         let stamp = Stamp {
@@ -492,7 +496,6 @@ fn microphone_stop_acceptance_wait_keeps_typing_and_does_not_open_another_source
             TalkHeld::default(),
             cx,
         );
-        assert!(token.retired());
         assert!(owner.text_open());
         assert_eq!(
             owner.text.as_ref().unwrap().input.read(cx).value().as_str(),
@@ -501,7 +504,10 @@ fn microphone_stop_acceptance_wait_keeps_typing_and_does_not_open_another_source
         assert_eq!(owner.voice.status, Some(Text::TurnBusy));
         assert!(owner.voice.pending.is_none());
         assert!(owner.link.voice_stop_pending());
+        token
     });
+    cx.run_until_parked();
+    assert!(token.retired());
     assert_eq!(starts.get(), 0);
     assert!(data.is_empty());
     assert_eq!(
@@ -553,19 +559,22 @@ fn microphone_start_without_running_reports_unavailable_not_cancellation(cx: &mu
             assert!(!owner.link.input_is(GestureId(1)));
         });
         assert!(data.is_empty());
+        cx.run_until_parked();
         assert!(token.retired());
-        assert_eq!(
-            controls.try_recv().unwrap(),
-            ControlToBrain::VoiceHoldStopped {
-                gesture: GestureId(1)
-            }
-        );
-        assert_eq!(
-            controls.try_recv().unwrap(),
-            ControlToBrain::GestureCancel {
-                gesture: GestureId(1)
-            }
-        );
+        let stopped = ControlToBrain::VoiceHoldStopped {
+            gesture: GestureId(1),
+        };
+        let cancel = ControlToBrain::GestureCancel {
+            gesture: GestureId(1),
+        };
+        // A worker's receipt tells the brain first; an unstarted generation's gate after.
+        let (first, second) = if worker {
+            (stopped, cancel)
+        } else {
+            (cancel, stopped)
+        };
+        assert_eq!(controls.try_recv().unwrap(), first);
+        assert_eq!(controls.try_recv().unwrap(), second);
         assert!(controls.is_empty());
     }
 }
@@ -594,8 +603,9 @@ fn microphone_start_refusals_before_open_never_suggest_an_active_device(cx: &mut
     });
     assert!(data.is_empty());
     let (owner, data, _controls) = ready(cx);
-    owner.update(cx, |owner, cx| {
+    let token = owner.update(cx, |owner, cx| {
         owner.runs.disconnected();
+        crate::presence::voice_wiring_tests::gate(owner, 1, cx);
         let token = owner.link.microphone_gate().arm(GestureId(1)).unwrap();
         owner.link.track_input(GestureId(1));
         let stamp = Stamp {
@@ -616,8 +626,10 @@ fn microphone_start_refusals_before_open_never_suggest_an_active_device(cx: &mut
         );
         assert_eq!(owner.voice.status, Some(Text::HoldFailed));
         assert!(owner.voice.pending.is_none());
-        assert!(token.retired());
+        token
     });
+    cx.run_until_parked();
+    assert!(token.retired());
     assert!(data.is_empty());
 }
 
@@ -1130,7 +1142,7 @@ pub(super) fn until(cx: &mut TestAppContext, ready: impl Fn(&mut TestAppContext)
     }
 }
 
-fn source(
+pub(super) fn source(
     owner: &Entity<Presence>,
     cx: &mut TestAppContext,
     failure: Option<MicError>,
