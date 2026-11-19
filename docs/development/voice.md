@@ -990,8 +990,10 @@ then asks the owner for a claim; `Opening` and `NotQuiet` wait for the next wake
 reserves the start. Wakes never refill the rechecks or move the deadline, and the deadline stops
 applying once the start is reserved. The started worker's `Running` receipt is accepted under
 that claim with its copies still closed; the hold records the acceptance and shows Listening, and
-only then does `collect` check the claim again and open the copies. A release or end in between
-wins and nothing is copied; a refusal stops and drains that worker, and nothing reopens.
+only then does `collect` check the claim again and open the copies. Listening is published in
+that update and painted on the next frame, so the order is one of state, not of pixels. A release
+or end in between wins and nothing is copied; a refusal stops and drains that worker, and nothing
+reopens.
 
 Retirement needs proof: `NoMic` with no microphone bound, `Unstarted` for a generation that
 never started (the gate is its one discard, and `VoiceHoldStopped` follows as before), and
