@@ -719,7 +719,6 @@ mod tests {
                 Some(folders.local.to_string_lossy().into_owned())
             );
         }
-        fs::remove_dir_all(dir).expect("cleanup");
     }
 
     #[test]
@@ -743,7 +742,6 @@ mod tests {
             set("LOCALAPPDATA"),
             Some(Some(folders.local.to_string_lossy().into_owned()))
         );
-        fs::remove_dir_all(dir).expect("cleanup");
     }
 
     /// Product processes as (pid, parent, shell).
@@ -902,7 +900,6 @@ mod tests {
     #[test]
     fn the_ledger_records_each_grant_and_a_second_run_is_refused_without_touching_it() {
         let dir = scratch::dir("anthropic-key-ledger");
-        fs::create_dir_all(&dir).expect("folder");
         let path = dir.join(LEDGER);
         let mut ledger = Ledger::create(&path).expect("first run");
         for (index, launch) in PLAN.iter().enumerate() {
@@ -922,7 +919,6 @@ mod tests {
             )
         );
         assert_eq!(fs::read_to_string(&path).expect("untouched"), written);
-        fs::remove_dir_all(dir).expect("cleanup");
     }
 
     #[test]
@@ -1077,7 +1073,6 @@ mod tests {
     #[test]
     fn the_tap_yields_only_what_the_plan_watches_and_waits_for_a_cut_record() {
         let dir = scratch::dir("anthropic-key-tap");
-        fs::create_dir_all(&dir).expect("folder");
         let path = dir.join("tap.bin");
         assert_eq!(read(&path).expect("missing is empty"), []);
         let shell = |message: &ControlToShell| {
@@ -1134,6 +1129,5 @@ mod tests {
                 Seen::Unexpected("CaptureDone".to_owned()),
             ]
         );
-        fs::remove_dir_all(dir).expect("cleanup");
     }
 }

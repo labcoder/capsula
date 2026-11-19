@@ -3,6 +3,9 @@
 //! `cl` run can't overlap a worker spawn in another binary's tests.
 #![cfg(all(windows, debug_assertions))]
 
+#[path = "../../../tests/support/scratch.rs"]
+mod scratch;
+
 use std::io::{self, Read as _};
 use std::path::PathBuf;
 use std::sync::{Arc, mpsc};
@@ -74,15 +77,8 @@ fn a_startup_failure_is_not_replaced_by_missing_readers() {
 fn run_fixture(fixture: &str) {
     let exe = std::env::current_exe().expect("test binary");
     let system_root = std::env::var_os("SystemRoot").expect("Windows system root");
-    let mut random = [0; 16];
-    getrandom::fill(&mut random).expect("fixture directory identity");
-    let dir = std::env::temp_dir().join(format!(
-        "speech-{}-{:032x}",
-        std::process::id(),
-        u128::from_le_bytes(random)
-    ));
+    let dir = scratch::dir("speech");
     let job = Job::new().expect("fixture job");
-    std::fs::create_dir(&dir).expect("a new fixture directory, never an existing path");
     let mut stdout = None;
     let mut stderr = None;
     let result = (|| -> io::Result<u32> {
@@ -98,7 +94,7 @@ fn run_fixture(fixture: &str) {
         let mut child = spawn(&Launch {
             exe: &exe,
             args: &args,
-            cwd: &dir,
+            cwd: dir.path(),
             env: &env,
             stdio: Stdio::Piped,
             jobs: &[&job],
@@ -125,23 +121,22 @@ fn run_fixture(fixture: &str) {
     let stderr = stderr.map(|receive| receive.recv_timeout(OUTPUT_PATIENCE));
     let drained =
         stdout.as_ref().is_none_or(Result::is_ok) && stderr.as_ref().is_none_or(Result::is_ok);
-    let cleanup = if stopped.is_ok() && drained {
-        std::fs::remove_dir_all(&dir)
-    } else {
-        Err(io::Error::other("fixture teardown was not confirmed"))
-    };
     if let Err(error) = fixture_completion(result, stdout.is_some() && stderr.is_some()) {
         panic!(
-            "{error}; job_stopped={}; output_drained={drained}; directory_cleaned={}",
-            stopped.is_ok(),
-            cleanup.is_ok()
+            "{error}; job_stopped={}; output_drained={drained}",
+            stopped.is_ok()
         );
     }
     assert!(
-        stopped.is_ok() && drained && cleanup.is_ok(),
-        "fixture teardown incomplete; job_stopped={}; output_drained={drained}; directory_cleaned={}",
-        stopped.is_ok(),
-        cleanup.is_ok()
+        stopped.is_ok() && drained,
+        "fixture teardown incomplete; job_stopped={}; output_drained={drained}",
+        stopped.is_ok()
+    );
+    let path = dir.path().to_path_buf();
+    drop(dir);
+    assert!(
+        !path.try_exists().expect("check cleanup"),
+        "fixture directory left behind"
     );
     let stdout = stdout
         .expect("fixture stdout reader started")
@@ -272,7 +267,6 @@ fn a_reload_sent_as_a_decode_is_lost_is_served_by_the_next_worker() {
     reason = "the only test in this binary that spawns outside a worker, run alone with --exact"
 )]
 fn throwing_dll(dir: &std::path::Path) -> PathBuf {
-    std::fs::create_dir_all(dir).expect("fixture folder");
     std::fs::write(
         dir.join("throw.cpp"),
         "#include <stdexcept>\n\
@@ -294,8 +288,8 @@ fn throwing_dll(dir: &std::path::Path) -> PathBuf {
 #[tokio::test]
 #[ignore = "Rez only: needs cl, the pinned natives (SHERPA_NATIVES) and Parakeet (VOICE_MODELS)"]
 async fn measure_a_native_throw_costs_only_the_worker() {
-    let dir = std::env::temp_dir().join(format!("kumochi-throw-{}", std::process::id()));
-    let dll = throwing_dll(&dir);
+    let dir = scratch::dir("speech-throw");
+    let dll = throwing_dll(dir.path());
     let natives = PathBuf::from(std::env::var_os("SHERPA_NATIVES").expect("set SHERPA_NATIVES"));
     let models = PathBuf::from(std::env::var_os("VOICE_MODELS").expect("set VOICE_MODELS"));
     let job = Arc::new(Job::new().expect("job"));
@@ -326,5 +320,4 @@ async fn measure_a_native_throw_costs_only_the_worker() {
     drop(speech);
     tokio::task::yield_now().await;
     job.terminate().expect("end job");
-    std::fs::remove_dir_all(dir).ok();
 }

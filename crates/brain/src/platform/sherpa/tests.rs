@@ -37,6 +37,7 @@ use super::{
     Fns, MAX_TRANSCRIPT_BYTES, MODEL_FILES, NATIVE_CLOSURE, NativeError, ORT, SHERPA, Sherpa,
     check_closure, only_expected_added, sample_count, stage, verify,
 };
+use crate::scratch::Scratch as ScratchDir;
 use crate::speech::SpeechSupervisor;
 use crate::test_support::Scratch;
 use crate::voice::stt::{Decode, SttHandle, SttResult};
@@ -610,11 +611,6 @@ fn the_verified_handle_refuses_writers() {
 // Staging and the held load path. The pins here are copies of a harmless system DLL under names
 // no other test loads.
 
-/// A fresh scratch folder in the local application data folder, removed on drop. The temp
-/// folder won't do: on Rez it grants other accounts write access, which the checks refuse, and
-/// on CI it's spelled with 8.3 short names.
-pub(crate) struct TrustedScratch(pub(crate) PathBuf);
-
 pub(crate) fn model_fixture() -> Scratch {
     let scratch = Scratch::trusted("speech-models");
     std::fs::create_dir_all(scratch.dir()).unwrap();
@@ -682,31 +678,9 @@ fn model_paths_refuse_links_before_the_native_constructor_and_hold_ordinary_file
     assert_eq!(std::fs::read(victim).unwrap(), b"released");
 }
 
-impl TrustedScratch {
-    pub(crate) fn new(name: &str) -> Self {
-        let dir = local_app_data().expect("local app data").join(format!(
-            "{}-test-{}-{name}",
-            kumochi_protocol::constants::OBJECT_PREFIX,
-            std::process::id()
-        ));
-        if dir.exists() {
-            std::fs::remove_dir_all(&dir).expect("old scratch folder removable");
-        }
-        std::fs::create_dir(&dir).expect("scratch folder");
-        Self(dir)
-    }
-}
-
-impl Drop for TrustedScratch {
-    fn drop(&mut self) {
-        std::fs::remove_dir_all(&self.0).ok();
-    }
-}
-
-fn stage_root(name: &str) -> (TrustedScratch, PathBuf) {
-    let scratch = TrustedScratch::new(name);
-    let dir = scratch.0.clone();
-    (scratch, dir)
+/// The temp folder may be writable by other accounts or spelled with 8.3 short names.
+pub(crate) fn stage_root(name: &str) -> ScratchDir {
+    ScratchDir::under(&local_app_data().expect("local app data"), name)
 }
 
 fn fake_pin(source: &Path, name: &'static str) -> NativeFile {
@@ -864,6 +838,30 @@ fn junction_through(folder: &File, target: &Path) -> io::Result<()> {
 }
 
 #[test]
+fn scratch_cleanup_unlinks_a_junction_without_removing_its_target_contents() {
+    let target = stage_root("scratch-junction-target");
+    let sentinel = target.join("sentinel");
+    let contents = b"keep the junction target";
+    std::fs::write(&sentinel, contents).expect("sentinel file");
+    let scratch = stage_root("scratch-junction");
+    let junction = scratch.join("junction");
+    std::fs::create_dir(&junction).expect("junction folder");
+    set_junction(&junction, target.path()).expect("junction to another scratch folder");
+    assert_eq!(
+        std::fs::read(junction.join("sentinel")).expect("junction reaches the sentinel"),
+        contents
+    );
+
+    let root = scratch.path().to_path_buf();
+    drop(scratch);
+    assert!(!root.try_exists().expect("check scratch removal"));
+    assert_eq!(
+        std::fs::read(sentinel).expect("sentinel survives cleanup"),
+        contents
+    );
+}
+
+#[test]
 fn final_paths_compare_by_drive_path_without_case() {
     assert!(final_path_matches(r"\\?\C:\Users\Me\x", r"c:\users\me\x\"));
     assert!(final_path_matches(r"\\?\C:\", r"C:\"));
@@ -886,7 +884,7 @@ fn final_paths_compare_by_drive_path_without_case() {
 
 #[test]
 fn staging_copies_checked_pins_into_owner_only_folders_and_keeps_them() {
-    let (_scratch, root) = stage_root("stage");
+    let root = stage_root("stage");
     let source = root.join("source");
     let pin = fake_pin(&source, "kumochi-test-stage.dll");
     let staged = stage(&source, &root, std::slice::from_ref(&pin)).expect("staged");
@@ -909,7 +907,7 @@ fn staging_copies_checked_pins_into_owner_only_folders_and_keeps_them() {
 
 #[test]
 fn a_source_that_misses_its_pin_leaves_nothing_staged() {
-    let (_scratch, root) = stage_root("stage-bad");
+    let root = stage_root("stage-bad");
     let source = root.join("source");
     let pin = fake_pin(&source, "kumochi-test-bad.dll");
     let wrong = NativeFile {
@@ -925,7 +923,9 @@ fn a_source_that_misses_its_pin_leaves_nothing_staged() {
 
 #[test]
 fn nothing_rebinds_the_staged_pins_between_verification_and_load() {
-    let (_scratch, root) = stage_root("stage-held");
+    let scratch = stage_root("stage-held");
+    let root = scratch.join("root");
+    std::fs::create_dir(&root).expect("root folder");
     let source = root.join("source");
     let pin = fake_pin(&source, "kumochi-test-held.dll");
     let decoy = root.join("decoy");
@@ -938,7 +938,7 @@ fn nothing_rebinds_the_staged_pins_between_verification_and_load() {
     assert!(sharing_violation(std::fs::remove_file(&file)), "the DLL");
     // A folder rename may fail on the open files below it first, so any refusal will do.
     for folder in [&dir, &root.join("natives"), &root] {
-        let renamed = std::fs::rename(folder, root.with_extension("away"));
+        let renamed = std::fs::rename(folder, scratch.join("moved"));
         assert!(renamed.is_err() && folder.is_dir(), "{renamed:?}");
     }
     assert!(
@@ -953,7 +953,7 @@ fn nothing_rebinds_the_staged_pins_between_verification_and_load() {
 
 #[test]
 fn a_junction_on_the_root_path_is_refused_before_anything_loads() {
-    let (_scratch, base) = stage_root("stage-junction");
+    let base = stage_root("stage-junction");
     let real = base.join("real");
     let link = base.join("link");
     std::fs::create_dir_all(&real).expect("real folder");
@@ -983,7 +983,7 @@ fn a_junction_on_the_root_path_is_refused_before_anything_loads() {
 /// its DACL becomes, so the folder is refused as it is, before any pin is copied into it.
 #[test]
 fn an_existing_staging_folder_others_could_change_is_refused_and_left_alone() {
-    let (_scratch, root) = stage_root("stage-adopt");
+    let root = stage_root("stage-adopt");
     let dir = staged_dir(&root);
     std::fs::create_dir_all(&dir).expect("staging folders");
     icacls(&dir, &["/grant", "*S-1-1-0:(F)"]);
@@ -1020,7 +1020,7 @@ fn an_existing_staging_folder_others_could_change_is_refused_and_left_alone() {
 /// with no-write-up it doesn't.
 #[test]
 fn a_staging_folder_labelled_medium_without_no_write_up_is_refused() {
-    let (_scratch, root) = stage_root("stage-medium-label");
+    let root = stage_root("stage-medium-label");
     let natives = root.join("natives");
     std::fs::create_dir_all(&natives).expect("natives folder");
     set_label(&natives, "S:(ML;;NR;;;ME)");
@@ -1040,7 +1040,7 @@ fn a_staging_folder_labelled_medium_without_no_write_up_is_refused() {
 
 #[test]
 fn a_root_others_can_change_is_refused() {
-    let (_scratch, base) = stage_root("stage-open");
+    let base = stage_root("stage-open");
     let root = base.join("open");
     std::fs::create_dir_all(&root).expect("root folder");
     icacls(&root, &["/grant", "*S-1-1-0:(M)"]);
@@ -1055,7 +1055,7 @@ fn a_root_others_can_change_is_refused() {
 
 #[test]
 fn a_staging_folder_labelled_low_is_refused() {
-    let (_scratch, root) = stage_root("stage-low-label");
+    let root = stage_root("stage-low-label");
     let natives = root.join("natives");
     std::fs::create_dir_all(&natives).expect("natives folder");
     icacls(&natives, &["/setintegritylevel", "low"]);
@@ -1074,7 +1074,7 @@ const LOW_CHILD: &str = "KUMOCHI_TEST_SHERPA_LOW";
 /// this user would, and can't open anything on the held path with a right that changes it.
 #[test]
 fn a_lower_integrity_process_cant_change_the_staged_path() {
-    let (_scratch, root) = stage_root("stage-low");
+    let root = stage_root("stage-low");
     let source = root.join("source");
     let pin = fake_pin(&source, "kumochi-test-low.dll");
     let staged = stage(&source, &root, std::slice::from_ref(&pin)).expect("staged");
@@ -1087,7 +1087,7 @@ fn a_lower_integrity_process_cant_change_the_staged_path() {
             "--exact",
             "platform::sherpa::tests::child_at_low_integrity_changes_nothing",
         ])
-        .env(LOW_CHILD, &root));
+        .env(LOW_CHILD, root.path()));
     assert!(stdout.contains("1 passed"), "the child passed: {stdout}");
     drop(staged);
 }
@@ -1372,7 +1372,7 @@ fn measure_native_imports() {
 #[test]
 #[ignore = "Rez only: loads the pinned DLLs into this process"]
 fn measure_planted_neighbor() {
-    let (_scratch, root) = stage_root("sherpa-neighbor");
+    let root = stage_root("sherpa-neighbor");
     drop(stage(&natives_dir(), &root, kumochi_protocol::voice::NATIVE_FILES).expect("staged"));
     let system = super::system_dir().expect("system folder");
     std::fs::copy(

@@ -14,9 +14,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, mpsc as std_mpsc};
 use std::time::{Duration, Instant};
 
-use kumochi_protocol::constants::{
-    CLAUDE_CODE_DELETING, CLAUDE_CODE_DIR, CLAUDE_CODE_LOCK, OBJECT_PREFIX,
-};
+use kumochi_protocol::constants::{CLAUDE_CODE_DELETING, CLAUDE_CODE_DIR, CLAUDE_CODE_LOCK};
 use kumochi_protocol::message::{ClaudeVersion, PolicyFailed};
 use windows_sys::Win32::Security::{CONTAINER_INHERIT_ACE, OBJECT_INHERIT_ACE};
 use windows_sys::Win32::Storage::FileSystem::FILE_ALL_ACCESS;
@@ -33,6 +31,7 @@ use crate::platform::{
     DaclEntry, FAKE_CLAUDE, Job, ManagedPresence, Presence, SessionLock, dacl_entries, dacl_sddl,
     local_app_data, pause_after_check, set_dacl, this_user,
 };
+use crate::scratch::Scratch;
 
 /// The version every fake reports.
 pub(crate) const V: ClaudeVersion = ClaudeVersion {
@@ -325,19 +324,14 @@ fn hold(path: &Path) {
 
 /// A fresh trusted folder for one test's lane, removed on drop. The temp folder won't do: on Rez
 /// other accounts may write to it, which the folder checks refuse.
-pub(crate) struct Base(pub(crate) PathBuf);
+pub(crate) struct Base(pub(crate) Scratch);
 
 impl Base {
     pub(crate) fn new(name: &str) -> Self {
-        let dir = local_app_data().expect("local app data").join(format!(
-            "{OBJECT_PREFIX}-test-{}-claude-{name}",
-            std::process::id()
-        ));
-        if dir.exists() {
-            fs::remove_dir_all(&dir).expect("old scratch folder removable");
-        }
-        fs::create_dir(&dir).expect("scratch folder");
-        Self(dir)
+        Self(Scratch::under(
+            &local_app_data().expect("local app data"),
+            name,
+        ))
     }
 
     pub(crate) fn owned(&self) -> PathBuf {
@@ -365,12 +359,6 @@ impl Base {
 
     pub(crate) fn marker(&self) -> PathBuf {
         self.0.join(CLAUDE_CODE_DELETING)
-    }
-}
-
-impl Drop for Base {
-    fn drop(&mut self) {
-        fs::remove_dir_all(&self.0).ok();
     }
 }
 
@@ -405,7 +393,7 @@ pub(crate) fn host_finding(
     let managed = Arc::clone(&switches.managed);
     let host = Host {
         find,
-        base: base.0.clone(),
+        base: base.0.path().to_path_buf(),
         vault_held: Arc::clone(&switches.vault_held),
         managed: Box::new(move || ManagedPresence {
             files: [Presence::Absent; 3],
@@ -555,7 +543,7 @@ async fn the_child_sees_only_kumochis_folders_and_the_system_environment() {
     for (name, value) in &env {
         for path in value.split(';').map(Path::new) {
             assert!(
-                !path.starts_with(&real_profile) || path.starts_with(&base.0),
+                !path.starts_with(&real_profile) || path.starts_with(base.0.path()),
                 "{name} names a folder in the real profile"
             );
         }

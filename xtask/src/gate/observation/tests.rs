@@ -9,7 +9,7 @@ pub(super) const GEOMETRY: &str =
 pub(super) const COMMIT: &str =
     "commit seq=1 begin_qpc=10 qpc=11 result=shape proposal=1 epoch=1 geometry=1 proxy=0,-1,4,2\n";
 
-pub(super) fn directory() -> std::path::PathBuf {
+pub(super) fn directory() -> crate::scratch::Scratch {
     crate::scratch::dir("observer-test")
 }
 
@@ -110,8 +110,6 @@ fn incremental_reader_buffers_partial_lines_and_retains_bootstrap_frames() {
         0,
         "cold dock may precede its first commit"
     );
-    drop(reader);
-    fs::remove_dir_all(directory).unwrap();
 }
 
 #[test]
@@ -221,7 +219,8 @@ fn a_pull_is_an_empty_mask_over_an_area_grown_from_the_dock_and_counts_once_per_
     let observation = parsed(&stream(pulls.clone(), 5)).unwrap();
     assert_eq!(observation.pulls, 2, "each run of pull commits is one pull");
     assert_eq!(observation.commits.len(), 5);
-    let path = directory().join("observer.log");
+    let directory = directory();
+    let path = directory.join("observer.log");
     fs::write(&path, stream(pulls, 5)).unwrap();
     let (loaded, complete) = load(&path, 42);
     assert!(complete.is_ok(), "{complete:?}");

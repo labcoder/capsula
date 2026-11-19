@@ -159,7 +159,6 @@ mod tests {
             read(&dir, "ring 0.17.14").unwrap_err().to_string(),
             "reading reviewed notice input for ring 0.17.14: crypto/chacha/asm/chacha-x86_64.pl"
         );
-        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
@@ -207,6 +206,5 @@ mod tests {
                 .to_string(),
             "reviewed notice end missing before next start"
         );
-        fs::remove_dir_all(dir).unwrap();
     }
 }

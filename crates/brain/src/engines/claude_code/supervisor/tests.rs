@@ -264,8 +264,8 @@ pub(crate) async fn until(what: &str, check: impl Fn() -> bool) {
 
 /// Owner-only folders down to `path` under `base`, as a launch makes them.
 fn owned_dirs(base: &Base, path: &Path) {
-    let relative = path.strip_prefix(&base.0).expect("under the base");
-    let mut dir = base.0.clone();
+    let relative = path.strip_prefix(base.0.path()).expect("under the base");
+    let mut dir = base.0.path().to_path_buf();
     for part in relative.components() {
         dir.push(part);
         drop(platform::owner_only_dir(&dir).expect("an owner-only folder"));
@@ -395,7 +395,7 @@ async fn dropping_the_cancel_tears_the_launch_down() {
     let sibling = platform::spawn(&platform::Launch {
         exe: &std::env::current_exe().expect("exe"),
         args: &[FAKE_CLAUDE.into(), holding],
-        cwd: &base.0,
+        cwd: base.0.path(),
         env: &[],
         stdio: Stdio::Null,
         jobs: &[&brain_job],

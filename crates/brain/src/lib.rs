@@ -20,6 +20,9 @@ pub mod platform;
 mod recall;
 mod relaunch;
 mod runtime;
+#[cfg(test)]
+#[path = "../../../tests/support/scratch.rs"]
+mod scratch;
 pub mod screen;
 #[cfg(windows)]
 pub mod speech;

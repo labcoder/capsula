@@ -39,20 +39,13 @@ impl InstanceLock {
 #[cfg(test)]
 mod tests {
     use std::fs;
-    use std::path::PathBuf;
 
     use super::InstanceLock;
-
-    fn scratch(name: &str) -> PathBuf {
-        let dir =
-            std::env::temp_dir().join(format!("kumochi-instance-{name}-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
-        dir
-    }
+    use crate::scratch;
 
     #[test]
     fn a_second_shell_is_refused_until_the_first_drops_its_lock() {
-        let dir = scratch("refused");
+        let dir = scratch::dir("instance-refused");
         let path = dir.join("shell-1.lock");
         let first = InstanceLock::try_acquire(&path)
             .expect("the lock opens")
@@ -68,14 +61,12 @@ mod tests {
         assert!(second.is_some(), "dropping the guard releases the lock");
         drop(second);
         assert_eq!(fs::metadata(&path).expect("the lock file").len(), 0);
-        fs::remove_dir_all(dir).expect("scratch removed");
     }
 
     #[test]
     fn a_lock_that_cannot_open_is_an_error_not_another_shell() {
-        let dir = scratch("error");
+        let dir = scratch::dir("instance-error");
         fs::create_dir_all(dir.join("shell-1.lock")).expect("a directory where the file goes");
         assert!(InstanceLock::try_acquire(&dir.join("shell-1.lock")).is_err());
-        fs::remove_dir_all(dir).expect("scratch removed");
     }
 }

@@ -4,7 +4,7 @@ use std::fmt::Write as _;
 
 const CSV_HEADER: &str = "Application,ProcessID,SwapChainAddress,Runtime,SyncInterval,PresentFlags,Dropped,TimeInSeconds,msInPresentAPI,msBetweenPresents,AllowsTearing,PresentMode,msUntilRenderComplete,msUntilDisplayed,msBetweenDisplayChange,msFlipDelay,msUntilRenderStart,msGPUActive,QPCTime\n";
 
-fn directory() -> std::path::PathBuf {
+fn directory() -> crate::scratch::Scratch {
     crate::scratch::dir("receipt-test")
 }
 
@@ -82,7 +82,6 @@ fn resting_gate_requires_displayed_coverage_after_a_valid_warm_trace() {
         assert!(report.contains("native_measured="));
         assert!(report.contains("display_measured="));
     }
-    fs::remove_dir_all(directory).unwrap();
 }
 
 fn sample_data() -> Observation {
@@ -175,7 +174,6 @@ fn an_undisplayed_present_on_motion_demand_fails_even_with_good_display_gaps() {
             expected
         );
     }
-    fs::remove_dir_all(directory).unwrap();
 }
 
 fn frame(id: u64, geometry: u64, qpc: i64) -> Frame {

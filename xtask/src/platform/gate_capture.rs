@@ -381,8 +381,6 @@ mod tests {
         let file = std::fs::File::create_new(&path).unwrap();
         let resolved = final_path(super::HANDLE(file.as_raw_handle()));
         let expected = path.canonicalize().unwrap();
-        drop(file);
-        std::fs::remove_dir_all(directory).unwrap();
         assert_eq!(resolved.unwrap(), expected);
     }
 
@@ -392,7 +390,6 @@ mod tests {
         let path = directory.join("empty");
         drop(std::fs::File::create_new(&path).unwrap());
         let result = file_sha256(&path);
-        std::fs::remove_dir_all(directory).unwrap();
         assert_eq!(
             result.unwrap(),
             "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"

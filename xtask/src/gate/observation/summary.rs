@@ -403,7 +403,6 @@ mod tests {
             report.contains("p50_ms=50.000000 p95_ms=95.000000 max_ms=100.000000"),
             "nearest-rank statistics retain all samples"
         );
-        fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]
@@ -480,7 +479,6 @@ mod tests {
             assert!(report.contains("gate=unmeasured_or_fail"));
             fs::remove_file(directory.join("hover-display.txt")).unwrap();
         }
-        fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]
@@ -528,7 +526,6 @@ mod tests {
         assert!(first.contains("present_qpc=102 status=Presented present_latency_ms=2.000000 display_status=Displayed displayed_qpc=115 display_latency_ms=15.000000"));
         assert!(report.contains("summary=hover n=100 successful=100 attempted=100"));
         assert!(report.contains("gate=pass"));
-        fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]
@@ -558,7 +555,6 @@ mod tests {
         assert_eq!(report.matches("display_status=Unavailable displayed_qpc=unmeasured display_latency_ms=unmeasured").count(), 100);
         assert!(report.contains("summary=hover_display n=0 successful=0 attempted=100 p50_ms=unmeasured p95_ms=unmeasured max_ms=unmeasured"), "missing display is not a zero-latency sample");
         assert!(report.contains("gate=pass"));
-        fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]
@@ -600,7 +596,6 @@ mod tests {
                 "{status} remains in the denominator"
             );
             assert!(report.contains("gate=unmeasured_or_fail"));
-            fs::remove_dir_all(directory).unwrap();
         }
     }
 }

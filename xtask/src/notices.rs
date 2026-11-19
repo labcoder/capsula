@@ -234,7 +234,6 @@ mod tests {
             assert!(block.contains("Version 2.0, January 2004"));
             assert!(!block.contains("Zed Industries"));
         }
-        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

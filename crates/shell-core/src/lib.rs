@@ -17,6 +17,10 @@
 )]
 mod allocation;
 
+#[cfg(test)]
+#[path = "../../../tests/support/scratch.rs"]
+mod scratch;
+
 pub mod accounts;
 pub mod chat_notice;
 pub mod claude_accounts;

@@ -8,6 +8,10 @@
     reason = "shared allocator helpers serve several test binaries"
 )]
 mod allocation;
+#[cfg(test)]
+#[path = "../../../tests/support/scratch.rs"]
+mod scratch;
+
 mod assets;
 
 mod confirmation;

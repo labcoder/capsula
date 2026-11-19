@@ -21,8 +21,8 @@ mod staging;
 const SERVICE: &str = "authority-test";
 
 struct Setup {
-    scratch: Scratch,
     lock: SessionLock,
+    scratch: Scratch,
     store: FakeStore,
 }
 
@@ -33,8 +33,8 @@ impl Setup {
         let store = FakeStore::default();
         store.0.lock().expect("fake lock").write_once = true;
         Self {
-            scratch,
             lock,
+            scratch,
             store,
         }
     }

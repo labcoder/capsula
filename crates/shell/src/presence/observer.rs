@@ -1113,11 +1113,8 @@ mod tests {
 
     #[test]
     fn the_writer_hands_each_table_back() {
-        let path = std::env::temp_dir().join(format!(
-            "{}-observer-spares-{}",
-            kumochi_protocol::constants::OBJECT_PREFIX,
-            std::process::id()
-        ));
+        let scratch = crate::scratch::dir("observer-spares");
+        let path = scratch.join("observer.log");
         let file = std::fs::File::create_new(&path).unwrap();
         let (sender, receiver) = async_channel::bounded(4);
         let (returns, spares) = async_channel::bounded(4);
@@ -1130,7 +1127,6 @@ mod tests {
         sender.try_send(Record::Close(Totals::default())).unwrap();
         write(&receiver, &returns, file);
         let written = std::fs::read_to_string(&path).unwrap();
-        std::fs::remove_file(path).unwrap();
         assert!(written.starts_with("geometry id=1 origin_y=5 rows=3 "));
         let spare = spares.try_recv().unwrap();
         assert_eq!(spare.spans.len(), ROW_CAP, "the whole table comes back");
@@ -1197,17 +1193,13 @@ mod tests {
 
     #[test]
     fn an_observer_never_overwrites_existing_evidence() {
-        let path = std::env::temp_dir().join(format!(
-            "{}-observer-test-{}",
-            kumochi_protocol::constants::OBJECT_PREFIX,
-            std::process::id()
-        ));
+        let scratch = crate::scratch::dir("observer-create-only");
+        let path = scratch.join("observer.log");
         let mut file = std::fs::File::create_new(&path).unwrap();
         std::io::Write::write_all(&mut file, b"old evidence").unwrap();
         drop(file);
         let result = Observer::prepare(Some(&path));
         let kept = std::fs::read(&path).unwrap();
-        std::fs::remove_file(path).unwrap();
         assert_eq!(
             result.unwrap_err().kind(),
             std::io::ErrorKind::AlreadyExists

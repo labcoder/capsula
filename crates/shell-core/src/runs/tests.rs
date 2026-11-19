@@ -618,12 +618,7 @@ fn restarted(store: &Store) -> Coordinator {
 
 #[test]
 fn a_new_thread_lost_in_a_brain_crash_is_not_continued_and_an_answered_one_is() {
-    let dir = std::env::temp_dir().join(format!(
-        "{}-shell-runs-{}",
-        kumochi_protocol::constants::OBJECT_PREFIX,
-        std::process::id()
-    ));
-    std::fs::create_dir_all(&dir).expect("scratch folder");
+    let dir = crate::scratch::dir("shell-runs");
     let mut store = Store::open(&dir.join("store.db")).expect("store");
     store.recover().expect("recovered");
     let mut runs = Runs::default();
@@ -697,8 +692,6 @@ fn a_new_thread_lost_in_a_brain_crash_is_not_continued_and_an_answered_one_is() 
     );
     let effects = brain.handle(turn).expect("turn");
     deliver(&mut runs, Some(&mut store), effects);
-    drop(store);
-    std::fs::remove_dir_all(&dir).ok();
 }
 
 #[test]

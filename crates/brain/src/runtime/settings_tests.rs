@@ -21,7 +21,7 @@ use crate::context::{Origin, RunSnapshot};
 use crate::coordinator::{BuildContext, BuildKey};
 use crate::ipc;
 use crate::platform::set_dacl;
-use crate::platform::sherpa::tests::{TrustedScratch, set_junction};
+use crate::platform::sherpa::tests::{set_junction, stage_root};
 use crate::runtime::CLOSE_WAIT;
 use crate::runtime::Seen;
 use crate::runtime::settings::Gate;
@@ -699,13 +699,13 @@ async fn a_rename_reaches_the_next_run_and_never_a_running_ones_rebuild() {
 #[tokio::test]
 async fn a_junction_on_the_way_to_a_part_deletes_nothing_outside_it() {
     let scratch = Scratch::new("voice-removal-junction");
-    let root = TrustedScratch::new("voice-removal-junction");
+    let root = stage_root("voice-removal-junction");
     let path = seeded(&scratch, "[\"speech-input\"]");
-    let outside = root.0.join("outside");
+    let outside = root.join("outside");
     let sentinel = outside.join(VoicePart::SpeechInput.dir()).join("keep.txt");
     std::fs::create_dir_all(sentinel.parent().expect("a parent")).expect("the outside folder");
     std::fs::write(&sentinel, [1]).expect("the sentinel");
-    let models = root.0.join("models");
+    let models = root.join("models");
     std::fs::create_dir(&models).expect("models folder");
     set_junction(&models, &outside).expect("models redirected outside");
     let mut brain = test_support::brain(&scratch, "");
@@ -722,9 +722,9 @@ async fn a_junction_on_the_way_to_a_part_deletes_nothing_outside_it() {
 #[tokio::test]
 async fn a_models_folder_others_can_change_deletes_nothing() {
     let scratch = Scratch::new("voice-removal-unsafe");
-    let root = TrustedScratch::new("voice-removal-unsafe");
+    let root = stage_root("voice-removal-unsafe");
     let path = seeded(&scratch, "[\"speech-input\"]");
-    let models = root.0.join("models");
+    let models = root.join("models");
     let model = models.join(VoicePart::SpeechInput.dir()).join("model.onnx");
     std::fs::create_dir_all(model.parent().expect("a parent")).expect("the part's folder");
     std::fs::write(&model, [1]).expect("a model file");
@@ -748,10 +748,10 @@ async fn a_models_folder_others_can_change_deletes_nothing() {
 #[tokio::test]
 async fn a_missing_models_folder_counts_as_deleted() {
     let scratch = Scratch::new("voice-removal-no-models");
-    let root = TrustedScratch::new("voice-removal-no-models");
+    let root = stage_root("voice-removal-no-models");
     let path = seeded(&scratch, "[\"speech-input\"]");
     let mut brain = test_support::brain(&scratch, "");
-    brain.finish_removals(&root.0.join("models"));
+    brain.finish_removals(&root.join("models"));
     brain.drain_settings().await;
     assert_eq!(removing_on_disk(&path), toml::Value::Array(Vec::new()));
     assert_eq!(brain.config.removing(), []);
@@ -780,12 +780,12 @@ fn seeded(scratch: &Scratch, removing: &str) -> std::path::PathBuf {
 #[tokio::test]
 async fn start_up_deletes_each_removed_part_then_finishes_its_removal() {
     let scratch = Scratch::new("voice-removals");
-    let root = TrustedScratch::new("voice-removals");
+    let root = stage_root("voice-removals");
     let path = seeded(
         &scratch,
         "[\"speech-input\", \"later-part\", \"spoken-replies\"]",
     );
-    let models = root.0.join("models");
+    let models = root.join("models");
     let spoken = models.join(VoicePart::SpokenReplies.dir());
     std::fs::create_dir_all(spoken.join("voices")).expect("a part left mid-delete");
     std::fs::write(spoken.join("voices").join("juniper.bin"), [1, 2, 3]).expect("a model file");
@@ -805,9 +805,9 @@ async fn start_up_deletes_each_removed_part_then_finishes_its_removal() {
 #[tokio::test]
 async fn a_part_that_cant_be_deleted_stays_listed_for_the_next_start() {
     let scratch = Scratch::new("voice-removal-stuck");
-    let root = TrustedScratch::new("voice-removal-stuck");
+    let root = stage_root("voice-removal-stuck");
     let path = seeded(&scratch, "[\"speech-input\"]");
-    let models = root.0.join("models");
+    let models = root.join("models");
     let part = models.join(VoicePart::SpeechInput.dir());
     std::fs::create_dir_all(&part).expect("the part's folder");
     let stuck = part.join("model.onnx");
