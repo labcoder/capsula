@@ -13,10 +13,10 @@ use std::time::Duration;
 
 use kumochi_protocol::geometry::PhysicalPoint;
 use kumochi_protocol::message::{
-    CaptureFailure, CaptureFor, ControlToBrain, ControlToShell, DataToShell, HOLD_DRAIN_TIMEOUT_MS,
-    HOLD_START_TIMEOUT_MS, HoldFailure, HoldStatus, LeaseGeneration, MAX_HOLD_CHUNKS,
-    MAX_TRANSCRIPT_BYTES, MicPcm, ModelChoice, PartState, ScreenClass, ScreenHolds, ScreenOff,
-    SettingsOp, ThreadId, ThreadOp,
+    CaptureFailure, CaptureFor, ConnectionKind, ControlToBrain, ControlToShell, DataToShell,
+    HOLD_DRAIN_TIMEOUT_MS, HOLD_START_TIMEOUT_MS, HoldFailure, HoldStatus, LeaseGeneration,
+    MAX_HOLD_CHUNKS, MAX_TRANSCRIPT_BYTES, MicPcm, ModelChoice, ModelSlug, PartState, ScreenClass,
+    ScreenHolds, ScreenOff, SettingsOp, ThreadId, ThreadOp,
 };
 use tokio::sync::{Notify, mpsc, oneshot};
 use tokio::time::Instant;
@@ -161,8 +161,20 @@ struct Hold {
     decode: Option<oneshot::Receiver<SttResult>>,
     terminal: Option<HoldStatus>,
     screen: ScreenPart,
+    screen_recipient: Option<(ConnectionKind, ModelSlug)>,
     /// The transcript, while it waits for a screen hold's picture.
     words: Option<String>,
+}
+
+impl Hold {
+    fn matches_screen_recipient(&self, choice: Option<&ModelChoice>) -> bool {
+        self.screen_recipient
+            .as_ref()
+            .zip(choice)
+            .is_some_and(|((connection, model), choice)| {
+                *connection == choice.connection && *model == choice.model
+            })
+    }
 }
 
 impl std::fmt::Debug for Holds {
@@ -600,6 +612,7 @@ impl Brain {
             decode: None,
             terminal: None,
             screen: ScreenPart::None,
+            screen_recipient: None,
             words: None,
         });
         if state == PartState::Loading {
@@ -975,7 +988,14 @@ impl Brain {
             self.holds.refuse_screen(key);
             return Err(NoScreen::TooLate);
         }
-        if !self.holds.start_screen(key, pointer, lease, until) {
+        let choice = choice.ok_or(NoScreen::Gate(ScreenOff::NotReady))?;
+        if !self.holds.start_screen(
+            key,
+            pointer,
+            lease,
+            until,
+            (choice.connection, choice.model),
+        ) {
             return Err(NoScreen::NotStarted);
         }
         Ok(())

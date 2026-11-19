@@ -7,8 +7,8 @@ use std::time::Duration;
 
 use kumochi_protocol::geometry::{PhysicalPoint, PointerPath};
 use kumochi_protocol::message::{
-    CaptureFailure, CaptureFor, ControlToBrain, ControlToShell, LeaseGeneration, ModelChoice,
-    ScreenHolds,
+    CaptureFailure, CaptureFor, ConnectionKind, ControlToBrain, ControlToShell, LeaseGeneration,
+    ModelChoice, ModelSlug, ScreenHolds, ScreenOff,
 };
 use tokio::sync::mpsc;
 use tokio::time::Instant;
@@ -132,8 +132,16 @@ impl super::Holds {
         point: PhysicalPoint,
         lease: LeaseGeneration,
         until: Instant,
+        recipient: (ConnectionKind, ModelSlug),
     ) -> bool {
-        self.start(key, Aim::Window(point), lease, until)
+        if !self.start(key, Aim::Window(point), lease, until) {
+            return false;
+        }
+        self.pending
+            .as_mut()
+            .expect("the started part has a pending hold")
+            .screen_recipient = Some(recipient);
+        true
     }
 
     /// Starts the pending hold `key`'s screen part on `aim`: a window from no part, a display
@@ -182,7 +190,11 @@ impl super::Holds {
     }
 
     /// Arms the pending hold `key`'s screen part; false when it isn't pending or has a part.
-    pub(super) fn arm_screen(&mut self, key: HoldKey) -> bool {
+    pub(super) fn arm_screen(
+        &mut self,
+        key: HoldKey,
+        recipient: (ConnectionKind, ModelSlug),
+    ) -> bool {
         let Some(hold) = self.pending.as_mut().filter(|hold| hold.key == key) else {
             return false;
         };
@@ -190,6 +202,7 @@ impl super::Holds {
             return false;
         }
         hold.screen = ScreenPart::Armed;
+        hold.screen_recipient = Some(recipient);
         true
     }
 
@@ -305,6 +318,14 @@ impl super::Holds {
     pub(super) fn submit_screen(&mut self) -> Option<Screen> {
         self.retire_waiting();
         let hold = self.pending.as_mut()?;
+        let choice = hold
+            .snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot.defaults.choice.as_ref());
+        if matches!(hold.screen, ScreenPart::Ready(_)) && !hold.matches_screen_recipient(choice) {
+            tracing::info!(closed = ?ScreenClass::NotReady, "hold screen part closed");
+            hold.screen = ScreenPart::Closed(ScreenClass::NotReady);
+        }
         let picture = hold.kind == super::Kind::Screen;
         match std::mem::replace(&mut hold.screen, ScreenPart::None) {
             ScreenPart::Ready(context) if picture => {
@@ -353,7 +374,11 @@ impl crate::runtime::Brain {
         if let ScreenHolds::Off(off) = self.display_gate(choice.as_ref()) {
             return Err(NoScreen::Gate(off));
         }
-        if !self.holds.arm_screen(key) {
+        let choice = choice.ok_or(NoScreen::Gate(ScreenOff::NotReady))?;
+        if !self
+            .holds
+            .arm_screen(key, (choice.connection, choice.model))
+        {
             return Err(NoScreen::NotStarted);
         }
         Ok(())
@@ -422,16 +447,21 @@ impl crate::runtime::Brain {
         point: PhysicalPoint,
         ink: PointerPath,
     ) -> Result<(), NoScreen> {
-        if self.holds.pending.as_ref().is_none_or(|hold| {
-            hold.key != key
-                || hold.cancel.load(Ordering::SeqCst)
-                || !matches!(hold.screen, ScreenPart::Armed)
-        }) {
+        let Some(hold) = self.holds.pending.as_ref().filter(|hold| {
+            hold.key == key
+                && !hold.cancel.load(Ordering::SeqCst)
+                && matches!(hold.screen, ScreenPart::Armed)
+        }) else {
             return Err(NoScreen::NotArmed);
-        }
+        };
         let choice = self.config.view().default_model.clone();
         if let ScreenHolds::Off(off) = self.display_gate(choice.as_ref()) {
             return Err(NoScreen::Gate(off));
+        }
+        if hold.snapshot.as_ref().is_some_and(|snapshot| {
+            !hold.matches_screen_recipient(snapshot.defaults.choice.as_ref())
+        }) {
+            return Err(NoScreen::NotArmed);
         }
         // Read before the age, so the ticket can only end sooner than the check allows.
         let until = Instant::now() + MAX_TTL;

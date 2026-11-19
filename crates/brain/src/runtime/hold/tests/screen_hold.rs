@@ -311,8 +311,7 @@ async fn a_release_that_isnt_an_armed_holds_is_answered_unless_a_capture_may_sti
 async fn words_go_on_at_once_with_an_armed_part_and_wait_for_a_capturing_one() {
     let scratch = Scratch::new("screen-hold-words");
     let mut brain = test_support::brain(&scratch, "");
-    let mut rig = crate::supervise::fixture::start::<crate::screen::Holds>();
-    brain.holds.screen = Some(Arc::new(HoldClient::new(rig.handle.clone())));
+    let mut rig = seeing(&mut brain);
     let (out, _output) = mpsc::channel(64);
     let queue = RefCell::new(DataQueue::new(crate::runtime::window()));
     let ready_notify = Notify::new();
@@ -555,6 +554,56 @@ async fn a_release_for_a_hold_whose_choice_changed_captures_nothing() {
         ScreenPart::Closed(ScreenClass::NotReady)
     ));
     brain.holds.lost();
+    brain.close().await;
+}
+
+#[tokio::test]
+async fn a_display_release_requires_the_armed_recipient_once_prepared() {
+    use kumochi_protocol::message::{Effort, ModelSlug};
+
+    let scratch = Scratch::new("screen-hold-prepared-recipient");
+    let (mut brain, mut rig, _keep) = desk(&scratch).await;
+    let sol = brain.config.view().default_model.clone().unwrap();
+    let (out, mut output) = mpsc::channel(16);
+    let queue = RefCell::new(DataQueue::new(crate::runtime::window()));
+    let ready_notify = Notify::new();
+    let mut tap = Tap::from_env();
+    let mut link = Link::new(&out, &queue, &ready_notify, &mut tap);
+    let release = release(KEY.gesture, 100, 200, 2);
+
+    for prepared in [
+        None,
+        Some(ModelChoice {
+            model: ModelSlug::new("gpt-6.1-sol").unwrap(),
+            ..sol.clone()
+        }),
+    ] {
+        held(&mut brain, Kind::Screen, ScreenPart::Armed);
+        let hold = brain.holds.pending.as_mut().unwrap();
+        hold.snapshot.as_mut().unwrap().defaults.choice = prepared;
+        assert!(brain.hold_control(&release, &mut link).unwrap());
+        assert_eq!(controls(&mut output), [failed(KEY.gesture)]);
+        assert!(matches!(
+            part(&brain),
+            ScreenPart::Closed(ScreenClass::NotReady)
+        ));
+        assert!(brain.hold_control(&release, &mut link).unwrap());
+        assert_eq!(controls(&mut output), [failed(KEY.gesture)]);
+        brain.holds.lost();
+    }
+
+    held(&mut brain, Kind::Screen, ScreenPart::Armed);
+    let hold = brain.holds.pending.as_mut().unwrap();
+    hold.snapshot.as_mut().unwrap().defaults.choice = Some(ModelChoice {
+        effort: Effort::High,
+        ..sol
+    });
+    assert!(brain.hold_control(&release, &mut link).unwrap());
+    assert!(controls(&mut output).is_empty());
+    let (_, request) = rig.next().await;
+    assert!(matches!(request, Request::Display { .. }));
+    brain.holds.lost();
+    crate::screen::release_next(&mut rig, KEY).await;
     brain.close().await;
 }
 
