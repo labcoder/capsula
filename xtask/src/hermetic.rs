@@ -83,9 +83,16 @@ pub(crate) fn build(
         cargo.args(["--package", package]);
     }
     cargo.arg("--target-dir").arg(&target);
-    // `cargo run` sets it for xtask, and ring's build script reruns when it changes, so keeping it
-    // would rebuild a prebuilt image inside a timed run.
-    cargo.env_remove("CARGO_MANIFEST_DIR");
+    // `cargo run` gives xtask its package's variables, and ring's build script reruns when any of
+    // them changes, so keeping them would rebuild a prebuilt image inside a timed run.
+    for (name, _) in std::env::vars_os() {
+        if name
+            .to_str()
+            .is_some_and(|name| name.starts_with("CARGO_PKG_") || name.starts_with("CARGO_MANIFEST_"))
+        {
+            cargo.env_remove(name);
+        }
+    }
     if profile == Profile::Release {
         cargo.arg("--release");
     }
