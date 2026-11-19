@@ -702,7 +702,14 @@ impl Presence {
         // A control the brain wasn't told can't be undone locally, so that session ends; one
         // already ending isn't ended again.
         if !sent && session.open() {
-            self.end_session(session, cx).detach();
+            let end = self.end_session(session, cx);
+            // Its speaker got no stop, so no resume may reach it before that end has run.
+            let held = self.voice.gates.hold_back();
+            cx.spawn(async move |_, _| {
+                end.await;
+                drop(held);
+            })
+            .detach();
         }
         if sent && let Some(run) = run {
             self.pending_stops

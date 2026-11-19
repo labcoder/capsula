@@ -1191,3 +1191,46 @@ fn a_lost_screen_hold_owes_its_stop_to_the_next_connection(cx: &mut TestAppConte
         );
     });
 }
+
+#[gpui::test]
+fn a_refused_brain_stop_keeps_the_speaker_from_resuming(cx: &mut TestAppContext) {
+    let (owner, _data, _controls) = ready(cx);
+    let (commands, _tail) = answering(&owner, cx);
+    hold(&owner, 1, cx);
+    let _full = owner.update(cx, |owner, cx| {
+        let stamp = owner.voice.pending.as_ref().expect("hold 1").stamp;
+        owner.voice_intent(
+            Intent::End {
+                gesture: G1,
+                cancelled: true,
+            },
+            stamp,
+            0,
+            None,
+            TalkHeld::default(),
+            cx,
+        );
+        // The brain's control queue fills before Esc's stop.
+        let controls = owner.link.record_controls_bounded();
+        let session = owner.session.clone().expect("connected");
+        while owner.link.send_control(
+            &session,
+            ControlToBrain::Stop {
+                run: RunId(1),
+                revealed: Vec::new(),
+            },
+        ) {}
+        owner.activity = Presence::activity(&owner.runs, EscapePanel::Closed, &owner.presenter);
+        owner.escape(cx).expect("Esc");
+        assert!(!session.open(), "the refused stop ends its session");
+        assert!(owner.pending_stops.is_empty(), "and queues no speaker stop");
+        // The dispatcher's wake comes before the background end.
+        owner.dispatch(cx);
+        controls
+    });
+    assert_eq!(heard(&commands), [Command::Pause(1)], "held until the end");
+    cx.run_until_parked();
+    owner.read_with(cx, |owner, _| {
+        assert_eq!(owner.voice.gates.held(G1), None, "retired after the end");
+    });
+}

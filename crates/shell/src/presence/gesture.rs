@@ -17,7 +17,7 @@ use gpui_kit::{AnyWindowHandle, App, AppContext as _, AsyncApp, WeakEntity};
 
 use super::{
     Presence,
-    voice::{Escaping, Gates, Stamp},
+    voice::{Gates, HoldBack, Stamp},
 };
 use crate::input::{
     Edge, Event, Gesture, Key, TalkHeld,
@@ -39,7 +39,7 @@ struct Pending {
     held: TalkHeld,
     cancelled: Option<GestureId>,
     /// An Esc press: every retirement waits until this delivery is decided.
-    escape: Option<Rc<Escaping>>,
+    escape: Option<Rc<HoldBack>>,
     collection: u64,
 }
 
@@ -211,7 +211,7 @@ pub(super) fn deliver(
             pointer,
             held: state.talk_held(),
             cancelled,
-            escape: escape.then(|| gates.escaping()),
+            escape: escape.then(|| gates.hold_back()),
             collection: link.microphone_gate().latest(),
             stamp: Stamp {
                 target: target.get(),
