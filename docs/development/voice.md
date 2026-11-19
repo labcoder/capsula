@@ -967,13 +967,14 @@ gesture that stops being engaged before recognition ends its gate. Recognition b
 the hold's microphone generation; a gesture with no token gets no hold and leaves a pending one
 alone. If input continuity is lost before deferred recognition reaches presence, only that
 gesture moves to Ending with its unbound generation. The dispatcher retires its inhibit and
-discards the unstarted generation; an admitted hold or a successor keeps its own gate.
+discards the unstarted generation, including when an exhausted transfer already moved the
+gesture to Ending. An admitted hold or a successor keeps its own gate.
 
 ```mermaid
 stateDiagram-v2
     [*] --> Native: key-down
     Native --> Recognized: recognized with a generation
-    Native --> Ending: released, reset or superseded
+    Native --> Ending: released, reset, superseded or transfer refused
     Recognized --> Admitted: the brain admits the hold
     Recognized --> Ending: skipped delivery, the hold ends, or its receipt comes
     Admitted --> Ending: deadline, refusal, the hold ends, or its receipt comes
