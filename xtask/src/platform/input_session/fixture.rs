@@ -142,7 +142,7 @@ impl std::error::Error for IdleRefusal {}
 const MAX_ESCAPE_TOGGLES: u32 = 64;
 
 /// The framed window, and its EDIT inside it.
-pub(super) const FRAME: [i32; 4] = [80, 80, 640, 490];
+const FRAME: [i32; 4] = [80, 80, 640, 490];
 const EDIT_FRAME: [i32; 4] = [12, 84, 600, 260];
 
 const GESTURES: [&str; 2] = ["Hold", "Double-tap"];
@@ -778,7 +778,7 @@ fn off_cursor_frame(work: RECT, cursor: POINT) -> Option<[i32; 4]> {
 }
 
 /// Which of `off_cursor_frame`'s placements starts at `origin`, named by its side of `FRAME`.
-pub(super) fn frame_name([x, y]: [i32; 2]) -> &'static str {
+fn frame_name([x, y]: [i32; 2]) -> &'static str {
     let [left, top, ..] = FRAME;
     match (x.cmp(&left), y.cmp(&top)) {
         (Ordering::Equal, Ordering::Equal) => "preferred",
@@ -788,6 +788,20 @@ pub(super) fn frame_name([x, y]: [i32; 2]) -> &'static str {
         (Ordering::Equal, Ordering::Less) => "upper",
         _ => "shifted",
     }
+}
+
+/// The frame a fixture published as `FRAME_ORIGIN`, with its name, or `None` when the value is
+/// missing, zero or can't be a frame's rectangle.
+pub(super) fn published_frame(origin: usize) -> Option<(RECT, &'static str)> {
+    let [x, y] = unpack(u64::try_from(origin).ok().filter(|origin| *origin != 0)?);
+    let [_, _, width, height] = FRAME;
+    let rect = RECT {
+        left: x,
+        top: y,
+        right: x.checked_add(width)?,
+        bottom: y.checked_add(height)?,
+    };
+    Some((rect, frame_name([x, y])))
 }
 
 pub(crate) fn cursor_position() -> Result<POINT> {
@@ -971,7 +985,9 @@ fn run_fixture(
     placement: FixturePlacement,
 ) -> Result<()> {
     let [x, y, ..] = START_FRAME.get();
-    set_property(root, FRAME_ORIGIN, usize::try_from(pack(x, y))?)?;
+    // Only the missed-hit diagnostic reads the origin, so a failed publication never stops startup.
+    let _published = usize::try_from(pack(x, y))
+        .is_ok_and(|origin| set_property(root, FRAME_ORIGIN, origin).is_ok());
     let edit = child(
         w!("EDIT"),
         &HSTRING::new(),
@@ -1061,6 +1077,7 @@ fn focus_edit() -> Result<()> {
 mod tests {
     use super::{
         FRAME, IdleRefusal, POINT, RECT, current_queue_categories, frame_name, off_cursor_frame,
+        pack, published_frame,
     };
     use windows::Win32::UI::Input::{
         MOUSE_MOVE_ABSOLUTE, MOUSE_MOVE_NOCOALESCE, RAWINPUT, RAWKEYBOARD, RAWMOUSE, RAWMOUSE_0,
@@ -1143,6 +1160,40 @@ mod tests {
         assert_eq!(frame_name([80, 510]), "lower");
         assert_eq!(frame_name([80, 0]), "upper");
         assert_eq!(frame_name([0, 0]), "shifted");
+    }
+
+    #[test]
+    fn only_a_published_origin_that_fits_a_frame_reads_back() {
+        let origin = |x, y| usize::try_from(pack(x, y)).unwrap();
+        let frame = |left, top| RECT {
+            left,
+            top,
+            right: left + 640,
+            bottom: top + 490,
+        };
+        assert_eq!(
+            published_frame(origin(80, 80)),
+            Some((frame(80, 80), "preferred"))
+        );
+        assert_eq!(
+            published_frame(origin(1920, 80)),
+            Some((frame(1920, 80), "right"))
+        );
+        assert_eq!(
+            published_frame(origin(-560, 80)),
+            Some((frame(-560, 80), "left"))
+        );
+        assert_eq!(published_frame(0), None);
+        assert_eq!(
+            published_frame(origin(i32::MAX - 640, 80)).map(|(rect, _)| rect.right),
+            Some(i32::MAX)
+        );
+        assert_eq!(published_frame(origin(i32::MAX - 639, 80)), None);
+        assert_eq!(published_frame(origin(80, i32::MAX - 489)), None);
+        assert_eq!(
+            published_frame(origin(i32::MIN, i32::MIN)).map(|(_, name)| name),
+            Some("shifted")
+        );
     }
 
     fn mouse_event(mouse: RAWMOUSE) -> RAWINPUT {

@@ -6,7 +6,7 @@ use std::thread::sleep;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result, bail, ensure};
-use windows::Win32::Foundation::{HWND, LPARAM, POINT, RECT, WPARAM};
+use windows::Win32::Foundation::{HWND, LPARAM, POINT, WPARAM};
 use windows::Win32::Graphics::Dwm::{DWMWA_CLOAKED, DwmGetWindowAttribute};
 use windows::Win32::System::SystemInformation::GetTickCount;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
@@ -20,12 +20,12 @@ use windows::Win32::UI::WindowsAndMessaging::{
 
 use super::super::activation::{Idle, Look, cloak, has_ex, missed_hit, see_through};
 use super::super::fixture::{
-    ABORT, ARMED_INPUT, FINALIZE_IDLE, FRAME, FRAME_ORIGIN, PREPARE_IDLE, READY, frame_name,
+    ABORT, ARMED_INPUT, FINALIZE_IDLE, FRAME_ORIGIN, PREPARE_IDLE, READY, published_frame,
 };
 use super::super::gate::Gate;
 use super::super::{
     Receipt, class_name, desktop_ours, desktop_rect, foreground_process_name, last_input,
-    mouse_and_keyboard_only, normalized, property, request, size, unpack,
+    mouse_and_keyboard_only, normalized, pid, property, request, size,
 };
 use super::{FRESH, Session, click_inputs, mouse_input, owner};
 
@@ -224,13 +224,24 @@ impl Session {
     /// hit test: no title, text, handle or coordinate.
     fn missed_edit(&self, look: Look) -> String {
         let hit = HWND(std::ptr::with_exposed_provenance_mut(look.at_point.window));
-        let root = self.fixture.hwnd;
+        let (root, edit) = (self.fixture.hwnd, self.edit);
         // SAFETY: reads the hit's top-level ancestor; a stale or null handle yields null.
         let hit_root = unsafe { GetAncestor(hit, GA_ROOT) };
-        // SAFETY: reads only a window's extended style; a stale or null handle reads zero.
-        let ex = |window| unsafe { GetWindowLongPtrW(window, GWL_EXSTYLE) };
-        // SAFETY: reads only a window's visibility; a stale handle reads false.
-        let visible = |window| unsafe { IsWindowVisible(window) }.as_bool();
+        let ours = |window| pid(window) == self.fixture.pid;
+        let (root_live, edit_live, hit_live) = (ours(root), ours(edit), pid(hit_root) != 0);
+        let ex = |window, live: bool| {
+            // SAFETY: reads only a live window's extended style.
+            live.then(|| unsafe { GetWindowLongPtrW(window, GWL_EXSTYLE) })
+        };
+        let visible = |window, live: bool| {
+            // SAFETY: reads only a live window's visibility.
+            live.then(|| unsafe { IsWindowVisible(window) }.as_bool())
+        };
+        let flag = |known: Option<bool>| match known {
+            Some(true) => "true",
+            Some(false) => "false",
+            None => "unread",
+        };
         let mut cloaked = 0u32;
         // SAFETY: cloaked is a writable u32 of the size passed; reads only the root's cloak state.
         let cloak_read = unsafe {
@@ -241,39 +252,30 @@ impl Session {
                 size::<u32>(),
             )
         };
-        let edit = self.edit;
-        // SAFETY: reads only whether the fixture EDIT takes input.
-        let edit_enabled = unsafe { IsWindowEnabled(edit) }.as_bool();
-        let hit_topmost = if hit_root.is_invalid() {
-            "unread"
-        } else if has_ex(ex(hit_root), WS_EX_TOPMOST) {
-            "true"
-        } else {
-            "false"
-        };
-        let [x, y] = unpack(u64::try_from(property(root, FRAME_ORIGIN)).unwrap_or_default());
-        let [_, _, width, height] = FRAME;
-        let asked = RECT {
-            left: x,
-            top: y,
-            right: x + width,
-            bottom: y + height,
-        };
+        // SAFETY: reads only whether the live fixture EDIT takes input.
+        let edit_enabled = edit_live.then(|| unsafe { IsWindowEnabled(edit) }.as_bool());
+        let asked = published_frame(property(root, FRAME_ORIGIN));
+        let at_frame =
+            asked.and_then(|(rect, _)| self.fixture.rect().ok().map(|actual| actual == rect));
         format!(
-            "hit_class={:?} hit_process={:?} hit={} hit_topmost={hit_topmost} root_visible={} root_cloaked={} \
+            "hit_class={:?} hit_process={:?} hit={} hit_topmost={} root_visible={} root_cloaked={} \
              root_topmost={} root_at_frame={} frame={} root_style={} edit_style={} \
-             edit_visible={} edit_enabled={edit_enabled}",
-            (!hit.is_invalid()).then(|| class_name(hit)),
+             edit_visible={} edit_enabled={}",
+            (!hit.is_invalid())
+                .then(|| class_name(hit))
+                .filter(|class| !class.is_empty()),
             foreground_process_name(look.at_point.pid).ok(),
             missed_hit(look.at_point, hit_root.0.addr(), owner(root)),
-            visible(root),
+            flag(ex(hit_root, hit_live).map(|style| has_ex(style, WS_EX_TOPMOST))),
+            flag(visible(root, root_live)),
             cloak(cloak_read.ok().map(|()| cloaked)),
-            has_ex(ex(root), WS_EX_TOPMOST),
-            self.fixture.rect().is_ok_and(|rect| rect == asked),
-            frame_name([x, y]),
-            see_through(ex(root)),
-            see_through(ex(edit)),
-            visible(edit),
+            flag(ex(root, root_live).map(|style| has_ex(style, WS_EX_TOPMOST))),
+            flag(at_frame),
+            asked.map_or("unread", |(_, name)| name),
+            ex(root, root_live).map_or("unread", see_through),
+            ex(edit, edit_live).map_or("unread", see_through),
+            flag(visible(edit, edit_live)),
+            flag(edit_enabled),
         )
     }
 

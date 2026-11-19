@@ -579,7 +579,9 @@ whether the fixture root is visible, topmost and at the frame it chose, and whic
 top-level window is topmost, whether DWM cloaks the root (`no`, `app`, `shell`, `inherited`,
 `mixed` or `unread`), whether the root and the EDIT are `layered`, `transparent`, both or
 `opaque`, and whether the EDIT is visible and enabled. These are read straight after the look
-without another hit test. A target that goes stale after admission
+without another hit test. Any fact that can't be read, including a frame origin the fixture
+couldn't publish or that isn't a valid frame, reads `unread`. Publishing the origin is best-effort
+and never stops the fixture. A target that goes stale after admission
 and an OS `SendInput` refusal keep their own existing messages. The surrounding refusal still names
 the foreground executable and its PID, as before. The refusal remains terminal.
 Only tagged mouse input is allowed at this stage: no Alt-key trick, `AttachThreadInput`, or
@@ -634,9 +636,10 @@ activation. At session end the existing guarded restore moves only to a freshly 
 point, and only after a successful session and cleanup; otherwise it leaves the pointer where it
 is. Because the fixture starts clear of the cursor, the starting point is usually not owned, so
 the restore usually skips. Once a session exists, its `final_cursor_restore` line names the restore
-outcome (`failed` if the restore itself erred) and `pointer_left` says whether the session's own
-moves left the pointer away from where it started. Every gate session then ends with
-`final_cursor=x,y`, the pointer's position after the fixture closed, or `unread`.
+outcome (`failed` if the restore itself erred). `pointer_left` says whether Windows accepted a
+move of the session's own with no completed restore after it; it is not a measured displacement.
+Every gate session then ends with `final_cursor=x,y`, sampled after the attempt to close the
+fixture and wait for it (not a confirmed close), or `unread`.
 
 ## Voice hold authority
 
