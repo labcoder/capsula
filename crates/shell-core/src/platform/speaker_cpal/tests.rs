@@ -100,9 +100,12 @@ fn maximum_rate_full_final_packet_does_not_grow_the_prepared_buffers() {
         .unwrap();
     let first = render.ready.pop().unwrap();
     let final_block = render.ready.pop().unwrap();
-    assert_eq!(first.pcm.len() + final_block.pcm.len(), 15_360);
-    assert_eq!(first.pcm.capacity(), MAX_FRAMES * 2);
-    assert_eq!(final_block.pcm.capacity(), MAX_FRAMES * 2);
+    assert_eq!(
+        first.pcm.samples.len() + final_block.pcm.samples.len(),
+        15_360
+    );
+    assert_eq!(first.pcm.samples.capacity(), MAX_FRAMES * 2);
+    assert_eq!(final_block.pcm.samples.capacity(), MAX_FRAMES * 2);
     assert_eq!(submit.mono.capacity(), MAX_FRAMES);
 }
 
@@ -123,6 +126,7 @@ fn an_unpublished_block_is_silent_until_the_next_callback() {
     let index = submit.free.pop().unwrap();
     std::sync::Arc::get_mut(&mut submit.blocks[index])
         .unwrap()
+        .samples
         .extend([0.5; 4]);
     let ready = ReadyBlock {
         index,
@@ -160,6 +164,7 @@ fn dropping_partial_playback_leaves_pcm_for_worker_teardown() {
     assert_eq!(std::sync::Arc::strong_count(&submit.blocks[index]), 1);
     assert_eq!(
         submit.blocks[index]
+            .samples
             .iter()
             .map(|sample| sample.to_bits())
             .collect::<Vec<_>>(),
@@ -167,7 +172,7 @@ fn dropping_partial_playback_leaves_pcm_for_worker_teardown() {
         "the callback must leave the worker's zeroizing block intact"
     );
 
-    let target = submit.blocks[index].as_ptr().addr();
+    let target = submit.blocks[index].samples.as_ptr().addr();
     let bytes = MAX_FRAMES * 2 * size_of::<f32>();
     let ((), releases) = crate::allocation::requests(64, || drop(submit));
     let pcm_releases = releases
@@ -178,4 +183,126 @@ fn dropping_partial_playback_leaves_pcm_for_worker_teardown() {
         pcm_releases.filter(|event| event.pointer == target).count(),
         1
     );
+}
+
+#[test]
+fn a_callback_retained_past_wrapper_drop_cannot_play() {
+    retained_wrapper(DropPath::Normal);
+}
+
+#[test]
+fn a_callback_retained_past_wrapper_unwind_cannot_play() {
+    retained_wrapper(DropPath::Unwind);
+}
+
+#[derive(Clone, Copy)]
+enum DropPath {
+    Normal,
+    Unwind,
+}
+
+struct ClearProbe;
+
+impl Drop for ClearProbe {
+    fn drop(&mut self) {
+        super::CLEAR_OBSERVER.set(None);
+    }
+}
+
+fn retained_wrapper(path: DropPath) {
+    use std::sync::atomic::AtomicBool;
+    use std::sync::mpsc;
+
+    use super::lifetime::{OwnedStream, Owner, Permit};
+    use crate::allocation;
+
+    static NORMAL: AtomicBool = AtomicBool::new(false);
+    static UNWIND: AtomicBool = AtomicBool::new(false);
+    let busy = match path {
+        DropPath::Normal => &NORMAL,
+        DropPath::Unwind => &UNWIND,
+    };
+    let (mut submit, mut playback) = pair(SOURCE_RATE, 2);
+    for index in 0..BLOCKS {
+        let samples = if index == 1 {
+            &[16_384, i16::MIN][..]
+        } else {
+            &[8192][..]
+        };
+        submit.packet(samples, PacketKind::End).unwrap();
+    }
+    let blocks: [usize; BLOCKS] =
+        std::array::from_fn(|index| submit.blocks[index].samples.as_ptr().addr());
+    let mut head = [99.0; 4];
+    playback.fill(&mut head);
+    assert_eq!(
+        head.map(f32::to_bits),
+        [0.25, 0.25, 0.5, 0.5].map(f32::to_bits)
+    );
+
+    super::CLEAR_OBSERVER.set(Some(|pointer| allocation::handoff(pointer, 0, 0)));
+    let _clear_probe = ClearProbe;
+    let (sender, receiver) = mpsc::sync_channel(1);
+    let wrapper = OwnedStream {
+        stream: (),
+        owner: Owner::new(submit, Permit::claim(busy).unwrap(), sender),
+    };
+    let (unwound, closing) = allocation::requests(128, || {
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+            let _wrapper = wrapper;
+            assert!(matches!(path, DropPath::Normal), "unwind the wrapper");
+        }))
+    });
+    assert_eq!(unwound.is_err(), matches!(path, DropPath::Unwind));
+    let mut parked = receiver.try_recv().unwrap();
+    assert!(!parked.acknowledged());
+    assert!(Permit::claim(busy).is_none());
+    assert!(parked.submit.blocks[0].samples.is_empty());
+    assert_eq!(parked.submit.blocks[1].samples.len(), 4);
+
+    let mut late = [99.0; 6];
+    let ((), callback_activity) = allocation::activity(|| playback.fill(&mut late));
+    assert_eq!(
+        late.map(f32::to_bits),
+        [0; 6],
+        "retained callback must be silent"
+    );
+    assert_eq!(callback_activity, [0, 0]);
+    assert_eq!(playback.current.as_ref().unwrap().index, 1);
+    assert_eq!(playback.offset, 2);
+    assert_eq!(playback.ready.len(), BLOCKS - 2);
+
+    let ((), callback_events) = allocation::requests(64, || drop(playback));
+    assert!(
+        callback_events.is_empty(),
+        "the callback must neither clear nor free a block"
+    );
+    assert!(parked.acknowledged());
+
+    let ((), freed) = allocation::requests(64, || drop(parked));
+    for pointer in blocks {
+        assert_eq!(
+            closing
+                .iter()
+                .chain(&freed)
+                .filter(|e| e.action == 4 && e.pointer == pointer)
+                .count(),
+            1
+        );
+        assert_eq!(
+            closing
+                .iter()
+                .filter(|e| e.action == 1 && e.pointer == pointer)
+                .count(),
+            0
+        );
+        assert_eq!(
+            freed
+                .iter()
+                .filter(|e| e.action == 1 && e.pointer == pointer)
+                .count(),
+            1
+        );
+    }
+    assert!(Permit::claim(busy).is_some());
 }

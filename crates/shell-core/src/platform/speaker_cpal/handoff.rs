@@ -39,20 +39,25 @@ pub(super) fn pair<T: Send>() -> (Producer<T>, Consumer<T>) {
 
 impl<T> Producer<T> {
     pub(super) fn push(&mut self, value: T) -> Result<(), T> {
-        self.push_before_publish(value, || {})
+        self.publish(value, || {})
     }
 
+    #[cfg(test)]
     pub(super) fn push_before_publish(
         &mut self,
         value: T,
         before_publish: impl FnOnce(),
     ) -> Result<(), T> {
+        self.publish(value, before_publish)
+    }
+
+    fn publish(&mut self, value: T, before_publish: impl FnOnce()) -> Result<(), T> {
         let slot = &self.slots[self.next];
         if slot.published.load(Ordering::Acquire) {
             return Err(value);
         }
-        // SAFETY: this producer exclusively owns the unpublished slot; a previous consumer
-        // took its value before releasing it, so there is no previously owned value to drop.
+        // SAFETY: this producer exclusively owns the unpublished slot. In normal use the
+        // previous consumer took the value before releasing the slot.
         unsafe { *slot.value.get() = Some(value) };
         before_publish();
         slot.published.store(true, Ordering::Release);

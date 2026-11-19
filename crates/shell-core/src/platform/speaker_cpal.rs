@@ -2,7 +2,7 @@
 
 use std::fmt;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
 use cpal::traits::{DeviceTrait as _, HostTrait as _, StreamTrait as _};
 use cpal::{BufferSize, ErrorKind, StreamConfig};
@@ -16,18 +16,57 @@ use zeroize::{Zeroize as _, Zeroizing};
     reason = "fixed SPSC slots transfer ownership by atomic publication"
 )]
 mod handoff;
+mod lifetime;
 
 #[cfg(test)]
 mod tests;
 
 use handoff::{Consumer, Producer};
+use lifetime::{OwnedStream, Owner, Permit, Shared, cleanup_sender};
 
 const SOURCE_RATE: u32 = 24_000;
 const PACKET_SAMPLES: usize = 480;
 const MAX_FRAMES: usize = 4_096;
 const MAX_CHANNELS: u16 = 32;
 const BLOCKS: usize = 8;
-type Block = Zeroizing<Vec<f32>>;
+struct Block {
+    samples: Vec<f32>,
+}
+
+impl Block {
+    fn clear(&mut self) {
+        if !self.samples.is_empty() {
+            self.samples.zeroize();
+            Self::note_clear(self);
+        }
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    fn note_clear(block: &Self) {
+        let _ = CLEAR_OBSERVER.try_with(|observer| {
+            if let Some(observe) = observer.get() {
+                observe(block.samples.as_ptr().addr());
+            }
+        });
+    }
+
+    #[cfg(not(any(test, feature = "test-support")))]
+    fn note_clear(_: &Self) {}
+}
+
+#[cfg(any(test, feature = "test-support"))]
+type ClearObserver = std::cell::Cell<Option<fn(usize)>>;
+
+#[cfg(any(test, feature = "test-support"))]
+thread_local! {
+    static CLEAR_OBSERVER: ClearObserver = const { std::cell::Cell::new(None) };
+}
+
+impl Drop for Block {
+    fn drop(&mut self) {
+        self.clear();
+    }
+}
 
 /// Whether a submission ends the current source segment.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -89,17 +128,13 @@ impl OutputEvent {
 }
 
 /// One stream and its worker-side converter. Keep them on the owning audio worker.
-/// Field order drops the stream before the worker's PCM references.
-pub struct Output {
-    stream: cpal::Stream,
-    submit: Submit,
-    pending: Arc<AtomicU8>,
-}
+/// Cancellation silences any later callback; backend closure destruction acknowledges retirement.
+pub struct Output(OwnedStream<cpal::Stream>);
 
 impl fmt::Debug for Output {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Output")
-            .field("endpoint_rate", &self.submit.rate)
+            .field("endpoint_rate", &self.0.owner.submit().rate)
             .finish_non_exhaustive()
     }
 }
@@ -131,9 +166,12 @@ impl Output {
     }
 
     fn open(device: &cpal::Device, rate: u32, channels: u16) -> Result<Self, ErrorKind> {
+        static OCCUPIED: AtomicBool = AtomicBool::new(false);
+        let permit = Permit::claim(&OCCUPIED).ok_or(ErrorKind::DeviceBusy)?;
+        let cleanup = cleanup_sender().ok_or(ErrorKind::ResourceExhausted)?;
         let (submit, mut playback) = pair(rate, usize::from(channels));
-        let pending = Arc::new(AtomicU8::new(0));
-        let notices = Arc::clone(&pending);
+        let notices = Arc::clone(&submit.shared);
+        let owner = Owner::new(submit, permit, cleanup);
         let config = StreamConfig {
             channels,
             sample_rate: rate,
@@ -143,15 +181,11 @@ impl Output {
             .build_output_stream(
                 config,
                 move |out: &mut [f32], _| playback.fill(out),
-                move |error| OutputEvent::latch(&notices, error.kind()),
+                move |error| OutputEvent::latch(&notices.pending, error.kind()),
                 None,
             )
             .map_err(|error| error.kind())?;
-        Ok(Self {
-            stream,
-            submit,
-            pending,
-        })
+        Ok(Self(OwnedStream { stream, owner }))
     }
 
     /// Resume or start the callback.
@@ -159,7 +193,7 @@ impl Output {
     /// # Errors
     /// The device refused playback.
     pub fn play(&self) -> Result<(), OutputError> {
-        self.stream.play().map_err(|_| OutputError::Unavailable)
+        self.0.stream.play().map_err(|_| OutputError::Unavailable)
     }
 
     /// Pause an idle callback, not an in-flight stop.
@@ -167,7 +201,7 @@ impl Output {
     /// # Errors
     /// The device refused to pause.
     pub fn pause(&self) -> Result<(), OutputError> {
-        self.stream.pause().map_err(|_| OutputError::Unavailable)
+        self.0.stream.pause().map_err(|_| OutputError::Unavailable)
     }
 
     /// Convert and enqueue up to 480 canonical mono samples; an end packet flushes the converter.
@@ -176,12 +210,12 @@ impl Output {
     /// An oversized packet or full pool leaves the input unconsumed. Retire the output if its
     /// block pool cannot continue.
     pub fn submit(&mut self, samples: &[i16], kind: PacketKind) -> Result<(), OutputError> {
-        self.submit.packet(samples, kind)
+        self.0.owner.submit_mut().packet(samples, kind)
     }
 
     /// Take the strongest pending notification. Loss outranks reroute, which outranks refill.
     pub fn take_event(&self) -> Option<OutputEvent> {
-        OutputEvent::take(&self.pending)
+        OutputEvent::take(&self.0.owner.submit().shared.pending)
     }
 }
 
@@ -199,22 +233,28 @@ struct Submit {
     channels: usize,
     converter: Option<Resampler>,
     mono: Zeroizing<Vec<f32>>,
+    shared: Arc<Shared>,
 }
 
+/// Dropping the last field releases the callback witness after its rings and block.
 struct Playback {
     free: Producer<usize>,
     ready: Consumer<ReadyBlock>,
     current: Option<ReadyBlock>,
     recycle: Option<usize>,
     offset: usize,
+    shared: Arc<Shared>,
 }
 
 fn pair(rate: u32, channels: usize) -> (Submit, Playback) {
+    let shared = Arc::new(Shared::default());
     let (mut recycle, free) = handoff::pair();
     let (ready, render) = handoff::pair();
     let blocks = std::array::from_fn(|index| {
         assert!(recycle.push(index).is_ok(), "one allocation per slot");
-        Arc::new(Zeroizing::new(Vec::with_capacity(MAX_FRAMES * channels)))
+        Arc::new(Block {
+            samples: Vec::with_capacity(MAX_FRAMES * channels),
+        })
     });
     let submit = Submit {
         free,
@@ -225,6 +265,7 @@ fn pair(rate: u32, channels: usize) -> (Submit, Playback) {
         channels,
         converter: None,
         mono: Zeroizing::new(Vec::with_capacity(MAX_FRAMES)),
+        shared: Arc::clone(&shared),
     };
     let playback = Playback {
         free: recycle,
@@ -232,11 +273,22 @@ fn pair(rate: u32, channels: usize) -> (Submit, Playback) {
         current: None,
         recycle: None,
         offset: 0,
+        shared,
     };
     (submit, playback)
 }
 
 impl Submit {
+    fn clear_available(&mut self) {
+        self.converter = None;
+        self.mono.zeroize();
+        for block in &mut self.blocks {
+            if let Some(block) = Arc::get_mut(block) {
+                block.clear();
+            }
+        }
+    }
+
     fn packet(&mut self, samples: &[i16], kind: PacketKind) -> Result<(), OutputError> {
         if samples.len() > PACKET_SAMPLES {
             return Err(OutputError::PacketTooLarge);
@@ -250,7 +302,8 @@ impl Submit {
             .or_else(|| self.free.pop())
             .ok_or(OutputError::Full)?;
         let block = Arc::get_mut(&mut self.blocks[index]).ok_or(OutputError::Unavailable)?;
-        block.zeroize();
+        block.clear();
+        let block = &mut block.samples;
         let mut input = Zeroizing::new([0.0; PACKET_SAMPLES]);
         for (out, &sample) in input.iter_mut().zip(samples) {
             *out = f32::from(sample) / 32_768.0;
@@ -295,6 +348,10 @@ impl Submit {
 
 impl Playback {
     fn fill(&mut self, mut out: &mut [f32]) {
+        if self.shared.cancelled.load(Ordering::Acquire) {
+            out.fill(0.0);
+            return;
+        }
         loop {
             if let Some(index) = self.recycle.take()
                 && let Err(index) = self.free.push(index)
@@ -312,12 +369,12 @@ impl Playback {
             let Some(block) = self.current.as_ref() else {
                 break;
             };
-            let len = out.len().min(block.pcm.len() - self.offset);
+            let len = out.len().min(block.pcm.samples.len() - self.offset);
             let (head, rest) = out.split_at_mut(len);
-            head.copy_from_slice(&block.pcm[self.offset..self.offset + len]);
+            head.copy_from_slice(&block.pcm.samples[self.offset..self.offset + len]);
             self.offset += len;
             out = rest;
-            if self.offset == block.pcm.len() {
+            if self.offset == block.pcm.samples.len() {
                 self.recycle = Some(block.index);
                 self.current = None;
             }
