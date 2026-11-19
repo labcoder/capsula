@@ -179,10 +179,13 @@ async fn runtime_distinguishes_invalid_lengths_and_rejected_present_bytes() {
     let event = next(&mut account).await;
     assert_eq!(
         account.handle(event),
-        vec![ControlToShell::AnthropicKeyStageDone {
-            plan: plan.id,
-            result: Err(KeyStageFailure::Rejected(KeyRejection::SubscriptionToken))
-        }]
+        [
+            view_frame(KeyView::Checking, None),
+            ControlToShell::AnthropicKeyStageDone {
+                plan: plan.id,
+                result: Err(KeyStageFailure::Rejected(KeyRejection::SubscriptionToken)),
+            },
+        ]
     );
     settle(&mut account).await;
     ready_old(&account);

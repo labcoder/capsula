@@ -42,6 +42,8 @@ An ordinary check of the same verified revision keeps its tag. Adoption and remo
 close both the authority's send fence and any queued catalog check before sending
 work to the credential thread. If adoption fails, only a new local read proving the
 old revision is still current can begin recovery; any recovered route has a new tag.
+If failure changes the account view, the current shell receives that snapshot.
+Only the shell epoch that submitted the paste can receive its receipt.
 The coordinator receives only model metadata and a tag, never a key.
 
 The saved key is the [credential authority](#credential-authority)'s `anthropic` record: Check

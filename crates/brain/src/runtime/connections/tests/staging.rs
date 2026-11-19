@@ -272,10 +272,13 @@ async fn stale_begin_replies_and_failed_queue_cannot_admit_a_paste() {
     account.connections.stage_admission = Some(plan.id);
     assert_eq!(
         account.stage_op(1, ConnectionOp::AnthropicKeyStaged { plan: plan.id }),
-        vec![ControlToShell::AnthropicKeyStageDone {
-            plan: plan.id,
-            result: Err(KeyStageFailure::Unavailable)
-        }]
+        [
+            view_frame(KeyView::Unconfirmed, Some(1)),
+            ControlToShell::AnthropicKeyStageDone {
+                plan: plan.id,
+                result: Err(KeyStageFailure::Unavailable),
+            },
+        ]
     );
     assert_eq!(account.connections.stage_admission, None);
     assert!(account.connections.verified.is_none());
@@ -366,6 +369,14 @@ fn ready_old(account: &Accounts) {
     assert!(account.connections.read.is_none());
 }
 
+fn view_frame(anthropic: KeyView, anthropic_revision: Option<u64>) -> ControlToShell {
+    ControlToShell::Connections(ConnectionsView {
+        anthropic,
+        anthropic_revision,
+        claude_code: ClaudeCodeView::NotFound,
+    })
+}
+
 #[tokio::test]
 async fn failed_or_superseded_paste_keeps_the_working_key_and_catalog() {
     let scratch = Scratch::new("stage-runtime-failed");
@@ -384,10 +395,13 @@ async fn failed_or_superseded_paste_keeps_the_working_key_and_catalog() {
     let event = next(&mut account).await;
     assert_eq!(
         account.handle(event),
-        vec![ControlToShell::AnthropicKeyStageDone {
-            plan: plan.id,
-            result: Err(KeyStageFailure::Unavailable)
-        }]
+        [
+            view_frame(KeyView::Checking, None),
+            ControlToShell::AnthropicKeyStageDone {
+                plan: plan.id,
+                result: Err(KeyStageFailure::Unavailable),
+            },
+        ]
     );
     settle(&mut account).await;
     ready_old(&account);
@@ -435,10 +449,13 @@ async fn failed_or_superseded_paste_keeps_the_working_key_and_catalog() {
     store.0.lock().expect("fake").refusing = false;
     assert_eq!(
         account.handle(event),
-        vec![ControlToShell::AnthropicKeyStageDone {
-            plan: current.id,
-            result: Err(KeyStageFailure::Unavailable)
-        }]
+        [
+            view_frame(KeyView::Checking, None),
+            ControlToShell::AnthropicKeyStageDone {
+                plan: current.id,
+                result: Err(KeyStageFailure::Unavailable),
+            },
+        ]
     );
     settle(&mut account).await;
     ready_old(&account);
@@ -450,6 +467,87 @@ async fn failed_or_superseded_paste_keeps_the_working_key_and_catalog() {
             .iter()
             .all(|name| !name.contains("anthropic-key-staged"))
     );
+    account
+        .close(tokio::time::Instant::now(), tokio::time::Instant::now())
+        .await;
+}
+
+#[tokio::test]
+async fn failed_first_paste_updates_the_reconnected_shell_without_an_old_receipt() {
+    let scratch = Scratch::new("stage-failed-first");
+    let store = FakeStore::default();
+    let lock = scratch.db().with_file_name("key-test.lock");
+    let (entered, at_gate) = std::sync::mpsc::channel();
+    let (resume, held) = std::sync::mpsc::channel();
+    let armed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let mut held_store = Some(HeldStore {
+        armed: Arc::clone(&armed),
+        store: store.clone(),
+        entered,
+        resume: std::sync::Mutex::new(Some(held)),
+    });
+    let worker = Worker::new(
+        Box::new(move || {
+            Vault::with_service(held_store.take().expect("one open"), "key-test", &lock)
+        }),
+        Arc::new(FixedClock(0)),
+    );
+    let peer = peer(EMPTY_CATALOG);
+    let mut account = with_transport(
+        Accounts::spawn_unconfigured(worker, test_support::net()).expect("worker"),
+        peer.clone(),
+        1,
+    );
+    account.connections.stage_session(Some(1));
+    assert_eq!(
+        account.connections.connected(),
+        view_frame(KeyView::Missing, None)
+    );
+    let plan = begin(&mut account, 1, 16).await;
+    plant(&store, plan, "sk-ant-api123456");
+    armed.store(true, std::sync::atomic::Ordering::SeqCst);
+    assert_eq!(
+        account.stage_op(1, ConnectionOp::AnthropicKeyStaged { plan: plan.id }),
+        []
+    );
+    at_gate
+        .recv_timeout(Duration::from_secs(5))
+        .expect("adoption waiting on the staged chunk");
+    store.0.lock().expect("fake").denied_read = Some(generation_target(
+        "key-test",
+        "anthropic",
+        &generation_hex(&plan.id.0),
+        0,
+    ));
+    account.connections.stage_session(None);
+    account.connections.stage_session(Some(2));
+    assert_eq!(
+        account.connections.connected(),
+        view_frame(KeyView::Checking, None)
+    );
+    resume.send(()).expect("release denied read");
+    let failed = next(&mut account).await;
+    assert!(matches!(
+        &failed,
+        Event::Connection(ConnectionEvent::StageDone {
+            epoch: 1,
+            result: Err(KeyStageFailure::Unavailable),
+            ..
+        })
+    ));
+    assert_eq!(
+        account.handle(failed),
+        [view_frame(KeyView::Unconfirmed, None)]
+    );
+    assert!(!account.connections.loading);
+    assert!(matches!(
+        account.connections.route_input(),
+        Some(Input::Engines(
+            ConnectionKind::AnthropicKey,
+            Availability::Unavailable(_)
+        ))
+    ));
+    assert_eq!(starts(&peer), 0);
     account
         .close(tokio::time::Instant::now(), tokio::time::Instant::now())
         .await;

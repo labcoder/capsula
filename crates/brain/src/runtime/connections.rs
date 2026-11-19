@@ -404,13 +404,16 @@ impl Accounts {
                     }]
                 }
                 ConnectionOp::AnthropicKeyStaged { plan } => {
+                    let mut frames = Vec::new();
                     if self.connections.adopting.take().is_some() {
                         self.connections.view.anthropic = KeyView::Unconfirmed;
+                        frames.push(ControlToShell::Connections(self.connections.view));
                     }
-                    vec![ControlToShell::AnthropicKeyStageDone {
+                    frames.push(ControlToShell::AnthropicKeyStageDone {
                         plan,
                         result: Err(KeyStageFailure::Unavailable),
-                    }]
+                    });
+                    frames
                 }
                 _ => Vec::new(),
             };
@@ -506,6 +509,7 @@ impl Accounts {
         plan: KeyStageId,
         result: Result<(u64, Secret<AnthropicKey>), KeyStageFailure>,
     ) -> Vec<ControlToShell> {
+        let before = self.connections.view;
         let adopted = self
             .connections
             .adopting
@@ -530,13 +534,17 @@ impl Accounts {
                 Err(error)
             }
         };
-        if self.connections.stage_link != Some(epoch) {
-            return Vec::new();
+        let mut frames = Vec::new();
+        if outcome.is_err() && before != self.connections.view {
+            frames.push(ControlToShell::Connections(self.connections.view));
         }
-        vec![ControlToShell::AnthropicKeyStageDone {
-            plan,
-            result: outcome,
-        }]
+        if self.connections.stage_link == Some(epoch) {
+            frames.push(ControlToShell::AnthropicKeyStageDone {
+                plan,
+                result: outcome,
+            });
+        }
+        frames
     }
 
     fn key_loaded(
@@ -778,7 +786,9 @@ impl Brain {
                 };
                 let frames = self.account.stage_op(self.epoch, op);
                 self.key_route_changed(Some(link))?;
-                frames.iter().try_for_each(|frame| link.control(frame))
+                frames
+                    .iter()
+                    .try_for_each(|frame| link.control(&self.composed(frame)))
             }
             ConnectionOp::ReconcileAnthropicKey { .. } if link.is_none() => Ok(()),
             ConnectionOp::CheckAnthropicKey
