@@ -1,5 +1,6 @@
 //! Win32 reader for the Accounts key row, separate from general clipboard handling.
 
+use std::ffi::c_void;
 use std::ptr::NonNull;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
@@ -8,8 +9,10 @@ use windows::Win32::Foundation::HGLOBAL;
 use windows::Win32::System::DataExchange::{
     CloseClipboard, GetClipboardData, GetClipboardSequenceNumber, OpenClipboard,
 };
+use windows::Win32::System::Diagnostics::Debug::ReadProcessMemory;
 use windows::Win32::System::Memory::{GlobalLock, GlobalSize, GlobalUnlock};
 use windows::Win32::System::Ole::CF_UNICODETEXT;
+use windows::Win32::System::Threading::GetCurrentProcess;
 use zeroize::Zeroizing;
 
 use super::super::clipboard::{ClipboardRefusal, KeyClipboardResult, MAX_KEY_CLIPBOARD_BYTES};
@@ -82,44 +85,48 @@ pub(in crate::platform) fn read(
         return Err(ClipboardRefusal::Invalid);
     }
     // SAFETY: the clipboard owns this live handle until Open closes it.
-    let ptr = NonNull::new(unsafe { GlobalLock(text) }.cast::<u16>())
-        .ok_or(ClipboardRefusal::Unavailable)?;
+    let ptr = NonNull::new(unsafe { GlobalLock(text) }).ok_or(ClipboardRefusal::Unavailable)?;
     let _locked = Locked(text);
-    // SAFETY: units comes from GlobalSize and bounds the reads to the allocation.
-    // CF_UNICODETEXT initializes the string through its NUL, not its trailing capacity.
-    // GlobalLock provides alignment for u16.
-    // The clipboard is open and the guard holds the allocation locked until decoding returns.
-    unsafe { decode_locked(ptr, units) }
+    copy_and_decode(ptr, units)
 }
 
-/// # Safety
-/// The pointer must be aligned and readable for `units` u16s while this runs.
-/// The units through the first NUL, or the whole scanned bound if none, must be initialized.
-unsafe fn decode_locked(ptr: NonNull<u16>, units: usize) -> KeyClipboardResult {
-    let bound = units.min(MAX_KEY_CLIPBOARD_BYTES + 1);
-    for end in 0..bound {
-        // SAFETY: the bound is within the allocation and all earlier units were nonzero,
-        // so this aligned u16 is part of the initialized prefix and is still readable.
-        if unsafe { ptr.as_ptr().wrapping_add(end).read() } == 0 {
-            // SAFETY: end is within the allocation; each preceding aligned u16 was read.
-            // The resulting slice exists only for decoding, while the allocation is locked.
-            let initialized = unsafe { std::slice::from_raw_parts(ptr.as_ptr(), end) };
-            return decode(initialized);
-        }
+fn copy_and_decode(source: NonNull<c_void>, units: usize) -> KeyClipboardResult {
+    let mut buffer = Zeroizing::new(vec![0u16; units.min(MAX_KEY_CLIPBOARD_BYTES + 1)]);
+    let bytes = size_of_val(buffer.as_slice());
+    let mut copied = 0;
+    // SAFETY: this returns the pseudo-handle for this process and needs no inputs.
+    let process = unsafe { GetCurrentProcess() };
+    // SAFETY: Windows checks the source range in this process; Rust never dereferences it.
+    // The destination is writable for the requested byte count, and copied is a separate output.
+    unsafe {
+        ReadProcessMemory(
+            process,
+            source.as_ptr(),
+            buffer.as_mut_ptr().cast(),
+            bytes,
+            Some(&raw mut copied),
+        )
     }
-    Err(if units > MAX_KEY_CLIPBOARD_BYTES {
-        ClipboardRefusal::TooLong
-    } else {
-        ClipboardRefusal::Invalid
-    })
+    .map_err(|_| ClipboardRefusal::Unavailable)?;
+    if copied != bytes {
+        return Err(ClipboardRefusal::Unavailable);
+    }
+    decode(&buffer)
 }
 
 fn decode(units: &[u16]) -> KeyClipboardResult {
-    if units.is_empty() {
+    let end = units.iter().position(|&unit| unit == 0).ok_or({
+        if units.len() > MAX_KEY_CLIPBOARD_BYTES {
+            ClipboardRefusal::TooLong
+        } else {
+            ClipboardRefusal::Invalid
+        }
+    })?;
+    if end == 0 {
         return Err(ClipboardRefusal::Invalid);
     }
     let mut text = Zeroizing::new(String::with_capacity(MAX_KEY_CLIPBOARD_BYTES));
-    for scalar in char::decode_utf16(units.iter().copied()) {
+    for scalar in char::decode_utf16(units[..end].iter().copied()) {
         let scalar = scalar.map_err(|_| ClipboardRefusal::Invalid)?;
         if text.len() + scalar.len_utf8() > MAX_KEY_CLIPBOARD_BYTES {
             return Err(ClipboardRefusal::TooLong);
@@ -131,25 +138,24 @@ fn decode(units: &[u16]) -> KeyClipboardResult {
 
 #[cfg(test)]
 mod tests {
-    use std::mem::MaybeUninit;
-
     use super::*;
 
-    fn decode_block(units: &[u16]) -> KeyClipboardResult {
-        // SAFETY: the borrowed slice is aligned, initialized and live for this call.
-        unsafe { decode_locked(NonNull::from(units).cast(), units.len()) }
-    }
-
     #[test]
-    fn clipboard_stops_before_uninitialized_padding() {
-        let block = [
-            MaybeUninit::new(u16::from(b'x')),
-            MaybeUninit::new(0),
-            MaybeUninit::uninit(),
-        ];
-        // SAFETY: the live array is aligned for u16 and initialized through the first NUL.
-        let text = unsafe { decode_locked(NonNull::from(&block).cast(), block.len()) };
-        assert_eq!(text.expect("short text").as_str(), "x");
+    fn clipboard_decodes_only_terminated_text_in_the_bounded_native_copy() {
+        let mut block = [u16::from(b'x'); MAX_KEY_CLIPBOARD_BYTES + 2];
+        block[MAX_KEY_CLIPBOARD_BYTES + 1] = 0;
+        assert_eq!(
+            copy_and_decode(NonNull::from(&block).cast(), block.len()),
+            Err(ClipboardRefusal::TooLong)
+        );
+        block[1] = 0;
+        block[2] = 0xD800;
+        assert_eq!(
+            copy_and_decode(NonNull::from(&block).cast(), block.len())
+                .expect("short text")
+                .as_str(),
+            "x"
+        );
     }
 
     #[test]
@@ -157,17 +163,15 @@ mod tests {
         let mut exact = "é".repeat(1023);
         exact.push_str("  ");
         let full = exact.encode_utf16().chain([0]).collect::<Vec<_>>();
-        assert_eq!(decode_block(&full).expect("fits").as_str(), exact);
+        assert_eq!(decode(&full).expect("fits").as_str(), exact);
         exact.push(' ');
         let over = exact.encode_utf16().chain([0]).collect::<Vec<_>>();
-        assert_eq!(decode_block(&over), Err(ClipboardRefusal::TooLong));
-        let mut ascii = [u16::from(b'x'); MAX_KEY_CLIPBOARD_BYTES + 2];
-        assert_eq!(decode_block(&ascii), Err(ClipboardRefusal::TooLong));
-        ascii[MAX_KEY_CLIPBOARD_BYTES + 1] = 0;
-        assert_eq!(decode_block(&ascii), Err(ClipboardRefusal::TooLong));
+        assert_eq!(decode(&over), Err(ClipboardRefusal::TooLong));
+        let mut ascii = [u16::from(b'x'); MAX_KEY_CLIPBOARD_BYTES + 1];
+        assert_eq!(decode(&ascii), Err(ClipboardRefusal::TooLong));
         ascii[MAX_KEY_CLIPBOARD_BYTES] = 0;
         assert_eq!(
-            decode_block(&ascii).expect("fits").as_str(),
+            decode(&ascii).expect("fits").as_str(),
             "x".repeat(MAX_KEY_CLIPBOARD_BYTES)
         );
     }
@@ -175,11 +179,8 @@ mod tests {
     #[test]
     fn clipboard_requires_terminated_nonempty_valid_unicode() {
         for units in [&[][..], &[0], &[0xD800, 0], &[u16::from(b'x')]] {
-            assert_eq!(decode_block(units), Err(ClipboardRefusal::Invalid));
+            assert_eq!(decode(units), Err(ClipboardRefusal::Invalid));
         }
-        assert_eq!(
-            decode_block(&[0xD83D, 0xDE00, 0]).expect("pair").as_str(),
-            "😀"
-        );
+        assert_eq!(decode(&[0xD83D, 0xDE00, 0]).expect("pair").as_str(), "😀");
     }
 }
