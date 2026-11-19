@@ -136,10 +136,12 @@ mod tests {
 
     #[test]
     fn clipboard_limits_raw_utf8_before_trimming() {
-        let exact = format!("{} ", "é".repeat(1023)) + " ";
+        let mut exact = "é".repeat(1023);
+        exact.push_str("  ");
         let full = exact.encode_utf16().chain([0]).collect::<Vec<_>>();
         assert_eq!(decode(&full).expect("fits").as_str(), exact);
-        let over = (exact + " ").encode_utf16().chain([0]).collect::<Vec<_>>();
+        exact.push(' ');
+        let over = exact.encode_utf16().chain([0]).collect::<Vec<_>>();
         assert_eq!(decode(&over), Err(ClipboardRefusal::TooLong));
         assert_eq!(
             decode(&[u16::from(b'x'); 2049]),

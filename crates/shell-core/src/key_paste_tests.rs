@@ -183,7 +183,10 @@ fn clipboard_and_staging_use_one_deadline_and_one_click() {
     assert!(state.start_read(SESSION, now).is_none());
     let text = || Ok(Zeroizing::new(KEY.into()));
     let len = u16::try_from(KEY.len()).expect("bounded");
-    let before = at.deadline - Duration::from_millis(1);
+    let before = at
+        .deadline
+        .checked_sub(Duration::from_millis(1))
+        .expect("before deadline");
     assert!(state.clipboard_read(at, text(), before, |op| {
         assert_eq!(op, ConnectionOp::BeginAnthropicKeyStage { request: 1, len });
         true
