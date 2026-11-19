@@ -25,7 +25,10 @@ pub(crate) const MAX_NATIVE_TURNS: u8 = 8;
 pub(crate) struct LineFramer {
     buf: Vec<u8>,
     start: usize,
+    searched: usize,
     charged: u64,
+    #[cfg(test)]
+    scanned: usize,
 }
 
 impl fmt::Debug for LineFramer {
@@ -48,6 +51,7 @@ impl LineFramer {
             return Err(ClaudeStreamFailure::Budget);
         }
         self.buf.drain(..self.start);
+        self.searched -= self.start;
         self.start = 0;
         self.buf.extend_from_slice(bytes);
         Ok(())
@@ -58,18 +62,26 @@ impl LineFramer {
     /// # Errors
     /// [`ClaudeStreamFailure::LineTooLong`] for a line over [`MAX_LINE`], complete or not.
     pub(crate) fn next_line(&mut self) -> Result<Option<&[u8]>, ClaudeStreamFailure> {
-        let rest = &self.buf[self.start..];
-        let Some(end) = rest.iter().position(|&byte| byte == b'\n') else {
-            if rest.len() > MAX_LINE {
+        let rest = &self.buf[self.searched..];
+        let end = rest.iter().position(|&byte| byte == b'\n');
+        #[cfg(test)]
+        {
+            self.scanned += end.map_or(rest.len(), |end| end + 1);
+        }
+        let Some(end) = end else {
+            self.searched = self.buf.len();
+            if self.searched - self.start > MAX_LINE {
                 return Err(ClaudeStreamFailure::LineTooLong);
             }
             return Ok(None);
         };
-        if end > MAX_LINE {
+        let end = self.searched + end;
+        if end - self.start > MAX_LINE {
             return Err(ClaudeStreamFailure::LineTooLong);
         }
-        let line = &self.buf[self.start..self.start + end];
-        self.start += end + 1;
+        let line = &self.buf[self.start..end];
+        self.start = end + 1;
+        self.searched = self.start;
         Ok(Some(line.strip_suffix(b"\r").unwrap_or(line)))
     }
 
