@@ -42,8 +42,8 @@ fn saved(default_model: ModelChoice) -> SettingsView {
     }
 }
 
-/// Only served connections are offered; a pick keeps its connection's effort, starts another at
-/// Low, and a refused one returns to the saved default.
+/// Every connection's catalog is offered and an empty one takes it off offer; a pick keeps its
+/// connection's effort, starts another at Low, and a refused one returns to the saved default.
 #[test]
 fn the_picker_offers_served_catalogs_and_a_refusal_returns_the_saved_default() {
     let luna = choice("m-0", Effort::High, ConnectionKind::ChatGpt);
@@ -61,8 +61,16 @@ fn the_picker_offers_served_catalogs_and_a_refusal_returns_the_saved_default() {
         [
             (ConnectionKind::ChatGpt, "m-0".to_owned()),
             (ConnectionKind::ChatGpt, "m-1".to_owned()),
+            (ConnectionKind::AnthropicKey, "k-0".to_owned()),
             (ConnectionKind::ClaudeCode, "c-0".to_owned()),
         ]
+    );
+    state.set_models(ConnectionKind::AnthropicKey, Vec::new());
+    assert!(
+        state
+            .model_choices()
+            .all(|(connection, _)| connection != ConnectionKind::AnthropicKey),
+        "an empty report takes the key's catalog off offer"
     );
 
     let model = |slug: &str| ModelSlug::new(slug).expect("slug");

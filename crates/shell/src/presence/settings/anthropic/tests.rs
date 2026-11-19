@@ -632,3 +632,74 @@ fn removing_stays_visible_until_its_own_receipt_arrives(cx: &mut TestAppContext)
         ))
     );
 }
+
+#[gpui::test]
+fn the_picker_offers_a_checked_key_catalog_and_sends_its_choice(cx: &mut TestAppContext) {
+    use kumochi_protocol::message::{
+        ConnectionKind, ControlToBrain, DataToShell, Effort, ModelChoice, ModelInfo, ModelName,
+        ModelSlug, SettingsOp,
+    };
+    let owner = test_fixture::presence(cx);
+    let (window, view) = super::super::general::tests::open(cx);
+    let controls = view.update(cx, |view, cx| {
+        view.owner = owner.downgrade();
+        owner.update(cx, |owner, _| {
+            owner.settings = view.model.clone();
+            owner.session = Some(Session::detached(7, Incarnation(1)));
+            owner.link.record_controls()
+        })
+    });
+    let info = |slug: &str| ModelInfo {
+        slug: ModelSlug::new(slug).expect("slug"),
+        display_name: ModelName::new(slug).expect("name"),
+        supported_efforts: None,
+    };
+    for (connection, slug) in [
+        (ConnectionKind::ChatGpt, "m-0"),
+        (ConnectionKind::AnthropicKey, "claude-haiku-5-5"),
+        (ConnectionKind::ClaudeCode, "c-0"),
+    ] {
+        let event = LinkEvent::Data {
+            generation: 7,
+            message: DataToShell::Models {
+                connection,
+                models: vec![info(slug)],
+            },
+            bytes: 0,
+        };
+        owner
+            .update(cx, |owner, cx| {
+                owner.link_events(Batch::Plain(vec![event]), cx)
+            })
+            .expect("the presence takes the frame");
+    }
+    let offered: Vec<_> = view.update(cx, |view, cx| {
+        view.model
+            .read(cx)
+            .model_choices()
+            .map(|(connection, model)| (connection, model.slug.as_str().to_owned()))
+            .collect()
+    });
+    assert_eq!(
+        offered,
+        [
+            (ConnectionKind::ChatGpt, "m-0".to_owned()),
+            (ConnectionKind::AnthropicKey, "claude-haiku-5-5".to_owned()),
+            (ConnectionKind::ClaudeCode, "c-0".to_owned()),
+        ]
+    );
+    let mut visual = VisualTestContext::from_window(window, cx);
+    visual.simulate_resize(gpui_kit::size(gpui_kit::px(768.), gpui_kit::px(1600.)));
+    click(&mut visual, "default-model-1");
+    let sent: Vec<_> = std::iter::from_fn(|| controls.try_recv().ok()).collect();
+    assert_eq!(
+        sent,
+        [ControlToBrain::Settings(SettingsOp::SetDefaultModel(
+            ModelChoice {
+                model: ModelSlug::new("claude-haiku-5-5").expect("slug"),
+                effort: Effort::Low,
+                connection: ConnectionKind::AnthropicKey,
+            }
+        ))]
+    );
+}

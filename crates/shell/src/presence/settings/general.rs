@@ -252,7 +252,12 @@ impl SettingsView {
         let radios: Vec<_> = choices
             .iter()
             .enumerate()
-            .map(|(ix, (_, _, name))| Radio::new(("default-model", ix)).label(name.clone()))
+            .map(|(ix, (_, _, name))| {
+                let radio = Radio::new(("default-model", ix)).label(name.clone());
+                #[cfg(test)]
+                let radio = radio.debug_selector(move || format!("default-model-{ix}"));
+                radio
+            })
             .collect();
         let picks: Vec<_> = choices
             .into_iter()
