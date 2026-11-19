@@ -570,8 +570,10 @@ The runner temporarily raises only the fixture above other windows, without acti
 It chooses a harmless point inside the fixture EDIT and checks both the exact window and its
 process with `WindowFromPoint` immediately before moving the pointer and again before clicking.
 A stale snapshot, wrong point, foreign capture/menu or interrupted admission stops the run.
-If the first move is refused, the error names the first failed check as a fixed reason, without
-reporting key identities, window handles or pointer coordinates. The refusal remains terminal.
+If pre-move admission is refused, a fixed reason names its first failed check without reporting
+key identities, window handles or pointer coordinates. A target that goes stale after admission
+and an OS `SendInput` refusal keep their own existing messages. The surrounding refusal still names
+the foreground executable and its PID, as before. The refusal remains terminal.
 Only tagged mouse input is allowed at this stage: no Alt-key trick, `AttachThreadInput`, or
 message/input to another app is used. Finalization restores the fixture's prior topmost state.
 If that request fails or cannot arrive, the run refuses and closes its owned fixture instead.
