@@ -284,12 +284,16 @@ whether a session has an output and whether an earlier generation still owes aud
   brain send ends that session and stops no speech. Presence keeps the stops a busy owner refused
   in order and offers the front one again every millisecond, up to ten offers in all (a policy,
   not a measured bound); a later stop waits behind it. When the offers run out, that session
-  ends. Both ends go through one path (`end_session`), even when a drawing's `StopScenes` was
-  refused: it closes the session at once (`Session::close`), so no send of any kind (controls,
-  data, held deletes, credit, an owed `VoiceHoldStopped`, which the next connection replays)
-  goes out on it and nothing received for it can open the microphone, then finishes the pipe
-  abort and the owner's barrier on the background executor, since that barrier takes the
-  owner's lock.
+  ends. Both ends go through one path (`end_session`), as does any refused drawing control
+  (`StopScenes`, `StepFailed`, `SceneFailed`, `ClearDrawing`): it closes the session at once
+  (`Session::close`), then finishes the pipe abort and the owner's barrier on the background
+  executor, since that barrier takes the owner's lock. Closing is session-scoped: no send made
+  through that session (controls, data, held deletes, credit) goes out after it, an owed
+  `VoiceHoldStopped` stays owed and is replayed on the next connection, and nothing received
+  for it can open the microphone. Three link-wide sends don't take a session and skip the check:
+  Quit (`tell_quit`, since a brain never told Quit relaunches the shell), the gesture cancel
+  (`cancel_input_gesture`), and the replay of an owed stop on a new connection. Work already
+  queued to the writers before the close is not recalled.
 - **Spoken runs.** `spoken(session)` reads the live output's tail without waiting and returns its
   `spoken` run: positive evidence the run is speaking, even after the device drained, since a
   pause can drain it while the run still has unwritten speech. A busy owner or a tail

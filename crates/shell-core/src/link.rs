@@ -551,6 +551,7 @@ impl Shared {
     /// user confirmed reaches the brain before Quit. False when there's no connection or its
     /// control queue is full.
     fn tell_quit(&self) -> bool {
+        // The one send that skips the closed check: a brain never told Quit relaunches the shell.
         let outbox = self.outbox.lock().unwrap_or_else(PoisonError::into_inner);
         let Some(outbox) = outbox.as_ref() else {
             return false;
