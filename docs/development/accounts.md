@@ -30,7 +30,8 @@ credential, never another app's key.
 
 The saved key is the [credential authority](#credential-authority)'s `anthropic` record: Check
 reads its current generation, and a removal confirmation applies only to the
-revision shown when the dialog opened. The worker compares that revision before
+authority revision shown when the dialog opened. A catalog result for that
+revision doesn't invalidate confirmation. The worker compares that revision before
 committing, then sweeps the names, so a stale confirmation can't delete a
 replacement and a removed key is never read again even while Credential Manager
 still serves it.

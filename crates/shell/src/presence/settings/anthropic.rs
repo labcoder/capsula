@@ -43,7 +43,7 @@ impl SettingsView {
                     });
                 }))
         });
-        let remove = state.remove_revision().map(|_| {
+        let remove = state.removal_confirmation().map(|_| {
             Button::new("anthropic-remove")
                 .debug_selector(|| "anthropic-remove".into())
                 .outline()
@@ -114,7 +114,7 @@ impl SettingsView {
     }
 
     fn confirm_remove_key(&self, window: &mut Window, cx: &mut Context<'_, Self>) {
-        let Some(revision) = self.model.read(cx).key_paste.remove_revision() else {
+        let Some(confirmation) = self.model.read(cx).key_paste.removal_confirmation() else {
             return;
         };
         let Some(owner) = self.owner.upgrade() else {
@@ -142,7 +142,7 @@ impl SettingsView {
                 let _gone = owner.update(cx, |owner, cx| {
                     owner.with_key_session(cx, |state, current, send| {
                         if current == session {
-                            state.remove(revision, send);
+                            state.remove(confirmation, send);
                         }
                     });
                 });
