@@ -1,3 +1,4 @@
+// The removal shortcut is documented in the shared guard below.
 include!("../../tests/support/scratch.rs");
 
 #[cfg(test)]

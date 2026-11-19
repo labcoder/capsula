@@ -8,6 +8,7 @@
 mod scratch;
 
 use std::io::{self, Read as _};
+use std::mem::ManuallyDrop;
 use std::path::PathBuf;
 use std::sync::{Arc, mpsc};
 use std::time::Duration;
@@ -75,11 +76,38 @@ fn a_startup_failure_is_not_replaced_by_missing_readers() {
     );
 }
 
+#[expect(
+    clippy::fn_params_excessive_bools,
+    reason = "the caller either confirmed teardown or must preserve the scratch"
+)]
+fn scratch_after_teardown(
+    dir: ManuallyDrop<scratch::Scratch>,
+    confirmed: bool,
+) -> Option<scratch::Scratch> {
+    // Leave scratch in place unless the child teardown is confirmed.
+    confirmed.then(|| ManuallyDrop::into_inner(dir))
+}
+
+#[test]
+fn unconfirmed_teardown_preserves_scratch() {
+    let parent = scratch::dir("speech-teardown-test");
+    let dir = ManuallyDrop::new(scratch::Scratch::under(parent.path(), "fixture"));
+    let marker = dir.join("marker");
+    std::fs::write(&marker, b"fixture evidence").expect("marker");
+
+    drop(scratch_after_teardown(dir, false));
+    assert_eq!(
+        std::fs::read(marker).expect("marker survives"),
+        b"fixture evidence"
+    );
+}
+
 fn run_fixture(fixture: &str) {
     let exe = std::env::current_exe().expect("test binary");
     let system_root = std::env::var_os("SystemRoot").expect("Windows system root");
     let dir = scratch::dir("speech");
     let job = Job::new().expect("fixture job");
+    let dir = ManuallyDrop::new(dir);
     let mut stdout = None;
     let mut stderr = None;
     let result = (|| -> io::Result<u32> {
@@ -122,17 +150,19 @@ fn run_fixture(fixture: &str) {
     let stderr = stderr.map(|receive| receive.recv_timeout(OUTPUT_PATIENCE));
     let drained =
         stdout.as_ref().is_none_or(Result::is_ok) && stderr.as_ref().is_none_or(Result::is_ok);
+    let dir = scratch_after_teardown(dir, stopped.is_ok() && drained);
     if let Err(error) = fixture_completion(result, stdout.is_some() && stderr.is_some()) {
         panic!(
             "{error}; job_stopped={}; output_drained={drained}",
             stopped.is_ok()
         );
     }
-    assert!(
-        stopped.is_ok() && drained,
-        "fixture teardown incomplete; job_stopped={}; output_drained={drained}",
-        stopped.is_ok()
-    );
+    let dir = dir.unwrap_or_else(|| {
+        panic!(
+            "fixture teardown incomplete; job_stopped={}; output_drained={drained}",
+            stopped.is_ok()
+        );
+    });
     let path = dir.path().to_path_buf();
     drop(dir);
     assert!(
@@ -294,6 +324,7 @@ async fn measure_a_native_throw_costs_only_the_worker() {
     let natives = PathBuf::from(std::env::var_os("SHERPA_NATIVES").expect("set SHERPA_NATIVES"));
     let models = PathBuf::from(std::env::var_os("VOICE_MODELS").expect("set VOICE_MODELS"));
     let job = Arc::new(Job::new().expect("job"));
+    let dir = ManuallyDrop::new(dir);
     let speech = start(&job);
     let mut losses = speech.lost();
     assert_eq!(
@@ -320,5 +351,7 @@ async fn measure_a_native_throw_costs_only_the_worker() {
     assert!(speech.decode(16_000, &vec![0; 16_000]).await.is_ok());
     drop(speech);
     tokio::task::yield_now().await;
-    job.terminate().expect("end job");
+    let stopped = job.terminate();
+    drop(scratch_after_teardown(dir, stopped.is_ok()));
+    stopped.expect("end job");
 }

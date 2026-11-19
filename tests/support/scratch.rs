@@ -77,6 +77,9 @@ impl Drop for Scratch {
     fn drop(&mut self) {
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
+            // shortcut: removal is by path, so a directory another process swaps in at this path
+            // during the test would be removed; bind to the created directory's identity if scratch
+            // ever leaves the user's own Temp or runs beside untrusted processes.
             match fs::remove_dir_all(&self.owned) {
                 Ok(()) => return,
                 Err(error) if error.kind() == ErrorKind::NotFound => return,

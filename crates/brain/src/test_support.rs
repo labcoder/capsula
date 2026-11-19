@@ -22,6 +22,7 @@ use crate::store::Store;
 
 /// A store file in its own temp folder, removed afterwards.
 pub(crate) struct Scratch {
+    // Teardown uses the pathname shortcut documented in tests/support/scratch.rs.
     _guard: scratch::Scratch,
     case: PathBuf,
 }
