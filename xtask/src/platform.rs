@@ -47,7 +47,7 @@ pub(crate) mod gate_pipe;
 pub(crate) mod input_session;
 mod job;
 
-pub(crate) use job::Job;
+pub(crate) use job::{Held, Job};
 
 pub(crate) fn close_shell_window(child: &mut Child) -> Result<()> {
     unsafe extern "system" fn collect(window: HWND, param: LPARAM) -> BOOL {

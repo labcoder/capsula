@@ -4,16 +4,22 @@
 use std::os::windows::io::{AsRawHandle as _, FromRawHandle as _, IntoRawHandle as _, OwnedHandle};
 #[cfg(test)]
 use std::process::Child;
+use std::thread;
+use std::time::{Duration, Instant};
 
-use anyhow::Result;
+use anyhow::{Result, ensure};
 use windows::Win32::Foundation::HANDLE;
 use windows::Win32::System::JobObjects::{
-    AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
-    JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
+    AssignProcessToJobObject, CreateJobObjectW, IsProcessInJob, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+    JOBOBJECT_BASIC_PROCESS_ID_LIST, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+    JobObjectBasicProcessIdList, JobObjectExtendedLimitInformation, QueryInformationJobObject,
     SetInformationJobObject,
 };
-use windows::Win32::System::Threading::GetCurrentProcess;
-use windows::core::PCWSTR;
+use windows::Win32::System::Threading::{
+    GetCurrentProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_TERMINATE,
+    TerminateProcess,
+};
+use windows::core::{BOOL, PCWSTR};
 
 /// The job; dropping it ends everything in it.
 #[derive(Debug)]
@@ -50,19 +56,118 @@ impl Job {
 
     /// Puts this process in the job and keeps the handle open until the process exits, so
     /// everything it starts afterwards ends with it.
-    pub(crate) fn hold_self(self) -> Result<()> {
+    pub(crate) fn hold_self(self) -> Result<Held> {
         // SAFETY: plain call returning the pseudo-handle of this live process, never closed.
         let me = unsafe { GetCurrentProcess() };
         // SAFETY: the job handle is open for the call and `me` names this process.
         unsafe { AssignProcessToJobObject(self.raw(), me) }?;
         // Windows closes it at exit, which ends what's left in the job.
-        let _open_until_exit = self.0.into_raw_handle();
-        Ok(())
+        Ok(Held(HANDLE(self.0.into_raw_handle())))
     }
 
     fn raw(&self) -> HANDLE {
         HANDLE(self.0.as_raw_handle())
     }
+}
+
+/// The job this process holds itself in; its handle stays open until the process exits.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Held(HANDLE);
+
+impl Held {
+    /// Ends every other process in the job, whatever started it, and waits up to `limit` until
+    /// they're gone.
+    pub(crate) fn end_others(self, limit: Duration) -> Result<()> {
+        end_all(self.0, std::process::id(), limit)
+    }
+}
+
+/// Room for more processes than a run starts; a fuller job fails the query instead.
+const ROOM: usize = 64;
+
+#[repr(C)]
+struct List {
+    head: JOBOBJECT_BASIC_PROCESS_ID_LIST,
+    rest: [usize; ROOM - 1],
+}
+
+/// The ids of the processes running in `job`.
+fn members(job: HANDLE) -> Result<Vec<u32>> {
+    let mut list = List {
+        head: JOBOBJECT_BASIC_PROCESS_ID_LIST::default(),
+        rest: [0; ROOM - 1],
+    };
+    let size = u32::try_from(size_of_val(&list))?;
+    // SAFETY: `list` is a process id list with room for ROOM ids, sized and alive for the call.
+    unsafe {
+        QueryInformationJobObject(
+            Some(job),
+            JobObjectBasicProcessIdList,
+            (&raw mut list).cast(),
+            size,
+            None,
+        )
+    }?;
+    let count = usize::try_from(list.head.NumberOfProcessIdsInList)?;
+    list.head
+        .ProcessIdList
+        .iter()
+        .chain(&list.rest)
+        .take(count)
+        .map(|&pid| Ok(u32::try_from(pid)?))
+        .collect()
+}
+
+/// Ends every process in `job` but `except`, whatever started it, and waits up to `limit` until
+/// the job lists none; a process outside the job is never touched.
+fn end_all(job: HANDLE, except: u32, limit: Duration) -> Result<()> {
+    let deadline = Instant::now() + limit;
+    let mut failed = String::new();
+    loop {
+        let left: Vec<u32> = members(job)?
+            .into_iter()
+            .filter(|&pid| pid != except)
+            .collect();
+        if left.is_empty() {
+            return Ok(());
+        }
+        ensure!(
+            Instant::now() < deadline,
+            "processes {left:?} of the run were still running {limit:?} after they were ended{failed}"
+        );
+        for pid in left {
+            if let Err(error) = terminate(job, pid) {
+                failed = format!(" (ending {pid} failed: {error})");
+            }
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// Ends `pid` while it's in `job`; one that has exited, or whose id now names a process outside
+/// the job, is left alone.
+fn terminate(job: HANDLE, pid: u32) -> Result<()> {
+    // SAFETY: plain call taking a numeric id; a handle it returns is owned below.
+    let Ok(raw) = (unsafe {
+        OpenProcess(
+            PROCESS_TERMINATE | PROCESS_QUERY_LIMITED_INFORMATION,
+            false,
+            pid,
+        )
+    }) else {
+        return Ok(());
+    };
+    // SAFETY: the call returned a valid handle that nothing else owns.
+    let process = unsafe { OwnedHandle::from_raw_handle(raw.0) };
+    let process = HANDLE(process.as_raw_handle());
+    let mut member = BOOL::default();
+    // SAFETY: both handles are open for the call and `member` is writable.
+    unsafe { IsProcessInJob(process, Some(job), &raw mut member) }?;
+    if member.as_bool() {
+        // SAFETY: the handle is open with terminate access for the call.
+        unsafe { TerminateProcess(process, 1) }?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -112,5 +217,50 @@ mod tests {
             assert!(start.elapsed() < BOUND, "the grandchild outlived the job");
             thread::sleep(Duration::from_millis(20));
         }
+    }
+
+    #[test]
+    fn ending_the_run_ends_every_process_in_its_job_and_nothing_outside_it() {
+        let job = Job::kill_on_close().expect("a job");
+        let mut parent = Command::new("cmd")
+            .arg("/C")
+            .raw_arg("set /p go= & start /B cmd")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("cmd starts");
+        job.assign(&parent)
+            .expect("assigned before it starts anything");
+        let mut outsider = Command::new("cmd")
+            .arg("/C")
+            .raw_arg("set /p go=")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("cmd starts");
+        let mut stdin = parent.stdin.take().expect("piped");
+        stdin.write_all(b"go\r\n").expect("the parent reads");
+        let start = Instant::now();
+        while parent.try_wait().expect("reads").is_none() {
+            assert!(start.elapsed() < BOUND, "the parent didn't exit");
+            thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(super::members(job.raw()).expect("listed").len(), 1);
+        super::end_all(job.raw(), std::process::id(), BOUND).expect("every member ended");
+        assert_eq!(
+            super::members(job.raw()).expect("listed"),
+            Vec::<u32>::new()
+        );
+        assert_eq!(
+            stdin.write_all(b"rem\r\n").map_err(|error| error.kind()),
+            Err(ErrorKind::BrokenPipe),
+            "the grandchild outlived the end"
+        );
+        let untouched = outsider.try_wait().expect("reads").is_none();
+        outsider.kill().expect("the outsider ends");
+        outsider.wait().expect("the outsider is reaped");
+        assert!(untouched, "a process outside the job was ended");
     }
 }

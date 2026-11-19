@@ -593,7 +593,7 @@ None of these gaps can send a paid request beyond the plan, because each launch'
 
 ### Cleanup
 
-Every exit, including a stop, ends the shell and its brain and then runs the gate cleanup. That cleanup deletes the gate service's staged and saved key names, every generation the launch's credential authority records, the gate instance entry and the gate folders. Cleanup sends nothing. The check prints step names, counts and closed state words, never a key, a body, a header or model text.
+Every exit, including a stop or an error, runs the gate cleanup. It first ends every process still in the run's job, whichever process started it, so a shell or brain that another one relaunched ends too, and only then deletes the gate service's staged and saved key names, each tried even if the other fails, every generation the launch's credential authority records, the gate instance entry and the gate folders. When it can't end a process or delete a name, it says which, and the next gate run deletes what is left. A killed xtask ends its processes through the job, but deletes nothing until that next run. Cleanup sends nothing. The check prints step names, counts and closed state words, never a key, a body, a header or model text.
 
 ## Bounds
 
