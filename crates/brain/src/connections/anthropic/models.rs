@@ -126,7 +126,7 @@ pub(super) async fn read_fenced(
             .map_err(|_| CheckError::Unconfirmed)?,
     );
     let head = match conn
-        .upload(&request, || true)
+        .upload(&request, || Some(()))
         .await
         .map_err(|_| CheckError::Unconfirmed)?
     {

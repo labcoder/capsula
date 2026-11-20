@@ -118,12 +118,16 @@ impl<F: FnMut(&SseEvent)> Events for F {
     }
 }
 
-/// A granted send's lease. The transport asks it right before the request's first write and
+/// A granted send's lease. The transport asks it to admit each poll of the request's writer and
 /// tells it once a write was attempted; a lease never told settles as unsent.
 pub trait Lease {
-    /// Whether the request may still be written: `false` once the picture it carries lost its
-    /// grant, and then nothing is.
-    fn may_write(&self) -> bool;
+    /// Held for one admitted poll of the writer.
+    type Write;
+
+    /// Admits one poll of the request's writer, a write or the flush, or refuses it once the
+    /// picture the request carries lost its grant. A refusal stops every later poll; a poll
+    /// already admitted may still write.
+    fn admit(&self) -> Option<Self::Write>;
 
     /// A write of the request was attempted, so bytes of it may have left.
     fn wrote(&mut self);
@@ -131,8 +135,10 @@ pub trait Lease {
 
 /// A live check's send, which no coordinator leases.
 impl Lease for () {
-    fn may_write(&self) -> bool {
-        true
+    type Write = ();
+
+    fn admit(&self) -> Option<()> {
+        Some(())
     }
 
     fn wrote(&mut self) {}
@@ -174,9 +180,11 @@ impl<Io, L: Lease> Drop for Attempt<Io, L> {
 ///
 /// The lease settles once the request's last byte is flushed to the kernel, or once the
 /// connection holding it is closed, and it's told [`Lease::wrote`] first once a write of the
-/// request was attempted. A lease that may no longer write ends the send as
-/// [`Failure::Rebuild`], with nothing written. Nothing is retried after a byte is written; an idle
-/// connection that turns out stale before the write is replaced under the same lease.
+/// request was attempted. Each poll of the writer must be admitted by the lease: a refusal before
+/// the first ends the send as [`Failure::Rebuild`], with nothing written, and a later one as
+/// [`Failure::Transport`], closing the connection with the request part written. Nothing is
+/// retried after a byte is written; an idle connection that turns out stale before the write is
+/// replaced under the same lease.
 ///
 /// # Errors
 /// Why the request didn't complete; see [`Failure`].
@@ -254,7 +262,7 @@ async fn send<C: Connect, L: Lease>(
         let lease = &attempt.lease;
         let conn = attempt.conn.insert(ModelConn::new(io));
         match conn
-            .upload(&request, || lease.as_ref().is_some_and(Lease::may_write))
+            .upload(&request, || lease.as_ref().and_then(Lease::admit))
             .await?
         {
             Upload::Flushed => Ok(()),

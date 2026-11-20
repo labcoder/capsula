@@ -161,12 +161,15 @@ impl<Io: AsyncRead + AsyncWrite + Unpin> ModelConn<Io> {
 
     /// Writes and flushes `request`. Interim heads that arrive meanwhile are skipped and a
     /// success head is kept for [`Self::head`], so writing goes on; any other final head stops it
-    /// for good. `may_write` is asked right before the first write attempt; `false` ends the
-    /// upload as [`Failure::Rebuild`] with nothing written.
-    pub(in crate::connections) async fn upload(
+    /// for good. `admit` is asked before each poll of the writer, a write or the flush, and its
+    /// admission is held for that one poll. A refusal ends the upload with no further poll: as
+    /// [`Failure::Rebuild`] before any poll was admitted, with nothing written, and as
+    /// [`Failure::Transport`] after one was, since an admitted poll may have written even when it
+    /// returned `Pending`, a partial count or an error.
+    pub(in crate::connections) async fn upload<W>(
         &mut self,
         request: &[u8],
-        may_write: impl Fn() -> bool,
+        admit: impl Fn() -> Option<W>,
     ) -> Result<Upload, Failure> {
         let mut written = 0;
         poll_fn(|cx| {
@@ -189,21 +192,27 @@ impl<Io: AsyncRead + AsyncWrite + Unpin> ModelConn<Io> {
                     Poll::Pending => break,
                 }
             }
-            while written < request.len() {
-                if !self.may_have_written && !may_write() {
-                    return Poll::Ready(Err(Failure::Rebuild));
-                }
+            loop {
+                let Some(_admitted) = admit() else {
+                    return Poll::Ready(Err(if self.may_have_written {
+                        Failure::Transport
+                    } else {
+                        Failure::Rebuild
+                    }));
+                };
                 self.may_have_written = true;
+                if written == request.len() {
+                    return Pin::new(&mut self.io).poll_flush(cx).map(|flushed| {
+                        flushed
+                            .map(|()| Upload::Flushed)
+                            .map_err(|_| Failure::Transport)
+                    });
+                }
                 match ready!(Pin::new(&mut self.io).poll_write(cx, &request[written..])) {
                     Ok(0) | Err(_) => return Poll::Ready(Err(Failure::Transport)),
                     Ok(count) => written += count,
                 }
             }
-            Pin::new(&mut self.io).poll_flush(cx).map(|flushed| {
-                flushed
-                    .map(|()| Upload::Flushed)
-                    .map_err(|_| Failure::Transport)
-            })
         })
         .await
     }

@@ -3050,9 +3050,9 @@ async fn a_new_generation_closes_a_picture_grant_while_its_unbound_launch_runs_o
         inputs,
     )
     .with_picture(Some(grant));
-    assert!(crate::connections::model::Lease::may_write(&lease));
+    assert!(crate::connections::model::Lease::admit(&lease).is_some());
     rig.claude.op(ConnectionOp::FindClaudeCode);
-    assert!(!crate::connections::model::Lease::may_write(&lease));
+    assert!(crate::connections::model::Lease::admit(&lease).is_none());
     assert!(
         rig.claude
             .launches

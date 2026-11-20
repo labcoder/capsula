@@ -6,7 +6,6 @@ use std::future::Future;
 use std::io;
 use std::ops::ControlFlow;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::task::{Context, Poll, Waker, ready};
 use std::time::Duration;
@@ -24,6 +23,7 @@ use super::error::{Code, Failure, Param, ProviderError};
 use super::sse::SseEvent;
 use super::{Events, ResponsesBody, stream, wire};
 use crate::connections::http_client::MAX_BODY_BYTES;
+use crate::coordinator::{PictureGrant, PictureWrite};
 use crate::test_support::Captured;
 
 /// The coordinator's side, as the tests play it: an ask names its attempt, a grant carries a
@@ -50,13 +50,15 @@ enum Admit {
 #[derive(Debug)]
 struct SendLease {
     settled: Settled,
-    open: Arc<AtomicBool>,
+    picture: PictureGrant,
     to: mpsc::UnboundedSender<Settled>,
 }
 
 impl super::Lease for SendLease {
-    fn may_write(&self) -> bool {
-        self.open.load(Ordering::Acquire)
+    type Write = PictureWrite;
+
+    fn admit(&self) -> Option<PictureWrite> {
+        self.picture.reserve_write()
     }
 
     fn wrote(&mut self) {
@@ -114,7 +116,7 @@ struct Valve {
     greeting: Option<Vec<u8>>,
     written: usize,
     /// Closed the first time the client polls a read.
-    revoke_on_read: Option<Arc<AtomicBool>>,
+    revoke_on_read: Option<PictureGrant>,
     /// Write polls the client made.
     write_polls: usize,
 }
@@ -153,8 +155,8 @@ impl AsyncRead for Gated {
         cx: &mut Context<'_>,
         buf: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
-        if let Some(open) = lock(&self.shared.valve).revoke_on_read.take() {
-            open.store(false, Ordering::Release);
+        if let Some(picture) = lock(&self.shared.valve).revoke_on_read.take() {
+            picture.close();
         }
         Pin::new(&mut self.io).poll_read(cx, buf)
     }
@@ -333,23 +335,23 @@ impl<C: Connect> Harness<C> {
     }
 
     /// Answers the waiting ask with grant `send`, whose picture grant the test may close.
-    fn grant_revocable(&self, send: u64) -> Arc<AtomicBool> {
+    fn grant_revocable(&self, send: u64) -> PictureGrant {
         let ready = lock(&self.asks).try_recv().expect("a send asked");
-        let open = Arc::new(AtomicBool::new(true));
+        let picture = PictureGrant::open_for_tests();
         let lease = SendLease {
             settled: Settled {
                 key: ready.key,
                 send,
                 unsent: true,
             },
-            open: Arc::clone(&open),
+            picture: picture.clone(),
             to: self.settled.clone(),
         };
         ready
             .answer
             .send(Admit::Grant(lease))
             .expect("the send still waits");
-        open
+        picture
     }
 
     fn settled(&self) -> Vec<Settled> {
@@ -780,8 +782,7 @@ async fn a_picture_grant_revoked_before_the_first_write_writes_nothing_and_settl
     let body = body("hello");
     let mut call = harness.call(&body, 1);
     assert!(poll(&mut call).is_pending());
-    let open = harness.grant_revocable(1);
-    open.store(false, Ordering::Release);
+    harness.grant_revocable(1).close();
     assert!(matches!(
         poll(&mut call),
         Poll::Ready((Err(Failure::Rebuild), _))
@@ -796,16 +797,177 @@ async fn a_picture_grant_revoked_inside_upload_before_the_first_write_writes_not
     let body = body("hello");
     let mut call = harness.call(&body, 1);
     assert!(poll(&mut call).is_pending());
-    let open = harness.grant_revocable(1);
-    harness.valve(|valve| valve.revoke_on_read = Some(Arc::clone(&open)));
+    let picture = harness.grant_revocable(1);
+    harness.valve(|valve| valve.revoke_on_read = Some(picture.clone()));
     assert!(matches!(
         poll(&mut call),
         Poll::Ready((Err(Failure::Rebuild), _))
     ));
-    assert!(!open.load(Ordering::Acquire), "revoked from the early read");
+    assert!(!picture.is_open(), "revoked from the early read");
     assert_eq!(lock(&harness.shared.valve).write_polls, 0);
     assert_eq!(received(&mut harness.accept()), (Vec::new(), true));
     assert_eq!(harness.settled(), settled_once(true));
+}
+
+#[tokio::test]
+async fn an_open_picture_grant_writes_the_exact_request_once_and_releases_each_admission() {
+    let harness = Harness::new(1 << 20);
+    let body = body("hello");
+    let mut call = harness.call(&body, 1);
+    assert!(poll(&mut call).is_pending());
+    let picture = harness.grant_revocable(1);
+    assert!(poll(&mut call).is_pending());
+    let mut server = harness.accept();
+    let (request, closed) = received(&mut server);
+    assert_eq!(
+        (request.len(), closed),
+        (request_length(&harness, &body), false)
+    );
+    assert!(request.starts_with(b"POST /v1/responses HTTP/1.1\r\n"));
+    assert!(request.ends_with(body.0.expose()));
+    assert!(
+        picture.reserve_write().is_some(),
+        "no admission outlives its poll"
+    );
+    reply(&mut server, &sse(TEXT));
+    let Poll::Ready((result, _)) = poll(&mut call) else {
+        panic!("the stream didn't end");
+    };
+    assert_eq!(result, Ok(()));
+    assert_eq!(lock(&harness.shared.valve).write_polls, 1);
+    assert_eq!(harness.settled(), settled_once(false));
+}
+
+#[tokio::test]
+async fn a_picture_grant_closed_before_a_pooled_connection_writes_nothing_and_drops_it() {
+    let harness = Harness::new(1 << 20);
+    let body = body("hello");
+    let mut server = complete(&harness, &body, 1, None);
+    harness.settled();
+    let polls = lock(&harness.shared.valve).write_polls;
+    let mut call = harness.call(&body, 2);
+    assert!(poll(&mut call).is_pending());
+    harness.grant_revocable(2).close();
+    assert!(matches!(
+        poll(&mut call),
+        Poll::Ready((Err(Failure::Rebuild), _))
+    ));
+    assert_eq!(lock(&harness.shared.valve).write_polls, polls);
+    assert_eq!(
+        harness.accepts(),
+        0,
+        "the pooled connection was the one used"
+    );
+    assert_eq!(received(&mut server), (Vec::new(), true));
+    assert!(harness.client.checkout().is_none());
+    assert_eq!(
+        harness.settled(),
+        [Settled {
+            key: key(2),
+            send: 2,
+            unsent: true,
+        }]
+    );
+}
+
+#[tokio::test]
+async fn a_picture_grant_closed_while_a_stale_pooled_connection_is_replaced_writes_nothing() {
+    let harness = Harness::new(1 << 20);
+    let body = body("hello");
+    drop(complete(&harness, &body, 1, None));
+    harness.settled();
+    let polls = lock(&harness.shared.valve).write_polls;
+    harness.open.send_replace(false);
+    let mut call = harness.call(&body, 2);
+    assert!(poll(&mut call).is_pending());
+    let picture = harness.grant_revocable(2);
+    assert!(
+        poll(&mut call).is_pending(),
+        "the replacement still connects"
+    );
+    picture.close();
+    harness.open.send_replace(true);
+    assert!(matches!(
+        poll(&mut call),
+        Poll::Ready((Err(Failure::Rebuild), _))
+    ));
+    assert_eq!(lock(&harness.shared.valve).write_polls, polls);
+    assert_eq!(received(&mut harness.accept()), (Vec::new(), true));
+    assert_eq!(
+        harness.settled(),
+        [Settled {
+            key: key(2),
+            send: 2,
+            unsent: true,
+        }]
+    );
+}
+
+#[tokio::test]
+async fn a_picture_grant_closed_after_a_pending_write_polls_no_more_and_never_settles_unsent() {
+    let harness = Harness::new(1 << 20);
+    let body = body("hello");
+    harness.valve(|valve| valve.hold = true);
+    let mut call = harness.call(&body, 1);
+    assert!(poll(&mut call).is_pending());
+    let picture = harness.grant_revocable(1);
+    assert!(poll(&mut call).is_pending());
+    assert_eq!(lock(&harness.shared.valve).write_polls, 1);
+    picture.close();
+    harness.valve(|valve| valve.hold = false);
+    assert!(matches!(
+        poll(&mut call),
+        Poll::Ready((Err(Failure::Transport), _))
+    ));
+    assert_eq!(lock(&harness.shared.valve).write_polls, 1);
+    assert_eq!(received(&mut harness.accept()), (Vec::new(), true));
+    assert_eq!(harness.settled(), settled_once(false));
+}
+
+#[tokio::test]
+async fn a_picture_grant_closed_after_a_partial_write_polls_no_more_and_closes_the_connection() {
+    let harness = Harness::new(16);
+    let body = body("hello");
+    let mut call = harness.call(&body, 1);
+    assert!(poll(&mut call).is_pending());
+    let picture = harness.grant_revocable(1);
+    assert!(poll(&mut call).is_pending());
+    assert_eq!(
+        lock(&harness.shared.valve).write_polls,
+        2,
+        "16 bytes, then full"
+    );
+    let mut server = harness.accept();
+    let (sent, closed) = received(&mut server);
+    assert_eq!((sent.len(), closed), (16, false));
+    picture.close();
+    assert!(matches!(
+        poll(&mut call),
+        Poll::Ready((Err(Failure::Transport), _))
+    ));
+    assert_eq!(lock(&harness.shared.valve).write_polls, 2);
+    assert_eq!(received(&mut server), (Vec::new(), true));
+    assert!(harness.client.checkout().is_none());
+    assert_eq!(harness.settled(), settled_once(false));
+}
+
+#[tokio::test]
+async fn a_picture_grant_closed_while_the_flush_waits_flushes_no_more() {
+    let harness = Harness::new(1 << 20);
+    let body = body("hello");
+    harness.valve(|valve| valve.hold_flush = true);
+    let mut call = harness.call(&body, 1);
+    assert!(poll(&mut call).is_pending());
+    let picture = harness.grant_revocable(1);
+    assert!(poll(&mut call).is_pending());
+    picture.close();
+    harness.valve(|valve| valve.hold_flush = false);
+    assert!(matches!(
+        poll(&mut call),
+        Poll::Ready((Err(Failure::Transport), _))
+    ));
+    assert_eq!(harness.seen().0, Vec::<usize>::new(), "no flush completed");
+    assert_eq!(harness.settled(), settled_once(false));
 }
 
 #[tokio::test]
