@@ -216,7 +216,9 @@ impl Worker {
             if again {
                 continue;
             }
+            let quiet = receipts.deadline(&self.engine);
             if closing
+                && quiet.is_none()
                 && self.physical.as_ref().is_none_or(|route| {
                     route
                         .retire_deadline
@@ -225,12 +227,7 @@ impl Worker {
             {
                 return;
             }
-            if let Some(next) = self
-                .deadline(now)
-                .into_iter()
-                .chain(receipts.deadline(&self.engine))
-                .min()
-            {
+            if let Some(next) = self.deadline(now).into_iter().chain(quiet).min() {
                 thread::park_timeout(next.saturating_sub(origin.elapsed()));
             } else {
                 thread::park();

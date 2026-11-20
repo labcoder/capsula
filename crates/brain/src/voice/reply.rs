@@ -105,7 +105,7 @@ enum End {
     Last,
     Played,
     Retired,
-    /// Its scene failed; nothing waits on it.
+    /// Its scene failed and its remaining synthesis debt was refunded.
     Dropped,
 }
 
@@ -118,6 +118,18 @@ impl End {
 enum Source {
     Text(Range<usize>),
     Say(StepRef),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ReportMode {
+    Legacy,
+    Queued,
+}
+
+#[derive(Default)]
+struct Retirement {
+    next_segment: u32,
+    heard_gap: bool,
 }
 
 struct Segment {
@@ -142,7 +154,7 @@ pub(crate) struct Reply {
     generation: OutputGeneration,
     segmenter: Segmenter,
     segments: Vec<Segment>,
-    /// Samples sent and not yet reported played.
+    /// In-flight synthesis sample debt, independent of hearing.
     unplayed: u64,
     /// Samples the pump may still read.
     credit: u64,
@@ -153,13 +165,17 @@ pub(crate) struct Reply {
     /// The shell's `SpeechStopped` arrived after a revoke.
     quiet: bool,
     epoch: u32,
-    legacy_reports: bool,
-    retirement: Option<(SegmentId, bool)>,
+    retirement: Option<Retirement>,
 }
 
 impl Reply {
     /// `rate` is the checked output rate from `AudioOutput`.
-    pub(crate) fn new(run: RunId, rate: u32, generation: OutputGeneration) -> Self {
+    pub(crate) fn new(
+        run: RunId,
+        rate: u32,
+        generation: OutputGeneration,
+        mode: ReportMode,
+    ) -> Self {
         Self {
             run,
             rate,
@@ -173,8 +189,7 @@ impl Reply {
             closed: false,
             quiet: false,
             epoch: 0,
-            legacy_reports: false,
-            retirement: None,
+            retirement: matches!(mode, ReportMode::Queued).then(Retirement::default),
         }
     }
 
@@ -366,7 +381,6 @@ impl Reply {
         self.unplayed -= u64::from(sample - found.played);
         found.played = sample;
         found.retired = sample;
-        self.legacy_reports = true;
         self.progressed(out);
         self.pump(out);
         Ok(())
@@ -403,7 +417,6 @@ impl Reply {
         found.played = found.sent;
         found.retired = found.sent;
         found.end = End::Played;
-        self.legacy_reports = true;
         self.progressed(out);
         self.pump(out);
         Ok(())
@@ -417,16 +430,18 @@ impl Reply {
         if receipt.run != self.run || receipt.output != self.generation || self.quiet {
             return Ok(());
         }
-        let (next, gap) = self.retirement.unwrap_or((SegmentId(0), false));
+        let Some(state) = &mut self.retirement else {
+            return Err(Refused::OutOfOrder);
+        };
         let SpeechRetirement {
             segment,
             retired: sample,
             ..
         } = receipt;
-        if segment < next {
+        if segment.0 < state.next_segment {
             return Ok(());
         }
-        if self.legacy_reports || segment != next {
+        if segment.0 != state.next_segment {
             return Err(Refused::OutOfOrder);
         }
         let found = self
@@ -442,7 +457,7 @@ impl Reply {
         let retired = sample - found.retired;
         if receipt.heard < found.played
             || receipt.heard - found.played > retired
-            || gap && receipt.heard != found.played
+            || state.heard_gap && receipt.heard != found.played
         {
             return Err(Refused::Total);
         }
@@ -461,10 +476,8 @@ impl Reply {
         }
         found.retired = sample;
         found.played = receipt.heard;
-        self.retirement = Some((
-            SegmentId(next.0 + u32::from(receipt.final_segment)),
-            gap || receipt.heard < sample,
-        ));
+        state.next_segment += u32::from(receipt.final_segment);
+        state.heard_gap |= receipt.heard < sample;
         self.progressed(out);
         self.pump(out);
         Ok(())
@@ -519,6 +532,12 @@ impl Reply {
             {
                 return Err(Refused::Total);
             }
+            if let Some(cursor) = cursor {
+                let found = &mut self.segments[index(cursor.segment)];
+                if found.end == End::Last && !found.failed && cursor.sample == found.sent {
+                    found.end = End::Played;
+                }
+            }
             self.quiet = true;
             return Ok(());
         }
@@ -560,7 +579,10 @@ impl Reply {
             Synthesis::Open | Synthesis::Stopped => {
                 self.closed
                     && self.speaking.is_none()
-                    && self.segments.iter().all(|segment| segment.end.finished())
+                    && self.retirement.as_ref().map_or_else(
+                        || self.segments.iter().all(|segment| segment.end.finished()),
+                        |state| usize::try_from(state.next_segment) == Ok(self.segments.len()),
+                    )
             }
         }
     }

@@ -115,6 +115,9 @@ pub(super) fn control_input(message: ControlToBrain) -> Result<Option<Input>, En
         ControlToBrain::AudioOutput { rate, generation } => {
             Some(Input::AudioOutput { rate, generation })
         }
+        ControlToBrain::QueuedAudioOutput(rate, generation) => check_rate(rate)
+            .map(|()| Some(Input::QueuedAudioOutput(rate, generation)))
+            .map_err(|_| Ended::Broken("an output rate out of bounds"))?,
         ControlToBrain::AudioOutputUnavailable { generation } => {
             Some(Input::AudioOutputUnavailable { generation })
         }

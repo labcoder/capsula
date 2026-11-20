@@ -31,7 +31,9 @@ The queued worker has a separate retirement report for the brain's synthesis win
 Each segment reports cumulative retired samples and its validated final in order,
 including virtual or discarded samples. Only the contiguous heard prefix contributes
 to heard history or the Stop cursor. Reported retirement neither releases a drawing
-binding nor confirms a quiet tail. The legacy opener and reports are unchanged.
+binding nor confirms a quiet tail. A retiring worker retains its report sink through
+a confirmed future quiet deadline; an unknown tail never produces a quiet receipt.
+The legacy opener and reports are unchanged.
 
 Only contiguous, generation-matched observations on a live route can extend the heard
 prefix. Loss keeps the last settled prefix; delivery time cannot prove pending estimates.

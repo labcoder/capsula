@@ -3,14 +3,14 @@ use kumochi_protocol::message::{
     SpeechRetirement, StepRef,
 };
 
-use super::{Failure, Heard, Refused, Reply, Revoker, Speech};
+use super::{Failure, Heard, Refused, Reply, ReportMode, Revoker, Speech};
 
 const RATE: u32 = 24_000;
 /// 20 s at 24 kHz.
 const WINDOW: u64 = 480_000;
 
 fn reply() -> Reply {
-    Reply::new(RunId(7), RATE, OutputGeneration(1))
+    Reply::new(RunId(7), RATE, OutputGeneration(1), ReportMode::Legacy)
 }
 
 fn seg(n: u32) -> SegmentId {
@@ -106,7 +106,7 @@ fn retirement(segment: u32, sample: u32, heard: u32) -> SpeechRetirement {
 
 #[test]
 fn retirement_replenishes_a_full_window_without_hearing_through_a_gap() {
-    let mut reply = reply();
+    let mut reply = Reply::new(RunId(7), RATE, OutputGeneration(1), ReportMode::Queued);
     run(&mut reply, |r, out| r.text("A. B. C. ", out));
     run(&mut reply, |r, out| {
         r.pcm(seg(0), vec![5; 480], out);
@@ -174,7 +174,7 @@ fn retirement_replenishes_a_full_window_without_hearing_through_a_gap() {
 
 #[test]
 fn producer_drop_does_not_refund_queued_retirement_twice() {
-    let mut reply = reply();
+    let mut reply = Reply::new(RunId(7), RATE, OutputGeneration(1), ReportMode::Queued);
     run(&mut reply, |r, out| {
         r.say(step(7, 0), "line", out);
         r.pcm(seg(0), vec![5; 480], out);
@@ -793,6 +793,40 @@ fn a_quiet_cursor_at_a_finished_segment_s_total_hears_its_text() {
         }),
         "more audio could have followed"
     );
+}
+
+#[test]
+fn a_queued_stop_hears_finished_text_even_before_the_data_final() {
+    for (played, expected_text) in [(7_200, 4), (6_000, 0)] {
+        let mut reply = Reply::new(RunId(7), RATE, OutputGeneration(1), ReportMode::Queued);
+        run(&mut reply, |r, out| {
+            r.text("One. ", out);
+            for _ in 0..3 {
+                r.pcm(seg(0), vec![5; 2_400], out);
+            }
+            r.done(seg(0), out);
+            r.revoke(Revoker::Shell, out);
+            let partial = SpeechRetirement {
+                final_segment: false,
+                ..retirement(0, 7_200, played)
+            };
+            r.retired(partial, out).unwrap();
+        });
+        reply
+            .stopped(Some(Cursor {
+                segment: seg(0),
+                sample: played,
+            }))
+            .unwrap();
+        assert_eq!(
+            reply.heard(),
+            Some(Heard {
+                segment: seg(0),
+                sample: played,
+                text: expected_text
+            })
+        );
+    }
 }
 
 #[test]

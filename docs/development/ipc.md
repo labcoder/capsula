@@ -644,6 +644,7 @@ records only their operation and length.
 | Shell to brain | control | `SpeechStopped` | `run`, optional `cursor` (`Cursor { segment, sample }`) |
 | Shell to brain | control | `SpeechRetired` (dormant queued output) | `run`, logical `output`, `segment`, cumulative `retired`, `heard`, `final_segment` |
 | Shell to brain | control | `AudioOutput` | `rate`, `generation` |
+| Shell to brain | control | `QueuedAudioOutput` (dormant) | `rate`, `generation`; selects retirement receipts before a run is admitted |
 | Shell to brain | control | `AudioOutputUnavailable` | `generation` |
 | Brain to shell | control | `SpeechRevoked` | `run` |
 

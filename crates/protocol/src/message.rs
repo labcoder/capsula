@@ -516,6 +516,8 @@ pub enum ControlToBrain {
     },
     /// Queued output released source samples. Appended; legacy playback reports are unchanged.
     SpeechRetired(SpeechRetirement),
+    /// Source rate in Hz and logical generation for output using retirement receipts.
+    QueuedAudioOutput(u32, OutputGeneration),
 }
 
 /// What a thread's delete came to.
@@ -1197,6 +1199,13 @@ mod tests {
             final_segment: true,
         });
         assert_eq!(encode(&message), [34, 1, 2, 3, 4, 0, 1]);
+        assert_eq!(
+            encode(&ControlToBrain::QueuedAudioOutput(
+                24_000,
+                OutputGeneration(2)
+            )),
+            [35, 192, 187, 1, 2]
+        );
         let frame = frame::encode(&message, Pipe::Control).unwrap();
         assert_eq!(
             frame::read(&mut frame.as_slice(), Pipe::Control).unwrap(),
