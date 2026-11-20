@@ -24,6 +24,10 @@ fn sent() -> Effect {
     }
 }
 
+fn marked() -> Effect {
+    Effect::Store(StoreOp::SentScreen { run: R })
+}
+
 /// Held image run R in task T, carrying B as a source too, with its first send granted and
 /// nothing told yet.
 fn granted() -> (Coordinator, LeaseId) {
@@ -60,9 +64,24 @@ fn a_granted_send_that_wrote_nothing_clears_the_mark_before_the_run_is_told_ende
 }
 
 #[test]
+fn only_a_send_that_may_have_written_marks_the_turn_s_picture_sent() {
+    let (mut core, lease) = granted();
+    let unsent = core.handle(Input::SendUnsent { lease }).unwrap();
+    assert!(!unsent.contains(&marked()), "{unsent:?}");
+    let again = lease_of(&sending(&mut core));
+    assert_eq!(
+        core.handle(Input::SendSettled { lease: again }).unwrap(),
+        [sent(), marked()]
+    );
+}
+
+#[test]
 fn a_send_that_may_have_written_tells_once_and_no_later_send_clears_the_mark() {
     let (mut core, lease) = granted();
-    assert_eq!(core.handle(Input::SendSettled { lease }).unwrap(), [sent()]);
+    assert_eq!(
+        core.handle(Input::SendSettled { lease }).unwrap(),
+        [sent(), marked()]
+    );
     assert_eq!(core.handle(Input::SendSettled { lease }), Err(Stale));
     let again = lease_of(&sending(&mut core));
     assert_ne!(again, lease);
@@ -115,11 +134,11 @@ fn a_failed_lease_s_late_settlement_settles_its_picture_once_and_nothing_else() 
         };
         let late = core.handle(settle()).unwrap();
         let expected = if unsent {
-            Effect::Store(StoreOp::ForgetScreen { run: R })
+            vec![Effect::Store(StoreOp::ForgetScreen { run: R })]
         } else {
-            sent()
+            vec![sent(), marked()]
         };
-        assert_eq!(late, [expected], "unsent: {unsent}");
+        assert_eq!(late, expected, "unsent: {unsent}");
         assert_eq!(core.handle(settle()).unwrap(), [], "unsent: {unsent}");
         assert!(core.transport_failed, "unsent: {unsent}");
         assert_eq!(core.leases.len(), 1, "the failed lease stays: {unsent}");
@@ -138,7 +157,10 @@ fn withdrawing_while_a_send_carries_the_picture_waits_for_that_send() {
         [Effect::Store(StoreOp::WithdrawScreen { run: R })]
     );
     let (mut core, lease) = granted();
-    assert_eq!(core.handle(Input::SendSettled { lease }).unwrap(), [sent()]);
+    assert_eq!(
+        core.handle(Input::SendSettled { lease }).unwrap(),
+        [sent(), marked()]
+    );
     let mut effects = core.handle(Input::ScreenHoldsOff).unwrap();
     effects.extend(ended(&mut core, 4));
     assert_eq!(withdrawals(&effects), []);

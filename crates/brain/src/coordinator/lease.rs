@@ -294,8 +294,8 @@ impl Coordinator {
         Ok(())
     }
 
-    /// A send that may have written any of its request tells the shell, once; the turn already
-    /// records the picture as sent. One that wrote nothing leaves its run as if never granted: a
+    /// A send that may have written any of its request tells the shell, once, and marks the turn's
+    /// pending picture sent. One that wrote nothing leaves its run as if never granted: a
     /// current run clears the mark at its end, or a later grant carries the picture again, and
     /// any other run's mark is cleared now.
     #[expect(
@@ -308,6 +308,7 @@ impl Coordinator {
                 hold: carried.hold,
                 outcome: carried.outcome,
             });
+            effects.push(Effect::Store(StoreOp::SentScreen { run: carried.run }));
             return;
         }
         if let Some(run) = self.current.as_mut().filter(|run| {
