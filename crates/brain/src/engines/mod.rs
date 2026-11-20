@@ -4,7 +4,8 @@
 //! round with [`TurnEvent::Finished`]. The coordinator, not the engine, decides whether a round
 //! ends its run. Each start gets its own pump and channel: the pump forwards the round's events
 //! to the coordinator tagged with the run, closes after the first `Finished`, and reports a round
-//! that ends without one, even after text, as `Finished(Truncated)`. Dropping the round's
+//! that ends without one, even after text, as `Finished(Truncated)`. A pre-write picture refusal
+//! leaves the round to the coordinator's lease settlement instead. Dropping the round's
 //! [`Cancel`] aborts the pump and the engine's future with it, even while the pump waits on a
 //! full coordinator queue, so a cancelled round sends nothing more and never reads as truncated.
 
@@ -206,8 +207,7 @@ pub enum Answer {
 /// A granted send. Dropping it, wherever it is, reports `SendUnsent` on the store-reply channel,
 /// which the brain always drains, so a lost grant settles too; `SendSettled` instead once the
 /// transport has said it attempted a write of its request.
-// shortcut: the Messages and Claude Code transports never say they wrote, so their sends settle
-// unsent; each says so before its route carries a picture.
+// shortcut: Claude Code text-only sends do not mark writes; only its pictured seed marks them.
 #[derive(Debug)]
 #[must_use = "dropping a SendLease settles its send"]
 pub struct SendLease {
@@ -395,6 +395,8 @@ pub enum Finish {
     Completed,
     /// The round's stream ended without saying how it finished.
     Truncated,
+    /// A pictured seed was refused before any write; only lease settlement may rebuild it.
+    AwaitingRebuild,
     /// The round failed.
     Failed(EngineFailure),
     /// The engine stopped the round itself. Only the coordinator interrupts runs, so this fails
@@ -691,6 +693,9 @@ async fn pump(
                 continue;
             }
         };
+        if matches!(event, TurnEvent::Finished(Finish::AwaitingRebuild)) {
+            return;
+        }
         let finished = matches!(event, TurnEvent::Finished(_));
         if inputs.send(Input::Engine { key, event }).await.is_err() || finished {
             return;

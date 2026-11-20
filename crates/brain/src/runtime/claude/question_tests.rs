@@ -3092,6 +3092,32 @@ async fn a_picture_grant_whose_send_settled_is_not_kept() {
     rig.close().await;
 }
 
+#[tokio::test]
+async fn a_busy_picture_grant_survives_pruning_until_generation_close() {
+    let script = synthetic_signed_in().held_until("go");
+    let mut rig = Rig::new("question-picture-busy", &script).await;
+    let request = choosing("haiku", Effort::Low, ConnectionKind::ClaudeCode);
+    let question = rig.claude.question(&request).expect("admitted");
+    let grant = crate::coordinator::PictureGrant::open_for_tests();
+    let kind = Some(ConnectionKind::ClaudeCode);
+    rig.claude.picture_granted(request.key, kind, grant.clone());
+    let write = grant.reserve_write().expect("first admission");
+    assert!(grant.is_open());
+    assert!(grant.reserve_write().is_none(), "one write at a time");
+    rig.claude.picture_granted(
+        request.key,
+        kind,
+        crate::coordinator::PictureGrant::open_for_tests(),
+    );
+    rig.claude.op(ConnectionOp::FindClaudeCode);
+    assert!(!grant.is_open(), "the kept grant closes while busy");
+    drop(write);
+    assert!(!grant.is_open(), "the permit cannot reopen the grant");
+    assert!(grant.reserve_write().is_none());
+    drop(question);
+    rig.close().await;
+}
+
 /// A picture grant for a question asked under an older generation is closed as it's granted,
 /// and so is a Claude Code grant for any other build; a key route's grant is never touched.
 #[tokio::test]

@@ -182,10 +182,12 @@ sequenceDiagram
   the first write all leave it unsent. The Claude Code stdin pump marks only a pictured seed,
   after the held grant's final check and just before its first write attempt.
 - **Picture grant.** A send carrying a picture on a Claude route also carries a revocable grant.
-  The coordinator closes it as soon as the run may no longer send that picture, and the
-  transport checks it at its first write attempt, after any early response it reads: closed,
-  nothing is written, the round ends as `Rebuild` and settles unsent, and the coordinator builds
-  again without the picture. On Claude Code the grant also belongs to the account generation
+  The coordinator closes it as soon as the run may no longer send that picture. The key route
+  checks at its first write attempt, after any early response. Claude Code reserves each pipe
+  write against the same grant. If it closes before the first admission, the round's pump sends
+  no engine failure; after confirmed teardown, the unsent receipt lets the coordinator rebuild
+  the still-current build without the picture. An unexpected stream EOF still reports `Truncated`.
+  On Claude Code the grant also belongs to the account generation
   the question it was issued for was asked under, not the one its picture was captured under:
   a new generation closes it, before that generation is published, even while that launch,
   unbound, runs on. A Claude Code grant for any build other than the one asked under the

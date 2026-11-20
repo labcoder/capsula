@@ -351,12 +351,17 @@ one at a time. A run whose choice names Claude Code starts one through `Claude::
   (4 MiB). A borrowed size precheck rejects oversized input before constructing text blocks.
   The image goes after the newest user text, directly into exact-sized zeroing storage; the
   ordinary prompt and tool text copies made while formatting are not zeroed. Only a foreground
-  build with the held picture grant can queue that seed. The stdin pump checks the grant, deadline,
-  Stop and observed closure, and marks the lease immediately before the first attempt even if the
-  pipe rejects it. Control writes don't mark it. Picture chunks are zeroed on drop, including
-  queued chunks the pump discards. No alias fact or switch is enabled here.
+  build with the held picture grant can queue that seed. The stdin pump reserves the grant for
+  one pipe call, then checks Stop, observed stdout EOF and the deadline before marking the held
+  lease and writing. Every chunk, short-write remainder and interrupted retry needs a fresh
+  reservation. If close wins, there is no new admission; if admission wins, that one write may
+  still begin or finish after close returns. Only confirmed teardown proves the child and pumps
+  have stopped. A first attempt counts even if the pipe accepted no bytes; control writes don't
+  count. Picture chunks are zeroed on drop, including queued chunks the pump discards. No alias
+  fact or switch is enabled here.
   Stdin is the only picture sink: never argv, environment, files or chat history. A structured
-  picture echo or oversized stdout fails closed without its contents. The owner-only launch
+  picture echo or oversized stdout fails closed without forwarding its contents, but the read
+  buffer, queue and framer do not wipe echoed bytes. The owner-only launch
   folder is removed best effort after confirmed teardown, not securely erased. This is not a
   sandbox or a guarantee about what the CLI or provider retains.
 - **The held send.** The round moves its seed's `SendLease` into the launch (`hold_send`) before

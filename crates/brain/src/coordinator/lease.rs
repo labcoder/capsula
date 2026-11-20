@@ -10,8 +10,8 @@
 //! round and a background job (`job`) ask the same way, each under its own key.
 
 use std::collections::BTreeSet;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::{Arc, Weak};
 use std::time::Duration;
 
 use kumochi_protocol::message::{ConnectionKind, Deleted, HeldScreen, RunId, ThreadId};
@@ -26,12 +26,27 @@ pub const SEND_DEADLINE: Duration = Duration::from_secs(15);
 /// A Claude route's revocable grant for the picture a send carries. Only the coordinator makes
 /// one, so a lease without it can't claim a picture.
 #[derive(Clone, Debug)]
-pub(crate) struct PictureGrant(Arc<AtomicBool>);
+pub(crate) struct PictureGrant(Arc<AtomicU8>);
 
 impl PictureGrant {
-    /// Whether the send may still write its picture.
+    const CLOSED: u8 = 1;
+    const WRITING: u8 = 2;
+
+    fn new() -> Self {
+        Self(Arc::new(AtomicU8::new(0)))
+    }
+
+    /// Whether the grant is still open, including during an admitted write.
     pub(crate) fn is_open(&self) -> bool {
-        self.0.load(Ordering::Acquire)
+        self.0.load(Ordering::Acquire) & Self::CLOSED == 0
+    }
+
+    /// Admits at most one pipe write. If close wins the race, this can't admit it.
+    pub(crate) fn reserve_write(&self) -> Option<PictureWrite> {
+        self.0
+            .compare_exchange(0, Self::WRITING, Ordering::AcqRel, Ordering::Acquire)
+            .ok()
+            .map(|_| PictureWrite(Arc::downgrade(&self.0)))
     }
 
     /// Whether a handle besides this one is left: once a send has settled, its lease's and
@@ -40,14 +55,25 @@ impl PictureGrant {
         Arc::strong_count(&self.0) > 1
     }
 
-    /// Ends the grant: a transport that hasn't written yet writes nothing.
+    /// Fences new writes. A write already admitted may still begin or finish.
     pub(crate) fn close(&self) {
-        self.0.store(false, Ordering::Release);
+        self.0.fetch_or(Self::CLOSED, Ordering::AcqRel);
     }
 
     #[cfg(test)]
     pub(crate) fn open_for_tests() -> Self {
-        Self(Arc::new(AtomicBool::new(true)))
+        Self::new()
+    }
+}
+
+/// One admitted pipe write. Dropping this permit doesn't reopen a closed grant.
+pub(crate) struct PictureWrite(Weak<AtomicU8>);
+
+impl Drop for PictureWrite {
+    fn drop(&mut self) {
+        if let Some(state) = self.0.upgrade() {
+            state.fetch_and(!PictureGrant::WRITING, Ordering::AcqRel);
+        }
     }
 }
 
@@ -84,9 +110,8 @@ pub(super) struct Lease {
     held_send: bool,
     /// The hold's picture this send carries, until it settles.
     screen: Option<Carried>,
-    /// Open while the picture this send carries on a Claude route may still go; the transport
-    /// checks it right before its first write.
-    picture: Option<Arc<AtomicBool>>,
+    /// The revocable grant for the picture this send carries on a Claude route.
+    picture: Option<PictureGrant>,
 }
 
 /// A granted send carrying a hold's picture, which its turn already records as sent.
@@ -115,21 +140,19 @@ impl Coordinator {
             .collect()
     }
 
-    /// The picture grant of `lease`, which its transport checks right before its first write.
+    /// The picture grant of `lease`, shared with its transport.
     pub(crate) fn picture_grant(&self, lease: LeaseId) -> Option<PictureGrant> {
         self.leases
             .iter()
             .find(|held| held.id == lease)?
             .picture
             .clone()
-            .map(PictureGrant)
     }
 
-    /// Closes each picture grant whose run may no longer send its picture, so a transport that
-    /// hasn't written yet writes nothing.
+    /// Fences new write admissions for each picture grant whose run may no longer send it.
     pub(super) fn revoke_pictures(&self) {
         for lease in &self.leases {
-            let (Some(open), SendKey::Build(key)) = (&lease.picture, lease.id.key) else {
+            let (Some(grant), SendKey::Build(key)) = (&lease.picture, lease.id.key) else {
                 continue;
             };
             if !self
@@ -139,7 +162,7 @@ impl Coordinator {
                 .find(|run| run.id == key.run)
                 .is_some_and(|run| !run.screen_lost && self.run_pictured(run))
             {
-                open.store(false, Ordering::Release);
+                grant.close();
             }
         }
     }
@@ -274,7 +297,7 @@ impl Coordinator {
             .and_then(super::Run::carried);
         self.grant(SendKey::Build(key), sources, hold, screen, effects);
         if revocable && let Some(lease) = self.leases.last_mut() {
-            lease.picture = Some(Arc::new(AtomicBool::new(true)));
+            lease.picture = Some(PictureGrant::new());
         }
     }
 
@@ -333,7 +356,7 @@ impl Coordinator {
             && self.leases[at]
                 .picture
                 .as_ref()
-                .is_some_and(|open| !open.load(Ordering::Acquire));
+                .is_some_and(|grant| !grant.is_open());
         if revoked
             && let SendKey::Build(key) = lease.key
             && self.current.as_ref().is_some_and(|run| {

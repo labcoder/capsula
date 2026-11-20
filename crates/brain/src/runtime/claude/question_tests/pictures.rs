@@ -41,8 +41,11 @@ fn pictured_lease(rig: &mut Rig, played: &Played, picture: PictureGrant) -> Answ
     let Answer::Grant(lease) = played.lease() else {
         panic!("test grant");
     };
-    rig.claude
-        .picture_granted(played.key, Some(ConnectionKind::ClaudeCode), picture.clone());
+    rig.claude.picture_granted(
+        played.key,
+        Some(ConnectionKind::ClaudeCode),
+        picture.clone(),
+    );
     Answer::Grant(lease.with_picture(Some(picture)))
 }
 
@@ -168,7 +171,11 @@ async fn a_missing_or_closed_grant_or_unsealed_capture_never_seeds() {
         rig.drive(played.asked(lease)).await;
         let events = rig.drive(played.events()).await;
         if reason == "closed" {
-            assert!(events.is_empty(), "the coordinator owns the retry");
+            assert_eq!(
+                events,
+                [TurnEvent::Finished(Finish::AwaitingRebuild)],
+                "the coordinator owns the retry"
+            );
         } else {
             assert_eq!(
                 events,

@@ -29,6 +29,7 @@ use crate::bridge::LaunchId;
 use crate::bridge::listener::{Binding, LaunchContext, Listener, McpCall};
 use crate::connections::model::Lease as _;
 use crate::context::ToolSchema;
+use crate::coordinator::PictureWrite;
 use crate::engines::SendLease;
 use crate::platform::{self, Job, Stdio};
 
@@ -371,27 +372,27 @@ impl Control {
             .is_ok()
     }
 
-    fn admit_picture(&self, chunk: &PictureChunk) -> Result<(), StdinRefused> {
+    fn admit_picture(&self, until: Instant) -> Result<PictureWrite, StdinRefused> {
         let mut slot = self.send.lock().unwrap_or_else(PoisonError::into_inner);
         let SendSlot::Open(Some(lease)) = &mut *slot else {
             return Err(StdinRefused::Revoked);
         };
-        if !lease.carries_picture() {
-            return Err(StdinRefused::Revoked);
-        }
-        if !lease.may_write() {
-            return Err(StdinRefused::PictureClosed);
-        }
+        let grant = lease.picture.as_ref().ok_or(StdinRefused::Revoked)?;
+        let Some(permit) = grant.reserve_write() else {
+            return Err(if lease.unsent && !grant.is_open() {
+                StdinRefused::PictureClosed
+            } else {
+                StdinRefused::Revoked
+            });
+        };
         if self.is_revoked() || self.output_closed.load(Ordering::Acquire) {
             return Err(StdinRefused::Revoked);
         }
-        if Instant::now() >= chunk.until {
+        if Instant::now() >= until {
             return Err(StdinRefused::Deadline);
         }
-        if chunk.first.is_some() {
-            lease.wrote();
-        }
-        Ok(())
+        lease.wrote();
+        Ok(permit)
     }
 
     /// The admitted write returned; false when it was revoked meanwhile.
@@ -1117,12 +1118,10 @@ fn write_input(
         }
         #[cfg(test)]
         tests::pause(write.take());
-        let permission = match pictured {
-            Some(chunk) => control.admit_picture(chunk),
-            None => Ok(()),
+        let result = match pictured {
+            Some(chunk) => write_picture(&mut pipe, control, chunk),
+            None => pipe.write_all(bytes).map_err(|_| StdinRefused::Revoked),
         };
-        let result =
-            permission.and_then(|()| pipe.write_all(bytes).map_err(|_| StdinRefused::Revoked));
         #[cfg(test)]
         if let (Some(writes), Ok(())) = (&writes, &result) {
             writes.send(bytes.len()).ok();
@@ -1139,6 +1138,26 @@ fn write_input(
             return;
         }
     }
+}
+
+fn write_picture(
+    pipe: &mut impl io::Write,
+    control: &Control,
+    chunk: &PictureChunk,
+) -> Result<(), StdinRefused> {
+    let mut bytes = chunk.bytes.as_slice();
+    while !bytes.is_empty() {
+        let outcome = {
+            let _permit = control.admit_picture(chunk.until)?;
+            pipe.write(bytes)
+        };
+        match outcome {
+            Ok(written) if written != 0 => bytes = &bytes[written..],
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+            _ => return Err(StdinRefused::Revoked),
+        }
+    }
+    Ok(())
 }
 
 /// stdout, in chunks of at most [`CHUNK`], until its end. A full channel is retried every

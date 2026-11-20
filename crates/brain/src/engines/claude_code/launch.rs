@@ -582,7 +582,7 @@ impl Question<'_> {
         .await
         {
             Ok(()) => {}
-            Err(StdinRefused::PictureClosed) => return None,
+            Err(StdinRefused::PictureClosed) => return Some(Finish::AwaitingRebuild),
             Err(StdinRefused::Deadline) => return Some(expired(launch, report)),
             Err(_) => {
                 report.report(Outcome::Launch);
