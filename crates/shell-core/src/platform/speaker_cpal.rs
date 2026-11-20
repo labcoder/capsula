@@ -543,6 +543,8 @@ impl Playback {
                 self.control.handed_through(handed);
                 if let Some(span) = span {
                     if let Some(previous) = &mut report
+                        && previous.source.run == span.source.run
+                        && previous.source.generation == span.source.generation
                         && previous.source.segment == span.source.segment
                         && previous.through == span.first
                     {

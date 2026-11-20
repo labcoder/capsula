@@ -588,6 +588,64 @@ fn dropping_the_backend_before_the_transport_silences_a_surviving_callback() {
 }
 
 #[test]
+fn adjacent_source_spans_keep_distinct_run_and_generation_tags() {
+    use super::{Presented, Source};
+    use kumochi_protocol::message::{RunId, SegmentId};
+    use std::time::Duration;
+
+    let (mut submit, mut playback) = pair(SOURCE_RATE, 1);
+    let a = Source {
+        run: RunId(5),
+        generation: 3,
+        segment: SegmentId(0),
+        at: 100,
+    };
+    let b = Source {
+        run: RunId(6),
+        at: 101,
+        ..a
+    };
+    let c = Source {
+        generation: 4,
+        at: 102,
+        ..b
+    };
+    for source in [a, b, c] {
+        submit
+            .packet_for(&[16_384], PacketKind::End, Some(source))
+            .unwrap();
+    }
+    let start = Duration::from_millis(10);
+    playback.fill_at(&mut [0.0; 3], Some(start));
+    let actual = std::array::from_fn(|_| submit.observed.pop());
+    assert_eq!(
+        actual,
+        [
+            Some(Presented {
+                source: a,
+                first: 100,
+                through: 101,
+                at: Some(start)
+            }),
+            Some(Presented {
+                source: b,
+                first: 101,
+                through: 102,
+                at: Some(start + Duration::from_nanos(41_666))
+            }),
+            Some(Presented {
+                source: c,
+                first: 102,
+                through: 103,
+                at: Some(start + Duration::from_nanos(83_333))
+            }),
+            None,
+        ]
+    );
+    assert!(!submit.control.overflowed());
+}
+
+#[test]
 fn canceling_one_backend_does_not_cancel_a_fallback_open() {
     use super::{BackendStream, Control};
     use std::sync::Arc;
