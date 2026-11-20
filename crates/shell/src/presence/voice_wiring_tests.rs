@@ -81,6 +81,7 @@ pub(super) fn key_down(owner: &Presence, id: u32, cx: &gpui_kit::App) {
             GestureId(id),
             owner.link.link_generation(),
             owner.link.choice_revision(),
+            owner.voice.target.get(),
         );
     }
 }

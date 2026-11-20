@@ -2608,3 +2608,27 @@ fn shown_marks_are_timed_from_their_answer_s_end_and_one_esc_clears_them(cx: &mu
         ]
     );
 }
+
+/// The brain's refusal of a sent release ends that release's watch and lease; one from an older
+/// connection, or for another gesture, leaves them alone.
+#[gpui::test]
+fn a_refused_release_drops_only_its_own_watch_and_lease(cx: &mut TestAppContext) {
+    let watching = released(true, cx);
+    let refused = |generation, gesture| crate::link::LinkEvent::CaptureFailed {
+        generation,
+        capture_for: CaptureFor::Gesture(GestureId(gesture)),
+        reason: kumochi_protocol::message::CaptureFailure::Unavailable,
+    };
+    for other in [refused(0, 1), refused(1, 2)] {
+        super::super::screen_hold_tests::receive(&watching.ready.owner, other, cx);
+        watching.ready.owner.read_with(cx, |owner, _| {
+            assert!(owner.voice.watched.is_some());
+            assert_eq!(owner.screen_lease, Some(LeaseGeneration(1)));
+        });
+    }
+    super::super::screen_hold_tests::receive(&watching.ready.owner, refused(1, 1), cx);
+    watching.ready.owner.read_with(cx, |owner, _| {
+        assert!(owner.voice.watched.is_none());
+        assert_eq!(owner.screen_lease, None);
+    });
+}

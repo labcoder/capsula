@@ -65,7 +65,8 @@ notice and for which hold message the shell sends: `ScreenHoldRecognized` only w
 otherwise `VoiceHoldRecognized`. It spoke for `screen_holds` and the window under the pointer
 until the shell began sending screen holds. Both changed in one commit, so the notice never spoke
 for one setting while a hold sent what the other governs. `HoldRecognized` is that earlier hold,
-which the shell no longer sends. It carries the gesture, the thread, the selection revision,
+which the shell no longer sends, and the brain takes it as a voice hold: it answers
+`CaptureFailed`, which ends the lease, and starts no capture. It carries the gesture, the thread, the selection revision,
 the pointer sampled once at recognition, the exclusion lease, the recognition time and the
 appended `notice` ([notice revision](#notice-revision)). Its
 fields changed in place, not by appending: `pointer_display`, the display that held the pointer,
@@ -121,8 +122,9 @@ things hold at recognition, and a hold's line and the conversation's screen note
 
 1. the stored state is `On { model }`;
 2. the target is a new thread, or a thread whose stored choice is none or the default model at
-   any effort. A thread whose row was never read counts as on the default: a `shortcut:` that
-   is due before any view sends `SetModel`;
+   any effort. A thread whose row wasn't read on this connection is only a candidate: the brain
+   proves its recipient before any capture ([notice revision](#notice-revision)), and a row read
+   as pinned to another model makes the hold voice-only;
 3. `model` is the display name of the shell's own newest default, queued before saved. Between
    a default change the shell sent and the brain's next `ScreenHolds`, the stored `On` still
    names the old model and counts as not ready.
@@ -141,14 +143,24 @@ the gate authorizes changes: a different route or model, the gate closing, a new
 route, or, for a Claude Code offer only, a move of Claude Code's generation. A new display name
 alone keeps it, and a new connection starts again from 1. A 0 doesn't decode.
 
-`HoldRecognized`, `ScreenHoldRecognized` and `ScreenRelease` have room for the offer the user was
-shown before the hold began, as `notice`. The shell sends none in all three, because nothing it
-draws proves which offer the user saw. The dock and its peek say nothing about the screen
-([presence](presence.md)), and the conversation's screen note is a history row that appears only
-when the answer changes, and only in the open conversation. Receiving an `On`, or the repaint it
-schedules, isn't evidence that it was shown, so a hold never takes the `On` stored when its
-recognition is delivered. The brain doesn't read `notice` yet: a hold, its picture and the notice
-behave as they did before the field was added.
+`ScreenHoldRecognized` and `ScreenRelease` carry, as `notice`, the offer the hold's first input
+was seen under. The user's show-screen setting is the choice; `notice` binds a gesture to the
+offer that choice was under, not to anything drawn. The shell publishes its current offer for the
+native callback whenever a link event, a target change or the show-screen box changes it: the
+stored `On`'s revision, only while it names exactly the default model's route and slug, the box
+is on, and the target is new or a thread not read as pinned elsewhere. The offer is bound to the
+connection, the choice revision and the target, and a local epoch counts every change, so an
+offer that went and came back is another one. The native callback freezes the published offer at
+the gesture's key-down, before any delivery is deferred, and keeps it only for that key-down's
+connection, choice and target. Recognition sends it only while it is still the published offer,
+else the hold is voice-only; release sends it only while it still is, else the hold goes on
+without the picture. A later offer never upgrades a gesture seen under none.
+
+A thread whose row wasn't read is a conditional candidate, not shell proof of the recipient or its
+capability. The brain arms a screen hold only for the revision it last sent while that offer
+still says what it would send now (route, slug and sign-in), and a release starts a capture only
+under the same check and once the hold's own read recipient is exactly the armed route and slug.
+None, an older revision, a new sign-in, an unread recipient or a different pin captures nothing.
 
 ## Screen release
 

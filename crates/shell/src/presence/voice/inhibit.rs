@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 
 use async_channel::{Receiver, Sender};
 use gpui_kit::{BackgroundExecutor, Task};
-use kumochi_protocol::message::{ControlToBrain, GestureId, RunId};
+use kumochi_protocol::message::{ControlToBrain, GestureId, NoticeRevision, RunId, ThreadId};
 use kumochi_shell_core::link::output::{Claim, Denied, InhibitToken, OutputOwner, Retirement};
 
 use super::{Context, FailureReason, FailureStage, Presence, Session, Source};
@@ -48,11 +48,25 @@ enum Stage {
     Ending,
 }
 
+/// The screen offer a hold's first input is seen under: the brain's revision, bound to the
+/// connection, choice revision and target it was published for. `epoch` counts every change the
+/// shell published, so an offer that went and came back is another one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::presence) struct Offer {
+    pub(in crate::presence) session: u64,
+    pub(in crate::presence) choice: u64,
+    pub(in crate::presence) target: (Option<ThreadId>, u64),
+    pub(in crate::presence) revision: NoticeRevision,
+    pub(in crate::presence) epoch: u64,
+}
+
 struct Gate {
     gesture: GestureId,
     /// The link generation and choice revision at key-down.
     session: u64,
     choice: u64,
+    /// The offer published at key-down, if it was for that connection, choice and target.
+    offer: Option<Offer>,
     authority: Authority,
     /// The run to fence, taken once when `Warm` is applied.
     run: Option<(u64, RunId)>,
@@ -68,11 +82,18 @@ struct Gate {
 }
 
 impl Gate {
-    fn new(gesture: GestureId, session: u64, choice: u64, authority: Authority) -> Self {
+    fn new(
+        gesture: GestureId,
+        session: u64,
+        choice: u64,
+        offer: Option<Offer>,
+        authority: Authority,
+    ) -> Self {
         Self {
             gesture,
             session,
             choice,
+            offer,
             authority,
             run: None,
             mic: None,
@@ -109,6 +130,8 @@ pub(in crate::presence) struct Gates {
     list: Rc<RefCell<Vec<Gate>>>,
     /// Whether hold-to-talk can take a hold, mirrored from settings.
     on: Rc<Cell<bool>>,
+    /// The offer presence published last, and how many changes it has published.
+    offer: Rc<Cell<(Option<Offer>, u64)>>,
     /// Undecided Esc deliveries and refused stops' session ends: no gate retires while one is.
     held_back: Rc<Cell<usize>>,
     poke: Sender<()>,
@@ -134,6 +157,7 @@ impl Default for Gates {
         Self {
             list: Rc::default(),
             on: Rc::default(),
+            offer: Rc::default(),
             held_back: Rc::default(),
             poke,
             pokes,
@@ -148,6 +172,30 @@ impl Gates {
     )]
     pub(super) fn follow(&self, on: bool) {
         self.on.set(on);
+    }
+
+    /// Publishes `offer`, whose epoch is ignored, for the next key-down, and returns it as
+    /// published: unchanged, it keeps its epoch; changed, it takes the next one.
+    pub(in crate::presence) fn publish(&self, offer: Option<Offer>) -> Option<Offer> {
+        let (last, epoch) = self.offer.get();
+        let same = |offer: Offer| Offer { epoch: 0, ..offer };
+        if last.map(same) == offer.map(same) {
+            return last;
+        }
+        let epoch = epoch + 1;
+        let offer = offer.map(|offer| Offer { epoch, ..offer });
+        self.offer.set((offer, epoch));
+        offer
+    }
+
+    /// The offer `gesture`'s newest key-down was seen under, if any.
+    pub(in crate::presence) fn offer_of(&self, gesture: GestureId) -> Option<Offer> {
+        self.list
+            .borrow()
+            .iter()
+            .rev()
+            .find(|gate| gate.gesture == gesture)
+            .and_then(|gate| gate.offer)
     }
 
     /// Holds every retirement until the returned hold is dropped.
@@ -176,10 +224,14 @@ impl Gates {
         gesture: GestureId,
         session: u64,
         choice: u64,
+        target: (Option<ThreadId>, u64),
     ) {
         if !self.on.get() {
             return;
         }
+        let offer = self.offer.get().0.filter(|offer| {
+            offer.session == session && offer.choice == choice && offer.target == target
+        });
         let mut gates = self.list.borrow_mut();
         let native = gates.iter().position(|gate| {
             matches!(gate.stage, Stage::Native)
@@ -224,7 +276,7 @@ impl Gates {
                 Err(_) => Authority::None,
             },
         };
-        gates.push(Gate::new(gesture, session, choice, authority));
+        gates.push(Gate::new(gesture, session, choice, offer, authority));
         drop(gates);
         self.poke();
     }

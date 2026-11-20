@@ -86,7 +86,9 @@ sequenceDiagram
 - **Same callback.** The gesture lives in an `Rc<Cell<Gesture>>` shared by the native callback
   and the owner. The callback installs the shared hold fence and revokes collection before
   deferring anything. Voice intents capture the target revision, session generation, choice
-  revision and original QPC; double-tap effects retain their ordinary typing path.
+  revision and original QPC; double-tap effects retain their ordinary typing path. Key-down's
+  gate also freezes the screen offer published for that connection, choice and target
+  ([notice revision](ipc.md#notice-revision)).
   Both reach the owner through `AsyncApp::update_window`, which
   only tries to borrow GPUI. If GPUI is already borrowed, because a nested message loop
   dispatched the callback, the effects wait in an ordered queue with their original times, and

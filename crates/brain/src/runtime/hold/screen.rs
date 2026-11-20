@@ -8,7 +8,7 @@ use std::time::Duration;
 use kumochi_protocol::geometry::{PhysicalPoint, PointerPath};
 use kumochi_protocol::message::{
     CaptureFailure, CaptureFor, ConnectionKind, ControlToBrain, ControlToShell, LeaseGeneration,
-    ModelChoice, ModelSlug, ScreenHolds, ScreenOff,
+    ModelChoice, ModelSlug, NoticeRevision, ScreenHolds, ScreenOff,
 };
 use tokio::sync::mpsc;
 use tokio::time::Instant;
@@ -115,6 +115,13 @@ impl std::fmt::Debug for ScreenEvent {
 /// What a hold's task captures.
 pub(super) enum Aim {
     /// The window under the point, for a window hold.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "no shell sends a window hold; its worker path stays tested"
+        )
+    )]
     Window(PhysicalPoint),
     /// The display under `point`, drawn after `excluded`, with `ink` to paint, for a screen hold.
     Display {
@@ -126,6 +133,13 @@ pub(super) enum Aim {
 
 impl super::Holds {
     /// Starts the pending hold `key`'s screen part on the window under `point`.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "no shell sends a window hold; its worker path stays tested"
+        )
+    )]
     pub(super) fn start_screen(
         &mut self,
         key: HoldKey,
@@ -214,17 +228,6 @@ impl super::Holds {
         {
             tracing::info!(closed = ?part, "hold screen part closed");
             hold.screen = part;
-        }
-    }
-
-    /// Closes the pending hold `key`'s unstarted part as `NotReady`: it was recognized too long
-    /// ago for its capture to end within the shell's lease.
-    pub(super) fn refuse_screen(&mut self, key: HoldKey) {
-        if let Some(hold) = self.pending.as_mut().filter(|hold| hold.key == key)
-            && matches!(hold.screen, ScreenPart::None)
-        {
-            tracing::info!(closed = "recognized too late", "hold screen part closed");
-            hold.screen = ScreenPart::Closed(ScreenClass::NotReady);
         }
     }
 
@@ -369,7 +372,14 @@ impl super::Holds {
 impl crate::runtime::Brain {
     /// Arms the admitted screen hold `key` when the gate is open for the default model now, since
     /// the shell's state may lag. It captures nothing until its release.
-    pub(super) fn hold_arm(&mut self, key: HoldKey) -> Result<(), NoScreen> {
+    pub(super) fn hold_arm(
+        &mut self,
+        key: HoldKey,
+        notice: Option<NoticeRevision>,
+    ) -> Result<(), NoScreen> {
+        if !self.offer_holds(notice) {
+            return Err(NoScreen::Unoffered);
+        }
         let choice = self.config.view().default_model.clone();
         if let ScreenHolds::Off(off) = self.display_gate(choice.as_ref()) {
             return Err(NoScreen::Gate(off));
@@ -400,6 +410,7 @@ impl crate::runtime::Brain {
             excluded_qpc,
             pointer,
             path,
+            notice,
             ..
         } = message
         else {
@@ -422,6 +433,7 @@ impl crate::runtime::Brain {
                 (*lease, *t_qpc, *excluded_qpc),
                 pointer.0,
                 path.clone(),
+                *notice,
             )
         };
         tracing::info!(?started, "hold screen released");
@@ -446,6 +458,7 @@ impl crate::runtime::Brain {
         (lease, t_qpc, excluded): (LeaseGeneration, u64, u64),
         point: PhysicalPoint,
         ink: PointerPath,
+        notice: Option<NoticeRevision>,
     ) -> Result<(), NoScreen> {
         let Some(hold) = self.holds.pending.as_ref().filter(|hold| {
             hold.key == key
@@ -458,7 +471,11 @@ impl crate::runtime::Brain {
         if let ScreenHolds::Off(off) = self.display_gate(choice.as_ref()) {
             return Err(NoScreen::Gate(off));
         }
-        if hold.snapshot.as_ref().is_some_and(|snapshot| {
+        if !self.offer_holds(notice) {
+            return Err(NoScreen::Unoffered);
+        }
+        // A recipient not read yet may be another model's: nothing starts until it is.
+        if hold.snapshot.as_ref().is_none_or(|snapshot| {
             !hold.matches_screen_recipient(snapshot.defaults.choice.as_ref())
         }) {
             return Err(NoScreen::NotArmed);

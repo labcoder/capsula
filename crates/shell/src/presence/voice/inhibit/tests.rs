@@ -1167,6 +1167,7 @@ fn turning_hold_to_talk_off_reaches_the_next_press_at_once(cx: &mut TestAppConte
             G1,
             owner.link.link_generation(),
             owner.link.choice_revision(),
+            owner.voice.target.get(),
         );
     });
     cx.run_until_parked();

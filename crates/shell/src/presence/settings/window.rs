@@ -112,6 +112,7 @@ impl Presence {
         if !on {
             self.marks_off(cx);
         }
+        self.publish_offer(cx);
         sent
     }
 

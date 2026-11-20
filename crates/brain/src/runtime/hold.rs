@@ -11,12 +11,11 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::time::Duration;
 
-use kumochi_protocol::geometry::PhysicalPoint;
 use kumochi_protocol::message::{
     CaptureFailure, CaptureFor, ConnectionKind, ControlToBrain, ControlToShell, DataToShell,
-    HOLD_DRAIN_TIMEOUT_MS, HOLD_START_TIMEOUT_MS, HoldFailure, HoldStatus, LeaseGeneration,
-    MAX_HOLD_CHUNKS, MAX_TRANSCRIPT_BYTES, MicPcm, ModelChoice, ModelSlug, NoticeRevision,
-    PartState, ScreenClass, ScreenHolds, ScreenOff, SettingsOp, ThreadId, ThreadOp,
+    HOLD_DRAIN_TIMEOUT_MS, HOLD_START_TIMEOUT_MS, HoldFailure, HoldStatus, MAX_HOLD_CHUNKS,
+    MAX_TRANSCRIPT_BYTES, MicPcm, ModelChoice, ModelSlug, NoticeRevision, PartState, ScreenClass,
+    ScreenHolds, ScreenOff, SettingsOp, ThreadId, ThreadOp,
 };
 use tokio::sync::{Notify, mpsc, oneshot};
 use tokio::time::Instant;
@@ -25,9 +24,9 @@ use zeroize::Zeroize as _;
 use super::{Brain, Effect, Full, Input, Link, Origin};
 use crate::coordinator::{HoldKey, HoldSnapshot};
 use crate::platform::ShellProcess;
-use crate::screen::{HoldClient, MAX_TTL};
+use crate::screen::HoldClient;
 use crate::voice::stt::{Decode, SttHandle, SttResult};
-use screen::{LATEST_START, Outcome, ScreenEvent, ScreenPart, capturing};
+use screen::{Outcome, ScreenEvent, ScreenPart, capturing};
 
 #[derive(Debug)]
 enum FailureStage {
@@ -49,8 +48,6 @@ enum Refusal {
 /// Why a screen hold's part didn't start.
 #[derive(Debug)]
 enum NoScreen {
-    /// A repeat of a voice hold's gesture.
-    Repeated,
     Gate(ScreenOff),
     /// Recognized, or for a screen hold released, longer ago than `LATEST_START`.
     TooLate,
@@ -64,6 +61,8 @@ enum NoScreen {
     ExcludedEarly,
     /// A release whose exclusion stamp is later than now, or can't be read.
     ExcludedLate,
+    /// A hold not under the offer last sent, or under one that no longer holds; a window hold.
+    Unoffered,
 }
 
 impl NoScreen {
@@ -417,34 +416,18 @@ impl Brain {
             gesture,
             thread,
             selection,
-            pointer,
-            lease,
-            t_qpc,
             ..
         } = message
         {
-            let held = key(*gesture);
-            // A repeat of a voice hold's gesture is refused, so it can't add a part to that hold.
-            let repeated = self
-                .holds
-                .pending
-                .as_ref()
-                .is_some_and(|hold| hold.key == held);
-            let admitted = self.admit_hold(held, *thread, *selection, Kind::Window, link)?;
-            let screen = if repeated {
-                Err(NoScreen::Repeated)
-            } else {
-                self.hold_screen(held, *pointer, *lease, *t_qpc)
-            };
-            if admitted {
-                tracing::info!(hold = "screen", ?screen, "hold taken");
+            // No shell sends a window hold now, and its capture would start before the hold's
+            // recipient is read: it goes on as voice, and its lease ends.
+            if self.admit_hold(key(*gesture), *thread, *selection, Kind::Window, link)? {
+                tracing::info!(hold = "screen", screen = ?NoScreen::Unoffered, "hold taken");
             }
-            if screen.is_err() {
-                link.control(&ControlToShell::CaptureFailed {
-                    capture_for: CaptureFor::Gesture(*gesture),
-                    reason: CaptureFailure::Unavailable,
-                })?;
-            }
+            link.control(&ControlToShell::CaptureFailed {
+                capture_for: CaptureFor::Gesture(*gesture),
+                reason: CaptureFailure::Unavailable,
+            })?;
             return Ok(true);
         }
         match message {
@@ -461,11 +444,12 @@ impl Brain {
                 gesture,
                 thread,
                 selection,
+                notice,
                 ..
             } => {
                 let held = key(*gesture);
                 if self.admit_hold(held, *thread, *selection, Kind::Screen, link)? {
-                    let screen = self.hold_arm(held);
+                    let screen = self.hold_arm(held, *notice);
                     tracing::info!(hold = "screen", ?screen, "hold taken");
                 }
             }
@@ -1005,15 +989,7 @@ impl Brain {
         }) {
             self.holds.close_screen_as(Some(ScreenClass::ModelCantSee));
         }
-        let choice = self.config.view().default_model.clone();
-        let state = self.display_gate(choice.as_ref());
-        let tag =
-            choice.and_then(
-                |choice| match self.coordinator.availability_of(choice.connection) {
-                    crate::coordinator::Availability::Ready(ready) => Some(ready.connection),
-                    _ => None,
-                },
-            );
+        let (state, tag) = self.offered();
         let offer = |state: &ScreenHolds| match state {
             ScreenHolds::On {
                 connection, slug, ..
@@ -1040,41 +1016,29 @@ impl Brain {
         Ok(())
     }
 
-    /// Starts the pending hold `key`'s screen part when the gate is open for the default model
-    /// now, since the shell's state may lag, and the worker's ticket would end within the shell's
-    /// lease: a part started more than `LATEST_START` after `t_qpc`, the recognition, closes
-    /// `NotReady` instead.
-    fn hold_screen(
-        &mut self,
-        key: HoldKey,
-        pointer: PhysicalPoint,
-        lease: LeaseGeneration,
-        t_qpc: u64,
-    ) -> Result<(), NoScreen> {
-        // shortcut: the gate opens on the default model, so a thread pinned to a model that can
-        // see goes voice-only while the default can't; check the thread's pin at recognition
-        // once a thread's pin differs from the default in image input.
+    /// The offer for the default model now, and the sign-in it goes on.
+    fn offered(&self) -> (ScreenHolds, Option<crate::context::ConnectionTag>) {
         let choice = self.config.view().default_model.clone();
-        if let ScreenHolds::Off(off) = self.screen_gate(choice.as_ref()) {
-            return Err(NoScreen::Gate(off));
-        }
-        // Read before the age, so the ticket can only end sooner than the check allows.
-        let until = Instant::now() + MAX_TTL;
-        if (self.holds.stamp_age)(t_qpc).is_none_or(|age| age > LATEST_START) {
-            self.holds.refuse_screen(key);
-            return Err(NoScreen::TooLate);
-        }
-        let choice = choice.ok_or(NoScreen::Gate(ScreenOff::NotReady))?;
-        if !self.holds.start_screen(
-            key,
-            pointer,
-            lease,
-            until,
-            (choice.connection, choice.model),
-        ) {
-            return Err(NoScreen::NotStarted);
-        }
-        Ok(())
+        let state = self.display_gate(choice.as_ref());
+        let tag =
+            choice.and_then(
+                |choice| match self.coordinator.availability_of(choice.connection) {
+                    crate::coordinator::Availability::Ready(ready) => Some(ready.connection),
+                    _ => None,
+                },
+            );
+        (state, tag)
+    }
+
+    /// Whether `notice`, the offer a hold's first input was seen under, is the `On` last sent and
+    /// still says what the brain would send now. None, an older revision or a moved authority
+    /// never is, though the offer may look the same again.
+    pub(super) fn offer_holds(&self, notice: Option<NoticeRevision>) -> bool {
+        notice.is_some()
+            && notice == self.holds.notice
+            && self.holds.screen_sent.as_ref().is_some_and(|sent| {
+                matches!(sent.0, ScreenHolds::On { .. }) && *sent == self.offered()
+            })
     }
 
     /// Takes a screen task's answer. The capture's end, either way, releases the shell's

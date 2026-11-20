@@ -409,6 +409,7 @@ impl Presence {
         self.voice
             .target
             .set((self.runs.thread(), self.runs.revision()));
+        self.publish_offer(cx);
         if self.text.as_ref().is_some_and(|text| text.typing.visible) {
             self.chat.update(cx, |state, cx| {
                 if state.follow(self.runs.thread()) {

@@ -38,7 +38,27 @@ pub(in crate::runtime) fn seeing(
     brain.holds.window_capture = true;
     brain.holds.stamp_age = AGE;
     set(brain, SettingsOp::SetShowScreen(true));
+    let (out, _output) = mpsc::channel(4);
+    let queue = RefCell::new(DataQueue::new(crate::runtime::window()));
+    let ready_notify = Notify::new();
+    let mut tap = Tap::from_env();
+    let mut link = Link::new(&out, &queue, &ready_notify, &mut tap);
+    brain.screen_holds_changed(&mut link).unwrap();
     rig
+}
+
+/// The pending hold's recipient, read as the store reads it.
+fn prepared(brain: &mut Brain) {
+    let hold = brain.holds.pending.as_ref().unwrap();
+    let (key, thread, cancel) = (hold.key, hold.thread, Arc::clone(&hold.cancel));
+    let Ok(StoreOp::ReadHold(read)) =
+        brain
+            .coordinator
+            .prepare_hold(key, thread, 1, brain.snapshot(Origin::Kumo), cancel)
+    else {
+        panic!("no hold read");
+    };
+    brain.holds.pending.as_mut().unwrap().snapshot = Some(read.snapshot);
 }
 
 pub(in crate::runtime) fn image_recipients(brain: &mut Brain) -> (ModelChoice, ModelChoice) {
@@ -74,7 +94,7 @@ pub(in crate::runtime) fn recognized(gesture: GestureId) -> ControlToBrain {
         thread: None,
         selection: 1,
         t_qpc: 1,
-        notice: None,
+        notice: Some(kumochi_protocol::message::NoticeRevision::FIRST),
     }
 }
 
@@ -91,7 +111,7 @@ pub(in crate::runtime) fn release(
         excluded_qpc,
         pointer: ReleasePointer(PhysicalPoint([5, 5])),
         path: PointerPath(vec![PhysicalPoint([5, 5]); points]),
-        notice: None,
+        notice: Some(kumochi_protocol::message::NoticeRevision::FIRST),
     }
 }
 
@@ -152,6 +172,7 @@ async fn a_screen_hold_arms_at_recognition_and_captures_the_display_at_release()
     );
     assert!(matches!(part(&brain), ScreenPart::Armed));
     assert!(!controls(&mut output).contains(&failed(KEY.gesture)));
+    prepared(&mut brain);
     let path = vec![PhysicalPoint([5, 5]), PhysicalPoint([40, 5])];
     let mut released = release(KEY.gesture, 100, 200, 0);
     if let ControlToBrain::ScreenRelease { path: sent, .. } = &mut released {
@@ -226,6 +247,7 @@ async fn a_release_runs_the_gate_the_stamps_and_the_path_before_any_capture() {
         let g = GestureId(gesture);
         assert!(brain.hold_control(&recognized(g), &mut link).unwrap());
         assert!(matches!(part(&brain), ScreenPart::Armed), "{gesture}");
+        prepared(&mut brain);
         controls(&mut output);
         if let Some(change) = change {
             set(&mut brain, change);
@@ -258,6 +280,7 @@ async fn a_release_runs_the_gate_the_stamps_and_the_path_before_any_capture() {
     // capture is the worker's first request, so no refused release asked for one.
     let g = GestureId(17);
     assert!(brain.hold_control(&recognized(g), &mut link).unwrap());
+    prepared(&mut brain);
     let released = release(g, 1_500, 1_500, MAX_PATH_POINTS);
     assert!(brain.hold_control(&released, &mut link).unwrap());
     assert!(!controls(&mut output).contains(&failed(g)));
@@ -602,7 +625,9 @@ async fn a_display_release_requires_the_armed_recipient_once_prepared() {
     let ready_notify = Notify::new();
     let mut tap = Tap::from_env();
     let mut link = Link::new(&out, &queue, &ready_notify, &mut tap);
-    let refused_release = release(KEY.gesture, 100, 200, 2);
+    brain.screen_holds_changed(&mut link).unwrap();
+    controls(&mut output);
+    let refused_release = eligible(release(KEY.gesture, 100, 200, 2), brain.holds.notice);
 
     for prepared in [None, Some(other)] {
         held(&mut brain, Kind::Screen, ScreenPart::Armed);
@@ -625,7 +650,7 @@ async fn a_display_release_requires_the_armed_recipient_once_prepared() {
         effort: Effort::High,
         ..sol
     });
-    let allowed_release = release(KEY.gesture, 300, 400, 1);
+    let allowed_release = eligible(release(KEY.gesture, 300, 400, 1), brain.holds.notice);
     assert!(brain.hold_control(&allowed_release, &mut link).unwrap());
     assert!(controls(&mut output).is_empty());
     let (_, request) = rig.next().await;
@@ -700,18 +725,27 @@ async fn a_screen_hold_reads_only_show_screen_at_recognition_release_and_the_run
         brain.holds.high = 0;
         set(&mut brain, SettingsOp::SetShowScreen(show));
         set(&mut brain, SettingsOp::SetScreenHolds(window));
+        brain.screen_holds_changed(&mut link).unwrap();
+        let offer = brain.holds.notice;
         let g = GestureId(gesture);
-        assert!(brain.hold_control(&recognized(g), &mut link).unwrap());
+        assert!(
+            brain
+                .hold_control(&eligible(recognized(g), offer), &mut link)
+                .unwrap()
+        );
         assert_eq!(
             matches!(part(&brain), ScreenPart::Armed),
             show,
             "{show}: {:?}",
             part(&brain)
         );
+        if show {
+            prepared(&mut brain);
+        }
         controls(&mut output);
         assert!(
             brain
-                .hold_control(&release(g, 100, 200, 2), &mut link)
+                .hold_control(&eligible(release(g, 100, 200, 2), offer), &mut link)
                 .unwrap()
         );
         if show {
@@ -743,5 +777,259 @@ async fn a_screen_hold_reads_only_show_screen_at_recognition_release_and_the_run
         }
         brain.holds.lost();
     }
+    brain.close().await;
+}
+
+/// `message` bringing `revision` as its first input's eligibility.
+fn eligible(
+    mut message: ControlToBrain,
+    revision: Option<kumochi_protocol::message::NoticeRevision>,
+) -> ControlToBrain {
+    if let ControlToBrain::HoldRecognized { notice, .. }
+    | ControlToBrain::ScreenHoldRecognized { notice, .. }
+    | ControlToBrain::ScreenRelease { notice, .. } = &mut message
+    {
+        *notice = revision;
+    }
+    message
+}
+
+/// The `ChatGPT` sign-in `tag`, as the coordinator hears it.
+fn signed_in(tag: u64) -> crate::coordinator::Input {
+    crate::coordinator::Input::Engines(
+        kumochi_protocol::message::ConnectionKind::ChatGpt,
+        Availability::Ready(crate::coordinator::Ready {
+            connection: crate::context::ConnectionTag(tag),
+            models: Vec::new(),
+            images: Vec::new(),
+            trusted_draw: false,
+        }),
+    )
+}
+
+/// A screen hold that brings no eligibility from its first input, or one the brain has since
+/// revised, arms nothing, and its release captures nothing.
+#[tokio::test]
+async fn a_screen_hold_without_its_current_eligibility_captures_nothing() {
+    use kumochi_protocol::message::NoticeRevision;
+    for (n, revision) in [None, Some(NoticeRevision::FIRST.next())]
+        .into_iter()
+        .enumerate()
+    {
+        let scratch = Scratch::new(&format!("screen-hold-ineligible-{n}"));
+        let (mut brain, _rig, _keep) = desk(&scratch).await;
+        let (out, mut output) = mpsc::channel(64);
+        let queue = RefCell::new(DataQueue::new(crate::runtime::window()));
+        let ready_notify = Notify::new();
+        let mut tap = Tap::from_env();
+        let mut link = Link::new(&out, &queue, &ready_notify, &mut tap);
+        brain.screen_holds_changed(&mut link).unwrap();
+        controls(&mut output);
+        let g = KEY.gesture;
+        let recognition = eligible(recognized(g), revision);
+        assert!(brain.hold_control(&recognition, &mut link).unwrap());
+        assert!(!matches!(part(&brain), ScreenPart::Armed), "{revision:?}");
+        controls(&mut output);
+        let released = eligible(release(g, 100, 200, 0), revision);
+        assert!(brain.hold_control(&released, &mut link).unwrap());
+        assert_eq!(controls(&mut output), [failed(g)], "{revision:?}");
+        assert!(!matches!(part(&brain), ScreenPart::Capturing { .. }));
+        brain.holds.lost();
+        brain.close().await;
+    }
+}
+
+/// A new sign-in between a screen hold's recognition and its release, for the same model,
+/// captures nothing.
+#[tokio::test]
+async fn a_new_sign_in_between_recognition_and_release_captures_nothing() {
+    let scratch = Scratch::new("screen-hold-new-sign-in");
+    let (mut brain, _rig, _keep) = desk(&scratch).await;
+    let (out, mut output) = mpsc::channel(64);
+    let queue = RefCell::new(DataQueue::new(crate::runtime::window()));
+    let ready_notify = Notify::new();
+    let mut tap = Tap::from_env();
+    let mut link = Link::new(&out, &queue, &ready_notify, &mut tap);
+    brain.coordinator.handle(signed_in(7)).unwrap();
+    brain.screen_holds_changed(&mut link).unwrap();
+    controls(&mut output);
+    let g = KEY.gesture;
+    let first = brain.holds.notice;
+    assert!(
+        brain
+            .hold_control(&eligible(recognized(g), first), &mut link)
+            .unwrap()
+    );
+    assert!(matches!(part(&brain), ScreenPart::Armed));
+    prepared(&mut brain);
+    brain.coordinator.handle(signed_in(8)).unwrap();
+    brain.screen_holds_changed(&mut link).unwrap();
+    controls(&mut output);
+    let released = eligible(release(g, 100, 200, 0), first);
+    assert!(brain.hold_control(&released, &mut link).unwrap());
+    assert_eq!(controls(&mut output), [failed(g)]);
+    assert!(!matches!(part(&brain), ScreenPart::Capturing { .. }));
+    brain.holds.lost();
+    brain.close().await;
+}
+
+/// A screen hold on the main thread under the current offer, its recipient read as the offered
+/// model: one capture, and a repeated release starts no second.
+#[tokio::test]
+async fn a_screen_hold_under_its_current_eligibility_captures() {
+    use kumochi_protocol::message::NoticeRevision;
+    let scratch = Scratch::new("screen-hold-eligible");
+    let (mut brain, mut rig, _keep) = desk(&scratch).await;
+    let (out, mut output) = mpsc::channel(64);
+    let queue = RefCell::new(DataQueue::new(crate::runtime::window()));
+    let ready_notify = Notify::new();
+    let mut tap = Tap::from_env();
+    let mut link = Link::new(&out, &queue, &ready_notify, &mut tap);
+    brain.screen_holds_changed(&mut link).unwrap();
+    controls(&mut output);
+    let g = KEY.gesture;
+    let first = Some(NoticeRevision::FIRST);
+    let mut recognition = eligible(recognized(g), first);
+    if let ControlToBrain::ScreenHoldRecognized { thread, .. } = &mut recognition {
+        *thread = Some(brain.config.view().main_thread);
+    }
+    assert!(brain.hold_control(&recognition, &mut link).unwrap());
+    assert!(matches!(part(&brain), ScreenPart::Armed));
+    prepared(&mut brain);
+    controls(&mut output);
+    let released = eligible(release(g, 100, 200, 0), first);
+    assert!(brain.hold_control(&released, &mut link).unwrap());
+    assert!(controls(&mut output).is_empty());
+    assert!(matches!(part(&brain), ScreenPart::Capturing { .. }));
+    let (_id, request) = rig.next().await;
+    assert!(matches!(request, Request::Display { .. }), "{request:?}");
+    assert!(brain.hold_control(&released, &mut link).unwrap());
+    assert!(controls(&mut output).is_empty());
+    assert!(matches!(
+        part(&brain),
+        ScreenPart::Capturing { lease: LEASE, .. }
+    ));
+    brain.holds.lost();
+    crate::screen::release_next(&mut rig, KEY).await;
+    brain.close().await;
+}
+
+/// A window hold whose recognition brings no current eligibility captures nothing.
+#[tokio::test]
+async fn a_window_hold_without_its_current_eligibility_captures_nothing() {
+    use kumochi_protocol::message::NoticeRevision;
+    for (n, revision) in [None, Some(NoticeRevision::FIRST.next())]
+        .into_iter()
+        .enumerate()
+    {
+        let scratch = Scratch::new(&format!("window-hold-ineligible-{n}"));
+        let (mut brain, _rig, _keep) = desk(&scratch).await;
+        let (out, mut output) = mpsc::channel(64);
+        let queue = RefCell::new(DataQueue::new(crate::runtime::window()));
+        let ready_notify = Notify::new();
+        let mut tap = Tap::from_env();
+        let mut link = Link::new(&out, &queue, &ready_notify, &mut tap);
+        brain.screen_holds_changed(&mut link).unwrap();
+        controls(&mut output);
+        let g = KEY.gesture;
+        let window = ControlToBrain::HoldRecognized {
+            gesture: g,
+            thread: None,
+            selection: 1,
+            pointer: PhysicalPoint([5, 5]),
+            lease: LEASE,
+            t_qpc: 1,
+            notice: revision,
+        };
+        assert!(brain.hold_control(&window, &mut link).unwrap());
+        assert_eq!(controls(&mut output), [failed(g)], "{revision:?}");
+        assert!(matches!(part(&brain), ScreenPart::None), "{revision:?}");
+        brain.holds.lost();
+        brain.close().await;
+    }
+}
+
+/// A release that comes before the hold's recipient is read starts no capture, though the hold
+/// is under its current offer: the recipient may be another model's.
+#[tokio::test]
+async fn a_release_before_its_recipient_is_read_captures_nothing() {
+    let scratch = Scratch::new("screen-hold-unprepared");
+    let (mut brain, _rig, _keep) = desk(&scratch).await;
+    let (out, mut output) = mpsc::channel(64);
+    let queue = RefCell::new(DataQueue::new(crate::runtime::window()));
+    let ready_notify = Notify::new();
+    let mut tap = Tap::from_env();
+    let mut link = Link::new(&out, &queue, &ready_notify, &mut tap);
+    let g = KEY.gesture;
+    assert!(brain.hold_control(&recognized(g), &mut link).unwrap());
+    assert!(matches!(part(&brain), ScreenPart::Armed));
+    controls(&mut output);
+    assert!(
+        brain
+            .hold_control(&release(g, 100, 200, 0), &mut link)
+            .unwrap()
+    );
+    assert_eq!(controls(&mut output), [failed(g)]);
+    assert!(matches!(
+        part(&brain),
+        ScreenPart::Closed(ScreenClass::NotReady)
+    ));
+    brain.holds.lost();
+    brain.close().await;
+}
+
+/// A pin set on the hold's thread while its recipient is read, even one set back, ends the whole
+/// hold: the read in flight never lets a capture start.
+#[tokio::test]
+async fn a_pin_moved_while_the_recipient_is_read_ends_the_hold_without_a_capture() {
+    let scratch = Scratch::new("screen-hold-pin-moved");
+    let (mut brain, _rig, _keep) = desk(&scratch).await;
+    let (sol, other) = image_recipients(&mut brain);
+    let (out, mut output) = mpsc::channel(64);
+    let queue = RefCell::new(DataQueue::new(crate::runtime::window()));
+    let ready_notify = Notify::new();
+    let mut tap = Tap::from_env();
+    let mut link = Link::new(&out, &queue, &ready_notify, &mut tap);
+    brain.screen_holds_changed(&mut link).unwrap();
+    controls(&mut output);
+    let (g, main) = (KEY.gesture, brain.config.view().main_thread);
+    let mut recognition = eligible(recognized(g), brain.holds.notice);
+    if let ControlToBrain::ScreenHoldRecognized { thread, .. } = &mut recognition {
+        *thread = Some(main);
+    }
+    assert!(brain.hold_control(&recognition, &mut link).unwrap());
+    assert!(matches!(part(&brain), ScreenPart::Armed));
+    let hold = brain.holds.pending.as_ref().unwrap();
+    let key = hold.key;
+    let Ok(StoreOp::ReadHold(read)) = brain.coordinator.prepare_hold(
+        key,
+        Some(main),
+        1,
+        brain.snapshot(Origin::Kumo),
+        Arc::clone(&hold.cancel),
+    ) else {
+        panic!("no hold read");
+    };
+    for choice in [other, sol] {
+        brain.hold_fence(&Input::ThreadOp(ThreadOp::SetModel {
+            thread: main,
+            choice,
+        }));
+    }
+    controls(&mut output);
+    brain
+        .hold_prepared(key, Ok(read.snapshot), &mut link)
+        .unwrap();
+    assert_eq!(
+        controls(&mut output),
+        [ControlToShell::VoiceHoldStatus {
+            gesture: g,
+            status: HoldStatus::Failed(HoldFailure::ChoiceChanged),
+        }]
+    );
+    assert!(brain.holds.pending.is_none());
+    let released = eligible(release(g, 100, 200, 0), brain.holds.notice);
+    assert!(brain.hold_control(&released, &mut link).unwrap());
+    assert_eq!(controls(&mut output), [failed(g)]);
     brain.close().await;
 }
