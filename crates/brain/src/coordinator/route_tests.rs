@@ -1076,7 +1076,12 @@ fn a_written_picture_lost_ends_its_run_by_its_first_cause_and_its_lease_settles_
         let refused = core.handle(ask).expect("current");
         assert_ended_without_a_send(&refused);
         let expected = if generation_first {
-            model_unavailable()
+            UserError::new(
+                ErrorKey::ScreenConnectionChanged,
+                Vec::new(),
+                vec![Action::OpenSettings],
+            )
+            .unwrap()
         } else {
             kumochi_protocol::message::ErrorKey::ScreenPictureStopped.into()
         };

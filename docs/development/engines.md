@@ -381,16 +381,19 @@ this model can't be sent images.", the shell hears `HoldScreen` as `NotIncluded(
 and the turn's `screen` becomes `model_cant_see`. A pending hold's picture closes the same way as
 soon as its recipient stops taking pictures, and stays closed if the fact comes back. Once a
 request is built, availability and generation latch the loss; admission and the send grant
-enforce it: the grant asks again, and a revoked picture grant whose send wrote nothing builds again the same way ("The send lease"). A
+enforce it: the grant asks again, and a revoked picture grant whose send wrote nothing builds again the same way ("The send lease"), unless an earlier send of the run may have written the picture. A
 send that may have written settles without building again. A loss sticks to the run, with its
 first cause: once its recipient stops taking pictures, or Claude Code's account generation moves
 while the picture is held for Claude Code, no later build carries that picture, even if the fact
 comes back. A pending hold's picture closes as `ModelCantSee` on either. The grant judges the
 request the engine holds, built with the picture or not, never the run's account of its screen,
 so a pictured request whose picture was lost and came back before its grant builds again without
-it. Once the grant took the picture, so a send may have written it, the ask is answered
-`Rebuild` and the run ends: `ModelUnavailable` for a generation move, `ScreenPictureStopped`
-("This model stopped accepting screenshots during this answer…") for a lost capability. A later
+it. Once a grant took the picture, so a send may have written it, no later request of the run
+starts: an inline compaction, a later build's grant and a later pictured grant proved unsent each
+end the run instead, an ask answered `Rebuild`. It ends as `ScreenConnectionChanged` ("Claude
+Code's connection changed during this answer…", with the Settings action) for a generation move,
+and as `ScreenPictureStopped` ("Kumochi can no longer confirm that this model can receive
+screenshots…") for a lost capability, which a failed catalog check alone can cause. A later
 build still holding the picture ends the same way. Earlier leases settle on their own, so
 history and held deletes follow what was actually written. Turning screen sharing off is the
 user's choice, not the model's, so it ends a run as `ScreenUnavailable`, whose line ("The screen

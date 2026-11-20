@@ -127,7 +127,12 @@ impl super::Run {
     /// Why the run ends when its picture may no longer go after a send may have written it.
     pub(super) fn picture_stopped(&self) -> kumochi_protocol::message::UserError {
         match self.screen_lost {
-            Some(super::Lost::Generation) => super::availability::model_unavailable(),
+            Some(super::Lost::Generation) => kumochi_protocol::message::UserError::new(
+                kumochi_protocol::message::ErrorKey::ScreenConnectionChanged,
+                Vec::new(),
+                vec![kumochi_protocol::message::Action::OpenSettings],
+            )
+            .expect("one action is within the limit"),
             _ => kumochi_protocol::message::ErrorKey::ScreenPictureStopped.into(),
         }
     }

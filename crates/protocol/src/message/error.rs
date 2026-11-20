@@ -114,9 +114,12 @@ pub enum ErrorKey {
     ClaudeCodeBusy,
     /// Speech input cannot be manually loaded with Hold to talk off.
     HoldToTalkOff,
-    /// The model stopped accepting screenshots after one may have reached it, so the answer
-    /// was stopped.
+    /// Kumochi can no longer confirm the model takes screenshots after one may have reached it,
+    /// so the answer was stopped.
     ScreenPictureStopped,
+    /// Claude Code's connection changed after a screenshot may have reached it, so the answer
+    /// was stopped.
+    ScreenConnectionChanged,
 }
 
 macro_rules! catalog {
@@ -189,6 +192,7 @@ impl ErrorKey {
         DrawingNotReturned,
         ScreenUnavailable,
         ScreenPictureStopped,
+        ScreenConnectionChanged,
         ConnectionNeeded,
     }
 }

@@ -84,6 +84,7 @@ impl Accounts {
             | ErrorKey::DrawingNotReturned
             | ErrorKey::ScreenUnavailable
             | ErrorKey::ScreenPictureStopped
+            | ErrorKey::ScreenConnectionChanged
             | ErrorKey::ConnectionNeeded => {}
             ErrorKey::SignInTimedOut
             | ErrorKey::SignInFailed

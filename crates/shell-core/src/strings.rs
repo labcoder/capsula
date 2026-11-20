@@ -676,6 +676,7 @@ const fn error_id(key: ErrorKey) -> &'static str {
         ErrorKey::DrawingNotReturned => "error-drawing-not-returned",
         ErrorKey::ScreenUnavailable => "error-screen-unavailable",
         ErrorKey::ScreenPictureStopped => "error-screen-picture-stopped",
+        ErrorKey::ScreenConnectionChanged => "error-screen-connection-changed",
         ErrorKey::ConnectionNeeded => "error-connection-needed",
     }
 }
@@ -827,7 +828,11 @@ mod tests {
         );
         assert_eq!(
             text(ErrorKey::ScreenPictureStopped),
-            "This model stopped accepting screenshots during this answer, so the answer was stopped. The screenshot may already have reached the model."
+            "Kumochi can no longer confirm that this model can receive screenshots, so it stopped this answer. The screenshot may already have reached the model."
+        );
+        assert_eq!(
+            text(ErrorKey::ScreenConnectionChanged),
+            "Claude Code's connection changed during this answer, so it was stopped. The screenshot may already have reached the model."
         );
     }
 

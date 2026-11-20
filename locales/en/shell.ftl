@@ -488,5 +488,6 @@ error-voice-model-path = The speech model folder goes through a link or network 
 error-drawing-replacement-failed = The replacement couldn't be drawn. Your previous drawings were removed.
 error-drawing-not-returned = No drawing came back.
 error-screen-unavailable = The screen is no longer available, so this turn was stopped.
-error-screen-picture-stopped = This model stopped accepting screenshots during this answer, so the answer was stopped. The screenshot may already have reached the model.
+error-screen-picture-stopped = Kumochi can no longer confirm that this model can receive screenshots, so it stopped this answer. The screenshot may already have reached the model.
+error-screen-connection-changed = Claude Code's connection changed during this answer, so it was stopped. The screenshot may already have reached the model.
 error-voice-unavailable = Voice can't be installed, loaded or removed right now.
