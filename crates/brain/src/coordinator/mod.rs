@@ -639,6 +639,9 @@ struct Run {
     pictured: bool,
     /// Why the hold's picture may never go again, the first cause kept. Every later build reads it.
     screen_lost: Option<Lost>,
+    /// The latest send whose picture grant closed, and why it first closed: what that send ends
+    /// with if its lease stopped it.
+    grant_closed: Option<(BuildKey, kumochi_protocol::message::UserError)>,
     /// The hold's gesture while its screen is still to be told to the shell, which happens once:
     /// an image once a granted send carrying it may have written it, anything else at the run's
     /// first request. A granted send holds it until it settles.
@@ -1355,6 +1358,7 @@ impl Coordinator {
             hold,
             pictured: matches!(screen, Some(crate::context::Screen::Picture(..))),
             screen_lost: None,
+            grant_closed: None,
             screen,
             build: None,
             arrived,

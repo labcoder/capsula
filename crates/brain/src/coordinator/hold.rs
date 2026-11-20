@@ -121,15 +121,6 @@ impl super::Run {
         self.untold.is_none() && matches!(self.screen, Some(Screen::Image(_) | Screen::Picture(..)))
     }
 
-    /// Why the run ends when its own lease stopped a send that may have written: its picture was
-    /// withdrawn, or else it may no longer go.
-    pub(super) fn withheld(&self) -> kumochi_protocol::message::UserError {
-        if matches!(self.screen, Some(Screen::Withdrawn)) {
-            return kumochi_protocol::message::ErrorKey::ScreenUnavailable.into();
-        }
-        self.picture_stopped()
-    }
-
     /// Why the run ends when its picture may no longer go after a send may have written it.
     pub(super) fn picture_stopped(&self) -> kumochi_protocol::message::UserError {
         match self.screen_lost {

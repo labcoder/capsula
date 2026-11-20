@@ -242,8 +242,7 @@ impl Coordinator {
             }
             TurnEvent::TextDelta(_) => return self.fail(run, Failure::Budget, effects),
             TurnEvent::Finished(finish) => {
-                let route = self.current(run)?.route;
-                self.current(run)?.error = self.engine_reason(route, finish);
+                self.current(run)?.error = self.round_reason(key, finish);
                 return self.fail(run, Failure::Engine, effects);
             }
             _ => return self.fail(run, Failure::Engine, effects),

@@ -188,12 +188,13 @@ sequenceDiagram
   `Rebuild` with nothing written; after one, it fails as `Withheld` and its connection is
   closed, never pooled, because an admitted poll may have written even when it was pending,
   partial or failed. Only a picture grant refuses, so the coordinator ends that run by why the
-  grant closed (see Picture grant), never as the connection failing; a connection that fails on
-  its own still ends as `Transport`. Closing wins only against new admissions: bytes an admitted poll already
-  handed to TLS or the kernel still go, so this orders writes, not the first byte at the peer,
-  and nothing here proves the peer received any of the request. Connecting and the TLS
-  handshake are not request writes. A refused send's round ends with `ReceiptOrdered`, so its
-  pump says nothing and the unsent receipt decides what follows.
+  grant first closed (see Picture grant), on an ordinary or an inline round alike, never as the
+  connection failing; a connection that fails on its own still ends as `Transport`. Closing wins
+  only against new admissions: bytes an admitted poll already handed to TLS or the kernel may
+  continue, so this orders writes, not the first byte at the peer, and nothing here proves the
+  peer received any of the request. Connecting and the TLS handshake are not request writes. A
+  send refused before any poll was admitted ends as `Rebuild` and its round with
+  `ReceiptOrdered`, so its pump says nothing and the unsent receipt decides what follows.
 - **Picture grant.** A send carrying a picture also carries a revocable grant. On `ChatGPT`, so
   does every later send of a run whose picture a send may have written, such as an inline
   rewrite, though it carries no picture of its own and its settlement tells nothing. The
@@ -395,8 +396,9 @@ the pointer's path was painted inside the image, one saying the pink line follow
 movement and where it lies, in image pixels. Its changed display and too-large picture have their
 own class lines. The lines live in `locales/en/brain.ftl` and carry no window details. The
 picture goes only where the run's route may carry it now (screen.md, "The brain's hold client"):
-always on `ChatGPT`, and on a Claude route with its switch on and its fresh fact still listing
-the model under the run's own sign-in. When that answer is no and no send carrying the picture
+on `ChatGPT` when its current sign-in's catalog lists the chosen model as taking images, and on
+a Claude route with its switch on and its fresh fact still listing the model under the run's own
+sign-in. When that answer is no and no send carrying the picture
 has attempted a write, the build goes without it: the model gets "The screen was not included:
 this model can't be sent images.", the shell hears `HoldScreen` as `NotIncluded(ModelCantSee)`,
 and the turn's `screen` becomes `model_cant_see`. A pending hold's picture closes the same way as
@@ -420,13 +422,13 @@ starts no inline compaction at all, even while the picture may still go: the rew
 comes before its connection, and nothing could stop its text after a loss while it connects, so
 the run ends on its budget. Other screen-attachment refusals still end as `ScreenUnavailable`.
 Earlier leases settle on their own, so
-history and held deletes follow what was actually written. Turning screen sharing off is the
+history and held deletes follow what each send may have written. Turning screen sharing off is the
 user's choice, not the model's, so it ends a run as `ScreenUnavailable`, whose line ("The screen
 is no longer available, so this turn was stopped.") makes no claim about what was sent. The
 direct connection control runs the pending hold's check at once. On every route, a settlement
 that changes the turn's stored row, marking it sent or clearing it after the run has ended, also
-sends the shell `EventsChanged { thread }` (ipc.md) after that write is queued, unless the thread
-is being deleted, so a shown page of that thread is read again; that read waits for the write
+sends the shell `EventsChanged { thread }` (ipc.md) under its hold's epoch after that write is
+queued, unless the thread is being deleted, so a shown page of that thread is read again; that read waits for the write
 attempt, not for proof that it succeeded. What the hold carried goes in the run's row
 with its turn (store.md, `runs.screen`), and the shell hears it once as `HoldScreen`: an image
 when a send carrying it settles after attempting a write ("The send lease"), anything else when
@@ -455,7 +457,8 @@ records no screen: a turn not
 yet written is written without it, and a written one is cleared by a store write queued behind
 the turn's. Known limits:
 - **A granted send can't be recalled.** Turning screen holds off refuses a request's send that
-  hasn't been granted yet, but a body already granted goes out with its image.
+  hasn't been granted yet; a body already granted may still go with its image. A `ChatGPT`
+  upload stops at its next write poll, though bytes already admitted may continue.
 - **History can show a window that never left.** A write that was attempted marks the screen
   sent even if no byte was accepted. Kumochi exiting before the send outcome is recorded while the picture is pending, including after a
   send proved unsent while its run could still send again, and a failed write of the mark or of

@@ -376,6 +376,56 @@ impl Rig {
         (settled, effects, ended)
     }
 
+    /// Run R's image goes on a first send, then the run compacts inline: the rewrite is built and
+    /// started, its grant not yet asked for.
+    async fn exposed_rewrite(&mut self) -> BuildKey {
+        let (_, effects) = self.settle().await;
+        let lease = granted(&effects);
+        let mut peer = self.peer().await;
+        peer.request().await;
+        let (settled, effects) = self.settle().await;
+        assert_eq!(settled, Input::SendSettled { lease });
+        assert_eq!(written_settlement(&effects), (1, 1, 1));
+        self.rounds.clear();
+        drop(peer);
+        let mut effects = Vec::new();
+        self.core.build(R, 2, &mut effects);
+        self.apply(&effects);
+        let round = *self.builds.last().expect("a later round");
+        let compact = self.handle(Input::ContextBuilt(ContextBuilt {
+            key: round,
+            snapshot: None,
+            result: Err(Unbuilt::TooLarge { room: Some(500) }),
+        }));
+        let rewrite = compact
+            .iter()
+            .find_map(|effect| match effect {
+                Effect::Store(StoreOp::CompactContext(context)) => Some(context.key),
+                _ => None,
+            })
+            .expect("it compacts inline");
+        self.handle(Input::CompactBuilt(CompactBuilt {
+            key: rewrite,
+            result: Ok(Some((
+                JobAsk {
+                    generation: Generation(1),
+                    built: Built {
+                        request: ModelRequest {
+                            choice: Some(choice(CHATGPT, "m")),
+                            instructions: String::new(),
+                            input: vec![user()],
+                            tools: Vec::new(),
+                        },
+                        sources: vec![T],
+                    },
+                    covers: Some((EventId(1), EventId(2))),
+                },
+                100,
+            ))),
+        }));
+        rewrite
+    }
+
     /// The fact that m takes images goes and comes back, with the tag and model unchanged.
     fn lose_and_restore(&mut self) {
         for images in [&[][..], &["m"]] {
@@ -551,51 +601,8 @@ async fn an_image_lost_after_an_admitted_first_write_is_never_replayed_or_called
 async fn an_exposed_runs_inline_rewrite_goes_only_while_its_image_may() {
     for lost in [true, false] {
         let mut rig = Rig::new(Pool::Empty, &["m"]);
-        let (_, effects) = rig.settle().await;
-        let lease = granted(&effects);
-        let mut peer = rig.peer().await;
-        peer.request().await;
-        let (settled, effects) = rig.settle().await;
-        assert_eq!(settled, Input::SendSettled { lease });
-        assert_eq!(written_settlement(&effects), (1, 1, 1));
-        rig.rounds.clear();
-        drop(peer);
-        let mut effects = Vec::new();
-        rig.core.build(R, 2, &mut effects);
-        rig.apply(&effects);
-        let round = *rig.builds.last().expect("a later round");
-        let compact = rig.handle(Input::ContextBuilt(ContextBuilt {
-            key: round,
-            snapshot: None,
-            result: Err(Unbuilt::TooLarge { room: Some(500) }),
-        }));
-        let rewrite = compact
-            .iter()
-            .find_map(|effect| match effect {
-                Effect::Store(StoreOp::CompactContext(context)) => Some(context.key),
-                _ => None,
-            })
-            .expect("it compacts inline");
+        let rewrite = rig.exposed_rewrite().await;
         rig.open.send_replace(!lost);
-        rig.handle(Input::CompactBuilt(CompactBuilt {
-            key: rewrite,
-            result: Ok(Some((
-                JobAsk {
-                    generation: Generation(1),
-                    built: Built {
-                        request: ModelRequest {
-                            choice: Some(choice(CHATGPT, "m")),
-                            instructions: String::new(),
-                            input: vec![user()],
-                            tools: Vec::new(),
-                        },
-                        sources: vec![T],
-                    },
-                    covers: Some((EventId(1), EventId(2))),
-                },
-                100,
-            ))),
-        }));
         let (_, effects) = rig.settle().await;
         let lease = granted(&effects);
         assert_eq!(lease.key, SendKey::Build(rewrite));
@@ -752,4 +759,95 @@ async fn a_connection_lost_mid_upload_under_an_open_grant_keeps_its_own_reason()
         )
     );
     assert!(!sends_again(&ended));
+}
+
+fn ended_with(key: ErrorKey) -> UserError {
+    UserError::new(key, Vec::new(), Vec::new()).expect("valid")
+}
+
+/// Sharing turned off after an exposed run's rewrite admitted a partial write: no later poll,
+/// summary, follow-up or second picture mark, and the run ends as the picture unavailable.
+#[tokio::test]
+async fn sharing_off_after_a_partial_inline_write_ends_as_the_picture_unavailable() {
+    let mut rig = Rig::new(Pool::Empty, &["m"]);
+    let rewrite = rig.exposed_rewrite().await;
+    *lock(&rig.next) = (256, false);
+    let (_, effects) = rig.settle().await;
+    let lease = granted(&effects);
+    assert_eq!(lease.key, SendKey::Build(rewrite));
+    let grant = rig
+        .core
+        .picture_grant(lease)
+        .expect("an exposed run's rewrite is under a grant");
+    let mut peer = rig.peer().await;
+    settle_tasks().await;
+    let polls = peer.polls();
+    assert_eq!(polls, 2);
+    let off = rig.handle(Input::ScreenHoldsOff);
+    assert!(!grant.is_open());
+    assert_eq!(failure(&off), None);
+    let mut written = vec![0; 256];
+    peer.server.read_exact(&mut written).await.expect("read");
+    let (settled, effects, ended) = rig.settled_then_finished().await;
+    assert_eq!(settled, Input::SendSettled { lease });
+    assert_eq!(
+        written_settlement(&effects),
+        (0, 0, 0),
+        "no second picture mark"
+    );
+    assert_eq!(peer.polls(), polls, "no poll after the refusal");
+    assert_eq!(peer.rest().await, Vec::<u8>::new());
+    assert_eq!(
+        failure(&ended),
+        Some(ended_with(ErrorKey::ScreenUnavailable))
+    );
+    assert!(!sends_again(&ended));
+    assert!(
+        !effects
+            .iter()
+            .chain(&ended)
+            .any(|effect| matches!(effect, Effect::Store(StoreOp::StoreSummary { .. })))
+    );
+}
+
+/// A capability loss and sharing turned off both close one grant before its send's terminal is
+/// read: the run ends by whichever came first.
+#[tokio::test]
+async fn a_grant_closed_by_two_causes_ends_its_run_by_the_first() {
+    for capability_first in [true, false] {
+        let mut rig = Rig::new(Pool::Empty, &["m"]);
+        *lock(&rig.next) = (1 << 20, true);
+        let (_, effects) = rig.settle().await;
+        let lease = granted(&effects);
+        let grant = rig.core.picture_grant(lease).expect("a revocable grant");
+        let peer = rig.peer().await;
+        settle_tasks().await;
+        assert_eq!(peer.polls(), 1);
+        let lost = Input::Engines(CHATGPT, pictured(7, &[]));
+        let causes = if capability_first {
+            [lost, Input::ScreenHoldsOff]
+        } else {
+            [Input::ScreenHoldsOff, lost]
+        };
+        for cause in causes {
+            assert_eq!(failure(&rig.handle(cause)), None, "{capability_first}");
+        }
+        assert!(!grant.is_open());
+        peer.release();
+        let (settled, effects, ended) = rig.settled_then_finished().await;
+        assert_eq!(settled, Input::SendSettled { lease });
+        assert_eq!(written_settlement(&effects), (1, 1, 1));
+        assert_eq!(peer.polls(), 1, "no poll after the refusal");
+        let first = if capability_first {
+            ErrorKey::ScreenPictureStopped
+        } else {
+            ErrorKey::ScreenUnavailable
+        };
+        assert_eq!(
+            failure(&ended),
+            Some(ended_with(first)),
+            "{capability_first}"
+        );
+        assert!(!sends_again(&ended));
+    }
 }

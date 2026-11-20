@@ -154,26 +154,63 @@ impl Coordinator {
     }
 
     /// Fences new write admissions for each picture grant whose run may no longer send it: its
-    /// picture was lost or withdrawn, or its recipient no longer takes it.
-    pub(super) fn revoke_pictures(&self) {
+    /// picture was withdrawn or lost, or its recipient no longer takes it. Each grant's first
+    /// close keeps that cause on its run for the send's terminal (`Self::round_reason`).
+    pub(super) fn revoke_pictures(&mut self) {
+        let mut first = Vec::new();
         for lease in &self.leases {
             let (Some(grant), SendKey::Build(key)) = (&lease.picture, lease.id.key) else {
                 continue;
             };
-            if !self
+            let run = self
                 .ending
                 .iter()
                 .chain(&self.current)
+                .find(|run| run.id == key.run);
+            let cause = match run {
+                Some(run) if matches!(run.screen, Some(crate::context::Screen::Withdrawn)) => {
+                    Some(kumochi_protocol::message::ErrorKey::ScreenUnavailable.into())
+                }
+                Some(run) if run.screen_lost.is_none() && self.run_pictured(run) => continue,
+                Some(run) => Some(run.picture_stopped()),
+                None => None,
+            };
+            if let Some(cause) = cause.filter(|_| grant.is_open()) {
+                first.push((key, cause));
+            }
+            grant.close();
+        }
+        for (key, cause) in first {
+            if let Some(run) = self
+                .ending
+                .iter_mut()
+                .chain(&mut self.current)
                 .find(|run| run.id == key.run)
-                .is_some_and(|run| {
-                    run.screen_lost.is_none()
-                        && !matches!(run.screen, Some(crate::context::Screen::Withdrawn))
-                        && self.run_pictured(run)
-                })
             {
-                grant.close();
+                run.grant_closed = Some((key, cause));
             }
         }
+    }
+
+    /// Why a round ended, read the same way for every build kind: a send its own lease stopped
+    /// ends by why that send's grant first closed, and anything else by the engine's reason.
+    pub(super) fn round_reason(
+        &self,
+        key: BuildKey,
+        finish: crate::engines::Finish,
+    ) -> Option<kumochi_protocol::message::UserError> {
+        let run = self.current.as_ref().filter(|run| run.id == key.run);
+        let withheld = crate::engines::Finish::Failed(crate::engines::EngineFailure::Stream(
+            crate::connections::model::error::Failure::Withheld,
+        ));
+        if finish == withheld
+            && let Some((_, cause)) = run
+                .and_then(|run| run.grant_closed.as_ref())
+                .filter(|(closed, _)| *closed == key)
+        {
+            return Some(cause.clone());
+        }
+        self.engine_reason(run.and_then(|run| run.route), finish)
     }
 
     /// The current run's hold's picture is lost for good when its recipient no longer takes
