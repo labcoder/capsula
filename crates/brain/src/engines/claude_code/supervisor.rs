@@ -30,7 +30,7 @@ use crate::bridge::listener::{Binding, LaunchContext, Listener, McpCall};
 use crate::connections::model::Lease as _;
 use crate::context::ToolSchema;
 use crate::coordinator::PictureWrite;
-use crate::engines::SendLease;
+use crate::engines::{PictureReceipt, SendLease};
 use crate::platform::{self, Job, Stdio};
 
 /// The longest a launch may live, from admission [guess, not measured: C5b's 30 s warm window
@@ -144,8 +144,6 @@ pub(crate) enum StdinRefused {
     Revoked,
     /// The deadline passed while it waited for room.
     Deadline,
-    /// The held picture grant closed before the first write; the coordinator can rebuild.
-    PictureClosed,
 }
 
 /// Writes a launch's stdin: the control lines, then one seed, each checked whole against its cap
@@ -380,13 +378,7 @@ impl Control {
             return Err(StdinRefused::Revoked);
         };
         let grant = lease.picture.as_ref().ok_or(StdinRefused::Revoked)?;
-        let Some(permit) = grant.reserve_write() else {
-            return Err(if lease.unsent && !grant.is_open() {
-                StdinRefused::PictureClosed
-            } else {
-                StdinRefused::Revoked
-            });
-        };
+        let permit = grant.reserve_write().ok_or(StdinRefused::Revoked)?;
         if self.is_revoked() || self.output_closed.load(Ordering::Acquire) {
             return Err(StdinRefused::Revoked);
         }
@@ -394,6 +386,9 @@ impl Control {
             return Err(StdinRefused::Deadline);
         }
         lease.wrote();
+        if let Some(receipt) = lease.picture_receipt.take() {
+            receipt.send(PictureReceipt::Attempted).ok();
+        }
         Ok(permit)
     }
 

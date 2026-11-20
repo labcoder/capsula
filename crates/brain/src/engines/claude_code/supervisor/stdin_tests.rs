@@ -196,7 +196,6 @@ fn pictured_stdin_distinguishes_no_write_from_a_partial_first_chunk() {
         assert_eq!(pipe.calls, expected_writes, "{fence:?}");
         let expected = match fence {
             Fence::Stop => Err(tokio::sync::oneshot::error::TryRecvError::Closed),
-            Fence::GrantClosed => Ok(Err(StdinRefused::PictureClosed)),
             Fence::Deadline => Ok(Err(StdinRefused::Deadline)),
             _ => Ok(Err(StdinRefused::Revoked)),
         };

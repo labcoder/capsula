@@ -170,19 +170,24 @@ async fn a_missing_or_closed_grant_or_unsealed_capture_never_seeds() {
         };
         rig.drive(played.asked(lease)).await;
         let events = rig.drive(played.events()).await;
-        if reason == "closed" {
-            assert_eq!(
-                events,
-                [TurnEvent::Finished(Finish::AwaitingRebuild)],
-                "the coordinator owns the retry"
-            );
+        let failure = TurnEvent::Finished(Finish::Failed(EngineFailure::Provider));
+        if reason == "no-grant" {
+            assert_eq!(events, [failure]);
+            receipt(&mut played, |lease| Input::SendUnsent { lease }).await;
         } else {
+            assert_eq!(events, [TurnEvent::Finished(Finish::ReceiptOrdered)]);
+            receipt(&mut played, |lease| Input::SendUnsent { lease }).await;
+            let SendKey::Build(key) = played.key else {
+                panic!("pictured build")
+            };
             assert_eq!(
-                events,
-                [TurnEvent::Finished(Finish::Failed(EngineFailure::Provider))]
+                played.inputs.try_recv(),
+                Ok(Input::Engine {
+                    key,
+                    event: failure
+                })
             );
         }
-        receipt(&mut played, |lease| Input::SendUnsent { lease }).await;
         assert_eq!(rig.stdin(), ["1 initialize", "1 mcp_status"]);
         until("removed after refusal", || !folder.exists()).await;
         rig.close().await;
@@ -226,18 +231,34 @@ async fn closed_picture_grant_does_not_truncate_while_teardown_holds_the_receipt
         .await
         .expect("held teardown")
         .expect("arrived");
-    let before_settlement = rig.drive(events.recv()).await;
+    let before_settlement = timeout(Duration::from_millis(300), events.recv()).await;
     let premature_receipt = receipts.try_recv();
     resume.send(()).expect("release teardown");
 
-    assert_eq!(
-        before_settlement, None,
-        "the production pump must not synthesize Truncated"
+    assert!(
+        before_settlement.is_err(),
+        "the production pump must not synthesize Truncated: {before_settlement:?}"
     );
     assert_eq!(premature_receipt, Err(mpsc::error::TryRecvError::Empty));
     assert_eq!(
         timeout(WAIT, receipts.recv()).await.expect("settled"),
         Some(Input::SendUnsent { lease })
+    );
+    let SendKey::Build(key) = key else {
+        panic!("pictured build")
+    };
+    assert_eq!(
+        timeout(WAIT, receipts.recv())
+            .await
+            .expect("ordered terminal outcome"),
+        Some(Input::Engine {
+            key,
+            event: TurnEvent::Finished(Finish::Failed(EngineFailure::Provider))
+        })
+    );
+    assert_eq!(
+        timeout(WAIT, events.recv()).await.expect("pump ended"),
+        None
     );
     assert_eq!(rig.stdin(), ["1 initialize", "1 mcp_status"]);
     drop(pump);

@@ -184,9 +184,11 @@ sequenceDiagram
 - **Picture grant.** A send carrying a picture on a Claude route also carries a revocable grant.
   The coordinator closes it as soon as the run may no longer send that picture. The key route
   checks at its first write attempt, after any early response. Claude Code reserves each pipe
-  write against the same grant. If it closes before the first admission, the round's pump sends
-  no engine failure; after confirmed teardown, the unsent receipt lets the coordinator rebuild
-  the still-current build without the picture. An unexpected stream EOF still reports `Truncated`.
+  write against the same grant. If no write was attempted, any terminal outcome goes behind the
+  confirmed unsent receipt on that same channel. A closed grant makes the still-current build
+  rebuild without the picture, so the old terminal outcome is stale. Unconfirmed teardown leaves
+  settlement to the held lease's deadline. Once a write was attempted, the pump reports terminal
+  outcomes as usual, including `Truncated` for unexpected stream EOF.
   On Claude Code the grant also belongs to the account generation
   the question it was issued for was asked under, not the one its picture was captured under:
   a new generation closes it, before that generation is published, even while that launch,

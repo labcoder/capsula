@@ -27,10 +27,10 @@ use super::supervisor::{
 use crate::bridge::LaunchId;
 use crate::connections::model::budget::Budget;
 use crate::context::{InputItem, Origin, ToolSchema};
-use crate::coordinator::{BuildKey, SendKey};
+use crate::coordinator::{BuildKey, Input as CoordinatorInput, SendKey};
 use crate::engines::{
-    Answer, ClaudeStreamFailure, Engine, EngineFailure, Finish, Round, RunRequest, SendGate,
-    ToolName, TurnEvent,
+    Answer, ClaudeStreamFailure, Engine, EngineFailure, Finish, PictureReceipt, Round, RunRequest,
+    SendGate, ToolName, TurnEvent,
 };
 
 /// How long a warm launch waits for its question [guess, the design's 30 s].
@@ -485,20 +485,38 @@ impl Engine for ClaudeQuestion {
         let notes = self.notes.clone();
         let clock = self.clock.clone();
         Box::pin(async move {
+            let mut receipt = None;
             let finish = match attempt {
                 Some(attempt) => {
-                    let round = Question {
+                    let mut round = Question {
                         events: &events,
                         gate: &gate,
                         budget: &budget,
                         notes: &notes,
                         clock: &clock,
+                        receipt: &mut receipt,
                     };
                     round.play(attempt, &request).await
                 }
                 None => Some(Finish::Failed(EngineFailure::Provider)),
             };
-            if let Some(finish) = finish {
+            drop(request);
+            if let Some(mut finish) = finish {
+                if let (Some(receipt), SendKey::Build(key)) = (receipt, gate.key) {
+                    finish = match receipt.await {
+                        Ok(PictureReceipt::Attempted) => finish,
+                        Ok(PictureReceipt::Unsent(inputs)) => {
+                            inputs
+                                .send(CoordinatorInput::Engine {
+                                    key,
+                                    event: TurnEvent::Finished(finish),
+                                })
+                                .ok();
+                            Finish::ReceiptOrdered
+                        }
+                        Err(_) => Finish::ReceiptOrdered,
+                    };
+                }
                 events.send(TurnEvent::Finished(finish)).await.ok();
             }
         })
@@ -512,11 +530,12 @@ struct Question<'a> {
     budget: &'a Budget,
     notes: &'a mpsc::UnboundedSender<Note>,
     clock: &'a Clock,
+    receipt: &'a mut Option<oneshot::Receiver<PictureReceipt>>,
 }
 
 impl Question<'_> {
     /// The round's `Finished`; `None` for a `Rebuild`, which sends nothing.
-    async fn play(&self, mut attempt: Attempt, request: &RunRequest) -> Option<Finish> {
+    async fn play(&mut self, mut attempt: Attempt, request: &RunRequest) -> Option<Finish> {
         let mut warmed = match attempt.ready().await {
             Ok(warmed) => warmed,
             Err(outcome) => return Some(failed(outcome)),
@@ -556,12 +575,17 @@ impl Question<'_> {
         }
         let hold = (launch.deadline() + SETTLE).saturating_duration_since(Instant::now());
         // A timeout polls the ask first, so a Grant ready after the deadline still needs refusing.
-        let lease = match tokio::time::timeout_at(until.into(), self.gate.ask_held(hold)).await {
-            Ok(Answer::Grant(lease)) if Instant::now() < until => lease,
+        let mut lease = match tokio::time::timeout_at(until.into(), self.gate.ask_held(hold)).await
+        {
+            Ok(Answer::Grant(lease)) => lease,
             Ok(Answer::Rebuild) => return None,
-            Ok(Answer::Grant(_)) | Err(_) => return Some(expired(launch, report)),
+            Err(_) => return Some(expired(launch, report)),
         };
         let picture = lease.carries_picture().then_some(request.key);
+        *self.receipt = picture.map(|_| lease.track_picture_receipt());
+        if Instant::now() >= until {
+            return Some(expired(launch, report));
+        }
         if !self.budget.reserve() {
             drop(lease);
             return Some(claude(ErrorKey::ClaudeCodeBudget));
@@ -582,7 +606,6 @@ impl Question<'_> {
         .await
         {
             Ok(()) => {}
-            Err(StdinRefused::PictureClosed) => return Some(Finish::AwaitingRebuild),
             Err(StdinRefused::Deadline) => return Some(expired(launch, report)),
             Err(_) => {
                 report.report(Outcome::Launch);

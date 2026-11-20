@@ -4,8 +4,8 @@
 //! round with [`TurnEvent::Finished`]. The coordinator, not the engine, decides whether a round
 //! ends its run. Each start gets its own pump and channel: the pump forwards the round's events
 //! to the coordinator tagged with the run, closes after the first `Finished`, and reports a round
-//! that ends without one, even after text, as `Finished(Truncated)`. A pre-write picture refusal
-//! leaves the round to the coordinator's lease settlement instead. Dropping the round's
+//! that ends without one, even after text, as `Finished(Truncated)`. An unattempted pictured
+//! send orders its terminal outcome behind the lease receipt instead. Dropping the round's
 //! [`Cancel`] aborts the pump and the engine's future with it, even while the pump waits on a
 //! full coordinator queue, so a cancelled round sends nothing more and never reads as truncated.
 
@@ -217,6 +217,14 @@ pub struct SendLease {
     unsent: bool,
     /// The coordinator's revocable grant for the picture the request carries.
     picture: Option<PictureGrant>,
+    picture_receipt: Option<oneshot::Sender<PictureReceipt>>,
+}
+
+/// Whether terminal delivery can use the pump or must follow the unsent receipt.
+#[derive(Debug)]
+enum PictureReceipt {
+    Attempted,
+    Unsent(mpsc::UnboundedSender<Input>),
 }
 
 impl SendLease {
@@ -226,6 +234,7 @@ impl SendLease {
             inputs: Some(inputs),
             unsent: true,
             picture: None,
+            picture_receipt: None,
         }
     }
 
@@ -239,6 +248,12 @@ impl SendLease {
     /// coordinator granted with one, open or since closed.
     pub(crate) fn carries_picture(&self) -> bool {
         self.picture.is_some()
+    }
+
+    fn track_picture_receipt(&mut self) -> oneshot::Receiver<PictureReceipt> {
+        let (settled, wait) = oneshot::channel();
+        self.picture_receipt = Some(settled);
+        wait
     }
 
     /// Gives the lease up unsettled: its send may still be going out, so its sources stay held
@@ -270,6 +285,8 @@ impl Drop for SendLease {
         };
         if inputs.send(settled).is_err() {
             tracing::debug!("a send settled after the brain ended");
+        } else if let Some(receipt) = self.picture_receipt.take() {
+            receipt.send(PictureReceipt::Unsent(inputs)).ok();
         }
     }
 }
@@ -395,8 +412,8 @@ pub enum Finish {
     Completed,
     /// The round's stream ended without saying how it finished.
     Truncated,
-    /// A pictured seed was refused before any write; only lease settlement may rebuild it.
-    AwaitingRebuild,
+    /// A pictured launch's terminal outcome is ordered by its send receipt, not by the pump.
+    ReceiptOrdered,
     /// The round failed.
     Failed(EngineFailure),
     /// The engine stopped the round itself. Only the coordinator interrupts runs, so this fails
@@ -693,7 +710,7 @@ async fn pump(
                 continue;
             }
         };
-        if matches!(event, TurnEvent::Finished(Finish::AwaitingRebuild)) {
+        if matches!(event, TurnEvent::Finished(Finish::ReceiptOrdered)) {
             return;
         }
         let finished = matches!(event, TurnEvent::Finished(_));
