@@ -55,6 +55,8 @@ mod scenes;
 mod settings;
 #[path = "speech_tests.rs"]
 mod speech;
+#[path = "stop_scene_tests.rs"]
+mod stop_scenes;
 #[path = "thread_op_tests.rs"]
 mod thread_ops;
 #[path = "voice_tests.rs"]
