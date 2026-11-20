@@ -188,8 +188,9 @@ sequenceDiagram
   again without the picture. On Claude Code the grant also belongs to the account generation
   the question it was issued for was asked under, not the one its picture was captured under:
   a new generation closes it, before that generation is published, even while that launch,
-  unbound, runs on, and a grant for a question asked under an older generation is closed as
-  it's issued.
+  unbound, runs on. A Claude Code grant for any build other than the one asked under the
+  current generation is closed as it's issued, before its engine is answered; a key route's
+  grant is never Claude Code's to touch.
 - **The picture's settlement.** A lease carrying a hold's picture settles it once: unsent, the run is as if never
   granted (a later grant carries the picture again, or the run's end clears the mark); otherwise
   the shell is told `HoldScreen`. A failed lease's late settlement settles only the picture.
@@ -377,12 +378,15 @@ and the turn's `screen` becomes `model_cant_see`. A pending hold's picture close
 soon as its recipient stops taking pictures, and stays closed if the fact comes back. Once a
 request is built, a loss is caught at the grant and only there: the grant asks again, and a
 revoked picture grant whose send wrote nothing builds again the same way ("The send lease"). A
-send that may have written settles without building again: the run's next build carries the
-picture again if the fact came back, and fails with `ScreenUnavailable` only if it's still false,
-as it does with no user message left. Two gaps stay open in this change: a request the engine
-already holds isn't rebuilt when the fact goes false, so a loss and return before its grant isn't
-caught, and the direct connection control doesn't run the pending hold's check yet. Both must
-close before either Claude picture switch turns on. What the hold carried goes in the run's row
+send that may have written settles without building again. A loss sticks to the run: once its
+recipient stops taking pictures, or Claude Code's account generation moves while the picture is
+held for Claude Code, no later build carries that picture, even if the fact comes back. A
+pending hold's picture closes as `ModelCantSee` on either. The grant judges the request the
+engine holds, built with the picture or not, never the run's account of its screen, so a
+pictured request whose picture was lost and came back before its grant builds again without it,
+or, once a send may have written it, is never granted and its replacement fails with
+`ScreenUnavailable`, as it does with no user message left. The direct connection control runs
+the pending hold's check at once. What the hold carried goes in the run's row
 with its turn (store.md, `runs.screen`), and the shell hears it once as `HoldScreen`: an image
 when a send carrying it settles after attempting a write ("The send lease"), anything else when
 the run's first request starts. An inline compaction's send carries only text, so it doesn't

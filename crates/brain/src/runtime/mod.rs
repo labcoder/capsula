@@ -1307,7 +1307,11 @@ impl Brain {
                 Effect::Grant(lease) => {
                     let picture = self.coordinator.picture_grant(lease);
                     if let Some(grant) = &picture {
-                        self.claude.picture_granted(lease.key, grant.clone());
+                        let kind = match lease.key {
+                            SendKey::Build(build) => self.coordinator.route_kind(build.run),
+                            SendKey::Job(_) => None,
+                        };
+                        self.claude.picture_granted(lease.key, kind, grant.clone());
                     }
                     let granted =
                         SendLease::new(lease, self.inputs_tx.clone()).with_picture(picture);

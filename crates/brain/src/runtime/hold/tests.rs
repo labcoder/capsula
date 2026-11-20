@@ -2681,3 +2681,137 @@ async fn a_queued_repair_with_nothing_to_write_leaves_a_pending_hold_pending() {
     brain.holds.lost();
     brain.close().await;
 }
+
+#[tokio::test]
+async fn a_claude_code_generation_change_closes_only_a_pending_claude_code_picture() {
+    use crate::engines::claude_code::lane::Lane;
+    use crate::engines::claude_code::lane::tests::{Base, host};
+    use crate::runtime::claude::{Claude, SignInStore};
+    use kumochi_protocol::message::{
+        ClaudeCodeView, ConnectionKind, ConnectionOp, ModelSlug, ScreenClass,
+    };
+    for (kind, closed) in [
+        (ConnectionKind::ClaudeCode, true),
+        (ConnectionKind::AnthropicKey, false),
+    ] {
+        let scratch = Scratch::new("hold-picture-generation");
+        let (mut brain, _release, _decoded, _fetch) =
+            crate::runtime::tests::holds::input(&scratch, Vec::new(), "not submitted").await;
+        let base = Base::new("hold-picture-generation");
+        let (host, _switches) = host(&base, "in");
+        brain.attach_claude(Claude::new(
+            Some(Lane::start(host).expect("lane")),
+            SignInStore::FileWithDacl,
+            ClaudeCodeView::NotFound,
+        ));
+        let (out, _output) = mpsc::channel(16);
+        let queue = RefCell::new(DataQueue::new(super::super::window()));
+        let ready_notify = Notify::new();
+        let mut tap = Tap::from_env();
+        let mut link = Link::new(&out, &queue, &ready_notify, &mut tap);
+        screen_hold(&mut brain, KEY, ready());
+        brain.holds.pending.as_mut().unwrap().screen_recipient =
+            Some((kind, ModelSlug::new("m").unwrap()));
+        brain
+            .claude_op(ConnectionOp::FindClaudeCode, Some(&mut link))
+            .unwrap();
+        let part = &brain.holds.pending.as_ref().unwrap().screen;
+        if closed {
+            assert!(
+                matches!(part, ScreenPart::Closed(ScreenClass::ModelCantSee)),
+                "{kind:?}"
+            );
+        } else {
+            assert!(matches!(part, ScreenPart::Ready(_)), "{kind:?}");
+        }
+        brain.holds.lost();
+        screen_hold(&mut brain, KEY, ready());
+        brain.holds.pending.as_mut().unwrap().screen_recipient =
+            Some((kind, ModelSlug::new("m").unwrap()));
+        brain
+            .claude_op(ConnectionOp::FindClaudeCode, Some(&mut link))
+            .unwrap();
+        assert!(
+            matches!(
+                &brain.holds.pending.as_ref().unwrap().screen,
+                ScreenPart::Ready(_)
+            ),
+            "a hold taken after the move keeps its picture through a Find that only queues: {kind:?}"
+        );
+        brain.holds.lost();
+        assert!(
+            brain
+                .claude
+                .close(crate::engines::claude_code::lane::tests::soon())
+                .await
+        );
+        brain.close().await;
+    }
+}
+
+#[tokio::test]
+async fn a_connection_control_sends_the_screen_notice_it_changed_at_once() {
+    use crate::context::ConnectionTag;
+    use crate::coordinator::{PictureRoutes, Ready};
+    use kumochi_protocol::message::{
+        ConnectionKind, ConnectionOp, Effort, ModelInfo, ModelName, ModelSlug,
+    };
+    let scratch = Scratch::new("hold-connection-notice");
+    let (mut brain, _release, _decoded, _fetch) =
+        crate::runtime::tests::holds::input(&scratch, Vec::new(), "not submitted").await;
+    let (out, mut output) = mpsc::channel(16);
+    let queue = RefCell::new(DataQueue::new(super::super::window()));
+    let ready_notify = Notify::new();
+    let mut tap = Tap::from_env();
+    let mut link = Link::new(&out, &queue, &ready_notify, &mut tap);
+    let (_rig, _sol, _luna) = sees_on_sol(&mut brain);
+    brain.holds.window_capture = true;
+    let seen = ModelSlug::new("seen").unwrap();
+    brain
+        .coordinator
+        .set_pictures(PictureRoutes::new(false, true));
+    brain
+        .coordinator
+        .handle(crate::coordinator::Input::Engines(
+            ConnectionKind::ClaudeCode,
+            Availability::Ready(Ready {
+                connection: ConnectionTag(5),
+                models: vec![ModelInfo {
+                    slug: seen.clone(),
+                    display_name: ModelName::new("Seen").unwrap(),
+                    supported_efforts: None,
+                }],
+                images: vec![seen.clone()],
+                trusted_draw: false,
+            }),
+        ))
+        .unwrap();
+    set(
+        &mut brain,
+        SettingsOp::SetDefaultModel(ModelChoice {
+            model: seen,
+            effort: Effort::Low,
+            connection: ConnectionKind::ClaudeCode,
+        }),
+    );
+    brain.screen_holds_changed(&mut link).unwrap();
+    assert_eq!(
+        gates(&mut output),
+        [ScreenHolds::On {
+            model: ModelName::new("Seen").unwrap()
+        }]
+    );
+    let mut ping = None;
+    brain
+        .control_frame(
+            ControlToBrain::Connection(ConnectionOp::DisconnectClaudeCode),
+            0,
+            &mut link,
+            &mut ping,
+        )
+        .unwrap();
+    let sent = gates(&mut output);
+    assert_eq!(sent.len(), 1, "{sent:?}");
+    assert!(matches!(sent[0], ScreenHolds::Off(_)), "{sent:?}");
+    brain.close().await;
+}

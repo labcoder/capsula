@@ -3037,7 +3037,8 @@ async fn a_new_generation_closes_a_picture_grant_while_its_unbound_launch_runs_o
     let request = choosing("haiku", Effort::Low, ConnectionKind::ClaudeCode);
     let question = rig.claude.question(&request).expect("admitted");
     let grant = crate::coordinator::PictureGrant::open_for_tests();
-    rig.claude.picture_granted(request.key, grant.clone());
+    rig.claude
+        .picture_granted(request.key, Some(ConnectionKind::ClaudeCode), grant.clone());
     let (inputs, _settled) = mpsc::unbounded_channel();
     let lease = crate::engines::SendLease::new(
         LeaseId {
@@ -3071,13 +3072,16 @@ async fn a_picture_grant_whose_send_settled_is_not_kept() {
     let question = rig.claude.question(&request).expect("admitted");
     rig.claude.picture_granted(
         request.key,
+        Some(ConnectionKind::ClaudeCode),
         crate::coordinator::PictureGrant::open_for_tests(),
     );
     let held = crate::coordinator::PictureGrant::open_for_tests();
-    rig.claude.picture_granted(request.key, held.clone());
+    rig.claude
+        .picture_granted(request.key, Some(ConnectionKind::ClaudeCode), held.clone());
     assert_eq!(rig.claude.pictures.len(), 1);
     rig.claude.picture_granted(
         request.key,
+        Some(ConnectionKind::ClaudeCode),
         crate::coordinator::PictureGrant::open_for_tests(),
     );
     assert_eq!(rig.claude.pictures.len(), 2);
@@ -3086,8 +3090,8 @@ async fn a_picture_grant_whose_send_settled_is_not_kept() {
     rig.close().await;
 }
 
-/// A picture grant for a question asked under an older generation is closed as it's granted;
-/// one for another build's send isn't Claude Code's to close.
+/// A picture grant for a question asked under an older generation is closed as it's granted,
+/// and so is a Claude Code grant for any other build; a key route's grant is never touched.
 #[tokio::test]
 async fn a_picture_grant_for_a_question_of_an_older_generation_is_closed_at_once() {
     let script = synthetic_signed_in().held_until("go");
@@ -3096,7 +3100,8 @@ async fn a_picture_grant_for_a_question_of_an_older_generation_is_closed_at_once
     let question = rig.claude.question(&request).expect("admitted");
     rig.claude.op(ConnectionOp::FindClaudeCode);
     let grant = crate::coordinator::PictureGrant::open_for_tests();
-    rig.claude.picture_granted(request.key, grant.clone());
+    rig.claude
+        .picture_granted(request.key, Some(ConnectionKind::ClaudeCode), grant.clone());
     assert!(!grant.is_open());
     let other = crate::coordinator::PictureGrant::open_for_tests();
     let SendKey::Build(build) = request.key else {
@@ -3106,8 +3111,92 @@ async fn a_picture_grant_for_a_question_of_an_older_generation_is_closed_at_once
         attempt: build.attempt + 1,
         ..build
     });
-    rig.claude.picture_granted(elsewhere, other.clone());
-    assert!(other.is_open());
+    rig.claude
+        .picture_granted(elsewhere, Some(ConnectionKind::ClaudeCode), other.clone());
+    assert!(!other.is_open());
+    let key = crate::coordinator::PictureGrant::open_for_tests();
+    rig.claude
+        .picture_granted(elsewhere, Some(ConnectionKind::AnthropicKey), key.clone());
+    assert!(key.is_open());
     drop(question);
     rig.close().await;
+}
+
+/// Only an actual move of the generation reports a picture loss, once; a Find that only queues
+/// behind one already out doesn't.
+#[tokio::test]
+async fn only_a_generation_that_moved_reports_a_picture_loss_once() {
+    let script = synthetic_signed_in().held_until("go");
+    let mut rig = Rig::new("question-picture-loss", &script).await;
+    rig.claude.take_picture_loss();
+    assert!(!rig.claude.take_picture_loss());
+    rig.claude.op(ConnectionOp::FindClaudeCode);
+    assert!(rig.claude.take_picture_loss());
+    assert!(!rig.claude.take_picture_loss());
+    rig.claude.op(ConnectionOp::FindClaudeCode);
+    assert!(
+        !rig.claude.take_picture_loss(),
+        "queued behind the Find already out"
+    );
+    rig.close().await;
+}
+
+/// F6 through the brain's own grant: a Claude Code picture grant for the asked build is kept
+/// until a generation bump closes that same permit, one for an unasked Claude Code build is
+/// closed at once, and an Anthropic key's grant is never touched by either.
+#[tokio::test]
+async fn the_brains_grant_keeps_only_the_asked_claude_code_picture_and_never_a_keys() {
+    use crate::coordinator::{Effect, PictureRoutes};
+    for (kind, ask, granted_open, bumped_open) in [
+        (ConnectionKind::ClaudeCode, true, true, false),
+        (ConnectionKind::ClaudeCode, false, false, false),
+        (ConnectionKind::AnthropicKey, false, true, true),
+    ] {
+        let script = synthetic_signed_in().held_until("go");
+        let mut rig = Rig::new("question-picture-brain", &script).await;
+        let scratch = crate::test_support::Scratch::new("question-picture-brain");
+        let mut brain = crate::test_support::brain(&scratch, "");
+        std::mem::swap(&mut brain.claude, &mut rig.claude);
+        let (core, built) = crate::coordinator::pictured_run(kind, PictureRoutes::new(true, true));
+        *brain.coordinator = core;
+        let mut request = built
+            .into_iter()
+            .find_map(|effect| match effect {
+                Effect::StartEngine { request } => Some(request),
+                _ => None,
+            })
+            .expect("started");
+        request.request.choice = choosing("haiku", Effort::Low, ConnectionKind::ClaudeCode)
+            .request
+            .choice;
+        let question = ask.then(|| brain.claude.question(&request).expect("admitted"));
+        let granted = brain
+            .coordinator
+            .handle(Input::SendReady {
+                key: request.key,
+                hold: None,
+            })
+            .expect("current");
+        let lease = granted
+            .iter()
+            .find_map(|effect| match effect {
+                Effect::Grant(lease) => Some(*lease),
+                _ => None,
+            })
+            .expect("granted");
+        let permit = brain
+            .coordinator
+            .picture_grant(lease)
+            .expect("a revocable grant");
+        brain.apply(granted, None).expect("no link");
+        assert_eq!(permit.is_open(), granted_open, "{kind:?} asked {ask}");
+        brain
+            .claude_op(ConnectionOp::FindClaudeCode, None)
+            .expect("no link");
+        assert_eq!(permit.is_open(), bumped_open, "{kind:?} asked {ask}");
+        drop(question);
+        std::mem::swap(&mut brain.claude, &mut rig.claude);
+        rig.close().await;
+        brain.close().await;
+    }
 }
