@@ -9,16 +9,16 @@ const PCM_HOLD: Duration = Duration::from_millis(250);
 const REBUILD_GRACE: Duration = Duration::from_millis(250);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) struct Assignment {
-    pub(super) session: u64,
-    pub(super) output: OutputGeneration,
-    pub(super) run: RunId,
-    pub(super) segment: SegmentId,
-    pub(super) step: StepRef,
+pub(crate) struct Assignment {
+    pub(crate) session: u64,
+    pub(crate) output: OutputGeneration,
+    pub(crate) run: RunId,
+    pub(crate) segment: SegmentId,
+    pub(crate) step: StepRef,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum View {
+pub(crate) enum View {
     Preparing,
     Prepared,
     Eligible,
@@ -51,10 +51,10 @@ pub(super) struct SynthesisFinal {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) struct SourceSpan {
-    pub(super) source: u64,
-    pub(super) at: Duration,
-    pub(super) submitted_through: u64,
+pub(crate) struct SourceSpan {
+    pub(crate) source: u64,
+    pub(crate) at: Duration,
+    pub(crate) submitted_through: u64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -89,20 +89,53 @@ pub(super) enum Gate {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum Motion {
+pub(crate) enum Motion {
     Frozen,
     Follow(SourceSpan),
     Authored,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum Picture {
+pub(crate) enum Picture {
     Wait,
     At(Duration),
     Authored,
     Silent,
     Shown(Motion),
     Fenced,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Binding {
+    pub(crate) assignment: Assignment,
+    pub(crate) nonce: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ViewLevel {
+    pub(crate) binding: Binding,
+    pub(crate) speech: bool,
+    pub(crate) view: View,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RouteStamp {
+    Unstamped,
+    Live(u64),
+    Retired(u64),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PictureState {
+    Unavailable,
+    Owned(Picture),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct PictureLevel {
+    pub(crate) binding: Binding,
+    pub(crate) route: RouteStamp,
+    pub(crate) state: PictureState,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
