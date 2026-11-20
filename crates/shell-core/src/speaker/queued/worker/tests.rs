@@ -67,9 +67,14 @@ fn stop_is_processed_while_the_open_and_ingress_mailboxes_are_busy() {
     let (credits, received) = mpsc::sync_channel(1);
     let (closed, done) = mpsc::sync_channel(1);
     let owner = thread::spawn(move || {
-        worker.serve(&port, Instant::now(), |credit| {
-            credits.send(credit).unwrap();
-        });
+        worker.serve(
+            &port,
+            Instant::now(),
+            |credit| {
+                credits.send(credit).unwrap();
+            },
+            |_| {},
+        );
         closed.send(()).unwrap();
     });
     input.worker = owner.thread().clone();
@@ -366,9 +371,14 @@ fn a_hung_resume_moves_to_virtual_and_releases_held_credit() {
 fn malformed_input_reports_disconnected_instead_of_staying_full() {
     let (worker, mut input, port, _requests, _reply) = fake();
     let owner = thread::spawn(move || {
-        worker.serve(&port, Instant::now(), |_| {
-            panic!("malformed ingress does not earn credit");
-        });
+        worker.serve(
+            &port,
+            Instant::now(),
+            |_| {
+                panic!("malformed ingress does not earn credit");
+            },
+            |_| {},
+        );
     });
     input.worker = owner.thread().clone();
     input.submit(packet(7, 1, 20, Some(20))).unwrap();

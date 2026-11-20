@@ -19,7 +19,8 @@ use std::ops::Range;
 
 use kumochi_protocol::message::{
     Cursor, MAX_AHEAD_SEGMENTS, MAX_SAY_BYTES, MAX_SEGMENTS_PER_RUN, MAX_UNPLAYED_SECONDS,
-    OutputGeneration, RunId, SceneId, SegmentId, SegmentStart, SpeechPcm, SpeechPromise, StepRef,
+    OutputGeneration, RunId, SceneId, SegmentId, SegmentStart, SpeechPcm, SpeechPromise,
+    SpeechRetirement, StepRef,
 };
 
 use super::segment::{Cut, Segmenter};
@@ -103,8 +104,15 @@ enum End {
     /// Its final chunk went out.
     Last,
     Played,
+    Retired,
     /// Its scene failed; nothing waits on it.
     Dropped,
+}
+
+impl End {
+    fn finished(self) -> bool {
+        matches!(self, Self::Played | Self::Retired | Self::Dropped)
+    }
 }
 
 enum Source {
@@ -118,6 +126,7 @@ struct Segment {
     text: Option<String>,
     sent: u32,
     played: u32,
+    retired: u32,
     chunks: u32,
     end: End,
     /// Its final chunk went out; a dropped segment's waits for every earlier one's.
@@ -144,6 +153,8 @@ pub(crate) struct Reply {
     /// The shell's `SpeechStopped` arrived after a revoke.
     quiet: bool,
     epoch: u32,
+    legacy_reports: bool,
+    retirement: Option<(SegmentId, bool)>,
 }
 
 impl Reply {
@@ -162,6 +173,8 @@ impl Reply {
             closed: false,
             quiet: false,
             epoch: 0,
+            legacy_reports: false,
+            retirement: None,
         }
     }
 
@@ -304,10 +317,10 @@ impl Reply {
             let Source::Say(step) = segment.source else {
                 continue;
             };
-            if step.scene != scene || matches!(segment.end, End::Played | End::Dropped) {
+            if step.scene != scene || segment.end.finished() {
                 continue;
             }
-            let unplayed = u64::from(segment.sent - segment.played);
+            let unplayed = u64::from(segment.sent - segment.retired);
             segment.end = End::Dropped;
             segment.text = None;
             self.unplayed -= unplayed;
@@ -337,6 +350,9 @@ impl Reply {
         if self.quiet {
             return Ok(());
         }
+        if self.retirement.is_some() {
+            return Err(Refused::OutOfOrder);
+        }
         let Some(at) = self.playing_report(segment)? else {
             return Ok(());
         };
@@ -349,6 +365,8 @@ impl Reply {
         }
         self.unplayed -= u64::from(sample - found.played);
         found.played = sample;
+        found.retired = sample;
+        self.legacy_reports = true;
         self.progressed(out);
         self.pump(out);
         Ok(())
@@ -368,6 +386,9 @@ impl Reply {
         if self.quiet {
             return Ok(());
         }
+        if self.retirement.is_some() {
+            return Err(Refused::OutOfOrder);
+        }
         let Some(at) = self.playing_report(segment)? else {
             return Ok(());
         };
@@ -380,7 +401,70 @@ impl Reply {
         }
         self.unplayed -= u64::from(found.sent - found.played);
         found.played = found.sent;
+        found.retired = found.sent;
         found.end = End::Played;
+        self.legacy_reports = true;
+        self.progressed(out);
+        self.pump(out);
+        Ok(())
+    }
+
+    pub(crate) fn retired(
+        &mut self,
+        receipt: SpeechRetirement,
+        out: &mut Vec<Speech>,
+    ) -> Result<(), Refused> {
+        if receipt.run != self.run || receipt.output != self.generation || self.quiet {
+            return Ok(());
+        }
+        let (next, gap) = self.retirement.unwrap_or((SegmentId(0), false));
+        let SpeechRetirement {
+            segment,
+            retired: sample,
+            ..
+        } = receipt;
+        if segment < next {
+            return Ok(());
+        }
+        if self.legacy_reports || segment != next {
+            return Err(Refused::OutOfOrder);
+        }
+        let found = self
+            .segments
+            .get_mut(index(segment))
+            .ok_or(Refused::Unknown)?;
+        if sample > found.sent || receipt.final_segment && (!found.marked || sample != found.sent) {
+            return Err(Refused::Total);
+        }
+        if sample < found.retired {
+            return Ok(());
+        }
+        let retired = sample - found.retired;
+        if receipt.heard < found.played
+            || receipt.heard - found.played > retired
+            || gap && receipt.heard != found.played
+        {
+            return Err(Refused::Total);
+        }
+        if retired == 0 && !receipt.final_segment {
+            return Ok(());
+        }
+        if found.end != End::Dropped {
+            self.unplayed -= u64::from(retired);
+            if receipt.final_segment {
+                found.end = if receipt.heard == sample {
+                    End::Played
+                } else {
+                    End::Retired
+                };
+            }
+        }
+        found.retired = sample;
+        found.played = receipt.heard;
+        self.retirement = Some((
+            SegmentId(next.0 + u32::from(receipt.final_segment)),
+            gap || receipt.heard < sample,
+        ));
         self.progressed(out);
         self.pump(out);
         Ok(())
@@ -426,6 +510,18 @@ impl Reply {
         if self.synthesis != Synthesis::Revoked || self.quiet {
             return Err(Refused::OutOfOrder);
         }
+        if self.retirement.is_some() {
+            if cursor
+                != self.heard().map(|heard| Cursor {
+                    segment: heard.segment,
+                    sample: heard.sample,
+                })
+            {
+                return Err(Refused::Total);
+            }
+            self.quiet = true;
+            return Ok(());
+        }
         if let Some(cursor) = cursor {
             let at = index(cursor.segment);
             let found = self.segments.get(at).ok_or(Refused::Unknown)?;
@@ -464,10 +560,7 @@ impl Reply {
             Synthesis::Open | Synthesis::Stopped => {
                 self.closed
                     && self.speaking.is_none()
-                    && self
-                        .segments
-                        .iter()
-                        .all(|segment| matches!(segment.end, End::Played | End::Dropped))
+                    && self.segments.iter().all(|segment| segment.end.finished())
             }
         }
     }
@@ -540,6 +633,7 @@ impl Reply {
             text: Some(text),
             sent: 0,
             played: 0,
+            retired: 0,
             chunks: 0,
             end: End::Open,
             marked: false,
@@ -585,7 +679,7 @@ impl Reply {
     fn playing(&self) -> usize {
         self.segments
             .iter()
-            .position(|segment| !matches!(segment.end, End::Played | End::Dropped))
+            .position(|segment| !segment.end.finished())
             .unwrap_or(self.segments.len())
     }
 
@@ -596,7 +690,7 @@ impl Reply {
         let found = self.segments.get(at).ok_or(Refused::Unknown)?;
         match found.end {
             End::Dropped => Ok(None),
-            End::Played => Err(Refused::OutOfOrder),
+            End::Played | End::Retired => Err(Refused::OutOfOrder),
             End::Open | End::Last if at != self.playing() => Err(Refused::OutOfOrder),
             End::Open | End::Last => Ok(Some(at)),
         }

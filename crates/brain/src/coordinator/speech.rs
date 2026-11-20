@@ -186,6 +186,7 @@ impl Coordinator {
             | Input::SpeechProgress { run, .. }
             | Input::SegmentPlayed { run, .. }
             | Input::SpeechStopped { run, .. } => run,
+            Input::SpeechRetired(receipt) => receipt.run,
             _ => unreachable!("only speech inputs are routed here"),
         };
         let found = self.find(run)?;
@@ -209,6 +210,7 @@ impl Coordinator {
             Input::SegmentPlayed {
                 segment, samples, ..
             } => reply.played(segment, samples, &mut out),
+            Input::SpeechRetired(receipt) => reply.retired(receipt, &mut out),
             Input::SpeechStopped { cursor, .. } => {
                 // A second answer, for a Stop that crossed a revoke, changes nothing.
                 if !reply.revoked() || reply.is_final() {

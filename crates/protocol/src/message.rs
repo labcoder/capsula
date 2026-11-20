@@ -65,8 +65,8 @@ pub use voice::{
     MAX_AHEAD_SEGMENTS, MAX_HOLD_CHUNKS, MAX_MIC_SAMPLES, MAX_RATE, MAX_SAY_BYTES,
     MAX_SEGMENT_SECONDS, MAX_SEGMENTS_PER_RUN, MAX_SPEECH_SAMPLES, MAX_TRANSCRIPT_BYTES,
     MAX_UNPLAYED_SECONDS, MIN_RATE, MicPcm, OutputGeneration, PROGRESS_INTERVAL_MS, PartState,
-    SegmentId, SegmentStart, SpeechPcm, SpeechPromise, StepRef, Transcript, VoiceBound, VoiceView,
-    check_rate,
+    SegmentId, SegmentStart, SpeechPcm, SpeechPromise, SpeechRetirement, StepRef, Transcript,
+    VoiceBound, VoiceView, check_rate,
 };
 
 /// The most rows one page carries [guess].
@@ -514,6 +514,8 @@ pub enum ControlToBrain {
         /// The generation withdrawn.
         generation: OutputGeneration,
     },
+    /// Queued output released source samples. Appended; legacy playback reports are unchanged.
+    SpeechRetired(SpeechRetirement),
 }
 
 /// What a thread's delete came to.
@@ -1152,6 +1154,53 @@ mod tests {
                 thread: ThreadId(2)
             }),
             [21, 1, 2]
+        );
+    }
+
+    #[test]
+    fn queued_retirement_appends_to_the_unchanged_speech_control_tags() {
+        use super::{Cursor, OutputGeneration, SegmentId, SpeechRetirement};
+
+        let encode = |message: &ControlToBrain| postcard::to_allocvec(message).expect("encodes");
+        let run = RunId(1);
+        let segment = SegmentId(3);
+        assert_eq!(
+            encode(&ControlToBrain::SpeechProgress {
+                run,
+                segment,
+                sample: 4,
+                t_qpc: 5,
+            }),
+            [20, 1, 3, 4, 5]
+        );
+        assert_eq!(
+            encode(&ControlToBrain::SpeechStopped {
+                run,
+                cursor: Some(Cursor { segment, sample: 4 }),
+            }),
+            [21, 1, 1, 3, 4]
+        );
+        assert_eq!(
+            encode(&ControlToBrain::SegmentPlayed {
+                run,
+                segment,
+                samples: 4,
+            }),
+            [22, 1, 3, 4]
+        );
+        let message = ControlToBrain::SpeechRetired(SpeechRetirement {
+            run,
+            output: OutputGeneration(2),
+            segment,
+            retired: 4,
+            heard: 0,
+            final_segment: true,
+        });
+        assert_eq!(encode(&message), [34, 1, 2, 3, 4, 0, 1]);
+        let frame = frame::encode(&message, Pipe::Control).unwrap();
+        assert_eq!(
+            frame::read(&mut frame.as_slice(), Pipe::Control).unwrap(),
+            Some(message)
         );
     }
 

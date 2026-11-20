@@ -129,6 +129,7 @@ pub(super) fn control_input(message: ControlToBrain) -> Result<Option<Input>, En
             sample,
         }),
         ControlToBrain::SpeechStopped { run, cursor } => Some(Input::SpeechStopped { run, cursor }),
+        ControlToBrain::SpeechRetired(receipt) => Some(Input::SpeechRetired(receipt)),
         ControlToBrain::SegmentPlayed {
             run,
             segment,

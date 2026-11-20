@@ -11,6 +11,8 @@ use zeroize::Zeroize as _;
 
 #[cfg(any(windows, target_os = "macos"))]
 mod backend;
+#[cfg(any(windows, target_os = "macos", test))]
+mod receipts;
 mod timeline;
 #[cfg(any(windows, target_os = "macos"))]
 mod worker;
@@ -90,6 +92,7 @@ struct Queue {
     received: u64,
     next_segment: u32,
     completed: u32,
+    completed_samples: [u32; SEGMENT_SLOTS],
     discarded: [bool; SEGMENT_SLOTS],
     staged: [bool; SEGMENT_SLOTS],
     unheard: [bool; SEGMENT_SLOTS],
@@ -108,6 +111,7 @@ impl Queue {
             received: 0,
             next_segment: 0,
             completed: 0,
+            completed_samples: [0; SEGMENT_SLOTS],
             discarded: [false; SEGMENT_SLOTS],
             staged: [false; SEGMENT_SLOTS],
             unheard: [false; SEGMENT_SLOTS],
@@ -256,7 +260,11 @@ impl Queue {
             .front()
             .is_some_and(|segment| segment.ended && segment.end() <= self.retired)
         {
-            self.segments.pop_front();
+            let segment = self
+                .segments
+                .pop_front()
+                .expect("checked the completed segment");
+            self.completed_samples[self.completed as usize] = segment.samples;
             self.completed += 1;
         }
     }

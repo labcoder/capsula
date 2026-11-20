@@ -421,6 +421,7 @@ fn failed_backend_start_and_idle_exit_notify_without_an_ingress_packet() {
             origin,
             drawing,
             |_| panic!("no credit"),
+            |_| {},
             |_, provided| {
                 assert_eq!(provided, origin);
                 if fail {
