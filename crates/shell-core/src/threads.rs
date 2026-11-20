@@ -1,6 +1,6 @@
 //! The threads panel's page state, independent of GPUI and the connection transport.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::{cell::RefCell, rc::Rc};
 
 use kumochi_protocol::constants;
@@ -133,6 +133,8 @@ pub struct Threads {
     event_needed: Option<Read>,
     deferred_search: Option<u64>,
     cached: HashMap<ThreadId, ThreadRow>,
+    /// Threads whose row was read on this connection.
+    fresh: HashSet<ThreadId>,
     pages: HashMap<ThreadId, Option<ThreadCursor>>,
     reread: VecDeque<Option<ThreadCursor>>,
     /// Renamed tasks whose new title no page has shown yet: the cursor of the page each was on,
@@ -368,6 +370,14 @@ impl Threads {
         self.settings = Some(settings);
     }
 
+    /// `thread`'s row as read on this connection; none if it wasn't read since connecting.
+    pub fn fresh_row(&self, thread: ThreadId) -> Option<&ThreadRow> {
+        self.fresh
+            .contains(&thread)
+            .then(|| self.row(thread))
+            .flatten()
+    }
+
     pub fn row(&self, thread: ThreadId) -> Option<&ThreadRow> {
         self.cached
             .get(&thread)
@@ -459,6 +469,7 @@ impl Threads {
             reads.exhausted = false;
         }
         drop(reads);
+        self.fresh.clear();
         self.connected = false;
         self.proven = None;
         self.settled = None;
@@ -881,6 +892,7 @@ impl Threads {
                 self.unconfirmed.remove(&row.id);
             }
             self.cached.insert(row.id, row.clone());
+            self.fresh.insert(row.id);
             self.pages.insert(row.id, pending.after);
         }
         match pending.read {

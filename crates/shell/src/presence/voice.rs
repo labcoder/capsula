@@ -118,6 +118,8 @@ pub(super) struct Hold {
     /// A hold the brain was told shows the screen, until it asks for that release: once, when
     /// the keys come up or when the notice stops being `On` before they do.
     screen: bool,
+    /// The offer such a hold's first input was seen under; its release needs it still current.
+    offer: Option<inhibit::Offer>,
     terminal: Option<Text>,
     /// Later run states carry no origin, so they match the hold by the run its first one named.
     pub(super) run: Option<RunTail>,
@@ -422,13 +424,56 @@ impl Presence {
     /// screen read these, so the icon never names a model the picture won't reach.
     fn screen_inputs<'a>(&self, cx: &'a gpui_kit::App) -> (bool, Option<&'a ModelName>) {
         let settings = self.settings.read(cx);
-        // shortcut: a thread whose row was never read counts as on the default model (OSC-763), upgrade before any view sends `SetModel`.
+        // shortcut: a row not read on this connection shows as on the default model (OSC-763); a hold on it is only a candidate the brain proves before capture.
         let own = self
             .runs
             .thread()
-            .and_then(|thread| self.threads.read(cx).row(thread))
+            .and_then(|thread| self.threads.read(cx).fresh_row(thread))
             .and_then(|row| row.choice.as_ref());
         (settings.own_model(own), settings.default_model_name())
+    }
+
+    /// Publishes the offer a first input may be seen under now, and returns it: the brain's `On`
+    /// for exactly the default model while the show-screen choice is on, for a target that is
+    /// new or not read on this connection as pinned elsewhere. An unread row leaves a candidate
+    /// only: the brain proves its recipient before any capture.
+    pub(super) fn publish_offer(&self, cx: &gpui_kit::App) -> Option<inhibit::Offer> {
+        let offer = || {
+            let session = self.session.as_ref().filter(|session| session.open())?;
+            let Some(kumochi_protocol::message::ScreenHolds::On {
+                connection,
+                slug,
+                revision,
+                ..
+            }) = self.runs.screen_holds()
+            else {
+                return None;
+            };
+            let settings = self.settings.read(cx);
+            let default = settings.default_model_choice()?;
+            let thread = self.runs.thread();
+            let target = matches!(self.runs.target(), crate::runs::Target::New)
+                || thread
+                    .and_then(|thread| self.threads.read(cx).fresh_row(thread))
+                    .is_none_or(|row| {
+                        row.choice
+                            .as_ref()
+                            .is_none_or(|pin| pin.connection == *connection && pin.model == *slug)
+                    });
+            (target
+                && settings.show_screen_choice() == Some(true)
+                && default.connection == *connection
+                && default.model == *slug
+                && matches!(self.screen_notice(cx), ScreenNotice::On(_)))
+            .then(|| inhibit::Offer {
+                session: session.generation(),
+                choice: self.link.choice_revision(),
+                target: (thread, self.runs.revision()),
+                revision: *revision,
+                epoch: 0,
+            })
+        };
+        self.voice.gates.publish(offer())
     }
 
     /// What a hold on the current target does with the screen.
@@ -441,6 +486,7 @@ impl Presence {
     /// stops being `On` ends the line at once, and that refusal is the gesture's one ask: the
     /// hold's line says why, and its release sends nothing even if the notice comes back.
     pub(super) fn screen_changed(&mut self, cx: &mut Context<'_, Self>) {
+        self.publish_offer(cx);
         if matches!(self.screen_notice(cx), ScreenNotice::On(_)) {
             return;
         }
@@ -623,6 +669,13 @@ impl Presence {
         // An unchecked box that is still saving is already the user's no.
         if self.settings.read(cx).show_screen_choice() == Some(false) {
             self.runs.hold_screen_turned_off();
+            return;
+        }
+        // The offer its first input was seen under must still be the one published now.
+        let offer = self.voice.pending.as_ref().and_then(|hold| hold.offer);
+        if offer.is_none() || offer != self.publish_offer(cx) {
+            tracing::debug!(stage = ?FailureStage::Release, reason = ?FailureReason::StaleContext, "screen release refused; voice only");
+            self.runs.hold_screen_refused(gesture);
             return;
         }
         // The pointer picks the display, so a release that couldn't read it shows none.
@@ -976,10 +1029,20 @@ impl Presence {
         }
         // Nothing of the screen is taken now, after every refusal above. The runs model reads
         // the notice the dock's icon shows, and its answer says which hold this is.
+        // Only the offer its first input was seen under, and only while it is still published.
+        let offer = self
+            .voice
+            .gates
+            .offer_of(gesture)
+            .filter(|seen| Some(*seen) == self.publish_offer(cx));
         let (own_model, default) = self.screen_inputs(cx);
-        let request = self
-            .runs
-            .begin_screen_hold(gesture, qpc, own_model, default);
+        let request = self.runs.begin_screen_hold(
+            gesture,
+            qpc,
+            own_model,
+            default,
+            offer.map(|o| o.revision),
+        );
         let screen = matches!(request, Ok(ControlToBrain::ScreenHoldRecognized { .. }));
         let notice = if matches!(request, Err(crate::runs::Refused::Busy)) {
             Text::TurnBusy
@@ -1027,6 +1090,7 @@ impl Presence {
                 collected: false,
                 released: None,
                 screen,
+                offer: offer.filter(|_| screen),
                 terminal: None,
                 run: None,
             });

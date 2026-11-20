@@ -468,6 +468,9 @@ impl Accounts {
             .map_or(ScreenHolds::Off(ScreenOff::ModelCantSee), |info| {
                 ScreenHolds::On {
                     model: info.display_name.clone(),
+                    connection: choice.connection,
+                    slug: choice.model.clone(),
+                    revision: kumochi_protocol::message::NoticeRevision::FIRST,
                 }
             })
     }

@@ -113,6 +113,22 @@ pub struct RunId(pub u64);
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GestureId(pub u32);
 
+/// Names one `ScreenHolds::On` offer: the brain counts it up on each connection, from
+/// [`Self::FIRST`], whenever what the offer authorizes changes. 0 never decodes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NoticeRevision(pub std::num::NonZeroU64);
+
+impl NoticeRevision {
+    /// A connection's first revision.
+    pub const FIRST: Self = Self(std::num::NonZeroU64::MIN);
+
+    /// The revision after this one.
+    #[must_use]
+    pub const fn next(self) -> Self {
+        Self(self.0.saturating_add(1))
+    }
+}
+
 /// An exclusion lease generation, counted up by the shell on each connection.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LeaseGeneration(pub u32);
@@ -362,6 +378,9 @@ pub enum ControlToBrain {
         lease: LeaseGeneration,
         /// When the hold was recognized, in QPC ticks.
         t_qpc: u64,
+        /// The offer revision the hold's first input was seen under. The shell no longer sends
+        /// this message, and the brain takes it as a voice hold.
+        notice: Option<NoticeRevision>,
     },
     /// The hold key was released.
     KeyUp {
@@ -481,6 +500,10 @@ pub enum ControlToBrain {
         selection: u64,
         /// When the hold was recognized, in QPC ticks.
         t_qpc: u64,
+        /// The offer revision the hold's first input was seen under: eligibility under the
+        /// user's standing show-screen setting, not proof that a notice was seen. None is a hold
+        /// that may not show the screen.
+        notice: Option<NoticeRevision>,
     },
     /// A screen hold's keys were released: the shell took an exclusion lease and asks for one
     /// picture of the display under the pointer. Answered by one [`ControlToShell::CaptureDone`]
@@ -499,6 +522,9 @@ pub enum ControlToBrain {
         pointer: ReleasePointer,
         /// The pointer's path over the hold; empty when it never moved.
         path: PointerPath,
+        /// The recognition's `notice`. The brain captures only for the revision the hold was
+        /// armed under, while that is still its current offer.
+        notice: Option<NoticeRevision>,
     },
     /// The shell skipped a screen scene because the screen may have changed since its picture.
     /// Nothing of it was shown. Appended.
@@ -829,6 +855,12 @@ pub enum ScreenHolds {
     On {
         /// The chosen model's display name.
         model: ModelName,
+        /// The route a hold's picture goes on.
+        connection: ConnectionKind,
+        /// The model a hold's picture goes to.
+        slug: ModelSlug,
+        /// This offer's revision.
+        revision: NoticeRevision,
     },
     /// Holds are voice only.
     Off(ScreenOff),

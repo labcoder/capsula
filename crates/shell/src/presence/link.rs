@@ -119,6 +119,15 @@ impl Presence {
                     reason: _reason,
                 } => {
                     self.capture_finished(generation, capture_for, cx);
+                    // A refused capture has no screenshot to mark: its own hold's watch ends.
+                    if let kumochi_protocol::message::CaptureFor::Gesture(gesture) = capture_for
+                        && self
+                            .session
+                            .as_ref()
+                            .is_some_and(|session| session.generation() == generation)
+                    {
+                        self.marks_dropped(gesture, cx);
+                    }
                 }
                 LinkEvent::ScreenHolds { state, .. } => {
                     let off = matches!(state, ScreenHolds::Off(ScreenOff::TurnedOff));

@@ -3,7 +3,9 @@
 //! switch and its fresh fact for the chosen model decide (docs/development/screen.md, "The
 //! brain's hold client").
 
-use kumochi_protocol::message::{ConnectionKind, ModelChoice, ScreenHolds, ScreenOff};
+use kumochi_protocol::message::{
+    ConnectionKind, ModelChoice, NoticeRevision, ScreenHolds, ScreenOff,
+};
 
 use crate::coordinator::{Availability, PictureRoutes};
 
@@ -59,6 +61,9 @@ pub(super) fn claude(
         .map_or(ScreenHolds::Off(ScreenOff::ModelCantSee), |info| {
             ScreenHolds::On {
                 model: info.display_name.clone(),
+                connection: choice.connection,
+                slug: choice.model.clone(),
+                revision: NoticeRevision::FIRST,
             }
         })
 }

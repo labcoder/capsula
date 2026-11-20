@@ -3228,3 +3228,101 @@ async fn the_brains_grant_keeps_only_the_asked_claude_code_picture_and_never_a_k
         brain.close().await;
     }
 }
+
+/// A generation move is a new offer of Claude Code's only: a Claude Code offer that the new
+/// generation finds unchanged goes again once under a new revision, and an unchanged `ChatGPT`
+/// offer doesn't move.
+#[tokio::test]
+async fn a_generation_move_revises_only_a_claude_code_offer() {
+    use crate::context::ConnectionTag;
+    use crate::coordinator::{Availability, PictureRoutes, Ready};
+    use crate::runtime::hold::tests::{sees_on_sol, set};
+    use kumochi_protocol::message::{
+        ControlToShell, Effort, ModelInfo, ModelName, ModelSlug, NoticeRevision, ScreenHolds,
+        SettingsOp,
+    };
+    let seen = ModelSlug::new("seen").expect("slug");
+    let claude_ready = || {
+        Input::Engines(
+            ConnectionKind::ClaudeCode,
+            Availability::Ready(Ready {
+                connection: ConnectionTag(5),
+                models: vec![ModelInfo {
+                    slug: seen.clone(),
+                    display_name: ModelName::new("Seen").expect("name"),
+                    supported_efforts: None,
+                }],
+                images: vec![seen.clone()],
+                trusted_draw: false,
+            }),
+        )
+    };
+    let mut moved = Vec::new();
+    for claude in [false, true] {
+        let script = synthetic_signed_in().held_until("go");
+        let mut rig = Rig::new("question-gate-generation", &script).await;
+        rig.claude.take_picture_loss();
+        let scratch = crate::test_support::Scratch::new("question-gate-generation");
+        let mut brain = crate::test_support::brain(&scratch, "");
+        std::mem::swap(&mut brain.claude, &mut rig.claude);
+        let (_screen, _sol, _luna) = sees_on_sol(&mut brain);
+        if claude {
+            brain
+                .coordinator
+                .set_pictures(PictureRoutes::new(false, true));
+            brain
+                .coordinator
+                .handle(claude_ready())
+                .expect("an availability is never stale");
+            set(
+                &mut brain,
+                SettingsOp::SetDefaultModel(ModelChoice {
+                    model: seen.clone(),
+                    effort: Effort::Low,
+                    connection: ConnectionKind::ClaudeCode,
+                }),
+            );
+        }
+        let (out, mut output) = mpsc::channel(16);
+        let queue = std::cell::RefCell::new(crate::runtime::data::DataQueue::new(
+            crate::runtime::window(),
+        ));
+        let ready = tokio::sync::Notify::new();
+        let mut tap = crate::tap::Tap::from_env();
+        let mut link = crate::runtime::Link::new(&out, &queue, &ready, &mut tap);
+        let mut gates = || {
+            std::iter::from_fn(|| output.try_recv().ok())
+                .filter_map(|bytes| {
+                    match kumochi_protocol::frame::decode(
+                        &bytes[kumochi_protocol::frame::HEADER_LEN..],
+                    ) {
+                        Ok(ControlToShell::ScreenHolds(ScreenHolds::On { revision, .. })) => {
+                            Some(Some(revision))
+                        }
+                        Ok(ControlToShell::ScreenHolds(ScreenHolds::Off(_))) => Some(None),
+                        _ => None,
+                    }
+                })
+                .collect::<Vec<_>>()
+        };
+        brain.screen_holds_changed(&mut link).expect("room");
+        assert_eq!(gates(), [Some(NoticeRevision::FIRST)], "claude {claude}");
+        brain
+            .claude_op(ConnectionOp::FindClaudeCode, None)
+            .expect("no link");
+        // The new generation finds the same model on the same sign-in.
+        brain
+            .coordinator
+            .handle(claude_ready())
+            .expect("an availability is never stale");
+        brain.screen_holds_changed(&mut link).expect("room");
+        moved.push(gates());
+        brain.screen_holds_changed(&mut link).expect("room");
+        assert_eq!(gates(), [], "an identical wake sends nothing");
+        drop(link);
+        std::mem::swap(&mut brain.claude, &mut rig.claude);
+        rig.close().await;
+        brain.close().await;
+    }
+    assert_eq!(moved, [vec![], vec![Some(NoticeRevision::FIRST.next())]]);
+}

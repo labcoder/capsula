@@ -546,9 +546,10 @@ it (a panic, an aborted task, a dropped `context`) leaves its frame to the ticke
 wasn't shown, and callers never treat it as fatal.
 
 **The hold's screen part** (`runtime/hold/screen.rs`) is `None` for a voice hold. A
-`HoldRecognized` goes through the voice hold's admission first, so it's refused, or admitted as a
-hold, exactly as a voice hold would be; one that repeats a voice hold's gesture is refused and adds
-no part to that hold. Then the image gate is checked again, on the default model,
+`HoldRecognized` goes through the voice hold's admission, so it's refused, or admitted as a hold,
+exactly as a voice hold would be, and then answered `CaptureFailed`: no shell sends one, and its
+capture would start before the hold's recipient is read, so it takes no picture. What follows
+describes the window part as its worker still runs it. The image gate is checked again, on the default model,
 with the brain's worker client standing in for capture: the shell's `On` may be out of date. If
 it's open, the part starts at `Waiting` and its task starts; otherwise `CaptureFailed` releases
 the shell's exclusion lease and the hold goes on as voice, with no line for the model. An open
@@ -565,10 +566,12 @@ retired and any image zeroed either way. The gate opens only on the default mode
 to a model that can see goes voice-only while the default can't: a known limit.
 
 **A screen hold** (`ScreenHoldRecognized`) is admitted the same way, but its part follows
-`show_screen`, not `screen_holds`, in every gate. An open gate only arms the part (`Armed`):
-nothing is captured while the keys are down. A closed one leaves the hold voice-only. Its
+`show_screen`, not `screen_holds`, in every gate. An open gate under the hold's own offer
+([notice revision](ipc.md#notice-revision)) only arms the part (`Armed`): nothing is captured
+while the keys are down. A closed gate or another offer leaves the hold voice-only. Its
 `ScreenRelease` starts the capture after these checks, in order: the path (`PointerPath::check`),
-the part still armed and its hold's choice unchanged, the gate again, a prepared recipient check,
+the part still armed and its hold's choice unchanged, the gate again, the offer again, the hold's
+recipient read and exactly the armed one (a release before the read starts nothing),
 the release stamp's age against `LATEST_START` (the
 deadline, `MAX_TTL` from now, is read first, so the ticket can only end sooner than the check
 allows), and the exclusion stamp, which may be neither earlier than the release stamp nor later

@@ -98,6 +98,11 @@ impl Presence {
         on: bool,
         cx: &mut Context<'_, Self>,
     ) -> bool {
+        // The user's no ends every offer a press was seen under before the save is tried, so a
+        // save that can't be queued or comes back refused never gives such a press the screen.
+        if !on {
+            self.voice.gates.publish(None);
+        }
         let (link, session) = (&self.link, &self.session);
         let sent = self.settings.update(cx, |state, cx| {
             let sent = state.send_show_screen(on, |op| {
@@ -112,6 +117,7 @@ impl Presence {
         if !on {
             self.marks_off(cx);
         }
+        self.publish_offer(cx);
         sent
     }
 

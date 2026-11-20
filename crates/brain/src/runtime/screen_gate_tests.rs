@@ -37,9 +37,12 @@ fn unavailable() -> Availability {
     )
 }
 
-fn on() -> ScreenHolds {
+fn on(connection: ConnectionKind) -> ScreenHolds {
     ScreenHolds::On {
         model: ModelName::new("Seen").expect("name"),
+        connection,
+        slug: slug("seen"),
+        revision: kumochi_protocol::message::NoticeRevision::FIRST,
     }
 }
 
@@ -74,12 +77,18 @@ fn each_claude_switch_opens_only_its_own_route() {
     let key = PictureRoutes::new(true, false);
     let code = PictureRoutes::new(false, true);
     let gate = |kind, routes| claude(&ready(&["seen"]), &choice(kind), routes, true, true);
-    assert_eq!(gate(ConnectionKind::AnthropicKey, key), on());
+    assert_eq!(
+        gate(ConnectionKind::AnthropicKey, key),
+        on(ConnectionKind::AnthropicKey)
+    );
     assert_eq!(
         gate(ConnectionKind::ClaudeCode, key),
         ScreenHolds::Off(ScreenOff::ModelCantSee)
     );
-    assert_eq!(gate(ConnectionKind::ClaudeCode, code), on());
+    assert_eq!(
+        gate(ConnectionKind::ClaudeCode, code),
+        on(ConnectionKind::ClaudeCode)
+    );
     assert_eq!(
         gate(ConnectionKind::AnthropicKey, code),
         ScreenHolds::Off(ScreenOff::ModelCantSee)
@@ -138,7 +147,7 @@ fn the_claude_gate_checks_capture_then_the_setting_then_the_route_then_the_model
             true,
             ScreenHolds::Off(ScreenOff::ModelCantSee),
         ),
-        (ready(&["seen"]), true, true, on()),
+        (ready(&["seen"]), true, true, on(kind)),
     ];
     for (index, (availability, capture, enabled, expected)) in cases.into_iter().enumerate() {
         assert_eq!(

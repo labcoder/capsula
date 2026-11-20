@@ -4,7 +4,7 @@ use kumochi_protocol::frame::{self, Pipe};
 use kumochi_protocol::geometry::PhysicalPoint;
 use kumochi_protocol::message::{
     AudioSession, ControlToBrain, ControlToShell, DataToBrain, GestureId, LeaseGeneration,
-    MAX_RATE, MIN_RATE, OutputGeneration, SceneId, ScreenChoice,
+    MAX_RATE, MIN_RATE, NoticeRevision, OutputGeneration, SceneId, ScreenChoice,
 };
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _, DuplexStream};
 use tokio::sync::{Notify, mpsc};
@@ -92,6 +92,7 @@ async fn early_hold_controls_fail_before_prepare_capture_or_input_reload() {
             pointer: PhysicalPoint([0, 0]),
             lease: LeaseGeneration(1),
             t_qpc: 1,
+            notice: None,
         },
         ControlToBrain::VoiceHoldRecognized {
             gesture,
@@ -103,6 +104,7 @@ async fn early_hold_controls_fail_before_prepare_capture_or_input_reload() {
             thread: None,
             selection: 1,
             t_qpc: 1,
+            notice: Some(NoticeRevision(std::num::NonZeroU64::MIN)),
         },
     ] {
         let result = queued(&mut brain, async |mut shell| {

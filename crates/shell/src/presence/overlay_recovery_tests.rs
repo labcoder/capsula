@@ -831,9 +831,9 @@ fn episode(outer: &mut gpui_kit::TestAppContext, case: Case) {
     let bound = match case {
         // No case opens a host: a closed one is replaced only by the next show.
         Case::A => [150, 46_140, 21, 8_432],
-        Case::B => [159, 46_268, 30, 8_560],
+        Case::B => [159, 46_276, 30, 8_568],
         Case::C | Case::E => [149, 46_108, 65, 19_394],
-        Case::D => [162, 47_332, 33, 9_624],
+        Case::D => [162, 47_340, 33, 9_632],
     };
     assert!(
         allocations <= bound[0]

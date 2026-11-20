@@ -742,6 +742,7 @@ async fn recognize_screen_recipient(
             thread: task,
             selection: 1,
             t_qpc: 1,
+            notice: Some(kumochi_protocol::message::NoticeRevision::FIRST),
         })
         .await;
 }

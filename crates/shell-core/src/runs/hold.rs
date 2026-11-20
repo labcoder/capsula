@@ -1,7 +1,7 @@
 use kumochi_protocol::geometry::{PhysicalPoint, PointerPath, ReleasePointer};
 use kumochi_protocol::message::{
-    ControlToBrain, GestureId, HeldScreen, LeaseGeneration, ModelName, RunId, RunOrigin,
-    ScreenClass, ScreenHolds, ScreenOff, ThreadId,
+    ControlToBrain, GestureId, HeldScreen, LeaseGeneration, ModelName, NoticeRevision, RunId,
+    RunOrigin, ScreenClass, ScreenHolds, ScreenOff, ThreadId,
 };
 
 use super::{Applied, Refused, Runs, Target};
@@ -85,6 +85,8 @@ pub(super) struct Hold {
     pub(super) release_due: bool,
     /// The brain's word about this hold's screen has landed; a second one doesn't.
     pub(super) told: bool,
+    /// The offer its first input was seen under, for a hold that shows the screen at release.
+    pub(super) offer: Option<NoticeRevision>,
 }
 
 impl Runs {
@@ -115,7 +117,9 @@ impl Runs {
             Some(ScreenHolds::Off(ScreenOff::Unsupported)) => ScreenNotice::Hidden,
             Some(ScreenHolds::Off(ScreenOff::TurnedOff)) => ScreenNotice::TurnedOff,
             _ if own_model => ScreenNotice::OwnModel,
-            Some(ScreenHolds::On { model }) if Some(model) == default => ScreenNotice::On(model),
+            Some(ScreenHolds::On { model, .. }) if Some(model) == default => {
+                ScreenNotice::On(model)
+            }
             Some(ScreenHolds::Off(ScreenOff::ModelCantSee)) => {
                 default.map_or(ScreenNotice::NotReady, ScreenNotice::ModelCantSee)
             }
@@ -224,6 +228,7 @@ impl Runs {
             at_release: false,
             release_due: false,
             told: false,
+            offer: None,
         }))
     }
 
@@ -248,6 +253,7 @@ impl Runs {
                 pointer,
                 lease,
                 t_qpc,
+                notice: None,
             },
             None => ControlToBrain::VoiceHoldRecognized {
                 gesture,
@@ -259,8 +265,9 @@ impl Runs {
 
     /// Starts a hold that shows the model the screen once it's released, while the standing
     /// notice is `On`; else a voice-only one. The notice is [`Self::screen_notice`]'s, read here
-    /// from the same two answers. Nothing of the screen is taken now, and the hold has no line
-    /// of its own yet.
+    /// from the same two answers, and `offer` is the one its first input was seen under: without
+    /// one it's voice only. Nothing of the screen is taken now, and the hold has no line of its
+    /// own yet.
     #[expect(
         clippy::fn_params_excessive_bools,
         reason = "the settings model's answer about the target thread, carried unchanged"
@@ -271,11 +278,14 @@ impl Runs {
         t_qpc: u64,
         own_model: bool,
         default: Option<&ModelName>,
+        offer: Option<NoticeRevision>,
     ) -> Result<ControlToBrain, Refused> {
-        let on = matches!(self.screen_notice(own_model, default), ScreenNotice::On(_));
+        let on = offer.is_some()
+            && matches!(self.screen_notice(own_model, default), ScreenNotice::On(_));
         let hold = self.admit_hold(gesture)?;
         hold.at_release = on;
         hold.release_due = on;
+        hold.offer = offer.filter(|_| on);
         let (thread, selection) = (hold.thread, hold.revision);
         Ok(if on {
             ControlToBrain::ScreenHoldRecognized {
@@ -283,6 +293,7 @@ impl Runs {
                 thread,
                 selection,
                 t_qpc,
+                notice: offer,
             }
         } else {
             ControlToBrain::VoiceHoldRecognized {
@@ -338,9 +349,10 @@ impl Runs {
         if !self.releases_screen(gesture, own_model, default) {
             return None;
         }
-        if let Some(hold) = &mut self.hold {
+        let notice = self.hold.as_mut().and_then(|hold| {
             hold.release_due = false;
-        }
+            hold.offer
+        });
         let HoldRelease {
             pointer,
             path,
@@ -355,6 +367,7 @@ impl Runs {
             excluded_qpc,
             pointer: ReleasePointer(pointer),
             path,
+            notice,
         })
     }
 

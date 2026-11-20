@@ -63,9 +63,21 @@ fn choice(model: &ModelInfo, effort: Effort) -> ModelChoice {
         connection: ConnectionKind::ChatGpt,
     }
 }
+/// The offer naming `model` at `revision`.
+fn offer(model: &ModelInfo, revision: kumochi_protocol::message::NoticeRevision) -> ScreenHolds {
+    ScreenHolds::On {
+        model: model.display_name.clone(),
+        connection: kumochi_protocol::message::ConnectionKind::ChatGpt,
+        slug: model.slug.clone(),
+        revision,
+    }
+}
 pub(super) fn on(model: &ModelInfo) -> ScreenHolds {
     ScreenHolds::On {
         model: model.display_name.clone(),
+        connection: kumochi_protocol::message::ConnectionKind::ChatGpt,
+        slug: model.slug.clone(),
+        revision: kumochi_protocol::message::NoticeRevision::FIRST,
     }
 }
 
@@ -141,10 +153,23 @@ fn deliver(
     held: TalkHeld,
     cx: &mut TestAppContext,
 ) {
+    deliver_in(owner, 1, intent, qpc, pointer, held, cx);
+}
+
+/// As [`deliver`], stamped on connection `session`.
+fn deliver_in(
+    owner: &Entity<Presence>,
+    session: u64,
+    intent: Intent,
+    qpc: u64,
+    pointer: Option<PhysicalPoint>,
+    held: TalkHeld,
+    cx: &mut TestAppContext,
+) {
     let (dock, stamp) = owner.read_with(cx, |owner, _| {
         let stamp = Stamp {
             target: owner.voice.target.get(),
-            session: 1,
+            session,
             choice: owner.link.choice_revision(),
         };
         (owner.dock_window, stamp)
@@ -168,6 +193,17 @@ fn recognize_at(
     pointer: Option<PhysicalPoint>,
     cx: &mut TestAppContext,
 ) {
+    recognize_in(owner, id, 1, pointer, cx);
+}
+
+/// Recognizes a hold, as the native callback stamps it on connection `session`.
+fn recognize_in(
+    owner: &Entity<Presence>,
+    id: u32,
+    session: u64,
+    pointer: Option<PhysicalPoint>,
+    cx: &mut TestAppContext,
+) {
     let gesture = GestureId(id);
     let token = owner.update(cx, |owner, cx| {
         crate::presence::voice_wiring_tests::gate(owner, id, cx);
@@ -183,7 +219,15 @@ fn recognize_at(
         gesture,
         generation: Ok(token),
     };
-    deliver(owner, intent, QPC, pointer, TalkHeld::default(), cx);
+    deliver_in(
+        owner,
+        session,
+        intent,
+        QPC,
+        pointer,
+        TalkHeld::default(),
+        cx,
+    );
     // The line's timer counts from here.
     cx.run_until_parked();
 }
@@ -273,6 +317,7 @@ pub(super) fn screen_hold(id: u32) -> ControlToBrain {
         thread: Some(ThreadId(1)),
         selection: 1,
         t_qpc: QPC,
+        notice: Some(kumochi_protocol::message::NoticeRevision::FIRST),
     }
 }
 
@@ -289,6 +334,7 @@ pub(super) fn screen_release(
         excluded_qpc: STAMP,
         pointer: ReleasePointer(pointer),
         path: PointerPath(path.to_vec()),
+        notice: Some(kumochi_protocol::message::NoticeRevision::FIRST),
     }
 }
 
@@ -1215,4 +1261,486 @@ fn a_default_model_that_stops_or_starts_taking_pictures_says_so_once_in_the_open
         note(&ready, cx),
         Some((thread, Text::ScreenNoteCan, luna().display_name))
     );
+}
+
+/// A press under one offer, or under none, whose recognition is delivered after a newer offer
+/// arrived takes no screen: receiving the newer one doesn't show it.
+#[gpui::test]
+fn a_hold_carries_no_offer_that_arrived_before_its_deferred_recognition(cx: &mut TestAppContext) {
+    use kumochi_protocol::message::NoticeRevision;
+    for (id, shown) in [
+        (1, on(&luna())),
+        (2, ScreenHolds::Off(ScreenOff::ModelCantSee)),
+    ] {
+        let ready = screen_ready(Some(shown), cx);
+        press(&ready, id, cx);
+        let warm = Intent::Warm(GestureId(id));
+        deliver(
+            &ready.owner,
+            warm,
+            QPC,
+            Some(ORIGIN),
+            TalkHeld::default(),
+            cx,
+        );
+        gate(&ready, offer(&luna(), NoticeRevision::FIRST.next()), cx);
+        recognize(&ready.owner, id, cx);
+        listening(&ready.owner, cx);
+        release(&ready.owner, id, Some(ORIGIN), cx);
+        let sent = sent(&ready);
+        assert!(
+            !sent
+                .iter()
+                .any(|message| matches!(message, ControlToBrain::ScreenRelease { .. })),
+            "{sent:?}"
+        );
+        assert!(
+            !sent.iter().any(|message| matches!(
+                message,
+                ControlToBrain::ScreenHoldRecognized {
+                    notice: Some(_),
+                    ..
+                } | ControlToBrain::ScreenRelease {
+                    notice: Some(_),
+                    ..
+                }
+            )),
+            "{sent:?}"
+        );
+    }
+}
+
+/// Gesture `id`'s first native input, as the callback sees it before anything reaches the dock.
+fn press(ready: &Ready, id: u32, cx: &mut TestAppContext) {
+    ready.owner.read_with(cx, |owner, cx| {
+        crate::presence::voice_wiring_tests::key_down(owner, id, cx);
+    });
+}
+
+/// The press's Warm, delivered through the dock as the native callback delivers it.
+fn warm(ready: &Ready, id: u32, cx: &mut TestAppContext) {
+    let intent = Intent::Warm(GestureId(id));
+    deliver(
+        &ready.owner,
+        intent,
+        QPC,
+        Some(ORIGIN),
+        TalkHeld::default(),
+        cx,
+    );
+}
+
+/// `message` carrying the eligibility of offer `revision`.
+fn under(
+    mut message: ControlToBrain,
+    revision: kumochi_protocol::message::NoticeRevision,
+) -> ControlToBrain {
+    if let ControlToBrain::ScreenHoldRecognized { notice, .. }
+    | ControlToBrain::ScreenRelease { notice, .. } = &mut message
+    {
+        *notice = Some(revision);
+    }
+    message
+}
+
+/// Hold `id` went without the screen: no screen recognition or release, no lease and no
+/// marks watch.
+fn omitted(ready: &Ready, id: u32, cx: &mut TestAppContext) {
+    listening(&ready.owner, cx);
+    release(&ready.owner, id, Some(DOWN), cx);
+    let sent = sent(ready);
+    assert!(
+        !sent.iter().any(|message| matches!(
+            message,
+            ControlToBrain::ScreenHoldRecognized { .. } | ControlToBrain::ScreenRelease { .. }
+        )),
+        "{sent:?}"
+    );
+    assert_eq!(lease(ready, cx), (0, false));
+    ready.owner.read_with(cx, |owner, _| {
+        assert!(owner.voice.watched.is_none());
+    });
+}
+
+/// The 300 ms race: a press the native callback saw while the screen wasn't offered stays
+/// without it when the offer arrives before its Warm is delivered, or after that but before its
+/// recognition.
+#[gpui::test]
+fn a_press_seen_without_an_offer_never_takes_the_screen(cx: &mut TestAppContext) {
+    for before_warm in [true, false] {
+        let ready = screen_ready(Some(ScreenHolds::Off(ScreenOff::ModelCantSee)), cx);
+        press(&ready, 1, cx);
+        if before_warm {
+            gate(&ready, on(&luna()), cx);
+        }
+        warm(&ready, 1, cx);
+        if !before_warm {
+            gate(&ready, on(&luna()), cx);
+        }
+        recognize(&ready.owner, 1, cx);
+        omitted(&ready, 1, cx);
+    }
+}
+
+/// An offer revised between the press and its recognition leaves the hold without the screen,
+/// even for the same model: the new revision may be another account's.
+#[gpui::test]
+fn a_press_keeps_only_the_offer_it_was_seen_under(cx: &mut TestAppContext) {
+    use kumochi_protocol::message::NoticeRevision;
+    let ready = screen_ready(Some(on(&luna())), cx);
+    press(&ready, 1, cx);
+    warm(&ready, 1, cx);
+    gate(&ready, offer(&luna(), NoticeRevision::FIRST.next()), cx);
+    recognize(&ready.owner, 1, cx);
+    omitted(&ready, 1, cx);
+}
+
+/// A press seen on one connection takes nothing on the next, though that one offers the same
+/// model under the revision the first one used.
+#[gpui::test]
+fn a_press_never_takes_a_later_connections_reused_revision(cx: &mut TestAppContext) {
+    let ready = screen_ready(Some(on(&luna())), cx);
+    press(&ready, 1, cx);
+    warm(&ready, 1, cx);
+    receive(
+        &ready.owner,
+        LinkEvent::State(crate::link::LinkState::Reconnecting),
+        cx,
+    );
+    receive(
+        &ready.owner,
+        LinkEvent::Connected(crate::link::Session::detached(
+            2,
+            kumochi_protocol::message::Incarnation(1),
+        )),
+        cx,
+    );
+    receive(
+        &ready.owner,
+        LinkEvent::ScreenHolds {
+            generation: 2,
+            state: on(&luna()),
+        },
+        cx,
+    );
+    sent(&ready);
+    recognize_in(&ready.owner, 1, 2, Some(ORIGIN), cx);
+    omitted(&ready, 1, cx);
+}
+
+/// A press seen under an offer that stays the same carries it to its recognition and release.
+#[gpui::test]
+fn a_press_under_an_unchanged_offer_carries_it_to_its_release(cx: &mut TestAppContext) {
+    use kumochi_protocol::message::NoticeRevision;
+    let ready = screen_ready(Some(on(&luna())), cx);
+    press(&ready, 1, cx);
+    warm(&ready, 1, cx);
+    sent(&ready);
+    recognize(&ready.owner, 1, cx);
+    listening(&ready.owner, cx);
+    assert_eq!(sent(&ready), [under(screen_hold(1), NoticeRevision::FIRST)]);
+    release(&ready.owner, 1, Some(DOWN), cx);
+    assert_eq!(
+        sent(&ready),
+        [under(
+            screen_release(1, 1, DOWN, &[]),
+            NoticeRevision::FIRST
+        )]
+    );
+    assert_eq!(lease(&ready, cx), (1, true));
+}
+
+/// A press seen on one target takes no screen on another: a target chosen after the press and
+/// before its recognition leaves the hold voice only, and one chosen after its recognition
+/// cancels the hold. Neither takes a lease or a marks watch.
+#[gpui::test]
+fn a_press_takes_no_screen_on_a_target_it_was_not_seen_on(cx: &mut TestAppContext) {
+    for before_recognition in [true, false] {
+        let ready = screen_ready(Some(on(&luna())), cx);
+        press(&ready, 1, cx);
+        let retarget = |cx: &mut TestAppContext| {
+            ready.owner.update(cx, Presence::new_thread).unwrap();
+        };
+        if before_recognition {
+            retarget(cx);
+        }
+        warm(&ready, 1, cx);
+        recognize(&ready.owner, 1, cx);
+        if !before_recognition {
+            retarget(cx);
+        }
+        listening(&ready.owner, cx);
+        release(&ready.owner, 1, Some(DOWN), cx);
+        let sent = sent(&ready);
+        assert!(
+            !sent.iter().any(|message| matches!(
+                message,
+                ControlToBrain::ScreenRelease { .. }
+                    | ControlToBrain::ScreenHoldRecognized { notice: None, .. }
+            )),
+            "{sent:?}"
+        );
+        assert_eq!(
+            sent.iter()
+                .any(|message| matches!(message, ControlToBrain::ScreenHoldRecognized { .. })),
+            !before_recognition,
+            "{sent:?}"
+        );
+        assert_eq!(lease(&ready, cx), (0, false));
+        ready.owner.read_with(cx, |owner, _| {
+            assert!(owner.voice.watched.is_none());
+        });
+    }
+}
+
+/// An offer that goes and comes back is another one, though the brain names it with the same
+/// revision: the press under the first takes no screen, whether it went before the recognition
+/// or between the recognition and the release.
+#[gpui::test]
+fn an_offer_that_went_and_came_back_is_not_the_one_the_press_saw(cx: &mut TestAppContext) {
+    for before_recognition in [true, false] {
+        let ready = screen_ready(Some(on(&luna())), cx);
+        press(&ready, 1, cx);
+        warm(&ready, 1, cx);
+        let away_and_back = |cx: &mut TestAppContext| {
+            gate(&ready, ScreenHolds::Off(ScreenOff::NotReady), cx);
+            gate(&ready, on(&luna()), cx);
+        };
+        if before_recognition {
+            away_and_back(cx);
+        }
+        recognize(&ready.owner, 1, cx);
+        if !before_recognition {
+            away_and_back(cx);
+        }
+        listening(&ready.owner, cx);
+        release(&ready.owner, 1, Some(DOWN), cx);
+        let sent = sent(&ready);
+        assert!(
+            !sent
+                .iter()
+                .any(|message| matches!(message, ControlToBrain::ScreenRelease { .. })),
+            "{sent:?}"
+        );
+        assert_eq!(lease(&ready, cx), (0, false));
+        ready.owner.read_with(cx, |owner, _| {
+            assert!(owner.voice.watched.is_none());
+        });
+    }
+}
+
+/// An offer revised for the same model between a hold's recognition and its release leaves the
+/// release without the screen, though the notice still says on: no release, lease or watch.
+#[gpui::test]
+fn a_release_keeps_only_the_offer_its_press_was_seen_under(cx: &mut TestAppContext) {
+    use kumochi_protocol::message::NoticeRevision;
+    let ready = screen_ready(Some(on(&luna())), cx);
+    press(&ready, 1, cx);
+    warm(&ready, 1, cx);
+    sent(&ready);
+    recognize(&ready.owner, 1, cx);
+    listening(&ready.owner, cx);
+    assert_eq!(sent(&ready), [screen_hold(1)]);
+    gate(&ready, offer(&luna(), NoticeRevision::FIRST.next()), cx);
+    assert_eq!(notice(&ready, cx), "on");
+    release(&ready.owner, 1, Some(DOWN), cx);
+    let sent = sent(&ready);
+    assert!(
+        !sent
+            .iter()
+            .any(|message| matches!(message, ControlToBrain::ScreenRelease { .. })),
+        "{sent:?}"
+    );
+    assert_eq!(lease(&ready, cx), (0, false));
+    ready.owner.read_with(cx, |owner, _| {
+        assert!(owner.voice.watched.is_none());
+    });
+}
+
+/// The user's Off disqualifies the press it met even when the brain refuses to save it and the
+/// choice comes back on; the next press shares under the restored setting.
+#[gpui::test]
+fn an_off_whose_save_was_refused_keeps_its_press_off_and_the_next_press_shares(
+    cx: &mut TestAppContext,
+) {
+    use kumochi_protocol::message::{ErrorKey, SettingsOp};
+    let ready = screen_ready(Some(on(&luna())), cx);
+    press(&ready, 1, cx);
+    warm(&ready, 1, cx);
+    sent(&ready);
+    recognize(&ready.owner, 1, cx);
+    listening(&ready.owner, cx);
+    assert_eq!(sent(&ready), [screen_hold(1)]);
+    assert!(
+        ready
+            .owner
+            .update(cx, |owner, cx| owner.save_show_screen(false, cx))
+    );
+    assert_eq!(
+        sent(&ready),
+        [ControlToBrain::Settings(SettingsOp::SetShowScreen(false))]
+    );
+    let saved = ready.owner.read_with(cx, |owner, cx| {
+        owner
+            .settings
+            .read(cx)
+            .view()
+            .expect("a saved view")
+            .clone()
+    });
+    assert!(saved.show_screen);
+    receive(
+        &ready.owner,
+        LinkEvent::Error {
+            generation: 1,
+            error: ErrorKey::SettingsRefused.into(),
+        },
+        cx,
+    );
+    receive(
+        &ready.owner,
+        LinkEvent::Settings {
+            generation: 1,
+            view: saved,
+            answer: true,
+        },
+        cx,
+    );
+    ready.owner.read_with(cx, |owner, cx| {
+        let state = owner.settings.read(cx);
+        assert!(!state.show_screen_pending());
+        assert_eq!(state.show_screen_choice(), Some(true));
+    });
+    assert_eq!(notice(&ready, cx), "on");
+    release(&ready.owner, 1, Some(DOWN), cx);
+    assert_eq!(sent(&ready), []);
+    assert_eq!(
+        line(&ready, cx),
+        Some((Text::ScreenNotIncludedNotReady, None))
+    );
+    assert_eq!(lease(&ready, cx), (0, false));
+    ready.owner.read_with(cx, |owner, _| {
+        assert!(owner.voice.watched.is_none());
+    });
+    finish(&ready, 1, cx);
+
+    press(&ready, 2, cx);
+    warm(&ready, 2, cx);
+    sent(&ready);
+    recognize(&ready.owner, 2, cx);
+    listening(&ready.owner, cx);
+    assert_eq!(sent(&ready), [screen_hold(2)]);
+    release(&ready.owner, 2, Some(DOWN), cx);
+    assert_eq!(sent(&ready), [screen_release(2, 1, DOWN, &[])]);
+    assert_eq!(lease(&ready, cx), (1, true));
+    assert_eq!(line(&ready, cx), None);
+}
+
+/// Drains `controls`, the recorder a test swapped in.
+fn drained(controls: &async_channel::Receiver<ControlToBrain>) -> Vec<ControlToBrain> {
+    std::iter::from_fn(|| controls.try_recv().ok()).collect()
+}
+
+/// An Off the control queue can't take leaves the saved choice on, but the press it met never
+/// takes the screen, even once the queue has room before its release; the next press does.
+#[gpui::test]
+fn an_off_that_cant_be_queued_keeps_its_press_off_and_the_next_press_shares(
+    cx: &mut TestAppContext,
+) {
+    let ready = screen_ready(Some(on(&luna())), cx);
+    press(&ready, 1, cx);
+    warm(&ready, 1, cx);
+    sent(&ready);
+    recognize(&ready.owner, 1, cx);
+    listening(&ready.owner, cx);
+    assert_eq!(sent(&ready), [screen_hold(1)]);
+    let full = ready.owner.update(cx, |owner, _| {
+        let controls = owner.link.record_controls_bounded();
+        let session = owner.session.clone().expect("connected");
+        while owner.link.send_control(&session, ControlToBrain::Pong) {}
+        controls
+    });
+    assert!(
+        !ready
+            .owner
+            .update(cx, |owner, cx| owner.save_show_screen(false, cx))
+    );
+    ready.owner.read_with(cx, |owner, cx| {
+        let state = owner.settings.read(cx);
+        assert!(!state.show_screen_pending());
+        assert_eq!(state.show_screen_choice(), Some(true));
+        assert!(owner.session.as_ref().expect("connected").open());
+    });
+    assert_eq!(notice(&ready, cx), "on");
+    // The queue has room again before the keys come up.
+    assert!(
+        drained(&full)
+            .iter()
+            .all(|message| *message == ControlToBrain::Pong)
+    );
+    release(&ready.owner, 1, Some(DOWN), cx);
+    assert_eq!(drained(&full), []);
+    assert_eq!(
+        line(&ready, cx),
+        Some((Text::ScreenNotIncludedNotReady, None))
+    );
+    assert_eq!(lease(&ready, cx), (0, false));
+    ready.owner.read_with(cx, |owner, _| {
+        assert!(owner.voice.watched.is_none());
+    });
+    status(
+        &ready.owner,
+        1,
+        1,
+        HoldStatus::Failed(HoldFailure::Busy),
+        cx,
+    );
+    cx.run_until_parked();
+    ready.owner.read_with(cx, |owner, _| {
+        owner.link.accept_recorded_microphone_stop(1, GestureId(1));
+    });
+    assert_eq!(drained(&full), stopped(1));
+
+    press(&ready, 2, cx);
+    warm(&ready, 2, cx);
+    drained(&full);
+    recognize(&ready.owner, 2, cx);
+    listening(&ready.owner, cx);
+    assert_eq!(drained(&full), [screen_hold(2)]);
+    release(&ready.owner, 2, Some(DOWN), cx);
+    assert_eq!(drained(&full), [screen_release(2, 1, DOWN, &[])]);
+    assert_eq!(lease(&ready, cx), (1, true));
+}
+
+/// A main row read as pinned elsewhere on an earlier connection is no proof once that connection
+/// is gone: with Threads closed it doesn't veto the next press, which stays a candidate the brain
+/// proves. The same row read on this connection still does (the stored-model test above).
+#[gpui::test]
+fn a_row_read_before_a_reconnect_does_not_veto_the_next_press(cx: &mut TestAppContext) {
+    let ready = screen_ready(Some(on(&luna())), cx);
+    read_row(&ready, Some(choice(&sol(), Effort::Low)), cx);
+    assert_eq!(notice(&ready, cx), "own model");
+    ready.owner.update(cx, |owner, cx| {
+        owner.threads.update(cx, |state, _| {
+            state.hide();
+            state.disconnected();
+            state.connected();
+        });
+        owner.screen_changed(cx);
+    });
+    ready.owner.read_with(cx, |owner, cx| {
+        let threads = owner.threads.read(cx);
+        assert!(threads.row(ThreadId(1)).is_some(), "still cached");
+        assert!(threads.fresh_row(ThreadId(1)).is_none());
+    });
+    assert_eq!(notice(&ready, cx), "on");
+    press(&ready, 1, cx);
+    warm(&ready, 1, cx);
+    sent(&ready);
+    recognize(&ready.owner, 1, cx);
+    listening(&ready.owner, cx);
+    assert_eq!(sent(&ready), [screen_hold(1)]);
+    release(&ready.owner, 1, Some(DOWN), cx);
+    assert_eq!(sent(&ready), [screen_release(1, 1, DOWN, &[])]);
+    assert_eq!(lease(&ready, cx), (1, true));
 }

@@ -607,6 +607,7 @@ fn a_hold_is_a_screen_hold_only_when_it_is_given_a_screen() {
             pointer: kumochi_protocol::geometry::PhysicalPoint([-1_234_567, 7_654_321]),
             lease: kumochi_protocol::message::LeaseGeneration(424_242),
             t_qpc: 515_151_515,
+            notice: None,
         })
     );
     assert_eq!(runs.hold_screen_line(), Some(ScreenLine::WillSee));
@@ -707,6 +708,9 @@ fn the_screen_holds_state_lasts_one_connection() {
     use kumochi_protocol::message::{ModelName, ScreenHolds, ScreenOff};
     let on = ScreenHolds::On {
         model: ModelName::new("GPT-5.5").expect("valid"),
+        connection: kumochi_protocol::message::ConnectionKind::ChatGpt,
+        slug: kumochi_protocol::message::ModelSlug::new("fixture").expect("valid"),
+        revision: kumochi_protocol::message::NoticeRevision::FIRST.next(),
     };
     let mut runs = ready();
     assert_eq!(runs.screen_holds(), None);
@@ -733,6 +737,9 @@ fn the_standing_notice_gives_way_in_order_and_names_only_the_newest_default() {
     let on = |model: &ModelName| {
         Some(ScreenHolds::On {
             model: model.clone(),
+            connection: kumochi_protocol::message::ConnectionKind::ChatGpt,
+            slug: kumochi_protocol::message::ModelSlug::new("fixture").expect("valid"),
+            revision: kumochi_protocol::message::NoticeRevision::FIRST.next(),
         })
     };
     let off = |why| Some(ScreenHolds::Off(why));
@@ -827,6 +834,50 @@ fn a_holds_prediction_names_the_notices_model_and_goes_quiet_when_the_notice_cha
     }
 }
 
+/// A hold carries only the offer its caller says its first input was seen under: none is voice
+/// only whatever is stored, and the one it began with goes to its release though a newer one is
+/// stored by then.
+#[test]
+fn a_hold_carries_only_the_offer_its_first_input_was_seen_under() {
+    use kumochi_protocol::message::{ConnectionKind, ModelSlug, NoticeRevision, ScreenHolds};
+    let mut runs = ready();
+    let luna = shown_to_luna(&mut runs);
+    let on = Some(&luna);
+    let notice = |message: Option<ControlToBrain>| match message {
+        Some(
+            ControlToBrain::HoldRecognized { notice, .. }
+            | ControlToBrain::ScreenHoldRecognized { notice, .. }
+            | ControlToBrain::ScreenRelease { notice, .. },
+        ) => notice,
+        other => panic!("not a screen hold's control: {other:?}"),
+    };
+    assert_eq!(
+        notice(runs.begin_hold(GestureId(1), Some(SCREEN)).ok()),
+        None
+    );
+    runs.cancel_hold();
+    assert_eq!(runs.take_hold_cancel(), cancel(1));
+    assert!(matches!(
+        runs.begin_screen_hold(GestureId(2), 1, false, on, None),
+        Ok(ControlToBrain::VoiceHoldRecognized { .. })
+    ));
+    runs.cancel_hold();
+    assert_eq!(runs.take_hold_cancel(), cancel(2));
+    let first = Some(NoticeRevision::FIRST.next());
+    let begun = runs
+        .begin_screen_hold(GestureId(3), 1, false, on, first)
+        .ok();
+    assert_eq!(notice(begun), first);
+    runs.set_screen_holds(ScreenHolds::On {
+        model: luna.clone(),
+        connection: ConnectionKind::ChatGpt,
+        slug: ModelSlug::new("fixture").expect("valid"),
+        revision: NoticeRevision::FIRST.next().next(),
+    });
+    let released = runs.screen_release(GestureId(3), false, on, release());
+    assert_eq!(notice(released), first);
+}
+
 fn release() -> HoldRelease {
     use kumochi_protocol::geometry::{PhysicalPoint, PointerPath};
     HoldRelease {
@@ -845,6 +896,9 @@ fn shown_to_luna(runs: &mut Runs) -> kumochi_protocol::message::ModelName {
     let model = ModelName::new("GPT-6 Luna").expect("valid");
     runs.set_screen_holds(ScreenHolds::On {
         model: model.clone(),
+        connection: kumochi_protocol::message::ConnectionKind::ChatGpt,
+        slug: kumochi_protocol::message::ModelSlug::new("fixture").expect("valid"),
+        revision: kumochi_protocol::message::NoticeRevision::FIRST.next(),
     });
     model
 }
@@ -854,7 +908,7 @@ fn a_hold_that_shows_the_screen_at_release_is_admitted_as_any_hold_is() {
     let mut runs = ready();
     let luna = shown_to_luna(&mut runs);
     let begin = |runs: &mut Runs, gesture, t_qpc| {
-        runs.begin_screen_hold(GestureId(gesture), t_qpc, false, Some(&luna))
+        runs.begin_screen_hold(GestureId(gesture), t_qpc, false, Some(&luna), seen(runs))
     };
     assert_eq!(
         begin(&mut runs, 1, 515_151_515),
@@ -863,6 +917,7 @@ fn a_hold_that_shows_the_screen_at_release_is_admitted_as_any_hold_is() {
             thread: Some(ThreadId(1)),
             selection: 1,
             t_qpc: 515_151_515,
+            notice: Some(kumochi_protocol::message::NoticeRevision::FIRST.next()),
         })
     );
     // It predicts nothing, so it has no line unless something refuses its screen.
@@ -898,6 +953,7 @@ fn a_hold_that_shows_the_screen_at_release_is_admitted_as_any_hold_is() {
             thread: None,
             selection,
             t_qpc: 2,
+            notice: Some(kumochi_protocol::message::NoticeRevision::FIRST.next()),
         })
     );
     assert!(state(&mut runs, 1, 9, 6, Phase::Thinking).visible);
@@ -911,6 +967,9 @@ fn a_hold_begun_while_the_notice_is_not_on_is_voice_only_and_never_releases_the_
     let sol = ModelName::new("GPT-6 Sol").expect("valid");
     let on = ScreenHolds::On {
         model: luna.clone(),
+        connection: kumochi_protocol::message::ConnectionKind::ChatGpt,
+        slug: kumochi_protocol::message::ModelSlug::new("fixture").expect("valid"),
+        revision: kumochi_protocol::message::NoticeRevision::FIRST.next(),
     };
     let off = |why| Some(ScreenHolds::Off(why));
     // (what the brain said, the target thread has its own model, the default's name)
@@ -931,7 +990,7 @@ fn a_hold_begun_while_the_notice_is_not_on_is_voice_only_and_never_releases_the_
             runs.set_screen_holds(stored);
         }
         assert_eq!(
-            runs.begin_screen_hold(GestureId(1), 515_151_515, own, default),
+            runs.begin_screen_hold(GestureId(1), 515_151_515, own, default, seen(&runs)),
             Ok(ControlToBrain::VoiceHoldRecognized {
                 gesture: GestureId(1),
                 thread: Some(ThreadId(1)),
@@ -983,7 +1042,7 @@ fn only_the_current_hold_of_that_kind_builds_one_screen_release_while_the_notice
     runs.cancel_hold();
     assert_eq!(runs.take_hold_cancel(), cancel(2));
 
-    runs.begin_screen_hold(GestureId(3), 1, false, on)
+    runs.begin_screen_hold(GestureId(3), 1, false, on, seen(&runs))
         .expect("held");
     // Another gesture's release builds none, and refuses nothing of this hold.
     for other in [2, 4] {
@@ -1008,6 +1067,7 @@ fn only_the_current_hold_of_that_kind_builds_one_screen_release_while_the_notice
             excluded_qpc: 717_171_717,
             pointer: ReleasePointer(PhysicalPoint([-2_345_678, 8_765_432])),
             path: PointerPath(vec![PhysicalPoint([3_456_789, -9_876_543])]),
+            notice: Some(kumochi_protocol::message::NoticeRevision::FIRST.next()),
         })
     );
     let (model, sent) = (format!("{runs:?}"), format!("{message:?}"));
@@ -1046,7 +1106,7 @@ fn a_refusal_lands_once_on_a_hold_that_shows_the_screen_at_release_in_that_flow_
     ] {
         let mut runs = ready();
         let luna = shown_to_luna(&mut runs);
-        runs.begin_screen_hold(GestureId(1), 1, false, Some(&luna))
+        runs.begin_screen_hold(GestureId(1), 1, false, Some(&luna), seen(&runs))
             .expect("held");
         // Another gesture's outcome isn't this hold's.
         assert!(!runs.hold_screen(GestureId(2), HeldScreen::NotIncluded(class)));
@@ -1064,7 +1124,7 @@ fn a_refusal_lands_once_on_a_hold_that_shows_the_screen_at_release_in_that_flow_
     // A picture that was taken leaves no line: history's icon speaks for it.
     let mut runs = ready();
     let luna = shown_to_luna(&mut runs);
-    runs.begin_screen_hold(GestureId(1), 1, false, Some(&luna))
+    runs.begin_screen_hold(GestureId(1), 1, false, Some(&luna), seen(&runs))
         .expect("held");
     assert!(runs.hold_screen(GestureId(1), HeldScreen::Screen));
     assert_eq!(runs.hold_screen_line(), None);
@@ -1083,7 +1143,7 @@ fn a_refusal_lands_once_on_a_hold_that_shows_the_screen_at_release_in_that_flow_
     // A hold that began as voice only has no line for an outcome to land on.
     let mut runs = ready();
     assert_eq!(
-        runs.begin_screen_hold(GestureId(1), 1, false, None),
+        runs.begin_screen_hold(GestureId(1), 1, false, None, seen(&runs)),
         Ok(ControlToBrain::VoiceHoldRecognized {
             gesture: GestureId(1),
             thread: Some(ThreadId(1)),
@@ -1113,6 +1173,9 @@ fn a_release_the_notice_refuses_is_refused_for_good() {
     let sol = ModelName::new("GPT-6 Sol").expect("valid");
     let on = ScreenHolds::On {
         model: luna.clone(),
+        connection: kumochi_protocol::message::ConnectionKind::ChatGpt,
+        slug: kumochi_protocol::message::ModelSlug::new("fixture").expect("valid"),
+        revision: kumochi_protocol::message::NoticeRevision::FIRST.next(),
     };
     let off = |why| Some(ScreenHolds::Off(why));
     // What changed while the keys were down: (what the brain says now, the target thread has
@@ -1144,7 +1207,7 @@ fn a_release_the_notice_refuses_is_refused_for_good() {
         for asked in [true, false] {
             let mut runs = ready();
             runs.set_screen_holds(on.clone());
-            runs.begin_screen_hold(GestureId(1), 1, false, Some(&luna))
+            runs.begin_screen_hold(GestureId(1), 1, false, Some(&luna), seen(&runs))
                 .expect("held");
             if let Some(now) = now.clone() {
                 runs.set_screen_holds(now);
@@ -1190,7 +1253,7 @@ fn a_hold_that_ended_before_its_release_builds_no_screen_release() {
     let luna = shown_to_luna(&mut runs);
     let on = Some(&luna);
     // A release before the hold is listening reaches the model as a cancel.
-    runs.begin_screen_hold(GestureId(1), 1, false, on)
+    runs.begin_screen_hold(GestureId(1), 1, false, on, seen(&runs))
         .expect("held");
     runs.cancel_hold();
     assert!(!runs.releases_screen(GestureId(1), false, on));
@@ -1219,7 +1282,7 @@ fn a_hold_that_ended_before_its_release_builds_no_screen_release() {
     runs.cancel_hold();
     assert_eq!(runs.take_hold_cancel(), cancel(2));
     // A changed selection cancels the hold.
-    runs.begin_screen_hold(GestureId(3), 1, false, on)
+    runs.begin_screen_hold(GestureId(3), 1, false, on, seen(&runs))
         .expect("held");
     assert!(runs.releases_screen(GestureId(3), false, on));
     assert!(runs.select_thread(None));
@@ -1230,7 +1293,7 @@ fn a_hold_that_ended_before_its_release_builds_no_screen_release() {
     assert_eq!(runs.take_hold_cancel(), cancel(3));
     // A lost connection cancels it and takes the brain's word with it; the word alone,
     // said again on the next connection, brings nothing back.
-    runs.begin_screen_hold(GestureId(4), 1, false, on)
+    runs.begin_screen_hold(GestureId(4), 1, false, on, seen(&runs))
         .expect("held");
     assert!(runs.releases_screen(GestureId(4), false, on));
     runs.disconnected();
@@ -1246,7 +1309,7 @@ fn a_hold_that_ended_before_its_release_builds_no_screen_release() {
         None
     );
     // A hold whose run is answering is over.
-    runs.begin_screen_hold(GestureId(5), 1, false, on)
+    runs.begin_screen_hold(GestureId(5), 1, false, on, seen(&runs))
         .expect("held");
     state(&mut runs, 1, 1, 5, Phase::Thinking);
     assert!(runs.releases_screen(GestureId(5), false, on));
@@ -1309,5 +1372,13 @@ fn presenter_first_runs_retire_their_stops_whichever_ending_comes_first() {
         assert_eq!(runs.owned_disposition(run), RunDisposition::Stopped);
         runs.apply_state(run, ThreadId(1), Phase::Done, None);
         assert!(runs.pending_stops.is_empty(), "run {} retired", run.0);
+    }
+}
+
+/// The offer a first input sees now: the stored `On`'s revision.
+fn seen(runs: &Runs) -> Option<kumochi_protocol::message::NoticeRevision> {
+    match runs.screen_holds() {
+        Some(kumochi_protocol::message::ScreenHolds::On { revision, .. }) => Some(*revision),
+        _ => None,
     }
 }
