@@ -73,9 +73,13 @@ impl FakeIo {
         key
     }
 
+    fn latest(&self) -> Option<PictureLevel> {
+        self.0.lock().unwrap().picture
+    }
+
     fn picture(&self, key: Binding, route: RouteStamp, state: PictureState) {
         assert_eq!(
-            self.0.lock().unwrap().picture,
+            self.latest(),
             Some(PictureLevel {
                 binding: key,
                 route,
@@ -394,10 +398,10 @@ fn replacement_rejects_old_terminals_and_latches_a_current_terminal_during_a_tor
 
     io.0.lock().unwrap().view = None;
     step(&mut worker, &port, ms(9));
-    assert_eq!(io.0.lock().unwrap().picture, None);
+    assert_eq!(io.latest(), None);
     io.view(3, 2, View::Eligible);
     step(&mut worker, &port, ms(10));
-    assert_eq!(io.0.lock().unwrap().picture, None);
+    assert_eq!(io.latest(), None);
 }
 
 #[test]
