@@ -129,6 +129,7 @@ pub(crate) enum RouteStamp {
 pub(crate) enum PictureState {
     Unavailable,
     Owned(Picture),
+    Ended(Picture),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
