@@ -376,6 +376,11 @@ one at a time. A run whose choice names Claude Code starts one through `Claude::
   picture bytes are still not fully wiped. The owner-only launch
   folder is removed best effort after confirmed teardown, not securely erased. This is not a
   sandbox or a guarantee about what the CLI or provider retains.
+  A string where a control response, its body or its `account`, or a pictured user message's
+  `content` belongs fails as `Mistyped` with a type error that names only the kind, so serde_json
+  doesn't copy the string into it. The pictured check reads every block before it judges an
+  image. Accepted controls still build `rest: Value` and `Field`. Other type errors, serde_json's
+  scratch and the child's or OS's copies can still hold echoed text.
 - **The held send.** The round moves its seed's `SendLease` into the launch (`hold_send`) before
   the first seed chunk, and asks for it with `SendGate::ask_held`, whose deadline is the launch's
   lifetime plus `SETTLE` (15 s [guess]). Claude Code sends the user message again on each native
