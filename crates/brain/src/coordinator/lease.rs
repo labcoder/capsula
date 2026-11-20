@@ -35,6 +35,12 @@ impl PictureGrant {
         self.0.load(Ordering::Acquire)
     }
 
+    /// Whether a handle besides this one is left: once a send has settled, its lease's and
+    /// the coordinator's are gone, and the last one left guards nothing.
+    pub(crate) fn is_shared(&self) -> bool {
+        Arc::strong_count(&self.0) > 1
+    }
+
     /// Ends the grant: a transport that hasn't written yet writes nothing.
     pub(crate) fn close(&self) {
         self.0.store(false, Ordering::Release);

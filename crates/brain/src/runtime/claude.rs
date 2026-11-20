@@ -227,11 +227,12 @@ impl Claude {
         let Some(lane) = &self.lane else {
             return false;
         };
-        self.generation += 1;
-        lane.fence(self.generation);
+        // Closed before the new generation is published, so no pump reads one open after it.
         for grant in self.pictures.drain(..) {
             grant.close();
         }
+        self.generation += 1;
+        lane.fence(self.generation);
         self.recheck = None;
         // A bound launch's authority ends with the generation it was bound under.
         for held in self.launches.iter().filter(|held| held.bound) {
@@ -666,7 +667,8 @@ impl Claude {
         };
         match self.asked {
             Some((asked, generation)) if asked == build && generation == self.generation => {
-                self.pictures.retain(PictureGrant::is_open);
+                self.pictures
+                    .retain(|kept| kept.is_open() && kept.is_shared());
                 self.pictures.push(grant);
             }
             Some((asked, _)) if asked == build => grant.close(),

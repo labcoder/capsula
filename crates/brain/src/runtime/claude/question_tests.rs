@@ -3061,6 +3061,31 @@ async fn a_new_generation_closes_a_picture_grant_while_its_unbound_launch_runs_o
     rig.close().await;
 }
 
+/// A kept picture grant whose send has settled, so only this core holds it, is let go at the
+/// next grant; one a lease still holds is kept.
+#[tokio::test]
+async fn a_picture_grant_whose_send_settled_is_not_kept() {
+    let script = synthetic_signed_in().held_until("go");
+    let mut rig = Rig::new("question-picture-settled", &script).await;
+    let request = choosing("haiku", Effort::Low, ConnectionKind::ClaudeCode);
+    let question = rig.claude.question(&request).expect("admitted");
+    rig.claude.picture_granted(
+        request.key,
+        crate::coordinator::PictureGrant::open_for_tests(),
+    );
+    let held = crate::coordinator::PictureGrant::open_for_tests();
+    rig.claude.picture_granted(request.key, held.clone());
+    assert_eq!(rig.claude.pictures.len(), 1);
+    rig.claude.picture_granted(
+        request.key,
+        crate::coordinator::PictureGrant::open_for_tests(),
+    );
+    assert_eq!(rig.claude.pictures.len(), 2);
+    assert!(held.is_open());
+    drop(question);
+    rig.close().await;
+}
+
 /// A picture grant for a question asked under an older generation is closed as it's granted;
 /// one for another build's send isn't Claude Code's to close.
 #[tokio::test]
