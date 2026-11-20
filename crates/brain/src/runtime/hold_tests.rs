@@ -4,7 +4,8 @@ use std::sync::{Arc, Mutex};
 use kumochi_protocol::frame::{self, Pipe};
 use kumochi_protocol::message::{
     CaptureFor, ConnectionKind, ControlToBrain, ControlToShell, DataToBrain, DataToShell, Effort,
-    GestureId, HoldFailure, HoldStatus, MicPcm, ModelChoice, ModelSlug, RunOrigin, ThreadId,
+    GestureId, HoldFailure, HoldStatus, MicPcm, ModelChoice, ModelSlug, RunId, RunOrigin, ThreadId,
+    ThreadOp,
 };
 use tokio::io::AsyncWriteExt as _;
 use tokio::sync::mpsc;
@@ -677,7 +678,7 @@ async fn told_at_the_grant(shell: &mut Shell<tokio::io::DuplexStream>, go: &toki
 }
 
 /// The run's history line says the picture went with it.
-fn stored_with_its_picture(scratch: &Scratch) {
+fn stored_with_its_picture(scratch: &Scratch, task: Option<ThreadId>) {
     let screens: Vec<Option<String>> = Store::open(&scratch.db())
         .unwrap()
         .conn_for_tests()
@@ -687,16 +688,80 @@ fn stored_with_its_picture(scratch: &Scratch) {
         .unwrap()
         .collect::<Result<_, _>>()
         .unwrap();
-    assert_eq!(screens, [Some("screen".to_owned())]);
+    let mut expected = vec![None; usize::from(task.is_some())];
+    expected.push(Some("screen".to_owned()));
+    assert_eq!(screens, expected);
+}
+
+fn seed_task_for_a_screen_hold(scratch: &Scratch) -> ThreadId {
+    let mut store = Store::open(&scratch.db()).unwrap();
+    let task = ThreadId(1);
+    store
+        .begin_turn(task, Some("Task"), RunId(1), "earlier words")
+        .unwrap();
+    store
+        .end_run(task, RunId(1), &[], crate::store::RunEnd::Done)
+        .unwrap();
+    task
+}
+
+async fn commit_hold_model(
+    shell: &mut Shell<tokio::io::DuplexStream>,
+    thread: ThreadId,
+    choice: &ModelChoice,
+) {
+    shell
+        .send(&ControlToBrain::ThreadOp(ThreadOp::SetModel {
+            thread,
+            choice: choice.clone(),
+        }))
+        .await;
+    assert_eq!(
+        shell.control().await,
+        Some(ControlToShell::ThreadModelSet {
+            thread,
+            choice: choice.clone(),
+            applied: true,
+        })
+    );
+}
+
+async fn recognize_screen_recipient(
+    shell: &mut Shell<tokio::io::DuplexStream>,
+    task: Option<ThreadId>,
+    choice: &ModelChoice,
+) {
+    opened(shell).await;
+    if let Some(thread) = task {
+        commit_hold_model(shell, thread, choice).await;
+    }
+    shell
+        .send(&ControlToBrain::ScreenHoldRecognized {
+            gesture: G,
+            thread: task,
+            selection: 1,
+            t_qpc: 1,
+        })
+        .await;
 }
 
 /// A spoken screen hold through the running brain whose picture is sealed, its words coming
 /// before the picture or after it: the run carries both, and `HoldScreen` waits for the grant.
 async fn a_screen_hold_reaches_its_run_with_its_picture(first: First) {
-    use crate::runtime::hold::tests::screen_hold::{recognized, release as released, seeing};
+    use crate::runtime::hold::tests::screen_hold::{release as released, seeing};
     type Request = <crate::screen::Holds as crate::supervise::Kind>::Request;
     type Reply = <crate::screen::Holds as crate::supervise::Kind>::Reply;
     let scratch = Scratch::new("hold-screen-picture");
+    let task = (first == First::Picture).then(|| seed_task_for_a_screen_hold(&scratch));
+    let choice = ModelChoice {
+        model: ModelSlug::new("gpt-6-sol").unwrap(),
+        effort: if task.is_some() {
+            Effort::High
+        } else {
+            Effort::Low
+        },
+        connection: ConnectionKind::ChatGpt,
+    };
     let (mut brain, release, mut decoded, _fetch) =
         input(&scratch, vec![105, -5], "words and a picture").await;
     let mut rig = seeing(&mut brain);
@@ -712,8 +777,7 @@ async fn a_screen_hold_reaches_its_run_with_its_picture(first: First) {
     let ((control, data), mut shell) = duplex();
     let mut tap = Tap::from_env();
     let client = async {
-        opened(&mut shell).await;
-        shell.send(&recognized(G)).await;
+        recognize_screen_recipient(&mut shell, task, &choice).await;
         status(&mut shell, HoldStatus::Admitted).await;
         shell.send(&released(G, 100, 200, 2)).await;
         let (id, display) = rig.next().await;
@@ -756,6 +820,10 @@ async fn a_screen_hold_reaches_its_run_with_its_picture(first: First) {
     .await
     .unwrap();
     let request = requests.try_recv().unwrap();
+    assert_eq!(request.request.choice, Some(choice));
+    if let Some(task) = task {
+        assert_eq!(request.thread, task);
+    }
     let jpeg = crate::context::Jpeg::new(PICTURE.to_vec()).unwrap();
     let images: Vec<_> = request
         .request
@@ -769,8 +837,10 @@ async fn a_screen_hold_reaches_its_run_with_its_picture(first: First) {
     assert_eq!(images, [&jpeg]);
     assert!(requests.is_empty());
     brain.close().await;
-    assert_eq!(users(&scratch), ["words and a picture"]);
-    stored_with_its_picture(&scratch);
+    let mut expected = vec!["earlier words"; usize::from(task.is_some())];
+    expected.push("words and a picture");
+    assert_eq!(users(&scratch), expected);
+    stored_with_its_picture(&scratch, task);
 }
 
 #[tokio::test]
@@ -788,6 +858,80 @@ async fn a_screen_holds_picture_then_its_words_reach_the_run_together() {
 
 #[path = "screen_sent_tests.rs"]
 mod sent;
+
+#[tokio::test]
+async fn a_voice_hold_uses_the_committed_task_model_and_effort() {
+    use crate::context::InputItem;
+    use crate::runtime::hold::tests::screen_hold::image_recipients;
+    use kumochi_protocol::message::Phase;
+
+    let scratch = Scratch::new("hold-voice-pin");
+    let task = seed_task_for_a_screen_hold(&scratch);
+    let (mut brain, release, mut decoded, _fetch) =
+        input(&scratch, vec![105, -5], "new spoken words").await;
+    let (_, choice) = image_recipients(&mut brain);
+    assert!(brain.account.takes_images(&choice));
+    let (send, mut requests) = mpsc::unbounded_channel();
+    brain.engine = Box::new(Requested(send));
+    let ((control, data), mut shell) = duplex();
+    let mut tap = Tap::from_env();
+    let client = async {
+        opened(&mut shell).await;
+        commit_hold_model(&mut shell, task, &choice).await;
+        shell
+            .send(&ControlToBrain::VoiceHoldRecognized {
+                gesture: G,
+                thread: Some(task),
+                selection: 1,
+            })
+            .await;
+        status(&mut shell, HoldStatus::Admitted).await;
+        packet(&mut shell, 16_000, 0, true, vec![105, -5]).await;
+        release_source(&mut shell, 1).await;
+        status(&mut shell, HoldStatus::Transcribing).await;
+        assert_eq!(decoded.recv().await, Some(()));
+        release.send(()).unwrap();
+        let (run, phase) = shell.state().await;
+        assert_eq!(phase, Phase::Thinking);
+        assert!(matches!(shell.data().await, DataToShell::Models { .. }));
+        shell.held(G, "new spoken words").await;
+        assert_eq!(shell.read_to_end(run).await, "selected answer".len());
+        assert_eq!(shell.state().await, (run, Phase::Answering));
+        assert_eq!(shell.state().await, (run, Phase::Done));
+        drop(shell);
+    };
+    let (ended, ()) = tokio::time::timeout(super::PATIENCE, async {
+        tokio::join!(brain.serve(control, data, &mut tap), client)
+    })
+    .await
+    .unwrap();
+    assert_eq!(ended, Ended::Lost);
+    let request = requests.try_recv().unwrap();
+    assert_eq!(request.thread, task);
+    assert_eq!(request.request.choice, Some(choice));
+    assert!(
+        !request
+            .request
+            .input
+            .iter()
+            .any(|item| matches!(item, InputItem::Image(_)))
+    );
+    let words = sent_users(&request);
+    let [earlier, current] = words.as_slice() else {
+        panic!("expected two user turns");
+    };
+    assert_eq!(*earlier, "earlier words");
+    let (minute, drawings) = current
+        .strip_prefix("new spoken words\n\nLocal time: ")
+        .unwrap()
+        .split_once("\nDrawings on screen: ")
+        .unwrap();
+    super::asks::assert_minute(minute);
+    assert_eq!(drawings, "[]");
+    assert!(requests.is_empty());
+    brain.close().await;
+    assert_eq!(users(&scratch), ["earlier words", "new spoken words"]);
+}
 
 #[tokio::test]
 async fn quiet_audio_or_blank_transcript_store_and_send_nothing() {

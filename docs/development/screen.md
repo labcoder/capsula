@@ -560,7 +560,8 @@ to a model that can see goes voice-only while the default can't: a known limit.
 `show_screen`, not `screen_holds`, in every gate. An open gate only arms the part (`Armed`):
 nothing is captured while the keys are down. A closed one leaves the hold voice-only. Its
 `ScreenRelease` starts the capture after these checks, in order: the path (`PointerPath::check`),
-the part still armed and its hold's choice unchanged, the gate again, the release stamp's age against `LATEST_START` (the
+the part still armed and its hold's choice unchanged, the gate again, a prepared recipient check,
+the release stamp's age against `LATEST_START` (the
 deadline, `MAX_TTL` from now, is read first, so the ticket can only end sooner than the check
 allows), and the exclusion stamp, which may be neither earlier than the release stamp nor later
 than now. A refusal closes the armed part as the thread gate would (`ModelCantSee`, no line for
@@ -574,6 +575,13 @@ closes the part `NotReady`, its retire waits behind the seal, and the frame is r
 way. Words ready while the part is `Capturing` wait for it until that deadline, then go on
 without it. A part still `Armed` when the words are ready, because its release never came,
 closes `NotReady`.
+
+The brain records the gate's connection kind and model slug at arm (display) or capture start
+(window). Effort and display name don't affect the recipient. If the store's prepared choice is
+already known at display release, a missing or different recipient refuses the capture. At
+submission, either kind of sealed image is dropped unless the prepared choice matches the
+recorded recipient exactly. The hold continues with its voice text and the existing `NotReady`
+line when its prepared route can still answer. No lease ownership changes.
 
 The task runs `context` (or `display`) and `seal` by the deadline that check set. It never
 touches the part. Each answer comes back as a `ScreenEvent` keyed by the hold and the worker

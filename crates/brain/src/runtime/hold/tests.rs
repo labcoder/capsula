@@ -617,6 +617,7 @@ fn recording(brain: &mut Brain) {
         decode: None,
         terminal: None,
         screen: ScreenPart::None,
+        screen_recipient: None,
         words: None,
     });
     brain.holds.debt = Some(KEY);
@@ -1301,11 +1302,15 @@ async fn an_answered_decode_is_taken_in_the_poll_that_reads_it() {
 /// Leaves a recording hold on `thread` whose screen part is `screen`.
 fn screen_hold(brain: &mut Brain, key: HoldKey, screen: ScreenPart) {
     recording(brain);
-    let thread = brain.config.view().main_thread;
+    let view = brain.config.view();
     let hold = brain.holds.pending.as_mut().unwrap();
     hold.key = key;
-    hold.thread = Some(thread);
+    hold.thread = Some(view.main_thread);
     hold.screen = screen;
+    hold.screen_recipient = view
+        .default_model
+        .as_ref()
+        .map(|choice| (choice.connection, choice.model.clone()));
 }
 
 fn waiting() -> ScreenPart {
@@ -1411,8 +1416,7 @@ async fn a_ready_image_goes_to_its_run_and_a_waiting_part_closes_before_its_run_
     use crate::context::{Jpeg, Screen, ScreenClass};
     let scratch = Scratch::new("hold-screen-submit");
     let mut brain = test_support::brain(&scratch, "");
-    let mut rig = crate::supervise::fixture::start::<crate::screen::Holds>();
-    brain.holds.screen = Some(Arc::new(HoldClient::new(rig.handle.clone())));
+    let (mut rig, _, _) = sees_on_sol(&mut brain);
     screen_hold(&mut brain, KEY, ready());
     let image = Jpeg::new(JPEG.to_vec()).unwrap();
     assert!(matches!(brain.holds.submit_screen(), Some(Screen::Image(sent)) if sent == image));
@@ -1445,9 +1449,97 @@ async fn a_ready_image_goes_to_its_run_and_a_waiting_part_closes_before_its_run_
 }
 
 #[tokio::test]
+async fn a_ready_hold_part_without_a_prepared_choice_is_not_included() {
+    use crate::context::Screen;
+    let scratch = Scratch::new("hold-screen-unresolved");
+    let mut brain = test_support::brain(&scratch, "");
+    for kind in [Kind::Window, Kind::Screen] {
+        screen_hold(&mut brain, KEY, ready());
+        let hold = brain.holds.pending.as_mut().unwrap();
+        hold.kind = kind;
+        hold.snapshot.as_mut().unwrap().defaults.choice = None;
+        assert!(matches!(
+            (kind, brain.holds.submit_screen()),
+            (
+                Kind::Window,
+                Some(Screen::NotIncluded(ScreenClass::NotReady))
+            ) | (
+                Kind::Screen,
+                Some(Screen::PictureNotIncluded(ScreenClass::NotReady))
+            )
+        ));
+        assert!(brain.holds.submit_screen().is_none());
+        brain.holds.lost();
+    }
+    brain.close().await;
+}
+
+#[tokio::test]
+async fn a_ready_part_is_only_paired_with_its_armed_recipient() {
+    use crate::context::{Jpeg, Screen};
+    use kumochi_protocol::message::Effort;
+
+    let scratch = Scratch::new("hold-screen-recipient");
+    let mut brain = test_support::brain(&scratch, "");
+    let (_rig, mut sol, _) = sees_on_sol(&mut brain);
+    sol.effort = Effort::High;
+    let jpeg = Jpeg::new(JPEG.to_vec()).unwrap();
+    let cases = [
+        (sol.clone(), true),
+        (
+            ModelChoice {
+                model: ModelSlug::new("gpt-6.1-sol").unwrap(),
+                ..sol.clone()
+            },
+            false,
+        ),
+        (
+            ModelChoice {
+                connection: ConnectionKind::ClaudeCode,
+                ..sol
+            },
+            false,
+        ),
+    ];
+    for (choice, includes) in cases {
+        for kind in [Kind::Window, Kind::Screen] {
+            screen_hold(&mut brain, KEY, ready());
+            let hold = brain.holds.pending.as_mut().unwrap();
+            hold.kind = kind;
+            hold.snapshot.as_mut().unwrap().defaults.choice = Some(choice.clone());
+            let part = brain.holds.submit_screen();
+            match (kind, includes) {
+                (Kind::Window, true) => {
+                    assert!(matches!(part, Some(Screen::Image(sent)) if sent == jpeg));
+                }
+                (Kind::Screen, true) => {
+                    assert!(matches!(part, Some(Screen::Picture(sent, None, _)) if sent == jpeg));
+                }
+                (Kind::Window, false) => {
+                    assert!(matches!(
+                        part,
+                        Some(Screen::NotIncluded(ScreenClass::NotReady))
+                    ));
+                }
+                (Kind::Screen, false) => {
+                    assert!(matches!(
+                        part,
+                        Some(Screen::PictureNotIncluded(ScreenClass::NotReady))
+                    ));
+                }
+                (Kind::Voice, _) => unreachable!(),
+            }
+            brain.holds.lost();
+        }
+    }
+    brain.close().await;
+}
+
+#[tokio::test]
 async fn the_transcript_hands_a_ready_image_to_its_run() {
     let scratch = Scratch::new("hold-screen-run");
     let mut brain = test_support::brain(&scratch, "");
+    let (_rig, _, _) = sees_on_sol(&mut brain);
     let (out, _output) = mpsc::channel(16);
     let queue = RefCell::new(DataQueue::new(super::super::window()));
     let ready_notify = Notify::new();
@@ -1486,6 +1578,7 @@ fn a_hold_dropped_with_a_live_screen_part_fails_in_tests() {
         decode: None,
         terminal: None,
         screen: waiting(),
+        screen_recipient: None,
         words: None,
     });
 }
@@ -1680,19 +1773,21 @@ async fn a_frame_held_after_its_part_closed_is_retired_on_the_worker_that_holds_
 async fn a_part_closed_during_its_capture_retires_the_frame_without_a_walk() {
     let scratch = Scratch::new("hold-screen-stop");
     let mut brain = test_support::brain(&scratch, "");
-    let mut rig = crate::supervise::fixture::start::<crate::screen::Holds>();
-    brain.holds.screen = Some(Arc::new(HoldClient::new(rig.handle.clone())));
+    let (mut rig, sol, _) = sees_on_sol(&mut brain);
+    let recipient = (sol.connection, sol.model);
     screen_hold(&mut brain, KEY, ScreenPart::None);
     let point = kumochi_protocol::geometry::PhysicalPoint([5, 5]);
-    assert!(
-        brain
-            .holds
-            .start_screen(KEY, point, LEASE, Instant::now() + MAX_TTL)
-    );
+    assert!(brain.holds.start_screen(
+        KEY,
+        point,
+        LEASE,
+        Instant::now() + MAX_TTL,
+        recipient.clone()
+    ));
     assert!(
         !brain
             .holds
-            .start_screen(KEY, point, LEASE, Instant::now() + MAX_TTL),
+            .start_screen(KEY, point, LEASE, Instant::now() + MAX_TTL, recipient),
         "one part per hold"
     );
     let (id, capture) = rig.next().await;
@@ -1884,9 +1979,7 @@ fn sees_on_sol(
     let info = |choice: &ModelChoice, name: &str| ModelInfo {
         slug: choice.model.clone(),
         display_name: ModelName::new(name).unwrap(),
-        supported_efforts: kumochi_protocol::message::EffortSet::new([
-            kumochi_protocol::message::Effort::Low,
-        ]),
+        supported_efforts: kumochi_protocol::message::EffortSet::new([Effort::Low, Effort::High]),
     };
     brain.account.read_catalog(
         vec![info(&sol, "GPT-6 Sol"), info(&luna, "GPT-6 Luna")],
@@ -2120,14 +2213,14 @@ async fn a_capture_the_system_refuses_comes_back_from_the_task_as_unsupported() 
     type Reply = <crate::screen::Holds as crate::supervise::Kind>::Reply;
     let scratch = Scratch::new("hold-screen-refused");
     let mut brain = test_support::brain(&scratch, "");
-    let mut rig = crate::supervise::fixture::start::<crate::screen::Holds>();
-    brain.holds.screen = Some(Arc::new(HoldClient::new(rig.handle.clone())));
+    let (mut rig, sol, _) = sees_on_sol(&mut brain);
+    let recipient = (sol.connection, sol.model);
     screen_hold(&mut brain, KEY, ScreenPart::None);
     let point = kumochi_protocol::geometry::PhysicalPoint([5, 5]);
     assert!(
         brain
             .holds
-            .start_screen(KEY, point, LEASE, Instant::now() + MAX_TTL)
+            .start_screen(KEY, point, LEASE, Instant::now() + MAX_TTL, recipient)
     );
     let (id, _capture) = rig.next().await;
     rig.reply(id, &Reply::Refused(Refusal::Unsupported)).await;
@@ -2147,14 +2240,14 @@ async fn a_hold_asks_for_its_picture_without_a_walk_that_could_be_cut_short() {
     type Reply = <Kind as crate::supervise::Kind>::Reply;
     let scratch = Scratch::new("hold-screen-no-walk");
     let mut brain = test_support::brain(&scratch, "");
-    let mut rig = crate::supervise::fixture::start::<Kind>();
-    brain.holds.screen = Some(Arc::new(HoldClient::new(rig.handle.clone())));
+    let (mut rig, sol, _) = sees_on_sol(&mut brain);
+    let recipient = (sol.connection, sol.model);
     screen_hold(&mut brain, KEY, ScreenPart::None);
     let point = kumochi_protocol::geometry::PhysicalPoint([5, 5]);
     assert!(
         brain
             .holds
-            .start_screen(KEY, point, LEASE, Instant::now() + MAX_TTL)
+            .start_screen(KEY, point, LEASE, Instant::now() + MAX_TTL, recipient)
     );
     let (id, capture) = rig.next().await;
     crate::screen::hold_frame(&rig, id, capture).await;
