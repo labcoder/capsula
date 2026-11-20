@@ -8,6 +8,11 @@
 //! connection's control queue.
 
 mod clock;
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "the drawing conductor has no live caller yet")
+)]
+mod conductor;
 mod engine;
 #[cfg(test)]
 pub(crate) mod fake;

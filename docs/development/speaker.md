@@ -133,6 +133,20 @@ Everything else is shared and tested offline against a fake device clock
   `AudioOutputUnavailable` goes out. The clock runs on, so a stop is still answered once what
   was written has played.
 
+## Dormant drawing conductor
+
+The dormant drawing conductor decides only an assignment's audio gate and picture timing.
+The presenter supplies readiness and fences, the worker supplies actual handoff and the
+current physical route's source span, the link reports worker absence, and the brain supplies
+synthesis finals. It doesn't infer submission from staged or virtually consumed samples.
+Preparation allows sound without waiting for visual eligibility; after a 250 ms hold the
+whole line is allowed and the picture takes silent timing. On rebuild, an unshown speech
+step has 250 ms to receive a handoff from the new route before taking silent timing.
+A route rebuild mid-line ends speech-following for that shown step; it takes authored
+timing immediately. A shown or fenced step can't show again. The worker still arbitrates
+a drop against actual handoff. These defaults aren't measured; there's no wiring to
+either playback worker or presenter.
+
 ## Reports
 
 All go out on the connection's control queue, in order. The announcement comes first.
