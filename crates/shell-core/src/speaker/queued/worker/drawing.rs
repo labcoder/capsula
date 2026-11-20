@@ -240,9 +240,10 @@ impl Worker {
         let id = bound.key.assignment.segment;
         let segment = self.engine.queue.segment(id);
         let unheard = self.engine.queue.has_unheard(id);
+        let fully_retired = self.engine.queue.completed > id.0;
         let head = if bound.revoked || self.engine.queue.discarded(id) {
             Head::Revoked
-        } else if self.engine.queue.completed > id.0 && !unheard {
+        } else if fully_retired && !unheard {
             Head::Played
         } else if self.engine.queue.completed < id.0 {
             Head::AdvancingPredecessor
@@ -260,7 +261,10 @@ impl Worker {
                 samples: value.samples,
             });
         let (stamp, mut route) = self.drawing_route();
-        if route == Route::Pending && unheard {
+        if unheard
+            && route != Route::Rebuilding
+            && (fully_retired || stamp == RouteStamp::Unstamped)
+        {
             route = Route::Virtual;
         }
         let decision = bound

@@ -570,3 +570,43 @@ fn a_pending_open_arms_the_hold_for_ready_pcm_and_releases_it_to_virtual_pacing(
         PictureState::Owned(Picture::Silent),
     );
 }
+
+#[test]
+fn opening_after_the_eligible_line_is_consumed_uses_silent_fallback_without_ending() {
+    static OCCUPIED: AtomicBool = AtomicBool::new(false);
+    let (mut worker, input, port, requests, replies) = fake();
+    let io = FakeIo::attach(&mut worker, &port);
+    let key = io.view(1, 0, View::Preparing);
+    input.command(Command::Expect).unwrap();
+    step(&mut worker, &port, ms(0));
+    let Request::Open(generation, control) = requests.try_recv().unwrap() else {
+        panic!("expected an open");
+    };
+    input.submit(packet(9, 0, 240, Some(240))).unwrap();
+    step(&mut worker, &port, ms(30));
+    assert_eq!(worker.deadline(ms(30)), Some(ms(280)));
+    io.view(1, 0, View::Eligible);
+    step(&mut worker, &port, ms(31));
+    assert_eq!(worker.engine.progress.consumed, 0);
+    io.picture(
+        key,
+        RouteStamp::Unstamped,
+        PictureState::Owned(Picture::Wait),
+    );
+
+    let (transport, _playback) = FakePlayback::open(control, &OCCUPIED);
+    assert!(
+        replies
+            .send(Reply::Opened(generation, Some(transport)))
+            .is_ok()
+    );
+    step(&mut worker, &port, ms(42));
+    assert_eq!(worker.engine.progress.consumed, 240);
+    assert_eq!(worker.engine.progress.heard, 0);
+    assert!(!worker.engine.queue.was_staged(SegmentId(0)));
+    io.picture(
+        key,
+        RouteStamp::Live(generation),
+        PictureState::Owned(Picture::Silent),
+    );
+}

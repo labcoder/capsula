@@ -180,8 +180,10 @@ route predicts onset; shown motion is authored and later progress doesn't publis
 A sticky end publishes independently of timing. An end before visual eligibility can
 carry Wait: it releases the audio binding while the presenter keeps the step. Retiring
 unheard source never produces a played terminal; an earlier gap doesn't prevent a
-later fully heard segment from ending. Ready PCM arms the hold even during a pending
-device open, so expiry can release it to virtual pacing without another packet.
+later fully heard segment from ending. A fully retired unheard line takes silent
+fallback even when a device opens as virtual pacing exhausts it. Retirement still
+keeps the existing rebuild grace. Ready PCM arms the hold during a pending device
+open, so expiry can release it to virtual pacing without another packet.
 Missing owner, backend startup failure and worker exit
 are reported to the future link, which supplies keyed Unavailable. Unit 4 must ensure
 the worker has seen the matching binding before forwarding that assignment's first PCM,
