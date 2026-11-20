@@ -125,6 +125,7 @@ impl Coordinator {
         }
     }
 
+    #[expect(clippy::too_many_lines, reason = "one exhaustive speech input router")]
     pub(super) fn speech_input(
         &mut self,
         input: Input,
@@ -192,6 +193,7 @@ impl Coordinator {
             | Input::SegmentPlayed { run, .. }
             | Input::SpeechStopped { run, .. } => run,
             Input::SpeechRetired(receipt) => receipt.run,
+            Input::SpeechDecision(key, _) => key.run,
             _ => unreachable!("only speech inputs are routed here"),
         };
         let found = self.find(run)?;
@@ -216,6 +218,7 @@ impl Coordinator {
                 segment, samples, ..
             } => reply.played(segment, samples, &mut out),
             Input::SpeechRetired(receipt) => reply.retired(receipt, &mut out),
+            Input::SpeechDecision(key, decision) => reply.decide(key, decision, &mut out),
             Input::SpeechStopped { cursor, .. } => {
                 // A second answer, for a Stop that crossed a revoke, changes nothing.
                 if !reply.revoked() || reply.is_final() {
@@ -267,6 +270,7 @@ pub(super) fn carry(run: &mut Run, out: Vec<Speech>, effects: &mut Vec<Effect>) 
                 output_generation,
             }),
             Speech::Pcm(pcm) => Effect::Data(DataToShell::SpeechPcm(pcm)),
+            Speech::DecisionTaken(key) => Effect::Control(ControlToShell::SpeechDecisionTaken(key)),
             Speech::Speak { segment, text } => Effect::Speak {
                 run: id,
                 segment,

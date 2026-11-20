@@ -2,19 +2,53 @@
 //! ends `Done` once the shell played it.
 
 use std::path::Path;
+use std::time::Duration;
 
+use kumochi_protocol::frame::{self, Pipe};
 use kumochi_protocol::message::{
-    ControlToBrain, DataToShell, OutputGeneration, Phase, RunId, SegmentId, SpeechPcm, ThreadId,
+    ControlToBrain, ControlToShell, DataToBrain, DataToShell, OutputGeneration, PageOf, Phase,
+    RunId, SegmentId, SegmentStart, SpeechDecision, SpeechDispatch, SpeechPcm, SpeechPromise,
+    SpeechRetirement, StepRef, ThreadId,
 };
+use tokio::io::AsyncWriteExt as _;
+use tokio::time::{sleep, timeout};
 
-use super::{Brain, Ended, duplex};
-use crate::coordinator::{Effect, Input, StoreOp};
+use super::{Brain, Ended, PATIENCE, duplex};
+use crate::coordinator::{Effect, Input, SendKey, StoreOp};
+use crate::engines::fixture::Fixture;
+use crate::engines::{self, Finish, Round, RunRequest, SendGate, TurnEvent};
 use crate::store::{RunEnd, Store};
 use crate::tap::Tap;
 use crate::test_support::{self, Scratch};
 use crate::voice::pump::Pump;
 use crate::voice::reply::Heard;
 use crate::voice::tts::{Engine, TtsError, TtsHandle};
+
+#[derive(Debug)]
+struct DrawThenFinish(Fixture);
+
+impl engines::Engine for DrawThenFinish {
+    fn start(
+        &self,
+        request: RunRequest,
+        events: tokio::sync::mpsc::Sender<TurnEvent>,
+        gate: SendGate,
+    ) -> Round {
+        let SendKey::Build(key) = request.key else {
+            panic!("a foreground run");
+        };
+        if key.round == 1 {
+            return engines::Engine::start(&self.0, request, events, gate);
+        }
+        assert_eq!(key.round, 2);
+        Box::pin(async move {
+            events
+                .send(TurnEvent::Finished(Finish::Completed))
+                .await
+                .unwrap();
+        })
+    }
+}
 
 /// Speaks every segment as one frame of 240 silent samples.
 struct Silence;
@@ -29,6 +63,11 @@ impl Engine for Silence {
 /// A brain playing `script` with spoken replies on, speaking through `Silence`.
 fn spoken(scratch: &Scratch, script: &str) -> Brain {
     let mut brain = test_support::brain(scratch, script);
+    enable_spoken(&mut brain);
+    brain
+}
+
+fn enable_spoken(brain: &mut Brain) {
     let (reports, _) = crate::voice::Reports::new();
     let tts = TtsHandle::spawn_with(tokio::runtime::Handle::current(), reports, |_: &Path| {
         Ok(Silence)
@@ -41,7 +80,229 @@ fn spoken(scratch: &Scratch, script: &str) -> Brain {
         rate: 24_000,
         generation: OutputGeneration(1),
     });
-    brain
+}
+
+#[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one ordered exchange over the two real pipes"
+)]
+async fn closed_speech_waits_across_live_data_credits_then_dispatches_once() {
+    use super::super::draw_stream_tests;
+    use crate::coordinator::DRAIN_STALL;
+
+    let scratch = Scratch::new("queued-speech-decisions");
+    let history = ThreadId(2);
+    {
+        let mut store = Store::open(&scratch.db()).unwrap();
+        store
+            .begin_turn(history, Some("history"), RunId(1), &"x".repeat(31 * 1024))
+            .unwrap();
+        store.end_run(history, RunId(1), &[], RunEnd::Done).unwrap();
+    }
+    let mut brain = draw_stream_tests::brain(&scratch);
+    let script = concat!(
+        "0 text Plain.\n",
+        r#"0 step {"records":[{"begin":{"v":1,"scene":"diagram","surface":"overlay","alt":""}},"#,
+        r#"{"step":{"id":"s1","start":"speech","say":"Narration.","put":[{"shape":{"id":"a","#,
+        r#""kind":"rect","box":[0,0,10,10]}}]}},{"end":{}}]}"#,
+    );
+    brain.engine = Box::new(DrawThenFinish(Fixture::parse(script).unwrap()));
+    enable_spoken(&mut brain);
+    let inputs = brain.inputs_tx.clone();
+    let ((control, data), mut shell) = duplex();
+    let mut tap = Tap::from_env();
+    let client = async {
+        assert_eq!(shell.scenes().await, []);
+        inputs.send(draw_stream_tests::provider_ready()).unwrap();
+        let output = OutputGeneration(1);
+        shell
+            .send(&ControlToBrain::QueuedAudioOutput(24_000, output))
+            .await;
+        shell.submit("draw").await;
+        let (run, phase) = shell.state().await;
+        assert_eq!(phase, Phase::Thinking);
+        assert_eq!(shell.state().await, (run, Phase::Answering));
+        let key = SpeechDispatch {
+            run,
+            output,
+            segment: SegmentId(1),
+        };
+        let retire = |segment, samples| {
+            ControlToBrain::SpeechRetired(SpeechRetirement {
+                run,
+                output,
+                segment,
+                retired: samples,
+                heard: samples,
+                final_segment: true,
+            })
+        };
+        let pcm = |segment, seq, samples, last| {
+            DataToShell::SpeechPcm(SpeechPcm {
+                run,
+                segment,
+                output_generation: output,
+                seq,
+                samples,
+                last,
+            })
+        };
+        let (mut scene, mut committed, mut announced, mut scene_ended) =
+            (None, false, false, false);
+        let mut plain_pcm = Vec::new();
+        while !(announced && scene_ended && plain_pcm.len() == 2) {
+            let frame = shell.data().await;
+            shell
+                .credit(frame::encode(&frame, Pipe::Data).unwrap().len())
+                .await;
+            match frame {
+                DataToShell::AssistantText { run: owner, delta } => {
+                    assert_eq!((owner, delta.as_str()), (run, "Plain."));
+                }
+                DataToShell::SceneBegin { scene: id, .. } => assert_eq!(scene.replace(id), None),
+                DataToShell::SegmentQueued {
+                    run: owner,
+                    segment: SegmentId(0),
+                    step,
+                    start,
+                    output_generation,
+                } => {
+                    assert_eq!(
+                        (owner, step, start, output_generation),
+                        (run, None, SegmentStart::Plain, output)
+                    );
+                }
+                DataToShell::SceneStepCommit {
+                    run: owner,
+                    scene: id,
+                    index,
+                    speech,
+                    ..
+                } => {
+                    assert_eq!(
+                        (owner, index, speech),
+                        (
+                            run,
+                            0,
+                            Some(SpeechPromise {
+                                output_generation: output,
+                                segment: key.segment
+                            })
+                        )
+                    );
+                    assert_eq!(scene, Some(id));
+                    assert!(!std::mem::replace(&mut committed, true));
+                }
+                DataToShell::SegmentQueued {
+                    run: owner,
+                    segment,
+                    step,
+                    start,
+                    output_generation,
+                } => {
+                    assert!(committed);
+                    let id = scene.expect("commit precedes its speech");
+                    assert_eq!(
+                        (owner, segment, step, start, output_generation),
+                        (
+                            run,
+                            key.segment,
+                            Some(StepRef {
+                                scene: id,
+                                index: 0
+                            }),
+                            SegmentStart::Speech,
+                            output
+                        )
+                    );
+                    assert!(!std::mem::replace(&mut announced, true));
+                }
+                DataToShell::SceneEnd {
+                    run: owner,
+                    scene: id,
+                    complete,
+                } => {
+                    assert_eq!((owner, Some(id), complete), (run, scene, true));
+                    assert!(!std::mem::replace(&mut scene_ended, true));
+                }
+                DataToShell::SpeechPcm(SpeechPcm {
+                    segment: SegmentId(0),
+                    ..
+                }) => plain_pcm.push(frame),
+                other => panic!("unexpected pre-decision data: {other:?}"),
+            }
+        }
+        assert_eq!(
+            plain_pcm,
+            [
+                pcm(SegmentId(0), 0, vec![0; 240], None),
+                pcm(SegmentId(0), 1, Vec::new(), Some(240))
+            ]
+        );
+        shell.send(&retire(SegmentId(0), 240)).await;
+
+        let waiting = tokio::time::Instant::now();
+        let mut returned = 0;
+        for request in 1..=18 {
+            if request % 3 == 1 {
+                sleep(Duration::from_secs(1)).await;
+            }
+            let data = DataToBrain::PageRequest {
+                request,
+                page: PageOf::Events {
+                    thread: history,
+                    before: None,
+                },
+            };
+            shell
+                .data_out
+                .write_all(&frame::encode(&data, Pipe::Data).unwrap())
+                .await
+                .unwrap();
+            let frame = shell.data().await;
+            assert!(
+                matches!(&frame, DataToShell::Page { request: reply, thread, events, before: None }
+                    if *reply == request && *thread == history && events.len() == 1),
+                "{frame:?}"
+            );
+            let bytes = frame::encode(&frame, Pipe::Data).unwrap().len();
+            shell.credit(bytes).await;
+            returned += bytes;
+        }
+        assert!(returned > super::super::window());
+        assert!(waiting.elapsed() > DRAIN_STALL);
+        shell
+            .send(&ControlToBrain::SpeechDecision(key, SpeechDecision::Allow))
+            .await;
+        assert_eq!(
+            shell.control().await,
+            Some(ControlToShell::SpeechDecisionTaken(key))
+        );
+        shell
+            .send(&ControlToBrain::SpeechDecision(key, SpeechDecision::Allow))
+            .await;
+        assert_eq!(
+            shell.control().await,
+            Some(ControlToShell::SpeechDecisionTaken(key))
+        );
+        assert_eq!(shell.data().await, pcm(key.segment, 0, vec![0; 240], None));
+        assert_eq!(
+            shell.data().await,
+            pcm(key.segment, 1, Vec::new(), Some(240))
+        );
+        shell.send(&retire(key.segment, 240)).await;
+        assert_eq!(shell.state().await, (run, Phase::Done));
+        assert_eq!(shell.data().await, DataToShell::RunEnd { run });
+        drop(shell);
+    };
+    let (ended, ()) = timeout(PATIENCE, async {
+        tokio::join!(brain.serve(control, data, &mut tap), client)
+    })
+    .await
+    .expect("connected speech run finishes");
+    assert_eq!(ended, Ended::Lost);
+    brain.close().await;
 }
 
 #[tokio::test]

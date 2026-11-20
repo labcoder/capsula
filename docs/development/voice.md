@@ -225,6 +225,12 @@ stateDiagram-v2
 - **Queued output (dormant).** Instead of legacy progress and played reports, ordered retirement
   refunds the synthesis window even for unheard samples. Only the separate heard prefix updates
   history; duplicate retirement and a producer-side drop cannot refund the same samples twice.
+- **Speech-start admission (dormant).** The producer holds the next queued Speech-start segment
+  until a keyed Allow or Discard joins it at the normal synthesis window. An early decision sticks
+  to its announced segment; a duplicate cannot dispatch it again. Discard still owes the ordered
+  final. A closed reply waiting only on eligibility invalidates its drain timer; resolving that
+  wait immediately checks completion or resumes ordinary drain. The future shell adapter owns
+  the eligibility deadline. The legacy opener does not use this decision path.
 - **Chunks.** Audio goes out as it's made, in chunks of at most 100 ms. Every queued segment ends with one empty chunk whose `last` carries the samples sent. TTS reaching `Done`, a failure, a zero-output segment and a failed scene all end a segment that way. Final chunks go out in segment order, so a dropped segment's waits for every earlier one's.
 - **Finality.** The producer must be closed and synthesis idle. Legacy output then waits for every surviving segment to play. Queued output waits for worker finals, even for a scene failure that already refunded synthesis debt. After revoke, both wait for confirmed `SpeechStopped`.
 - **Revoke.** A revoke stops the run's speech for good, and nothing more goes out for the run, a later scene failure included. A Stop from the shell isn't told back to it; any revoke from the brain sends `SpeechRevoked`. A new output-device generation mid-run revokes too: the text stays, and nothing is replayed at the new rate.

@@ -645,6 +645,8 @@ records only their operation and length.
 | Shell to brain | control | `SpeechRetired` (dormant queued output) | `run`, logical `output`, `segment`, cumulative `retired`, `heard`, `final_segment` |
 | Shell to brain | control | `AudioOutput` | `rate`, `generation` |
 | Shell to brain | control | `QueuedAudioOutput` (dormant) | `rate`, `generation`; selects retirement receipts before a run is admitted |
+| Shell to brain | control | `SpeechDecision` (dormant) | `run`, logical `output`, `segment`, Allow or Discard |
+| Brain to shell | control | `SpeechDecisionTaken` (dormant) | the same run, output and segment, after consumption or terminal |
 | Shell to brain | control | `AudioOutputUnavailable` | `generation` |
 | Brain to shell | control | `SpeechRevoked` | `run` |
 

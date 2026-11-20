@@ -1306,6 +1306,7 @@ fn welcome(control: &PipeClient) -> Result<IssueSession, LinkError> {
             | ControlToShell::AnthropicKeyRemoved { .. }
             | ControlToShell::AnthropicKeyReconciled { .. }
             | ControlToShell::SpeechRevoked { .. }
+            | ControlToShell::SpeechDecisionTaken(..)
             | ControlToShell::VoiceHoldStatus { .. }
             | ControlToShell::VoiceHoldStopAccepted { .. }
             | ControlToShell::ScreenHolds(_)
@@ -1701,6 +1702,7 @@ fn watch(
                 }
             }
             Ok(Some(ControlToShell::ThreadModelSet { .. } | ControlToShell::NoVisual { .. })) => {}
+            Ok(Some(ControlToShell::SpeechDecisionTaken(..))) => return,
             Ok(Some(ControlToShell::Welcome { .. } | ControlToShell::BuildMismatch { .. })) => {
                 tracing::warn!("the brain repeated its handshake; ending the connection");
                 return;
