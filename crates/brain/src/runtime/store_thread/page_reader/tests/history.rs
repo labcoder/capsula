@@ -84,6 +84,7 @@ fn actual_model_builds_refuse_create_and_focus_without_a_commit_or_tool_row() {
 enum Prior {
     Empty,
     Reference,
+    CompactableQuote(&'static str),
 }
 
 fn recorded(scratch: &Scratch) -> (i64, i64) {
@@ -128,6 +129,25 @@ fn active_on(
             &[Opaque::new(br#"{"type":"function_call","call_id":"prior","name":"read_history","arguments":"{}"}"#.to_vec()).unwrap()],
             &[(CallId::new("prior").unwrap(), ToolOutput::Recall(Selection::Read { task: 2, first_shown: Some(1), last_shown: Some(1), cut: None, next: None }))]).unwrap();
         store.end_run(MAIN, RunId(2), &[], RunEnd::Done).unwrap();
+    }
+    if let Prior::CompactableQuote(text) = prior {
+        store.begin_turn(MAIN, None, RunId(2), "prior").unwrap();
+        store
+            .end_run(
+                MAIN,
+                RunId(2),
+                &[crate::store::NewEvent {
+                    kind: crate::store::EventKind::AssistantText,
+                    text: Some(text),
+                    body: None,
+                }],
+                RunEnd::Done,
+            )
+            .unwrap();
+        for run in (3..R.0).map(RunId) {
+            store.begin_turn(MAIN, None, run, "later").unwrap();
+            store.end_run(MAIN, run, &[], RunEnd::Done).unwrap();
+        }
     }
     store.begin_turn(thread, None, R, "read").unwrap();
     let running = run(store, None);

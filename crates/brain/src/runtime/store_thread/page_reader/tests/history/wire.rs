@@ -1,9 +1,16 @@
+use super::super::super::context::{read as build_request, read_job};
 use super::*;
 use crate::connections::model::sse::Reader;
-use crate::engines::responses::Round;
+use crate::coordinator::{Arrived, JobKey, JobKind, ReadJob};
+use crate::engines::{claude_code::seed, responses};
 use crate::recall::Hit;
-use serde_json::json;
+use crate::recall::control::Control;
+use kumochi_protocol::message::{ConnectionKind, Deleted, EventId};
+use serde_json::{Value, json};
 use std::fmt::Write as _;
+use std::time::Instant;
+
+use responses::Round;
 
 fn wire(core: &mut Coordinator, key: BuildKey, name: &str, args: &str) -> Vec<Effect> {
     let item = json!({"type":"function_call", "id":"fc-wire", "call_id":"wire", "name":name, "arguments":args});
@@ -208,6 +215,245 @@ fn wire_kumo_list_reaches_the_reader_ledger_and_reference_commit() {
             tasks: vec![2],
             truncated: false,
         },
+    );
+}
+
+fn next_request(store: &Store, run: RunId, kind: ConnectionKind) -> Built {
+    let connection = match kind {
+        ConnectionKind::ChatGpt => ConnectionTag(0),
+        ConnectionKind::ClaudeCode => ConnectionTag(1),
+        ConnectionKind::AnthropicKey => unreachable!(),
+    };
+    build_request(
+        Some(&store.side()),
+        BuildContext {
+            control: Control::new(Instant::now() + Duration::from_secs(10)),
+            key: BuildKey {
+                run,
+                round: 1,
+                attempt: 1,
+            },
+            thread: MAIN,
+            origin: Origin::Kumo,
+            snapshot: Some(RunSnapshot {
+                origin: Origin::Kumo,
+                assistant: AssistantName::new("Kumo").unwrap(),
+                user: None,
+                choice: Some(ModelChoice {
+                    connection: kind,
+                    model: ModelSlug::new("fixture").unwrap(),
+                    effort: Effort::Low,
+                }),
+                connection,
+            }),
+            first: true,
+            arrived: Arrived::of(kind, connection),
+            drawings: crate::drawing::Digest::default(),
+        },
+        || {},
+    )
+    .result
+    .unwrap()
+}
+
+fn wire_output(body: &Value) -> Value {
+    let mut outputs = body["input"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|item| item["type"] == "function_call_output" && item["call_id"] == "wire");
+    let output = outputs.next().expect("stored wire recall");
+    assert_eq!(outputs.count(), 0, "only one stored wire recall");
+    serde_json::from_str(output["output"].as_str().unwrap()).unwrap()
+}
+
+fn store_wire_recall(running: &Running, core: &mut Coordinator, key: BuildKey) {
+    let effects = wire(core, key, "read_history", r#"{"task":2,"from":1,"to":1}"#);
+    let [Effect::Store(StoreOp::ReadCall(call))] = effects.as_slice() else {
+        panic!("the wire call did not reach the reader");
+    };
+    assert!(running.thread.send(StoreOp::ReadCall(call.clone())));
+    let effects = core.handle(running.ack()).unwrap();
+    let [Effect::Store(StoreOp::CommitCall(commit))] = effects.as_slice() else {
+        panic!("the read was not committed");
+    };
+    assert!(running.thread.send(StoreOp::CommitCall(commit.clone())));
+    let effects = core.handle(running.ack()).unwrap();
+    let [Effect::Store(StoreOp::RoundItems(round))] = effects.as_slice() else {
+        panic!("the committed result did not reach the round");
+    };
+    assert!(running.thread.send(StoreOp::RoundItems(round.clone())));
+    assert_eq!(running.ack(), Input::RoundStored { run: R, round: 1 });
+}
+
+fn compact_quoted_reply(store: &mut Store, quote: &str) {
+    let compact = read_job(
+        Some(&store.side()),
+        ReadJob {
+            control: Control::new(Instant::now() + Duration::from_secs(10)),
+            key: JobKey {
+                thread: MAIN,
+                serial: 1,
+            },
+            kind: JobKind::Compact,
+            origin: Origin::Kumo,
+            snapshot: Some(RunSnapshot {
+                origin: Origin::Kumo,
+                assistant: AssistantName::new("Kumo").unwrap(),
+                user: None,
+                choice: None,
+                connection: ConnectionTag(0),
+            }),
+            compact_at: 0,
+        },
+        || {},
+    )
+    .result
+    .unwrap()
+    .unwrap();
+    assert_eq!(compact.covers, Some((EventId(2), EventId(3))));
+    assert_eq!(compact.built.sources, [MAIN]);
+    assert_eq!(
+        compact.built.request.input,
+        [
+            InputItem::Message {
+                role: Role::User,
+                text: "prior".into()
+            },
+            InputItem::Message {
+                role: Role::Assistant,
+                text: quote.into()
+            },
+            InputItem::Message {
+                role: Role::Developer,
+                text: "Write the new summary now.".into()
+            },
+        ]
+    );
+    // A committed Kumo reply or summary may retain its quoted text after the source is deleted.
+    assert!(
+        store
+            .store_summary(
+                MAIN,
+                compact.generation,
+                compact.covers.unwrap(),
+                quote,
+                None
+            )
+            .unwrap()
+    );
+}
+
+fn delete_source(store: Store, last_run: RunId) {
+    let running = run(store, None);
+    let mut core = Coordinator::ready_for_tests(MAIN, SOURCE, last_run, Vec::new());
+    let effects = core
+        .handle(Input::Delete {
+            thread: SOURCE,
+            after_turns: 0,
+            resend: false,
+        })
+        .unwrap();
+    let [Effect::Store(op @ StoreOp::Delete { thread: SOURCE })] = effects.as_slice() else {
+        panic!("the source delete was not admitted");
+    };
+    assert!(running.thread.send(op.clone()));
+    let deleted = running.ack();
+    assert_eq!(
+        deleted,
+        Input::Deleted {
+            thread: SOURCE,
+            outcome: Deleted::Removed,
+            last_run: Some(RunId(1))
+        }
+    );
+    core.handle(deleted).unwrap();
+    running.thread.close().blocking_recv().unwrap();
+}
+
+#[test]
+fn deleted_wire_recall_is_not_replayed_after_compaction_and_restart() {
+    const RAW: &str = "raw-only-marker-19";
+    const QUOTE: &str = "committed-quote-marker-23";
+    const PROMPT: &str = "next-user-marker-31";
+    let (scratch, running, mut core, key) = active(
+        "history-wire-compact-delete",
+        &format!("{RAW} {QUOTE}"),
+        Prior::CompactableQuote(QUOTE),
+    );
+    store_wire_recall(&running, &mut core, key);
+    running.thread.close().blocking_recv().unwrap();
+
+    let mut store = Store::open(&scratch.db()).unwrap();
+    store.end_run(MAIN, R, &[], RunEnd::Done).unwrap();
+    compact_quoted_reply(&mut store, QUOTE);
+
+    store
+        .begin_turn(MAIN, None, RunId(18), "before deletion")
+        .unwrap();
+    let live = next_request(&store, RunId(18), ConnectionKind::ChatGpt);
+    assert_eq!(live.sources, [MAIN, SOURCE]);
+    let live_body = responses::body(&live.request).unwrap();
+    assert_eq!(
+        wire_output(&live_body)["quoted_history"][0]["events"][0]["text"],
+        format!("{RAW} {QUOTE}")
+    );
+    store.end_run(MAIN, RunId(18), &[], RunEnd::Done).unwrap();
+
+    delete_source(store, RunId(18));
+    let mut store = Store::open(&scratch.db()).unwrap();
+    store.recover().unwrap();
+    store.begin_turn(MAIN, None, RunId(19), PROMPT).unwrap();
+    let responses = next_request(&store, RunId(19), ConnectionKind::ChatGpt);
+    let claude = next_request(&store, RunId(19), ConnectionKind::ClaudeCode);
+    let body = responses::body(&responses.request).unwrap();
+    let payload = body.to_string();
+    let bytes = seed::encode(&claude.request, &claude.request.tools);
+    let stream = std::str::from_utf8(&bytes).unwrap();
+    assert!(
+        !payload.contains(RAW),
+        "Responses replayed deleted source text"
+    );
+    assert!(
+        !stream.contains(RAW),
+        "Claude Code replayed deleted source text"
+    );
+    assert_eq!(responses.sources, [MAIN]);
+    assert_eq!(claude.sources, [MAIN]);
+    assert_eq!(payload.matches(QUOTE).count(), 1);
+    assert_eq!(stream.matches(QUOTE).count(), 1);
+    assert_eq!(
+        wire_output(&body),
+        json!({
+            "quoted_history": [{"task": 2, "note": "[removed with a deleted task]"}],
+            "note": null, "duplicate_titles": false, "truncated": false
+        })
+    );
+    assert!(!stream.contains("tool result, quoted data"));
+    let inputs = body["input"].as_array().unwrap();
+    assert!(inputs.contains(&json!({
+        "type": "message", "role": "developer", "content": format!("Summary of events 2–3:\n{QUOTE}")
+    })));
+    let user = inputs.last().unwrap();
+    assert_eq!(user["role"], "user");
+    assert_eq!(
+        user["content"].as_str().unwrap().lines().next(),
+        Some(PROMPT)
+    );
+    let seed: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(seed["message"]["role"], "user");
+    let blocks = seed["message"]["content"].as_array().unwrap();
+    assert!(blocks.contains(&json!({
+        "type": "text", "text": format!("developer:\nSummary of events 2–3:\n{QUOTE}")
+    })));
+    assert_eq!(
+        blocks.last().unwrap()["text"]
+            .as_str()
+            .unwrap()
+            .lines()
+            .take(2)
+            .collect::<Vec<_>>(),
+        ["user:", PROMPT]
     );
 }
 
