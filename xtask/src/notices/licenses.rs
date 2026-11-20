@@ -495,7 +495,6 @@ mod tests {
             let error = Policy::read(&dir).err().expect("missing key must fail");
             assert_eq!(error.to_string(), message);
         }
-        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
@@ -567,7 +566,6 @@ mod tests {
         );
         fs::remove_file(dir.join("terms.txt")).unwrap();
         assert!(policy.package(&package).is_err());
-        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
@@ -636,7 +634,6 @@ mod tests {
                 other(extra)
             ]
         );
-        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
@@ -686,6 +683,5 @@ mod tests {
                 .map(|(_, credit)| format!("{credit}\n\n{permission}"))
                 .collect::<BTreeSet<_>>()
         );
-        fs::remove_dir_all(dir).unwrap();
     }
 }

@@ -91,6 +91,13 @@ once for the whole command, so the `kumochi.exe` it writes carries the core's te
 That has to fail safe, so test support only ever takes something away: a device becomes a
 stub that reports itself unavailable, never the other way round.
 
+Tests that need files use the shared scratch guard in `tests/support/scratch.rs`. It creates
+a new child of Temp (or of an existing trusted root for fixtures that need one), skips
+occupied names, and removes its recorded child path on return or unwind. It does not
+sweep old folders or follow symbolic links in the scratch tree, but removal by path
+cannot distinguish a directory swapped into that path during a test. Speech fixtures
+leave scratch in place if they cannot confirm child teardown.
+
 Dev and test builds compile ten dependencies at opt-level 2: image, zune-jpeg, libsqlite3-sys,
 rusqlite, serde_json, sha2, ring, memchr, postcard and base64, every version of each
 (`[profile.dev.package]` in the root `Cargo.toml`). The brain's tests spend most of their CPU in

@@ -302,7 +302,6 @@ mod tests {
         );
         fs::write(&file, "").unwrap();
         assert_eq!(source_header(&file).unwrap(), Vec::<String>::new());
-        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
@@ -328,7 +327,6 @@ mod tests {
                 "Copyright 2026 Fixture Library".to_owned()
             )])
         );
-        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
@@ -366,7 +364,6 @@ mod tests {
             source_header(&file).unwrap_err().to_string(),
             "unterminated leading comment"
         );
-        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
@@ -411,7 +408,6 @@ mod tests {
                 .to_string(),
             "empty legal input for markup5ever_rcdom 0.3.0: src/component/NOTICE"
         );
-        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

@@ -151,12 +151,8 @@ mod tests {
 
     #[test]
     fn only_a_proven_missing_file_or_folder_is_absent() {
-        let dir = std::env::temp_dir().join(format!(
-            "{}-policy-test-{}",
-            kumochi_protocol::constants::OBJECT_PREFIX,
-            std::process::id()
-        ));
-        std::fs::create_dir_all(dir.join("managed-settings.d")).expect("scratch folder");
+        let dir = crate::scratch::dir("managed-policy");
+        std::fs::create_dir(dir.join("managed-settings.d")).expect("scratch folder");
         std::fs::write(dir.join("managed-settings.json"), b"").expect("scratch file");
         let cases = [
             (dir.join("managed-settings.json"), Presence::Present),
@@ -169,7 +165,6 @@ mod tests {
             (dir.join("bad<name"), Presence::Indeterminate),
         ];
         let seen: Vec<Presence> = cases.iter().map(|(path, _)| file_presence(path)).collect();
-        std::fs::remove_dir_all(&dir).expect("cleanup");
         assert_eq!(
             seen,
             cases.map(|(_, presence)| presence),

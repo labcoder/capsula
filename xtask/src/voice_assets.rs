@@ -225,13 +225,14 @@ fn verify(path: &Path, bytes: u64, sha256: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use std::fs;
-    use std::path::{Path, PathBuf};
+    use std::path::Path;
 
     use kumochi_protocol::voice::MODEL_FILES;
 
     use super::{Placement, S5_LAYOUT, install, link, s5_path, verify};
+    use crate::scratch::Scratch;
 
-    fn scratch(name: &str) -> PathBuf {
+    fn scratch(name: &str) -> Scratch {
         crate::scratch::dir(&format!("voice-assets-{name}"))
     }
 
@@ -239,9 +240,7 @@ mod tests {
         let dir = scratch("sha");
         let path = dir.join("f");
         fs::write(&path, b"voice").expect("write");
-        let sha = crate::platform::gate_capture::file_sha256(&path).expect("hash");
-        fs::remove_dir_all(dir).expect("cleanup");
-        sha
+        crate::platform::gate_capture::file_sha256(&path).expect("hash")
     }
 
     fn placement<'a>(source: &Path, dest: &Path, sha: &'a str) -> Placement<'a> {
@@ -294,7 +293,6 @@ mod tests {
             folder.to_string().contains("not a regular file"),
             "{folder}"
         );
-        fs::remove_dir_all(dir).expect("cleanup");
     }
 
     #[test]
@@ -317,7 +315,6 @@ mod tests {
 
         install(&[placement(&dir.join("absent"), &dest, &sha)])
             .expect("a verified destination is left alone");
-        fs::remove_dir_all(dir).expect("cleanup");
     }
 
     #[test]
@@ -343,7 +340,6 @@ mod tests {
             "the conflicting bytes survive"
         );
         assert!(!fresh.exists(), "nothing was linked before the conflict");
-        fs::remove_dir_all(dir).expect("cleanup");
     }
 
     #[test]
@@ -363,7 +359,6 @@ mod tests {
         assert!(!first.exists(), "the first link was removed again");
         assert!(!second.exists());
         assert_eq!(fs::read(&source).expect("read"), b"voice");
-        fs::remove_dir_all(dir).expect("cleanup");
     }
 
     #[test]
@@ -380,6 +375,5 @@ mod tests {
         assert!(error.to_string().contains("is missing"), "{error}");
         assert!(!models_root.exists(), "nothing was created");
         assert!(!dir.join("bin").exists(), "nothing was created");
-        fs::remove_dir_all(dir).expect("cleanup");
     }
 }

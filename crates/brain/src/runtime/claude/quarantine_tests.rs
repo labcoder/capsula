@@ -96,7 +96,7 @@ fn marker(base: &Base, version: &str) -> PathBuf {
 
 /// Every name in the base with the quarantine prefix.
 fn markers(base: &Base) -> Vec<String> {
-    let mut names: Vec<String> = fs::read_dir(&base.0)
+    let mut names: Vec<String> = fs::read_dir(base.0.path())
         .expect("the base")
         .flatten()
         .map(|entry| entry.file_name().to_string_lossy().into_owned())

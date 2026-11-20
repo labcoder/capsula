@@ -345,9 +345,8 @@ fn null_gives_no_pipes() {
 #[test]
 #[ignore = "opens a visible console; run by hand"]
 fn console_gives_the_child_its_own_console_and_terminate_ends_it() {
+    let dir = crate::scratch::dir("spawn-console");
     let job = Job::new().expect("job");
-    let dir = std::env::temp_dir().join(format!("kumochi-spawn-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).expect("folder");
     let report_path = dir.join("console.txt");
     let child = start(
         "console",
@@ -367,7 +366,9 @@ fn console_gives_the_child_its_own_console_and_terminate_ends_it() {
             .exits_within(Duration::from_secs(1))
             .expect("wait")
     );
-    std::fs::remove_dir_all(&dir).expect("clean up");
+    let path = dir.path().to_path_buf();
+    drop(dir);
+    assert!(!path.try_exists().expect("check cleanup"), "clean up");
 }
 
 /// Closing the console window ends the child. Needs a person to close it.

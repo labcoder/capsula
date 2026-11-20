@@ -2,6 +2,10 @@
 //! while another test spawned a worker could inherit that worker's pipe ends.
 #![cfg(all(windows, debug_assertions))]
 
+#[cfg(test)]
+#[path = "../../../tests/support/scratch.rs"]
+mod scratch;
+
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::Arc;
@@ -48,8 +52,7 @@ fn drain(mut pipe: impl std::io::Read + Send + 'static) -> std::thread::JoinHand
     reason = "the only test this binary runs in-process, so no spawn overlaps it"
 )]
 fn panic_hook_and_environment_fault_are_exercised_in_child_processes() {
-    let dir = std::env::temp_dir().join(format!("screen-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).expect("logs directory");
+    let dir = scratch::dir("screen-logs");
     for (test, fault) in [
         ("panic_fixture", "panic"),
         ("environment_crash_fixture", "crash"),
@@ -58,7 +61,7 @@ fn panic_hook_and_environment_fault_are_exercised_in_child_processes() {
         let mut child = std::process::Command::new(std::env::current_exe().expect("test binary"))
             .args(["--exact", test, "--ignored", "--nocapture"])
             .env(kumochi_protocol::constants::SCREEN_FAULT_ENV, fault)
-            .env("LOCALAPPDATA", &dir)
+            .env("LOCALAPPDATA", dir.path())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
@@ -98,7 +101,9 @@ fn panic_hook_and_environment_fault_are_exercised_in_child_processes() {
     assert!(logs.contains("actor.rs:"), "{logs}");
     assert!(!logs.contains("private screen fault payload"), "{logs}");
     assert!(!logs.contains("ScreenRequest"), "{logs}");
-    std::fs::remove_dir_all(dir).expect("remove logs");
+    let path = dir.path().to_path_buf();
+    drop(dir);
+    assert!(!path.try_exists().expect("check cleanup"), "remove logs");
 }
 
 #[tokio::test]

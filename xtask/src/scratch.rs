@@ -1,49 +1,78 @@
-//! Test scratch folders: one fresh folder per call, unique within this process by a counter and
-//! across processes by the pid, so tests running in parallel never share one.
-
-use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
-
-static NEXT: AtomicU64 = AtomicU64::new(0);
-
-/// Creates and returns a new empty folder under the temp folder, replacing one of the same name.
-pub(crate) fn dir(label: &str) -> PathBuf {
-    numbered(label, NEXT.fetch_add(1, Ordering::Relaxed))
-}
-
-fn numbered(label: &str, number: u64) -> PathBuf {
-    let path = std::env::temp_dir().join(format!(
-        "{}-{label}-{}-{number}",
-        kumochi_protocol::constants::OBJECT_PREFIX,
-        std::process::id(),
-    ));
-    // The name carries our pid, so a folder already there was left by a dead process with that pid.
-    if let Err(error) = std::fs::remove_dir_all(&path) {
-        assert_eq!(
-            error.kind(),
-            std::io::ErrorKind::NotFound,
-            "a stale scratch folder is removed"
-        );
-    }
-    std::fs::create_dir(&path).expect("a fresh scratch folder");
-    path
-}
+// The removal shortcut is documented in the shared guard below.
+include!("../../tests/support/scratch.rs");
 
 #[cfg(test)]
 mod tests {
-    use super::numbered;
+    use std::fs;
+    use std::io::ErrorKind;
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+    use std::sync::atomic::AtomicU64;
+
+    use super::{Scratch, dir};
 
     #[test]
-    fn a_folder_left_under_the_same_name_is_replaced() {
-        let stale = numbered("scratch-stale", u64::MAX);
-        std::fs::write(stale.join("left.txt"), b"old").expect("a planted file");
-
-        let fresh = numbered("scratch-stale", u64::MAX);
-
-        assert_eq!(fresh, stale);
+    fn scratch_is_removed_after_success() {
+        let path = {
+            let scratch = dir("scratch-pass");
+            fs::create_dir(scratch.join("nested")).expect("nested folder");
+            fs::write(scratch.join("nested/marker"), b"test data").expect("marker");
+            scratch.to_path_buf()
+        };
         assert_eq!(
-            std::fs::read_dir(&fresh).expect("the fresh folder").count(),
-            0
+            path.symlink_metadata().expect_err("scratch is gone").kind(),
+            ErrorKind::NotFound
         );
+    }
+
+    #[test]
+    fn scratch_is_removed_after_a_panic() {
+        let mut path = None;
+        let panic = catch_unwind(AssertUnwindSafe(|| {
+            let scratch = dir("scratch-unwind");
+            fs::write(scratch.join("marker"), b"test data").expect("marker");
+            path = Some(scratch.to_path_buf());
+            panic!("test body panicked");
+        }))
+        .expect_err("the test body panicked");
+        assert_eq!(panic.downcast_ref::<&str>(), Some(&"test body panicked"));
+        assert_eq!(
+            path.expect("recorded path")
+                .symlink_metadata()
+                .expect_err("scratch is gone")
+                .kind(),
+            ErrorKind::NotFound
+        );
+    }
+
+    #[test]
+    fn a_preexisting_folder_is_left_alone() {
+        let root = dir("scratch-collision");
+        let old = Scratch::numbered(root.path(), "same", &AtomicU64::new(0));
+        let marker = old.join("marker");
+        fs::write(&marker, b"preexisting data").expect("marker");
+
+        let fresh = Scratch::numbered(root.path(), "same", &AtomicU64::new(0));
+        assert_ne!(fresh.path(), old.path());
+        assert_eq!(fs::read_dir(&fresh).expect("empty scratch").count(), 0);
+        drop(fresh);
+        assert_eq!(
+            fs::read(marker).expect("marker survives"),
+            b"preexisting data"
+        );
+    }
+
+    #[test]
+    fn a_label_cannot_introduce_a_path() {
+        let root = dir("scratch-label");
+        for label in ["../outside", r"part\..\..\outside", "C:", ""] {
+            let Err(panic) = catch_unwind(|| Scratch::under(root.path(), label)) else {
+                panic!("a path-like label was accepted");
+            };
+            assert_eq!(
+                panic.downcast_ref::<&str>(),
+                Some(&"a scratch label must be a simple name")
+            );
+        }
+        assert_eq!(fs::read_dir(&root).expect("no scratch created").count(), 0);
     }
 }

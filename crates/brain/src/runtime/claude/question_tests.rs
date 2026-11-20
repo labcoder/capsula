@@ -27,7 +27,7 @@ use crate::engines::{
     self, Answer, Asks, Engine, EngineFailure, Finish, RunRequest, SendGate, SendLease, TurnEvent,
 };
 use crate::platform::Job;
-use crate::test_support::{Captured, SENTINEL};
+use crate::test_support::{Captured, SENTINEL, Scratch};
 
 const FACTS: &str = include_str!("../../../fixtures/claude-code/facts.jsonl");
 const TEXT: &str = include_str!("../../../fixtures/claude-code/text.jsonl");
@@ -170,8 +170,8 @@ fn deltas() -> Vec<TurnEvent> {
 
 /// A connection Ready on the fake, with a clock the test sets.
 struct Rig {
-    base: Base,
     claude: Claude,
+    base: Base,
     t0: Instant,
     now: Arc<Mutex<Instant>>,
     /// Every report the core heard, in order.
@@ -200,8 +200,8 @@ impl Rig {
             *read.lock().unwrap_or_else(PoisonError::into_inner)
         }));
         let mut rig = Self {
-            base,
             claude,
+            base,
             t0,
             now,
             ended: Vec::new(),
@@ -343,7 +343,7 @@ impl Rig {
     }
 
     fn markers(&self) -> Vec<String> {
-        let mut names: Vec<String> = fs::read_dir(&self.base.0)
+        let mut names: Vec<String> = fs::read_dir(self.base.0.path())
             .expect("the base")
             .flatten()
             .map(|entry| entry.file_name().to_string_lossy().into_owned())
@@ -2458,8 +2458,8 @@ async fn drive_until(brain: &mut Brain, done: impl Fn() -> bool) {
 }
 
 /// A brain whose Claude Code is `rig`'s Ready connection; the rig keeps the fake's base.
-fn brain_on(rig: &mut Rig, name: &str) -> Brain {
-    let mut brain = crate::test_support::brain(&crate::test_support::Scratch::new(name), "");
+fn brain_on(rig: &mut Rig, scratch: &Scratch) -> Brain {
+    let mut brain = crate::test_support::brain(scratch, "");
     std::mem::swap(&mut brain.claude, &mut rig.claude);
     brain
 }
@@ -2609,7 +2609,8 @@ async fn a_turn_deadline_during_recheck_keeps_the_observed_provider_failure() {
         .pre_tools(BOTH_TOOLS)
         .post_tools(BOTH_TOOLS);
     let mut rig = Rig::new(name, &script).await;
-    let mut brain = brain_on(&mut rig, name);
+    let scratch = Scratch::new(name);
+    let mut brain = brain_on(&mut rig, &scratch);
     let run = started_provider_recheck(&mut brain, &rig.base).await;
     let effects = brain.handle(Input::Deadline { run }).unwrap();
     assert_eq!(
@@ -2621,6 +2622,7 @@ async fn a_turn_deadline_during_recheck_keeps_the_observed_provider_failure() {
     );
     brain.apply(effects, None).unwrap();
     assert!(brain.claude.close(soon()).await);
+    brain.close().await;
 }
 
 #[tokio::test]
@@ -2722,7 +2724,8 @@ async fn stop_beats_the_recheck_reply_but_does_not_hide_confirmed_account_status
             .to_string(),
     )
     .unwrap();
-    let mut brain = brain_on(&mut rig, name);
+    let scratch = Scratch::new(name);
+    let mut brain = brain_on(&mut rig, &scratch);
     let run = started_provider_recheck(&mut brain, &rig.base).await;
     let done = timeout(WAIT, brain.claude.lane.as_mut().unwrap().next())
         .await
@@ -2755,6 +2758,7 @@ async fn stop_beats_the_recheck_reply_but_does_not_hide_confirmed_account_status
         ClaudeCodeView::SignedOut { version: V }
     );
     assert!(brain.claude.close(soon()).await);
+    brain.close().await;
 }
 
 #[tokio::test]
@@ -2767,7 +2771,8 @@ async fn an_admitted_foreground_offer_binds_before_seeding() {
         .post_tools(BOTH_TOOLS)
         .held_at_user("go");
     let mut rig = Rig::new("question-admitted-draw", &script).await;
-    let mut brain = brain_on(&mut rig, "question-admitted-draw");
+    let scratch = Scratch::new("question-admitted-draw");
+    let mut brain = brain_on(&mut rig, &scratch);
     brain.claude_reported(None).expect("no shell");
     brain
         .coordinator
@@ -2844,7 +2849,8 @@ fn title_job(job: crate::coordinator::JobKey) -> RunRequest {
 async fn a_title_job_on_claude_code_asks_like_a_turn_and_reports_its_title() {
     use crate::coordinator::{JobKey, JobKind, JobOutput};
     let mut rig = Rig::new("job-title", &offering_nothing()).await;
-    let mut brain = brain_on(&mut rig, "job-title");
+    let scratch = Scratch::new("job-title");
+    let mut brain = brain_on(&mut rig, &scratch);
     let job = JobKey {
         thread: ThreadId(1),
         serial: 2,
@@ -2884,7 +2890,8 @@ async fn a_turn_during_a_claude_code_title_job_tears_the_job_down_and_is_answere
     use crate::coordinator::{Effect, JobKey, JobKind};
     let mut rig = Rig::new("job-then-turn", &offering_nothing().held_at_user("go")).await;
     offering_nothing().write(&rig.base, Some(2));
-    let mut brain = brain_on(&mut rig, "job-then-turn");
+    let scratch = Scratch::new("job-then-turn");
+    let mut brain = brain_on(&mut rig, &scratch);
     let job = JobKey {
         thread: ThreadId(1),
         serial: 2,

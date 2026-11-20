@@ -21,7 +21,7 @@ use tokio::sync::{Notify, mpsc, watch};
 
 use super::{Brain, Ended, Shell, duplex};
 use crate::coordinator::Input;
-use crate::platform::sherpa::tests::TrustedScratch;
+use crate::platform::sherpa::tests::stage_root;
 use crate::runtime::data::DataQueue;
 use crate::runtime::settings::Gate;
 use crate::runtime::voice::{self as runtime_voice, Event};
@@ -1083,7 +1083,7 @@ async fn a_cancelled_install_goes_back_and_the_next_fetches_once_the_first_ends(
 #[tokio::test]
 async fn a_removal_whose_last_write_fails_shows_a_storage_failure_and_fetches_nothing() {
     let scratch = Scratch::trusted("voice-cleared-refused");
-    let root = TrustedScratch::new("voice-cleared-refused");
+    let root = stage_root("voice-cleared-refused");
     std::fs::create_dir_all(scratch.dir()).expect("scratch folder");
     std::fs::write(
         scratch.dir().join(CONFIG_FILE),
@@ -1092,7 +1092,7 @@ async fn a_removal_whose_last_write_fails_shows_a_storage_failure_and_fetches_no
     .expect("seeded");
     let mut brain = test_support::brain(&scratch, "");
     let release = brain.hold_config_write();
-    let models = root.0.join("models");
+    let models = root.join("models");
     let stuck = brain.finish_removals(&models);
     assert_eq!(stuck, [], "a missing folder counts as deleted");
     let (fetcher, _fetched) = held_fetch();
@@ -1459,10 +1459,10 @@ async fn an_install_finishes_while_no_shell_is_connected() {
 
 /// Spoken replies installed under a trusted models folder, with talk-back on; it loads once the
 /// returned sender sends. Returns its folder too.
-fn removable(scratch: &Scratch, root: &TrustedScratch) -> (Brain, std_mpsc::Sender<()>, PathBuf) {
+fn removable(scratch: &Scratch, root: &Path) -> (Brain, std_mpsc::Sender<()>, PathBuf) {
     let models = seeded_at(
         scratch,
-        root.0.join("models"),
+        root.join("models"),
         "talk_back = true\ninstalled = [\"spoken-replies\"]",
         0,
     );
@@ -1693,7 +1693,7 @@ async fn cancel_received_during_remove_done_fences_only_older_installs() {
 #[tokio::test]
 async fn a_refused_removal_keeps_the_part_speaking_and_its_files() {
     let scratch = Scratch::trusted("voice-remove-refused");
-    let root = TrustedScratch::new("voice-remove-refused");
+    let root = stage_root("voice-remove-refused");
     let (mut brain, release, folder) = removable(&scratch, &root);
     let gate = brain.hold_config_write();
     let ((control, data), mut shell) = duplex();
@@ -1732,7 +1732,7 @@ async fn a_refused_removal_keeps_the_part_speaking_and_its_files() {
 #[tokio::test]
 async fn a_removal_answers_with_its_intent_then_deletes_and_finishes() {
     let scratch = Scratch::trusted("voice-remove");
-    let root = TrustedScratch::new("voice-remove");
+    let root = stage_root("voice-remove");
     let (mut brain, release, folder) = removable(&scratch, &root);
     let ((control, data), mut shell) = duplex();
     let mut tap = Tap::from_env();
@@ -1763,10 +1763,7 @@ async fn a_removal_answers_with_its_intent_then_deletes_and_finishes() {
     assert_eq!(ended, Ended::Lost);
     brain.close().await;
     assert!(!folder.exists(), "the part's folder is deleted");
-    assert!(
-        root.0.join("models").is_dir(),
-        "only the part's folder goes"
-    );
+    assert!(root.join("models").is_dir(), "only the part's folder goes");
     let saved = voice_on_disk(&scratch);
     assert_eq!(saved["installed"], toml::Value::Array(Vec::new()));
     assert_eq!(saved["removing"], toml::Value::Array(Vec::new()));
@@ -1776,7 +1773,7 @@ async fn a_removal_answers_with_its_intent_then_deletes_and_finishes() {
 #[tokio::test]
 async fn quit_lands_a_held_intent_and_leaves_the_delete_to_start_up() {
     let scratch = Scratch::trusted("voice-remove-quit");
-    let root = TrustedScratch::new("voice-remove-quit");
+    let root = stage_root("voice-remove-quit");
     let (mut brain, _release, folder) = removable(&scratch, &root);
     let gate = brain.hold_config_write();
     let mut tap = Tap::from_env();
@@ -1805,7 +1802,7 @@ async fn quit_lands_a_held_intent_and_leaves_the_delete_to_start_up() {
 #[tokio::test]
 async fn an_intent_held_past_quit_still_lands_on_disk() {
     let scratch = Scratch::trusted("voice-remove-late");
-    let root = TrustedScratch::new("voice-remove-late");
+    let root = stage_root("voice-remove-late");
     let (mut brain, _release, _) = removable(&scratch, &root);
     let gate = brain.hold_config_write();
     let mut tap = Tap::from_env();
@@ -1845,12 +1842,12 @@ async fn an_intent_held_past_quit_still_lands_on_disk() {
 /// part's folder.
 async fn activate_behind_a_removal(
     scratch: &Scratch,
-    root: &TrustedScratch,
+    root: &Path,
     intent: Option<Gate>,
 ) -> (Brain, std_mpsc::Sender<Gate>, PathBuf) {
     let models = seeded_at(
         scratch,
-        root.0.join("models"),
+        root.join("models"),
         "talk_back = true\ninstalled = [\"speech-input\"]",
         0,
     );
@@ -2000,7 +1997,7 @@ const TICK: std::time::Duration = std::time::Duration::from_millis(10);
 #[tokio::test]
 async fn an_activate_queued_behind_a_committed_removal_isnt_written() {
     let scratch = Scratch::trusted("voice-remove-activate");
-    let root = TrustedScratch::new("voice-remove-activate");
+    let root = stage_root("voice-remove-activate");
     let (mut brain, held, folder) = activate_behind_a_removal(&scratch, &root, None).await;
     held.send(Gate::Write).expect("the write waits on the gate");
     idle_until(&mut brain, &scratch, |saved| {
@@ -2028,7 +2025,7 @@ async fn an_activate_queued_behind_a_committed_removal_isnt_written() {
 #[tokio::test]
 async fn an_activate_queued_behind_a_refused_removal_still_lands() {
     let scratch = Scratch::trusted("voice-remove-activate-refused");
-    let root = TrustedScratch::new("voice-remove-activate-refused");
+    let root = stage_root("voice-remove-activate-refused");
     let (mut brain, held, folder) =
         activate_behind_a_removal(&scratch, &root, Some(Gate::Panic)).await;
     held.send(Gate::Write).expect("the write waits on the gate");
@@ -2066,8 +2063,8 @@ async fn an_activate_queued_behind_a_refused_removal_still_lands() {
 #[tokio::test]
 async fn a_cancelled_native_load_keeps_its_files_until_its_owner_finishes() {
     let scratch = Scratch::trusted("voice-cancel-load-remove");
-    let root = TrustedScratch::new("voice-cancel-load-remove");
-    let models = seeded_at(&scratch, root.0.join("models"), "", 0);
+    let root = stage_root("voice-cancel-load-remove");
+    let models = seeded_at(&scratch, root.join("models"), "", 0);
     let folder = models.join(VoicePart::SpokenReplies.dir());
     let (fetch, results) = held_fetch();
     let (mut brain, release, loads) = attached_at(&scratch, models, fetch);
@@ -2142,8 +2139,8 @@ impl Fetch for RetiringFetch {
 #[tokio::test]
 async fn a_cancelled_fetch_keeps_its_files_until_its_task_finishes() {
     let scratch = Scratch::trusted("voice-cancel-fetch-remove");
-    let root = TrustedScratch::new("voice-cancel-fetch-remove");
-    let models = seeded_at(&scratch, root.0.join("models"), "", 0);
+    let root = stage_root("voice-cancel-fetch-remove");
+    let models = seeded_at(&scratch, root.join("models"), "", 0);
     let folder = models.join(VoicePart::SpokenReplies.dir());
     let fetch = Arc::new(RetiringFetch {
         cancelled: Notify::new(),

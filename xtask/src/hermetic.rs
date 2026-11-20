@@ -542,7 +542,8 @@ mod tests {
             assert_eq!(format!("{error:#}"), REFUSAL);
         }
         require_gate(ProductIdentity::GATE).expect("the gate identity runs");
-        let root = scratch::dir("gate-refused").join("run");
+        let dir = scratch::dir("gate-refused");
+        let root = dir.join("run");
         let error = Run::begin(root.clone()).expect_err("a test build is never the gate identity");
         assert_eq!(format!("{error:#}"), REFUSAL);
         assert!(!root.exists());
@@ -602,7 +603,8 @@ mod tests {
 
     #[test]
     fn cleanup_deletes_only_what_the_runs_own_authority_names() {
-        let root = scratch::dir("gate-cleanup");
+        let dir = scratch::dir("gate-cleanup");
+        let root = dir.join("run");
         authority(&root.join("app"), &[[0x07; 16]]);
         Folders::create(&root.join("idle")).expect("a launch that stored nothing");
         let ours = "Kumochi Gate/gen/host/07070707070707070707070707070707";
@@ -675,17 +677,19 @@ mod tests {
     #[test]
     fn the_lock_is_emptied_only_after_a_success_whose_cleanup_finished() {
         let line = "kumochi-gate-run 0123456789abcdef0123456789abcdef C:/run\n";
-        let held = |name: &str| {
-            let path = scratch::dir(name).join("run.lock");
+        let held = |dir: &Path| {
+            let path = dir.join("run.lock");
             fs::write(&path, line).expect("a run's lock");
             take(&path).expect("lock")
         };
         let length = |lock: &File| lock.metadata().expect("lock").len();
         let whole = u64::try_from(line.len()).expect("a short line");
-        let root = scratch::dir("gate-end-success");
+        let dir = scratch::dir("gate-end-success");
+        let root = dir.join("run");
         authority(&root.join("app"), &[[0x07; 16]]);
         let mut store = Fake([HELD.to_owned()].into());
-        let lock = held("gate-end-success-lock");
+        let lock_dir = scratch::dir("gate-end-success-lock");
+        let lock = held(&lock_dir);
         end(&root, &lock, Ok(()), &mut store).expect("ended");
         assert_eq!(length(&lock), 0);
         assert!(!root.exists());
@@ -694,7 +698,8 @@ mod tests {
         let root = scratch::dir("gate-end-failed");
         authority(&root.join("app"), &[[0x07; 16]]);
         let mut store = Fake([HELD.to_owned()].into());
-        let lock = held("gate-end-failed-lock");
+        let lock_dir = scratch::dir("gate-end-failed-lock");
+        let lock = held(&lock_dir);
         let error = end(&root, &lock, Err(anyhow!("an item failed")), &mut store)
             .expect_err("the run failed");
         assert_eq!(
@@ -717,7 +722,8 @@ mod tests {
         authority(&root.join("app"), &[[0x07; 16]]);
         fs::create_dir(root.join("app/local/Kumochi")).expect("another identity's folder");
         let mut store = Fake([HELD.to_owned()].into());
-        let lock = held("gate-end-unclean-lock");
+        let lock_dir = scratch::dir("gate-end-unclean-lock");
+        let lock = held(&lock_dir);
         let error = end(&root, &lock, Ok(()), &mut store).expect_err("cleanup failed");
         assert_eq!(
             format!("{error:#}"),
@@ -733,7 +739,8 @@ mod tests {
 
     #[test]
     fn a_second_gate_run_is_refused_while_the_first_holds_the_lock() {
-        let lock = scratch::dir("gate-lock").join("run.lock");
+        let dir = scratch::dir("gate-lock");
+        let lock = dir.join("run.lock");
         fs::write(&lock, "C:/the/first/run").expect("the first run's folder");
         let first = take(&lock).expect("the first run takes it");
         let error = take(&lock).expect_err("the second is refused");

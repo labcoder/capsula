@@ -214,8 +214,6 @@ mod tests {
             live_files(&root, "capsgate").is_err(),
             "all other read failures remain fatal"
         );
-        drop(lock);
-        fs::remove_dir_all(root).expect("remove scratch");
     }
 
     #[test]
