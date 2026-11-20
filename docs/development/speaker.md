@@ -146,6 +146,19 @@ Everything else is shared and tested offline against a fake device clock
   `AudioOutputUnavailable` goes out. The clock runs on, so a stop is still answered once what
   was written has played.
 
+## Dormant segment gate
+
+A hold blocks native staging and virtual pacing at one segment, not its predecessor.
+Releasing it does not catch up elapsed hold time. Discard keeps PCM ingress in sequence
+and returns its credit, but skips the discarded source in head order without marking it
+heard. Later PCM for that segment cannot restart it.
+
+If the segment was staged, the worker inhibits the route while it checks actual callback
+handoff. The copy must settle before that count is usable; a presentation report can
+arrive later. Once any of the segment reached the callback, the route is kept and the rest
+can play. Otherwise the route is retired before staged blocks can replay, and the source
+is discarded. No opener or production caller enables this gate yet.
+
 ## Dormant drawing conductor
 
 The dormant drawing conductor decides only an assignment's audio gate and picture timing.

@@ -484,3 +484,97 @@ fn a_live_callback_refreshes_the_deadline_until_callbacks_cease() {
     assert_eq!(worker.engine.progress.heard, 0);
     assert_eq!(worker.engine.progress.consumed, 480);
 }
+
+fn staged_for_drop(occupied: &'static AtomicBool) -> (Worker, FakePlayback, Arc<Control>) {
+    let (mut worker, input, port, requests, reply) = fake();
+    let mut pcm = [0; 480];
+    let mut credits = Vec::new();
+    input.command(Command::Expect).unwrap();
+    input.submit(packet(7, 0, 480, Some(480))).unwrap();
+    worker
+        .step(&port, &mut pcm, &mut |credit| credits.push(credit), INSTANT)
+        .unwrap();
+    let Request::Open(generation, control) = requests.try_recv().unwrap() else {
+        panic!("expected an open");
+    };
+    let (transport, playback) = FakePlayback::open(Arc::clone(&control), occupied);
+    assert!(
+        reply
+            .send(Reply::Opened(generation, Some(transport)))
+            .is_ok()
+    );
+    worker
+        .step(&port, &mut pcm, &mut |credit| credits.push(credit), INSTANT)
+        .unwrap();
+    assert_eq!(
+        credits,
+        [Credit {
+            origin: 7,
+            bytes: 50
+        }]
+    );
+    assert_eq!(worker.engine.offered, 480);
+    (worker, playback, control)
+}
+
+#[test]
+fn a_drop_before_handoff_retires_the_staged_route_and_discards_source() {
+    use super::gate::DropOutcome;
+
+    static OCCUPIED: AtomicBool = AtomicBool::new(false);
+    let (mut worker, mut playback, control) = staged_for_drop(&OCCUPIED);
+    assert_eq!(
+        worker.drop_unsubmitted(SegmentId(0), INSTANT),
+        DropOutcome::Discarded
+    );
+    assert_eq!(control.fenced_handoff(), Some(0));
+    let mut out = [99.0; 8];
+    playback.fill(&mut out, INSTANT);
+    assert_eq!(out.map(f32::to_bits), [0; 8]);
+    assert_eq!(worker.engine.progress.consumed, 480);
+    assert_eq!(worker.engine.progress.heard, 0);
+    assert_eq!(worker.engine.progress.first_gap, Some(0));
+}
+
+#[test]
+fn a_drop_after_handoff_keeps_playing_without_waiting_for_its_report() {
+    use super::gate::DropOutcome;
+
+    static OCCUPIED: AtomicBool = AtomicBool::new(false);
+    let (mut worker, mut playback, control) = staged_for_drop(&OCCUPIED);
+    let mut out = [99.0; 8];
+    playback.fill(&mut out, INSTANT);
+    assert_eq!(out.map(f32::to_bits), [0.5f32.to_bits(); 8]);
+    assert_eq!(worker.engine.progress.consumed, 0);
+    assert_eq!(
+        worker.drop_unsubmitted(SegmentId(0), INSTANT),
+        DropOutcome::Kept
+    );
+    assert_eq!(control.fenced_handoff(), None);
+    assert!(!worker.engine.queue.discarded(SegmentId(0)));
+    playback.fill(&mut out, INSTANT);
+    assert_eq!(out.map(f32::to_bits), [0.5f32.to_bits(); 8]);
+}
+
+#[test]
+fn dropping_a_staged_successor_cannot_cut_its_partially_handed_predecessor() {
+    use super::gate::DropOutcome;
+
+    static OCCUPIED: AtomicBool = AtomicBool::new(false);
+    let (mut worker, mut playback, control) = staged_for_drop(&OCCUPIED);
+    let mut successor = packet(8, 0, 480, Some(480));
+    successor.pcm.segment = SegmentId(1);
+    worker.engine.offer(successor, INSTANT).unwrap();
+    worker.feed(&mut [0; 480], INSTANT);
+    assert_eq!(worker.engine.offered, 960);
+    let mut out = [99.0; 8];
+    playback.fill(&mut out, INSTANT);
+    assert_eq!(out.map(f32::to_bits), [0.5f32.to_bits(); 8]);
+    assert_eq!(
+        worker.drop_unsubmitted(SegmentId(1), INSTANT),
+        DropOutcome::PredecessorPending
+    );
+    assert_eq!(control.fenced_handoff(), None);
+    playback.fill(&mut out, INSTANT);
+    assert_eq!(out.map(f32::to_bits), [0.5f32.to_bits(); 8]);
+}

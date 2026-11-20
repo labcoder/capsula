@@ -73,6 +73,7 @@ pub(super) struct Engine {
     pub(super) progress: Progress,
     pub(super) phase: Phase,
     pub(super) offered: u64,
+    blocked: Option<SegmentId>,
     physical: Option<u64>,
     recovering: bool,
     pending_open: Option<u64>,
@@ -95,6 +96,7 @@ impl Engine {
             progress: Progress::default(),
             phase: Phase::Idle,
             offered: 0,
+            blocked: None,
             physical: None,
             recovering: false,
             pending_open: None,
@@ -188,6 +190,7 @@ impl Engine {
         }
         let admission = self.queue.offer(packet)?;
         if valid && matches!(admission, Admission::Return(_)) {
+            self.skip_discarded(now);
             self.warm(now);
             self.active_at = now;
             self.ready(now);
@@ -207,6 +210,9 @@ impl Engine {
                         && segment.ended
                         && flushed.is_none_or(|previous| segment.id.0 > previous.0))
         })?;
+        if self.blocked == Some(segment.id) || self.queue.discarded(segment.id) {
+            return None;
+        }
         let len = (segment.end() - at).min(480);
         let start = usize::try_from(at - self.queue.retired).ok()?;
         let count = usize::try_from(len).ok()?;
@@ -227,6 +233,38 @@ impl Engine {
     pub(super) fn staged(&mut self, through: u64) {
         if self.can_stage() {
             self.offered = self.offered.max(through.min(self.queue.received));
+        }
+    }
+
+    pub(super) fn hold(&mut self, segment: Option<SegmentId>, now: Duration) {
+        if self.blocked != segment {
+            self.settle(now);
+            self.blocked = segment;
+        }
+    }
+
+    pub(super) fn release(&mut self, segment: SegmentId, now: Duration) {
+        if self.blocked == Some(segment) {
+            self.hold(None, now);
+        }
+    }
+
+    pub(super) fn discard(&mut self, segment: SegmentId, now: Duration) {
+        if let Some(discarded) = self.queue.discarded.get_mut(segment.0 as usize) {
+            *discarded = true;
+            self.release(segment, now);
+            self.skip_discarded(now);
+        }
+    }
+
+    fn skip_discarded(&mut self, now: Duration) {
+        while let Some(head) = self.queue.segments.front()
+            && self.queue.discarded(head.id)
+            && head.end() > self.progress.consumed
+        {
+            let end = head.end();
+            self.consume(end, Evidence::Unheard, now);
+            self.offered = self.offered.max(end);
         }
     }
 
@@ -254,9 +292,15 @@ impl Engine {
             return None;
         }
         let empty = self.queue.samples.is_empty();
+        let held = self.blocked.is_some_and(|id| {
+            self.queue
+                .segments
+                .front()
+                .is_some_and(|head| head.id == id)
+        });
         let mut deadline = empty.then(|| self.active_at.saturating_add(IDLE));
         if self.physical.is_none() {
-            if self.phase == Phase::Running && !self.inhibited() {
+            if self.phase == Phase::Running && !self.inhibited() && !held {
                 deadline = deadline
                     .into_iter()
                     .chain([now.saturating_add(Duration::from_millis(20))])
@@ -390,9 +434,12 @@ impl Engine {
         }
         self.settle(now);
         let credit = self.queue.retry()?;
-        if credit.is_some() && !self.queue.samples.is_empty() {
-            self.warm(now);
-            self.active_at = now;
+        if credit.is_some() {
+            self.skip_discarded(now);
+            if !self.queue.samples.is_empty() {
+                self.warm(now);
+                self.active_at = now;
+            }
         }
         self.ready(now);
         Ok(credit)
@@ -409,13 +456,20 @@ impl Engine {
             let numerator = elapsed.saturating_mul(u128::from(RATE)) + self.virtual_fraction;
             self.virtual_fraction = numerator % 1_000_000_000;
             let add = u64::try_from(numerator / 1_000_000_000).unwrap_or(u64::MAX);
-            let through = self
-                .progress
-                .consumed
-                .saturating_add(add)
-                .min(self.queue.received);
+            let limit = self
+                .queue
+                .segments
+                .iter()
+                .find(|segment| {
+                    self.blocked == Some(segment.id) || self.queue.discarded(segment.id)
+                })
+                .map_or(self.queue.received, |segment| {
+                    segment.first.max(self.progress.consumed)
+                });
+            let through = self.progress.consumed.saturating_add(add).min(limit);
             self.consume(through, Evidence::Unheard, now);
         }
+        self.skip_discarded(now);
         if self.phase == Phase::Running && self.queue.samples.is_empty() {
             self.phase = Phase::Buffering(REFILL);
             self.rebase(now);

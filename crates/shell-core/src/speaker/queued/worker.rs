@@ -16,6 +16,8 @@ use crate::platform::speaker_cpal::{
     Control, OutputError, OutputEvent, PacketKind, Source, TailAck, Transport,
 };
 
+mod gate;
+
 const COMMANDS: usize = 16;
 const SERVICE: usize = 8;
 

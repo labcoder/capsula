@@ -85,6 +85,7 @@ struct Queue {
     received: u64,
     next_segment: u32,
     completed: u32,
+    discarded: [bool; MAX_SEGMENTS_PER_RUN as usize],
     samples: VecDeque<i16>,
     segments: VecDeque<Segment>,
     held: Option<Packet>,
@@ -100,10 +101,19 @@ impl Queue {
             received: 0,
             next_segment: 0,
             completed: 0,
+            discarded: [false; MAX_SEGMENTS_PER_RUN as usize],
             samples: VecDeque::with_capacity(CAPACITY),
             segments: VecDeque::new(),
             held: None,
         }
+    }
+
+    fn segment(&self, id: SegmentId) -> Option<&Segment> {
+        self.segments.iter().find(|segment| segment.id == id)
+    }
+
+    fn discarded(&self, id: SegmentId) -> bool {
+        self.discarded.get(id.0 as usize).copied().unwrap_or(false)
     }
 
     fn current(&self, pcm: &SpeechPcm) -> bool {
