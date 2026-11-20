@@ -1459,10 +1459,7 @@ fn a_press_takes_no_screen_on_a_target_it_was_not_seen_on(cx: &mut TestAppContex
         let ready = screen_ready(Some(on(&luna())), cx);
         press(&ready, 1, cx);
         let retarget = |cx: &mut TestAppContext| {
-            ready
-                .owner
-                .update(cx, Presence::new_thread)
-                .unwrap();
+            ready.owner.update(cx, Presence::new_thread).unwrap();
         };
         if before_recognition {
             retarget(cx);
