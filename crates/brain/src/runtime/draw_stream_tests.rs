@@ -547,8 +547,9 @@ async fn unspoken_line_preserves_reply_order_while_the_drawing_write_is_held() {
     link.recovery = brain.describe(&mut link).expect("initial membership");
     let key = start(&mut brain, &mut link).await;
     let prefix = "Before the drawing.";
-    let suffix = "After the drawing.";
-    let expected = "Before the drawing.\n\nOne Chat line.\n\nAfter the drawing.";
+    let between = "Between the steps.";
+    let expected =
+        "Before the drawing.\n\nOne Chat line.\n\nBetween the steps.\n\nA second Chat line.\n\n";
     apply(
         &mut brain,
         &mut link,
@@ -594,7 +595,7 @@ async fn unspoken_line_preserves_reply_order_while_the_drawing_write_is_held() {
         &mut link,
         Input::Engine {
             key,
-            event: TurnEvent::TextDelta(suffix.into()),
+            event: TurnEvent::TextDelta(between.into()),
         },
     );
     let early = all_frames(&queue);
@@ -618,14 +619,36 @@ async fn unspoken_line_preserves_reply_order_while_the_drawing_write_is_held() {
             index: 0,
         }),
     );
+    let second = SECOND.replace(
+        "\"id\":\"s2\",",
+        "\"id\":\"s2\",\"say\":\"A second Chat line.\",",
+    );
+    apply(
+        &mut brain,
+        &mut link,
+        Input::Engine {
+            key,
+            event: delta(&second),
+        },
+    );
+    assert_eq!(step_landed(&mut brain, &mut link).await, scene);
+    apply(
+        &mut brain,
+        &mut link,
+        Input::Drawing(crate::drawing::Input::StepReady {
+            run: key.run,
+            scene,
+            index: 1,
+        }),
+    );
     let end = r#",{"end":{}}]}"#;
-    let args = format!("{record}{end}");
+    let args = format!("{record}{second}{end}");
     let provider_prefix = json!({"type":"message","role":"assistant",
         "content":[{"type":"output_text","text":prefix}]});
     let provider_call = json!({"type":"function_call","id":"item-draw","call_id":"provider-draw",
         "name":"draw","arguments":args});
-    let provider_suffix = json!({"type":"message","role":"assistant","content":[
-        {"type":"output_text","text":suffix},
+    let provider_between = json!({"type":"message","role":"assistant","content":[
+        {"type":"output_text","text":between},
         {"type":"refusal","refusal":"fixture non-text output"},
         {"type":"output_text","text":"Final-only words."}
     ]});
@@ -649,7 +672,7 @@ async fn unspoken_line_preserves_reply_order_while_the_drawing_write_is_held() {
             },
         },
     );
-    for (index, item) in [&provider_prefix, &provider_call, &provider_suffix]
+    for (index, item) in [&provider_prefix, &provider_call, &provider_between]
         .into_iter()
         .enumerate()
     {
@@ -718,8 +741,8 @@ async fn unspoken_line_preserves_reply_order_while_the_drawing_write_is_held() {
         [
             provider_prefix,
             provider_call,
-            json!({"local":"\n\nOne Chat line.\n\n"}),
-            provider_suffix,
+            json!({"local":"\n\nOne Chat line.\n\n\n\nA second Chat line.\n\n"}),
+            provider_between,
             json!({"result":"provider-draw"}),
         ]
     );

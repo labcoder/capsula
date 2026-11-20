@@ -324,6 +324,8 @@ pub(super) fn render(
 }
 
 fn native_narration(items: &[Item]) -> BTreeMap<&str, String> {
+    // shortcut: native replay groups each call's lines at its boundary, so it can't preserve
+    // same-call text interleaving; add position evidence if a provider interleaves in practice.
     let mut lines = BTreeMap::<_, String>::new();
     for item in items {
         if let Body::Narration { text, call } = &item.body {

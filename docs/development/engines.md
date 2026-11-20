@@ -39,6 +39,8 @@ round's items in output order, then its results. A `ChatGPT` round's items carry
 its text only what was written after its last round, such as a Stop's partial answer, goes as one
 assistant message. Unspoken drawing narration follows its matching native draw call as a local
 assistant message; the provider items, including refusals and final-only text, stay intact.
+Native replay groups all lines for one draw call at its boundary, so it doesn't preserve ordinary
+text interleaved between those lines as live Chat and saved history do.
 Narration without a matching native call stays with the saved reply text. An Anthropic key round
 stores only its calls, each a `tool_use` item of its id,
 name and input, so its text replays as written, beside them. Its writer requires exactly one
