@@ -173,7 +173,7 @@ impl Conductor {
             return Picture::Fenced;
         }
         let hold_expired = self.audio == Gate::Held && self.hold_until.is_some_and(|at| now >= at);
-        let rebuilding = self.observe_route(now, &mut playback);
+        self.observe_route(now, &mut playback);
         if view == View::Fenced {
             self.drop_unsent();
             self.stage = Stage::Fenced;
@@ -206,10 +206,10 @@ impl Conductor {
         }
 
         if view == View::Shown {
-            self.stage = match self.stage {
-                Stage::Waiting => Stage::Shown,
-                Stage::Silent => Stage::ShownSilent,
-                other => other,
+            self.stage = match (self.stage, self.rebuild_until.take()) {
+                (Stage::Waiting, None) => Stage::Shown,
+                (Stage::Waiting | Stage::Silent, _) => Stage::ShownSilent,
+                (stage, _) => stage,
             };
         }
         match self.stage {
@@ -250,14 +250,12 @@ impl Conductor {
         }
         if self.stage == Stage::Silent {
             Picture::Silent
-        } else if rebuilding {
-            Picture::Wait
         } else {
             onset.map_or(Picture::Wait, Picture::At)
         }
     }
 
-    fn observe_route(&mut self, now: Duration, playback: &mut Playback) -> bool {
+    fn observe_route(&mut self, now: Duration, playback: &mut Playback) {
         if self.rebuild_until.is_some_and(|at| now >= at) {
             self.silent();
         }
@@ -276,10 +274,13 @@ impl Conductor {
         match playback.route {
             Route::Rebuilding => {
                 self.route_retired = true;
-                self.rebuild_until
-                    .get_or_insert(now.saturating_add(REBUILD_GRACE));
                 self.handoff = None;
-                true
+                if self.stage == Stage::Shown {
+                    self.silent();
+                } else if self.stage == Stage::Waiting && self.speech {
+                    self.rebuild_until
+                        .get_or_insert(now.saturating_add(REBUILD_GRACE));
+                }
             }
             Route::Live(generation) => {
                 self.route_retired = false;
@@ -298,18 +299,16 @@ impl Conductor {
                         self.audio = Gate::Allowed;
                     }
                 }
-                self.rebuild_until.is_some()
             }
             Route::Virtual | Route::Muted | Route::NoWorker => {
                 self.route_retired = false;
                 self.handoff = None;
-                self.rebuild_until = None;
-                false
             }
         }
     }
 
     fn silent(&mut self) {
+        self.rebuild_until = None;
         match self.stage {
             Stage::Waiting => self.stage = Stage::Silent,
             Stage::Shown => self.stage = Stage::ShownSilent,
@@ -550,94 +549,83 @@ mod tests {
 
     #[test]
     fn rebuild_grace_is_separate_and_does_not_reshow() {
-        let after_gap = SourceSpan {
-            source: 240,
-            at: ms(279),
-            submitted_through: 264,
+        let old = Playback {
+            handoff: Some(observed(7, 24)),
+            ..live()
         };
-        let shown = |motion| Decision {
+        let lost = Playback {
+            route: Route::Rebuilding,
+            ..live()
+        };
+        let opened = Playback {
+            route: Route::Live(8),
+            ..live()
+        };
+        let submitted = Handoff {
+            first: ms(279),
+            predicted: Some(ms(290)),
+            motion: None,
+            ..observed(8, 240)
+        };
+        let recovered = Playback {
+            handoff: Some(submitted),
+            ..opened
+        };
+        let allowed = |picture| Decision {
             audio: Gate::Allowed,
-            picture: Picture::Shown(motion),
+            picture,
         };
-        for (open_at, return_at, expected) in [
-            (None, 279, Motion::Follow(after_gap)),
-            (None, 280, Motion::Authored),
-            (Some(278), 279, Motion::Follow(after_gap)),
-            (Some(279), 281, Motion::Authored),
-        ] {
-            let mut core = speech();
-            let old = Playback {
-                handoff: Some(observed(7, 24)),
-                ..live()
-            };
-            assert_eq!(
-                at(&mut core, 10, View::Eligible, old).picture,
-                Picture::At(ms(20))
-            );
-            assert_eq!(
-                at(&mut core, 20, View::Shown, old).picture,
-                Picture::Shown(Motion::Follow(observed(7, 24).motion.expect("old span")))
-            );
-            let lost = Playback {
-                route: Route::Rebuilding,
-                ..live()
-            };
-            for now in [30, 278] {
-                assert_eq!(at(&mut core, now, View::Shown, lost), shown(Motion::Frozen));
-            }
-            let opened = Playback {
-                route: Route::Live(8),
-                ..live()
-            };
-            if let Some(open_at) = open_at {
-                assert_eq!(
-                    at(&mut core, open_at, View::Shown, opened),
-                    shown(Motion::Frozen)
-                );
-                if return_at > 280 {
-                    assert_eq!(
-                        at(&mut core, 280, View::Shown, opened),
-                        shown(Motion::Authored)
-                    );
-                }
-            }
-            let recovered = Playback {
-                handoff: Some(Handoff {
-                    first: ms(return_at),
-                    predicted: None,
-                    motion: Some(after_gap),
-                    ..observed(8, 240)
+        let authored = allowed(Picture::Shown(Motion::Authored));
+        let mut core = speech();
+        assert_eq!(
+            at(&mut core, 20, View::Shown, old),
+            allowed(Picture::Shown(Motion::Follow(SourceSpan {
+                source: 24,
+                at: ms(20),
+                submitted_through: 48,
+            })))
+        );
+        assert_eq!(at(&mut core, 30, View::Shown, lost), authored);
+        assert_eq!(at(&mut core, 279, View::Eligible, recovered), authored);
+        let later_motion = Playback {
+            handoff: Some(Handoff {
+                motion: Some(SourceSpan {
+                    source: 240,
+                    at: ms(281),
+                    submitted_through: 264,
                 }),
-                ..opened
-            };
-            assert_eq!(
-                at(&mut core, return_at, View::Eligible, recovered),
-                shown(expected)
-            );
-            for (now, stale) in [
-                (
-                    281,
-                    Playback {
-                        handoff: old.handoff,
-                        ..recovered
-                    },
-                ),
-                (
-                    282,
-                    Playback {
-                        handoff: None,
-                        ..recovered
-                    },
-                ),
-                (
-                    283,
-                    Playback {
-                        head: Head::Played,
-                        ..old
-                    },
-                ),
+                ..submitted
+            }),
+            ..opened
+        };
+        assert_eq!(at(&mut core, 281, View::Eligible, later_motion), authored);
+
+        let stale = Playback {
+            head: Head::Played,
+            ..old
+        };
+        let torn = Playback {
+            handoff: old.handoff,
+            ..opened
+        };
+        for (return_at, expected) in [(279, Picture::At(ms(290))), (280, Picture::Silent)] {
+            let mut core = speech();
+            for (now, playback) in [(0, live()), (30, lost), (278, stale), (279, torn)] {
+                assert_eq!(
+                    at(&mut core, now, View::Eligible, playback),
+                    allowed(Picture::Wait)
+                );
+            }
+            for (now, playback) in [
+                (return_at, recovered),
+                (281, later_motion),
+                (282, stale),
+                (283, opened),
             ] {
-                assert_eq!(at(&mut core, now, View::Shown, stale), shown(expected));
+                assert_eq!(
+                    at(&mut core, now, View::Eligible, playback),
+                    allowed(expected)
+                );
             }
         }
         for route in [Route::Virtual, Route::NoWorker] {
