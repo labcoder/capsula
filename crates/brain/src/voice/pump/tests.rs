@@ -433,7 +433,14 @@ fn a_ready_event_at_the_deadline_keeps_its_outcome_without_credit_or_forwarding(
         h.wait_buffered();
         let generation = h.pump.tts.generation();
         h.advance(FIRST_PCM_LIMIT);
-        assert_eq!(h.expire(due), None);
+        let expired = h.runtime.block_on(async {
+            for _ in 0..128 {
+                tokio::task::consume_budget().await;
+            }
+            assert!(!tokio::task::coop::has_budget_remaining());
+            h.pump.expire_first_pcm(due)
+        });
+        assert_eq!(expired, None);
         assert_eq!(h.pump.tts.generation(), generation);
         assert_eq!(h.pump.first_pcm_deadline(), None);
         if let Ready::Audio = ready {
@@ -442,6 +449,24 @@ fn a_ready_event_at_the_deadline_keeps_its_outcome_without_credit_or_forwarding(
         }
         assert_eq!(h.next(), expected);
     }
+}
+
+#[test]
+fn an_unpublished_reserved_send_does_not_delay_first_pcm_expiry() {
+    let mut h = Harness::for_output(OutputMode::Conducted);
+    h.runtime.block_on(async { tokio::time::pause() });
+    let _frames = h.speak(1, 4);
+    let due = h.deadline();
+    let (out, events) = tokio::sync::mpsc::channel(1);
+    let permit = out
+        .try_reserve_owned()
+        .expect("sender reserved its capacity");
+    h.pump.active.as_mut().expect("dispatched Speak").events = events;
+
+    h.advance(FIRST_PCM_LIMIT);
+    assert_eq!(h.expire(due), Some((RunId(1), SegmentId(4))));
+    assert!(permit.release().is_closed());
+    assert_eq!(h.expire(due), None);
 }
 
 #[test]

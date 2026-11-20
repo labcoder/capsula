@@ -241,6 +241,7 @@ pub(crate) enum Seen {
     CheckpointOwed,
     /// The brain handled a control input and applied its effects.
     ControlApplied,
+    FirstPcmExpired,
     /// A page reply landed while the data queue was full and waits for room.
     PageHeld,
     /// Another pipe ended first, and the control reader's grace began.
@@ -925,7 +926,11 @@ impl Brain {
                 }
                 () = sleep_until(first_pcm.map(|due| due.at)) => {
                     match self.pump.as_mut().and_then(|pump| pump.expire_first_pcm(first_pcm?)) {
-                        Some((run, segment)) => Input::Tts { run, segment, made: Synthesized::Failed { run: true } },
+                        Some((run, segment)) => {
+                            #[cfg(test)]
+                            self.observer.send(Seen::FirstPcmExpired).ok();
+                            Input::Tts { run, segment, made: Synthesized::Failed { run: true } }
+                        }
                         None => continue,
                     }
                 }

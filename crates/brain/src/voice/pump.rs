@@ -7,11 +7,11 @@
 mod tests;
 
 use std::future;
+use std::task::{Context, Poll, Waker};
 use std::time::Duration;
 
 use kumochi_protocol::message::{RunId, SegmentId};
 use tokio::sync::mpsc;
-use tokio::sync::mpsc::error::TryRecvError;
 use tokio::time::Instant;
 
 use super::tts::{Speak, TtsError, TtsEvent, TtsHandle};
@@ -156,14 +156,19 @@ impl Pump {
         if self.held.is_some() {
             return None;
         }
-        self.held = Some(match active.events.try_recv() {
-            Ok(event) => event,
-            Err(TryRecvError::Disconnected) => closed(due.segment),
-            Err(TryRecvError::Empty) if self.tts.generation() == due.generation => {
-                self.stop();
+        // try_recv can park behind a sender that claimed a slot but hasn't published it.
+        let event = std::pin::pin!(tokio::task::unconstrained(active.events.recv()))
+            .poll(&mut Context::from_waker(Waker::noop()));
+        self.held = Some(match event {
+            Poll::Ready(Some(event)) => event,
+            Poll::Ready(None) => closed(due.segment),
+            Poll::Pending => {
+                self.active = None;
+                if self.tts.generation() == due.generation {
+                    self.tts.cancel();
+                }
                 return Some((due.run, due.segment));
             }
-            Err(TryRecvError::Empty) => return None,
         });
         None
     }

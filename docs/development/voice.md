@@ -323,8 +323,9 @@ sequenceDiagram
   text, from dispatch to its first nonempty PCM or terminal. Queued segments have no timer.
   The provisional deadline is five seconds; it needs measuring on the current build before activation.
   At expiry the pump checks the receiver even if the data pipe has no room. A ready event keeps
-  its normal credit and order. Silence at expiry cancels the TTS generation and ends the reply's
-  remaining narration with ordered empty finals; earlier audio and the text reply continue.
+  its normal credit and order; an unfinished send does not delay expiry. Silence at expiry fences
+  the dispatch even if unload already moved its TTS generation, and ends the reply's remaining
+  narration with ordered empty finals. Earlier audio and the text reply continue.
   An empty final releases its own picture to authored timing without claiming it was heard.
   This fences late output but does not interrupt a blocked native call. Conducted output stays off.
 - **Draining.** When the engine finishes, the reply closes. The run ends `done` only once its
