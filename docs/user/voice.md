@@ -128,7 +128,8 @@ Not checked yet: displays at different scales, multiple monitors, HDR and exclus
 Esc, a target/model/connection change, deletion or a new typed submission cancels pending
 voice input. Another key cancels while the shortcut is held, not arbitrary typing after release.
 Changing foreground apps alone does not cancel a global hold. Release
-before Listening cancels rather than submitting startup audio. The source has a 60-second cap.
+before Listening cancels rather than submitting startup audio. The status panel
+warns after 55 seconds if you're still holding; the microphone stops at 60 seconds.
 If microphone cleanup cannot be confirmed, input stays unavailable and another recording is
 refused; a timeout never means the microphone was released. Follow the restart warning if it
 stays active. A system-default-device change does not migrate an already-open microphone.

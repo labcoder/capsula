@@ -466,6 +466,74 @@ fn listening(
 }
 
 #[gpui::test]
+fn the_voice_limit_warning_only_reaches_a_still_listening_hold(cx: &mut TestAppContext) {
+    for (end_before_warning, cancelled) in
+        [(false, false), (false, true), (true, false), (true, true)]
+    {
+        let (owner, _data, _controls) = ready(cx);
+        let (open, finish, started, samples) = source(&owner, cx, None);
+        let (token, stamp) = hold(&owner, 1, cx);
+        status(&owner, 1, 1, HoldStatus::Admitted, cx);
+        started
+            .recv_timeout(Duration::from_secs(3))
+            .expect("source started");
+        open.send(()).expect("source opens");
+        until(cx, |_| samples.try_recv().is_ok());
+        let just_before = token
+            .hold_deadline()
+            .duration_since(cx.background_executor.now())
+            .checked_sub(Duration::from_millis(5_001))
+            .expect("clock still precedes the warning");
+        cx.background_executor.advance_clock(just_before);
+        owner.read_with(cx, |owner, cx| {
+            assert_eq!(owner.panel.read(cx).voice, Some(Text::HoldListening));
+        });
+        let end_input = |owner: &Presence| {
+            let gate = owner.link.microphone_gate();
+            if cancelled {
+                gate.cancel(G1);
+            } else {
+                gate.release(G1);
+            }
+        };
+        if end_before_warning {
+            owner.read_with(cx, |owner, _| end_input(owner));
+        }
+        cx.background_executor
+            .advance_clock(Duration::from_millis(1));
+        owner.read_with(cx, |owner, cx| {
+            let expected = if end_before_warning {
+                Text::HoldListening
+            } else {
+                Text::HoldNearLimit
+            };
+            assert_eq!(owner.panel.read(cx).voice, Some(expected));
+            assert!(owner.dock.read(cx).listening);
+        });
+        owner.update(cx, |owner, cx| {
+            if !end_before_warning {
+                end_input(owner);
+            }
+            owner.voice_intent(
+                Intent::End {
+                    gesture: G1,
+                    cancelled,
+                },
+                stamp,
+                0,
+                None,
+                TalkHeld::default(),
+                cx,
+            );
+            assert_eq!(owner.panel.read(cx).voice, Some(Text::HoldStopping));
+            assert!(!owner.dock.read(cx).listening);
+        });
+        finish.send(()).expect("the fake source drains");
+        until(cx, |_| token.retired());
+    }
+}
+
+#[gpui::test]
 fn only_the_physical_receipt_retires_a_live_microphone(cx: &mut TestAppContext) {
     let (owner, _data, _controls) = ready(cx);
     let commands = witness(&owner, cx);

@@ -37,6 +37,28 @@ impl Presence {
         self.voice.pending.as_mut().expect("admitted hold").source = Source::Recording;
         let (link, gates) = (self.link.clone(), self.voice.gates.clone());
         let (watch, alive) = (token.clone(), session.alive());
+        let warning = cx.spawn({
+            let (watch, alive) = (watch.clone(), session.alive());
+            async move |this, cx| {
+                let clock = cx.background_executor();
+                let limit = watch.hold_deadline();
+                let remaining = limit.saturating_duration_since(clock.now());
+                clock
+                    .timer(remaining.saturating_sub(Duration::from_secs(5)))
+                    .await;
+                let _applied = this.update(cx, |this, cx| {
+                    let now = cx.background_executor().now();
+                    if now < limit
+                        && this.voice.status == Some(Text::HoldListening)
+                        && this.voice_current(stamp)
+                        && this.link.input_is(watch.gesture())
+                        && watch.mode(&alive, now) == Ok(Mode::Collecting)
+                    {
+                        this.voice_notice(Text::HoldNearLimit, cx);
+                    }
+                });
+            }
+        });
         cx.spawn(async move |this, cx| {
             while !watch.retired() {
                 cx.background_executor()
@@ -65,6 +87,7 @@ impl Presence {
         })
         .detach();
         cx.spawn(async move |this, cx| {
+            let _warning = warning;
             let mut refused = false;
             if let Ok(running) = mic.running.recv().await {
                 let mut accepted = false;

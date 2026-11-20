@@ -318,7 +318,10 @@ impl Presence {
     /// Follows confirmed microphone collection and the settings notice in the status panel.
     // shortcut: the line carries no notice, so the offline and settings notices show only in the status panel; B2b's peek shows them by the line.
     fn refresh_dock(&self, cx: &mut Context<'_, Self>) {
-        let listening = self.voice.status == Some(Text::HoldListening);
+        let listening = matches!(
+            self.voice.status,
+            Some(Text::HoldListening | Text::HoldNearLimit)
+        );
         let was_listening = self.dock.update(cx, |dock, cx| {
             cx.notify();
             std::mem::replace(&mut dock.listening, listening)

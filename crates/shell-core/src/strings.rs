@@ -189,6 +189,7 @@ texts! {
     HoldToTalkHelp => "hold-to-talk-help",
     HoldDisabled => "hold-disabled",
     HoldListening => "hold-listening",
+    HoldNearLimit => "hold-near-limit",
     HoldStopping => "hold-stopping",
     HoldTranscribing => "hold-transcribing",
     HoldThinking => "hold-thinking",

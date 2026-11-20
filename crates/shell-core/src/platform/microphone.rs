@@ -317,6 +317,10 @@ impl Generation {
         self.gesture
     }
 
+    pub fn hold_deadline(&self) -> Instant {
+        self.at + HOLD_LIMIT
+    }
+
     pub fn retired(&self) -> bool {
         self.gate.load(Ordering::Acquire) == (u64::from(self.gesture.0) << 3 | RETIRED)
     }
