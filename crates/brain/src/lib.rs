@@ -20,7 +20,14 @@ pub mod platform;
 mod recall;
 mod relaunch;
 mod runtime;
-#[cfg(test)]
+#[cfg(any(test, all(windows, debug_assertions, feature = "test-support")))]
+#[cfg_attr(
+    all(windows, debug_assertions, feature = "test-support"),
+    expect(
+        clippy::print_stderr,
+        reason = "the shared fixture reports cleanup failures during unwind"
+    )
+)]
 #[path = "../../../tests/support/scratch.rs"]
 mod scratch;
 pub mod screen;

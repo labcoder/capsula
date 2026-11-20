@@ -41,7 +41,7 @@ pub(super) enum Command {
     Stop,
 }
 
-pub(super) struct Input {
+pub(crate) struct Input {
     worker: Thread,
     commands: SyncSender<Command>,
     packets: SyncSender<Packet>,
@@ -68,7 +68,11 @@ impl Input {
         Ok(())
     }
 
-    pub(super) fn submit(&self, packet: Packet) -> Result<(), TrySendError<Packet>> {
+    pub(crate) fn stop(&self) -> bool {
+        self.command(Command::Stop).is_ok()
+    }
+
+    pub(crate) fn submit(&self, packet: Packet) -> Result<(), TrySendError<Packet>> {
         if self.closed.load(Ordering::Acquire) {
             return Err(TrySendError::Disconnected(packet));
         }
@@ -85,6 +89,40 @@ impl Input {
                 Err(err)
             }
         }
+    }
+}
+
+pub(crate) fn spawn_plain(
+    run: RunId,
+    output: OutputGeneration,
+    session: u64,
+    mut grant: impl FnMut(u32) + Send + 'static,
+    report: impl FnMut(ControlToBrain) -> bool + Send + 'static,
+    exit: impl FnMut(bool) + Send + 'static,
+    #[cfg(any(test, feature = "test-support"))] fake: Option<SyncSender<super::FixturePlayback>>,
+) -> io::Result<Input> {
+    spawn(
+        run,
+        output,
+        session,
+        Instant::now(),
+        Plain(exit),
+        move |credit| grant(credit.bytes),
+        report,
+        #[cfg(any(test, feature = "test-support"))]
+        fake,
+    )
+}
+
+struct Plain<F>(F);
+
+impl<F: FnMut(bool) + Send + 'static> DrawingIo for Plain<F> {
+    fn view(&mut self) -> Result<Option<super::super::conductor::ViewLevel>, ()> {
+        Ok(None)
+    }
+    fn picture(&mut self, _: Binding, _: Option<super::super::conductor::PictureLevel>) {}
+    fn owner_exited(&mut self, exit: OwnerExit) {
+        (self.0)(exit == OwnerExit::ReportRefused);
     }
 }
 
@@ -125,6 +163,13 @@ struct Worker {
     drawing: Option<Drawing>,
 }
 
+#[cfg_attr(
+    any(test, feature = "test-support"),
+    expect(
+        clippy::too_many_arguments,
+        reason = "the test-only device factory is an extra argument"
+    )
+)]
 pub(super) fn spawn(
     run: RunId,
     generation: OutputGeneration,
@@ -133,6 +178,7 @@ pub(super) fn spawn(
     drawing: impl DrawingIo,
     give: impl FnMut(Credit) + Send + 'static,
     report: impl FnMut(ControlToBrain) -> bool + Send + 'static,
+    #[cfg(any(test, feature = "test-support"))] fake: Option<SyncSender<super::FixturePlayback>>,
 ) -> io::Result<Input> {
     let (commands, pending) = mpsc::sync_channel(COMMANDS);
     let (packets, data) = mpsc::sync_channel(1);
@@ -147,6 +193,15 @@ pub(super) fn spawn(
         closed: Arc::clone(&closed),
     };
     let drawing = Drawing::new(session, Arc::clone(&closed), drawing);
+    #[cfg(not(any(test, feature = "test-support")))]
+    let start = backend::spawn;
+    #[cfg(any(test, feature = "test-support"))]
+    let start = |owner, origin| {
+        if let Some(fake) = fake {
+            return backend::spawn_fake(owner, origin, fake);
+        }
+        backend::spawn(owner, origin)
+    };
     let task = thread::Builder::new()
         .name("speaker-owner".into())
         .spawn(move || {
@@ -157,7 +212,7 @@ pub(super) fn spawn(
                 drawing,
                 give,
                 report,
-                backend::spawn,
+                start,
             );
         })?;
     let worker = task.thread().clone();

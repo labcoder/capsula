@@ -9,11 +9,93 @@ use std::time::Duration;
 use async_channel::Receiver;
 use kumochi_protocol::message::{AudioSession, Incarnation, IssueSession};
 
-use super::{Connection, Link, LinkEvent, LinkHandle, Session, Shared, start};
+use super::{Attendance, Connection, Link, LinkEvent, LinkHandle, Session, Shared, start};
 use crate::platform::{PipeClient, test_pair};
 
 /// How long a test waits for anything before it fails.
 pub(crate) const PATIENCE: Duration = Duration::from_secs(5);
+
+#[cfg(debug_assertions)]
+pub use crate::speaker::queued::{FixturePlayback, serialize_playback};
+
+#[cfg(debug_assertions)]
+pub fn with_outbox_held(handle: &LinkHandle, session: &Session, run: impl FnOnce()) {
+    let (ready, held) = mpsc::channel();
+    let (release, done) = mpsc::channel();
+    thread::scope(|scope| {
+        let holder = scope.spawn(move || {
+            let outbox = handle
+                .shared
+                .outbox
+                .lock()
+                .expect("the outbox lock is healthy");
+            assert_eq!(
+                outbox.as_ref().expect("a linked outbox").generation,
+                session.generation(),
+                "hold the exact connected outbox"
+            );
+            ready
+                .send(())
+                .expect("the headless caller waits for the lock");
+            done.recv_timeout(Duration::from_secs(2))
+        });
+        held.recv_timeout(PATIENCE)
+            .expect("the fixture holds the outbox");
+        run();
+        release
+            .send(())
+            .expect("Esc returned while the real outbox was held");
+        holder
+            .join()
+            .expect("the fixture holder ran")
+            .expect("Esc did not wait for the outbox");
+    });
+}
+
+#[cfg(debug_assertions)]
+pub struct Authenticated {
+    pub handle: LinkHandle,
+    pub events: Receiver<LinkEvent>,
+    pub playback: mpsc::Receiver<FixturePlayback>,
+    pub link: JoinHandle<bool>,
+}
+
+/// The real authenticated Shell path, without opening the vault or a physical device.
+#[cfg(debug_assertions)]
+pub fn authenticated(
+    id: u32,
+    hello: kumochi_protocol::message::Hello,
+    mode: AudioSession,
+) -> Authenticated {
+    use kumochi_protocol::frame::Pipe;
+    let (sender, events) = async_channel::unbounded();
+    let (output, playback) = mpsc::sync_channel(1);
+    let link = Link {
+        brain: std::env::current_exe().expect("the fixture shares the test image"),
+        session: id,
+        audio: mode,
+        shared: Arc::new(Shared {
+            fake_playback: Some(output),
+            ..Shared::default()
+        }),
+        speaker: None,
+    };
+    let (handle, start) = start(link, sender);
+    let link = thread::spawn(move || {
+        let open = |pipe: Pipe| super::open(&pipe.name(id), &start.link.brain);
+        let control = open(Pipe::Control).expect("the fixture control pipe");
+        control.set_timeout(Some(PATIENCE));
+        let connection = super::handshake_pair(control, hello, mode, || open(Pipe::Data))
+            .expect("authenticate both fixture legs");
+        start.link.attend(connection, &start.events) == Attendance::Lost
+    });
+    Authenticated {
+        handle,
+        events,
+        playback,
+        link,
+    }
+}
 
 pub(crate) fn pair(label: &str) -> (PipeClient, PipeClient) {
     let name = format!(
@@ -58,19 +140,42 @@ pub(super) fn attended_shared(
     shared: Arc<Shared>,
     incarnation: Incarnation,
 ) -> Attended {
-    attended_with(label, shared, incarnation, None)
+    attended_with(label, shared, incarnation, AudioSession::Legacy, None)
 }
 
 /// A connection whose link opens a speaker with `opener`.
 #[cfg(test)]
 pub(super) fn attended_speaking(label: &str, opener: crate::speaker::Opener) -> Attended {
-    attended_with(label, Arc::default(), Incarnation(1), Some(opener))
+    attended_with(
+        label,
+        Arc::default(),
+        Incarnation(1),
+        AudioSession::Legacy,
+        Some(opener),
+    )
+}
+
+#[cfg(test)]
+pub(super) fn attended_queued(label: &str) -> Attended {
+    attended_queued_shared(label, Arc::default())
+}
+
+#[cfg(test)]
+pub(super) fn attended_queued_shared(label: &str, shared: Arc<Shared>) -> Attended {
+    attended_with(
+        label,
+        shared,
+        Incarnation(1),
+        AudioSession::QueuedRequired,
+        None,
+    )
 }
 
 fn attended_with(
     label: &str,
     shared: Arc<Shared>,
     incarnation: Incarnation,
+    audio: AudioSession,
     speaker: Option<crate::speaker::Opener>,
 ) -> Attended {
     let (control, shell_control) = pair(&format!("{label}-control"));
@@ -81,7 +186,7 @@ fn attended_with(
     let link = Link {
         brain: PathBuf::new(),
         session: 0,
-        audio: AudioSession::Legacy,
+        audio,
         shared,
         speaker,
     };
@@ -94,7 +199,8 @@ fn attended_with(
             epoch: 91,
         },
     };
-    let link = thread::spawn(move || start.link.attend(connection, &start.events));
+    let link =
+        thread::spawn(move || start.link.attend(connection, &start.events) == Attendance::Lost);
     Attended {
         handle,
         events,

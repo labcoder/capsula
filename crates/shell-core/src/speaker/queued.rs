@@ -1,4 +1,4 @@
-//! Dormant source queue and playback state; no worker or device is started here.
+//! Per-run source queue and playback state for the internal queued output path.
 
 use std::collections::VecDeque;
 use std::fmt;
@@ -16,10 +16,14 @@ mod timeline;
 #[cfg(any(windows, target_os = "macos"))]
 mod worker;
 
+#[cfg(any(test, feature = "test-support"))]
+pub use backend::{FixturePlayback, serialize_playback};
+
 #[cfg(test)]
 mod tests;
 
-const RATE: u32 = 24_000;
+pub(crate) use worker::{Input, spawn_plain};
+pub(crate) const RATE: u32 = 24_000;
 const CAPACITY: usize = 480_000;
 const SEGMENT_SLOTS: usize = 256;
 const _: () = assert!(
@@ -37,9 +41,18 @@ struct Credit {
     bytes: u32,
 }
 
-struct Packet {
+pub(crate) struct Packet {
     credit: Credit,
     pcm: SpeechPcm,
+}
+
+impl Packet {
+    pub(crate) fn wire(pcm: SpeechPcm, origin: u64, bytes: u32) -> Self {
+        Self {
+            pcm,
+            credit: Credit { origin, bytes },
+        }
+    }
 }
 
 impl fmt::Debug for Packet {

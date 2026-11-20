@@ -16,9 +16,9 @@ pub use hold::{HoldRelease, ScreenHold, ScreenLine, ScreenNotice};
 
 use kumochi_protocol::frame::Pipe;
 use kumochi_protocol::message::{
-    Action, Content, ControlToBrain, DataToBrain, DataToShell, Deleted, ErrorKey, GestureId,
-    Incarnation, MAX_PENDING_DELETES, MAX_PENDING_TURNS, Phase, RunId, RunOrigin, SceneDescriptor,
-    SceneId, ThreadId, ThreadKind, ThreadRow, UserError,
+    Action, AudioSession, Content, ControlToBrain, DataToBrain, DataToShell, Deleted, ErrorKey,
+    GestureId, Incarnation, MAX_PENDING_DELETES, MAX_PENDING_TURNS, Phase, RunId, RunOrigin,
+    SceneDescriptor, SceneId, ThreadId, ThreadKind, ThreadRow, UserError,
 };
 
 #[cfg(any(test, feature = "test-support"))]
@@ -570,8 +570,22 @@ impl Runs {
         text: &str,
         send: impl FnOnce(DataToBrain) -> bool,
     ) -> Result<(), Refused> {
+        self.submit_with_audio(text, AudioSession::Legacy, send)
+    }
+
+    /// Queued refusal preserves earlier recovery until a fresh turn is actually accepted.
+    /// # Errors
+    /// [`Refused`] says why the turn wasn't sent.
+    pub fn submit_with_audio(
+        &mut self,
+        text: &str,
+        audio: AudioSession,
+        send: impl FnOnce(DataToBrain) -> bool,
+    ) -> Result<(), Refused> {
         self.cancel_hold();
-        self.forget_texts(|_| true);
+        if audio == AudioSession::Legacy {
+            self.forget_texts(|_| true);
+        }
         if text.trim().is_empty() {
             return Err(Refused::Blank);
         }
@@ -587,6 +601,9 @@ impl Runs {
         }
         if !send(message) {
             return Err(Refused::Offline);
+        }
+        if audio == AudioSession::QueuedRequired {
+            self.forget_texts(|_| true);
         }
         self.submitted.push_back(Submitted {
             revision,
