@@ -12,7 +12,12 @@ until the backend actually destroys its callback closures, then wipes and frees 
 the audio thread. At most one pool may be live or awaiting retirement; if a backend never
 releases its closures, that pool stays retained and new opens are refused. The worker clears
 converter history at close and scrubs blocks as they become exclusively owned while waiting.
-Route notifications go back to the worker.
+The callback checks an atomic fence before each bounded copy. Stop discards ready blocks
+and ramps the last sample to silence in at most 5 ms. Source observations cover copied
+speech only; their positions follow the converter's device-frame phase, not how much
+source it accepted. The callback publishes those observations into a bounded ring. It
+latches the last non-silent frame independently, including the ramp; missing timing stays
+unknown. Neither filler nor the ramp advances the source cursor.
 
 The dormant `speaker::queued` state keeps one bounded source queue. Admission or stale
 discard returns ingress byte credit once; consumption or discard frees source capacity.

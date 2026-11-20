@@ -1,0 +1,132 @@
+use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
+use std::thread::Thread;
+use std::time::Duration;
+
+use cpal::StreamInstant;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TailAck {
+    Pending,
+    Unknown,
+    At(Duration),
+}
+
+const STOPPED: u8 = 1;
+const INHIBITED: u8 = 2;
+const COPYING: u8 = 4;
+
+#[derive(Default)]
+pub(crate) struct Control {
+    gate: AtomicU8,
+    wake: Option<Thread>,
+    tail: AtomicU64,
+    handoff: AtomicU64,
+    overflow: AtomicBool,
+    clock: OnceLock<(StreamInstant, Duration)>,
+}
+
+#[expect(
+    dead_code,
+    reason = "the separate queued owner drives the callback controls"
+)]
+impl Control {
+    pub(crate) fn new(wake: Thread) -> Self {
+        Self {
+            wake: Some(wake),
+            ..Self::default()
+        }
+    }
+
+    pub(super) fn wake(&self) {
+        if let Some(wake) = &self.wake {
+            wake.unpark();
+        }
+    }
+
+    pub(crate) fn stop(&self) {
+        self.gate.fetch_or(STOPPED, Ordering::AcqRel);
+    }
+
+    pub(crate) fn inhibit(&self) {
+        self.gate.fetch_or(INHIBITED, Ordering::AcqRel);
+    }
+
+    pub(crate) fn resume(&self) {
+        self.gate.fetch_and(!INHIBITED, Ordering::AcqRel);
+    }
+
+    pub(super) fn stopped(&self) -> bool {
+        self.gate.load(Ordering::Acquire) & STOPPED != 0
+    }
+
+    pub(super) fn inhibited(&self) -> bool {
+        self.gate.load(Ordering::Acquire) & INHIBITED != 0
+    }
+
+    pub(super) fn begin_copy(&self) -> bool {
+        self.gate
+            .compare_exchange(0, COPYING, Ordering::AcqRel, Ordering::Relaxed)
+            .is_ok()
+    }
+
+    pub(super) fn end_copy(&self) {
+        self.gate.fetch_and(!COPYING, Ordering::Release);
+    }
+
+    pub(crate) fn fenced_handoff(&self) -> Option<u64> {
+        (self.gate.load(Ordering::Acquire) & (STOPPED | COPYING) == STOPPED).then(|| self.handed())
+    }
+
+    pub(super) fn handed(&self) -> u64 {
+        self.handoff.load(Ordering::Acquire)
+    }
+
+    pub(super) fn handed_through(&self, through: u64) {
+        self.handoff.fetch_max(through, Ordering::Release);
+    }
+
+    pub(crate) fn overflowed(&self) -> bool {
+        self.overflow.load(Ordering::Acquire)
+    }
+
+    pub(super) fn overflow(&self) {
+        self.overflow.store(true, Ordering::Release);
+    }
+
+    pub(crate) fn tail(&self) -> TailAck {
+        match self.tail.load(Ordering::Acquire) {
+            0 => TailAck::Pending,
+            1 => TailAck::Unknown,
+            at => TailAck::At(Duration::from_nanos(at - 2)),
+        }
+    }
+
+    pub(super) fn latch(&self, at: Option<Duration>) {
+        let encoded = at
+            .and_then(|time| u64::try_from(time.as_nanos()).ok())
+            .and_then(|nanos| nanos.checked_add(2))
+            .unwrap_or(1);
+        let _ = self
+            .tail
+            .compare_exchange(0, encoded, Ordering::Release, Ordering::Relaxed);
+    }
+
+    pub(super) fn calibrate(&self, backend: StreamInstant, local: Duration) {
+        let _ = self.clock.set((backend, local));
+    }
+
+    pub(super) fn time(&self, when: StreamInstant) -> Option<Duration> {
+        let &(backend, local) = self.clock.get()?;
+        if let Some(after) = when.checked_duration_since(backend) {
+            local.checked_add(after)
+        } else {
+            local.checked_sub(backend.checked_duration_since(when)?)
+        }
+    }
+}
+
+pub(super) fn frame_time(base: Option<Duration>, frames: usize, rate: u32) -> Option<Duration> {
+    let nanos = u64::try_from(frames).ok()?.checked_mul(1_000_000_000)? / u64::from(rate);
+    base?.checked_add(Duration::from_nanos(nanos))
+}
