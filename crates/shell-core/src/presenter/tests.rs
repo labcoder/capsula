@@ -98,6 +98,9 @@ mod stop;
 #[path = "activation_tests.rs"]
 mod activation;
 
+#[path = "conduction_tests.rs"]
+mod conduction;
+
 #[path = "placement_tests.rs"]
 mod placement;
 

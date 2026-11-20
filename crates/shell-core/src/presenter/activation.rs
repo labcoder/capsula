@@ -107,6 +107,12 @@ impl Activation {
         self.installed.is_some_and(|installed| installed.run == run)
     }
 
+    pub(super) fn installation(&self, run: RunId, index: u32) -> Option<bool> {
+        self.installed
+            .filter(|installed| (installed.run, installed.index) == (run, index))
+            .map(|installed| installed.acknowledged)
+    }
+
     pub(super) fn retain(&mut self, state: &SceneState) {
         for (index, end) in self.ends.iter_mut().enumerate() {
             if state
@@ -126,6 +132,10 @@ impl Presenter {
         }
         let mut out = Out::default();
         self.check_marks(now, &mut out)?;
+        if self.conduction.is_some() {
+            self.frames.borrow_mut().expire_retirement(now);
+            self.sync_conduction(now);
+        }
         let mut heads = [None; MAX_VISIBLE_SCENES];
         for (slot, (id, scene)) in heads.iter_mut().zip(&self.scenes) {
             if scene.cut == Cut::Open && !scene.skipping && scene.pending_consumption.is_none() {
@@ -151,6 +161,7 @@ impl Presenter {
             .get(&id)
             .is_some_and(|scene| scene.pending_consumption == Some(index))
         {
+            self.sync_conduction(now);
             self.activate_ready(generation, id, index, now, &mut out)?;
             let busy = self.lane.as_ref().is_some_and(|lane| lane.scene == id);
             if !busy
@@ -196,6 +207,17 @@ impl Presenter {
             Ok(_) => {}
             Err(reason) => return self.fail(id, run, index, reason, now, out),
         }
+        if self.conduction.is_some()
+            && !self
+                .conducted_onset(DrawKey {
+                    run,
+                    scene: id,
+                    index,
+                })
+                .is_ok_and(|onset| onset.is_none_or(|at| now >= at))
+        {
+            return Ok(());
+        }
         match self.consume_ready(id, index, now, time, 0) {
             Ok(consumed) => {
                 let super::window::Consumed {
@@ -219,6 +241,13 @@ impl Presenter {
                             })
                     })
                     && self.frames.borrow().epoch(id) == Some(epoch);
+                if current && let Some(state) = &mut self.conduction {
+                    state.record_installation(DrawKey {
+                        run,
+                        scene: id,
+                        index,
+                    });
+                }
                 if !current
                     && let Some(scene) = self.scenes.get_mut(&id)
                     && scene.activation.installed.is_some_and(|installed| {
@@ -330,20 +359,33 @@ impl Presenter {
                         scene.pending_consumption.is_none() && !frames.guards_successor(*id)
                     })
                     .and_then(|head| {
-                        scene
+                        let due = scene
                             .activation
                             .due(scene.state.view(), head.step.index)
-                            .ok()
+                            .ok()?;
+                        let authored = scene
+                            .activation
+                            .origin
+                            .checked_add(Duration::from_millis(due))?;
+                        let key = DrawKey {
+                            run: head.run,
+                            scene: *id,
+                            index: head.step.index,
+                        };
+                        match self.conducted_onset(key) {
+                            Ok(Some(at)) => Some(authored.max(at)),
+                            Ok(None) => Some(authored),
+                            Err(()) => (authored > now).then_some(authored),
+                        }
                     });
                 head.into_iter()
-                    .chain(scene.view.next_wake(time))
-                    .min()
-                    .and_then(|at| {
+                    .chain(scene.view.next_wake(time).and_then(|at| {
                         scene
                             .activation
                             .origin
                             .checked_add(Duration::from_millis(at))
-                    })
+                    }))
+                    .min()
             })
             .min()
     }
