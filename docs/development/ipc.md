@@ -18,7 +18,8 @@ expiry is terminal but never releases an unconfirmed device owner.
 
 `EventsChanged { thread }` (data tag 24) says a thread's stored events changed with no run frame,
 such as a held turn's picture marked sent. The brain sends it only on the hold's own connection,
-after queuing the write, so any page read that follows it sees the write. The shell gives it to
+after queuing the write, so any page read that follows it waits for that write attempt to finish,
+which doesn't prove it succeeded. The shell gives it to
 both the panel and the chat; each rereads its newest page only if that thread is open, replacing
 its cached rows so older ones reload through pagination, and the frame's credit comes back once.
 

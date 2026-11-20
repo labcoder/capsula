@@ -1209,9 +1209,9 @@ fn a_later_build_of_a_written_picture_lost_since_ends_as_the_picture_stopping() 
     );
 }
 
-/// A key run whose first pictured round was written, and whose picture is then lost, sends
-/// nothing more: neither the inline compaction a hungry continuation would take, before its read
-/// or after it, nor a later pictured grant that proves unsent, which reads no replacement.
+/// A run whose first pictured round was written, and whose picture is then lost, sends nothing
+/// more: neither a key run's inline compaction before its read, nor a Claude Code run's after it,
+/// nor a later pictured grant that proves unsent, which reads no replacement.
 #[test]
 fn a_written_picture_lost_stops_every_later_send_of_its_run() {
     use crate::coordinator::{CompactBuilt, JobAsk, PictureRoutes, Unbuilt};
@@ -1226,12 +1226,18 @@ fn a_written_picture_lost_stops_every_later_send_of_its_run() {
         })
     };
     let mut outcomes = Vec::new();
-    for schedule in [
-        "before the inline read",
-        "during the inline read",
-        "later grant unsent",
+    for (schedule, kind) in [
+        ("before the inline read", KEY),
+        ("during the inline read", CLAUDE),
+        ("later grant unsent", KEY),
     ] {
-        let (mut core, _) = pictured_run(KEY, PictureRoutes::new(true, false));
+        let (mut core, _) = pictured_run(kind, PictureRoutes::new(true, true));
+        let lose = |core: &mut Coordinator| {
+            for images in [&[][..], &["m"]] {
+                core.handle(Input::Engines(kind, pictured(5, images)))
+                    .expect("an availability is never stale");
+            }
+        };
         let ask = |key| Input::SendReady {
             key: SendKey::Build(key),
             hold: None,
@@ -1240,16 +1246,16 @@ fn a_written_picture_lost_stops_every_later_send_of_its_run() {
         core.handle(Input::SendSettled { lease: first })
             .expect("written");
         if schedule == "before the inline read" {
-            the_fact_goes_and_comes_back(&mut core);
+            lose(&mut core);
         }
         let mut effects = Vec::new();
         core.build(R, 2, &mut effects);
         let second = super::engine_key(&core, R);
         if schedule == "later grant unsent" {
-            core.handle(built_for(second, &choice(KEY, "m")))
+            core.handle(built_for(second, &choice(kind, "m")))
                 .expect("current");
             let lease = lease_of(&core.handle(ask(second)).expect("current"));
-            the_fact_goes_and_comes_back(&mut core);
+            lose(&mut core);
             let unsent = core.handle(Input::SendUnsent { lease }).expect("current");
             outcomes.push((schedule, reads(&unsent), failure(&unsent)));
             continue;
@@ -1266,7 +1272,7 @@ fn a_written_picture_lost_stops_every_later_send_of_its_run() {
             continue;
         }
         assert!(reads(&hungry), "the compaction reads");
-        the_fact_goes_and_comes_back(&mut core);
+        lose(&mut core);
         let inline = super::engine_key(&core, R);
         core.handle(Input::CompactBuilt(CompactBuilt {
             key: inline,
@@ -1275,7 +1281,7 @@ fn a_written_picture_lost_stops_every_later_send_of_its_run() {
                     generation: Generation(5),
                     built: Built {
                         request: ModelRequest {
-                            choice: Some(choice(KEY, "m")),
+                            choice: Some(choice(kind, "m")),
                             instructions: String::new(),
                             input: vec![user()],
                             tools: Vec::new(),
@@ -1305,4 +1311,76 @@ fn a_written_picture_lost_stops_every_later_send_of_its_run() {
             ("later grant unsent", false, stopped),
         ]
     );
+}
+
+/// A key run that may have written its picture starts no inline rewrite, even while the picture
+/// may still go: the rewrite's grant would come before its connection, and a loss while it
+/// connected couldn't stop its text. It ends on the budget with nothing read, started, granted or
+/// marked sent, and the loss that follows sends nothing either. A key run whose picture never
+/// went, and a live `ChatGPT` run whose picture did, compact as before.
+#[test]
+fn a_key_run_that_may_have_written_its_picture_starts_no_inline_rewrite() {
+    use crate::coordinator::{PictureRoutes, Unbuilt};
+    use crate::store::{Failure, RunEnd};
+    let written = |core: &mut Coordinator| {
+        let ask = Input::SendReady {
+            key: SendKey::Build(key()),
+            hold: None,
+        };
+        let lease = lease_of(&core.handle(ask).expect("current"));
+        core.handle(Input::SendSettled { lease }).expect("written");
+    };
+    let hungry = |core: &mut Coordinator| {
+        let mut effects = Vec::new();
+        core.build(R, 2, &mut effects);
+        core.handle(Input::ContextBuilt(ContextBuilt {
+            key: super::engine_key(core, R),
+            snapshot: None,
+            result: Err(Unbuilt::TooLarge { room: Some(500) }),
+        }))
+        .expect("current")
+    };
+    let count = |effects: &[Effect], wanted: fn(&Effect) -> bool| {
+        effects.iter().filter(|effect| wanted(effect)).count()
+    };
+    let rewrites = |effect: &Effect| matches!(effect, Effect::Store(StoreOp::CompactContext(_)));
+    let sends = |effect: &Effect| {
+        matches!(
+            effect,
+            Effect::Store(StoreOp::CompactContext(_) | StoreOp::SentScreen { .. })
+                | Effect::StartEngine { .. }
+                | Effect::Grant(_)
+        )
+    };
+
+    let (mut core, _) = pictured_run(KEY, PictureRoutes::new(true, false));
+    written(&mut core);
+    let refused = hungry(&mut core);
+    assert_eq!(count(&refused, sends), 0);
+    assert!(refused.contains(&super::end_run(None, None, RunEnd::Failed(Failure::Budget))));
+    let lost = core
+        .handle(Input::Engines(KEY, pictured(5, &[])))
+        .expect("an availability is never stale");
+    assert_eq!(count(&lost, sends), 0);
+
+    let (mut core, _) = pictured_run(KEY, PictureRoutes::SHIPPED);
+    written(&mut core);
+    assert_eq!(count(&hungry(&mut core), rewrites), 1, "no picture went");
+
+    let (mut core, hold) = held(
+        vec![ready(CHATGPT, 7, &["m"])],
+        choice(CHATGPT, "m"),
+        Some(T),
+    );
+    core.submit_hold(
+        hold,
+        "words".into(),
+        Some(crate::context::Screen::Image(jpeg())),
+    )
+    .expect("admitted");
+    core.handle(Input::TurnStored { run: R }).expect("current");
+    core.handle(built_for(key(), &choice(CHATGPT, "m")))
+        .expect("current");
+    written(&mut core);
+    assert_eq!(count(&hungry(&mut core), rewrites), 1, "ChatGPT");
 }

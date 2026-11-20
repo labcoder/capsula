@@ -394,13 +394,18 @@ end the run instead, an ask answered `Rebuild`. It ends as `ScreenConnectionChan
 Code's connection changed during this answer…", with the Settings action) for a generation move,
 and as `ScreenPictureStopped` ("Kumochi can no longer confirm that this model can receive
 screenshots…") for a lost capability, which a failed catalog check alone can cause. A later
-build still holding the picture ends the same way. Earlier leases settle on their own, so
+build still holding the picture ends the same way. A key run that may have written its picture
+starts no inline compaction at all, even while the picture may still go: the rewrite's grant
+comes before its connection, and nothing could stop its text after a loss while it connects, so
+the run ends on its budget. Other screen-attachment refusals still end as `ScreenUnavailable`.
+Earlier leases settle on their own, so
 history and held deletes follow what was actually written. Turning screen sharing off is the
 user's choice, not the model's, so it ends a run as `ScreenUnavailable`, whose line ("The screen
 is no longer available, so this turn was stopped.") makes no claim about what was sent. The
 direct connection control runs the pending hold's check at once. On a route behind a picture
 switch, a written settlement also sends the shell `EventsChanged { thread }` (ipc.md) after the
-mark is queued, so a shown page of that thread is read again. What the hold carried goes in the run's row
+mark is queued, so a shown page of that thread is read again; that read waits for the write
+attempt, not for proof that it succeeded. What the hold carried goes in the run's row
 with its turn (store.md, `runs.screen`), and the shell hears it once as `HoldScreen`: an image
 when a send carrying it settles after attempting a write ("The send lease"), anything else when
 the run's first request starts. An inline compaction's send carries only text, so it doesn't
