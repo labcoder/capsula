@@ -10,14 +10,14 @@ use std::time::Duration;
 use kumochi_protocol::BUILD_ID;
 use kumochi_protocol::frame::{self, FrameError, HEADER_LEN, Pipe};
 use kumochi_protocol::message::{
-    Capability, ControlToBrain, ControlToShell, DataToBrain, Hello, Incarnation,
+    AudioSession, Capability, ControlToBrain, ControlToShell, DataToBrain, Hello, Incarnation,
 };
 use kumochi_protocol::tap::Direction;
 use serde::de::DeserializeOwned;
 use subtle::ConstantTimeEq as _;
 use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::sync::oneshot;
-use tokio::time::timeout;
+use tokio::time::{Instant, timeout, timeout_at};
 
 use crate::platform::{self, Instance, PipeServer};
 use crate::runtime::{Brain, Ended};
@@ -86,6 +86,8 @@ enum SessionError {
     NotHello,
     #[error("wrong capability")]
     WrongCapability,
+    #[error("queued output is not available for this session")]
+    QueuedUnavailable,
     #[error("protocol error: {0}")]
     Protocol(&'static str),
     #[error("the visible scenes didn't settle in time")]
@@ -198,8 +200,10 @@ impl Pipes {
             return Err(SessionError::ClosedEarly);
         };
         tap.record(Pipe::Control, Direction::ToBrain, &first, len);
-        let ControlToBrain::Hello(hello) = first else {
-            return Err(SessionError::NotHello);
+        let (hello, audio) = match first {
+            ControlToBrain::Hello(hello) => (hello, AudioSession::Legacy),
+            ControlToBrain::QueuedHello(hello) => (hello, AudioSession::QueuedRequired),
+            _ => return Err(SessionError::NotHello),
         };
         match check_hello(&hello, identity) {
             Verdict::WrongCapability => return Err(SessionError::WrongCapability),
@@ -213,19 +217,26 @@ impl Pipes {
             }
             Verdict::Welcome => {}
         }
-        let session = brain.prepare_issue_session(identity.incarnation);
+        let session = match audio {
+            AudioSession::Legacy => brain.prepare_issue_session(identity.incarnation),
+            AudioSession::QueuedRequired => brain.reserve_issue_session(identity.incarnation),
+        };
         let welcome = ControlToShell::Welcome {
             incarnation: identity.incarnation,
             issue_epoch: session.epoch,
         };
         send(&mut self.control, &welcome, tap).await?;
 
-        timeout(HANDSHAKE_TIMEOUT, self.data.connect())
+        let second_leg_deadline = Instant::now() + HANDSHAKE_TIMEOUT;
+        timeout_at(second_leg_deadline, self.data.connect())
             .await
             .map_err(|_| SessionError::Timeout)??;
         check_client(&self.data, &identity.shell_image)?;
-        let first = timeout(
-            HANDSHAKE_TIMEOUT,
+        let first = timeout_at(
+            match audio {
+                AudioSession::Legacy => Instant::now() + HANDSHAKE_TIMEOUT,
+                AudioSession::QueuedRequired => second_leg_deadline,
+            },
             read_sized::<DataToBrain>(&mut self.data, Pipe::Data),
         )
         .await
@@ -234,14 +245,23 @@ impl Pipes {
             return Err(SessionError::ClosedEarly);
         };
         tap.record(Pipe::Data, Direction::ToBrain, &first, len);
-        let DataToBrain::Hello(hello) = first else {
-            return Err(SessionError::ClosedEarly);
+        let (hello, paired) = match first {
+            DataToBrain::Hello(hello) => (hello, None),
+            DataToBrain::QueuedHello(hello, session) => (hello, Some(session)),
+            _ => return Err(SessionError::ClosedEarly),
         };
         if check_hello(&hello, identity) != Verdict::Welcome {
             return Err(SessionError::WrongCapability);
         }
-        let (process, _shell_identity) =
-            platform::shell_connection(&self.control, &self.data, &identity.shell_image)?;
+        let expected = (audio == AudioSession::QueuedRequired).then_some(session);
+        if paired != expected {
+            return Err(SessionError::Protocol("data hello does not match control"));
+        }
+        let process = platform::shell_connection(&self.control, &self.data, &identity.shell_image)?;
+        if audio == AudioSession::QueuedRequired {
+            return Err(SessionError::QueuedUnavailable);
+        }
+        let _shell_identity = process.register();
         brain.connected_shell(process);
         tracing::info!("shell connected");
         Ok(
@@ -348,12 +368,19 @@ pub(crate) async fn read_sized<T: DeserializeOwned>(
 mod tests {
     use std::path::PathBuf;
 
-    use kumochi_protocol::message::{CAPABILITY_LEN, Hello, Incarnation};
+    use kumochi_protocol::frame::{self, FrameError, Pipe};
+    use kumochi_protocol::message::{
+        AudioSession, CAPABILITY_LEN, ControlToBrain, ControlToShell, DataToBrain, DataToShell,
+        Hello, Incarnation, IssueSession,
+    };
     use kumochi_protocol::{BUILD_ID, Secret};
 
+    use tokio::io::AsyncWriteExt as _;
+    use tokio::net::windows::named_pipe::ClientOptions;
     use tokio::sync::oneshot;
+    use tokio::time::timeout;
 
-    use super::{Identity, Pipes, Session, Verdict, check_hello};
+    use super::{Identity, Pipes, Session, SessionError, Verdict, check_hello};
     use crate::tap::Tap;
     use crate::test_support::{self, Scratch};
 
@@ -370,6 +397,201 @@ mod tests {
             build_id: build.to_owned(),
             capability: Secret::new([byte; CAPABILITY_LEN]),
         }
+    }
+
+    async fn request_audio(
+        control: &mut crate::platform::PipeClient,
+        mode: AudioSession,
+    ) -> IssueSession {
+        let hello = hello(1, BUILD_ID);
+        let message = match mode {
+            AudioSession::Legacy => ControlToBrain::Hello(hello),
+            AudioSession::QueuedRequired => ControlToBrain::QueuedHello(hello),
+        };
+        control
+            .write_all(&frame::encode(&message, Pipe::Control).unwrap())
+            .await
+            .unwrap();
+        let Some(ControlToShell::Welcome {
+            incarnation,
+            issue_epoch,
+        }) = super::read(control, Pipe::Control).await.unwrap()
+        else {
+            panic!("expected Welcome before the data hello");
+        };
+        IssueSession {
+            incarnation,
+            epoch: issue_epoch,
+        }
+    }
+
+    #[tokio::test]
+    async fn paired_handshake_accepts_only_matching_authenticated_queued_legs() {
+        let mut id = identity();
+        id.shell_image = std::env::current_exe().unwrap();
+        let scratch = Scratch::new("queued-hello-pair");
+        let mut brain = test_support::brain(&scratch, "");
+        let mut tap = Tap::from_env();
+        let queued = AudioSession::QueuedRequired;
+        let legacy = AudioSession::Legacy;
+        let mut first = None;
+        for (index, control_mode, data_mode, secret) in [
+            (0, queued, queued, 1),
+            (1, queued, legacy, 1),
+            (2, legacy, queued, 1),
+            (3, queued, queued, 2),
+            (4, queued, queued, 1),
+        ] {
+            let (control, mut peer_control) =
+                crate::platform::test_pair(&format!("queued-hello-c-{index}"))
+                    .await
+                    .unwrap();
+            let (data, mut peer_data) =
+                crate::platform::test_pair(&format!("queued-hello-d-{index}"))
+                    .await
+                    .unwrap();
+            let mut pipes = Pipes {
+                session: 0,
+                control,
+                data,
+            };
+            let peer = async {
+                let welcomed = request_audio(&mut peer_control, control_mode).await;
+                let echo = if index == 4 { first.unwrap() } else { welcomed };
+                first.get_or_insert(welcomed);
+                let hello = hello(secret, BUILD_ID);
+                let message = match data_mode {
+                    AudioSession::Legacy => DataToBrain::Hello(hello),
+                    AudioSession::QueuedRequired => DataToBrain::QueuedHello(hello, echo),
+                };
+                peer_data
+                    .write_all(&frame::encode(&message, Pipe::Data).unwrap())
+                    .await
+                    .unwrap();
+            };
+            let (result, ()) = timeout(std::time::Duration::from_secs(7), async {
+                tokio::join!(pipes.session(&id, &mut brain, &mut tap), peer)
+            })
+            .await
+            .unwrap();
+            match index {
+                0 => assert!(matches!(result, Err(SessionError::QueuedUnavailable))),
+                3 => assert!(matches!(result, Err(SessionError::WrongCapability))),
+                _ => assert!(matches!(
+                    result,
+                    Err(SessionError::Protocol("data hello does not match control"))
+                )),
+            }
+        }
+        brain.close().await;
+    }
+
+    #[tokio::test]
+    async fn reconnect_cannot_replay_a_data_leg_and_refusal_closes_both_pipes() {
+        let session = u32::MAX - 17 - std::process::id();
+        let mut pipes = Pipes::create(session).unwrap();
+        let mut id = identity();
+        id.shell_image = std::env::current_exe().unwrap();
+        let scratch = Scratch::new("queued-hello-reconnect");
+        let mut brain = test_support::brain(&scratch, "");
+        let mut tap = Tap::from_env();
+        let (finished, exit) = oneshot::channel();
+        let mut launched = Some(exit);
+        let peer = async {
+            let mut previous: Option<IssueSession> = None;
+            for _ in 0..2 {
+                let mut control = ClientOptions::new()
+                    .open(Pipe::Control.name(session))
+                    .unwrap();
+                let welcome = request_audio(&mut control, AudioSession::QueuedRequired).await;
+                if let Some(old) = previous {
+                    assert_eq!(welcome.incarnation, old.incarnation);
+                    assert_eq!(welcome.epoch, old.epoch + 1);
+                }
+                let mut data = ClientOptions::new().open(Pipe::Data.name(session)).unwrap();
+                let message =
+                    DataToBrain::QueuedHello(hello(1, BUILD_ID), previous.unwrap_or(welcome));
+                data.write_all(&frame::encode(&message, Pipe::Data).unwrap())
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    super::read::<ControlToShell>(&mut control, Pipe::Control)
+                        .await
+                        .unwrap(),
+                    None
+                );
+                assert_eq!(
+                    super::read::<DataToShell>(&mut data, Pipe::Data)
+                        .await
+                        .unwrap(),
+                    None
+                );
+                previous = Some(welcome);
+            }
+            let mut control = ClientOptions::new()
+                .open(Pipe::Control.name(session))
+                .unwrap();
+            request_audio(&mut control, AudioSession::QueuedRequired).await;
+            assert_eq!(
+                super::read::<ControlToShell>(&mut control, Pipe::Control)
+                    .await
+                    .unwrap(),
+                None
+            );
+            finished.send(()).unwrap();
+        };
+        let (result, ()) = timeout(std::time::Duration::from_secs(9), async {
+            tokio::join!(
+                pipes.next_session(&id, &mut brain, &mut tap, &mut launched),
+                peer
+            )
+        })
+        .await
+        .unwrap();
+        assert_eq!(result.unwrap(), Session::ShellLost);
+        brain.close().await;
+    }
+
+    #[tokio::test]
+    async fn queued_data_hello_rejects_malformed_frames_and_times_out_partial_ones() {
+        let mut id = identity();
+        id.shell_image = std::env::current_exe().unwrap();
+        let scratch = Scratch::new("queued-hello-invalid");
+        let mut brain = test_support::brain(&scratch, "");
+        let mut tap = Tap::from_env();
+        for (index, bytes) in [(0, &[1, 0, 0, 0, 255][..]), (1, &[1, 0][..])] {
+            let (control, mut peer_control) =
+                crate::platform::test_pair(&format!("queued-invalid-c-{index}"))
+                    .await
+                    .unwrap();
+            let (data, mut peer_data) =
+                crate::platform::test_pair(&format!("queued-invalid-d-{index}"))
+                    .await
+                    .unwrap();
+            let mut pipes = Pipes {
+                session: 0,
+                control,
+                data,
+            };
+            let peer = async {
+                request_audio(&mut peer_control, AudioSession::QueuedRequired).await;
+                peer_data.write_all(bytes).await.unwrap();
+            };
+            let (result, ()) = timeout(std::time::Duration::from_secs(7), async {
+                tokio::join!(pipes.session(&id, &mut brain, &mut tap), peer)
+            })
+            .await
+            .unwrap();
+            if index == 0 {
+                assert!(matches!(
+                    result,
+                    Err(SessionError::Frame(FrameError::Malformed(_)))
+                ));
+            } else {
+                assert!(matches!(result, Err(SessionError::Timeout)));
+            }
+        }
+        brain.close().await;
     }
 
     #[test]

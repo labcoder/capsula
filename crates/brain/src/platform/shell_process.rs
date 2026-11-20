@@ -29,6 +29,11 @@ impl ShellProcess {
         }
     }
 
+    #[cfg(windows)]
+    pub(crate) fn register(&self) -> super::connected_shell::Registration<'static> {
+        super::register_shell(self.pid)
+    }
+
     pub(crate) fn exited(&self) -> io::Result<bool> {
         match *self.owner {
             #[cfg(windows)]

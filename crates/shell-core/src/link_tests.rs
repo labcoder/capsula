@@ -929,10 +929,85 @@ fn a_full_batch_leaves_the_next_event_queued() {
 /// A link to no brain, with no speaker.
 fn bare_link() -> Link {
     Link {
+        audio: super::AudioSession::Legacy,
         brain: PathBuf::new(),
         session: 0,
         shared: Arc::new(Shared::default()),
         speaker: None,
+    }
+}
+
+#[test]
+fn real_handshake_writer_preserves_legacy_order_and_echoes_queued_welcome() {
+    use std::io::Read as _;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    use kumochi_protocol::Secret;
+    use kumochi_protocol::message::{AudioSession, CAPABILITY_LEN, Hello};
+
+    for (mode, control_tag, data_tag) in [
+        (AudioSession::Legacy, 0, 0),
+        (AudioSession::QueuedRequired, 37, 9),
+    ] {
+        let (peer_control, control) = pair(&format!("hello-control-{control_tag}"));
+        let (peer_data, data) = pair(&format!("hello-data-{data_tag}"));
+        for pipe in [&peer_control, &control, &peer_data, &data] {
+            pipe.set_timeout(Some(PATIENCE));
+        }
+        let allowed = Arc::new(AtomicBool::new(false));
+        let connect = {
+            let allowed = Arc::clone(&allowed);
+            thread::spawn(move || {
+                let hello = Hello {
+                    build_id: "b".into(),
+                    capability: Secret::new([7; CAPABILITY_LEN]),
+                };
+                super::handshake_pair(control, hello, mode, || {
+                    assert!(allowed.load(Ordering::Acquire), "data opens after Welcome");
+                    Ok(data)
+                })
+            })
+        };
+        let greeting = |tag, echo| {
+            let mut payload = vec![tag, 1, b'b'];
+            payload.extend([7; CAPABILITY_LEN]);
+            if echo {
+                payload.extend([5, 128, 1]);
+            }
+            let len = u32::try_from(payload.len()).unwrap().to_le_bytes();
+            [len.as_slice(), &payload].concat()
+        };
+        let control_bytes = greeting(control_tag, false);
+        let mut got = vec![0; control_bytes.len()];
+        (&peer_control).read_exact(&mut got).unwrap();
+        assert_eq!(got, control_bytes);
+        allowed.store(true, Ordering::Release);
+        frame::write(
+            &mut &peer_control,
+            &ControlToShell::Welcome {
+                incarnation: Incarnation(5),
+                issue_epoch: 128,
+            },
+            Pipe::Control,
+        )
+        .unwrap();
+        let data_bytes = greeting(data_tag, mode == AudioSession::QueuedRequired);
+        got.resize(data_bytes.len(), 0);
+        (&peer_data).read_exact(&mut got).unwrap();
+        assert_eq!(got, data_bytes);
+        let result = connect.join().unwrap();
+        match mode {
+            AudioSession::Legacy => assert_eq!(
+                result.unwrap().issue_origin,
+                IssueSession {
+                    incarnation: Incarnation(5),
+                    epoch: 128
+                },
+            ),
+            AudioSession::QueuedRequired => {
+                assert!(matches!(result, Err(super::LinkError::QueuedUnavailable)));
+            }
+        }
     }
 }
 
@@ -2255,7 +2330,7 @@ mod hold_tests;
 #[test]
 fn a_prepared_link_has_no_speaker_opener() {
     let (sender, _events) = async_channel::unbounded();
-    let (_handle, start) = super::prepare(sender).expect("prepares");
+    let (_handle, start) = super::prepare(sender, super::AudioSession::Legacy).expect("prepares");
     assert!(
         start.link.speaker.is_none(),
         "a normal launch never opens an output"

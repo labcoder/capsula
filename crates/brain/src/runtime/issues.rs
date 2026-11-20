@@ -270,17 +270,21 @@ impl Filing {
 impl Brain {
     pub(crate) fn prepare_issue_session(&mut self, incarnation: Incarnation) -> IssueSession {
         self.filing.cancel_reviews();
+        let session = self.reserve_issue_session(incarnation);
+        self.filing.session = Some(session);
+        session
+    }
+
+    pub(crate) fn reserve_issue_session(&mut self, incarnation: Incarnation) -> IssueSession {
         self.filing.next_session = self
             .filing
             .next_session
             .checked_add(1)
             .expect("issue session identities never wrap");
-        let session = IssueSession {
+        IssueSession {
             incarnation,
             epoch: self.filing.next_session,
-        };
-        self.filing.session = Some(session);
-        session
+        }
     }
 
     pub(super) fn issue_session(&self) -> Option<IssueSession> {

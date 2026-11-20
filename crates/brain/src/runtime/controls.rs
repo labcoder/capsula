@@ -21,7 +21,9 @@ pub(super) async fn read_control(
 ) -> Ended {
     loop {
         match ipc::read_sized::<ControlToBrain>(pipe, Pipe::Control).await {
-            Ok(Some((ControlToBrain::Hello(_), _))) => return Ended::Broken("Hello sent twice"),
+            Ok(Some((ControlToBrain::Hello(_) | ControlToBrain::QueuedHello(_), _))) => {
+                return Ended::Broken("Hello sent twice");
+            }
             Ok(Some((ControlToBrain::Quitting, _))) => {
                 let deadline = Instant::now() + close_wait();
                 quit.set(Some(deadline));
@@ -150,6 +152,7 @@ pub(super) fn control_input(message: ControlToBrain) -> Result<Option<Input>, En
         // shortcut: nothing answers Connection or Warm until A1, C2 and C5b build them.
         ControlToBrain::Pong
         | ControlToBrain::Hello(_)
+        | ControlToBrain::QueuedHello(_)
         | ControlToBrain::Quitting
         | ControlToBrain::Settings(_)
         | ControlToBrain::AccountOp(_)

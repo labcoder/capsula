@@ -44,6 +44,7 @@ impl Tapped for ControlToBrain {
     fn op(&self) -> &'static str {
         match self {
             Self::Hello(_) => "Hello",
+            Self::QueuedHello(_) => "QueuedHello",
             Self::Quitting => "Quitting",
             Self::Stop { .. } => "Stop",
             Self::Pong => "Pong",
@@ -209,6 +210,7 @@ impl Tapped for DataToBrain {
     fn op(&self) -> &'static str {
         match self {
             Self::Hello(_) => "Hello",
+            Self::QueuedHello(..) => "QueuedHello",
             Self::TextSubmit { .. } => "TextSubmit",
             Self::Credit { .. } => "Credit",
             Self::PageRequest { .. } => "PageRequest",

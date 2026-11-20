@@ -26,6 +26,7 @@ mod theme;
 use std::process::ExitCode;
 
 use kumochi_protocol::constants;
+use kumochi_protocol::message::AudioSession;
 use kumochi_shell_core::{
     accounts, chat_notice, claude_accounts, drawing, escape, input, instance, link, logging,
     onboarding, runs, settings, sign_in_mark, threads,
@@ -76,7 +77,7 @@ fn main() -> ExitCode {
         "shell started"
     );
     let (events, link_events) = async_channel::unbounded();
-    let (link, start) = match link::prepare(events) {
+    let (link, start) = match link::prepare(events, AudioSession::Legacy) {
         Ok(prepared) => prepared,
         Err(error) => {
             tracing::error!(%error, "can't prepare the link to the brain");

@@ -1,5 +1,18 @@
 # The pipes and the handshake
 
+## Queued-required session mode (dormant)
+
+The shipped shell selects Legacy: control Hello, Welcome, then data Hello, with their
+existing bytes. The internal queued-required selection instead sends the appended QueuedHello
+on both pipes. Its data Hello echoes this Welcome's incarnation and issue epoch. The brain
+checks the executable, matching build and capability on both legs and the existing same-process
+pairing. It refuses a mixed mode or a data Hello from another session. The queued second leg
+has one deadline for connecting and reading; refusal renews both pipe instances.
+
+This negotiates a requirement, not an installed audio output. Neither endpoint starts a
+turn-capable queued connection in this slice, and neither falls back to Legacy. Output
+registration, readiness and admission are separate.
+
 ## Voice-only hold messages
 
 `VoiceHoldRecognized` carries a connection-local gesture, exact thread/New target and
