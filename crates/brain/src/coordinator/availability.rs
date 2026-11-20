@@ -322,19 +322,6 @@ impl Coordinator {
         };
         *entry = now;
         self.revoke_pictures();
-        // A picture no send has written closes once its model stops taking it, so the same
-        // capture can't regain permission if the fact comes back.
-        if self
-            .current
-            .as_ref()
-            .and_then(|run| run.snapshot.as_ref()?.choice.as_ref())
-            .is_some_and(|choice| {
-                choice.connection == kind && !self.takes_pictures(kind, &choice.model)
-            })
-            && let Some(run) = self.current.as_mut()
-        {
-            run.picture_lost(effects);
-        }
         // A `ChatGPT` job follows the account's sign-in and sign-out instead.
         let job = self.job.as_ref().map(|job| job.route);
         if kind != ConnectionKind::ChatGpt
