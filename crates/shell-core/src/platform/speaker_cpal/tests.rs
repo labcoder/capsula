@@ -1,3 +1,11 @@
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
+use std::time::Duration;
+
+use super::lifetime::{Owner, Permit, cleanup_sender};
+use super::{Control, Transport};
+
+
 use super::{
     AtomicU8, BLOCKS, ErrorKind, MAX_FRAMES, MAX_RATE, OutputError, OutputEvent, PACKET_SAMPLES,
     PacketKind, ReadyBlock, SOURCE_RATE,
@@ -662,4 +670,22 @@ fn canceling_one_backend_does_not_cancel_a_fallback_open() {
         out.map(f32::to_bits),
         [0.5f32.to_bits(), 0.5f32.to_bits(), 0, 0, 0, 0, 0, 0]
     );
+}
+
+pub(crate) struct FakePlayback(super::Playback);
+
+impl FakePlayback {
+    pub(crate) fn open(control: Arc<Control>, occupied: &'static AtomicBool) -> (Transport, Self) {
+        let (submit, playback) = super::pair(SOURCE_RATE, 1, control);
+        let owner = Owner::new(
+            submit,
+            Permit::claim(occupied).expect("one fake stream test owns the pool"),
+            cleanup_sender().expect("fake stream retains its pool until callback drop"),
+        );
+        (Transport(owner), Self(playback))
+    }
+
+    pub(crate) fn fill(&mut self, out: &mut [f32], at: Duration) {
+        self.0.fill_at(out, Some(at));
+    }
 }

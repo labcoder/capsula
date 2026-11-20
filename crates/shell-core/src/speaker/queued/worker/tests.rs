@@ -1,5 +1,5 @@
 use super::*;
-use crate::platform::speaker_cpal::FakePlayback;
+use crate::platform::speaker_cpal::tests::FakePlayback;
 use kumochi_protocol::message::SpeechPcm;
 
 const RUN: RunId = RunId(17);
