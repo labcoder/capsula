@@ -2,14 +2,13 @@
 //! byte caps (§3), and S4's Idle half (T15).
 
 use std::io::{self, Write};
-use std::sync::atomic::Ordering;
 use std::sync::mpsc as std_mpsc;
 use std::time::{Duration, Instant};
 
 use kumochi_protocol::message::RunId;
 use tokio::time::timeout;
 
-use super::tests::{Stdin, WAIT, barrier, echoed, end, found, pipes, question, queue};
+use super::tests::{Pause, Stdin, WAIT, barrier, echoed, end, found, pause, pipes, question, queue};
 use super::{
     CHUNK, Input, MAX_CONTROL, MAX_SEED, Revoked, StdinRefused, Teardown, admit, write_input,
 };
@@ -38,6 +37,28 @@ enum Fence {
     Stop,
     Deadline,
     Eof,
+    ReadError,
+}
+
+struct TerminalStdout {
+    error: bool,
+    cleanup: Option<Pause>,
+}
+
+impl io::Read for TerminalStdout {
+    fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
+        if self.error {
+            Err(io::ErrorKind::BrokenPipe.into())
+        } else {
+            Ok(0)
+        }
+    }
+}
+
+impl Drop for TerminalStdout {
+    fn drop(&mut self) {
+        pause(self.cleanup.take());
+    }
 }
 
 struct PartialPipe {
@@ -77,6 +98,7 @@ fn pictured_stdin_distinguishes_no_write_from_a_partial_first_chunk() {
         Fence::Stop,
         Fence::Deadline,
         Fence::Eof,
+        Fence::ReadError,
     ] {
         let (start, launch) = admit(question(Duration::from_secs(60))).expect("launch");
         let (inputs, mut settled) = tokio::sync::mpsc::unbounded_channel();
@@ -132,6 +154,19 @@ fn pictured_stdin_distinguishes_no_write_from_a_partial_first_chunk() {
                     },
                 );
             });
+            let stdout = matches!(fence, Fence::Eof | Fence::ReadError).then(|| {
+                let (pause_cleanup, at_cleanup) = barrier();
+                let reader = scope.spawn(move || {
+                    let (tx, _rx) = tokio::sync::mpsc::channel(1);
+                    let pipe = TerminalStdout {
+                        error: fence == Fence::ReadError,
+                        cleanup: Some(pause_cleanup),
+                    };
+                    super::read_output(pipe, &tx, control);
+                });
+                let reached = at_cleanup.reached_within(WAIT);
+                (at_cleanup, reader, reached)
+            });
             let reached = gate.reached_within(WAIT);
             if reached {
                 match fence {
@@ -139,13 +174,17 @@ fn pictured_stdin_distinguishes_no_write_from_a_partial_first_chunk() {
                     Fence::Stop => {
                         let _ = launch.lease().revoke();
                     }
-                    Fence::Eof => control.output_closed.store(true, Ordering::Release),
                     _ => {}
                 }
             }
             gate.release();
             assert!(reached, "pump took the chunk before any write");
             wrote.join().expect("pump ended");
+            if let Some((cleanup, reader, reached)) = stdout {
+                cleanup.release();
+                reader.join().expect("reader ended");
+                assert!(reached, "reader observed the end before stdin ran");
+            }
         });
         let expected_writes: &[usize] = match fence {
             Fence::None => &[CHUNK, CHUNK - 1],

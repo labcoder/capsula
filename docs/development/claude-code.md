@@ -353,7 +353,8 @@ one at a time. A run whose choice names Claude Code starts one through `Claude::
   ordinary prompt and tool text copies made while formatting are not zeroed. Only a foreground
   build with the held picture grant can queue that seed. The stdin pump reserves the grant for
   one pipe call, then checks Stop, observed stdout EOF and the deadline before marking the held
-  lease and writing. Every chunk, short-write remainder and interrupted retry needs a fresh
+  lease and writing. The reader publishes EOF or a terminal read error before cleaning up its
+  pipe. Every chunk, short-write remainder and interrupted retry needs a fresh
   reservation. If close wins, there is no new admission; if admission wins, that one write may
   still begin or finish after close returns. Only confirmed teardown proves the child and pumps
   have stopped. A first attempt counts even if the pipe accepted no bytes; control writes don't

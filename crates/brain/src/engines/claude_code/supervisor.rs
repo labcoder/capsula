@@ -9,7 +9,7 @@ use std::collections::BTreeSet;
 use std::ffi::OsString;
 use std::fmt;
 use std::fs::File;
-use std::io::{self, PipeReader, PipeWriter, Read as _};
+use std::io::{self, PipeReader, PipeWriter};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError, mpsc as std_mpsc};
@@ -888,10 +888,7 @@ fn pumps(
     running.pumps.push(
         pump(
             "claude-code-stdout",
-            move || {
-                read_output(child_stdout, &output, &reader);
-                reader.output_closed.store(true, Ordering::Release);
-            },
+            move || read_output(child_stdout, &output, &reader),
             #[cfg(test)]
             (report.clone(), fails),
         )
@@ -1162,15 +1159,17 @@ fn write_picture(
 
 /// stdout, in chunks of at most [`CHUNK`], until its end. A full channel is retried every
 /// [`POLL`], never waited on, and once the round has let go what's read is dropped.
-fn read_output(mut pipe: PipeReader, output: &mpsc::Sender<Vec<u8>>, control: &Control) {
+fn read_output(mut pipe: impl io::Read, output: &mpsc::Sender<Vec<u8>>, control: &Control) {
     let mut buffer = vec![0; CHUNK];
     let mut wanted = true;
     loop {
         let read = match pipe.read(&mut buffer) {
-            Ok(0) => return,
-            Ok(read) => read,
             Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
-            Err(_) => return,
+            Ok(0) | Err(_) => {
+                control.output_closed.store(true, Ordering::Release);
+                return;
+            }
+            Ok(read) => read,
         };
         if !wanted {
             continue;
