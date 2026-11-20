@@ -33,17 +33,28 @@ enum Fence {
     None,
     PlainLease,
     GrantClosed,
+    PartialThenClose,
+    InterruptedThenClose,
     Stop,
     Deadline,
     Eof,
 }
 
-struct PartialPipe(Vec<usize>);
+struct PartialPipe {
+    calls: Vec<usize>,
+    close: Option<(PictureGrant, bool)>,
+}
 
 impl Write for PartialPipe {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-        self.0.push(bytes.len());
-        if self.0.len() == 1 {
+        self.calls.push(bytes.len());
+        if self.calls.len() == 1 {
+            if let Some((grant, interrupted)) = self.close.take() {
+                grant.close();
+                if interrupted {
+                    return Err(io::ErrorKind::Interrupted.into());
+                }
+            }
             Ok(1)
         } else {
             Err(io::ErrorKind::BrokenPipe.into())
@@ -61,6 +72,8 @@ fn pictured_stdin_distinguishes_no_write_from_a_partial_first_chunk() {
         Fence::None,
         Fence::PlainLease,
         Fence::GrantClosed,
+        Fence::PartialThenClose,
+        Fence::InterruptedThenClose,
         Fence::Stop,
         Fence::Deadline,
         Fence::Eof,
@@ -100,7 +113,11 @@ fn pictured_stdin_distinguishes_no_write_from_a_partial_first_chunk() {
         }
         let (paused, gate) = barrier();
         let super::Start { stdin, control, .. } = start;
-        let mut pipe = PartialPipe(Vec::new());
+        let mut pipe = PartialPipe {
+            calls: Vec::new(),
+            close: matches!(fence, Fence::PartialThenClose | Fence::InterruptedThenClose)
+                .then(|| (picture.clone(), fence == Fence::InterruptedThenClose)),
+        };
         std::thread::scope(|scope| {
             let control = &control;
             let pipe = &mut pipe;
@@ -130,9 +147,12 @@ fn pictured_stdin_distinguishes_no_write_from_a_partial_first_chunk() {
             assert!(reached, "pump took the chunk before any write");
             wrote.join().expect("pump ended");
         });
-        let wrote = fence == Fence::None;
-        let expected_writes: &[usize] = if wrote { &[CHUNK, CHUNK - 1] } else { &[] };
-        assert_eq!(pipe.0, expected_writes, "{fence:?}");
+        let expected_writes: &[usize] = match fence {
+            Fence::None => &[CHUNK, CHUNK - 1],
+            Fence::PartialThenClose | Fence::InterruptedThenClose => &[CHUNK],
+            _ => &[],
+        };
+        assert_eq!(pipe.calls, expected_writes, "{fence:?}");
         let expected = match fence {
             Fence::Stop => Err(tokio::sync::oneshot::error::TryRecvError::Closed),
             Fence::GrantClosed => Ok(Err(StdinRefused::PictureClosed)),
@@ -144,7 +164,7 @@ fn pictured_stdin_distinguishes_no_write_from_a_partial_first_chunk() {
         drop(control.seal_send());
         assert_eq!(
             settled.try_recv().expect("settled"),
-            if wrote {
+            if !expected_writes.is_empty() {
                 CoordinatorInput::SendSettled { lease: id }
             } else {
                 CoordinatorInput::SendUnsent { lease: id }
