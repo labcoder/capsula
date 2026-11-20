@@ -182,7 +182,7 @@ impl<Io, L: Lease> Drop for Attempt<Io, L> {
 /// connection holding it is closed, and it's told [`Lease::wrote`] first once a write of the
 /// request was attempted. Each poll of the writer must be admitted by the lease: a refusal before
 /// the first ends the send as [`Failure::Rebuild`], with nothing written, and a later one as
-/// [`Failure::Transport`], closing the connection with the request part written. Nothing is
+/// [`Failure::Withheld`], closing the connection with the request part written. Nothing is
 /// retried after a byte is written; an idle connection that turns out stale before the write is
 /// replaced under the same lease.
 ///

@@ -185,9 +185,11 @@ sequenceDiagram
   writer, every write and the flush, and holds that admission for the one poll. A send without a
   picture grant admits every poll; one with a grant admits a poll only while it can reserve the
   grant. A refusal stops every later poll: before any poll was admitted, the send ends as
-  `Rebuild` with nothing written; after one, it fails as `Transport` and its connection is
+  `Rebuild` with nothing written; after one, it fails as `Withheld` and its connection is
   closed, never pooled, because an admitted poll may have written even when it was pending,
-  partial or failed. Closing wins only against new admissions: bytes an admitted poll already
+  partial or failed. Only a picture grant refuses, so the coordinator ends that run by why the
+  grant closed (see Picture grant), never as the connection failing; a connection that fails on
+  its own still ends as `Transport`. Closing wins only against new admissions: bytes an admitted poll already
   handed to TLS or the kernel still go, so this orders writes, not the first byte at the peer,
   and nothing here proves the peer received any of the request. Connecting and the TLS
   handshake are not request writes. A refused send's round ends with `ReceiptOrdered`, so its
@@ -421,9 +423,10 @@ Earlier leases settle on their own, so
 history and held deletes follow what was actually written. Turning screen sharing off is the
 user's choice, not the model's, so it ends a run as `ScreenUnavailable`, whose line ("The screen
 is no longer available, so this turn was stopped.") makes no claim about what was sent. The
-direct connection control runs the pending hold's check at once. On a route behind a picture
-switch, a written settlement also sends the shell `EventsChanged { thread }` (ipc.md) after the
-mark is queued, so a shown page of that thread is read again; that read waits for the write
+direct connection control runs the pending hold's check at once. On every route, a settlement
+that changes the turn's stored row, marking it sent or clearing it after the run has ended, also
+sends the shell `EventsChanged { thread }` (ipc.md) after that write is queued, unless the thread
+is being deleted, so a shown page of that thread is read again; that read waits for the write
 attempt, not for proof that it succeeded. What the hold carried goes in the run's row
 with its turn (store.md, `runs.screen`), and the shell hears it once as `HoldScreen`: an image
 when a send carrying it settles after attempting a write ("The send lease"), anything else when
@@ -443,7 +446,9 @@ withdraws every run's window image, and turning show-screen off every run's scre
 each only the pictures it allowed: the run's own copy drops at once, and the bytes are zeroed
 when the last copy drops. The run's next build fails with `ScreenUnavailable`, and a request that has
 started keeps its copy until its round ends but is refused at the send, failing the run the same
-way. If no send carrying the image has attempted a write yet, the turn's `screen` becomes
+way. A `ChatGPT` upload already writing the picture is cut at its next write poll: it settles as
+possibly written, its connection closes, nothing is sent again, and the run ends as
+`ScreenUnavailable`; one cut by a lost capability ends as `ScreenPictureStopped`. If no send carrying the image has attempted a write yet, the turn's `screen` becomes
 `withdrawn`; once one has, it stays `attached` or `screen`. A held run that ends any other way
 before a send carrying its image attempted a write (it fails, is stopped, cancelled or replaced)
 records no screen: a turn not

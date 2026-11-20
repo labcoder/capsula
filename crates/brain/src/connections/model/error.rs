@@ -159,6 +159,11 @@ pub enum Failure {
     /// so it's never sent again on its own.
     #[error("the model connection failed")]
     Transport,
+    /// The send's own lease stopped admitting writes after one may have written, so the request
+    /// may have partly arrived. Only its picture's grant refuses, so the coordinator names why;
+    /// it's never sent again on its own.
+    #[error("the send's lease stopped its writes")]
+    Withheld,
     /// The body isn't a streamed request with storage off, or is too large; nothing was sent.
     #[error("the request body was refused")]
     Request,
@@ -180,6 +185,7 @@ impl Failure {
                 (ErrorKey::AccountOffline, Some(Action::Retry))
             }
             Self::Protocol => (ErrorKey::ResponseUnreadable, Some(Action::Retry)),
+            Self::Withheld => (ErrorKey::ScreenPictureStopped, None),
             // shortcut: a spent live-check budget reads as a refused request; it's debug-only
             Self::Spent | Self::Request => (ErrorKey::RequestRefused, None),
             Self::Credential => (ErrorKey::AccountRefused, Some(Action::SignIn)),

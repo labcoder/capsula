@@ -324,6 +324,7 @@ fn kind_of(failure: Failure) -> &'static str {
         Failure::Rebuild => "rebuild",
         Failure::Spent => "spent",
         Failure::Transport => "transport",
+        Failure::Withheld => "withheld",
         Failure::Request => "request",
         Failure::Credential => "credential",
     }

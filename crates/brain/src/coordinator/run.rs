@@ -185,7 +185,15 @@ impl Coordinator {
             // Only the coordinator interrupts a run, so an engine's interruption fails it too.
             TurnEvent::Finished(finish) => {
                 let route = current.route;
-                self.current(run)?.error = self.engine_reason(route, finish);
+                let withheld = Finish::Failed(crate::engines::EngineFailure::Stream(
+                    crate::connections::model::error::Failure::Withheld,
+                ));
+                let reason = if finish == withheld {
+                    Some(current.withheld())
+                } else {
+                    self.engine_reason(route, finish)
+                };
+                self.current(run)?.error = reason;
                 self.fail(run, Failure::Engine, effects)?;
             }
         }

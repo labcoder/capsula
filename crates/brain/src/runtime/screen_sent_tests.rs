@@ -261,6 +261,10 @@ async fn play(
     let (mut brain, release, mut decoded, _fetch) =
         input(&scratch, vec![105, -5], "words and a picture").await;
     let mut rig = seeing(&mut brain);
+    brain.fixture = Some(crate::coordinator::Ready {
+        images: vec![kumochi_protocol::message::ModelSlug::new("gpt-6-sol").unwrap()],
+        ..crate::coordinator::Ready::fixture()
+    });
     let mut observed = brain.observe();
     let (wrote, mut writes) = mpsc::unbounded_channel();
     let (keep, mut kept) = mpsc::unbounded_channel();

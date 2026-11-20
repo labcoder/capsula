@@ -233,7 +233,7 @@ impl From<model::error::Failure> for Failure {
             model::error::Failure::Credential => Self::Credential,
             model::error::Failure::Rebuild => Self::Rebuild,
             model::error::Failure::Spent => Self::Spent,
-            model::error::Failure::Transport => Self::Transport,
+            model::error::Failure::Transport | model::error::Failure::Withheld => Self::Transport,
             model::error::Failure::Incomplete | model::error::Failure::Truncated => Self::Truncated,
             model::error::Failure::Protocol | model::error::Failure::Provider(_) => Self::Protocol,
         }

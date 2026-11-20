@@ -9,7 +9,7 @@ use std::task::{Context, Poll, Waker};
 use std::time::Duration;
 
 use kumochi_protocol::Secret;
-use kumochi_protocol::message::{ConnectionKind, ErrorKey, EventId};
+use kumochi_protocol::message::{Action, ConnectionKind, ErrorKey, EventId, UserError};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, DuplexStream, ReadBuf};
 use tokio::sync::{mpsc, watch};
 use zeroize::Zeroizing;
@@ -353,6 +353,29 @@ impl Rig {
         }
     }
 
+    /// The send's settlement and then the round's terminal, handled in the order the runtime's
+    /// biased loop takes them: the settlement must already be queued once the terminal is.
+    async fn settled_then_finished(&mut self) -> (Input, Vec<Effect>, Vec<Effect>) {
+        let finished = tokio::time::timeout(WAIT, self.events.recv())
+            .await
+            .expect("in time")
+            .expect("an event");
+        assert!(matches!(
+            finished,
+            Input::Engine {
+                event: TurnEvent::Finished(_),
+                ..
+            }
+        ));
+        let settled = self
+            .inputs
+            .try_recv()
+            .expect("the settlement is queued ahead of the terminal");
+        let effects = self.handle(settled.clone());
+        let ended = self.handle(finished);
+        (settled, effects, ended)
+    }
+
     /// The fact that m takes images goes and comes back, with the tag and model unchanged.
     fn lose_and_restore(&mut self) {
         for images in [&[][..], &["m"]] {
@@ -502,14 +525,20 @@ async fn an_image_lost_after_an_admitted_first_write_is_never_replayed_or_called
         } else {
             peer.release();
         }
-        let (settled, effects) = rig.settle().await;
+        let (settled, effects, ended) = rig.settled_then_finished().await;
         assert_eq!(settled, Input::SendSettled { lease }, "{partial}");
         assert_eq!(written_settlement(&effects), (1, 1, 1), "{partial}");
         assert_eq!(told_cant_see(&effects), 0);
         assert_eq!(peer.polls(), polls, "no poll after the refusal");
         assert_eq!(peer.rest().await, Vec::<u8>::new());
-        let ended = rig.finish().await;
-        assert!(failure(&ended).is_some(), "{partial}");
+        assert_eq!(
+            failure(&ended),
+            Some(
+                UserError::new(ErrorKey::ScreenPictureStopped, Vec::new(), Vec::new())
+                    .expect("valid")
+            ),
+            "{partial}"
+        );
         assert!(!sends_again(&ended), "{partial}");
         assert_eq!(told_cant_see(&ended), 0);
     }
@@ -666,4 +695,61 @@ fn withdrawal_or_sign_out_after_a_grant_closes_it_by_its_own_cause() {
             .expect("current");
         assert_eq!(failure(&ended), Some(ErrorKey::ScreenUnavailable.into()));
     }
+}
+
+/// Sharing turned off while an admitted upload is under way: no poll after the refusal, the send
+/// settles as possibly written, nothing is sent again, and the run ends as the picture becoming
+/// unavailable, not as the connection failing.
+#[tokio::test]
+async fn sharing_off_mid_upload_stops_its_writes_and_ends_as_the_picture_unavailable() {
+    let mut rig = Rig::new(Pool::Empty, &["m"]);
+    *lock(&rig.next) = (256, false);
+    let (_, effects) = rig.settle().await;
+    let lease = granted(&effects);
+    let grant = rig.core.picture_grant(lease).expect("a revocable grant");
+    let mut peer = rig.peer().await;
+    settle_tasks().await;
+    let polls = peer.polls();
+    assert_eq!(polls, 2);
+    rig.handle(Input::ScreenHoldsOff);
+    assert!(!grant.is_open());
+    let mut written = vec![0; 256];
+    peer.server.read_exact(&mut written).await.expect("read");
+    let (settled, effects, ended) = rig.settled_then_finished().await;
+    assert_eq!(settled, Input::SendSettled { lease });
+    assert_eq!(written_settlement(&effects), (1, 1, 1));
+    assert_eq!(peer.polls(), polls, "no poll after the refusal");
+    assert_eq!(peer.rest().await, Vec::<u8>::new());
+    assert_eq!(
+        failure(&ended),
+        Some(UserError::new(ErrorKey::ScreenUnavailable, Vec::new(), Vec::new()).expect("valid"))
+    );
+    assert!(!sends_again(&ended));
+    assert_eq!(told_cant_see(&ended), 0);
+}
+
+/// A connection that fails mid-upload while the grant stays open keeps its own reason.
+#[tokio::test]
+async fn a_connection_lost_mid_upload_under_an_open_grant_keeps_its_own_reason() {
+    let mut rig = Rig::new(Pool::Empty, &["m"]);
+    *lock(&rig.next) = (256, false);
+    let (_, effects) = rig.settle().await;
+    let lease = granted(&effects);
+    let grant = rig.core.picture_grant(lease).expect("a revocable grant");
+    let peer = rig.peer().await;
+    settle_tasks().await;
+    assert_eq!(peer.polls(), 2);
+    drop(peer);
+    let (settled, effects, ended) = rig.settled_then_finished().await;
+    assert!(grant.is_open());
+    assert_eq!(settled, Input::SendSettled { lease });
+    assert_eq!(written_settlement(&effects), (1, 1, 1));
+    assert_eq!(
+        failure(&ended),
+        Some(
+            UserError::new(ErrorKey::AccountOffline, Vec::new(), vec![Action::Retry])
+                .expect("valid")
+        )
+    );
+    assert!(!sends_again(&ended));
 }

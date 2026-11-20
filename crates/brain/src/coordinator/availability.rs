@@ -254,12 +254,12 @@ impl Coordinator {
     }
 
     /// Whether `kind` may take a picture for `model` now, whatever its sign-in: by its switch
-    /// and its fresh fact. The dev fixture has no catalog, so the hold's gate alone decides.
+    /// and its fresh fact. A route that lists no models, the dev fixture's included, takes none.
     pub(crate) fn takes_pictures(&self, kind: ConnectionKind, model: &ModelSlug) -> bool {
         let Availability::Ready(ready) = self.availability_of(kind) else {
             return false;
         };
-        self.pictures.allows(kind) && (ready.images.contains(model) || ready.trusted())
+        self.pictures.allows(kind) && ready.images.contains(model)
     }
 
     /// Whether a request on `route` for `choice` may carry its run's picture now, as
