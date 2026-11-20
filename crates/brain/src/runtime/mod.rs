@@ -1501,7 +1501,9 @@ async fn read_data(
 ) -> Ended {
     loop {
         match ipc::read::<DataToBrain>(pipe, Pipe::Data).await {
-            Ok(Some(DataToBrain::Hello(_))) => return Ended::Broken("Hello sent twice"),
+            Ok(Some(DataToBrain::Hello(_) | DataToBrain::QueuedHello(..))) => {
+                return Ended::Broken("Hello sent twice");
+            }
             Ok(Some(DataToBrain::MicPcm(mut chunk))) => {
                 if let Some(pcm) = pcm {
                     pcm.push(chunk);

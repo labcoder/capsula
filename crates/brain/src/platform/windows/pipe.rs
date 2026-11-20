@@ -291,10 +291,7 @@ pub(crate) fn shell_connection(
     server: &NamedPipeServer,
     data: &NamedPipeServer,
     expected: &std::path::Path,
-) -> io::Result<(
-    super::super::ShellProcess,
-    super::super::connected_shell::Registration<'static>,
-)> {
+) -> io::Result<super::super::ShellProcess> {
     let process = client_process(server)?;
     if !process_image(process.as_handle())?
         .as_os_str()
@@ -316,10 +313,7 @@ pub(crate) fn shell_connection(
             "shell identity changed",
         ));
     }
-    Ok((
-        super::super::ShellProcess::new(pid, process),
-        super::super::register_shell(pid),
-    ))
+    Ok(super::super::ShellProcess::new(pid, process))
 }
 
 /// Whether `process` has exited. An exited process still opens while anyone holds it.
@@ -461,8 +455,9 @@ mod tests {
         let image = std::env::current_exe().expect("the test binary has a path");
         let connection =
             super::shell_connection(&control, &data, &image).expect("this process is both clients");
+        let registration = connection.register();
         assert_eq!(crate::platform::connected_shell_pid(), std::process::id());
-        drop(connection);
+        drop(registration);
         assert_eq!(crate::platform::connected_shell_pid(), 0);
     }
 }

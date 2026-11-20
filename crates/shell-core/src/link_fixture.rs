@@ -7,7 +7,7 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use async_channel::Receiver;
-use kumochi_protocol::message::{Incarnation, IssueSession};
+use kumochi_protocol::message::{AudioSession, Incarnation, IssueSession};
 
 use super::{Connection, Link, LinkEvent, LinkHandle, Session, Shared, start};
 use crate::platform::{PipeClient, test_pair};
@@ -81,6 +81,7 @@ fn attended_with(
     let link = Link {
         brain: PathBuf::new(),
         session: 0,
+        audio: AudioSession::Legacy,
         shared,
         speaker,
     };

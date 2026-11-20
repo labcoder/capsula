@@ -182,6 +182,15 @@ pub struct Hello {
     pub capability: Capability,
 }
 
+/// Audio mode selected at paired-session establishment, before output registration.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AudioSession {
+    /// The existing handshake and output behavior.
+    Legacy,
+    /// The session must use queued output or refuse to open.
+    QueuedRequired,
+}
+
 /// The most steps one run may draw (architecture v1 §5.2).
 pub const MAX_STEPS: usize = 64;
 
@@ -520,6 +529,8 @@ pub enum ControlToBrain {
     QueuedAudioOutput(u32, OutputGeneration),
     /// Decide the next announced Speech-start segment on queued output.
     SpeechDecision(SpeechDispatch, SpeechDecision),
+    /// First control frame when this session requires queued output.
+    QueuedHello(Hello),
 }
 
 /// What a thread's delete came to.
@@ -898,6 +909,8 @@ pub enum DataToBrain {
         /// At most sixteen ids, before stable duplicate coalescing.
         drafts: kumochi_scene::text::Bounded<DraftId, MAX_ISSUE_CARDS>,
     },
+    /// First data frame for queued output, echoing this control pipe's Welcome.
+    QueuedHello(Hello, IssueSession),
 }
 
 /// Brain to shell, on the data pipe.
@@ -1152,6 +1165,30 @@ mod tests {
             })),
             [1, 1, b'b']
         );
+    }
+
+    #[test]
+    fn queued_hellos_append_tags_and_echo_the_welcome_identity() {
+        let hello = Hello {
+            build_id: "b".to_owned(),
+            capability: Secret::new([7; CAPABILITY_LEN]),
+        };
+        let session = super::IssueSession {
+            incarnation: Incarnation(5),
+            epoch: 128,
+        };
+        let mut control = vec![37, 1, b'b'];
+        control.extend([7; CAPABILITY_LEN]);
+        let message = ControlToBrain::QueuedHello(hello.clone());
+        assert_eq!(postcard::to_allocvec(&message).unwrap(), control);
+        assert_eq!(frame::decode::<ControlToBrain>(&control).unwrap(), message);
+
+        let mut data = control;
+        data[0] = 9;
+        data.extend([5, 128, 1]);
+        let message = DataToBrain::QueuedHello(hello, session);
+        assert_eq!(postcard::to_allocvec(&message).unwrap(), data);
+        assert_eq!(frame::decode::<DataToBrain>(&data).unwrap(), message);
     }
 
     /// Variants are appended, so an added one never renumbers the tags before it.

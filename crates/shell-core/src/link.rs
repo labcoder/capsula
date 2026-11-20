@@ -20,9 +20,9 @@ use kumochi_protocol::BUILD_ID;
 use kumochi_protocol::constants::BRAIN_EXE;
 use kumochi_protocol::frame::{self, FrameError, Pipe};
 use kumochi_protocol::message::{
-    AccountView, ConnectionsView, ControlToBrain, ControlToShell, DataToBrain, DataToShell,
-    Deleted, ErrorKey, GestureId, GitHubView, Hello, HoldStatus, Incarnation, IssueSession,
-    MAX_PENDING_TURNS, MAX_VISIBLE_SCENES, OutputGeneration, Phase, RunId, RunOrigin,
+    AccountView, AudioSession, ConnectionsView, ControlToBrain, ControlToShell, DataToBrain,
+    DataToShell, Deleted, ErrorKey, GestureId, GitHubView, Hello, HoldStatus, Incarnation,
+    IssueSession, MAX_PENDING_TURNS, MAX_VISIBLE_SCENES, OutputGeneration, Phase, RunId, RunOrigin,
     SceneDescriptor, SceneDescriptorV1, SettingsOp, SettingsView, ThreadId, ThreadOp, UserError,
 };
 use kumochi_protocol::voice::VoicePart;
@@ -390,6 +390,8 @@ enum LinkError {
     Capability(#[from] CredentialError),
     #[error("the brain closed the connection during the handshake")]
     Rejected,
+    #[error("queued output is not available for this session")]
+    QueuedUnavailable,
     #[error("the brain is from another build")]
     BuildMismatch,
     #[error("quitting")]
@@ -885,6 +887,7 @@ impl Session {
 struct Link {
     brain: PathBuf,
     session: u32,
+    audio: AudioSession,
     shared: Arc<Shared>,
     /// Opens each connection's speaker; none in a normal launch.
     speaker: Option<Opener>,
@@ -905,10 +908,14 @@ pub struct LinkStart {
 ///
 /// # Errors
 /// Fails when the shell can't find its own path or session.
-pub fn prepare(events: Sender<LinkEvent>) -> std::io::Result<(LinkHandle, LinkStart)> {
+pub fn prepare(
+    events: Sender<LinkEvent>,
+    audio: AudioSession,
+) -> std::io::Result<(LinkHandle, LinkStart)> {
     let link = Link {
         brain: std::env::current_exe()?.with_file_name(BRAIN_EXE),
         session: platform::session_id()?,
+        audio,
         shared: Arc::new(Shared::default()),
         speaker: None,
     };
@@ -1233,7 +1240,9 @@ impl Link {
                     launched = false;
                     LinkError::BuildMismatch
                 }
-                Err(error @ LinkError::NotOurBrain(_)) => return Err(error),
+                Err(error @ (LinkError::NotOurBrain(_) | LinkError::QueuedUnavailable)) => {
+                    return Err(error);
+                }
                 Err(error) => error,
             };
             // A brain we started is kept so it can be told to quit; otherwise nothing waits on us.
@@ -1256,21 +1265,42 @@ impl Link {
             build_id: BUILD_ID.to_owned(),
             capability: credential::read(self.session)?,
         };
-        frame::write(
-            &mut &control,
-            &ControlToBrain::Hello(hello.clone()),
-            Pipe::Control,
-        )?;
-        let issue_origin = welcome(&control)?;
-        let data = open(&Pipe::Data.name(self.session), &self.brain)?;
-        frame::write(&mut &data, &DataToBrain::Hello(hello), Pipe::Data)?;
-        control.set_timeout(None);
-        Ok(Connection {
-            control: Arc::new(control),
-            data: Arc::new(data),
-            issue_origin,
+        handshake_pair(control, hello, self.audio, || {
+            open(&Pipe::Data.name(self.session), &self.brain)
         })
     }
+}
+
+fn handshake_pair(
+    control: PipeClient,
+    hello: Hello,
+    audio: AudioSession,
+    open_data: impl FnOnce() -> Result<PipeClient, LinkError>,
+) -> Result<Connection, LinkError> {
+    let greeting = match audio {
+        AudioSession::Legacy => ControlToBrain::Hello(hello.clone()),
+        AudioSession::QueuedRequired => ControlToBrain::QueuedHello(hello.clone()),
+    };
+    frame::write(&mut &control, &greeting, Pipe::Control)?;
+    let issue_origin = welcome(&control)?;
+    let data = open_data()?;
+    let greeting = match audio {
+        AudioSession::Legacy => DataToBrain::Hello(hello),
+        AudioSession::QueuedRequired => {
+            data.set_timeout(Some(HANDSHAKE_TIMEOUT));
+            DataToBrain::QueuedHello(hello, issue_origin)
+        }
+    };
+    frame::write(&mut &data, &greeting, Pipe::Data)?;
+    if audio == AudioSession::QueuedRequired {
+        return Err(LinkError::QueuedUnavailable);
+    }
+    control.set_timeout(None);
+    Ok(Connection {
+        control: Arc::new(control),
+        data: Arc::new(data),
+        issue_origin,
+    })
 }
 
 /// The brain's answer to Hello: its issue session, or why this brain can't be used.
