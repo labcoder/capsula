@@ -36,8 +36,21 @@ handoff boundary, or Stop can discard the queue without the handoff boundary. St
 observations don't request recovery. Virtual pacing never crosses the first unheard gap
 in heard history. Finality after Stop still requires every applicable generation-specific
 tail proof and the latest known deadline. Two unresolved device tails refuse another
-physical open, but virtual pacing continues. No production worker connects this state to
-cpal, and no wire message, hold admission or opener changes here.
+physical open, but virtual pacing continues.
+
+Stop is sticky and bypasses the bounded command mailbox. The owner handles commands
+before admitting ingress, and a terminated owner reports disconnection, not backpressure.
+Open, play, pause and stream destruction run on a separate backend thread. One process-wide
+slot is held from before device discovery until the native stream is destroyed, so a stuck
+backend can't start more native opens. Callback work and route notifications wake the owner.
+A native resume must return within the existing 200 ms stall interval, even if
+callbacks continue. Callback activity refreshes the deadline only for staged speech
+outside a pending resume. A stall fences the old route and allows virtual pacing
+without waiting for the device call to return or starting a second stream.
+Loss, an invalid observation, or overflow enters the same fenced recovery path. A
+reroute replaces the stream instead of assuming that old endpoint timing still applies.
+An xrun rechecks refill readiness on every tick, even without new ingress.
+No production opener starts this owner, and no wire message or hold admission changes here.
 
 `kumochi_shell_core::speaker` owns one connection's output device: it keeps the run's queued
 speech, writes it to the device, and decides from the device's own clock which samples played.

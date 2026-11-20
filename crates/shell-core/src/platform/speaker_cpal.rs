@@ -22,7 +22,7 @@ mod lifetime;
 mod source;
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 
 pub(crate) use control::{Control, TailAck};
 use control::{CopyDenied, frame_time};
@@ -271,10 +271,6 @@ impl BackendStream {
 
 pub(crate) struct Transport(Owner);
 
-#[expect(
-    dead_code,
-    reason = "transport is passed to the queued owner in a separate change"
-)]
 impl Transport {
     pub(crate) fn control(&self) -> &Control {
         &self.0.submit().control
@@ -474,6 +470,7 @@ impl Submit {
 
 impl Playback {
     fn fill_at(&mut self, out: &mut [f32], start: Option<Duration>) {
+        self.control.note_callback();
         self.render(out, start, Control::begin_copy, || {});
     }
 

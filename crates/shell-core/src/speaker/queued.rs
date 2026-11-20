@@ -9,7 +9,11 @@ use kumochi_protocol::message::{
 };
 use zeroize::Zeroize as _;
 
+#[cfg(any(windows, target_os = "macos"))]
+mod backend;
 mod timeline;
+#[cfg(any(windows, target_os = "macos"))]
+mod worker;
 
 #[cfg(test)]
 mod tests;

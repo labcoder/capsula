@@ -38,14 +38,11 @@ pub(crate) struct Control {
     wake: Option<Thread>,
     tail: AtomicU64,
     handoff: AtomicU64,
+    callbacks: AtomicU64,
     overflow: AtomicBool,
     clock: OnceLock<(StreamInstant, Duration)>,
 }
 
-#[expect(
-    dead_code,
-    reason = "the separate queued owner drives the callback controls"
-)]
 impl Control {
     pub(crate) fn new(wake: Thread) -> Self {
         Self {
@@ -90,6 +87,14 @@ impl Control {
 
     pub(crate) fn fenced_handoff(&self) -> Option<u64> {
         (self.gate.load(Ordering::Acquire) & (STOPPED | COPYING) == STOPPED).then(|| self.handed())
+    }
+
+    pub(super) fn note_callback(&self) {
+        self.callbacks.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn callback_count(&self) -> u64 {
+        self.callbacks.load(Ordering::Relaxed)
     }
 
     pub(super) fn handed(&self) -> u64 {
