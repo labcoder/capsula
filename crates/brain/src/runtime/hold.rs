@@ -952,6 +952,27 @@ impl Brain {
         self.offline(Input::ShowScreenOff);
     }
 
+    /// Claude Code's generation moved: every picture held for it that wasn't granted is lost, so
+    /// the pending hold's closes and the current run's never goes. Text goes on.
+    pub(super) fn claude_generation_moved(&mut self) {
+        if !self.claude.take_picture_loss() {
+            return;
+        }
+        if self.holds.pending.as_ref().is_some_and(|hold| {
+            !matches!(
+                hold.screen,
+                ScreenPart::None | ScreenPart::Closed(_) | ScreenPart::Discarded
+            ) && hold
+                .screen_recipient
+                .as_ref()
+                .is_some_and(|(kind, _)| *kind == ConnectionKind::ClaudeCode)
+        }) {
+            self.holds.close_screen_as(Some(ScreenClass::ModelCantSee));
+        }
+        self.coordinator
+            .lose_pictures(Some(ConnectionKind::ClaudeCode));
+    }
+
     /// Sends the gate's state for the default model once per connection, then whenever it
     /// changes. It speaks for the screen's picture at release, which is the hold the shell sends.
     pub(super) fn screen_holds_changed(&mut self, link: &mut Link<'_, '_>) -> Result<(), Full> {

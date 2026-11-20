@@ -104,6 +104,9 @@ pub(crate) struct Claude {
     asked: Option<(BuildKey, u64)>,
     /// The picture grants of this generation's questions, closed when it ends.
     pictures: Vec<PictureGrant>,
+    /// The generation moved since the brain last looked, so every picture held for Claude Code
+    /// that wasn't granted is lost.
+    picture_loss: bool,
 }
 
 /// Runs bound under one epoch go on through a Find; a sign-out, a Disconnect, an audit failure,
@@ -195,6 +198,7 @@ impl Claude {
             full: false,
             asked: None,
             pictures: Vec::new(),
+            picture_loss: false,
         }
     }
 
@@ -232,6 +236,7 @@ impl Claude {
             grant.close();
         }
         self.generation += 1;
+        self.picture_loss = true;
         lane.fence(self.generation);
         self.recheck = None;
         // A bound launch's authority ends with the generation it was bound under.
@@ -658,22 +663,33 @@ impl Claude {
         Ok(question)
     }
 
-    /// Keeps `grant`, the picture grant for `key`'s send, while that build's question was asked
-    /// under this generation, and closes it at once otherwise; a new generation closes every one
-    /// kept. A grant for another connection's send isn't this core's.
-    pub(crate) fn picture_granted(&mut self, key: SendKey, grant: PictureGrant) {
-        let SendKey::Build(build) = key else {
+    /// Keeps `grant`, the picture grant for `key`'s send on `kind`, while that build's question
+    /// was asked under this generation; any other Claude Code grant is closed before its engine is
+    /// answered, and a new generation closes every one kept. Another route's grant isn't this core's.
+    pub(crate) fn picture_granted(
+        &mut self,
+        key: SendKey,
+        kind: Option<ConnectionKind>,
+        grant: PictureGrant,
+    ) {
+        if kind != Some(ConnectionKind::ClaudeCode) {
             return;
-        };
-        match self.asked {
-            Some((asked, generation)) if asked == build && generation == self.generation => {
+        }
+        match (key, self.asked) {
+            (SendKey::Build(build), Some((asked, generation)))
+                if asked == build && generation == self.generation =>
+            {
                 self.pictures
                     .retain(|kept| kept.is_open() && kept.is_shared());
                 self.pictures.push(grant);
             }
-            Some((asked, _)) if asked == build => grant.close(),
-            _ => {}
+            _ => grant.close(),
         }
+    }
+
+    /// Whether the generation moved since the last call.
+    pub(crate) fn take_picture_loss(&mut self) -> bool {
+        std::mem::take(&mut self.picture_loss)
     }
 
     /// Claude Code's half of the brain's repair of `default_model`, while a launch would be
@@ -1153,6 +1169,7 @@ impl Brain {
         mut link: Option<&mut Link<'_, '_>>,
     ) -> Result<(), Full> {
         self.claude.op(op);
+        self.claude_generation_moved();
         self.claude_reported(link.as_deref_mut())
             .map_err(|_| Full)?;
         self.repair_default(link.as_deref_mut())?;
@@ -1192,6 +1209,7 @@ impl Brain {
             Wake::Lane(done) => self.claude.done(done),
             wake => (self.claude.wake(wake), None),
         };
+        self.claude_generation_moved();
         let terminal = if let Some(key) = late
             && let Some(effects) = self.handle(Input::Engine {
                 key,

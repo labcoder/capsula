@@ -40,7 +40,7 @@ mod leases;
 #[path = "mcp_tests.rs"]
 pub(super) mod mcp;
 #[path = "route_tests.rs"]
-mod routes;
+pub(super) mod routes;
 #[path = "scene_tests.rs"]
 mod scenes;
 #[path = "speech_tests.rs"]

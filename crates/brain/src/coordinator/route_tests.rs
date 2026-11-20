@@ -547,15 +547,18 @@ fn told_cant_see(effects: &[Effect]) -> usize {
         .count()
 }
 
-/// A screen hold's image on the key's model `m`, whose fact says it takes pictures, admitted
+/// A screen hold's image on `kind`'s model `m`, whose fact says it takes pictures, admitted
 /// with `routes` and built once.
-fn pictured_run(routes: crate::coordinator::PictureRoutes) -> (Coordinator, Vec<Effect>) {
+pub(crate) fn pictured_run(
+    kind: ConnectionKind,
+    routes: crate::coordinator::PictureRoutes,
+) -> (Coordinator, Vec<Effect>) {
     let (mut core, hold) = held(
         vec![
             ready(CHATGPT, 7, &["m"]),
-            Input::Engines(KEY, pictured(5, &["m"])),
+            Input::Engines(kind, pictured(5, &["m"])),
         ],
-        choice(KEY, "m"),
+        choice(kind, "m"),
         Some(T),
     );
     core.set_pictures(routes);
@@ -567,7 +570,7 @@ fn pictured_run(routes: crate::coordinator::PictureRoutes) -> (Coordinator, Vec<
     .expect("admitted");
     core.handle(Input::TurnStored { run: R }).expect("current");
     let effects = core
-        .handle(built_for(key(), &choice(KEY, "m")))
+        .handle(built_for(key(), &choice(kind, "m")))
         .expect("current");
     (core, effects)
 }
@@ -580,7 +583,7 @@ fn a_claude_routes_picture_goes_only_with_its_own_switch_on() {
         (PictureRoutes::new(false, true), false),
         (PictureRoutes::new(true, false), true),
     ] {
-        let (_, effects) = pictured_run(routes);
+        let (_, effects) = pictured_run(KEY, routes);
         let expected = if sent {
             vec![
                 user(),
@@ -622,7 +625,7 @@ fn a_picture_fact_changing_alone_never_fails_a_hold() {
 #[test]
 fn a_grant_refuses_a_picture_whose_fact_alone_went_false_and_rebuilds_without_it() {
     use crate::coordinator::PictureRoutes;
-    let (mut core, effects) = pictured_run(PictureRoutes::new(true, false));
+    let (mut core, effects) = pictured_run(KEY, PictureRoutes::new(true, false));
     assert_eq!(
         started_input(&effects),
         Some(vec![
@@ -674,7 +677,7 @@ fn a_grant_refuses_a_picture_whose_fact_alone_went_false_and_rebuilds_without_it
 fn a_revoked_picture_grant_that_wrote_nothing_rebuilds_without_the_picture() {
     use crate::coordinator::PictureRoutes;
     for unsent in [true, false] {
-        let (mut core, _) = pictured_run(PictureRoutes::new(true, false));
+        let (mut core, _) = pictured_run(KEY, PictureRoutes::new(true, false));
         let effects = core
             .handle(Input::SendReady {
                 key: SendKey::Build(key()),
@@ -750,7 +753,7 @@ fn a_chatgpt_picture_grant_is_never_revocable() {
 fn only_a_lease_granted_with_its_picture_grant_carries_a_picture() {
     use crate::coordinator::PictureRoutes;
     use crate::engines::SendLease;
-    let (mut core, _) = pictured_run(PictureRoutes::new(true, false));
+    let (mut core, _) = pictured_run(KEY, PictureRoutes::new(true, false));
     let effects = core
         .handle(Input::SendReady {
             key: SendKey::Build(key()),
@@ -773,4 +776,205 @@ fn only_a_lease_granted_with_its_picture_grant_carries_a_picture() {
             .with_picture(None)
             .carries_picture()
     );
+}
+
+/// A screen hold's image on `kind`'s model `m`, whose fact says it takes pictures, submitted
+/// with `routes`; its turn isn't stored yet, so it has no build.
+fn pictured_hold(kind: ConnectionKind, routes: crate::coordinator::PictureRoutes) -> Coordinator {
+    let (mut core, hold) = held(
+        vec![
+            ready(CHATGPT, 7, &["m"]),
+            Input::Engines(kind, pictured(5, &["m"])),
+        ],
+        choice(kind, "m"),
+        Some(T),
+    );
+    core.set_pictures(routes);
+    core.submit_hold(
+        hold,
+        "words".into(),
+        Some(crate::context::Screen::Image(jpeg())),
+    )
+    .expect("admitted");
+    core
+}
+
+fn the_fact_goes_and_comes_back(core: &mut Coordinator) {
+    for images in [&[][..], &["m"]] {
+        core.handle(Input::Engines(KEY, pictured(5, images)))
+            .expect("an availability is never stale");
+    }
+}
+
+#[test]
+fn a_picture_lost_and_back_before_its_turn_is_stored_never_goes() {
+    use crate::coordinator::PictureRoutes;
+    let mut core = pictured_hold(KEY, PictureRoutes::new(true, false));
+    the_fact_goes_and_comes_back(&mut core);
+    core.handle(Input::TurnStored { run: R }).expect("current");
+    let effects = core
+        .handle(built_for(key(), &choice(KEY, "m")))
+        .expect("current");
+    assert_eq!(started_input(&effects), Some(vec![user(), line(CANT_SEE)]));
+    assert_eq!(told_cant_see(&effects), 1);
+}
+
+#[test]
+fn a_picture_lost_while_building_stays_lost_in_a_replacement_build() {
+    use crate::coordinator::PictureRoutes;
+    let mut core = pictured_hold(KEY, PictureRoutes::new(true, false));
+    core.handle(Input::TurnStored { run: R }).expect("current");
+    the_fact_goes_and_comes_back(&mut core);
+    let mut effects = Vec::new();
+    core.build(R, 1, &mut effects);
+    let again = super::engine_key(&core, R);
+    assert_ne!(
+        again,
+        key(),
+        "a replacement, as a delete or a compaction starts"
+    );
+    let rebuilt = core
+        .handle(built_for(again, &choice(KEY, "m")))
+        .expect("current");
+    assert_eq!(started_input(&rebuilt), Some(vec![user(), line(CANT_SEE)]));
+}
+
+#[test]
+fn a_pictured_request_whose_picture_went_and_came_back_is_never_granted() {
+    use crate::coordinator::PictureRoutes;
+    let (mut core, effects) = pictured_run(KEY, PictureRoutes::new(true, false));
+    assert_eq!(
+        started_input(&effects),
+        Some(vec![
+            user(),
+            crate::context::InputItem::Image(jpeg()),
+            line(SNAPSHOT)
+        ])
+    );
+    the_fact_goes_and_comes_back(&mut core);
+    let refused = core
+        .handle(Input::SendReady {
+            key: SendKey::Build(key()),
+            hold: None,
+        })
+        .expect("current");
+    assert!(refused.contains(&Effect::Rebuild(SendKey::Build(key()))));
+    assert!(
+        !refused
+            .iter()
+            .any(|effect| matches!(effect, Effect::Grant(_)))
+    );
+    assert_eq!(told_cant_see(&refused), 1);
+    let again = super::engine_key(&core, R);
+    let rebuilt = core
+        .handle(built_for(again, &choice(KEY, "m")))
+        .expect("current");
+    assert_eq!(started_input(&rebuilt), Some(vec![user(), line(CANT_SEE)]));
+}
+
+#[test]
+fn a_grant_judges_the_request_the_engine_holds_not_the_runs_screen() {
+    use crate::coordinator::PictureRoutes;
+    let (mut core, _) = pictured_run(KEY, PictureRoutes::new(true, false));
+    core.current.as_mut().expect("current").screen = Some(crate::context::Screen::NotIncluded(
+        crate::context::ScreenClass::ModelCantSee,
+    ));
+    let effects = core
+        .handle(Input::SendReady {
+            key: SendKey::Build(key()),
+            hold: None,
+        })
+        .expect("current");
+    let lease = effects
+        .iter()
+        .find_map(|effect| match effect {
+            Effect::Grant(lease) => Some(*lease),
+            _ => None,
+        })
+        .expect("granted");
+    assert!(
+        core.picture_grant(lease).is_some(),
+        "the engine's request still carries the image"
+    );
+}
+
+#[test]
+fn a_claude_code_generation_change_loses_only_a_claude_code_picture() {
+    use crate::coordinator::PictureRoutes;
+    for (kind, lost) in [(CLAUDE, true), (KEY, false)] {
+        let mut core = pictured_hold(kind, PictureRoutes::new(true, true));
+        core.handle(Input::TurnStored { run: R }).expect("current");
+        core.lose_pictures(Some(CLAUDE));
+        let effects = core
+            .handle(built_for(key(), &choice(kind, "m")))
+            .expect("current");
+        let expected = if lost {
+            vec![user(), line(CANT_SEE)]
+        } else {
+            vec![
+                user(),
+                crate::context::InputItem::Image(jpeg()),
+                line(SNAPSHOT),
+            ]
+        };
+        assert_eq!(started_input(&effects), Some(expected), "{kind:?}");
+    }
+}
+
+/// F4: a granted picture's permit stays shut once its fact went false and came back. Proved
+/// unsent, the request goes again without the picture; possibly written, the build is never
+/// granted again and its replacement fails closed instead of sending the turn without it.
+#[test]
+fn a_granted_picture_lost_and_back_stays_shut_and_a_written_one_never_goes_again() {
+    use crate::coordinator::PictureRoutes;
+    for unsent in [true, false] {
+        let (mut core, _) = pictured_run(KEY, PictureRoutes::new(true, false));
+        let ask = Input::SendReady {
+            key: SendKey::Build(key()),
+            hold: None,
+        };
+        let effects = core.handle(ask.clone()).expect("current");
+        let lease = effects
+            .iter()
+            .find_map(|effect| match effect {
+                Effect::Grant(lease) => Some(*lease),
+                _ => None,
+            })
+            .expect("granted");
+        let permit = core.picture_grant(lease).expect("a revocable grant");
+        the_fact_goes_and_comes_back(&mut core);
+        assert!(!permit.is_open(), "{unsent}");
+        core.handle(if unsent {
+            Input::SendUnsent { lease }
+        } else {
+            Input::SendSettled { lease }
+        })
+        .expect("current");
+        if unsent {
+            let again = super::engine_key(&core, R);
+            assert_ne!(again, key(), "built again");
+            let rebuilt = core
+                .handle(built_for(again, &choice(KEY, "m")))
+                .expect("current");
+            assert_eq!(started_input(&rebuilt), Some(vec![user(), line(CANT_SEE)]));
+            continue;
+        }
+        let refused = core.handle(ask).expect("current");
+        assert!(
+            !refused
+                .iter()
+                .any(|effect| matches!(effect, Effect::Grant(_)))
+        );
+        assert_eq!(told_cant_see(&refused), 0);
+        let again = super::engine_key(&core, R);
+        assert_ne!(again, key(), "built again");
+        let rebuilt = core
+            .handle(built_for(again, &choice(KEY, "m")))
+            .expect("current");
+        assert_eq!(started_input(&rebuilt), None);
+        assert_eq!(
+            failure(&rebuilt),
+            Some(kumochi_protocol::message::ErrorKey::ScreenUnavailable.into())
+        );
+    }
 }

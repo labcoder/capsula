@@ -103,6 +103,10 @@ pub enum Unbuilt {
 
 /// The current run's build.
 #[derive(Debug)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "each flag is its own fact about the admitted request, not one state spread over flags"
+)]
 pub(super) struct Build {
     pub(super) control: crate::recall::control::CancelOnDrop,
     key: BuildKey,
@@ -115,6 +119,8 @@ pub(super) struct Build {
     pub(super) provider_failed: bool,
     /// The admitted request offered the draw tool, or the dev fixture answers (D13-H2).
     offers_draw: bool,
+    /// The admitted request carries the hold's image.
+    pictured: bool,
     /// The dispatcher's tools the admitted request offered.
     offered: Vec<ToolName>,
     /// The admitted request's sources, checked again before each send.
@@ -138,6 +144,7 @@ impl Build {
             admitted: false,
             provider_failed: false,
             offers_draw: false,
+            pictured: false,
             offered: Vec::new(),
             sources: Vec::new(),
             inline,
@@ -152,6 +159,10 @@ impl Build {
 
     pub(super) fn admitted(&self) -> bool {
         self.admitted
+    }
+
+    pub(super) fn pictured(&self) -> bool {
+        self.pictured
     }
 
     pub(super) fn offers_draw(&self) -> bool {
@@ -362,6 +373,7 @@ impl Coordinator {
         let route = current.route;
         let pictured = self.request_pictured(route, request.choice.as_ref());
         let current = self.current(key.run)?;
+        let pictured = pictured && !current.screen_lost;
         if !pictured {
             current.picture_lost(effects);
         }
@@ -389,8 +401,14 @@ impl Coordinator {
         {
             return self.fail(key.run, Failure::Engine, effects);
         }
+        let image = pictured
+            && matches!(
+                current.screen,
+                Some(crate::context::Screen::Image(_) | crate::context::Screen::Picture(..))
+            );
         let build = current.build.as_mut().expect("the build was just matched");
         build.offers_draw = offers_draw;
+        build.pictured = image;
         build.offered = request
             .tools
             .iter()

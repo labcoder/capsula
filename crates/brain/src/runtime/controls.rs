@@ -254,6 +254,8 @@ impl Brain {
         if let ControlToBrain::Connection(op) = message {
             self.connection_op(op, Some(link))
                 .map_err(|Full| Ended::Lost)?;
+            self.screen_holds_changed(link)
+                .map_err(|Full| Ended::Lost)?;
             return Ok(None);
         }
         if let ControlToBrain::KeyDown { .. } = message {

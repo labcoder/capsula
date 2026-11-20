@@ -29,6 +29,8 @@ mod store_op;
 mod tests;
 #[cfg(test)]
 pub(crate) use tests::mcp::draft::draft_launch;
+#[cfg(test)]
+pub(crate) use tests::routes::pictured_run;
 mod thread_op;
 mod tools;
 
@@ -36,8 +38,9 @@ use std::collections::VecDeque;
 use std::time::Duration;
 
 use kumochi_protocol::message::{
-    Content, ControlToShell, Cursor, DataToShell, Deleted, ModelChoice, OutputGeneration, PageOf,
-    Phase, RunId, SceneId, SegmentId, Step, ThreadId, ThreadOp, UserError,
+    ConnectionKind, Content, ControlToShell, Cursor, DataToShell, Deleted, ModelChoice,
+    OutputGeneration, PageOf, Phase, RunId, SceneId, SegmentId, Step, ThreadId, ThreadOp,
+    UserError,
 };
 
 use crate::engines::{RunRequest, TurnEvent};
@@ -611,6 +614,9 @@ struct Run {
     /// The run took up a screen hold's picture, so while marks are on every round stores its
     /// native items without boxes, even after the picture is withdrawn or can't be drawn on.
     pictured: bool,
+    /// The hold's picture may never go again: its recipient stopped taking pictures, or Claude
+    /// Code's generation moved, after the hold sealed it. Every later build reads it.
+    screen_lost: bool,
     /// The hold's gesture while its screen is still to be told to the shell, which happens once:
     /// an image once a granted send carrying it may have written it, anything else at the run's
     /// first request. A granted send holds it until it settles.
@@ -870,6 +876,16 @@ impl Coordinator {
     /// The run in flight, if any.
     pub fn current_run(&self) -> Option<RunId> {
         self.current.as_ref().map(|run| run.id)
+    }
+
+    /// The kind `run` answers on, once its first build was admitted.
+    pub(crate) fn route_kind(&self, run: RunId) -> Option<ConnectionKind> {
+        self.ending
+            .iter()
+            .chain(&self.current)
+            .find(|held| held.id == run)?
+            .route
+            .map(|route| route.kind)
     }
 
     /// How many ended runs still wait on the store.
@@ -1313,6 +1329,7 @@ impl Coordinator {
             untold,
             hold,
             pictured: matches!(screen, Some(crate::context::Screen::Picture(..))),
+            screen_lost: false,
             screen,
             build: None,
             arrived,

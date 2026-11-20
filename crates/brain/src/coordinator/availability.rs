@@ -241,6 +241,7 @@ impl Coordinator {
     #[cfg(test)]
     pub(crate) fn set_pictures(&mut self, pictures: PictureRoutes) {
         self.pictures = pictures;
+        self.lose_pictures(None);
         self.revoke_pictures();
     }
 
@@ -322,6 +323,7 @@ impl Coordinator {
             ConnectionKind::ClaudeCode => &mut self.claude_code,
         };
         *entry = now;
+        self.lose_pictures(None);
         self.revoke_pictures();
         // A `ChatGPT` job follows the account's sign-in and sign-out instead.
         let job = self.job.as_ref().map(|job| job.route);

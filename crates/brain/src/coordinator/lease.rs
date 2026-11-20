@@ -18,7 +18,6 @@ use kumochi_protocol::message::{ConnectionKind, Deleted, HeldScreen, RunId, Thre
 
 use super::availability::sign_in_needed;
 use super::{BuildKey, Coordinator, Effect, HoldKey, JobKey, Stale, StoreOp};
-use crate::context::Screen;
 use crate::store::Failure;
 
 /// How long a granted send may go without settling [guess].
@@ -138,10 +137,30 @@ impl Coordinator {
                 .iter()
                 .chain(&self.current)
                 .find(|run| run.id == key.run)
-                .is_some_and(|run| self.run_pictured(run))
+                .is_some_and(|run| !run.screen_lost && self.run_pictured(run))
             {
                 open.store(false, Ordering::Release);
             }
+        }
+    }
+
+    /// The current run's hold's picture is lost for good when its recipient no longer takes
+    /// pictures, or, with `kind`, answers on that kind: no later build carries it.
+    pub(crate) fn lose_pictures(&mut self, kind: Option<ConnectionKind>) {
+        let Some(choice) = self
+            .current
+            .as_ref()
+            .and_then(|run| run.hold.as_ref())
+            .and_then(|hold| hold.defaults.choice.as_ref())
+        else {
+            return;
+        };
+        let lost = kind.map_or_else(
+            || !self.takes_pictures(choice.connection, &choice.model),
+            |kind| choice.connection == kind,
+        );
+        if lost && let Some(run) = self.current.as_mut() {
+            run.screen_lost = true;
         }
     }
 
@@ -230,15 +249,13 @@ impl Coordinator {
             return;
         }
         let sources = build.sources().to_vec();
-        // Only a normal build adds the hold's screen; an inline compaction's request is text.
-        let carries_screen = build.inline.is_none();
-        let picture = self.current.as_ref().filter(|run| {
-            carries_screen && matches!(run.screen, Some(Screen::Image(_) | Screen::Picture(..)))
-        });
+        // The request handed to the engine is judged, never the run's account of its screen.
+        let pictured = build.pictured();
+        let picture = self.current.as_ref().filter(|_| pictured);
         let revocable = picture
             .and_then(|run| run.route)
             .is_some_and(|route| route.kind != ConnectionKind::ChatGpt);
-        if picture.is_some_and(|run| !self.run_pictured(run)) {
+        if picture.is_some_and(|run| run.screen_lost || !self.run_pictured(run)) {
             effects.push(Effect::Rebuild(SendKey::Build(key)));
             self.rebuild_without_picture(key, &pending, effects);
             return;
@@ -253,7 +270,7 @@ impl Coordinator {
         let screen = self
             .current
             .as_mut()
-            .filter(|_| carries_screen)
+            .filter(|_| pictured)
             .and_then(super::Run::carried);
         self.grant(SendKey::Build(key), sources, hold, screen, effects);
         if revocable && let Some(lease) = self.leases.last_mut() {
