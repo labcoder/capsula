@@ -1058,6 +1058,7 @@ fn a_key_job_whose_model_a_refresh_dropped_ends_unsent_at_the_grant() {
                         supported_efforts: None,
                     })
                     .collect(),
+                images: Vec::new(),
                 trusted_draw: false,
             }),
         ))
