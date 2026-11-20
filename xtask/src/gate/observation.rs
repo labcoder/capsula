@@ -9,7 +9,11 @@ use std::str::FromStr;
 use anyhow::{Context as _, Result, bail, ensure};
 use kumochi_protocol::constants::{INPUT_SESSION_MARKER, OBSERVER_REPAINT_MESSAGE};
 
+mod draw;
 mod summary;
+use draw::DrawStep;
+pub(super) use draw::{Active, DRAW_STEPS, DrawKey};
+pub(super) use summary::milliseconds;
 pub(super) use summary::summarize_hover;
 
 #[derive(Debug, Clone, Copy)]
@@ -122,6 +126,7 @@ pub(super) struct Observation {
     pub(super) clicks: Vec<Click>,
     pub(super) hovers: Vec<Hover>,
     pub(super) stop_target: Option<StopTarget>,
+    pub(super) draw_steps: [DrawStep; DRAW_STEPS],
     /// Kumo pulls seen: runs of commits of an empty mask over an area grown from the dock.
     pub(super) pulls: u32,
     /// The last commit was a pull's.
@@ -253,6 +258,7 @@ impl Observation {
             "commit" => self.accept_commit(text)?,
             "paint" => self.accept_paint(text)?,
             "drawn" => self.accept_drawn(text)?,
+            "draw_ready" | "draw_active" | "draw_paint" => self.accept_draw_timing(kind, text)?,
             "target" => self.accept_target(text)?,
             "hover" => {
                 let [id, counter, visible, click] =

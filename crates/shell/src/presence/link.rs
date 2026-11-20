@@ -629,6 +629,15 @@ impl Presence {
             return;
         }
         self.runs.settings(view.main_thread);
+        #[cfg(debug_assertions)]
+        if let Some(session) = &self.session
+            && let Some(draft) = super::Observer::take_draw_fixture(cx)
+            && let Err(refusal) = self
+                .runs
+                .submit(draft, |turn| self.link.send_data(session, turn))
+        {
+            tracing::warn!(?refusal, "drawing timing fixture submission refused");
+        }
         if !view.hold_to_talk {
             self.cancel_voice(cx);
         }

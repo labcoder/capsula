@@ -193,3 +193,24 @@ attempt, or a reservation beyond the model ceiling invalidates the observation, 
 there is no final count. Auxiliary HTTP categories do not spend the model budget.
 Missing or inconsistent totals are invalid; the model budget still applies independently.
 Neither stream content nor request data is written.
+
+## Opt-in offline draw observation
+
+The Windows Debug GATE brain also accepts the `draw` opt-in in that copy layout, with budget
+`1`. An unavailable receipt fails closed instead of choosing the account engine. This mode
+uses a fixed in-memory HTTP/SSE replay; the ordinary Responses reader and connection do no
+drawing observation. The replay knows the exact byte offsets of the call start's SSE JSON
+and each step record's opening byte, and stamps the reads that actually carry them. Only
+the replay's argument events select the coordinator's observed tokenizer call, which
+stamps a step when its record closes. The store thread marks the successful transaction
+reply before sending it; the data queue marks the accepted `SceneStepCommit` hand-off.
+At Quit the mode writes only PID, run, scene, index, byte count and QPC stamps. It omits
+the final marker if any of the four step receipts is missing or inconsistent.
+
+The replay's connector cannot open a socket or use a provider bearer. This is not a
+process-wide network sandbox: normal account startup remains enabled and could load
+credentials or fetch a catalog on a configured profile. The draw trial starts with an
+empty GATE profile, Claude Code off, and no account actions or sign-in. It writes the
+fixture turn and drawing to its local database to measure a real durable reply. The
+driver retains validated receipts and cleans the isolated app data through the shared
+gate teardown; cleanup failures are reported separately.

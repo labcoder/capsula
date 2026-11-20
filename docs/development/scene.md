@@ -2302,6 +2302,11 @@ and installed once-state. A refused control ends the connection. Hidden, empty, 
 revoked or superseded observations cannot acknowledge; visibility-only epoch changes never
 reset an already acknowledged activation. Skipped semantic retirement fabricates no paint.
 
+With [drawing timing enabled](input.md#offline-drawing-timing), the shell saves a QPC
+stamp at the first successful paint for that scene, epoch and bound. It reports the
+stamp only when the presenter accepts the same sample for the live step. A paint
+receipt does not establish when the display presents that sample.
+
 An entrance starts at its first paint, not at consumption. A newly activated frame keeps its
 first sample with something to paint until a shown overlay paints it, and later samples leave it
 unchanged. While that frame is still empty after its first sample, it is sampled no later than
@@ -2376,6 +2381,12 @@ A separate thread-local counter checks allocation, zeroed allocation and
 reallocation, including an instrumentation sanity test; it observes only the
 calling test thread. Main had no drawing tokenizer, so the before baseline is
 “none,” not an invented speedup.
+
+The [offline drawing timing gate](input.md#offline-drawing-timing) measures a
+separate path through the presenter. Its opt-in observer can see when prep enters
+the ready window, when the activated view and cache are installed, and which
+scene epoch the presenter accepted as shown. It also reports the narration and
+entrance lengths separately; those observations do not change which clock wins.
 
 Build the release tests below normal priority before acquiring the shared
 measurement lock. On Rez, after 30 seconds without cargo/rustc, run at normal

@@ -184,7 +184,7 @@ impl<C: Connect> Shared<C> {
             .observation
             .as_ref()
             .map(|record| Stamp::new(request, record));
-        let out = Out {
+        let out = Out::<false> {
             round: &mut round,
             events,
             #[cfg(all(windows, debug_assertions))]
@@ -224,14 +224,59 @@ impl<C: Connect> Shared<C> {
 
 /// A round's events on their way out: each read's go to the pump before the next read, and a
 /// gone pump or a broken round stops the stream.
-struct Out<'a> {
+struct Out<'a, const REPLAY: bool> {
     round: &'a mut Round,
     events: &'a mpsc::Sender<TurnEvent>,
     #[cfg(all(windows, debug_assertions))]
     stamp: Option<Stamp>,
 }
 
-impl Events for Out<'_> {
+#[cfg(all(windows, debug_assertions))]
+pub(super) async fn replay_round(
+    connect: impl Connect,
+    request: &RunRequest,
+    events: &mpsc::Sender<TurnEvent>,
+    gate: SendGate,
+) -> Finish {
+    let failed = Finish::Failed(EngineFailure::Stream(Failure::Request));
+    let Ok(mut value) = body(&request.request) else {
+        return failed;
+    };
+    let body = ResponsesBody::new(&value);
+    wipe_images(&mut value);
+    let Ok(body) = body else {
+        return failed;
+    };
+    let client = ModelClient::new(connect);
+    let token = Secret::new(Zeroizing::new(String::from("offline-fixture")));
+    let ask = async {
+        match gate.ask().await {
+            Answer::Grant(lease) => Some(lease),
+            Answer::Rebuild => None,
+        }
+    };
+    let mut round = Round::default();
+    let out = Out::<true> {
+        round: &mut round,
+        events,
+        stamp: None,
+    };
+    let result = crate::connections::model::stream(
+        &client,
+        &body,
+        &token,
+        ask,
+        &Budget::limited(Some(1)),
+        out,
+    )
+    .await;
+    match round.end(result.map(|()| Progress::Completed)) {
+        Some(TurnEvent::Finished(finish)) => finish,
+        _ => Finish::Truncated,
+    }
+}
+
+impl<const REPLAY: bool> Events for Out<'_, REPLAY> {
     fn event(&mut self, event: &SseEvent) {
         #[cfg(all(windows, debug_assertions))]
         let previous = self.stamp.as_ref().map(|_| self.round.events.len());
@@ -247,6 +292,17 @@ impl Events for Out<'_> {
 
     async fn taken(&mut self) -> ControlFlow<()> {
         for event in self.round.take() {
+            #[cfg(all(windows, debug_assertions))]
+            let event = if REPLAY {
+                match event {
+                    TurnEvent::ToolArgsDelta { call, delta } => {
+                        TurnEvent::ReplayDrawDelta { call, delta }
+                    }
+                    other => other,
+                }
+            } else {
+                event
+            };
             if self.events.send(event).await.is_err() {
                 return ControlFlow::Break(());
             }

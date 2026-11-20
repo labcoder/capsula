@@ -14,11 +14,12 @@ use super::{
     observation::{self, Kind, Observation},
     present::Present,
 };
+use crate::hermetic::Run;
 use crate::platform::{self, Process, gate_capture, input_session::WindowKind};
 use crate::session;
 
 pub(in crate::gate) fn run(args: impl Iterator<Item = String>) -> Result<()> {
-    super::retained_run(args, |output, run| {
+    super::retained_run(args, Run::finish, |output, run| {
         Images::build(run).and_then(|images| batch(output, &images))
     })
 }

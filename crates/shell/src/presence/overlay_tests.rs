@@ -36,19 +36,41 @@ fn paint_notifications_coalesce_fresh_numbers_and_keep_pending_until_the_drain()
     let notice = super::PaintNotice::default();
     let first = [Some((SceneId(1), 2, 1)), None, None, None];
     let next = [Some((SceneId(3), 8, 2)), None, None, None];
-    assert!(notice.observe(false, first));
-    assert!(!notice.observe(false, first));
-    assert!(!notice.observe(false, [None; 4]));
+    let observe = |failed, observation| notice.observe(failed, observation, |_| {});
+    assert!(observe(false, first));
+    assert!(!observe(false, first));
+    assert!(!observe(false, [None; 4]));
     assert!(notice.pending.get());
-    assert!(!notice.observe(false, next));
+    assert!(!observe(false, next));
     assert_eq!(notice.seen.get(), next);
     assert!(notice.pending.get());
     notice.pending.set(false);
-    assert!(!notice.observe(false, next));
+    assert!(!observe(false, next));
     assert!(!notice.pending.get());
-    assert!(notice.observe(true, [None; 4]));
-    assert!(!notice.observe(true, [None; 4]));
+    assert!(observe(true, [None; 4]));
+    assert!(!observe(true, [None; 4]));
     assert!(notice.failed.get());
+}
+
+#[test]
+fn a_failed_paint_batch_never_stamps_a_fresh_observation() {
+    let notice = super::PaintNotice::default();
+    let stamps = RefCell::new(Vec::new());
+    let observe = |failed, observation| {
+        notice.observe(failed, observation, |before| {
+            stamps.borrow_mut().push(*before);
+        })
+    };
+    let first = [Some((SceneId(1), 2, 1)), None, None, None];
+    let second = [Some((SceneId(2), 3, 1)), None, None, None];
+    let later = [Some((SceneId(2), 4, 2)), None, None, None];
+    assert!(observe(true, first));
+    assert!(!observe(false, second));
+    notice.failed.set(false);
+    notice.pending.set(false);
+    assert!(!observe(false, second));
+    assert!(observe(false, later));
+    assert_eq!(*stamps.borrow(), [second]);
 }
 
 fn ready_canvas() -> Presenter {

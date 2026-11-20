@@ -295,8 +295,20 @@ pub(crate) fn launch(
     quit_after_ms: u64,
     extra: impl IntoIterator<Item = impl AsRef<OsStr>>,
 ) -> Result<Child> {
+    launch_with(exe, folders, quit_after_ms, extra, |_| {})
+}
+
+pub(crate) fn launch_with(
+    exe: &Path,
+    folders: &Folders,
+    quit_after_ms: u64,
+    extra: impl IntoIterator<Item = impl AsRef<OsStr>>,
+    configure: impl FnOnce(&mut Command),
+) -> Result<Child> {
+    let mut command = Command::new(exe);
+    configure(&mut command);
     Ok(folders
-        .apply(&mut Command::new(exe))
+        .apply(&mut command)
         .args(extra)
         .arg(format!("--quit-after-ms={quit_after_ms}"))
         .creation_flags(NORMAL_PRIORITY_CLASS.0)

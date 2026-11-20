@@ -6,6 +6,7 @@
 
 mod capture;
 mod cold;
+mod draw_timing;
 mod observation;
 mod present;
 mod receipts;
@@ -208,6 +209,7 @@ fn retained_output(mut args: impl Iterator<Item = String>) -> Result<(PathBuf, P
 /// runs `body` with the folder, and ends the run.
 fn retained_run(
     args: impl Iterator<Item = String>,
+    finish: fn(Run, Result<()>) -> Result<()>,
     body: impl FnOnce(&Path, &Run) -> Result<()>,
 ) -> Result<()> {
     let (transcript, output) = retained_output(args)?;
@@ -221,11 +223,15 @@ fn retained_run(
     )
     .map_err(anyhow::Error::from)
     .and_then(|()| body(&output, &run));
-    run.finish(result)
+    finish(run, result)
 }
 
 pub(crate) fn cold(args: impl Iterator<Item = String>) -> Result<()> {
     cold::run(args)
+}
+
+pub(crate) fn draw_timing(args: impl Iterator<Item = String>) -> Result<()> {
+    draw_timing::run(args)
 }
 
 pub(crate) fn run(args: impl Iterator<Item = String>) -> Result<()> {
@@ -252,7 +258,7 @@ fn session_run(
     opener: (&str, Opener, FixturePlacement),
     trials: &[Trial],
 ) -> Result<()> {
-    retained_run(args, |output, run| {
+    retained_run(args, Run::finish, |output, run| {
         let result =
             Images::build(run).and_then(|images| run_session(output, &images, opener, trials));
         let cursor = native::cursor_position();

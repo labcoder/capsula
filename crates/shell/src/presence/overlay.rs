@@ -28,6 +28,7 @@ use kumochi_scene::{
 };
 
 use super::ink::{self, Held};
+use super::observer;
 use super::overlay_visibility::{Surface, Visibility};
 use super::paint_cache::{self, PaintScene, Pending};
 use super::paint_geometry;
@@ -61,6 +62,7 @@ impl PaintNotice {
         &self,
         failed: bool,
         observations: [Option<(SceneId, u64, u32)>; MAX_VISIBLE_SCENES],
+        on_fresh: impl FnOnce(&[Option<(SceneId, u64, u32)>; MAX_VISIBLE_SCENES]),
     ) -> bool {
         self.failed.set(self.failed.get() || failed);
         let before = self.seen.replace(observations);
@@ -68,6 +70,9 @@ impl PaintNotice {
             .iter()
             .flatten()
             .any(|observation| !before.contains(&Some(*observation)));
+        if fresh && !self.failed.get() {
+            on_fresh(&before);
+        }
         (failed || fresh) && !self.pending.replace(true)
     }
 }
@@ -282,7 +287,11 @@ impl Element for DrawingElement {
             } else {
                 [None; MAX_VISIBLE_SCENES]
             };
-            if self.painting.get() && self.notice.observe(failed, observations) {
+            if self.painting.get()
+                && self.notice.observe(failed, observations, |before| {
+                    observer::overlay_painted(cx, before, &observations);
+                })
+            {
                 let owner = self.owner.clone();
                 let notice = Rc::clone(&self.notice);
                 let notify = move |cx: &mut App| {

@@ -290,6 +290,14 @@ pub enum TurnEvent {
         /// The next bytes of its arguments.
         delta: String,
     },
+    /// Argument bytes emitted only by the fixed draw timing replay.
+    #[cfg(all(windows, debug_assertions))]
+    ReplayDrawDelta {
+        /// The replay's call.
+        call: CallId,
+        /// The next bytes of its arguments.
+        delta: String,
+    },
     /// A call's arguments are complete.
     ToolCallReady {
         /// The call.
@@ -329,6 +337,11 @@ impl fmt::Debug for TurnEvent {
             Self::ToolArgsDelta { call, delta } => f
                 .debug_struct("ToolArgsDelta")
                 .field("call", call)
+                .field("delta_bytes", &delta.len())
+                .finish(),
+            #[cfg(all(windows, debug_assertions))]
+            Self::ReplayDrawDelta { delta, .. } => f
+                .debug_struct("ReplayDrawDelta")
                 .field("delta_bytes", &delta.len())
                 .finish(),
             Self::ToolCallReady { call, args } => f

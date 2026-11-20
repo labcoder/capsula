@@ -211,6 +211,15 @@ impl Run {
     /// it also deletes the run's folders; after a failure it keeps them, with the product logs,
     /// until the next run.
     pub(crate) fn finish(self, result: Result<()>) -> Result<()> {
+        self.finish_with(result, Keep::Folders)
+    }
+
+    /// Ends an offline fixture run without keeping its application data on failure.
+    pub(crate) fn finish_discard(self, result: Result<()>) -> Result<()> {
+        self.finish_with(result, Keep::Nothing)
+    }
+
+    fn finish_with(self, result: Result<()>, on_failure: Keep) -> Result<()> {
         if let Err(running) = self.job.end_others(END_LIMIT) {
             return crate::session::combine([
                 result,
@@ -222,7 +231,7 @@ impl Run {
             ]);
         }
         let mut store = CredentialManager;
-        let ended = end(&self.root, &self.alone, result, &mut store);
+        let ended = end(&self.root, &self.alone, result, &mut store, on_failure);
         let instance = platform::gate_pipe::session_id()
             .map_err(anyhow::Error::from)
             .and_then(|session| store.delete(&instance_target(GATE.instance_service, session)));
@@ -245,13 +254,19 @@ fn kept(root: &Path) -> String {
     )
 }
 
-/// Deletes what the run's launches stored and, after a success, its folders; then empties the
-/// held `lock` only once they're gone, so the next run deletes whatever is left.
-fn end(root: &Path, lock: &File, result: Result<()>, store: &mut impl Credentials) -> Result<()> {
+/// Deletes what the run's launches stored, keeping folders only on request after failure.
+/// Empties the held lock only once they're gone, so the next run deletes whatever is left.
+fn end(
+    root: &Path,
+    lock: &File,
+    result: Result<()>,
+    store: &mut impl Credentials,
+    on_failure: Keep,
+) -> Result<()> {
     let keep = if result.is_ok() {
         Keep::Nothing
     } else {
-        Keep::Folders
+        on_failure
     };
     let entries = remove_entries(root, store, keep);
     let released = match (keep, &entries) {
@@ -467,6 +482,9 @@ fn own_entries(authority: &Path) -> Result<Vec<String>> {
 }
 
 #[cfg(test)]
+pub(crate) use tests::assert_claim_after_refusal;
+
+#[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
 
@@ -516,6 +534,29 @@ mod tests {
             self.0.remove(target);
             Ok(())
         }
+    }
+
+    pub(crate) fn assert_claim_after_refusal(dir: &Path, body: impl FnOnce(&Path) -> Result<()>) {
+        let path = dir.join("run.lock");
+        let first = dir.join("first/data");
+        let mut lock = take(&path).unwrap();
+        let mut store = Fake(BTreeSet::new());
+        claim(&mut lock, &path, &first, &mut store).unwrap();
+        let error = body(first.parent().unwrap()).expect_err("the first run must be refused");
+        let expected = format!("{error:#}");
+        let error = end(&first, &lock, Err(error), &mut store, Keep::Nothing).unwrap_err();
+        assert_eq!(error.to_string(), expected);
+        assert!(
+            !first.exists(),
+            "failure must remove app data before another claim"
+        );
+        drop(lock);
+
+        let mut lock = take(&path).unwrap();
+        let next = dir.join("next/data");
+        claim(&mut lock, &path, &next, &mut store).expect("next gate run can claim and recover");
+        assert!(!first.exists());
+        end(&next, &lock, Ok(()), &mut store, Keep::Nothing).unwrap();
     }
 
     /// Refuses to delete one target, as a locked Credential Manager entry would.
@@ -690,7 +731,7 @@ mod tests {
         let mut store = Fake([HELD.to_owned()].into());
         let lock_dir = scratch::dir("gate-end-success-lock");
         let lock = held(&lock_dir);
-        end(&root, &lock, Ok(()), &mut store).expect("ended");
+        end(&root, &lock, Ok(()), &mut store, Keep::Folders).expect("ended");
         assert_eq!(length(&lock), 0);
         assert!(!root.exists());
         assert_eq!(store.0, BTreeSet::new());
@@ -700,8 +741,14 @@ mod tests {
         let mut store = Fake([HELD.to_owned()].into());
         let lock_dir = scratch::dir("gate-end-failed-lock");
         let lock = held(&lock_dir);
-        let error = end(&root, &lock, Err(anyhow!("an item failed")), &mut store)
-            .expect_err("the run failed");
+        let error = end(
+            &root,
+            &lock,
+            Err(anyhow!("an item failed")),
+            &mut store,
+            Keep::Folders,
+        )
+        .expect_err("the run failed");
         assert_eq!(
             format!("{error:#}"),
             format!(
@@ -724,7 +771,8 @@ mod tests {
         let mut store = Fake([HELD.to_owned()].into());
         let lock_dir = scratch::dir("gate-end-unclean-lock");
         let lock = held(&lock_dir);
-        let error = end(&root, &lock, Ok(()), &mut store).expect_err("cleanup failed");
+        let error =
+            end(&root, &lock, Ok(()), &mut store, Keep::Folders).expect_err("cleanup failed");
         assert_eq!(
             format!("{error:#}"),
             format!(

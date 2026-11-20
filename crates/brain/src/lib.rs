@@ -117,7 +117,7 @@ pub fn shut_down(runtime: tokio::runtime::Runtime) {
     end_runtime(
         runtime,
         #[cfg(all(windows, debug_assertions))]
-        Observation::active().map(AsRef::as_ref),
+        Observation::current().map(AsRef::as_ref),
     );
 }
 
@@ -336,6 +336,17 @@ fn claude_lane(
 /// [`kumochi_protocol::constants::FIXTURE_ENV`], that script answers every run; otherwise the
 /// account's Responses engine answers, once the account is ready.
 fn engine() -> Result<Selected, BrainError> {
+    #[cfg(all(windows, debug_assertions))]
+    if std::env::var(kumochi_protocol::constants::LIVE_CHATGPT_TEXT_ENV).as_deref() == Ok("draw") {
+        let observation = Observation::drawing().ok_or_else(|| {
+            BrainError::Fixture(io::Error::other(
+                "drawing replay needs a fresh gate receipt",
+            ))
+        })?;
+        let replay =
+            engines::responses::replay::Replay::new(observation).map_err(BrainError::Fixture)?;
+        return Ok(Selected::DrawReplay(Box::new(replay)));
+    }
     #[cfg(debug_assertions)]
     if let Some(path) = std::env::var_os(kumochi_protocol::constants::FIXTURE_ENV) {
         let script = std::fs::read_to_string(path).map_err(BrainError::Fixture)?;

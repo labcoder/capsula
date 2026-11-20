@@ -57,6 +57,11 @@ tasks:
   measure-gate <path-session.txt>
                     gate-session's measured phases with hover-gate's opener;
                     no Ready and no feel verdicts
+  draw-timing <path-session.txt> <shell-sha256> <brain-sha256>
+                    one offline paint timing trial (90 seconds plus shared teardown);
+                    run the prebuilt Debug gate xtask.exe after external idle admission,
+                    beside the pinned same-build shell and brain, with create-new redirection;
+                    no input, PresentMon, Cargo, sign-in, or service requests
   input-fixture     internal bounded separate-process EDIT/Ready fixture
   input-quiet <seconds>
                     observe raw input on a hidden window for 1..120 seconds;
@@ -145,6 +150,8 @@ fn main() -> Result<()> {
         Some("hover-gate") => gate::hover(args),
         #[cfg(windows)]
         Some("measure-gate") => gate::measure(args),
+        #[cfg(windows)]
+        Some("draw-timing") => gate::draw_timing(args),
         #[cfg(windows)]
         Some("live") => live::run(args),
         #[cfg(windows)]

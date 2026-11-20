@@ -19,14 +19,16 @@ pub(crate) struct Launch {
     pub(super) observer: Option<PathBuf>,
     /// `--receipt-fixture`: start the dock middle-left for the gate's click-receipt phases.
     pub(super) receipt_fixture: bool,
+    /// `--draw-timing`: add step readiness, activation and first paint to a bounded observer run.
+    pub(super) draw_timing: bool,
 }
 
 impl Launch {
     /// Reads the flags after the program name.
     ///
     /// # Errors
-    /// Fails on a bad value, a fixture or observer without a quit deadline, a receipt fixture
-    /// that is repeated or has no observer.
+    /// Fails on a bad value, a fixture or observer without a quit deadline, a repeated fixture
+    /// or timing flag, or either receipt mode without its required observer.
     pub(crate) fn parse(args: impl Iterator<Item = String>) -> Result<Self, OpenError> {
         let mut launch = Self::default();
         for arg in args {
@@ -68,6 +70,11 @@ impl Launch {
                 launch.escape_fixture = true;
             } else if let Some(path) = arg.strip_prefix("--gate-observer=") {
                 launch.observer = Some(PathBuf::from(path));
+            } else if arg == "--draw-timing" {
+                if launch.draw_timing {
+                    return Err(OpenError::DrawTiming);
+                }
+                launch.draw_timing = true;
             } else if arg == "--receipt-fixture" {
                 if launch.receipt_fixture {
                     return Err(OpenError::ReceiptFixture);
@@ -100,6 +107,9 @@ impl Launch {
         if launch.receipt_fixture && launch.observer.is_none() {
             return Err(OpenError::ReceiptFixture);
         }
+        if launch.draw_timing && (launch.observer.is_none() || launch.receipt_fixture) {
+            return Err(OpenError::DrawTiming);
+        }
         Ok(launch)
     }
 
@@ -110,11 +120,6 @@ impl Launch {
         } else {
             Position::default()
         }
-    }
-
-    /// The observer's file, if this run records the gate.
-    pub(crate) fn observer(&self) -> Option<&std::path::Path> {
-        self.observer.as_deref()
     }
 }
 
@@ -221,6 +226,29 @@ mod tests {
             ])),
             Err(OpenError::ReceiptFixture)
         ));
+    }
+
+    #[test]
+    fn draw_timing_is_separate_from_the_ordinary_bounded_gate() {
+        let observer = "--gate-observer=gate.log";
+        let timing = "--draw-timing";
+        assert!(!launch(args(&[observer, "--smoke"])).unwrap().draw_timing);
+        assert!(
+            launch(args(&[observer, timing, "--smoke"]))
+                .unwrap()
+                .draw_timing
+        );
+        assert!(matches!(
+            launch(args(&[observer, timing])),
+            Err(OpenError::ObserverDeadline)
+        ));
+        for invalid in [
+            &[timing, "--smoke"][..],
+            &[observer, timing, timing, "--smoke"][..],
+            &[observer, timing, "--receipt-fixture", "--smoke"][..],
+        ] {
+            assert!(matches!(launch(args(invalid)), Err(OpenError::DrawTiming)));
+        }
     }
 
     #[cfg(debug_assertions)]

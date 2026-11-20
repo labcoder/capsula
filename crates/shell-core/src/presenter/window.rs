@@ -16,7 +16,7 @@ use std::{
 use kumochi_protocol::message::{RunId, SceneId};
 use kumochi_scene::{deferred::Deferred, layout::PreparedStep, limits::MAX_RESIDENT_BYTES};
 
-use super::{Broken, Effect, Out, Presenter, Ready};
+use super::{Broken, DrawKey, DrawTiming, Effect, Out, Presenter, Ready};
 
 /// Why nothing was consumed; each leaves the presenter unchanged, except that `Busy` keeps the
 /// request.
@@ -127,9 +127,10 @@ impl Presenter {
             .view
             .prepare_activation(&head.step, scene_time, segment_ms)
             .map_err(|_| ConsumeError::Stale)?;
-        let segment_ms = activation.view().entrance_end().map_or(segment_ms, |end| {
-            segment_ms.max(end.saturating_sub(scene_time))
-        });
+        let entrance_ms = activation
+            .view()
+            .entrance_end()
+            .map_or(0, |end| end.saturating_sub(scene_time));
         let cache = self.stage.stage(activation.view());
         let cache_bytes = cache.bytes();
         let bytes = head.step.attribution();
@@ -181,8 +182,24 @@ impl Presenter {
             run,
             expected_index,
             scene_time,
-            segment_ms,
+            segment_ms.max(entrance_ms),
         );
+        if let Some(observe) = self.draw_timing.as_mut() {
+            observe(DrawTiming::Active {
+                key: DrawKey {
+                    run,
+                    scene: id,
+                    index: expected_index,
+                },
+                segment_ms,
+                entrance_ms,
+                narrated: step
+                    .step()
+                    .say
+                    .as_ref()
+                    .is_some_and(|say| !say.as_str().trim().is_empty()),
+            });
+        }
         scene.view_bytes = view_bytes;
         scene.cache_bytes = cache_bytes;
         scene.paint = scene

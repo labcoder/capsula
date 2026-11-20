@@ -83,7 +83,7 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let observer = match presence::Observer::prepare(flags.observer()) {
+    let observer = match presence::Observer::prepare(&flags) {
         Ok(observer) => observer,
         Err(error) => {
             tracing::error!(%error, "can't create the --gate-observer file");

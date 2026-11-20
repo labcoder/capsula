@@ -1,4 +1,6 @@
 use std::{
+    cell::RefCell,
+    rc::Rc,
     sync::atomic::Ordering,
     time::{Duration, Instant},
 };
@@ -6,7 +8,7 @@ use std::{
 use kumochi_protocol::message::{ControlToBrain, RunId, SceneFailure, SceneId};
 use kumochi_scene::{Step, limits::MAX_RESIDENT_BYTES, record::Start};
 
-use super::super::{activation::Shown, scene::Cut};
+use super::super::{DrawKey, DrawTiming, activation::Shown, scene::Cut};
 use super::{
     GENERATION, LIVE, Presenter, RUN, Shaper, acknowledge, arrive, begin, commit_as, commit_frame,
     controls, jobs, live, ms, only_admission, only_job, paint_shown, recovering, rect, step,
@@ -14,10 +16,15 @@ use super::{
 
 fn prepared(steps: &[(RunId, Step)]) -> (Presenter, Instant) {
     let (mut presenter, now) = live();
-    begin(&mut presenter, LIVE, now);
+    prepare_steps(&mut presenter, now, steps);
+    (presenter, now)
+}
+
+fn prepare_steps(presenter: &mut Presenter, now: Instant, steps: &[(RunId, Step)]) {
+    begin(presenter, LIVE, now);
     for (index, (run, step)) in steps.iter().enumerate() {
         let effects = commit_as(
-            &mut presenter,
+            presenter,
             *run,
             LIVE,
             u32::try_from(index).expect("index"),
@@ -33,7 +40,6 @@ fn prepared(steps: &[(RunId, Step)]) -> (Presenter, Instant) {
                 .is_empty()
         );
     }
-    (presenter, now)
 }
 
 fn bound(presenter: &Presenter) -> u32 {
@@ -171,6 +177,73 @@ fn shown(run: RunId, index: u32) -> [Option<Shown>; 4] {
 }
 
 #[test]
+fn timing_reports_the_accepted_step_with_zero_narration_and_its_entrance_span() {
+    let (mut presenter, now) = live();
+    let receipts = Rc::new(RefCell::new(Vec::new()));
+    let out = Rc::clone(&receipts);
+    presenter.observe_draw_timing(move |receipt| out.borrow_mut().push(receipt));
+    let first = step(
+        r#"{"step":{"id":"first","say":"one two three four","put":[{"shape":{"id":"r","kind":"rect","box":[0,0,10,10],"enter":"fade","dur":150}}]}}"#,
+    );
+    prepare_steps(&mut presenter, now, &[(RUN, first)]);
+    let key = DrawKey {
+        run: RUN,
+        scene: LIVE,
+        index: 0,
+    };
+    assert_eq!(*receipts.borrow(), [DrawTiming::Ready(key)]);
+    presenter.advance(GENERATION, now).expect("activate");
+    presenter.sample_at(now).expect("a sample");
+    paint(&presenter);
+    assert_eq!(presenter.take_shown(GENERATION), [None; 4]);
+    presenter.frames.borrow_mut().shown = true;
+    paint(&presenter);
+    assert_eq!(presenter.take_shown(GENERATION), shown(RUN, 0));
+    assert_eq!(presenter.take_shown(GENERATION), [None; 4]);
+    assert_eq!(
+        *receipts.borrow(),
+        [
+            DrawTiming::Ready(key),
+            DrawTiming::Active {
+                key,
+                segment_ms: 0,
+                entrance_ms: 150,
+                narrated: true,
+            },
+            DrawTiming::Shown { key, epoch: 2 },
+        ]
+    );
+}
+
+#[test]
+fn timing_reports_nonblank_narration_text_without_a_time_reservation() {
+    for (first, narrated) in [
+        (step(r#"{"step":{"id":"silent"}}"#), false),
+        (step(r#"{"step":{"id":"blank","say":" \t"}}"#), false),
+        (step(r#"{"step":{"id":"unspoken","say":"one"}}"#), true),
+    ] {
+        let (mut presenter, now) = prepared(&[(RUN, first)]);
+        let receipts = Rc::new(RefCell::new(Vec::new()));
+        let out = Rc::clone(&receipts);
+        presenter.observe_draw_timing(move |receipt| out.borrow_mut().push(receipt));
+        presenter.advance(GENERATION, now).expect("activate");
+        assert_eq!(
+            *receipts.borrow(),
+            [DrawTiming::Active {
+                key: DrawKey {
+                    run: RUN,
+                    scene: LIVE,
+                    index: 0
+                },
+                segment_ms: 0,
+                entrance_ms: 0,
+                narrated,
+            }]
+        );
+    }
+}
+
+#[test]
 fn visual_end_offsets_late_readiness_and_runs_use_one_scene_origin() {
     let first = step(
         r#"{"step":{"id":"first","put":[{"shape":{"id":"r","kind":"rect","box":[0,0,10,10],"enter":"none","delay":1200}}]}}"#,
@@ -270,6 +343,9 @@ fn a_failed_epoch_cannot_deliver_an_earlier_success() {
     presenter.advance(GENERATION, now).expect("activate");
     presenter.sample_at(ms(now, 800)).expect("a sample");
     presenter.frames.borrow_mut().shown = true;
+    let receipts = Rc::new(RefCell::new(Vec::new()));
+    let out = Rc::clone(&receipts);
+    presenter.observe_draw_timing(move |receipt| out.borrow_mut().push(receipt));
     paint(&presenter);
     assert!(presenter.frames.borrow().paint(|_, _| Err::<(), _>(())));
     assert_eq!(presenter.take_shown(GENERATION), [None; 4]);
@@ -279,6 +355,7 @@ fn a_failed_epoch_cannot_deliver_an_earlier_success() {
     );
     assert_eq!(presenter.stoppable_run(), None);
     assert_eq!(presenter.residency(), 0);
+    assert_eq!(*receipts.borrow(), []);
 }
 
 #[test]
