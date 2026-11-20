@@ -110,6 +110,7 @@ async fn closed_speech_waits_across_live_data_credits_then_dispatches_once() {
     brain.engine = Box::new(DrawThenFinish(Fixture::parse(script).unwrap()));
     enable_spoken(&mut brain);
     let inputs = brain.inputs_tx.clone();
+    let mut observed = brain.observe();
     let ((control, data), mut shell) = duplex();
     let mut tap = Tap::from_env();
     let client = async {
@@ -119,6 +120,9 @@ async fn closed_speech_waits_across_live_data_credits_then_dispatches_once() {
         shell
             .send(&ControlToBrain::QueuedAudioOutput(24_000, output))
             .await;
+        while observed.recv().await.expect("brain control observation")
+            != super::super::Seen::ControlApplied
+        {}
         shell.submit("draw").await;
         let (run, phase) = shell.state().await;
         assert_eq!(phase, Phase::Thinking);

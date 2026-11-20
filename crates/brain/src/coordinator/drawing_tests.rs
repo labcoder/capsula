@@ -1,11 +1,15 @@
 use kumochi_protocol::{
     frame::{self, Pipe},
-    message::{ControlToShell, DataToShell, Phase, SceneCuts, ThreadId},
+    message::{
+        ControlToShell, DataToShell, OutputGeneration, Phase, SceneCuts, SceneId, SegmentId,
+        SpeechDecision, SpeechDispatch, SpeechPcm, SpeechRetirement, ThreadId,
+    },
 };
 use serde_json::json;
 
 use super::super::Notify;
 use super::{Coordinator, Effect, Input, R, StoreOp, T, started};
+use crate::coordinator::Synthesized;
 use crate::{
     drawing::{self, Write},
     engines::{CallId, Finish, TurnEvent},
@@ -207,6 +211,228 @@ fn a_committed_step_s_say_is_spoken_and_its_failed_scene_drops_it() {
             })),
         ]
     );
+}
+
+fn narrated(core: &mut Coordinator, store: &mut Store, name: &str, plain: Option<&str>) -> SceneId {
+    let mut records = vec![
+        json!({"begin":{"v":1,"scene":name,"surface":"overlay","alt":"diagram","others":"keep"}}),
+        json!({"step":{"id":"said","say":name,"start":"speech",
+            "put":[{"shape":{"id":"a","kind":"rect","box":[0,0,10,10]}}]}}),
+    ];
+    if let Some(plain) = plain {
+        records.push(json!({"step":{"id":"plain","say":plain,"start":"now",
+            "put":[{"shape":{"id":"b","kind":"rect","box":[20,0,10,10]}}]}}));
+    }
+    records.push(json!({"end":{}}));
+    let args = serde_json::to_vec(&json!({"records":records})).unwrap();
+    let mut batch = Vec::new();
+    assert_eq!(
+        core.drawing_call(
+            T,
+            &crate::dispatch::LedgerKey {
+                run: R,
+                route: crate::dispatch::Route::Model,
+                call: name.into()
+            },
+            crate::dispatch::DrawAction::Complete(crate::dispatch::validate_draw(&args)),
+            &mut batch,
+        ),
+        crate::dispatch::Dispatch::Committing
+    );
+    settle(core, store, batch)
+        .into_iter()
+        .find_map(|effect| match effect {
+            Effect::Data(DataToShell::SceneBegin { scene, .. }) => Some(scene),
+            _ => None,
+        })
+        .expect("the narrated scene commits")
+}
+
+enum SceneRemoval {
+    Clear,
+    Failure,
+}
+
+fn removal(core: &mut Coordinator, scene: SceneId, route: SceneRemoval) -> Vec<Effect> {
+    let input = match route {
+        SceneRemoval::Failure => Input::Drawing(drawing::Input::SceneFailed { scene }),
+        SceneRemoval::Clear => Input::Clear {
+            scenes: vec![scene],
+        },
+    };
+    let effects = core.handle(input).unwrap();
+    assert!(effects.contains(&Effect::RevokeScenes {
+        scenes: vec![scene]
+    }));
+    assert_eq!(core.current_run(), Some(R));
+    speech_crossing(effects)
+}
+
+fn speech_crossing(effects: Vec<Effect>) -> Vec<Effect> {
+    effects
+        .into_iter()
+        .filter(|effect| {
+            matches!(
+                effect,
+                Effect::Speak { .. }
+                    | Effect::CancelSpeech { .. }
+                    | Effect::RevokeSpeech { .. }
+                    | Effect::Data(DataToShell::SpeechPcm(_))
+                    | Effect::Control(
+                        ControlToShell::SpeechDecisionTaken(_)
+                            | ControlToShell::SpeechRevoked { .. }
+                    )
+            )
+        })
+        .collect()
+}
+
+fn synthesized(core: &mut Coordinator, segment: u32, made: Synthesized) -> Vec<Effect> {
+    speech_crossing(
+        core.handle(Input::Tts {
+            run: R,
+            segment: SegmentId(segment),
+            made,
+        })
+        .unwrap(),
+    )
+}
+
+fn pcm(segment: u32, seq: u32, samples: usize, last: Option<u32>) -> Effect {
+    Effect::Data(DataToShell::SpeechPcm(SpeechPcm {
+        run: R,
+        segment: SegmentId(segment),
+        output_generation: OutputGeneration(1),
+        seq,
+        samples: vec![3; samples],
+        last,
+    }))
+}
+
+enum SpeechAtRemoval {
+    Latched,
+    Active,
+}
+
+fn whole_scene_speech_crossing(route: SceneRemoval, speech: SpeechAtRemoval) {
+    let scratch = Scratch::new("drawing-speech-removal");
+    let mut store = open(&scratch);
+    let mut core = super::speech::queued();
+    core.handle(super::engine(
+        super::engine_key(&core, R),
+        TurnEvent::TextDelta("Plain. ".into()),
+    ))
+    .unwrap();
+    let scene = narrated(&mut core, &mut store, "one", Some("Still plain."));
+    let other = narrated(&mut core, &mut store, "two", None);
+    assert_ne!(scene, other);
+    let speak = |segment, text: &str| Effect::Speak {
+        run: R,
+        segment: SegmentId(segment),
+        rate: 24_000,
+        text: text.to_owned().into(),
+    };
+    let key = |segment| SpeechDispatch {
+        run: R,
+        output: OutputGeneration(1),
+        segment: SegmentId(segment),
+    };
+    let decide = |segment| Input::SpeechDecision(key(segment), SpeechDecision::Allow);
+    let taken = |segment| Effect::Control(ControlToShell::SpeechDecisionTaken(key(segment)));
+    assert_eq!(speech_crossing(core.handle(decide(1)).unwrap()), []);
+    if matches!(speech, SpeechAtRemoval::Active) {
+        assert_eq!(
+            synthesized(&mut core, 0, Synthesized::Done),
+            [pcm(0, 0, 0, Some(0)), taken(1), speak(1, "one")]
+        );
+        assert_eq!(
+            synthesized(&mut core, 1, Synthesized::Audio(vec![3; 40])),
+            [pcm(1, 0, 40, None)]
+        );
+    }
+    let removed = removal(&mut core, scene, route);
+    if matches!(speech, SpeechAtRemoval::Active) {
+        assert_eq!(
+            removed,
+            [
+                Effect::CancelSpeech { run: R },
+                pcm(1, 1, 0, Some(40)),
+                speak(2, "Still plain.")
+            ]
+        );
+    } else {
+        assert_eq!(removed, [taken(1)]);
+        assert_eq!(
+            synthesized(&mut core, 0, Synthesized::Done),
+            [
+                pcm(0, 0, 0, Some(0)),
+                pcm(1, 0, 0, Some(0)),
+                speak(2, "Still plain.")
+            ]
+        );
+    }
+    assert_eq!(
+        synthesized(&mut core, 1, Synthesized::Audio(vec![3; 8])),
+        []
+    );
+    assert_eq!(synthesized(&mut core, 1, Synthesized::Done), []);
+    assert_eq!(
+        synthesized(&mut core, 2, Synthesized::Done),
+        [pcm(2, 0, 0, Some(0))]
+    );
+    assert_eq!(
+        speech_crossing(
+            core.handle(Input::SpeechRetired(SpeechRetirement {
+                run: R,
+                output: OutputGeneration(1),
+                segment: SegmentId(0),
+                retired: 0,
+                heard: 0,
+                final_segment: true,
+            }))
+            .unwrap()
+        ),
+        []
+    );
+    assert_eq!(
+        speech_crossing(core.handle(decide(3)).unwrap()),
+        [taken(3), speak(3, "two")]
+    );
+}
+
+#[test]
+fn whole_scene_clear_suppresses_its_latched_speech() {
+    whole_scene_speech_crossing(SceneRemoval::Clear, SpeechAtRemoval::Latched);
+}
+
+#[test]
+fn whole_scene_clear_cancels_its_active_speech() {
+    whole_scene_speech_crossing(SceneRemoval::Clear, SpeechAtRemoval::Active);
+}
+
+#[test]
+fn whole_scene_failure_suppresses_its_latched_speech() {
+    whole_scene_speech_crossing(SceneRemoval::Failure, SpeechAtRemoval::Latched);
+}
+
+#[test]
+fn whole_scene_failure_cancels_its_active_speech() {
+    whole_scene_speech_crossing(SceneRemoval::Failure, SpeechAtRemoval::Active);
+}
+
+#[test]
+fn whole_scene_removal_preserves_legacy_speech() {
+    for route in [SceneRemoval::Clear, SceneRemoval::Failure] {
+        let scratch = Scratch::new("drawing-legacy-removal");
+        let mut store = open(&scratch);
+        let mut core = super::spoken();
+        let scene = narrated(&mut core, &mut store, "one", None);
+        assert_eq!(removal(&mut core, scene, route), []);
+        assert_eq!(
+            synthesized(&mut core, 0, Synthesized::Audio(vec![3; 40])),
+            [pcm(0, 0, 40, None)]
+        );
+    }
 }
 
 /// A round that completes while its drawing is still being stored ends through the tool loop,

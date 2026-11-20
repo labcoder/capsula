@@ -340,6 +340,20 @@ impl Reply {
     /// `scene` failed: its say segments are dropped, and audio already sent for them stops
     /// counting against the window. Once the run's speech is revoked nothing more goes out.
     pub(crate) fn step_failed(&mut self, scene: SceneId, out: &mut Vec<Speech>) {
+        self.drop_says(|step, _| step.scene == scene, out);
+    }
+
+    /// A whole-scene removal takes away only the queued Speech assignments in those scenes.
+    pub(crate) fn scenes_removed(&mut self, scenes: &[SceneId], out: &mut Vec<Speech>) {
+        if self.retirement.is_some() {
+            self.drop_says(
+                |step, segment| segment.decision.is_some() && scenes.contains(&step.scene),
+                out,
+            );
+        }
+    }
+
+    fn drop_says(&mut self, matches: impl Fn(StepRef, &Segment) -> bool, out: &mut Vec<Speech>) {
         if self.synthesis == Synthesis::Revoked {
             return;
         }
@@ -349,7 +363,7 @@ impl Reply {
             let Source::Say(step) = segment.source else {
                 continue;
             };
-            if step.scene != scene || segment.end.finished() {
+            if segment.end.finished() || !matches(step, segment) {
                 continue;
             }
             let unplayed = u64::from(segment.sent - segment.retired);

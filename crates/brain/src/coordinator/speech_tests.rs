@@ -93,7 +93,7 @@ fn dispatch(segment: u32) -> SpeechDispatch {
     }
 }
 
-fn queued() -> Coordinator {
+pub(super) fn queued() -> Coordinator {
     let mut core = fresh();
     core.handle(Input::QueuedAudioOutput(RATE, OutputGeneration(1)))
         .unwrap();

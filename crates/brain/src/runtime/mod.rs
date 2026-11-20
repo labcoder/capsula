@@ -424,7 +424,11 @@ impl Brain {
     fn control_taken(&self, input: &Input) {
         if matches!(
             input,
-            Input::Stop { .. } | Input::Clear { .. } | Input::Delete { .. } | Input::ThreadOp(_)
+            Input::Stop { .. }
+                | Input::Clear { .. }
+                | Input::Delete { .. }
+                | Input::ThreadOp(_)
+                | Input::QueuedAudioOutput(..)
         ) {
             // A test that stopped listening doesn't matter.
             self.observer.send(Seen::ControlApplied).ok();

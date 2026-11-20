@@ -471,6 +471,13 @@ impl Coordinator {
             }
             true
         });
+        if let Some(run) = &mut self.current
+            && let Some(reply) = &mut run.reply
+        {
+            let mut out = Vec::new();
+            reply.scenes_removed(&scenes, &mut out);
+            speech::carry(run, out, effects);
+        }
         effects.push(Effect::RevokeScenes { scenes });
         let mut at = 0;
         while at < self.drawing_held.len() {
