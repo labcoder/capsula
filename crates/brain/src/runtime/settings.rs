@@ -204,6 +204,11 @@ impl Brain {
 
     /// Stops superseded installs and manual loads at receipt, without reordering their replies.
     pub(super) fn queue_settings(&mut self, op: SettingsOp) {
+        // Off withdraws as it's taken, so a slow, queued or refused save keeps no granted send
+        // going; the commit's withdrawal then finds nothing left to close.
+        if op == SettingsOp::SetShowScreen(false) {
+            self.show_screen_off();
+        }
         let change = if matches!(op, SettingsOp::CancelVoiceInstall)
             && let Some(before) = self.fence_voice_installs()
         {

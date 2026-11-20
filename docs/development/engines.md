@@ -444,8 +444,10 @@ record can over-report a screen but never miss one that may have left the machin
 thread's loaded rows can lag it: while a run is active a loaded turn stays plain until history is
 read again, and a late unsent settlement after the run ended leaves a loaded row saying sent until
 a re-read. Turning screen holds off
-withdraws every run's window image, and turning show-screen off every run's screen picture,
-each only the pictures it allowed: the run's own copy drops at once, and the bytes are zeroed
+withdraws every run's window image once the change is saved. Turning show-screen off withdraws
+every run's screen picture as soon as the brain takes the change, before its save, so a slow or
+refused save keeps no send going; a refused save leaves show-screen on, and neither it nor a
+later On brings a withdrawn picture back. Each withdraws only the pictures it allowed: the run's own copy drops at once, and the bytes are zeroed
 when the last copy drops. The run's next build fails with `ScreenUnavailable`, and a request that has
 started keeps its copy until its round ends but is refused at the send, failing the run the same
 way. A `ChatGPT` upload already writing the picture is cut at its next write poll: it settles as
