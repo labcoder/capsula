@@ -10,12 +10,15 @@
 //! round and a background job (`job`) ask the same way, each under its own key.
 
 use std::collections::BTreeSet;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use kumochi_protocol::message::{ConnectionKind, Deleted, HeldScreen, RunId, ThreadId};
 
 use super::availability::sign_in_needed;
 use super::{BuildKey, Coordinator, Effect, HoldKey, JobKey, Stale, StoreOp};
+use crate::context::Screen;
 use crate::store::Failure;
 
 /// How long a granted send may go without settling [guess].
@@ -53,6 +56,9 @@ pub(super) struct Lease {
     held_send: bool,
     /// The hold's picture this send carries, until it settles.
     screen: Option<Carried>,
+    /// Open while the picture this send carries on a Claude route may still go; the transport
+    /// checks it right before its first write.
+    picture: Option<Arc<AtomicBool>>,
 }
 
 /// A granted send carrying a hold's picture, which its turn already records as sent.
@@ -79,6 +85,49 @@ impl Coordinator {
             .filter(|lease| lease.failed)
             .flat_map(|lease| lease.sources.iter().copied())
             .collect()
+    }
+
+    /// The picture grant of `lease`, which its transport checks right before its first write.
+    pub(crate) fn picture_grant(&self, lease: LeaseId) -> Option<Arc<AtomicBool>> {
+        self.leases
+            .iter()
+            .find(|held| held.id == lease)?
+            .picture
+            .clone()
+    }
+
+    /// Closes each picture grant whose run may no longer send its picture, so a transport that
+    /// hasn't written yet writes nothing.
+    pub(super) fn revoke_pictures(&self) {
+        for lease in &self.leases {
+            let (Some(open), SendKey::Build(key)) = (&lease.picture, lease.id.key) else {
+                continue;
+            };
+            if !self
+                .ending
+                .iter()
+                .chain(&self.current)
+                .find(|run| run.id == key.run)
+                .is_some_and(|run| self.run_pictured(run))
+            {
+                open.store(false, Ordering::Release);
+            }
+        }
+    }
+
+    /// The current run's picture may no longer go: its build goes again, without the picture
+    /// when no send may have written it, and otherwise its admission fails closed.
+    fn rebuild_without_picture(
+        &mut self,
+        key: BuildKey,
+        pending: &BTreeSet<ThreadId>,
+        effects: &mut Vec<Effect>,
+    ) {
+        if let Some(run) = self.current.as_mut() {
+            run.picture_lost(effects);
+        }
+        effects.push(Effect::CancelEngine { run: key.run });
+        self.rebuild(key, &BTreeSet::new(), pending, effects);
     }
 
     /// The transport is about to send `key`'s body. It's granted only for the current run's
@@ -143,6 +192,17 @@ impl Coordinator {
         let sources = build.sources().to_vec();
         // Only a normal build adds the hold's screen; an inline compaction's request is text.
         let carries_screen = build.inline.is_none();
+        let picture = self.current.as_ref().filter(|run| {
+            carries_screen && matches!(run.screen, Some(Screen::Image(_) | Screen::Picture(..)))
+        });
+        let revocable = picture
+            .and_then(|run| run.route)
+            .is_some_and(|route| route.kind != ConnectionKind::ChatGpt);
+        if picture.is_some_and(|run| !self.run_pictured(run)) {
+            effects.push(Effect::Rebuild(SendKey::Build(key)));
+            self.rebuild_without_picture(key, &pending, effects);
+            return;
+        }
         if let Some(run) = self.current.as_mut()
             && run
                 .route
@@ -156,6 +216,9 @@ impl Coordinator {
             .filter(|_| carries_screen)
             .and_then(super::Run::carried);
         self.grant(SendKey::Build(key), sources, hold, screen, effects);
+        if revocable && let Some(lease) = self.leases.last_mut() {
+            lease.picture = Some(Arc::new(AtomicBool::new(true)));
+        }
     }
 
     /// Records a lease for `key` carrying `sources` and `screen`, grants it and arms its deadline:
@@ -179,6 +242,7 @@ impl Coordinator {
             failed: false,
             held_send: hold.is_some(),
             screen,
+            picture: None,
         });
         effects.push(Effect::Grant(id));
         effects.push(Effect::ArmSendDeadline {
@@ -207,6 +271,20 @@ impl Coordinator {
             .ok_or(Stale)?;
         if let Some(carried) = self.leases[at].screen.take() {
             self.screen_settled(carried, unsent, effects);
+        }
+        let revoked = unsent
+            && self.leases[at]
+                .picture
+                .as_ref()
+                .is_some_and(|open| !open.load(Ordering::Acquire));
+        if revoked
+            && let SendKey::Build(key) = lease.key
+            && self.current.as_ref().is_some_and(|run| {
+                run.id == key.run && run.build.as_ref().is_some_and(|build| build.key() == key)
+            })
+        {
+            let pending = self.pending_deletes();
+            self.rebuild_without_picture(key, &pending, effects);
         }
         if !self.leases[at].failed {
             self.leases.remove(at);

@@ -706,6 +706,89 @@ async fn step(accounts: &mut Accounts) -> bool {
     }
 }
 
+const IMAGE_CATALOG: &str = r#"{"data":[{"type":"model","id":"claude-opus-5-5","display_name":"Opus","capabilities":{"image_input":{"supported":true}}}],"has_more":false}"#;
+
+/// The models the key's route reports may take a picture now.
+fn pictured(accounts: &Accounts) -> Vec<String> {
+    match accounts.connections.route_input() {
+        Some(Input::Engines(_, Availability::Ready(ready))) => ready
+            .images
+            .iter()
+            .map(|slug| slug.as_str().to_owned())
+            .collect(),
+        _ => panic!("the key's route isn't ready"),
+    }
+}
+
+#[tokio::test]
+async fn only_a_verifying_check_of_the_current_key_makes_its_picture_facts_fresh() {
+    let scratch = Scratch::new("key-picture-fresh");
+    let peer = Scripted(Arc::new(std::sync::Mutex::new(Script {
+        responses: [
+            wire(200, IMAGE_CATALOG),
+            wire(500, "{}"),
+            wire(200, IMAGE_CATALOG),
+        ]
+        .into(),
+        ..Script::default()
+    })));
+    let (mut accounts, _) = ready_then_checking(&scratch, peer).await;
+    assert_eq!(
+        pictured(&accounts),
+        ["claude-opus-5-5"],
+        "the last conclusive fact"
+    );
+    let stale = accounts.connections.generation;
+    settle(&mut accounts).await;
+    assert_eq!(accounts.connections.view.anthropic, KeyView::Unconfirmed);
+    assert_eq!(pictured(&accounts), Vec::<String>::new(), "text only");
+    accounts.connection_event(ConnectionEvent::Op(ConnectionOp::CheckAnthropicKey));
+    assert_ne!(accounts.connections.generation, stale);
+    let late = CatalogModel {
+        info: kumochi_protocol::message::ModelInfo {
+            slug: kumochi_protocol::message::ModelSlug::new("claude-opus-5-5").expect("slug"),
+            display_name: kumochi_protocol::message::ModelName::new("Opus").expect("name"),
+            supported_efforts: None,
+        },
+        capabilities: crate::connections::anthropic::models::Capabilities {
+            images: true,
+            pdfs: true,
+            tool_argument_streaming: true,
+            effort: true,
+        },
+    };
+    assert_eq!(
+        accounts.connection_event(ConnectionEvent::Checked {
+            generation: stale,
+            result: Ok(vec![late]),
+        }),
+        vec![]
+    );
+    assert_eq!(
+        pictured(&accounts),
+        Vec::<String>::new(),
+        "an older Check can't restore it"
+    );
+    settle(&mut accounts).await;
+    assert_eq!(accounts.connections.view.anthropic, KeyView::Ready);
+    assert_eq!(pictured(&accounts), ["claude-opus-5-5"]);
+    accounts.connection_event(ConnectionEvent::Refused {
+        tag: accounts
+            .connections
+            .verified
+            .as_ref()
+            .expect("verified")
+            .tag,
+    });
+    assert!(
+        !accounts.connections.fresh,
+        "a refused key's facts are never fresh"
+    );
+    accounts
+        .close(tokio::time::Instant::now(), tokio::time::Instant::now())
+        .await;
+}
+
 #[tokio::test]
 async fn a_check_waiting_on_its_load_cant_bring_a_refused_key_back() {
     let scratch = Scratch::new("key-refused-held-load");

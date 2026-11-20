@@ -699,6 +699,7 @@ impl Accounts {
             .collect()
     }
 
+    #[expect(clippy::too_many_lines, reason = "one arm per connection event")]
     pub(super) fn connection_event(&mut self, event: ConnectionEvent) -> Vec<ControlToShell> {
         let reply = match event {
             ConnectionEvent::StagePlan {

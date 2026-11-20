@@ -362,6 +362,9 @@ impl Coordinator {
         let route = current.route;
         let pictured = self.request_pictured(route, request.choice.as_ref());
         let current = self.current(key.run)?;
+        if !pictured {
+            current.picture_lost(effects);
+        }
         // shortcut: the screen's developer line isn't counted in BOUND, so a request built within
         // about 60 bytes of it is refused at send (failing safe); count it if that's ever hit.
         if current

@@ -304,6 +304,12 @@ pub enum StoreOp {
         /// The run.
         run: RunId,
     },
+    /// A run's image couldn't go to its model before any request carried it, so its turn's
+    /// `attached` or `screen` becomes `model_cant_see`. Nothing answers it.
+    CantSeeScreen {
+        /// The run.
+        run: RunId,
+    },
 }
 
 /// A summary's text. Its `Debug` shows only the length, so formatting a write never prints it.
@@ -346,7 +352,8 @@ impl StoreOp {
             | Self::SetModel { .. }
             | Self::Heard { .. }
             | Self::WithdrawScreen { .. }
-            | Self::ForgetScreen { .. } => None,
+            | Self::ForgetScreen { .. }
+            | Self::CantSeeScreen { .. } => None,
         }
     }
 
@@ -428,7 +435,10 @@ impl StoreOp {
                 choice: choice.clone(),
                 applied: false,
             },
-            Self::Heard { .. } | Self::WithdrawScreen { .. } | Self::ForgetScreen { .. } => {
+            Self::Heard { .. }
+            | Self::WithdrawScreen { .. }
+            | Self::ForgetScreen { .. }
+            | Self::CantSeeScreen { .. } => {
                 return None;
             }
         })

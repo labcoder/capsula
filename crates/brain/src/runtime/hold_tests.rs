@@ -38,9 +38,10 @@ impl crate::engines::Engine for Requested {
     ) -> crate::engines::Round {
         let seen = self.0.clone();
         Box::pin(async move {
-            let crate::engines::Answer::Grant(lease) = gate.ask().await else {
+            let crate::engines::Answer::Grant(mut lease) = gate.ask().await else {
                 return;
             };
+            crate::connections::model::Lease::wrote(&mut lease);
             seen.send(request).unwrap();
             for event in [
                 crate::engines::TurnEvent::TextDelta("selected answer".into()),

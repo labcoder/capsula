@@ -127,6 +127,10 @@ impl PictureRoutes {
     };
 
     #[cfg(test)]
+    #[expect(
+        clippy::fn_params_excessive_bools,
+        reason = "one switch per Claude route"
+    )]
     pub(crate) const fn new(anthropic_key: bool, claude_code: bool) -> Self {
         Self {
             anthropic_key,
@@ -236,6 +240,7 @@ impl Coordinator {
     #[cfg(test)]
     pub(crate) fn set_pictures(&mut self, pictures: PictureRoutes) {
         self.pictures = pictures;
+        self.revoke_pictures();
     }
 
     /// Whether a run's picture may go out on `route` to `model` now. `ChatGPT` sends one on any
@@ -269,6 +274,15 @@ impl Coordinator {
         }
     }
 
+    /// Whether `run`'s picture may go now, on its route to its chosen model.
+    pub(super) fn run_pictured(&self, run: &super::Run) -> bool {
+        let choice = run
+            .snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot.choice.as_ref());
+        self.request_pictured(run.route, choice)
+    }
+
     /// The sign-in each kind has ready now, which a new turn records.
     pub(super) fn arrived_now(&self) -> Arrived {
         let mut arrived = Arrived::default();
@@ -299,6 +313,7 @@ impl Coordinator {
             ConnectionKind::ClaudeCode => &mut self.claude_code,
         };
         *entry = now;
+        self.revoke_pictures();
         // A `ChatGPT` job follows the account's sign-in and sign-out instead.
         let job = self.job.as_ref().map(|job| job.route);
         if kind != ConnectionKind::ChatGpt

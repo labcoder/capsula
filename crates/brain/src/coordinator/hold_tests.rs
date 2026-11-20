@@ -405,6 +405,7 @@ fn a_held_runs_screen_goes_with_its_request_or_fails_the_run() {
     };
     let snapshot = "The image is a snapshot from when the user spoke.";
     let not_ready = "The screen was not included: it wasn't ready in time.";
+    let cant_see = "The screen was not included: this model can't be sent images.";
     let cases = [
         (
             Some(Screen::Image(image.clone())),
@@ -424,7 +425,7 @@ fn a_held_runs_screen_goes_with_its_request_or_fails_the_run() {
         (
             Some(Screen::Image(image)),
             ConnectionKind::AnthropicKey,
-            None,
+            Some(vec![user.clone(), line(cant_see)]),
         ),
     ];
     for (screen, connection, sent) in cases {
@@ -850,39 +851,72 @@ fn a_held_runs_screen_is_told_once_and_an_image_once_its_send_may_have_written_i
 #[test]
 fn a_held_run_that_never_starts_a_request_tells_nothing() {
     use crate::context::{Jpeg, Screen};
-    for ending in ["cancelled before its build", "image refused by the route"] {
-        let mut core = ready_for("captured");
-        let image = Jpeg::new(vec![0xFF, 0xD8, 0xFF, 0xD9]).unwrap();
-        let mut effects = core
-            .submit_hold(
-                prepared(&core, Some(T)),
-                "words".into(),
-                Some(Screen::Image(image)),
-            )
-            .unwrap();
-        effects.extend(core.handle(Input::TurnStored { run: R }).unwrap());
-        let key = engine_key(&core, R);
-        if ending == "cancelled before its build" {
-            effects.extend(core.cancel_hold(KEY));
-            assert_eq!(core.current_run(), None);
-            assert_eq!(core.handle(screened(key, &[T])), Err(Stale));
-        } else {
-            let Input::ContextBuilt(mut done) = screened(key, &[T]) else {
-                unreachable!()
-            };
-            done.result.as_mut().unwrap().request.choice = Some(ModelChoice {
-                connection: ConnectionKind::AnthropicKey,
-                ..choice("captured", Effort::High)
-            });
-            effects.extend(core.handle(Input::ContextBuilt(done)).unwrap());
-            assert!(effects.iter().any(|effect| matches!(
-                effect,
-                Effect::Control(ControlToShell::RunState { error: Some(error), .. })
-                    if error.key() == kumochi_protocol::message::ErrorKey::ScreenUnavailable
-            )));
-        }
-        assert_eq!(told(&effects), Vec::<&Effect>::new(), "{ending}");
-    }
+    let mut core = ready_for("captured");
+    let image = Jpeg::new(vec![0xFF, 0xD8, 0xFF, 0xD9]).unwrap();
+    let mut effects = core
+        .submit_hold(
+            prepared(&core, Some(T)),
+            "words".into(),
+            Some(Screen::Image(image)),
+        )
+        .unwrap();
+    effects.extend(core.handle(Input::TurnStored { run: R }).unwrap());
+    let key = engine_key(&core, R);
+    effects.extend(core.cancel_hold(KEY));
+    assert_eq!(core.current_run(), None);
+    assert_eq!(core.handle(screened(key, &[T])), Err(Stale));
+    assert_eq!(told(&effects), Vec::<&Effect>::new());
+}
+
+#[test]
+fn a_picture_its_route_cant_take_goes_as_model_cant_see_before_any_send() {
+    use crate::context::{InputItem, Jpeg, Role, Screen, ScreenClass};
+    use kumochi_protocol::message::HeldScreen;
+    let mut core = ready_for("captured");
+    let image = Jpeg::new(vec![0xFF, 0xD8, 0xFF, 0xD9]).unwrap();
+    core.submit_hold(
+        prepared(&core, Some(T)),
+        "words".into(),
+        Some(Screen::Image(image)),
+    )
+    .unwrap();
+    core.handle(Input::TurnStored { run: R }).unwrap();
+    let key = engine_key(&core, R);
+    let Input::ContextBuilt(mut done) = screened(key, &[T]) else {
+        unreachable!()
+    };
+    done.result.as_mut().unwrap().request.choice = Some(ModelChoice {
+        connection: ConnectionKind::AnthropicKey,
+        ..choice("captured", Effort::High)
+    });
+    let effects = core.handle(Input::ContextBuilt(done)).unwrap();
+    let started = effects.iter().find_map(|effect| match effect {
+        Effect::StartEngine { request } => Some(request.request.input.clone()),
+        _ => None,
+    });
+    assert_eq!(
+        started,
+        Some(vec![
+            InputItem::Message {
+                role: Role::User,
+                text: "words".to_owned(),
+            },
+            InputItem::Message {
+                role: Role::Developer,
+                text: "The screen was not included: this model can't be sent images.".to_owned(),
+            },
+        ])
+    );
+    assert!(effects.contains(&Effect::Store(StoreOp::CantSeeScreen { run: R })));
+    let cant_see = Effect::Control(ControlToShell::HoldScreen {
+        gesture: KEY.gesture,
+        outcome: HeldScreen::NotIncluded(ScreenClass::ModelCantSee),
+    });
+    assert_eq!(told(&effects), [&cant_see]);
+    assert!(!effects.iter().any(|effect| matches!(
+        effect,
+        Effect::Control(ControlToShell::RunState { error: Some(_), .. })
+    )));
 }
 
 /// A coordinator whose engines are ready with `model` listed.

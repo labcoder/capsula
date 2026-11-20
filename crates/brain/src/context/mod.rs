@@ -429,6 +429,10 @@ impl ModelRequest {
     /// Adds `image` after the newest user message when `pictured`, the coordinator's answer that
     /// this request's route may carry it now; otherwise it refuses, so no adapter ever has an
     /// image to drop.
+    #[expect(
+        clippy::fn_params_excessive_bools,
+        reason = "the coordinator's answer that the run's route may carry its picture now"
+    )]
     fn insert_image(&mut self, image: Jpeg, pictured: bool) -> Result<(), ImageRefused> {
         if !pictured || self.choice.is_none() {
             return Err(ImageRefused::Route);
@@ -442,6 +446,10 @@ impl ModelRequest {
     /// is, then for a screen hold's path the line saying where it was painted, or the line saying
     /// why it isn't there. Each flow has its own lines. An image goes only when `pictured`
     /// ([`Self::insert_image`]).
+    #[expect(
+        clippy::fn_params_excessive_bools,
+        reason = "the coordinator's answer that the run's route may carry its picture now"
+    )]
     pub(crate) fn add_screen(
         &mut self,
         screen: &Screen,
@@ -616,6 +624,10 @@ impl Screen {
     /// [`ModelRequest::add_screen`] took, so a scene is never drawn on a picture that didn't go.
     /// # Errors
     /// [`NoCanvas`] says why not.
+    #[expect(
+        clippy::fn_params_excessive_bools,
+        reason = "the coordinator's answer that the run's route may carry its picture now"
+    )]
     pub(crate) fn canvas(screen: Option<&Self>, pictured: bool) -> Result<Geometry, NoCanvas> {
         let geometry = match screen {
             Some(Self::Picture(_, _, geometry)) => *geometry,

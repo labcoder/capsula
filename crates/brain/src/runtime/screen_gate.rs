@@ -9,6 +9,10 @@ use crate::coordinator::{Availability, PictureRoutes};
 
 impl super::Brain {
     /// The gate for a hold on `choice`, with `enabled` the user's switch for that kind of hold.
+    #[expect(
+        clippy::fn_params_excessive_bools,
+        reason = "the user's switch for that kind of hold"
+    )]
     pub(super) fn picture_gate(&self, choice: Option<&ModelChoice>, enabled: bool) -> ScreenHolds {
         let capture = self.holds.can_capture();
         match choice {

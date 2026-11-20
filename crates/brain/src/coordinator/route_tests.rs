@@ -444,3 +444,278 @@ fn another_connections_choice_fails_while_chatgpt_lists_its_slug() {
         assert_eq!(core.sending(SendKey::Build(key())), None);
     }
 }
+
+/// The key ready under `tag` with model `m`, its fresh fact saying `images` take pictures.
+fn pictured(tag: u64, images: &[&str]) -> Availability {
+    Availability::Ready(Ready {
+        connection: ConnectionTag(tag),
+        models: vec![info("m")],
+        trusted_draw: false,
+        images: images
+            .iter()
+            .map(|slug| ModelSlug::new(slug).expect("slug"))
+            .collect(),
+    })
+}
+
+fn jpeg() -> crate::context::Jpeg {
+    crate::context::Jpeg::new(vec![0xFF, 0xD8, 0xFF, 0xD9]).expect("a jpeg")
+}
+
+fn user() -> crate::context::InputItem {
+    crate::context::InputItem::Message {
+        role: crate::context::Role::User,
+        text: "words".to_owned(),
+    }
+}
+
+fn line(text: &str) -> crate::context::InputItem {
+    crate::context::InputItem::Message {
+        role: crate::context::Role::Developer,
+        text: text.to_owned(),
+    }
+}
+
+const SNAPSHOT: &str = "The image is a snapshot from when the user spoke.";
+const CANT_SEE: &str = "The screen was not included: this model can't be sent images.";
+
+/// A build of `key` whose request names `choice`, with the first build's snapshot.
+fn built_for(key: BuildKey, choice: &ModelChoice) -> Input {
+    Input::ContextBuilt(ContextBuilt {
+        key,
+        snapshot: (key.attempt == 1).then(|| defaults(Some(choice.clone()))),
+        result: Ok(Built {
+            request: ModelRequest {
+                choice: Some(choice.clone()),
+                instructions: String::new(),
+                input: vec![user()],
+                tools: Vec::new(),
+            },
+            sources: vec![T],
+        }),
+    })
+}
+
+fn started_input(effects: &[Effect]) -> Option<Vec<crate::context::InputItem>> {
+    effects.iter().find_map(|effect| match effect {
+        Effect::StartEngine { request } => Some(request.request.input.clone()),
+        _ => None,
+    })
+}
+
+fn told_cant_see(effects: &[Effect]) -> usize {
+    effects
+        .iter()
+        .filter(|effect| {
+            **effect
+                == Effect::Control(ControlToShell::HoldScreen {
+                    gesture: GestureId(1),
+                    outcome: kumochi_protocol::message::HeldScreen::NotIncluded(
+                        crate::context::ScreenClass::ModelCantSee,
+                    ),
+                })
+        })
+        .count()
+}
+
+/// A screen hold's image on the key's model `m`, whose fact says it takes pictures, admitted
+/// with `routes` and built once.
+fn pictured_run(routes: crate::coordinator::PictureRoutes) -> (Coordinator, Vec<Effect>) {
+    let (mut core, hold) = held(
+        vec![
+            ready(CHATGPT, 7, &["m"]),
+            Input::Engines(KEY, pictured(5, &["m"])),
+        ],
+        choice(KEY, "m"),
+        Some(T),
+    );
+    core.set_pictures(routes);
+    core.submit_hold(
+        hold,
+        "words".into(),
+        Some(crate::context::Screen::Image(jpeg())),
+    )
+    .expect("admitted");
+    core.handle(Input::TurnStored { run: R }).expect("current");
+    let effects = core
+        .handle(built_for(key(), &choice(KEY, "m")))
+        .expect("current");
+    (core, effects)
+}
+
+#[test]
+fn a_claude_routes_picture_goes_only_with_its_own_switch_on() {
+    use crate::coordinator::PictureRoutes;
+    for (routes, sent) in [
+        (PictureRoutes::SHIPPED, false),
+        (PictureRoutes::new(false, true), false),
+        (PictureRoutes::new(true, false), true),
+    ] {
+        let (_, effects) = pictured_run(routes);
+        let expected = if sent {
+            vec![
+                user(),
+                crate::context::InputItem::Image(jpeg()),
+                line(SNAPSHOT),
+            ]
+        } else {
+            vec![user(), line(CANT_SEE)]
+        };
+        assert_eq!(started_input(&effects), Some(expected), "{routes:?}");
+        assert_eq!(told_cant_see(&effects), usize::from(!sent), "{routes:?}");
+        assert_eq!(
+            effects.contains(&Effect::Store(StoreOp::CantSeeScreen { run: R })),
+            !sent,
+            "{routes:?}"
+        );
+    }
+}
+
+#[test]
+fn a_picture_fact_changing_alone_never_fails_a_hold() {
+    let (core, hold) = held(
+        vec![
+            ready(CHATGPT, 7, &["m"]),
+            Input::Engines(KEY, pictured(5, &["m"])),
+        ],
+        choice(KEY, "m"),
+        None,
+    );
+    for images in [&[][..], &["m", "other"], &["other"]] {
+        assert!(
+            !core.hold_availability_changes(KEY, &pictured(5, images), Some(&hold)),
+            "{images:?}"
+        );
+    }
+    assert!(core.hold_availability_changes(KEY, &pictured(6, &["m"]), Some(&hold)));
+}
+
+#[test]
+fn a_grant_refuses_a_picture_whose_fact_alone_went_false_and_rebuilds_without_it() {
+    use crate::coordinator::PictureRoutes;
+    let (mut core, effects) = pictured_run(PictureRoutes::new(true, false));
+    assert_eq!(
+        started_input(&effects),
+        Some(vec![
+            user(),
+            crate::context::InputItem::Image(jpeg()),
+            line(SNAPSHOT)
+        ])
+    );
+    assert_eq!(
+        core.handle(Input::Engines(KEY, pictured(5, &[]))),
+        Ok(Vec::new()),
+        "text authority, kind, tag and slug are unchanged"
+    );
+    let refused = core
+        .handle(Input::SendReady {
+            key: SendKey::Build(key()),
+            hold: None,
+        })
+        .expect("current");
+    assert!(refused.contains(&Effect::Rebuild(SendKey::Build(key()))));
+    assert!(
+        !refused
+            .iter()
+            .any(|effect| matches!(effect, Effect::Grant(_)))
+    );
+    assert!(refused.contains(&Effect::Store(StoreOp::CantSeeScreen { run: R })));
+    assert_eq!(told_cant_see(&refused), 1);
+    assert_eq!(failure(&refused), None);
+    let again = super::engine_key(&core, R);
+    assert_ne!(again, key(), "a new attempt");
+    let rebuilt = core
+        .handle(built_for(again, &choice(KEY, "m")))
+        .expect("current");
+    assert_eq!(started_input(&rebuilt), Some(vec![user(), line(CANT_SEE)]));
+    let granted = core
+        .handle(Input::SendReady {
+            key: SendKey::Build(again),
+            hold: None,
+        })
+        .expect("current");
+    assert!(
+        granted
+            .iter()
+            .any(|effect| matches!(effect, Effect::Grant(_)))
+    );
+}
+
+#[test]
+fn a_revoked_picture_grant_that_wrote_nothing_rebuilds_without_the_picture() {
+    use crate::coordinator::PictureRoutes;
+    for unsent in [true, false] {
+        let (mut core, _) = pictured_run(PictureRoutes::new(true, false));
+        let effects = core
+            .handle(Input::SendReady {
+                key: SendKey::Build(key()),
+                hold: None,
+            })
+            .expect("current");
+        let lease = effects
+            .iter()
+            .find_map(|effect| match effect {
+                Effect::Grant(lease) => Some(*lease),
+                _ => None,
+            })
+            .expect("granted");
+        let open = core.picture_grant(lease).expect("a revocable grant");
+        assert!(open.load(Ordering::Acquire));
+        core.handle(Input::Engines(KEY, pictured(5, &[])))
+            .expect("current");
+        assert!(
+            !open.load(Ordering::Acquire),
+            "revoked when the fact went false"
+        );
+        let settled = core
+            .handle(if unsent {
+                Input::SendUnsent { lease }
+            } else {
+                Input::SendSettled { lease }
+            })
+            .expect("current");
+        assert_eq!(
+            settled.contains(&Effect::Store(StoreOp::CantSeeScreen { run: R })),
+            unsent,
+            "{unsent}"
+        );
+        assert_eq!(told_cant_see(&settled), usize::from(unsent), "{unsent}");
+        assert_eq!(
+            super::engine_key(&core, R) != key(),
+            unsent,
+            "only an unsent send is built again: {unsent}"
+        );
+    }
+}
+
+#[test]
+fn a_chatgpt_picture_grant_is_never_revocable() {
+    let (mut core, hold) = held(
+        vec![ready(CHATGPT, 7, &["m"])],
+        choice(CHATGPT, "m"),
+        Some(T),
+    );
+    core.submit_hold(
+        hold,
+        "words".into(),
+        Some(crate::context::Screen::Image(jpeg())),
+    )
+    .expect("admitted");
+    core.handle(Input::TurnStored { run: R }).expect("current");
+    core.handle(built_for(key(), &choice(CHATGPT, "m")))
+        .expect("current");
+    let effects = core
+        .handle(Input::SendReady {
+            key: SendKey::Build(key()),
+            hold: None,
+        })
+        .expect("current");
+    let lease = effects
+        .iter()
+        .find_map(|effect| match effect {
+            Effect::Grant(lease) => Some(*lease),
+            _ => None,
+        })
+        .expect("granted");
+    assert!(core.picture_grant(lease).is_none());
+}

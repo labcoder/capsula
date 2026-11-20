@@ -53,6 +53,16 @@ impl super::Store {
         self.unsent_screen(run, None)
     }
 
+    /// Marks `run`'s screen `model_cant_see` when it says `attached` or `screen`: its model
+    /// stopped taking pictures before any send carrying the image was granted.
+    ///
+    /// # Errors
+    /// When the run's id doesn't fit SQL, or the write fails.
+    pub(crate) fn cant_see_screen(&mut self, run: RunId) -> Result<(), StoreError> {
+        let to = column(HeldScreen::NotIncluded(ScreenClass::ModelCantSee));
+        self.unsent_screen(run, Some(to))
+    }
+
     fn unsent_screen(&mut self, run: RunId, to: Option<&str>) -> Result<(), StoreError> {
         let run = super::sql_id(run.0, StoreError::NoRun)?;
         self.conn.execute(

@@ -1305,7 +1305,8 @@ impl Brain {
                 Effect::StartJob { job, kind, request } => self.start_job(job, kind, request),
                 Effect::CancelJob(job) => drop(self.job.take_if(|(held, _)| *held == job)),
                 Effect::Grant(lease) => {
-                    let granted = SendLease::new(lease, self.inputs_tx.clone());
+                    let granted = SendLease::new(lease, self.inputs_tx.clone())
+                        .with_picture(self.coordinator.picture_grant(lease));
                     engines::answer(&self.asks, lease.key, Answer::Grant(granted));
                 }
                 Effect::Rebuild(key) => {
