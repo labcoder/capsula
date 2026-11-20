@@ -183,8 +183,10 @@ sequenceDiagram
   yet, so their sends settle unsent; each must before its route carries a picture.
 - **Picture grant.** A send carrying a picture on a Claude route also carries a revocable grant.
   The coordinator closes it as soon as the run may no longer send that picture, and the
-  transport checks it right before its first write: closed, nothing is written, the round ends
-  as `Rebuild` and settles unsent, and the coordinator builds again without the picture. A lease carrying a hold's picture settles it once: unsent, the run is as if never
+  transport checks it at its first write attempt, after any early response it reads: closed,
+  nothing is written, the round ends as `Rebuild` and settles unsent, and the coordinator builds
+  again without the picture.
+- **The picture's settlement.** A lease carrying a hold's picture settles it once: unsent, the run is as if never
   granted (a later grant carries the picture again, or the run's end clears the mark); otherwise
   the shell is told `HoldScreen`. A failed lease's late settlement settles only the picture.
 - **Held deletes.** A delete whose thread an unsettled lease carries waits in `deleting` with no
@@ -367,10 +369,12 @@ always on `ChatGPT`, and on a Claude route with its switch on and its fresh fact
 the model under the run's own sign-in. When that answer is no and no send carrying the picture
 has attempted a write, the build goes without it: the model gets "The screen was not included:
 this model can't be sent images.", the shell hears `HoldScreen` as `NotIncluded(ModelCantSee)`,
-and the turn's `screen` becomes `model_cant_see`. The grant asks again, so a fact that goes false
-between the build and the send builds again the same way, and so does a revoked picture grant
-("The send lease"). If the image can't go otherwise (no user message left, or a send may already
-have written it), the run fails with `ScreenUnavailable` rather than sending without it. What the hold carried goes in the run's row
+and the turn's `screen` becomes `model_cant_see`. A picture no send has written, a pending hold's
+included, closes the same way as soon as its model's fact goes false, and stays closed if the fact
+comes back. The grant asks again, and a revoked picture grant whose send wrote nothing builds
+again the same way ("The send lease"). A send that may have written settles without building
+again: the run's next build carries the picture again if the fact came back, and fails with
+`ScreenUnavailable` only if it's still false, as it does with no user message left. What the hold carried goes in the run's row
 with its turn (store.md, `runs.screen`), and the shell hears it once as `HoldScreen`: an image
 when a send carrying it settles after attempting a write ("The send lease"), anything else when
 the run's first request starts. An inline compaction's send carries only text, so it doesn't

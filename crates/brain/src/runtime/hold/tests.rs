@@ -2279,6 +2279,59 @@ async fn a_hold_asks_for_its_picture_without_a_walk_that_could_be_cut_short() {
 }
 
 #[tokio::test]
+async fn a_pending_holds_picture_closes_once_its_recipient_stops_taking_pictures() {
+    use crate::context::ConnectionTag;
+    use crate::coordinator::{Availability, PictureRoutes, Ready};
+    use kumochi_protocol::message::{ConnectionKind, ModelSlug, ScreenClass};
+    let scratch = Scratch::new("hold-picture-latch");
+    let (mut brain, _release, _decoded, _fetch) =
+        crate::runtime::tests::holds::input(&scratch, Vec::new(), "not submitted").await;
+    let (out, _output) = mpsc::channel(16);
+    let queue = RefCell::new(DataQueue::new(super::super::window()));
+    let ready_notify = Notify::new();
+    let mut tap = Tap::from_env();
+    let mut link = Link::new(&out, &queue, &ready_notify, &mut tap);
+    let slug = ModelSlug::new("m").unwrap();
+    let key = |images: Vec<ModelSlug>| {
+        crate::coordinator::Input::Engines(
+            ConnectionKind::AnthropicKey,
+            Availability::Ready(Ready {
+                connection: ConnectionTag(5),
+                models: Vec::new(),
+                images,
+                trusted_draw: false,
+            }),
+        )
+    };
+    brain
+        .coordinator
+        .set_pictures(PictureRoutes::new(true, false));
+    brain.coordinator.handle(key(vec![slug.clone()])).unwrap();
+    screen_hold(&mut brain, KEY, ready());
+    brain.holds.pending.as_mut().unwrap().screen_recipient =
+        Some((ConnectionKind::AnthropicKey, slug.clone()));
+    let part = |brain: &Brain| match &brain.holds.pending.as_ref().unwrap().screen {
+        ScreenPart::Ready(_) => Some(None),
+        ScreenPart::Closed(class) => Some(Some(*class)),
+        _ => None,
+    };
+    brain.screen_holds_changed(&mut link).unwrap();
+    assert_eq!(part(&brain), Some(None), "the fact still holds");
+    brain.coordinator.handle(key(Vec::new())).unwrap();
+    brain.screen_holds_changed(&mut link).unwrap();
+    assert_eq!(part(&brain), Some(Some(ScreenClass::ModelCantSee)));
+    brain.coordinator.handle(key(vec![slug])).unwrap();
+    brain.screen_holds_changed(&mut link).unwrap();
+    assert_eq!(
+        part(&brain),
+        Some(Some(ScreenClass::ModelCantSee)),
+        "the fact coming back doesn't reopen it"
+    );
+    brain.holds.lost();
+    brain.close().await;
+}
+
+#[tokio::test]
 async fn a_capture_fault_ends_the_hold_not_ready_and_leaves_screen_holds_on() {
     use crate::screen::Closed;
     let scratch = Scratch::new("hold-screen-fault");

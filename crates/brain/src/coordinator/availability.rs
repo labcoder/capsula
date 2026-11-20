@@ -250,12 +250,20 @@ impl Coordinator {
         if route.kind == ConnectionKind::ChatGpt {
             return true;
         }
-        let Availability::Ready(ready) = self.availability_of(route.kind) else {
+        matches!(self.availability_of(route.kind), Availability::Ready(ready) if ready.connection == route.tag)
+            && model.is_some_and(|model| self.takes_pictures(route.kind, model))
+    }
+
+    /// Whether `kind` may take a picture for `model` now, whatever its sign-in: `ChatGPT` as its
+    /// hold's gate allowed, a Claude route by its switch and its fresh fact.
+    pub(crate) fn takes_pictures(&self, kind: ConnectionKind, model: &ModelSlug) -> bool {
+        if kind == ConnectionKind::ChatGpt {
+            return true;
+        }
+        let Availability::Ready(ready) = self.availability_of(kind) else {
             return false;
         };
-        self.pictures.allows(route.kind)
-            && ready.connection == route.tag
-            && model.is_some_and(|model| ready.images.contains(model))
+        self.pictures.allows(kind) && ready.images.contains(model)
     }
 
     /// Whether a request on `route` for `choice` may carry its run's picture now: always on
@@ -314,6 +322,19 @@ impl Coordinator {
         };
         *entry = now;
         self.revoke_pictures();
+        // A picture no send has written closes once its model stops taking it, so the same
+        // capture can't regain permission if the fact comes back.
+        if self
+            .current
+            .as_ref()
+            .and_then(|run| run.snapshot.as_ref()?.choice.as_ref())
+            .is_some_and(|choice| {
+                choice.connection == kind && !self.takes_pictures(kind, &choice.model)
+            })
+            && let Some(run) = self.current.as_mut()
+        {
+            run.picture_lost(effects);
+        }
         // A `ChatGPT` job follows the account's sign-in and sign-out instead.
         let job = self.job.as_ref().map(|job| job.route);
         if kind != ConnectionKind::ChatGpt

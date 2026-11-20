@@ -602,11 +602,9 @@ fn a_grant_refuses_a_picture_whose_fact_alone_went_false_and_rebuilds_without_it
             line(SNAPSHOT)
         ])
     );
-    assert_eq!(
-        core.handle(Input::Engines(KEY, pictured(5, &[]))),
-        Ok(Vec::new()),
-        "text authority, kind, tag and slug are unchanged"
-    );
+    // Only the route's switch goes off: no availability change reaches the run, so the grant's
+    // own check must refuse.
+    core.set_pictures(PictureRoutes::SHIPPED);
     let refused = core
         .handle(Input::SendReady {
             key: SendKey::Build(key()),
@@ -718,4 +716,39 @@ fn a_chatgpt_picture_grant_is_never_revocable() {
         })
         .expect("granted");
     assert!(core.picture_grant(lease).is_none());
+}
+
+#[test]
+fn a_held_picture_closes_when_its_fact_goes_false_and_stays_closed_when_it_returns() {
+    use crate::coordinator::PictureRoutes;
+    let (mut core, hold) = held(
+        vec![
+            ready(CHATGPT, 7, &["m"]),
+            Input::Engines(KEY, pictured(5, &["m"])),
+        ],
+        choice(KEY, "m"),
+        Some(T),
+    );
+    core.set_pictures(PictureRoutes::new(true, false));
+    core.submit_hold(
+        hold,
+        "words".into(),
+        Some(crate::context::Screen::Image(jpeg())),
+    )
+    .expect("admitted");
+    core.handle(Input::TurnStored { run: R }).expect("current");
+    let closed = core
+        .handle(Input::Engines(KEY, pictured(5, &[])))
+        .expect("current");
+    assert!(closed.contains(&Effect::Store(StoreOp::CantSeeScreen { run: R })));
+    assert_eq!(told_cant_see(&closed), 1);
+    assert_eq!(failure(&closed), None);
+    assert_eq!(
+        core.handle(Input::Engines(KEY, pictured(5, &["m"]))),
+        Ok(Vec::new())
+    );
+    let effects = core
+        .handle(built_for(key(), &choice(KEY, "m")))
+        .expect("current");
+    assert_eq!(started_input(&effects), Some(vec![user(), line(CANT_SEE)]));
 }
