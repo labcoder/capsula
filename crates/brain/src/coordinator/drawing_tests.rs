@@ -437,6 +437,179 @@ fn whole_scene_removal_preserves_legacy_speech() {
     }
 }
 
+#[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one real store sequence checks prior audio, three speech promises, and a later unspoken step"
+)]
+fn a_synthesis_run_failure_settles_committed_and_in_flight_speech_without_ending_text() {
+    use kumochi_protocol::message::{
+        OutputGeneration, SegmentId, SegmentStart, SpeechPcm, SpeechPromise, StepRef,
+    };
+
+    use crate::coordinator::Synthesized;
+    use crate::voice::reply::Heard;
+
+    let scratch = Scratch::new("drawing-speech-timeout");
+    let mut store = open(&scratch);
+    let mut core = super::spoken();
+    let build = super::engine_key(&core, R);
+    let say_text = |core: &mut Coordinator, text: &str| {
+        core.handle(Input::Engine {
+            key: build,
+            event: TurnEvent::TextDelta(text.into()),
+        })
+        .expect("current answer")
+    };
+    let tts = |core: &mut Coordinator, segment, made| {
+        core.handle(Input::Tts {
+            run: R,
+            segment: SegmentId(segment),
+            made,
+        })
+        .expect("current reply")
+    };
+    let generation = OutputGeneration(1);
+    let final_frame = |segment, seq, total| {
+        Effect::Data(DataToShell::SpeechPcm(SpeechPcm {
+            run: R,
+            segment: SegmentId(segment),
+            output_generation: generation,
+            seq,
+            samples: Vec::new(),
+            last: Some(total),
+        }))
+    };
+    let heard = |core: &mut Coordinator| {
+        core.current(R)
+            .expect("current")
+            .reply
+            .as_ref()
+            .expect("reply")
+            .heard()
+    };
+    let _ = say_text(&mut core, "First. ");
+    let _ = tts(&mut core, 0, Synthesized::Audio(vec![5; 24]));
+    assert_eq!(
+        tts(&mut core, 0, Synthesized::Done),
+        [final_frame(0, 1, 24)]
+    );
+    core.handle(Input::SpeechProgress {
+        run: R,
+        segment: SegmentId(0),
+        sample: 8,
+    })
+    .expect("the first line is still playing");
+    let prefix = Some(Heard {
+        segment: SegmentId(0),
+        sample: 8,
+        text: 0,
+    });
+    assert_eq!(heard(&mut core), prefix);
+
+    let mut records =
+        vec![json!({"begin":{"v":1,"scene":"diagram","surface":"overlay","alt":"diagram"}})];
+    records.extend((0..4).map(|index| {
+        json!({"step":{
+            "id":format!("s{index}"),"say":"Look here.",
+            "put":[{"shape":{"id":format!("r{index}"),"kind":"rect","box":[0,0,10,10]}}]
+        }})
+    }));
+    records.push(json!({"end":{}}));
+    let args = serde_json::to_vec(&json!({"records":records})).expect("arguments");
+    let mut lookup = Vec::new();
+    assert_eq!(
+        core.drawing_call(
+            T,
+            &crate::dispatch::LedgerKey {
+                run: R,
+                route: crate::dispatch::Route::Model,
+                call: "draw".into()
+            },
+            crate::dispatch::DrawAction::Complete(crate::dispatch::validate_draw(&args)),
+            &mut lookup,
+        ),
+        crate::dispatch::Dispatch::Committing
+    );
+    let mut pending_step = commit(&mut core, &mut store, &lookup);
+    let mut scene = None;
+    for index in 0..3 {
+        if index == 2 {
+            assert!(matches!(
+                pending(&pending_step).1,
+                Write::Step { revision: 3, .. }
+            ));
+            assert_eq!(
+                tts(&mut core, 1, Synthesized::Failed { run: true }),
+                [final_frame(1, 0, 0), final_frame(2, 0, 0)]
+            );
+            assert_eq!(tts(&mut core, 1, Synthesized::Audio(vec![5; 24])), []);
+        }
+        pending_step = commit(&mut core, &mut store, &pending_step);
+        let at = pending_step
+            .iter()
+            .position(|effect| matches!(effect, Effect::Data(DataToShell::SceneStepCommit { .. })))
+            .expect("commit");
+        let Effect::Data(DataToShell::SceneStepCommit {
+            run,
+            scene: committed,
+            index: actual,
+            speech,
+            ..
+        }) = &pending_step[at]
+        else {
+            unreachable!("matched above");
+        };
+        assert_eq!(
+            (*run, *committed, *actual),
+            (R, *scene.get_or_insert(*committed), index)
+        );
+        let segment = SegmentId(index + 1);
+        assert_eq!(
+            *speech,
+            Some(SpeechPromise {
+                output_generation: generation,
+                segment
+            })
+        );
+        assert_eq!(
+            pending_step[at + 1],
+            Effect::Data(DataToShell::SegmentQueued {
+                run: R,
+                segment,
+                step: Some(StepRef {
+                    scene: *committed,
+                    index
+                }),
+                start: SegmentStart::Speech,
+                output_generation: generation,
+            })
+        );
+        if index == 2 {
+            assert_eq!(pending_step[at + 2], final_frame(3, 0, 0));
+        }
+    }
+    let next = commit(&mut core, &mut store, &pending_step);
+    assert!(next.iter().any(|effect| matches!(
+        effect,
+        Effect::Data(DataToShell::SceneStepCommit {
+            index: 3,
+            speech: None,
+            ..
+        })
+    )));
+    assert!(
+        !next
+            .iter()
+            .any(|effect| matches!(effect, Effect::Data(DataToShell::SegmentQueued { .. })))
+    );
+    assert_eq!(
+        say_text(&mut core, "The reply continues."),
+        [super::text("The reply continues.")]
+    );
+    assert_eq!(heard(&mut core), prefix);
+}
+
 /// A round that completes while its drawing is still being stored ends through the tool loop,
 /// so its call is answered and its items stored before anything else.
 #[test]

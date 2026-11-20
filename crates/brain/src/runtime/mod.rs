@@ -241,6 +241,7 @@ pub(crate) enum Seen {
     CheckpointOwed,
     /// The brain handled a control input and applied its effects.
     ControlApplied,
+    FirstPcmExpired,
     /// A page reply landed while the data queue was full and waits for room.
     PageHeld,
     /// Another pipe ended first, and the control reader's grace began.
@@ -845,6 +846,8 @@ impl Brain {
             let described = link.recovery.is_some();
             let running = self.coordinator.current_run();
             let deadline = self.deadline;
+            let first_pcm = self.pump.as_ref().and_then(Pump::first_pcm_deadline);
+            let first_pcm_due = first_pcm.is_some_and(|due| due.at <= Instant::now());
             let send_due = self.next_send_deadline();
             let take_engine = link.queue.borrow().bytes() < DATA_CAP;
             let take_turns = self.admits_turn(&link);
@@ -858,10 +861,10 @@ impl Brain {
                         Err(ended) => return ended,
                     }
                 }
-                () = std::future::ready(()), if take_engine && !link.held_pages.is_empty() => {
+                () = std::future::ready(()), if take_engine && !first_pcm_due && !link.held_pages.is_empty() => {
                     link.held_pages.pop_front().expect("a held page is ready")
                 }
-                () = std::future::ready(()), if feed => {
+                () = std::future::ready(()), if feed && !first_pcm_due => {
                     if self.queue_recovery(&mut link).is_err() {
                         return Ended::Lost;
                     }
@@ -905,7 +908,7 @@ impl Brain {
                     continue;
                 }
                 Some(input) = self.inputs.recv() => input,
-                Some(input) = pages.recv() => input,
+                Some(input) = pages.recv(), if !first_pcm_due => input,
                 Some(input) = turns.recv(), if take_turns => {
                     if self.hold_end(kumochi_protocol::message::HoldStatus::Cancelled, &mut link).is_err() {
                         return Ended::Lost;
@@ -920,6 +923,16 @@ impl Brain {
                         return Ended::Lost;
                     }
                     continue;
+                }
+                () = sleep_until(first_pcm.map(|due| due.at)) => {
+                    match self.pump.as_mut().and_then(|pump| pump.expire_first_pcm(first_pcm?)) {
+                        Some((run, segment)) => {
+                            #[cfg(test)]
+                            self.observer.send(Seen::FirstPcmExpired).ok();
+                            Input::Tts { run, segment, made: Synthesized::Failed { run: true } }
+                        }
+                        None => continue,
+                    }
                 }
                 Some(input) = self.engine_events.recv(), if take_engine => input,
                 () = room.notified(), if !take_engine => continue,

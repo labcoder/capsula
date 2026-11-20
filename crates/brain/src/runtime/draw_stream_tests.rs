@@ -1275,6 +1275,317 @@ async fn unspoken_text_drawing_lines_appear_once_in_chat_and_history() {
 }
 
 #[tokio::test]
+async fn first_pcm_deadline_is_taken_with_a_full_fifo_but_loses_to_output_change() {
+    for at in [AtFirstPcm::Silent, AtFirstPcm::NewOutput] {
+        Box::pin(first_pcm_with_full_fifo(at)).await;
+    }
+}
+
+#[tokio::test]
+async fn a_ready_stop_wins_first_pcm_expiry_before_pruning_the_fifo() {
+    Box::pin(first_pcm_with_full_fifo(AtFirstPcm::Stop)).await;
+}
+
+#[tokio::test]
+async fn unloading_a_blocked_speak_still_settles_narration_without_bumping_again() {
+    Box::pin(first_pcm_with_full_fifo(AtFirstPcm::Unloaded)).await;
+}
+
+#[tokio::test]
+async fn first_pcm_expiry_keeps_ready_events_behind_the_full_fifo() {
+    for at in [
+        AtFirstPcm::Pcm,
+        AtFirstPcm::Done,
+        AtFirstPcm::Failed,
+        AtFirstPcm::Eof,
+    ] {
+        Box::pin(first_pcm_with_full_fifo(at)).await;
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AtFirstPcm {
+    Silent,
+    Unloaded,
+    Stop,
+    NewOutput,
+    Pcm,
+    Done,
+    Failed,
+    Eof,
+}
+
+#[expect(
+    clippy::too_many_lines,
+    reason = "one saturated core loop fixture checks the distinct expiry outcomes and predecessors"
+)]
+async fn first_pcm_with_full_fifo(at: AtFirstPcm) {
+    use std::future::poll_fn;
+    use std::path::Path;
+    use std::sync::{Arc, Mutex, mpsc as native};
+    use std::task::Poll;
+
+    use kumochi_protocol::message::{ControlToBrain, DATA_WINDOW};
+
+    use super::DATA_CAP;
+    use super::data::Owner;
+    use crate::voice::pump::{OutputMode, Pump};
+    use crate::voice::tts::{Engine, TtsError, TtsEvent, TtsHandle};
+
+    type Frames = native::Receiver<Result<Vec<f32>, TtsError>>;
+
+    #[derive(Clone)]
+    struct PausedSynth {
+        frames: Arc<Mutex<Frames>>,
+        entered: native::Sender<()>,
+    }
+    impl Iterator for PausedSynth {
+        type Item = Result<Vec<f32>, TtsError>;
+        fn next(&mut self) -> Option<Self::Item> {
+            self.entered.send(()).ok();
+            self.frames.lock().expect("test owner").recv().ok()
+        }
+    }
+    impl Engine for PausedSynth {
+        type Stream = Self;
+        fn stream(&self, _text: &str) -> Result<Self::Stream, TtsError> {
+            Ok(self.clone())
+        }
+    }
+
+    let scratch = Scratch::new("first-pcm-full-fifo");
+    let mut brain = brain(&scratch);
+    let mut seen = brain.observe();
+    let (frames, native) = native::channel();
+    let mut frames = Some(frames);
+    let (entered, inside_next) = native::channel();
+    let (loading, entering_load) = native::channel();
+    let synth = PausedSynth {
+        frames: Arc::new(Mutex::new(native)),
+        entered,
+    };
+    let step = |received: &native::Receiver<()>| {
+        received
+            .recv_timeout(Duration::from_secs(5))
+            .expect("owner reaches the barrier");
+    };
+    let (reports, _) = crate::voice::Reports::new();
+    let tts = TtsHandle::spawn_with(
+        tokio::runtime::Handle::current(),
+        reports,
+        move |_: &Path| {
+            loading.send(()).ok();
+            Ok(synth.clone())
+        },
+    )
+    .expect("synthetic owner");
+    tts.load("models".into(), 1);
+    brain.pump = Some(Pump::new(tts, OutputMode::Conducted));
+    let generation = OutputGeneration(7);
+    brain.offline(Input::SpokenReplies { loaded: true });
+    brain.offline(Input::AudioOutput {
+        rate: 24_000,
+        generation,
+    });
+    let (out, _keep_controls) = mpsc::channel(64);
+    let (control, mut controls) = mpsc::channel(2);
+    let (_turns, mut turns) = mpsc::channel(1);
+    let (_pages, mut pages) = mpsc::channel(1);
+    let (ready, room) = (Notify::new(), Notify::new());
+    let mut tap = Tap::from_env();
+    let queue = RefCell::new(DataQueue::new(window()));
+    queue.borrow_mut().push(Owner::Marker, vec![0; window()]);
+    assert_eq!(
+        queue
+            .borrow_mut()
+            .pop(std::time::Instant::now())
+            .expect("initial credit")
+            .len(),
+        window()
+    );
+    queue.borrow_mut().wrote();
+    let mut link = Link::new(&out, &queue, &ready, &mut tap);
+    link.recovery = brain.describe(&mut link).expect("initial membership");
+    let key = start(&mut brain, &mut link).await;
+    let run = key.run;
+    tokio::time::pause();
+    apply(
+        &mut brain,
+        &mut link,
+        Input::Engine {
+            key,
+            event: TurnEvent::TextDelta("Ready now. Another".into()),
+        },
+    );
+    let due = brain
+        .pump
+        .as_ref()
+        .and_then(Pump::first_pcm_deadline)
+        .expect("open Speak")
+        .at;
+    step(&entering_load);
+    step(&inside_next);
+    let tts = brain.pump.as_ref().expect("pump").tts();
+    let original_generation = tts.generation();
+    let ready_event = match at {
+        AtFirstPcm::Unloaded => {
+            tts.unload(1);
+            None
+        }
+        AtFirstPcm::Pcm => {
+            frames
+                .as_ref()
+                .expect("open input")
+                .send(Ok(vec![0.0; 2]))
+                .expect("owner waits");
+            step(&inside_next);
+            Some(TtsEvent::Pcm {
+                segment: 0,
+                samples: vec![0; 2],
+            })
+        }
+        AtFirstPcm::Done | AtFirstPcm::Failed | AtFirstPcm::Eof => {
+            if at == AtFirstPcm::Failed {
+                frames
+                    .as_ref()
+                    .expect("open input")
+                    .send(Err(TtsError::Synthesis))
+                    .expect("owner waits");
+            }
+            if at == AtFirstPcm::Eof {
+                tts.cancel();
+            }
+            drop(frames.take());
+            tts.load("models".into(), 2);
+            step(&entering_load);
+            Some(if at == AtFirstPcm::Done {
+                TtsEvent::Done {
+                    segment: 0,
+                    total: 0,
+                }
+            } else {
+                TtsEvent::Failed {
+                    segment: 0,
+                    error: TtsError::Synthesis,
+                }
+            })
+        }
+        AtFirstPcm::Silent | AtFirstPcm::Stop | AtFirstPcm::NewOutput => None,
+    };
+    let generation_at_expiry = tts.generation();
+    if at == AtFirstPcm::Unloaded {
+        assert_eq!(generation_at_expiry, original_generation + 1);
+    }
+    {
+        let mut queue = queue.borrow_mut();
+        let fill = frame::encode(
+            &DataToShell::AssistantText {
+                run,
+                delta: "x".repeat(240_000).into(),
+            },
+            Pipe::Data,
+        )
+        .expect("bounded frame");
+        for _ in 0..3 {
+            queue.push(Owner::Marker, fill.clone());
+        }
+        assert!(queue.bytes() >= DATA_CAP);
+    }
+    {
+        let core = brain.core(&mut controls, &mut turns, &mut pages, &room, link);
+        tokio::pin!(core);
+        assert!(poll_fn(|cx| Poll::Ready(core.as_mut().poll(cx).is_pending())).await);
+        tokio::time::advance(due - tokio::time::Instant::now() + Duration::from_millis(1)).await;
+        assert!(
+            queue
+                .borrow_mut()
+                .pop(tokio::time::Instant::now().into_std())
+                .is_none(),
+            "the writer has no credit at expiry"
+        );
+        control
+            .try_send((ControlToBrain::Pong, 0))
+            .expect("a live shell");
+        if matches!(at, AtFirstPcm::Stop | AtFirstPcm::NewOutput) {
+            let message = if at == AtFirstPcm::NewOutput {
+                ControlToBrain::AudioOutput {
+                    rate: 24_000,
+                    generation: OutputGeneration(8),
+                }
+            } else {
+                ControlToBrain::Stop {
+                    run,
+                    revealed: Vec::new(),
+                }
+            };
+            control
+                .try_send((message, 0))
+                .expect("control is ready at expiry");
+        }
+        assert!(poll_fn(|cx| Poll::Ready(core.as_mut().poll(cx).is_pending())).await);
+    }
+    assert_eq!(brain.pump.as_ref().and_then(Pump::first_pcm_deadline), None);
+    let did_expire = matches!(at, AtFirstPcm::Silent | AtFirstPcm::Unloaded);
+    let mut expiries = 0;
+    while let Ok(observed) = seen.try_recv() {
+        expiries += usize::from(matches!(observed, Seen::FirstPcmExpired));
+    }
+    assert_eq!(expiries, usize::from(did_expire));
+    if at == AtFirstPcm::Unloaded {
+        assert_eq!(
+            brain.pump.as_ref().expect("pump").tts().generation(),
+            generation_at_expiry
+        );
+    }
+    assert!(
+        queue.borrow_mut().pop(std::time::Instant::now()).is_none(),
+        "no byte credit"
+    );
+    let mut terminals = Vec::new();
+    while queue.borrow().bytes() > 0 {
+        queue.borrow_mut().grant(DATA_WINDOW);
+        terminals.extend(
+            all_frames(&queue)
+                .into_iter()
+                .filter(|message| matches!(message, DataToShell::SpeechPcm(_))),
+        );
+    }
+    let expected = did_expire.then_some(DataToShell::SpeechPcm(SpeechPcm {
+        run,
+        segment: SegmentId(0),
+        output_generation: generation,
+        seq: 0,
+        samples: Vec::new(),
+        last: Some(0),
+    }));
+    assert_eq!(terminals, expected.into_iter().collect::<Vec<_>>());
+    if let Some(event) = ready_event {
+        let pump = brain.pump.as_mut().expect("pump");
+        assert_eq!(
+            tokio::time::timeout(Duration::from_millis(100), pump.next()).await,
+            Ok((run, event))
+        );
+    }
+    if did_expire {
+        assert_eq!(brain.coordinator.current_run(), Some(run));
+        assert_eq!(
+            brain.handle(Input::Engine {
+                key,
+                event: TurnEvent::TextDelta(" sentence. More".into()),
+            }),
+            Some(vec![Effect::Data(DataToShell::AssistantText {
+                run,
+                delta: " sentence. More".into(),
+            })]),
+        );
+    }
+    tokio::time::resume();
+    drop(frames);
+    brain.offline(Input::ShellLost);
+    brain.close().await;
+}
+
+#[tokio::test]
 async fn unspoken_lines_in_a_spoken_drawing_exclude_assigned_and_blank_say() {
     let scratch = Scratch::new("drawing-spoken-say");
     let mut brain = brain(&scratch);

@@ -5,8 +5,8 @@ use std::time::Duration;
 
 use kumochi_protocol::message::{RunId, SegmentId};
 
-use super::Pump;
-use crate::voice::tts::{Engine, TtsError, TtsEvent, TtsHandle};
+use super::{FIRST_PCM_LIMIT, FirstPcmDeadline, OutputMode, Pump};
+use crate::voice::tts::{Engine, Speak, TtsError, TtsEvent, TtsHandle};
 
 const WAIT: Duration = Duration::from_secs(5);
 
@@ -57,6 +57,10 @@ struct Harness {
 
 impl Harness {
     fn new() -> Self {
+        Self::for_output(OutputMode::Legacy)
+    }
+
+    fn for_output(output: OutputMode) -> Self {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_time()
             .build()
@@ -74,7 +78,7 @@ impl Harness {
         .expect("the owner thread starts");
         tts.load("models".into(), 1);
         Self {
-            pump: Pump::new(tts),
+            pump: Pump::new(tts, output),
             streams,
             entered,
             runtime,
@@ -92,6 +96,7 @@ impl Harness {
     fn speak(&mut self, run: u64, segment: u32) -> std_mpsc::Sender<Frame> {
         let (frames, stream) = std_mpsc::channel();
         self.streams.lock().expect("unpoisoned").push_back(stream);
+        let _runtime = self.runtime.enter();
         self.pump
             .speak(RunId(run), SegmentId(segment), 24_000, "hello".into());
         frames
@@ -109,6 +114,38 @@ impl Harness {
             tokio::time::timeout(Duration::from_millis(100), self.pump.next()).await
         });
         assert!(next.is_err(), "{next:?}");
+    }
+
+    fn advance(&self, by: Duration) {
+        self.runtime.block_on(tokio::time::advance(by));
+    }
+
+    fn deadline(&self) -> FirstPcmDeadline {
+        self.pump
+            .first_pcm_deadline()
+            .expect("a dispatched Speak is timed")
+    }
+
+    fn expire(&mut self, due: FirstPcmDeadline) -> Option<(RunId, SegmentId)> {
+        let _runtime = self.runtime.enter();
+        self.pump.expire_first_pcm(due)
+    }
+
+    fn wait_buffered(&self) {
+        let until = std::time::Instant::now() + WAIT;
+        let events = &self
+            .pump
+            .active
+            .as_ref()
+            .expect("the Speak is active")
+            .events;
+        while events.is_empty() && !events.is_closed() {
+            assert!(
+                std::time::Instant::now() < until,
+                "the owner sends or closes"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
     }
 }
 
@@ -290,4 +327,178 @@ fn another_run_starts_over_without_credit() {
     harness.assert_pending();
     harness.pump.credit(RunId(2), 1);
     assert_eq!(harness.next(), pcm(2, 0, 3));
+}
+
+#[test]
+fn only_conducted_dispatches_arm_and_first_pcm_disarms_even_when_held_for_credit() {
+    for output in [OutputMode::Legacy, OutputMode::Conducted] {
+        let mut h = Harness::for_output(output);
+        h.runtime.block_on(async { tokio::time::pause() });
+        assert_eq!(h.pump.first_pcm_deadline(), None, "no dispatch yet");
+        let frames = h.speak(1, 0);
+        let due = h.pump.first_pcm_deadline();
+        assert_eq!(due.is_some(), output == OutputMode::Conducted);
+        send(&frames, 2);
+        h.wait_buffered();
+        h.assert_pending();
+        assert_eq!(
+            h.pump.first_pcm_deadline(),
+            None,
+            "PCM is held, not stalled"
+        );
+        h.advance(FIRST_PCM_LIMIT);
+        if let Some(due) = due {
+            assert_eq!(h.expire(due), None);
+        }
+        h.pump.credit(RunId(1), 2);
+        assert_eq!(h.next(), pcm(1, 0, 2));
+    }
+}
+
+#[test]
+fn a_busy_owner_does_not_arm_first_pcm_for_the_rejected_speak() {
+    let mut h = Harness::for_output(OutputMode::Conducted);
+    let _blocked = h.speak(1, 0);
+    h.wait_entered();
+    h.pump.cancel(RunId(1));
+    let (out, _events) = tokio::sync::mpsc::channel(1);
+    let generation = h.pump.tts.generation();
+    assert_eq!(
+        h.pump.tts.try_speak(Speak {
+            segment: 1,
+            generation,
+            rate: 24_000,
+            text: "waiting segment".into(),
+            out,
+        }),
+        Ok(())
+    );
+
+    let _rejected = h.speak(1, 2);
+    assert_eq!(h.pump.first_pcm_deadline(), None);
+    assert_eq!(
+        h.next(),
+        (
+            RunId(1),
+            TtsEvent::Failed {
+                segment: 2,
+                error: TtsError::Synthesis
+            }
+        )
+    );
+    assert_eq!(h.pump.tts.generation(), generation);
+}
+
+#[test]
+fn a_ready_event_at_the_deadline_keeps_its_outcome_without_credit_or_forwarding() {
+    enum Ready {
+        Audio,
+        Done,
+        Failed,
+        Eof,
+    }
+    for ready in [Ready::Audio, Ready::Done, Ready::Failed, Ready::Eof] {
+        let mut h = Harness::for_output(OutputMode::Conducted);
+        h.runtime.block_on(async { tokio::time::pause() });
+        let frames = h.speak(1, 4);
+        h.wait_entered();
+        let due = h.deadline();
+        let expected = match ready {
+            Ready::Audio => {
+                send(&frames, 2);
+                pcm(1, 4, 2)
+            }
+            Ready::Done => {
+                drop(frames);
+                (
+                    RunId(1),
+                    TtsEvent::Done {
+                        segment: 4,
+                        total: 0,
+                    },
+                )
+            }
+            Ready::Failed => {
+                frames
+                    .send(Err(TtsError::Synthesis))
+                    .expect("owner is waiting");
+                ended(1, 4, TtsError::Synthesis)
+            }
+            Ready::Eof => {
+                h.pump.tts.cancel();
+                drop(frames);
+                ended(1, 4, TtsError::Synthesis)
+            }
+        };
+        h.wait_buffered();
+        let generation = h.pump.tts.generation();
+        h.advance(FIRST_PCM_LIMIT);
+        let expired = h.runtime.block_on(async {
+            for _ in 0..128 {
+                tokio::task::consume_budget().await;
+            }
+            assert!(!tokio::task::coop::has_budget_remaining());
+            h.pump.expire_first_pcm(due)
+        });
+        assert_eq!(expired, None);
+        assert_eq!(h.pump.tts.generation(), generation);
+        assert_eq!(h.pump.first_pcm_deadline(), None);
+        if let Ready::Audio = ready {
+            h.assert_pending();
+            h.pump.credit(RunId(1), 2);
+        }
+        assert_eq!(h.next(), expected);
+    }
+}
+
+#[test]
+fn an_unpublished_reserved_send_does_not_delay_first_pcm_expiry() {
+    let mut h = Harness::for_output(OutputMode::Conducted);
+    h.runtime.block_on(async { tokio::time::pause() });
+    let _frames = h.speak(1, 4);
+    let due = h.deadline();
+    let (out, events) = tokio::sync::mpsc::channel(1);
+    let permit = out
+        .try_reserve_owned()
+        .expect("sender reserved its capacity");
+    h.pump.active.as_mut().expect("dispatched Speak").events = events;
+
+    h.advance(FIRST_PCM_LIMIT);
+    assert_eq!(h.expire(due), Some((RunId(1), SegmentId(4))));
+    assert!(permit.release().is_closed());
+    assert_eq!(h.expire(due), None);
+}
+
+#[test]
+fn first_pcm_timeout_fences_once_while_the_same_owner_is_still_in_next() {
+    let mut h = Harness::for_output(OutputMode::Conducted);
+    h.runtime.block_on(async { tokio::time::pause() });
+    let old = h.speak(1, 0);
+    h.wait_entered();
+    let due = h.deadline();
+    let generation = h.pump.tts.generation();
+    let tick = Duration::from_millis(1);
+    h.advance(
+        FIRST_PCM_LIMIT
+            .checked_sub(tick)
+            .expect("before the deadline"),
+    );
+    assert_eq!(h.expire(due), None);
+    h.advance(tick);
+    assert_eq!(h.expire(due), Some((RunId(1), SegmentId(0))));
+    assert_eq!(h.expire(due), None);
+    assert_eq!(h.pump.tts.generation(), generation + 1);
+
+    let next = h.speak(2, 0);
+    let replacement = h.deadline();
+    assert_eq!(h.expire(due), None);
+    assert_eq!(h.deadline(), replacement);
+    assert_eq!(h.pump.tts.generation(), generation + 1);
+    send_value(&old, 2, 0.5);
+    drop(old);
+    h.wait_entered();
+    h.pump.credit(RunId(2), 2);
+    send(&next, 2);
+    h.wait_buffered();
+    assert_eq!(h.next(), pcm(2, 0, 2));
 }
