@@ -1,6 +1,6 @@
 use std::sync::Mutex;
 
-use kumochi_protocol::message::{SceneId, StepRef};
+use kumochi_protocol::message::{SceneId, SpeechRetirement, StepRef};
 
 use super::*;
 use crate::speaker::conductor::{
@@ -15,11 +15,11 @@ struct Levels {
     torn: bool,
     picture: Option<PictureLevel>,
     writes: usize,
-    exits: usize,
+    exits: Vec<OwnerExit>,
 }
 
 #[derive(Clone, Default)]
-struct FakeIo(Arc<Mutex<Levels>>);
+pub(super) struct FakeIo(Arc<Mutex<Levels>>);
 
 impl DrawingIo for FakeIo {
     fn view(&mut self) -> Result<Option<ViewLevel>, ()> {
@@ -39,13 +39,13 @@ impl DrawingIo for FakeIo {
         }
     }
 
-    fn owner_exited(&mut self) {
-        self.0.lock().unwrap().exits += 1;
+    fn owner_exited(&mut self, exit: OwnerExit) {
+        self.0.lock().unwrap().exits.push(exit);
     }
 }
 
 impl FakeIo {
-    fn attach(worker: &mut Worker, port: &Port) -> Self {
+    pub(super) fn attach(worker: &mut Worker, port: &Port) -> Self {
         let io = Self::default();
         worker.drawing = Some(Drawing::new(SESSION, Arc::clone(&port.closed), io.clone()));
         io
@@ -90,6 +90,10 @@ impl FakeIo {
 
     fn writes(&self) -> usize {
         self.0.lock().unwrap().writes
+    }
+
+    pub(super) fn exits(&self) -> Vec<OwnerExit> {
+        self.0.lock().unwrap().exits.clone()
     }
 }
 
@@ -415,13 +419,17 @@ fn failed_backend_start_and_idle_exit_notify_without_an_ingress_packet() {
             drop(input.take());
         }
         let origin = Instant::now().checked_sub(ms(37)).unwrap();
+        let mut reports = Vec::new();
         own(
             &port,
             worker.engine,
             origin,
             drawing,
             |_| panic!("no credit"),
-            |_| {},
+            |report| {
+                reports.push(report);
+                true
+            },
             |_, provided| {
                 assert_eq!(provided, origin);
                 if fail {
@@ -432,8 +440,85 @@ fn failed_backend_start_and_idle_exit_notify_without_an_ingress_packet() {
             },
         );
         assert!(port.closed.load(Ordering::Acquire));
-        assert_eq!(io.0.lock().unwrap().exits, 1);
+        assert_eq!(io.exits(), [OwnerExit::Closed]);
         assert_eq!(io.writes(), 0);
+        if fail {
+            assert!(reports.is_empty());
+        } else {
+            assert_eq!(
+                reports,
+                [ControlToBrain::SpeechStopped {
+                    run: RUN,
+                    cursor: None,
+                }]
+            );
+        }
+    }
+}
+
+#[test]
+fn refused_ordered_delivery_closes_ingress_and_preserves_only_the_accepted_prefix() {
+    let mut ordered: Vec<_> = (0..3)
+        .map(|id| {
+            ControlToBrain::SpeechRetired(SpeechRetirement {
+                run: RUN,
+                output: OUTPUT,
+                segment: SegmentId(id),
+                retired: 480,
+                heard: 0,
+                final_segment: true,
+            })
+        })
+        .collect();
+    ordered.push(ControlToBrain::SpeechStopped {
+        run: RUN,
+        cursor: None,
+    });
+    for (capacity, stopping) in [(1, false), (1, true), (3, true)] {
+        let (mut worker, input, port, requests, _replies) = fake();
+        let io = FakeIo::attach(&mut worker, &port);
+        for id in 0..3 {
+            let mut line = packet(7, 0, 480, Some(480));
+            line.pcm.segment = SegmentId(id);
+            worker.engine.offer(line, ms(u64::from(id) * 20)).unwrap();
+            worker.engine.tick(ms(u64::from(id + 1) * 20)).unwrap();
+        }
+        if stopping {
+            input.command(Command::Stop).unwrap();
+        }
+        if capacity == 3 {
+            port.closed.store(true, Ordering::Release);
+        }
+        let (send, received) = mpsc::sync_channel(capacity);
+        let mut attempts = 0;
+        worker.serve(
+            &port,
+            Instant::now().checked_sub(ms(60)).unwrap(),
+            |_| panic!("no ingress credit is owed"),
+            |report| {
+                assert!(attempts <= capacity, "report attempted after refusal");
+                assert_eq!(report, ordered[attempts]);
+                attempts += 1;
+                send.try_send(report).is_ok()
+            },
+        );
+        assert_eq!(attempts, capacity + 1);
+        assert_eq!(received.try_iter().collect::<Vec<_>>(), ordered[..capacity]);
+        assert_eq!(io.exits(), [OwnerExit::ReportRefused]);
+        assert!(matches!(
+            input.command(Command::Stop),
+            Err(TrySendError::Disconnected(Command::Stop))
+        ));
+        assert!(matches!(
+            input.submit(packet(8, 0, 1, Some(1))),
+            Err(TrySendError::Disconnected(_))
+        ));
+        if !stopping {
+            let Request::Open(_, control) = requests.try_recv().unwrap() else {
+                panic!("expected the pending open to be fenced");
+            };
+            assert_eq!(control.fenced_handoff(), Some(0));
+        }
     }
 }
 

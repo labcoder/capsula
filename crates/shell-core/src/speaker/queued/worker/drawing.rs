@@ -6,7 +6,7 @@ use kumochi_protocol::message::MAX_SEGMENTS_PER_RUN;
 use kumochi_scene::record::Start;
 
 use super::gate::DropOutcome;
-use super::{Anchor, Engine, Worker};
+use super::{Anchor, Engine, OwnerExit, Worker};
 use crate::speaker::conductor::{
     Binding, Completion, Conductor, Gate, Handoff, Head, Motion, Picture, PictureLevel,
     PictureState, Playback, Route, RouteStamp, SynthesisFinal, View, ViewLevel,
@@ -15,13 +15,14 @@ use crate::speaker::conductor::{
 pub(in crate::speaker::queued) trait DrawingIo: Send + 'static {
     fn view(&mut self) -> Result<Option<ViewLevel>, ()>;
     fn picture(&mut self, binding: Binding, level: Option<PictureLevel>);
-    fn owner_exited(&mut self);
+    fn owner_exited(&mut self, exit: OwnerExit);
 }
 
 pub(super) struct Drawing {
     session: u64,
     closed: Arc<AtomicBool>,
     io: Box<dyn DrawingIo>,
+    exit: OwnerExit,
     newest: Option<u64>,
     wanted: Option<ViewLevel>,
     pending_revoke: Option<Binding>,
@@ -42,12 +43,17 @@ impl Drawing {
             session,
             closed,
             io: Box::new(io),
+            exit: OwnerExit::Closed,
             newest: None,
             wanted: None,
             pending_revoke: None,
             bound: None,
             published: None,
         }
+    }
+
+    pub(super) fn report_refused(&mut self) {
+        self.exit = OwnerExit::ReportRefused;
     }
 
     fn accepts(&self, key: Binding, engine: &Engine) -> bool {
@@ -170,7 +176,7 @@ fn picture_state(picture: Picture, completion: Completion) -> Option<PictureStat
 impl Drop for Drawing {
     fn drop(&mut self) {
         self.closed.store(true, Ordering::Release);
-        self.io.owner_exited();
+        self.io.owner_exited(self.exit);
     }
 }
 

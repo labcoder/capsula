@@ -33,6 +33,9 @@ including virtual or discarded samples. Only the contiguous heard prefix contrib
 to heard history or the Stop cursor. Reported retirement neither releases a drawing
 binding nor confirms a quiet tail. A retiring worker retains its report sink through
 a confirmed future quiet deadline; an unknown tail never produces a quiet receipt.
+The sink accepts or refuses each report in order. Refusal keeps the accepted prefix,
+closes ingress, and stops the owner, which signals report failure once. It attempts
+no more reports and makes no quiet claim.
 The legacy opener and reports are unchanged.
 
 Only contiguous, generation-matched observations on a live route can extend the heard

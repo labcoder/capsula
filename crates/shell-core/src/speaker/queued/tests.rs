@@ -185,7 +185,10 @@ fn audible_virtual_audible_stop_cannot_bridge_the_heard_gap() {
     assert!(!engine.final_at(ms(1060)));
     let mut receipts = Receipts::default();
     let mut reports = Vec::new();
-    receipts.publish(&engine, ms(1060), &mut |report| reports.push(report));
+    assert!(receipts.publish(&engine, ms(1060), &mut |report| {
+        reports.push(report);
+        true
+    }));
     assert_eq!(
         reports,
         [(0, 480), (1, 0), (2, 0)].map(|(id, heard)| ControlToBrain::SpeechRetired(
@@ -207,10 +210,13 @@ fn audible_virtual_audible_stop_cannot_bridge_the_heard_gap() {
     assert_eq!(engine.tail(), Tail::At(ms(1060)));
     assert!(!engine.final_at(ms(1059)));
     assert_eq!(receipts.deadline(&engine), Some(ms(1060)));
-    receipts.publish(&engine, ms(1059), &mut |_| panic!("not quiet"));
+    assert!(receipts.publish(&engine, ms(1059), &mut |_| panic!("not quiet")));
     assert!(engine.final_at(ms(1060)));
     reports.clear();
-    receipts.publish(&engine, ms(1060), &mut |report| reports.push(report));
+    assert!(receipts.publish(&engine, ms(1060), &mut |report| {
+        reports.push(report);
+        true
+    }));
     assert_eq!(
         reports,
         [ControlToBrain::SpeechStopped {
@@ -222,7 +228,7 @@ fn audible_virtual_audible_stop_cannot_bridge_the_heard_gap() {
         }]
     );
     assert_eq!(receipts.deadline(&engine), None);
-    receipts.publish(&engine, ms(1061), &mut |_| panic!("already sent"));
+    assert!(receipts.publish(&engine, ms(1061), &mut |_| panic!("already sent")));
     assert_eq!(engine.queue.completed, 3);
     assert!(engine.queue.segments.is_empty());
 }

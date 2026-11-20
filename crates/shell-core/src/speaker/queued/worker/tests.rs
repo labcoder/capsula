@@ -73,7 +73,7 @@ fn stop_is_processed_while_the_open_and_ingress_mailboxes_are_busy() {
             |credit| {
                 credits.send(credit).unwrap();
             },
-            |_| {},
+            |_| true,
         );
         closed.send(()).unwrap();
     });
@@ -166,6 +166,7 @@ fn a_late_physical_open_is_retired_without_feeding_or_waiting_for_backend_drop()
 fn dropping_input_keeps_a_worker_alive_until_its_known_quiet_deadline() {
     static OCCUPIED: AtomicBool = AtomicBool::new(false);
     let (mut worker, input, port, requests, replies) = fake();
+    let io = drawing_tests::FakeIo::attach(&mut worker, &port);
     let mut source = [0; 480];
     input.command(Command::Expect).unwrap();
     input.submit(packet(7, 0, 480, Some(480))).unwrap();
@@ -201,7 +202,10 @@ fn dropping_input_keeps_a_worker_alive_until_its_known_quiet_deadline() {
         &port,
         origin,
         |_| {},
-        |message| reports.push((origin.elapsed(), message)),
+        |message| {
+            reports.push((origin.elapsed(), message));
+            true
+        },
     );
     assert_eq!(reports.len(), 2, "{reports:?}");
     assert!(matches!(reports[0].1, ControlToBrain::SpeechRetired(_)));
@@ -216,6 +220,7 @@ fn dropping_input_keeps_a_worker_alive_until_its_known_quiet_deadline() {
         }
     );
     assert!(reports[1].0 >= quiet_at);
+    assert_eq!(io.exits(), [OwnerExit::Closed]);
 }
 
 #[test]
@@ -433,7 +438,7 @@ fn malformed_input_reports_disconnected_instead_of_staying_full() {
             |_| {
                 panic!("malformed ingress does not earn credit");
             },
-            |_| {},
+            |_| true,
         );
     });
     input.worker = owner.thread().clone();

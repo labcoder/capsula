@@ -25,8 +25,8 @@ impl Receipts {
         &mut self,
         engine: &Engine,
         now: Duration,
-        report: &mut impl FnMut(ControlToBrain),
-    ) {
+        report: &mut impl FnMut(ControlToBrain) -> bool,
+    ) -> bool {
         let queue = &engine.queue;
         loop {
             let final_segment = self.next < queue.completed;
@@ -50,20 +50,22 @@ impl Receipts {
                     .min(u64::from(sample)),
             )
             .expect("heard prefix lies within the segment");
-            if heard != 0 {
-                self.heard = Some(Cursor {
-                    segment,
-                    sample: heard,
-                });
-            }
-            report(ControlToBrain::SpeechRetired(SpeechRetirement {
+            if !report(ControlToBrain::SpeechRetired(SpeechRetirement {
                 run: queue.run,
                 output: queue.logical,
                 segment,
                 retired: sample,
                 heard,
                 final_segment,
-            }));
+            })) {
+                return false;
+            }
+            if heard != 0 {
+                self.heard = Some(Cursor {
+                    segment,
+                    sample: heard,
+                });
+            }
             if !final_segment {
                 self.through = sample;
                 break;
@@ -73,12 +75,13 @@ impl Receipts {
             self.through = 0;
         }
         if !self.stopped && engine.final_at(now) {
-            self.stopped = true;
-            report(ControlToBrain::SpeechStopped {
+            self.stopped = report(ControlToBrain::SpeechStopped {
                 run: queue.run,
                 cursor: self.heard,
             });
+            return self.stopped;
         }
+        true
     }
 
     pub(super) fn deadline(&self, engine: &Engine) -> Option<Duration> {
