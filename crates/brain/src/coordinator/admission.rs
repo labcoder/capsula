@@ -105,7 +105,7 @@ pub enum Unbuilt {
 #[derive(Debug)]
 #[expect(
     clippy::struct_excessive_bools,
-    reason = "each flag is its own fact about the admitted request, not one state spread over flags"
+    reason = "each flag is its own fact about the build, not one state spread over flags"
 )]
 pub(super) struct Build {
     pub(super) control: crate::recall::control::CancelOnDrop,
@@ -115,7 +115,9 @@ pub(super) struct Build {
     exposed: BTreeSet<ThreadId>,
     /// A voided build's rebuild waits until these deletes are answered.
     blocked: BTreeSet<ThreadId>,
+    /// The request may be sent until a delete or a rebuild invalidates it.
     admitted: bool,
+    /// Claude Code observed a provider failure while answering this build.
     pub(super) provider_failed: bool,
     /// The admitted request offered the draw tool, or the dev fixture answers (D13-H2).
     offers_draw: bool,
@@ -373,7 +375,7 @@ impl Coordinator {
         let route = current.route;
         let pictured = self.request_pictured(route, request.choice.as_ref());
         let current = self.current(key.run)?;
-        let pictured = pictured && !current.screen_lost;
+        let pictured = pictured && current.screen_lost.is_none();
         if !pictured {
             current.picture_lost(effects);
         }
@@ -384,7 +386,11 @@ impl Coordinator {
             .as_ref()
             .is_some_and(|screen| request.add_screen(screen, pictured).is_err())
         {
-            let reason = kumochi_protocol::message::ErrorKey::ScreenUnavailable.into();
+            let reason = if !pictured && current.exposed() {
+                current.picture_stopped()
+            } else {
+                kumochi_protocol::message::ErrorKey::ScreenUnavailable.into()
+            };
             return self.fail_with(key.run, Failure::Engine, reason, effects);
         }
         let current = self.current(key.run)?;

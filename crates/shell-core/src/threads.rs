@@ -54,6 +54,8 @@ enum Read {
     First,
     More,
     Repair,
+    /// The newest page, replacing every cached row, so older ones reload through pagination.
+    Refresh,
     Renamed(Option<ThreadCursor>),
 }
 
@@ -574,10 +576,20 @@ impl Threads {
         }
     }
 
+    /// `thread`'s stored events changed with no run frame: its open page is read again, and the
+    /// reply replaces every cached row, so none stays as it was before the change.
+    pub fn events_changed(&mut self, thread: ThreadId) {
+        if self.open == Some(thread) && self.event_needed != Some(Read::First) {
+            self.event_needed = Some(Read::Refresh);
+        }
+    }
+
     pub fn run_state(&mut self, thread: ThreadId) {
         // shortcut: Stop and failure are told before their outcome is written, so this read can
         // miss it until the next RunState; refresh on the store's ack if that shows.
-        if self.open == Some(thread) && self.event_needed != Some(Read::First) {
+        if self.open == Some(thread)
+            && !matches!(self.event_needed, Some(Read::First | Read::Refresh))
+        {
             self.event_needed = Some(Read::Repair);
         }
         if self.searching() {
@@ -622,7 +634,7 @@ impl Threads {
         }
         if self.reads.borrow_mut().cards.take_refresh(self.view)
             && self.open.is_some()
-            && self.event_needed != Some(Read::First)
+            && !matches!(self.event_needed, Some(Read::First | Read::Refresh))
         {
             self.event_needed = Some(Read::Repair);
         }
@@ -645,7 +657,7 @@ impl Threads {
             let after = match read {
                 Read::More => self.next,
                 Read::Renamed(after) => after,
-                Read::First | Read::Repair => None,
+                Read::First | Read::Repair | Read::Refresh => None,
             };
             self.list_pending = Some(Pending {
                 request,
@@ -675,7 +687,7 @@ impl Threads {
                 read,
                 stale: false,
                 after: None,
-                proves: if matches!(read, Read::First | Read::Repair) {
+                proves: if matches!(read, Read::First | Read::Repair | Read::Refresh) {
                     self.settled
                 } else {
                     None
@@ -773,7 +785,7 @@ impl Threads {
                 if pending.revision != self.event_revision || self.open != Some(thread) {
                     return;
                 }
-                if pending.read == Read::First || !self.loaded {
+                if matches!(pending.read, Read::First | Read::Refresh) || !self.loaded {
                     self.events = events;
                     self.before = before;
                 } else if pending.read == Read::Repair
@@ -833,6 +845,7 @@ impl Threads {
             | DataToShell::Models { .. }
             | DataToShell::HoldWords { .. }
             | DataToShell::HoldStored { .. }
+            | DataToShell::EventsChanged { .. }
             | DataToShell::Transcript(_)
             | DataToShell::SegmentQueued { .. }
             | DataToShell::SpeechPcm(_) => {
@@ -871,7 +884,7 @@ impl Threads {
             self.pages.insert(row.id, pending.after);
         }
         match pending.read {
-            Read::First => {
+            Read::First | Read::Refresh => {
                 self.rows = threads;
                 self.next = next;
             }

@@ -569,6 +569,16 @@ impl Presence {
                     self.hold_stored(generation, gesture);
                     bytes
                 }
+                DataToShell::EventsChanged { thread } => {
+                    for model in [&self.threads, &self.chat] {
+                        model.update(cx, |state, cx| {
+                            state.events_changed(thread);
+                            cx.notify();
+                        });
+                    }
+                    self.request_pages(cx);
+                    bytes
+                }
                 DataToShell::Models { connection, models } => {
                     self.settings.update(cx, |state, cx| {
                         state.set_models(connection, models);

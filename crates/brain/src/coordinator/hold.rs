@@ -111,7 +111,30 @@ impl super::Run {
             run: self.id,
             hold,
             outcome,
+            thread: self
+                .route
+                .is_some_and(|route| route.kind != ConnectionKind::ChatGpt)
+                .then_some(self.thread),
         })
+    }
+
+    /// Whether a send of the run may have written its picture: a grant took the held image and no
+    /// settlement has proved that send unsent.
+    pub(super) fn exposed(&self) -> bool {
+        self.untold.is_none() && matches!(self.screen, Some(Screen::Image(_) | Screen::Picture(..)))
+    }
+
+    /// Why the run ends when its picture may no longer go after a send may have written it.
+    pub(super) fn picture_stopped(&self) -> kumochi_protocol::message::UserError {
+        match self.screen_lost {
+            Some(super::Lost::Generation) => kumochi_protocol::message::UserError::new(
+                kumochi_protocol::message::ErrorKey::ScreenConnectionChanged,
+                Vec::new(),
+                vec![kumochi_protocol::message::Action::OpenSettings],
+            )
+            .expect("one action is within the limit"),
+            _ => kumochi_protocol::message::ErrorKey::ScreenPictureStopped.into(),
+        }
     }
 
     /// The run's picture may no longer go to its model. Before any send could have written it,

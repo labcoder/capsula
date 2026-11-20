@@ -437,6 +437,13 @@ pub enum Effect {
     },
     /// Tell the shell a held recognition's turn is stored, only on the hold's own connection.
     HoldStored(HoldKey),
+    /// Tell the shell `thread`'s stored events changed, only on the hold's own connection.
+    EventsChanged {
+        /// The hold whose picture's settlement changed them.
+        hold: HoldKey,
+        /// The held turn's thread.
+        thread: ThreadId,
+    },
     /// Tell the shell what a hold's screen carried into its turn, only on the hold's own
     /// connection.
     HoldScreen {
@@ -582,6 +589,15 @@ enum Notify {
     Nobody,
 }
 
+/// Why a run's picture was lost for good, after the hold sealed it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Lost {
+    /// Its recipient stopped taking pictures.
+    Fact,
+    /// Claude Code's account generation moved.
+    Generation,
+}
+
 /// The run in flight, or one that ended and is waiting on the store.
 #[derive(Debug)]
 #[expect(
@@ -621,9 +637,8 @@ struct Run {
     /// The run took up a screen hold's picture, so while marks are on every round stores its
     /// native items without boxes, even after the picture is withdrawn or can't be drawn on.
     pictured: bool,
-    /// The hold's picture may never go again: its recipient stopped taking pictures, or Claude
-    /// Code's generation moved, after the hold sealed it. Every later build reads it.
-    screen_lost: bool,
+    /// Why the hold's picture may never go again, the first cause kept. Every later build reads it.
+    screen_lost: Option<Lost>,
     /// The hold's gesture while its screen is still to be told to the shell, which happens once:
     /// an image once a granted send carrying it may have written it, anything else at the run's
     /// first request. A granted send holds it until it settles.
@@ -1339,7 +1354,7 @@ impl Coordinator {
             untold,
             hold,
             pictured: matches!(screen, Some(crate::context::Screen::Picture(..))),
-            screen_lost: false,
+            screen_lost: None,
             screen,
             build: None,
             arrived,

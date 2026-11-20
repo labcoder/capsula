@@ -120,6 +120,9 @@ pub(super) struct Carried {
     pub(super) run: RunId,
     pub(super) hold: HoldKey,
     pub(super) outcome: HeldScreen,
+    /// The held turn's thread, only on a route behind a picture switch, so its written
+    /// settlement tells the shell even after the run has gone.
+    pub(super) thread: Option<ThreadId>,
 }
 
 impl Coordinator {
@@ -160,7 +163,7 @@ impl Coordinator {
                 .iter()
                 .chain(&self.current)
                 .find(|run| run.id == key.run)
-                .is_some_and(|run| !run.screen_lost && self.run_pictured(run))
+                .is_some_and(|run| run.screen_lost.is_none() && self.run_pictured(run))
             {
                 grant.close();
             }
@@ -179,12 +182,25 @@ impl Coordinator {
             return;
         };
         let lost = kind.map_or_else(
-            || !self.takes_pictures(choice.connection, &choice.model),
-            |kind| choice.connection == kind,
+            || {
+                (!self.takes_pictures(choice.connection, &choice.model))
+                    .then_some(super::Lost::Fact)
+            },
+            |kind| (choice.connection == kind).then_some(super::Lost::Generation),
         );
-        if lost && let Some(run) = self.current.as_mut() {
-            run.screen_lost = true;
+        if let Some(lost) = lost
+            && let Some(run) = self.current.as_mut()
+        {
+            run.screen_lost.get_or_insert(lost);
         }
+    }
+
+    /// Why the current run ends now: a send may have written its picture, which may no longer go,
+    /// so no later request of the run may start.
+    pub(super) fn written_picture_lost(&self) -> Option<kumochi_protocol::message::UserError> {
+        let run = self.current.as_ref()?;
+        (run.exposed() && (run.screen_lost.is_some() || !self.run_pictured(run)))
+            .then(|| run.picture_stopped())
     }
 
     /// The current run's picture may no longer go: its build goes again, without the picture
@@ -224,27 +240,22 @@ impl Coordinator {
             .current
             .as_ref()
             .filter(|run| run.id == key.run)
-            .and_then(|run| run.build.as_ref())
-            .filter(|build| build.key() == key && build.admitted());
-        let Some(build) = current else {
+            .and_then(|run| Some((run, run.build.as_ref()?)))
+            .filter(|(_, build)| build.key() == key && build.admitted());
+        let Some((run, build)) = current else {
             effects.push(Effect::Rebuild(SendKey::Build(key)));
             return;
         };
-        let refused = self
-            .current
-            .as_ref()
-            .and_then(|run| run.route)
+        let refused = run
+            .route
             .map_or_else(|| Some(sign_in_needed()), |route| self.refusal(route))
             .or_else(|| {
                 // A request that started before the switch went off still holds its own copy.
-                self.current
-                    .as_ref()
-                    .filter(|run| matches!(run.screen, Some(crate::context::Screen::Withdrawn)))
-                    .map(|_| kumochi_protocol::message::ErrorKey::ScreenUnavailable.into())
+                matches!(run.screen, Some(crate::context::Screen::Withdrawn))
+                    .then(|| kumochi_protocol::message::ErrorKey::ScreenUnavailable.into())
             })
             .or_else(|| {
                 // A same-key catalog refresh can drop the model after the build was admitted.
-                let run = self.current.as_ref()?;
                 let model = run
                     .snapshot
                     .as_ref()
@@ -274,11 +285,17 @@ impl Coordinator {
         let sources = build.sources().to_vec();
         // The request handed to the engine is judged, never the run's account of its screen.
         let pictured = build.pictured();
-        let picture = self.current.as_ref().filter(|_| pictured);
-        let revocable = picture
-            .and_then(|run| run.route)
-            .is_some_and(|route| route.kind != ConnectionKind::ChatGpt);
-        if picture.is_some_and(|run| run.screen_lost || !self.run_pictured(run)) {
+        let revocable = pictured
+            && run
+                .route
+                .is_some_and(|route| route.kind != ConnectionKind::ChatGpt);
+        if let Some(reason) = self.written_picture_lost() {
+            effects.push(Effect::Rebuild(SendKey::Build(key)));
+            self.fail_with(key.run, Failure::Engine, reason, effects)
+                .expect("the run is current");
+            return;
+        }
+        if pictured && (run.screen_lost.is_some() || !self.run_pictured(run)) {
             effects.push(Effect::Rebuild(SendKey::Build(key)));
             self.rebuild_without_picture(key, &pending, effects);
             return;
@@ -363,8 +380,13 @@ impl Coordinator {
                 run.id == key.run && run.build.as_ref().is_some_and(|build| build.key() == key)
             })
         {
-            let pending = self.pending_deletes();
-            self.rebuild_without_picture(key, &pending, effects);
+            if let Some(reason) = self.written_picture_lost() {
+                self.fail_with(key.run, Failure::Engine, reason, effects)
+                    .expect("the run is current");
+            } else {
+                let pending = self.pending_deletes();
+                self.rebuild_without_picture(key, &pending, effects);
+            }
         }
         if !self.leases[at].failed {
             self.leases.remove(at);
@@ -389,6 +411,15 @@ impl Coordinator {
                 outcome: carried.outcome,
             });
             effects.push(Effect::Store(StoreOp::SentScreen { run: carried.run }));
+            if let Some(thread) = carried
+                .thread
+                .filter(|thread| !self.pending_deletes().contains(thread))
+            {
+                effects.push(Effect::EventsChanged {
+                    hold: carried.hold,
+                    thread,
+                });
+            }
             return;
         }
         if let Some(run) = self.current.as_mut().filter(|run| {

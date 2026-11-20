@@ -541,3 +541,23 @@ fn held_words_and_their_receipt_append_redacted_data_tags() {
     };
     assert!(frame::encode(&longest, Pipe::Data).is_ok());
 }
+#[test]
+fn a_thread_events_change_appends_data_tag_24_and_the_next_tag_is_refused() {
+    let message = super::DataToShell::EventsChanged {
+        thread: ThreadId(u64::MAX),
+    };
+    assert_eq!(postcard::to_allocvec(&message).expect("encodes")[0], 24);
+    round_trip(&message, Pipe::Data, 11);
+    let record = Record::of(Pipe::Data, Direction::ToShell, &message, 11).expect("records");
+    assert_eq!(
+        (record.op.as_str(), record.payload.as_ref()),
+        ("EventsChanged", None)
+    );
+    assert!(frame::decode::<super::DataToShell>(&[25, 7]).is_err());
+    assert_eq!(
+        frame::decode::<super::DataToShell>(&[24, 7]).expect("decodes"),
+        super::DataToShell::EventsChanged {
+            thread: ThreadId(7)
+        }
+    );
+}

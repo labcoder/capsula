@@ -984,7 +984,8 @@ async fn read_pages_and_text(
             | DataToShell::SegmentQueued { .. }
             | DataToShell::SpeechPcm(_)
             | DataToShell::HoldWords { .. }
-            | DataToShell::HoldStored { .. }) => {
+            | DataToShell::HoldStored { .. }
+            | DataToShell::EventsChanged { .. }) => {
                 panic!("unexpected {other:?}")
             }
         }
@@ -1122,4 +1123,105 @@ async fn a_reply_that_lands_while_the_queue_is_full_waits_for_room() {
     };
     tokio::select! { ended = core => panic!("core ended {ended:?}"), () = client => {} }
     brain.close().await;
+}
+
+/// A page read the shell sends after a picture's sent marker waits for the held mark, then shows
+/// the still active run's turn as sent; an active pending turn shows no picture until then.
+#[tokio::test]
+async fn a_page_read_after_the_sent_marker_waits_for_the_mark_and_shows_the_active_turn_sent() {
+    use kumochi_protocol::message::{HeldScreen, PageEventKind};
+    let scratch = Scratch::new("page-after-marker");
+    let mut brain = test_support::brain(&scratch, "");
+    let mut seen = brain.observe();
+    assert!(brain.store.as_ref().unwrap().send(StoreOp::BeginTurn {
+        thread: ThreadId(2),
+        title: Some("task".into()),
+        run: RunId(1),
+        text: "text".into(),
+        screen: Some(HeldScreen::Attached),
+    }));
+    let release = brain.hold_store(|op| matches!(op, StoreOp::SentScreen { .. }));
+    assert!(
+        brain
+            .store
+            .as_ref()
+            .unwrap()
+            .send(StoreOp::SentScreen { run: RunId(1) })
+    );
+    while !matches!(
+        seen.recv().await,
+        Some(crate::runtime::Seen::StoreOpStarted(
+            StoreOp::SentScreen { .. }
+        ))
+    ) {}
+    let ((control, data), mut shell) = duplex();
+    let mut tap = Tap::from_env();
+    let client = async {
+        request(
+            &mut shell,
+            7,
+            PageOf::Events {
+                thread: ThreadId(2),
+                before: None,
+            },
+        )
+        .await;
+        timeout(PATIENCE, async {
+            while seen.recv().await != Some(crate::runtime::Seen::ReadWaiting) {}
+        })
+        .await
+        .expect("the read waits for the store");
+        release.send(()).unwrap();
+        let reply = timeout(
+            PATIENCE,
+            ipc::read::<DataToShell>(&mut shell.data_in, Pipe::Data),
+        )
+        .await
+        .expect("answered")
+        .expect("read");
+        let Some(DataToShell::Page { events, .. }) = reply else {
+            panic!("a page");
+        };
+        assert!(
+            events.iter().any(|event| event.kind
+                == PageEventKind::HeldTurn {
+                    screen: HeldScreen::Attached
+                }),
+            "the active turn reads as sent"
+        );
+        drop(shell);
+    };
+    let (ended, ()) = tokio::join!(brain.serve(control, data, &mut tap), client);
+    assert_eq!(ended, Ended::Lost);
+    brain.close().await;
+}
+
+/// The events marker goes only on its hold's own connection.
+#[tokio::test]
+async fn the_events_marker_goes_only_on_its_holds_connection() {
+    use kumochi_protocol::message::GestureId;
+    for (stale, frames) in [(false, 1), (true, 0)] {
+        let scratch = Scratch::new("page-marker-epoch");
+        let mut brain = test_support::brain(&scratch, "");
+        let queue = RefCell::new(DataQueue::new(100));
+        let ready = Notify::new();
+        let (out, _control) = mpsc::channel(64);
+        let mut tap = Tap::from_env();
+        let mut link = Link::new(&out, &queue, &ready, &mut tap);
+        let hold = crate::coordinator::HoldKey {
+            epoch: brain.epoch + u64::from(stale),
+            gesture: GestureId(1),
+        };
+        brain
+            .apply(
+                vec![Effect::EventsChanged {
+                    hold,
+                    thread: ThreadId(2),
+                }],
+                Some(&mut link),
+            )
+            .expect("room");
+        assert_eq!(queue.borrow().frames_for_tests(), frames, "stale {stale}");
+        brain.close().await;
+    }
 }

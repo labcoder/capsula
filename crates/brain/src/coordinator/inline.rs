@@ -10,7 +10,7 @@
 
 use std::fmt;
 
-use kumochi_protocol::message::EventId;
+use kumochi_protocol::message::{ConnectionKind, EventId};
 
 use super::admission::{Build, BuildKey, origin};
 use super::{Coordinator, Effect, JobAsk, SendKey, Stale, StoreOp, SummaryText, Unbuilt};
@@ -96,6 +96,19 @@ impl Coordinator {
         room: usize,
         effects: &mut Vec<Effect>,
     ) -> Result<(), Stale> {
+        if let Some(reason) = self.written_picture_lost() {
+            return self.fail_with(key.run, Failure::Engine, reason, effects);
+        }
+        // A key rewrite is granted before it connects, and nothing revokes it then, so a picture
+        // lost while it waits couldn't stop its text: a key run that may have written one doesn't.
+        let current = self.current(key.run)?;
+        if current.exposed()
+            && current
+                .route
+                .is_some_and(|route| route.kind == ConnectionKind::AnthropicKey)
+        {
+            return self.fail(key.run, Failure::Budget, effects);
+        }
         self.attempts += 1;
         let attempt = self.attempts;
         let exposed = self.pending_deletes();

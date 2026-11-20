@@ -1081,6 +1081,12 @@ pub enum DataToShell {
         /// The hold.
         gesture: GestureId,
     },
+    /// A thread's stored events changed with no run frame to say so, such as a held turn's
+    /// picture marked sent; a shown page of them is read again.
+    EventsChanged {
+        /// The thread.
+        thread: ThreadId,
+    },
 }
 
 #[cfg(test)]
