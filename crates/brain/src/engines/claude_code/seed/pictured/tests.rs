@@ -1,6 +1,6 @@
 use serde_json::{Value, json};
 
-use super::{PictureSeedError, encode, pictured_len};
+use super::{PictureSeedError, check_non_image_lower_bound, encode, pictured_len};
 use crate::context::{InputItem, Jpeg, ModelRequest, Role, ToolSchema};
 use crate::engines::CallId;
 
@@ -82,6 +82,50 @@ fn refuses_existing_images_and_a_missing_user() {
     assert_eq!(
         encode(&request_with_image, &[], &[], [1, 1]).unwrap_err(),
         PictureSeedError::NotJpeg,
+    );
+}
+
+#[test]
+fn rejects_oversized_text_and_tool_results_at_the_lower_bound() {
+    let result = InputItem::FunctionOutput {
+        call: CallId::new("call-1").expect("id"),
+        output: "\n".repeat(524_289),
+    };
+    let message_over = message(Role::User, &"a".repeat(524_289));
+    for item in [result, message_over] {
+        let request = request(vec![message(Role::User, "now"), item]);
+        assert_eq!(
+            check_non_image_lower_bound(&request, &[]),
+            Err(PictureSeedError::NonImageSize),
+        );
+        assert_eq!(
+            encode(&request, &[], JPEG, [1, 1]).unwrap_err(),
+            PictureSeedError::NonImageSize,
+        );
+    }
+}
+
+#[test]
+fn counts_tool_schema_parameters_before_building_the_instructions_block() {
+    let request = request(vec![message(Role::User, "now")]);
+    let tools = [ToolSchema {
+        name: "check",
+        description: "",
+        parameters: json!({"pattern": "\n".repeat(300_000)}),
+    }];
+    assert_eq!(
+        check_non_image_lower_bound(&request, &tools),
+        Err(PictureSeedError::NonImageSize),
+    );
+}
+
+#[test]
+fn raw_equality_still_has_to_pass_the_exact_encoded_limit() {
+    let request = request(vec![message(Role::User, &"\"".repeat(524_288 - 9))]);
+    assert_eq!(check_non_image_lower_bound(&request, &[]), Ok(()));
+    assert_eq!(
+        encode(&request, &[], JPEG, [1, 1]).unwrap_err(),
+        PictureSeedError::NonImageSize,
     );
 }
 

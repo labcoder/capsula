@@ -348,8 +348,10 @@ one at a time. A run whose choice names Claude Code starts one through `Claude::
   lets go.
 - **Dormant picture encoding.** The pure seed encoder budgets one trusted JPEG (2 MiB and
   1280×720), the encoded text-only line including LF (512 KiB), and the complete pictured line
-  (4 MiB). It writes the image after the newest user text into exact-sized zeroing storage. It has
-  no live consumer and confers no permission. The later write, receipt, echo refusal and teardown
+  (4 MiB). A borrowed size precheck rejects oversized input before constructing text blocks.
+  The image goes after the newest user text, directly into exact-sized zeroing storage; the
+  ordinary prompt and tool text copies made while formatting are not zeroed. The encoder has no
+  live consumer and confers no permission. The later write, receipt, echo refusal and teardown
   work depends on the pictured grant landing first; neither switch is enabled here.
 - **The held send.** The round moves its seed's `SendLease` into the launch (`hold_send`) before
   the first seed chunk, and asks for it with `SendGate::ask_held`, whose deadline is the launch's

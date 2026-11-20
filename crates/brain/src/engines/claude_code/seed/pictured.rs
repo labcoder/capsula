@@ -1,9 +1,12 @@
 use std::{fmt, io::Write as _};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
+use serde::Serialize;
+use serde_json::Value;
 use zeroize::Zeroizing;
 
 use super::{input_text, instructions};
+use crate::connections::model::serialized_len;
 use crate::context::{BOUND, InputItem, ModelRequest, Role, ToolSchema};
 
 const JPEG_CAP: usize = 2 * 1024 * 1024;
@@ -89,6 +92,8 @@ pub(super) fn encode(
         })
         .ok_or(Error::NoUser)?;
 
+    check_non_image_lower_bound(request, tools)?;
+
     let mut non_image = Zeroizing::new(vec![0; BOUND]);
     let mut room = non_image.as_mut_slice();
     room.write_all(LINE_START)
@@ -122,6 +127,51 @@ pub(super) fn encode(
     end.copy_from_slice(IMAGE_END);
     after.copy_from_slice(&non_image[insert_at..non_image_len]);
     Ok(PicturedSeed(seed))
+}
+
+fn check_non_image_lower_bound(
+    request: &ModelRequest,
+    tools: &[ToolSchema],
+) -> Result<(), PictureSeedError> {
+    #[derive(Serialize)]
+    struct BorrowedTool<'a> {
+        name: &'a str,
+        description: &'a str,
+        parameters: &'a Value,
+    }
+
+    let mut remaining = BOUND;
+    let mut charge = |len| -> Result<(), PictureSeedError> {
+        remaining = remaining
+            .checked_sub(len)
+            .ok_or(PictureSeedError::NonImageSize)?;
+        Ok(())
+    };
+
+    // JSON escaping only adds bytes, so this lower bound cannot reject a line that would fit.
+    charge(request.instructions.len())?;
+    for item in &request.input {
+        match item {
+            InputItem::Message { text, .. } | InputItem::FunctionOutput { output: text, .. } => {
+                charge(text.len())?;
+            }
+            InputItem::FunctionCall {
+                name, arguments, ..
+            } => {
+                charge(name.len())?;
+                charge(arguments.len())?;
+            }
+            InputItem::Native(_) | InputItem::Image(_) => {}
+        }
+    }
+    for tool in tools {
+        charge(serialized_len(&BorrowedTool {
+            name: tool.name,
+            description: tool.description,
+            parameters: &tool.parameters,
+        }))?;
+    }
+    Ok(())
 }
 
 fn pictured_len(non_image: usize, jpeg: usize, ceiling: usize) -> Result<usize, PictureSeedError> {
