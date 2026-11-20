@@ -3,13 +3,13 @@
 //! code. `KUMOCHI_LIVE_BUDGET` reaches the brain through the environment; 0 is the dry run.
 
 use std::path::Path;
-use std::process::{Command, ExitStatus, Stdio};
+use std::process::{ExitStatus, Stdio};
 use std::time::Duration;
 
 use anyhow::{Context as _, Result, ensure};
 use kumochi_protocol::constants::{BRAIN_EXE, MARKS_CHECK_ARG};
 
-use super::{drained, refuse_running};
+use super::{brain_command, drained, refuse_running};
 use crate::platform;
 
 /// How long the check may run [guess: 37 requests at well under 45 s each].
@@ -22,7 +22,7 @@ pub(super) fn run(folder: &Path) -> Result<()> {
         .and_then(platform::Job::hold_self)
         .context("putting the run in a job")?;
     refuse_running(&platform::processes()?, std::process::id())?;
-    let child = Command::new(folder.join("bin").join(BRAIN_EXE))
+    let child = brain_command(&folder.join("bin").join(BRAIN_EXE))
         .arg(MARKS_CHECK_ARG)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())

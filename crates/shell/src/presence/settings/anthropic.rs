@@ -1,4 +1,4 @@
-//! The dormant Anthropic key row in Accounts.
+//! The Anthropic key row in Accounts.
 
 use std::time::Instant;
 

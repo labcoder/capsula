@@ -31,7 +31,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use anyhow::{Context as _, Result, anyhow, bail, ensure};
 use kumochi_protocol::constants::{
     BRAIN_EXE, CLAUDE_QUESTIONS_ENV, IMAGE_CHECK_ARG, IMAGE_DIAGNOSTIC_ARG, LIVE_BUDGET_ENV,
-    LIVE_RUN_BIN_DIR, LIVE_RUNS_DIR, ProductIdentity, SHELL_EXE,
+    LIVE_KEY_CATALOG_BUDGET_ENV, LIVE_KEY_MESSAGES_BUDGET_ENV, LIVE_RUN_BIN_DIR, LIVE_RUNS_DIR,
+    ProductIdentity, SHELL_EXE,
 };
 
 use self::claude_signin::Ask;
@@ -411,7 +412,7 @@ impl Brain {
             .and_then(platform::Job::hold_self)
             .context("putting the run in a job")?;
         refuse_running(&platform::processes()?, std::process::id())?;
-        let mut command = Command::new(bin.join(BRAIN_EXE));
+        let mut command = brain_command(&bin.join(BRAIN_EXE));
         command
             .env(LIVE_BUDGET_ENV, budget.to_string())
             .env(CLAUDE_QUESTIONS_ENV, questions.to_string())
@@ -447,20 +448,51 @@ impl Drop for Brain {
     }
 }
 
+/// The copied dev brain, allowed no Anthropic key request unless its check sets its own counts.
+fn brain_command(exe: &std::path::Path) -> Command {
+    let mut command = Command::new(exe);
+    command
+        .env(LIVE_KEY_CATALOG_BUDGET_ENV, "0")
+        .env(LIVE_KEY_MESSAGES_BUDGET_ENV, "0");
+    command
+}
+
 #[cfg(test)]
 mod tests {
+    use std::ffi::OsStr;
     use std::io::{self, Read};
     use std::os::windows::process::CommandExt as _;
     use std::process::{Child, Command, Stdio};
     use std::time::{Duration, Instant};
 
     use super::{
-        Ask, Check, Entry, ProductIdentity, build, drained, end, end_with, entry, read_kept,
+        Ask, Check, Entry, LIVE_KEY_CATALOG_BUDGET_ENV, LIVE_KEY_MESSAGES_BUDGET_ENV,
+        ProductIdentity, brain_command, build, drained, end, end_with, entry, read_kept,
         refuse_running, run_bounded, wait_bounded, warn_cleanup, with_cleanup,
     };
     use crate::platform;
 
     const SHORT: Duration = Duration::from_millis(200);
+
+    #[test]
+    fn a_brain_a_check_starts_may_send_no_key_request() {
+        let command = brain_command(std::path::Path::new("kumochid.exe"));
+        let mut envs: Vec<_> = command.get_envs().collect();
+        envs.sort();
+        assert_eq!(
+            envs,
+            [
+                (
+                    OsStr::new(LIVE_KEY_CATALOG_BUDGET_ENV),
+                    Some(OsStr::new("0"))
+                ),
+                (
+                    OsStr::new(LIVE_KEY_MESSAGES_BUDGET_ENV),
+                    Some(OsStr::new("0"))
+                ),
+            ]
+        );
+    }
 
     #[test]
     fn a_child_printing_far_more_than_a_pipe_holds_still_finishes() {

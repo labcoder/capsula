@@ -284,6 +284,35 @@ fn the_model_check_reads_the_routes_own_catalog() {
     }
 }
 
+/// A same-key catalog refresh between a key build's admission and its send grant: the grant
+/// rechecks the model, so a model the refresh dropped gets no grant and the run fails unavailable.
+#[test]
+fn a_key_send_whose_model_a_refresh_dropped_is_refused_at_the_grant() {
+    for (refreshed, grants) in [(&["k", "n"][..], true), (&["n"][..], false)] {
+        let mut core = typed(vec![ready(KEY, 7, &["k"])]);
+        assert!(started(
+            &core.handle(built(Some(choice(KEY, "k")))).expect("current")
+        ));
+        core.handle(ready(KEY, 7, refreshed))
+            .expect("the same key's refreshed catalog");
+        let effects = core
+            .handle(Input::SendReady {
+                key: SendKey::Build(key()),
+                hold: None,
+            })
+            .expect("current");
+        assert_eq!(
+            effects
+                .iter()
+                .any(|effect| matches!(effect, Effect::Grant(_))),
+            grants,
+            "{refreshed:?}"
+        );
+        let expected = (!grants).then(|| reason(ErrorKey::ModelUnavailable, Action::OpenSettings));
+        assert_eq!(failure(&effects), expected, "{refreshed:?}");
+    }
+}
+
 #[test]
 fn only_a_chatgpt_route_gets_a_bearer() {
     for (kind, bearer) in [(CHATGPT, Some(ConnectionTag(7))), (CLAUDE, None)] {

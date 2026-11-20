@@ -10,12 +10,7 @@ impl Settings {
     /// Keeps `connection`'s catalog whole, in its order; an empty one takes it off offer.
     pub fn set_models(&mut self, connection: ConnectionKind, models: Vec<ModelInfo>) {
         self.models.retain(|(kind, _)| *kind != connection);
-        // shortcut: only connections with an engine are offered; add AnthropicKey once it has one.
-        let served = matches!(
-            connection,
-            ConnectionKind::ChatGpt | ConnectionKind::ClaudeCode
-        );
-        if served && !models.is_empty() {
+        if !models.is_empty() {
             self.models.push((connection, models));
         }
     }

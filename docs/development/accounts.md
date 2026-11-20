@@ -35,7 +35,7 @@ The key never crosses the pipe or enters a file, log, command line or environmen
 Only keys connected inside Kumochi are used; live checks must read the same Kumochi-owned
 credential, never another app's key.
 
-The dormant key-chat transport gives each verified authority a nonzero random tag.
+The key-chat transport gives each verified authority a nonzero random tag.
 Without the transport, a readable saved key reports Unconfirmed; startup, Check
 and successful adoption send no catalog request. There is no alternate client.
 An ordinary check of the same verified revision keeps its tag. Adoption and removal
@@ -96,7 +96,9 @@ authority is ignored. The account hears the tag before the route change, and pas
 the run that sent the refused post, or any run still current on that key, including one compacting
 its context inline, ends with the rejected-key notice rather than as unavailable, whichever of the
 tag and the post's own 401 reaches it first. A run on another connection, or on the key under a
-newer tag, keeps its own outcome. A title or compaction job shows nothing, but the row still
+newer tag, keeps its own outcome. A Check whose catalog read is refused retires the key the same
+way and passes its tag on first too, so a run still current on the key ends with the rejected-key
+notice whichever refusal the account handles first; asks after it are refused as unavailable. A title or compaction job shows nothing, but the row still
 changes. Between the fence closing and the account handling the tag, the row can still show Ready
 for a moment; no post can go out in that window, because the fence is already closed. With spoken replies the row can change before the
 notice, which waits for the reply's audio to end.
@@ -105,7 +107,10 @@ A 403, any other status, and an error typed inside a 200 stream only show their 
 the row as it is: a 403 can concern one model, and retiring the key for it would make the row flip
 between Ready and Unconfirmed with every Check.
 Every saved-key check or replacement fences late worker/HTTP replies
-by generation and clears the old catalog. Catalog checks do not authorize inference or
+by generation. A replacement, a removal, a refused Check or a Messages 401 clears the old catalog.
+A Check that ends inconclusive keeps the last verified catalog, which sends are still granted on,
+and a shell that connects later is offered that same catalog; once a 401 has closed the key's
+fence, it is offered nothing. Catalog checks do not authorize inference or
 automatic fallback to another connection. Fixtures are synthetic API-reference examples;
 no live provider call is part of the tests.
 

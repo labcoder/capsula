@@ -47,6 +47,10 @@ flowchart LR
   The client checks set both to 0, except that `claude-question` sets the second to the questions
   its plan asks, and first-text sets the first to its explicitly supplied cap. Each budget
   refuses its requests once its cap is spent.
+- Every brain a check starts, `catalog-provenance`, `image` and `marks` included, gets
+  `KUMOCHI_LIVE_KEY_CATALOG_BUDGET=0` and `KUMOCHI_LIVE_KEY_MESSAGES_BUDGET=0`, so no Anthropic
+  key request can go out, except `anthropic-key`, which starts each launch's brain with its slice
+  ([below](#anthropic-key)). `KUMOCHI_LIVE_BUDGET` doesn't cover the key route.
 
 ## `account`
 
@@ -145,7 +149,7 @@ refuses to start while any `kumochi.exe` or `kumochid.exe` runs, as the other ch
 **The budget is in code.** Before it builds anything, xtask adds up the questions its plan asks and
 refuses a plan over 3 (`CAP` in `xtask/src/live/claude_question.rs`). The copied harness starts the
 brain with `KUMOCHI_CLAUDE_QUESTIONS` set to exactly what the plan asks, 3, and
-`KUMOCHI_LIVE_BUDGET=0`, so no `ChatGPT` or Anthropic key model request can go out and a fourth
+`KUMOCHI_LIVE_BUDGET=0` with both Anthropic key budgets at 0, so no `ChatGPT` or Anthropic key request can go out and a fourth
 Claude Code question would be refused as `ClaudeCodeBudget`. The first step that fails stops the
 rest. The owner's cap counts across runs; the Captain keeps that count.
 

@@ -251,6 +251,7 @@ texts! {
     MaxFrameRate => "settings-max-frame-rate",
     FrameRateAutomatic => "settings-frame-rate-automatic",
     DefaultModel => "settings-default-model",
+    ModelOnConnection => "settings-model-on-connection",
     ModelsNotListed => "settings-models-not-listed",
 
     // Onboarding
@@ -470,6 +471,14 @@ impl Strings {
         let mut args = FluentArgs::new();
         args.set("assistant", assistant);
         self.format(Text::ThreadAssistant.id(), Some(&args))
+    }
+
+    /// A model row whose name another connection's model shares, with its connection's name.
+    pub fn model_on(&self, model: &str, connection: &str) -> String {
+        let mut args = FluentArgs::new();
+        args.set("model", model);
+        args.set("connection", connection);
+        self.format(Text::ModelOnConnection.id(), Some(&args))
     }
 
     /// The onboarding window's heading, with the product name.

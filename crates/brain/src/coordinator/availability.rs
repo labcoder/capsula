@@ -149,7 +149,7 @@ impl PictureRoutes {
     }
 }
 
-/// The tag of the Anthropic key a Messages post found refused.
+/// The tag of the Anthropic key a Messages post or a Check found refused.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RefusedKey(pub(crate) ConnectionTag);
 
@@ -361,8 +361,8 @@ impl Coordinator {
         }
     }
 
-    /// A Messages post found the Anthropic key under `tag` refused. A current run bound to that
-    /// key was sending on it, so it ends with the key's rejection before the route change that
+    /// A Messages post or a Check found the Anthropic key under `tag` refused. A current run bound
+    /// to that key was sending on it, so it ends with the key's rejection before the route change that
     /// follows would end it as unavailable; any other run keeps its own outcome.
     pub(super) fn key_refused(&mut self, tag: ConnectionTag, effects: &mut Vec<Effect>) {
         let refused = Route {
@@ -490,6 +490,16 @@ impl Coordinator {
             Availability::Ready(ready) => Some(ready.connection),
             Availability::Unavailable(_) | Availability::Finding => None,
         }
+    }
+
+    /// Whether a send on `route` may go to `model`: on any route but the key's, yes; on the
+    /// key's, only while its checked catalog offers `model` now.
+    pub(super) fn offered(&self, route: Route, model: Option<&str>) -> bool {
+        route.kind != ConnectionKind::AnthropicKey
+            || matches!(self.availability_of(route.kind), Availability::Ready(ready)
+            if model.is_some_and(|model| {
+                ready.models.iter().any(|offered| offered.slug.as_str() == model)
+            }))
     }
 
     /// Why a run on `route` can't go on, if it can't: another sign-in on its kind needs a sign-in

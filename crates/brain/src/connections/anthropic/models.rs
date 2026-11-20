@@ -5,7 +5,8 @@
 //! <https://platform.claude.com/docs/en/build-with-claude/pdf-support>,
 //! <https://platform.claude.com/docs/en/agents-and-tools/tool-use/fine-grained-tool-streaming>,
 //! <https://platform.claude.com/docs/en/build-with-claude/effort>.
-//! Unknown ids stay disabled; streaming support requires eager input streaming on the tool.
+//! Only those ids are offered; a model whose capabilities aren't known isn't offered until this list
+//! learns it. Streaming support requires eager input streaming on the tool.
 //! Image input alone is the entry's own `capabilities.image_input.supported`, in the same
 //! reference, checked 2026-11-20.
 
@@ -187,10 +188,7 @@ fn catalog(status: u16, bytes: &[u8]) -> Result<Vec<CatalogModel>, CheckError> {
         if entry.kind != "model" || models.iter().any(|model| model.info.slug == slug) {
             return Err(CheckError::Unconfirmed);
         }
-        let known = matches!(
-            entry.id.as_str(),
-            "claude-fable-5-1" | "claude-opus-5-5" | "claude-sonnet-5-5" | "claude-haiku-5-5"
-        );
+        let known = known(&entry.id);
         let images = entry.takes_images();
         models.push(CatalogModel {
             info: ModelInfo {
@@ -206,7 +204,15 @@ fn catalog(status: u16, bytes: &[u8]) -> Result<Vec<CatalogModel>, CheckError> {
             },
         });
     }
+    models.retain(|model| known(model.info.slug.as_str()));
     Ok(models)
+}
+
+fn known(id: &str) -> bool {
+    matches!(
+        id,
+        "claude-fable-5-1" | "claude-opus-5-5" | "claude-sonnet-5-5" | "claude-haiku-5-5"
+    )
 }
 
 #[cfg(test)]

@@ -199,6 +199,16 @@ impl Coordinator {
                     .as_ref()
                     .filter(|run| matches!(run.screen, Some(crate::context::Screen::Withdrawn)))
                     .map(|_| kumochi_protocol::message::ErrorKey::ScreenUnavailable.into())
+            })
+            .or_else(|| {
+                // A same-key catalog refresh can drop the model after the build was admitted.
+                let run = self.current.as_ref()?;
+                let model = run
+                    .snapshot
+                    .as_ref()
+                    .and_then(|snapshot| snapshot.choice.as_ref())
+                    .map(|choice| choice.model.as_str());
+                (!self.offered(run.route?, model)).then(super::availability::model_unavailable)
             });
         if let Some(reason) = refused {
             effects.push(Effect::Rebuild(SendKey::Build(key)));

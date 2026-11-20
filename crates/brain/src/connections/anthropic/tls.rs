@@ -49,6 +49,10 @@ impl Connect for AnthropicTls {
     type Io = TlsStream<TcpStream>;
 
     async fn connect(&self) -> io::Result<Self::Io> {
+        // Tests never reach the network, so the only socket the route opens refuses in one.
+        if cfg!(test) {
+            return Err(io::ErrorKind::PermissionDenied.into());
+        }
         let tcp = TcpStream::connect((HOST, 443)).await?;
         tcp.set_nodelay(true)?;
         let name = server_name()?;

@@ -238,21 +238,28 @@ impl SettingsView {
                 (connection, model.slug.clone(), name)
             })
             .collect();
+        let mut labelled = labels(&choices, strings);
         if let Some(current) = current
             && !choices
                 .iter()
                 .any(|(connection, slug, _)| is(*connection, slug))
         {
             let name = current.model.as_str().to_owned();
+            labelled.insert(0, label(current.connection, &name, &[], strings));
             choices.insert(0, (current.connection, current.model.clone(), name));
         }
         let selected = choices
             .iter()
             .position(|(connection, slug, _)| is(*connection, slug));
-        let radios: Vec<_> = choices
-            .iter()
+        let radios: Vec<_> = labelled
+            .into_iter()
             .enumerate()
-            .map(|(ix, (_, _, name))| Radio::new(("default-model", ix)).label(name.clone()))
+            .map(|(ix, label)| {
+                let radio = Radio::new(("default-model", ix)).label(label);
+                #[cfg(test)]
+                let radio = radio.debug_selector(move || format!("default-model-{ix}"));
+                radio
+            })
             .collect();
         let picks: Vec<_> = choices
             .into_iter()
@@ -334,6 +341,34 @@ impl SettingsView {
     }
 }
 
+/// Each offered row's label, by [`label`] against the other offered rows.
+fn labels(choices: &[(ConnectionKind, ModelSlug, String)], strings: &Strings) -> Vec<String> {
+    choices
+        .iter()
+        .map(|(connection, _, name)| label(*connection, name, choices, strings))
+        .collect()
+}
+
+/// A key model's row always names the key, since each of its requests is billed; another row names
+/// its connection only when another connection in `offered` has a model of the same name.
+fn label(
+    connection: ConnectionKind,
+    name: &str,
+    offered: &[(ConnectionKind, ModelSlug, String)],
+    strings: &Strings,
+) -> String {
+    let shared = offered
+        .iter()
+        .any(|(other, _, other_name)| *other != connection && other_name == name);
+    let provider = match connection {
+        ConnectionKind::AnthropicKey => Text::AnthropicTitle,
+        _ if !shared => return name.to_owned(),
+        ConnectionKind::ChatGpt => Text::AccountProvider,
+        ConnectionKind::ClaudeCode => Text::ClaudeProvider,
+    };
+    strings.model_on(name, &strings.get(provider))
+}
+
 /// The radio showing the newest choice, queued or saved: Kit gives a checked radio no click
 /// handler, so showing the saved cap while a new one is queued would swallow a quick reversal.
 fn choice_index(model: &Settings) -> usize {
@@ -373,9 +408,38 @@ pub(super) mod tests {
     };
     use kumochi_protocol::message::{AssistantName, MaxFrameRate, SettingsView, ThreadId};
 
-    use super::{choice_index, dock_choice_index, rate_at};
+    use super::{choice_index, dock_choice_index, labels, rate_at};
     use crate::settings::{Settings, Update};
     use crate::strings::Strings;
+
+    #[test]
+    fn a_key_row_always_names_the_key_and_another_only_on_a_shared_name() {
+        use kumochi_protocol::message::ConnectionKind::{AnthropicKey, ChatGpt, ClaudeCode};
+        let row = |connection, slug: &str, name: &str| {
+            (
+                connection,
+                kumochi_protocol::message::ModelSlug::new(slug).expect("slug"),
+                name.to_owned(),
+            )
+        };
+        let choices = [
+            row(ChatGpt, "m-0", "GPT Luna"),
+            row(AnthropicKey, "claude-haiku-5-5", "Claude Haiku 5.5"),
+            row(AnthropicKey, "claude-opus-5-5", "Claude Opus 5.5"),
+            row(ClaudeCode, "haiku", "Claude Haiku 5.5"),
+            row(ClaudeCode, "sonnet", "Claude Sonnet 5.5"),
+        ];
+        assert_eq!(
+            labels(&choices, &Strings::english()),
+            [
+                "GPT Luna",
+                "Claude Haiku 5.5 (Anthropic API key)",
+                "Claude Opus 5.5 (Anthropic API key)",
+                "Claude Haiku 5.5 (Claude Code)",
+                "Claude Sonnet 5.5",
+            ]
+        );
+    }
 
     #[gpui::test]
     fn the_copy_control_copies_the_running_build(cx: &mut TestAppContext) {

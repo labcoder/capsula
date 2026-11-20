@@ -168,6 +168,8 @@ pub(super) struct Connections {
     // the next conclusive Check.
     fresh: bool,
     unsent: bool,
+    /// The tag of the authority a refusal just retired, for the coordinator to hear first.
+    refused: Option<ConnectionTag>,
     read: Option<JoinHandle<()>>,
     loading: bool,
     /// A Remove is admitted but hasn't committed (design §5): every key op retries it.
@@ -201,6 +203,7 @@ impl Default for Connections {
             models: Vec::new(),
             fresh: false,
             unsent: false,
+            refused: None,
             read: None,
             loading: false,
             removing: None,
@@ -257,6 +260,13 @@ impl Connections {
             },
         );
         Some(Input::Engines(ConnectionKind::AnthropicKey, availability))
+    }
+
+    /// A refusal retires the key, and the account hears which connection it was.
+    fn refuse(&mut self) {
+        self.refused = self.verified.as_ref().map(|verified| verified.tag);
+        self.retire();
+        self.models.clear();
     }
 
     fn retire(&mut self) {
@@ -318,15 +328,32 @@ impl Connections {
     }
 
     pub(super) fn connected(&mut self) -> ControlToShell {
-        self.unsent |= self.view.anthropic == KeyView::Ready;
+        self.unsent |= self.granted();
         ControlToShell::Connections(self.view)
     }
 
     pub(super) fn models_unsent(&mut self) -> Option<DataToShell> {
+        // A 401 closes the fence before the account hears it, so withhold the models here too.
+        let granted = self.granted();
         std::mem::take(&mut self.unsent).then(|| DataToShell::Models {
             connection: ConnectionKind::AnthropicKey,
-            models: self.models.iter().map(|model| model.info.clone()).collect(),
+            models: self
+                .models
+                .iter()
+                .filter(|_| granted)
+                .map(|model| model.info.clone())
+                .collect(),
         })
+    }
+
+    fn granted(&self) -> bool {
+        self.verified
+            .as_ref()
+            .is_some_and(|verified| verified.fence.open())
+    }
+
+    pub(super) fn take_refused(&mut self) -> Option<ConnectionTag> {
+        self.refused.take()
     }
 
     fn advance(&mut self) -> u64 {
@@ -700,7 +727,6 @@ impl Accounts {
             .collect()
     }
 
-    #[expect(clippy::too_many_lines, reason = "one arm per connection event")]
     pub(super) fn connection_event(&mut self, event: ConnectionEvent) -> Vec<ControlToShell> {
         let reply = match event {
             ConnectionEvent::StagePlan {
@@ -758,9 +784,8 @@ impl Accounts {
                     }
                     Err(CheckError::Rejected(reason)) => {
                         if self.connections.transport.is_some() {
-                            self.connections.retire();
+                            self.connections.refuse();
                             self.connections.key = None;
-                            self.connections.models.clear();
                         }
                         self.connections.view.anthropic = KeyView::Rejected(reason);
                     }
@@ -792,8 +817,7 @@ impl Accounts {
                         read: None,
                     }
                 });
-                self.connections.retire();
-                self.connections.models.clear();
+                self.connections.refuse();
                 // A Check already waiting on its load or its catalog read can't bring the key back.
                 self.connections.advance();
                 self.connections.loading = false;
@@ -819,6 +843,18 @@ impl Brain {
         let (tag, motion) = self.coordinator.key_motion(request)?;
         let authority = self.account.connections.verified.as_ref()?;
         if authority.tag != tag {
+            return None;
+        }
+        // Every send, a job's rereading of the saved choice included, goes only to a model the
+        // checked catalog offers now.
+        let model = &request.request.choice.as_ref()?.model;
+        if !self
+            .account
+            .connections
+            .models
+            .iter()
+            .any(|offered| offered.info.slug == *model)
+        {
             return None;
         }
         let authority = Arc::clone(authority);

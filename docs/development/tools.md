@@ -402,8 +402,9 @@ its row.
 Anthropic key calls use the provider's id within their own round. An id can recur
 in a later round without repeating an earlier result. A streamed `draw` is keyed the same
 way: its start, records, completion and result carry the round's key, so a later round's
-drawing under a reused id is a new drawing with its own result, while the same round's id
-still joins the call it started. The same model offer and
+drawing under a reused id is a new drawing with its own result. Within one round, a second
+provider start under the same id is rejected and fails the run, and an eligible ledger retry
+under the round's key joins pending work or returns the settled result. The same model offer and
 retry argument checks apply, and each accepted model call start still charges
 the run's 16-call budget. The sixteen tool starts and eight foreground rounds are not the cap on
 HTTP attempts: each run has its own allowance of 17 Messages attempts, inline and job sends

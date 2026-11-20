@@ -2,13 +2,13 @@
 //! bounded and in a kill-on-close job, and prints one line that counts the requests it sent.
 
 use std::path::Path;
-use std::process::{Command, ExitStatus, Stdio};
+use std::process::{ExitStatus, Stdio};
 use std::time::Duration;
 
 use anyhow::{Context as _, Result, ensure};
 use kumochi_protocol::constants::{BRAIN_EXE, CATALOG_PROVENANCE_ARG, CATALOG_PROVENANCE_FILE};
 
-use super::{bounded, refuse_running};
+use super::{bounded, brain_command, refuse_running};
 use crate::platform;
 
 /// How long the capture may run [guess: its 120 s request plus the vault open and trust store].
@@ -20,7 +20,7 @@ pub(super) fn run(folder: &Path) -> Result<()> {
         .and_then(platform::Job::hold_self)
         .context("putting the run in a job")?;
     refuse_running(&platform::processes()?, std::process::id())?;
-    let child = Command::new(folder.join("bin").join(BRAIN_EXE))
+    let child = brain_command(&folder.join("bin").join(BRAIN_EXE))
         .arg(CATALOG_PROVENANCE_ARG)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
