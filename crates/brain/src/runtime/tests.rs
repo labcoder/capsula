@@ -49,6 +49,8 @@ mod leases;
 mod loops;
 #[path = "page_tests.rs"]
 mod pages;
+#[path = "registration_tests.rs"]
+mod registration;
 #[path = "scene_tests.rs"]
 mod scenes;
 #[path = "settings_tests.rs"]

@@ -9,9 +9,15 @@ checks the executable, matching build and capability on both legs and the existi
 pairing. It refuses a mixed mode or a data Hello from another session. The queued second leg
 has one deadline for connecting and reading; refusal renews both pipe instances.
 
-This negotiates a requirement, not an installed audio output. Neither endpoint starts a
-turn-capable queued connection in this slice, and neither falls back to Legacy. Output
-registration, readiness and admission are separate.
+This negotiates a requirement, not an installed audio output. Both production endpoints
+still refuse queued-required before serving or attending, with no fallback to Legacy.
+The dormant Brain serving path starts each queued pair closed to turns. It sends
+`QueuedAudioRegistered(output)` once, only after a valid `QueuedAudioOutput` installs the
+exact logical output in Queued mode. It opens admission only if that receipt queues.
+Early typed/Ask frames and new hold intent end the pair without buffering for later;
+settings, recovery, and cleanup keep their existing paths. A duplicate registration,
+Legacy announcement, current-output withdrawal, or failed receipt enqueue ends the pair.
+The receipt isn't proof of playback, silence, or the shell having received it.
 
 ## Voice-only hold messages
 

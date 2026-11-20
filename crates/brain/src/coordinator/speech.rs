@@ -107,13 +107,17 @@ impl Coordinator {
     }
 
     /// The shell's output device; one at or below a withdrawn generation stays withdrawn.
-    fn announce(&mut self, output: (u32, OutputGeneration, ReportMode), effects: &mut Vec<Effect>) {
+    fn announce(
+        &mut self,
+        output: (u32, OutputGeneration, ReportMode),
+        effects: &mut Vec<Effect>,
+    ) -> bool {
         let (_, generation, _) = output;
         if self
             .withdrawn
             .is_some_and(|withdrawn| generation.0 <= withdrawn.0)
         {
-            return;
+            return false;
         }
         self.output = Some(output);
         if let Some(current) = self.current.as_mut()
@@ -123,6 +127,19 @@ impl Coordinator {
             reply.output(generation, &mut out);
             carry(current, out, effects);
         }
+        true
+    }
+
+    pub(crate) fn register_queued_output(
+        &mut self,
+        rate: u32,
+        generation: OutputGeneration,
+    ) -> Result<Vec<Effect>, Stale> {
+        let mut effects = Vec::new();
+        if !self.announce((rate, generation, ReportMode::Queued), &mut effects) {
+            return Err(Stale);
+        }
+        Ok(effects)
     }
 
     #[expect(clippy::too_many_lines, reason = "one exhaustive speech input router")]

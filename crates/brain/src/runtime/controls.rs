@@ -1,7 +1,10 @@
 use std::cell::Cell;
 
 use kumochi_protocol::frame::Pipe;
-use kumochi_protocol::message::{ControlToBrain, MAX_VISIBLE_SCENES, SettingsOp, check_rate};
+use kumochi_protocol::message::{
+    AudioSession, ControlToBrain, ControlToShell, MAX_VISIBLE_SCENES, OutputGeneration, SettingsOp,
+    check_rate,
+};
 use kumochi_protocol::tap::{Direction, Tapped};
 use tokio::io::AsyncRead;
 use tokio::sync::mpsc;
@@ -13,6 +16,49 @@ use crate::coordinator::Input;
 use crate::ipc;
 use crate::tap::Tap;
 use crate::voice::installer::Installer;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum Registration {
+    Awaiting,
+    Applied(OutputGeneration),
+}
+
+impl Registration {
+    pub(super) fn admits(registration: Option<&Cell<Self>>) -> bool {
+        registration.is_none_or(|state| matches!(state.get(), Self::Applied(_)))
+    }
+
+    fn control(self, message: &ControlToBrain) -> Result<Option<(u32, OutputGeneration)>, Ended> {
+        match message {
+            ControlToBrain::QueuedAudioOutput(rate, generation) => {
+                if self != Self::Awaiting {
+                    return Err(Ended::Broken("queued audio registered twice"));
+                }
+                if generation.0 == 0 || check_rate(*rate).is_err() {
+                    return Err(Ended::Broken("invalid queued audio output"));
+                }
+                Ok(Some((*rate, *generation)))
+            }
+            ControlToBrain::AudioOutput { .. } => {
+                Err(Ended::Broken("legacy audio on a queued connection"))
+            }
+            ControlToBrain::AudioOutputUnavailable { generation }
+                if self == Self::Awaiting || self == Self::Applied(*generation) =>
+            {
+                Err(Ended::Broken("queued audio output withdrawn"))
+            }
+            ControlToBrain::KeyDown { .. }
+            | ControlToBrain::HoldRecognized { .. }
+            | ControlToBrain::VoiceHoldRecognized { .. }
+            | ControlToBrain::ScreenHoldRecognized { .. }
+                if self == Self::Awaiting =>
+            {
+                Err(Ended::Broken("hold before queued audio registration"))
+            }
+            _ => Ok(None),
+        }
+    }
+}
 
 pub(super) async fn read_control(
     pipe: &mut (impl AsyncRead + Unpin),
@@ -162,6 +208,25 @@ pub(super) fn control_input(message: ControlToBrain) -> Result<Option<Input>, En
 }
 
 impl Brain {
+    pub(super) fn control_after_loss(
+        &mut self,
+        message: ControlToBrain,
+        len: usize,
+        tap: &mut Tap,
+        audio: AudioSession,
+    ) {
+        if audio == AudioSession::Legacy
+            || !matches!(
+                message,
+                ControlToBrain::AudioOutput { .. }
+                    | ControlToBrain::QueuedAudioOutput(..)
+                    | ControlToBrain::AudioOutputUnavailable { .. }
+            )
+        {
+            self.control_offline(message, len, tap);
+        }
+    }
+
     /// Applies a control frame with no shell to tell, as `serve` does once the core has gone.
     pub(super) fn control_offline(&mut self, message: ControlToBrain, len: usize, tap: &mut Tap) {
         tap.record(Pipe::Control, Direction::ToBrain, &message, len);
@@ -217,6 +282,19 @@ impl Brain {
     ) -> Result<Option<Input>, Ended> {
         link.tap
             .record(Pipe::Control, Direction::ToBrain, &message, len);
+        if let Some(registration) = link.registration
+            && let Some((rate, output)) = registration.get().control(&message)?
+        {
+            let effects = self
+                .coordinator
+                .register_queued_output(rate, output)
+                .map_err(|_| Ended::Broken("stale queued audio output"))?;
+            self.apply(effects, Some(link))?;
+            link.control(&ControlToShell::QueuedAudioRegistered(output))
+                .map_err(|Full| Ended::Lost)?;
+            registration.set(Registration::Applied(output));
+            return Ok(None);
+        }
         let hold = self.hold_control(&message, link);
         if let ControlToBrain::Settings(op) = message {
             match hold {
