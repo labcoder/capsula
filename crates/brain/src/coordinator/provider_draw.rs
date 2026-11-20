@@ -14,6 +14,7 @@ use crate::engines::{CallId, ToolName};
 pub(super) struct DrawCall {
     pub(super) call: CallId,
     pub(super) key: LedgerKey,
+    pub(super) build: Option<BuildKey>,
     pub(super) provider: Option<ProviderCall>,
 }
 

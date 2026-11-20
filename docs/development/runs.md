@@ -530,6 +530,10 @@ flowchart LR
   transaction, the text streamed since the last write, the round's native items in output order,
   then each call's result in call order. `Input::RoundStored { run, round }` answers it, and only
   then does the next round's build go out through admission, so it reads what was just stored.
+  Ordinary reply text enters the attempt's buffer on acceptance, even if live delivery waits
+  for a drawing receipt. An accepted receipt for the current attempt inserts unspoken narration
+  in that same buffer before the deferred suffix. A crash before the round or outcome write
+  keeps the committed drawing but loses its unflushed Chat line along with the unflushed reply.
   The round counter is the build key's: a round that would be the 9th is refused before its build,
   so no ninth ask or send happens. A delete's rebuild keeps `(run, round)` and the counters,
   but drops the withdrawn attempt's response, including its typed key calls.

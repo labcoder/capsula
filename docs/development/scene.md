@@ -21,6 +21,11 @@ flowchart LR
 
 ## Records
 
+The brain reserves speech when a prepared step enters the store queue. If the step has
+nonblank `say` and no reservation, its successful write receipt adds a line to the current
+attempt's reply even if the scene frame is suppressed. History reads the saved reply;
+recovery doesn't turn restored drawing records into Chat text.
+
 The brain's provider path uses the existing cursor tokenizer and public 2D `parse_draw_record`
 gate for each closed record, then the drawing reducer's order/semantic admission and store FIFO.
 Complete-call/MCP typed preflight stays whole-envelope. A committed provider prefix can outlive
@@ -543,8 +548,9 @@ the original f64 chart values, rather than changing a final bit during recovery.
 
 All relative timing fields, including delays, entrances, edge flow, after-step
 offsets and animation key times, are milliseconds in 0–60,000. `Ms` validates on
-both routes and `checked_add` returns none if a sum exceeds that cap. `at_word` denotes an estimated offset within a synthetic speech
-segment, not real-audio alignment. Optional style values are left to preparation;
+both routes and `checked_add` returns none if a sum exceeds that cap. `at_word` is a
+proportional offset within a narration segment. Without timed narration it adds no
+delay. Optional style values are left to preparation;
 for example, an omitted diagram direction can use the inline surface's downwards
 default instead of imposing the overlay's direction at parse time.
 
@@ -1298,8 +1304,8 @@ default lengths below a quarter ends late instead (`motion::pace`). An object wi
 `"enter":"none"` keeps its turn in that order but adds no time, so the next one starts
 as it appears.
 `entrance_end()` is when the last object the step put finishes entering, after parent
-gating and clipped to the deadline. The presenter ends the step at the later of its
-narration segment and that instant, so the next `speech` step waits for the drawing.
+gating and clipped to the deadline. With zero narration time the next `speech` step
+waits only for the drawing's entrance.
 Explicit tracks retain their step-relative clocks, so a track may finish while a
 delayed parent still hides its target; only entrances are shifted.
 `delay_entrance(by)` starts what the view's own step put `by` ms later: its objects'
@@ -1332,10 +1338,10 @@ the same entrance envelope, including pivot translation inherited by descendants
 Generated position glides capture the sampled live start when activated and run for
 450 ms with InOut easing; a newer explicit position owner wins over a glide.
 
-Synthetic narration takes `max(800, ceil(words * 4000 / 11))` milliseconds, with no
-60-second narration cap: 11 words take 4,000 ms and 200 take 72,728 ms. Word offsets
-use integer proportional placement within that segment, with u128 multiplication.
-Speech-driven timing and painting belong to their later slices.
+The current presenter supplies zero narration time for every step, even if the brain
+reserved a speech segment. `at_word` adds no delay; authored delays and entrances
+keep their timing. The normal shell doesn't open a speaker. Don't enable step
+narration before the conductor can align the picture to playback.
 
 Esc during an explicit opacity fade-in on an object with `"enter":"none"` reveals its final
 opacity.
@@ -2269,8 +2275,8 @@ cancellation and later named runs still use ordinary fencing.
 Each scene owns one adoption clock, 64 fixed lifetime segment-end slots and its installed
 generation/run/index/once-state. Recovery seeds only kept activated anchors at zero and
 does not invent a live run. Continuations preserve the origin and surviving anchors. Now
-still follows predecessor activation; Speech waits for its synthetic segment end; After
-uses the named kept segment's end plus its offset. Actual late activation sets the end,
+still follows predecessor activation; Speech waits for its predecessor's end; After
+uses the named kept step's end plus its offset. Actual late activation sets the end,
 with saturating `u64` arithmetic rather than wire-duration or frame-delta limits.
 
 Presence advances ready heads before sampling. The consume transaction records the actual
@@ -2315,7 +2321,7 @@ control serialization/outbox work and retained owner state remain application co
 explicit measurement and bounds, not framework/cold exclusions. This CPU paint observation
 does not prove native visibility or presentation under occlusion.
 
-Live current-connection preparation and synthetic motion retain their actual Stop token
+Live current-connection preparation and motion retain their actual Stop token
 after provider Done and paint acknowledgement. Esc keeps selection and pull cancellation
 precedence, but invokes Presenter Stop even if the placeholder `Runs::stop` returns None;
 the next focused Esc clears through the existing scene path. Halting revokes live identity,

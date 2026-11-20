@@ -11,7 +11,9 @@
 use std::fmt;
 use std::time::Duration;
 
-use kumochi_protocol::message::{ControlToShell, DataToShell, OutputGeneration, RunId, StepRef};
+use kumochi_protocol::message::{
+    ControlToShell, DataToShell, OutputGeneration, RunId, SegmentId, StepRef,
+};
 
 use super::{Coordinator, Effect, Input, Notify, Run, Stale};
 use crate::store::{Interruption, RunEnd};
@@ -68,13 +70,27 @@ impl Coordinator {
         Ok(())
     }
 
-    /// A committed step's `say` joins its run's speech.
-    pub(super) fn say(&mut self, run: RunId, step: StepRef, say: &str, effects: &mut Vec<Effect>) {
-        if let Ok(current) = self.current(run)
-            && let Some(reply) = &mut current.reply
-        {
+    pub(super) fn reserve_say(
+        current: &mut Run,
+        say: &str,
+        effects: &mut Vec<Effect>,
+    ) -> Option<SegmentId> {
+        let mut out = Vec::new();
+        let reserved = current.reply.as_mut()?.reserve_say(say, &mut out);
+        carry(current, out, effects);
+        reserved
+    }
+
+    pub(super) fn publish_say(
+        current: &mut Run,
+        segment: SegmentId,
+        step: StepRef,
+        say: &str,
+        effects: &mut Vec<Effect>,
+    ) {
+        if let Some(reply) = &mut current.reply {
             let mut out = Vec::new();
-            reply.say(step, say, &mut out);
+            reply.publish_say(segment, step, say, &mut out);
             carry(current, out, effects);
         }
     }

@@ -1388,6 +1388,93 @@ mod tests {
     }
 
     #[gpui::test]
+    fn active_store_pages_and_preview_own_the_same_run_in_turn(cx: &mut TestAppContext) {
+        use kumochi_brain::store::{EventKind, Interruption, NewEvent, RunEnd, Store};
+        use kumochi_protocol::message::DataToBrain;
+
+        let dir = std::env::temp_dir().join(format!(
+            "{}-active-chat-history-{}",
+            kumochi_protocol::constants::OBJECT_PREFIX,
+            std::process::id()
+        ));
+        std::fs::create_dir(&dir).expect("owned Chat fixture directory");
+        let thread = ThreadId(1);
+        let run = RunId(1);
+        let line = NewEvent {
+            kind: EventKind::AssistantText,
+            text: Some("same words"),
+            body: None,
+        };
+        for (name, end) in [
+            ("done", RunEnd::Done),
+            ("replaced", RunEnd::Interrupted(Interruption::Replaced)),
+        ] {
+            let mut store = Store::open(&dir.join(format!("{name}.db"))).expect("fixture store");
+            store.recover().expect("main thread");
+            store
+                .begin_turn(thread, None, run, "draw")
+                .expect("active run");
+            store
+                .append(thread, run, &[line])
+                .expect("first step's line");
+            let (model, view, window) = open(cx);
+            let answer = Shown {
+                run,
+                thread: Some(thread),
+                text: "same words\n\nsame words".into(),
+                ..Shown::default()
+            };
+            view.update(cx, |view, cx| view.live(Some(&answer), cx));
+            let load = |state: &mut Threads, store: &Store| {
+                let (request, page) = state
+                    .requests()
+                    .into_iter()
+                    .find_map(|message| match message {
+                        DataToBrain::PageRequest {
+                            request,
+                            page: page @ kumochi_protocol::message::PageOf::Events { .. },
+                        } => Some((request, page)),
+                        _ => None,
+                    })
+                    .expect("real history request");
+                state.apply_for_tests(store.page_for_tests(request, page).expect("real page"));
+            };
+            model.update(cx, |state, cx| {
+                state.connected();
+                state.show();
+                load(state, &store);
+                assert_eq!(state.proven, None);
+                assert_eq!(state.events[0].text, "same words");
+                cx.notify();
+            });
+            cx.run_until_parked();
+            {
+                let mut paint = gpui_kit::VisualTestContext::from_window(window, cx);
+                assert!(paint.debug_bounds("message-live-1").is_some());
+                assert!(paint.debug_bounds("message-event-2").is_none());
+            }
+
+            store
+                .end_run(thread, run, &[line], end)
+                .expect("terminal run with second line");
+            model.update(cx, |state, cx| {
+                state.settled(thread, run);
+                state.run_state(thread);
+                load(state, &store);
+                assert_eq!(state.proven, Some(run));
+                cx.notify();
+            });
+            cx.run_until_parked();
+            let mut paint = gpui_kit::VisualTestContext::from_window(window, cx);
+            assert!(paint.debug_bounds("message-live-1").is_none());
+            for id in ["message-event-2", "message-event-3"] {
+                assert!(paint.debug_bounds(id).is_some(), "{name}: {id}");
+            }
+        }
+        std::fs::remove_dir_all(dir).expect("remove Chat fixture");
+    }
+
+    #[gpui::test]
     fn empty_repairs_keep_live_text_and_its_row_remeasures_with_the_font(cx: &mut TestAppContext) {
         let (model, view, window) = open(cx);
         let mut answer = Shown {

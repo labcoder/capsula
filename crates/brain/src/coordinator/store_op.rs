@@ -5,7 +5,141 @@ use kumochi_protocol::message::{
     ThreadId, ThreadTitle,
 };
 
-use std::fmt;
+use std::{fmt, ops::Deref};
+
+use crate::store::{EventKind, NewEvent};
+
+/// The unflushed answer. Delayed delivery doesn't delay acceptance into this buffer.
+#[derive(Clone, Default, PartialEq)]
+pub struct ReplyText {
+    text: String,
+    delayed: usize,
+    narration: Vec<(std::ops::Range<usize>, String)>,
+}
+
+impl ReplyText {
+    pub(super) fn accept(&mut self, text: &str) {
+        self.text.push_str(text);
+    }
+
+    pub(super) fn defer(&mut self, bytes: usize) {
+        self.delayed += bytes;
+    }
+
+    pub(super) fn released(&mut self, bytes: usize) {
+        self.delayed -= bytes;
+    }
+
+    pub(super) fn narrate(&mut self, line: &str, call: Option<&str>) {
+        let at = self.text.len() - self.delayed;
+        self.text.insert_str(at, line);
+        if let Some(call) = call {
+            let body = serde_json::json!({ "draw_call": call }).to_string();
+            self.narration.push((at..at + line.len(), body));
+        }
+    }
+
+    pub(super) fn take(&mut self) -> Option<Self> {
+        self.delayed = 0;
+        (!self.text.is_empty()).then(|| std::mem::take(self))
+    }
+
+    pub(super) fn into_plain(self) -> Content {
+        debug_assert!(
+            self.narration.is_empty(),
+            "legacy steps do not carry V1 narration"
+        );
+        self.text.into()
+    }
+
+    pub(crate) fn events(&self) -> Vec<NewEvent<'_>> {
+        let mut events = Vec::new();
+        let mut at = 0;
+        for (range, body) in &self.narration {
+            if at < range.start {
+                events.push(assistant(&self.text[at..range.start], None));
+            }
+            events.push(assistant(&self.text[range.clone()], Some(body)));
+            at = range.end;
+        }
+        if at < self.text.len() {
+            events.push(assistant(&self.text[at..], None));
+        }
+        events
+    }
+}
+
+fn assistant<'a>(text: &'a str, body: Option<&'a str>) -> NewEvent<'a> {
+    NewEvent {
+        kind: EventKind::AssistantText,
+        text: Some(text),
+        body,
+    }
+}
+
+impl Deref for ReplyText {
+    type Target = str;
+
+    fn deref(&self) -> &str {
+        &self.text
+    }
+}
+
+impl From<&str> for ReplyText {
+    fn from(text: &str) -> Self {
+        text.to_owned().into()
+    }
+}
+
+impl From<String> for ReplyText {
+    fn from(text: String) -> Self {
+        Self {
+            text,
+            ..Self::default()
+        }
+    }
+}
+
+impl fmt::Debug for ReplyText {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ReplyText")
+            .field("bytes", &self.text.len())
+            .field("delayed_bytes", &self.delayed)
+            .field("narration", &self.narration.len())
+            .finish()
+    }
+}
+
+#[test]
+fn unspoken_chat_debug_redacts_text_and_bytes() {
+    const MARKER: &str = "private-narration";
+    let key = super::BuildKey {
+        run: RunId(1),
+        round: 1,
+        attempt: 1,
+    };
+    let mut reply = ReplyText::from(MARKER);
+    reply.narrate(MARKER, Some(MARKER));
+    let printed = format!(
+        "{:?}",
+        [
+            super::Effect::Store(StoreOp::EndRun {
+                thread: ThreadId(1),
+                run: key.run,
+                text: Some(reply),
+                revealed: None,
+                clear: None,
+                end: RunEnd::Done,
+            }),
+            super::Effect::DrawingReplyText {
+                key,
+                text: MARKER.into()
+            },
+        ]
+    );
+    assert!(!printed.contains(MARKER));
+    assert!(!printed.contains(&format!("{:?}", MARKER.as_bytes())));
+}
 
 use super::Input;
 use crate::store::{Generation, RunEnd, SceneTarget, TitleSource};
@@ -88,7 +222,7 @@ pub enum StoreOp {
         /// The run.
         run: RunId,
         /// Text streamed since the last step, if any.
-        text: Option<Content>,
+        text: Option<ReplyText>,
         /// The steps that stayed on screen, when the user stopped the run.
         revealed: Option<Vec<u32>>,
         /// The run's scene, when a Stop kept none of its steps.

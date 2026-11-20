@@ -95,7 +95,6 @@ impl Coordinator {
         {
             run.ledger.refused(&done.key, ToolError::Ended);
             if !voided.is_empty() {
-                run.unstored.clear();
                 effects.push(Effect::CancelEngine { run: done.key.run });
                 self.rebuild(done.build, &voided, &pending, effects);
             }
@@ -397,7 +396,6 @@ impl Coordinator {
         let voided = build.voided(build.sources());
         if !voided.is_empty() {
             let key = build.key();
-            run.unstored.clear();
             effects.push(Effect::CancelEngine { run: key.run });
             self.rebuild(key, &voided, &pending, effects);
             return ended;

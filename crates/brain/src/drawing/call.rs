@@ -1068,6 +1068,7 @@ impl Drawing {
         self.calls.retain(|call| call.run > closed || !call.done);
         self.runs.retain(|ledger| ledger.run > closed);
         self.queue.retain(|job| match job {
+            Job::ReplyText { key, .. } => key.run > closed,
             Job::Record { run, .. } | Job::Reject { run, .. } | Job::Finish { run, .. } => {
                 *run > closed
             }

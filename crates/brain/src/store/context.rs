@@ -12,6 +12,7 @@ use super::choice::StoredChoice;
 use super::threads::kind_of;
 use super::{Generation, StoreError, rounds, row_id, sql_id};
 use crate::context::{Body, Item, Summary};
+use crate::engines::CallId;
 
 /// A thread as a reference finds it.
 #[derive(Clone, PartialEq, Eq)]
@@ -203,7 +204,10 @@ impl Snapshot<'_> {
             bytes = bytes.saturating_add(text.len() + stored.len());
             let body = match kind.as_str() {
                 "user" => Body::User(text),
-                "assistant_text" => Body::Assistant(text),
+                "assistant_text" => match draw_call(&stored) {
+                    Some(call) => Body::Narration { text, call },
+                    None => Body::Assistant(text),
+                },
                 "output_item" => rounds::native(&stored)?,
                 _ => rounds::result(&stored)?,
             };
@@ -509,6 +513,14 @@ impl Snapshot<'_> {
         self.0.commit()?;
         Ok(())
     }
+}
+
+fn draw_call(body: &str) -> Option<CallId> {
+    if body.is_empty() {
+        return None;
+    }
+    let body: serde_json::Value = serde_json::from_str(body).ok()?;
+    CallId::new(body["draw_call"].as_str()?).ok()
 }
 
 /// The longest prefix of `text` within `cap` bytes that ends on a character boundary.

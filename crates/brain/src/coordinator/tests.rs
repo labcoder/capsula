@@ -275,7 +275,7 @@ fn end_run(text: Option<&str>, revealed: Option<Vec<u32>>, end: RunEnd) -> Effec
     Effect::Store(StoreOp::EndRun {
         thread: T,
         run: R,
-        text: text.map(Content::from),
+        text: text.map(super::ReplyText::from),
         revealed,
         clear: None,
         end,

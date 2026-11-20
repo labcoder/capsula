@@ -41,6 +41,42 @@ fn bound(presenter: &Presenter) -> u32 {
 }
 
 #[test]
+fn unspoken_steps_reserve_no_time_and_keep_authored_delays() {
+    let first = step(
+        r#"{"step":{"id":"first","say":"one two three four","put":[{"shape":{"id":"r","kind":"rect","box":[0,0,10,10],"enter":"none","delay":150,"at_word":2}}]}}"#,
+    );
+    let second = step(r#"{"step":{"id":"second"}}"#);
+    let third = step(r#"{"step":{"id":"third","start":{"after":"second","ms":200}}}"#);
+    let (mut presenter, now) = prepared(&[(RUN, first), (RUN, second), (RUN, third)]);
+    presenter.advance(GENERATION, now).expect("first starts");
+    assert_eq!(bound(&presenter), 1);
+    let start = presenter.next_wake(now).expect("first authored delay");
+    let first_visible = start.duration_since(now).as_millis();
+    assert!(
+        !presenter
+            .sample_at(
+                start
+                    .checked_sub(Duration::from_millis(1))
+                    .expect("before delay")
+            )
+            .expect("sample")
+            .0
+            .visible
+    );
+    assert!(presenter.sample_at(start).expect("sample").0.visible);
+    let mut starts = Vec::new();
+    let mut cursor = start;
+    for index in 2..=3 {
+        let at = presenter.next_wake(cursor).expect("next authored start");
+        presenter.advance(GENERATION, at).expect("activate");
+        assert_eq!(bound(&presenter), index);
+        starts.push(at.duration_since(now).as_millis());
+        cursor = at;
+    }
+    assert_eq!((first_visible, starts), (150, vec![150, 350]));
+}
+
+#[test]
 fn a_stopped_admission_freezes_a_real_moving_view_before_issuing_its_cut() {
     let moving = step(
         r#"{"step":{"id":"motion","put":[{"shape":{"id":"r","kind":"rect","box":[0,0,10,10],"enter":"none"}},{"anim":{"target":"r","track":"x","ease":"linear","keys":[[0,0],[1000,100]]}}]}}"#,
@@ -96,7 +132,7 @@ fn one_absolute_wake_keeps_its_identity_across_fractional_millisecond_samples() 
     for ns in [0, 1, 999_999, 1_234_567, 2_999_999_999] {
         assert_eq!(
             presenter.next_wake(now + Duration::from_nanos(ns)),
-            Some(ms(now, 3000))
+            Some(ms(now, 2200))
         );
     }
     let delayed = step(
@@ -135,13 +171,14 @@ fn shown(run: RunId, index: u32) -> [Option<Shown>; 4] {
 }
 
 #[test]
-fn synthetic_end_offsets_late_readiness_and_runs_use_one_scene_origin() {
-    let words = std::iter::repeat_n("w", 200).collect::<Vec<_>>().join(" ");
-    let first = step(&format!(r#"{{"step":{{"id":"first","say":"{words}"}}}}"#));
+fn visual_end_offsets_late_readiness_and_runs_use_one_scene_origin() {
+    let first = step(
+        r#"{"step":{"id":"first","put":[{"shape":{"id":"r","kind":"rect","box":[0,0,10,10],"enter":"none","delay":1200}}]}}"#,
+    );
     let second = rect("second");
     let third = step(r#"{"step":{"id":"third","start":{"after":"first","ms":200}}}"#);
     let (mut presenter, now) = prepared(&[(RUN, first), (RunId(6), second), (RunId(7), third)]);
-    for (at, expected) in [(100, 1), (72_827, 1), (72_828, 2), (73_027, 2), (73_028, 3)] {
+    for (at, expected) in [(100, 1), (1299, 1), (1300, 2), (1499, 2), (1500, 3)] {
         assert!(
             presenter
                 .advance(GENERATION, ms(now, at))
@@ -152,10 +189,7 @@ fn synthetic_end_offsets_late_readiness_and_runs_use_one_scene_origin() {
     }
     assert_eq!(presenter.stoppable_run(), Some(RunId(7)));
     assert_eq!(presenter.returned.load(Ordering::Relaxed), 0);
-    assert_eq!(
-        presenter.scenes[&LIVE].activation.time(ms(now, 73_100)),
-        73_100
-    );
+    assert_eq!(presenter.scenes[&LIVE].activation.time(ms(now, 1600)), 1600);
 }
 
 #[test]
@@ -539,7 +573,9 @@ fn recovery_origin_cut_gaps_and_saturated_ends_keep_lifetime_identity() {
         .expect("recovered");
     assert_eq!(presenter.scenes[&LIVE].activation.time(ms(now, 100)), 0);
     assert_eq!(presenter.stoppable_run(), None);
-    let after = step(r#"{"step":{"id":"next","start":{"after":"old","ms":200}}}"#);
+    let after = step(
+        r#"{"step":{"id":"next","start":{"after":"old","ms":200},"put":[{"shape":{"id":"next","kind":"rect","box":[0,0,10,10],"enter":"none","delay":1000}}]}}"#,
+    );
     let job = only_job(
         commit_as(&mut presenter, RunId(6), LIVE, 1, after, ms(now, 100)).expect("continue"),
     );
@@ -577,14 +613,14 @@ fn recovery_origin_cut_gaps_and_saturated_ends_keep_lifetime_identity() {
         .completed(job.run(&mut Shaper), ms(now, 400))
         .expect("ready");
     presenter
-        .advance(GENERATION, ms(now, 1099))
-        .expect("prior segment not ended");
+        .advance(GENERATION, ms(now, 1299))
+        .expect("prior entrance not ended");
     assert_eq!(bound(&presenter), 2);
     presenter
-        .advance(GENERATION, ms(now, 1100))
+        .advance(GENERATION, ms(now, 1300))
         .expect("kept predecessor ended");
     assert_eq!(bound(&presenter), 4);
-    assert_eq!(presenter.scenes[&LIVE].activation.time(ms(now, 1100)), 1000);
+    assert_eq!(presenter.scenes[&LIVE].activation.time(ms(now, 1300)), 1200);
     let (mut presenter, now) = prepared(&[
         (RUN, rect("r")),
         (

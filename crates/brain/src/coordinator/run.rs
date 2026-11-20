@@ -80,10 +80,11 @@ impl Coordinator {
                 return Ok(());
             }
         }
-        let drawing_pending = self.drawing.pending_for(run);
+        let drawing_pending = matches!(&event, TurnEvent::Finished(Finish::Completed))
+            && self.drawing.pending_for(run);
         let current = self.current(run)?;
         match event {
-            TurnEvent::TextDelta(delta) => self.text(run, &delta, effects)?,
+            TurnEvent::TextDelta(delta) => self.text(key, &delta, effects)?,
             // Charged before anything of the call is kept (D13-M2).
             TurnEvent::ToolCallStarted { .. } if !current.tools.charge() => {
                 self.fail(run, Failure::Budget, effects)?;
@@ -188,13 +189,42 @@ impl Coordinator {
     }
 
     /// More of the answer: sent in frames that fit the data pipe, or held behind a pending step.
-    fn text(&mut self, run: RunId, delta: &str, effects: &mut Vec<Effect>) -> Result<(), Stale> {
+    fn text(&mut self, key: BuildKey, delta: &str, effects: &mut Vec<Effect>) -> Result<(), Stale> {
+        let run = key.run;
+        let delayed = self.drawing.pending_for(run);
         let current = self.current(run)?;
         if current.text_bytes + delta.len() > MAX_TEXT {
             return self.fail(run, Failure::Budget, effects);
         }
         current.text_bytes += delta.len();
-        current.unstored.push_str(delta);
+        current.unstored.accept(delta);
+        if delayed {
+            current.unstored.defer(delta.len());
+            let output = self.drawing.hold_reply_text(key, delta);
+            self.drawing_output(output, effects);
+        } else {
+            Self::carry_reply_text(current, delta, effects);
+            self.spoken_text(run, delta, effects);
+        }
+        Ok(())
+    }
+
+    pub(super) fn release_reply_text(
+        &mut self,
+        key: BuildKey,
+        delta: &str,
+        effects: &mut Vec<Effect>,
+    ) {
+        let Some(current) = self.current_attempt(key) else {
+            return;
+        };
+        current.unstored.released(delta.len());
+        Self::carry_reply_text(current, delta, effects);
+        self.spoken_text(key.run, delta, effects);
+    }
+
+    pub(super) fn carry_reply_text(current: &mut Run, delta: &str, effects: &mut Vec<Effect>) {
+        let run = current.id;
         answering(current, effects);
         let mut rest = delta;
         while !rest.is_empty() {
@@ -221,8 +251,6 @@ impl Coordinator {
             }
             rest = tail;
         }
-        self.spoken_text(run, delta, effects);
-        Ok(())
     }
 
     /// Each closed line of the draw call's arguments is one step. The open line is charged
