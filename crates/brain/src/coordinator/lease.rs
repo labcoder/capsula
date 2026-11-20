@@ -23,6 +23,35 @@ use crate::store::Failure;
 
 /// How long a granted send may go without settling [guess].
 pub const SEND_DEADLINE: Duration = Duration::from_secs(15);
+
+/// A Claude route's revocable grant for the picture a send carries. Only the coordinator makes
+/// one, so a lease without it can't claim a picture.
+#[derive(Clone, Debug)]
+pub(crate) struct PictureGrant(Arc<AtomicBool>);
+
+impl PictureGrant {
+    /// Whether the send may still write its picture.
+    pub(crate) fn is_open(&self) -> bool {
+        self.0.load(Ordering::Acquire)
+    }
+
+    /// Whether a handle besides this one is left: once a send has settled, its lease's and
+    /// the coordinator's are gone, and the last one left guards nothing.
+    pub(crate) fn is_shared(&self) -> bool {
+        Arc::strong_count(&self.0) > 1
+    }
+
+    /// Ends the grant: a transport that hasn't written yet writes nothing.
+    pub(crate) fn close(&self) {
+        self.0.store(false, Ordering::Release);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn open_for_tests() -> Self {
+        Self(Arc::new(AtomicBool::new(true)))
+    }
+}
+
 /// The longest a held send may go without settling: a Claude Code question's whole launch and
 /// the grace for its teardown to confirm its job empty [guess].
 pub const MAX_HOLD: Duration = Duration::from_secs(165);
@@ -88,12 +117,13 @@ impl Coordinator {
     }
 
     /// The picture grant of `lease`, which its transport checks right before its first write.
-    pub(crate) fn picture_grant(&self, lease: LeaseId) -> Option<Arc<AtomicBool>> {
+    pub(crate) fn picture_grant(&self, lease: LeaseId) -> Option<PictureGrant> {
         self.leases
             .iter()
             .find(|held| held.id == lease)?
             .picture
             .clone()
+            .map(PictureGrant)
     }
 
     /// Closes each picture grant whose run may no longer send its picture, so a transport that

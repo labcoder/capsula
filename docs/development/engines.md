@@ -185,7 +185,11 @@ sequenceDiagram
   The coordinator closes it as soon as the run may no longer send that picture, and the
   transport checks it at its first write attempt, after any early response it reads: closed,
   nothing is written, the round ends as `Rebuild` and settles unsent, and the coordinator builds
-  again without the picture.
+  again without the picture. On Claude Code the grant also belongs to the account generation
+  the question it was issued for was asked under, not the one its picture was captured under:
+  a new generation closes it, before that generation is published, even while that launch,
+  unbound, runs on, and a grant for a question asked under an older generation is closed as
+  it's issued.
 - **The picture's settlement.** A lease carrying a hold's picture settles it once: unsent, the run is as if never
   granted (a later grant carries the picture again, or the run's end clears the mark); otherwise
   the shell is told `HoldScreen`. A failed lease's late settlement settles only the picture.

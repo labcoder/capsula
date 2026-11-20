@@ -25,7 +25,6 @@ pub(crate) mod responses;
 use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
@@ -35,7 +34,9 @@ use tokio::task::AbortHandle;
 
 use crate::context::compact::clean_summary;
 use crate::context::{ModelRequest, Origin};
-use crate::coordinator::{BuildKey, Input, JobKey, JobKind, JobOutput, LeaseId, SendKey};
+use crate::coordinator::{
+    BuildKey, Input, JobKey, JobKind, JobOutput, LeaseId, PictureGrant, SendKey,
+};
 
 /// Events a round queues ahead of its pump; the coordinator's own queue does the buffering.
 const ROUND_QUEUE: usize = 1;
@@ -215,7 +216,7 @@ pub struct SendLease {
     inputs: Option<mpsc::UnboundedSender<Input>>,
     unsent: bool,
     /// The coordinator's revocable grant for the picture the request carries.
-    picture: Option<Arc<AtomicBool>>,
+    picture: Option<PictureGrant>,
 }
 
 impl SendLease {
@@ -229,9 +230,22 @@ impl SendLease {
     }
 
     /// Lets the send write only while `picture`, the grant for the picture it carries, is open.
-    pub(crate) fn with_picture(mut self, picture: Option<Arc<AtomicBool>>) -> Self {
+    pub(crate) fn with_picture(mut self, picture: Option<PictureGrant>) -> Self {
         self.picture = picture;
         self
+    }
+
+    /// Whether this send carries a Claude route's picture grant: true only for a lease the
+    /// coordinator granted with one, open or since closed.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "the Claude Code picture consumer is the first caller"
+        )
+    )]
+    pub(crate) fn carries_picture(&self) -> bool {
+        self.picture.is_some()
     }
 
     /// Gives the lease up unsettled: its send may still be going out, so its sources stay held
@@ -243,9 +257,7 @@ impl SendLease {
 
 impl crate::connections::model::Lease for SendLease {
     fn may_write(&self) -> bool {
-        self.picture
-            .as_ref()
-            .is_none_or(|open| open.load(Ordering::Acquire))
+        self.picture.as_ref().is_none_or(PictureGrant::is_open)
     }
 
     fn wrote(&mut self) {

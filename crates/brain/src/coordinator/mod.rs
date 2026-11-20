@@ -52,6 +52,7 @@ pub use hold::{HoldKey, HoldRead, HoldSnapshot};
 pub use inline::{CompactBuilt, CompactContext};
 pub(crate) use job::JobAsk;
 pub use job::{JobBuilt, JobKey, JobKind, JobOutput, ReadJob};
+pub(crate) use lease::PictureGrant;
 pub use lease::{LeaseId, MAX_HOLD, SEND_DEADLINE, SendKey};
 pub use speech::{DRAIN_STALL, QUIET_TIMEOUT, Synthesized};
 pub use store_op::{ReplyText, StoreOp, SummaryText};
