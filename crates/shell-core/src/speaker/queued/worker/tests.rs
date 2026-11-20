@@ -23,6 +23,9 @@ fn fake() -> (Worker, Input, Port, Receiver<Request>, SyncSender<Reply>) {
             send,
             replies,
             route_closed: false,
+            retired_route: None,
+            virtual_route: false,
+            drawing: None,
         },
         Input {
             worker: thread::current(),
@@ -646,3 +649,6 @@ fn virtual_consumption_never_commits_a_segment() {
     assert_eq!(worker.engine.progress.consumed, 480);
     assert_eq!(worker.engine.progress.heard, 0);
 }
+
+#[path = "drawing_tests.rs"]
+mod drawing_tests;
