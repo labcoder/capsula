@@ -1669,7 +1669,7 @@ fn an_off_that_cant_be_queued_keeps_its_press_off_and_the_next_press_shares(
         let state = owner.settings.read(cx);
         assert!(!state.show_screen_pending());
         assert_eq!(state.show_screen_choice(), Some(true));
-        assert!(owner.session.as_ref().is_some_and(|session| session.open()));
+        assert!(owner.session.as_ref().expect("connected").open());
     });
     assert_eq!(notice(&ready, cx), "on");
     // The queue has room again before the keys come up.
