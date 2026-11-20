@@ -311,7 +311,9 @@ waits, and a read that overlaps a write returns nothing.
   the UI. The control watcher hands it each newly named run from `RunState`, and each
   `SpeechRevoked` as a Stop. A frame whose run control hasn't named is held, uncredited, so
   data that overtakes its `RunState` can't start playback; a revoke that comes first fences it.
-  Without a speaker, `SpeechPcm` is zeroed and credited.
+  The reader decodes the announcement's start class and logical output generation, but the
+  legacy speaker still receives only its run and segment. Without a speaker, `SpeechPcm` is
+  zeroed and credited.
 - **Failure.** A command the speaker's queue refuses ends the connection, since a lost revoke
   would leave speech playing. Once the owner kept a speaker, the link arms its worker's end:
   when the worker ends for any reason, idle included, it aborts both pipes, so the link notices

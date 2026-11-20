@@ -10,8 +10,9 @@ use serde::{Serialize, de::DeserializeOwned};
 use serde_json::json;
 
 use super::{
-    ControlToBrain, ControlToShell, DataToShell, RunId, SceneCut, SceneCuts, SceneDescriptorV1,
-    SceneFailure, SceneHeader, SceneId, SceneSnapshotChunk,
+    ControlToBrain, ControlToShell, DataToShell, OutputGeneration, RunId, SceneCut, SceneCuts,
+    SceneDescriptorV1, SceneFailure, SceneHeader, SceneId, SceneSnapshotChunk, SegmentId,
+    SegmentStart, SpeechPromise, StepRef,
 };
 use crate::frame::{self, HEADER_LEN, Pipe};
 
@@ -151,6 +152,7 @@ fn data() -> Vec<DataToShell> {
             scene: SceneId(u64::MAX),
             index: 0,
             step: step(),
+            speech: None,
         },
         snapshot(header(), step()),
         DataToShell::SceneCutApplied {
@@ -262,6 +264,7 @@ fn number_dense_legal_step_and_snapshot_event_fit_the_data_frame() {
         scene: SceneId(u64::MAX),
         index: 63,
         step: step.clone(),
+        speech: None,
     };
     let bytes = frame::encode(&live, Pipe::Data).expect("dense live frame fits");
     assert!(
@@ -269,6 +272,71 @@ fn number_dense_legal_step_and_snapshot_event_fit_the_data_frame() {
         "exercise numeric expansion, not text compression"
     );
     round_trip(&live, Pipe::Data);
+    round_trip(&snapshot(header(), step), Pipe::Data);
+}
+
+#[test]
+fn live_speech_metadata_is_required_and_not_part_of_snapshots() {
+    let run = RunId(1);
+    let scene = SceneId(2);
+    let step_ref = StepRef { scene, index: 0 };
+    let segment = SegmentId(3);
+    let output_generation = OutputGeneration(17);
+    let promise = SpeechPromise {
+        output_generation,
+        segment,
+    };
+    let step = step();
+    for (message, suffix) in [
+        (
+            DataToShell::SegmentQueued {
+                run,
+                segment,
+                step: Some(step_ref),
+                start: SegmentStart::Speech,
+                output_generation,
+            },
+            2,
+        ),
+        (
+            DataToShell::SceneStepCommit {
+                run,
+                scene,
+                index: 0,
+                step: step.clone(),
+                speech: Some(promise),
+            },
+            3,
+        ),
+        (
+            DataToShell::SceneStepCommit {
+                run,
+                scene,
+                index: 0,
+                step: step.clone(),
+                speech: None,
+            },
+            1,
+        ),
+    ] {
+        round_trip(&message, Pipe::Data);
+        let mut payload = frame::encode_payload(&message).expect("payload");
+        for missing in 1..=suffix {
+            assert!(matches!(
+                frame::decode::<DataToShell>(&payload[..payload.len() - missing]),
+                Err(frame::FrameError::Malformed(
+                    postcard::Error::DeserializeUnexpectedEnd
+                ))
+            ));
+        }
+        payload.push(0);
+        assert!(matches!(
+            frame::decode::<DataToShell>(&payload),
+            Err(frame::FrameError::Malformed(
+                postcard::Error::DeserializeBadEncoding
+            ))
+        ));
+    }
     round_trip(&snapshot(header(), step), Pipe::Data);
 }
 

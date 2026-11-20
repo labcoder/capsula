@@ -62,6 +62,24 @@ pub struct SegmentId(pub u32);
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OutputGeneration(pub u32);
 
+/// Whether a queued segment narrates a step authored to start with speech.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SegmentStart {
+    /// Ordinary text speech, or narration for a step with an independent start.
+    Plain,
+    /// Narration for a step authored to start with speech.
+    Speech,
+}
+
+/// The exact live narration promised by a scene commit, within the commit's run.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SpeechPromise {
+    /// The logical output generation used by the announcement and PCM.
+    pub output_generation: OutputGeneration,
+    /// The matching segment in the run.
+    pub segment: SegmentId,
+}
+
 /// One voice-only hold's admission or terminal outcome; never audio or recognized words.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum HoldStatus {

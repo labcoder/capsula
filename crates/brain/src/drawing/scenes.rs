@@ -211,6 +211,7 @@ impl Drawing {
             scene,
             index,
             step: Step::clone(&step),
+            speech: None,
         }));
         self.drew(run, &call, scene, &step);
         if begun {

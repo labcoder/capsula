@@ -1,5 +1,6 @@
 use kumochi_protocol::message::{
-    Cursor, OutputGeneration, RunId, SceneId, SegmentId, SpeechPcm, StepRef,
+    Cursor, OutputGeneration, RunId, SceneId, SegmentId, SegmentStart, SpeechPcm, SpeechPromise,
+    StepRef,
 };
 
 use super::{Failure, Heard, Refused, Reply, Revoker, Speech};
@@ -38,6 +39,8 @@ fn queued(segment: u32) -> Speech {
     Speech::Queued {
         segment: seg(segment),
         step: None,
+        start: SegmentStart::Plain,
+        output_generation: OutputGeneration(1),
     }
 }
 
@@ -271,6 +274,53 @@ fn a_failure_of_one_segment_moves_on_to_the_next() {
 }
 
 #[test]
+fn a_reservation_promises_only_an_announced_segment_even_if_synthesis_stopped() {
+    let step = step(4, 0);
+    for revoked in [false, true] {
+        let mut reply = reply();
+        run(&mut reply, |r, out| r.text("First. ", out));
+        let mut out = Vec::new();
+        let reserved = reply
+            .reserve_say("Look here.", &mut out)
+            .expect("reserved while open");
+        assert_eq!(reserved, seg(1));
+        assert!(out.is_empty());
+        if revoked {
+            run(&mut reply, |r, out| r.revoke(Revoker::Brain, out));
+        } else {
+            run(&mut reply, |r, out| r.failed(seg(0), Failure::Run, out));
+        }
+        let start = SegmentStart::Speech;
+        let output_generation = OutputGeneration(1);
+        let promise = reply.publish_say(reserved, step, start, "Look here.", &mut out);
+        if revoked {
+            assert_eq!(promise, None);
+            assert_eq!(out, []);
+        } else {
+            assert_eq!(
+                promise,
+                Some(SpeechPromise {
+                    output_generation,
+                    segment: seg(1)
+                })
+            );
+            assert_eq!(
+                out,
+                [
+                    Speech::Queued {
+                        segment: seg(1),
+                        step: Some(step),
+                        start,
+                        output_generation
+                    },
+                    pcm(1, 0, 0, Some(0)),
+                ]
+            );
+        }
+    }
+}
+
+#[test]
 fn a_failed_scene_drops_its_say_and_the_text_after_it_still_plays() {
     let mut reply = reply();
     run(&mut reply, |r, out| r.text("Look", out));
@@ -282,6 +332,8 @@ fn a_failed_scene_drops_its_say_and_the_text_after_it_still_plays() {
             Speech::Queued {
                 segment: seg(1),
                 step: Some(step(4, 0)),
+                start: SegmentStart::Speech,
+                output_generation: OutputGeneration(1),
             },
             speak(0, "Look"),
             Speech::Credit(WINDOW),

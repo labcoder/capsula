@@ -1517,6 +1517,7 @@ fn the_real_busy_notification_reaches_consumption_and_the_first_canvas_paint(
                     scene: SceneId(1),
                     index: 1,
                     step,
+                    speech: None,
                 },
                 100,
             ),

@@ -38,6 +38,7 @@ fn live_frames_apply_only_on_the_current_connection_while_the_dropper_runs() {
                 scene: LIVE,
                 index: 0,
                 step: rect("a"),
+                speech: None,
             },
             DataToShell::ScenesRemoved { scenes: vec![LIVE] },
         ];

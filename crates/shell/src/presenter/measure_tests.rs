@@ -167,6 +167,7 @@ fn measure_motion_heavy_prepared_tip_admission_and_clear() {
                     scene,
                     index: 63,
                     step: last.clone(),
+                    speech: None,
                 };
                 let bytes = u32::try_from(
                     frame::encode(&message, Pipe::Data)

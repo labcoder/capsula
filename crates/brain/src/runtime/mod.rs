@@ -1730,6 +1730,7 @@ impl<'a, 't> Link<'a, 't> {
             scene,
             index,
             step,
+            ..
         } = message
             && let Some(observation) =
                 crate::connections::model::text_observation::Observation::drawing()

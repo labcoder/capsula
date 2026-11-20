@@ -637,7 +637,7 @@ records only their operation and length.
 | --- | --- | --- | --- |
 | Shell to brain | data | `MicPcm` | `gesture`, `seq`, `rate`, `last`, `samples` (i16) |
 | Brain to shell | data | `Transcript` | `run`, `text` |
-| Brain to shell | data | `SegmentQueued` | `run`, `segment`, optional `step` (`StepRef { scene, index }`) |
+| Brain to shell | data | `SegmentQueued` | `run`, `segment`, optional `step` (`StepRef { scene, index }`), `start` (`Plain` or `Speech`), `output_generation` |
 | Brain to shell | data | `SpeechPcm` | `run`, `segment`, `output_generation`, `seq`, `samples`, `last` |
 | Shell to brain | control | `SpeechProgress` | `run`, `segment`, `sample`, `t_qpc` |
 | Shell to brain | control | `SegmentPlayed` | `run`, `segment`, `samples` |
@@ -653,7 +653,9 @@ records only their operation and length.
   generation it names; PCM for an older generation is dropped. Every queued segment ends with
   exactly one chunk whose `last` carries its total samples, at most `MAX_SEGMENT_SECONDS` (30 s)
   of them. That chunk may be empty, so audio goes out as it's made, and a segment that made no
-  audio or was cut still ends.
+  audio or was cut still ends. The announcement is run-owned, like PCM; a scene clear can
+  remove its scene-owned commit from the shared FIFO without removing the announcement. The
+  stored start class is therefore independent of whether the shell receives that commit.
 - **Withdrawal.** `AudioOutputUnavailable` (a fault, or talk-back turned off) withdraws the
   output of its `generation` without ending the connection; a withdrawal of any other
   generation changes nothing. Until an `AudioOutput` of a strictly newer generation, no run gets a reply: the brain ignores one at or below the
@@ -794,7 +796,7 @@ tags and bytes do not change. Mixed builds still fail their build-id handshake.
 | Control, shell to brain | `StepShown`, `StepReady`, `StepFailed` | First paint containing a lifetime step index, the step's preparation succeeding and queueing it to activate, or a content-free preparation failure with its scene-wide cut; the appended `PaintWork` reason marks a step past the shell's paint-work cap, which the brain reports to the model as `drawing.TooMuchToPaint` while the step's draw call is open or its result is held for the shell ([tools](tools.md), "`draw`"), with the paint budget the draw prompt states (the shell sends no counts, so the refusal can't say how far over the step was). The brain refuses most such steps at admission, before writing them (scene.md, "The brain's count"); this is the late residual. A draw call's result waits until the shell has prepared or refused its last step, so the model hears a refusal made while preparing; a step refused when it activates (Residency or Validation), or a screen scene skipped after its steps were prepared, is not reported to the model, and the person sees the existing notice when nothing is left on screen. Control order keeps these observations ahead of later Stop cuts. |
 | Control, brain to shell | `ScenesV1` | Authoritative visible membership and each scene's lifetime revision, retained count and full log-entry count. |
 | Control, brain to shell | `NoVisual` | Legacy run-level advisory, consumed without changing state. |
-| Data, brain to shell | `SceneBegin`, `SceneStepCommit` | An immutable typed header/layout version, then original typed steps after durable commit. |
+| Data, brain to shell | `SceneBegin`, `SceneStepCommit` | An immutable typed header/layout version, then original typed steps after durable commit, with an optional live speech promise (`output_generation`, `segment`). |
 | Data, brain to shell | `SceneSnapshotV1` | Complete ordered original steps and effective cuts, packed as whole events. Chunk zero alone carries the header. |
 | Data, brain to shell | `SceneCutApplied` | Authoritative cut, after every step committed before it; the last committed revision is included for a cheap consistency check. |
 | Data, brain to shell | `SceneEnd` | A call completed or ended incomplete; already committed history remains. |
@@ -822,6 +824,9 @@ Raw 50-row/32 KiB page limits, continuation and credit accounting are unchanged.
 The new page kind is appended at tag 5; existing kind tags and the control's tag 10 are
 unchanged. Old readers cannot decode the new kind. The capability-first exact `BUILD_ID`
 handshake rejects mixed committed builds; this is paired-build compatibility, not negotiation.
+The live speech metadata also requires that exact build match. A received live commit's
+`None` means no live speech promise; a missing commit is not an absence signal. Snapshot log
+events have no live speech metadata.
 
 `SceneStepCommit` and `StepShown` indices are zero-based lifetime indices; scene revisions and `StopCut.activated`
 are one-based bounds. They are not dense indices into the kept steps. The per-run 64-step

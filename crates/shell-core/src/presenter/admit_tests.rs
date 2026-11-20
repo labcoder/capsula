@@ -783,7 +783,8 @@ fn older_held_scenes_settle_under_the_newest_stop_without_losing_a_later_run() {
                     run,
                     scene,
                     index: 0,
-                    step: rect(id)
+                    step: rect(id),
+                    speech: None,
                 },
                 now
             )
@@ -947,6 +948,7 @@ fn second_clear_cancels_a_held_scenes_admission_and_late_cut_cannot_restore_it()
                 scene,
                 index: 0,
                 step: rect(id),
+                speech: None,
             },
             now,
         )

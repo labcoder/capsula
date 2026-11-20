@@ -24,7 +24,9 @@ flowchart LR
 The brain reserves speech when a prepared step enters the store queue. If the step has
 nonblank `say` and no reservation, its successful write receipt adds a line to the current
 attempt's reply even if the scene frame is suppressed. History reads the saved reply;
-recovery doesn't turn restored drawing records into Chat text.
+recovery doesn't turn restored drawing records into Chat text or promise live speech. The
+live commit only promises narration for a speech-start step whose segment was actually
+announced. That metadata doesn't change presentation timing.
 
 The brain's provider path uses the existing cursor tokenizer and public 2D `parse_draw_record`
 gate for each closed record, then the drawing reducer's order/semantic admission and store FIFO.

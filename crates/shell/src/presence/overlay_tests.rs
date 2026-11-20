@@ -106,6 +106,7 @@ fn prepare_scene_step_at(
                     scene,
                     index,
                     step,
+                    speech: None,
                 },
                 100,
             ),
