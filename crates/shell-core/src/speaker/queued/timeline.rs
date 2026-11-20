@@ -250,7 +250,9 @@ impl Engine {
     }
 
     pub(super) fn discard(&mut self, segment: SegmentId, now: Duration) {
-        if let Some(discarded) = self.queue.discarded.get_mut(segment.0 as usize) {
+        if let Ok(index) = usize::try_from(segment.0)
+            && let Some(discarded) = self.queue.discarded.get_mut(index)
+        {
             *discarded = true;
             self.release(segment, now);
             self.skip_discarded(now);

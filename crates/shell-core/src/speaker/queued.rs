@@ -20,6 +20,11 @@ mod tests;
 
 const RATE: u32 = 24_000;
 const CAPACITY: usize = 480_000;
+const DISCARD_SLOTS: usize = 256;
+const _: () = assert!(
+    MAX_SEGMENTS_PER_RUN == 256,
+    "discard slots cover every wire segment"
+);
 const _: () = assert!(
     RATE * MAX_UNPLAYED_SECONDS == 480_000,
     "capacity follows the wire source window"
@@ -85,7 +90,7 @@ struct Queue {
     received: u64,
     next_segment: u32,
     completed: u32,
-    discarded: [bool; MAX_SEGMENTS_PER_RUN as usize],
+    discarded: [bool; DISCARD_SLOTS],
     samples: VecDeque<i16>,
     segments: VecDeque<Segment>,
     held: Option<Packet>,
@@ -101,7 +106,7 @@ impl Queue {
             received: 0,
             next_segment: 0,
             completed: 0,
-            discarded: [false; MAX_SEGMENTS_PER_RUN as usize],
+            discarded: [false; DISCARD_SLOTS],
             samples: VecDeque::with_capacity(CAPACITY),
             segments: VecDeque::new(),
             held: None,
@@ -113,7 +118,11 @@ impl Queue {
     }
 
     fn discarded(&self, id: SegmentId) -> bool {
-        self.discarded.get(id.0 as usize).copied().unwrap_or(false)
+        usize::try_from(id.0)
+            .ok()
+            .and_then(|index| self.discarded.get(index))
+            .copied()
+            .unwrap_or(false)
     }
 
     fn current(&self, pcm: &SpeechPcm) -> bool {
