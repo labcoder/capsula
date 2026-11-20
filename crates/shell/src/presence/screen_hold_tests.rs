@@ -1492,3 +1492,39 @@ fn a_press_takes_no_screen_on_a_target_it_was_not_seen_on(cx: &mut TestAppContex
         });
     }
 }
+
+/// An offer that goes and comes back is another one, though the brain names it with the same
+/// revision: the press under the first takes no screen, whether it went before the recognition
+/// or between the recognition and the release.
+#[gpui::test]
+fn an_offer_that_went_and_came_back_is_not_the_one_the_press_saw(cx: &mut TestAppContext) {
+    for before_recognition in [true, false] {
+        let ready = screen_ready(Some(on(&luna())), cx);
+        press(&ready, 1, cx);
+        warm(&ready, 1, cx);
+        let away_and_back = |cx: &mut TestAppContext| {
+            gate(&ready, ScreenHolds::Off(ScreenOff::NotReady), cx);
+            gate(&ready, on(&luna()), cx);
+        };
+        if before_recognition {
+            away_and_back(cx);
+        }
+        recognize(&ready.owner, 1, cx);
+        if !before_recognition {
+            away_and_back(cx);
+        }
+        listening(&ready.owner, cx);
+        release(&ready.owner, 1, Some(DOWN), cx);
+        let sent = sent(&ready);
+        assert!(
+            !sent
+                .iter()
+                .any(|message| matches!(message, ControlToBrain::ScreenRelease { .. })),
+            "{sent:?}"
+        );
+        assert_eq!(lease(&ready, cx), (0, false));
+        ready.owner.read_with(cx, |owner, _| {
+            assert!(owner.voice.watched.is_none());
+        });
+    }
+}

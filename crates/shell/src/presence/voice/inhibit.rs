@@ -65,7 +65,8 @@ struct Gate {
     /// The link generation and choice revision at key-down.
     session: u64,
     choice: u64,
-    /// The offer published at key-down, if it was for that connection, choice and target.
+    /// The offer published at key-down; recognition and release compare it whole with the
+    /// offer published then.
     offer: Option<Offer>,
     authority: Authority,
     /// The run to fence, taken once when `Warm` is applied.
@@ -224,14 +225,11 @@ impl Gates {
         gesture: GestureId,
         session: u64,
         choice: u64,
-        target: (Option<ThreadId>, u64),
     ) {
         if !self.on.get() {
             return;
         }
-        let offer = self.offer.get().0.filter(|offer| {
-            offer.session == session && offer.choice == choice && offer.target == target
-        });
+        let offer = self.offer.get().0;
         let mut gates = self.list.borrow_mut();
         let native = gates.iter().position(|gate| {
             matches!(gate.stage, Stage::Native)

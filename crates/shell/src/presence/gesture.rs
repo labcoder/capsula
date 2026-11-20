@@ -203,7 +203,6 @@ pub(super) fn deliver(
                         *warm,
                         link.link_generation(),
                         link.choice_revision(),
-                        target.get(),
                     );
                 }
                 Intent::Recognized {
