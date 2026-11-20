@@ -24,8 +24,8 @@ mod source;
 #[cfg(test)]
 mod tests;
 
-use control::frame_time;
 pub(crate) use control::{Control, TailAck};
+use control::{CopyDenied, frame_time};
 use handoff::{Consumer, Producer};
 use lifetime::{OwnedStream, Owner, Permit, Shared, cleanup_sender};
 use source::{Conversion, Stamp};
@@ -188,7 +188,13 @@ impl Output {
     }
 }
 
-pub(crate) struct BackendStream(cpal::Stream);
+pub(crate) struct BackendStream<S = cpal::Stream>(S, Arc<AtomicBool>);
+
+impl<S> Drop for BackendStream<S> {
+    fn drop(&mut self) {
+        self.1.store(true, Ordering::Release);
+    }
+}
 
 impl BackendStream {
     pub(crate) fn open(
@@ -227,6 +233,7 @@ impl BackendStream {
         let permit = Permit::claim(&OCCUPIED).ok_or(ErrorKind::DeviceBusy)?;
         let cleanup = cleanup_sender().ok_or(ErrorKind::ResourceExhausted)?;
         let (submit, mut playback) = pair(rate, usize::from(channels), Arc::clone(control));
+        let cancelled = Arc::clone(&submit.shared.cancelled);
         let notices = Arc::clone(&submit.shared);
         let signal = Arc::clone(control);
         let owner = Owner::new(submit, permit, cleanup);
@@ -250,7 +257,7 @@ impl BackendStream {
             )
             .map_err(|error| error.kind())?;
         control.calibrate(stream.now(), origin.elapsed());
-        Ok((Self(stream), Transport(owner)))
+        Ok((Self(stream, cancelled), Transport(owner)))
     }
 
     pub(crate) fn play(&self) -> Result<(), OutputError> {
@@ -467,43 +474,37 @@ impl Submit {
 
 impl Playback {
     fn fill_at(&mut self, out: &mut [f32], start: Option<Duration>) {
-        self.render(out, start, || {});
+        self.render(out, start, Control::begin_copy, || {});
     }
 
     fn render(
         &mut self,
         mut out: &mut [f32],
         start: Option<Duration>,
+        mut admit: impl FnMut(&Control) -> Result<(), CopyDenied>,
         mut after_copy: impl FnMut(),
     ) {
         let total = out.len();
         let mut report: Option<Presented> = None;
         let mut worked = false;
         let limit = usize::try_from(self.rate / 400).expect("bounded output rate") * self.channels;
-        loop {
+        let interruption = loop {
             if self.shared.cancelled.load(Ordering::Acquire) {
-                break;
+                break Some(CopyDenied::Silence);
+            }
+            if let Some(reason) = self.control.interruption() {
+                break Some(reason);
+            }
+            if !self.return_slot() || out.is_empty() {
+                break None;
             }
             let at = (total - out.len()) / self.channels;
-            if self.control.stopped() {
-                self.publish(report);
-                self.discard_ready();
-                let pending = self.control.tail() == TailAck::Pending;
-                self.fade(out, frame_time(start, at, self.rate));
-                if worked || pending {
-                    self.control.wake();
-                }
-                return;
-            }
-            if self.control.inhibited() || !self.return_slot() || out.is_empty() {
-                break;
-            }
             if self.current.is_none() {
                 self.current = self.ready.pop();
                 self.offset = 0;
             }
             let Some(block) = self.current.as_ref() else {
-                break;
+                break None;
             };
             let len = out
                 .len()
@@ -511,10 +512,10 @@ impl Playback {
                 .min(limit);
             let len = len - len % self.channels;
             if len == 0 {
-                break;
+                break None;
             }
-            if !self.control.begin_copy() {
-                continue;
+            if let Err(reason) = admit(&self.control) {
+                break Some(reason);
             }
             let (head, rest) = out.split_at_mut(len);
             head.copy_from_slice(&block.pcm.samples[self.offset..self.offset + len]);
@@ -555,14 +556,20 @@ impl Playback {
             self.control.end_copy();
             worked = true;
             after_copy();
-        }
+        };
         self.publish(report);
-        if worked {
-            self.control.wake();
-        }
-        if !out.is_empty() {
+        if interruption == Some(CopyDenied::Stop) && !self.shared.cancelled.load(Ordering::Acquire)
+        {
+            let at = (total - out.len()) / self.channels;
+            self.discard_ready();
+            worked |= self.control.tail() == TailAck::Pending;
+            self.fade(out, frame_time(start, at, self.rate));
+        } else if !out.is_empty() {
             out.fill(0.0);
             self.last = 0.0;
+        }
+        if worked {
+            self.control.wake();
         }
     }
 

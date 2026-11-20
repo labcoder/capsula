@@ -365,12 +365,17 @@ fn a_stop_between_bounded_copies_fences_the_remainder_of_the_same_block() {
     let ctrl = std::sync::Arc::clone(&submit.control);
     let mut out = [99.0; 210];
     let mut copies = 0;
-    playback.render(&mut out, Some(Duration::from_millis(11)), || {
-        copies += 1;
-        if copies == 1 {
-            ctrl.stop();
-        }
-    });
+    playback.render(
+        &mut out,
+        Some(Duration::from_millis(11)),
+        super::Control::begin_copy,
+        || {
+            copies += 1;
+            if copies == 1 {
+                ctrl.stop();
+            }
+        },
+    );
 
     assert_eq!(copies, 1);
     assert_eq!(
@@ -478,13 +483,13 @@ fn missing_device_time_reports_handoff_without_confirming_presentation() {
 #[test]
 fn recovery_fence_waits_for_an_in_flight_copy_without_admitting_another() {
     let ctrl = super::Control::default();
-    assert!(ctrl.begin_copy());
+    assert_eq!(ctrl.begin_copy(), Ok(()));
     ctrl.stop();
     assert_eq!(ctrl.fenced_handoff(), None);
     ctrl.handed_through(41);
     ctrl.end_copy();
     assert_eq!(ctrl.fenced_handoff(), Some(41));
-    assert!(!ctrl.begin_copy());
+    assert_eq!(ctrl.begin_copy(), Err(super::CopyDenied::Stop));
 }
 
 #[test]
@@ -505,5 +510,98 @@ fn inhibit_writes_silence_without_consuming_the_retained_block() {
     assert_eq!(
         out.map(f32::to_bits),
         [0.5f32.to_bits(), 0.75f32.to_bits(), 0]
+    );
+}
+
+#[test]
+fn a_rejected_copy_admission_silences_this_callback_without_retrying() {
+    let (mut submit, mut playback) = pair(SOURCE_RATE, 1);
+    submit.packet(&[8_192, 16_384], PacketKind::End).unwrap();
+    let mut attempts = 0;
+    let mut out = [99.0];
+    playback.render(
+        &mut out,
+        None,
+        |control| {
+            attempts += 1;
+            if attempts == 1 {
+                control.inhibit();
+                let admitted = control.begin_copy();
+                control.resume();
+                admitted
+            } else {
+                control.begin_copy()
+            }
+        },
+        || {},
+    );
+    assert_eq!(attempts, 1);
+    assert_eq!(out[0].to_bits(), 0);
+    playback.fill(&mut out);
+    assert_eq!(out[0].to_bits(), 0.25f32.to_bits());
+}
+
+#[test]
+fn dropping_the_backend_before_the_transport_silences_a_surviving_callback() {
+    use super::lifetime::{Owner, Permit, cleanup_sender};
+    use super::{BackendStream, Source, Transport};
+    use kumochi_protocol::message::{RunId, SegmentId};
+    use std::sync::atomic::AtomicBool;
+    use std::time::Duration;
+
+    static OCCUPIED: AtomicBool = AtomicBool::new(false);
+    let (mut submit, mut playback) = pair(SOURCE_RATE, 1);
+    let source = Source {
+        run: RunId(5),
+        generation: 3,
+        segment: SegmentId(0),
+        at: 100,
+    };
+    submit
+        .packet_for(&[8_192, 16_384], PacketKind::End, Some(source))
+        .unwrap();
+    submit
+        .packet_for(
+            &[24_576],
+            PacketKind::End,
+            Some(Source {
+                at: 102,
+                segment: SegmentId(1),
+                ..source
+            }),
+        )
+        .unwrap();
+    let transport = Transport(Owner::new(
+        submit,
+        Permit::claim(&OCCUPIED).unwrap(),
+        cleanup_sender().unwrap(),
+    ));
+    playback.fill_at(&mut [0.0; 1], Some(Duration::ZERO));
+    assert_eq!(transport.control().handed(), 101);
+    let backend = BackendStream((), std::sync::Arc::clone(&playback.shared.cancelled));
+    drop(backend);
+
+    let mut out = [99.0; 2];
+    playback.fill_at(&mut out, Some(Duration::from_millis(1)));
+    assert_eq!(out.map(f32::to_bits), [0; 2]);
+    assert_eq!(transport.control().handed(), 101);
+}
+
+#[test]
+fn canceling_one_backend_does_not_cancel_a_fallback_open() {
+    use super::{BackendStream, Control};
+    use std::sync::Arc;
+
+    let control = Arc::new(Control::default());
+    let (first, _) = super::pair(SOURCE_RATE, 2, Arc::clone(&control));
+    drop(BackendStream((), Arc::clone(&first.shared.cancelled)));
+
+    let (mut fallback, mut callback) = super::pair(SOURCE_RATE, 8, control);
+    fallback.packet(&[16_384], PacketKind::End).unwrap();
+    let mut out = [0.0; 8];
+    callback.fill(&mut out);
+    assert_eq!(
+        out.map(f32::to_bits),
+        [0.5f32.to_bits(), 0.5f32.to_bits(), 0, 0, 0, 0, 0, 0]
     );
 }

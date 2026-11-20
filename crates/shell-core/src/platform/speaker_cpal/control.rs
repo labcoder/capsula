@@ -16,6 +16,22 @@ const STOPPED: u8 = 1;
 const INHIBITED: u8 = 2;
 const COPYING: u8 = 4;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum CopyDenied {
+    Stop,
+    Silence,
+}
+
+impl CopyDenied {
+    fn from_gate(gate: u8) -> Self {
+        if gate & STOPPED != 0 {
+            Self::Stop
+        } else {
+            Self::Silence
+        }
+    }
+}
+
 #[derive(Default)]
 pub(crate) struct Control {
     gate: AtomicU8,
@@ -56,18 +72,16 @@ impl Control {
         self.gate.fetch_and(!INHIBITED, Ordering::AcqRel);
     }
 
-    pub(super) fn stopped(&self) -> bool {
-        self.gate.load(Ordering::Acquire) & STOPPED != 0
+    pub(super) fn interruption(&self) -> Option<CopyDenied> {
+        let gate = self.gate.load(Ordering::Acquire);
+        (gate != 0).then(|| CopyDenied::from_gate(gate))
     }
 
-    pub(super) fn inhibited(&self) -> bool {
-        self.gate.load(Ordering::Acquire) & INHIBITED != 0
-    }
-
-    pub(super) fn begin_copy(&self) -> bool {
+    pub(super) fn begin_copy(&self) -> Result<(), CopyDenied> {
         self.gate
-            .compare_exchange(0, COPYING, Ordering::AcqRel, Ordering::Relaxed)
-            .is_ok()
+            .compare_exchange(0, COPYING, Ordering::AcqRel, Ordering::Acquire)
+            .map(|_| ())
+            .map_err(CopyDenied::from_gate)
     }
 
     pub(super) fn end_copy(&self) {
