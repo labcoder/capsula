@@ -1963,7 +1963,7 @@ async fn a_screen_part_starts_only_while_its_ticket_ends_within_the_lease() {
 }
 
 /// Sol takes images and is the default; Luna doesn't. A brain with a worker client and that catalog.
-fn sees_on_sol(
+pub(in crate::runtime) fn sees_on_sol(
     brain: &mut Brain,
 ) -> (
     crate::supervise::fixture::Rig<crate::screen::Holds>,
@@ -1992,7 +1992,7 @@ fn sees_on_sol(
     (rig, sol, luna)
 }
 
-fn set(brain: &mut Brain, op: SettingsOp) {
+pub(in crate::runtime) fn set(brain: &mut Brain, op: SettingsOp) {
     let pending = brain.config.stage(op).unwrap();
     pending.write().unwrap();
     brain.config.commit(pending);
@@ -2427,6 +2427,71 @@ async fn the_gate_is_sent_once_per_connection_and_again_only_when_it_changes() {
         "a new connection gets the state again"
     );
     assert!(output.is_empty());
+    brain.close().await;
+}
+
+/// A new sign-in on the offer's own route, for the same model, revises the offer once; a wake that
+/// changes nothing sends nothing.
+#[tokio::test]
+async fn a_new_sign_in_alone_revises_the_offer_once() {
+    use crate::context::ConnectionTag;
+    use crate::coordinator::{PictureRoutes, Ready};
+    use kumochi_protocol::message::{
+        ConnectionKind, Effort, ModelInfo, ModelName, ModelSlug, NoticeRevision, ScreenHolds,
+    };
+    let scratch = Scratch::new("hold-screen-sign-in");
+    let (mut brain, _release, _decoded, _fetch) =
+        crate::runtime::tests::holds::input(&scratch, Vec::new(), "not submitted").await;
+    let (out, mut output) = mpsc::channel(16);
+    let queue = RefCell::new(DataQueue::new(super::super::window()));
+    let ready_notify = Notify::new();
+    let mut tap = Tap::from_env();
+    let mut link = Link::new(&out, &queue, &ready_notify, &mut tap);
+    let (_rig, _sol, _luna) = sees_on_sol(&mut brain);
+    brain.holds.window_capture = true;
+    let seen = ModelSlug::new("seen").unwrap();
+    brain
+        .coordinator
+        .set_pictures(PictureRoutes::new(false, true));
+    let signed_in = |tag| {
+        crate::coordinator::Input::Engines(
+            ConnectionKind::ClaudeCode,
+            Availability::Ready(Ready {
+                connection: ConnectionTag(tag),
+                models: vec![ModelInfo {
+                    slug: seen.clone(),
+                    display_name: ModelName::new("Seen").unwrap(),
+                    supported_efforts: None,
+                }],
+                images: vec![seen.clone()],
+                trusted_draw: false,
+            }),
+        )
+    };
+    brain.coordinator.handle(signed_in(5)).unwrap();
+    set(
+        &mut brain,
+        SettingsOp::SetDefaultModel(ModelChoice {
+            model: seen.clone(),
+            effort: Effort::Low,
+            connection: ConnectionKind::ClaudeCode,
+        }),
+    );
+    let on = |revision| {
+        [ScreenHolds::On {
+            model: ModelName::new("Seen").unwrap(),
+            connection: ConnectionKind::ClaudeCode,
+            slug: seen.clone(),
+            revision,
+        }]
+    };
+    brain.screen_holds_changed(&mut link).unwrap();
+    assert_eq!(gates(&mut output), on(NoticeRevision::FIRST));
+    brain.coordinator.handle(signed_in(6)).unwrap();
+    brain.screen_holds_changed(&mut link).unwrap();
+    assert_eq!(gates(&mut output), on(NoticeRevision::FIRST.next()));
+    brain.screen_holds_changed(&mut link).unwrap();
+    assert_eq!(gates(&mut output), []);
     brain.close().await;
 }
 

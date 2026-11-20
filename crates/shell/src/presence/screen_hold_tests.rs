@@ -63,6 +63,15 @@ fn choice(model: &ModelInfo, effort: Effort) -> ModelChoice {
         connection: ConnectionKind::ChatGpt,
     }
 }
+/// The offer naming `model` at `revision`.
+fn offer(model: &ModelInfo, revision: kumochi_protocol::message::NoticeRevision) -> ScreenHolds {
+    ScreenHolds::On {
+        model: model.display_name.clone(),
+        connection: kumochi_protocol::message::ConnectionKind::ChatGpt,
+        slug: model.slug.clone(),
+        revision,
+    }
+}
 pub(super) fn on(model: &ModelInfo) -> ScreenHolds {
     ScreenHolds::On {
         model: model.display_name.clone(),
@@ -276,7 +285,7 @@ pub(super) fn screen_hold(id: u32) -> ControlToBrain {
         thread: Some(ThreadId(1)),
         selection: 1,
         t_qpc: QPC,
-        notice: Some(kumochi_protocol::message::NoticeRevision::FIRST),
+        notice: None,
     }
 }
 
@@ -293,7 +302,7 @@ pub(super) fn screen_release(
         excluded_qpc: STAMP,
         pointer: ReleasePointer(pointer),
         path: PointerPath(path.to_vec()),
-        notice: Some(kumochi_protocol::message::NoticeRevision::FIRST),
+        notice: None,
     }
 }
 
@@ -1220,4 +1229,50 @@ fn a_default_model_that_stops_or_starts_taking_pictures_says_so_once_in_the_open
         note(&ready, cx),
         Some((thread, Text::ScreenNoteCan, luna().display_name))
     );
+}
+
+/// A press under one offer, or under none, whose recognition is delivered after a newer offer
+/// arrived carries no offer to the brain, in its recognition or its release: receiving the newer
+/// one doesn't show it.
+#[gpui::test]
+fn a_hold_carries_no_offer_that_arrived_before_its_deferred_recognition(cx: &mut TestAppContext) {
+    use kumochi_protocol::message::NoticeRevision;
+    for (id, shown) in [
+        (1, on(&luna())),
+        (2, ScreenHolds::Off(ScreenOff::ModelCantSee)),
+    ] {
+        let ready = screen_ready(Some(shown), cx);
+        let press = Intent::Warm(GestureId(id));
+        deliver(
+            &ready.owner,
+            press,
+            QPC,
+            Some(ORIGIN),
+            TalkHeld::default(),
+            cx,
+        );
+        gate(&ready, offer(&luna(), NoticeRevision::FIRST.next()), cx);
+        recognize(&ready.owner, id, cx);
+        listening(&ready.owner, cx);
+        release(&ready.owner, id, Some(ORIGIN), cx);
+        let sent = sent(&ready);
+        assert!(
+            sent.iter()
+                .any(|message| matches!(message, ControlToBrain::ScreenRelease { .. })),
+            "{sent:?}"
+        );
+        assert!(
+            !sent.iter().any(|message| matches!(
+                message,
+                ControlToBrain::ScreenHoldRecognized {
+                    notice: Some(_),
+                    ..
+                } | ControlToBrain::ScreenRelease {
+                    notice: Some(_),
+                    ..
+                }
+            )),
+            "{sent:?}"
+        );
+    }
 }

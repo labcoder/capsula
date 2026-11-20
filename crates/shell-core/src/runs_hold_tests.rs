@@ -834,17 +834,15 @@ fn a_holds_prediction_names_the_notices_model_and_goes_quiet_when_the_notice_cha
     }
 }
 
-/// A hold carries the revision of the `On` showing when the user began it to its release, never a
-/// later one, and none when no `On` was showing.
+/// Nothing the shell shows proves which offer the user saw, so no hold carries one: not the offer
+/// stored when it began, not a newer one stored before its release, and not the first revision a
+/// new connection uses again.
 #[test]
-fn a_hold_carries_the_notice_it_began_under_to_its_release() {
-    use kumochi_protocol::message::{
-        ConnectionKind, ModelSlug, NoticeRevision, ScreenHolds, ScreenOff,
-    };
+fn no_hold_carries_an_offer_it_cannot_show_was_seen() {
+    use kumochi_protocol::message::{ConnectionKind, ModelSlug, NoticeRevision, ScreenHolds};
     let mut runs = ready();
     let luna = shown_to_luna(&mut runs);
     let on = Some(&luna);
-    let shown = Some(NoticeRevision::FIRST.next());
     let notice = |message: Option<ControlToBrain>| match message {
         Some(
             ControlToBrain::HoldRecognized { notice, .. }
@@ -853,31 +851,31 @@ fn a_hold_carries_the_notice_it_began_under_to_its_release() {
         ) => notice,
         other => panic!("not a screen hold's control: {other:?}"),
     };
+    let offer = |revision| ScreenHolds::On {
+        model: luna.clone(),
+        connection: ConnectionKind::ChatGpt,
+        slug: ModelSlug::new("fixture").expect("valid"),
+        revision,
+    };
     assert_eq!(
         notice(runs.begin_hold(GestureId(1), Some(SCREEN)).ok()),
-        shown
+        None
     );
     runs.cancel_hold();
     assert_eq!(runs.take_hold_cancel(), cancel(1));
     let begun = runs.begin_screen_hold(GestureId(2), 1, false, on).ok();
-    assert_eq!(notice(begun), shown);
-    runs.set_screen_holds(ScreenHolds::On {
-        model: luna.clone(),
-        connection: ConnectionKind::ChatGpt,
-        slug: ModelSlug::new("fixture").expect("valid"),
-        revision: NoticeRevision::FIRST.next().next(),
-    });
-    assert_eq!(
-        notice(runs.screen_release(GestureId(2), false, on, release())),
-        shown
-    );
+    assert_eq!(notice(begun), None);
+    runs.set_screen_holds(offer(NoticeRevision::FIRST.next().next()));
+    let released = runs.screen_release(GestureId(2), false, on, release());
+    assert_eq!(notice(released), None);
     runs.cancel_hold();
     assert_eq!(runs.take_hold_cancel(), cancel(2));
-    runs.set_screen_holds(ScreenHolds::Off(ScreenOff::ModelCantSee));
-    assert_eq!(
-        notice(runs.begin_hold(GestureId(3), Some(SCREEN)).ok()),
-        None
-    );
+    runs.disconnected();
+    runs.connected(2);
+    runs.settings(ThreadId(1));
+    runs.set_screen_holds(offer(NoticeRevision::FIRST));
+    let begun = runs.begin_screen_hold(GestureId(3), 1, false, on).ok();
+    assert_eq!(notice(begun), None);
 }
 
 fn release() -> HoldRelease {
@@ -919,7 +917,7 @@ fn a_hold_that_shows_the_screen_at_release_is_admitted_as_any_hold_is() {
             thread: Some(ThreadId(1)),
             selection: 1,
             t_qpc: 515_151_515,
-            notice: Some(kumochi_protocol::message::NoticeRevision::FIRST.next()),
+            notice: None,
         })
     );
     // It predicts nothing, so it has no line unless something refuses its screen.
@@ -955,7 +953,7 @@ fn a_hold_that_shows_the_screen_at_release_is_admitted_as_any_hold_is() {
             thread: None,
             selection,
             t_qpc: 2,
-            notice: Some(kumochi_protocol::message::NoticeRevision::FIRST.next()),
+            notice: None,
         })
     );
     assert!(state(&mut runs, 1, 9, 6, Phase::Thinking).visible);
@@ -1069,7 +1067,7 @@ fn only_the_current_hold_of_that_kind_builds_one_screen_release_while_the_notice
             excluded_qpc: 717_171_717,
             pointer: ReleasePointer(PhysicalPoint([-2_345_678, 8_765_432])),
             path: PointerPath(vec![PhysicalPoint([3_456_789, -9_876_543])]),
-            notice: Some(kumochi_protocol::message::NoticeRevision::FIRST.next()),
+            notice: None,
         })
     );
     let (model, sent) = (format!("{runs:?}"), format!("{message:?}"));

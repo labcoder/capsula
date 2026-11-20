@@ -976,8 +976,17 @@ impl Brain {
         }
         self.coordinator
             .lose_pictures(Some(ConnectionKind::ClaudeCode));
-        // A new generation is a new offer, even for the same model.
-        self.holds.screen_sent = None;
+        if self.holds.screen_sent.as_ref().is_some_and(|(state, _)| {
+            matches!(
+                state,
+                ScreenHolds::On {
+                    connection: ConnectionKind::ClaudeCode,
+                    ..
+                }
+            )
+        }) {
+            self.holds.screen_sent = None;
+        }
     }
 
     /// Sends the gate's state for the default model once per connection, then whenever it

@@ -1,7 +1,7 @@
 use kumochi_protocol::geometry::{PhysicalPoint, PointerPath, ReleasePointer};
 use kumochi_protocol::message::{
-    ControlToBrain, GestureId, HeldScreen, LeaseGeneration, ModelName, NoticeRevision, RunId,
-    RunOrigin, ScreenClass, ScreenHolds, ScreenOff, ThreadId,
+    ControlToBrain, GestureId, HeldScreen, LeaseGeneration, ModelName, RunId, RunOrigin,
+    ScreenClass, ScreenHolds, ScreenOff, ThreadId,
 };
 
 use super::{Applied, Refused, Runs, Target};
@@ -73,8 +73,6 @@ impl ScreenNotice<'_> {
 pub(super) struct Hold {
     pub(super) gesture: GestureId,
     pub(super) revision: u64,
-    /// The `On` showing when the user began the hold, kept for its release.
-    pub(super) notice: Option<NoticeRevision>,
     pub(super) thread: Option<ThreadId>,
     pub(super) run: Option<RunId>,
     /// Set for a window hold, and for a hold whose screen was refused. Never the pointer:
@@ -98,14 +96,6 @@ impl Runs {
     /// This connection's last `ScreenHolds`: none before it arrives, and none once it ends.
     pub fn screen_holds(&self) -> Option<&ScreenHolds> {
         self.screen_holds.as_ref()
-    }
-
-    /// The revision of the `On` showing now, which a hold the user begins now carries.
-    fn shown_revision(&self) -> Option<NoticeRevision> {
-        match &self.screen_holds {
-            Some(ScreenHolds::On { revision, .. }) => Some(*revision),
-            _ => None,
-        }
     }
 
     /// The notice for a hold on the current target. `own_model` says the target thread runs on
@@ -230,7 +220,6 @@ impl Runs {
         Ok(self.hold.insert(Hold {
             gesture,
             revision: self.revision,
-            notice: None,
             thread,
             run: None,
             screen: None,
@@ -246,10 +235,8 @@ impl Runs {
         gesture: GestureId,
         screen: Option<ScreenHold>,
     ) -> Result<ControlToBrain, Refused> {
-        let notice = screen.and(self.shown_revision());
         let hold = self.admit_hold(gesture)?;
         hold.screen = screen.map(|_| ScreenLine::WillSee);
-        hold.notice = notice;
         let (thread, selection) = (hold.thread, hold.revision);
         Ok(match screen {
             Some(ScreenHold {
@@ -263,7 +250,7 @@ impl Runs {
                 pointer,
                 lease,
                 t_qpc,
-                notice,
+                notice: None,
             },
             None => ControlToBrain::VoiceHoldRecognized {
                 gesture,
@@ -289,11 +276,9 @@ impl Runs {
         default: Option<&ModelName>,
     ) -> Result<ControlToBrain, Refused> {
         let on = matches!(self.screen_notice(own_model, default), ScreenNotice::On(_));
-        let notice = self.shown_revision().filter(|_| on);
         let hold = self.admit_hold(gesture)?;
         hold.at_release = on;
         hold.release_due = on;
-        hold.notice = notice;
         let (thread, selection) = (hold.thread, hold.revision);
         Ok(if on {
             ControlToBrain::ScreenHoldRecognized {
@@ -301,7 +286,7 @@ impl Runs {
                 thread,
                 selection,
                 t_qpc,
-                notice,
+                notice: None,
             }
         } else {
             ControlToBrain::VoiceHoldRecognized {
@@ -357,10 +342,9 @@ impl Runs {
         if !self.releases_screen(gesture, own_model, default) {
             return None;
         }
-        let notice = self.hold.as_mut().and_then(|hold| {
+        if let Some(hold) = &mut self.hold {
             hold.release_due = false;
-            hold.notice
-        });
+        }
         let HoldRelease {
             pointer,
             path,
@@ -375,7 +359,7 @@ impl Runs {
             excluded_qpc,
             pointer: ReleasePointer(pointer),
             path,
-            notice,
+            notice: None,
         })
     }
 

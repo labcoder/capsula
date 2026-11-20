@@ -138,13 +138,17 @@ out-of-date `On` costs at most the lease.
 
 `NoticeRevision` names one `On`. The brain counts it up on each connection, from 1, whenever what
 the gate authorizes changes: a different route or model, the gate closing, a new sign-in on the
-route, or a move of Claude Code's generation. A new display name alone keeps it, and a new
-connection starts again from 1. A 0 doesn't decode.
+route, or, for a Claude Code offer only, a move of Claude Code's generation. A new display name
+alone keeps it, and a new connection starts again from 1. A 0 doesn't decode.
 
-The shell stamps a hold at recognition with the revision of the `On` showing then, never a later
-one, or none when no `On` was showing. `HoldRecognized` and `ScreenHoldRecognized` carry it as
-`notice`, and `ScreenRelease` carries the recognition's again. The brain doesn't read the stamp
-yet: a hold, its picture and the notice behave as they did before the field was added.
+`HoldRecognized`, `ScreenHoldRecognized` and `ScreenRelease` have room for the offer the user was
+shown before the hold began, as `notice`. The shell sends none in all three, because nothing it
+draws proves which offer the user saw. The dock and its peek say nothing about the screen
+([presence](presence.md)), and the conversation's screen note is a history row that appears only
+when the answer changes, and only in the open conversation. Receiving an `On`, or the repaint it
+schedules, isn't evidence that it was shown, so a hold never takes the `On` stored when its
+recognition is delivered. The brain doesn't read `notice` yet: a hold, its picture and the notice
+behave as they did before the field was added.
 
 ## Screen release
 

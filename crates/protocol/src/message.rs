@@ -113,8 +113,8 @@ pub struct RunId(pub u64);
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GestureId(pub u32);
 
-/// Which `ScreenHolds::On` the shell showed: the brain counts it up on each connection, from
-/// [`Self::FIRST`], whenever the offer's authorization changes. 0 never decodes.
+/// Names one `ScreenHolds::On` offer: the brain counts it up on each connection, from
+/// [`Self::FIRST`], whenever what the offer authorizes changes. 0 never decodes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NoticeRevision(pub std::num::NonZeroU64);
 
@@ -378,7 +378,8 @@ pub enum ControlToBrain {
         lease: LeaseGeneration,
         /// When the hold was recognized, in QPC ticks.
         t_qpc: u64,
-        /// The `On` showing when the user began the hold; none never allows a capture.
+        /// The offer the user was shown before the hold began. The shell sends none, because
+        /// nothing it draws proves which offer that was.
         notice: Option<NoticeRevision>,
     },
     /// The hold key was released.
@@ -519,7 +520,7 @@ pub enum ControlToBrain {
         pointer: ReleasePointer,
         /// The pointer's path over the hold; empty when it never moved.
         path: PointerPath,
-        /// The hold's notice from its recognition, never a later one.
+        /// As in [`Self::HoldRecognized`].
         notice: Option<NoticeRevision>,
     },
     /// The shell skipped a screen scene because the screen may have changed since its picture.
@@ -855,7 +856,7 @@ pub enum ScreenHolds {
         connection: ConnectionKind,
         /// The model a hold's picture goes to.
         slug: ModelSlug,
-        /// This offer's revision, which a hold the user began under it carries.
+        /// This offer's revision.
         revision: NoticeRevision,
     },
     /// Holds are voice only.
