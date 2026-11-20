@@ -6,13 +6,19 @@ mono packets. It converts on the worker through `kumochi-audio`, which also serv
 speech and microphone input, then fills a preallocated pool of device-format blocks. The
 callback takes only atomically published blocks and fills silence without waiting for the
 worker. The fixed single-producer/single-consumer rings return slot IDs for reuse.
-Closing the stream cancels the callback before dropping the backend handle. A callback that
-starts after cancellation writes silence. Worker-side retirement retains the pool and rings
+Closing either the backend handle or the transport cancels the callback. Backend
+destruction starts only after cancellation; a later callback writes silence. Worker-side retirement retains the pool and rings
 until the backend actually destroys its callback closures, then wipes and frees them off
 the audio thread. At most one pool may be live or awaiting retirement; if a backend never
 releases its closures, that pool stays retained and new opens are refused. The worker clears
 converter history at close and scrubs blocks as they become exclusively owned while waiting.
-Route notifications go back to the worker.
+The callback checks an atomic fence before each bounded copy. A denied copy ends that
+callback's copying without retrying. Stop discards ready blocks and ramps the last sample
+to silence in at most 5 ms. Source observations cover copied
+speech only; their positions follow the converter's device-frame phase, not how much
+source it accepted. The callback publishes those observations into a bounded ring. It
+latches the last non-silent frame independently, including the ramp; missing timing stays
+unknown. Neither filler nor the ramp advances the source cursor.
 
 The dormant `speaker::queued` state keeps one bounded source queue. Admission or stale
 discard returns ingress byte credit once; consumption or discard frees source capacity.

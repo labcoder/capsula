@@ -7,7 +7,7 @@ use super::Submit;
 
 #[derive(Default)]
 pub(super) struct Shared {
-    pub(super) cancelled: AtomicBool,
+    pub(super) cancelled: Arc<AtomicBool>,
     pub(super) pending: AtomicU8,
 }
 
