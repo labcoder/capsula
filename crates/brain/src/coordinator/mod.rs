@@ -39,8 +39,8 @@ use std::time::Duration;
 
 use kumochi_protocol::message::{
     ConnectionKind, Content, ControlToShell, Cursor, DataToShell, Deleted, ModelChoice,
-    OutputGeneration, PageOf, Phase, RunId, SceneId, SegmentId, SpeechRetirement, Step, ThreadId,
-    ThreadOp, UserError,
+    OutputGeneration, PageOf, Phase, RunId, SceneId, SegmentId, SpeechDecision, SpeechDispatch,
+    SpeechRetirement, Step, ThreadId, ThreadOp, UserError,
 };
 
 use crate::engines::{RunRequest, TurnEvent};
@@ -396,6 +396,8 @@ pub enum Input {
     },
     /// Queued output retired source, reporting hearing independently.
     SpeechRetired(SpeechRetirement),
+    /// The queued output resolved an announced speech segment.
+    SpeechDecision(SpeechDispatch, SpeechDecision),
     /// The shell's output for `run` went quiet after a Stop or a revoke.
     SpeechStopped {
         /// The run.
@@ -1144,6 +1146,7 @@ impl Coordinator {
             | Input::SpeechProgress { .. }
             | Input::SegmentPlayed { .. }
             | Input::SpeechRetired(_)
+            | Input::SpeechDecision(..)
             | Input::SpeechStopped { .. }
             | Input::DrainTimeout { .. }
             | Input::QuietTimeout { .. }) => self.speech_input(input, &mut effects)?,

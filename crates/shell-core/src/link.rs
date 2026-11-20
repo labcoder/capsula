@@ -1306,6 +1306,7 @@ fn welcome(control: &PipeClient) -> Result<IssueSession, LinkError> {
             | ControlToShell::AnthropicKeyRemoved { .. }
             | ControlToShell::AnthropicKeyReconciled { .. }
             | ControlToShell::SpeechRevoked { .. }
+            | ControlToShell::SpeechDecisionTaken(..)
             | ControlToShell::VoiceHoldStatus { .. }
             | ControlToShell::VoiceHoldStopAccepted { .. }
             | ControlToShell::ScreenHolds(_)
@@ -1375,7 +1376,7 @@ fn watch(
     let mut named = RunId(0);
     loop {
         match frame::read::<ControlToShell>(&mut &*control, Pipe::Control) {
-            Ok(None) => return,
+            Ok(None | Some(ControlToShell::SpeechDecisionTaken(..))) => return,
             Ok(Some(ControlToShell::Ping)) => {
                 if out.try_send(ControlToBrain::Pong).is_err() {
                     tracing::warn!("the control queue is full; the brain isn't reading");

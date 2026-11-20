@@ -1,6 +1,6 @@
 use kumochi_protocol::message::{
-    Cursor, OutputGeneration, RunId, SceneId, SegmentId, SegmentStart, SpeechPcm, SpeechPromise,
-    SpeechRetirement, StepRef,
+    Cursor, OutputGeneration, RunId, SceneId, SegmentId, SegmentStart, SpeechDecision,
+    SpeechDispatch, SpeechPcm, SpeechPromise, SpeechRetirement, StepRef,
 };
 
 use super::{Failure, Heard, Refused, Reply, ReportMode, Revoker, Speech};
@@ -15,6 +15,150 @@ fn reply() -> Reply {
 
 fn seg(n: u32) -> SegmentId {
     SegmentId(n)
+}
+
+fn dispatch(segment: u32) -> SpeechDispatch {
+    SpeechDispatch {
+        run: RunId(7),
+        output: OutputGeneration(1),
+        segment: seg(segment),
+    }
+}
+
+#[test]
+fn early_speech_decision_waits_for_the_producer_window() {
+    let mut reply = Reply::new(RunId(7), RATE, OutputGeneration(1), ReportMode::Queued);
+    run(&mut reply, |r, out| r.text("Plain. ", out));
+    run(&mut reply, |r, out| r.say(step(8, 1), "Speech.", out));
+    assert!(
+        run(&mut reply, |r, out| r
+            .decide(dispatch(1), SpeechDecision::Allow, out)
+            .unwrap())
+        .is_empty()
+    );
+    assert_eq!(
+        run(&mut reply, |r, out| r.done(seg(0), out)),
+        [
+            pcm(0, 0, 0, Some(0)),
+            Speech::DecisionTaken(dispatch(1)),
+            speak(1, "Speech.")
+        ]
+    );
+    assert_eq!(
+        run(&mut reply, |r, out| r
+            .decide(dispatch(1), SpeechDecision::Allow, out)
+            .unwrap()),
+        [Speech::DecisionTaken(dispatch(1))]
+    );
+}
+
+#[test]
+fn two_speech_steps_decide_in_order_and_discard_owes_one_final() {
+    let mut reply = Reply::new(RunId(7), RATE, OutputGeneration(1), ReportMode::Queued);
+    assert!(
+        run(&mut reply, |r, out| {
+            r.say(step(8, 0), "A.", out);
+            r.say(step(8, 1), "B.", out);
+        })
+        .iter()
+        .all(|effect| matches!(effect, Speech::Queued { .. }))
+    );
+    let later = run(&mut reply, |r, out| {
+        assert_eq!(
+            r.decide(dispatch(1), SpeechDecision::Discard, out),
+            Err(Refused::OutOfOrder)
+        );
+    });
+    assert!(later.is_empty());
+    assert_eq!(
+        run(&mut reply, |r, out| r
+            .decide(dispatch(0), SpeechDecision::Allow, out)
+            .unwrap()),
+        [
+            Speech::DecisionTaken(dispatch(0)),
+            speak(0, "A."),
+            Speech::Credit(WINDOW)
+        ]
+    );
+    assert!(
+        run(&mut reply, |r, out| r
+            .decide(dispatch(1), SpeechDecision::Discard, out)
+            .unwrap())
+        .is_empty()
+    );
+    assert_eq!(
+        run(&mut reply, |r, out| r.done(seg(0), out)),
+        [
+            pcm(0, 0, 0, Some(0)),
+            Speech::DecisionTaken(dispatch(1)),
+            pcm(1, 0, 0, Some(0))
+        ]
+    );
+    assert_eq!(
+        run(&mut reply, |r, out| r
+            .decide(dispatch(1), SpeechDecision::Allow, out)
+            .unwrap()),
+        [Speech::DecisionTaken(dispatch(1))]
+    );
+}
+
+#[test]
+fn speech_fences_around_allow_reject_late_source() {
+    for (allowed, replaced) in [(false, false), (false, true), (true, false), (true, true)] {
+        let mut reply = Reply::new(RunId(7), RATE, OutputGeneration(1), ReportMode::Queued);
+        run(&mut reply, |r, out| r.say(step(8, 0), "A.", out));
+        if allowed {
+            run(&mut reply, |r, out| {
+                r.decide(dispatch(0), SpeechDecision::Allow, out).unwrap();
+            });
+            assert_eq!(
+                run(&mut reply, |r, out| r.pcm(seg(0), vec![5; 240], out))[0],
+                pcm(0, 0, 240, None)
+            );
+        }
+        let fenced = run(&mut reply, |r, out| {
+            if replaced {
+                r.output(OutputGeneration(2), out);
+            } else {
+                r.step_failed(SceneId(8), out);
+            }
+        });
+        if replaced {
+            assert_eq!(fenced, [Speech::Revoke { tell_shell: true }]);
+        } else if allowed {
+            assert_eq!(fenced, [Speech::Cancel, pcm(0, 1, 0, Some(240))]);
+        } else {
+            assert_eq!(fenced, [pcm(0, 0, 0, Some(0))]);
+        }
+        assert_eq!(
+            run(&mut reply, |r, out| r
+                .decide(dispatch(0), SpeechDecision::Allow, out)
+                .unwrap()),
+            [Speech::DecisionTaken(dispatch(0))]
+        );
+        assert!(run(&mut reply, |r, out| r.pcm(seg(0), vec![5; 8], out)).is_empty());
+    }
+}
+
+#[test]
+fn a_cut_releases_a_latched_allow_without_overtaking_the_earlier_final() {
+    let mut reply = Reply::new(RunId(7), RATE, OutputGeneration(1), ReportMode::Queued);
+    run(&mut reply, |r, out| r.text("Plain. ", out));
+    run(&mut reply, |r, out| r.say(step(8, 0), "Speech.", out));
+    assert!(
+        run(&mut reply, |r, out| {
+            r.decide(dispatch(1), SpeechDecision::Allow, out).unwrap();
+        })
+        .is_empty()
+    );
+    assert_eq!(
+        run(&mut reply, |r, out| r.step_failed(SceneId(8), out)),
+        [Speech::DecisionTaken(dispatch(1))]
+    );
+    assert_eq!(
+        run(&mut reply, |r, out| r.done(seg(0), out)),
+        [pcm(0, 0, 0, Some(0)), pcm(1, 0, 0, Some(0))]
+    );
 }
 
 fn step(scene: u64, index: u32) -> StepRef {
@@ -177,6 +321,7 @@ fn producer_drop_does_not_refund_queued_retirement_twice() {
     let mut reply = Reply::new(RunId(7), RATE, OutputGeneration(1), ReportMode::Queued);
     run(&mut reply, |r, out| {
         r.say(step(7, 0), "line", out);
+        r.decide(dispatch(0), SpeechDecision::Allow, out).unwrap();
         r.pcm(seg(0), vec![5; 480], out);
         let partial = SpeechRetirement {
             final_segment: false,

@@ -65,8 +65,8 @@ pub use voice::{
     MAX_AHEAD_SEGMENTS, MAX_HOLD_CHUNKS, MAX_MIC_SAMPLES, MAX_RATE, MAX_SAY_BYTES,
     MAX_SEGMENT_SECONDS, MAX_SEGMENTS_PER_RUN, MAX_SPEECH_SAMPLES, MAX_TRANSCRIPT_BYTES,
     MAX_UNPLAYED_SECONDS, MIN_RATE, MicPcm, OutputGeneration, PROGRESS_INTERVAL_MS, PartState,
-    SegmentId, SegmentStart, SpeechPcm, SpeechPromise, SpeechRetirement, StepRef, Transcript,
-    VoiceBound, VoiceView, check_rate,
+    SegmentId, SegmentStart, SpeechDecision, SpeechDispatch, SpeechPcm, SpeechPromise,
+    SpeechRetirement, StepRef, Transcript, VoiceBound, VoiceView, check_rate,
 };
 
 /// The most rows one page carries [guess].
@@ -518,6 +518,8 @@ pub enum ControlToBrain {
     SpeechRetired(SpeechRetirement),
     /// Source rate in Hz and logical generation for output using retirement receipts.
     QueuedAudioOutput(u32, OutputGeneration),
+    /// Decide the next announced Speech-start segment on queued output.
+    SpeechDecision(SpeechDispatch, SpeechDecision),
 }
 
 /// What a thread's delete came to.
@@ -767,6 +769,8 @@ pub enum ControlToShell {
         /// The current local key state, or None if the worker couldn't establish it.
         read: Option<KeyRecoveryRead>,
     },
+    /// The keyed decision was consumed or its segment is already terminal.
+    SpeechDecisionTaken(SpeechDispatch),
 }
 
 /// What a screen hold carried into its turn. It never says the window was sent: a run can end
@@ -1210,6 +1214,38 @@ mod tests {
         assert_eq!(
             frame::read(&mut frame.as_slice(), Pipe::Control).unwrap(),
             Some(message)
+        );
+    }
+
+    #[test]
+    fn speech_decision_and_keyed_release_append_to_the_control_tags() {
+        use super::{OutputGeneration, SegmentId, SpeechDecision, SpeechDispatch};
+
+        let key = SpeechDispatch {
+            run: RunId(1),
+            output: OutputGeneration(2),
+            segment: SegmentId(3),
+        };
+        for (decision, tag) in [(SpeechDecision::Allow, 0), (SpeechDecision::Discard, 1)] {
+            let message = ControlToBrain::SpeechDecision(key, decision);
+            assert_eq!(postcard::to_allocvec(&message).unwrap(), [36, 1, 2, 3, tag]);
+            let bytes = frame::encode(&message, Pipe::Control).unwrap();
+            assert_eq!(
+                frame::read(&mut bytes.as_slice(), Pipe::Control).unwrap(),
+                Some(message)
+            );
+        }
+        let previous = ControlToShell::AnthropicKeyReconciled {
+            request: 4,
+            read: None,
+        };
+        assert_eq!(postcard::to_allocvec(&previous).unwrap(), [34, 4, 0]);
+        let release = ControlToShell::SpeechDecisionTaken(key);
+        assert_eq!(postcard::to_allocvec(&release).unwrap(), [35, 1, 2, 3]);
+        let bytes = frame::encode(&release, Pipe::Control).unwrap();
+        assert_eq!(
+            frame::read(&mut bytes.as_slice(), Pipe::Control).unwrap(),
+            Some(release)
         );
     }
 

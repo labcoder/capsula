@@ -153,6 +153,26 @@ pub struct SpeechRetirement {
     pub final_segment: bool,
 }
 
+/// The announced segment on this connection's logical output.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SpeechDispatch {
+    /// Its run.
+    pub run: RunId,
+    /// Its logical output generation.
+    pub output: OutputGeneration,
+    /// Its ordered segment.
+    pub segment: SegmentId,
+}
+
+/// The queued output's decision after validating, or rejecting, an assignment.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SpeechDecision {
+    /// Allow synthesis for this segment.
+    Allow,
+    /// Owe only the ordered final for this segment.
+    Discard,
+}
+
 /// Each voice part's state, as the brain's installer reports it. Nothing sends it until the
 /// installer lands.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

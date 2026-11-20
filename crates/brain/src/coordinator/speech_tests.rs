@@ -2,8 +2,8 @@
 //! quiet barrier.
 
 use kumochi_protocol::message::{
-    ControlToShell, Cursor, DataToShell, OutputGeneration, Phase, RunId, SegmentId, SpeechPcm,
-    SpeechRetirement, StepRef,
+    ControlToShell, Cursor, DataToShell, OutputGeneration, Phase, RunId, SegmentId, SpeechDecision,
+    SpeechDispatch, SpeechPcm, SpeechRetirement, StepRef,
 };
 
 use super::{
@@ -85,6 +85,184 @@ fn heard(sample: u32, text: usize) -> Effect {
     })
 }
 
+fn dispatch(segment: u32) -> SpeechDispatch {
+    SpeechDispatch {
+        run: R,
+        output: OutputGeneration(1),
+        segment: SegmentId(segment),
+    }
+}
+
+pub(super) fn queued() -> Coordinator {
+    let mut core = fresh();
+    core.handle(Input::QueuedAudioOutput(RATE, OutputGeneration(1)))
+        .unwrap();
+    core.handle(Input::SpokenReplies { loaded: true }).unwrap();
+    core.handle(Input::Turn {
+        turn: 1,
+        thread: None,
+        text: "hi".into(),
+    })
+    .unwrap();
+    admit(&mut core, R);
+    core
+}
+
+fn queue_drawing(core: &mut Coordinator, index: u32) {
+    core.current(R).unwrap().reply.as_mut().unwrap().say(
+        StepRef {
+            scene: super::S,
+            index,
+        },
+        "line",
+        &mut Vec::new(),
+    );
+}
+
+#[test]
+fn closed_queued_reply_ignores_old_drain_until_its_speech_decision() {
+    let mut core = queued();
+    say(&mut core, "Plain. ");
+    queue_drawing(&mut core, 1);
+    assert_eq!(finish(&mut core), [arm(1)]);
+    let after_plain = core.handle(tts(Synthesized::Done)).unwrap();
+    assert!(after_plain.contains(&pcm(0, 0, Some(0))));
+    assert!(
+        after_plain
+            .iter()
+            .all(|effect| !matches!(effect, Effect::Speak { .. }))
+    );
+    assert_eq!(
+        core.handle(Input::DrainTimeout { run: R, epoch: 1 }),
+        Err(Stale)
+    );
+    assert_eq!(
+        core.handle(Input::DrainTimeout { run: R, epoch: 2 }),
+        Err(Stale)
+    );
+    let key = dispatch(1);
+    let allowed = core
+        .handle(Input::SpeechDecision(key, SpeechDecision::Allow))
+        .unwrap();
+    assert_eq!(
+        allowed
+            .iter()
+            .filter(|effect| matches!(
+                effect,
+                Effect::Speak {
+                    segment: SegmentId(1),
+                    ..
+                }
+            ))
+            .count(),
+        1
+    );
+    assert!(
+        allowed
+            .iter()
+            .any(|effect| matches!(effect, Effect::ArmDrain { .. }))
+    );
+    assert_eq!(
+        core.handle(Input::SpeechDecision(key, SpeechDecision::Allow)),
+        Ok(vec![Effect::Control(ControlToShell::SpeechDecisionTaken(
+            key
+        ))])
+    );
+}
+
+#[test]
+fn discarded_closed_head_enters_the_next_wait_then_completes() {
+    let mut core = queued();
+    queue_drawing(&mut core, 0);
+    queue_drawing(&mut core, 1);
+    assert_eq!(finish(&mut core), []);
+    let discard = |segment| Input::SpeechDecision(dispatch(segment), SpeechDecision::Discard);
+    assert_eq!(
+        core.handle(discard(0)).unwrap(),
+        [
+            Effect::Control(ControlToShell::SpeechDecisionTaken(dispatch(0))),
+            pcm(0, 0, Some(0))
+        ]
+    );
+    let last = core.handle(discard(1)).unwrap();
+    assert!(
+        last.iter()
+            .any(|effect| matches!(effect, Effect::ArmDrain { .. }))
+    );
+    for segment in [0, 1] {
+        let effects = core
+            .handle(Input::SpeechRetired(SpeechRetirement {
+                run: R,
+                output: OutputGeneration(1),
+                segment: SegmentId(segment),
+                retired: 0,
+                heard: 0,
+                final_segment: true,
+            }))
+            .unwrap();
+        assert_eq!(
+            effects
+                .iter()
+                .any(|effect| matches!(effect, Effect::Store(StoreOp::EndRun { .. }))),
+            segment == 1
+        );
+    }
+    assert!(
+        core.handle(Input::RunStored { run: R })
+            .unwrap()
+            .contains(&run_end(R))
+    );
+}
+
+#[test]
+fn stop_replacement_and_session_loss_invalidate_closed_eligibility() {
+    for end in [
+        Input::Stop {
+            run: R,
+            revealed: Vec::new(),
+        },
+        Input::QueuedAudioOutput(RATE, OutputGeneration(2)),
+        Input::ShellLost,
+    ] {
+        let lost = matches!(end, Input::ShellLost);
+        let replaced = matches!(end, Input::QueuedAudioOutput(..));
+        let mut core = queued();
+        queue_drawing(&mut core, 0);
+        assert_eq!(finish(&mut core), []);
+        let ending = core.handle(end).unwrap();
+        assert!(
+            ending
+                .iter()
+                .any(|effect| matches!(effect, Effect::RevokeSpeech { run: R }))
+        );
+        assert_eq!(
+            core.handle(Input::DrainTimeout { run: R, epoch: 1 }),
+            Err(Stale)
+        );
+        let effects = core.handle(Input::SpeechDecision(dispatch(0), SpeechDecision::Allow));
+        if let Ok(effects) = effects {
+            assert!(
+                effects.iter().all(|effect| !matches!(
+                    effect,
+                    Effect::Speak { .. } | Effect::ArmDrain { .. }
+                ))
+            );
+        }
+        if !lost {
+            let quiet = core.handle(stopped(None)).unwrap();
+            assert_eq!(
+                quiet
+                    .iter()
+                    .any(|effect| matches!(effect, Effect::Store(StoreOp::EndRun { .. }))),
+                replaced
+            );
+        }
+        let stored = core.handle(Input::RunStored { run: R }).unwrap();
+        assert_eq!(stored.contains(&run_end(R)), !lost);
+        assert_eq!(core.ending_runs(), 0);
+    }
+}
+
 /// Forty samples into the only segment.
 const CUT: Option<Cursor> = Some(Cursor {
     segment: SEG,
@@ -120,17 +298,7 @@ fn scene_failure_keeps_queued_history_open_through_the_worker_final() {
     for (reported_early, receipt_first) in
         [(true, false), (true, true), (false, false), (false, true)]
     {
-        let mut core = fresh();
-        core.handle(Input::QueuedAudioOutput(RATE, OutputGeneration(1)))
-            .unwrap();
-        core.handle(Input::SpokenReplies { loaded: true }).unwrap();
-        core.handle(Input::Turn {
-            turn: 1,
-            thread: None,
-            text: "hi".into(),
-        })
-        .unwrap();
-        admit(&mut core, R);
+        let mut core = queued();
         let scene = super::S;
         let mut effects = Vec::new();
         core.current(R).unwrap().reply.as_mut().unwrap().say(
@@ -138,6 +306,8 @@ fn scene_failure_keeps_queued_history_open_through_the_worker_final() {
             "One.",
             &mut Vec::new(),
         );
+        core.handle(Input::SpeechDecision(dispatch(0), SpeechDecision::Allow))
+            .unwrap();
         for _ in 0..5 {
             core.handle(tts(Synthesized::Audio(vec![3; 2_400])))
                 .unwrap();

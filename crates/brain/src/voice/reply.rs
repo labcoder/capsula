@@ -19,8 +19,8 @@ use std::ops::Range;
 
 use kumochi_protocol::message::{
     Cursor, MAX_AHEAD_SEGMENTS, MAX_SAY_BYTES, MAX_SEGMENTS_PER_RUN, MAX_UNPLAYED_SECONDS,
-    OutputGeneration, RunId, SceneId, SegmentId, SegmentStart, SpeechPcm, SpeechPromise,
-    SpeechRetirement, StepRef,
+    OutputGeneration, RunId, SceneId, SegmentId, SegmentStart, SpeechDecision, SpeechDispatch,
+    SpeechPcm, SpeechPromise, SpeechRetirement, StepRef,
 };
 
 use super::segment::{Cut, Segmenter};
@@ -37,18 +37,26 @@ pub(crate) enum Speech {
     },
     /// Hand TTS a segment; its events come back as [`Reply::pcm`], [`Reply::done`] and
     /// [`Reply::failed`].
-    Speak { segment: SegmentId, text: String },
+    Speak {
+        segment: SegmentId,
+        text: String,
+    },
     /// Send the shell audio, or a segment's final chunk.
     Pcm(SpeechPcm),
+    DecisionTaken(SpeechDispatch),
     /// Let the pump read this many more samples from TTS.
     Credit(u64),
     /// Stop the current Speak and drop its receiver; the run's speech goes on.
     Cancel,
     /// Stop the run's speech for good: cancel TTS, drop the pump and, when `tell_shell`, send
     /// `SpeechRevoked`. The shell answers with `SpeechStopped` either way.
-    Revoke { tell_shell: bool },
+    Revoke {
+        tell_shell: bool,
+    },
     /// (Re)arm the drain stall timer; only the latest epoch counts.
-    Arm { epoch: u32 },
+    Arm {
+        epoch: u32,
+    },
 }
 
 /// A speech report from the shell that can't be true. It carries no audio or text.
@@ -130,6 +138,14 @@ pub(crate) enum ReportMode {
 struct Retirement {
     next_segment: u32,
     heard_gap: bool,
+    waiting: Option<SegmentId>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Decision {
+    Pending,
+    Latched(SpeechDecision),
+    Taken,
 }
 
 struct Segment {
@@ -145,6 +161,7 @@ struct Segment {
     marked: bool,
     /// TTS failed it, so playing all its audio isn't hearing all its text.
     failed: bool,
+    decision: Option<Decision>,
 }
 
 /// One spoken run's speech state, owned by the coordinator's run.
@@ -323,6 +340,20 @@ impl Reply {
     /// `scene` failed: its say segments are dropped, and audio already sent for them stops
     /// counting against the window. Once the run's speech is revoked nothing more goes out.
     pub(crate) fn step_failed(&mut self, scene: SceneId, out: &mut Vec<Speech>) {
+        self.drop_says(|step, _| step.scene == scene, out);
+    }
+
+    /// A whole-scene removal takes away only the queued Speech assignments in those scenes.
+    pub(crate) fn scenes_removed(&mut self, scenes: &[SceneId], out: &mut Vec<Speech>) {
+        if self.retirement.is_some() {
+            self.drop_says(
+                |step, segment| segment.decision.is_some() && scenes.contains(&step.scene),
+                out,
+            );
+        }
+    }
+
+    fn drop_says(&mut self, matches: impl Fn(StepRef, &Segment) -> bool, out: &mut Vec<Speech>) {
         if self.synthesis == Synthesis::Revoked {
             return;
         }
@@ -332,13 +363,14 @@ impl Reply {
             let Source::Say(step) = segment.source else {
                 continue;
             };
-            if step.scene != scene || segment.end.finished() {
+            if segment.end.finished() || !matches(step, segment) {
                 continue;
             }
             let unplayed = u64::from(segment.sent - segment.retired);
             segment.end = End::Dropped;
             segment.text = None;
             self.unplayed -= unplayed;
+            let _ = self.take_decision(at, out);
             changed = true;
             if self.speaking == Some(at) {
                 self.speaking = None;
@@ -350,6 +382,58 @@ impl Reply {
             self.progressed(out);
             self.pump(out);
         }
+    }
+
+    pub(crate) fn decide(
+        &mut self,
+        key: SpeechDispatch,
+        decision: SpeechDecision,
+        out: &mut Vec<Speech>,
+    ) -> Result<(), Refused> {
+        if key.run != self.run || key.output != self.generation {
+            return Ok(());
+        }
+        let at = index(key.segment);
+        let segment = self.segments.get(at).ok_or(Refused::Unknown)?;
+        match segment.decision {
+            None => return Err(Refused::OutOfOrder),
+            Some(Decision::Taken) => {
+                out.push(Speech::DecisionTaken(key));
+                return Ok(());
+            }
+            _ if segment.end != End::Open || self.revoked() => {
+                out.push(Speech::DecisionTaken(key));
+                return Ok(());
+            }
+            Some(Decision::Latched(previous)) if previous == decision => return Ok(()),
+            Some(Decision::Latched(_)) => return Err(Refused::OutOfOrder),
+            Some(Decision::Pending) => {}
+        }
+        if self.segments[..at].iter().any(|earlier| {
+            earlier.end == End::Open
+                && matches!(
+                    earlier.decision,
+                    Some(Decision::Pending | Decision::Latched(_))
+                )
+        }) {
+            return Err(Refused::OutOfOrder);
+        }
+        self.segments[at].decision = Some(Decision::Latched(decision));
+        self.pump(out);
+        Ok(())
+    }
+
+    fn take_decision(&mut self, at: usize, out: &mut Vec<Speech>) -> Option<SpeechDecision> {
+        let Some(Decision::Latched(decision)) = self.segments[at].decision else {
+            return None;
+        };
+        self.segments[at].decision = Some(Decision::Taken);
+        out.push(Speech::DecisionTaken(SpeechDispatch {
+            run: self.run,
+            output: self.generation,
+            segment: id(at),
+        }));
+        Some(decision)
     }
 
     /// The shell played `sample` samples of `segment`, which must be the one playing.
@@ -506,6 +590,9 @@ impl Reply {
             return;
         }
         self.synthesis = Synthesis::Revoked;
+        if let Some(state) = &mut self.retirement {
+            state.waiting = None;
+        }
         self.speaking = None;
         self.credit = 0;
         out.push(Speech::Revoke {
@@ -590,7 +677,16 @@ impl Reply {
     /// Whether the stall timer armed with `epoch` should revoke: it's the latest one, and the
     /// speech is still draining.
     pub(crate) fn stalled(&self, epoch: u32) -> bool {
-        epoch == self.epoch && self.synthesis != Synthesis::Revoked && !self.is_final()
+        epoch == self.epoch
+            && self.synthesis != Synthesis::Revoked
+            && !self.waiting_for_decision()
+            && !self.is_final()
+    }
+
+    fn waiting_for_decision(&self) -> bool {
+        self.retirement
+            .as_ref()
+            .is_some_and(|state| state.waiting.is_some())
     }
 
     /// The furthest point the user heard, if any audio played.
@@ -660,6 +756,8 @@ impl Reply {
             end: End::Open,
             marked: false,
             failed: false,
+            decision: (self.retirement.is_some() && start == SegmentStart::Speech)
+                .then_some(Decision::Pending),
         });
         SpeechPromise {
             output_generation,
@@ -669,26 +767,47 @@ impl Reply {
 
     /// Issues the next Speak when the window allows, and tops up the pump's credit.
     fn pump(&mut self, out: &mut Vec<Speech>) {
-        if self.synthesis != Synthesis::Open {
-            return;
-        }
         let window = u64::from(MAX_UNPLAYED_SECONDS) * u64::from(self.rate);
-        if self.speaking.is_none() && self.unplayed < window {
+        let mut waiting = None;
+        while self.synthesis == Synthesis::Open && self.speaking.is_none() && self.unplayed < window
+        {
             let playing = self.playing();
-            let next = self
+            let Some(next) = self
                 .segments
                 .iter()
-                .position(|segment| segment.end == End::Open && segment.text.is_some());
-            if let Some(next) = next.filter(|&next| next - playing <= max_ahead())
-                && let Some(text) = self.segments[next].text.take()
-            {
-                self.speaking = Some(next);
-                out.push(Speech::Speak {
-                    segment: id(next),
-                    text,
-                });
-                self.progressed(out);
+                .position(|segment| segment.end == End::Open && segment.text.is_some())
+                .filter(|&next| next - playing <= max_ahead())
+            else {
+                break;
+            };
+            if self.segments[next].decision == Some(Decision::Pending) {
+                waiting = Some(id(next));
+                break;
             }
+            if self.take_decision(next, out) == Some(SpeechDecision::Discard) {
+                self.segments[next].end = End::Dropped;
+                self.segments[next].text = None;
+                self.finals(out);
+                continue;
+            }
+            let text = self.segments[next]
+                .text
+                .take()
+                .expect("selected a segment with text");
+            self.speaking = Some(next);
+            out.push(Speech::Speak {
+                segment: id(next),
+                text,
+            });
+            self.progressed(out);
+        }
+        if let Some(state) = &mut self.retirement
+            && std::mem::replace(&mut state.waiting, waiting) != waiting
+        {
+            self.progressed(out);
+        }
+        if self.synthesis != Synthesis::Open {
+            return;
         }
         let room = window.saturating_sub(self.unplayed + self.credit);
         if self.speaking.is_some() && room > 0 {
@@ -762,6 +881,7 @@ impl Reply {
 
     /// Sends `at`'s final chunk: empty, with the samples sent as its total.
     fn end(&mut self, at: usize, out: &mut Vec<Speech>) {
+        let _ = self.take_decision(at, out);
         let segment = &mut self.segments[at];
         out.push(Speech::Pcm(SpeechPcm {
             run: self.run,
@@ -783,7 +903,9 @@ impl Reply {
     fn progressed(&mut self, out: &mut Vec<Speech>) {
         if self.closed && self.synthesis != Synthesis::Revoked && !self.is_final() {
             self.epoch = self.epoch.wrapping_add(1);
-            out.push(Speech::Arm { epoch: self.epoch });
+            if !self.waiting_for_decision() {
+                out.push(Speech::Arm { epoch: self.epoch });
+            }
         }
     }
 }
@@ -825,6 +947,7 @@ impl fmt::Debug for Speech {
                 .field("text", &text.len())
                 .finish(),
             Self::Pcm(pcm) => f.debug_tuple("Pcm").field(pcm).finish(),
+            Self::DecisionTaken(key) => f.debug_tuple("DecisionTaken").field(key).finish(),
             Self::Credit(samples) => f.debug_tuple("Credit").field(samples).finish(),
             Self::Cancel => f.write_str("Cancel"),
             Self::Revoke { tell_shell } => f
