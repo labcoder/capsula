@@ -1275,6 +1275,183 @@ async fn unspoken_text_drawing_lines_appear_once_in_chat_and_history() {
 }
 
 #[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "the same saturated core-loop setup checks timeout, Stop, and output replacement"
+)]
+async fn first_pcm_deadline_is_taken_with_a_full_fifo_but_loses_to_stop_or_output_change() {
+    use std::future::poll_fn;
+    use std::path::Path;
+    use std::sync::mpsc as native;
+    use std::task::Poll;
+
+    use kumochi_protocol::message::{ControlToBrain, DATA_WINDOW};
+
+    use super::DATA_CAP;
+    use super::data::Owner;
+    use crate::voice::pump::{OutputMode, Pump};
+    use crate::voice::tts::{Engine, TtsError, TtsHandle};
+
+    struct Silent(native::Receiver<()>);
+    impl Engine for Silent {
+        type Stream = std::iter::Empty<Result<Vec<f32>, TtsError>>;
+        fn stream(&self, _text: &str) -> Result<Self::Stream, TtsError> {
+            self.0.recv().ok();
+            Ok(std::iter::empty())
+        }
+    }
+
+    for interrupt in [None, Some(false), Some(true)] {
+        let scratch = Scratch::new("first-pcm-full-fifo");
+        let mut brain = brain(&scratch);
+        let (unblock, native) = native::channel();
+        let mut native = Some(native);
+        let (reports, _) = crate::voice::Reports::new();
+        let tts = TtsHandle::spawn_with(
+            tokio::runtime::Handle::current(),
+            reports,
+            move |_: &Path| Ok(Silent(native.take().expect("one load"))),
+        )
+        .expect("synthetic owner");
+        tts.load("models".into(), 1);
+        brain.pump = Some(Pump::new(tts, OutputMode::Conducted));
+        let generation = OutputGeneration(7);
+        brain.offline(Input::SpokenReplies { loaded: true });
+        brain.offline(Input::AudioOutput {
+            rate: 24_000,
+            generation,
+        });
+        let (out, _keep_controls) = mpsc::channel(64);
+        let (control, mut controls) = mpsc::channel(2);
+        let (_turns, mut turns) = mpsc::channel(1);
+        let (_pages, mut pages) = mpsc::channel(1);
+        let (ready, room) = (Notify::new(), Notify::new());
+        let mut tap = Tap::from_env();
+        let queue = RefCell::new(DataQueue::new(window()));
+        queue.borrow_mut().push(Owner::Marker, vec![0; window()]);
+        assert_eq!(
+            queue
+                .borrow_mut()
+                .pop(std::time::Instant::now())
+                .expect("initial credit")
+                .len(),
+            window()
+        );
+        queue.borrow_mut().wrote();
+        let mut link = Link::new(&out, &queue, &ready, &mut tap);
+        link.recovery = brain.describe(&mut link).expect("initial membership");
+        let key = start(&mut brain, &mut link).await;
+        let run = key.run;
+        tokio::time::pause();
+        apply(
+            &mut brain,
+            &mut link,
+            Input::Engine {
+                key,
+                event: TurnEvent::TextDelta("Ready now. Another".into()),
+            },
+        );
+        let due = brain
+            .pump
+            .as_ref()
+            .and_then(Pump::first_pcm_deadline)
+            .expect("open Speak")
+            .at;
+        {
+            let mut queue = queue.borrow_mut();
+            let fill = frame::encode(
+                &DataToShell::AssistantText {
+                    run,
+                    delta: "x".repeat(240_000).into(),
+                },
+                Pipe::Data,
+            )
+            .expect("bounded frame");
+            for _ in 0..3 {
+                queue.push(Owner::Marker, fill.clone());
+            }
+            assert!(queue.bytes() >= DATA_CAP);
+        }
+        {
+            let core = brain.core(&mut controls, &mut turns, &mut pages, &room, link);
+            tokio::pin!(core);
+            assert!(poll_fn(|cx| Poll::Ready(core.as_mut().poll(cx).is_pending())).await);
+            tokio::time::advance(due - tokio::time::Instant::now() + Duration::from_millis(1))
+                .await;
+            assert!(
+                queue
+                    .borrow_mut()
+                    .pop(tokio::time::Instant::now().into_std())
+                    .is_none(),
+                "the writer has no credit at expiry"
+            );
+            control
+                .try_send((ControlToBrain::Pong, 0))
+                .expect("a live shell");
+            if let Some(replace_output) = interrupt {
+                let message = if replace_output {
+                    ControlToBrain::AudioOutput {
+                        rate: 24_000,
+                        generation: OutputGeneration(8),
+                    }
+                } else {
+                    ControlToBrain::Stop {
+                        run,
+                        revealed: Vec::new(),
+                    }
+                };
+                control
+                    .try_send((message, 0))
+                    .expect("control is ready at expiry");
+            }
+            assert!(poll_fn(|cx| Poll::Ready(core.as_mut().poll(cx).is_pending())).await);
+        }
+        assert_eq!(brain.pump.as_ref().and_then(Pump::first_pcm_deadline), None);
+        assert!(
+            queue.borrow_mut().pop(std::time::Instant::now()).is_none(),
+            "no byte credit"
+        );
+        let mut terminals = Vec::new();
+        while queue.borrow().bytes() > 0 {
+            queue.borrow_mut().grant(DATA_WINDOW);
+            terminals.extend(
+                all_frames(&queue)
+                    .into_iter()
+                    .filter(|message| matches!(message, DataToShell::SpeechPcm(_))),
+            );
+        }
+        let expected = interrupt
+            .is_none()
+            .then_some(DataToShell::SpeechPcm(SpeechPcm {
+                run,
+                segment: SegmentId(0),
+                output_generation: generation,
+                seq: 0,
+                samples: Vec::new(),
+                last: Some(0),
+            }));
+        assert_eq!(terminals, expected.into_iter().collect::<Vec<_>>());
+        if interrupt.is_none() {
+            assert_eq!(brain.coordinator.current_run(), Some(run));
+            assert_eq!(
+                brain.handle(Input::Engine {
+                    key,
+                    event: TurnEvent::TextDelta(" sentence. More".into()),
+                }),
+                Some(vec![Effect::Data(DataToShell::AssistantText {
+                    run,
+                    delta: " sentence. More".into(),
+                })]),
+            );
+        }
+        tokio::time::resume();
+        drop(unblock);
+        brain.offline(Input::ShellLost);
+        brain.close().await;
+    }
+}
+
+#[tokio::test]
 async fn unspoken_lines_in_a_spoken_drawing_exclude_assigned_and_blank_say() {
     let scratch = Scratch::new("drawing-spoken-say");
     let mut brain = brain(&scratch);

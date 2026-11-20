@@ -20,7 +20,7 @@ use crate::engines::{self, Finish, Round, RunRequest, SendGate, TurnEvent};
 use crate::store::{RunEnd, Store};
 use crate::tap::Tap;
 use crate::test_support::{self, Scratch};
-use crate::voice::pump::Pump;
+use crate::voice::pump::{OutputMode, Pump};
 use crate::voice::reply::Heard;
 use crate::voice::tts::{Engine, TtsError, TtsHandle};
 
@@ -74,7 +74,7 @@ fn enable_spoken(brain: &mut Brain) {
     })
     .expect("the owner thread starts");
     tts.load("models".into(), 1);
-    brain.pump = Some(Pump::new(tts));
+    brain.pump = Some(Pump::new(tts, OutputMode::Legacy));
     brain.offline(Input::SpokenReplies { loaded: true });
     brain.offline(Input::AudioOutput {
         rate: 24_000,

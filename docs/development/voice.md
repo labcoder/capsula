@@ -319,6 +319,14 @@ sequenceDiagram
   spoken replies until the conductor supplies real playback timing.
 - **The pump** is owned by the core loop and read only while the data queue has room. With no
   pump, a Speak fails as if TTS weren't loaded, and the run's remaining segments end empty.
+- **First PCM, conducted output only.** The pump times one dispatched Speak, including plain
+  text, from dispatch to its first nonempty PCM or terminal. Queued segments have no timer.
+  The provisional deadline is five seconds; it needs measuring on the current build before activation.
+  At expiry the pump checks the receiver even if the data pipe has no room. A ready event keeps
+  its normal credit and order. Silence at expiry cancels the TTS generation and ends the reply's
+  remaining narration with ordered empty finals; earlier audio and the text reply continue.
+  An empty final releases its own picture to authored timing without claiming it was heard.
+  This fences late output but does not interrupt a blocked native call. Conducted output stays off.
 - **Draining.** When the engine finishes, the reply closes. The run ends `done` only once its
   speech is final, so it can sit finished with its speech still playing; see
   [runs.md](runs.md#draining-a-spoken-run).
