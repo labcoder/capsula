@@ -3,17 +3,19 @@
 //! the window's close) cancels one that hasn't ended; Continue, Not now and the finish hand a
 //! waiting one over to the rest of the app.
 
+use gpui_kit::base::InteractiveElementExt as _;
 use gpui_kit::component::ActiveTheme as _;
-use gpui_kit::component::scroll::ScrollableElement as _;
+use gpui_kit::component::scroll::{Scrollbar, ScrollbarMode};
 use gpui_kit::{
-    App, Context, InteractiveElement as _, IntoElement, ParentElement as _, Styled as _, div,
+    App, Context, InteractiveElement as _, IntoElement, ParentElement as _,
+    StatefulInteractiveElement as _, Styled as _, div,
 };
 use kumochi_protocol::message::{AccountOp, AccountView, ClaudeCodeView, ConnectionOp};
 
 use super::OnboardingView;
 use crate::onboarding::{Step, account_complete};
 use crate::presence::Presence;
-use crate::presence::settings::accounts::account_section;
+use crate::presence::settings::accounts::{ProviderLayout, account_section};
 use crate::presence::settings::claude::claude_section;
 use crate::settings::{Field, Settings};
 use crate::sign_in_mark::Shows;
@@ -33,49 +35,61 @@ impl OnboardingView {
         let model = self.model.read(cx);
         let [heading, help] = strings.onboarding_accounts(model.value(Field::Assistant));
         let (chatgpt, claude) = (self.owner.clone(), self.owner.clone());
-        div()
+        let mut details = Vec::new();
+        let chatgpt = account_section(
+            model,
+            move |op, cx| {
+                let _gone = chatgpt.update(cx, |owner, cx| owner.onboarding_account_op(op, cx));
+            },
+            false,
+            ProviderLayout::Onboarding(&mut details),
+            cx,
+        );
+        let claude = claude_section(
+            &self.model,
+            move |op, cx| {
+                let _gone = claude.update(cx, |owner, cx| owner.onboarding_claude_op(op, cx));
+            },
+            ProviderLayout::Onboarding(&mut details),
+            cx,
+        );
+        let intro = div()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .child(div().text_xl().child(heading))
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(help),
+            );
+        let viewport = div()
             .id("onboarding-accounts")
-            .flex_1()
-            .min_h_0()
-            .overflow_y_scrollbar()
+            .debug_selector(|| "onboarding-accounts".into())
+            .size_full()
+            .overflow_y_scroll()
+            .track_scroll(&self.account_scroll)
+            .lock_scroll_axis()
             .child(
                 div()
                     .flex()
                     .flex_col()
-                    .gap_4()
-                    .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .gap_1()
-                            .child(div().text_xl().child(heading))
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child(help),
-                            ),
-                    )
-                    .child(account_section(
-                        model,
-                        move |op, cx| {
-                            let _gone =
-                                chatgpt.update(cx, |owner, cx| owner.onboarding_account_op(op, cx));
-                        },
-                        false,
-                        None,
-                        cx,
-                    ))
-                    .child(claude_section(
-                        &self.model,
-                        move |op, cx| {
-                            let _gone =
-                                claude.update(cx, |owner, cx| owner.onboarding_claude_op(op, cx));
-                        },
-                        None,
-                        cx,
-                    )),
-            )
+                    .gap_2()
+                    .pr_3()
+                    .child(intro)
+                    .child(chatgpt)
+                    .child(claude)
+                    .children(details),
+            );
+        div()
+            .relative()
+            .flex_1()
+            .min_h_0()
+            .flex()
+            .flex_col()
+            .child(viewport)
+            .child(Scrollbar::vertical(&self.account_scroll).mode(ScrollbarMode::Always))
     }
 }
 

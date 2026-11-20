@@ -3,12 +3,16 @@
 use gpui_kit::component::button::Button;
 use gpui_kit::component::{ActiveTheme as _, Disableable as _, WindowExt as _};
 use gpui_kit::{
-    App, Context, Entity, InteractiveElement as _, IntoElement, ParentElement as _, Styled as _,
-    div,
+    App, Context, Div, Entity, InteractiveElement as _, IntoElement, ParentElement as _, Stateful,
+    Styled as _, div,
 };
 use kumochi_protocol::message::{ClaudeCodeView, ConnectionOp};
 
-use super::SettingsView;
+use super::{
+    SettingsView,
+    accounts::{ProviderLayout, provider_row},
+};
+use crate::claude_accounts::ClaudeAccounts;
 use crate::settings::Settings;
 use crate::strings::{Strings, Text};
 
@@ -46,6 +50,7 @@ impl SettingsView {
     pub(super) fn claude(&self, cx: &Context<'_, Self>) -> impl IntoElement {
         let owner = self.owner.clone();
         let disconnect = Button::new("claude-disconnect")
+            .debug_selector(|| "claude-disconnect".into())
             .outline()
             .label(cx.global::<Strings>().get(Text::ClaudeDisconnect))
             .disabled(
@@ -63,22 +68,23 @@ impl SettingsView {
             move |op, cx| {
                 let _gone = owner.update(cx, |owner, cx| owner.settings_claude_op(op, cx));
             },
-            Some(disconnect),
+            ProviderLayout::Settings(disconnect.into_any_element()),
             cx,
         )
     }
 }
 
-/// The Claude Code section, for every view that shows the connection. `route` sends a button's
-/// operation; `disconnect` shows while connected.
+/// The Claude Code section for Settings and onboarding. `route` sends a button's operation.
 pub(in crate::presence) fn claude_section(
     model: &Entity<Settings>,
     route: impl Fn(ConnectionOp, &mut App) + Clone + 'static,
-    disconnect: Option<Button>,
+    layout: ProviderLayout<'_>,
     cx: &App,
-) -> impl IntoElement {
+) -> Stateful<Div> {
     let strings = cx.global::<Strings>();
     let state = &model.read(cx).claude;
+    let reviewing =
+        state.connect_screen && matches!(state.view, Some(ClaudeCodeView::SignedOut { .. }));
     let button = |id: &'static str, text: Text, op: ConnectionOp| {
         let route = route.clone();
         Button::new(id)
@@ -103,7 +109,7 @@ pub(in crate::presence) fn claude_section(
                 }),
         );
     }
-    if state.connect_screen && matches!(state.view, Some(ClaudeCodeView::SignedOut { .. })) {
+    if reviewing {
         actions = actions.child(button(
             "claude-connect",
             Text::ClaudeConnect,
@@ -124,49 +130,74 @@ pub(in crate::presence) fn claude_section(
             ConnectionOp::FindClaudeCode,
         ));
     }
-    if matches!(state.view, Some(ClaudeCodeView::Ready { .. })) {
-        actions = actions.children(disconnect);
-    }
-
-    div()
+    let title = div()
+        .debug_selector(|| "claude-provider".into())
+        .text_lg()
+        .child(strings.get(Text::ClaudeProvider));
+    let status = div()
+        .debug_selector(|| "claude-status".into())
+        .text_sm()
+        .child(strings.claude_status(state.view));
+    let details = claude_details(state, cx).into_iter().flatten();
+    let section = div()
         .id("claude-accounts")
         .flex()
         .flex_col()
         .gap_3()
         .min_w_0()
         .border_t_1()
-        .border_color(cx.theme().border)
-        .pt_4()
-        .child(div().text_lg().child(strings.get(Text::ClaudeProvider)))
-        .child(div().text_sm().child(strings.claude_status(state.view)))
-        .children(
-            matches!(
-                state.view,
-                Some(ClaudeCodeView::Ready {
-                    analytics_on: true,
-                    ..
-                })
-            )
-            .then(|| div().text_sm().child(strings.get(Text::ClaudeAnalytics))),
+        .border_color(cx.theme().border);
+    match layout {
+        ProviderLayout::Onboarding(below) => {
+            below.extend(details);
+            let actions = if reviewing {
+                below.push(actions);
+                div()
+            } else {
+                actions
+            };
+            section.pt_2().child(provider_row(title, status, actions))
+        }
+        ProviderLayout::Settings(disconnect) => section
+            .pt_4()
+            .child(title)
+            .child(status)
+            .children(details)
+            .child(actions.children(
+                matches!(state.view, Some(ClaudeCodeView::Ready { .. })).then_some(disconnect),
+            )),
+    }
+}
+
+fn claude_details(state: &ClaudeAccounts, cx: &App) -> [Option<Div>; 3] {
+    let strings = cx.global::<Strings>();
+    [
+        matches!(
+            state.view,
+            Some(ClaudeCodeView::Ready {
+                analytics_on: true,
+                ..
+            })
         )
-        .children(connect_texts(state).map(|texts| {
+        .then(|| div().text_sm().child(strings.get(Text::ClaudeAnalytics))),
+        connect_texts(state).map(|texts| {
             div()
                 .flex()
                 .flex_col()
                 .gap_3()
                 .text_sm()
                 .children(texts.map(|text| div().child(strings.get(text))))
-        }))
-        .children(state.send_failed.then(|| {
+        }),
+        state.send_failed.then(|| {
             div()
                 .text_sm()
                 .text_color(cx.theme().danger)
                 .child(strings.get(Text::AccountSendFailed))
-        }))
-        .child(actions)
+        }),
+    ]
 }
 
-fn connect_texts(state: &crate::claude_accounts::ClaudeAccounts) -> Option<[Text; 4]> {
+fn connect_texts(state: &ClaudeAccounts) -> Option<[Text; 4]> {
     let signing = state.view == Some(ClaudeCodeView::SigningIn);
     (state.connect_screen || signing).then_some([
         Text::ClaudePolicyNotice,

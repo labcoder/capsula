@@ -6,9 +6,10 @@ The first time you start Kumochi, a window opens under the dock.
    if you like, then press Enter or **Continue**.
 2. **What should Kumo call you?** This is optional. Leave it blank to skip it. Your name is sent to
    the model you chat with, so the assistant can use it.
-3. **Connect an account for Kumo.** ChatGPT and Claude Code, each as Settings → Accounts shows
-   them (see [accounts](accounts.md)). Connect any you have, or none. The button reads
-   **Not now** until one is ready, then **Continue**; either goes on to the last step. A sign-in
+3. **Connect an account for Kumo.** Use the sign-in button beside ChatGPT or Claude Code.
+   Scroll for more details when needed. You can also connect either later in
+   [Settings → Accounts](accounts.md). The bottom button reads **Not now** until one is ready,
+   then **Continue**; either goes on to the last step. A sign-in
    still waiting for your browser carries on after that, and closing the window later doesn't
    cancel it.
 4. **Double-tap left Ctrl + left Alt to chat with Kumo.** Two quick presses of both keys finish
