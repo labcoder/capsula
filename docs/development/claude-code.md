@@ -337,11 +337,12 @@ one at a time. A run whose choice names Claude Code starts one through `Claude::
 - **Pipes.** stdin and stdout are bounded channels of `PIPE_QUEUE` (4) chunks. stdout's chunks
   are at most `CHUNK` (64 KiB). stdout never parks in a blocking send: on a full channel it retries every
   `POLL`, and once the round lets go it drops what it reads until EOF. stderr is drained and
-  dropped. The stdout and stderr read buffers and stdout's chunks are zeroed when they drop: a
-  queued chunk when the round's receiver drops or takes it, a chunk the pump holds while the queue
-  is full when it's queued or discarded, and a read buffer only when its pump returns. A pump
-  blocked in a read holds its buffer until the child's pipe ends, so a release or cancellation
-  isn't proof that every drop has run. The framer grows lazily, doubling up to `MAX_LINE` plus
+  dropped. The stdout and stderr read buffers and stdout's chunks are zeroed when they drop.
+  Queuing a chunk and taking it off the queue move the same allocation and wipe nothing. A chunk
+  is zeroed when the pump discards it after a release or a closed queue, when the queue drops it
+  still queued, or when the round drops it after copying it into the framer. A read buffer is
+  zeroed only when its pump returns, so a read blocked in the pipe may keep bytes after a
+  release. A release or cancellation isn't proof that every drop has run. The framer grows lazily, doubling up to `MAX_LINE` plus
   one `CHUNK` (bigger only for a bigger push), by copying into a zeroed replacement and dropping
   the old allocation, which zeroes it. Compaction clears the bytes it vacates; consumed lines stay
   until the next push or the framer's drop.
