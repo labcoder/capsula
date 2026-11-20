@@ -272,7 +272,7 @@ impl Presence {
             return Ok((lease, stamp));
         }
         // The brain never saw this lease, so releasing it is no lapse.
-        self.revoke_exclusion(cx);
+        self.revoke_exclusion_generation(lease, cx);
         Err(Error::Exhausted)
     }
 
@@ -290,6 +290,16 @@ impl Presence {
             .is_err()
         {
             tracing::warn!("exclusion cleanup retained restoration debt");
+        }
+    }
+
+    pub(super) fn revoke_exclusion_generation(
+        &mut self,
+        lease: LeaseGeneration,
+        cx: &mut Context<'_, Self>,
+    ) {
+        if self.exclusion.owns(lease) {
+            self.revoke_exclusion(cx);
         }
     }
 

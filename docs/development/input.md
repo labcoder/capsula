@@ -70,11 +70,19 @@ sequenceDiagram
   Right Ctrl (E0 0x1D) and AltGr's right Alt (E0 0x38) are other keys, so AltGr cancels instead of
   firing. AltGr's synthetic left Ctrl can't be told from a real one by its flags; the right Alt
   that follows still cancels. Pause (E1) resets, because it has no dependable key-up. A keyboard
-  overrun resets. A key with no make code is named through `MapVirtualKeyW`.
+  overrun resets. A missing make code falls back to `MapVirtualKeyW` only when its result
+  preserves the record's prefix evidence and doesn't guess a modifier side. An unsided
+  modifier VK or conflicting prefix is loss of coverage, not a left-key make or break.
   The adapter hands the reducer semantic left Ctrl, left Alt, Escape or other-key events.
   Escape remains distinguishable from the registered Escape event, and bounded opaque
-  slots track the other physical makes and breaks. The reducer doesn't decode Windows
-  scan codes; diagnostics don't print slots or edge values.
+  slots track makes and breaks from up to two sources with keys down. Readable keyboard
+  records with a null Raw Input device handle, as can occur with injected input, share one
+  source distinct from every non-null handle. They follow the same shortcut and recovery
+  rules as any keyboard. A second source sending a make or break for a left modifier still
+  held by another source makes its identity ambiguous and resets input. If both banks are
+  occupied, another source invalidates coverage rather than growing a list.
+  The reducer doesn't decode Windows scan codes; diagnostics don't print devices, slots,
+  layout identifiers or edge values.
 - **Same callback.** The gesture lives in an `Rc<Cell<Gesture>>` shared by the native callback
   and the owner. The callback installs the shared hold fence and revokes collection before
   deferring anything. Voice intents capture the target revision, session generation, choice
@@ -83,7 +91,7 @@ sequenceDiagram
   only tries to borrow GPUI. If GPUI is already borrowed, because a nested message loop
   dispatched the callback, the effects wait in an ordered queue with their original times, and
   a foreground task retries them every millisecond until they apply or the owner is gone.
-  Later effects queue behind them. Nothing panics and no key is lost.
+  Queued effects retain their order.
 - **Deadlines.** The gesture returns at most one deadline: the 300 ms hold or the double-tap
   window. The proxy arms it with `SetTimer` after delivery, for the time left from then, rounded
   up to whole milliseconds, so slow delivery never lengthens the hold, and disarms it
@@ -98,13 +106,28 @@ sequenceDiagram
   that comes only after the keyboard's repeat delay. The recognition line logs whether the native
   deadline, the scheduled one, a repeat or the release reached the threshold, and a chord key
   more than 50 ms past an armed deadline logs the thread's message queue status once per gesture.
-- **Resets.** Device removal, any session change (lock or unlock), a desktop switch such as
-  Ctrl+Alt+Del's secure desktop, suspend, an overrun and Pause all reset the gesture. Keys
-  released while Kumochi couldn't see them would otherwise stay held. A desktop switch arrives
-  through an out-of-context WinEvent, not a keyboard hook. If the session or desktop watcher
-  can't be registered, arming fails and undoes what it registered, rather than running without
-  a reset source. Delivery isn't guaranteed in every
-  case, so a missed key-up can still leave a modifier held until that key is pressed again.
+- **Resets.** An unreadable Raw Input record resets the gesture; a record known to be
+  non-keyboard input does not. Device changes, observed keyboard-layout changes, session
+  changes, desktop switches, suspend, overruns and Pause also reset it. On every decoded
+  left Ctrl or left Alt record (make, repeat, or break), the proxy calls
+  `GetForegroundWindow`, `GetWindowThreadProcessId`, and `GetKeyboardLayout` for the
+  foreground thread, if it can identify one. The deferred release checks sample again,
+  so a layout change that changes back between samples can escape detection. The decoded
+  tracker uses fixed storage; that doesn't bound the cost of the native queries. After coverage loss,
+  overflow or registered Escape, shell-core clears the remembered keys and blocks recognition.
+  An eligible new modifier make can try once. Windows reads left Ctrl and left Alt before and
+  after a bounded `GetAsyncKeyState` sweep, using only the down bit; another down keyboard VK
+  vetoes that attempt. Aggregate Ctrl/Alt aliases, mouse buttons and toggle state do not count.
+  The same attempt starts a fresh hold if Windows' observable virtual-key state agreed with
+  this chord. A failed read leaves the next attempt eligible; time, another reset and an empty
+  ledger cannot rearm. The scan isn't atomic: a key can go down after its slot was read,
+  access can change mid-sweep (zero means up or failure), two physical keys can share one VK,
+  and firmware-only keys without a VK aren't visible. A stuck or remapped extra key vetoes for
+  as long as Windows reports it down. The scan and behavior with elevated foreground windows,
+  a secure desktop, AltGr or two keyboards remain unmeasured. OS bits don't give a device
+  identity or a watch exemption. A desktop switch arrives via
+  an out-of-context WinEvent, not a keyboard hook. If the session or desktop watcher can't
+  be registered, arming fails and undoes what it registered.
 
 ## What each effect does
 
@@ -126,12 +149,16 @@ and native key-up rendezvous once before KeyUp is sent, regardless of UI deliver
 Committed PCM may drain after native retirement; logical input/session/choice fences still
 discard stale packets. Typed submissions remain text-only
 (`ScreenChoice::None`). A recognized hold whose [standing notice](ipc.md#screen-holds) is on
-goes out as `ScreenHoldRecognized`, and its release takes the
+goes out as `ScreenHoldRecognized`, and a release that still owns its input takes the
 [exclusion lease](screen.md#local-shell-exclusion) and goes out as `ScreenRelease`
 ([presence](presence.md#a-screen-holds-pointer-line)). The native callback samples the pointer
 when its delivery carries a recognition or a release that isn't a cancel. So the line starts
 where the pointer was at recognition, and the picture is of the display it was on at release,
 however late the UI thread applies the delivery. `input/hold.rs` never sees the pointer.
+The shell checks the release's input stamp at both GPUI delivery boundaries and again
+before arming its watch and sending `ScreenRelease`. An intervening edge other than a
+proven modifier repeat makes the release voice-only; a reset cancels it. Cleanup for a
+refused or failed release can clear only its own hold, watch and exclusion lease.
 
 ## The typing panel
 
@@ -256,12 +283,18 @@ recognition until its keys come up or it ends, the proxy holds a second hotkey, 
 and Alt (`TalkEscape`). Those are the only modifiers a hold's keys can have down, since any
 other key going down cancels the hold, and the chord is never held outside a hold.
 
-- Raw Input doesn't report a press a hotkey took. The proxy delivers this hotkey's message as
-  the Esc key going down and up, so the hold cancels as it does for any other key and the press
-  does nothing else: it stops no run and clears no drawing.
-- Windows is asked once per hold. If another app already holds the chord, the refusal is logged
-  once for that hold, without key or text content, and that app gets the press: Esc then
-  doesn't cancel the hold, and any other key still does.
+- The talk hotkey cancels the hold and invalidates coverage without inventing a key-up.
+  It stops no run and clears no drawing. Plain registered Esc does its usual work and also
+  invalidates coverage.
+- Windows is asked once per hold, before voice admission. If it refuses the registration,
+  the typed refusal prevents microphone admission and screen context for that hold. A valid
+  recognition still stops the run that was speaking at key-down, brain first and then the
+  speaker. The proxy retires the talk ID and revokes collection and stale watch authority before it calls
+  `UnregisterHotKey` on the window's thread. Terminal UI effects wait until after that call.
+  It doesn't reuse retired hotkey IDs, so neither a queued message nor late
+  cleanup can reach a later hold. An uncertain unregister leaves input inert until the
+  proxy is recreated; dropping the ID locally does not prove Windows released it.
+  The plain Esc lease is separate.
 - A second ignored fixture, `cargo test -p kumochi-shell -- --ignored talk_keys_escape`,
   registers the chord beside plain Esc on a hidden window, sees a second registration refused,
   and sees dropping the chord free it and leave plain Esc held. Run it only in an approved

@@ -1,20 +1,22 @@
 //! What the presence tells the screen watch about a hold that sends the screen, read as one
 //! ordered sequence: what the sources were told and what was written to the brain.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use gpui_kit::TestAppContext;
 use kumochi_protocol::message::{
-    ControlToBrain, DataToShell, GestureId, HeldScreen, HoldStatus, Phase, RunId, RunOrigin,
-    SceneCut, SceneCuts, SceneHeader, SceneId, ScreenClass, ScreenHolds, ScreenOff, ThreadId,
+    CaptureFor, ControlToBrain, DataToShell, GestureId, HeldScreen, HoldStatus, LeaseGeneration,
+    Phase, RunId, RunOrigin, SceneCut, SceneCuts, SceneHeader, SceneId, ScreenClass, ScreenHolds,
+    ScreenOff, ThreadId,
 };
 use kumochi_scene::{
     Record, StopCut, deferred::Deferred, parse_record, parse_screen_draw_record,
     record::ScreenDisplay, screen, text::Bounded,
 };
 use kumochi_shell_core::platform::screen_watch::{Changed, Sources};
+use kumochi_shell_core::speaker::{Command, Snapshot};
 
 use super::super::Presence;
 use super::super::overlay_visibility::Visibility;
@@ -24,11 +26,11 @@ use super::super::screen_hold_tests::{
 };
 use super::super::voice_wiring_tests::status;
 use super::Source;
-use super::tests::{after, listen, native, until};
+use super::tests::{after, chord, listen, native, source, until};
 use crate::input::{Edge, Event, Key, TalkHeld};
 use crate::link::{LinkEvent, LinkState};
 use crate::platform::input::{Button, input};
-use crate::platform::{Deliver, PresenceEvent};
+use crate::platform::{Deliver, PresenceEvent, with_raw_keys, with_raw_modifiers};
 use crate::presence::kumo::{Motion, v2};
 use crate::presence::pulling::{Grab, PullSpace};
 use crate::strings::Text;
@@ -82,7 +84,7 @@ impl Scripted {
 
 impl Sources for Scripted {
     fn start(&mut self, changed: Changed, held: TalkHeld) -> bool {
-        self.tell(Told::Start(held.control, held.alt));
+        self.tell(Told::Start(held.0[0].is_some(), held.0[1].is_some()));
         self.bit.replace(Some(changed));
         self.starts
     }
@@ -301,10 +303,7 @@ fn the_watch_starts_before_the_release_is_written_and_an_unwritten_release_drops
         [Told::Sent(screen_hold(1))],
         "recognition starts nothing"
     );
-    let held = TalkHeld {
-        control: true,
-        alt: false,
-    };
+    let held = TalkHeld([crate::input::PhysicalKey::new(0x1D), None]);
     release_holding(&watching.ready.owner, 1, Some(DOWN), held, cx);
     assert_eq!(
         told(&watching),
@@ -324,6 +323,114 @@ fn the_watch_starts_before_the_release_is_written_and_an_unwritten_release_drops
     assert_eq!(told(&watching), [Told::Start(false, false), Told::Stop]);
     watching.ready.owner.read_with(cx, |owner, _| {
         assert!(owner.voice.watched.is_none());
+    });
+}
+
+#[gpui::test]
+fn talk_escape_refusal_still_stops_the_spoken_run_in_order(cx: &mut TestAppContext) {
+    let watching = watch(true, cx);
+    let owner = &watching.ready.owner;
+    state(&watching, RUN, Phase::Answering, None, cx);
+    let controls = watching.ready.controls.clone();
+    let (sent, stopped) = std::sync::mpsc::channel();
+    let mic_starts = Rc::new(Cell::new(0));
+    let starts = Rc::clone(&mic_starts);
+    let (_commands, _tail) = owner.update(cx, |owner, _| {
+        assert_eq!(owner.runs.stoppable(), Some(RunId(RUN)));
+        let (commands, tail) = owner.link.output().scripted(1);
+        tail.publish(&Snapshot {
+            exposed: 480,
+            played: 0,
+            flight: 0,
+            quiet: 0,
+            flags: 0,
+            spoken: RUN,
+        });
+        owner.link.output().witness(Box::new(move |command| {
+            if let Command::Stop(run) = command {
+                let prior = std::iter::from_fn(|| controls.try_recv().ok()).collect::<Vec<_>>();
+                let _seen = sent.send((prior, *run));
+            }
+        }));
+        owner.native.refuse_talk_escape_for_test();
+        owner.voice.start = Some(Box::new(move |_, _| {
+            starts.set(starts.get() + 1);
+            Err(crate::platform::microphone::MicError::Unavailable)
+        }));
+        (commands, tail)
+    });
+    let deliver = native(owner, cx);
+    let at = Instant::now();
+    chord(&deliver, Edge::Down, at);
+    deliver(Event::Deadline, after(at, 301));
+    cx.run_until_parked();
+    status(owner, 1, 1, HoldStatus::Admitted, cx);
+    chord(&deliver, Edge::Up, at + Duration::from_millis(302));
+    cx.run_until_parked();
+
+    let [(before_speaker, run)]: [_; 1] = stopped
+        .try_iter()
+        .collect::<Vec<_>>()
+        .try_into()
+        .expect("exactly one speaker stop");
+    assert_eq!(run, RunId(RUN));
+    assert_eq!(
+        before_speaker
+            .iter()
+            .filter_map(|message| match message {
+                ControlToBrain::Stop { run, .. } => Some(*run),
+                _ => None,
+            })
+            .collect::<Vec<_>>(),
+        [RunId(RUN)],
+        "the brain stop was already queued when the speaker stopped"
+    );
+    assert_eq!(mic_starts.get(), 0);
+    let events = before_speaker
+        .into_iter()
+        .map(Told::Sent)
+        .chain(told(&watching));
+    assert!(events.into_iter().all(|message| !matches!(
+        message,
+        Told::Start(..)
+            | Told::Sent(
+                ControlToBrain::VoiceHoldRecognized { .. }
+                    | ControlToBrain::ScreenHoldRecognized { .. }
+                    | ControlToBrain::ScreenRelease { .. }
+            )
+    )));
+}
+
+#[gpui::test]
+fn talk_escape_refusal_never_admits_a_hold_or_arms_a_screen_watch(cx: &mut TestAppContext) {
+    let watching = watch(true, cx);
+    watching
+        .ready
+        .owner
+        .read_with(cx, |owner, _| owner.native.refuse_talk_escape_for_test());
+    recognize(&watching.ready.owner, 1, cx);
+    release(&watching.ready.owner, 1, Some(DOWN), cx);
+    let told = told(&watching);
+    assert!(told.iter().all(|t| !matches!(
+        t,
+        Told::Start(..)
+            | Told::Sent(
+                ControlToBrain::ScreenHoldRecognized { .. } | ControlToBrain::ScreenRelease { .. }
+            )
+    )));
+    assert_eq!(
+        told.iter()
+            .filter(|t| **t
+                == Told::Sent(ControlToBrain::VoiceHoldStopped {
+                    gesture: GestureId(1)
+                }))
+            .count(),
+        1
+    );
+    watching.ready.owner.read_with(cx, |owner, _| {
+        assert!(owner.voice.pending.is_none());
+        assert!(!owner.talk_escape.held());
+        assert!(!owner.link.input_is(GestureId(1)));
     });
 }
 
@@ -416,7 +523,7 @@ fn the_dock_says_marks_were_skipped_only_beside_their_own_answer(cx: &mut TestAp
 #[gpui::test]
 fn the_native_callback_hands_over_the_talk_key_still_down(cx: &mut TestAppContext) {
     let watching = watch(true, cx);
-    let deliver = native(&watching.ready.owner, cx);
+    let deliver = with_raw_modifiers(native(&watching.ready.owner, cx));
     let at = Instant::now();
     let finish = listen(&watching.ready.owner, &deliver, 1, at, cx);
     assert_eq!(sources(&watching), []);
@@ -427,6 +534,311 @@ fn the_native_callback_hands_over_the_talk_key_still_down(cx: &mut TestAppContex
     cx.run_until_parked();
     assert_eq!(sources(&watching), [Told::Start(true, false)]);
     finish.send(()).expect("the fake microphone ends");
+}
+
+#[gpui::test]
+fn a_reset_before_recognition_delivery_retires_only_that_unstarted_generation(
+    cx: &mut TestAppContext,
+) {
+    let watching = watch(true, cx);
+    let owner = &watching.ready.owner;
+    let (commands, speaker) = std::sync::mpsc::channel();
+    owner.update(cx, |owner, _| {
+        owner.link.output().witness(Box::new(move |command| {
+            let _seen = commands.send(*command);
+        }));
+    });
+    let (open, finish, started, samples) = source(owner, cx, None);
+    let deliver = native(owner, cx);
+    let at = Instant::now();
+    cx.update(|_| {
+        chord(&deliver, Edge::Down, at);
+        deliver(Event::Deadline, after(at, 301));
+        deliver(Event::Reset, after(at, 302));
+    });
+    cx.run_until_parked();
+    assert!(told(&watching).iter().all(|message| !matches!(
+        message,
+        Told::Start(..)
+            | Told::Sent(
+                ControlToBrain::ScreenHoldRecognized { .. } | ControlToBrain::ScreenRelease { .. }
+            )
+    )));
+    owner.read_with(cx, |owner, _| {
+        assert_eq!(owner.link.microphone_gate().latest(), 1);
+        assert!(owner.voice.pending.is_none());
+    });
+
+    chord(&deliver, Edge::Down, at + Duration::from_secs(1));
+    deliver(Event::Deadline, after(at, 1_301));
+    cx.run_until_parked();
+    assert_eq!(
+        told(&watching)
+            .into_iter()
+            .filter_map(|message| match message {
+                Told::Sent(ControlToBrain::ScreenHoldRecognized { gesture, .. }) => Some(gesture),
+                _ => None,
+            })
+            .collect::<Vec<_>>(),
+        [GestureId(2)],
+        "only the second hold reaches recognition"
+    );
+    assert_eq!(
+        speaker.try_iter().collect::<Vec<_>>(),
+        [Command::Pause(1), Command::Resume(1), Command::Pause(2)],
+        "the skipped hold resumes output before the successor takes the inhibit"
+    );
+    status(owner, 1, 2, HoldStatus::Admitted, cx);
+    started.recv_timeout(Duration::from_secs(3)).unwrap();
+    open.send(()).unwrap();
+    until(cx, |cx| {
+        owner.read_with(cx, |owner, _| {
+            owner
+                .voice
+                .pending
+                .as_ref()
+                .is_some_and(|hold| hold.token.gesture() == GestureId(2) && hold.collected)
+        })
+    });
+    samples.recv_timeout(Duration::from_secs(3)).unwrap();
+    deliver(Event::Reset, after(at, 1_302));
+    finish.send(()).unwrap();
+    until(cx, |cx| {
+        owner.read_with(cx, |owner, _| owner.voice.pending.is_none())
+    });
+}
+
+#[gpui::test]
+fn overflow_refuses_unconfirmed_chords_then_accepts_a_clean_read(cx: &mut TestAppContext) {
+    needs_neutral(NeutralLoss::Overflow, cx);
+}
+
+#[gpui::test]
+fn registered_escape_requires_a_clean_read_even_with_no_known_key(cx: &mut TestAppContext) {
+    needs_neutral(NeutralLoss::Escape, cx);
+    needs_neutral(NeutralLoss::NeutralEscape, cx);
+}
+
+#[gpui::test]
+fn a_repeat_after_reset_cannot_rearm_but_the_first_clean_read_works(cx: &mut TestAppContext) {
+    needs_neutral(NeutralLoss::Reset, cx);
+}
+
+#[derive(Clone, Copy, Debug)]
+enum NeutralLoss {
+    Overflow,
+    Escape,
+    NeutralEscape,
+    Reset,
+}
+
+fn needs_neutral(loss: NeutralLoss, cx: &mut TestAppContext) {
+    let watching = watch(true, cx);
+    let deliver = native(&watching.ready.owner, cx);
+    let raw = with_raw_keys(&deliver);
+    let at = Instant::now();
+    let key = |device, make, edge, ms| raw(device, make, edge, after(at, ms));
+    let chord = |edge, ms| {
+        key(1, 0x1D, edge, ms);
+        key(1, 0x38, edge, ms + 1);
+    };
+    let unrelated = match loss {
+        NeutralLoss::Overflow => {
+            key(1, 0x25, Edge::Down, 0);
+            key(2, 0x24, Edge::Down, 1);
+            key(3, 0x2A, Edge::Down, 2);
+            key(1, 0x25, Edge::Up, 3);
+            key(2, 0x24, Edge::Up, 4);
+            Some((3, 0x2A))
+        }
+        NeutralLoss::Escape => {
+            key(1, 0x25, Edge::Down, 0);
+            deliver(Event::Escape, after(at, 1));
+            Some((1, 0x25))
+        }
+        NeutralLoss::NeutralEscape => {
+            deliver(Event::Escape, after(at, 1));
+            None
+        }
+        NeutralLoss::Reset => {
+            key(1, 0x1D, Edge::Down, 0);
+            key(1, 0xFF, Edge::Down, 1);
+            key(1, 0x1D, Edge::Down, 2);
+            key(1, 0x1D, Edge::Down, 3);
+            key(1, 0x1D, Edge::Up, 4);
+            None
+        }
+    };
+    {
+        chord(Edge::Down, 20);
+        chord(Edge::Up, 30);
+        chord(Edge::Down, 700);
+        deliver(Event::Deadline, after(at, 1_002));
+        chord(Edge::Up, 1_010);
+        cx.run_until_parked();
+        assert!(
+            told(&watching).iter().all(|message| !matches!(
+                message,
+                Told::Start(..)
+                    | Told::Sent(
+                        ControlToBrain::KeyDown { .. }
+                            | ControlToBrain::VoiceHoldRecognized { .. }
+                            | ControlToBrain::ScreenHoldRecognized { .. }
+                            | ControlToBrain::ScreenRelease { .. }
+                    )
+            )),
+            "{loss:?}: never warm, recognize, arm or send without a clean read"
+        );
+        if let Some((device, make)) = unrelated {
+            key(device, make, Edge::Up, 1_020);
+        }
+    }
+    cx.run_until_parked();
+    key(1, 0x1D, Edge::Down, 2_000);
+    raw(
+        1,
+        0x38,
+        Edge::Down,
+        after(at, 2_001).with_keyboard_read(Some),
+    );
+    deliver(Event::Deadline, after(at, 2_302));
+    cx.run_until_parked();
+    assert_eq!(
+        told(&watching)
+            .into_iter()
+            .filter_map(|message| match message {
+                Told::Sent(ControlToBrain::ScreenHoldRecognized { gesture, .. }) => Some(gesture),
+                _ => None,
+            })
+            .collect::<Vec<_>>(),
+        [GestureId(1)],
+        "{loss:?}: the clean read admits that attempt"
+    );
+    key(1, 0xFF, Edge::Down, 2_303);
+    cx.run_until_parked();
+}
+
+#[gpui::test]
+fn stale_releases_cannot_arm_or_send_at_either_delivery_boundary(cx: &mut TestAppContext) {
+    for second in [false, true] {
+        for reset in [false, true] {
+            let watching = watch(true, cx);
+            let deliver = Rc::new(with_raw_modifiers(native(&watching.ready.owner, cx)));
+            let at = Instant::now();
+            let finish = listen(&watching.ready.owner, &deliver, 1, at, cx);
+            told(&watching);
+            let advance = {
+                let deliver = Rc::clone(&deliver);
+                move || {
+                    deliver(
+                        Event::Key {
+                            key: Key::LeftControl,
+                            edge: Edge::Up,
+                        },
+                        after(at, 901),
+                    );
+                    deliver(
+                        Event::Key {
+                            key: Key::LeftControl,
+                            edge: Edge::Down,
+                        },
+                        after(at, 902),
+                    );
+                    if reset {
+                        deliver(Event::Reset, after(at, 903));
+                    }
+                }
+            };
+            let release = || {
+                deliver(
+                    Event::Key {
+                        key: Key::LeftAlt,
+                        edge: Edge::Up,
+                    },
+                    after(at, 900),
+                )
+            };
+            if second {
+                crate::presence::gesture::before_deferred_release(advance);
+                release();
+            } else {
+                cx.update(|_| {
+                    release();
+                    advance();
+                });
+            }
+            cx.run_until_parked();
+            finish.send(()).unwrap();
+            let terminals = Cell::new((0, 0));
+            until(cx, |cx| {
+                let messages = told(&watching);
+                assert!(messages.iter().all(|t| !matches!(
+                    t,
+                    Told::Start(..) | Told::Sent(ControlToBrain::ScreenRelease { .. })
+                )));
+                let (mut stops, mut releases) = terminals.get();
+                for message in messages {
+                    match message {
+                        Told::Sent(ControlToBrain::VoiceHoldStopped {
+                            gesture: GestureId(1),
+                        }) => stops += 1,
+                        Told::Sent(ControlToBrain::KeyUp {
+                            gesture: GestureId(1),
+                            ..
+                        }) => releases += 1,
+                        _ => {}
+                    }
+                }
+                terminals.set((stops, releases));
+                stops > 0
+                    && watching.ready.owner.read_with(cx, |owner, _| {
+                        if reset {
+                            owner.voice.pending.is_none()
+                        } else {
+                            releases > 0
+                        }
+                    })
+            });
+            assert_eq!(terminals.get(), (1, usize::from(!reset)));
+            watching.ready.owner.read_with(cx, |owner, _| {
+                assert!(owner.voice.watched.is_none());
+                assert!(owner.exclusion.lease().is_none());
+                assert!(!owner.talk_escape.held());
+            });
+        }
+    }
+}
+
+#[gpui::test]
+fn an_older_failed_send_cannot_revoke_the_successors_watch_or_exclusion(cx: &mut TestAppContext) {
+    let watching = released(true, cx);
+    watching.ready.owner.update(cx, |owner, cx| {
+        let hold = owner.voice.pending.as_ref().expect("the first hold");
+        hold.token.discard_unstarted().expect("never started");
+        owner.voice.gates.received(&hold.token);
+        let session = owner.session.as_ref().expect("connected");
+        let stopped = ControlToBrain::VoiceHoldStopped {
+            gesture: GestureId(1),
+        };
+        assert!(owner.link.send_control(session, stopped));
+        owner.link.accept_recorded_microphone_stop(1, GestureId(1));
+        assert!(!owner.link.voice_stop_pending());
+        owner.capture_finished(1, CaptureFor::Gesture(GestureId(1)), cx);
+    });
+    state(&watching, RUN, Phase::Answering, HOLD, cx);
+    cx.run_until_parked();
+    hold(&watching, 2, cx);
+    release(&watching.ready.owner, 2, Some(DOWN), cx);
+    let second = told(&watching);
+    assert!(second.iter().any(|t| matches!(t, Told::Start(..))));
+    assert!(second.contains(&Told::Sent(screen_release(2, 2, DOWN, &[]))));
+    watching.ready.owner.update(cx, |owner, cx| {
+        owner.screen_release_failed(GestureId(1), LeaseGeneration(1), cx);
+        assert!(owner.voice.watched.is_some());
+        assert!(owner.exclusion.live(LeaseGeneration(2)));
+        assert_eq!(owner.screen_lease, Some(LeaseGeneration(2)));
+    });
+    assert_eq!(sources(&watching), []);
 }
 
 #[gpui::test]

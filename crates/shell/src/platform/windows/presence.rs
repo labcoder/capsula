@@ -150,6 +150,8 @@ pub(crate) enum PresenceError {
     /// Raw Input was started twice.
     #[error("the keyboard is already armed")]
     KeyboardArmed,
+    #[error("the Escape lease is unavailable")]
+    EscapeLease,
     /// Session changes can't be watched, so a lock could leave keys held.
     #[error("can't watch session changes")]
     SessionWatch(#[source] windows::core::Error),
@@ -400,7 +402,7 @@ impl PresenceNative {
         if self.hwnd.is_invalid() {
             return Err(PresenceError::NotWin32);
         }
-        EscapeHotkey::register(self.hwnd)
+        EscapeHotkey::register(self.hwnd, &self.state().keys)
     }
 
     /// Holds Esc with Ctrl and Alt down system-wide until the returned value drops.
@@ -408,11 +410,11 @@ impl PresenceNative {
     /// # Errors
     /// Fails when another app, or this one, already holds that chord.
     pub(crate) fn register_talk_escape(&self) -> Result<EscapeHotkey, PresenceError> {
-        #[cfg(test)]
-        if self.hwnd.is_invalid() {
-            return Err(PresenceError::NotWin32);
-        }
-        EscapeHotkey::register_with_talk_keys(self.hwnd)
+        EscapeHotkey::register_with_talk_keys(self.hwnd, &self.state().keys)
+    }
+
+    pub(crate) fn escape_trusted(&self) -> bool {
+        self.state().keys.escape_trusted()
     }
 
     /// Keeps the proxy, which shows over the dock, out of capture like the GPUI surfaces.
@@ -471,6 +473,10 @@ impl PresenceNative {
 
 #[cfg(test)]
 impl PresenceNative {
+    pub(crate) fn refuse_talk_escape_for_test(&self) {
+        self.state().keys.refuse_talk_escape.set(true);
+    }
+
     /// The owner's state with no window, tray icon, keyboard hook, hotkey or taskbar button:
     /// only the mask's 1x1 memory DC, so presence's glue runs headless in GPUI tests. Nothing
     /// that needs the proxy window may be called on it.
@@ -1093,7 +1099,7 @@ unsafe extern "system" fn proxy_proc(
         if observer::on_message(state.observe.get(), message, wparam, click_qpc) {
             return LRESULT(0);
         }
-        if EscapeHotkey::fired(message, wparam) {
+        if state.keys.plain_escape(message, wparam) {
             send(&state.hover.events, PresenceEvent::Escape);
             return LRESULT(0);
         }

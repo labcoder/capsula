@@ -261,6 +261,25 @@ impl Gates {
         self.poke();
     }
 
+    /// Accounts for a skipped recognition without touching a gate that already owns its mic.
+    pub(in crate::presence) fn skip_recognition(&self, mic: Generation) -> bool {
+        let mut gates = self.list.borrow_mut();
+        match gates.iter_mut().find(|gate| gate.gesture == mic.gesture()) {
+            Some(gate) if gate.mic.is_some() => false,
+            Some(gate) if matches!(gate.stage, Stage::Recognized | Stage::Ending) => {
+                gate.mic = Some(mic);
+                gate.stage = Stage::Ending;
+                drop(gates);
+                self.poke();
+                true
+            }
+            _ => {
+                drop(gates);
+                mic.discard_unstarted().is_ok()
+            }
+        }
+    }
+
     /// `gesture`'s `Warm` was applied with `run` speaking: what its recognition fences.
     pub(super) fn capture(&self, gesture: GestureId, run: Option<(u64, RunId)>) {
         for gate in self.list.borrow_mut().iter_mut() {

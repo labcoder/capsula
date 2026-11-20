@@ -94,6 +94,18 @@ impl Fence {
         now: Instant,
         paused: &Cell<bool>,
     ) -> Delivery {
+        self.reduce_with_keyboard_read(state, event, now, paused, || None)
+    }
+
+    pub fn reduce_with_keyboard_read(
+        &mut self,
+        state: &mut Gesture,
+        event: Event,
+        now: Instant,
+        paused: &Cell<bool>,
+        read: impl FnOnce() -> Option<Instant>,
+    ) -> Delivery {
+        let now = state.recover(event, read).unwrap_or(now);
         let paused = paused.get();
         let reduced = state.recognize(event, now, |reason| {
             tracing::debug!(stage = ?InputStage::Gesture, ?reason, "held speech input boundary");

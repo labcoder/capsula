@@ -638,14 +638,12 @@ fn native(owner: &Entity<Presence>, cx: &mut TestAppContext) -> Deliver {
 
 fn chord(deliver: &Deliver, edge: Edge, at: Instant) {
     for key in [Key::LeftControl, Key::LeftAlt] {
-        deliver(Event::Key { key, edge }, EventTime { instant: at });
+        deliver(Event::Key { key, edge }, EventTime::new(at));
     }
 }
 
 fn at_ms(at: Instant, millis: u64) -> EventTime {
-    EventTime {
-        instant: at + Duration::from_millis(millis),
-    }
+    EventTime::new(at + Duration::from_millis(millis))
 }
 
 /// A whole hold: the chord, the 300 ms threshold through `threshold` (GPUI's scheduled timer

@@ -620,10 +620,12 @@ fn a_hold_is_a_screen_hold_only_when_it_is_given_a_screen() {
 fn a_hold_refused_its_lease_says_the_screen_wasnt_ready_until_it_ends() {
     use kumochi_protocol::message::{HeldScreen, ScreenClass};
     let mut runs = ready();
-    runs.hold_screen_refused();
+    runs.hold_screen_refused(GestureId(1));
     assert_eq!(runs.hold_screen_line(), None);
     recognized(&mut runs, 1);
-    runs.hold_screen_refused();
+    runs.hold_screen_refused(GestureId(2));
+    assert_eq!(runs.hold_screen_line(), None);
+    runs.hold_screen_refused(GestureId(1));
     let line = Some(ScreenLine::NotIncluded(ScreenClass::NotReady));
     assert_eq!(runs.hold_screen_line(), line);
     // The brain was sent a voice-only hold, so no screen outcome is this hold's to show.

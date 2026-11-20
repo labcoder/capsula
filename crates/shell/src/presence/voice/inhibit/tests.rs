@@ -16,7 +16,7 @@ use crate::input::hold::Intent;
 use crate::input::{Edge, Event, Key, PhysicalKey, TalkHeld};
 use crate::platform::microphone::MicError;
 use crate::platform::{Deliver, EventTime};
-use crate::presence::voice::tests::{chord, native, source, until};
+use crate::presence::voice::tests::{chord, listen, native, source, until};
 use crate::presence::voice_wiring_tests::{gate, hold, key_down, ready, status};
 use crate::presence::{EscapePanel, Presence};
 use crate::strings::Text;
@@ -83,9 +83,7 @@ fn heard(commands: &Receiver<Command>) -> Vec<Command> {
 }
 
 fn at(start: Instant, millis: u64) -> EventTime {
-    EventTime {
-        instant: start + Duration::from_millis(millis),
-    }
+    EventTime::new(start + Duration::from_millis(millis))
 }
 
 fn deadline(deliver: &Deliver, start: Instant, millis: u64) {
@@ -270,6 +268,66 @@ fn a_busy_transfer_keeps_the_old_token_until_the_dispatcher_moves_it(cx: &mut Te
     );
     owner.read_with(cx, |owner, _| {
         assert_eq!(owner.voice.gates.held(G2), Some(true), "moved on the retry");
+    });
+}
+
+#[gpui::test]
+fn a_skipped_recognition_after_transfer_exhaustion_leaves_collection_reusable(
+    cx: &mut TestAppContext,
+) {
+    let (owner, _data, controls) = ready(cx);
+    let commands = witness(&owner, cx);
+    let deliver = native(&owner, cx);
+    let (link, retirement) = owner.read_with(cx, |owner, _| {
+        (owner.link.clone(), owner.voice.gates.hold_back())
+    });
+    let start = Instant::now();
+    cx.update(|_| {
+        chord(&deliver, Edge::Down, start);
+        chord(&deliver, Edge::Up, start + Duration::from_millis(10));
+        link.output().refuse(u32::MAX);
+        chord(&deliver, Edge::Down, start + Duration::from_millis(20));
+    });
+    cx.run_until_parked();
+    for _ in 0..super::RECHECKS {
+        cx.background_executor.advance_clock(super::RECHECK);
+        cx.run_until_parked();
+    }
+    owner.read_with(cx, |owner, _| {
+        let gates = owner.voice.gates.list.borrow();
+        let gate = gates
+            .iter()
+            .find(|gate| gate.gesture == G2)
+            .expect("second gate");
+        assert_eq!(gate.rechecks, 0);
+        assert!(matches!(gate.stage, super::Stage::Ending));
+        assert!(gate.mic.is_none());
+    });
+    cx.update(|_| {
+        deadline(&deliver, start, 321);
+        deliver(Event::Reset, at(start, 322));
+    });
+    cx.run_until_parked();
+    assert_eq!(
+        link.microphone_gate().latest(),
+        2,
+        "the skipped generation was armed"
+    );
+    assert!(!sent(&controls).iter().any(|message| matches!(
+        message,
+        ControlToBrain::VoiceHoldRecognized { .. } | ControlToBrain::ScreenHoldRecognized { .. }
+    )));
+    link.output().refuse(0);
+    drop(retirement);
+    cx.run_until_parked();
+    assert_eq!(heard(&commands), [Command::Pause(1), Command::Resume(1)]);
+
+    let next = start + Duration::from_secs(1);
+    let finish = listen(&owner, &deliver, 3, next, cx);
+    deliver(Event::Reset, at(next, 302));
+    finish.send(()).unwrap();
+    until(cx, |cx| {
+        owner.read_with(cx, |owner, _| owner.voice.pending.is_none())
     });
 }
 
@@ -842,12 +900,7 @@ fn an_esc_waiting_for_a_busy_owner_holds_the_resume_until_it_is_decided(cx: &mut
                     .store(false, std::sync::atomic::Ordering::Release);
             }
             // The owner is busy here, so the press waits in the delivery queue.
-            deliver(
-                Event::Escape,
-                EventTime {
-                    instant: Instant::now(),
-                },
-            );
+            deliver(Event::Escape, EventTime::new(Instant::now()));
             // The dispatcher's wake comes before the queued press is retried.
             owner.dispatch(cx);
         });
