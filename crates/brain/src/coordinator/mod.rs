@@ -30,7 +30,7 @@ mod tests;
 #[cfg(test)]
 pub(crate) use tests::mcp::draft::draft_launch;
 #[cfg(test)]
-pub(crate) use tests::routes::pictured_run;
+pub(crate) use tests::routes::{built_for, pictured_claude_run, pictured_run};
 mod thread_op;
 mod tools;
 
@@ -55,8 +55,8 @@ pub use hold::{HoldKey, HoldRead, HoldSnapshot};
 pub use inline::{CompactBuilt, CompactContext};
 pub(crate) use job::JobAsk;
 pub use job::{JobBuilt, JobKey, JobKind, JobOutput, ReadJob};
-pub(crate) use lease::PictureGrant;
 pub use lease::{LeaseId, MAX_HOLD, SEND_DEADLINE, SendKey};
+pub(crate) use lease::{PictureGrant, PictureWrite};
 pub use speech::{DRAIN_STALL, QUIET_TIMEOUT, Synthesized};
 pub use store_op::{ReplyText, StoreOp, SummaryText};
 pub use tools::{MAX_CALLS, MAX_ROUNDS, RoundItems};

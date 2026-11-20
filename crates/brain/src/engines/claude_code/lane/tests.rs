@@ -14,6 +14,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, mpsc as std_mpsc};
 use std::time::{Duration, Instant};
 
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use kumochi_protocol::constants::{CLAUDE_CODE_DELETING, CLAUDE_CODE_DIR, CLAUDE_CODE_LOCK};
 use kumochi_protocol::message::{ClaudeVersion, PolicyFailed};
 use windows_sys::Win32::Security::{CONTAINER_INHERIT_ACE, OBJECT_INHERIT_ACE};
@@ -32,6 +33,8 @@ use crate::platform::{
     local_app_data, pause_after_check, set_dacl, this_user,
 };
 use crate::scratch::Scratch;
+
+pub(crate) const PICTURE_JPEG: &[u8] = b"\xff\xd8\xffoffline-picture-copy-sentinel-476\xff\xd9";
 
 /// The version every fake reports.
 pub(crate) const V: ClaudeVersion = ClaudeVersion {
@@ -255,6 +258,17 @@ fn replay() {
                 }
                 continue;
             }
+            let out = match out {
+                "!expect-picture" => {
+                    check_picture_seed(&value);
+                    fs::write(base.join(format!("picture-shape.{ordinal}")), b"1")
+                        .expect("shape passed");
+                    continue;
+                }
+                "!exit" => return,
+                "!echo-input" => line.as_str(),
+                _ => out,
+            };
             let answer = match serde_json::from_str::<serde_json::Value>(out) {
                 Ok(mut answer) if answer["type"] == "control_response" => {
                     answer["response"]["request_id"] = value["request_id"].clone();
@@ -274,6 +288,35 @@ fn replay() {
     if base.join("watch-stdin-eof").is_file() {
         fs::write(base.join(format!("stdin-eof.{ordinal}")), b"").expect("observed stdin close");
     }
+}
+
+fn check_picture_seed(value: &serde_json::Value) {
+    let blocks = value["message"]["content"]
+        .as_array()
+        .expect("content blocks");
+    let at = blocks
+        .iter()
+        .rposition(|block| {
+            block["text"]
+                .as_str()
+                .is_some_and(|text| text.starts_with("user:\n"))
+        })
+        .expect("user text");
+    assert_eq!(
+        blocks
+            .iter()
+            .filter(|block| block["type"] == "image")
+            .count(),
+        1
+    );
+    let picture = &blocks[at + 1];
+    assert!(
+        picture["type"] == "image"
+            && picture["source"]["type"] == "base64"
+            && picture["source"]["media_type"] == "image/jpeg"
+            && picture["source"]["data"] == STANDARD.encode(PICTURE_JPEG),
+        "the picture follows the user's text"
+    );
 }
 
 fn record(args: &[String]) {

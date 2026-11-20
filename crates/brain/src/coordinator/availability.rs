@@ -597,6 +597,7 @@ impl Coordinator {
                     .unwrap_or_else(sign_in_needed),
             ),
             Finish::Completed
+            | Finish::ReceiptOrdered
             | Finish::Interrupted
             | Finish::Failed(
                 EngineFailure::Provider | EngineFailure::TurnCap | EngineFailure::ClaudeStream(_),

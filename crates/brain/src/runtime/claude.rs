@@ -107,6 +107,8 @@ pub(crate) struct Claude {
     /// The generation moved since the brain last looked, so every picture held for Claude Code
     /// that wasn't granted is lost.
     picture_loss: bool,
+    #[cfg(test)]
+    fixture_picture: Option<ModelSlug>,
 }
 
 /// Runs bound under one epoch go on through a Find; a sign-out, a Disconnect, an audit failure,
@@ -199,6 +201,8 @@ impl Claude {
             asked: None,
             pictures: Vec::new(),
             picture_loss: false,
+            #[cfg(test)]
+            fixture_picture: None,
         }
     }
 
@@ -562,6 +566,11 @@ impl Claude {
             .filter(|model| row.images.contains(&model.slug.as_str()))
             .map(|model| model.slug.clone())
             .collect();
+
+        #[cfg(test)]
+        let mut images: Vec<_> = images;
+        #[cfg(test)]
+        images.extend(self.fixture_picture.iter().cloned());
         Availability::Ready(Ready {
             connection: ConnectionTag(epoch.tag),
             models,

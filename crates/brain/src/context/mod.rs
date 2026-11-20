@@ -251,6 +251,7 @@ struct Image {
     #[cfg(windows)]
     _dump: Option<crate::platform::DumpExclusion>,
     bytes: Zeroizing<Vec<u8>>,
+    capture_size: Option<[u32; 2]>,
 }
 
 impl Drop for Image {
@@ -272,12 +273,14 @@ impl Jpeg {
     /// already covers it.
     pub(crate) fn sealed(
         bytes: Zeroizing<Vec<u8>>,
+        capture_size: [u32; 2],
         #[cfg(windows)] dump: Option<crate::platform::DumpExclusion>,
     ) -> Self {
         Self(Arc::new(Image {
             #[cfg(windows)]
             _dump: dump,
             bytes,
+            capture_size: Some(capture_size),
         }))
     }
 
@@ -293,6 +296,7 @@ impl Jpeg {
                 #[cfg(windows)]
                 _dump: None,
                 bytes,
+                capture_size: None,
             }))
         })
     }
@@ -315,6 +319,11 @@ impl Jpeg {
     /// since neither the prefix nor base64 needs escaping.
     pub(crate) fn item_len(&self) -> usize {
         EMPTY_IMAGE_ITEM.len() + self.data_url_len()
+    }
+
+    /// The JPEG and dimensions from the sealed capture that produced them.
+    pub(crate) fn capture(&self) -> Option<(&[u8], [u32; 2])> {
+        Some((&self.0.bytes, self.0.capture_size?))
     }
 }
 

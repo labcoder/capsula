@@ -509,7 +509,7 @@ const SNAPSHOT: &str = "The image is a snapshot from when the user spoke.";
 const CANT_SEE: &str = "The screen was not included: this model can't be sent images.";
 
 /// A build of `key` whose request names `choice`, with the first build's snapshot.
-fn built_for(key: BuildKey, choice: &ModelChoice) -> Input {
+pub(crate) fn built_for(key: BuildKey, choice: &ModelChoice) -> Input {
     Input::ContextBuilt(ContextBuilt {
         key,
         snapshot: (key.attempt == 1).then(|| defaults(Some(choice.clone()))),
@@ -573,6 +573,40 @@ pub(crate) fn pictured_run(
         .handle(built_for(key(), &choice(kind, "m")))
         .expect("current");
     (core, effects)
+}
+
+pub(crate) fn pictured_claude_run(
+    available: Availability,
+    jpeg: crate::context::Jpeg,
+) -> (Coordinator, Vec<Effect>) {
+    let choice = choice(CLAUDE, "haiku");
+    let (mut core, hold) = held(
+        vec![Input::Engines(CLAUDE, available)],
+        choice.clone(),
+        Some(ThreadId(1)),
+    );
+    core.set_pictures(crate::coordinator::PictureRoutes::new(false, true));
+    core.submit_hold(
+        hold,
+        "words".into(),
+        Some(crate::context::Screen::Image(jpeg)),
+    )
+    .expect("admitted");
+    core.handle(Input::TurnStored { run: R }).expect("current");
+    let Input::ContextBuilt(mut built) = built_for(key(), &choice) else {
+        unreachable!("built fixture");
+    };
+    built.result.as_mut().expect("built").request.tools = crate::context::tools(Origin::Kumo);
+    let effects = core.handle(Input::ContextBuilt(built)).expect("current");
+    (core, effects)
+}
+
+impl Coordinator {
+    pub(crate) fn picture_lost_for_test(&self, run: RunId) -> bool {
+        self.current
+            .as_ref()
+            .is_some_and(|current| current.id == run && current.screen_lost)
+    }
 }
 
 #[test]

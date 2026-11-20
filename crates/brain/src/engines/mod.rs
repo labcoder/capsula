@@ -4,7 +4,8 @@
 //! round with [`TurnEvent::Finished`]. The coordinator, not the engine, decides whether a round
 //! ends its run. Each start gets its own pump and channel: the pump forwards the round's events
 //! to the coordinator tagged with the run, closes after the first `Finished`, and reports a round
-//! that ends without one, even after text, as `Finished(Truncated)`. Dropping the round's
+//! that ends without one, even after text, as `Finished(Truncated)`. An unattempted pictured
+//! send orders its terminal outcome behind the lease receipt instead. Dropping the round's
 //! [`Cancel`] aborts the pump and the engine's future with it, even while the pump waits on a
 //! full coordinator queue, so a cancelled round sends nothing more and never reads as truncated.
 
@@ -206,8 +207,7 @@ pub enum Answer {
 /// A granted send. Dropping it, wherever it is, reports `SendUnsent` on the store-reply channel,
 /// which the brain always drains, so a lost grant settles too; `SendSettled` instead once the
 /// transport has said it attempted a write of its request.
-// shortcut: the Messages and Claude Code transports never say they wrote, so their sends settle
-// unsent; each says so before its route carries a picture.
+// shortcut: Claude Code text-only sends do not mark writes; only its pictured seed marks them.
 #[derive(Debug)]
 #[must_use = "dropping a SendLease settles its send"]
 pub struct SendLease {
@@ -217,6 +217,14 @@ pub struct SendLease {
     unsent: bool,
     /// The coordinator's revocable grant for the picture the request carries.
     picture: Option<PictureGrant>,
+    picture_receipt: Option<oneshot::Sender<PictureReceipt>>,
+}
+
+/// Whether terminal delivery can use the pump or must follow the unsent receipt.
+#[derive(Debug)]
+enum PictureReceipt {
+    Attempted,
+    Unsent(mpsc::UnboundedSender<Input>),
 }
 
 impl SendLease {
@@ -226,6 +234,7 @@ impl SendLease {
             inputs: Some(inputs),
             unsent: true,
             picture: None,
+            picture_receipt: None,
         }
     }
 
@@ -237,15 +246,14 @@ impl SendLease {
 
     /// Whether this send carries a Claude route's picture grant: true only for a lease the
     /// coordinator granted with one, open or since closed.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the Claude Code picture consumer is the first caller"
-        )
-    )]
     pub(crate) fn carries_picture(&self) -> bool {
         self.picture.is_some()
+    }
+
+    fn track_picture_receipt(&mut self) -> oneshot::Receiver<PictureReceipt> {
+        let (settled, wait) = oneshot::channel();
+        self.picture_receipt = Some(settled);
+        wait
     }
 
     /// Gives the lease up unsettled: its send may still be going out, so its sources stay held
@@ -277,6 +285,8 @@ impl Drop for SendLease {
         };
         if inputs.send(settled).is_err() {
             tracing::debug!("a send settled after the brain ended");
+        } else if let Some(receipt) = self.picture_receipt.take() {
+            receipt.send(PictureReceipt::Unsent(inputs)).ok();
         }
     }
 }
@@ -402,6 +412,8 @@ pub enum Finish {
     Completed,
     /// The round's stream ended without saying how it finished.
     Truncated,
+    /// A pictured launch's terminal outcome is ordered by its send receipt, not by the pump.
+    ReceiptOrdered,
     /// The round failed.
     Failed(EngineFailure),
     /// The engine stopped the round itself. Only the coordinator interrupts runs, so this fails
@@ -440,6 +452,8 @@ pub enum ClaudeStreamFailure {
     NotJson,
     /// A known message with the wrong shape.
     Mistyped,
+    /// The child echoed the picture-bearing seed.
+    PictureEcho,
 }
 
 /// Token counts as the provider reports them.
@@ -696,6 +710,9 @@ async fn pump(
                 continue;
             }
         };
+        if matches!(event, TurnEvent::Finished(Finish::ReceiptOrdered)) {
+            return;
+        }
         let finished = matches!(event, TurnEvent::Finished(_));
         if inputs.send(Input::Engine { key, event }).await.is_err() || finished {
             return;

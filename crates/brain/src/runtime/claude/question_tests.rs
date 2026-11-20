@@ -29,6 +29,8 @@ use crate::engines::{
 use crate::platform::Job;
 use crate::test_support::{Captured, SENTINEL, Scratch};
 
+mod pictures;
+
 const FACTS: &str = include_str!("../../../fixtures/claude-code/facts.jsonl");
 const TEXT: &str = include_str!("../../../fixtures/claude-code/text.jsonl");
 
@@ -3086,6 +3088,32 @@ async fn a_picture_grant_whose_send_settled_is_not_kept() {
     );
     assert_eq!(rig.claude.pictures.len(), 2);
     assert!(held.is_open());
+    drop(question);
+    rig.close().await;
+}
+
+#[tokio::test]
+async fn a_busy_picture_grant_survives_pruning_until_generation_close() {
+    let script = synthetic_signed_in().held_until("go");
+    let mut rig = Rig::new("question-picture-busy", &script).await;
+    let request = choosing("haiku", Effort::Low, ConnectionKind::ClaudeCode);
+    let question = rig.claude.question(&request).expect("admitted");
+    let grant = crate::coordinator::PictureGrant::open_for_tests();
+    let kind = Some(ConnectionKind::ClaudeCode);
+    rig.claude.picture_granted(request.key, kind, grant.clone());
+    let write = grant.reserve_write().expect("first admission");
+    assert!(grant.is_open());
+    assert!(grant.reserve_write().is_none(), "one write at a time");
+    rig.claude.picture_granted(
+        request.key,
+        kind,
+        crate::coordinator::PictureGrant::open_for_tests(),
+    );
+    rig.claude.op(ConnectionOp::FindClaudeCode);
+    assert!(!grant.is_open(), "the kept grant closes while busy");
+    drop(write);
+    assert!(!grant.is_open(), "the permit cannot reopen the grant");
+    assert!(grant.reserve_write().is_none());
     drop(question);
     rig.close().await;
 }
