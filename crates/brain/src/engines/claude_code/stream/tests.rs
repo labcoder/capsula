@@ -592,7 +592,9 @@ fn stdout_of_exactly_the_budget_passes_and_one_more_byte_fails() {
 }
 
 fn count(held: &[u8], marker: &[u8]) -> usize {
-    held.windows(marker.len()).filter(|at| *at == marker).count()
+    held.windows(marker.len())
+        .filter(|at| *at == marker)
+        .count()
 }
 
 #[test]
@@ -608,7 +610,11 @@ fn compaction_keeps_one_copy_of_the_unread_bytes_and_clears_what_it_vacates() {
         Ok(Some(114))
     );
     assert_eq!(framer.next_line(), Ok(None));
-    assert_eq!(count(framer.held(), marker), 2, "the consumed line is still owned");
+    assert_eq!(
+        count(framer.held(), marker),
+        2,
+        "the consumed line is still owned"
+    );
 
     framer.push(b"\n").expect("push");
     let held = framer.held();
@@ -641,7 +647,11 @@ fn growth_doubles_from_the_first_read_and_stops_at_a_full_line_and_one_read() {
     assert_eq!(framer.held().len(), MAX_LINE);
     let read = [&b"\n"[..], &vec![b'b'; CHUNK - 1]].concat();
     framer.push(&read).expect("push");
-    assert_eq!(framer.held().len(), MAX_LINE + CHUNK, "the bound, not double");
+    assert_eq!(
+        framer.held().len(),
+        MAX_LINE + CHUNK,
+        "the bound, not double"
+    );
     assert_eq!(
         framer.next_line().map(|line| line.map(<[u8]>::len)),
         Ok(Some(MAX_LINE))
@@ -693,15 +703,15 @@ fn a_pictured_echo_of_exactly_the_line_bound_fails_closed_and_one_more_byte_is_t
     let tool = br#"{"type":"user","message":{"content":[{"type":"tool_result","content":"x"}]}}"#;
     framer.push(tool).expect("push");
     framer.push(b"\n").expect("push");
-    let mut mapped = Vec::new();
+    let mut seen = Vec::new();
     for chunk in echo(MAX_LINE).chunks(CHUNK) {
         framer.push(chunk).expect("push");
         while let Some(line) = framer.next_line().expect("frames") {
-            mapped.push((line.len(), mapper.line(line)));
+            seen.push((line.len(), mapper.line(line)));
         }
     }
     assert_eq!(
-        mapped,
+        seen,
         [
             (tool.len(), Ok(Mapped::Ignored)),
             (MAX_LINE, Err(ClaudeStreamFailure::PictureEcho))
