@@ -146,7 +146,10 @@ fn a_withdrawal_marks_only_an_attached_turn() {
         Some(HeldScreen::NotIncluded(ScreenClass::NotReady)),
     );
     let (_, plain) = held_run(&mut store, None);
-    assert_eq!(screen(&store, attached).as_deref(), Some("pending_attached"));
+    assert_eq!(
+        screen(&store, attached).as_deref(),
+        Some("pending_attached")
+    );
     for run in [attached, closed, plain] {
         store.withdraw_screen(run).expect("withdrawn");
     }
@@ -209,15 +212,28 @@ fn an_unsent_picture_is_cleared_and_every_other_value_kept() {
     store.forget_screen(attached).expect("cleared");
     assert_eq!(screen(&store, attached), None);
     assert_eq!(screen(&store, picture).as_deref(), Some("pending_screen"));
-    assert_eq!(screen(&store, other_attached).as_deref(), Some("pending_attached"));
+    assert_eq!(
+        screen(&store, other_attached).as_deref(),
+        Some("pending_attached")
+    );
     for run in [picture, closed, withdrawn, sent] {
         store.forget_screen(run).expect("cleared");
     }
     assert_eq!(screen(&store, attached), None);
     assert_eq!(screen(&store, picture), None);
-    assert_eq!(screen(&store, other_attached).as_deref(), Some("pending_attached"));
-    assert_eq!(screen(&store, other_picture).as_deref(), Some("pending_screen"));
-    assert_eq!(screen(&store, sent).as_deref(), Some("attached"), "a sent mark stays");
+    assert_eq!(
+        screen(&store, other_attached).as_deref(),
+        Some("pending_attached")
+    );
+    assert_eq!(
+        screen(&store, other_picture).as_deref(),
+        Some("pending_screen")
+    );
+    assert_eq!(
+        screen(&store, sent).as_deref(),
+        Some("attached"),
+        "a sent mark stays"
+    );
     assert_eq!(screen(&store, closed).as_deref(), Some("not_ready"));
     assert_eq!(screen(&store, withdrawn).as_deref(), Some("withdrawn"));
     assert_eq!(kinds(&store, thread), [PageEventKind::User]);
@@ -258,7 +274,10 @@ fn a_pending_picture_reads_as_a_plain_turn_until_a_send_may_have_written_it() {
         assert_eq!(kinds(&store, thread), [PageEventKind::User]);
         store.sent_screen(run).expect("sent");
         store.sent_screen(run).expect("sent again");
-        assert_eq!(kinds(&store, thread), [PageEventKind::HeldTurn { screen: held }]);
+        assert_eq!(
+            kinds(&store, thread),
+            [PageEventKind::HeldTurn { screen: held }]
+        );
     }
     let (thread, closed) = held_run(
         &mut store,
