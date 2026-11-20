@@ -346,13 +346,19 @@ one at a time. A run whose choice names Claude Code starts one through `Claude::
   256 KiB of payload waits in the queue (the seed itself, the pump's buffer and the OS pipe come
   on top). A wait for room ends with `Deadline`, or `Revoked` once the revoked launch's pump
   lets go.
-- **Dormant picture encoding.** The pure seed encoder budgets one trusted JPEG (2 MiB and
-  1280×720), the encoded text-only line including LF (512 KiB), and the complete pictured line
+- **Dormant picture path.** The seed encoder budgets one validated capture's JPEG and dimensions
+  together (2 MiB and 1280×720), the encoded text-only line including LF (512 KiB), and the pictured line
   (4 MiB). A borrowed size precheck rejects oversized input before constructing text blocks.
   The image goes after the newest user text, directly into exact-sized zeroing storage; the
-  ordinary prompt and tool text copies made while formatting are not zeroed. The encoder has no
-  live consumer and confers no permission. The later write, receipt, echo refusal and teardown
-  work depends on the pictured grant landing first; neither switch is enabled here.
+  ordinary prompt and tool text copies made while formatting are not zeroed. Only a foreground
+  build with the held picture grant can queue that seed. The stdin pump checks the grant, deadline,
+  Stop and observed closure, and marks the lease immediately before the first attempt even if the
+  pipe rejects it. Control writes don't mark it. Picture chunks are zeroed on drop, including
+  queued chunks the pump discards. No alias fact or switch is enabled here.
+  Stdin is the only picture sink: never argv, environment, files or chat history. A structured
+  picture echo or oversized stdout fails closed without its contents. The owner-only launch
+  folder is removed best effort after confirmed teardown, not securely erased. This is not a
+  sandbox or a guarantee about what the CLI or provider retains.
 - **The held send.** The round moves its seed's `SendLease` into the launch (`hold_send`) before
   the first seed chunk, and asks for it with `SendGate::ask_held`, whose deadline is the launch's
   lifetime plus `SETTLE` (15 s [guess]). Claude Code sends the user message again on each native

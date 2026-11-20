@@ -119,6 +119,7 @@ impl ScreenContext {
     pub(crate) fn into_jpeg(mut self) -> crate::context::Jpeg {
         crate::context::Jpeg::sealed(
             std::mem::take(&mut self.jpeg),
+            self.size,
             #[cfg(windows)]
             self.dump.take(),
         )

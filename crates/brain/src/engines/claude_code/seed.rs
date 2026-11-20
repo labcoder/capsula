@@ -5,14 +5,7 @@ use serde_json::{Value, json};
 
 use crate::context::{InputItem, ModelRequest, Role, ToolSchema};
 
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the dormant encoder has no launch or stdin consumer"
-    )
-)]
-mod pictured;
+pub(super) mod pictured;
 
 /// The question as one line and its line feed. Block 1 depends only on the instructions and the
 /// tools, so two questions on a thread share it byte for byte; then one text block per item.

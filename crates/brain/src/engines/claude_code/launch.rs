@@ -26,7 +26,7 @@ use super::supervisor::{
 };
 use crate::bridge::LaunchId;
 use crate::connections::model::budget::Budget;
-use crate::context::{Origin, ToolSchema};
+use crate::context::{InputItem, Origin, ToolSchema};
 use crate::coordinator::{BuildKey, SendKey};
 use crate::engines::{
     Answer, ClaudeStreamFailure, Engine, EngineFailure, Finish, Round, RunRequest, SendGate,
@@ -525,22 +525,11 @@ impl Question<'_> {
             .expires
             .is_some_and(|expires| self.clock.now() >= expires)
         {
-            let deadline = attempt.launch.deadline();
-            let (reply, fresh) = oneshot::channel();
-            let refresh = Refresh {
-                old: attempt.id(),
-                snapshot: attempt.snapshot.clone(),
-                reply,
-            };
             drop(warmed);
-            drop(attempt);
-            if self.notes.send(Note::Refresh(refresh)).is_err() {
+            let Some(fresh) = self.refresh_attempt(attempt).await else {
                 return Some(Finish::Failed(EngineFailure::Provider));
-            }
-            attempt = match tokio::time::timeout_at(deadline.into(), fresh).await {
-                Ok(Ok(Ok(attempt))) => attempt,
-                _ => return Some(Finish::Failed(EngineFailure::Provider)),
             };
+            attempt = fresh;
             warmed = match attempt.ready().await {
                 Ok(warmed) => warmed,
                 Err(outcome) => return Some(failed(outcome)),
@@ -572,6 +561,7 @@ impl Question<'_> {
             Ok(Answer::Rebuild) => return None,
             Ok(Answer::Grant(_)) | Err(_) => return Some(expired(launch, report)),
         };
+        let picture = lease.carries_picture().then_some(request.key);
         if !self.budget.reserve() {
             drop(lease);
             return Some(claude(ErrorKey::ClaudeCodeBudget));
@@ -581,9 +571,18 @@ impl Question<'_> {
             report.report(Outcome::Launch);
             return Some(Finish::Failed(EngineFailure::Provider));
         }
-        let seed = seed::encode(&request.request, attempt.snapshot.offer.schemas());
-        match writer.seed(&seed, until).await {
+        match queue_seed(
+            &mut writer,
+            &mut mapper,
+            request,
+            attempt.snapshot.offer.schemas(),
+            picture,
+            until,
+        )
+        .await
+        {
             Ok(()) => {}
+            Err(StdinRefused::PictureClosed) => return None,
             Err(StdinRefused::Deadline) => return Some(expired(launch, report)),
             Err(_) => {
                 report.report(Outcome::Launch);
@@ -614,6 +613,23 @@ impl Question<'_> {
                 Some(failed(outcome))
             }
         }
+    }
+
+    async fn refresh_attempt(&self, attempt: Attempt) -> Option<Attempt> {
+        let deadline = attempt.launch.deadline();
+        let (reply, fresh) = oneshot::channel();
+        let refresh = Refresh {
+            old: attempt.id(),
+            snapshot: attempt.snapshot.clone(),
+            reply,
+        };
+        drop(attempt);
+        self.notes.send(Note::Refresh(refresh)).ok()?;
+        tokio::time::timeout_at(deadline.into(), fresh)
+            .await
+            .ok()?
+            .ok()?
+            .ok()
     }
 
     async fn finish_answer(
@@ -728,6 +744,33 @@ struct Reading<'a> {
     post: &'a mut PostSeedAudit,
     launch: &'a Launch,
     analytics: Option<bool>,
+}
+
+async fn queue_seed(
+    writer: &mut StdinWriter,
+    mapper: &mut StreamMapper,
+    request: &RunRequest,
+    tools: &[ToolSchema],
+    picture: Option<SendKey>,
+    until: Instant,
+) -> Result<(), StdinRefused> {
+    if matches!(picture, Some(SendKey::Build(_))) {
+        let seed =
+            seed::pictured::attached(&request.request, tools).map_err(|_| StdinRefused::Revoked)?;
+        mapper.refuse_picture_echo();
+        return writer.picture(&seed, until).await;
+    }
+    if picture.is_some()
+        || request
+            .request
+            .input
+            .iter()
+            .any(|item| matches!(item, InputItem::Image(_)))
+    {
+        return Err(StdinRefused::Revoked);
+    }
+    let seed = seed::encode(&request.request, tools);
+    writer.seed(&seed, until).await
 }
 
 /// Logs an audit failure's closed check and its phase, and nothing Claude Code sent. Before stdin a

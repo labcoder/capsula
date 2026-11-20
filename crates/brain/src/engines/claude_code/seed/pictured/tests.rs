@@ -1,6 +1,6 @@
 use serde_json::{Value, json};
 
-use super::{PictureSeedError, check_non_image_lower_bound, encode, pictured_len};
+use super::{PictureSeedError, attached, check_non_image_lower_bound, encode, pictured_len};
 use crate::context::{InputItem, Jpeg, ModelRequest, Role, ToolSchema};
 use crate::engines::CallId;
 
@@ -82,6 +82,50 @@ fn refuses_existing_images_and_a_missing_user() {
     assert_eq!(
         encode(&request_with_image, &[], &[], [1, 1]).unwrap_err(),
         PictureSeedError::NotJpeg,
+    );
+}
+
+#[test]
+fn attached_seed_requires_the_one_sealed_capture_after_the_newest_user() {
+    let sealed = crate::screen::ScreenContext::fixture(JPEG).into_jpeg();
+    let contextless = Jpeg::new(JPEG.to_vec()).expect("marker");
+    let mut request = request(vec![
+        message(Role::User, "now"),
+        InputItem::Image(contextless),
+    ]);
+    assert_eq!(
+        attached(&request, &[]).unwrap_err(),
+        PictureSeedError::NoCapture
+    );
+    request.input[1] = InputItem::Image(sealed.clone());
+    let seed = attached(&request, &[]).expect("the sealed capture");
+    assert!(
+        seed.bytes()
+            .windows(b"/9j/AAE=".len())
+            .any(|part| part == b"/9j/AAE=")
+    );
+    request.input.push(InputItem::Image(sealed));
+    assert_eq!(
+        attached(&request, &[]).unwrap_err(),
+        PictureSeedError::DuplicateImage
+    );
+    request.input[2] = message(Role::User, "newer");
+    assert_eq!(
+        attached(&request, &[]).unwrap_err(),
+        PictureSeedError::NoCapture
+    );
+
+    let too_wide = Jpeg::sealed(
+        zeroize::Zeroizing::new(JPEG.to_vec()),
+        [1281, 720],
+        #[cfg(windows)]
+        None,
+    );
+    request.input.insert(3, InputItem::Image(too_wide));
+    request.input.remove(1);
+    assert_eq!(
+        attached(&request, &[]).unwrap_err(),
+        PictureSeedError::Dimensions
     );
 }
 

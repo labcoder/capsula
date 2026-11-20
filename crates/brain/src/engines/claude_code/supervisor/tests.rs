@@ -17,7 +17,7 @@ use super::{
     Start, Teardown, admit, mcp_json,
 };
 use crate::bridge::listener::Listener;
-use crate::coordinator::Input as CoordinatorInput;
+use crate::coordinator::{BuildKey, Input as CoordinatorInput, LeaseId, PictureGrant, SendKey};
 use crate::engines::claude_code::lane::tests::{Base, host, locked, soon};
 use crate::engines::claude_code::lane::{Failure, LANE_QUEUE, Lane, Outcome, PIPE_GRACE, Work};
 use crate::engines::{self, Asks, Engine, Finish, Round, RunRequest, SendGate, TurnEvent};
@@ -55,6 +55,7 @@ pub(super) struct Pumps {
 }
 
 /// The stdin pump's share of [`Hooks`].
+#[derive(Default)]
 pub(super) struct Stdin {
     pub(super) admit: Option<Pause>,
     pub(super) write: Option<Pause>,
@@ -198,6 +199,24 @@ pub(crate) async fn end(launch: Launch) -> Teardown {
     timeout(Duration::from_secs(20), launch.end())
         .await
         .expect("the teardown ends")
+}
+
+fn hold_test_picture(launch: &Launch) -> (LeaseId, mpsc::UnboundedReceiver<CoordinatorInput>) {
+    let id = LeaseId {
+        key: SendKey::Build(BuildKey {
+            run: RunId(1),
+            round: 1,
+            attempt: 1,
+        }),
+        send: 1,
+    };
+    let (input, settled) = mpsc::unbounded_channel();
+    launch
+        .hold_send(
+            engines::SendLease::new(id, input).with_picture(Some(PictureGrant::open_for_tests())),
+        )
+        .expect("held");
+    (id, settled)
 }
 
 fn engine_dir(base: &Base) -> PathBuf {
@@ -945,11 +964,17 @@ async fn a_failed_termination_keeps_everything() {
     .await;
     TERMINATION_FAILS.store(true, Ordering::SeqCst);
     let (start, mut launch) = admit(question(Duration::from_secs(20))).expect("a launch id");
+    let (_, mut settled) = hold_test_picture(&launch);
     let control = start.control();
     queue(&lane, start);
     let _pipes = pipes(&mut launch).await;
     until("the exit ends it", || control.is_ended()).await;
     assert_eq!(end(launch).await, Teardown::Stuck);
+    assert_eq!(
+        settled.try_recv(),
+        Err(mpsc::error::TryRecvError::Disconnected),
+        "abandoned, not unsent"
+    );
     assert_eq!(launch_dirs(&base).len(), 1, "the folder is kept");
     assert_eq!(version(&mut lane).await, Err(Failure::Refused));
     assert_eq!(launch_dirs(&base).len(), 1, "and not swept");
@@ -1079,15 +1104,44 @@ async fn a_locked_file_leaves_the_folder_for_the_sweep() {
     let base = Base::new("launch-folder-left");
     let mut lane = found(&base, "deaf").await;
     let (mut start, mut launch) = admit(question(Duration::from_secs(20))).expect("a launch id");
+    let (lease, mut settled) = hold_test_picture(&launch);
     let (id_tx, id) = std_mpsc::channel();
     start.hooks.id = Some(id_tx);
     queue(&lane, start);
-    let _pipes = pipes(&mut launch).await;
+    let mut pipes = pipes(&mut launch).await;
     let id = id.recv_timeout(WAIT).expect("the id");
     let file = engine_dir(&base).join(id.hex()).join("work").join("held");
     fs::write(&file, b"").expect("a file in the launch folder");
     let held = locked(&file);
+    let mut request = RunRequest::for_tests(RunId(1), ThreadId(1), "brief").request;
+    request.input = vec![
+        crate::context::InputItem::Message {
+            role: crate::context::Role::User,
+            text: "look".to_owned(),
+        },
+        crate::context::InputItem::Image(
+            crate::screen::ScreenContext::fixture(
+                crate::engines::claude_code::lane::tests::PICTURE_JPEG,
+            )
+            .into_jpeg(),
+        ),
+    ];
+    let seed = super::super::seed::pictured::attached(&request, &[]).expect("seed");
+    pipes
+        .writer()
+        .expect("writer")
+        .picture(&seed, launch.deadline())
+        .await
+        .expect("write attempted");
+    assert!(
+        settled.try_recv().is_err(),
+        "not settled before confirmation"
+    );
     assert_eq!(end(launch).await, Teardown::FolderLeft);
+    assert_eq!(
+        settled.try_recv(),
+        Ok(CoordinatorInput::SendSettled { lease })
+    );
     assert_eq!(launch_dirs(&base), [id.hex()]);
     drop(held);
     assert!(matches!(version(&mut lane).await, Ok(Outcome::Version(_))));

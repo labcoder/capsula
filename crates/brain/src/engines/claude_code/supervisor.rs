@@ -9,7 +9,7 @@ use std::collections::BTreeSet;
 use std::ffi::OsString;
 use std::fmt;
 use std::fs::File;
-use std::io::{self, PipeReader, PipeWriter, Read as _, Write as _};
+use std::io::{self, PipeReader, PipeWriter, Read as _};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError, mpsc as std_mpsc};
@@ -19,12 +19,15 @@ use kumochi_protocol::constants::{CLAUDE_CODE_DIR, ENGINE_DIR, MCP_SERVER_NAME};
 use kumochi_protocol::message::ThreadId;
 use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::{mpsc, oneshot};
+use zeroize::Zeroizing;
 
 use super::audit::AuditGate;
 use super::lane::{Failure, Folders, Host, PIPE_GRACE, POLL, Program};
 use super::policy::{self, EntryPoint, OwnedFolders};
+use super::seed::pictured::PicturedSeed;
 use crate::bridge::LaunchId;
 use crate::bridge::listener::{Binding, LaunchContext, Listener, McpCall};
+use crate::connections::model::Lease as _;
 use crate::context::ToolSchema;
 use crate::engines::SendLease;
 use crate::platform::{self, Job, Stdio};
@@ -71,6 +74,7 @@ pub(crate) struct Question {
 /// What the round sends on stdin.
 pub(crate) enum Input {
     Chunk(Vec<u8>),
+    Picture(PictureChunk),
     /// Closes stdin, so the child reads its end.
     #[cfg_attr(
         not(test),
@@ -81,6 +85,12 @@ pub(crate) enum Input {
     Wake,
 }
 
+pub(crate) struct PictureChunk {
+    bytes: Zeroizing<Vec<u8>>,
+    until: Instant,
+    first: Option<oneshot::Sender<Result<(), StdinRefused>>>,
+}
+
 /// Kinds and lengths only: a chunk is the user's question.
 impl fmt::Debug for Input {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -88,6 +98,10 @@ impl fmt::Debug for Input {
             Self::Chunk(bytes) => f
                 .debug_struct("Chunk")
                 .field("bytes", &bytes.len())
+                .finish(),
+            Self::Picture(chunk) => f
+                .debug_struct("Picture")
+                .field("bytes", &chunk.bytes.len())
                 .finish(),
             Self::End => f.write_str("End"),
             Self::Wake => f.write_str("Wake"),
@@ -129,6 +143,8 @@ pub(crate) enum StdinRefused {
     Revoked,
     /// The deadline passed while it waited for room.
     Deadline,
+    /// The held picture grant closed before the first write; the coordinator can rebuild.
+    PictureClosed,
 }
 
 /// Writes a launch's stdin: the control lines, then one seed, each checked whole against its cap
@@ -157,7 +173,7 @@ impl StdinWriter {
         }
         // One chunk, since MAX_CONTROL < CHUNK: charged only once it's queued, so a wait that
         // ends or is dropped first leaves the allowance as it was.
-        self.enqueue(line, until).await?;
+        self.enqueue(until, || Input::Chunk(line.to_vec())).await?;
         self.control.line_bytes.store(total, Ordering::Release);
         Ok(())
     }
@@ -170,14 +186,53 @@ impl StdinWriter {
     /// [`StdinRefused::Deadline`] when `until` passes while it waits for room. Chunks queued
     /// before a revocation or the deadline stay queued; the revoked launch never runs them.
     pub(crate) async fn seed(&mut self, seed: &[u8], until: Instant) -> Result<(), StdinRefused> {
+        self.start_seed(seed.len())?;
+        for chunk in seed.chunks(CHUNK) {
+            self.enqueue(until, || Input::Chunk(chunk.to_vec())).await?;
+        }
+        Ok(())
+    }
+
+    pub(super) async fn picture(
+        &mut self,
+        seed: &PicturedSeed,
+        until: Instant,
+    ) -> Result<(), StdinRefused> {
+        self.start_seed(seed.bytes().len())?;
+        let mut chunks = seed.bytes().chunks(CHUNK);
+        let first = chunks.next().ok_or(StdinRefused::Revoked)?;
+        let (sent, written) = oneshot::channel();
+        self.enqueue(until, || {
+            Input::Picture(PictureChunk {
+                bytes: Zeroizing::new(first.to_vec()),
+                until,
+                first: Some(sent),
+            })
+        })
+        .await?;
+        tokio::time::timeout_at(until.into(), written)
+            .await
+            .map_err(|_| StdinRefused::Deadline)?
+            .map_err(|_| StdinRefused::Revoked)??;
+        for chunk in chunks {
+            self.enqueue(until, || {
+                Input::Picture(PictureChunk {
+                    bytes: Zeroizing::new(chunk.to_vec()),
+                    until,
+                    first: None,
+                })
+            })
+            .await?;
+        }
+        Ok(())
+    }
+
+    fn start_seed(&self, len: usize) -> Result<(), StdinRefused> {
         if self.control.seeded.swap(true, Ordering::AcqRel) {
             return Err(StdinRefused::Second);
         }
-        if seed.len() > MAX_SEED {
+        if len > MAX_SEED {
             return Err(StdinRefused::TooLarge);
-        }
-        for chunk in seed.chunks(CHUNK) {
-            self.enqueue(chunk, until).await?;
         }
         Ok(())
     }
@@ -188,8 +243,12 @@ impl StdinWriter {
         self.sender.try_send(Input::End).ok();
     }
 
-    /// Takes room, then queues `bytes` as a chunk whose capacity is its length.
-    async fn enqueue(&self, bytes: &[u8], until: Instant) -> Result<(), StdinRefused> {
+    /// Takes room before making the owned chunk.
+    async fn enqueue(
+        &self,
+        until: Instant,
+        chunk: impl FnOnce() -> Input,
+    ) -> Result<(), StdinRefused> {
         if self.control.is_revoked() {
             return Err(StdinRefused::Revoked);
         }
@@ -201,7 +260,7 @@ impl StdinWriter {
         if self.control.is_revoked() {
             return Err(StdinRefused::Revoked);
         }
-        permit.send(Input::Chunk(bytes.to_vec()));
+        permit.send(chunk());
         Ok(())
     }
 }
@@ -221,6 +280,7 @@ pub(crate) struct Control {
     released: AtomicBool,
     /// Its teardown is over, whatever it came to.
     ended: AtomicBool,
+    output_closed: AtomicBool,
     gate: AuditGate,
     /// The stdin channel, for the revocation's [`Input::Wake`].
     wake: mpsc::Sender<Input>,
@@ -309,6 +369,29 @@ impl Control {
         self.state
             .compare_exchange(OPEN, WRITING, Ordering::AcqRel, Ordering::Acquire)
             .is_ok()
+    }
+
+    fn admit_picture(&self, chunk: &PictureChunk) -> Result<(), StdinRefused> {
+        let mut slot = self.send.lock().unwrap_or_else(PoisonError::into_inner);
+        let SendSlot::Open(Some(lease)) = &mut *slot else {
+            return Err(StdinRefused::Revoked);
+        };
+        if !lease.carries_picture() {
+            return Err(StdinRefused::Revoked);
+        }
+        if !lease.may_write() {
+            return Err(StdinRefused::PictureClosed);
+        }
+        if self.is_revoked() || self.output_closed.load(Ordering::Acquire) {
+            return Err(StdinRefused::Revoked);
+        }
+        if Instant::now() >= chunk.until {
+            return Err(StdinRefused::Deadline);
+        }
+        if chunk.first.is_some() {
+            lease.wrote();
+        }
+        Ok(())
     }
 
     /// The admitted write returned; false when it was revoked meanwhile.
@@ -537,6 +620,7 @@ pub(crate) fn admit(question: Question) -> Result<(Start, Launch), LaunchRefused
         state: AtomicU8::new(OPEN),
         released: AtomicBool::new(false),
         ended: AtomicBool::new(false),
+        output_closed: AtomicBool::new(false),
         gate: AuditGate::new(),
         wake: round_stdin.clone(),
         send: Mutex::new(SendSlot::Open(None)),
@@ -803,7 +887,10 @@ fn pumps(
     running.pumps.push(
         pump(
             "claude-code-stdout",
-            move || read_output(child_stdout, &output, &reader),
+            move || {
+                read_output(child_stdout, &output, &reader);
+                reader.output_closed.store(true, Ordering::Release);
+            },
             #[cfg(test)]
             (report.clone(), fails),
         )
@@ -1001,7 +1088,7 @@ fn pump(
 /// stdin: each chunk is admitted, then written. `End`, `Wake`, a refused admission or a failed
 /// write closes the pipe.
 fn write_input(
-    mut pipe: PipeWriter,
+    mut pipe: impl io::Write,
     mut input: mpsc::Receiver<Input>,
     control: &Control,
     #[cfg(test)] hooks: tests::Stdin,
@@ -1013,7 +1100,12 @@ fn write_input(
         writes,
         entries,
     } = hooks;
-    while let Some(Input::Chunk(bytes)) = input.blocking_recv() {
+    while let Some(chunk) = input.blocking_recv() {
+        let (bytes, pictured) = match &chunk {
+            Input::Chunk(bytes) => (bytes.as_slice(), None),
+            Input::Picture(chunk) => (chunk.bytes.as_slice(), Some(chunk)),
+            Input::End | Input::Wake => return,
+        };
         #[cfg(test)]
         tests::pause(admit.take());
         if !control.admit() {
@@ -1025,12 +1117,25 @@ fn write_input(
         }
         #[cfg(test)]
         tests::pause(write.take());
-        let wrote = pipe.write_all(&bytes);
+        let permission = match pictured {
+            Some(chunk) => control.admit_picture(chunk),
+            None => Ok(()),
+        };
+        let result =
+            permission.and_then(|()| pipe.write_all(bytes).map_err(|_| StdinRefused::Revoked));
         #[cfg(test)]
-        if let (Some(writes), Ok(())) = (&writes, &wrote) {
+        if let (Some(writes), Ok(())) = (&writes, &result) {
             writes.send(bytes.len()).ok();
         }
-        if !control.written() || wrote.is_err() {
+        if let Input::Picture(PictureChunk { first, .. }) = chunk {
+            if result.is_err() {
+                control.revoke();
+            }
+            if let Some(first) = first {
+                first.send(result).ok();
+            }
+        }
+        if !control.written() || result.is_err() {
             return;
         }
     }

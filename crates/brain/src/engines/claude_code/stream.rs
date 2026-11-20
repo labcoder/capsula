@@ -373,10 +373,15 @@ pub(crate) struct StreamMapper {
     first: Option<Tokens>,
     ended: bool,
     policy_broken: bool,
+    pictured: bool,
     unknown: u32,
 }
 
 impl StreamMapper {
+    pub(super) fn refuse_picture_echo(&mut self) {
+        self.pictured = true;
+    }
+
     /// Maps one complete line.
     ///
     /// # Errors
@@ -394,6 +399,19 @@ impl StreamMapper {
             "result" => self.result(parse(line)?),
             "system" if head.subtype == Some("init") => Mapped::Init(parse(line)?),
             "control_response" => Mapped::Control(parse::<ControlLine>(line)?.response),
+            "user" if self.pictured => {
+                let user: UserLine<'_> = parse(line)?;
+                if user
+                    .message
+                    .content
+                    .iter()
+                    .any(|block| block.kind == "image")
+                {
+                    self.ended = true;
+                    return Err(ClaudeStreamFailure::PictureEcho);
+                }
+                Mapped::Ignored
+            }
             "system" | "assistant" | "user" => Mapped::Ignored,
             _ => {
                 self.unknown = self.unknown.saturating_add(1);
@@ -482,6 +500,24 @@ struct Head<'a> {
     kind: &'a str,
     #[serde(default, borrow)]
     subtype: Option<&'a str>,
+}
+
+#[derive(Deserialize)]
+struct UserLine<'a> {
+    #[serde(borrow)]
+    message: UserMessage<'a>,
+}
+
+#[derive(Deserialize)]
+struct UserMessage<'a> {
+    #[serde(borrow)]
+    content: Vec<UserBlock<'a>>,
+}
+
+#[derive(Deserialize)]
+struct UserBlock<'a> {
+    #[serde(rename = "type", borrow)]
+    kind: &'a str,
 }
 
 #[derive(Deserialize)]

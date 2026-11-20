@@ -237,13 +237,6 @@ impl SendLease {
 
     /// Whether this send carries a Claude route's picture grant: true only for a lease the
     /// coordinator granted with one, open or since closed.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the Claude Code picture consumer is the first caller"
-        )
-    )]
     pub(crate) fn carries_picture(&self) -> bool {
         self.picture.is_some()
     }
@@ -440,6 +433,8 @@ pub enum ClaudeStreamFailure {
     NotJson,
     /// A known message with the wrong shape.
     Mistyped,
+    /// The child echoed the picture-bearing seed.
+    PictureEcho,
 }
 
 /// Token counts as the provider reports them.

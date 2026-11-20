@@ -18,9 +18,11 @@ const IMAGE_START: &[u8] =
 const IMAGE_END: &[u8] = br#""}}"#;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
-pub(super) enum PictureSeedError {
+pub(in crate::engines::claude_code) enum PictureSeedError {
     #[error("the seed already contains an image")]
     DuplicateImage,
+    #[error("the seed has no sealed capture for the newest user message")]
+    NoCapture,
     #[error("the seed has no user message")]
     NoUser,
     #[error("the seed JPEG has no JPEG marker")]
@@ -37,10 +39,10 @@ pub(super) enum PictureSeedError {
     Encoding,
 }
 
-pub(super) struct PicturedSeed(Zeroizing<Vec<u8>>);
+pub(in crate::engines::claude_code) struct PicturedSeed(Zeroizing<Vec<u8>>);
 
 impl PicturedSeed {
-    pub(super) fn bytes(&self) -> &[u8] {
+    pub(in crate::engines::claude_code) fn bytes(&self) -> &[u8] {
         &self.0
     }
 }
@@ -53,12 +55,35 @@ impl fmt::Debug for PicturedSeed {
     }
 }
 
-/// Packs a trusted capture, not permission to send it. The request must not already carry an image.
-pub(super) fn encode(
+/// Packs the one sealed capture attached to the newest user message, not permission to send it.
+pub(in crate::engines::claude_code) fn attached(
+    request: &ModelRequest,
+    tools: &[ToolSchema],
+) -> Result<PicturedSeed, PictureSeedError> {
+    let at = newest_user(request).ok_or(PictureSeedError::NoUser)? + 1;
+    let Some(InputItem::Image(image)) = request.input.get(at) else {
+        return Err(PictureSeedError::NoCapture);
+    };
+    let (jpeg, size) = image.capture().ok_or(PictureSeedError::NoCapture)?;
+    pack(request, tools, jpeg, size, Some(at))
+}
+
+#[cfg(test)]
+fn encode(
+    request: &ModelRequest,
+    tools: &[ToolSchema],
+    jpeg: &[u8],
+    size: [u32; 2],
+) -> Result<PicturedSeed, PictureSeedError> {
+    pack(request, tools, jpeg, size, None)
+}
+
+fn pack(
     request: &ModelRequest,
     tools: &[ToolSchema],
     jpeg: &[u8],
     [width, height]: [u32; 2],
+    attached: Option<usize>,
 ) -> Result<PicturedSeed, PictureSeedError> {
     use PictureSeedError as Error;
 
@@ -74,23 +99,15 @@ pub(super) fn encode(
     if request
         .input
         .iter()
-        .any(|item| matches!(item, InputItem::Image(_)))
+        .enumerate()
+        .any(|(i, item)| Some(i) != attached && matches!(item, InputItem::Image(_)))
     {
         return Err(Error::DuplicateImage);
     }
-    let newest = request
-        .input
-        .iter()
-        .rposition(|item| {
-            matches!(
-                item,
-                InputItem::Message {
-                    role: Role::User,
-                    ..
-                }
-            )
-        })
-        .ok_or(Error::NoUser)?;
+    let newest = match attached {
+        Some(at) => at - 1,
+        None => newest_user(request).ok_or(Error::NoUser)?,
+    };
 
     check_non_image_lower_bound(request, tools)?;
 
@@ -102,6 +119,9 @@ pub(super) fn encode(
         .map_err(|_| Error::NonImageSize)?;
     let mut insert_at = 0;
     for (index, item) in request.input.iter().enumerate() {
+        if Some(index) == attached {
+            continue;
+        }
         if let Some(block) = input_text(item) {
             room.write_all(b",").map_err(|_| Error::NonImageSize)?;
             serde_json::to_writer(&mut room, &block).map_err(|_| Error::NonImageSize)?;
@@ -127,6 +147,18 @@ pub(super) fn encode(
     end.copy_from_slice(IMAGE_END);
     after.copy_from_slice(&non_image[insert_at..non_image_len]);
     Ok(PicturedSeed(seed))
+}
+
+fn newest_user(request: &ModelRequest) -> Option<usize> {
+    request.input.iter().rposition(|item| {
+        matches!(
+            item,
+            InputItem::Message {
+                role: Role::User,
+                ..
+            }
+        )
+    })
 }
 
 fn check_non_image_lower_bound(

@@ -29,6 +29,8 @@ use crate::engines::{
 use crate::platform::Job;
 use crate::test_support::{Captured, SENTINEL, Scratch};
 
+mod pictures;
+
 const FACTS: &str = include_str!("../../../fixtures/claude-code/facts.jsonl");
 const TEXT: &str = include_str!("../../../fixtures/claude-code/text.jsonl");
 

@@ -4,6 +4,27 @@ use serde_json::json;
 
 use super::*;
 
+#[test]
+fn a_pictured_seed_echo_fails_closed_and_oversized_output_stays_bounded() {
+    let echo = br#"{"type":"user","message":{"role":"user","content":[{"type":"text","text":"look"},{"type":"image","source":{"data":"test-only-marker"}}]}}"#;
+    let tool = br#"{"type":"user","message":{"content":[{"type":"tool_result","content":"{\"type\":\"image\"}"}]}}"#;
+    let mut mapper = StreamMapper::default();
+    assert_eq!(mapper.line(echo), Ok(Mapped::Ignored));
+    mapper.refuse_picture_echo();
+    assert_eq!(mapper.line(tool), Ok(Mapped::Ignored));
+    let error = mapper.line(echo).unwrap_err();
+    assert_eq!(error, ClaudeStreamFailure::PictureEcho);
+    assert_eq!(format!("{error:?}"), "PictureEcho");
+    assert_eq!(mapper.line(tool), Ok(Mapped::Ignored));
+    assert_eq!(mapper.finish(), None);
+
+    let mut framer = LineFramer::default();
+    framer
+        .push(&vec![b'x'; MAX_LINE + 1])
+        .expect("within the stdout budget");
+    assert_eq!(framer.next_line(), Err(ClaudeStreamFailure::LineTooLong));
+}
+
 const TEXT: &[u8] = include_bytes!("../../../../fixtures/claude-code/text.jsonl");
 const RETRY: &[u8] = include_bytes!("../../../../fixtures/claude-code/retry.jsonl");
 const TURNS: &[u8] = include_bytes!("../../../../fixtures/claude-code/turns.jsonl");

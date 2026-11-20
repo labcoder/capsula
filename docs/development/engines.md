@@ -179,8 +179,8 @@ sequenceDiagram
   request was attempted: it sets one flag right before its first write poll, so a write that
   errors, returns 0 or is pending counts, even if no byte was accepted, while the upload budget
   spent, a connect failure, its deadline while connecting, and a final head or EOF read before
-  the first write all leave it unsent. The Messages and Claude Code transports don't tell it
-  yet, so their sends settle unsent; each must before its route carries a picture.
+  the first write all leave it unsent. The Claude Code stdin pump marks only a pictured seed,
+  after the held grant's final check and just before its first write attempt.
 - **Picture grant.** A send carrying a picture on a Claude route also carries a revocable grant.
   The coordinator closes it as soon as the run may no longer send that picture, and the
   transport checks it at its first write attempt, after any early response it reads: closed,
@@ -528,7 +528,7 @@ on:
 | Line | Maps to |
 |---|---|
 | `stream_event` `content_block_delta` with `text_delta` | `TextDelta`; text comes only from here, so without `--include-partial-messages` an answer is empty |
-| `assistant`, `user`, `system:status`, `system:api_retry` | ignored; `assistant` repeats the streamed text |
+| `assistant`, `user`, `system:status`, `system:api_retry` | ignored; `assistant` repeats streamed text. After a pictured seed, a structured `user` image echo fails the stream without returning its payload |
 | `stream_event` `message_start` | one native request; the first one's usage is kept for the prompt-cache decision. A 9th fails the question with `TurnCap` and marks the version's turn cap broken |
 | `result` | `Usage { whole, first_request }`, then `Completed`, `Failed(TurnCap)` for `error_max_turns` (the cap working, not broken), or `Failed(Provider)`; anything after it is ignored |
 | EOF before a result | `Truncated` |
