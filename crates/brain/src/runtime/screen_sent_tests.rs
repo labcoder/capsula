@@ -215,6 +215,29 @@ async fn page_turn(
     }
 }
 
+/// After the run's Interrupted state: the history read the shell starts, then the kept send's
+/// settlement, told once.
+async fn read_then_settle(
+    shell: &mut Shell<tokio::io::DuplexStream>,
+    lease: crate::engines::SendLease,
+    told: &mut Vec<ControlToShell>,
+) -> Option<PageEventKind> {
+    let thread = shell.thread.expect("the run's thread");
+    let repaired = page_turn(shell, thread).await;
+    drop(lease);
+    loop {
+        match shell.control().await {
+            Some(message @ ControlToShell::HoldScreen { .. }) => {
+                told.push(message);
+                break;
+            }
+            None => break,
+            Some(_) => {}
+        }
+    }
+    repaired
+}
+
 /// [`play`] without the history read.
 async fn played(wire: Wire) -> (Vec<ControlToShell>, Vec<Option<String>>) {
     let (told, screens, _) = Box::pin(play(wire)).await;
@@ -305,19 +328,7 @@ async fn play(
             }
         }
         if let Some(lease) = lease {
-            let thread = shell.thread.expect("the run's thread");
-            repaired = page_turn(&mut shell, thread).await;
-            drop(lease);
-            loop {
-                match shell.control().await {
-                    Some(message @ ControlToShell::HoldScreen { .. }) => {
-                        told.push(message);
-                        break;
-                    }
-                    None => break,
-                    Some(_) => {}
-                }
-            }
+            repaired = read_then_settle(&mut shell, lease, &mut told).await;
         }
         drop(shell);
     };
