@@ -53,7 +53,9 @@ Stop is sticky and bypasses the bounded command mailbox. The owner handles comma
 before admitting ingress, and a terminated owner reports disconnection, not backpressure.
 Open, play, pause and stream destruction run on a separate backend thread. One process-wide
 slot is held from before device discovery until the native stream is destroyed, so a stuck
-backend can't start more native opens. Callback work and route notifications wake the owner.
+backend can't start more native opens. If Stop closes the gate during discovery, a late
+successful open is dropped without starting playback. If playback admission wins the race,
+Stop still fences the callback's source. Callback work and route notifications wake the owner.
 A native resume must return within the existing 200 ms stall interval, even if
 callbacks continue. Callback activity refreshes the deadline only for staged speech
 outside a pending resume. A stall fences the old route and allows virtual pacing

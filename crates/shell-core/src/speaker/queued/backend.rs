@@ -34,10 +34,16 @@ pub(super) fn spawn(
     owner: Thread,
     origin: Instant,
 ) -> io::Result<(SyncSender<Request>, Receiver<Reply>)> {
-    spawn_with(owner, origin, BackendStream::open)
+    spawn_with(owner, origin, BackendStream::open, |stream, power| {
+        match power {
+            Power::Playing => stream.play(),
+            Power::Paused => stream.pause(),
+        }
+        .is_ok()
+    })
 }
 
-type OpenResult = Result<(BackendStream, Transport), OutputError>;
+type OpenResult<S> = Result<(S, Transport), OutputError>;
 
 static NATIVE: AtomicBool = AtomicBool::new(false);
 
@@ -58,34 +64,37 @@ impl Drop for Native {
     }
 }
 
-fn spawn_with(
+fn spawn_with<S: 'static>(
     owner: Thread,
     origin: Instant,
-    open: impl FnMut(&Arc<Control>, Instant) -> OpenResult + Send + 'static,
+    open: impl FnMut(&Arc<Control>, Instant) -> OpenResult<S> + Send + 'static,
+    power: fn(&S, Power) -> bool,
 ) -> io::Result<(SyncSender<Request>, Receiver<Reply>)> {
     let (send, requests) = mpsc::sync_channel(1);
     let (replies, receive) = mpsc::sync_channel(1);
     thread::Builder::new()
         .name("speaker-device".into())
-        .spawn(move || serve(&requests, &replies, &owner, origin, open))?;
+        .spawn(move || serve(&requests, &replies, &owner, origin, open, power))?;
     Ok((send, receive))
 }
 
-fn serve(
+fn serve<S>(
     requests: &Receiver<Request>,
     replies: &SyncSender<Reply>,
     owner: &Thread,
     origin: Instant,
-    mut open: impl FnMut(&Arc<Control>, Instant) -> OpenResult,
+    mut open: impl FnMut(&Arc<Control>, Instant) -> OpenResult<S>,
+    apply_power: fn(&S, Power) -> bool,
 ) {
-    let mut stream: Option<(u64, BackendStream, Native)> = None;
+    let mut stream: Option<(u64, S, Native)> = None;
     while let Ok(request) = requests.recv() {
         let reply = match request {
             Request::Open(generation, control) => {
                 let transport = if stream.is_none()
                     && let Some(permit) = Native::claim()
                     && let Ok((opened, transport)) = open(&control, origin)
-                    && opened.play().is_ok()
+                    && !control.stopped()
+                    && apply_power(&opened, Power::Playing)
                 {
                     stream = Some((generation, opened, permit));
                     Some(transport)
@@ -97,12 +106,7 @@ fn serve(
             Request::Power(generation, power) => Reply::Powered(
                 generation,
                 stream.as_ref().is_some_and(|(current, stream, _)| {
-                    *current == generation
-                        && match power {
-                            Power::Playing => stream.play(),
-                            Power::Paused => stream.pause(),
-                        }
-                        .is_ok()
+                    *current == generation && apply_power(stream, power)
                 }),
             ),
             Request::Retire(generation) => {
