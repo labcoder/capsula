@@ -1528,3 +1528,31 @@ fn an_offer_that_went_and_came_back_is_not_the_one_the_press_saw(cx: &mut TestAp
         });
     }
 }
+
+/// An offer revised for the same model between a hold's recognition and its release leaves the
+/// release without the screen, though the notice still says on: no release, lease or watch.
+#[gpui::test]
+fn a_release_keeps_only_the_offer_its_press_was_seen_under(cx: &mut TestAppContext) {
+    use kumochi_protocol::message::NoticeRevision;
+    let ready = screen_ready(Some(on(&luna())), cx);
+    press(&ready, 1, cx);
+    warm(&ready, 1, cx);
+    sent(&ready);
+    recognize(&ready.owner, 1, cx);
+    listening(&ready.owner, cx);
+    assert_eq!(sent(&ready), [screen_hold(1)]);
+    gate(&ready, offer(&luna(), NoticeRevision::FIRST.next()), cx);
+    assert_eq!(notice(&ready, cx), "on");
+    release(&ready.owner, 1, Some(DOWN), cx);
+    let sent = sent(&ready);
+    assert!(
+        !sent
+            .iter()
+            .any(|message| matches!(message, ControlToBrain::ScreenRelease { .. })),
+        "{sent:?}"
+    );
+    assert_eq!(lease(&ready, cx), (0, false));
+    ready.owner.read_with(cx, |owner, _| {
+        assert!(owner.voice.watched.is_none());
+    });
+}
