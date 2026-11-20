@@ -183,6 +183,7 @@ fn stale_cancel_connection_pending_delete_and_unread_target_create_no_turn() {
                     connection: ConnectionTag(0),
                     models: Vec::new(),
                     trusted_draw: false,
+                    images: Vec::new(),
                 });
             }
             _ => unreachable!(),
@@ -245,6 +246,7 @@ fn pinned_choice_survives_delayed_build_but_still_gets_the_first_catalog_check()
                     Vec::new()
                 },
                 trusted_draw: false,
+                images: Vec::new(),
             }),
         ))
         .unwrap();
@@ -439,6 +441,7 @@ fn a_held_runs_screen_goes_with_its_request_or_fails_the_run() {
                     ]),
                 }],
                 trusted_draw: false,
+                images: Vec::new(),
             }),
         ))
         .unwrap();
@@ -894,6 +897,7 @@ fn held_catalog(model: &str, effort: Effort) -> Input {
                 supported_efforts: EffortSet::new([effort]),
             }],
             trusted_draw: false,
+            images: Vec::new(),
         }),
     )
 }

@@ -22,6 +22,9 @@ pub(crate) struct Reviewed {
     /// The aliases a run may name on this version, with the names the picker shows, in the
     /// order it lists them. Only these reach `--model`.
     pub(crate) models: &'static [(&'static str, &'static str)],
+    /// The aliases in `models` this version's own probe showed taking a picture on its input.
+    /// One alias's evidence says nothing about another, so an unprobed alias isn't here.
+    pub(crate) images: &'static [&'static str],
     /// The alias a profile with only Claude Code starts on, at `Low`; one of `models`, named here
     /// so their order decides nothing.
     pub(crate) default_model: &'static str,
@@ -57,6 +60,8 @@ pub(crate) static REVIEWED_CLAUDE_CODE: &[Reviewed] = &[Reviewed {
         ("haiku", "Haiku"),
         ("fable", "Fable"),
     ],
+    // No alias is probed for pictures yet.
+    images: &[],
     // The owner's default (OSC-742).
     default_model: "haiku",
 }];

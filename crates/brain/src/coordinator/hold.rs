@@ -275,7 +275,8 @@ impl Coordinator {
         now: &super::Availability,
         hold: Option<&HoldSnapshot>,
     ) -> bool {
-        now != self.availability_of(kind) && hold.is_none_or(|hold| hold.kind() == kind)
+        now.differs_beyond_pictures(self.availability_of(kind))
+            && hold.is_none_or(|hold| hold.kind() == kind)
     }
 
     /// Cancels only the real run transferred from this exact hold.

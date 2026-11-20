@@ -213,6 +213,7 @@ fn a_typed_chatgpt_tool_round_reuses_the_first_granted_effort() {
                     supported_efforts: EffortSet::new([effort]),
                 }],
                 trusted_draw: false,
+                images: Vec::new(),
             }),
         )
     };
@@ -1030,6 +1031,7 @@ fn a_key_round_ends_the_run_when_a_source_it_carries_on_has_gone() {
                     supported_efforts: None,
                 }],
                 trusted_draw: false,
+                images: Vec::new(),
             }),
         ))
         .expect("never stale");
@@ -1103,6 +1105,7 @@ fn admitted_key_round(sources: Vec<ThreadId>) -> Coordinator {
                 supported_efforts: None,
             }],
             trusted_draw: false,
+            images: Vec::new(),
         }),
     ))
     .expect("never stale");

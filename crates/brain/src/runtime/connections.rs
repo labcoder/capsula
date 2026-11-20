@@ -162,6 +162,11 @@ pub(super) struct Connections {
     before_key_mutation: Option<Box<dyn Fn() + Send + Sync>>,
     view: ConnectionsView,
     models: Vec<CatalogModel>,
+    /// The current key's last Check verified it, so `models`' picture facts are current. Every
+    /// inconclusive path clears it; only a verifying Check of the current generation sets it.
+    // shortcut: after an inconclusive Check, pictures are omitted, with a truthful notice, until
+    // the next conclusive Check.
+    fresh: bool,
     unsent: bool,
     read: Option<JoinHandle<()>>,
     loading: bool,
@@ -194,6 +199,7 @@ impl Default for Connections {
                 claude_code: ClaudeCodeView::NotFound,
             },
             models: Vec::new(),
+            fresh: false,
             unsent: false,
             read: None,
             loading: false,
@@ -239,6 +245,14 @@ impl Connections {
                     models: self.models.iter().map(|model| model.info.clone()).collect(),
                     #[cfg(any(test, debug_assertions))]
                     trusted_draw: false,
+                    images: self
+                        .models
+                        .iter()
+                        .filter(|model| {
+                            self.fresh && verified.fence.open() && model.capabilities.images
+                        })
+                        .map(|model| model.info.slug.clone())
+                        .collect(),
                 })
             },
         );
@@ -246,6 +260,7 @@ impl Connections {
     }
 
     fn retire(&mut self) {
+        self.fresh = false;
         if let Some(verified) = self.verified.take() {
             verified.fence.revoke();
         }
@@ -728,10 +743,12 @@ impl Accounts {
                     return Vec::new();
                 }
                 self.connections.cancel();
+                self.connections.fresh = false;
                 match result {
                     Ok(models) => {
                         if self.connections.verify() {
                             self.connections.models = models;
+                            self.connections.fresh = true;
                             self.connections.view.anthropic = KeyView::Ready;
                         } else {
                             self.connections.view.anthropic = KeyView::Unconfirmed;

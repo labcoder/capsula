@@ -1455,6 +1455,7 @@ fn lists_same_slug(kind: kumochi_protocol::message::ConnectionKind) -> crate::co
                 ]),
             }],
             trusted_draw: false,
+            images: Vec::new(),
         }),
     )
 }
@@ -1811,6 +1812,7 @@ async fn availability_is_the_saved_connection_until_a_sign_out_is_accepted() {
             connection: ConnectionTag(SEEDED),
             models: accounts.models().expect("read").to_vec(),
             trusted_draw: false,
+            images: Vec::new(),
         })
     );
     let frames = accounts.handle(Input::Op(AccountOp::SignOut));

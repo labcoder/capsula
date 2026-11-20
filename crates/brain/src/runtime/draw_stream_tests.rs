@@ -197,6 +197,7 @@ pub(super) fn provider_ready() -> Input {
                 ]),
             }],
             trusted_draw: false,
+            images: Vec::new(),
         }),
     )
 }

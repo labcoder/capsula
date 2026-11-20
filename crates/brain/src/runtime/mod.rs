@@ -15,6 +15,7 @@ mod draw_stream_tests;
 mod hold;
 mod issues;
 mod recovery;
+mod screen_gate;
 mod settings;
 mod store_thread;
 #[cfg(test)]
@@ -886,7 +887,9 @@ impl Brain {
                     continue;
                 }
                 done = self.claude.next() => {
-                    if self.claude_done(done, Some(&mut link)).is_err() {
+                    if self.claude_done(done, Some(&mut link)).is_err()
+                        || self.screen_holds_changed(&mut link).is_err()
+                    {
                         return Ended::Lost;
                     }
                     continue;

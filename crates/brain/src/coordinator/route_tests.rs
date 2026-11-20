@@ -36,6 +36,7 @@ fn ready(kind: ConnectionKind, tag: u64, models: &[&str]) -> Input {
             connection: ConnectionTag(tag),
             models: models.iter().map(|slug| info(slug)).collect(),
             trusted_draw: false,
+            images: Vec::new(),
         }),
     )
 }
@@ -229,6 +230,7 @@ fn a_kind_whose_sign_in_changed_since_arrival_is_refused_at_the_first_build() {
         connection: ConnectionTag(8),
         models: vec![info("m")],
         trusted_draw: false,
+        images: Vec::new(),
     });
     let refused = core
         .handle(built(Some(choice(CHATGPT, "m"))))
@@ -364,12 +366,14 @@ fn a_pending_hold_fails_only_on_its_own_kinds_change_once_its_kind_is_known() {
         connection: ConnectionTag(8),
         models: vec![info("m")],
         trusted_draw: false,
+        images: Vec::new(),
     });
     let claude = |tag| {
         Availability::Ready(Ready {
             connection: ConnectionTag(tag),
             models: vec![info("m")],
             trusted_draw: false,
+            images: Vec::new(),
         })
     };
     assert!(!core.hold_availability_changes(CHATGPT, &chatgpt, Some(&hold)));

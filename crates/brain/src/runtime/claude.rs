@@ -542,11 +542,17 @@ impl Claude {
             })
             .collect();
         self.offer(models.clone());
+        let images = models
+            .iter()
+            .filter(|model| row.images.contains(&model.slug.as_str()))
+            .map(|model| model.slug.clone())
+            .collect();
         Availability::Ready(Ready {
             connection: ConnectionTag(epoch.tag),
             models,
             #[cfg(any(test, debug_assertions))]
             trusted_draw: false,
+            images,
         })
     }
 

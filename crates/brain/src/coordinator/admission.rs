@@ -359,12 +359,15 @@ impl Coordinator {
         if let (Some(choice), Some(effort)) = (&mut request.choice, current.effective_effort) {
             choice.effort = effort;
         }
+        let route = current.route;
+        let pictured = self.request_pictured(route, request.choice.as_ref());
+        let current = self.current(key.run)?;
         // shortcut: the screen's developer line isn't counted in BOUND, so a request built within
         // about 60 bytes of it is refused at send (failing safe); count it if that's ever hit.
         if current
             .screen
             .as_ref()
-            .is_some_and(|screen| request.add_screen(screen).is_err())
+            .is_some_and(|screen| request.add_screen(screen, pictured).is_err())
         {
             let reason = kumochi_protocol::message::ErrorKey::ScreenUnavailable.into();
             return self.fail_with(key.run, Failure::Engine, reason, effects);

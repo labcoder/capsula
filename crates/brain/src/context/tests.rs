@@ -2307,7 +2307,10 @@ fn every_screen_class_tells_the_model_its_own_fixed_line() {
             input: vec![message(Role::User, "words")],
             tools: Vec::new(),
         };
-        assert_eq!(request.add_screen(&Screen::NotIncluded(class)), Ok(()));
+        assert_eq!(
+            request.add_screen(&Screen::NotIncluded(class), false),
+            Ok(())
+        );
         assert_eq!(
             request.input,
             [message(Role::User, "words"), message(Role::Developer, line)],
@@ -2334,7 +2337,10 @@ fn a_screen_picture_tells_the_model_what_it_is_and_where_the_line_lies() {
     };
     let mut pointed = request();
     assert_eq!(
-        pointed.add_screen(&Screen::Picture(jpeg.clone(), Some(ink), Geometry::FIXTURE)),
+        pointed.add_screen(
+            &Screen::Picture(jpeg.clone(), Some(ink), Geometry::FIXTURE),
+            true
+        ),
         Ok(())
     );
     assert_eq!(
@@ -2361,7 +2367,10 @@ fn a_screen_picture_tells_the_model_what_it_is_and_where_the_line_lies() {
     );
     let mut alone = request();
     assert_eq!(
-        alone.add_screen(&Screen::Picture(jpeg.clone(), None, Geometry::FIXTURE)),
+        alone.add_screen(
+            &Screen::Picture(jpeg.clone(), None, Geometry::FIXTURE),
+            true
+        ),
         Ok(())
     );
     assert_eq!(
@@ -2392,7 +2401,7 @@ fn a_screen_picture_tells_the_model_what_it_is_and_where_the_line_lies() {
     ] {
         let mut closed = request();
         assert_eq!(
-            closed.add_screen(&Screen::PictureNotIncluded(class)),
+            closed.add_screen(&Screen::PictureNotIncluded(class), false),
             Ok(())
         );
         assert_eq!(

@@ -958,6 +958,7 @@ fn ready_on(kind: ConnectionKind, tag: u64) -> Input {
                 supported_efforts: None,
             }],
             trusted_draw: false,
+            images: Vec::new(),
         }),
     )
 }
@@ -1037,6 +1038,7 @@ fn chatgpt_catalog(tag: u64, model: &str, efforts: Option<EffortSet>) -> Input {
                 supported_efforts: efforts,
             }],
             trusted_draw: false,
+            images: Vec::new(),
         }),
     )
 }

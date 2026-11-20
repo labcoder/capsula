@@ -121,7 +121,7 @@ async fn only_documented_exact_models_receive_capability_facts() {
         .map(|model| model.capabilities)
         .collect();
     let supported = Capabilities {
-        images: true,
+        images: false,
         pdfs: true,
         tool_argument_streaming: true,
         effort: true,
@@ -136,6 +136,56 @@ async fn only_documented_exact_models_receive_capability_facts() {
         flags,
         [supported, supported, supported, supported, unknown, unknown]
     );
+}
+
+#[tokio::test]
+async fn only_an_entrys_literal_true_image_input_says_it_takes_pictures() {
+    let cases = [
+        (json!({ "image_input": { "supported": true } }), true),
+        (
+            json!({ "image_input": { "supported": true, "future": 1 }, "unknown": {} }),
+            true,
+        ),
+        (json!({ "image_input": { "supported": false } }), false),
+        (json!({ "image_input": {} }), false),
+        (json!({ "image_input": null }), false),
+        (json!({ "image_input": { "supported": "true" } }), false),
+        (json!({ "image_input": { "supported": [] } }), false),
+        (json!({ "image_input": { "supported": 1 } }), false),
+        (json!({ "image_input": [] }), false),
+        (json!({ "unknown": { "supported": true } }), false),
+        (json!({}), false),
+        (json!(null), false),
+        (json!("image_input"), false),
+    ];
+    for (index, (capabilities, images)) in cases.into_iter().enumerate() {
+        let mut known = model("claude-opus-5-5", "Known");
+        known["capabilities"] = capabilities.clone();
+        let mut other = model("claude-unknown-9", "Other");
+        other["capabilities"] = capabilities;
+        let catalog = check(200, &body(vec![known, other]))
+            .await
+            .unwrap_or_else(|error| panic!("case {index}: {error:?}"));
+        let flags: Vec<_> = catalog.iter().map(|model| model.capabilities).collect();
+        assert_eq!(
+            flags,
+            [
+                Capabilities {
+                    images,
+                    pdfs: true,
+                    tool_argument_streaming: true,
+                    effort: true,
+                },
+                Capabilities {
+                    images,
+                    pdfs: false,
+                    tool_argument_streaming: false,
+                    effort: false,
+                },
+            ],
+            "case {index}",
+        );
+    }
 }
 
 #[tokio::test]
