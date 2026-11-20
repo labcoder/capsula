@@ -245,6 +245,137 @@ async fn closed_picture_grant_does_not_truncate_while_teardown_holds_the_receipt
 }
 
 #[tokio::test]
+async fn a_bound_find_keeps_the_round_until_its_picture_settles_unsent() {
+    use crate::coordinator::{Effect, StoreOp, built_for, pictured_claude_run};
+    use crate::engines::claude_code::supervisor::tests::{Barrier, barrier};
+
+    let script = synthetic_signed_in()
+        .pre_tools(BOTH_TOOLS)
+        .post_tools(BOTH_TOOLS);
+    let mut rig = Rig::new("picture-bound-find", &script).await;
+    let scratch = Scratch::new("picture-bound-find");
+    let mut brain = brain_on(&mut rig, &scratch);
+    brain.claude.fixture_picture = Some(ModelSlug::new("haiku").expect("alias"));
+    let (coordinator, effects) = pictured_claude_run(
+        brain.claude.availability(),
+        ScreenContext::fixture(PICTURE_JPEG).into_jpeg(),
+    );
+    *brain.coordinator = coordinator;
+    let Some(Effect::StartEngine { request }) = effects.last() else {
+        panic!("pictured request was not admitted");
+    };
+    let SendKey::Build(key) = request.key else {
+        panic!("pictured build")
+    };
+    let choice = request.request.choice.clone().expect("run choice");
+    let config = brain
+        .config
+        .stage(kumochi_protocol::message::SettingsOp::SetDefaultModel(
+            choice.clone(),
+        ))
+        .unwrap();
+    brain.config.commit(config);
+    brain.apply(effects, None).expect("launch");
+
+    let (pause_write, writing) = barrier();
+    let (pause_teardown, teardown) = barrier();
+    let held = brain.claude.launches.last().expect("launch");
+    {
+        let mut hooks = held.control.picture_hooks.lock().expect("hooks");
+        hooks.write = Some(pause_write);
+        hooks.terminate = Some(pause_teardown);
+    }
+    let note = timeout(WAIT, brain.claude.notes.1.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        matches!(note, Note::Bind(_)),
+        "expected a bind, got {note:?}"
+    );
+    brain.claude_done(Wake::Note(note), None).expect("bound");
+    assert!(brain.claude.launches.last().expect("launch").bound);
+    let ask = timeout(WAIT, brain.inputs.recv()).await.unwrap().unwrap();
+    let grants = brain.handle(ask).expect("grant effects");
+    let lease = LeaseId {
+        key: SendKey::Build(key),
+        send: 1,
+    };
+    assert!(grants.contains(&Effect::Grant(lease)));
+    brain.apply(grants, None).expect("grant");
+
+    let reached = |gate: Barrier| {
+        tokio::task::spawn_blocking(move || {
+            assert!(gate.reached_within(WAIT), "reached barrier");
+            gate
+        })
+    };
+    let writing = reached(writing).await.expect("picture poised");
+    let generation = brain.claude.generation;
+    brain
+        .claude_op(ConnectionOp::FindClaudeCode, None)
+        .expect("find");
+    assert_eq!(brain.claude.generation, generation + 1);
+    let teardown = reached(teardown).await.expect("send sealed");
+    assert_eq!(brain.coordinator.current_run(), Some(key.run));
+    assert!(
+        brain
+            .coordinator
+            .takes_pictures(ConnectionKind::ClaudeCode, &choice.model)
+    );
+    assert!(
+        brain.coordinator.picture_lost_for_test(key.run),
+        "generation loss is sticky before settlement"
+    );
+    writing.release();
+    let early = timeout(Duration::from_millis(300), brain.engine_events.recv()).await;
+    let early_receipt = brain.inputs.try_recv();
+    teardown.release();
+    assert!(
+        early.is_err(),
+        "no terminal event before settlement: {early:?}"
+    );
+    assert_eq!(early_receipt, Err(mpsc::error::TryRecvError::Empty));
+
+    let receipt = timeout(WAIT, brain.inputs.recv()).await.unwrap().unwrap();
+    assert_eq!(receipt, Input::SendUnsent { lease });
+    assert_eq!(rig.stdin(), ["1 initialize", "1 mcp_status"]);
+    let effects = brain.handle(receipt).expect("rebuild");
+    let Some(Effect::Store(StoreOp::BuildContext(again))) = effects.last() else {
+        panic!("no text-only rebuild");
+    };
+    assert_eq!(
+        again.key,
+        crate::coordinator::BuildKey {
+            attempt: key.attempt + 1,
+            ..key
+        }
+    );
+    let rebuilt = brain
+        .handle(built_for(again.key, &choice))
+        .expect("rebuilt");
+    let Some(Effect::StartEngine { request }) = rebuilt.last() else {
+        panic!("text rebuild was not admitted");
+    };
+    assert_eq!(request.request.choice, Some(choice));
+    let text = |role, text: &str| InputItem::Message {
+        role,
+        text: text.into(),
+    };
+    assert_eq!(
+        request.request.input,
+        [
+            text(Role::User, "words"),
+            text(
+                Role::Developer,
+                "The screen was not included: this model can't be sent images."
+            ),
+        ]
+    );
+    brain.close().await;
+}
+
+#[tokio::test]
 async fn pictured_child_loss_or_echo_retires_without_forwarding_a_picture() {
     for (action, size, finish) in [
         ("!exit", PICTURE_JPEG.len(), Finish::Truncated),

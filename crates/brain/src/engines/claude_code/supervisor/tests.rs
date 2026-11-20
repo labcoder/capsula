@@ -105,6 +105,14 @@ pub(super) fn pause(pause: Option<Pause>) {
     }
 }
 
+pub(super) fn pause_picture(
+    control: &super::Control,
+    take: impl FnOnce(&mut Hooks) -> Option<Pause>,
+) {
+    let pending = take(&mut control.picture_hooks.lock().expect("picture hooks"));
+    pause(pending);
+}
+
 /// A pump's end signal that also tells the test which pump ended.
 pub(super) struct Ending {
     _signal: std_mpsc::Sender<()>,

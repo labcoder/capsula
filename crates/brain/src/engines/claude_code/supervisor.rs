@@ -291,6 +291,8 @@ pub(crate) struct Control {
     seeded: AtomicBool,
     /// The control lines' bytes so far.
     line_bytes: AtomicUsize,
+    #[cfg(test)]
+    pub(crate) picture_hooks: Mutex<tests::Hooks>,
 }
 
 impl Control {
@@ -627,6 +629,8 @@ pub(crate) fn admit(question: Question) -> Result<(Start, Launch), LaunchRefused
         send: Mutex::new(SendSlot::Open(None)),
         seeded: AtomicBool::new(false),
         line_bytes: AtomicUsize::new(0),
+        #[cfg(test)]
+        picture_hooks: Mutex::default(),
     });
     let (started_tx, started) = oneshot::channel();
     let (ended_tx, ended) = oneshot::channel();
@@ -1027,6 +1031,8 @@ impl Running {
         });
         #[cfg(test)]
         tests::pause(self.terminate.take());
+        #[cfg(test)]
+        tests::pause_picture(&self.control, |hooks| hooks.terminate.take());
         if let Some(job) = &self.job
             && (host.terminate)(job).is_err()
         {
@@ -1106,6 +1112,10 @@ fn write_input(
         };
         #[cfg(test)]
         tests::pause(admit.take());
+        #[cfg(test)]
+        if pictured.is_some() {
+            tests::pause_picture(control, |hooks| hooks.write.take());
+        }
         if !control.admit() {
             return;
         }

@@ -30,7 +30,7 @@ mod tests;
 #[cfg(test)]
 pub(crate) use tests::mcp::draft::draft_launch;
 #[cfg(test)]
-pub(crate) use tests::routes::pictured_run;
+pub(crate) use tests::routes::{built_for, pictured_claude_run, pictured_run};
 mod thread_op;
 mod tools;
 

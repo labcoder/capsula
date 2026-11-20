@@ -8,7 +8,9 @@ use std::time::{Duration, Instant};
 use kumochi_protocol::message::RunId;
 use tokio::time::timeout;
 
-use super::tests::{Pause, Stdin, WAIT, barrier, echoed, end, found, pause, pipes, question, queue};
+use super::tests::{
+    Pause, Stdin, WAIT, barrier, echoed, end, found, pause, pipes, question, queue,
+};
 use super::{
     CHUNK, Input, MAX_CONTROL, MAX_SEED, Revoked, StdinRefused, Teardown, admit, write_input,
 };
