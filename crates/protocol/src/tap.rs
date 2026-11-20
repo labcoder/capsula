@@ -149,6 +149,7 @@ impl Tapped for ControlToShell {
             Self::AnthropicKeyRemoved { .. } => "AnthropicKeyRemoved",
             Self::AnthropicKeyReconciled { .. } => "AnthropicKeyReconciled",
             Self::SpeechDecisionTaken(..) => "SpeechDecisionTaken",
+            Self::QueuedAudioRegistered(..) => "QueuedAudioRegistered",
             Self::SpeechRevoked { .. } => "SpeechRevoked",
             Self::GitHub(_) => "GitHub",
             Self::ActionState { .. } => "ActionState",

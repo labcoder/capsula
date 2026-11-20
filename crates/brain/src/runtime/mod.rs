@@ -29,9 +29,9 @@ use std::time::Duration;
 
 use kumochi_protocol::frame::{self, Pipe};
 use kumochi_protocol::message::{
-    ConnectionKind, ControlToBrain, ControlToShell, DATA_WINDOW, DataToBrain, DataToShell, Deleted,
-    MAX_PENDING_TURNS, MAX_VISIBLE_SCENES, RunId, SceneDescriptor, SceneId, SpeechPcm, ThreadId,
-    Transcript,
+    AudioSession, ConnectionKind, ControlToBrain, ControlToShell, DATA_WINDOW, DataToBrain,
+    DataToShell, Deleted, MAX_PENDING_TURNS, MAX_VISIBLE_SCENES, RunId, SceneDescriptor, SceneId,
+    SpeechPcm, ThreadId, Transcript,
 };
 use kumochi_protocol::tap::{Direction, Tapped as _};
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt as _};
@@ -56,7 +56,7 @@ use crate::tap::Tap;
 use crate::voice::pump::Pump;
 use crate::voice::tts::{TtsError, TtsEvent};
 use account::Accounts;
-use controls::read_control;
+use controls::{Registration, read_control};
 use data::{DataQueue, Owner};
 use recovery::Recovery;
 use store_thread::StoreThread;
@@ -674,6 +674,21 @@ impl Brain {
         C: AsyncRead + AsyncWrite + Unpin,
         D: AsyncRead + AsyncWrite + Unpin,
     {
+        self.serve_with_audio(control, data, tap, AudioSession::Legacy)
+            .await
+    }
+
+    async fn serve_with_audio<C, D>(
+        &mut self,
+        control: C,
+        data: D,
+        tap: &mut Tap,
+        audio: AudioSession,
+    ) -> Ended
+    where
+        C: AsyncRead + AsyncWrite + Unpin,
+        D: AsyncRead + AsyncWrite + Unpin,
+    {
         self.epoch = self
             .epoch
             .checked_add(1)
@@ -696,6 +711,9 @@ impl Brain {
         let room = Notify::new();
         let quit = Cell::new(None);
         let pcm = self.holds.ingress();
+        let registration =
+            (audio == AudioSession::QueuedRequired).then_some(Cell::new(Registration::Awaiting));
+        let registration = registration.as_ref();
 
         let control_reader = read_control(&mut control_in, &controls_tx, &quit);
         tokio::pin!(control_reader);
@@ -709,10 +727,12 @@ impl Brain {
                 &ready,
                 self.epoch,
                 Some(&pcm),
+                registration,
             );
             let control_writer = write_control(&mut control_out, &mut out);
             let data_writer = write_data(&mut data_out, &queue, &ready, &room);
-            let link = Link::new(&out_tx, &queue, &ready, &mut *tap);
+            let mut link = Link::new(&out_tx, &queue, &ready, &mut *tap);
+            link.registration = registration;
             let core = self.core(&mut controls, &mut turns, &mut pages, &room, link);
             tokio::select! {
                 ended = &mut control_reader => {
@@ -741,7 +761,7 @@ impl Brain {
                 tokio::select! {
                     biased;
                     Some((message, len)) = controls.recv() => {
-                        self.control_offline(message, len, tap);
+                        self.control_after_loss(message, len, tap, audio);
                     }
                     _ = &mut control_reader => break,
                     () = &mut grace => break,
@@ -755,7 +775,7 @@ impl Brain {
         while let Ok((message, len)) = controls.try_recv() {
             #[cfg(test)]
             self.observer.send(Seen::ControlDrained).ok();
-            self.control_offline(message, len, tap);
+            self.control_after_loss(message, len, tap, audio);
         }
         let ended = match quit.get() {
             Some(deadline) => Ended::Quit { deadline },
@@ -1040,7 +1060,10 @@ impl Brain {
     }
 
     fn admits_turn(&self, link: &Link<'_, '_>) -> bool {
-        link.recovery.is_some() && link.queue.borrow().bytes() < DATA_CAP && self.room_for_turns()
+        Registration::admits(link.registration)
+            && link.recovery.is_some()
+            && link.queue.borrow().bytes() < DATA_CAP
+            && self.room_for_turns()
     }
 
     /// Sends `Scenes` for the settled visible set, and the recovery that sends their snapshots.
@@ -1503,6 +1526,10 @@ fn take(turns: &mpsc::Sender<Turn>, turn: Turn) -> Option<Ended> {
 
 /// Reads the data pipe. Credit is applied here, so it never waits behind turns the core
 /// isn't taking yet.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the reader borrows per-connection ingress"
+)]
 async fn read_data(
     pipe: &mut (impl AsyncRead + Unpin),
     turns: &mpsc::Sender<Turn>,
@@ -1511,6 +1538,7 @@ async fn read_data(
     ready: &Notify,
     epoch: u64,
     pcm: Option<&hold::Ingress>,
+    registration: Option<&Cell<Registration>>,
 ) -> Ended {
     loop {
         match ipc::read::<DataToBrain>(pipe, Pipe::Data).await {
@@ -1561,6 +1589,11 @@ async fn read_data(
                 }
             }
             // Never waits for the core, so credit behind a turn is always read.
+            Ok(Some(DataToBrain::TextSubmit { .. } | DataToBrain::AskAbout { .. }))
+                if !Registration::admits(registration) =>
+            {
+                return Ended::Broken("turn before queued audio registration");
+            }
             Ok(Some(DataToBrain::TextSubmit {
                 turn, thread, text, ..
             })) => {
@@ -1677,6 +1710,7 @@ struct Link<'a, 't> {
     queue: &'a RefCell<DataQueue>,
     ready: &'a Notify,
     tap: &'t mut Tap,
+    registration: Option<&'a Cell<Registration>>,
     /// The snapshots still to send, once `Scenes` has gone.
     recovery: Option<Recovery>,
     /// Page replies waiting for room in the data queue.
@@ -1695,6 +1729,7 @@ impl<'a, 't> Link<'a, 't> {
             queue,
             ready,
             tap,
+            registration: None,
             recovery: None,
             held_pages: VecDeque::new(),
         }
@@ -1710,7 +1745,11 @@ impl<'a, 't> Link<'a, 't> {
             }
             Err(error) => {
                 tracing::error!(%error, "a control message didn't encode");
-                Ok(())
+                if matches!(message, ControlToShell::QueuedAudioRegistered(_)) {
+                    Err(Full)
+                } else {
+                    Ok(())
+                }
             }
         }
     }

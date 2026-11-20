@@ -6,9 +6,9 @@ use std::time::Duration;
 
 use kumochi_protocol::frame::{self, Pipe};
 use kumochi_protocol::message::{
-    ControlToBrain, ControlToShell, DataToBrain, DataToShell, OutputGeneration, PageOf, Phase,
-    RunId, SegmentId, SegmentStart, SpeechDecision, SpeechDispatch, SpeechPcm, SpeechPromise,
-    SpeechRetirement, StepRef, ThreadId,
+    AudioSession, ControlToBrain, ControlToShell, DataToBrain, DataToShell, OutputGeneration,
+    PageOf, Phase, RunId, SegmentId, SegmentStart, SpeechDecision, SpeechDispatch, SpeechPcm,
+    SpeechPromise, SpeechRetirement, StepRef, ThreadId,
 };
 use tokio::io::AsyncWriteExt as _;
 use tokio::time::{sleep, timeout};
@@ -110,19 +110,19 @@ async fn closed_speech_waits_across_live_data_credits_then_dispatches_once() {
     brain.engine = Box::new(DrawThenFinish(Fixture::parse(script).unwrap()));
     enable_spoken(&mut brain);
     let inputs = brain.inputs_tx.clone();
-    let mut observed = brain.observe();
     let ((control, data), mut shell) = duplex();
     let mut tap = Tap::from_env();
     let client = async {
         assert_eq!(shell.scenes().await, []);
         inputs.send(draw_stream_tests::provider_ready()).unwrap();
-        let output = OutputGeneration(1);
+        let output = OutputGeneration(7);
         shell
             .send(&ControlToBrain::QueuedAudioOutput(24_000, output))
             .await;
-        while observed.recv().await.expect("brain control observation")
-            != super::super::Seen::ControlApplied
-        {}
+        assert_eq!(
+            shell.control().await,
+            Some(ControlToShell::QueuedAudioRegistered(output))
+        );
         shell.submit("draw").await;
         let (run, phase) = shell.state().await;
         assert_eq!(phase, Phase::Thinking);
@@ -301,7 +301,10 @@ async fn closed_speech_waits_across_live_data_credits_then_dispatches_once() {
         drop(shell);
     };
     let (ended, ()) = timeout(PATIENCE, async {
-        tokio::join!(brain.serve(control, data, &mut tap), client)
+        tokio::join!(
+            brain.serve_with_audio(control, data, &mut tap, AudioSession::QueuedRequired),
+            client
+        )
     })
     .await
     .expect("connected speech run finishes");

@@ -782,6 +782,8 @@ pub enum ControlToShell {
     },
     /// The keyed decision was consumed or its segment is already terminal.
     SpeechDecisionTaken(SpeechDispatch),
+    /// The queued connection's exact logical output has been installed.
+    QueuedAudioRegistered(OutputGeneration),
 }
 
 /// What a screen hold carried into its turn. It never says the window was sent: a run can end
@@ -1289,6 +1291,13 @@ mod tests {
         assert_eq!(
             frame::read(&mut bytes.as_slice(), Pipe::Control).unwrap(),
             Some(release)
+        );
+        let registered = ControlToShell::QueuedAudioRegistered(OutputGeneration(7));
+        assert_eq!(postcard::to_allocvec(&registered).unwrap(), [36, 7]);
+        let bytes = frame::encode(&registered, Pipe::Control).unwrap();
+        assert_eq!(
+            frame::read(&mut bytes.as_slice(), Pipe::Control).unwrap(),
+            Some(registered)
         );
     }
 
