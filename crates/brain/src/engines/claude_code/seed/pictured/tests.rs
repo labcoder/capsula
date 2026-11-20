@@ -43,10 +43,15 @@ fn puts_one_image_after_the_latest_user_and_keeps_lookalikes_as_text() {
     let line = seed.bytes().strip_suffix(b"\n").expect("line feed");
     assert!(!line.contains(&b'\n'));
     let value: Value = serde_json::from_slice(line).expect("JSON");
+    let tools = json!([{
+        "name": "check",
+        "description": "say \"hi\"",
+        "parameters": {"type": "object"},
+    }]);
     let expected = json!({
         "type": "user",
         "message": {"role": "user", "content": [
-            {"type": "text", "text": "Be brief.\n\nTools:\n[{\"description\":\"say \\\"hi\\\"\",\"name\":\"check\",\"parameters\":{\"type\":\"object\"}}]"},
+            {"type": "text", "text": format!("Be brief.\n\nTools:\n{tools}")},
             {"type": "text", "text": "user:\nearlier"},
             {"type": "text", "text": format!("user:\n{lookalike}")},
             {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": "/9j/AAE="}},
