@@ -518,22 +518,26 @@ fn staged_for_drop(occupied: &'static AtomicBool) -> (Worker, FakePlayback, Arc<
 }
 
 #[test]
-fn a_drop_before_handoff_retires_the_staged_route_and_discards_source() {
+fn a_hold_requested_after_staging_cannot_uncommit_a_line() {
     use super::gate::DropOutcome;
 
     static OCCUPIED: AtomicBool = AtomicBool::new(false);
+    let id = SegmentId(0);
     let (mut worker, mut playback, control) = staged_for_drop(&OCCUPIED);
-    assert_eq!(
-        worker.drop_unsubmitted(SegmentId(0), INSTANT),
-        DropOutcome::Discarded
-    );
-    assert_eq!(control.fenced_handoff(), Some(0));
+    worker.engine.pause(1, INSTANT);
+    worker.inhibit();
+    worker.engine.hold(Some(id), INSTANT);
+    assert_eq!(worker.drop_unsubmitted(id, INSTANT), DropOutcome::Kept);
+    assert_eq!(control.fenced_handoff(), None);
+
+    let later = Duration::from_secs(4);
     let mut out = [99.0; 8];
-    playback.fill(&mut out, INSTANT);
+    playback.fill(&mut out, later);
     assert_eq!(out.map(f32::to_bits), [0; 8]);
-    assert_eq!(worker.engine.progress.consumed, 480);
-    assert_eq!(worker.engine.progress.heard, 0);
-    assert_eq!(worker.engine.progress.first_gap, Some(0));
+    worker.engine.resume(1, later);
+    worker.inhibit();
+    playback.fill(&mut out, later);
+    assert_eq!(out.map(f32::to_bits), [0.5f32.to_bits(); 8]);
 }
 
 #[test]
@@ -557,24 +561,88 @@ fn a_drop_after_handoff_keeps_playing_without_waiting_for_its_report() {
 }
 
 #[test]
-fn dropping_a_staged_successor_cannot_cut_its_partially_handed_predecessor() {
+fn a_hold_before_staging_keeps_a_successor_droppable_while_its_predecessor_plays() {
     use super::gate::DropOutcome;
 
     static OCCUPIED: AtomicBool = AtomicBool::new(false);
+    let id = SegmentId(1);
     let (mut worker, mut playback, control) = staged_for_drop(&OCCUPIED);
+    worker.engine.hold(Some(id), INSTANT);
     let mut successor = packet(8, 0, 480, Some(480));
-    successor.pcm.segment = SegmentId(1);
+    successor.pcm.segment = id;
     worker.engine.offer(successor, INSTANT).unwrap();
-    worker.feed(&mut [0; 480], INSTANT);
-    assert_eq!(worker.engine.offered, 960);
     let mut out = [99.0; 8];
     playback.fill(&mut out, INSTANT);
     assert_eq!(out.map(f32::to_bits), [0.5f32.to_bits(); 8]);
-    assert_eq!(
-        worker.drop_unsubmitted(SegmentId(1), INSTANT),
-        DropOutcome::PredecessorPending
-    );
+
+    worker.feed(&mut [0; 480], INSTANT);
+    assert_eq!(worker.engine.offered, 480);
+    assert_eq!(worker.drop_unsubmitted(id, INSTANT), DropOutcome::Discarded);
     assert_eq!(control.fenced_handoff(), None);
-    playback.fill(&mut out, INSTANT);
-    assert_eq!(out.map(f32::to_bits), [0.5f32.to_bits(); 8]);
+
+    let mut remainder = [99.0; 480];
+    playback.fill(&mut remainder, Duration::from_millis(1));
+    assert_eq!(
+        remainder.map(f32::to_bits),
+        std::array::from_fn(|i| if i < 472 { 0.5f32.to_bits() } else { 0 })
+    );
+    let now = Duration::from_millis(25);
+    worker.observations(now);
+    assert_eq!(worker.engine.tick(now), Ok(None));
+    assert_eq!(worker.engine.progress.consumed, 960);
+    assert_eq!(worker.engine.progress.heard, 480);
+    assert_eq!(worker.engine.progress.first_gap, Some(480));
+}
+
+fn assert_staging_survives_route_loss(occupied: &'static AtomicBool, copied: usize) {
+    use super::gate::DropOutcome;
+
+    let id = SegmentId(0);
+    let (mut worker, mut playback, control) = staged_for_drop(occupied);
+    playback.fill(&mut [0.0; 8][..copied], INSTANT);
+    worker.recover(INSTANT);
+    let copies = u64::try_from(copied).unwrap();
+    assert_eq!(control.fenced_handoff(), Some(copies));
+    worker.drive(super::super::super::DRAIN);
+    assert!(worker.physical.is_none());
+    assert_eq!(worker.engine.offered, copies);
+
+    assert_eq!(
+        worker.drop_unsubmitted(id, super::super::super::DRAIN),
+        DropOutcome::Kept
+    );
+    assert_eq!(worker.engine.queue.samples.len(), 480 - copied);
+    assert_eq!(worker.engine.progress.heard, 0);
+}
+
+#[test]
+fn staging_survives_route_loss_before_any_copy() {
+    static OCCUPIED: AtomicBool = AtomicBool::new(false);
+    assert_staging_survives_route_loss(&OCCUPIED, 0);
+}
+
+#[test]
+fn staging_survives_route_loss_after_a_partial_copy() {
+    static OCCUPIED: AtomicBool = AtomicBool::new(false);
+    assert_staging_survives_route_loss(&OCCUPIED, 8);
+}
+
+#[test]
+fn virtual_consumption_never_commits_a_segment() {
+    use super::gate::DropOutcome;
+
+    let (mut worker, _input, _port, _requests, _reply) = fake();
+    worker
+        .engine
+        .offer(packet(7, 0, 480, Some(480)), INSTANT)
+        .unwrap();
+    let now = Duration::from_millis(10);
+    assert_eq!(worker.engine.tick(now), Ok(None));
+    assert_eq!(worker.engine.progress.consumed, 240);
+    assert_eq!(
+        worker.drop_unsubmitted(SegmentId(0), now),
+        DropOutcome::Discarded
+    );
+    assert_eq!(worker.engine.progress.consumed, 480);
+    assert_eq!(worker.engine.progress.heard, 0);
 }

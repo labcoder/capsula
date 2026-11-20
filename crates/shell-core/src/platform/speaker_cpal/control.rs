@@ -89,12 +89,6 @@ impl Control {
         (self.gate.load(Ordering::Acquire) & (STOPPED | COPYING) == STOPPED).then(|| self.handed())
     }
 
-    /// Inhibit prevents new copies; seeing no in-flight copy means the handoff count is stable.
-    pub(crate) fn inhibited_handoff(&self) -> Option<u64> {
-        (self.gate.load(Ordering::Acquire) & (INHIBITED | COPYING) == INHIBITED)
-            .then(|| self.handed())
-    }
-
     pub(super) fn note_callback(&self) {
         self.callbacks.fetch_add(1, Ordering::Relaxed);
     }

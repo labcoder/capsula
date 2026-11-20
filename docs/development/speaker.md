@@ -153,12 +153,12 @@ Releasing it does not catch up elapsed hold time. Discard keeps PCM ingress in s
 and returns its credit, but skips the discarded source in head order without marking it
 heard. Later PCM for that segment cannot restart it.
 
-If the segment was staged, the worker inhibits the route while it checks actual callback
-handoff. The copy must settle before that count is usable; a presentation report can
-arrive later. Once any of the segment reached the callback, the route is kept and the rest
-can play. An unsubmitted successor also cannot retire a route while a partially handed-off
-predecessor still needs it. Once retirement is safe, it fences staged blocks before the
-unsubmitted source is discarded. No opener or production caller enables this gate yet.
+The worker applies a hold before it stages the segment. A step fence discards an
+unstaged line without touching the device; accepting the first source packet for
+staging commits the line, even if the callback hasn't taken it. The eight transport
+blocks hold about 160 ms of source, but staging is not a time bound: a committed
+line can wait seconds during a pause and play on resume unless its run is stopped
+or replaced. No opener or production caller enables this gate yet.
 
 ## Dormant drawing conductor
 
@@ -170,9 +170,9 @@ Preparation allows sound without waiting for visual eligibility; after a 250 ms 
 whole line is allowed and the picture takes silent timing. On rebuild, an unshown speech
 step has 250 ms to receive a handoff from the new route before taking silent timing.
 A route rebuild mid-line ends speech-following for that shown step; it takes authored
-timing immediately. A shown or fenced step can't show again. The worker still arbitrates
-a drop against actual handoff. These defaults aren't measured; there's no wiring to
-either playback worker or presenter.
+timing immediately. A shown or fenced step can't show again. Step-level Drop uses the
+staging commitment above. These defaults aren't measured; there's no wiring to either
+playback worker or presenter.
 
 ## Reports
 
