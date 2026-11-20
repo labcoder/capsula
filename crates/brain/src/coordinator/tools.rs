@@ -5,9 +5,9 @@
 
 use std::fmt;
 
-use kumochi_protocol::message::{ConnectionKind, Content, RunId, ThreadId};
+use kumochi_protocol::message::{ConnectionKind, RunId, ThreadId};
 
-use super::{Coordinator, Effect, Stale, StoreOp, unstored};
+use super::{Coordinator, Effect, ReplyText, Stale, StoreOp};
 use crate::context::{BOUND, Route};
 use crate::dispatch::{Caller, Dispatch, ToolOutput};
 use crate::engines::anthropic::encode::ToolUse;
@@ -28,7 +28,7 @@ pub struct RoundItems {
     pub(crate) round: u32,
     /// The run's route, which replays the items.
     pub(crate) connection: Route,
-    pub(crate) text: Option<Content>,
+    pub(crate) text: Option<ReplyText>,
     pub(crate) items: Vec<Opaque>,
     /// The Anthropic key's calls, in output order: the only items its rounds store.
     pub(crate) key_calls: Vec<ToolUse>,
@@ -263,7 +263,6 @@ impl Coordinator {
                     .as_ref()
                     .is_some_and(super::admission::Build::admitted)
                 {
-                    current.unstored.clear();
                     current.finishing = false;
                     return Ok(());
                 }
@@ -296,7 +295,6 @@ impl Coordinator {
             let voided = build.voided(build.sources());
             if !voided.is_empty() {
                 let key = build.key();
-                current.unstored.clear();
                 effects.push(Effect::CancelEngine { run });
                 self.rebuild(key, &voided, &pending, effects);
                 return Ok(());
@@ -331,7 +329,7 @@ impl Coordinator {
             run,
             round,
             connection,
-            text: unstored(current),
+            text: current.unstored.take(),
             items: items
                 .into_iter()
                 .map(|(_, item)| {

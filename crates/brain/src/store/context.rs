@@ -12,6 +12,7 @@ use super::choice::StoredChoice;
 use super::threads::kind_of;
 use super::{Generation, StoreError, rounds, row_id, sql_id};
 use crate::context::{Body, Item, Summary};
+use crate::engines::CallId;
 
 /// A thread as a reference finds it.
 #[derive(Clone, PartialEq, Eq)]
@@ -203,10 +204,10 @@ impl Snapshot<'_> {
             bytes = bytes.saturating_add(text.len() + stored.len());
             let body = match kind.as_str() {
                 "user" => Body::User(text),
-                "assistant_text" if !stored.is_empty() && narration(&stored) => {
-                    Body::Narration(text)
-                }
-                "assistant_text" => Body::Assistant(text),
+                "assistant_text" => match draw_call(&stored) {
+                    Some(call) => Body::Narration { text, call },
+                    None => Body::Assistant(text),
+                },
                 "output_item" => rounds::native(&stored)?,
                 _ => rounds::result(&stored)?,
             };
@@ -514,12 +515,12 @@ impl Snapshot<'_> {
     }
 }
 
-fn narration(body: &str) -> bool {
-    let Ok(body) = serde_json::from_str::<serde_json::Value>(body) else {
-        return false;
-    };
-    body["scene"].as_u64().is_some_and(|scene| scene > 0)
-        && body["revision"].as_u64().is_some_and(|rev| rev > 0)
+fn draw_call(body: &str) -> Option<CallId> {
+    if body.is_empty() {
+        return None;
+    }
+    let body: serde_json::Value = serde_json::from_str(body).ok()?;
+    CallId::new(body["draw_call"].as_str()?).ok()
 }
 
 /// The longest prefix of `text` within `cap` bytes that ends on a character boundary.

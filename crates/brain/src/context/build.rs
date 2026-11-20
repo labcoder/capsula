@@ -1,6 +1,6 @@
 //! Builds one request from one read transaction.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use kumochi_protocol::constants::DISPLAY_NAME;
 use kumochi_protocol::message::{ConnectionKind, EventId, RunId, ThreadId, ThreadKind};
@@ -184,7 +184,7 @@ fn runs(items: Vec<Item>, current: RunId) -> Result<Vec<Vec<Item>>, BuildError> 
                 Body::Call { .. } | Body::History { .. } => return Err(BuildError::InvalidCut),
                 Body::User(_)
                 | Body::Assistant(_)
-                | Body::Narration(_)
+                | Body::Narration { .. }
                 | Body::Native { .. }
                 | Body::Result { .. }
                 | Body::Recall { .. } => {}
@@ -216,7 +216,7 @@ fn runs(items: Vec<Item>, current: RunId) -> Result<Vec<Vec<Item>>, BuildError> 
 /// A run whose stored rounds all came from this run's route, its kind and tag, and pair up (see
 /// [`replayable`]) replays them natively, each round's items then its results, and of its text
 /// only what came after its last round, which a `ChatGPT` round's items carry (D13-M1).
-/// With local narration, the ordered assistant rows supply the answer text instead.
+/// Local narration follows its matching native draw call; unmatched lines stay in the text.
 /// Any other run replays as text only, so no call or result travels without its pair.
 pub(super) fn render(
     snapshot: &Snapshot<'_>,
@@ -232,12 +232,12 @@ pub(super) fn render(
         .map_or(ConnectionKind::ChatGpt, |choice| choice.connection);
     let native = kind != ConnectionKind::ClaudeCode && replayable(kind, run.connection, items);
     // A `ChatGPT` round's items carry its text; the key's carry only its calls, so its text stays.
-    let local_narration = native
-        && kind == ConnectionKind::ChatGpt
-        && items
-            .iter()
-            .any(|item| matches!(item.body, Body::Narration(_)));
-    let carried = native && kind == ConnectionKind::ChatGpt && !local_narration;
+    let carried = native && kind == ConnectionKind::ChatGpt;
+    let narration = if carried {
+        native_narration(items)
+    } else {
+        BTreeMap::new()
+    };
     let after_rounds = items
         .iter()
         .rposition(|item| {
@@ -251,6 +251,7 @@ pub(super) fn render(
     for (at, item) in items.iter().enumerate() {
         match &item.body {
             Body::Assistant(_) if after_rounds.is_some_and(|last| at < last) => {}
+            Body::Narration { call, .. } if narration.contains_key(call.as_str()) => {}
             Body::User(text) => input.push(InputItem::Message {
                 role: Role::User,
                 text: match local_time {
@@ -258,7 +259,7 @@ pub(super) fn render(
                     None => text.clone(),
                 },
             }),
-            Body::Assistant(text) | Body::Narration(text) => match input.last_mut() {
+            Body::Assistant(text) | Body::Narration { text, .. } => match input.last_mut() {
                 Some(InputItem::Message {
                     role: Role::Assistant,
                     text: open,
@@ -289,12 +290,16 @@ pub(super) fn render(
             }
             Body::Native { item, .. } => {
                 if native {
-                    let item = if local_narration {
-                        without_provider_text(item)?
-                    } else {
-                        Some(item.clone())
-                    };
-                    input.extend(item.map(InputItem::Native));
+                    input.push(InputItem::Native(item.clone()));
+                    if !narration.is_empty()
+                        && let Some(call) = called(item)
+                        && let Some(text) = narration.get(call.as_str())
+                    {
+                        input.push(InputItem::Message {
+                            role: Role::Assistant,
+                            text: text.clone(),
+                        });
+                    }
                 }
             }
             Body::Result { call, output } => {
@@ -318,29 +323,24 @@ pub(super) fn render(
     Ok(input)
 }
 
-fn without_provider_text(
-    item: &crate::engines::Opaque,
-) -> Result<Option<crate::engines::Opaque>, StoreError> {
-    let mut value: serde_json::Value =
-        serde_json::from_slice(item.bytes()).map_err(|_| StoreError::RoundRecord)?;
-    if value["type"] != "message" || value["role"] != "assistant" {
-        return Ok(Some(item.clone()));
+fn native_narration(items: &[Item]) -> BTreeMap<&str, String> {
+    let mut lines = BTreeMap::<_, String>::new();
+    for item in items {
+        if let Body::Narration { text, call } = &item.body {
+            lines.entry(call.as_str()).or_default().push_str(text);
+        }
     }
-    let Some(parts) = value["content"].as_array_mut() else {
-        return Ok(Some(item.clone()));
-    };
-    let before = parts.len();
-    parts.retain(|part| part["type"] != "output_text");
-    if parts.len() == before {
-        return Ok(Some(item.clone()));
+    if !lines.is_empty() {
+        let calls: BTreeSet<_> = items
+            .iter()
+            .filter_map(|item| match &item.body {
+                Body::Native { item, .. } => called(item),
+                _ => None,
+            })
+            .collect();
+        lines.retain(|call, _| calls.contains(*call));
     }
-    if parts.is_empty() {
-        return Ok(None);
-    }
-    let bytes = serde_json::to_vec(&value).map_err(|_| StoreError::RoundRecord)?;
-    crate::engines::Opaque::new(bytes)
-        .map(Some)
-        .map_err(|_| StoreError::RoundRecord)
+    lines
 }
 
 /// Whether a run's stored rounds replay natively on `kind` and `tag`: at least one native item,

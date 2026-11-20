@@ -75,7 +75,6 @@ impl World {
                 clear: Vec::new(),
                 revision: 1,
                 layout_version: 2,
-                chat: None,
                 step: std::sync::Arc::new(step),
             })
             .expect("drawing")

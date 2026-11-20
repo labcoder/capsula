@@ -21,10 +21,10 @@ flowchart LR
 
 ## Records
 
-The brain decides narration when a prepared step enters the store queue. If the step has
-nonblank `say` and no speech reservation, the step and its ordinary Chat line commit together.
-The live reply can show the line after that commit. Recovery restores original drawing records;
-history reads the committed Chat rows rather than turning the restored step into new text.
+The brain reserves speech when a prepared step enters the store queue. If the step has
+nonblank `say` and no reservation, its successful write receipt adds a line to the current
+attempt's reply even if the scene frame is suppressed. History reads the saved reply;
+recovery doesn't turn restored drawing records into Chat text.
 
 The brain's provider path uses the existing cursor tokenizer and public 2D `parse_draw_record`
 gate for each closed record, then the drawing reducer's order/semantic admission and store FIFO.

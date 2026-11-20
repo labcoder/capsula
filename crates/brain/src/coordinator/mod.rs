@@ -53,7 +53,7 @@ pub(crate) use job::JobAsk;
 pub use job::{JobBuilt, JobKey, JobKind, JobOutput, ReadJob};
 pub use lease::{LeaseId, MAX_HOLD, SEND_DEADLINE, SendKey};
 pub use speech::{DRAIN_STALL, QUIET_TIMEOUT, Synthesized};
-pub use store_op::{StoreOp, SummaryText};
+pub use store_op::{ReplyText, StoreOp, SummaryText};
 pub use tools::{MAX_CALLS, MAX_ROUNDS, RoundItems};
 mod page;
 pub use page::PageKey;
@@ -417,8 +417,8 @@ pub enum Effect {
     Data(DataToShell),
     /// Reply text ordered behind an in-flight drawing operation, handled by the coordinator.
     DrawingReplyText {
-        /// The originating run.
-        run: RunId,
+        /// The originating model attempt.
+        key: BuildKey,
         /// Text to release.
         text: Content,
     },
@@ -584,7 +584,7 @@ struct Run {
     begin: Option<StoreOp>,
     answering: bool,
     /// Streamed text not yet stored; it's stored with the next step or the outcome.
-    unstored: String,
+    unstored: ReplyText,
     text_bytes: usize,
     /// Steps the run produced, and how many the store acknowledged, in order.
     steps: u32,
@@ -1294,7 +1294,7 @@ impl Coordinator {
             turn_stored: false,
             begin: Some(begin),
             answering: false,
-            unstored: String::new(),
+            unstored: ReplyText::default(),
             text_bytes: 0,
             steps: 0,
             acked: 0,
@@ -1540,7 +1540,7 @@ impl Coordinator {
         if ended.outstanding() {
             return;
         }
-        let (thread, text, scene) = (ended.thread, unstored(ended), ended.scene);
+        let (thread, text, scene) = (ended.thread, ended.unstored.take(), ended.scene);
         let Some(ending) = ended.ending.as_mut().filter(|ending| !ending.written) else {
             return;
         };
@@ -1645,7 +1645,7 @@ fn run_state(run: &Run, phase: Phase) -> Effect {
 
 /// The text streamed since the last write, taken for the next one.
 fn unstored(run: &mut Run) -> Option<Content> {
-    (!run.unstored.is_empty()).then(|| std::mem::take(&mut run.unstored).into())
+    run.unstored.take().map(ReplyText::into_plain)
 }
 
 /// A new thread's title: the first line of its first turn, cut to [`TITLE_CHARS`].

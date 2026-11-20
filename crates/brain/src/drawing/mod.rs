@@ -30,12 +30,12 @@ use kumochi_scene::layout::LayoutState;
 use kumochi_scene::theme::Theme;
 use kumochi_scene::{Admitted, Begin, GlobalBudget, Record, SceneState, Step, StopCut};
 
-use crate::coordinator::{Effect, Stale, StoreOp};
+use crate::coordinator::{BuildKey, Effect, Stale, StoreOp};
 use crate::engines::CallId;
 
 pub use call::{CallEnd, CallError, Remaining};
 pub(crate) use digest::Digest;
-pub use io::{Reply, StepChat, StoredScene, Target, Write};
+pub use io::{Reply, StoredScene, Target, Write};
 pub use prepare::{PrepareJob, Prepared, Shared};
 pub use ready::READY_WAIT;
 pub(crate) use screen::{SCREEN_MARKS, ScreenMarks, stored_item};
@@ -253,7 +253,7 @@ struct Held {
 /// Work that waits for the store to answer.
 enum Job {
     ReplyText {
-        run: RunId,
+        key: BuildKey,
         text: Content,
     },
     Record {
@@ -633,32 +633,43 @@ impl Drawing {
             });
         writing
             || self.queue.iter().any(|job| {
-                matches!(job, Job::ReplyText { run: owner, .. }
-                    | Job::Record { run: owner, .. }
+                matches!(job, Job::ReplyText { key, .. } if key.run == run)
+                    || matches!(job, Job::Record { run: owner, .. }
                     | Job::Reject { run: owner, .. }
                     | Job::Finish { run: owner, .. } if *owner == run)
             })
     }
 
-    pub(crate) fn hold_reply_text(&mut self, run: RunId, text: &str) -> Output {
+    pub(crate) fn hold_reply_text(&mut self, key: BuildKey, text: &str) -> Output {
         let mut out = Output::default();
         if let Some(Job::ReplyText {
-            run: owner,
+            key: owner,
             text: held,
         }) = self.queue.back_mut()
-            && *owner == run
+            && *owner == key
         {
             held.push_str(text);
         } else {
             self.enqueue(
                 Job::ReplyText {
-                    run,
+                    key,
                     text: text.into(),
                 },
                 &mut out,
             );
         }
         out
+    }
+
+    pub(crate) fn writing_call(&self, serial: u64) -> Option<&CallId> {
+        match self.pending.as_ref() {
+            Some(Pending {
+                serial: owner,
+                wait: Wait::Step(step),
+                ..
+            }) if *owner == serial => Some(&step.call),
+            _ => None,
+        }
     }
 
     /// Nothing is in the store or waiting for it.
@@ -729,8 +740,8 @@ impl Drawing {
                 return;
             };
             match job {
-                Job::ReplyText { run, text } => {
-                    out.effects.push(Effect::DrawingReplyText { run, text });
+                Job::ReplyText { key, text } => {
+                    out.effects.push(Effect::DrawingReplyText { key, text });
                 }
                 Job::Record { run, call, record } => self.record(run, &call, *record, out),
                 Job::Reject { run, call, error } => {

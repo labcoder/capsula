@@ -37,7 +37,6 @@ fn drawn(scratch: &Scratch) -> (Coordinator, SceneId) {
             target: Target::New(header),
             revision: 1,
             layout_version: 2,
-            chat: None,
             step: Arc::new(step),
         })
         .expect("first step")

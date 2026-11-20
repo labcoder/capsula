@@ -796,7 +796,6 @@ fn typed_scene(store: &mut Store, thread: ThreadId, run: RunId) -> SceneId {
             target: Target::New(header),
             revision: 1,
             layout_version: 2,
-            chat: None,
             step,
         })
         .expect("typed write")

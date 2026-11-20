@@ -123,14 +123,18 @@ fn a_committed_step_s_say_is_spoken_and_its_failed_scene_drops_it() {
         {"end":{}}
     ]}))
     .expect("arguments");
-    let lookup = core
-        .handle(Input::Drawing(drawing::Input::Call {
-            thread: T,
+    let mut lookup = Vec::new();
+    let dispatched = core.drawing_call(
+        T,
+        &crate::dispatch::LedgerKey {
             run: R,
-            call: CallId::new("draw").expect("call"),
-            args,
-        }))
-        .expect("fresh call");
+            route: crate::dispatch::Route::Model,
+            call: "draw".into(),
+        },
+        crate::dispatch::DrawAction::Complete(crate::dispatch::validate_draw(&args)),
+        &mut lookup,
+    );
+    assert_eq!(dispatched, crate::dispatch::Dispatch::Committing);
     let step_write = commit(&mut core, &mut store, &lookup);
     let first = commit(&mut core, &mut store, &step_write);
     let at = first

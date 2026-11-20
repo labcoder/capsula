@@ -741,19 +741,27 @@ fn serve_op(store: &mut Store, purger: &mut Purger, acks: &UnboundedSender<Input
         }),
         StoreOp::RoundItems(round) => write(store, purger, acks, round.run, "round", |store| {
             let ids = (round.thread, round.run);
-            let text = round.text.as_deref();
+            let text = round
+                .text
+                .as_ref()
+                .map_or_else(Vec::new, crate::coordinator::ReplyText::events);
             match round.connection.kind {
-                ConnectionKind::AnthropicKey if round.items.is_empty() => store.append_key_round(
+                ConnectionKind::AnthropicKey if round.items.is_empty() => store
+                    .append_key_round_events(
+                        ids,
+                        round.connection.tag,
+                        &text,
+                        &round.key_calls,
+                        &round.calls,
+                    ),
+                // `append_round` refuses the key's route, so its opaque items are never written.
+                _ if round.key_calls.is_empty() => store.append_round_events(
                     ids,
-                    round.connection.tag,
-                    text,
-                    &round.key_calls,
+                    round.connection,
+                    &text,
+                    &round.items,
                     &round.calls,
                 ),
-                // `append_round` refuses the key's route, so its opaque items are never written.
-                _ if round.key_calls.is_empty() => {
-                    store.append_round(ids, round.connection, text, &round.items, &round.calls)
-                }
                 _ => Err(StoreError::RoundRecord),
             }
             .map(|()| Input::RoundStored {
@@ -771,14 +779,9 @@ fn serve_op(store: &mut Store, purger: &mut Purger, acks: &UnboundedSender<Input
         } => write(store, purger, acks, run, "outcome", |store| {
             let revealed = revealed.map(|steps| serde_json::json!(steps).to_string());
             let clear = clear.map(cleared_body);
-            let mut events = Vec::with_capacity(3);
-            if let Some(text) = &text {
-                events.push(NewEvent {
-                    kind: EventKind::AssistantText,
-                    text: Some(text.as_str()),
-                    body: None,
-                });
-            }
+            let mut events = text
+                .as_ref()
+                .map_or_else(Vec::new, crate::coordinator::ReplyText::events);
             if let Some(revealed) = &revealed {
                 events.push(NewEvent {
                     kind: EventKind::Revealed,

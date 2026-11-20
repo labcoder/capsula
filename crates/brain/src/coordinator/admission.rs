@@ -424,20 +424,24 @@ impl Coordinator {
         pending: &BTreeSet<ThreadId>,
         effects: &mut Vec<Effect>,
     ) {
-        self.revoke_mcp(key.run, effects);
-        self.close_provider_round(key.run, effects);
         let Some(current) = self.current.as_mut() else {
             return;
         };
-        current.tools.drop_round();
-        current.finishing = false;
-        let Some(build) = current.build.as_mut() else {
+        let Some(build) = current.build.as_mut().filter(|build| build.key() == key) else {
             return;
         };
+        current.unstored = super::ReplyText::default();
         build.admitted = false;
         build.control.0.cancel();
         build.blocked = voided & pending;
-        if build.blocked.is_empty() {
+        let ready = build.blocked.is_empty();
+        self.revoke_mcp(key.run, effects);
+        self.close_provider_round(key.run, effects);
+        if let Ok(current) = self.current(key.run) {
+            current.tools.drop_round();
+            current.finishing = false;
+        }
+        if ready {
             self.build(key.run, key.round, effects);
         }
     }

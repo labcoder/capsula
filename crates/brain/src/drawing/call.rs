@@ -768,7 +768,6 @@ impl Drawing {
             revision,
             layout_version,
             step: stored,
-            chat: None,
         };
         let wait = StepWait {
             run,
@@ -1069,10 +1068,10 @@ impl Drawing {
         self.calls.retain(|call| call.run > closed || !call.done);
         self.runs.retain(|ledger| ledger.run > closed);
         self.queue.retain(|job| match job {
-            Job::ReplyText { run, .. }
-            | Job::Record { run, .. }
-            | Job::Reject { run, .. }
-            | Job::Finish { run, .. } => *run > closed,
+            Job::ReplyText { key, .. } => key.run > closed,
+            Job::Record { run, .. } | Job::Reject { run, .. } | Job::Finish { run, .. } => {
+                *run > closed
+            }
             Job::Cut { .. }
             | Job::Shown { .. }
             | Job::Ready { .. }

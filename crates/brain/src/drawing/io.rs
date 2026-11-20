@@ -6,7 +6,7 @@
 
 use std::{fmt, sync::Arc};
 
-use kumochi_protocol::message::{Content, RunId, SceneHeader, SceneId, ThreadId};
+use kumochi_protocol::message::{RunId, SceneHeader, SceneId, ThreadId};
 use kumochi_scene::{SceneEvent, Step, StopCut, WireId, record::Surface};
 
 /// The scene a step's write goes into.
@@ -48,8 +48,6 @@ pub enum Write {
         layout_version: u32,
         /// The original typed step.
         step: Arc<Step>,
-        /// Any ordinary reply prefix and unspoken narration committed with this step.
-        chat: Option<StepChat>,
     },
     /// An effective cut as a `scene_cut` event, ordered after every step it follows.
     Cut {
@@ -60,24 +58,6 @@ pub enum Write {
         /// The authoritative cut.
         cut: StopCut,
     },
-}
-
-/// A step's unspoken narration and the ordinary reply text immediately before it.
-#[derive(Clone, PartialEq, Eq)]
-pub struct StepChat {
-    /// Unstored ordinary reply text preceding the step.
-    pub before: Option<Content>,
-    /// The narration with its answer separators.
-    pub line: Content,
-}
-
-impl fmt::Debug for StepChat {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("StepChat")
-            .field("before_bytes", &self.before.as_ref().map(|text| text.len()))
-            .field("line_bytes", &self.line.len())
-            .finish()
-    }
 }
 
 /// The store's answer to a committed [`Write`]. A failed write answers `Err(())`, after which

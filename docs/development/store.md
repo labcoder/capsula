@@ -66,11 +66,9 @@ activated bound and finished handles. Identical cut retries are idempotent. All 
 have NULL `text`: drawing content never enters FTS or a page's text, and pages omit cut metadata.
 Every drawing SQL or JSON failure becomes a fixed, source-free error, never a parser diagnostic.
 
-When a step has nonblank narration but no speech reservation, the same write appends any
-preceding assistant text, the typed step, and a separate assistant text row for the narration.
-The narration row carries the scene and revision in `body`, with the same paragraph separators
-as the live reply. Recovery reads the original event; it never derives a Chat write from the
-drawing log.
+The drawing write doesn't append reply text. Round and outcome writes keep unspoken narration
+in order with surrounding assistant text. Model draw narration uses the existing
+`assistant_text` kind; its `body` can carry the provider call ID for native replay.
 
 The canonical reducer is the single writer and validates admission and cuts. The store checks
 run/thread membership, first-step name reservation, the encoded-body cap and retry identity

@@ -27,11 +27,23 @@ impl Store {
     /// # Errors
     /// [`StoreError::RoundRecord`] when an item or a result is one the reader would refuse, or
     /// the route is the key's, writing nothing; and whatever [`Store::append`] fails with.
+    #[cfg(test)]
     pub(crate) fn append_round(
         &mut self,
         ids: (ThreadId, RunId),
         connection: Route,
         text: Option<&str>,
+        items: &[Opaque],
+        results: &[(CallId, ToolOutput)],
+    ) -> Result<(), StoreError> {
+        self.append_round_events(ids, connection, plain_text(text).as_slice(), items, results)
+    }
+
+    pub(crate) fn append_round_events(
+        &mut self,
+        ids: (ThreadId, RunId),
+        connection: Route,
+        text: &[NewEvent<'_>],
         items: &[Opaque],
         results: &[(CallId, ToolOutput)],
     ) -> Result<(), StoreError> {
@@ -55,11 +67,23 @@ impl Store {
     /// # Errors
     /// As [`Store::append_round`], or [`StoreError::RoundRecord`] unless the calls and results
     /// match one-to-one by id.
+    #[cfg(test)]
     pub(crate) fn append_key_round(
         &mut self,
         ids: (ThreadId, RunId),
         tag: ConnectionTag,
         text: Option<&str>,
+        calls: &[ToolUse],
+        results: &[(CallId, ToolOutput)],
+    ) -> Result<(), StoreError> {
+        self.append_key_round_events(ids, tag, plain_text(text).as_slice(), calls, results)
+    }
+
+    pub(crate) fn append_key_round_events(
+        &mut self,
+        ids: (ThreadId, RunId),
+        tag: ConnectionTag,
+        text: &[NewEvent<'_>],
         calls: &[ToolUse],
         results: &[(CallId, ToolOutput)],
     ) -> Result<(), StoreError> {
@@ -95,7 +119,7 @@ impl Store {
     fn write_round(
         &mut self,
         (thread, run): (ThreadId, RunId),
-        text: Option<&str>,
+        text: &[NewEvent<'_>],
         natives: &[String],
         results: &[(CallId, ToolOutput)],
     ) -> Result<(), StoreError> {
@@ -107,11 +131,6 @@ impl Store {
                 Ok(body)
             })
             .collect::<Result<Vec<_>, StoreError>>()?;
-        let text = text.map(|text| NewEvent {
-            kind: EventKind::AssistantText,
-            text: Some(text),
-            body: None,
-        });
         let natives = natives.iter().map(|body| NewEvent {
             kind: EventKind::OutputItem,
             text: None,
@@ -122,9 +141,19 @@ impl Store {
             text: None,
             body: Some(body),
         });
-        let events: Vec<NewEvent<'_>> = text.into_iter().chain(natives).chain(results).collect();
+        let events: Vec<NewEvent<'_>> =
+            text.iter().copied().chain(natives).chain(results).collect();
         self.append(thread, run, &events)
     }
+}
+
+#[cfg(test)]
+fn plain_text(text: Option<&str>) -> Option<NewEvent<'_>> {
+    text.map(|text| NewEvent {
+        kind: EventKind::AssistantText,
+        text: Some(text),
+        body: None,
+    })
 }
 
 /// A native item's body: the route that made it, its tag and kind, and the item as the same

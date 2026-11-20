@@ -46,7 +46,6 @@ fn typed_brain_with_steps(
             target: Target::New(header),
             revision: 1,
             layout_version: 2,
-            chat: None,
             step: stored_step("a", "a"),
         })
         .expect("first step")
@@ -61,7 +60,6 @@ fn typed_brain_with_steps(
             target: Target::Existing(scene),
             revision: 2,
             layout_version: 2,
-            chat: None,
             step: stored_step("b", "b"),
         })
         .expect("second step");
@@ -74,7 +72,6 @@ fn typed_brain_with_steps(
                 target: Target::Existing(scene),
                 revision,
                 layout_version: 2,
-                chat: None,
                 step: Arc::clone(step),
             })
             .expect("extra recovery step");
@@ -146,7 +143,6 @@ fn four_typed_scenes(
                 target: Target::New(header),
                 revision: 1,
                 layout_version: 2,
-                chat: None,
                 step,
             })
             .expect("durable step")
@@ -511,7 +507,6 @@ async fn a_refused_snapshot_scene_is_durably_cleared_before_the_other_scene_is_d
             target: Target::New(header),
             revision: 1,
             layout_version: 2,
-            chat: None,
             step,
         })
         .expect("step")
@@ -716,7 +711,6 @@ async fn a_typed_restart_describes_and_queues_the_original_log_with_scene_owners
             target: Target::New(header),
             revision: 1,
             layout_version: 2,
-            chat: None,
             step: Arc::clone(&step),
         })
         .expect("durable step")
