@@ -8,7 +8,10 @@ use std::time::{Duration, Instant};
 use kumochi_protocol::message::{OutputGeneration, RunId, SegmentId};
 use zeroize::Zeroizing;
 
+use self::drawing::Drawing;
+pub(super) use self::drawing::DrawingIo;
 use super::super::STALL;
+use super::super::conductor::Binding;
 use super::backend::{self, Power, Reply, Request};
 use super::timeline::{Anchor, Engine, Observation, Opened, Phase};
 use super::{Admission, Credit, Fault, Packet};
@@ -16,6 +19,7 @@ use crate::platform::speaker_cpal::{
     Control, OutputError, OutputEvent, PacketKind, Source, TailAck, Transport,
 };
 
+mod drawing;
 mod gate;
 
 const COMMANDS: usize = 16;
@@ -26,6 +30,7 @@ pub(super) enum Command {
     Expect,
     Pause(u64),
     Resume(u64),
+    Revoke(Binding),
     Stop,
 }
 
@@ -39,6 +44,10 @@ pub(super) struct Input {
 }
 
 impl Input {
+    pub(super) fn wake(&self) {
+        self.worker.unpark();
+    }
+
     pub(super) fn command(&self, command: Command) -> Result<(), TrySendError<Command>> {
         if self.closed.load(Ordering::Acquire) {
             return Err(TrySendError::Disconnected(command));
@@ -48,7 +57,7 @@ impl Input {
         } else {
             self.commands.try_send(command)?;
         }
-        self.worker.unpark();
+        self.wake();
         Ok(())
     }
 
@@ -61,7 +70,7 @@ impl Input {
         }
         match self.packets.try_send(packet) {
             Ok(()) => {
-                self.worker.unpark();
+                self.wake();
                 Ok(())
             }
             Err(err) => {
@@ -104,11 +113,17 @@ struct Worker {
     send: SyncSender<Request>,
     replies: Receiver<Reply>,
     route_closed: bool,
+    retired_route: Option<u64>,
+    virtual_route: bool,
+    drawing: Option<Drawing>,
 }
 
 pub(super) fn spawn(
     run: RunId,
     generation: OutputGeneration,
+    session: u64,
+    origin: Instant,
+    drawing: impl DrawingIo,
     give: impl FnMut(Credit) + Send + 'static,
 ) -> io::Result<Input> {
     let (commands, pending) = mpsc::sync_channel(COMMANDS);
@@ -123,23 +138,18 @@ pub(super) fn spawn(
         stop: Arc::clone(&stop),
         closed: Arc::clone(&closed),
     };
+    let drawing = Drawing::new(session, Arc::clone(&closed), drawing);
     let task = thread::Builder::new()
         .name("speaker-owner".into())
         .spawn(move || {
-            let origin = Instant::now();
-            let Ok((send, replies)) = backend::spawn(thread::current(), origin) else {
-                return;
-            };
-            let worker = Worker {
-                engine: Engine::new(run, generation),
-                physical: None,
-                job: None,
-                pending_packet: None,
-                send,
-                replies,
-                route_closed: false,
-            };
-            worker.serve(&port, origin, give);
+            own(
+                &port,
+                Engine::new(run, generation),
+                origin,
+                drawing,
+                give,
+                backend::spawn,
+            );
         })?;
     let worker = task.thread().clone();
     Ok(Input {
@@ -150,6 +160,32 @@ pub(super) fn spawn(
         stop,
         closed,
     })
+}
+
+fn own(
+    port: &Port,
+    engine: Engine,
+    origin: Instant,
+    drawing: Drawing,
+    give: impl FnMut(Credit),
+    start: impl FnOnce(Thread, Instant) -> io::Result<(SyncSender<Request>, Receiver<Reply>)>,
+) {
+    let Ok((send, replies)) = start(thread::current(), origin) else {
+        return;
+    };
+    Worker {
+        engine,
+        physical: None,
+        job: None,
+        pending_packet: None,
+        send,
+        replies,
+        route_closed: false,
+        retired_route: None,
+        virtual_route: false,
+        drawing: Some(drawing),
+    }
+    .serve(port, origin, give);
 }
 
 impl Worker {
@@ -189,6 +225,7 @@ impl Worker {
         self.engine
             .active_deadline(now)
             .into_iter()
+            .chain(self.drawing.as_ref().and_then(Drawing::deadline))
             .chain(
                 self.physical
                     .iter()
@@ -213,6 +250,8 @@ impl Worker {
         if self.pending_packet.is_none() && self.engine.queue.held.is_none() {
             self.pending_packet = port.packets.try_recv().ok();
         }
+        let coherent_view = self.read_drawing();
+        self.update_drawing(now);
         let mut drained = false;
         for _ in 0..COMMANDS {
             match port.commands.try_recv() {
@@ -224,6 +263,11 @@ impl Worker {
                 Ok(Command::Resume(serial)) => {
                     self.engine.resume(serial, now);
                     self.inhibit();
+                }
+                Ok(Command::Revoke(binding)) => {
+                    if let Some(drawing) = &mut self.drawing {
+                        drawing.revoke(binding, &self.engine);
+                    }
                 }
                 Ok(Command::Stop) => unreachable!("Stop is published outside the mailbox"),
                 Err(TryRecvError::Empty | TryRecvError::Disconnected) => {
@@ -244,9 +288,16 @@ impl Worker {
         {
             port.credit(credit, give);
         }
-        self.feed(source, now);
+        self.update_drawing(now);
+        let retired = self.retired_route;
+        if coherent_view {
+            self.feed(source, now);
+        }
         self.drive(now);
         self.watch_playback(now);
+        if self.retired_route != retired {
+            self.update_drawing(now);
+        }
         Ok(false)
     }
 
@@ -266,6 +317,9 @@ impl Worker {
                     Opened::Unavailable
                 };
                 let accepted = self.engine.opened(generation, outcome, now);
+                if accepted {
+                    self.virtual_route = transport.is_none();
+                }
                 if let Some(transport) = transport {
                     let mut route = Physical {
                         generation,
@@ -355,17 +409,25 @@ impl Worker {
                 self.recover(now);
                 return;
             };
-            if self.engine.observe(Anchor {
+            let anchor = Anchor {
                 run: report.source.run,
                 generation: report.source.generation,
                 segment: report.source.segment,
                 first: report.first,
                 through: report.through,
                 at,
-            }) == Observation::Recover
-            {
-                self.recover(now);
-                return;
+            };
+            match self.engine.observe(anchor) {
+                Observation::Accepted => {
+                    if let Some(drawing) = &mut self.drawing {
+                        drawing.observe(anchor, now);
+                    }
+                }
+                Observation::Stale => {}
+                Observation::Recover => {
+                    self.recover(now);
+                    return;
+                }
             }
         }
     }
@@ -399,6 +461,7 @@ impl Worker {
     fn recover(&mut self, now: Duration) {
         if let Some(route) = &mut self.physical {
             self.engine.require_recovery(route.generation);
+            self.retired_route = Some(route.generation);
             route.retire(now);
         }
     }

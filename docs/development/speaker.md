@@ -171,8 +171,19 @@ whole line is allowed and the picture takes silent timing. On rebuild, an unshow
 step has 250 ms to receive a handoff from the new route before taking silent timing.
 A route rebuild mid-line ends speech-following for that shown step; it takes authored
 timing immediately. A shown or fenced step can't show again. Step-level Drop uses the
-staging commitment above. These defaults aren't measured; there's no wiring to either
-playback worker or presenter.
+staging commitment above. These defaults aren't measured. The dormant worker now uses
+one reducer and the session clock supplied by its caller. It reads the keyed view and
+applies the matching hold before feeding source, services hold and rebuild deadlines on
+its own wake, and publishes one keyed picture. An accepted first handoff on the current
+route predicts onset; shown motion is authored and later progress doesn't publish a level.
+
+A sticky end publishes independently of timing. An end before visual eligibility can
+carry Wait: it releases the audio binding while the presenter keeps the step. Route
+retirement alone doesn't end it. Missing owner, backend startup failure and worker exit
+are reported to the future link, which supplies keyed Unavailable. Unit 4 must ensure
+the worker has seen the matching binding before forwarding that assignment's first PCM,
+for example by using the keyed picture as acknowledgment. An unresolved assignment is
+not unassigned. No link or opener uses this adapter yet.
 
 ## Reports
 

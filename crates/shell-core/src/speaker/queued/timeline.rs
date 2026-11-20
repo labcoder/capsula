@@ -270,7 +270,7 @@ impl Engine {
         }
     }
 
-    fn can_stage(&self) -> bool {
+    pub(super) fn can_stage(&self) -> bool {
         self.physical.is_some()
             && !self.recovering
             && !self.inhibited()

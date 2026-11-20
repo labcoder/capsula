@@ -28,6 +28,7 @@ pub(crate) enum View {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Route {
+    Pending,
     Live(u64),
     Rebuilding,
     Virtual,
@@ -154,12 +155,19 @@ enum Stage {
     Fenced,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum Completion {
+    Active,
+    Ended,
+}
+
 pub(super) struct Conductor {
     assignment: Assignment,
     speech: bool,
     stage: Stage,
     audio: Gate,
     submitted: bool,
+    completion: Completion,
     eligible_since: Option<Duration>,
     hold_until: Option<Duration>,
     rebuild_until: Option<Duration>,
@@ -176,6 +184,7 @@ impl Conductor {
             stage: Stage::Waiting,
             audio: Gate::Held,
             submitted: false,
+            completion: Completion::Active,
             eligible_since: None,
             hold_until: None,
             rebuild_until: None,
@@ -202,6 +211,26 @@ impl Conductor {
         })
     }
 
+    pub(super) fn deadline(&self) -> Option<Duration> {
+        if self.stage == Stage::Fenced {
+            return None;
+        }
+        self.hold_until
+            .filter(|_| self.audio == Gate::Held)
+            .into_iter()
+            .chain(self.rebuild_until)
+            .min()
+    }
+
+    pub(super) fn completion(&self) -> Completion {
+        self.completion
+    }
+
+    pub(super) fn keep_audio(&mut self) {
+        self.submitted = true;
+        self.audio = Gate::Allowed;
+    }
+
     fn picture(&mut self, now: Duration, view: View, mut playback: Playback) -> Picture {
         if self.stage == Stage::Fenced {
             return Picture::Fenced;
@@ -223,7 +252,10 @@ impl Conductor {
         if playback.head == Head::Revoked {
             self.drop_unsent();
         }
-        if empty || no_sound || matches!(playback.head, Head::Played | Head::Revoked) {
+        if empty || matches!(playback.head, Head::Played | Head::Revoked) {
+            self.completion = Completion::Ended;
+        }
+        if self.completion == Completion::Ended || no_sound {
             self.silent();
         }
 
@@ -306,6 +338,7 @@ impl Conductor {
             playback.handoff = None;
         }
         match playback.route {
+            Route::Pending => {}
             Route::Rebuilding => {
                 self.route_retired = true;
                 self.handoff = None;
@@ -335,7 +368,6 @@ impl Conductor {
                 }
             }
             Route::Virtual | Route::Muted | Route::NoWorker => {
-                self.route_retired = false;
                 self.handoff = None;
             }
         }
