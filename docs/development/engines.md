@@ -179,10 +179,13 @@ sequenceDiagram
   request was attempted: it sets one flag right before its first write poll, so a write that
   errors, returns 0 or is pending counts, even if no byte was accepted, while the upload budget
   spent, a connect failure, its deadline while connecting, and a final head or EOF read before
-  the first write all leave it unsent. The Claude Code stdin pump marks only a pictured seed,
-  after the held grant's final check and just before its first write attempt.
+  the first write all leave it unsent. The Messages transport reads the same flag on the same
+  connection type, so the same cases leave it unsent. The Claude Code stdin pump marks only a
+  pictured seed, after the held grant's final check and just before its first write attempt.
 - **Write admission.** The Responses transport asks the lease to admit each poll of the request's
-  writer, every write and the flush, and holds that admission for the one poll. A send without a
+  writer, every write and the flush, and holds that admission for the one poll. The Messages
+  transport admits its polls the same way, and refuses a pictured body before connecting when the
+  lease has no picture grant. A send without a
   picture grant admits every poll; one with a grant admits a poll only while it can reserve the
   grant. A refusal stops every later poll: before any poll was admitted, the send ends as
   `Rebuild` with nothing written; after one, it fails as `Withheld` and its connection is

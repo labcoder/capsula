@@ -131,6 +131,11 @@ pub trait Lease {
 
     /// A write of the request was attempted, so bytes of it may have left.
     fn wrote(&mut self);
+
+    /// Whether the coordinator granted this send a picture, so a pictured body may go.
+    fn carries_picture(&self) -> bool {
+        false
+    }
 }
 
 /// A live check's send, which no coordinator leases.

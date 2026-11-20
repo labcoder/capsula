@@ -104,7 +104,11 @@ The attempt accepts only `AnthropicConnect`, fixes `POST /v1/messages`, sensitiv
 and API version `2023-06-01`, and uses no proxy, redirect or fallback. Request bytes are wiped
 on drop. A connection is closed after every attempt; no pooling/drain path is needed. Upload
 and connect share a 10-second deadline. The admission lease settles only after the upload
-flushes or the socket closes, including early refusal and cancellation.
+flushes or the socket closes, including early refusal and cancellation. It's told of a write
+once one was attempted on the connection, so a send that never wrote settles unsent. Each writer
+poll goes through the lease's admission, which a closed picture grant refuses. A pictured body
+under a lease with no picture grant is refused as a request failure, before any budget is spent
+or a connection opens.
 
 Headers and body reads have a 60-second byte-idle deadline; pings reset it. A separate
 10-minute content-idle shortcut prevents an empty ping stream from living forever, pending
@@ -175,6 +179,7 @@ since Messages wants roles to alternate:
 | a stored call | an assistant `tool_use` block whose `input` is the parsed arguments |
 | a result | a user `tool_result` block |
 | a native item | rebuilt from its known fields on the assistant side: a `text` block with its text, or a `tool_use` block with its id, name and object input; the build passes only this connection's |
+| an image | a user `image` block holding the JPEG as base64, in its place among the user's blocks; only while the key's picture switch is on |
 
 Empty messages are skipped. The `Kumochi note:` label tells the model where a line came from;
 it carries no authority, and a user who types it is still the user. Nothing is built for:
@@ -187,8 +192,15 @@ it carries no authority, and a user who types it is still the user. Nothing is b
   document block among them, since stored items never carry thinking);
 - a call that isn't answered exactly once by the results that open the next user message, a
   result anywhere else, or an id called twice. Nothing is moved to make a pair;
-- an image, which this route doesn't carry yet;
-- a serialised body over the 512 KiB bound.
+- an image while the key's picture switch is off, which it is in every build; an image that isn't
+  one sealed capture of at most 2 MiB; or a second image;
+- a serialised body over the 512 KiB bound, counted without its picture.
+
+The picture never sits in a `Value` or a plain string. The bound and the envelope check see the
+body without it. Then its block, fixed JSON and base64 that need no escaping, is written into one
+zeroing buffer of the final length (`MessagesBody::spliced`), and the body is marked as pictured.
+The 16 MiB request cap still holds, and a compile-time check shows a body at its bound with the
+largest picture fits under it.
 
 ### Tool rounds
 
@@ -196,7 +208,8 @@ A round that called tools continues its run's `Conversation` with `encode::next`
 isn't built again: the next request is the last one unchanged, then the round's reply as one
 assistant message, then the results as one user message. Each signed block is bound to the
 system text, the tools and every message before it, so a rebuild, which refreshes the drawing
-digest, would invalidate it.
+digest, would invalidate it. A picture the first request carried goes again, in the same place,
+only while the switch is still on; otherwise the round builds nothing.
 
 Only the round's own mapper supplies the reply. The run makes it with
 `Mapper::answering(&conversation)` before the stream's first callback, which binds it to that

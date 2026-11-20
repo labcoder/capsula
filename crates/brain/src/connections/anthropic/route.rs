@@ -81,7 +81,7 @@ impl Transport {
         .unwrap_or(Err(CheckError::Unconfirmed))
     }
 
-    pub(crate) async fn messages<L: Send>(
+    pub(crate) async fn messages<L: crate::connections::model::Lease + Send>(
         &self,
         authority: &Verified,
         offer: Offer<'_>,

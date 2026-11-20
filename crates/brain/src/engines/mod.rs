@@ -286,6 +286,10 @@ impl crate::connections::model::Lease for SendLease {
     fn wrote(&mut self) {
         self.unsent = false;
     }
+
+    fn carries_picture(&self) -> bool {
+        SendLease::carries_picture(self)
+    }
 }
 
 impl Drop for SendLease {

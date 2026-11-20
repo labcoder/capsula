@@ -13,7 +13,7 @@ use crate::connections::model::budget::Budget;
 use crate::connections::model::conn::{ModelClient, ModelConn, Upload};
 use crate::connections::model::sse::Progress;
 use crate::connections::model::wire::{Body, Head, Media};
-use crate::connections::model::{ERROR_BODY_DEADLINE, Events, IDLE, SEND_DEADLINE};
+use crate::connections::model::{ERROR_BODY_DEADLINE, Events, IDLE, Lease, SEND_DEADLINE};
 
 use super::error::{Failure, ProviderFailure};
 use super::key::AnthropicKey;
@@ -26,9 +26,23 @@ pub const BACKPRESSURE: Duration = Duration::from_secs(60);
 // shortcut: ten minutes without content, replace after approved live gap measurements
 const CONTENT_IDLE: Duration = Duration::from_secs(600);
 
-struct Attempt<Io, L> {
+/// One send's state. Fields drop in declaration order, so the connection closes before the lease
+/// settles.
+struct Attempt<Io, L: Lease> {
     conn: Option<ModelConn<Io>>,
     lease: Option<L>,
+}
+
+impl<Io, L: Lease> Drop for Attempt<Io, L> {
+    /// A lease still held here is told of a write once one was attempted on its connection;
+    /// otherwise it settles unsent.
+    fn drop(&mut self) {
+        if let Some(lease) = &mut self.lease
+            && self.conn.as_ref().is_some_and(|conn| conn.may_have_written)
+        {
+            lease.wrote();
+        }
+    }
 }
 
 /// Send one validated request using the caller's key and shared run/live budgets.
@@ -50,7 +64,7 @@ struct Attempt<Io, L> {
     clippy::too_many_arguments,
     reason = "the capture choice comes from the stream's mapper, before the stream starts"
 )]
-pub async fn stream<C: AnthropicConnect, L>(
+pub async fn stream<C: AnthropicConnect, L: Lease>(
     client: &ModelClient<C>,
     body: &MessagesBody,
     key: &Secret<AnthropicKey>,
@@ -62,6 +76,10 @@ pub async fn stream<C: AnthropicConnect, L>(
 ) -> Result<StopReason, Failure> {
     let request = request(key.expose().as_str(), body.bytes())?;
     let lease = ask.await.ok_or(Failure::Rebuild)?;
+    // A picture goes only under the coordinator's grant for it, which each write rechecks.
+    if body.pictured() && !lease.carries_picture() {
+        return Err(Failure::Request);
+    }
     if !run_budget.reserve() || !live_budget.reserve() {
         return Err(Failure::Spent);
     }
@@ -75,15 +93,21 @@ pub async fn stream<C: AnthropicConnect, L>(
             .connect()
             .await
             .map_err(|_| Failure::Transport)?;
+        let lease = &attempt.lease;
         let conn = attempt.conn.insert(ModelConn::new(io));
-        match conn.upload(request.expose(), || Some(())).await? {
+        match conn
+            .upload(request.expose(), || lease.as_ref().and_then(Lease::admit))
+            .await?
+        {
             Upload::Flushed => Ok(()),
             Upload::Refused(head) => Err(Failure::Provider(refusal(conn, head).await?)),
         }
     })
     .await
     .map_err(|_| Failure::Transport)??;
-    drop(attempt.lease.take());
+    if let Some(mut lease) = attempt.lease.take() {
+        lease.wrote();
+    }
     let conn = attempt
         .conn
         .as_mut()

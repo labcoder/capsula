@@ -122,6 +122,13 @@ impl super::super::tls::sealed::Sealed for Peer {}
 impl AnthropicConnect for Peer {}
 
 struct Lease(Shared);
+impl crate::connections::model::Lease for Lease {
+    type Write = ();
+    fn admit(&self) -> Option<()> {
+        Some(())
+    }
+    fn wrote(&mut self) {}
+}
 impl Drop for Lease {
     fn drop(&mut self) {
         self.0.lock().expect("peer state").settled += 1;
@@ -720,5 +727,88 @@ async fn a_401_head_with_a_cut_body_is_still_the_keys_refusal() {
             (error.status(), error.kind()),
             (401, super::super::error::Kind::Authentication)
         );
+    }
+}
+
+fn send_lease(
+    picture: Option<crate::coordinator::PictureGrant>,
+) -> (
+    crate::engines::SendLease,
+    tokio::sync::mpsc::UnboundedReceiver<crate::coordinator::Input>,
+) {
+    use crate::coordinator::{BuildKey, LeaseId, SendKey};
+    let (inputs, received) = tokio::sync::mpsc::unbounded_channel();
+    let lease = LeaseId {
+        key: SendKey::Build(BuildKey {
+            run: kumochi_protocol::message::RunId(1),
+            round: 1,
+            attempt: 1,
+        }),
+        send: 1,
+    };
+    let lease = crate::engines::SendLease::new(lease, inputs).with_picture(picture);
+    (lease, received)
+}
+
+/// A pictured body goes only under a lease with a picture grant: without one nothing connects;
+/// with one closed before the first write nothing is written and the send settles unsent; with
+/// one open the whole request goes and the send settles as written. A text body's send settles
+/// as written too.
+#[tokio::test]
+async fn a_pictured_body_writes_only_under_its_open_picture_grant() {
+    use crate::coordinator::{Input, PictureGrant};
+    let harness = Harness::new(response(200, END));
+    let pictured = harness
+        .body
+        .spliced(0, 0, |_| Ok::<(), ()>(()))
+        .expect("a pictured copy");
+    let run = Budget::limited(None);
+    let live = Budget::limited(None);
+    let call = |body, lease| {
+        tokio::task::unconstrained(stream(
+            &harness.client,
+            body,
+            &harness.key,
+            ready(Some(lease)),
+            &run,
+            &live,
+            Capture::Nothing,
+            Sink(Arc::clone(&harness.state)),
+        ))
+    };
+    let reset = || {
+        let mut state = harness.state.lock().expect("peer state");
+        let seen = (state.connects, std::mem::take(&mut state.written));
+        state.connects = 0;
+        state.read = 0;
+        state.flushed = false;
+        seen
+    };
+
+    let (lease, mut received) = send_lease(None);
+    let unleased = call(&pictured, lease).await;
+    assert!(matches!(unleased, Err(Failure::Request)), "{unleased:?}");
+    assert_eq!(reset(), (0, Vec::new()));
+    assert!(matches!(received.try_recv(), Ok(Input::SendUnsent { .. })));
+
+    let grant = PictureGrant::open_for_tests();
+    grant.close();
+    let (lease, mut received) = send_lease(Some(grant));
+    let revoked = call(&pictured, lease).await;
+    assert!(matches!(revoked, Err(Failure::Rebuild)), "{revoked:?}");
+    assert_eq!(reset(), (1, Vec::new()));
+    assert!(matches!(received.try_recv(), Ok(Input::SendUnsent { .. })));
+
+    for (body, grant) in [
+        (&pictured, Some(PictureGrant::open_for_tests())),
+        (&harness.body, None),
+    ] {
+        let (lease, mut received) = send_lease(grant);
+        let sent = call(body, lease).await;
+        assert!(matches!(sent, Ok(StopReason::EndTurn)), "{sent:?}");
+        let (connects, written) = reset();
+        assert_eq!(connects, 1);
+        assert!(written.ends_with(body.bytes()));
+        assert!(matches!(received.try_recv(), Ok(Input::SendSettled { .. })));
     }
 }
