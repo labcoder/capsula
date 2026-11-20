@@ -156,8 +156,9 @@ heard. Later PCM for that segment cannot restart it.
 If the segment was staged, the worker inhibits the route while it checks actual callback
 handoff. The copy must settle before that count is usable; a presentation report can
 arrive later. Once any of the segment reached the callback, the route is kept and the rest
-can play. Otherwise the route is retired before staged blocks can replay, and the source
-is discarded. No opener or production caller enables this gate yet.
+can play. An unsubmitted successor also cannot retire a route while a partially handed-off
+predecessor still needs it. Once retirement is safe, it fences staged blocks before the
+unsubmitted source is discarded. No opener or production caller enables this gate yet.
 
 ## Dormant drawing conductor
 
