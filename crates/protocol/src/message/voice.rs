@@ -136,6 +136,23 @@ pub struct Cursor {
     pub sample: u32,
 }
 
+/// Ordered source retirement on a queued output, independent of its physical routes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SpeechRetirement {
+    /// The spoken run.
+    pub run: RunId,
+    /// The logical output that accepted its source.
+    pub output: OutputGeneration,
+    /// The segment whose source retired.
+    pub segment: SegmentId,
+    /// Cumulative retired samples within that segment.
+    pub retired: u32,
+    /// Samples within this segment covered by the run's contiguous heard prefix.
+    pub heard: u32,
+    /// The validated final packet arrived and all its samples retired.
+    pub final_segment: bool,
+}
+
 /// Each voice part's state, as the brain's installer reports it. Nothing sends it until the
 /// installer lands.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

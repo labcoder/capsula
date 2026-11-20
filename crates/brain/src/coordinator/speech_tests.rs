@@ -3,6 +3,7 @@
 
 use kumochi_protocol::message::{
     ControlToShell, Cursor, DataToShell, OutputGeneration, Phase, RunId, SegmentId, SpeechPcm,
+    SpeechRetirement, StepRef,
 };
 
 use super::{
@@ -12,6 +13,7 @@ use super::{
 use crate::coordinator::{DRAIN_STALL, QUIET_TIMEOUT, Synthesized};
 use crate::engines::{Finish, TurnEvent};
 use crate::store::{Interruption, RunEnd};
+use crate::voice::reply::ReportMode;
 
 const RATE: u32 = 24_000;
 /// 20 s at 24 kHz.
@@ -111,6 +113,74 @@ fn draining() -> Coordinator {
         .expect("current");
     core.handle(tts(Synthesized::Done)).expect("current");
     core
+}
+
+#[test]
+fn scene_failure_keeps_queued_history_open_through_the_worker_final() {
+    for (reported_early, receipt_first) in
+        [(true, false), (true, true), (false, false), (false, true)]
+    {
+        let mut core = fresh();
+        core.handle(Input::QueuedAudioOutput(RATE, OutputGeneration(1)))
+            .unwrap();
+        core.handle(Input::SpokenReplies { loaded: true }).unwrap();
+        core.handle(Input::Turn {
+            turn: 1,
+            thread: None,
+            text: "hi".into(),
+        })
+        .unwrap();
+        admit(&mut core, R);
+        let scene = super::S;
+        let mut effects = Vec::new();
+        core.current(R).unwrap().reply.as_mut().unwrap().say(
+            StepRef { scene, index: 0 },
+            "One.",
+            &mut Vec::new(),
+        );
+        for _ in 0..5 {
+            core.handle(tts(Synthesized::Audio(vec![3; 2_400])))
+                .unwrap();
+        }
+        let partial = SpeechRetirement {
+            run: R,
+            output: OutputGeneration(1),
+            segment: SEG,
+            retired: 6_000,
+            heard: 6_000,
+            final_segment: false,
+        };
+        if reported_early {
+            core.handle(Input::SpeechRetired(partial)).unwrap();
+        }
+        core.step_failed(R, scene, &mut effects);
+        assert!(effects.contains(&pcm(5, 0, Some(12_000))));
+        let final_receipt = Input::SpeechRetired(SpeechRetirement {
+            retired: 12_000,
+            heard: 12_000,
+            final_segment: true,
+            ..partial
+        });
+        if receipt_first {
+            core.handle(final_receipt).unwrap();
+            assert!(
+                finish(&mut core)
+                    .iter()
+                    .any(|effect| matches!(effect, Effect::Store(StoreOp::EndRun { .. })))
+            );
+        } else {
+            finish(&mut core);
+            assert_eq!(core.handle(Input::RunStored { run: R }), Err(Stale));
+            assert!(
+                core.handle(final_receipt)
+                    .unwrap()
+                    .iter()
+                    .any(|effect| matches!(effect, Effect::Store(StoreOp::EndRun { .. })))
+            );
+        }
+        let saved = core.handle(Input::RunStored { run: R }).unwrap();
+        assert!(saved.contains(&heard(12_000, 0)), "{saved:?}");
+    }
 }
 
 #[test]
@@ -449,7 +519,10 @@ fn only_a_strictly_newer_generation_announces_after_a_withdrawal() {
         assert_eq!(core.output, None, "generation {stale} stays withdrawn");
     }
     assert_eq!(core.handle(announce(3)), Ok(Vec::new()));
-    assert_eq!(core.output, Some((RATE, OutputGeneration(3))));
+    assert_eq!(
+        core.output,
+        Some((RATE, OutputGeneration(3), ReportMode::Legacy))
+    );
 }
 
 #[test]
@@ -462,7 +535,10 @@ fn withdrawing_another_generation_changes_nothing() {
         }),
         Ok(Vec::new())
     );
-    assert_eq!(core.output, Some((RATE, OutputGeneration(1))));
+    assert_eq!(
+        core.output,
+        Some((RATE, OutputGeneration(1), ReportMode::Legacy))
+    );
 }
 
 #[test]

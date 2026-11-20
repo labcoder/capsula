@@ -1,16 +1,16 @@
 use kumochi_protocol::message::{
     Cursor, OutputGeneration, RunId, SceneId, SegmentId, SegmentStart, SpeechPcm, SpeechPromise,
-    StepRef,
+    SpeechRetirement, StepRef,
 };
 
-use super::{Failure, Heard, Refused, Reply, Revoker, Speech};
+use super::{Failure, Heard, Refused, Reply, ReportMode, Revoker, Speech};
 
 const RATE: u32 = 24_000;
 /// 20 s at 24 kHz.
 const WINDOW: u64 = 480_000;
 
 fn reply() -> Reply {
-    Reply::new(RunId(7), RATE, OutputGeneration(1))
+    Reply::new(RunId(7), RATE, OutputGeneration(1), ReportMode::Legacy)
 }
 
 fn seg(n: u32) -> SegmentId {
@@ -91,6 +91,107 @@ fn at_most_two_segments_are_spoken_beyond_the_playing_one() {
         r.played(seg(0), 0, out).expect("plays");
     });
     assert_eq!(out, [speak(3, " D.")]);
+}
+
+fn retirement(segment: u32, sample: u32, heard: u32) -> SpeechRetirement {
+    SpeechRetirement {
+        run: RunId(7),
+        output: OutputGeneration(1),
+        segment: seg(segment),
+        retired: sample,
+        heard,
+        final_segment: true,
+    }
+}
+
+#[test]
+fn retirement_replenishes_a_full_window_without_hearing_through_a_gap() {
+    let mut reply = Reply::new(RunId(7), RATE, OutputGeneration(1), ReportMode::Queued);
+    run(&mut reply, |r, out| r.text("A. B. C. ", out));
+    run(&mut reply, |r, out| {
+        r.pcm(seg(0), vec![5; 480], out);
+        r.done(seg(0), out);
+        r.retired(retirement(0, 480, 480), out).unwrap();
+    });
+    for _ in 0..200 {
+        run(&mut reply, |r, out| r.pcm(seg(1), vec![5; 2_400], out));
+    }
+    assert_eq!(reply.unplayed, WINDOW);
+    let partial = SpeechRetirement {
+        final_segment: false,
+        ..retirement(1, 6_000, 0)
+    };
+    assert_eq!(
+        run(&mut reply, |r, out| r.retired(partial, out).unwrap()),
+        [Speech::Credit(6_000)]
+    );
+    assert!(run(&mut reply, |r, out| r.retired(partial, out).unwrap()).is_empty());
+    assert_eq!(reply.unplayed, WINDOW - 6_000);
+    run(&mut reply, |r, out| {
+        r.done(seg(1), out);
+        r.pcm(seg(2), vec![5; 480], out);
+        r.done(seg(2), out);
+        assert_eq!(
+            r.retired(retirement(2, 480, 0), out),
+            Err(Refused::OutOfOrder)
+        );
+        let mut stale = retirement(1, 480_000, 0);
+        stale.output = OutputGeneration(2);
+        assert_eq!(r.retired(stale, out), Ok(()));
+        assert_eq!(r.unplayed, WINDOW - 6_000 + 480);
+        r.retired(retirement(1, 480_000, 0), out).unwrap();
+        assert_eq!(r.retired(retirement(2, 480, 480), out), Err(Refused::Total));
+        r.retired(retirement(2, 480, 0), out).unwrap();
+        r.close(out);
+    });
+    assert_eq!(reply.unplayed, 0);
+    let heard = Some(Heard {
+        segment: seg(0),
+        sample: 480,
+        text: 2,
+    });
+    assert_eq!(reply.heard(), heard);
+    assert!(reply.is_final());
+    run(&mut reply, |r, out| r.revoke(Revoker::Shell, out));
+    assert!(!reply.is_final());
+    assert_eq!(
+        reply.stopped(Some(Cursor {
+            segment: seg(2),
+            sample: 480
+        })),
+        Err(Refused::Total)
+    );
+    assert_eq!(
+        reply.stopped(Some(Cursor {
+            segment: seg(0),
+            sample: 480
+        })),
+        Ok(())
+    );
+    assert_eq!(reply.heard(), heard);
+    assert!(reply.is_final());
+}
+
+#[test]
+fn producer_drop_does_not_refund_queued_retirement_twice() {
+    let mut reply = Reply::new(RunId(7), RATE, OutputGeneration(1), ReportMode::Queued);
+    run(&mut reply, |r, out| {
+        r.say(step(7, 0), "line", out);
+        r.pcm(seg(0), vec![5; 480], out);
+        let partial = SpeechRetirement {
+            final_segment: false,
+            ..retirement(0, 240, 240)
+        };
+        r.retired(partial, out).unwrap();
+        assert_eq!(r.unplayed, 240);
+        r.step_failed(SceneId(7), out);
+        assert_eq!(r.unplayed, 0);
+        let final_receipt = retirement(0, 480, 240);
+        r.retired(final_receipt, out).unwrap();
+        r.retired(final_receipt, out).unwrap();
+    });
+    assert_eq!(reply.unplayed, 0);
+    assert_eq!(reply.heard().map(|heard| heard.sample), Some(240));
 }
 
 #[test]
@@ -692,6 +793,40 @@ fn a_quiet_cursor_at_a_finished_segment_s_total_hears_its_text() {
         }),
         "more audio could have followed"
     );
+}
+
+#[test]
+fn a_queued_stop_hears_finished_text_even_before_the_data_final() {
+    for (played, expected_text) in [(7_200, 4), (6_000, 0)] {
+        let mut reply = Reply::new(RunId(7), RATE, OutputGeneration(1), ReportMode::Queued);
+        run(&mut reply, |r, out| {
+            r.text("One. ", out);
+            for _ in 0..3 {
+                r.pcm(seg(0), vec![5; 2_400], out);
+            }
+            r.done(seg(0), out);
+            r.revoke(Revoker::Shell, out);
+            let partial = SpeechRetirement {
+                final_segment: false,
+                ..retirement(0, 7_200, played)
+            };
+            r.retired(partial, out).unwrap();
+        });
+        reply
+            .stopped(Some(Cursor {
+                segment: seg(0),
+                sample: played,
+            }))
+            .unwrap();
+        assert_eq!(
+            reply.heard(),
+            Some(Heard {
+                segment: seg(0),
+                sample: played,
+                text: expected_text
+            })
+        );
+    }
 }
 
 #[test]

@@ -5,7 +5,7 @@ use std::sync::mpsc::{self, Receiver, SyncSender, TryRecvError, TrySendError};
 use std::thread::{self, Thread};
 use std::time::{Duration, Instant};
 
-use kumochi_protocol::message::{OutputGeneration, RunId, SegmentId};
+use kumochi_protocol::message::{ControlToBrain, OutputGeneration, RunId, SegmentId};
 use zeroize::Zeroizing;
 
 use self::drawing::Drawing;
@@ -13,6 +13,7 @@ pub(super) use self::drawing::DrawingIo;
 use super::super::STALL;
 use super::super::conductor::Binding;
 use super::backend::{self, Power, Reply, Request};
+use super::receipts::Receipts;
 use super::timeline::{Anchor, Engine, Observation, Opened, Phase};
 use super::{Admission, Credit, Fault, Packet};
 use crate::platform::speaker_cpal::{
@@ -125,6 +126,7 @@ pub(super) fn spawn(
     origin: Instant,
     drawing: impl DrawingIo,
     give: impl FnMut(Credit) + Send + 'static,
+    report: impl FnMut(ControlToBrain) + Send + 'static,
 ) -> io::Result<Input> {
     let (commands, pending) = mpsc::sync_channel(COMMANDS);
     let (packets, data) = mpsc::sync_channel(1);
@@ -148,6 +150,7 @@ pub(super) fn spawn(
                 origin,
                 drawing,
                 give,
+                report,
                 backend::spawn,
             );
         })?;
@@ -168,6 +171,7 @@ fn own(
     origin: Instant,
     drawing: Drawing,
     give: impl FnMut(Credit),
+    report: impl FnMut(ControlToBrain),
     start: impl FnOnce(Thread, Instant) -> io::Result<(SyncSender<Request>, Receiver<Reply>)>,
 ) {
     let Ok((send, replies)) = start(thread::current(), origin) else {
@@ -185,12 +189,19 @@ fn own(
         virtual_route: false,
         drawing: Some(drawing),
     }
-    .serve(port, origin, give);
+    .serve(port, origin, give, report);
 }
 
 impl Worker {
-    fn serve(mut self, port: &Port, origin: Instant, mut give: impl FnMut(Credit)) {
+    fn serve(
+        mut self,
+        port: &Port,
+        origin: Instant,
+        mut give: impl FnMut(Credit),
+        mut report: impl FnMut(ControlToBrain),
+    ) {
         let mut source = Zeroizing::new([0; 480]);
+        let mut receipts = Receipts::default();
         loop {
             let now = origin.elapsed();
             let closing = port.closed.load(Ordering::Acquire);
@@ -201,10 +212,13 @@ impl Worker {
                     self.stop(now, &mut |credit| port.credit(credit, &mut give));
                     true
                 });
+            receipts.publish(&self.engine, now, &mut report);
             if again {
                 continue;
             }
+            let quiet = receipts.deadline(&self.engine);
             if closing
+                && quiet.is_none()
                 && self.physical.as_ref().is_none_or(|route| {
                     route
                         .retire_deadline
@@ -213,7 +227,7 @@ impl Worker {
             {
                 return;
             }
-            if let Some(next) = self.deadline(now) {
+            if let Some(next) = self.deadline(now).into_iter().chain(quiet).min() {
                 thread::park_timeout(next.saturating_sub(origin.elapsed()));
             } else {
                 thread::park();

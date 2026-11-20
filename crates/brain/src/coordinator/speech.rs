@@ -15,7 +15,7 @@ use kumochi_protocol::message::{ControlToShell, DataToShell, OutputGeneration, R
 
 use super::{Coordinator, Effect, Input, Notify, Run, Stale};
 use crate::store::{Interruption, RunEnd};
-use crate::voice::reply::{Failure, Reply, Revoker, Speech};
+use crate::voice::reply::{Failure, Reply, ReportMode, Revoker, Speech};
 
 /// How long a draining run may go without progress before its speech is revoked [guess].
 pub const DRAIN_STALL: Duration = Duration::from_secs(5);
@@ -107,14 +107,15 @@ impl Coordinator {
     }
 
     /// The shell's output device; one at or below a withdrawn generation stays withdrawn.
-    fn announce(&mut self, rate: u32, generation: OutputGeneration, effects: &mut Vec<Effect>) {
+    fn announce(&mut self, output: (u32, OutputGeneration, ReportMode), effects: &mut Vec<Effect>) {
+        let (_, generation, _) = output;
         if self
             .withdrawn
             .is_some_and(|withdrawn| generation.0 <= withdrawn.0)
         {
             return;
         }
-        self.output = Some((rate, generation));
+        self.output = Some(output);
         if let Some(current) = self.current.as_mut()
             && let Some(reply) = &mut current.reply
         {
@@ -131,13 +132,17 @@ impl Coordinator {
     ) -> Result<(), Stale> {
         let run = match input {
             Input::AudioOutput { rate, generation } => {
-                self.announce(rate, generation, effects);
+                self.announce((rate, generation, ReportMode::Legacy), effects);
+                return Ok(());
+            }
+            Input::QueuedAudioOutput(rate, generation) => {
+                self.announce((rate, generation, ReportMode::Queued), effects);
                 return Ok(());
             }
             Input::AudioOutputUnavailable { generation } => {
                 if self
                     .output
-                    .is_some_and(|(_, current)| current == generation)
+                    .is_some_and(|(_, current, _)| current == generation)
                 {
                     self.output = None;
                     self.withdrawn = Some(generation);
@@ -186,6 +191,7 @@ impl Coordinator {
             | Input::SpeechProgress { run, .. }
             | Input::SegmentPlayed { run, .. }
             | Input::SpeechStopped { run, .. } => run,
+            Input::SpeechRetired(receipt) => receipt.run,
             _ => unreachable!("only speech inputs are routed here"),
         };
         let found = self.find(run)?;
@@ -209,6 +215,7 @@ impl Coordinator {
             Input::SegmentPlayed {
                 segment, samples, ..
             } => reply.played(segment, samples, &mut out),
+            Input::SpeechRetired(receipt) => reply.retired(receipt, &mut out),
             Input::SpeechStopped { cursor, .. } => {
                 // A second answer, for a Stop that crossed a revoke, changes nothing.
                 if !reply.revoked() || reply.is_final() {

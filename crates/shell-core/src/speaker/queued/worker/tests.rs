@@ -67,9 +67,14 @@ fn stop_is_processed_while_the_open_and_ingress_mailboxes_are_busy() {
     let (credits, received) = mpsc::sync_channel(1);
     let (closed, done) = mpsc::sync_channel(1);
     let owner = thread::spawn(move || {
-        worker.serve(&port, Instant::now(), |credit| {
-            credits.send(credit).unwrap();
-        });
+        worker.serve(
+            &port,
+            Instant::now(),
+            |credit| {
+                credits.send(credit).unwrap();
+            },
+            |_| {},
+        );
         closed.send(()).unwrap();
     });
     input.worker = owner.thread().clone();
@@ -155,6 +160,62 @@ fn a_late_physical_open_is_retired_without_feeding_or_waiting_for_backend_drop()
             }
         ]
     );
+}
+
+#[test]
+fn dropping_input_keeps_a_worker_alive_until_its_known_quiet_deadline() {
+    static OCCUPIED: AtomicBool = AtomicBool::new(false);
+    let (mut worker, input, port, requests, replies) = fake();
+    let mut source = [0; 480];
+    input.command(Command::Expect).unwrap();
+    input.submit(packet(7, 0, 480, Some(480))).unwrap();
+    worker
+        .step(&port, &mut source, &mut |_| {}, INSTANT)
+        .unwrap();
+    let Request::Open(generation, control) = requests.try_recv().unwrap() else {
+        panic!("expected an open");
+    };
+    let (transport, mut playback) = FakePlayback::open(Arc::clone(&control), &OCCUPIED);
+    assert!(
+        replies
+            .send(Reply::Opened(generation, Some(transport)))
+            .is_ok()
+    );
+    worker
+        .step(&port, &mut source, &mut |_| {}, INSTANT)
+        .unwrap();
+    playback.fill(&mut [0.0; 1], INSTANT);
+    let stop = Duration::from_millis(1);
+    input.command(Command::Stop).unwrap();
+    worker.step(&port, &mut source, &mut |_| {}, stop).unwrap();
+    drop(input);
+
+    let origin = Instant::now();
+    playback.fill(&mut [0.0; 128], Duration::from_millis(200));
+    let TailAck::At(quiet_at) = control.tail() else {
+        panic!("the fake proved quiet")
+    };
+    assert!(origin.elapsed() < quiet_at);
+    let mut reports = Vec::new();
+    worker.serve(
+        &port,
+        origin,
+        |_| {},
+        |message| reports.push((origin.elapsed(), message)),
+    );
+    assert_eq!(reports.len(), 2, "{reports:?}");
+    assert!(matches!(reports[0].1, ControlToBrain::SpeechRetired(_)));
+    assert_eq!(
+        reports[1].1,
+        ControlToBrain::SpeechStopped {
+            run: RUN,
+            cursor: Some(kumochi_protocol::message::Cursor {
+                segment: SegmentId(0),
+                sample: 1
+            })
+        }
+    );
+    assert!(reports[1].0 >= quiet_at);
 }
 
 #[test]
@@ -366,9 +427,14 @@ fn a_hung_resume_moves_to_virtual_and_releases_held_credit() {
 fn malformed_input_reports_disconnected_instead_of_staying_full() {
     let (worker, mut input, port, _requests, _reply) = fake();
     let owner = thread::spawn(move || {
-        worker.serve(&port, Instant::now(), |_| {
-            panic!("malformed ingress does not earn credit");
-        });
+        worker.serve(
+            &port,
+            Instant::now(),
+            |_| {
+                panic!("malformed ingress does not earn credit");
+            },
+            |_| {},
+        );
     });
     input.worker = owner.thread().clone();
     input.submit(packet(7, 1, 20, Some(20))).unwrap();

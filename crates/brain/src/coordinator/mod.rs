@@ -39,12 +39,13 @@ use std::time::Duration;
 
 use kumochi_protocol::message::{
     ConnectionKind, Content, ControlToShell, Cursor, DataToShell, Deleted, ModelChoice,
-    OutputGeneration, PageOf, Phase, RunId, SceneId, SegmentId, Step, ThreadId, ThreadOp,
-    UserError,
+    OutputGeneration, PageOf, Phase, RunId, SceneId, SegmentId, SpeechRetirement, Step, ThreadId,
+    ThreadOp, UserError,
 };
 
 use crate::engines::{RunRequest, TurnEvent};
 use crate::store::{Failure, Interruption, RunEnd, SceneState};
+use crate::voice::reply::ReportMode;
 
 pub use admission::{BuildContext, BuildKey, ContextBuilt, Unbuilt};
 pub(crate) use availability::PictureRoutes;
@@ -349,6 +350,8 @@ pub enum Input {
         /// The device's generation.
         generation: OutputGeneration,
     },
+    /// Output rate and logical generation for the queued receipt path.
+    QueuedAudioOutput(u32, OutputGeneration),
     /// The shell withdrew its output device of `generation`.
     AudioOutputUnavailable {
         /// The generation withdrawn.
@@ -391,6 +394,8 @@ pub enum Input {
         /// Its total samples.
         samples: u32,
     },
+    /// Queued output retired source, reporting hearing independently.
+    SpeechRetired(SpeechRetirement),
     /// The shell's output for `run` went quiet after a Stop or a revoke.
     SpeechStopped {
         /// The run.
@@ -790,7 +795,7 @@ pub struct Coordinator {
     /// The newest account generation that signed out.
     signed_out: Option<u64>,
     /// The shell's output device on this connection: its rate and generation.
-    output: Option<(u32, OutputGeneration)>,
+    output: Option<(u32, OutputGeneration, ReportMode)>,
     /// The newest generation the shell withdrew on this connection; it never announces again.
     withdrawn: Option<OutputGeneration>,
     /// Spoken replies are loaded.
@@ -1132,11 +1137,13 @@ impl Coordinator {
                 }
             }
             input @ (Input::AudioOutput { .. }
+            | Input::QueuedAudioOutput(..)
             | Input::AudioOutputUnavailable { .. }
             | Input::SpokenReplies { .. }
             | Input::Tts { .. }
             | Input::SpeechProgress { .. }
             | Input::SegmentPlayed { .. }
+            | Input::SpeechRetired(_)
             | Input::SpeechStopped { .. }
             | Input::DrainTimeout { .. }
             | Input::QuietTimeout { .. }) => self.speech_input(input, &mut effects)?,
@@ -1352,7 +1359,9 @@ impl Coordinator {
             reply: self
                 .output
                 .filter(|_| self.spoken)
-                .map(|(rate, generation)| crate::voice::reply::Reply::new(run, rate, generation)),
+                .map(|(rate, generation, mode)| {
+                    crate::voice::reply::Reply::new(run, rate, generation, mode)
+                }),
         });
         self.begin_turns(effects);
         effects.push(Effect::Control(ControlToShell::RunState {
