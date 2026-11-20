@@ -31,7 +31,7 @@ impl Receipts {
         loop {
             let final_segment = self.next < queue.completed;
             let sample = if final_segment {
-                queue.completed_samples[self.next as usize]
+                queue.completed_samples[usize::try_from(self.next).expect("bounded segment id")]
             } else {
                 u32::try_from(engine.progress.consumed - self.first).expect("one bounded segment")
             };

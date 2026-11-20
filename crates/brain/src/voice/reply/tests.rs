@@ -93,14 +93,14 @@ fn at_most_two_segments_are_spoken_beyond_the_playing_one() {
     assert_eq!(out, [speak(3, " D.")]);
 }
 
-fn retirement(segment: u32, sample: u32, heard: u32, final_segment: bool) -> SpeechRetirement {
+fn retirement(segment: u32, sample: u32, heard: u32) -> SpeechRetirement {
     SpeechRetirement {
         run: RunId(7),
         output: OutputGeneration(1),
         segment: seg(segment),
         retired: sample,
         heard,
-        final_segment,
+        final_segment: true,
     }
 }
 
@@ -111,13 +111,16 @@ fn retirement_replenishes_a_full_window_without_hearing_through_a_gap() {
     run(&mut reply, |r, out| {
         r.pcm(seg(0), vec![5; 480], out);
         r.done(seg(0), out);
-        r.retired(retirement(0, 480, 480, true), out).unwrap();
+        r.retired(retirement(0, 480, 480), out).unwrap();
     });
     for _ in 0..200 {
         run(&mut reply, |r, out| r.pcm(seg(1), vec![5; 2_400], out));
     }
     assert_eq!(reply.unplayed, WINDOW);
-    let partial = retirement(1, 6_000, 0, false);
+    let partial = SpeechRetirement {
+        final_segment: false,
+        ..retirement(1, 6_000, 0)
+    };
     assert_eq!(
         run(&mut reply, |r, out| r.retired(partial, out).unwrap()),
         [Speech::Credit(6_000)]
@@ -129,19 +132,16 @@ fn retirement_replenishes_a_full_window_without_hearing_through_a_gap() {
         r.pcm(seg(2), vec![5; 480], out);
         r.done(seg(2), out);
         assert_eq!(
-            r.retired(retirement(2, 480, 0, true), out),
+            r.retired(retirement(2, 480, 0), out),
             Err(Refused::OutOfOrder)
         );
-        let mut stale = retirement(1, 480_000, 0, true);
+        let mut stale = retirement(1, 480_000, 0);
         stale.output = OutputGeneration(2);
         assert_eq!(r.retired(stale, out), Ok(()));
         assert_eq!(r.unplayed, WINDOW - 6_000 + 480);
-        r.retired(retirement(1, 480_000, 0, true), out).unwrap();
-        assert_eq!(
-            r.retired(retirement(2, 480, 480, true), out),
-            Err(Refused::Total)
-        );
-        r.retired(retirement(2, 480, 0, true), out).unwrap();
+        r.retired(retirement(1, 480_000, 0), out).unwrap();
+        assert_eq!(r.retired(retirement(2, 480, 480), out), Err(Refused::Total));
+        r.retired(retirement(2, 480, 0), out).unwrap();
         r.close(out);
     });
     assert_eq!(reply.unplayed, 0);
@@ -178,11 +178,15 @@ fn producer_drop_does_not_refund_queued_retirement_twice() {
     run(&mut reply, |r, out| {
         r.say(step(7, 0), "line", out);
         r.pcm(seg(0), vec![5; 480], out);
-        r.retired(retirement(0, 240, 240, false), out).unwrap();
+        let partial = SpeechRetirement {
+            final_segment: false,
+            ..retirement(0, 240, 240)
+        };
+        r.retired(partial, out).unwrap();
         assert_eq!(r.unplayed, 240);
         r.step_failed(SceneId(7), out);
         assert_eq!(r.unplayed, 0);
-        let final_receipt = retirement(0, 480, 240, true);
+        let final_receipt = retirement(0, 480, 240);
         r.retired(final_receipt, out).unwrap();
         r.retired(final_receipt, out).unwrap();
     });

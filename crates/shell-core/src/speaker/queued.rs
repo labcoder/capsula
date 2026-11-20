@@ -263,7 +263,8 @@ impl Queue {
                 .segments
                 .pop_front()
                 .expect("checked the completed segment");
-            self.completed_samples[self.completed as usize] = segment.samples;
+            let index = usize::try_from(self.completed).expect("bounded segment id");
+            self.completed_samples[index] = segment.samples;
             self.completed += 1;
         }
     }
