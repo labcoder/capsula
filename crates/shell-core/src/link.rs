@@ -1376,7 +1376,7 @@ fn watch(
     let mut named = RunId(0);
     loop {
         match frame::read::<ControlToShell>(&mut &*control, Pipe::Control) {
-            Ok(None) => return,
+            Ok(None | Some(ControlToShell::SpeechDecisionTaken(..))) => return,
             Ok(Some(ControlToShell::Ping)) => {
                 if out.try_send(ControlToBrain::Pong).is_err() {
                     tracing::warn!("the control queue is full; the brain isn't reading");
@@ -1702,7 +1702,6 @@ fn watch(
                 }
             }
             Ok(Some(ControlToShell::ThreadModelSet { .. } | ControlToShell::NoVisual { .. })) => {}
-            Ok(Some(ControlToShell::SpeechDecisionTaken(..))) => return,
             Ok(Some(ControlToShell::Welcome { .. } | ControlToShell::BuildMismatch { .. })) => {
                 tracing::warn!("the brain repeated its handshake; ending the connection");
                 return;
