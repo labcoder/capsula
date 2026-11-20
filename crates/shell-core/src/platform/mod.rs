@@ -7,11 +7,13 @@ pub mod host;
 pub mod input;
 pub mod microphone;
 pub mod screen_watch;
+#[cfg(any(windows, target_os = "macos"))]
+pub mod speaker_cpal;
 
 #[cfg(windows)]
 #[expect(
     unsafe_code,
-    reason = "Win32 calls; the core's only shipped unsafe code lives here"
+    reason = "Win32 calls are isolated to this platform adapter"
 )]
 mod windows;
 

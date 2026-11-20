@@ -1,0 +1,17 @@
+[package]
+name = "kumochi-audio"
+description = "Shared signal processing for Kumochi's speech and capture."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+zeroize.workspace = true
+
+[dev-dependencies]
+kumochi-protocol.workspace = true
+
+[lints]
+workspace = true

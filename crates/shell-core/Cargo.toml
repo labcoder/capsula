@@ -20,6 +20,10 @@ tracing-subscriber.workspace = true
 unic-langid.workspace = true
 zeroize.workspace = true
 
+[target.'cfg(any(windows, target_os = "macos"))'.dependencies]
+cpal = { version = "=0.18.2", default-features = false }
+kumochi-audio.workspace = true
+
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.62", features = [
     "Win32_Foundation",
