@@ -25,6 +25,7 @@ pub(crate) mod responses;
 use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
@@ -201,9 +202,11 @@ pub enum Answer {
     Rebuild,
 }
 
-/// A granted send. Dropping it, wherever it is, reports `SendSettled` on the store-reply
-/// channel, which the brain always drains, so a lost grant settles too; `SendUnsent` instead
-/// once the transport has said no write of its request was attempted.
+/// A granted send. Dropping it, wherever it is, reports `SendUnsent` on the store-reply channel,
+/// which the brain always drains, so a lost grant settles too; `SendSettled` instead once the
+/// transport has said it attempted a write of its request.
+// shortcut: the Messages and Claude Code transports never say they wrote, so their sends settle
+// unsent; each says so before its route carries a picture.
 #[derive(Debug)]
 #[must_use = "dropping a SendLease settles its send"]
 pub struct SendLease {
@@ -211,6 +214,8 @@ pub struct SendLease {
     /// `None` once abandoned.
     inputs: Option<mpsc::UnboundedSender<Input>>,
     unsent: bool,
+    /// The coordinator's revocable grant for the picture the request carries.
+    picture: Option<Arc<AtomicBool>>,
 }
 
 impl SendLease {
@@ -218,8 +223,15 @@ impl SendLease {
         Self {
             lease,
             inputs: Some(inputs),
-            unsent: false,
+            unsent: true,
+            picture: None,
         }
+    }
+
+    /// Lets the send write only while `picture`, the grant for the picture it carries, is open.
+    pub(crate) fn with_picture(mut self, picture: Option<Arc<AtomicBool>>) -> Self {
+        self.picture = picture;
+        self
     }
 
     /// Gives the lease up unsettled: its send may still be going out, so its sources stay held
@@ -230,8 +242,14 @@ impl SendLease {
 }
 
 impl crate::connections::model::Lease for SendLease {
-    fn unsent(&mut self) {
-        self.unsent = true;
+    fn may_write(&self) -> bool {
+        self.picture
+            .as_ref()
+            .is_none_or(|open| open.load(Ordering::Acquire))
+    }
+
+    fn wrote(&mut self) {
+        self.unsent = false;
     }
 }
 
@@ -765,7 +783,7 @@ mod tests {
         );
         assert_eq!(
             received.recv().await,
-            Some(Input::SendSettled { lease: lease() })
+            Some(Input::SendUnsent { lease: lease() })
         );
     }
 
@@ -795,7 +813,7 @@ mod tests {
         );
         assert_eq!(
             received.recv().await,
-            Some(Input::SendSettled { lease: lease() })
+            Some(Input::SendUnsent { lease: lease() })
         );
     }
 

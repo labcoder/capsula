@@ -78,6 +78,13 @@ as does a 400 `invalid_request_error` naming the exact `anthropic-workspace-id` 
 (`WorkspaceRequired`). No workspace id is accepted or provider message forwarded. Rate limits,
 server, transport or catalog failures keep it Unconfirmed for a later Check.
 
+An entry takes pictures only when its own `capabilities.image_input.supported` is a literal
+`true`; absent, `null` or any other value means no, and never fails the Check. The other flags
+keep the documented-model list. That fact reaches the screen gate only while it is fresh: the
+current key's latest Check verified it. An inconclusive Check, a failed load, a refusal or a
+replaced key clears it, and only the next verifying Check of the current generation restores it,
+so meanwhile the key keeps text and omits pictures with the truthful `ModelCantSee` line.
+
 A final HTTP 401 on a Messages post refuses the key itself, whichever run or job sent it. The
 transport decides it from the status at the response head, never the body, closes the sending
 authority's fence there, and tells the account the authority's tag; nothing else is sent. The

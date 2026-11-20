@@ -6,6 +6,8 @@
 //! <https://platform.claude.com/docs/en/agents-and-tools/tool-use/fine-grained-tool-streaming>,
 //! <https://platform.claude.com/docs/en/build-with-claude/effort>.
 //! Unknown ids stay disabled; streaming support requires eager input streaming on the tool.
+//! Image input alone is the entry's own `capabilities.image_input.supported`, in the same
+//! reference, checked 2026-11-20.
 
 use zeroize::Zeroizing;
 
@@ -71,6 +73,19 @@ struct Entry {
     kind: String,
     id: String,
     display_name: String,
+    /// Read leniently: a malformed or missing object means no capability, never a failed Check.
+    #[serde(default)]
+    capabilities: Option<serde_json::Value>,
+}
+
+impl Entry {
+    /// Whether the entry itself says the model takes image content blocks: only a literal `true`.
+    fn takes_images(&self) -> bool {
+        self.capabilities
+            .as_ref()
+            .and_then(|capabilities| capabilities.pointer("/image_input/supported"))
+            == Some(&serde_json::Value::Bool(true))
+    }
 }
 
 #[derive(Deserialize)]
@@ -110,7 +125,7 @@ pub(super) async fn read_fenced(
             .map_err(|_| CheckError::Unconfirmed)?,
     );
     let head = match conn
-        .upload(&request)
+        .upload(&request, || true)
         .await
         .map_err(|_| CheckError::Unconfirmed)?
     {
@@ -176,6 +191,7 @@ fn catalog(status: u16, bytes: &[u8]) -> Result<Vec<CatalogModel>, CheckError> {
             entry.id.as_str(),
             "claude-fable-5-1" | "claude-opus-5-5" | "claude-sonnet-5-5" | "claude-haiku-5-5"
         );
+        let images = entry.takes_images();
         models.push(CatalogModel {
             info: ModelInfo {
                 slug,
@@ -183,7 +199,7 @@ fn catalog(status: u16, bytes: &[u8]) -> Result<Vec<CatalogModel>, CheckError> {
                 supported_efforts: None,
             },
             capabilities: Capabilities {
-                images: known,
+                images,
                 pdfs: known,
                 tool_argument_streaming: known,
                 effort: known,

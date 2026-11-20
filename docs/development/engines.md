@@ -172,14 +172,21 @@ sequenceDiagram
 - **Lease.** Each grant is a `LeaseId { key, send }` with its sources. Leases belong to send
   attempts, not runs, so Stop, a replacement and a lost shell keep them.
 - **Settle.** The `SendLease` guard travels inside the grant. Dropping it, wherever it is (a lost
-  answer, a dropped round, a finished send), reports `SendSettled` on the store-reply channel the
-  brain always drains, quit included. So a delete of the sending run's own task can't wait on
-  itself.
-- **Unsent.** A send that stops before any write of its request was attempted (the upload budget
-  spent, a connect failure, its deadline while connecting, a refusal before the first write)
-  reports `SendUnsent` instead. The transport sets one flag right before its first write poll,
-  so a write that errors, returns 0 or is pending counts as attempted, even if no byte was
-  accepted. A lease carrying a hold's picture settles it once: unsent, the run is as if never
+  answer, a dropped round, a finished send), reports on the store-reply channel the brain always
+  drains, quit included. So a delete of the sending run's own task can't wait on itself.
+- **Unsent unless written.** A lease reports `SendUnsent` unless its transport told it
+  `wrote()`, and then `SendSettled`. The Responses transport tells it once a write of the
+  request was attempted: it sets one flag right before its first write poll, so a write that
+  errors, returns 0 or is pending counts, even if no byte was accepted, while the upload budget
+  spent, a connect failure, its deadline while connecting, and a final head or EOF read before
+  the first write all leave it unsent. The Messages and Claude Code transports don't tell it
+  yet, so their sends settle unsent; each must before its route carries a picture.
+- **Picture grant.** A send carrying a picture on a Claude route also carries a revocable grant.
+  The coordinator closes it as soon as the run may no longer send that picture, and the
+  transport checks it at its first write attempt, after any early response it reads: closed,
+  nothing is written, the round ends as `Rebuild` and settles unsent, and the coordinator builds
+  again without the picture.
+- **The picture's settlement.** A lease carrying a hold's picture settles it once: unsent, the run is as if never
   granted (a later grant carries the picture again, or the run's end clears the mark); otherwise
   the shell is told `HoldScreen`. A failed lease's late settlement settles only the picture.
 - **Held deletes.** A delete whose thread an unsettled lease carries waits in `deleting` with no
@@ -356,8 +363,22 @@ included: it wasn't ready in time."). A screen hold's picture has its own lines:
 a picture of the user's screen, its width and height in pixels, taken at release, with their pointer where it was then, and, when
 the pointer's path was painted inside the image, one saying the pink line follows the pointer's
 movement and where it lies, in image pixels. Its changed display and too-large picture have their
-own class lines. The lines live in `locales/en/brain.ftl` and carry no window details. If the image can't go (another route, or no user message left), the run fails with
-`ScreenUnavailable` rather than sending without it. What the hold carried goes in the run's row
+own class lines. The lines live in `locales/en/brain.ftl` and carry no window details. The
+picture goes only where the run's route may carry it now (screen.md, "The brain's hold client"):
+always on `ChatGPT`, and on a Claude route with its switch on and its fresh fact still listing
+the model under the run's own sign-in. When that answer is no and no send carrying the picture
+has attempted a write, the build goes without it: the model gets "The screen was not included:
+this model can't be sent images.", the shell hears `HoldScreen` as `NotIncluded(ModelCantSee)`,
+and the turn's `screen` becomes `model_cant_see`. A pending hold's picture closes the same way as
+soon as its recipient stops taking pictures, and stays closed if the fact comes back. Once a
+request is built, a loss is caught at the grant and only there: the grant asks again, and a
+revoked picture grant whose send wrote nothing builds again the same way ("The send lease"). A
+send that may have written settles without building again: the run's next build carries the
+picture again if the fact came back, and fails with `ScreenUnavailable` only if it's still false,
+as it does with no user message left. Two gaps stay open in this change: a request the engine
+already holds isn't rebuilt when the fact goes false, so a loss and return before its grant isn't
+caught, and the direct connection control doesn't run the pending hold's check yet. Both must
+close before either Claude picture switch turns on. What the hold carried goes in the run's row
 with its turn (store.md, `runs.screen`), and the shell hears it once as `HoldScreen`: an image
 when a send carrying it settles after attempting a write ("The send lease"), anything else when
 the run's first request starts. An inline compaction's send carries only text, so it doesn't

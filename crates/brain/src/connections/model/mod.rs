@@ -118,16 +118,24 @@ impl<F: FnMut(&SseEvent)> Events for F {
     }
 }
 
-/// A granted send's lease, which the transport tells before it settles when no write of the
-/// request was attempted.
+/// A granted send's lease. The transport asks it right before the request's first write and
+/// tells it once a write was attempted; a lease never told settles as unsent.
 pub trait Lease {
-    /// No write of the request was attempted on any connection, so none of it left.
-    fn unsent(&mut self);
+    /// Whether the request may still be written: `false` once the picture it carries lost its
+    /// grant, and then nothing is.
+    fn may_write(&self) -> bool;
+
+    /// A write of the request was attempted, so bytes of it may have left.
+    fn wrote(&mut self);
 }
 
 /// A live check's send, which no coordinator leases.
 impl Lease for () {
-    fn unsent(&mut self) {}
+    fn may_write(&self) -> bool {
+        true
+    }
+
+    fn wrote(&mut self) {}
 }
 
 /// One send's state. Fields drop in declaration order, so the connection always closes before
@@ -140,13 +148,13 @@ struct Attempt<Io, L: Lease> {
 }
 
 impl<Io, L: Lease> Drop for Attempt<Io, L> {
-    /// A lease still held here settles unsent only when no connection was made or nothing was
-    /// written on it; any attempted write may have sent bytes.
+    /// A lease still held here is told of a write once one was attempted on its connection, as
+    /// any attempted write may have sent bytes; otherwise it settles unsent.
     fn drop(&mut self) {
         if let Some(lease) = &mut self.lease
-            && self.conn.as_ref().is_none_or(|conn| !conn.may_have_written)
+            && self.conn.as_ref().is_some_and(|conn| conn.may_have_written)
         {
-            lease.unsent();
+            lease.wrote();
         }
         #[cfg(all(windows, debug_assertions))]
         if let Some(stamp) = self.stamp.take() {
@@ -165,8 +173,9 @@ impl<Io, L: Lease> Drop for Attempt<Io, L> {
 /// settles when it drops. A retry is another call, so it asks again.
 ///
 /// The lease settles once the request's last byte is flushed to the kernel, or once the
-/// connection holding it is closed, and it's told [`Lease::unsent`] first when no write of the
-/// request was attempted. Nothing is retried after a byte is written; an idle
+/// connection holding it is closed, and it's told [`Lease::wrote`] first once a write of the
+/// request was attempted. A lease that may no longer write ends the send as
+/// [`Failure::Rebuild`], with nothing written. Nothing is retried after a byte is written; an idle
 /// connection that turns out stale before the write is replaced under the same lease.
 ///
 /// # Errors
@@ -242,14 +251,20 @@ async fn send<C: Connect, L: Lease>(
                 .await
                 .map_err(|_| Failure::Transport)?,
         };
+        let lease = &attempt.lease;
         let conn = attempt.conn.insert(ModelConn::new(io));
-        match conn.upload(&request).await? {
+        match conn
+            .upload(&request, || lease.as_ref().is_some_and(Lease::may_write))
+            .await?
+        {
             Upload::Flushed => Ok(()),
             Upload::Refused(head) => Err(Failure::Provider(refusal(conn, head).await?)),
         }
     });
     upload.await.map_err(|_| Failure::Transport)??;
-    drop(attempt.lease.take());
+    if let Some(mut lease) = attempt.lease.take() {
+        lease.wrote();
+    }
     let conn = attempt
         .conn
         .as_mut()

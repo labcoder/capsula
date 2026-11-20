@@ -6,6 +6,7 @@ use std::future::Future;
 use std::io;
 use std::ops::ControlFlow;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::task::{Context, Poll, Waker, ready};
 use std::time::Duration;
@@ -49,12 +50,17 @@ enum Admit {
 #[derive(Debug)]
 struct SendLease {
     settled: Settled,
+    open: Arc<AtomicBool>,
     to: mpsc::UnboundedSender<Settled>,
 }
 
 impl super::Lease for SendLease {
-    fn unsent(&mut self) {
-        self.settled.unsent = true;
+    fn may_write(&self) -> bool {
+        self.open.load(Ordering::Acquire)
+    }
+
+    fn wrote(&mut self) {
+        self.settled.unsent = false;
     }
 }
 
@@ -107,6 +113,10 @@ struct Valve {
     /// What the peer has already sent when the connection opens.
     greeting: Option<Vec<u8>>,
     written: usize,
+    /// Closed the first time the client polls a read.
+    revoke_on_read: Option<Arc<AtomicBool>>,
+    /// Write polls the client made.
+    write_polls: usize,
 }
 
 /// Leases settled when each flush completed and when each connection closed.
@@ -143,6 +153,9 @@ impl AsyncRead for Gated {
         cx: &mut Context<'_>,
         buf: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
+        if let Some(open) = lock(&self.shared.valve).revoke_on_read.take() {
+            open.store(false, Ordering::Release);
+        }
         Pin::new(&mut self.io).poll_read(cx, buf)
     }
 }
@@ -155,6 +168,7 @@ impl AsyncWrite for Gated {
     ) -> Poll<io::Result<usize>> {
         let this = self.get_mut();
         let mut valve = lock(&this.shared.valve);
+        valve.write_polls += 1;
         if valve.hold {
             return Poll::Pending;
         }
@@ -315,19 +329,27 @@ impl<C: Connect> Harness<C> {
 
     /// Answers the waiting ask with grant `send`.
     fn grant(&self, send: u64) {
+        drop(self.grant_revocable(send));
+    }
+
+    /// Answers the waiting ask with grant `send`, whose picture grant the test may close.
+    fn grant_revocable(&self, send: u64) -> Arc<AtomicBool> {
         let ready = lock(&self.asks).try_recv().expect("a send asked");
+        let open = Arc::new(AtomicBool::new(true));
         let lease = SendLease {
             settled: Settled {
                 key: ready.key,
                 send,
-                unsent: false,
+                unsent: true,
             },
+            open: Arc::clone(&open),
             to: self.settled.clone(),
         };
         ready
             .answer
             .send(Admit::Grant(lease))
             .expect("the send still waits");
+        open
     }
 
     fn settled(&self) -> Vec<Settled> {
@@ -748,6 +770,40 @@ async fn a_final_head_waiting_before_any_write_settles_unsent() {
         poll(&mut call),
         Poll::Ready((Err(Failure::Provider(ProviderError { status: 400, .. })), _))
     ));
+    assert_eq!(received(&mut harness.accept()), (Vec::new(), true));
+    assert_eq!(harness.settled(), settled_once(true));
+}
+
+#[tokio::test]
+async fn a_picture_grant_revoked_before_the_first_write_writes_nothing_and_settles_unsent() {
+    let harness = Harness::new(1 << 20);
+    let body = body("hello");
+    let mut call = harness.call(&body, 1);
+    assert!(poll(&mut call).is_pending());
+    let open = harness.grant_revocable(1);
+    open.store(false, Ordering::Release);
+    assert!(matches!(
+        poll(&mut call),
+        Poll::Ready((Err(Failure::Rebuild), _))
+    ));
+    assert_eq!(received(&mut harness.accept()), (Vec::new(), true));
+    assert_eq!(harness.settled(), settled_once(true));
+}
+
+#[tokio::test]
+async fn a_picture_grant_revoked_inside_upload_before_the_first_write_writes_nothing() {
+    let harness = Harness::new(1 << 20);
+    let body = body("hello");
+    let mut call = harness.call(&body, 1);
+    assert!(poll(&mut call).is_pending());
+    let open = harness.grant_revocable(1);
+    harness.valve(|valve| valve.revoke_on_read = Some(Arc::clone(&open)));
+    assert!(matches!(
+        poll(&mut call),
+        Poll::Ready((Err(Failure::Rebuild), _))
+    ));
+    assert!(!open.load(Ordering::Acquire), "revoked from the early read");
+    assert_eq!(lock(&harness.shared.valve).write_polls, 0);
     assert_eq!(received(&mut harness.accept()), (Vec::new(), true));
     assert_eq!(harness.settled(), settled_once(true));
 }

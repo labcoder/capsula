@@ -425,6 +425,7 @@ fn chatgpt_inline_and_its_rebuild_use_the_same_granted_effort() {
                     supported_efforts: EffortSet::new([effort]),
                 }],
                 trusted_draw: false,
+                images: Vec::new(),
             }),
         )
     };
@@ -528,6 +529,7 @@ fn compacting_on(kind: kumochi_protocol::message::ConnectionKind) -> Coordinator
                 supported_efforts: None,
             }],
             trusted_draw: false,
+            images: Vec::new(),
         }),
     ))
     .expect("never stale");

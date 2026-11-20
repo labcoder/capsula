@@ -6,12 +6,13 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
 use kumochi_protocol::message::{
-    ConnectionKind, Content, ControlToShell, GestureId, RunOrigin, ThreadId,
+    ConnectionKind, Content, ControlToShell, GestureId, HeldScreen, RunOrigin, ScreenClass,
+    ThreadId,
 };
 
 use super::availability::Arrived;
 use super::{Coordinator, Effect, Input, StoreOp, admission};
-use crate::context::{Origin, RunSnapshot};
+use crate::context::{Origin, RunSnapshot, Screen};
 use crate::recall::control::{Control, READ_TIME};
 use crate::store::Generation;
 
@@ -111,6 +112,29 @@ impl super::Run {
             hold,
             outcome,
         })
+    }
+
+    /// The run's picture may no longer go to its model. Before any send could have written it,
+    /// the request goes without it, and the model, the shell and history get the existing
+    /// `ModelCantSee` lines, never `Withdrawn`, which says the user turned sharing off. Once one
+    /// may have, the picture stays, so the run's next build fails closed.
+    pub(super) fn picture_lost(&mut self, effects: &mut Vec<Effect>) {
+        if self.untold.is_none() {
+            return;
+        }
+        let screen = match self.screen {
+            Some(Screen::Image(_)) => Screen::NotIncluded(ScreenClass::ModelCantSee),
+            Some(Screen::Picture(..)) => Screen::PictureNotIncluded(ScreenClass::ModelCantSee),
+            _ => return,
+        };
+        self.screen = Some(screen);
+        match &mut self.begin {
+            Some(StoreOp::BeginTurn { screen, .. }) => {
+                *screen = Some(HeldScreen::NotIncluded(ScreenClass::ModelCantSee));
+            }
+            _ => effects.push(Effect::Store(StoreOp::CantSeeScreen { run: self.id })),
+        }
+        self.tell_screen(effects);
     }
 
     /// Tells the shell what its hold's screen carried, once.
@@ -275,7 +299,8 @@ impl Coordinator {
         now: &super::Availability,
         hold: Option<&HoldSnapshot>,
     ) -> bool {
-        now != self.availability_of(kind) && hold.is_none_or(|hold| hold.kind() == kind)
+        now.differs_beyond_pictures(self.availability_of(kind))
+            && hold.is_none_or(|hold| hold.kind() == kind)
     }
 
     /// Cancels only the real run transferred from this exact hold.

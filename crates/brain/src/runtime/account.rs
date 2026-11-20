@@ -371,6 +371,7 @@ impl Accounts {
                         models: self.models().unwrap_or_default().to_vec(),
                         #[cfg(any(test, debug_assertions))]
                         trusted_draw: false,
+                        images: Vec::new(),
                     });
                 }
                 None => error(ErrorKey::SignInNeeded, Action::SignIn),

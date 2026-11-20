@@ -1735,6 +1735,7 @@ fn key_offered() -> Coordinator {
                 supported_efforts: None,
             }],
             trusted_draw: false,
+            images: Vec::new(),
         }),
     ))
     .expect("never stale");

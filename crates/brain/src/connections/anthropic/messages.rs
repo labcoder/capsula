@@ -76,7 +76,7 @@ pub async fn stream<C: AnthropicConnect, L>(
             .await
             .map_err(|_| Failure::Transport)?;
         let conn = attempt.conn.insert(ModelConn::new(io));
-        match conn.upload(request.expose()).await? {
+        match conn.upload(request.expose(), || true).await? {
             Upload::Flushed => Ok(()),
             Upload::Refused(head) => Err(Failure::Provider(refusal(conn, head).await?)),
         }

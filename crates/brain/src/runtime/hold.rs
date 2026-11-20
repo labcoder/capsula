@@ -229,6 +229,11 @@ impl Default for Holds {
 }
 
 impl Holds {
+    /// Whether this platform can capture and the screen worker started.
+    pub(super) fn can_capture(&self) -> bool {
+        self.window_capture && self.screen.is_some()
+    }
+
     fn connected(&mut self, peer: ShellProcess) {
         self.retire_exited_peer();
         self.peer = Some(peer);
@@ -916,11 +921,7 @@ impl Brain {
 
     /// Whether a hold on `choice` may show the model the window under the pointer now, or why not.
     fn screen_gate(&self, choice: Option<&ModelChoice>) -> ScreenHolds {
-        self.account.screen_holds(
-            choice,
-            self.holds.window_capture && self.holds.screen.is_some(),
-            self.config.view().screen_holds,
-        )
+        self.picture_gate(choice, self.config.view().screen_holds)
     }
 
     /// The user turned screen holds off: a pending window hold goes on as voice with no line, and
@@ -954,6 +955,19 @@ impl Brain {
     /// Sends the gate's state for the default model once per connection, then whenever it
     /// changes. It speaks for the screen's picture at release, which is the hold the shell sends.
     pub(super) fn screen_holds_changed(&mut self, link: &mut Link<'_, '_>) -> Result<(), Full> {
+        // A pending hold's picture closes once its own recipient stops taking pictures, so the
+        // same capture can't regain permission if the fact comes back; the voice turn goes on.
+        if self.holds.pending.as_ref().is_some_and(|hold| {
+            !matches!(
+                hold.screen,
+                ScreenPart::None | ScreenPart::Closed(_) | ScreenPart::Discarded
+            ) && hold
+                .screen_recipient
+                .as_ref()
+                .is_some_and(|(kind, model)| !self.coordinator.takes_pictures(*kind, model))
+        }) {
+            self.holds.close_screen_as(Some(ScreenClass::ModelCantSee));
+        }
         let choice = self.config.view().default_model.clone();
         let state = self.display_gate(choice.as_ref());
         if self.holds.screen_sent.as_ref() == Some(&state) {

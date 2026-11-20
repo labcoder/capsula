@@ -44,6 +44,7 @@ use crate::engines::{RunRequest, TurnEvent};
 use crate::store::{Failure, Interruption, RunEnd, SceneState};
 
 pub use admission::{BuildContext, BuildKey, ContextBuilt, Unbuilt};
+pub(crate) use availability::PictureRoutes;
 pub(crate) use availability::{Arrived, model_unavailable};
 pub use availability::{Availability, Ready, RefusedKey};
 pub use cards::{CardRead, Cards};
@@ -772,6 +773,8 @@ pub struct Coordinator {
     /// The other connections, which no engine answers yet, so they stay unavailable.
     anthropic_key: Availability,
     claude_code: Availability,
+    /// Which routes may carry a picture.
+    pictures: availability::PictureRoutes,
     /// The one background job.
     job: Option<job::Job>,
     /// The signed-in account's generation, while one can send.
@@ -839,6 +842,7 @@ impl Coordinator {
             availability: Availability::Unavailable(availability::sign_in_needed()),
             anthropic_key: Availability::Unavailable(availability::model_unavailable()),
             claude_code: Availability::Unavailable(availability::model_unavailable()),
+            pictures: availability::PictureRoutes::SHIPPED,
             job: None,
             account: None,
             signed_out: None,

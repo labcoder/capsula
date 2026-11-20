@@ -420,11 +420,22 @@ pub(crate) enum ImageRefused {
 }
 
 impl ModelRequest {
-    /// Adds `image` right after the newest user message. Only the Responses route carries images,
-    /// so any other refuses here and no adapter ever has one to drop. The body's ceiling is
-    /// checked when it's serialised.
+    /// Adds `image` right after the newest user message, for a live check's own `ChatGPT`
+    /// request: any other route refuses here. The body's ceiling is checked when it's serialised.
+    #[cfg(any(test, debug_assertions))]
     pub(crate) fn attach(&mut self, image: Jpeg) -> Result<(), ImageRefused> {
-        if !takes_images(self.choice.as_ref()) {
+        self.insert_image(image, takes_images(self.choice.as_ref()))
+    }
+
+    /// Adds `image` after the newest user message when `pictured`, the coordinator's answer that
+    /// this request's route may carry it now; otherwise it refuses, so no adapter ever has an
+    /// image to drop.
+    #[expect(
+        clippy::fn_params_excessive_bools,
+        reason = "the coordinator's answer that the run's route may carry its picture now"
+    )]
+    fn insert_image(&mut self, image: Jpeg, pictured: bool) -> Result<(), ImageRefused> {
+        if !pictured || self.choice.is_none() {
             return Err(ImageRefused::Route);
         }
         let at = self.turn()?;
@@ -434,8 +445,17 @@ impl ModelRequest {
 
     /// Adds a hold's screen after the newest user message: the image and the line saying what it
     /// is, then for a screen hold's path the line saying where it was painted, or the line saying
-    /// why it isn't there. Each flow has its own lines.
-    pub(crate) fn add_screen(&mut self, screen: &Screen) -> Result<(), ImageRefused> {
+    /// why it isn't there. Each flow has its own lines. An image goes only when `pictured`
+    /// ([`Self::insert_image`]).
+    #[expect(
+        clippy::fn_params_excessive_bools,
+        reason = "the coordinator's answer that the run's route may carry its picture now"
+    )]
+    pub(crate) fn add_screen(
+        &mut self,
+        screen: &Screen,
+        pictured: bool,
+    ) -> Result<(), ImageRefused> {
         let id = match screen {
             Screen::Image(_) => "screen-snapshot",
             Screen::Picture(..) => "screen-picture",
@@ -482,7 +502,7 @@ impl ModelRequest {
         }
         let after = match screen {
             Screen::Image(image) | Screen::Picture(image, ..) => {
-                self.attach(image.clone())?;
+                self.insert_image(image.clone(), pictured)?;
                 2
             }
             _ => 1,
@@ -521,7 +541,10 @@ impl ModelRequest {
 /// gets and the one the user sees can't drift.
 pub(crate) use kumochi_protocol::message::ScreenClass;
 
-/// Whether a request on `choice` carries images: only the Responses route does.
+/// Whether a request on `choice` lists the drawings on screen, and a live check's request takes
+/// an image: only the Responses route's.
+// shortcut: a Claude run that carries a picture still gets the drawings line without screen
+// scenes; carry the run's picture answer into the build before a Claude route is switched on.
 fn takes_images(choice: Option<&ModelChoice>) -> bool {
     choice.is_some_and(|choice| choice.connection == ConnectionKind::ChatGpt)
 }
@@ -597,21 +620,22 @@ impl Screen {
         }
     }
 
-    /// The picture a screen scene of the run is drawn on: a screen hold's, sent on the route
-    /// [`ModelRequest::attach`] takes images on, of the display at the desktop's origin. The
-    /// same route test decides both, so a scene is never drawn on a picture that didn't go.
+    /// The picture a screen scene of the run is drawn on: a screen hold's, of the display at the
+    /// desktop's origin, on a route that may carry it. `pictured` is the same answer
+    /// [`ModelRequest::add_screen`] took, so a scene is never drawn on a picture that didn't go.
     /// # Errors
     /// [`NoCanvas`] says why not.
-    pub(crate) fn canvas(
-        screen: Option<&Self>,
-        choice: Option<&ModelChoice>,
-    ) -> Result<Geometry, NoCanvas> {
+    #[expect(
+        clippy::fn_params_excessive_bools,
+        reason = "the coordinator's answer that the run's route may carry its picture now"
+    )]
+    pub(crate) fn canvas(screen: Option<&Self>, pictured: bool) -> Result<Geometry, NoCanvas> {
         let geometry = match screen {
             Some(Self::Picture(_, _, geometry)) => *geometry,
             Some(Self::Withdrawn) => return Err(NoCanvas::Off),
             _ => return Err(NoCanvas::NoPicture),
         };
-        if !takes_images(choice) {
+        if !pictured {
             return Err(NoCanvas::NoPicture);
         }
         if geometry.display.origin != [0, 0] {

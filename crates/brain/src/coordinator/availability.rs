@@ -6,7 +6,7 @@
 //! model check (S4) runs once, on the first build, against the route's catalog.
 
 use kumochi_protocol::message::{
-    Action, ConnectionKind, Effort, ErrorKey, ModelChoice, ModelInfo, RunId, UserError,
+    Action, ConnectionKind, Effort, ErrorKey, ModelChoice, ModelInfo, ModelSlug, RunId, UserError,
     effective_effort,
 };
 
@@ -44,6 +44,9 @@ pub struct Ready {
     pub(crate) connection: ConnectionTag,
     /// The account's catalog; empty until it's read.
     pub(crate) models: Vec<ModelInfo>,
+    /// The listed models a picture may go to on a Claude route: the route's own fact, fresh from
+    /// its current sign-in. `ChatGPT`'s pictures follow its account's catalog instead.
+    pub(crate) images: Vec<ModelSlug>,
     /// The dev fixture answers, so its draw calls draw though no request offers the tool.
     #[cfg(any(test, debug_assertions))]
     pub(crate) trusted_draw: bool,
@@ -63,6 +66,7 @@ impl Ready {
                     .expect("the replay model has a valid name"),
                 supported_efforts: EffortSet::new([Effort::Low]),
             }],
+            images: Vec::new(),
             trusted_draw: false,
         }
     }
@@ -73,6 +77,7 @@ impl Ready {
         Self {
             connection: ConnectionTag(0),
             models: Vec::new(),
+            images: Vec::new(),
             trusted_draw: true,
         }
     }
@@ -86,6 +91,61 @@ impl Ready {
     #[expect(clippy::unused_self, reason = "a release build never trusts a draw")]
     fn trusted(&self) -> bool {
         false
+    }
+}
+
+impl Availability {
+    /// Whether `self` and `other` differ in more than which models take pictures. A picture fact
+    /// changing alone never fails a hold or a run: only the picture it covers is withdrawn.
+    pub(super) fn differs_beyond_pictures(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Ready(ready), Self::Ready(other)) => {
+                ready.connection != other.connection || ready.models != other.models
+            }
+            _ => self != other,
+        }
+    }
+}
+
+/// Turns pictures on for the Anthropic key route. Only this const turns it on outside tests.
+pub(crate) const ANTHROPIC_KEY_PICTURES: bool = false;
+/// Turns pictures on for the Claude Code route. Only this const turns it on outside tests.
+pub(crate) const CLAUDE_CODE_PICTURES: bool = false;
+
+/// Which routes may carry a picture. `ChatGPT` always may; each Claude route only once its
+/// const is on, so no setting, message, variable or flag reaches it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct PictureRoutes {
+    anthropic_key: bool,
+    claude_code: bool,
+}
+
+impl PictureRoutes {
+    /// What every build ships.
+    pub(crate) const SHIPPED: Self = Self {
+        anthropic_key: ANTHROPIC_KEY_PICTURES,
+        claude_code: CLAUDE_CODE_PICTURES,
+    };
+
+    #[cfg(test)]
+    #[expect(
+        clippy::fn_params_excessive_bools,
+        reason = "one switch per Claude route"
+    )]
+    pub(crate) const fn new(anthropic_key: bool, claude_code: bool) -> Self {
+        Self {
+            anthropic_key,
+            claude_code,
+        }
+    }
+
+    /// Whether a request on `kind` may carry a picture at all.
+    pub(crate) const fn allows(self, kind: ConnectionKind) -> bool {
+        match kind {
+            ConnectionKind::ChatGpt => true,
+            ConnectionKind::AnthropicKey => self.anthropic_key,
+            ConnectionKind::ClaudeCode => self.claude_code,
+        }
     }
 }
 
@@ -165,12 +225,71 @@ impl Coordinator {
     }
 
     /// Whether runs on `kind` can be answered now.
-    pub(super) fn availability_of(&self, kind: ConnectionKind) -> &Availability {
+    pub(crate) fn availability_of(&self, kind: ConnectionKind) -> &Availability {
         match kind {
             ConnectionKind::ChatGpt => &self.availability,
             ConnectionKind::AnthropicKey => &self.anthropic_key,
             ConnectionKind::ClaudeCode => &self.claude_code,
         }
+    }
+
+    /// Which routes may carry a picture.
+    pub(crate) fn pictures(&self) -> PictureRoutes {
+        self.pictures
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_pictures(&mut self, pictures: PictureRoutes) {
+        self.pictures = pictures;
+        self.revoke_pictures();
+    }
+
+    /// Whether a run's picture may go out on `route` to `model` now. `ChatGPT` sends one on any
+    /// of its models, as the hold's gate allowed. A Claude route needs its switch on, the run's
+    /// own sign-in still ready, and that sign-in's fresh fact that the model takes pictures.
+    pub(super) fn pictured(&self, route: Route, model: Option<&ModelSlug>) -> bool {
+        if route.kind == ConnectionKind::ChatGpt {
+            return true;
+        }
+        matches!(self.availability_of(route.kind), Availability::Ready(ready) if ready.connection == route.tag)
+            && model.is_some_and(|model| self.takes_pictures(route.kind, model))
+    }
+
+    /// Whether `kind` may take a picture for `model` now, whatever its sign-in: `ChatGPT` as its
+    /// hold's gate allowed, a Claude route by its switch and its fresh fact.
+    pub(crate) fn takes_pictures(&self, kind: ConnectionKind, model: &ModelSlug) -> bool {
+        if kind == ConnectionKind::ChatGpt {
+            return true;
+        }
+        let Availability::Ready(ready) = self.availability_of(kind) else {
+            return false;
+        };
+        self.pictures.allows(kind) && ready.images.contains(model)
+    }
+
+    /// Whether a request on `route` for `choice` may carry its run's picture now: always on
+    /// `ChatGPT`, whose hold's gate allowed it, and on a Claude route as [`Self::pictured`] says.
+    pub(super) fn request_pictured(
+        &self,
+        route: Option<Route>,
+        choice: Option<&ModelChoice>,
+    ) -> bool {
+        match (route, choice) {
+            (_, Some(choice)) if choice.connection == ConnectionKind::ChatGpt => true,
+            (Some(route), Some(choice)) => {
+                route.kind == choice.connection && self.pictured(route, Some(&choice.model))
+            }
+            _ => false,
+        }
+    }
+
+    /// Whether `run`'s picture may go now, on its route to its chosen model.
+    pub(super) fn run_pictured(&self, run: &super::Run) -> bool {
+        let choice = run
+            .snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot.choice.as_ref());
+        self.request_pictured(run.route, choice)
     }
 
     /// The sign-in each kind has ready now, which a new turn records.
@@ -203,6 +322,7 @@ impl Coordinator {
             ConnectionKind::ClaudeCode => &mut self.claude_code,
         };
         *entry = now;
+        self.revoke_pictures();
         // A `ChatGPT` job follows the account's sign-in and sign-out instead.
         let job = self.job.as_ref().map(|job| job.route);
         if kind != ConnectionKind::ChatGpt

@@ -728,6 +728,17 @@ fn serve_op(store: &mut Store, purger: &mut Purger, acks: &UnboundedSender<Input
             }
             purger.op_arrived(store);
         }
+        StoreOp::CantSeeScreen { run } => {
+            purger.op_arriving();
+            if store
+                .reconnect()
+                .and_then(|()| store.cant_see_screen(run))
+                .is_err()
+            {
+                tracing::warn!("an unsent screen's omission wasn't stored");
+            }
+            purger.op_arrived(store);
+        }
         StoreOp::BeginTurn {
             thread,
             title,

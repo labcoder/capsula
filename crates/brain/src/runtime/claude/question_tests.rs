@@ -1632,7 +1632,7 @@ async fn with_no_question_left_the_lease_goes_back_unused_and_nothing_is_seeded(
     };
     assert_eq!(
         played.inputs.try_recv().ok(),
-        Some(Input::SendSettled { lease }),
+        Some(Input::SendUnsent { lease }),
         "settled before the round ended"
     );
     assert!(rig.stdin().iter().all(|line| !line.ends_with(" user")));
@@ -2103,7 +2103,7 @@ async fn a_grant_ready_with_its_expired_deadline_seeds_nothing() {
         seen,
         [TurnEvent::Finished(Finish::Failed(EngineFailure::Provider))]
     );
-    assert_eq!(inputs.try_recv().ok(), Some(Input::SendSettled { lease }));
+    assert_eq!(inputs.try_recv().ok(), Some(Input::SendUnsent { lease }));
     assert_eq!(rig.reported(id).await, [launch::Outcome::Deadline]);
     assert!(rig.stdin().iter().all(|line| !line.ends_with(" user")));
     assert!(rig.claude.budget.reserve(), "no question was spent");

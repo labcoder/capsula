@@ -109,8 +109,9 @@ impl Coordinator {
             .snapshot
             .as_ref()
             .and_then(|snapshot| snapshot.choice.as_ref());
+        let pictured = self.request_pictured(current.route, choice);
         (self.screen_marks != ScreenMarks::Off)
-            .then(|| Screen::canvas(current.screen.as_ref(), choice))
+            .then(|| Screen::canvas(current.screen.as_ref(), pictured))
     }
 
     pub(crate) fn drawing_described(&mut self) {

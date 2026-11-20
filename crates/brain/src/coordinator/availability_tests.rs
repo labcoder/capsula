@@ -30,6 +30,7 @@ fn ready(connection: u64, models: &[&str]) -> Input {
             connection: ConnectionTag(connection),
             models: models.iter().map(|slug| info(slug)).collect(),
             trusted_draw: false,
+            images: Vec::new(),
         }),
     )
 }
@@ -367,6 +368,7 @@ fn the_grant_checks_the_runs_connection_itself() {
         connection: ConnectionTag(8),
         models: vec![info("m")],
         trusted_draw: false,
+        images: Vec::new(),
     });
     let mut refused = vec![Effect::Rebuild(SendKey::Build(key(1)))];
     refused.extend(failed(Some(sign_in())));
@@ -614,6 +616,7 @@ fn claude_ready(tag: u64) -> Input {
         connection: ConnectionTag(tag),
         models: vec![info("haiku")],
         trusted_draw: false,
+        images: Vec::new(),
     }))
 }
 
@@ -745,6 +748,7 @@ fn kind_ready(kind: kumochi_protocol::message::ConnectionKind, tag: u64) -> Inpu
             connection: ConnectionTag(tag),
             models: vec![info("haiku")],
             trusted_draw: false,
+            images: Vec::new(),
         }),
     )
 }
@@ -1126,6 +1130,7 @@ fn a_choice_changed_during_the_wait_routes_as_the_new_choice() {
             connection: ConnectionTag(8),
             models: vec![info("haiku")],
             trusted_draw: false,
+            images: Vec::new(),
         }),
     );
     assert_eq!(core.handle(later), Ok(Vec::new()));
