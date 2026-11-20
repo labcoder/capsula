@@ -1004,4 +1004,9 @@ fn a_discarded_segment_keeps_ingress_order_and_never_stages_late_pcm() {
     let feed = engine.feed(&mut [0; 480], Some(SegmentId(0))).unwrap();
     assert_eq!((feed.segment, feed.at, feed.len), (SegmentId(2), 962, 8));
     assert_eq!(engine.progress.heard, 480);
+    let limit = kumochi_protocol::message::MAX_SEGMENTS_PER_RUN;
+    engine.discard(SegmentId(limit - 1), ms(10));
+    engine.discard(SegmentId(limit), ms(10));
+    assert!(engine.queue.discarded(SegmentId(limit - 1)));
+    assert!(!engine.queue.discarded(SegmentId(limit)));
 }
