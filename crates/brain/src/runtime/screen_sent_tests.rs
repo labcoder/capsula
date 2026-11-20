@@ -326,6 +326,10 @@ async fn played(wire: Wire) -> (Vec<ControlToShell>, Vec<Option<String>>) {
 /// Plays a screen hold whose picture is sealed and whose send meets `wire`; the `HoldScreen`s
 /// the shell was told, the run's stored screen, and for [`Wire::Kept`] the user turn the history
 /// read after Stop showed.
+#[expect(
+    clippy::too_many_lines,
+    reason = "one scripted send through a whole hold"
+)]
 async fn play(
     wire: Wire,
 ) -> (
@@ -541,12 +545,18 @@ struct OffMidSend {
 
 /// A screen hold's send held at `at`, then show-screen Off with its save held, then the send let
 /// go, then the save finished by `save`, then show-screen On.
-#[expect(clippy::too_many_lines, reason = "one hold, one send and two settings, in order")]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one hold, one send and two settings, in order"
+)]
 async fn off_mid_send(at: At, save: Gate) -> OffMidSend {
     use crate::runtime::hold::tests::screen_hold::{recognized, release as released, seeing};
     type Request = <crate::screen::Holds as crate::supervise::Kind>::Request;
     type Reply = <crate::screen::Holds as crate::supervise::Kind>::Reply;
-    let scratch = Scratch::new(&format!("hold-screen-off-{at:?}-{}", matches!(save, Gate::Panic)));
+    let scratch = Scratch::new(&format!(
+        "hold-screen-off-{at:?}-{}",
+        matches!(save, Gate::Panic)
+    ));
     let (mut brain, release, mut decoded, _fetch) =
         input(&scratch, vec![105, -5], "words and a picture").await;
     let mut rig = seeing(&mut brain);
@@ -698,11 +708,9 @@ async fn show_screen_answer(shell: &mut Shell<tokio::io::DuplexStream>) -> bool 
     }
 }
 
-fn unavailable() -> Option<kumochi_protocol::message::UserError> {
-    Some(
-        kumochi_protocol::message::UserError::new(ErrorKey::ScreenUnavailable, Vec::new(), Vec::new())
-            .expect("valid"),
-    )
+fn unavailable() -> kumochi_protocol::message::UserError {
+    kumochi_protocol::message::UserError::new(ErrorKey::ScreenUnavailable, Vec::new(), Vec::new())
+        .expect("valid")
 }
 
 /// Off while an admitted write or flush poll is pending and the save is held: the send is cut at
@@ -721,7 +729,7 @@ async fn show_screen_off_cuts_an_admitted_send_before_its_save_finishes() {
                 Box::pin(off_mid_send(at, save)).await,
                 OffMidSend {
                     polls: (polls, polls),
-                    error: unavailable(),
+                    error: Some(unavailable()),
                     told: told.clone(),
                     answers,
                     after_on: polls,
@@ -743,7 +751,7 @@ async fn show_screen_off_before_any_write_leaves_the_picture_unsent() {
             Box::pin(off_mid_send(At::Connect, save)).await,
             OffMidSend {
                 polls: (0, 0),
-                error: unavailable(),
+                error: Some(unavailable()),
                 told: Vec::new(),
                 answers,
                 after_on: 0,
