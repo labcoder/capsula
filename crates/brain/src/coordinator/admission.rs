@@ -103,6 +103,10 @@ pub enum Unbuilt {
 
 /// The current run's build.
 #[derive(Debug)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "each flag is its own fact about the admitted request, not one state spread over flags"
+)]
 pub(super) struct Build {
     pub(super) control: crate::recall::control::CancelOnDrop,
     key: BuildKey,
