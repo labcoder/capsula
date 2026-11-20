@@ -2609,7 +2609,8 @@ async fn a_turn_deadline_during_recheck_keeps_the_observed_provider_failure() {
         .pre_tools(BOTH_TOOLS)
         .post_tools(BOTH_TOOLS);
     let mut rig = Rig::new(name, &script).await;
-    let mut brain = brain_on(&mut rig, name);
+    let scratch = Scratch::new(name);
+    let mut brain = brain_on(&mut rig, &scratch);
     let run = started_provider_recheck(&mut brain, &rig.base).await;
     let effects = brain.handle(Input::Deadline { run }).unwrap();
     assert_eq!(
@@ -2621,6 +2622,7 @@ async fn a_turn_deadline_during_recheck_keeps_the_observed_provider_failure() {
     );
     brain.apply(effects, None).unwrap();
     assert!(brain.claude.close(soon()).await);
+    brain.close().await;
 }
 
 #[tokio::test]
@@ -2722,7 +2724,8 @@ async fn stop_beats_the_recheck_reply_but_does_not_hide_confirmed_account_status
             .to_string(),
     )
     .unwrap();
-    let mut brain = brain_on(&mut rig, name);
+    let scratch = Scratch::new(name);
+    let mut brain = brain_on(&mut rig, &scratch);
     let run = started_provider_recheck(&mut brain, &rig.base).await;
     let done = timeout(WAIT, brain.claude.lane.as_mut().unwrap().next())
         .await
@@ -2755,6 +2758,7 @@ async fn stop_beats_the_recheck_reply_but_does_not_hide_confirmed_account_status
         ClaudeCodeView::SignedOut { version: V }
     );
     assert!(brain.claude.close(soon()).await);
+    brain.close().await;
 }
 
 #[tokio::test]
