@@ -28,6 +28,7 @@ const SECOND: &str =
     r#",{"step":{"id":"s2","put":[{"shape":{"id":"b","kind":"rect","box":[20,0,10,10]}}]}}"#;
 const THIRD: &str =
     r#",{"step":{"id":"s3","put":[{"shape":{"id":"c","kind":"rect","box":[40,0,10,10]}}]}}"#;
+const MODEL: &str = "offline-model";
 
 #[cfg(all(windows, debug_assertions))]
 #[tokio::test]
@@ -167,25 +168,29 @@ fn assert_draw_receipt(rows: &[String], run: kumochi_protocol::message::RunId, s
     }
 }
 
-fn brain(scratch: &Scratch) -> Brain {
+pub(super) fn brain(scratch: &Scratch) -> Brain {
     let mut brain = test_support::brain(scratch, "60000 text never");
-    let slug = ModelSlug::new("offline-model").expect("model slug");
     let pending = brain
         .config
         .stage(SettingsOp::SetDefaultModel(ModelChoice {
-            model: slug.clone(),
+            model: ModelSlug::new(MODEL).expect("model slug"),
             effort: Effort::Low,
             connection: ConnectionKind::ChatGpt,
         }))
         .expect("scratch model choice");
     pending.write().expect("scratch settings");
     brain.config.commit(pending);
-    brain.offline(Input::Engines(
-        kumochi_protocol::message::ConnectionKind::ChatGpt,
+    brain.offline(provider_ready());
+    brain
+}
+
+pub(super) fn provider_ready() -> Input {
+    Input::Engines(
+        ConnectionKind::ChatGpt,
         Availability::Ready(Ready {
             connection: ConnectionTag(0),
             models: vec![ModelInfo {
-                slug,
+                slug: ModelSlug::new(MODEL).expect("model slug"),
                 display_name: ModelName::new("Offline model").expect("model name"),
                 supported_efforts: kumochi_protocol::message::EffortSet::new([
                     kumochi_protocol::message::Effort::Low,
@@ -193,8 +198,7 @@ fn brain(scratch: &Scratch) -> Brain {
             }],
             trusted_draw: false,
         }),
-    ));
-    brain
+    )
 }
 
 fn apply(brain: &mut Brain, link: &mut Link<'_, '_>, input: Input) {
