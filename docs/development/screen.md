@@ -500,6 +500,14 @@ actor's messages and the zeroing reply reader. The image gate takes the platform
 `WINDOW_CAPTURE` as well as the client, so off Windows it reads `Unsupported` even though the
 client starts.
 
+The gate itself is `runtime/screen_gate.rs`, one for every route. `ChatGPT` reads its
+account's catalog. A Claude route also needs its own switch, `ANTHROPIC_KEY_PICTURES` or
+`CLAUDE_CODE_PICTURES`, consts that are off in every build (only changing the const turns one
+on; tests alone have a setter), and the chosen model in the route's `Ready.images`: the
+key's fresh catalog fact (accounts.md) or the admitted Claude Code version's row, which lists
+no model yet. A picture fact changing alone never fails a hold or a run; only the picture it
+covers is dropped, at the build or the grant (engines.md, "A held run's screen").
+
 Whether this system can capture a window is the worker's answer, not the brain's. The worker
 asks when it opens its capturer, on a hold's first capture, and a no comes back as the
 `Unsupported` refusal. That hold ends `NotReady`, with no image and no line beyond what
