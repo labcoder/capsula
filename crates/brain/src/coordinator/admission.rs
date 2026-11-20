@@ -386,12 +386,7 @@ impl Coordinator {
             .as_ref()
             .is_some_and(|screen| request.add_screen(screen, pictured).is_err())
         {
-            // A picture still held here was carried by an earlier send, so it may have been written.
-            let reason = if !pictured
-                && matches!(
-                    current.screen,
-                    Some(crate::context::Screen::Image(_) | crate::context::Screen::Picture(..))
-                ) {
+            let reason = if !pictured && current.exposed() {
                 current.picture_stopped()
             } else {
                 kumochi_protocol::message::ErrorKey::ScreenUnavailable.into()

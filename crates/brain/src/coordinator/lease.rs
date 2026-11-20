@@ -195,6 +195,14 @@ impl Coordinator {
         }
     }
 
+    /// Why the current run ends now: a send may have written its picture, which may no longer go,
+    /// so no later request of the run may start.
+    pub(super) fn written_picture_lost(&self) -> Option<kumochi_protocol::message::UserError> {
+        let run = self.current.as_ref()?;
+        (run.exposed() && (run.screen_lost.is_some() || !self.run_pictured(run)))
+            .then(|| run.picture_stopped())
+    }
+
     /// The current run's picture may no longer go: its build goes again, without the picture
     /// when no send may have written it, and otherwise its admission fails closed.
     fn rebuild_without_picture(
@@ -281,15 +289,14 @@ impl Coordinator {
             && run
                 .route
                 .is_some_and(|route| route.kind != ConnectionKind::ChatGpt);
+        if let Some(reason) = self.written_picture_lost() {
+            effects.push(Effect::Rebuild(SendKey::Build(key)));
+            self.fail_with(key.run, Failure::Engine, reason, effects)
+                .expect("the run is current");
+            return;
+        }
         if pictured && (run.screen_lost.is_some() || !self.run_pictured(run)) {
             effects.push(Effect::Rebuild(SendKey::Build(key)));
-            // The grant took the untold image, so a send may have written it: the run ends.
-            if run.untold.is_none() {
-                let reason = run.picture_stopped();
-                self.fail_with(key.run, Failure::Engine, reason, effects)
-                    .expect("the run is current");
-                return;
-            }
             self.rebuild_without_picture(key, &pending, effects);
             return;
         }
@@ -373,8 +380,13 @@ impl Coordinator {
                 run.id == key.run && run.build.as_ref().is_some_and(|build| build.key() == key)
             })
         {
-            let pending = self.pending_deletes();
-            self.rebuild_without_picture(key, &pending, effects);
+            if let Some(reason) = self.written_picture_lost() {
+                self.fail_with(key.run, Failure::Engine, reason, effects)
+                    .expect("the run is current");
+            } else {
+                let pending = self.pending_deletes();
+                self.rebuild_without_picture(key, &pending, effects);
+            }
         }
         if !self.leases[at].failed {
             self.leases.remove(at);

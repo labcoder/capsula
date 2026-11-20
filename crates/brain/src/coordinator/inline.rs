@@ -96,6 +96,9 @@ impl Coordinator {
         room: usize,
         effects: &mut Vec<Effect>,
     ) -> Result<(), Stale> {
+        if let Some(reason) = self.written_picture_lost() {
+            return self.fail_with(key.run, Failure::Engine, reason, effects);
+        }
         self.attempts += 1;
         let attempt = self.attempts;
         let exposed = self.pending_deletes();

@@ -118,6 +118,12 @@ impl super::Run {
         })
     }
 
+    /// Whether a send of the run may have written its picture: a grant took the held image and no
+    /// settlement has proved that send unsent.
+    pub(super) fn exposed(&self) -> bool {
+        self.untold.is_none() && matches!(self.screen, Some(Screen::Image(_) | Screen::Picture(..)))
+    }
+
     /// Why the run ends when its picture may no longer go after a send may have written it.
     pub(super) fn picture_stopped(&self) -> kumochi_protocol::message::UserError {
         match self.screen_lost {

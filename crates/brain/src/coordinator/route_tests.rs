@@ -986,6 +986,8 @@ fn a_granted_picture_lost_and_back_stays_shut_and_a_written_one_never_goes_again
             })
             .expect("current");
         if unsent {
+            assert_eq!(written_settlement(&settled), (0, 0, 0));
+            assert_eq!(told_cant_see(&settled), 1);
             let again = super::engine_key(&core, R);
             assert_ne!(again, key(), "built again");
             let rebuilt = core
@@ -1199,5 +1201,103 @@ fn a_later_build_of_a_written_picture_lost_since_ends_as_the_picture_stopping() 
     assert_eq!(
         failure(&rebuilt),
         Some(kumochi_protocol::message::ErrorKey::ScreenPictureStopped.into())
+    );
+}
+
+/// A key run whose first pictured round was written, and whose picture is then lost, sends
+/// nothing more: neither the inline compaction a hungry continuation would take, before its read
+/// or after it, nor a later pictured grant that proves unsent, which reads no replacement.
+#[test]
+fn a_written_picture_lost_stops_every_later_send_of_its_run() {
+    use crate::coordinator::{CompactBuilt, JobAsk, PictureRoutes, Unbuilt};
+    let stopped: Option<UserError> =
+        Some(kumochi_protocol::message::ErrorKey::ScreenPictureStopped.into());
+    let reads = |effects: &[Effect]| {
+        effects.iter().any(|effect| {
+            matches!(
+                effect,
+                Effect::Store(StoreOp::BuildContext(_) | StoreOp::CompactContext(_))
+            )
+        })
+    };
+    let mut outcomes = Vec::new();
+    for schedule in [
+        "before the inline read",
+        "during the inline read",
+        "later grant unsent",
+    ] {
+        let (mut core, _) = pictured_run(KEY, PictureRoutes::new(true, false));
+        let ask = |key| Input::SendReady {
+            key: SendKey::Build(key),
+            hold: None,
+        };
+        let first = lease_of(&core.handle(ask(key())).expect("current"));
+        core.handle(Input::SendSettled { lease: first })
+            .expect("written");
+        if schedule == "before the inline read" {
+            the_fact_goes_and_comes_back(&mut core);
+        }
+        let mut effects = Vec::new();
+        core.build(R, 2, &mut effects);
+        let second = super::engine_key(&core, R);
+        if schedule == "later grant unsent" {
+            core.handle(built_for(second, &choice(KEY, "m")))
+                .expect("current");
+            let lease = lease_of(&core.handle(ask(second)).expect("current"));
+            the_fact_goes_and_comes_back(&mut core);
+            let unsent = core.handle(Input::SendUnsent { lease }).expect("current");
+            outcomes.push((schedule, reads(&unsent), failure(&unsent)));
+            continue;
+        }
+        let hungry = core
+            .handle(Input::ContextBuilt(ContextBuilt {
+                key: second,
+                snapshot: None,
+                result: Err(Unbuilt::TooLarge { room: Some(500) }),
+            }))
+            .expect("current");
+        if schedule == "before the inline read" {
+            outcomes.push((schedule, reads(&hungry), failure(&hungry)));
+            continue;
+        }
+        assert!(reads(&hungry), "the compaction reads");
+        the_fact_goes_and_comes_back(&mut core);
+        let inline = super::engine_key(&core, R);
+        core.handle(Input::CompactBuilt(CompactBuilt {
+            key: inline,
+            result: Ok(Some((
+                JobAsk {
+                    generation: Generation(5),
+                    built: Built {
+                        request: ModelRequest {
+                            choice: Some(choice(KEY, "m")),
+                            instructions: String::new(),
+                            input: vec![user()],
+                            tools: Vec::new(),
+                        },
+                        sources: vec![T],
+                    },
+                    covers: Some((
+                        kumochi_protocol::message::EventId(20),
+                        kumochi_protocol::message::EventId(31),
+                    )),
+                },
+                100,
+            ))),
+        }))
+        .expect("current");
+        let refused = core.handle(ask(inline)).expect("current");
+        let granted = refused
+            .iter()
+            .any(|effect| matches!(effect, Effect::Grant(_)));
+        outcomes.push((schedule, granted, failure(&refused)));
+    }
+    assert_eq!(
+        outcomes,
+        [
+            ("before the inline read", false, stopped.clone()),
+            ("during the inline read", false, stopped.clone()),
+            ("later grant unsent", false, stopped),
+        ]
     );
 }
