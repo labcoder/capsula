@@ -26,6 +26,12 @@ mod gate;
 const COMMANDS: usize = 16;
 const SERVICE: usize = 8;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum OwnerExit {
+    Closed,
+    ReportRefused,
+}
+
 #[derive(Clone, Copy, Debug)]
 pub(super) enum Command {
     Expect,
@@ -126,7 +132,7 @@ pub(super) fn spawn(
     origin: Instant,
     drawing: impl DrawingIo,
     give: impl FnMut(Credit) + Send + 'static,
-    report: impl FnMut(ControlToBrain) + Send + 'static,
+    report: impl FnMut(ControlToBrain) -> bool + Send + 'static,
 ) -> io::Result<Input> {
     let (commands, pending) = mpsc::sync_channel(COMMANDS);
     let (packets, data) = mpsc::sync_channel(1);
@@ -171,7 +177,7 @@ fn own(
     origin: Instant,
     drawing: Drawing,
     give: impl FnMut(Credit),
-    report: impl FnMut(ControlToBrain),
+    report: impl FnMut(ControlToBrain) -> bool,
     start: impl FnOnce(Thread, Instant) -> io::Result<(SyncSender<Request>, Receiver<Reply>)>,
 ) {
     let Ok((send, replies)) = start(thread::current(), origin) else {
@@ -198,7 +204,7 @@ impl Worker {
         port: &Port,
         origin: Instant,
         mut give: impl FnMut(Credit),
-        mut report: impl FnMut(ControlToBrain),
+        mut report: impl FnMut(ControlToBrain) -> bool,
     ) {
         let mut source = Zeroizing::new([0; 480]);
         let mut receipts = Receipts::default();
@@ -212,7 +218,14 @@ impl Worker {
                     self.stop(now, &mut |credit| port.credit(credit, &mut give));
                     true
                 });
-            receipts.publish(&self.engine, now, &mut report);
+            if !receipts.publish(&self.engine, now, &mut report) {
+                port.closed.store(true, Ordering::Release);
+                self.stop(now, &mut |credit| port.credit(credit, &mut give));
+                if let Some(drawing) = &mut self.drawing {
+                    drawing.report_refused();
+                }
+                return;
+            }
             if again {
                 continue;
             }
