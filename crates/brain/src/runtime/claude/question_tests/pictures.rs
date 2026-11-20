@@ -1,4 +1,5 @@
 use std::path::Path;
+use std::sync::mpsc as std_mpsc;
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 
@@ -7,6 +8,18 @@ use crate::context::{InputItem, Jpeg, Role};
 use crate::engines::ClaudeStreamFailure;
 use crate::engines::claude_code::lane::tests::PICTURE_JPEG;
 use crate::screen::ScreenContext;
+
+type TeardownBarrier = (oneshot::Sender<()>, std_mpsc::Receiver<()>);
+static PICTURE_TEARDOWN: Mutex<Option<TeardownBarrier>> = Mutex::new(None);
+
+fn hold_picture_teardown(job: &Job) -> io::Result<()> {
+    let barrier = PICTURE_TEARDOWN.lock().expect("test barrier").take();
+    if let Some((reached, resume)) = barrier {
+        reached.send(()).ok();
+        resume.recv_timeout(WAIT).map_err(io::Error::other)?;
+    }
+    job.terminate()
+}
 
 fn request_with(image: Jpeg) -> RunRequest {
     let mut request = choosing("haiku", Effort::Low, ConnectionKind::ClaudeCode);
@@ -28,7 +41,8 @@ fn pictured_lease(rig: &mut Rig, played: &Played, picture: PictureGrant) -> Answ
     let Answer::Grant(lease) = played.lease() else {
         panic!("test grant");
     };
-    rig.claude.picture_granted(played.key, picture.clone());
+    rig.claude
+        .picture_granted(played.key, Some(ConnectionKind::ClaudeCode), picture.clone());
     Answer::Grant(lease.with_picture(Some(picture)))
 }
 
@@ -166,6 +180,61 @@ async fn a_missing_or_closed_grant_or_unsealed_capture_never_seeds() {
         until("removed after refusal", || !folder.exists()).await;
         rig.close().await;
     }
+}
+
+#[tokio::test]
+async fn closed_picture_grant_does_not_truncate_while_teardown_holds_the_receipt() {
+    let mut rig = Rig::with("picture-pump-rebuild", &offering_nothing(), |host| {
+        host.terminate = hold_picture_teardown;
+    })
+    .await;
+    let (reached, at_teardown) = oneshot::channel();
+    let (resume, held) = std_mpsc::channel();
+    *PICTURE_TEARDOWN.lock().expect("test barrier") = Some((reached, held));
+
+    let request = request_with(ScreenContext::fixture(PICTURE_JPEG).into_jpeg());
+    let question = rig.claude.question(&request).expect("admitted");
+    let key = request.key;
+    let (core, mut receipts) = mpsc::unbounded_channel();
+    let (engine, mut events) = mpsc::channel(1);
+    let asks = Asks::default();
+    let pump = engines::start(
+        &question,
+        request,
+        engine,
+        SendGate::new(key, Arc::clone(&asks), core.clone()),
+    );
+    assert!(
+        matches!(rig.drive(receipts.recv()).await, Some(Input::SendReady { key: asked, .. }) if asked == key)
+    );
+    let lease = LeaseId { key, send: 1 };
+    let grant = PictureGrant::open_for_tests();
+    grant.close();
+    engines::answer(
+        &asks,
+        key,
+        Answer::Grant(SendLease::new(lease, core).with_picture(Some(grant))),
+    );
+    timeout(WAIT, at_teardown)
+        .await
+        .expect("held teardown")
+        .expect("arrived");
+    let before_settlement = rig.drive(events.recv()).await;
+    let premature_receipt = receipts.try_recv();
+    resume.send(()).expect("release teardown");
+
+    assert_eq!(
+        before_settlement, None,
+        "the production pump must not synthesize Truncated"
+    );
+    assert_eq!(premature_receipt, Err(mpsc::error::TryRecvError::Empty));
+    assert_eq!(
+        timeout(WAIT, receipts.recv()).await.expect("settled"),
+        Some(Input::SendUnsent { lease })
+    );
+    assert_eq!(rig.stdin(), ["1 initialize", "1 mcp_status"]);
+    drop(pump);
+    rig.close().await;
 }
 
 #[tokio::test]
