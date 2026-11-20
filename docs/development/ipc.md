@@ -573,7 +573,9 @@ sequenceDiagram
   fences every run up to it, so the thread's frames still queued, or held for a `RunState`, are
   dropped, and their credit is granted once. The thread's scenes leave the visible set, and
   `ScenesRemoved` takes them off the drawing on the data pipe. `NotHidden` changes nothing: the
-  panel says the delete failed, and the user can try again.
+  panel says the delete failed, and the user can try again. Because the brain sends no
+  `EventsChanged` for a thread while it is deleting, the shell treats the answer as one for that
+  thread, so an open page of it is read again.
 - **Across connections.** The shell keeps each confirmed delete until it's answered, and sends
   it once per connection, after that connection's `Scenes`. A full control queue is retried
   every 250 ms [guess]. A delete that reached an earlier connection goes with `resend: true`,

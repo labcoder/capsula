@@ -78,6 +78,9 @@ impl Presence {
                 model.update(cx, |state, cx| {
                     if outcome == Deleted::NotHidden {
                         state.delete_failed = true;
+                        // The brain sends no events marker for a deleting thread; it stays, so
+                        // its open page is read again.
+                        state.events_changed(thread);
                     } else {
                         state.deleted(thread);
                     }
