@@ -20,6 +20,22 @@ pub use crate::speaker::queued::{FixturePlayback, serialize_playback};
 
 #[cfg(debug_assertions)]
 pub fn with_outbox_held(handle: &LinkHandle, session: &Session, run: impl FnOnce()) {
+    with_link_locks_held(handle, session, Hold::Outbox, run);
+}
+
+#[cfg(debug_assertions)]
+pub fn with_outbox_and_output_held(handle: &LinkHandle, session: &Session, run: impl FnOnce()) {
+    with_link_locks_held(handle, session, Hold::Both, run);
+}
+
+#[cfg(debug_assertions)]
+enum Hold {
+    Outbox,
+    Both,
+}
+
+#[cfg(debug_assertions)]
+fn with_link_locks_held(handle: &LinkHandle, session: &Session, locks: Hold, run: impl FnOnce()) {
     let (ready, held) = mpsc::channel();
     let (release, done) = mpsc::channel();
     thread::scope(|scope| {
@@ -34,10 +50,16 @@ pub fn with_outbox_held(handle: &LinkHandle, session: &Session, run: impl FnOnce
                 session.generation(),
                 "hold the exact connected outbox"
             );
-            ready
-                .send(())
-                .expect("the headless caller waits for the lock");
-            done.recv_timeout(Duration::from_secs(2))
+            let held = || {
+                ready
+                    .send(())
+                    .expect("the headless caller waits for the lock");
+                done.recv_timeout(Duration::from_secs(2))
+            };
+            match locks {
+                Hold::Outbox => held(),
+                Hold::Both => handle.shared.output.with_locked(held),
+            }
         });
         held.recv_timeout(PATIENCE)
             .expect("the fixture holds the outbox");

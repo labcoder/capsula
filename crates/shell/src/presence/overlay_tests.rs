@@ -94,6 +94,24 @@ fn prepare_scene_step_at(
     record: &[u8],
     now: Instant,
 ) {
+    prepare_run_scene_step_at(
+        presenter,
+        kumochi_protocol::message::RunId(6),
+        scene,
+        index,
+        record,
+        now,
+    );
+}
+
+fn prepare_run_scene_step_at(
+    presenter: &mut Presenter,
+    run: kumochi_protocol::message::RunId,
+    scene: SceneId,
+    index: u32,
+    record: &[u8],
+    now: Instant,
+) {
     let Record::Step(step) = parse_record(record).expect("fixture step") else {
         panic!("step");
     };
@@ -102,7 +120,7 @@ fn prepare_scene_step_at(
             1,
             Deferred::new(
                 DataToShell::SceneStepCommit {
-                    run: kumochi_protocol::message::RunId(6),
+                    run,
                     scene,
                     index,
                     step,

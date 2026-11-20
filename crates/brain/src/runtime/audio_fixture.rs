@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use kumochi_protocol::constants::{CONFIG_FILE, SESSION_LOCK};
 use kumochi_protocol::frame::{self, Pipe};
-use kumochi_protocol::message::{ControlToBrain, ControlToShell, RunId};
+use kumochi_protocol::message::{ControlToBrain, ControlToShell, RunId, SceneId};
 use tokio::sync::Notify;
 
 use crate::connections::account::Worker;
@@ -83,6 +83,7 @@ pub struct AudioProbe {
     stop: AtomicU64,
     quiet: AtomicU64,
     heard: AtomicU32,
+    scene_failed: std::sync::Mutex<Option<(RunId, SceneId)>>,
 }
 
 impl AudioProbe {
@@ -144,6 +145,17 @@ impl AudioProbe {
         self.heard.load(Ordering::Acquire)
     }
 
+    /// The last refused host scene and the Stop already received for it.
+    ///
+    /// # Panics
+    /// Panics if the fixture's control recorder is poisoned.
+    pub fn scene_failed(&self) -> Option<(RunId, SceneId)> {
+        *self
+            .scene_failed
+            .lock()
+            .expect("the fixture scene recorder is healthy")
+    }
+
     pub(super) async fn before_control(&self, bytes: &[u8]) {
         let mut bytes = bytes;
         let gate = match frame::read::<ControlToShell>(&mut bytes, Pipe::Control) {
@@ -166,6 +178,12 @@ impl AudioProbe {
             ControlToBrain::SpeechStopped { run, .. } => self.quiet.store(run.0, Ordering::Release),
             ControlToBrain::SpeechRetired(receipt) => {
                 self.heard.fetch_max(receipt.heard, Ordering::AcqRel);
+            }
+            ControlToBrain::SceneFailed { scene } => {
+                *self
+                    .scene_failed
+                    .lock()
+                    .expect("the fixture scene recorder is healthy") = Some((self.stop(), *scene));
             }
             _ => {}
         }

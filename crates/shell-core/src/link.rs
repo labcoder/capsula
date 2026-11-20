@@ -762,7 +762,8 @@ impl LinkHandle {
             ControlToBrain::Stop { .. }
                 | ControlToBrain::StopScenes { .. }
                 | ControlToBrain::ClearDrawing { .. }
-        ) {
+        ) || session.io.queued && matches!(&message, ControlToBrain::SceneFailed { .. })
+        {
             #[cfg(any(test, feature = "test-support"))]
             if let Some(recording) = &self.control_recording {
                 return recording.try_send(message).is_ok();

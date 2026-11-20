@@ -581,6 +581,13 @@ impl OutputOwner {
             .unwrap_or_else(PoisonError::into_inner) = Some(hook);
     }
 
+    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(all(windows, debug_assertions))]
+    pub(super) fn with_locked<T>(&self, run: impl FnOnce() -> T) -> T {
+        let _held = self.lock();
+        run()
+    }
+
     /// Ends `session`, from [`LinkHandle::end`] or first in the link thread's teardown, whichever
     /// comes first: claims stop matching, a bound microphone is cancelled, and the speaker's queue
     /// and the abort are let go here. Pending tails stay in the ledger; the inhibit stays for the

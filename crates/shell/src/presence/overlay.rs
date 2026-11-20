@@ -362,7 +362,7 @@ impl Presence {
                         )
                 });
                 if !sent {
-                    self.end_scene_connection();
+                    self.end_scene_connection(cx);
                     self.draw_changed(cx);
                     break;
                 }

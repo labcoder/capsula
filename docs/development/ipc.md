@@ -28,8 +28,9 @@ or close. Speech-start announcements and scene speech promises end the queued pa
 Each run uses the existing per-run worker. A Stop fences that run's late PCM, and a replacement
 cannot use closing a pipe or freeing a device permit as proof of quiet.
 Esc fences the scene before offering Stop or StopScenes to its exact session's control mailbox.
-The offer doesn't take the outbox mutex. If the mailbox or queued speaker refuses Stop, admission
-closes on that session before background teardown aborts either pipe. A new pair refused for
+A SceneFailed caused by host refusal follows in that same mailbox; neither offer takes the
+outbox mutex. If the scene stream is broken or the mailbox or queued speaker refuses Stop,
+admission closes on that session before background teardown aborts either pipe. A new pair refused for
 unproved quiet waits for explicit Retry. Only the old worker's positive local quiet proof pays
 that debt; the old receipt is never sent to the replacement. A refusal to queue a report on the
 live original session is still fatal to that session.
