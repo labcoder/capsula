@@ -111,10 +111,7 @@ impl super::Run {
             run: self.id,
             hold,
             outcome,
-            thread: self
-                .route
-                .is_some_and(|route| route.kind != ConnectionKind::ChatGpt)
-                .then_some(self.thread),
+            thread: self.thread,
         })
     }
 
@@ -199,6 +196,7 @@ impl Coordinator {
                 _ => effects.push(Effect::Store(StoreOp::WithdrawScreen { run: run.id })),
             }
         }
+        self.revoke_pictures();
         if let Some(run) = self.current.as_ref().filter(|run| {
             run.key_granted && matches!(run.screen, Some(crate::context::Screen::Withdrawn))
         }) {

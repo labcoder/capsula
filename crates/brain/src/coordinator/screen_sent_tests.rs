@@ -28,6 +28,13 @@ fn marked() -> Effect {
     Effect::Store(StoreOp::SentScreen { run: R })
 }
 
+fn refreshed() -> Effect {
+    Effect::EventsChanged {
+        hold: KEY,
+        thread: T,
+    }
+}
+
 /// Held image run R in task T, carrying B as a source too, with its first send granted and
 /// nothing told yet.
 fn granted() -> (Coordinator, LeaseId) {
@@ -71,7 +78,7 @@ fn only_a_send_that_may_have_written_marks_the_turn_s_picture_sent() {
     let again = lease_of(&sending(&mut core));
     assert_eq!(
         core.handle(Input::SendSettled { lease: again }).unwrap(),
-        [sent(), marked()]
+        [sent(), marked(), refreshed()]
     );
 }
 
@@ -80,7 +87,7 @@ fn a_send_that_may_have_written_tells_once_and_no_later_send_clears_the_mark() {
     let (mut core, lease) = granted();
     assert_eq!(
         core.handle(Input::SendSettled { lease }).unwrap(),
-        [sent(), marked()]
+        [sent(), marked(), refreshed()]
     );
     assert_eq!(core.handle(Input::SendSettled { lease }), Err(Stale));
     let again = lease_of(&sending(&mut core));
@@ -134,9 +141,9 @@ fn a_failed_lease_s_late_settlement_settles_its_picture_once_and_nothing_else() 
         };
         let late = core.handle(settle()).unwrap();
         let expected = if unsent {
-            vec![Effect::Store(StoreOp::ForgetScreen { run: R })]
+            vec![Effect::Store(StoreOp::ForgetScreen { run: R }), refreshed()]
         } else {
-            vec![sent(), marked()]
+            vec![sent(), marked(), refreshed()]
         };
         assert_eq!(late, expected, "unsent: {unsent}");
         assert_eq!(core.handle(settle()).unwrap(), [], "unsent: {unsent}");
@@ -152,14 +159,20 @@ fn withdrawing_while_a_send_carries_the_picture_waits_for_that_send() {
         withdrawals(&core.handle(Input::ScreenHoldsOff).unwrap()),
         []
     );
+    let unsent = core.handle(Input::SendUnsent { lease }).unwrap();
     assert_eq!(
-        core.handle(Input::SendUnsent { lease }).unwrap(),
-        [Effect::Store(StoreOp::WithdrawScreen { run: R })]
+        unsent[..2],
+        [
+            Effect::Store(StoreOp::WithdrawScreen { run: R }),
+            refreshed()
+        ]
     );
+    assert_eq!(withdrawals(&unsent), [R]);
+    assert_eq!(told(&unsent), Vec::<&Effect>::new());
     let (mut core, lease) = granted();
     assert_eq!(
         core.handle(Input::SendSettled { lease }).unwrap(),
-        [sent(), marked()]
+        [sent(), marked(), refreshed()]
     );
     let mut effects = core.handle(Input::ScreenHoldsOff).unwrap();
     effects.extend(ended(&mut core, 4));
@@ -181,7 +194,7 @@ fn an_old_send_that_wrote_nothing_clears_only_its_own_stopped_run() {
     assert_ne!(next, R);
     assert_eq!(
         core.handle(Input::SendUnsent { lease }).unwrap(),
-        [Effect::Store(StoreOp::ForgetScreen { run: R })]
+        [Effect::Store(StoreOp::ForgetScreen { run: R }), refreshed()]
     );
     assert_eq!(core.current_run(), Some(next));
 }

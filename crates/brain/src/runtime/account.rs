@@ -371,7 +371,12 @@ impl Accounts {
                         models: self.models().unwrap_or_default().to_vec(),
                         #[cfg(any(test, debug_assertions))]
                         trusted_draw: false,
-                        images: Vec::new(),
+                        images: self
+                            .catalog
+                            .listing
+                            .as_ref()
+                            .map(|listing| listing.images.clone())
+                            .unwrap_or_default(),
                     });
                 }
                 None => error(ErrorKey::SignInNeeded, Action::SignIn),

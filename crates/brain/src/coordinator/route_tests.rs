@@ -57,7 +57,7 @@ fn unavailable(kind: ConnectionKind, why: UserError) -> Input {
     Input::Engines(kind, Availability::Unavailable(why))
 }
 
-fn choice(kind: ConnectionKind, slug: &str) -> ModelChoice {
+pub(super) fn choice(kind: ConnectionKind, slug: &str) -> ModelChoice {
     ModelChoice {
         connection: kind,
         model: ModelSlug::new(slug).expect("slug"),
@@ -65,7 +65,7 @@ fn choice(kind: ConnectionKind, slug: &str) -> ModelChoice {
     }
 }
 
-fn key() -> BuildKey {
+pub(super) fn key() -> BuildKey {
     BuildKey {
         run: R,
         round: 1,
@@ -117,7 +117,7 @@ fn built(choice: Option<ModelChoice>) -> Input {
 }
 
 /// The reason run 10 failed with, when `effects` end it with one.
-fn failure(effects: &[Effect]) -> Option<UserError> {
+pub(super) fn failure(effects: &[Effect]) -> Option<UserError> {
     effects.iter().find_map(|effect| match effect {
         Effect::Control(ControlToShell::RunState {
             run: R,
@@ -327,7 +327,7 @@ fn only_a_chatgpt_route_gets_a_bearer() {
 }
 
 /// A hold on `choice` in `thread`, prepared after `inputs` and read.
-fn held(
+pub(super) fn held(
     inputs: Vec<Input>,
     choice: ModelChoice,
     thread: Option<ThreadId>,
@@ -475,7 +475,7 @@ fn another_connections_choice_fails_while_chatgpt_lists_its_slug() {
 }
 
 /// The key ready under `tag` with model `m`, its fresh fact saying `images` take pictures.
-fn pictured(tag: u64, images: &[&str]) -> Availability {
+pub(super) fn pictured(tag: u64, images: &[&str]) -> Availability {
     Availability::Ready(Ready {
         connection: ConnectionTag(tag),
         models: vec![info("m")],
@@ -487,18 +487,18 @@ fn pictured(tag: u64, images: &[&str]) -> Availability {
     })
 }
 
-fn jpeg() -> crate::context::Jpeg {
+pub(super) fn jpeg() -> crate::context::Jpeg {
     crate::context::Jpeg::new(vec![0xFF, 0xD8, 0xFF, 0xD9]).expect("a jpeg")
 }
 
-fn user() -> crate::context::InputItem {
+pub(super) fn user() -> crate::context::InputItem {
     crate::context::InputItem::Message {
         role: crate::context::Role::User,
         text: "words".to_owned(),
     }
 }
 
-fn line(text: &str) -> crate::context::InputItem {
+pub(super) fn line(text: &str) -> crate::context::InputItem {
     crate::context::InputItem::Message {
         role: crate::context::Role::Developer,
         text: text.to_owned(),
@@ -506,7 +506,7 @@ fn line(text: &str) -> crate::context::InputItem {
 }
 
 const SNAPSHOT: &str = "The image is a snapshot from when the user spoke.";
-const CANT_SEE: &str = "The screen was not included: this model can't be sent images.";
+pub(super) const CANT_SEE: &str = "The screen was not included: this model can't be sent images.";
 
 /// A build of `key` whose request names `choice`, with the first build's snapshot.
 pub(crate) fn built_for(key: BuildKey, choice: &ModelChoice) -> Input {
@@ -525,14 +525,14 @@ pub(crate) fn built_for(key: BuildKey, choice: &ModelChoice) -> Input {
     })
 }
 
-fn started_input(effects: &[Effect]) -> Option<Vec<crate::context::InputItem>> {
+pub(super) fn started_input(effects: &[Effect]) -> Option<Vec<crate::context::InputItem>> {
     effects.iter().find_map(|effect| match effect {
         Effect::StartEngine { request } => Some(request.request.input.clone()),
         _ => None,
     })
 }
 
-fn told_cant_see(effects: &[Effect]) -> usize {
+pub(super) fn told_cant_see(effects: &[Effect]) -> usize {
     effects
         .iter()
         .filter(|effect| {
@@ -752,9 +752,9 @@ fn a_revoked_picture_grant_that_wrote_nothing_rebuilds_without_the_picture() {
 }
 
 #[test]
-fn a_chatgpt_picture_grant_is_never_revocable() {
+fn a_chatgpt_picture_grant_is_revocable() {
     let (mut core, hold) = held(
-        vec![ready(CHATGPT, 7, &["m"])],
+        vec![Input::Engines(CHATGPT, pictured(7, &["m"]))],
         choice(CHATGPT, "m"),
         Some(T),
     );
@@ -780,7 +780,10 @@ fn a_chatgpt_picture_grant_is_never_revocable() {
             _ => None,
         })
         .expect("granted");
-    assert!(core.picture_grant(lease).is_none());
+    assert!(
+        core.picture_grant(lease)
+            .is_some_and(|grant| grant.is_open())
+    );
 }
 
 #[test]
@@ -1019,7 +1022,7 @@ fn lease_of(effects: &[Effect]) -> crate::coordinator::LeaseId {
 
 /// How many `HoldScreen`, `SentScreen` and `EventsChanged` a written settlement of run R's
 /// hold pushed, after checking the marker comes after the store op.
-fn written_settlement(effects: &[Effect]) -> (usize, usize, usize) {
+pub(super) fn written_settlement(effects: &[Effect]) -> (usize, usize, usize) {
     let hold = HoldKey {
         epoch: 0,
         gesture: GestureId(1),
@@ -1126,11 +1129,11 @@ fn a_written_settlement_sends_no_marker_for_a_thread_being_deleted_and_releases_
     assert_eq!(core.held_deletes(), Vec::<ThreadId>::new());
 }
 
-/// A `ChatGPT` picture's written settlement stays as on main: no marker.
+/// A `ChatGPT` picture's written settlement refreshes its thread, as on a Claude route.
 #[test]
-fn a_chatgpt_written_settlement_sends_no_marker() {
+fn a_chatgpt_written_settlement_refreshes_its_thread() {
     let (mut core, hold) = held(
-        vec![ready(CHATGPT, 7, &["m"])],
+        vec![Input::Engines(CHATGPT, pictured(7, &["m"]))],
         choice(CHATGPT, "m"),
         Some(T),
     );
@@ -1152,7 +1155,7 @@ fn a_chatgpt_written_settlement_sends_no_marker() {
             .expect("current"),
     );
     let settled = core.handle(Input::SendSettled { lease }).expect("settled");
-    assert_eq!(written_settlement(&settled), (1, 1, 0));
+    assert_eq!(written_settlement(&settled), (1, 1, 1));
 }
 
 /// Turning screen sharing off after a send carried the picture stops the key run with the

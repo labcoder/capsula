@@ -147,7 +147,8 @@ impl<C: Connect + 'static> Engine for Responses<C> {
 
 impl<C: Connect> Shared<C> {
     /// The checked body, then the bearer, then the ask inside the send, then the stream. A
-    /// Rebuild ends the round with nothing more, since the coordinator already dropped it.
+    /// Rebuild ends the round with no terminal outcome for the pump, since the coordinator already
+    /// dropped it or builds it again once the lease settles unsent.
     async fn round(
         &self,
         request: &RunRequest,
@@ -210,7 +211,7 @@ impl<C: Connect> Shared<C> {
         }
         drop(bearer);
         if read == Err(Failure::Rebuild) {
-            return None;
+            return Some(Finish::ReceiptOrdered);
         }
         for event in round.take() {
             events.send(event).await.ok()?;

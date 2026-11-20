@@ -188,11 +188,17 @@ sequenceDiagram
   `Rebuild` with nothing written; after one, it fails as `Transport` and its connection is
   closed, never pooled, because an admitted poll may have written even when it was pending,
   partial or failed. Closing wins only against new admissions: bytes an admitted poll already
-  handed to TLS or the kernel still go, so this orders writes, not the first byte at the peer.
-  Connecting and the TLS handshake are not request writes. No `ChatGPT` send carries a picture
-  grant yet, so on that route every poll is admitted.
-- **Picture grant.** A send carrying a picture on a Claude route also carries a revocable grant.
-  The coordinator closes it as soon as the run may no longer send that picture. The key route
+  handed to TLS or the kernel still go, so this orders writes, not the first byte at the peer,
+  and nothing here proves the peer received any of the request. Connecting and the TLS
+  handshake are not request writes. A refused send's round ends with `ReceiptOrdered`, so its
+  pump says nothing and the unsent receipt decides what follows.
+- **Picture grant.** A send carrying a picture also carries a revocable grant. On `ChatGPT`, so
+  does every later send of a run whose picture a send may have written, such as an inline
+  rewrite, though it carries no picture of its own and its settlement tells nothing. The
+  coordinator closes it as soon as the run may no longer send that picture: its route's fact no
+  longer lists the model as taking images (`ChatGPT`'s is its catalog's `input_modalities`, and a
+  loss holds for the rest of the run), the picture is withdrawn, or the run's sign-in changes.
+  The Responses transport admits each writer poll against it (see Write admission). The key route
   checks at its first write attempt, after any early response. Claude Code reserves each pipe
   write against the same grant. If no write was attempted, any terminal outcome goes behind the
   confirmed unsent receipt on that same channel. A closed grant makes the still-current build
@@ -208,6 +214,9 @@ sequenceDiagram
 - **The picture's settlement.** A lease carrying a hold's picture settles it once: unsent, the run is as if never
   granted (a later grant carries the picture again, or the run's end clears the mark); otherwise
   the shell is told `HoldScreen`. A failed lease's late settlement settles only the picture.
+  Whenever the settlement changes the turn's stored row, marking it sent or clearing it after
+  the run has gone, the shell is told its thread's events changed, unless that thread is being
+  deleted.
 - **Held deletes.** A delete whose thread an unsettled lease carries waits in `deleting` with no
   writer op. It goes out once, in the order accepted, when no lease carries it.
 - **Deadline.** A lease that hasn't settled 15 s [guess] after its grant fails closed: its held

@@ -44,8 +44,8 @@ pub struct Ready {
     pub(crate) connection: ConnectionTag,
     /// The account's catalog; empty until it's read.
     pub(crate) models: Vec<ModelInfo>,
-    /// The listed models a picture may go to on a Claude route: the route's own fact, fresh from
-    /// its current sign-in. `ChatGPT`'s pictures follow its account's catalog instead.
+    /// The listed models a picture may go to: the route's own fact, fresh from its current
+    /// sign-in, which for `ChatGPT` is its account's catalog listing image input.
     pub(crate) images: Vec<ModelSlug>,
     /// The dev fixture answers, so its draw calls draw though no request offers the tool.
     #[cfg(any(test, debug_assertions))]
@@ -112,8 +112,8 @@ pub(crate) const ANTHROPIC_KEY_PICTURES: bool = false;
 /// Turns pictures on for the Claude Code route. Only this const turns it on outside tests.
 pub(crate) const CLAUDE_CODE_PICTURES: bool = false;
 
-/// Which routes may carry a picture. `ChatGPT` always may; each Claude route only once its
-/// const is on, so no setting, message, variable or flag reaches it.
+/// Which routes may carry a picture. `ChatGPT` always may, by its catalog's fact; each Claude
+/// route only once its const is on, so no setting, message, variable or flag reaches it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct PictureRoutes {
     anthropic_key: bool,
@@ -245,38 +245,31 @@ impl Coordinator {
         self.revoke_pictures();
     }
 
-    /// Whether a run's picture may go out on `route` to `model` now. `ChatGPT` sends one on any
-    /// of its models, as the hold's gate allowed. A Claude route needs its switch on, the run's
-    /// own sign-in still ready, and that sign-in's fresh fact that the model takes pictures.
+    /// Whether a run's picture may go out on `route` to `model` now: the route allows pictures,
+    /// the run's own sign-in is still ready, and that sign-in's fresh fact says the model takes
+    /// them.
     pub(super) fn pictured(&self, route: Route, model: Option<&ModelSlug>) -> bool {
-        if route.kind == ConnectionKind::ChatGpt {
-            return true;
-        }
         matches!(self.availability_of(route.kind), Availability::Ready(ready) if ready.connection == route.tag)
             && model.is_some_and(|model| self.takes_pictures(route.kind, model))
     }
 
-    /// Whether `kind` may take a picture for `model` now, whatever its sign-in: `ChatGPT` as its
-    /// hold's gate allowed, a Claude route by its switch and its fresh fact.
+    /// Whether `kind` may take a picture for `model` now, whatever its sign-in: by its switch
+    /// and its fresh fact. The dev fixture has no catalog, so the hold's gate alone decides.
     pub(crate) fn takes_pictures(&self, kind: ConnectionKind, model: &ModelSlug) -> bool {
-        if kind == ConnectionKind::ChatGpt {
-            return true;
-        }
         let Availability::Ready(ready) = self.availability_of(kind) else {
             return false;
         };
-        self.pictures.allows(kind) && ready.images.contains(model)
+        self.pictures.allows(kind) && (ready.images.contains(model) || ready.trusted())
     }
 
-    /// Whether a request on `route` for `choice` may carry its run's picture now: always on
-    /// `ChatGPT`, whose hold's gate allowed it, and on a Claude route as [`Self::pictured`] says.
+    /// Whether a request on `route` for `choice` may carry its run's picture now, as
+    /// [`Self::pictured`] says.
     pub(super) fn request_pictured(
         &self,
         route: Option<Route>,
         choice: Option<&ModelChoice>,
     ) -> bool {
         match (route, choice) {
-            (_, Some(choice)) if choice.connection == ConnectionKind::ChatGpt => true,
             (Some(route), Some(choice)) => {
                 route.kind == choice.connection && self.pictured(route, Some(&choice.model))
             }

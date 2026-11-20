@@ -95,6 +95,12 @@ impl<C: Connect> ModelClient<C> {
         *self.lock() = Some((io, Instant::now()));
     }
 
+    /// Pools `io` as if a response had just finished on it.
+    #[cfg(test)]
+    pub(crate) fn pool_for_tests(&self, io: C::Io) {
+        self.put(io);
+    }
+
     fn lock(&self) -> std::sync::MutexGuard<'_, Option<(C::Io, Instant)>> {
         self.idle.lock().unwrap_or_else(PoisonError::into_inner)
     }
