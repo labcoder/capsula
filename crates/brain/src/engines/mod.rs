@@ -36,7 +36,7 @@ use tokio::task::AbortHandle;
 use crate::context::compact::clean_summary;
 use crate::context::{ModelRequest, Origin};
 use crate::coordinator::{
-    BuildKey, Input, JobKey, JobKind, JobOutput, LeaseId, PictureGrant, SendKey,
+    BuildKey, Input, JobKey, JobKind, JobOutput, LeaseId, PictureGrant, PictureWrite, SendKey,
 };
 
 /// Events a round queues ahead of its pump; the coordinator's own queue does the buffering.
@@ -263,9 +263,24 @@ impl SendLease {
     }
 }
 
+/// One writer poll a [`SendLease`] admitted, holding its picture grant's reservation if any.
+#[derive(Debug)]
+pub struct Admitted(
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "held for its drop, which ends the reservation")
+    )]
+    Option<PictureWrite>,
+);
+
 impl crate::connections::model::Lease for SendLease {
-    fn may_write(&self) -> bool {
-        self.picture.as_ref().is_none_or(PictureGrant::is_open)
+    type Write = Admitted;
+
+    /// Every poll of a send without a picture grant; with one, a poll the grant reserves.
+    fn admit(&self) -> Option<Admitted> {
+        self.picture.as_ref().map_or(Some(Admitted(None)), |grant| {
+            grant.reserve_write().map(|write| Admitted(Some(write)))
+        })
     }
 
     fn wrote(&mut self) {
@@ -789,6 +804,32 @@ mod tests {
             key: request().key,
             send: 1,
         }
+    }
+
+    #[test]
+    fn a_send_without_a_picture_grant_admits_every_writer_poll() {
+        use crate::connections::model::Lease;
+        let (_, inputs, _received) = gated();
+        let lease = SendLease::new(lease(), inputs);
+        let held = lease.admit().expect("admitted");
+        assert!(held.0.is_none(), "no reservation to hold");
+        assert!(lease.admit().is_some_and(|held| held.0.is_none()));
+    }
+
+    #[test]
+    fn a_send_with_a_picture_grant_admits_one_poll_at_a_time_until_closed() {
+        use crate::connections::model::Lease;
+        let (_, inputs, _received) = gated();
+        let grant = crate::coordinator::PictureGrant::open_for_tests();
+        let lease = SendLease::new(lease(), inputs).with_picture(Some(grant.clone()));
+        let held = lease.admit().expect("admitted");
+        assert!(held.0.is_some());
+        assert!(lease.admit().is_none(), "one poll at a time");
+        drop(held);
+        let held = lease.admit().expect("admitted again");
+        grant.close();
+        drop(held);
+        assert!(lease.admit().is_none());
     }
 
     #[tokio::test]

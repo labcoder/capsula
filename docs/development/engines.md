@@ -181,6 +181,16 @@ sequenceDiagram
   spent, a connect failure, its deadline while connecting, and a final head or EOF read before
   the first write all leave it unsent. The Claude Code stdin pump marks only a pictured seed,
   after the held grant's final check and just before its first write attempt.
+- **Write admission.** The Responses transport asks the lease to admit each poll of the request's
+  writer, every write and the flush, and holds that admission for the one poll. A send without a
+  picture grant admits every poll; one with a grant admits a poll only while it can reserve the
+  grant. A refusal stops every later poll: before any poll was admitted, the send ends as
+  `Rebuild` with nothing written; after one, it fails as `Transport` and its connection is
+  closed, never pooled, because an admitted poll may have written even when it was pending,
+  partial or failed. Closing wins only against new admissions: bytes an admitted poll already
+  handed to TLS or the kernel still go, so this orders writes, not the first byte at the peer.
+  Connecting and the TLS handshake are not request writes. No `ChatGPT` send carries a picture
+  grant yet, so on that route every poll is admitted.
 - **Picture grant.** A send carrying a picture on a Claude route also carries a revocable grant.
   The coordinator closes it as soon as the run may no longer send that picture. The key route
   checks at its first write attempt, after any early response. Claude Code reserves each pipe

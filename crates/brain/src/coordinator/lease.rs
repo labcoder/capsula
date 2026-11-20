@@ -67,6 +67,7 @@ impl PictureGrant {
 }
 
 /// One admitted pipe write. Dropping this permit doesn't reopen a closed grant.
+#[derive(Debug)]
 pub(crate) struct PictureWrite(Weak<AtomicU8>);
 
 impl Drop for PictureWrite {
