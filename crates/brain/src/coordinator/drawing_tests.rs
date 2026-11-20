@@ -248,6 +248,7 @@ fn narrated(core: &mut Coordinator, store: &mut Store, name: &str, plain: Option
         .expect("the narrated scene commits")
 }
 
+#[derive(Clone, Copy)]
 enum SceneRemoval {
     Clear,
     Failure,
@@ -309,6 +310,7 @@ fn pcm(segment: u32, seq: u32, samples: usize, last: Option<u32>) -> Effect {
     }))
 }
 
+#[derive(Clone, Copy)]
 enum SpeechAtRemoval {
     Latched,
     Active,
