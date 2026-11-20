@@ -51,16 +51,19 @@ run's first request starts, `NotIncluded` with one of seven fixed classes, the l
 thread is pinned to a model that can't be sent images. Nothing in it names a window. A history
 page carries the same value on the turn's user event as the appended
 `PageEventKind::HeldTurn { screen }` (tag 6), read from the run's stored `screen`
-([store](store.md#tables)). The value is stored with the turn, before any request exists, and
-the brain clears a picture when its run ends before any write of a request carrying it was
-attempted
+([store](store.md#tables)). The value is stored with the turn, before any request exists. A
+picture is stored pending: a page reads it as no picture while its run is active and as sent once
+the run has ended. A send that may have written it marks it sent, and the brain clears it when its
+run ends before any write of a request carrying it was attempted
 ([engines](engines.md#the-bound)). The shell shows a `HeldTurn`
 as a user turn with one thing under it. A turn whose picture is recorded (`Attached`, `Screen`)
 gets an icon whose tooltip and accessible label say which picture was sent and that the app
-keeps no copy. The icon is never missing from a turn whose picture left the machine. It
-over-reports only where the store does: a write that was attempted but may not have been
-accepted, a crash or a failed write before the clear, and a loaded row that a late clear reaches
-only when the thread is reopened. Any other turn gets one line saying why no
+keeps no copy. The icon can appear only after history refreshes: while a run is active a loaded
+turn stays plain until history is read again, so a missing icon doesn't prove no picture was
+sent. It over-reports where the store does: a write that was attempted but may not have been
+accepted, Kumochi exiting before the send outcome is recorded, and a failed write of the mark or
+of its clear. A late unsent settlement after the run ended leaves a loaded row saying sent until
+a re-read. Any other turn gets one line saying why no
 picture was included. Neither names a model, because nothing records which model a held turn
 ran on. `HeldScreen::Withdrawn` (tag 2) is
 appended for history only: a turn whose image the user withdrew by turning screen holds off

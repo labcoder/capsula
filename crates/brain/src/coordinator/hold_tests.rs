@@ -841,8 +841,14 @@ fn a_held_runs_screen_is_told_once_and_an_image_once_its_send_may_have_written_i
         let settled = core.handle(Input::SendSettled { lease }).unwrap();
         let sent: Vec<Effect> = held
             .filter(|_| !early)
-            .map(|outcome| Effect::HoldScreen { hold: KEY, outcome })
+            .map(|outcome| {
+                [
+                    Effect::HoldScreen { hold: KEY, outcome },
+                    Effect::Store(StoreOp::SentScreen { run: R }),
+                ]
+            })
             .into_iter()
+            .flatten()
             .collect();
         assert_eq!(settled, sent, "told once");
     }
@@ -1508,10 +1514,13 @@ fn an_inline_compaction_s_grant_leaves_a_held_image_untold() {
                     .expect("granted");
                 assert_eq!(
                     core.handle(Input::SendSettled { lease }).unwrap(),
-                    [Effect::HoldScreen {
-                        hold: KEY,
-                        outcome: HeldScreen::Attached,
-                    }]
+                    [
+                        Effect::HoldScreen {
+                            hold: KEY,
+                            outcome: HeldScreen::Attached,
+                        },
+                        Effect::Store(StoreOp::SentScreen { run: R })
+                    ]
                 );
             }
         }

@@ -291,22 +291,30 @@ pub enum StoreOp {
         /// The point.
         heard: crate::voice::reply::Heard,
     },
-    /// The user withdrew a run's image before any request carried it, so its turn's screen
-    /// becomes `withdrawn`. Nothing answers it: a failed write leaves `attached`, which
-    /// over-reports.
+    /// The user withdrew a run's image before any request carried it, so its turn's pending
+    /// picture becomes `withdrawn`. Nothing answers it: a failed write leaves it pending, which
+    /// recovery marks sent, an over-report.
     WithdrawScreen {
         /// The run.
         run: RunId,
     },
-    /// A run ended before any request carried its image, so its turn's `attached` or `screen`
-    /// becomes none. Nothing answers it: a failed write leaves the value, which over-reports.
+    /// A run ended before any request carried its image, so its turn's pending picture becomes
+    /// none. Nothing answers it: a failed write leaves it pending, which recovery marks sent, an
+    /// over-report.
     ForgetScreen {
         /// The run.
         run: RunId,
     },
     /// A run's image couldn't go to its model before any request carried it, so its turn's
-    /// `attached` or `screen` becomes `model_cant_see`. Nothing answers it.
+    /// pending picture becomes `model_cant_see`. Nothing answers it.
     CantSeeScreen {
+        /// The run.
+        run: RunId,
+    },
+    /// A send carrying a run's image may have written some of it, so its turn's pending picture
+    /// becomes `attached` or `screen`. Nothing answers it: a failed write leaves it pending,
+    /// which recovery marks sent.
+    SentScreen {
         /// The run.
         run: RunId,
     },
@@ -353,7 +361,8 @@ impl StoreOp {
             | Self::Heard { .. }
             | Self::WithdrawScreen { .. }
             | Self::ForgetScreen { .. }
-            | Self::CantSeeScreen { .. } => None,
+            | Self::CantSeeScreen { .. }
+            | Self::SentScreen { .. } => None,
         }
     }
 
@@ -438,7 +447,8 @@ impl StoreOp {
             Self::Heard { .. }
             | Self::WithdrawScreen { .. }
             | Self::ForgetScreen { .. }
-            | Self::CantSeeScreen { .. } => {
+            | Self::CantSeeScreen { .. }
+            | Self::SentScreen { .. } => {
                 return None;
             }
         })

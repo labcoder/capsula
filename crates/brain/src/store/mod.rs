@@ -422,6 +422,8 @@ impl Store {
              AND thread IN (SELECT id FROM threads WHERE state = 'live')",
             params![now_ms()],
         )?;
+        // No send is left to settle a pending picture, and whether one attempted a write is lost.
+        held::sent(&self.conn, None)?;
         (recovered.failed_sends, recovered.unknown_sends) = self.recover_sends()?;
         self.create_main()?;
         recovered.purge_pending = self.purge_pending;
@@ -465,7 +467,8 @@ impl Store {
     }
 
     /// [`Store::begin_turn`] for a hold's turn: `screen`, what the hold carried into it, goes in
-    /// the run's row in the same transaction, so it's committed before any request exists.
+    /// the run's row in the same transaction, so it's committed before any request exists; a
+    /// picture goes in pending, until a send carrying it settles.
     ///
     /// # Errors
     /// As [`Store::begin_turn`].
@@ -501,7 +504,7 @@ impl Store {
             "INSERT INTO runs (id, thread, state, started_ms, screen)
              SELECT ?1, ?2, 'active', ?3, ?4
              WHERE ?1 > coalesce((SELECT seq FROM sqlite_sequence WHERE name = 'runs'), 0)",
-            params![run, thread, now, screen.map(held::column)],
+            params![run, thread, now, screen.map(held::begun)],
         )?;
         if inserted == 0 {
             return Err(StoreError::StaleId);

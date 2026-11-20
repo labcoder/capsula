@@ -1605,5 +1605,5 @@ fn an_unsent_screen_is_cleared_after_its_turn() {
         .expect("the run's row")
     };
     assert_eq!(stored(1), None);
-    assert_eq!(stored(2).as_deref(), Some("attached"));
+    assert_eq!(stored(2).as_deref(), Some("pending_attached"));
 }
