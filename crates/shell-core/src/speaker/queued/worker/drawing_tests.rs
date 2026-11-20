@@ -435,3 +435,138 @@ fn failed_backend_start_and_idle_exit_notify_without_an_ingress_packet() {
         assert_eq!(io.writes(), 0);
     }
 }
+
+#[test]
+fn route_loss_retires_a_whole_copied_line_without_ending_its_binding() {
+    static OCCUPIED: AtomicBool = AtomicBool::new(false);
+    let (mut worker, input, port, _requests, _replies) = fake();
+    let io = FakeIo::attach(&mut worker, &port);
+    let key = io.view(1, 0, View::Eligible);
+    worker.engine.expect(ms(0));
+    let generation = worker.engine.request(ms(0)).unwrap();
+    assert!(worker.engine.opened(generation, Opened::Physical, ms(0)));
+    let mut playback = physical(&mut worker, generation, &OCCUPIED);
+
+    input.submit(packet(17, 0, 480, Some(480))).unwrap();
+    step(&mut worker, &port, ms(0));
+    let mut out = [0.0; 480];
+    playback.fill(&mut out, ms(100));
+    assert_eq!(out.map(f32::to_bits), [0.5f32.to_bits(); 480]);
+    step(&mut worker, &port, ms(10));
+    io.picture(
+        key,
+        RouteStamp::Live(generation),
+        PictureState::Owned(Picture::At(ms(100))),
+    );
+
+    worker.recover(ms(20));
+    step(&mut worker, &port, ms(20));
+    assert_eq!(worker.engine.progress.consumed, 480);
+    assert_eq!(worker.engine.progress.heard, 0);
+    assert_eq!(worker.engine.queue.completed, 1);
+    playback.fill(&mut [0.0; 128], ms(21));
+    step(&mut worker, &port, ms(22));
+    assert!(worker.physical.is_none());
+    let stamp = RouteStamp::Retired(generation);
+    io.picture(key, stamp, PictureState::Owned(Picture::Wait));
+    assert_eq!(worker.deadline(ms(22)), Some(ms(270)));
+    step(&mut worker, &port, ms(269));
+    io.picture(key, stamp, PictureState::Owned(Picture::Wait));
+    step(&mut worker, &port, ms(270));
+    io.picture(key, stamp, PictureState::Owned(Picture::Silent));
+}
+
+#[test]
+fn a_confirmed_line_after_an_earlier_virtual_gap_can_end_its_binding() {
+    static OCCUPIED: AtomicBool = AtomicBool::new(false);
+    let (mut worker, input, port, _requests, _replies) = fake();
+    let io = FakeIo::attach(&mut worker, &port);
+    worker.engine.expect(ms(0));
+    let generation = worker.engine.request(ms(0)).unwrap();
+    worker
+        .engine
+        .offer(packet(17, 0, 480, Some(480)), ms(0))
+        .unwrap();
+    assert_eq!(worker.engine.tick(ms(20)), Ok(None));
+    assert_eq!(worker.engine.progress.first_gap, Some(0));
+    assert!(worker.engine.opened(generation, Opened::Physical, ms(20)));
+    let mut playback = physical(&mut worker, generation, &OCCUPIED);
+    let key = io.view(1, 1, View::Eligible);
+    let mut successor = packet(18, 0, 480, Some(480));
+    successor.pcm.segment = SegmentId(1);
+    input.submit(successor).unwrap();
+    step(&mut worker, &port, ms(20));
+    playback.fill(&mut [0.0; 480], ms(30));
+    step(&mut worker, &port, ms(50));
+    assert_eq!(worker.engine.progress.consumed, 960);
+    assert_eq!(worker.engine.progress.heard, 0);
+    io.picture(
+        key,
+        RouteStamp::Live(generation),
+        PictureState::Ended(Picture::Silent),
+    );
+}
+
+#[test]
+fn a_pending_open_arms_the_hold_for_ready_pcm_and_releases_it_to_virtual_pacing() {
+    let (mut worker, input, port, requests, _replies) = fake();
+    let io = FakeIo::attach(&mut worker, &port);
+    let key = io.view(1, 0, View::Preparing);
+    input.command(Command::Expect).unwrap();
+    step(&mut worker, &port, ms(0));
+    assert!(matches!(requests.try_recv(), Ok(Request::Open(_, _))));
+    io.picture(
+        key,
+        RouteStamp::Unstamped,
+        PictureState::Owned(Picture::Wait),
+    );
+
+    input.submit(packet(17, 0, 480, Some(480))).unwrap();
+    step(&mut worker, &port, ms(30));
+    assert_eq!(worker.deadline(ms(30)), Some(ms(280)));
+    step(&mut worker, &port, ms(279));
+    assert_eq!(worker.engine.progress.consumed, 0);
+    step(&mut worker, &port, ms(280));
+    assert_eq!(worker.engine.progress.consumed, 0);
+    assert_eq!(worker.deadline(ms(280)), Some(ms(300)));
+    io.picture(
+        key,
+        RouteStamp::Unstamped,
+        PictureState::Owned(Picture::Wait),
+    );
+
+    io.view(1, 0, View::Eligible);
+    step(&mut worker, &port, ms(290));
+    assert_eq!(worker.engine.progress.consumed, 240);
+    io.picture(
+        key,
+        RouteStamp::Unstamped,
+        PictureState::Owned(Picture::Silent),
+    );
+    step(&mut worker, &port, ms(300));
+    assert_eq!(worker.engine.progress.consumed, 480);
+    assert_eq!(worker.engine.progress.heard, 0);
+    assert!(!worker.engine.queue.was_staged(SegmentId(0)));
+    io.picture(
+        key,
+        RouteStamp::Unstamped,
+        PictureState::Owned(Picture::Silent),
+    );
+    let next = io.view(2, 1, View::Eligible);
+    let mut successor = packet(18, 0, 480, Some(480));
+    successor.pcm.segment = SegmentId(1);
+    input.submit(successor).unwrap();
+    step(&mut worker, &port, ms(300));
+    io.picture(
+        next,
+        RouteStamp::Unstamped,
+        PictureState::Owned(Picture::Wait),
+    );
+    step(&mut worker, &port, ms(310));
+    assert_eq!(worker.engine.progress.consumed, 720);
+    io.picture(
+        next,
+        RouteStamp::Unstamped,
+        PictureState::Owned(Picture::Silent),
+    );
+}

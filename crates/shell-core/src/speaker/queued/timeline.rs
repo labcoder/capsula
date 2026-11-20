@@ -270,11 +270,12 @@ impl Engine {
         }
     }
 
-    pub(super) fn can_stage(&self) -> bool {
-        self.physical.is_some()
-            && !self.recovering
-            && !self.inhibited()
-            && self.phase == Phase::Running
+    pub(super) fn source_ready(&self) -> bool {
+        !self.queue.stopped && !self.inhibited() && self.phase == Phase::Running
+    }
+
+    fn can_stage(&self) -> bool {
+        self.physical.is_some() && !self.recovering && self.source_ready()
     }
 
     pub(super) fn require_recovery(&mut self, generation: u64) {
@@ -513,6 +514,9 @@ impl Engine {
     fn consume(&mut self, through: u64, evidence: Evidence, now: Duration) {
         let count = usize::try_from(through.saturating_sub(self.progress.consumed))
             .expect("a bounded source span");
+        if count != 0 && evidence == Evidence::Unheard {
+            self.queue.note_unheard(through);
+        }
         let retired = self.queue.retire(count);
         if retired == 0 {
             return;

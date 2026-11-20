@@ -239,13 +239,16 @@ impl Worker {
     ) -> (RouteStamp, Picture) {
         let id = bound.key.assignment.segment;
         let segment = self.engine.queue.segment(id);
+        let unheard = self.engine.queue.has_unheard(id);
         let head = if bound.revoked || self.engine.queue.discarded(id) {
             Head::Revoked
-        } else if self.engine.queue.completed > id.0 {
+        } else if self.engine.queue.completed > id.0 && !unheard {
             Head::Played
         } else if self.engine.queue.completed < id.0 {
             Head::AdvancingPredecessor
-        } else if self.engine.can_stage() && segment.is_some_and(|value| value.samples > 0) {
+        } else if self.engine.source_ready()
+            && segment.is_some_and(|value| value.end() > self.engine.progress.consumed)
+        {
             Head::EligiblePcm
         } else {
             Head::WaitingForPcm
@@ -256,7 +259,10 @@ impl Worker {
                 segment: id,
                 samples: value.samples,
             });
-        let (stamp, route) = self.drawing_route();
+        let (stamp, mut route) = self.drawing_route();
+        if route == Route::Pending && unheard {
+            route = Route::Virtual;
+        }
         let decision = bound
             .core
             .update(

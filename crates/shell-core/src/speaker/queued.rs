@@ -92,6 +92,7 @@ struct Queue {
     completed: u32,
     discarded: [bool; SEGMENT_SLOTS],
     staged: [bool; SEGMENT_SLOTS],
+    unheard: [bool; SEGMENT_SLOTS],
     samples: VecDeque<i16>,
     segments: VecDeque<Segment>,
     held: Option<Packet>,
@@ -109,6 +110,7 @@ impl Queue {
             completed: 0,
             discarded: [false; SEGMENT_SLOTS],
             staged: [false; SEGMENT_SLOTS],
+            unheard: [false; SEGMENT_SLOTS],
             samples: VecDeque::with_capacity(CAPACITY),
             segments: VecDeque::new(),
             held: None,
@@ -137,6 +139,26 @@ impl Queue {
 
     fn was_staged(&self, id: SegmentId) -> bool {
         usize::try_from(id.0).is_ok_and(|index| self.staged.get(index) == Some(&true))
+    }
+
+    fn has_unheard(&self, id: SegmentId) -> bool {
+        usize::try_from(id.0).is_ok_and(|index| self.unheard.get(index) == Some(&true))
+    }
+
+    fn note_unheard(&mut self, through: u64) {
+        for segment in self
+            .segments
+            .iter()
+            .take_while(|segment| segment.first < through)
+        {
+            if segment.samples != 0
+                && segment.end() > self.retired
+                && let Ok(index) = usize::try_from(segment.id.0)
+                && let Some(unheard) = self.unheard.get_mut(index)
+            {
+                *unheard = true;
+            }
+        }
     }
 
     fn current(&self, pcm: &SpeechPcm) -> bool {
