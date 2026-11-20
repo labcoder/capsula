@@ -384,7 +384,7 @@ impl Worker {
         }
         let callbacks = route.transport.control().callback_count();
         if let Some((at, observed)) = route.watchdog
-            && observed == callbacks
+            && (resuming || observed == callbacks)
         {
             if at <= now {
                 self.recover(now);
@@ -502,6 +502,9 @@ impl Worker {
                     Power::Playing
                 };
                 if desired != route.power {
+                    if desired == Power::Playing {
+                        route.watchdog = None;
+                    }
                     self.dispatch(Request::Power(generation, desired));
                 }
             }

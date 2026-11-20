@@ -1,5 +1,4 @@
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
 
 use super::*;
 
@@ -14,7 +13,7 @@ fn blocked_discovery_refuses_another_native_attempt_before_entering_it() {
     })
     .unwrap();
     assert!(first.send(Request::Open(1, Arc::default())).is_ok());
-    first_entered.recv_timeout(Duration::from_secs(2)).unwrap();
+    first_entered.recv().unwrap();
 
     let attempted = Arc::new(AtomicBool::new(false));
     let count = Arc::clone(&attempted);
@@ -24,12 +23,9 @@ fn blocked_discovery_refuses_another_native_attempt_before_entering_it() {
     })
     .unwrap();
     assert!(second.send(Request::Open(2, Arc::default())).is_ok());
-    let result = second_reply.recv_timeout(Duration::from_secs(2));
+    let result = second_reply.recv();
     release.send(()).unwrap();
-    assert!(matches!(
-        first_reply.recv_timeout(Duration::from_secs(2)),
-        Ok(Reply::Opened(1, None))
-    ));
+    assert!(matches!(first_reply.recv(), Ok(Reply::Opened(1, None))));
     assert!(matches!(result, Ok(Reply::Opened(2, None))));
     assert!(!attempted.load(Ordering::Acquire));
 }

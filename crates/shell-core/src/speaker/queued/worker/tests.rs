@@ -331,14 +331,10 @@ fn a_hung_resume_moves_to_virtual_and_releases_held_credit() {
 
     let expired = IDLE + STALL;
     assert_eq!(worker.deadline(IDLE), Some(expired));
-    worker
-        .step(
-            &port,
-            &mut pcm,
-            &mut grant,
-            expired.checked_sub(Duration::from_millis(1)).unwrap(),
-        )
-        .unwrap();
+    let before = expired.checked_sub(Duration::from_millis(1)).unwrap();
+    playback.fill(&mut [], before);
+    worker.step(&port, &mut pcm, &mut grant, before).unwrap();
+    assert_eq!(worker.deadline(before), Some(expired));
     assert_eq!(control.fenced_handoff(), None);
     worker.step(&port, &mut pcm, &mut grant, expired).unwrap();
     assert_eq!(control.fenced_handoff(), Some(0));
