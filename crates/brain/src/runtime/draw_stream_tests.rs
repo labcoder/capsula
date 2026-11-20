@@ -336,6 +336,35 @@ fn delta(bytes: &str) -> TurnEvent {
     }
 }
 
+fn assert_staged_speech(messages: &[DataToShell], owner: RunId, segments: &[u32]) {
+    let assigned: Vec<_> = messages
+        .iter()
+        .filter_map(|frame| match frame {
+            DataToShell::SegmentQueued {
+                run,
+                step: Some(step),
+                ..
+            } if *run == owner => Some(step.index),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(assigned, segments);
+    let promises: Vec<_> = messages
+        .iter()
+        .filter_map(|frame| match frame {
+            DataToShell::SceneStepCommit { run, speech, .. } if *run == owner => Some(*speech),
+            _ => None,
+        })
+        .collect();
+    let expected_promises = [0, 1, 2].map(|index| {
+        segments.contains(&index).then_some(SpeechPromise {
+            output_generation: OutputGeneration(1),
+            segment: SegmentId(0),
+        })
+    });
+    assert_eq!(promises, expected_promises);
+}
+
 async fn staged_say(brain: &mut Brain, narration: [&str; 2], expected: &[&str], segments: &[u32]) {
     let (out, mut controls) = mpsc::channel(64);
     let ready = Notify::new();
@@ -394,32 +423,7 @@ async fn staged_say(brain: &mut Brain, narration: [&str; 2], expected: &[&str], 
             _ => None,
         })
         .collect();
-    let assigned: Vec<_> = messages
-        .iter()
-        .filter_map(|frame| match frame {
-            DataToShell::SegmentQueued {
-                run,
-                step: Some(step),
-                ..
-            } if *run == key.run => Some(step.index),
-            _ => None,
-        })
-        .collect();
-    assert_eq!(assigned, segments);
-    let promises: Vec<_> = messages
-        .iter()
-        .filter_map(|frame| match frame {
-            DataToShell::SceneStepCommit { run, speech, .. } if *run == key.run => Some(*speech),
-            _ => None,
-        })
-        .collect();
-    let expected_promises = [0, 1, 2].map(|index| {
-        segments.contains(&index).then_some(SpeechPromise {
-            output_generation: OutputGeneration(1),
-            segment: SegmentId(0),
-        })
-    });
-    assert_eq!(promises, expected_promises);
+    assert_staged_speech(&messages, key.run, segments);
     assert_eq!(live, paragraphs, "Chat lines from the live steps");
 
     brain.offline(Input::ShellLost);
