@@ -382,12 +382,17 @@ close before either Claude picture switch turns on. What the hold carried goes i
 with its turn (store.md, `runs.screen`), and the shell hears it once as `HoldScreen`: an image
 when a send carrying it settles after attempting a write ("The send lease"), anything else when
 the run's first request starts. An inline compaction's send carries only text, so it doesn't
-count. An image goes in pending, which history doesn't show as sent, and the settlement that
-tells the shell also marks it sent. The row is written first on purpose: the first build starts
-only after `TurnStored`, and a failed turn write fails the run before anything is built. Recovery
-at the next start marks a picture still pending sent, because after a crash Kumochi can't tell
-whether a write was attempted, so history can over-report a screen but never miss one that may
-have left the machine. Turning screen holds off
+count. An image goes in pending: history doesn't show it as sent while its run is active, and
+shows it as sent once the run has ended, the rule recovery applies. The settlement that tells the
+shell also marks it sent. The row is written first on purpose: the first build starts only after
+`TurnStored`, and a failed turn write fails the run before anything is built. Recovery at the
+next start marks a picture still pending sent, because if Kumochi exits before the send outcome
+is recorded it can't tell whether a write was attempted. That covers a crash, and an orderly Quit
+whose run end is acknowledged before the aborted engine task's unsent settlement. So the recovered
+record can over-report a screen but never miss one that may have left the machine. An open
+thread's loaded rows can lag it: while a run is active a loaded turn stays plain until history is
+read again, and a late unsent settlement after the run ended leaves a loaded row saying sent until
+a re-read. Turning screen holds off
 withdraws every run's window image, and turning show-screen off every run's screen picture,
 each only the pictures it allowed: the run's own copy drops at once, and the bytes are zeroed
 when the last copy drops. The run's next build fails with `ScreenUnavailable`, and a request that has
@@ -401,7 +406,7 @@ the turn's. Known limits:
 - **A granted send can't be recalled.** Turning screen holds off refuses a request's send that
   hasn't been granted yet, but a body already granted goes out with its image.
 - **History can show a window that never left.** A write that was attempted marks the screen
-  sent even if no byte was accepted. A crash while the picture is pending, including after a
+  sent even if no byte was accepted. Kumochi exiting before the send outcome is recorded while the picture is pending, including after a
   send proved unsent while its run could still send again, and a failed write of the mark or of
   its clear, leave it pending, and recovery marks it sent. Either way its history shows a window
   for a turn whose image may never have been sent.

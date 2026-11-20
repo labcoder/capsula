@@ -103,9 +103,11 @@ Point at the icon to read that. When no screenshot was included, a line under th
 why instead. The screenshot goes to the model service you connected, for the model you chose,
 and nowhere else. Kumochi keeps no copy: it holds the screenshot in memory until the reply ends
 and never saves it to a file. Every request Kumochi makes for that reply carries the
-screenshot; later messages never do. The icon is never missing from a message whose screenshot
-was sent. In two rare cases it can show on a message whose screenshot never left your computer:
-when the request failed just as it started, before its upload began, or when Kumochi crashed.
+screenshot; later messages never do. The icon can appear only after history refreshes, so while
+a reply is running, or just after you stop it, a missing icon doesn't prove no screenshot was
+sent. In rare cases it can show on a message whose screenshot never left your computer: when
+the request failed just as it started, before its upload began, or when Kumochi closed before it
+recorded how the send ended.
 
 On Windows, Kumochi can point at things in that picture with marks and short labels over
 your desktop as it answers. The marks do not take clicks: a click reaches the app underneath
