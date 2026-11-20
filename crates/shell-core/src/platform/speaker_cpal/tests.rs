@@ -5,7 +5,6 @@ use std::time::Duration;
 use super::lifetime::{Owner, Permit, cleanup_sender};
 use super::{Control, Transport};
 
-
 use super::{
     AtomicU8, BLOCKS, ErrorKind, MAX_FRAMES, MAX_RATE, OutputError, OutputEvent, PACKET_SAMPLES,
     PacketKind, ReadyBlock, SOURCE_RATE,
