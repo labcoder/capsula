@@ -148,6 +148,24 @@ fn preparing_installs_the_hold_before_feeding_and_expires_without_packets() {
     );
     playback.fill(&mut out, ms(281));
     assert_eq!(out.map(f32::to_bits), [0.5f32.to_bits(); 8]);
+
+    input.command(Command::Stop).unwrap();
+    step(&mut worker, &port, ms(282));
+    io.picture(
+        key,
+        RouteStamp::Retired(generation),
+        PictureState::Owned(Picture::Fenced),
+    );
+    let writes = io.writes();
+    playback.fill(&mut [0.0; 128], ms(283));
+    step(&mut worker, &port, ms(284));
+    assert!(worker.physical.is_none());
+    assert_eq!(io.writes(), writes);
+    io.picture(
+        key,
+        RouteStamp::Retired(generation),
+        PictureState::Owned(Picture::Fenced),
+    );
 }
 
 #[test]

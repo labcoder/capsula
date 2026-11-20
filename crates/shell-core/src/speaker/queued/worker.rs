@@ -330,6 +330,7 @@ impl Worker {
                         watchdog: None,
                     };
                     if !accepted {
+                        self.retired_route = Some(generation);
                         route.retire(now);
                     }
                     self.physical = Some(route);
@@ -479,6 +480,7 @@ impl Worker {
             control.stop();
         }
         if let Some(route) = &mut self.physical {
+            self.retired_route = Some(route.generation);
             route.retire(now);
         }
         if let (_, Some(credit)) = self.engine.stop(now) {
