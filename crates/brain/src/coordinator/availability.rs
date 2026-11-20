@@ -66,6 +66,7 @@ impl Ready {
                     .expect("the replay model has a valid name"),
                 supported_efforts: EffortSet::new([Effort::Low]),
             }],
+            images: Vec::new(),
             trusted_draw: false,
         }
     }
