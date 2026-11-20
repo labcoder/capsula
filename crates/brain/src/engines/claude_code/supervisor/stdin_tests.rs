@@ -90,6 +90,10 @@ impl Write for PartialPipe {
 }
 
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "keeps both pump barriers and the lease assertions together"
+)]
 fn pictured_stdin_distinguishes_no_write_from_a_partial_first_chunk() {
     for fence in [
         Fence::None,
@@ -204,10 +208,10 @@ fn pictured_stdin_distinguishes_no_write_from_a_partial_first_chunk() {
         drop(control.seal_send());
         assert_eq!(
             settled.try_recv().expect("settled"),
-            if !expected_writes.is_empty() {
-                CoordinatorInput::SendSettled { lease: id }
-            } else {
+            if expected_writes.is_empty() {
                 CoordinatorInput::SendUnsent { lease: id }
+            } else {
+                CoordinatorInput::SendSettled { lease: id }
             },
             "{fence:?}",
         );

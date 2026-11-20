@@ -266,6 +266,10 @@ async fn closed_picture_grant_does_not_truncate_while_teardown_holds_the_receipt
 }
 
 #[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one ordered launch, teardown and rebuild"
+)]
 async fn a_bound_find_keeps_the_round_until_its_picture_settles_unsent() {
     use crate::coordinator::{Effect, StoreOp, built_for, pictured_claude_run};
     use crate::engines::claude_code::supervisor::tests::{Barrier, barrier};

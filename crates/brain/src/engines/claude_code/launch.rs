@@ -595,7 +595,7 @@ impl Question<'_> {
             report.report(Outcome::Launch);
             return Some(Finish::Failed(EngineFailure::Provider));
         }
-        match queue_seed(
+        if let Err(refused) = queue_seed(
             &mut writer,
             &mut mapper,
             request,
@@ -605,12 +605,11 @@ impl Question<'_> {
         )
         .await
         {
-            Ok(()) => {}
-            Err(StdinRefused::Deadline) => return Some(expired(launch, report)),
-            Err(_) => {
-                report.report(Outcome::Launch);
-                return Some(Finish::Failed(EngineFailure::Provider));
+            if refused == StdinRefused::Deadline {
+                return Some(expired(launch, report));
             }
+            report.report(Outcome::Launch);
+            return Some(Finish::Failed(EngineFailure::Provider));
         }
         let answer = Reading {
             pipes: &mut pipes,
