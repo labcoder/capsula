@@ -2,7 +2,7 @@ use super::*;
 use crate::platform::speaker_cpal::tests::FakePlayback;
 use kumochi_protocol::message::SpeechPcm;
 
-const RUN: RunId = RunId(17);
+pub(in crate::speaker::queued) const RUN: RunId = RunId(17);
 const OUTPUT: OutputGeneration = OutputGeneration(2);
 const INSTANT: Duration = Duration::ZERO;
 
@@ -45,6 +45,33 @@ fn fake() -> (Worker, Input, Port, Receiver<Request>, SyncSender<Reply>) {
         requests,
         reply,
     )
+}
+
+pub(in crate::speaker::queued) struct OpenActor {
+    pub input: Input,
+    pub requests: Receiver<Request>,
+    pub replies: SyncSender<Reply>,
+    pub owner: thread::JoinHandle<()>,
+    pub done: Receiver<()>,
+}
+
+pub(in crate::speaker::queued) fn open_actor(
+    report: impl FnMut(ControlToBrain) -> bool + Send + 'static,
+) -> OpenActor {
+    let (worker, mut input, port, requests, replies) = fake();
+    let (exit, done) = mpsc::sync_channel(1);
+    let owner = thread::spawn(move || {
+        worker.serve(&port, Instant::now(), |_| {}, report);
+        exit.send(()).unwrap();
+    });
+    input.worker = owner.thread().clone();
+    OpenActor {
+        input,
+        requests,
+        replies,
+        owner,
+        done,
+    }
 }
 
 fn packet(origin: u64, seq: u32, samples: usize, last: Option<u32>) -> Packet {
