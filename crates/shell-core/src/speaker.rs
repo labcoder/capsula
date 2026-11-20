@@ -52,7 +52,7 @@ const RETRY: Duration = Duration::from_millis(10);
 const IDLE: Duration = Duration::from_millis(20);
 /// The longest a retiring stream plays out what was written [guess]: the device's buffer is at
 /// most 100 ms, and the clock's own stall deadline is 200 ms.
-const DRAIN: Duration = Duration::from_millis(500);
+pub(crate) const DRAIN: Duration = Duration::from_millis(500);
 
 /// A speech frame and its size on the pipe, which is credited once it's kept or dropped. Its
 /// decoded samples are zeroed however it's let go.

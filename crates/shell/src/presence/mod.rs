@@ -849,6 +849,7 @@ fn status_text(state: LinkState) -> Text {
         LinkState::Connected => Text::Connected,
         LinkState::Reconnecting => Text::Reconnecting,
         LinkState::Failed => Text::Failed,
+        LinkState::OutputUnavailable => Text::OutputUnavailable,
     }
 }
 

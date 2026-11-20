@@ -1,13 +1,30 @@
 use super::{
-    Arc, AtomicBool, Control, Instant, Receiver, Reply, Request, SyncSender, Thread, io, spawn_with,
+    Arc, AtomicBool, Control, Instant, NATIVE, Ordering, Receiver, Reply, Request, SyncSender,
+    Thread, io, spawn_with, thread,
 };
 use crate::platform::speaker_cpal::{OutputError, playback_fixture::FakePlayback};
+use std::time::Duration;
 
+static OCCUPIED: AtomicBool = AtomicBool::new(false);
+
+/// Serializes fake sessions through disposal of the previous session's callback and device.
+///
+/// # Panics
+/// Panics if the previous fixture left a device or playback pool live past the test deadline.
 pub fn serialize_playback() -> std::sync::MutexGuard<'static, ()> {
     static EXCLUSIVE: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    EXCLUSIVE
+    let permit = EXCLUSIVE
         .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while NATIVE.load(Ordering::Acquire) || OCCUPIED.load(Ordering::Acquire) {
+        assert!(
+            Instant::now() < deadline,
+            "the previous playback fixture returns its permits"
+        );
+        thread::sleep(Duration::from_millis(2));
+    }
+    permit
 }
 
 pub struct FixturePlayback {
@@ -35,7 +52,6 @@ pub(in crate::speaker::queued) fn spawn_fake(
     origin: Instant,
     opened: SyncSender<FixturePlayback>,
 ) -> io::Result<(SyncSender<Request>, Receiver<Reply>)> {
-    static OCCUPIED: AtomicBool = AtomicBool::new(false);
     spawn_with(
         owner,
         origin,

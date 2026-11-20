@@ -1,7 +1,7 @@
 use std::sync::atomic::{AtomicBool, AtomicU8};
 use std::sync::mpsc::TrySendError;
 use std::sync::{OnceLock, Weak};
-use std::thread::Thread;
+use std::thread::{self, Thread};
 use std::time::Instant;
 
 use async_channel::Sender;
@@ -9,11 +9,20 @@ use kumochi_protocol::message::ControlToBrain;
 
 use super::{Arc, Ordering, Output, OutputGeneration, OutputOwner, RunId, State, SyncSender};
 use crate::link::Shared;
+use crate::speaker::DRAIN;
 use crate::speaker::queued::{Input, Packet, RATE, spawn_plain};
 
 const LOCAL_QUIET: u8 = 1;
 const RECEIPT_QUEUED: u8 = 2;
 const RETIRING: u8 = 4;
+const REPORT_REFUSED: u8 = 8;
+const TAIL_UNAVAILABLE: u8 = 16;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::link) enum RefusedTail {
+    Quiet,
+    Unavailable,
+}
 
 pub(in crate::link) struct Queued {
     closing: Arc<AtomicBool>,
@@ -119,6 +128,43 @@ impl State {
 }
 
 impl OutputOwner {
+    pub(in crate::link) fn wait_for_refused_tail(&self) -> Option<RefusedTail> {
+        let proof = {
+            let state = self.lock();
+            let active = state.queued.as_ref()?.active.as_ref()?;
+            if active.proof.load(Ordering::Acquire) & REPORT_REFUSED == 0 {
+                return None;
+            }
+            Arc::clone(&active.proof)
+        };
+        let deadline = Instant::now() + DRAIN;
+        loop {
+            let flags = proof.load(Ordering::Acquire);
+            if flags & LOCAL_QUIET != 0 {
+                return Some(RefusedTail::Quiet);
+            }
+            if flags & TAIL_UNAVAILABLE != 0 {
+                return Some(RefusedTail::Unavailable);
+            }
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                if proof
+                    .compare_exchange(
+                        flags,
+                        flags | TAIL_UNAVAILABLE,
+                        Ordering::AcqRel,
+                        Ordering::Acquire,
+                    )
+                    .is_ok()
+                {
+                    return Some(RefusedTail::Unavailable);
+                }
+            } else {
+                thread::park_timeout(left);
+            }
+        }
+    }
+
     pub(in crate::link) fn queued_turn(
         &self,
         session: u64,
@@ -223,6 +269,8 @@ impl OutputOwner {
         };
         let out = out.clone();
         let exit = Arc::clone(&proof);
+        let tail = Arc::clone(&proof);
+        let link_thread = thread::current();
         let reporter = Weak::clone(&shared);
         #[cfg(any(test, feature = "test-support"))]
         let fake = shared
@@ -238,34 +286,18 @@ impl OutputOwner {
                     reader.unpark();
                 }
             },
-            move |report| {
-                let quiet = matches!(
-                    &report,
-                    ControlToBrain::SpeechStopped { run: stopped, .. } if *stopped == run
-                );
-                if quiet {
-                    proof.fetch_or(LOCAL_QUIET, Ordering::AcqRel);
-                }
-                let Some(shared) = reporter.upgrade() else {
-                    return false;
-                };
-                let mut state = shared.output.lock();
-                let Some((_, owner)) = state.queue(session).filter(|(_, owner)| {
-                    owner.active.as_ref().is_some_and(|active| {
-                        active.id == run && Arc::ptr_eq(&active.proof, &proof)
-                    })
-                }) else {
-                    return true;
-                };
-                if out.try_send(report).is_err() {
-                    owner.refuse();
-                    return false;
-                }
-                if quiet {
-                    proof.fetch_or(RECEIPT_QUEUED, Ordering::AcqRel);
-                }
-                true
-            },
+            (
+                move |report| offer_queued_report(&reporter, &proof, session, run, &out, report),
+                move |quiet| {
+                    let bit = if quiet { LOCAL_QUIET } else { TAIL_UNAVAILABLE };
+                    let _updated =
+                        tail.fetch_update(Ordering::AcqRel, Ordering::Acquire, |flags| {
+                            (flags & REPORT_REFUSED != 0 && flags & TAIL_UNAVAILABLE == 0)
+                                .then_some(flags | bit)
+                        });
+                    link_thread.unpark();
+                },
+            ),
             move |refused| {
                 if (refused || exit.load(Ordering::Acquire) & RETIRING == 0)
                     && let Some(shared) = shared.upgrade()
@@ -352,4 +384,58 @@ impl OutputOwner {
         }
         true
     }
+}
+
+fn offer_queued_report(
+    reporter: &Weak<Shared>,
+    proof: &Arc<AtomicU8>,
+    session: u64,
+    run: RunId,
+    out: &Sender<ControlToBrain>,
+    report: ControlToBrain,
+) -> bool {
+    let quiet = matches!(
+        &report,
+        ControlToBrain::SpeechStopped { run: stopped, .. } if *stopped == run
+    );
+    if quiet {
+        proof.fetch_or(LOCAL_QUIET, Ordering::AcqRel);
+    }
+    let Some(shared) = reporter.upgrade() else {
+        return false;
+    };
+    let mut state = shared.output.lock();
+    let Some((_, owner)) = state.queue(session).filter(|(_, owner)| {
+        owner
+            .active
+            .as_ref()
+            .is_some_and(|active| active.id == run && Arc::ptr_eq(&active.proof, proof))
+    }) else {
+        return true;
+    };
+    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(windows)]
+    let retirement = match &report {
+        ControlToBrain::SpeechRetired(receipt) => Some(*receipt),
+        _ => None,
+    };
+    if out.try_send(report).is_err() {
+        #[cfg(any(test, feature = "test-support"))]
+        #[cfg(windows)]
+        if let Some(receipt) = retirement {
+            *shared
+                .refused_retirement
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(receipt);
+        }
+        if !quiet {
+            proof.fetch_or(REPORT_REFUSED, Ordering::AcqRel);
+        }
+        owner.refuse();
+        return false;
+    }
+    if quiet {
+        proof.fetch_or(RECEIPT_QUEUED, Ordering::AcqRel);
+    }
+    true
 }

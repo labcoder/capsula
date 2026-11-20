@@ -15,7 +15,7 @@ use crate::platform::microphone::{Generation, MicOwner, Reserved, Running};
 use crate::speaker::{Command, FAULT, RELEASED, Speaker, Tail, UNKNOWN};
 
 mod queued;
-pub(super) use queued::Queued;
+pub(super) use queued::{Queued, RefusedTail};
 
 #[cfg(test)]
 #[path = "output_tests.rs"]

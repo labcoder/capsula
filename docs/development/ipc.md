@@ -30,10 +30,11 @@ cannot use closing a pipe or freeing a device permit as proof of quiet.
 Esc fences the scene before offering Stop or StopScenes to its exact session's control mailbox.
 A SceneFailed caused by host refusal follows in that same mailbox; neither offer takes the
 outbox mutex. If the scene stream is broken or the mailbox or queued speaker refuses Stop,
-admission closes on that session before background teardown aborts either pipe. A new pair refused for
-unproved quiet waits for explicit Retry. Only the old worker's positive local quiet proof pays
-that debt; the old receipt is never sent to the replacement. A refusal to queue a report on the
-live original session is still fatal to that session.
+admission closes on that session before background teardown aborts either pipe. A new pair
+refused for unproved quiet waits for explicit Retry. A refused speech retirement aborts the
+original pair immediately and seals wire reporting. The old worker has one bounded drain to
+prove its callback quiet locally; only then does the link offer Retry. If it can't prove quiet,
+the connection remains unavailable until restart. No old receipt goes to a replacement pair.
 
 The queued shell checks fresh typed intent before changing the composer or its recovery state.
 Enter while admission is closed does not submit; it keeps the draft and does not replay it when

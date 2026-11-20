@@ -70,7 +70,10 @@ legacy tail, grant capture, or accept turns before the matching registration rec
 that pair drops its run input before aborting both pipes and closing both writer mailboxes.
 A worker's exact known-tail stop report can still pay its local quiet debt after disconnection.
 It cannot send that old receipt to another pair. A live pair needs the report queued before
-admitting another turn; a refused live report ends the pair. Unknown tails still block replacement. An
+admitting another turn; a refused live report ends the pair. After an earlier retirement report
+is refused, the original worker can observe its fenced callback for at most 500 ms without
+feeding audio or sending another report. That local proof doesn't release the device permit;
+the backend still owns disposal. Unknown tails still block replacement. An
 absolute startup deadline ends the same pair even while control traffic continues. Ordinary
 launch still selects Legacy; there is no user-facing queued selector or fallback.
 

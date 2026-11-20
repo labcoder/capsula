@@ -67,6 +67,7 @@ pub enum LinkState {
     Connected,
     Reconnecting,
     Failed,
+    OutputUnavailable,
 }
 
 /// What the link tells the UI thread, in the order it happened. Nothing from the brain comes
@@ -519,6 +520,9 @@ struct Shared {
     hold_control_writer: std::sync::atomic::AtomicU8,
     #[cfg(any(test, feature = "test-support"))]
     fake_playback: Option<std::sync::mpsc::SyncSender<speaker::queued::FixturePlayback>>,
+    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(windows)]
+    refused_retirement: Mutex<Option<kumochi_protocol::message::SpeechRetirement>>,
     /// Locked only after `outbox`, so a delete and a turn are counted in the order they're
     /// queued.
     deletes: Mutex<Vec<Held>>,
@@ -735,7 +739,7 @@ impl LinkHandle {
     }
 
     /// Queues a control message for `session`'s brain. False when the connection ended or the
-    /// mailbox refused. Stop and drawing clears don't wait for the outbox lock.
+    /// mailbox refused. Stop, drawing clears and queued scene refusals don't take the outbox lock.
     pub fn send_control(&self, session: &Session, message: ControlToBrain) -> bool {
         if session.io.queued
             && matches!(
@@ -1090,18 +1094,40 @@ impl Link {
                 return;
             }
             tracing::warn!("lost the brain");
-            let now = Instant::now();
-            if attended == Attendance::Retry
-                || last_loss.is_some_and(|at| now.duration_since(at) < REPEAT_WINDOW)
-            {
-                if !wait_for_retry(events, retries) {
-                    return;
-                }
-                (state, last_loss) = (LinkState::Connecting, None);
-                continue;
-            }
-            (state, last_loss) = (LinkState::Reconnecting, Some(now));
+            let Some(next) = self.after_loss(events, retries, attended, last_loss) else {
+                return;
+            };
+            (state, last_loss) = next;
         }
+    }
+
+    fn after_loss(
+        &self,
+        events: &Sender<LinkEvent>,
+        retries: &Receiver<()>,
+        attended: Attendance,
+        last_loss: Option<Instant>,
+    ) -> Option<(LinkState, Option<Instant>)> {
+        let refused_tail = if self.audio == AudioSession::QueuedRequired {
+            self.shared.output.wait_for_refused_tail()
+        } else {
+            None
+        };
+        if self.quitting() {
+            return None;
+        }
+        if refused_tail == Some(output::RefusedTail::Unavailable) {
+            let _notified = events.send_blocking(LinkEvent::State(LinkState::OutputUnavailable));
+            return None;
+        }
+        let now = Instant::now();
+        if attended == Attendance::Retry
+            || refused_tail == Some(output::RefusedTail::Quiet)
+            || last_loss.is_some_and(|at| now.duration_since(at) < REPEAT_WINDOW)
+        {
+            return wait_for_retry(events, retries).then_some((LinkState::Connecting, None));
+        }
+        Some((LinkState::Reconnecting, Some(now)))
     }
 
     fn quitting(&self) -> bool {
