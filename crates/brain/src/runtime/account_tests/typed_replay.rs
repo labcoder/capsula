@@ -162,6 +162,99 @@ async fn complete(shell: &mut Shell<DuplexStream>, run: RunId, mut socket: Duple
 }
 
 #[tokio::test]
+async fn sign_out_closes_an_active_responses_stream_and_refuses_the_next_turn() {
+    let scratch = Scratch::new("responses-typed-sign-out");
+    let store = FakeStore::default();
+    let accounts = seeded(&scratch, &store, Catalog::answering([listing()]), LATER);
+    let (mut brain, mut connections) = replay_brain(&scratch, accounts);
+    let ((control, data), mut shell) = duplex();
+    let mut tap = Tap::from_env();
+    let client = async {
+        ready(&mut shell).await;
+        submit(&mut shell, 1, "before sign-out").await;
+        let old = RunId(1);
+        assert_eq!(shell.state().await, (old, Phase::Thinking));
+        let mut stream = request(
+            connections.recv().await.expect("the active model request"),
+            "access-old",
+            "before sign-out",
+        )
+        .await;
+        let split = TEXT
+            .match_indices("event: response.output_text.delta")
+            .nth(1)
+            .expect("second delta")
+            .0;
+        head(&mut stream).await;
+        stream
+            .write_all(&TEXT.as_bytes()[..split])
+            .await
+            .expect("first delta");
+        assert_eq!(
+            shell.data().await,
+            DataToShell::AssistantText {
+                run: old,
+                delta: "Hello, ".into()
+            }
+        );
+        assert_eq!(shell.state().await, (old, Phase::Answering));
+
+        shell
+            .send(&ControlToBrain::AccountOp(AccountOp::SignOut))
+            .await;
+        let sign_in = Some(
+            UserError::new(ErrorKey::SignInNeeded, Vec::new(), vec![Action::SignIn])
+                .expect("sign-in notice"),
+        );
+        assert_eq!(shell.notice().await, (old, Phase::Failed, sign_in.clone()));
+        assert_eq!(shell.data().await, DataToShell::RunEnd { run: old });
+        assert_eq!(stream.read(&mut [0; 1]).await.expect("old model socket"), 0);
+        assert_eq!(
+            stream
+                .write_all(&TEXT.as_bytes()[split..])
+                .await
+                .expect_err("the stale tail is fenced")
+                .kind(),
+            io::ErrorKind::BrokenPipe
+        );
+
+        submit(&mut shell, 2, "after sign-out").await;
+        let next = RunId(2);
+        assert_eq!(shell.state().await, (next, Phase::Thinking));
+        assert_eq!(shell.notice().await, (next, Phase::Failed, sign_in));
+        loop {
+            match shell.data().await {
+                DataToShell::Models {
+                    connection: ConnectionKind::ChatGpt,
+                    models,
+                } if models.is_empty() => {}
+                DataToShell::RunEnd { run } => {
+                    assert_eq!(run, next);
+                    break;
+                }
+                other => panic!("unexpected data after sign-out: {other:?}"),
+            }
+        }
+        assert_eq!(
+            connections.try_recv().err(),
+            Some(mpsc::error::TryRecvError::Empty)
+        );
+        drop(shell);
+    };
+    let (ended, ()) = timeout(PATIENCE, async {
+        tokio::join!(brain.serve(control, data, &mut tap), client)
+    })
+    .await
+    .expect("bounded sign-out replay");
+    assert_eq!(ended, Ended::Lost);
+    brain.close().await;
+    assert_eq!(
+        outcomes(&scratch),
+        [outcome("failed", "engine"), outcome("failed", "engine")]
+    );
+}
+
+#[tokio::test]
 async fn typed_replay_esc_stop_and_replacement_close_the_old_stream() {
     for reason in ["stop", "replaced"] {
         let scratch = Scratch::new(&format!("responses-typed-{reason}"));
