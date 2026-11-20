@@ -621,11 +621,12 @@ impl<S: AsyncRead + AsyncWrite> Shell<S> {
     }
 
     /// Reads `run`'s text up to its `RunEnd`, granting credit as a shell would; the text's
-    /// length.
+    /// length. A held picture's settlement may refresh its thread meanwhile.
     async fn read_to_end(&mut self, run: RunId) -> usize {
         let mut bytes = 0;
         loop {
             match self.data().await {
+                DataToShell::EventsChanged { .. } => {}
                 DataToShell::AssistantText { run: of, delta } if of == run => {
                     bytes += delta.len();
                     self.credit(delta.len() + 64).await;

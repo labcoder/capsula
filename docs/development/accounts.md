@@ -705,7 +705,9 @@ up to 200 distinct slugs outside the final offer, including supported rows beyon
 They're for default repair only and authorize neither a request nor image capture. If a
 further distinct slug doesn't fit, the account can't prove a saved choice disappeared, so it
 doesn't repair that choice.
-An admitted row takes images only if its own `input_modalities` array names `"image"`.
+An admitted row takes images only if its own `input_modalities` array names `"image"`. Those
+slugs go to the coordinator with the account's availability, the only fact a `ChatGPT` send's
+picture is granted on; no read, or a cleared list, lists none.
 The catalog's [capture provenance](../../crates/brain/src/connections/catalog/README.md)
 describes the recorded shape behind both decoders.
 

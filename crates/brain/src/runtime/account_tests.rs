@@ -1719,6 +1719,35 @@ async fn only_a_listed_image_model_on_the_accounts_connection_takes_images() {
     accounts.close(Instant::now(), Instant::now()).await;
 }
 
+/// The coordinator hears the same listing's image models with the account's availability: none
+/// before a read, exactly the listed ones after it, and nothing once signed out.
+#[tokio::test]
+async fn availability_carries_exactly_the_listings_image_models() {
+    let scratch = Scratch::new("account-availability-images");
+    let store = FakeStore::default();
+    let body = json!({ "models": [
+        { "slug": "gpt-6-sol", "display_name": "GPT-6 Sol", "visibility": "list", "supported_reasoning_levels": [{"effort": "low"}],
+          "input_modalities": ["text", "image"] },
+        { "slug": "gpt-6-luna", "display_name": "GPT-6 Luna", "visibility": "list", "supported_reasoning_levels": [{"effort": "low"}],
+          "input_modalities": ["text"] },
+    ] });
+    let http = Catalog::answering([(200, body.to_string())]);
+    let mut accounts = seeded(&scratch, &store, http, LATER);
+    let images = |accounts: &Accounts| match accounts.availability() {
+        Availability::Ready(ready) => Some(ready.images),
+        Availability::Unavailable(_) | Availability::Finding => None,
+    };
+    assert_eq!(images(&accounts).unwrap_or_default(), []);
+    assert_eq!(read_ended(&mut accounts).await, []);
+    assert_eq!(
+        images(&accounts),
+        Some(vec![ModelSlug::new("gpt-6-sol").expect("slug")])
+    );
+    accounts.handle(Input::Op(AccountOp::SignOut));
+    assert_eq!(images(&accounts), None);
+    accounts.close(Instant::now(), Instant::now()).await;
+}
+
 /// The image gate's four states, each from its own condition, and closed again after sign-out.
 #[tokio::test]
 async fn the_image_gate_opens_only_for_a_listed_image_model_where_windows_can_be_captured() {

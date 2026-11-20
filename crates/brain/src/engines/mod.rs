@@ -427,7 +427,8 @@ pub enum Finish {
     Completed,
     /// The round's stream ended without saying how it finished.
     Truncated,
-    /// A pictured launch's terminal outcome is ordered by its send receipt, not by the pump.
+    /// The round's outcome is ordered by its send receipt, not by the pump: a pictured launch's
+    /// terminal, or a Responses send its lease refused, which the coordinator builds again.
     ReceiptOrdered,
     /// The round failed.
     Failed(EngineFailure),

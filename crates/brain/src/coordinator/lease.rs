@@ -121,9 +121,9 @@ pub(super) struct Carried {
     pub(super) run: RunId,
     pub(super) hold: HoldKey,
     pub(super) outcome: HeldScreen,
-    /// The held turn's thread, only on a route behind a picture switch, so its written
-    /// settlement tells the shell even after the run has gone.
-    pub(super) thread: Option<ThreadId>,
+    /// The held turn's thread, so a settlement that changes its row tells the shell even after
+    /// the run has gone.
+    pub(super) thread: ThreadId,
 }
 
 impl Coordinator {
@@ -153,22 +153,64 @@ impl Coordinator {
             .clone()
     }
 
-    /// Fences new write admissions for each picture grant whose run may no longer send it.
-    pub(super) fn revoke_pictures(&self) {
+    /// Fences new write admissions for each picture grant whose run may no longer send it: its
+    /// picture was withdrawn or lost, or its recipient no longer takes it. Each grant's first
+    /// close keeps that cause on its run for the send's terminal (`Self::round_reason`).
+    pub(super) fn revoke_pictures(&mut self) {
+        let mut first = Vec::new();
         for lease in &self.leases {
             let (Some(grant), SendKey::Build(key)) = (&lease.picture, lease.id.key) else {
                 continue;
             };
-            if !self
+            let run = self
                 .ending
                 .iter()
                 .chain(&self.current)
+                .find(|run| run.id == key.run);
+            let cause = match run {
+                Some(run) if matches!(run.screen, Some(crate::context::Screen::Withdrawn)) => {
+                    Some(kumochi_protocol::message::ErrorKey::ScreenUnavailable.into())
+                }
+                Some(run) if run.screen_lost.is_none() && self.run_pictured(run) => continue,
+                Some(run) => Some(run.picture_stopped()),
+                None => None,
+            };
+            if let Some(cause) = cause.filter(|_| grant.is_open()) {
+                first.push((key, cause));
+            }
+            grant.close();
+        }
+        for (key, cause) in first {
+            if let Some(run) = self
+                .ending
+                .iter_mut()
+                .chain(&mut self.current)
                 .find(|run| run.id == key.run)
-                .is_some_and(|run| run.screen_lost.is_none() && self.run_pictured(run))
             {
-                grant.close();
+                run.grant_closed = Some((key, cause));
             }
         }
+    }
+
+    /// Why a round ended, read the same way for every build kind: a send its own lease stopped
+    /// ends by why that send's grant first closed, and anything else by the engine's reason.
+    pub(super) fn round_reason(
+        &self,
+        key: BuildKey,
+        finish: crate::engines::Finish,
+    ) -> Option<kumochi_protocol::message::UserError> {
+        let run = self.current.as_ref().filter(|run| run.id == key.run);
+        let withheld = crate::engines::Finish::Failed(crate::engines::EngineFailure::Stream(
+            crate::connections::model::error::Failure::Withheld,
+        ));
+        if finish == withheld
+            && let Some((_, cause)) = run
+                .and_then(|run| run.grant_closed.as_ref())
+                .filter(|(closed, _)| *closed == key)
+        {
+            return Some(cause.clone());
+        }
+        self.engine_reason(run.and_then(|run| run.route), finish)
     }
 
     /// The current run's hold's picture is lost for good when its recipient no longer takes
@@ -286,10 +328,13 @@ impl Coordinator {
         let sources = build.sources().to_vec();
         // The request handed to the engine is judged, never the run's account of its screen.
         let pictured = build.pictured();
+        // A `ChatGPT` run that may have written its picture keeps every later send, such as an
+        // inline rewrite, under a grant too, though that send carries no picture of its own.
         let revocable = pictured
-            && run
-                .route
-                .is_some_and(|route| route.kind != ConnectionKind::ChatGpt);
+            || (run.exposed()
+                && run
+                    .route
+                    .is_some_and(|route| route.kind == ConnectionKind::ChatGpt));
         if let Some(reason) = self.written_picture_lost() {
             effects.push(Effect::Rebuild(SendKey::Build(key)));
             self.fail_with(key.run, Failure::Engine, reason, effects)
@@ -400,48 +445,47 @@ impl Coordinator {
     /// A send that may have written any of its request tells the shell, once, and marks the turn's
     /// pending picture sent. One that wrote nothing leaves its run as if never granted: a
     /// current run clears the mark at its end, or a later grant carries the picture again, and
-    /// any other run's mark is cleared now.
+    /// any other run's mark is cleared now. Either change to the turn's row refreshes its thread.
     #[expect(
         clippy::fn_params_excessive_bools,
         reason = "whether the transport proved no write was attempted"
     )]
     fn screen_settled(&mut self, carried: Carried, unsent: bool, effects: &mut Vec<Effect>) {
-        if !unsent {
+        if unsent
+            && let Some(run) = self.current.as_mut().filter(|run| {
+                run.id == carried.run
+                    && run
+                        .screen
+                        .as_ref()
+                        .is_some_and(|screen| screen.held() == carried.outcome)
+            })
+        {
+            run.untold = Some(carried.hold.gesture);
+            return;
+        }
+        let run = carried.run;
+        if unsent {
+            let withdrawn = self
+                .find(run)
+                .is_ok_and(|run| matches!(run.screen, Some(crate::context::Screen::Withdrawn)));
+            effects.push(Effect::Store(if withdrawn {
+                StoreOp::WithdrawScreen { run }
+            } else {
+                StoreOp::ForgetScreen { run }
+            }));
+        } else {
             effects.push(Effect::HoldScreen {
                 hold: carried.hold,
                 outcome: carried.outcome,
             });
-            effects.push(Effect::Store(StoreOp::SentScreen { run: carried.run }));
-            if let Some(thread) = carried
-                .thread
-                .filter(|thread| !self.pending_deletes().contains(thread))
-            {
-                effects.push(Effect::EventsChanged {
-                    hold: carried.hold,
-                    thread,
-                });
-            }
-            return;
+            effects.push(Effect::Store(StoreOp::SentScreen { run }));
         }
-        if let Some(run) = self.current.as_mut().filter(|run| {
-            run.id == carried.run
-                && run
-                    .screen
-                    .as_ref()
-                    .is_some_and(|screen| screen.held() == carried.outcome)
-        }) {
-            run.untold = Some(carried.hold.gesture);
-            return;
+        if !self.pending_deletes().contains(&carried.thread) {
+            effects.push(Effect::EventsChanged {
+                hold: carried.hold,
+                thread: carried.thread,
+            });
         }
-        let withdrawn = self
-            .find(carried.run)
-            .is_ok_and(|run| matches!(run.screen, Some(crate::context::Screen::Withdrawn)));
-        let run = carried.run;
-        effects.push(Effect::Store(if withdrawn {
-            StoreOp::WithdrawScreen { run }
-        } else {
-            StoreOp::ForgetScreen { run }
-        }));
     }
 
     /// A lease ran past its deadline. A delete is never released because time ran out, so the

@@ -917,7 +917,7 @@ async fn a_picture_grant_closed_after_a_pending_write_polls_no_more_and_never_se
     harness.valve(|valve| valve.hold = false);
     assert!(matches!(
         poll(&mut call),
-        Poll::Ready((Err(Failure::Transport), _))
+        Poll::Ready((Err(Failure::Withheld), _))
     ));
     assert_eq!(lock(&harness.shared.valve).write_polls, 1);
     assert_eq!(received(&mut harness.accept()), (Vec::new(), true));
@@ -943,7 +943,7 @@ async fn a_picture_grant_closed_after_a_partial_write_polls_no_more_and_closes_t
     picture.close();
     assert!(matches!(
         poll(&mut call),
-        Poll::Ready((Err(Failure::Transport), _))
+        Poll::Ready((Err(Failure::Withheld), _))
     ));
     assert_eq!(lock(&harness.shared.valve).write_polls, 2);
     assert_eq!(received(&mut server), (Vec::new(), true));
@@ -964,7 +964,7 @@ async fn a_picture_grant_closed_while_the_flush_waits_flushes_no_more() {
     harness.valve(|valve| valve.hold_flush = false);
     assert!(matches!(
         poll(&mut call),
-        Poll::Ready((Err(Failure::Transport), _))
+        Poll::Ready((Err(Failure::Withheld), _))
     ));
     assert_eq!(harness.seen().0, Vec::<usize>::new(), "no flush completed");
     assert_eq!(harness.settled(), settled_once(false));

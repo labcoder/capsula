@@ -43,6 +43,8 @@ pub(super) mod mcp;
 pub(super) mod routes;
 #[path = "scene_tests.rs"]
 mod scenes;
+#[path = "send_fence_tests.rs"]
+mod send_fence;
 #[path = "speech_tests.rs"]
 mod speech;
 #[path = "thread_op_tests.rs"]

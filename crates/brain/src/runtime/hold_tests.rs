@@ -767,6 +767,10 @@ async fn a_screen_hold_reaches_its_run_with_its_picture(first: First) {
     let (mut brain, release, mut decoded, _fetch) =
         input(&scratch, vec![105, -5], "words and a picture").await;
     let mut rig = seeing(&mut brain);
+    brain.fixture = Some(crate::coordinator::Ready {
+        images: vec![kumochi_protocol::message::ModelSlug::new("gpt-6-sol").unwrap()],
+        ..crate::coordinator::Ready::fixture()
+    });
     let mut observed = brain.observe();
     let (seen, mut requests) = mpsc::unbounded_channel();
     let (started, mut round) = mpsc::unbounded_channel();

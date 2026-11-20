@@ -1218,3 +1218,30 @@ fn a_delete_answered_during_the_wait_builds_nothing() {
     }
     released(&core.handle(claude_ready(5)).expect("current"), R);
 }
+
+/// Only the route's own listing says a model takes pictures: the dev fixture's trusted drawing
+/// authorizes none, and a fixture listing a synthetic image model authorizes exactly that one.
+#[test]
+fn trusted_drawing_alone_takes_no_pictures_and_only_a_listed_model_does() {
+    let chatgpt = kumochi_protocol::message::ConnectionKind::ChatGpt;
+    let image = ModelSlug::new("synthetic-image").expect("valid");
+    let text = ModelSlug::new("synthetic-text").expect("valid");
+    let mut core = Coordinator::new(ThreadId(1), ThreadId(3), RunId(9), Vec::new());
+    core.handle(Input::Engines(
+        chatgpt,
+        Availability::Ready(Ready::fixture()),
+    ))
+    .expect("never stale");
+    assert!(core.trusted_draw());
+    assert!(!core.takes_pictures(chatgpt, &image));
+    core.handle(Input::Engines(
+        chatgpt,
+        Availability::Ready(Ready {
+            images: vec![image.clone()],
+            ..Ready::fixture()
+        }),
+    ))
+    .expect("never stale");
+    assert!(core.takes_pictures(chatgpt, &image));
+    assert!(!core.takes_pictures(chatgpt, &text));
+}

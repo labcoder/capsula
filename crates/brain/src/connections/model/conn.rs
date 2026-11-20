@@ -95,6 +95,12 @@ impl<C: Connect> ModelClient<C> {
         *self.lock() = Some((io, Instant::now()));
     }
 
+    /// Pools `io` as if a response had just finished on it.
+    #[cfg(test)]
+    pub(crate) fn pool_for_tests(&self, io: C::Io) {
+        self.put(io);
+    }
+
     fn lock(&self) -> std::sync::MutexGuard<'_, Option<(C::Io, Instant)>> {
         self.idle.lock().unwrap_or_else(PoisonError::into_inner)
     }
@@ -164,7 +170,7 @@ impl<Io: AsyncRead + AsyncWrite + Unpin> ModelConn<Io> {
     /// for good. `admit` is asked before each poll of the writer, a write or the flush, and its
     /// admission is held for that one poll. A refusal ends the upload with no further poll: as
     /// [`Failure::Rebuild`] before any poll was admitted, with nothing written, and as
-    /// [`Failure::Transport`] after one was, since an admitted poll may have written even when it
+    /// [`Failure::Withheld`] after one was, since an admitted poll may have written even when it
     /// returned `Pending`, a partial count or an error.
     pub(in crate::connections) async fn upload<W>(
         &mut self,
@@ -195,7 +201,7 @@ impl<Io: AsyncRead + AsyncWrite + Unpin> ModelConn<Io> {
             loop {
                 let Some(_admitted) = admit() else {
                     return Poll::Ready(Err(if self.may_have_written {
-                        Failure::Transport
+                        Failure::Withheld
                     } else {
                         Failure::Rebuild
                     }));

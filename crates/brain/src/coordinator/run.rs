@@ -184,8 +184,7 @@ impl Coordinator {
             TurnEvent::Finished(Finish::Completed) => self.round_end(run, effects)?,
             // Only the coordinator interrupts a run, so an engine's interruption fails it too.
             TurnEvent::Finished(finish) => {
-                let route = current.route;
-                self.current(run)?.error = self.engine_reason(route, finish);
+                self.current(run)?.error = self.round_reason(key, finish);
                 self.fail(run, Failure::Engine, effects)?;
             }
         }

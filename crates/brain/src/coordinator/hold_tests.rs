@@ -246,7 +246,7 @@ fn pinned_choice_survives_delayed_build_but_still_gets_the_first_catalog_check()
                     Vec::new()
                 },
                 trusted_draw: false,
-                images: Vec::new(),
+                images: vec![ModelSlug::new("captured").unwrap()],
             }),
         ))
         .unwrap();
@@ -442,7 +442,7 @@ fn a_held_runs_screen_goes_with_its_request_or_fails_the_run() {
                     ]),
                 }],
                 trusted_draw: false,
-                images: Vec::new(),
+                images: vec![ModelSlug::new("captured").unwrap()],
             }),
         ))
         .unwrap();
@@ -845,6 +845,10 @@ fn a_held_runs_screen_is_told_once_and_an_image_once_its_send_may_have_written_i
                 [
                     Effect::HoldScreen { hold: KEY, outcome },
                     Effect::Store(StoreOp::SentScreen { run: R }),
+                    Effect::EventsChanged {
+                        hold: KEY,
+                        thread: T,
+                    },
                 ]
             })
             .into_iter()
@@ -937,7 +941,7 @@ fn held_catalog(model: &str, effort: Effort) -> Input {
                 supported_efforts: EffortSet::new([effort]),
             }],
             trusted_draw: false,
-            images: Vec::new(),
+            images: vec![ModelSlug::new(model).unwrap()],
         }),
     )
 }
@@ -1519,7 +1523,11 @@ fn an_inline_compaction_s_grant_leaves_a_held_image_untold() {
                             hold: KEY,
                             outcome: HeldScreen::Attached,
                         },
-                        Effect::Store(StoreOp::SentScreen { run: R })
+                        Effect::Store(StoreOp::SentScreen { run: R }),
+                        Effect::EventsChanged {
+                            hold: KEY,
+                            thread: T,
+                        },
                     ]
                 );
             }

@@ -234,7 +234,11 @@ async fn a_rebuild_sends_nothing_and_says_nothing() {
     let mut round = start(request(Some("gpt-fixture")));
     round.bearer(Ok(bearer())).await;
     round.answer(Answer::Rebuild).await;
-    assert_eq!(round.ended().await, []);
+    assert_eq!(
+        round.ended().await,
+        [TurnEvent::Finished(Finish::ReceiptOrdered)],
+        "nothing the pump forwards"
+    );
     assert!(round.servers.try_recv().is_err(), "nothing connected");
 }
 

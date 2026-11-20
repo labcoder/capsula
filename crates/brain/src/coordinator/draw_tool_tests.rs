@@ -44,6 +44,7 @@ fn offered(sources: Vec<ThreadId>) -> Coordinator {
         panic!("ready");
     };
     ready.trusted_draw = false;
+    ready.images = vec![kumochi_protocol::message::ModelSlug::new("gpt-fixture").expect("slug")];
     core
 }
 
