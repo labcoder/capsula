@@ -40,9 +40,9 @@ fn power(device: &Device, power: Power) -> bool {
 
 #[test]
 fn stopped_open_disposes_without_play_and_excludes_other_opens_until_drop() {
-    let _serial = EXCLUSIVE.lock().unwrap_or_else(PoisonError::into_inner);
     static FIRST_POOL: AtomicBool = AtomicBool::new(false);
     static NEXT_POOL: AtomicBool = AtomicBool::new(false);
+    let _serial = EXCLUSIVE.lock().unwrap_or_else(PoisonError::into_inner);
     let (entered, first_entered) = mpsc::sync_channel(1);
     let (release, finish) = mpsc::sync_channel(1);
     let (dropping, starts_drop) = mpsc::sync_channel(1);
@@ -141,10 +141,10 @@ fn stopped_open_disposes_without_play_and_excludes_other_opens_until_drop() {
     reason = "one device lifecycle across the worker and both backend contenders"
 )]
 fn detached_worker_cannot_give_a_successor_its_pending_native_permit() {
-    let _serial = EXCLUSIVE.lock().unwrap_or_else(PoisonError::into_inner);
     static LATE_POOL: AtomicBool = AtomicBool::new(false);
     static NEXT_POOLS: [AtomicBool; 2] = [const { AtomicBool::new(false) }; 2];
 
+    let _serial = EXCLUSIVE.lock().unwrap_or_else(PoisonError::into_inner);
     let (reports, receipts) = mpsc::channel();
     let actor = open_actor(move |message| reports.send(message).is_ok());
     let (entered, pending) = mpsc::sync_channel(1);
@@ -263,7 +263,7 @@ fn detached_worker_cannot_give_a_successor_its_pending_native_permit() {
             attempts.fetch_add(1, Ordering::Relaxed);
             Err(OutputError::Unavailable)
         },
-        |_, _| false,
+        |(), _| false,
     )
     .unwrap();
     refusing.send(Request::Open(5, Arc::default())).unwrap();
