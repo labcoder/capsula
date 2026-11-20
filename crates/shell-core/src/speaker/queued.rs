@@ -11,7 +11,6 @@ use zeroize::Zeroize as _;
 
 #[cfg(any(windows, target_os = "macos"))]
 mod backend;
-#[cfg(any(windows, target_os = "macos", test))]
 mod receipts;
 mod timeline;
 #[cfg(any(windows, target_os = "macos"))]
