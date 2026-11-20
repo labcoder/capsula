@@ -283,8 +283,8 @@ fn live_speech_metadata_is_required_and_not_part_of_snapshots() {
     let segment = SegmentId(3);
     let output_generation = OutputGeneration(17);
     let promise = SpeechPromise {
-        segment,
         output_generation,
+        segment,
     };
     let step = step();
     for (message, suffix) in [

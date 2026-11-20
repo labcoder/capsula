@@ -546,8 +546,8 @@ impl Reply {
             failed: false,
         });
         SpeechPromise {
-            segment,
             output_generation,
+            segment,
         }
     }
 

@@ -300,8 +300,8 @@ fn a_reservation_promises_only_an_announced_segment_even_if_synthesis_stopped() 
             assert_eq!(
                 promise,
                 Some(SpeechPromise {
-                    segment: seg(1),
-                    output_generation
+                    output_generation,
+                    segment: seg(1)
                 })
             );
             assert_eq!(

@@ -300,8 +300,9 @@ sequenceDiagram
   after reservation leaves no promise; a stopped but unrevoked producer still announces the
   segment and owes an empty final. Narrated `now`/`after` steps and ordinary text are `Plain`.
   If nonblank `say` gets no reservation, the successful step receipt puts the line ahead of
-  later text in the live reply and in the attempt's unflushed buffer. Chat history reads the saved reply; replaying a drawing doesn't emit it
-  again. An assigned segment that later fails isn't written as a new Chat line.
+  later text in the live reply and in the attempt's unflushed buffer. Chat history reads the
+  saved reply; replaying a drawing doesn't emit it again. An assigned segment that later fails
+  isn't written as a new Chat line.
 - **Drawing timing.** The presenter doesn't estimate narration time for any step, assigned or
   not. No normal launch opens a speaker here. Keep step narration off when enabling ordinary
   spoken replies until the conductor supplies real playback timing.

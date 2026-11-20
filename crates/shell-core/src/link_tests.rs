@@ -354,8 +354,8 @@ fn typed_scene_frames_keep_their_session_and_exact_credit_on_real_pipes() {
             index: 0,
             step: step.clone(),
             speech: Some(SpeechPromise {
-                segment: SegmentId(4),
                 output_generation: OutputGeneration(17),
+                segment: SegmentId(4),
             }),
         },
         DataToShell::SceneSnapshotV1 {
