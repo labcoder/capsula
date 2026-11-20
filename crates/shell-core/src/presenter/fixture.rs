@@ -174,6 +174,7 @@ pub fn commit_frame(scene: SceneId, index: u32, step: Step) -> DataToShell {
         scene,
         index,
         step,
+        speech: None,
     }
 }
 
@@ -208,6 +209,7 @@ pub fn commit_as(
         scene,
         index,
         step,
+        speech: None,
     };
     data(presenter, frame, now)
 }

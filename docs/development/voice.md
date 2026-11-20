@@ -295,9 +295,12 @@ sequenceDiagram
 
 - **Feeding the reply.** The brain reserves a drawing step's optional speech segment before
   writing the step. It announces a reserved segment only after the corresponding live step
-  commits and its scene frame is sent. If nonblank `say` gets no reservation, the successful
-  step receipt puts the line ahead of later text in the live reply and in the attempt's
-  unflushed buffer. Chat history reads the saved reply; replaying a drawing doesn't emit it
+  commits, behind its scene frame on the same FIFO. The producer stamps the live commit with
+  the exact announced output generation and segment only for speech-start steps. Revocation
+  after reservation leaves no promise; a stopped but unrevoked producer still announces the
+  segment and owes an empty final. Narrated `now`/`after` steps and ordinary text are `Plain`.
+  If nonblank `say` gets no reservation, the successful step receipt puts the line ahead of
+  later text in the live reply and in the attempt's unflushed buffer. Chat history reads the saved reply; replaying a drawing doesn't emit it
   again. An assigned segment that later fails isn't written as a new Chat line.
 - **Drawing timing.** The presenter doesn't estimate narration time for any step, assigned or
   not. No normal launch opens a speaker here. Keep step narration off when enabling ordinary

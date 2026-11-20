@@ -97,6 +97,7 @@ fn mirrored_presenter() -> Presenter {
                     scene: SceneId(1),
                     index: 0,
                     step,
+                    speech: None,
                 },
                 100,
             ),

@@ -200,6 +200,7 @@ fn a_closed_provider_step_is_durable_before_ready_but_an_open_object_has_no_effe
                 scene,
                 index,
                 step,
+                ..
             }) => Some((*run, *scene, *index, step.id.as_str())),
             _ => None,
         })

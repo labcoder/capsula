@@ -11,9 +11,7 @@
 use std::fmt;
 use std::time::Duration;
 
-use kumochi_protocol::message::{
-    ControlToShell, DataToShell, OutputGeneration, RunId, SegmentId, StepRef,
-};
+use kumochi_protocol::message::{ControlToShell, DataToShell, OutputGeneration, RunId, SegmentId};
 
 use super::{Coordinator, Effect, Input, Notify, Run, Stale};
 use crate::store::{Interruption, RunEnd};
@@ -79,20 +77,6 @@ impl Coordinator {
         let reserved = current.reply.as_mut()?.reserve_say(say, &mut out);
         carry(current, out, effects);
         reserved
-    }
-
-    pub(super) fn publish_say(
-        current: &mut Run,
-        segment: SegmentId,
-        step: StepRef,
-        say: &str,
-        effects: &mut Vec<Effect>,
-    ) {
-        if let Some(reply) = &mut current.reply {
-            let mut out = Vec::new();
-            reply.publish_say(segment, step, say, &mut out);
-            carry(current, out, effects);
-        }
     }
 
     /// A scene failed: its say segments are dropped from the run that drew it.
@@ -258,15 +242,22 @@ fn reply_final(run: &Run) -> bool {
 
 /// Carries out a run's speech. Frames for the shell wait behind a pending step like the run's
 /// text, so the shell sees them in the engine's order.
-fn carry(run: &mut Run, out: Vec<Speech>, effects: &mut Vec<Effect>) {
+pub(super) fn carry(run: &mut Run, out: Vec<Speech>, effects: &mut Vec<Effect>) {
     let id = run.id;
     let rate = run.reply.as_ref().map_or(0, Reply::rate);
     for speech in out {
         let effect = match speech {
-            Speech::Queued { segment, step } => Effect::Data(DataToShell::SegmentQueued {
+            Speech::Queued {
+                segment,
+                step,
+                start,
+                output_generation,
+            } => Effect::Data(DataToShell::SegmentQueued {
                 run: id,
                 segment,
                 step,
+                start,
+                output_generation,
             }),
             Speech::Pcm(pcm) => Effect::Data(DataToShell::SpeechPcm(pcm)),
             Speech::Speak { segment, text } => Effect::Speak {

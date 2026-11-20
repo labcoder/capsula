@@ -19,7 +19,7 @@ use std::ops::Range;
 
 use kumochi_protocol::message::{
     Cursor, MAX_AHEAD_SEGMENTS, MAX_SAY_BYTES, MAX_SEGMENTS_PER_RUN, MAX_UNPLAYED_SECONDS,
-    OutputGeneration, RunId, SceneId, SegmentId, SpeechPcm, StepRef,
+    OutputGeneration, RunId, SceneId, SegmentId, SegmentStart, SpeechPcm, SpeechPromise, StepRef,
 };
 
 use super::segment::{Cut, Segmenter};
@@ -31,6 +31,8 @@ pub(crate) enum Speech {
     Queued {
         segment: SegmentId,
         step: Option<StepRef>,
+        start: SegmentStart,
+        output_generation: OutputGeneration,
     },
     /// Hand TTS a segment; its events come back as [`Reply::pcm`], [`Reply::done`] and
     /// [`Reply::failed`].
@@ -207,28 +209,30 @@ impl Reply {
         &mut self,
         segment: SegmentId,
         step: StepRef,
+        start: SegmentStart,
         say: &str,
         out: &mut Vec<Speech>,
-    ) {
+    ) -> Option<SpeechPromise> {
         if self.synthesis == Synthesis::Revoked {
-            return;
+            return None;
         }
         assert_eq!(
             segment,
             id(self.segments.len()),
             "reply text must wait for the drawing receipt"
         );
-        self.append(Source::Say(step), say.to_owned(), out);
+        let published = self.append(Source::Say(step), start, say.to_owned(), out);
         if self.synthesis == Synthesis::Stopped {
             self.finals(out);
         }
         self.pump(out);
+        (start == SegmentStart::Speech).then_some(published)
     }
 
     #[cfg(test)]
     pub(crate) fn say(&mut self, step: StepRef, say: &str, out: &mut Vec<Speech>) {
         if let Some(segment) = self.reserve_say(say, out) {
-            self.publish_say(segment, step, say, out);
+            let _ = self.publish_say(segment, step, SegmentStart::Speech, say, out);
         }
     }
 
@@ -509,17 +513,27 @@ impl Reply {
         if self.synthesis != Synthesis::Open || self.segments.len() >= max_segments() {
             return;
         }
-        self.append(source, text, out);
+        self.append(source, SegmentStart::Plain, text, out);
     }
 
-    fn append(&mut self, source: Source, text: String, out: &mut Vec<Speech>) {
+    fn append(
+        &mut self,
+        source: Source,
+        start: SegmentStart,
+        text: String,
+        out: &mut Vec<Speech>,
+    ) -> SpeechPromise {
         let step = match source {
             Source::Say(step) => Some(step),
             Source::Text(_) => None,
         };
+        let segment = id(self.segments.len());
+        let output_generation = self.generation;
         out.push(Speech::Queued {
-            segment: id(self.segments.len()),
+            segment,
             step,
+            start,
+            output_generation,
         });
         self.segments.push(Segment {
             source,
@@ -531,6 +545,10 @@ impl Reply {
             marked: false,
             failed: false,
         });
+        SpeechPromise {
+            segment,
+            output_generation,
+        }
     }
 
     /// Issues the next Speak when the window allows, and tops up the pump's credit.
@@ -673,10 +691,17 @@ fn max_ahead() -> usize {
 impl fmt::Debug for Speech {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Queued { segment, step } => f
+            Self::Queued {
+                segment,
+                step,
+                start,
+                output_generation,
+            } => f
                 .debug_struct("Queued")
                 .field("segment", segment)
                 .field("step", step)
+                .field("start", start)
+                .field("output_generation", output_generation)
                 .finish(),
             Self::Speak { segment, text } => f
                 .debug_struct("Speak")

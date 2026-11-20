@@ -302,7 +302,10 @@ fn lapse_notification_is_only_session_fenced_bounded_queue_acceptance() {
     reason = "one real pipe connection exercises every typed scene frame family"
 )]
 fn typed_scene_frames_keep_their_session_and_exact_credit_on_real_pipes() {
-    use kumochi_protocol::message::{SceneDescriptorV1, SceneHeader, SceneId, SceneSnapshotChunk};
+    use kumochi_protocol::message::{
+        OutputGeneration, SceneDescriptorV1, SceneHeader, SceneId, SceneSnapshotChunk, SegmentId,
+        SpeechPromise,
+    };
     use kumochi_scene::{Record, SceneEvent, StopCut, parse_record, text::Bounded};
 
     let link = attended("typed-scenes");
@@ -350,6 +353,10 @@ fn typed_scene_frames_keep_their_session_and_exact_credit_on_real_pipes() {
             scene,
             index: 0,
             step: step.clone(),
+            speech: Some(SpeechPromise {
+                segment: SegmentId(4),
+                output_generation: OutputGeneration(17),
+            }),
         },
         DataToShell::SceneSnapshotV1 {
             chunk: SceneSnapshotChunk {
@@ -404,6 +411,47 @@ fn typed_scene_frames_keep_their_session_and_exact_credit_on_real_pipes() {
             Some(DataToBrain::Credit { bytes })
         );
     }
+    drop(link.control);
+    assert!(link.link.join().expect("joined"));
+}
+
+#[test]
+fn a_raw_segment_announcement_keeps_its_class_and_output_generation() {
+    use kumochi_protocol::message::{OutputGeneration, SceneId, SegmentId, SegmentStart, StepRef};
+
+    let link = attended("speech-metadata");
+    let events = patient(link.events);
+    let session = connected(next(&events));
+    let sent = DataToShell::SegmentQueued {
+        run: RunId(1),
+        segment: SegmentId(3),
+        step: Some(StepRef {
+            scene: SceneId(7),
+            index: 2,
+        }),
+        start: SegmentStart::Speech,
+        output_generation: OutputGeneration(17),
+    };
+    frame::write(&mut &*link.data, &sent, Pipe::Data).expect("announcement written");
+    let LinkEvent::Data {
+        generation,
+        message,
+        bytes,
+    } = next(&events)
+    else {
+        panic!("raw run-owned announcement");
+    };
+    assert_eq!(generation, session.generation());
+    assert_eq!(message, sent);
+    assert_eq!(
+        usize::try_from(bytes).expect("size"),
+        frame::encode(&sent, Pipe::Data).expect("frame").len()
+    );
+    session.grant(bytes);
+    assert_eq!(
+        frame::read::<DataToBrain>(&mut &*link.data, Pipe::Data).expect("credit"),
+        Some(DataToBrain::Credit { bytes }),
+    );
     drop(link.control);
     assert!(link.link.join().expect("joined"));
 }
@@ -1066,6 +1114,7 @@ fn legacy_no_visual_controls_are_no_ops_before_more_valid_traffic() {
             scene: SceneId(7),
             index: 0,
             step,
+            speech: None,
         },
         DataToShell::SceneEnd {
             run: RunId(2),
@@ -2238,6 +2287,7 @@ fn a_normal_session_never_announces_an_output() {
 #[test]
 fn a_speaking_session_announces_its_output_keeps_speech_from_the_ui_and_answers_a_revoke() {
     use kumochi_protocol::message::{OutputGeneration, SegmentId, SpeechPcm};
+    use kumochi_protocol::message::{SceneId, SegmentStart, StepRef};
     let opener = crate::speaker::Opener(Arc::new(|outlet| {
         Some(crate::speaker::deviceless(outlet, 24_000))
     }));
@@ -2261,7 +2311,12 @@ fn a_speaking_session_announces_its_output_keeps_speech_from_the_ui_and_answers_
     let queued = DataToShell::SegmentQueued {
         run: RunId(1),
         segment: SegmentId(0),
-        step: None,
+        step: Some(StepRef {
+            scene: SceneId(7),
+            index: 2,
+        }),
+        start: SegmentStart::Speech,
+        output_generation: OutputGeneration(1),
     };
     frame::write(&mut &*link.data, &queued, Pipe::Data).expect("written");
     link.data.set_timeout(Some(Duration::from_millis(150)));
@@ -2494,6 +2549,8 @@ fn opening_speaker(
         run: RunId(1),
         segment: SegmentId(0),
         step: None,
+        start: kumochi_protocol::message::SegmentStart::Plain,
+        output_generation: kumochi_protocol::message::OutputGeneration(1),
     };
     let pcm = DataToShell::SpeechPcm(SpeechPcm {
         run: RunId(1),

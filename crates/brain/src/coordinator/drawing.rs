@@ -1,6 +1,9 @@
 //! V1 drawing effects share the coordinator's run fences, store FIFO and clear debt.
 
-use kumochi_protocol::message::{DataToShell, RunId, SceneId, SegmentId, StepRef, ThreadId};
+use kumochi_protocol::message::{
+    DataToShell, RunId, SceneId, SegmentId, SegmentStart, StepRef, ThreadId,
+};
+use kumochi_scene::record::Start;
 
 use super::{BuildKey, Coordinator, Effect, Stale, StoreOp, speech};
 use crate::context::{Geometry, NoCanvas, Screen};
@@ -328,31 +331,36 @@ impl Coordinator {
         }
     }
 
-    fn forward_drawing_effect(&mut self, effect: Effect, effects: &mut Vec<Effect>) {
-        let staged = match &effect {
-            Effect::Data(DataToShell::SceneStepCommit {
-                run, scene, index, ..
-            }) => self
+    fn forward_drawing_effect(&mut self, mut effect: Effect, effects: &mut Vec<Effect>) {
+        if let Effect::Data(DataToShell::SceneStepCommit {
+            run,
+            scene,
+            index,
+            step,
+            speech,
+        }) = &mut effect
+            && let Some(staged) = self
                 .drawing_reply
                 .take_if(|reply| reply.key.run == *run && reply.revision == *index + 1)
-                .map(|reply| {
-                    (
-                        reply,
-                        StepRef {
-                            scene: *scene,
-                            index: *index,
-                        },
-                    )
-                }),
-            _ => None,
-        };
-        effects.push(effect);
-        if let Some((reply, step)) = staged
-            && let Some(segment) = reply.segment
-            && let Some(current) = self.current_attempt(reply.key)
+            && let Some(segment) = staged.segment
+            && let Some(current) = self.current_attempt(staged.key)
+            && let Some(reply) = &mut current.reply
         {
-            Self::publish_say(current, segment, step, reply.say.as_str(), effects);
+            let start = match step.start {
+                Start::Speech => SegmentStart::Speech,
+                Start::Now | Start::After { .. } => SegmentStart::Plain,
+            };
+            let step = StepRef {
+                scene: *scene,
+                index: *index,
+            };
+            let mut out = Vec::new();
+            *speech = reply.publish_say(segment, step, start, staged.say.as_str(), &mut out);
+            effects.push(effect);
+            speech::carry(current, out, effects);
+            return;
         }
+        effects.push(effect);
     }
 
     fn reserve_step_reply(&mut self, serial: u64, write: &Write, effects: &mut Vec<Effect>) {

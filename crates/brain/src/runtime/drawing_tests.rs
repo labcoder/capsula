@@ -747,6 +747,7 @@ async fn a_typed_restart_describes_and_queues_the_original_log_with_scene_owners
                     scene,
                     index: 0,
                     step: (*step).clone(),
+                    speech: None,
                 },
             )],
             Some(&mut link),

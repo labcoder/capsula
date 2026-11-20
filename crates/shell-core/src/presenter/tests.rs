@@ -197,6 +197,7 @@ fn measure_v1_mirror_admission_at_caps() {
                 scene: LIVE,
                 index,
                 step: update.clone(),
+                speech: None,
             };
             let bytes = u32::try_from(
                 frame::encode(&message, Pipe::Data)

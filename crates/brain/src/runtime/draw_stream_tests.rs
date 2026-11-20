@@ -4,8 +4,8 @@ use std::time::Duration;
 use kumochi_protocol::frame::{self, Pipe};
 use kumochi_protocol::message::{
     ConnectionKind, ControlToShell, DataToShell, Effort, ModelChoice, ModelInfo, ModelName,
-    ModelSlug, OutputGeneration, PageEvent, PageEventKind, PageOf, RunId, SceneId, SettingsOp,
-    ThreadId,
+    ModelSlug, OutputGeneration, PageEvent, PageEventKind, PageOf, RunId, SceneId, SegmentId,
+    SegmentStart, SettingsOp, SpeechPcm, SpeechPromise, StepRef, ThreadId,
 };
 use serde_json::json;
 use tokio::sync::{Notify, mpsc};
@@ -15,7 +15,7 @@ use super::data::DataQueue;
 use super::{Brain, Link, Seen, window};
 use crate::connections::model::sse::{Progress, Reader};
 use crate::context::{ConnectionTag, InputItem, Role};
-use crate::coordinator::{Availability, BuildKey, Input, Ready, StoreOp};
+use crate::coordinator::{Availability, BuildKey, Effect, Input, Ready, StoreOp, Synthesized};
 use crate::drawing::{Reply, Write};
 use crate::engines::{CallId, EngineFailure, Finish, Opaque, ToolName, TurnEvent};
 use crate::store::Store;
@@ -105,6 +105,7 @@ async fn offline_sse_replay_dispatches_all_step_receipts() {
                     scene,
                     index,
                     step,
+                    ..
                 } = frame
                 {
                     assert_eq!(owner, run);
@@ -405,6 +406,20 @@ async fn staged_say(brain: &mut Brain, narration: [&str; 2], expected: &[&str], 
         })
         .collect();
     assert_eq!(assigned, segments);
+    let promises: Vec<_> = messages
+        .iter()
+        .filter_map(|frame| match frame {
+            DataToShell::SceneStepCommit { run, speech, .. } if *run == key.run => Some(*speech),
+            _ => None,
+        })
+        .collect();
+    let expected_promises = [0, 1, 2].map(|index| {
+        segments.contains(&index).then_some(SpeechPromise {
+            output_generation: OutputGeneration(1),
+            segment: SegmentId(0),
+        })
+    });
+    assert_eq!(promises, expected_promises);
     assert_eq!(live, paragraphs, "Chat lines from the live steps");
 
     brain.offline(Input::ShellLost);
@@ -1141,6 +1156,109 @@ async fn unspoken_invalidated_attempt_leaves_no_reply_in_rebuild_history_or_sear
         )
     });
     assert_eq!(has_markers, [(false, false, false); 2]);
+}
+
+#[tokio::test]
+async fn narrated_class_survives_scene_revocation_on_the_shared_fifo() {
+    for (authored, class, revoke) in [
+        (json!("speech"), SegmentStart::Speech, true),
+        (json!("speech"), SegmentStart::Speech, false),
+        (json!("now"), SegmentStart::Plain, false),
+        (json!("now"), SegmentStart::Plain, true),
+        (json!({"after":"s1","ms":10}), SegmentStart::Plain, false),
+        (json!({"after":"s1","ms":10}), SegmentStart::Plain, true),
+    ] {
+        let scratch = Scratch::new("narration-owner");
+        let mut brain = brain(&scratch);
+        let generation = OutputGeneration(17);
+        brain.offline(Input::SpokenReplies { loaded: true });
+        brain.offline(Input::AudioOutput {
+            rate: 24_000,
+            generation,
+        });
+        let (out, _controls) = mpsc::channel(64);
+        let queue = RefCell::new(DataQueue::new(window()));
+        let ready = Notify::new();
+        let mut tap = Tap::from_env();
+        let mut link = Link::new(&out, &queue, &ready, &mut tap);
+        link.recovery = brain.describe(&mut link).expect("initial membership");
+        let key = start(&mut brain, &mut link).await;
+        let run = key.run;
+        submit_narrating_step(&mut brain, &mut link, key, "");
+        let scene = step_landed(&mut brain, &mut link).await;
+        let _ = all_frames(&queue);
+        let next = json!({"step":{"id":"s2","start":authored,"say":"This is the output.",
+            "put":[{"shape":{"id":"b","kind":"rect","box":[20,0,10,10]}}]}});
+        apply(
+            &mut brain,
+            &mut link,
+            Input::Engine {
+                key,
+                event: delta(&format!(",{next}")),
+            },
+        );
+        assert_eq!(step_landed(&mut brain, &mut link).await, scene);
+        let segment = SegmentId(0);
+        apply(
+            &mut brain,
+            &mut link,
+            Input::Tts {
+                run,
+                segment,
+                made: Synthesized::Audio(vec![1; 8]),
+            },
+        );
+        if revoke {
+            brain
+                .apply(
+                    vec![Effect::RevokeScenes {
+                        scenes: vec![scene],
+                    }],
+                    Some(&mut link),
+                )
+                .expect("runtime scene revocation");
+        }
+        let mut delivered = all_frames(&queue).into_iter();
+        if !revoke {
+            let Some(DataToShell::SceneStepCommit {
+                run: owner,
+                scene: committed,
+                index,
+                speech,
+                ..
+            }) = delivered.next()
+            else {
+                panic!("the durable scene commit precedes speech");
+            };
+            assert_eq!((owner, committed, index), (run, scene, 1));
+            let expected = (class == SegmentStart::Speech).then_some(SpeechPromise {
+                output_generation: generation,
+                segment,
+            });
+            assert_eq!(speech, expected);
+        }
+        assert_eq!(
+            delivered.collect::<Vec<_>>(),
+            [
+                DataToShell::SegmentQueued {
+                    run,
+                    segment,
+                    step: Some(StepRef { scene, index: 1 }),
+                    start: class,
+                    output_generation: generation,
+                },
+                DataToShell::SpeechPcm(SpeechPcm {
+                    run,
+                    segment,
+                    output_generation: generation,
+                    seq: 0,
+                    samples: vec![1; 8],
+                    last: None,
+                }),
+            ]
+        );
+        brain.close().await;
+    }
 }
 
 #[tokio::test]

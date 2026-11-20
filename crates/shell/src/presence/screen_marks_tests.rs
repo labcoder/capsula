@@ -275,6 +275,7 @@ fn mark(
             scene,
             index: 0,
             step,
+            speech: None,
         },
     ] {
         let event = LinkEvent::SceneData {
@@ -1464,6 +1465,7 @@ fn draw(watching: &Watching, run: u64, scene: SceneId, cx: &mut TestAppContext) 
             scene,
             index,
             step,
+            speech: None,
         },
     ] {
         let event = LinkEvent::SceneData {
@@ -1813,6 +1815,7 @@ fn measure_captured_stop_and_raw_intake(cx: &mut TestAppContext) {
                         scene,
                         index: 0,
                         step: rect("measured"),
+                        speech: None,
                     },
                 ] {
                     let bytes = u32::try_from(
@@ -2105,6 +2108,7 @@ fn automatic_hold_stop_cuts_pre_named_work_and_tags_later_commits(cx: &mut TestA
             scene: owned,
             index: 1,
             step: step(r#"{"step":{"id":"late"}}"#),
+            speech: None,
         },
     ] {
         receive(
@@ -2148,6 +2152,7 @@ fn automatic_hold_stop_cuts_pre_named_work_and_tags_later_commits(cx: &mut TestA
                     scene: owned,
                     index: 2,
                     step: step(r#"{"step":{"id":"later"}}"#),
+                    speech: None,
                 },
                 0,
             ),

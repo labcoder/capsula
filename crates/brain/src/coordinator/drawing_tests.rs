@@ -113,7 +113,9 @@ fn commit(core: &mut Coordinator, store: &mut Store, effects: &[Effect]) -> Vec<
 /// failure drops it.
 #[test]
 fn a_committed_step_s_say_is_spoken_and_its_failed_scene_drops_it() {
-    use kumochi_protocol::message::{OutputGeneration, SegmentId, SpeechPcm, StepRef};
+    use kumochi_protocol::message::{
+        OutputGeneration, SegmentId, SegmentStart, SpeechPcm, SpeechPromise, StepRef,
+    };
     let scratch = Scratch::new("drawing-say");
     let mut store = open(&scratch);
     let mut core = super::spoken();
@@ -146,10 +148,17 @@ fn a_committed_step_s_say_is_spoken_and_its_failed_scene_drops_it() {
             )
         })
         .expect("the step commits");
-    let Effect::Data(DataToShell::SceneStepCommit { scene, .. }) = first[at] else {
+    let Effect::Data(DataToShell::SceneStepCommit { scene, speech, .. }) = first[at] else {
         unreachable!("matched above");
     };
     let segment = SegmentId(0);
+    assert_eq!(
+        speech,
+        Some(SpeechPromise {
+            output_generation: OutputGeneration(1),
+            segment
+        })
+    );
     assert_eq!(
         first[at + 1..at + 4],
         [
@@ -157,6 +166,8 @@ fn a_committed_step_s_say_is_spoken_and_its_failed_scene_drops_it() {
                 run: R,
                 segment,
                 step: Some(StepRef { scene, index: 0 }),
+                start: SegmentStart::Speech,
+                output_generation: OutputGeneration(1),
             }),
             Effect::Speak {
                 run: R,

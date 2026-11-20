@@ -131,6 +131,7 @@ fn workloads() -> Vec<(&'static str, DataToShell)> {
         scene: SceneId(1),
         index: 0,
         step,
+        speech: None,
     };
     let snapshot = DataToShell::SceneSnapshotV1 {
         chunk: SceneSnapshotChunk {

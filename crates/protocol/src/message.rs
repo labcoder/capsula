@@ -65,7 +65,8 @@ pub use voice::{
     MAX_AHEAD_SEGMENTS, MAX_HOLD_CHUNKS, MAX_MIC_SAMPLES, MAX_RATE, MAX_SAY_BYTES,
     MAX_SEGMENT_SECONDS, MAX_SEGMENTS_PER_RUN, MAX_SPEECH_SAMPLES, MAX_TRANSCRIPT_BYTES,
     MAX_UNPLAYED_SECONDS, MIN_RATE, MicPcm, OutputGeneration, PROGRESS_INTERVAL_MS, PartState,
-    SegmentId, SpeechPcm, StepRef, Transcript, VoiceBound, VoiceView, check_rate,
+    SegmentId, SegmentStart, SpeechPcm, SpeechPromise, StepRef, Transcript, VoiceBound, VoiceView,
+    check_rate,
 };
 
 /// The most rows one page carries [guess].
@@ -976,6 +977,8 @@ pub enum DataToShell {
         index: u32,
         /// Original input, never a normalized or pre-expanded replacement.
         step: kumochi_scene::Step,
+        /// The live segment announced for a speech-start step, or authoritative absence.
+        speech: Option<SpeechPromise>,
     },
     /// A bounded chunk of the complete ordered step/cut log; install only on the last chunk.
     SceneSnapshotV1 {
@@ -1020,6 +1023,10 @@ pub enum DataToShell {
         segment: SegmentId,
         /// The step it narrates.
         step: Option<StepRef>,
+        /// Start class remains authoritative even if the scene-owned commit is removed.
+        start: SegmentStart,
+        /// The same logical output generation carried by this segment's PCM.
+        output_generation: OutputGeneration,
     },
     /// Audio of a queued segment.
     SpeechPcm(SpeechPcm),

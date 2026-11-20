@@ -80,6 +80,8 @@ async fn a_spoken_answer_streams_through_the_pump_and_ends_done_once_played() {
                     run,
                     segment,
                     step: None,
+                    start: kumochi_protocol::message::SegmentStart::Plain,
+                    output_generation: kumochi_protocol::message::OutputGeneration(1),
                 },
                 pcm(0, vec![0; 240], None),
                 pcm(1, Vec::new(), Some(240)),

@@ -453,6 +453,7 @@ fn scene_step(owner: &Entity<Presence>, run: u64, scene: u64, cx: &mut TestAppCo
                 scene: SceneId(scene),
                 index: 0,
                 step,
+                speech: None,
             },
         ),
     ];

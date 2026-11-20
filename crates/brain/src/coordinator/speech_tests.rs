@@ -125,6 +125,8 @@ fn a_spoken_answer_ends_done_only_after_its_last_segment_played() {
                 run: R,
                 segment: SEG,
                 step: None,
+                start: kumochi_protocol::message::SegmentStart::Plain,
+                output_generation: kumochi_protocol::message::OutputGeneration(1),
             }),
             Effect::Speak {
                 run: R,

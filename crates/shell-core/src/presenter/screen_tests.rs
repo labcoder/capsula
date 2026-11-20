@@ -136,6 +136,7 @@ fn mark_frame(run: RunId, scene: SceneId) -> DataToShell {
         scene,
         index: 0,
         step: mark(),
+        speech: None,
     }
 }
 
@@ -214,6 +215,7 @@ fn a_first_mark_is_judged_as_it_arrives_while_its_frames_are_held() {
         scene: LIVE,
         index: 0,
         step: rect("a"),
+        speech: None,
     };
     let admission = only_admission(arrive(&mut presenter, frame, now).expect("a step"));
     assert!(
@@ -242,6 +244,7 @@ fn a_change_clears_a_shown_scene_whose_frames_are_still_held() {
         scene: LIVE,
         index: 0,
         step: rect("a"),
+        speech: None,
     };
     let admission = only_admission(arrive(&mut presenter, frame, now).expect("a step"));
     assert!(
@@ -582,6 +585,7 @@ fn second_mark(scene: SceneId) -> DataToShell {
         scene,
         index: 1,
         step,
+        speech: None,
     }
 }
 
@@ -601,6 +605,7 @@ fn admitting() -> (Presenter, Instant, Rc<RefCell<Log>>, AdmitJob) {
         scene: LIVE,
         index: 0,
         step: rect("a"),
+        speech: None,
     };
     assert!(arrive(&mut presenter, frame, now).expect("held").is_empty());
     (presenter, now, log, admission)
@@ -1222,6 +1227,7 @@ fn a_sample_that_clears_the_marks_reports_a_held_frame_the_mirror_rejects() {
         scene: SECOND,
         index: 0,
         step: rect("a"),
+        speech: None,
     };
     assert!(
         arrive(&mut presenter, orphan, now)
@@ -1279,6 +1285,7 @@ fn a_first_mark_whose_view_cannot_be_placed_is_skipped_once_and_shows_nothing() 
         scene: LIVE,
         index: 0,
         step: rect("a"),
+        speech: None,
     };
     let admission = only_admission(arrive(&mut presenter, frame, now).expect("a step"));
     assert!(
@@ -1331,6 +1338,7 @@ fn an_unplaceable_first_mark_is_skipped_while_the_marks_that_were_up_are_cleared
         scene: LIVE,
         index: 0,
         step: rect("a"),
+        speech: None,
     };
     let admission = only_admission(arrive(&mut presenter, frame, now).expect("a step"));
     assert!(
