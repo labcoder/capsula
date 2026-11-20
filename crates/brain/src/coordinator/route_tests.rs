@@ -1031,7 +1031,7 @@ fn written_settlement(effects: &[Effect]) -> (usize, usize, usize) {
     let count =
         |wanted: &dyn Fn(&Effect) -> bool| effects.iter().filter(|effect| wanted(effect)).count();
     (
-        count(&|effect| matches!(effect, Effect::HoldScreen { hold: held, .. } if *held == hold)),
+        count(&|effect| matches!(effect, Effect::HoldScreen { hold: key, .. } if *key == hold)),
         count(&|effect| *effect == sent),
         count(&|effect| *effect == marker),
     )
