@@ -805,7 +805,7 @@ fn signed_in(tag: u64) -> crate::coordinator::Input {
         Availability::Ready(crate::coordinator::Ready {
             connection: crate::context::ConnectionTag(tag),
             models: Vec::new(),
-            images: Vec::new(),
+            images: vec![kumochi_protocol::message::ModelSlug::new("gpt-6-sol").unwrap()],
             trusted_draw: false,
         }),
     )
