@@ -7,7 +7,7 @@ use std::pin::Pin;
 use std::task::{Context, Poll};
 
 use kumochi_protocol::Secret;
-use kumochi_protocol::message::{HeldScreen, Phase};
+use kumochi_protocol::message::{HeldScreen, PageEventKind, PageOf, Phase};
 use serde_json::json;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use zeroize::Zeroizing;
@@ -35,6 +35,9 @@ enum Wire {
     WriteFails,
     /// Every byte is written and the flush never finishes, until the user stops the run.
     FlushHeld,
+    /// The round attempts a write and keeps its lease until the test lets it go, so the user's
+    /// Stop lands before the send settles.
+    Kept,
 }
 
 struct Scripted {
@@ -155,9 +158,73 @@ impl crate::engines::Engine for Transported {
     }
 }
 
-/// Plays a screen hold whose picture is sealed and whose send meets `wire`; the `HoldScreen`s
-/// the shell was told and the run's stored screen.
+/// A round that takes its grant, says a write was attempted, and hands its lease to the test, so
+/// its settlement waits for the test however the round ends.
+struct Kept(mpsc::UnboundedSender<crate::engines::SendLease>);
+
+impl std::fmt::Debug for Kept {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Kept")
+    }
+}
+
+impl crate::engines::Engine for Kept {
+    fn start(
+        &self,
+        _: crate::engines::RunRequest,
+        events: mpsc::Sender<TurnEvent>,
+        gate: crate::engines::SendGate,
+    ) -> crate::engines::Round {
+        let kept = self.0.clone();
+        Box::pin(async move {
+            if let Answer::Grant(mut lease) = gate.ask().await {
+                crate::connections::model::Lease::wrote(&mut lease);
+                kept.send(lease).ok();
+            }
+            let _open = events;
+            std::future::pending::<()>().await;
+        })
+    }
+}
+
+/// The user turn's kind on the first page of `thread`, read as the shell's repair read does.
+async fn page_turn(
+    shell: &mut Shell<tokio::io::DuplexStream>,
+    thread: ThreadId,
+) -> Option<PageEventKind> {
+    shell.credit(64 * 1024).await;
+    let ask = DataToBrain::PageRequest {
+        request: 7,
+        page: PageOf::Events {
+            thread,
+            before: None,
+        },
+    };
+    let frame = frame::encode(&ask, Pipe::Data).expect("encodes");
+    shell.data_out.write_all(&frame).await.expect("sent");
+    loop {
+        if let DataToShell::Page {
+            request: 7, events, ..
+        } = shell.data().await
+        {
+            return events
+                .iter()
+                .map(|event| event.kind)
+                .find(|kind| matches!(kind, PageEventKind::User | PageEventKind::HeldTurn { .. }));
+        }
+    }
+}
+
+/// [`play`] without the history read.
 async fn played(wire: Wire) -> (Vec<ControlToShell>, Vec<Option<String>>) {
+    let (told, screens, _) = Box::pin(play(wire)).await;
+    (told, screens)
+}
+
+/// Plays a screen hold whose picture is sealed and whose send meets `wire`; the `HoldScreen`s
+/// the shell was told, the run's stored screen, and for [`Wire::Kept`] the user turn the history
+/// read after Stop showed.
+async fn play(wire: Wire) -> (Vec<ControlToShell>, Vec<Option<String>>, Option<PageEventKind>) {
     use crate::runtime::hold::tests::screen_hold::{recognized, release as released, seeing};
     type Request = <crate::screen::Holds as crate::supervise::Kind>::Request;
     type Reply = <crate::screen::Holds as crate::supervise::Kind>::Reply;
@@ -167,13 +234,19 @@ async fn played(wire: Wire) -> (Vec<ControlToShell>, Vec<Option<String>>) {
     let mut rig = seeing(&mut brain);
     let mut observed = brain.observe();
     let (wrote, mut writes) = mpsc::unbounded_channel();
-    brain.engine = Box::new(Transported {
-        client: Arc::new(ModelClient::new(Scripted { wire, wrote })),
-        budget: Arc::new(Budget::limited((wire == Wire::Spent).then_some(0))),
-    });
+    let (keep, mut kept) = mpsc::unbounded_channel();
+    brain.engine = if wire == Wire::Kept {
+        Box::new(Kept(keep))
+    } else {
+        Box::new(Transported {
+            client: Arc::new(ModelClient::new(Scripted { wire, wrote })),
+            budget: Arc::new(Budget::limited((wire == Wire::Spent).then_some(0))),
+        })
+    };
     let ((control, data), mut shell) = duplex();
     let mut tap = Tap::from_env();
     let mut told = Vec::new();
+    let mut repaired = None;
     let client = async {
         opened(&mut shell).await;
         shell.send(&recognized(G)).await;
@@ -206,6 +279,13 @@ async fn played(wire: Wire) -> (Vec<ControlToShell>, Vec<Option<String>>) {
             assert_eq!(writes.recv().await, Some(()));
             shell.stop(run).await;
         }
+        let lease = if wire == Wire::Kept {
+            let lease = kept.recv().await.expect("a granted send");
+            shell.stop(run).await;
+            Some(lease)
+        } else {
+            None
+        };
         shell.read_to_end(run).await;
         loop {
             match shell.control().await {
@@ -216,6 +296,21 @@ async fn played(wire: Wire) -> (Vec<ControlToShell>, Vec<Option<String>>) {
                 })
                 | None => break,
                 Some(_) => {}
+            }
+        }
+        if let Some(lease) = lease {
+            let thread = shell.thread.expect("the run's thread");
+            repaired = page_turn(&mut shell, thread).await;
+            drop(lease);
+            loop {
+                match shell.control().await {
+                    Some(message @ ControlToShell::HoldScreen { .. }) => {
+                        told.push(message);
+                        break;
+                    }
+                    None => break,
+                    Some(_) => {}
+                }
             }
         }
         drop(shell);
@@ -235,7 +330,27 @@ async fn played(wire: Wire) -> (Vec<ControlToShell>, Vec<Option<String>>) {
         .unwrap()
         .collect::<Result<_, _>>()
         .unwrap();
-    (told, screens)
+    (told, screens, repaired)
+}
+
+/// Stop after a write attempt: the history read that the Interrupted frame starts shows the
+/// picture before the send's settlement records it sent, and the settlement tells the hold once.
+#[tokio::test]
+async fn a_stopped_hold_s_history_shows_its_picture_before_its_send_settles() {
+    let told = ControlToShell::HoldScreen {
+        gesture: G,
+        outcome: HeldScreen::Screen,
+    };
+    assert_eq!(
+        Box::pin(play(Wire::Kept)).await,
+        (
+            vec![told],
+            vec![Some("screen".to_owned())],
+            Some(PageEventKind::HeldTurn {
+                screen: HeldScreen::Screen
+            })
+        )
+    );
 }
 
 #[tokio::test]

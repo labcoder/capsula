@@ -111,6 +111,16 @@ pub(super) fn sent(conn: &rusqlite::Connection, run: Option<i64>) -> rusqlite::R
     )
 }
 
+/// What history shows for the stored value: a pending picture reads as sent once its run isn't
+/// `active`, as recovery would record it, and as none while it is.
+pub(super) fn shown(column_text: &str, active: Option<bool>) -> Option<HeldScreen> {
+    match column_text {
+        PENDING_ATTACHED if active == Some(false) => Some(HeldScreen::Attached),
+        PENDING_SCREEN if active == Some(false) => Some(HeldScreen::Screen),
+        other => read(other),
+    }
+}
+
 /// The stored value; one this build doesn't know reads as none, so no line claims a window.
 pub(super) fn read(column_text: &str) -> Option<HeldScreen> {
     ALL.into_iter()

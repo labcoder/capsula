@@ -339,3 +339,26 @@ fn a_picture_cleared_after_an_unsent_send_is_not_recovered_as_sent() {
         }]
     );
 }
+
+#[test]
+fn a_pending_picture_reads_as_sent_once_its_run_has_ended_and_its_value_stays_pending() {
+    let scratch = Scratch::new("held-pending-ended");
+    let mut store = Store::open(&scratch.db()).expect("store");
+    let (active, _) = held_run(&mut store, Some(HeldScreen::Screen));
+    let (ended, run) = held_run(&mut store, Some(HeldScreen::Attached));
+    store.end_run(ended, run, &[], RunEnd::Done).expect("ended");
+    let (cleared, cleared_run) = held_run(&mut store, Some(HeldScreen::Attached));
+    store.forget_screen(cleared_run).expect("cleared");
+    store
+        .end_run(cleared, cleared_run, &[], RunEnd::Done)
+        .expect("ended");
+    assert_eq!(kinds(&store, active), [PageEventKind::User]);
+    assert_eq!(
+        kinds(&store, ended),
+        [PageEventKind::HeldTurn {
+            screen: HeldScreen::Attached
+        }]
+    );
+    assert_eq!(kinds(&store, cleared), [PageEventKind::User]);
+    assert_eq!(screen(&store, run).as_deref(), Some("pending_attached"));
+}
