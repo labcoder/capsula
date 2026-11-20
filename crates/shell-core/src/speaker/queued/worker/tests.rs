@@ -601,11 +601,11 @@ fn assert_staging_survives_route_loss(occupied: &'static AtomicBool, copied: usi
     let (mut worker, mut playback, control) = staged_for_drop(occupied);
     playback.fill(&mut [0.0; 8][..copied], INSTANT);
     worker.recover(INSTANT);
-    let copies = u64::try_from(copied).unwrap();
-    assert_eq!(control.fenced_handoff(), Some(copies));
+    let expected_handoff = u64::try_from(copied).unwrap();
+    assert_eq!(control.fenced_handoff(), Some(expected_handoff));
     worker.drive(super::super::super::DRAIN);
     assert!(worker.physical.is_none());
-    assert_eq!(worker.engine.offered, copies);
+    assert_eq!(worker.engine.offered, expected_handoff);
 
     assert_eq!(
         worker.drop_unsubmitted(id, super::super::super::DRAIN),
