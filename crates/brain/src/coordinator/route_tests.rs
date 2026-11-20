@@ -660,13 +660,10 @@ fn a_revoked_picture_grant_that_wrote_nothing_rebuilds_without_the_picture() {
             })
             .expect("granted");
         let open = core.picture_grant(lease).expect("a revocable grant");
-        assert!(open.load(Ordering::Acquire));
+        assert!(open.is_open());
         core.handle(Input::Engines(KEY, pictured(5, &[])))
             .expect("current");
-        assert!(
-            !open.load(Ordering::Acquire),
-            "revoked when the fact went false"
-        );
+        assert!(!open.is_open(), "revoked when the fact went false");
         let settled = core
             .handle(if unsent {
                 Input::SendUnsent { lease }
@@ -718,4 +715,33 @@ fn a_chatgpt_picture_grant_is_never_revocable() {
         })
         .expect("granted");
     assert!(core.picture_grant(lease).is_none());
+}
+
+#[test]
+fn only_a_lease_granted_with_its_picture_grant_carries_a_picture() {
+    use crate::coordinator::PictureRoutes;
+    use crate::engines::SendLease;
+    let (mut core, _) = pictured_run(PictureRoutes::new(true, false));
+    let effects = core
+        .handle(Input::SendReady {
+            key: SendKey::Build(key()),
+            hold: None,
+        })
+        .expect("current");
+    let lease = effects
+        .iter()
+        .find_map(|effect| match effect {
+            Effect::Grant(lease) => Some(*lease),
+            _ => None,
+        })
+        .expect("granted");
+    let (inputs, _settled) = tokio::sync::mpsc::unbounded_channel();
+    let pictured = SendLease::new(lease, inputs.clone()).with_picture(core.picture_grant(lease));
+    assert!(pictured.carries_picture());
+    assert!(!SendLease::new(lease, inputs.clone()).carries_picture());
+    assert!(
+        !SendLease::new(lease, inputs)
+            .with_picture(None)
+            .carries_picture()
+    );
 }

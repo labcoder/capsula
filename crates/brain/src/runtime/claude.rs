@@ -19,7 +19,7 @@ use crate::bridge::listener::McpCall;
 use crate::connections::model::budget::Budget;
 use crate::context::ConnectionTag;
 use crate::coordinator::{
-    Availability, BuildKey, Input, Ready, SendKey, StoreOp, model_unavailable,
+    Availability, BuildKey, Input, PictureGrant, Ready, SendKey, StoreOp, model_unavailable,
 };
 use crate::engines::claude_code::install::FindError;
 use crate::engines::claude_code::lane::{self, Done, Failure, Lane, Outcome, Recheck, Work};
@@ -100,6 +100,10 @@ pub(crate) struct Claude {
     owed: Option<Vec<ModelInfo>>,
     /// The last job the lane couldn't take: `Unavailable` is then a full queue, not a stuck lane.
     full: bool,
+    /// The build whose question was asked last, and the generation its launch was admitted under.
+    asked: Option<(BuildKey, u64)>,
+    /// The picture grants of this generation's questions, closed when it ends.
+    pictures: Vec<PictureGrant>,
 }
 
 /// Runs bound under one epoch go on through a Find; a sign-out, a Disconnect, an audit failure,
@@ -189,6 +193,8 @@ impl Claude {
             models: Vec::new(),
             owed: None,
             full: false,
+            asked: None,
+            pictures: Vec::new(),
         }
     }
 
@@ -223,6 +229,9 @@ impl Claude {
         };
         self.generation += 1;
         lane.fence(self.generation);
+        for grant in self.pictures.drain(..) {
+            grant.close();
+        }
         self.recheck = None;
         // A bound launch's authority ends with the generation it was bound under.
         for held in self.launches.iter().filter(|held| held.bound) {
@@ -641,7 +650,28 @@ impl Claude {
             Some(effort.to_owned()),
             offer,
         )?;
-        self.take(&snapshot)
+        let question = self.take(&snapshot)?;
+        if let SendKey::Build(build) = request.key {
+            self.asked = Some((build, snapshot.account));
+        }
+        Ok(question)
+    }
+
+    /// Keeps `grant`, the picture grant for `key`'s send, while that build's question was asked
+    /// under this generation, and closes it at once otherwise; a new generation closes every one
+    /// kept. A grant for another connection's send isn't this core's.
+    pub(crate) fn picture_granted(&mut self, key: SendKey, grant: PictureGrant) {
+        let SendKey::Build(build) = key else {
+            return;
+        };
+        match self.asked {
+            Some((asked, generation)) if asked == build && generation == self.generation => {
+                self.pictures.retain(PictureGrant::is_open);
+                self.pictures.push(grant);
+            }
+            Some((asked, _)) if asked == build => grant.close(),
+            _ => {}
+        }
     }
 
     /// Claude Code's half of the brain's repair of `default_model`, while a launch would be
