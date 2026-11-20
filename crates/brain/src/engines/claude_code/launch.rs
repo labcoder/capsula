@@ -587,7 +587,6 @@ impl Question<'_> {
             return Some(expired(launch, report));
         }
         if !self.budget.reserve() {
-            drop(lease);
             return Some(claude(ErrorKey::ClaudeCodeBudget));
         }
         if let Err(lease) = launch.hold_send(lease) {
@@ -595,7 +594,7 @@ impl Question<'_> {
             report.report(Outcome::Launch);
             return Some(Finish::Failed(EngineFailure::Provider));
         }
-        if let Err(refused) = queue_seed(
+        match queue_seed(
             &mut writer,
             &mut mapper,
             request,
@@ -605,11 +604,12 @@ impl Question<'_> {
         )
         .await
         {
-            if refused == StdinRefused::Deadline {
-                return Some(expired(launch, report));
+            Ok(()) => {}
+            Err(StdinRefused::Deadline) => return Some(expired(launch, report)),
+            Err(_) => {
+                report.report(Outcome::Launch);
+                return Some(Finish::Failed(EngineFailure::Provider));
             }
-            report.report(Outcome::Launch);
-            return Some(Finish::Failed(EngineFailure::Provider));
         }
         let answer = Reading {
             pipes: &mut pipes,
