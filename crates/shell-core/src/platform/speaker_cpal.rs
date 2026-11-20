@@ -470,6 +470,7 @@ impl Submit {
 
 impl Playback {
     fn fill_at(&mut self, out: &mut [f32], start: Option<Duration>) {
+        self.control.note_callback();
         self.render(out, start, Control::begin_copy, || {});
     }
 

@@ -674,6 +674,10 @@ fn canceling_one_backend_does_not_cancel_a_fallback_open() {
 pub(crate) struct FakePlayback(super::Playback);
 
 impl FakePlayback {
+    pub(crate) fn xrun(&self) {
+        OutputEvent::latch(&self.0.shared.pending, ErrorKind::Xrun);
+    }
+
     pub(crate) fn open(control: Arc<Control>, occupied: &'static AtomicBool) -> (Transport, Self) {
         let (submit, playback) = super::pair(SOURCE_RATE, 1, control);
         let owner = Owner::new(

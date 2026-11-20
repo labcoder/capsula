@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 use kumochi_protocol::message::{OutputGeneration, RunId, SegmentId};
 use zeroize::Zeroizing;
 
+use super::super::STALL;
 use super::backend::{self, Power, Reply, Request};
 use super::timeline::{Anchor, Engine, Observation, Opened, Phase};
 use super::{Admission, Credit, Fault, Packet};
@@ -31,17 +32,28 @@ pub(super) struct Input {
     commands: SyncSender<Command>,
     packets: SyncSender<Packet>,
     busy: Arc<AtomicBool>,
+    stop: Arc<AtomicBool>,
     closed: Arc<AtomicBool>,
 }
 
 impl Input {
     pub(super) fn command(&self, command: Command) -> Result<(), TrySendError<Command>> {
-        self.commands.try_send(command)?;
+        if self.closed.load(Ordering::Acquire) {
+            return Err(TrySendError::Disconnected(command));
+        }
+        if matches!(command, Command::Stop) {
+            self.stop.store(true, Ordering::Release);
+        } else {
+            self.commands.try_send(command)?;
+        }
         self.worker.unpark();
         Ok(())
     }
 
     pub(super) fn submit(&self, packet: Packet) -> Result<(), TrySendError<Packet>> {
+        if self.closed.load(Ordering::Acquire) {
+            return Err(TrySendError::Disconnected(packet));
+        }
         if self.busy.swap(true, Ordering::AcqRel) {
             return Err(TrySendError::Full(packet));
         }
@@ -69,6 +81,7 @@ struct Port {
     commands: Receiver<Command>,
     packets: Receiver<Packet>,
     busy: Arc<AtomicBool>,
+    stop: Arc<AtomicBool>,
     closed: Arc<AtomicBool>,
 }
 
@@ -78,6 +91,7 @@ struct Physical {
     flushed: Option<SegmentId>,
     power: Power,
     retire_deadline: Option<Duration>,
+    watchdog: Option<(Duration, u64)>,
 }
 
 struct Worker {
@@ -98,11 +112,13 @@ pub(super) fn spawn(
     let (commands, pending) = mpsc::sync_channel(COMMANDS);
     let (packets, data) = mpsc::sync_channel(1);
     let busy = Arc::new(AtomicBool::new(false));
+    let stop = Arc::new(AtomicBool::new(false));
     let closed = Arc::new(AtomicBool::new(false));
     let port = Port {
         commands: pending,
         packets: data,
         busy: Arc::clone(&busy),
+        stop: Arc::clone(&stop),
         closed: Arc::clone(&closed),
     };
     let task = thread::Builder::new()
@@ -129,6 +145,7 @@ pub(super) fn spawn(
         commands,
         packets,
         busy,
+        stop,
         closed,
     })
 }
@@ -158,23 +175,26 @@ impl Worker {
             {
                 return;
             }
-            let next = self
-                .engine
-                .active_deadline(now)
-                .into_iter()
-                .chain(
-                    self.physical
-                        .as_ref()
-                        .and_then(|route| route.retire_deadline)
-                        .filter(|&deadline| deadline > now),
-                )
-                .min();
-            if let Some(next) = next {
+            if let Some(next) = self.deadline(now) {
                 thread::park_timeout(next.saturating_sub(origin.elapsed()));
             } else {
                 thread::park();
             }
         }
+    }
+
+    fn deadline(&self, now: Duration) -> Option<Duration> {
+        self.engine
+            .active_deadline(now)
+            .into_iter()
+            .chain(
+                self.physical
+                    .iter()
+                    .flat_map(|route| [route.retire_deadline, route.watchdog.map(|(at, _)| at)])
+                    .flatten()
+                    .filter(|&deadline| deadline > now),
+            )
+            .min()
     }
 
     fn step(
@@ -186,6 +206,8 @@ impl Worker {
     ) -> Result<bool, Fault> {
         self.backend_reply(now);
         self.observations(now);
+        self.watch_playback(now);
+        self.apply_stop(port, give, now);
         if self.pending_packet.is_none() && self.engine.queue.held.is_none() {
             self.pending_packet = port.packets.try_recv().ok();
         }
@@ -201,7 +223,7 @@ impl Worker {
                     self.engine.resume(serial, now);
                     self.inhibit();
                 }
-                Ok(Command::Stop) => self.stop(now, &mut |credit| port.credit(credit, give)),
+                Ok(Command::Stop) => unreachable!("Stop is published outside the mailbox"),
                 Err(TryRecvError::Empty | TryRecvError::Disconnected) => {
                     drained = true;
                     break;
@@ -211,9 +233,7 @@ impl Worker {
         if !drained {
             return Ok(true);
         }
-        if port.closed.load(Ordering::Acquire) {
-            self.stop(now, &mut |credit| port.credit(credit, give));
-        }
+        self.apply_stop(port, give, now);
         if let Some(credit) = self.engine.tick(now)? {
             port.credit(credit, give);
         }
@@ -224,6 +244,7 @@ impl Worker {
         }
         self.feed(source, now);
         self.drive(now);
+        self.watch_playback(now);
         Ok(false)
     }
 
@@ -250,6 +271,7 @@ impl Worker {
                         flushed: None,
                         power: Power::Playing,
                         retire_deadline: None,
+                        watchdog: None,
                     };
                     if !accepted {
                         route.retire(now);
@@ -346,10 +368,44 @@ impl Worker {
         }
     }
 
+    fn watch_playback(&mut self, now: Duration) {
+        let Some(route) = &mut self.physical else {
+            return;
+        };
+        if route.retire_deadline.is_some() {
+            return;
+        }
+        let resuming = matches!(self.job, Some(Request::Power(_, Power::Playing)));
+        let outstanding =
+            !self.engine.inhibited() && self.engine.offered > self.engine.progress.consumed;
+        if !resuming && !outstanding {
+            route.watchdog = None;
+            return;
+        }
+        let callbacks = route.transport.control().callback_count();
+        if let Some((at, observed)) = route.watchdog
+            && observed == callbacks
+        {
+            if at <= now {
+                self.recover(now);
+            }
+        } else {
+            route.watchdog = Some((now.saturating_add(STALL), callbacks));
+        }
+    }
+
     fn recover(&mut self, now: Duration) {
         if let Some(route) = &mut self.physical {
             self.engine.require_recovery(route.generation);
             route.retire(now);
+        }
+    }
+
+    fn apply_stop(&mut self, port: &Port, give: &mut impl FnMut(Credit), now: Duration) {
+        if !self.engine.queue.stopped
+            && (port.stop.load(Ordering::Acquire) || port.closed.load(Ordering::Acquire))
+        {
+            self.stop(now, &mut |credit| port.credit(credit, give));
         }
     }
 
@@ -473,8 +529,15 @@ impl Worker {
 impl Physical {
     fn retire(&mut self, now: Duration) {
         self.transport.control().stop();
+        self.watchdog = None;
         self.retire_deadline
             .get_or_insert(now.saturating_add(super::super::DRAIN));
+    }
+}
+
+impl Drop for Port {
+    fn drop(&mut self) {
+        self.closed.store(true, Ordering::Release);
     }
 }
 
