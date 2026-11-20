@@ -31,11 +31,40 @@ const THIRD: &str =
 
 #[cfg(all(windows, debug_assertions))]
 #[tokio::test]
-async fn offline_sse_replay_commits_the_recorded_step_and_the_three_paced_steps() {
-    use crate::connections::model::text_observation::{Observation, REPLAY_STEPS};
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the isolated fixture child is spawned under the shared spawn lock"
+)]
+async fn offline_sse_replay_dispatches_all_step_receipts() {
+    use crate::connections::model::text_observation::draw_fixture;
     use crate::engines::responses::replay::{MODEL, Replay};
     use crate::runtime::Selected;
     use kumochi_protocol::constants::CONFIG_FILE;
+    use std::process::{Command, Stdio};
+    use std::sync::{Arc, Mutex};
+
+    const CHILD: &str = "OFFLINE_DRAW_RECEIPT_CHILD";
+    if std::env::var_os(CHILD).as_deref() != Some(std::ffi::OsStr::new("1")) {
+        let spawn = crate::platform::spawn_lock();
+        let child = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "runtime::draw_stream_tests::offline_sse_replay_dispatches_all_step_receipts",
+            ])
+            .env(CHILD, "1")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("isolated draw receipt fixture");
+        drop(spawn);
+        let output = child.wait_with_output().expect("draw receipt output");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success() && stdout.contains("1 passed; 0 failed"),
+            "{stdout}"
+        );
+        return;
+    }
 
     let scratch = Scratch::new("offline-draw-replay");
     std::fs::create_dir(scratch.dir()).unwrap();
@@ -43,7 +72,10 @@ async fn offline_sse_replay_commits_the_recorded_step_and_the_three_paced_steps(
         scratch.dir().join(CONFIG_FILE),
         format!("default_model = {{ model = \"{MODEL}\", effort = \"Low\", connection = \"ChatGpt\" }}\n"),
     ).unwrap();
-    let replay = Replay::new(&Observation::draw_fixture()).unwrap();
+    let rows = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::clone(&rows);
+    let observation = draw_fixture(move |line| sink.lock().unwrap().push(line.to_owned()));
+    let replay = Replay::new(&observation).unwrap();
     let mut brain = test_support::brain_on(
         &scratch,
         Selected::DrawReplay(Box::new(replay)),
@@ -56,9 +88,10 @@ async fn offline_sse_replay_commits_the_recorded_step_and_the_three_paced_steps(
     let mut link = Link::new(&out, &queue, &ready, &mut tap);
     link.recovery = brain.describe(&mut link).expect("initial membership");
     let run = start(&mut brain, &mut link).await.run;
+    let steps = ["plot", "timing-first", "timing-second", "timing-third"];
     let commits = timeout(WAIT, async {
         let mut commits = Vec::new();
-        while commits.len() < REPLAY_STEPS.len() {
+        while commits.len() < steps.len() {
             let input = tokio::select! {
                 input = brain.inputs.recv() => input,
                 input = brain.engine_events.recv() => input,
@@ -85,13 +118,49 @@ async fn offline_sse_replay_commits_the_recorded_step_and_the_three_paced_steps(
     let scene = commits[0].0;
     assert_eq!(
         commits,
-        REPLAY_STEPS
+        steps
             .into_iter()
             .zip(0..)
             .map(|(id, index)| (scene, index, id.to_owned()))
             .collect::<Vec<_>>()
     );
     brain.close().await;
+    observation.finish();
+    assert_draw_receipt(&rows.lock().unwrap(), run, scene);
+}
+
+#[cfg(all(windows, debug_assertions))]
+fn assert_draw_receipt(rows: &[String], run: kumochi_protocol::message::RunId, scene: SceneId) {
+    assert_eq!(
+        rows.len(),
+        6,
+        "header, four complete actual draw stamps, and final marker"
+    );
+    let pid = u64::from(std::process::id());
+    let numeric = |line: &str, prefix: &str| {
+        line.strip_prefix(prefix)
+            .expect("row kind")
+            .split(' ')
+            .map(|field| field.parse::<u64>().expect("only numeric fields"))
+            .collect::<Vec<_>>()
+    };
+    let ready = numeric(&rows[0], "ready ");
+    let final_row = numeric(&rows[5], "final ");
+    assert_eq!(&ready[..2], &[pid, 1]);
+    assert_eq!(&final_row[..3], &[pid, 0, 0]);
+    assert_eq!((ready.len(), final_row.len()), (3, 4));
+    let mut call = None;
+    for (index, row) in rows[1..5].iter().enumerate() {
+        let step = numeric(row, "draw ");
+        assert_eq!(step.len(), 10);
+        assert_eq!(
+            &step[..4],
+            &[pid, run.0, scene.0, u64::try_from(index).unwrap()]
+        );
+        assert!(step[4] > 0);
+        assert_eq!(*call.get_or_insert(step[5]), step[5]);
+        assert!(ready[2] <= step[5] && step[5..].is_sorted() && step[9] <= final_row[3]);
+    }
 }
 
 fn brain(scratch: &Scratch) -> Brain {

@@ -23,7 +23,7 @@ use crate::platform::qpc_now;
 pub(crate) const MODEL: &str = "draw-replay";
 const RECORDED: &str = include_str!("../../../fixtures/responses/draw_y_squared_1.json");
 const STAGED: [&str; 3] = [
-    r#"{"step":{"id":"timing-first","say":"one two three four","put":[{"shape":{"id":"timing-a","kind":"rect","box":[120,380,35,35],"enter":"none","delay":150}}]}}"#,
+    r#"{"step":{"id":"timing-first","say":"one two three four","put":[{"shape":{"id":"timing-a-now","kind":"rect","box":[92,380,14,35],"enter":"none"}},{"shape":{"id":"timing-a","kind":"rect","box":[120,380,35,35],"enter":"none","delay":150}}]}}"#,
     r#"{"step":{"id":"timing-second","put":[{"shape":{"id":"timing-b","kind":"rect","box":[210,380,35,35],"enter":"none"}}]}}"#,
     r#"{"step":{"id":"timing-third","start":{"after":"timing-second","ms":200},"put":[{"shape":{"id":"timing-c","kind":"rect","box":[300,380,35,35],"enter":"none"}}]}}"#,
 ];
@@ -244,7 +244,85 @@ impl AsyncWrite for ReplayIo {
 
 #[cfg(test)]
 mod tests {
-    use super::{DrawStage, REPLAY_STEPS, Wire};
+    use super::{DrawStage, RECORDED, REPLAY_STEPS, STAGED, Wire};
+
+    #[test]
+    fn staged_step_has_new_pixels_in_the_first_sample() {
+        use std::sync::{Arc, atomic::AtomicBool};
+
+        use kumochi_scene::display::WideMeasure;
+        use kumochi_scene::layout::{LayoutState, PrepareInput, SurfaceGeometry, prepare};
+        use kumochi_scene::motion::synthetic_duration_ms;
+        use kumochi_scene::theme::Theme;
+        use kumochi_scene::{
+            Admission, Frame, GlobalBudget, Record, SceneState, SceneView, WireId,
+        };
+        use serde_json::Value;
+
+        let recorded: Value = serde_json::from_str(RECORDED).unwrap();
+        let bytes = serde_json::to_vec(&recorded["records"][0]).unwrap();
+        let Record::Begin(begin) = crate::dispatch::validate_draw_record(&bytes).unwrap() else {
+            panic!("recorded scene begins");
+        };
+        let mut state = SceneState::begin(begin).unwrap();
+        let mut budget = GlobalBudget::default();
+        let mut view = SceneView::new(&LayoutState::new(&state), 0);
+        let mut frame = Frame::new();
+        for (now, args) in [
+            (0, recorded["records"][1].to_string()),
+            (800, STAGED[0].to_owned()),
+        ] {
+            let Record::Step(step) =
+                crate::dispatch::validate_draw_record(args.as_bytes()).unwrap()
+            else {
+                panic!("typed fixture step");
+            };
+            let Admission::New(admission) = state.admit(&step, &budget).unwrap() else {
+                panic!("new fixture step");
+            };
+            let committed = state.commit(admission, &mut budget).unwrap();
+            let input = PrepareInput::new(
+                committed.preparation,
+                view.layout().clone(),
+                SurfaceGeometry::default(),
+                Arc::new(Theme::default()),
+            )
+            .unwrap();
+            let prepared = prepare(input, &mut WideMeasure, &AtomicBool::new(false)).unwrap();
+            view.activate(
+                prepared,
+                now,
+                synthetic_duration_ms(step.say.as_ref()),
+                &mut frame,
+            )
+            .unwrap();
+        }
+        let visible = |frame: &Frame, id: &str| {
+            view.layout()
+                .handle(&WireId::try_from(id.to_owned()).unwrap())
+                .is_some_and(|handle| {
+                    frame
+                        .items()
+                        .iter()
+                        .any(|item| item.handle == handle && item.opacity > 0.0)
+                })
+        };
+        view.frame(800, &mut frame).unwrap();
+        assert_eq!(
+            (
+                visible(&frame, "curve"),
+                visible(&frame, "timing-a-now"),
+                visible(&frame, "timing-a")
+            ),
+            (true, true, false),
+            "the first sample must show a new mark, not merely the earlier plot",
+        );
+        view.frame(950, &mut frame).unwrap();
+        assert!(
+            visible(&frame, "timing-a"),
+            "the independent entrance remains at 150 ms"
+        );
+    }
 
     #[test]
     fn stamps_name_record_bytes_even_when_the_event_spans_reads() {

@@ -106,12 +106,6 @@ impl Observation {
         Self::start_mode(out, ceiling, None)
     }
 
-    #[cfg(test)]
-    pub(crate) fn draw_fixture() -> Arc<Self> {
-        Self::start_mode(io::sink(), 1, Some(drawing::DrawReceipt::default()))
-            .expect("a fixture can open an in-memory drawing receipt")
-    }
-
     fn start_mode(
         mut out: impl Write + Send + 'static,
         ceiling: u32,
@@ -369,6 +363,25 @@ pub(crate) fn fixture(
     ceiling: u32,
     receive: impl FnMut(&str) + Send + 'static,
 ) -> Arc<Observation> {
+    fixture_mode(ceiling, None, receive)
+}
+
+#[cfg(test)]
+pub(crate) fn draw_fixture(receive: impl FnMut(&str) + Send + 'static) -> Arc<Observation> {
+    let observation = fixture_mode(1, Some(drawing::DrawReceipt::default()), receive);
+    assert!(
+        OBSERVATION.set(Some(Arc::clone(&observation))).is_ok(),
+        "the isolated child owns the receipt"
+    );
+    observation
+}
+
+#[cfg(test)]
+fn fixture_mode(
+    ceiling: u32,
+    draw: Option<drawing::DrawReceipt>,
+    receive: impl FnMut(&str) + Send + 'static,
+) -> Arc<Observation> {
     struct Lines<F>(F, Vec<u8>);
 
     impl<F: FnMut(&str)> Write for Lines<F> {
@@ -388,7 +401,8 @@ pub(crate) fn fixture(
             Ok(())
         }
     }
-    Observation::start(Lines(receive, Vec::new()), ceiling).expect("the memory recorder opens")
+    Observation::start_mode(Lines(receive, Vec::new()), ceiling, draw)
+        .expect("the memory recorder opens")
 }
 
 #[cfg(test)]

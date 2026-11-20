@@ -206,3 +206,11 @@ stamps a step when its record closes. The store thread marks the successful tran
 reply before sending it; the data queue marks the accepted `SceneStepCommit` hand-off.
 At Quit the mode writes only PID, run, scene, index, byte count and QPC stamps. It omits
 the final marker if any of the four step receipts is missing or inconsistent.
+
+The replay's connector cannot open a socket or use a provider bearer. This is not a
+process-wide network sandbox: normal account startup remains enabled and could load
+credentials or fetch a catalog on a configured profile. The draw trial starts with an
+empty GATE profile, Claude Code off, and no account actions or sign-in. It writes the
+fixture turn and drawing to its local database to measure a real durable reply. The
+driver retains validated receipts and cleans the isolated app data through the shared
+gate teardown; cleanup failures are reported separately.
