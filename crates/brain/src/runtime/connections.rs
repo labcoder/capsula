@@ -476,6 +476,7 @@ impl Accounts {
         self.connections.loading = true;
         let work = Work::Key { generation, op };
         if !self.send_key_work(work) {
+            self.connections.fresh = false;
             self.connections.view.anthropic = KeyView::Unconfirmed;
             self.connections.loading = false;
         }

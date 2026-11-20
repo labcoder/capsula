@@ -790,6 +790,25 @@ async fn only_a_verifying_check_of_the_current_key_makes_its_picture_facts_fresh
 }
 
 #[tokio::test]
+async fn a_check_the_key_worker_wont_take_leaves_text_and_no_picture_fact() {
+    let scratch = Scratch::new("key-picture-closed-worker");
+    let (mut accounts, _) = ready_then_checking(&scratch, peer(IMAGE_CATALOG)).await;
+    settle(&mut accounts).await;
+    assert_eq!(pictured(&accounts), ["claude-opus-5-5"]);
+    drop(accounts.jobs.take());
+    accounts.connection_event(ConnectionEvent::Op(ConnectionOp::CheckAnthropicKey));
+    assert_eq!(accounts.connections.view.anthropic, KeyView::Unconfirmed);
+    assert_eq!(pictured(&accounts), Vec::<String>::new());
+    assert!(
+        accounts.connections.verified.is_some(),
+        "the verified key keeps its text"
+    );
+    accounts
+        .close(tokio::time::Instant::now(), tokio::time::Instant::now())
+        .await;
+}
+
+#[tokio::test]
 async fn a_check_waiting_on_its_load_cant_bring_a_refused_key_back() {
     let scratch = Scratch::new("key-refused-held-load");
     let peer = peer(EMPTY_CATALOG);
