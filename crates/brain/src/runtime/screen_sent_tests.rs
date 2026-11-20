@@ -224,7 +224,13 @@ async fn played(wire: Wire) -> (Vec<ControlToShell>, Vec<Option<String>>) {
 /// Plays a screen hold whose picture is sealed and whose send meets `wire`; the `HoldScreen`s
 /// the shell was told, the run's stored screen, and for [`Wire::Kept`] the user turn the history
 /// read after Stop showed.
-async fn play(wire: Wire) -> (Vec<ControlToShell>, Vec<Option<String>>, Option<PageEventKind>) {
+async fn play(
+    wire: Wire,
+) -> (
+    Vec<ControlToShell>,
+    Vec<Option<String>>,
+    Option<PageEventKind>,
+) {
     use crate::runtime::hold::tests::screen_hold::{recognized, release as released, seeing};
     type Request = <crate::screen::Holds as crate::supervise::Kind>::Request;
     type Reply = <crate::screen::Holds as crate::supervise::Kind>::Reply;
