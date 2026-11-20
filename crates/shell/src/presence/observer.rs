@@ -19,7 +19,11 @@ use std::thread::JoinHandle;
 use async_channel::{Receiver, Sender};
 use gpui_kit::{App, Bounds, Global, Pixels, ScaledPixels, Window, px};
 use kumochi_protocol::constants::{INPUT_SESSION_MARKER, OBSERVER_REPAINT_MESSAGE};
+#[cfg(debug_assertions)]
+use kumochi_protocol::constants::{LIVE_CHATGPT_TEXT_ENV, ProductIdentity};
 
+#[cfg(debug_assertions)]
+use draw_timing::DrawFixture;
 pub(super) use draw_timing::overlay_painted;
 use draw_timing::{DrawRecord, PaintReceipts};
 
@@ -227,7 +231,6 @@ impl fmt::Display for Commit {
 pub(super) enum Surface {
     Dock,
     Panel,
-    Overlay,
 }
 
 impl fmt::Display for Surface {
@@ -235,7 +238,6 @@ impl fmt::Display for Surface {
         f.write_str(match self {
             Self::Dock => "dock",
             Self::Panel => "panel",
-            Self::Overlay => "overlay",
         })
     }
 }
@@ -382,6 +384,8 @@ impl Shared {
 #[derive(Debug)]
 pub(crate) struct Observer {
     shared: Rc<Shared>,
+    #[cfg(debug_assertions)]
+    draw_fixture: DrawFixture,
     writer: Option<JoinHandle<()>>,
     proxy: Option<ProxyHandle>,
     ledger: Ledger,
@@ -402,11 +406,15 @@ impl Global for Observer {}
 
 impl Observer {
     #[cfg(debug_assertions)]
-    pub(super) fn draw_timing_enabled(cx: &App) -> bool {
-        kumochi_protocol::constants::ProductIdentity::ACTIVE
-            == kumochi_protocol::constants::ProductIdentity::GATE
-            && cx.has_global::<Observer>()
-            && cx.global::<Observer>().shared.draw_timing.is_some()
+    pub(super) fn take_draw_fixture(cx: &mut App) -> Option<&'static str> {
+        if !cx.has_global::<Self>() {
+            return None;
+        }
+        let observer = cx.global_mut::<Self>();
+        if !observer.shared.active.get() {
+            return None;
+        }
+        observer.draw_fixture.take()
     }
 
     /// Creates the launch's observer file, allocates the queue and starts the writer thread. Called
@@ -438,6 +446,12 @@ impl Observer {
         }
         Ok(Some(Self {
             shared: Rc::new(shared),
+            #[cfg(debug_assertions)]
+            draw_fixture: DrawFixture::new(
+                ProductIdentity::ACTIVE,
+                launch,
+                std::env::var(LIVE_CHATGPT_TEXT_ENV).ok().as_deref(),
+            ),
             writer: Some(writer),
             proxy: None,
             ledger: Ledger::new(),
@@ -553,36 +567,30 @@ pub(super) fn painted(cx: &mut App, surface: Surface, drawn: Drawn) {
         return;
     }
     let qpc = platform::performance_counter();
-    cx.global_mut::<Observer>().paint(surface, drawn, qpc);
-}
-
-impl Observer {
-    fn paint(&mut self, surface: Surface, drawn: Drawn, qpc: i64) -> u64 {
-        self.totals.frames += 1;
-        let frame = self.totals.frames;
-        self.shared.send(Record::Paint {
-            frame,
-            qpc,
-            surface,
-            hover: if surface == Surface::Panel {
-                self.hover
-            } else {
-                0
-            },
-            drawn,
-            mask_epoch: self.shared.epoch.get(),
-        });
-        if let Some(proxy) = self.proxy {
-            if proxy.post_drawn(frame).is_err() {
-                self.totals.post_failed += 1;
-            }
-        } else {
-            match self.pending.iter_mut().find(|slot| slot.is_none()) {
-                Some(slot) => *slot = Some((surface, frame)),
-                None => self.totals.post_failed += 1,
-            }
+    let observer = cx.global_mut::<Observer>();
+    observer.totals.frames += 1;
+    let frame = observer.totals.frames;
+    let hover = match surface {
+        Surface::Dock => 0,
+        Surface::Panel => observer.hover,
+    };
+    observer.shared.send(Record::Paint {
+        frame,
+        qpc,
+        surface,
+        hover,
+        drawn,
+        mask_epoch: observer.shared.epoch.get(),
+    });
+    let Some(proxy) = observer.proxy else {
+        match observer.pending.iter_mut().find(|slot| slot.is_none()) {
+            Some(slot) => *slot = Some((surface, frame)),
+            None => observer.totals.post_failed += 1,
         }
-        frame
+        return;
+    };
+    if proxy.post_drawn(frame).is_err() {
+        observer.totals.post_failed += 1;
     }
 }
 

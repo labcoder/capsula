@@ -11,7 +11,8 @@ use kumochi_protocol::constants::{INPUT_SESSION_MARKER, OBSERVER_REPAINT_MESSAGE
 
 mod draw;
 mod summary;
-pub(super) use draw::{DRAW_STEPS, DrawKey, DrawStep};
+use draw::DrawStep;
+pub(super) use draw::{Active, DRAW_STEPS, DrawKey};
 pub(super) use summary::milliseconds;
 pub(super) use summary::summarize_hover;
 
@@ -81,7 +82,6 @@ pub(super) struct Commit {
 pub(super) enum Kind {
     Dock,
     Panel,
-    Overlay,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -234,15 +234,6 @@ pub(super) fn read(path: &Path, pid: u32) -> Result<Observation> {
         "Kumo pull seen by the observer (pulls={})",
         observation.pulls
     );
-    Ok(observation)
-}
-
-#[cfg(test)]
-pub(super) fn fixture(text: &str) -> Result<Observation> {
-    let mut observation = Observation::default();
-    for line in text.lines() {
-        observation.line(line)?;
-    }
     Ok(observation)
 }
 
@@ -587,13 +578,6 @@ impl Observation {
                     "invalid panel hover reference"
                 );
                 Kind::Panel
-            }
-            "overlay" => {
-                ensure!(
-                    hover == 0 && epoch == 0 && geometry == 0,
-                    "invalid overlay draw reference"
-                );
-                Kind::Overlay
             }
             _ => bail!("unknown observer surface"),
         };

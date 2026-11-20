@@ -22,10 +22,12 @@ pub enum DrawTiming {
     Active {
         /// The installed step.
         key: DrawKey,
-        /// The synthetic narration length, before taking the maximum with the entrance span.
+        /// The narration time supplied at activation, before the maximum with the entrance span.
         segment_ms: u64,
         /// Time from activation to the last entrance's end, or zero if there are no entrances.
         entrance_ms: u64,
+        /// The step has nonblank `say` text, regardless of whether it is spoken or reserves time.
+        narrated: bool,
     },
     /// The presenter accepted a successful shown sample for the current step.
     Shown {

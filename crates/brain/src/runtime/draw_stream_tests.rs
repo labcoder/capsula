@@ -107,7 +107,11 @@ async fn offline_sse_replay_dispatches_all_step_receipts() {
                 } = frame
                 {
                     assert_eq!(owner, run);
-                    commits.push((scene, index, step.id.as_str().to_owned()));
+                    let narrated = step
+                        .say
+                        .as_ref()
+                        .is_some_and(|say| !say.as_str().trim().is_empty());
+                    commits.push((scene, index, step.id.as_str().to_owned(), narrated));
                 }
             }
         }
@@ -121,7 +125,7 @@ async fn offline_sse_replay_dispatches_all_step_receipts() {
         steps
             .into_iter()
             .zip(0..)
-            .map(|(id, index)| (scene, index, id.to_owned()))
+            .map(|(id, index)| (scene, index, id.to_owned(), index == 1))
             .collect::<Vec<_>>()
     );
     brain.close().await;

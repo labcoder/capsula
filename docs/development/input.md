@@ -565,21 +565,6 @@ ETW session earlier. The trace is
 finished and validated even if the trial fails, before the owned product exits and flushes its
 observer close/end records. A fresh PID requires a fresh warm validation.
 
-### Offline drawing timing
-
-`xtask draw-timing <transcript-session.txt> <shell-sha256> <brain-sha256>` uses adjacent,
-prebuilt Debug GATE binaries and this gate's isolated profile, guards and PresentMon
-capture. It starts no build and uses no provider connection or sign-in. The recorded
-Responses plot is followed by three labeled synthetic steps in the same drawing. The
-typing window is dismissed before the offline turn is sent to keep its swapchain out of
-the draw match.
-
-The shell's opt-in observer marks readiness, activation and a successful first overlay
-paint by run, scene and index. The existing proxy completion bounds the PresentMon match
-for that paint. The report separates paint, actual Present and display feedback; a missing,
-dropped, ambiguous, reused or reconstructed PresentMon candidate is unmatched, not a
-display. The synthetic narration overlap is an estimate from the prior segment and
-entrance lengths, not a measurement of live model or speech latency.
 Immediately after the main trace starts, the input deadline is tightened to the earlier of the
 product cutoff and two seconds before that phase's trace bound. Acknowledged downs are
 released and the EDIT is uncovered before any potentially slow trace-finish wait, on both
@@ -599,6 +584,31 @@ closes only owned windows/processes gracefully, and retains
 all errors. It never force-kills another process or repairs language settings. Cursor restoration
 is skipped after any abort, and otherwise remains guarded and confined to owned destinations.
 Actual Alt-Tab into owner applications remains manual or unmeasured.
+
+### Offline drawing timing
+
+`xtask draw-timing <transcript-session.txt> <shell-sha256> <brain-sha256>` uses adjacent,
+prebuilt Debug GATE binaries and the shared gate's isolated launch and cleanup. The
+fixture asks once through the product link after connecting; it sends no keys, clicks
+or pointer motion. The recorded Responses plot is followed by three labeled synthetic
+steps in the same drawing. The run starts no build. Its trial deadline does not include
+all setup and the shared job's cleanup backstop.
+
+The shell's opt-in observer marks readiness, activation and first accepted overlay paint
+by run, scene and index. Byte arrival to that paint is the timing endpoint. The gate has
+no independent swapchain identity for this overlay, so the report says “present not
+matched”; it does not infer a display time from other surfaces. The narration-time
+field is zero with the current presenter; authored entrances and delays still count.
+The report estimates narration overlap only if a narrated predecessor reserves time
+beyond its entrance.
+
+The release shell accepts `--draw-timing` with an observer file and a bounded quit
+deadline. That records timing only; it never submits the fixture. The extra rows contain
+identifiers, clocks, durations and a bit for nonblank `say`, not scene or user content.
+The bit doesn't mean the step was spoken or reserved time.
+The ordinary gate observer still writes its existing geometry and counters. Without
+drawing observation there are presenter option and fresh-paint checks, but no added
+drawing clock reads or file writes. Their cost has not been measured end to end.
 
 ### The hover-only idle session
 

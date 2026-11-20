@@ -193,6 +193,11 @@ impl Presenter {
                 },
                 segment_ms,
                 entrance_ms,
+                narrated: step
+                    .step()
+                    .say
+                    .as_ref()
+                    .is_some_and(|say| !say.as_str().trim().is_empty()),
             });
         }
         scene.view_bytes = view_bytes;

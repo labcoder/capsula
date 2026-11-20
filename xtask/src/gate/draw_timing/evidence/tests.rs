@@ -1,5 +1,11 @@
-use super::{BrainStep, DrawKey, Unmatched, endpoint, narration_overlap, narration_share, parse};
-use crate::gate::{observation, present};
+use std::fs;
+use std::path::Path;
+
+use kumochi_protocol::constants::LIVE_CHATGPT_TEXT_STAMPS_FILE;
+
+use super::{BrainStep, DrawKey, parse, report};
+use crate::gate::observation;
+use crate::scratch;
 
 const RECEIPT: &str = concat!(
     "ready 17 1 20\n",
@@ -12,7 +18,7 @@ const RECEIPT: &str = concat!(
 
 #[test]
 fn brain_receipt_joins_the_exact_one_call_and_four_keys() {
-    let steps = parse(RECEIPT, 17, 99).unwrap();
+    let steps = parse(RECEIPT, 17).unwrap();
     assert_eq!(steps.len(), 4);
     assert_eq!(
         steps[0],
@@ -40,225 +46,176 @@ fn brain_receipt_joins_the_exact_one_call_and_four_keys() {
     );
     assert_eq!(steps[3].pipe, 180);
     assert_eq!(
-        parse(RECEIPT, 18, 99).unwrap_err().to_string(),
+        parse(RECEIPT, 18).unwrap_err().to_string(),
         "invalid brain draw ready stamp"
     );
     assert_eq!(
-        parse(RECEIPT, 17, 101).unwrap_err().to_string(),
+        parse(&RECEIPT.replace("ready 17 1 20", "ready 17 1 101"), 17)
+            .unwrap_err()
+            .to_string(),
         "invalid brain draw step identity or clock order"
     );
     assert_eq!(
-        parse(&RECEIPT.replace("9 11 2", "9 12 2"), 17, 99)
+        parse(&RECEIPT.replace("9 11 2", "9 12 2"), 17)
             .unwrap_err()
             .to_string(),
         "brain draw steps changed owner, call, or clock order"
     );
     assert_eq!(
-        parse(&RECEIPT.replace("11 2 23", "11 1 23"), 17, 99)
+        parse(&RECEIPT.replace("11 2 23", "11 1 23"), 17)
             .unwrap_err()
             .to_string(),
         "invalid brain draw step identity or clock order"
     );
     assert_eq!(
-        parse(&RECEIPT.replace("136 146", "136 132"), 17, 99)
+        parse(&RECEIPT.replace("136 146", "136 132"), 17)
             .unwrap_err()
             .to_string(),
         "invalid brain draw step identity or clock order"
     );
     assert_eq!(
-        parse(&RECEIPT.replace("final 17 0 0", "final 17 1 0"), 17, 99)
+        parse(&RECEIPT.replace("final 17 0 0", "final 17 1 0"), 17)
             .unwrap_err()
             .to_string(),
         "invalid or nonterminal brain draw final stamp"
     );
     assert_eq!(
-        parse(RECEIPT.trim_end(), 17, 99).unwrap_err().to_string(),
+        parse(RECEIPT.trim_end(), 17).unwrap_err().to_string(),
         "truncated brain draw receipt"
     );
     assert_eq!(
-        parse(&format!("{RECEIPT}ready 17 1 191\n"), 17, 99)
+        parse(&format!("{RECEIPT}ready 17 1 191\n"), 17)
             .unwrap_err()
             .to_string(),
         "invalid or nonterminal brain draw final stamp"
     );
 }
 
-const CSV: &str = "Application,ProcessID,SwapChainAddress,Runtime,SyncInterval,PresentFlags,Dropped,TimeInSeconds,msInPresentAPI,msBetweenPresents,AllowsTearing,PresentMode,msUntilRenderComplete,msUntilDisplayed,msBetweenDisplayChange,msFlipDelay,msUntilRenderStart,msGPUActive,QPCTime\n";
-const OVERLAY: &str = concat!(
-    "draw_ready run=9 scene=11 index=0 qpc=101\n",
-    "draw_active run=9 scene=11 index=0 qpc=105 segment_ms=800 entrance_ms=150\n",
-    "paint frame=1 qpc=110 kind=overlay hover=0 drawn_epoch=0 drawn_geometry=0 mask_epoch=0\n",
-    "drawn frame=1 qpc=120\n",
-    "draw_paint run=9 scene=11 index=0 qpc=110 frame=1 hwnd=0x123\n",
+const TRACE: &str = concat!(
+    "startup version=2 pid=42 dock_hwnd=0x1 panel_hwnd=0x2 proxy_hwnd=0x3 scale=1 position=TopCenter work_area=-20,-10,100,100 dock=0,0,4,2 overlay=-5,-5,14,12 panel=0,2,10,10 qpc_frequency=1000 row_cap=512 queue=256 repaint_message=0x8010 marker=0x43505331\n",
+    "draw_ready run=9 scene=11 index=0 qpc=156\n",
+    "draw_active run=9 scene=11 index=0 qpc=160 segment_ms=800 entrance_ms=30 narrated=0\n",
+    "draw_paint run=9 scene=11 index=0 qpc=165\n",
+    "draw_ready run=9 scene=11 index=1 qpc=161\n",
+    "draw_active run=9 scene=11 index=1 qpc=200 segment_ms=1455 entrance_ms=150 narrated=1\n",
+    "draw_paint run=9 scene=11 index=1 qpc=210\n",
+    "draw_ready run=9 scene=11 index=2 qpc=171\n",
+    "draw_active run=9 scene=11 index=2 qpc=900 segment_ms=800 entrance_ms=0 narrated=0\n",
+    "draw_paint run=9 scene=11 index=2 qpc=910\n",
+    "draw_ready run=9 scene=11 index=3 qpc=181\n",
+    "draw_active run=9 scene=11 index=3 qpc=1200 segment_ms=800 entrance_ms=0 narrated=0\n",
+    "draw_paint run=9 scene=11 index=3 qpc=1210\n",
+    "close commits=0 frames=0 dropped=0 overflow=0 post_failed=0 unposted=0\n",
+    "end lines=14 write_errors=0\n",
 );
 
-fn csv_row(chain: u32, qpc: i64, dropped: u8, delay: &str, display: &str, change: &str) -> String {
-    format!(
-        "app.exe,17,0x{chain},DXGI,0,0,{dropped},0,0,{delay},0,Flip,0,{display},{change},0,0,0,{qpc}\n"
-    )
+fn observed(dir: &Path) -> observation::Observation {
+    let path = dir.join("observer.log");
+    fs::write(&path, TRACE).unwrap();
+    observation::read(&path, 42).unwrap()
 }
 
 #[test]
-fn endpoint_refuses_missing_dropped_ambiguous_and_estimated_presents() {
-    let observed = observation::fixture(OVERLAY).unwrap();
-    let shell = &observed.draw_steps[0];
-    for (rows, expected) in [
+fn draw_trial_refuses_to_copy_a_receipt_from_another_brain() {
+    let dir = scratch::dir("draw-wrong-brain");
+    let source = dir.join("source.stamps");
+    fs::write(&source, RECEIPT).unwrap();
+    let error = report(&dir, &source, 18, &observed(&dir)).unwrap_err();
+    assert_eq!(error.to_string(), "invalid brain draw ready stamp");
+    assert!(!dir.join(LIVE_CHATGPT_TEXT_STAMPS_FILE).exists());
+    assert!(!dir.join("draw-timing.txt").exists());
+}
+
+#[test]
+fn draw_trial_does_not_estimate_zero_narration_time() {
+    let dir = scratch::dir("draw-zero-narration");
+    let source = dir.join("source.stamps");
+    fs::write(&source, RECEIPT).unwrap();
+    let trace = TRACE
+        .replace("segment_ms=800", "segment_ms=0")
+        .replace("segment_ms=1455", "segment_ms=0");
+    let path = dir.join("observer.log");
+    fs::write(&path, trace).unwrap();
+    let observed = observation::read(&path, 42).unwrap();
+    report(&dir, &source, 17, &observed).unwrap();
+    let report = fs::read_to_string(dir.join("draw-timing.txt")).unwrap();
+    assert!(report.contains("segment_ms=0 independent_entrance_ms=150 narrated=1"));
+    assert!(
+        !report.contains("estimated_narration_"),
+        "nonblank text with zero narration time must not receive a narration estimate"
+    );
+    assert!(report.contains("Step 3 has an authored after-delay of 200 ms."));
+    assert!(!report.contains("Silent segment floor"));
+}
+
+#[test]
+fn draw_trial_reads_paint_without_overlay_frames_or_completion() {
+    let dir = scratch::dir("draw-paint-only");
+    let source = dir.join("source.stamps");
+    fs::write(&source, RECEIPT).unwrap();
+    let observed = observed(&dir);
+    assert!(observed.all_painted());
+    assert!(observed.frames.is_empty());
+    assert_eq!(
+        observed.draw_steps.map(|step| step.paint),
+        [Some(165), Some(210), Some(910), Some(1210)]
+    );
+    report(&dir, &source, 17, &observed).unwrap();
+    assert_eq!(
+        fs::read_to_string(dir.join(LIVE_CHATGPT_TEXT_STAMPS_FILE)).unwrap(),
+        RECEIPT
+    );
+    let report = fs::read_to_string(dir.join("draw-timing.txt")).unwrap();
+    assert!(report.contains("present not matched"));
+    assert!(report.contains("Step 3 has an authored after-delay of 200 ms."));
+    assert!(report.contains("run=9 scene=11 call_to_first_step_ms=10.000000"));
+    let steps: Vec<_> = report
+        .lines()
+        .filter(|line| line.starts_with("step="))
+        .collect();
+    assert_eq!(steps.len(), 4);
+    assert!(steps[0].contains("accepted_paint_qpc=165"));
+    assert!(steps[0].ends_with("call_to_first_paint_ms=65.000000"));
+    assert!(steps[1].contains("segment_ms=1455 independent_entrance_ms=150 narrated=1"));
+    assert!(steps[2].ends_with(
+        "estimated_narration_overlap_ms=540.000000 estimated_narration_share_pct=74.07"
+    ));
+    assert!(steps[3].contains("segment_ms=800 independent_entrance_ms=0 narrated=0"));
+    for (step, expected) in
+        steps
+            .iter()
+            .zip(["55.000000", "90.000000", "788.000000", "1086.000000"])
+    {
+        assert_eq!(
+            step.split_whitespace()
+                .find_map(|field| field.strip_prefix("first_step_byte_to_accepted_paint_ms=")),
+            Some(expected)
+        );
+    }
+    for step in [steps[1], steps[3]] {
+        assert!(!step.contains("estimated_narration_"));
+    }
+    assert_eq!(report.matches("estimated_narration_overlap_ms=").count(), 1);
+    assert!(report.ends_with("painted=4/4\n"));
+
+    let path = dir.join("observer.log");
+    for (invalid, expected) in [
         (
-            csv_row(10, 115, 0, "0", "3", "0"),
-            Unmatched::Present(present::Join::Missing),
+            TRACE.replace("narrated=1", "narrated=2"),
+            "invalid draw narration bit",
         ),
         (
-            csv_row(20, 115, 1, "0", "NA", "0"),
-            Unmatched::Present(present::Join::Dropped),
-        ),
-        (
-            [
-                csv_row(30, 115, 0, "0", "3", "0"),
-                csv_row(20, 120, 0, "0", "NA", "0"),
-            ]
-            .concat(),
-            Unmatched::Present(present::Join::Ambiguous),
-        ),
-        (
-            csv_row(20, 140, 0, "25", "3", "25"),
-            Unmatched::EstimatedSeed,
+            TRACE.replace("index=2 qpc=910", "index=2 qpc=899"),
+            "duplicate or unordered draw paint stamp",
         ),
     ] {
-        let mut presents = present::parse(&format!("{CSV}{rows}"), 17).unwrap();
-        let mut chain = None;
-        let result = endpoint(
-            &observed,
-            shell,
-            &mut presents,
-            0x10,
-            1000,
-            &mut chain,
-            &mut Vec::new(),
+        fs::write(&path, invalid).unwrap();
+        assert_eq!(
+            observation::read(&path, 42)
+                .unwrap_err()
+                .root_cause()
+                .to_string(),
+            expected
         );
-        assert_eq!(result.unwrap_err(), expected);
-        assert_eq!(chain, None);
     }
-}
-
-#[test]
-fn endpoint_demands_confirmed_overlay_and_exact_present_interval() {
-    let observed = observation::fixture(OVERLAY).unwrap();
-    let shell = &observed.draw_steps[0];
-    assert_eq!(shell.ready, Some(101));
-    assert_eq!(
-        shell.active.map(|active| (active.qpc, active.entrance_ms)),
-        Some((105, 150))
-    );
-    assert_eq!(
-        shell
-            .paint
-            .map(|paint| (paint.qpc, paint.frame, paint.hwnd)),
-        Some((110, 1, 0x123))
-    );
-    let dock_only = csv_row(10, 115, 0, "0", "3", "0");
-    let exact = csv_row(20, 120, 0, "0", "NA", "0");
-    let mut presents = present::parse(&format!("{CSV}{dock_only}{exact}"), 17).unwrap();
-    let mut chain = None;
-    let mut frames = Vec::new();
-    let matched = endpoint(
-        &observed,
-        shell,
-        &mut presents,
-        0x10,
-        1000,
-        &mut chain,
-        &mut frames,
-    )
-    .unwrap();
-    assert_eq!(chain, Some(0x20));
-    assert_eq!(matched.present.qpc, 120);
-    assert_eq!(matched.source, present::Source::Csv { row: 3 });
-    assert_eq!(matched.displayed_qpc, None);
-    assert_eq!(
-        endpoint(
-            &observed,
-            shell,
-            &mut presents,
-            0x10,
-            1000,
-            &mut Some(0x30),
-            &mut Vec::new()
-        )
-        .unwrap_err(),
-        Unmatched::SwapchainChanged,
-    );
-    assert_eq!(
-        endpoint(
-            &observed,
-            shell,
-            &mut presents,
-            0x10,
-            1000,
-            &mut chain,
-            &mut Vec::new()
-        )
-        .unwrap_err(),
-        Unmatched::Present(present::Join::Reused),
-    );
-    assert_eq!(
-        endpoint(
-            &observed,
-            shell,
-            &mut presents,
-            0x10,
-            1000,
-            &mut chain,
-            &mut frames
-        )
-        .unwrap_err(),
-        Unmatched::ReusedFrame,
-    );
-}
-
-#[test]
-fn overlapping_panel_paint_rejects_even_one_eligible_non_dock_csv_row() {
-    let competing =
-        "paint frame=2 qpc=120 kind=panel hover=0 drawn_epoch=0 drawn_geometry=0 mask_epoch=0\n";
-    let trace = OVERLAY.replace("drawn frame=", &format!("{competing}drawn frame="));
-    let observed = observation::fixture(&trace).unwrap();
-    let mut presents = present::parse(
-        &format!("{CSV}app.exe,17,0x20,DXGI,0,0,0,0,0,0,0,Flip,0,NA,0,0,0,0,120\n"),
-        17,
-    )
-    .unwrap();
-    assert_eq!(
-        endpoint(
-            &observed,
-            &observed.draw_steps[0],
-            &mut presents,
-            0x10,
-            1000,
-            &mut None,
-            &mut Vec::new()
-        )
-        .unwrap_err(),
-        Unmatched::CompetingPanelPaint,
-    );
-}
-
-#[test]
-fn narration_includes_only_the_overlap_after_an_independent_entrance() {
-    assert_eq!(narration_share(650, 725), "89.65");
-    assert_eq!(narration_share(0, 0), "NA");
-    assert_eq!(
-        narration_overlap(100, 150, 800, 200, 925, 1000).unwrap(),
-        650
-    );
-    assert_eq!(
-        narration_overlap(100, 150, 800, 400, 600, 1000).unwrap(),
-        200
-    );
-    assert_eq!(
-        narration_overlap(100, 150, 800, 900, 1100, 1000).unwrap(),
-        0
-    );
-    assert_eq!(
-        narration_overlap(100, 900, 800, 200, 1100, 1000).unwrap(),
-        0
-    );
 }

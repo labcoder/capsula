@@ -1,8 +1,8 @@
 //! Keyed draw timing rows in the ordinary native observer.
 
-use anyhow::{Context as _, Result, ensure};
+use anyhow::{Context as _, Result, bail, ensure};
 
-use super::{Kind, Observation, fields, hex, number, positive};
+use super::{Observation, fields, number, positive};
 
 pub(in crate::gate) const DRAW_STEPS: usize = 4;
 
@@ -18,7 +18,7 @@ pub(in crate::gate) struct DrawStep {
     pub(in crate::gate) key: Option<DrawKey>,
     pub(in crate::gate) ready: Option<i64>,
     pub(in crate::gate) active: Option<Active>,
-    pub(in crate::gate) paint: Option<Paint>,
+    pub(in crate::gate) paint: Option<i64>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -26,28 +26,12 @@ pub(in crate::gate) struct Active {
     pub(in crate::gate) qpc: i64,
     pub(in crate::gate) segment_ms: u64,
     pub(in crate::gate) entrance_ms: u64,
-}
-
-#[derive(Debug, Clone, Copy)]
-pub(in crate::gate) struct Paint {
-    pub(in crate::gate) qpc: i64,
-    pub(in crate::gate) frame: u64,
-    pub(in crate::gate) hwnd: u64,
+    pub(in crate::gate) narrated: bool,
 }
 
 impl Observation {
-    pub(in crate::gate) fn all_drawn(&self) -> bool {
-        self.draw_steps.iter().all(|step| {
-            step.paint
-                .and_then(|paint| self.frame(paint.frame))
-                .is_some_and(|frame| frame.completion_qpc.is_some())
-        })
-    }
-
-    pub(in crate::gate) fn frame(&self, id: u64) -> Option<&super::Frame> {
-        id.checked_sub(1)
-            .and_then(|index| usize::try_from(index).ok())
-            .and_then(|index| self.frames.get(index))
+    pub(in crate::gate) fn all_painted(&self) -> bool {
+        self.draw_steps.iter().all(|step| step.paint.is_some())
     }
 
     pub(super) fn accept_draw_timing(&mut self, kind: &str, text: &str) -> Result<()> {
@@ -59,9 +43,17 @@ impl Observation {
                 step.ready = Some(positive(qpc)?);
             }
             "draw_active" => {
-                let [run, scene, index, qpc, segment, entrance] = fields(
+                let [run, scene, index, qpc, segment, entrance, narrated] = fields(
                     text,
-                    ["run", "scene", "index", "qpc", "segment_ms", "entrance_ms"],
+                    [
+                        "run",
+                        "scene",
+                        "index",
+                        "qpc",
+                        "segment_ms",
+                        "entrance_ms",
+                        "narrated",
+                    ],
                 )?;
                 let qpc = positive(qpc)?;
                 let step = self.draw_step(key(run, scene, index)?)?;
@@ -73,35 +65,24 @@ impl Observation {
                     qpc,
                     segment_ms: number(segment)?,
                     entrance_ms: number(entrance)?,
+                    narrated: match narrated {
+                        "0" => false,
+                        "1" => true,
+                        _ => bail!("invalid draw narration bit"),
+                    },
                 });
             }
-            _ => {
-                let [run, scene, index, qpc, frame, hwnd] =
-                    fields(text, ["run", "scene", "index", "qpc", "frame", "hwnd"])?;
-                let paint = Paint {
-                    qpc: positive(qpc)?,
-                    frame: number(frame)?,
-                    hwnd: hex(hwnd)?,
-                };
-                ensure!(
-                    paint.hwnd > 0
-                        && self.frame(paint.frame).is_some_and(|frame| {
-                            frame.kind == Kind::Overlay && frame.paint_qpc == paint.qpc
-                        })
-                        && self.draw_steps.iter().all(|step| {
-                            step.paint
-                                .is_none_or(|previous| previous.hwnd == paint.hwnd)
-                        }),
-                    "draw paint does not identify the same observed overlay"
-                );
+            "draw_paint" => {
+                let [run, scene, index, qpc] = fields(text, ["run", "scene", "index", "qpc"])?;
+                let qpc = positive(qpc)?;
                 let step = self.draw_step(key(run, scene, index)?)?;
                 ensure!(
-                    step.paint.is_none()
-                        && step.active.is_some_and(|active| active.qpc <= paint.qpc),
-                    "duplicate or unordered confirmed draw paint"
+                    step.paint.is_none() && step.active.is_some_and(|active| active.qpc <= qpc),
+                    "duplicate or unordered draw paint stamp"
                 );
-                step.paint = Some(paint);
+                step.paint = Some(qpc);
             }
+            _ => bail!("unknown draw timing stamp"),
         }
         Ok(())
     }

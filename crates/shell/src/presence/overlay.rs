@@ -289,7 +289,7 @@ impl Element for DrawingElement {
             };
             if self.painting.get()
                 && self.notice.observe(failed, observations, |before| {
-                    observer::overlay_painted(cx, window, before, &observations);
+                    observer::overlay_painted(cx, before, &observations);
                 })
             {
                 let owner = self.owner.clone();

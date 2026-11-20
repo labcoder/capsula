@@ -58,9 +58,10 @@ tasks:
                     gate-session's measured phases with hover-gate's opener;
                     no Ready and no feel verdicts
   draw-timing <path-session.txt> <shell-sha256> <brain-sha256>
-                    one offline drawing timing trial; run the prebuilt Debug gate xtask.exe
+                    one offline paint timing trial (90 seconds plus shared teardown);
+                    run the prebuilt Debug gate xtask.exe after external idle admission,
                     beside the pinned same-build shell and brain, with create-new redirection;
-                    no Cargo, sign-in, or service requests; the ten-minute away rule applies
+                    no input, PresentMon, Cargo, sign-in, or service requests
   input-fixture     internal bounded separate-process EDIT/Ready fixture
   input-quiet <seconds>
                     observe raw input on a hidden window for 1..120 seconds;

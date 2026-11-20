@@ -19,7 +19,7 @@ pub(crate) struct Launch {
     pub(super) observer: Option<PathBuf>,
     /// `--receipt-fixture`: start the dock middle-left for the gate's click-receipt phases.
     pub(super) receipt_fixture: bool,
-    /// `--draw-timing`: add exact step and overlay records to a bounded observer run.
+    /// `--draw-timing`: add step readiness, activation and first paint to a bounded observer run.
     pub(super) draw_timing: bool,
 }
 

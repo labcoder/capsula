@@ -177,7 +177,7 @@ fn shown(run: RunId, index: u32) -> [Option<Shown>; 4] {
 }
 
 #[test]
-fn timing_reports_the_accepted_step_and_actual_synthetic_and_entrance_spans() {
+fn timing_reports_the_accepted_step_with_zero_narration_and_its_entrance_span() {
     let (mut presenter, now) = live();
     let receipts = Rc::new(RefCell::new(Vec::new()));
     let out = Rc::clone(&receipts);
@@ -207,11 +207,40 @@ fn timing_reports_the_accepted_step_and_actual_synthetic_and_entrance_spans() {
             DrawTiming::Active {
                 key,
                 segment_ms: 0,
-                entrance_ms: 150
+                entrance_ms: 150,
+                narrated: true,
             },
             DrawTiming::Shown { key, epoch: 2 },
         ]
     );
+}
+
+#[test]
+fn timing_reports_nonblank_narration_text_without_a_time_reservation() {
+    for (first, narrated) in [
+        (step(r#"{"step":{"id":"silent"}}"#), false),
+        (step(r#"{"step":{"id":"blank","say":" \t"}}"#), false),
+        (step(r#"{"step":{"id":"unspoken","say":"one"}}"#), true),
+    ] {
+        let (mut presenter, now) = prepared(&[(RUN, first)]);
+        let receipts = Rc::new(RefCell::new(Vec::new()));
+        let out = Rc::clone(&receipts);
+        presenter.observe_draw_timing(move |receipt| out.borrow_mut().push(receipt));
+        presenter.advance(GENERATION, now).expect("activate");
+        assert_eq!(
+            *receipts.borrow(),
+            [DrawTiming::Active {
+                key: DrawKey {
+                    run: RUN,
+                    scene: LIVE,
+                    index: 0
+                },
+                segment_ms: 0,
+                entrance_ms: 0,
+                narrated,
+            }]
+        );
+    }
 }
 
 #[test]

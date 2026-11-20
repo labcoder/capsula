@@ -1,10 +1,11 @@
-//! One guarded, offline draw timing trial with prebuilt Debug GATE images.
+//! One offline paint timing trial with prebuilt Debug GATE images.
 
 mod evidence;
 
 use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::thread::sleep;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result, ensure};
@@ -13,17 +14,13 @@ use kumochi_protocol::constants::{
     LIVE_RUN_BIN_DIR, LIVE_RUNS_DIR, ProductIdentity, SHELL_EXE,
 };
 
-use super::{await_idle_open, await_startup, capture::Capture, observation, retained_run};
-use crate::hermetic::{self, Folders};
-use crate::platform::{
-    self, gate_capture,
-    input_session::{self as native, FixturePlacement, Registry, Session, Window, WindowKind},
-};
-use crate::session::{self, Diagnostics, Mark};
+use super::{observation, retained_run};
+use crate::hermetic::{self, Folders, Run};
+use crate::platform::{self, gate_capture, input_session::WindowKind};
+use crate::session;
 
 const LIMIT: Duration = Duration::from_secs(90);
 const SHELL_LIMIT_MS: u64 = 65_000;
-const CAPTURE_LIMIT: Duration = Duration::from_secs(30);
 
 pub(super) fn run(mut args: impl Iterator<Item = String>) -> Result<()> {
     hermetic::require_gate(ProductIdentity::ACTIVE)?;
@@ -46,28 +43,37 @@ pub(super) fn run(mut args: impl Iterator<Item = String>) -> Result<()> {
         "draw-timing takes only a transcript path and two SHA-256 pins"
     );
     let exe = std::env::current_exe()?;
-    retained_run(std::iter::once(transcript), |output, run| {
-        let bins = exe.parent().context("missing prebuilt image directory")?;
-        let (shell, stamps) = prepare(output, bins, &hashes)?;
-        let folders = run.folders("app")?;
-        folders.choose_model("ChatGpt", "draw-replay")?;
-        fs::write(
-            output.join("identity.txt"),
-            format!(
-                "driver_build_id={}\nidentity={}\nprofile=debug\ndriver_sha256={}\nshell_sha256={}\nbrain_sha256={}\n",
-                kumochi_protocol::BUILD_ID,
-                ProductIdentity::ACTIVE.data_dir,
-                gate_capture::file_sha256(&exe)?,
-                hashes[0],
-                hashes[1],
-            ),
-        )?;
-        guarded_session(&exe, output, &shell, &stamps, &folders)
-    })
+    retained_run(
+        std::iter::once(transcript),
+        Run::finish_discard,
+        |output, _| {
+            let bins = exe.parent().context("missing prebuilt image directory")?;
+            let (folders, shell, stamps) = prepare(output, bins, &hashes)?;
+            fs::write(
+                output.join("identity.txt"),
+                format!(
+                    "driver_build_id={}\nidentity={}\nprofile=debug\ndriver_sha256={}\nshell_sha256={}\nbrain_sha256={}\n",
+                    kumochi_protocol::BUILD_ID,
+                    ProductIdentity::ACTIVE.data_dir,
+                    gate_capture::file_sha256(&exe)?,
+                    hashes[0],
+                    hashes[1],
+                ),
+            )?;
+            trial(output, &shell, &stamps, &folders)
+        },
+    )
 }
 
-fn prepare(output: &Path, images: &Path, hashes: &[String; 2]) -> Result<(PathBuf, PathBuf)> {
-    let launch = output.join("data/app").join(LIVE_RUNS_DIR).join("1");
+fn prepare(
+    output: &Path,
+    images: &Path,
+    hashes: &[String; 2],
+) -> Result<(Folders, PathBuf, PathBuf)> {
+    let app = output.join("data/app");
+    let folders = Folders::create(&app)?;
+    folders.choose_model("ChatGpt", "draw-replay")?;
+    let launch = app.join(LIVE_RUNS_DIR).join("1");
     let bin = launch.join(LIVE_RUN_BIN_DIR);
     fs::create_dir_all(&bin)?;
     for (name, expected) in [SHELL_EXE, BRAIN_EXE].into_iter().zip(hashes) {
@@ -79,68 +85,21 @@ fn prepare(output: &Path, images: &Path, hashes: &[String; 2]) -> Result<(PathBu
         );
     }
     Ok((
+        folders,
         bin.join(SHELL_EXE),
         launch.join(LIVE_CHATGPT_TEXT_STAMPS_FILE),
     ))
 }
 
-fn guarded_session(
-    exe: &Path,
-    output: &Path,
-    shell: &Path,
-    stamps: &Path,
-    folders: &Folders,
-) -> Result<()> {
+fn trial(output: &Path, shell: &Path, stamps: &Path, folders: &Folders) -> Result<()> {
     fs::write(
         output.join("environment-before.txt"),
         gate_capture::desktop_metadata()?,
     )?;
-    let end = Instant::now() + LIMIT;
-    let mut fixture = native::spawn_fixture(exe, LIMIT, FixturePlacement::AwayFromCursor)?;
-    let mut window = None;
-    let measured = (|| {
-        let owned = session::discover(&mut fixture, WindowKind::Fixture)?;
-        window = Some(owned);
-        let mut session = Session::new(owned, end)?;
-        await_idle_open(
-            &mut session,
-            output,
-            Instant::now() + Duration::from_secs(10),
-        )?;
-        session.set_phase(1)?;
-        let before = Registry::snapshot();
-        let measured = trial(&mut session, output, shell, stamps, folders, end);
-        let released = session.release_injected();
-        let registry = before.ensure_unchanged(&Registry::snapshot());
-        if let Some(stop) = session.stop_metadata() {
-            println!("guard_stop={stop:?}");
-        }
-        session::combine([measured, released, registry])
-    })();
-    let closed = window.map_or(Ok(()), Window::close);
-    let exited = session::wait_child(&mut fixture, end);
-    let environment = gate_capture::desktop_metadata().and_then(|metadata| {
-        fs::write(output.join("environment-after.txt"), metadata).map_err(anyhow::Error::from)
-    });
-    session::combine([measured, closed, exited, environment])
-}
-
-fn trial(
-    session: &mut Session,
-    output: &Path,
-    shell: &Path,
-    stamps: &Path,
-    folders: &Folders,
-    end: Instant,
-) -> Result<()> {
-    let diagnostics = Diagnostics::in_directory(output);
     let trace_path = output.join("observer.log");
     let mut observer_arg = OsString::from("--gate-observer=");
     observer_arg.push(&trace_path);
-    let input_end = end
-        .checked_sub(Duration::from_secs(12))
-        .context("no draw cleanup reserve")?;
-    session.guard()?;
+    let end = Instant::now() + LIMIT;
     ensure!(
         platform::processes()?.is_empty(),
         "unexpected product before draw launch"
@@ -149,7 +108,7 @@ fn trial(
         shell,
         folders,
         SHELL_LIMIT_MS,
-        [diagnostics.argument(), observer_arg, "--draw-timing".into()],
+        [observer_arg, "--draw-timing".into()],
         |command| {
             command.env_clear().envs(
                 ["SystemRoot", "WINDIR"]
@@ -164,108 +123,72 @@ fn trial(
     let pid = child.id();
     let mut window = None;
     let mut helpers = Vec::new();
-    let mut capture = None;
-    let mut dismissed_qpc = None;
-    let body = (|| {
-        let product = session::discover(&mut child, WindowKind::ProductProxy)?;
-        window = Some(product);
+    let painted = (|| {
+        window = Some(session::discover(&mut child, WindowKind::ProductProxy)?);
         helpers = session::owned_helpers(pid)?;
-        let brain = brain_pid(&helpers)?;
-        session.bind_product(product, input_end)?;
-        diagnostics.await_started(session)?;
+        let brain = helpers
+            .iter()
+            .find_map(|(role, process, _)| (*role == "brain").then_some(process.pid))
+            .context("missing owned brain")?;
         let mut reader = observation::Reader::open(&trace_path, pid)?;
-        let startup = await_startup(&mut reader, session)?;
-        ensure!(
-            startup.frequency == session.qpc_frequency,
-            "shell and gate QPC rates differ"
-        );
-        session.bind_panel(startup.panel_hwnd)?;
-        evidence::ready(stamps, brain, session)?;
-        let trace = Capture::warm_and_start(
-            pid,
-            &output.join("presents.csv"),
-            CAPTURE_LIMIT,
-            || product.request_gate_repaint(),
-            || session.guard(),
-        )?;
-        let trace_end = trace.input_deadline();
-        capture = Some(trace);
-        let work_end = input_end
-            .min(trace_end)
-            .checked_sub(Duration::from_secs(1))
-            .context("no draw capture cleanup reserve")?;
-        dismissed_qpc = Some(submit(session, &diagnostics)?);
-        while !reader.update()?.all_drawn() {
+        while !reader.update()?.all_painted() {
+            ensure!(Instant::now() < end, "draw paint trial deadline exceeded");
             ensure!(
-                Instant::now() < work_end,
-                "drawing observer did not record four completed paints"
+                child.try_wait()?.is_none(),
+                "owned shell exited before four draw paints"
             );
-            session.wait(Duration::from_millis(10))?;
+            sleep(Duration::from_millis(10));
         }
-        session.wait(Duration::from_millis(250))
+        Ok(brain)
     })();
-    let released = session.release_injected();
-    let captured = capture
-        .as_mut()
-        .map(|trace| (trace.dock_swapchain, trace.finish(|| session.guard())));
-    session.unbind_product();
-    let brain = brain_pid(&helpers);
     let stopped = session::stop_product(Some(&mut child), window, helpers, end);
-    let report = (|| {
-        let (dock, rows) = captured.context("no main draw capture")?;
-        let observed = observation::read(&trace_path, pid)?;
-        evidence::report(
-            output,
-            stamps,
-            brain?,
-            dismissed_qpc.context("no guarded typing dismissal")?,
-            &observed,
-            &mut rows?,
-            dock,
-        )
-    })();
-    session::combine([body, released, stopped, report])
+    let result = match painted {
+        Ok(brain) => stopped.and_then(|()| {
+            let observed = observation::read(&trace_path, pid)?;
+            evidence::report(output, stamps, brain, &observed)
+        }),
+        Err(error) => session::combine([Err(error), stopped]),
+    };
+    let environment = gate_capture::desktop_metadata().and_then(|metadata| {
+        fs::write(output.join("environment-after.txt"), metadata).map_err(anyhow::Error::from)
+    });
+    session::combine([result, environment])
 }
 
-fn brain_pid(helpers: &[(&str, platform::Process, u32)]) -> Result<u32> {
-    helpers
-        .iter()
-        .find_map(|(role, process, _)| (*role == "brain").then_some(process.pid))
-        .context("missing owned brain")
-}
-
-fn submit(session: &mut Session, diagnostics: &Diagnostics) -> Result<i64> {
-    ensure!(
-        session.fixture_foreground(),
-        "the owned fixture is not foreground before the typing chord"
-    );
-    let since = session::short_chord(session)?;
-    session.wait(Duration::from_millis(50))?;
-    session::short_chord(session)?;
-    let opened = diagnostics.observe(session, since, |records| {
-        records
-            .iter()
-            .any(|record| matches!(record.mark, Mark::Opened(_)))
-    })?;
-    ensure!(
-        opened
-            .iter()
-            .any(|record| record.mark == Mark::Opened(true)),
-        "typing did not open with focus; no text or Enter sent"
-    );
-    let typing = session.typing_window()?;
-    session.tap_typing(0x1e, typing)?;
-    session.tap_typing(0x1c, typing)?;
-    let enter = session.last_qpc.context("missing Enter QPC")?;
-    let dismissed = diagnostics.observe(session, enter, |records| {
-        records.iter().any(|record| record.mark == Mark::Dismissed)
-    })?;
-    ensure!(
-        !typing.is_visible()? && session.fixture_foreground(),
-        "typing dismissal did not hide the verified window and return fixture foreground"
-    );
-    dismissed
-        .iter()
-        .find_map(|record| (record.mark == Mark::Dismissed).then_some(record.qpc))
-        .context("missing typing dismissal QPC")
+#[cfg(test)]
+#[test]
+fn draw_trial_a_broken_or_missing_pin_does_not_poison_the_next_claim() {
+    for missing in [false, true] {
+        let dir = crate::scratch::dir("draw-bad-pin");
+        let images = dir.join("images");
+        fs::create_dir(&images).unwrap();
+        let shell = images.join(SHELL_EXE);
+        fs::write(&shell, b"fake shell").unwrap();
+        let shell_pin = gate_capture::file_sha256(&shell).unwrap();
+        if !missing {
+            fs::write(images.join(BRAIN_EXE), b"fake brain").unwrap();
+        }
+        hermetic::assert_claim_after_refusal(&dir, |output| {
+            let error = prepare(output, &images, &[shell_pin, "0".repeat(64)]).unwrap_err();
+            assert_eq!(
+                error.to_string(),
+                if missing {
+                    format!("copying pinned {BRAIN_EXE}")
+                } else {
+                    format!("prebuilt {BRAIN_EXE} SHA-256 does not match its pin; no launch")
+                }
+            );
+            let local = output.join("data/app/local");
+            assert!(
+                local.is_dir(),
+                "pin failure leaves a cleanable launch folder"
+            );
+            let app = local.join(ProductIdentity::GATE.data_dir);
+            fs::create_dir(&app).unwrap();
+            let db = rusqlite::Connection::open(app.join("fixture.sqlite")).unwrap();
+            db.execute_batch("CREATE TABLE draw_fixture (id INTEGER);")
+                .unwrap();
+            Err(error)
+        });
+    }
 }

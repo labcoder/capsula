@@ -252,13 +252,13 @@ mod tests {
 
         use kumochi_scene::display::WideMeasure;
         use kumochi_scene::layout::{LayoutState, PrepareInput, SurfaceGeometry, prepare};
-        use kumochi_scene::motion::synthetic_duration_ms;
         use kumochi_scene::theme::Theme;
         use kumochi_scene::{
             Admission, Frame, GlobalBudget, Record, SceneState, SceneView, WireId,
         };
         use serde_json::Value;
 
+        const STAGED_AT: u64 = 1900;
         let recorded: Value = serde_json::from_str(RECORDED).unwrap();
         let bytes = serde_json::to_vec(&recorded["records"][0]).unwrap();
         let Record::Begin(begin) = crate::dispatch::validate_draw_record(&bytes).unwrap() else {
@@ -270,7 +270,7 @@ mod tests {
         let mut frame = Frame::new();
         for (now, args) in [
             (0, recorded["records"][1].to_string()),
-            (800, STAGED[0].to_owned()),
+            (STAGED_AT, STAGED[0].to_owned()),
         ] {
             let Record::Step(step) =
                 crate::dispatch::validate_draw_record(args.as_bytes()).unwrap()
@@ -289,13 +289,7 @@ mod tests {
             )
             .unwrap();
             let prepared = prepare(input, &mut WideMeasure, &AtomicBool::new(false)).unwrap();
-            view.activate(
-                prepared,
-                now,
-                synthetic_duration_ms(step.say.as_ref()),
-                &mut frame,
-            )
-            .unwrap();
+            view.activate(prepared, now, 0, &mut frame).unwrap();
         }
         let visible = |frame: &Frame, id: &str| {
             view.layout()
@@ -307,7 +301,7 @@ mod tests {
                         .any(|item| item.handle == handle && item.opacity > 0.0)
                 })
         };
-        view.frame(800, &mut frame).unwrap();
+        view.frame(STAGED_AT, &mut frame).unwrap();
         assert_eq!(
             (
                 visible(&frame, "curve"),
@@ -317,7 +311,7 @@ mod tests {
             (true, true, false),
             "the first sample must show a new mark, not merely the earlier plot",
         );
-        view.frame(950, &mut frame).unwrap();
+        view.frame(STAGED_AT + 150, &mut frame).unwrap();
         assert!(
             visible(&frame, "timing-a"),
             "the independent entrance remains at 150 ms"

@@ -372,7 +372,7 @@ pub(crate) fn combine(results: impl IntoIterator<Item = Result<()>>) -> Result<(
     Ok(())
 }
 
-pub(crate) fn short_chord(session: &mut Session) -> Result<i64> {
+fn short_chord(session: &mut Session) -> Result<i64> {
     session.modifier(0x1d, InputEdge::Down)?;
     session.modifier(0x38, InputEdge::Down)?;
     let make_qpc = session.last_qpc.context("chord make QPC missing")?;

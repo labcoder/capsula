@@ -209,6 +209,7 @@ fn retained_output(mut args: impl Iterator<Item = String>) -> Result<(PathBuf, P
 /// runs `body` with the folder, and ends the run.
 fn retained_run(
     args: impl Iterator<Item = String>,
+    finish: fn(Run, Result<()>) -> Result<()>,
     body: impl FnOnce(&Path, &Run) -> Result<()>,
 ) -> Result<()> {
     let (transcript, output) = retained_output(args)?;
@@ -222,7 +223,7 @@ fn retained_run(
     )
     .map_err(anyhow::Error::from)
     .and_then(|()| body(&output, &run));
-    run.finish(result)
+    finish(run, result)
 }
 
 pub(crate) fn cold(args: impl Iterator<Item = String>) -> Result<()> {
@@ -257,7 +258,7 @@ fn session_run(
     opener: (&str, Opener, FixturePlacement),
     trials: &[Trial],
 ) -> Result<()> {
-    retained_run(args, |output, run| {
+    retained_run(args, Run::finish, |output, run| {
         let result =
             Images::build(run).and_then(|images| run_session(output, &images, opener, trials));
         let cursor = native::cursor_position();
@@ -460,17 +461,13 @@ const AWAY: Duration = Duration::from_secs(600);
 
 /// Opens injection only after `AWAY` with no input, then the unchanged guarded quiet second.
 fn idle_open(session: &mut Session, _: &Images, output: &Path, end: Instant) -> Result<()> {
-    let open_end = end
-        .checked_sub(PHASE_LIMIT + FINAL_RESERVE)
-        .context("session too short for the idle opener")?;
-    await_idle_open(session, output, open_end)
-}
-
-fn await_idle_open(session: &mut Session, output: &Path, open_end: Instant) -> Result<()> {
     println!(
         "Injection is disabled until Rez has had no input for {} minutes; any input after that stops the run.",
         AWAY.as_secs() / 60
     );
+    let open_end = end
+        .checked_sub(PHASE_LIMIT + FINAL_RESERVE)
+        .context("session too short for the idle opener")?;
     let mut attempts = 0;
     loop {
         session.await_idle(open_end, AWAY)?;

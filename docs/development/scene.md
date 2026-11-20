@@ -2302,6 +2302,11 @@ and installed once-state. A refused control ends the connection. Hidden, empty, 
 revoked or superseded observations cannot acknowledge; visibility-only epoch changes never
 reset an already acknowledged activation. Skipped semantic retirement fabricates no paint.
 
+With [drawing timing enabled](input.md#offline-drawing-timing), the shell saves a QPC
+stamp at the first successful paint for that scene, epoch and bound. It reports the
+stamp only when the presenter accepts the same sample for the live step. A paint
+receipt does not establish when the display presents that sample.
+
 An entrance starts at its first paint, not at consumption. A newly activated frame keeps its
 first sample with something to paint until a shown overlay paints it, and later samples leave it
 unchanged. While that frame is still empty after its first sample, it is sampled no later than

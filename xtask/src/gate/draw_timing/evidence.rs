@@ -5,16 +5,12 @@ mod tests;
 
 use std::fmt::Write as _;
 use std::fs::{self, File};
-use std::io::ErrorKind;
 use std::path::Path;
-use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result, ensure};
 use kumochi_protocol::constants::LIVE_CHATGPT_TEXT_STAMPS_FILE;
 
-use crate::gate::observation::{DRAW_STEPS, DrawKey, DrawStep, Kind, Observation, milliseconds};
-use crate::gate::present::{Join, MatchedPresent, PresentRows, Source};
-use crate::platform::input_session::Session;
+use crate::gate::observation::{Active, DRAW_STEPS, DrawKey, Observation, milliseconds};
 
 const RECEIPT_CAP: u64 = 2048;
 
@@ -38,27 +34,6 @@ fn read(file: File) -> Result<String> {
         "brain draw receipt exceeds bound"
     );
     Ok(text)
-}
-
-pub(super) fn ready(path: &Path, pid: u32, session: &Session) -> Result<()> {
-    let end = Instant::now() + Duration::from_secs(3);
-    loop {
-        session.guard()?;
-        match File::open(path) {
-            Ok(file) => {
-                let text = read(file)?;
-                if text.ends_with('\n') {
-                    ensure!(text.lines().count() == 1, "unexpected stamps before submit");
-                    header(text.lines().next(), pid)?;
-                    return Ok(());
-                }
-            }
-            Err(error) if error.kind() == ErrorKind::NotFound => {}
-            Err(error) => return Err(error).context("opening brain draw receipt"),
-        }
-        ensure!(Instant::now() < end, "owned brain draw ready stamp missing");
-        session.wait(Duration::from_millis(10))?;
-    }
 }
 
 fn fields<'a, const N: usize>(line: Option<&'a str>, kind: &str) -> Result<[&'a str; N]> {
@@ -88,14 +63,10 @@ fn header(line: Option<&str>, pid: u32) -> Result<i64> {
     Ok(qpc)
 }
 
-fn parse(text: &str, pid: u32, dismissed: i64) -> Result<Vec<BrainStep>> {
+fn parse(text: &str, pid: u32) -> Result<Vec<BrainStep>> {
     ensure!(text.ends_with('\n'), "truncated brain draw receipt");
     let mut lines = text.lines();
     let ready = header(lines.next(), pid)?;
-    ensure!(
-        ready <= dismissed,
-        "brain draw readiness followed typing dismissal"
-    );
     let mut samples: Vec<BrainStep> = Vec::with_capacity(DRAW_STEPS);
     for expected in 0..DRAW_STEPS {
         let [
@@ -130,7 +101,7 @@ fn parse(text: &str, pid: u32, dismissed: i64) -> Result<Vec<BrainStep>> {
                 && sample.key.index == expected
                 && sample.bytes > 0
                 && [
-                    dismissed,
+                    ready,
                     sample.call,
                     sample.first,
                     sample.close,
@@ -170,272 +141,99 @@ pub(super) fn report(
     output: &Path,
     stamps: &Path,
     brain_pid: u32,
-    dismissed: i64,
     observed: &Observation,
-    presents: &mut PresentRows,
-    dock: u64,
 ) -> Result<()> {
     let text = read(File::open(stamps).context("missing brain draw receipt")?)?;
-    fs::write(output.join(LIVE_CHATGPT_TEXT_STAMPS_FILE), &text)?;
-    let samples = parse(&text, brain_pid, dismissed)?;
+    let samples = parse(&text, brain_pid)?;
     let frequency = observed
         .startup
         .context("missing draw observer startup")?
         .frequency;
     let ms = |ticks| milliseconds(ticks, frequency);
     let mut report = String::from(
-        "Offline Responses drawing: step 0 uses the checked-in capture; steps 1–3 are synthetic staged narration in the same call and scene.\n\
-         Display feedback, when available, is separate from Present.\n\
-         Eligible narration is the estimated overlap of ready-to-active with the prior synthetic segment beyond its independent entrance (no word anchors), using its confirmed first paint as the shifted start. Other constraints can also delay activation; this is not a causal breakdown.\n",
+        "Offline Responses drawing: step 0 uses the checked-in capture; steps 1–3 are synthetic in the same call and scene.\n\
+         The timing of record is first step byte to accepted paint, the first paint record for that step; present not matched.\n\
+         Step 3 has an authored after-delay of 200 ms.\n\
+         If a narrated predecessor reserves time beyond its entrance, the report estimates overlap with that extra time. It does not establish what caused the wait.\n",
     );
     writeln!(
         report,
-        "run={} scene={} typing_dismissed_qpc={dismissed} call_to_first_argument_ms={}",
+        "run={} scene={} call_to_first_step_ms={}",
         samples[0].key.run,
         samples[0].key.scene,
         ms(samples[0].first - samples[0].call)?
     )?;
-    let mut chain = None;
-    let mut frames = Vec::with_capacity(DRAW_STEPS);
-    let mut matched = 0;
+    let mut previous: Option<(i64, Active, i64)> = None;
     for (brain, shell) in samples.iter().zip(&observed.draw_steps) {
-        let previous = brain
-            .key
-            .index
-            .checked_sub(1)
-            .map(|index| &observed.draw_steps[index]);
-        let Some(active) = write_step(&mut report, brain, shell, previous, frequency)? else {
-            continue;
-        };
-        let endpoint = endpoint(
-            observed,
-            shell,
-            presents,
-            dock,
-            frequency,
-            &mut chain,
-            &mut frames,
+        ensure!(
+            shell.key == Some(brain.key),
+            "brain and shell draw identifiers differ or are missing"
         );
-        match endpoint {
-            Ok(row) => {
-                let paint = shell.paint.context("matched step has no confirmed paint")?;
-                write_endpoint(&mut report, brain, active, paint.qpc, row, frequency)?;
-                matched += 1;
-            }
-            Err(reason) => writeln!(report, " status=unmatched:{}", reason.label())?,
-        }
-    }
-    writeln!(report, "matched={matched}/{DRAW_STEPS}")?;
-    fs::write(output.join("draw-timing.txt"), &report)?;
-    print!("{report}");
-    ensure!(
-        matched == DRAW_STEPS,
-        "one or more draw steps have no exact present match"
-    );
-    Ok(())
-}
-
-fn write_step(
-    report: &mut String,
-    brain: &BrainStep,
-    shell: &DrawStep,
-    previous: Option<&DrawStep>,
-    frequency: i64,
-) -> Result<Option<i64>> {
-    ensure!(
-        shell.key.is_none_or(|key| key == brain.key),
-        "brain and shell draw identifiers differ"
-    );
-    let ms = |ticks| milliseconds(ticks, frequency);
-    let source = if brain.key.index == 0 {
-        "recorded"
-    } else {
-        "staged-synthetic"
-    };
-    write!(
-        report,
-        "step={} source={source} argument_bytes={}",
-        brain.key.index, brain.bytes
-    )?;
-    for (name, ticks) in [
-        ("first_argument_to_close", brain.close - brain.first),
-        ("close_to_durable", brain.durable - brain.close),
-        ("durable_to_pipe_queue", brain.pipe - brain.durable),
-    ] {
-        write!(report, " {name}_ms={}", ms(ticks)?)?;
-    }
-    let Some(ready) = shell.ready else {
-        writeln!(report, " status=unmatched:MissingReady")?;
-        return Ok(None);
-    };
-    ensure!(brain.pipe <= ready, "shell ready precedes its pipe commit");
-    ensure!(
-        previous
-            .and_then(|step| step.ready)
-            .is_none_or(|earlier| earlier <= ready),
-        "draw readiness reordered"
-    );
-    write!(
-        report,
-        " durable_to_ready_ms={} pipe_queue_to_ready_ms={}",
-        ms(ready - brain.durable)?,
-        ms(ready - brain.pipe)?
-    )?;
-    let Some(active) = shell.active else {
-        writeln!(report, " status=unmatched:MissingActive")?;
-        return Ok(None);
-    };
-    write!(
-        report,
-        " ready_to_active_ms={} segment_ms={} independent_entrance_ms={}",
-        ms(active.qpc - ready)?,
-        active.segment_ms,
-        active.entrance_ms
-    )?;
-    if let Some(earlier) = previous.and_then(|step| step.active) {
-        ensure!(earlier.qpc <= active.qpc, "draw activations reordered");
-        if brain.key.index > 1
-            && let Some(paint) = previous.and_then(|step| step.paint)
-        {
-            ensure!(
-                paint.qpc <= active.qpc,
-                "draw activated before previous confirmed paint"
-            );
-            let eligible = narration_overlap(
-                paint.qpc,
-                earlier.entrance_ms,
-                earlier.segment_ms,
-                ready,
-                active.qpc,
-                frequency,
-            )?;
-            let share = narration_share(eligible, active.qpc - ready);
-            write!(
-                report,
-                " estimated_narration_overlap_ms={} estimated_narration_share_pct={share}",
-                ms(eligible)?
-            )?;
-        }
-    }
-    if let Some(paint) = shell.paint {
+        let ready = shell.ready.context("missing draw ready stamp")?;
+        let active = shell.active.context("missing draw active stamp")?;
+        let paint = shell.paint.context("missing draw paint stamp")?;
+        ensure!(brain.pipe <= ready, "shell ready precedes its pipe commit");
+        let source = if brain.key.index == 0 {
+            "recorded"
+        } else {
+            "staged-synthetic"
+        };
         write!(
             report,
-            " overlay_hwnd={:#x} frame={} paint_qpc={} active_to_paint_ms={}",
-            paint.hwnd,
-            paint.frame,
-            paint.qpc,
-            ms(paint.qpc - active.qpc)?
+            "step={} source={source} argument_bytes={} segment_ms={} independent_entrance_ms={} narrated={} accepted_paint_qpc={paint}",
+            brain.key.index,
+            brain.bytes,
+            active.segment_ms,
+            active.entrance_ms,
+            u8::from(active.narrated)
         )?;
-        if brain.key.index == 0 {
+        for (name, ticks) in [
+            ("first_argument_to_close", brain.close - brain.first),
+            ("close_to_durable", brain.durable - brain.close),
+            ("durable_to_pipe_queue", brain.pipe - brain.durable),
+            ("pipe_queue_to_ready", ready - brain.pipe),
+            ("ready_to_active", active.qpc - ready),
+            ("active_to_paint", paint - active.qpc),
+            ("first_step_byte_to_accepted_paint", paint - brain.first),
+        ] {
+            write!(report, " {name}_ms={}", ms(ticks)?)?;
+        }
+        if let Some((prior_ready, prior, prior_paint)) = previous {
+            ensure!(
+                prior_ready <= ready && prior.qpc <= active.qpc && prior_paint <= paint,
+                "shell draw step timestamps reordered"
+            );
+            if prior.narrated && prior.segment_ms > prior.entrance_ms {
+                let overlap = narration_overlap(
+                    prior_paint,
+                    prior.entrance_ms,
+                    prior.segment_ms,
+                    ready,
+                    active.qpc,
+                    frequency,
+                )?;
+                let share = narration_share(overlap, active.qpc - ready);
+                write!(
+                    report,
+                    " estimated_narration_overlap_ms={} estimated_narration_share_pct={share}",
+                    ms(overlap)?
+                )?;
+            }
+        } else {
             write!(
                 report,
                 " call_to_first_paint_ms={}",
-                ms(paint.qpc - brain.call)?
+                ms(paint - brain.call)?
             )?;
         }
+        writeln!(report)?;
+        previous = Some((ready, active, paint));
     }
-    Ok(Some(active.qpc))
-}
-
-fn write_endpoint(
-    report: &mut String,
-    brain: &BrainStep,
-    active: i64,
-    paint: i64,
-    row: MatchedPresent,
-    frequency: i64,
-) -> Result<()> {
-    let Source::Csv { row: csv } = row.source else {
-        anyhow::bail!("matched step has no CSV row");
-    };
-    let present = row.present.qpc;
-    let ms = |ticks| milliseconds(ticks, frequency);
-    write!(
-        report,
-        " status=matched swapchain={:#x} csv_row={csv} present_qpc={present} paint_to_present_ms={} active_to_present_ms={} first_argument_to_present_ms={}",
-        row.present.swapchain,
-        ms(present - paint)?,
-        ms(present - active)?,
-        ms(present - brain.first)?,
-    )?;
-    if brain.key.index == 0 {
-        write!(
-            report,
-            " call_to_first_present_ms={}",
-            ms(present - brain.call)?
-        )?;
-    }
-    if let Some(displayed) = row.displayed_qpc {
-        writeln!(
-            report,
-            " displayed_qpc={displayed} present_to_display_ms={}",
-            ms(displayed - present)?
-        )?;
-    } else {
-        writeln!(report, " present_to_display_ms=NA")?;
-    }
+    writeln!(report, "painted={DRAW_STEPS}/{DRAW_STEPS}")?;
+    fs::write(output.join(LIVE_CHATGPT_TEXT_STAMPS_FILE), text)?;
+    fs::write(output.join("draw-timing.txt"), &report)?;
+    print!("{report}");
     Ok(())
-}
-
-#[derive(Debug, PartialEq, Eq)]
-enum Unmatched {
-    MissingPaint,
-    MissingDrawn,
-    ReusedFrame,
-    CompetingPanelPaint,
-    EstimatedSeed,
-    SwapchainChanged,
-    Present(Join),
-}
-
-impl Unmatched {
-    fn label(&self) -> String {
-        match self {
-            Self::Present(join) => format!("{join:?}"),
-            other => format!("{other:?}"),
-        }
-    }
-}
-
-fn endpoint(
-    observed: &Observation,
-    shell: &DrawStep,
-    presents: &mut PresentRows,
-    dock: u64,
-    frequency: i64,
-    chain: &mut Option<u64>,
-    frames: &mut Vec<u64>,
-) -> std::result::Result<MatchedPresent, Unmatched> {
-    let paint = shell.paint.ok_or(Unmatched::MissingPaint)?;
-    let drawn = observed
-        .frame(paint.frame)
-        .and_then(|frame| frame.completion_qpc)
-        .ok_or(Unmatched::MissingDrawn)?;
-    if frames.contains(&paint.frame) {
-        return Err(Unmatched::ReusedFrame);
-    }
-    frames.push(paint.frame);
-    if observed
-        .frames
-        .iter()
-        .any(|frame| frame.kind == Kind::Panel && (paint.qpc..=drawn).contains(&frame.paint_qpc))
-    {
-        return Err(Unmatched::CompetingPanelPaint);
-    }
-    let candidate = presents
-        .non_dock_swapchain(dock, paint.qpc, drawn, frequency)
-        .map_err(Unmatched::Present)?;
-    if chain.is_some_and(|known| known != candidate) {
-        return Err(Unmatched::SwapchainChanged);
-    }
-    let matched = presents
-        .join_present(candidate, paint.qpc, drawn, frequency)
-        .map_err(Unmatched::Present)?;
-    if !matches!(matched.source, Source::Csv { .. }) {
-        return Err(Unmatched::EstimatedSeed);
-    }
-    *chain = Some(candidate);
-    Ok(matched)
 }
 
 fn narration_overlap(
