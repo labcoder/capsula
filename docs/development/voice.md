@@ -924,7 +924,10 @@ the store read budget and loading the existing speech load budget.
 
 Microphone frames use an eight-packet queue. The data reader never waits on it:
 overflow terminally fails the matching gesture while credit still progresses.
-The source independently limits collection to 60 seconds. Brain permits the
+The source independently limits collection to 60 seconds. The Shell schedules
+one status warning five seconds before that same deadline, only for the current
+gesture while the source is collecting. The warning doesn't change collection
+or release. Brain permits the
 10-second startup allowance plus collection, then two seconds for remaining
 frames after both final count and physical stop. Neither deadline proves stop.
 Exact finalization moves nonempty PCM once to the existing STT owner. Nonblank
