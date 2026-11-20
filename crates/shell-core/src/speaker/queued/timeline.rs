@@ -42,6 +42,13 @@ pub(super) struct Anchor {
     pub(super) at: Duration,
 }
 
+pub(super) struct Feed {
+    pub(super) segment: SegmentId,
+    pub(super) at: u64,
+    pub(super) len: usize,
+    pub(super) last: bool,
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum Opened {
     Physical,
@@ -170,7 +177,7 @@ impl Engine {
         }
     }
 
-    fn inhibited(&self) -> bool {
+    pub(super) fn inhibited(&self) -> bool {
         self.inhibit.is_some_and(|(_, held)| held)
     }
 
@@ -188,14 +195,87 @@ impl Engine {
         Ok(admission)
     }
 
+    pub(super) fn feed(&self, out: &mut [i16; 480], flushed: Option<SegmentId>) -> Option<Feed> {
+        if !self.can_stage() {
+            return None;
+        }
+        let at = self.offered;
+        let segment = self.queue.segments.iter().find(|segment| {
+            segment.first <= at
+                && (at < segment.end()
+                    || at == segment.end()
+                        && segment.ended
+                        && flushed.is_none_or(|previous| segment.id.0 > previous.0))
+        })?;
+        let len = (segment.end() - at).min(480);
+        let start = usize::try_from(at - self.queue.retired).ok()?;
+        let count = usize::try_from(len).ok()?;
+        for (target, source) in out
+            .iter_mut()
+            .zip(self.queue.samples.range(start..start + count))
+        {
+            *target = *source;
+        }
+        Some(Feed {
+            segment: segment.id,
+            at,
+            len: count,
+            last: segment.ended && at + len == segment.end(),
+        })
+    }
+
     pub(super) fn staged(&mut self, through: u64) {
-        if self.physical.is_some()
+        if self.can_stage() {
+            self.offered = self.offered.max(through.min(self.queue.received));
+        }
+    }
+
+    fn can_stage(&self) -> bool {
+        self.physical.is_some()
             && !self.recovering
             && !self.inhibited()
             && self.phase == Phase::Running
-        {
-            self.offered = self.offered.max(through.min(self.queue.received));
+    }
+
+    pub(super) fn require_recovery(&mut self, generation: u64) {
+        if self.physical == Some(generation) {
+            self.recovering = true;
         }
+    }
+
+    pub(super) fn refill(&mut self) {
+        if self.physical.is_some() && self.phase == Phase::Running {
+            self.phase = Phase::Buffering(REFILL);
+        }
+    }
+
+    pub(super) fn active_deadline(&self, now: Duration) -> Option<Duration> {
+        if self.queue.stopped || self.phase == Phase::Idle {
+            return None;
+        }
+        let empty = self.queue.samples.is_empty();
+        let mut deadline = empty.then(|| self.active_at.saturating_add(IDLE));
+        if self.physical.is_none() {
+            if self.phase == Phase::Running && !self.inhibited() {
+                deadline = deadline
+                    .into_iter()
+                    .chain([now.saturating_add(Duration::from_millis(20))])
+                    .min();
+            }
+            if self.pending_open.is_none()
+                && self.unresolved.iter().any(Option::is_none)
+                && !self.inhibited()
+                && now < self.retry_at
+            {
+                deadline = deadline.into_iter().chain([self.retry_at]).min();
+            }
+        } else if !self.recovering {
+            deadline = deadline
+                .into_iter()
+                .chain(self.anchors.front().map(|anchor| anchor.at))
+                .min();
+        }
+        deadline
     }
 
     /// Recover fences presentation until the owner retires the route or stops.
@@ -223,7 +303,7 @@ impl Engine {
                     && anchor.through <= segment.end()
             })
         {
-            self.recovering = true;
+            self.require_recovery(anchor.generation);
             return Observation::Recover;
         }
         self.last_anchor_at = Some(anchor.at);

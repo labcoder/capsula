@@ -42,10 +42,6 @@ pub(crate) struct Control {
     clock: OnceLock<(StreamInstant, Duration)>,
 }
 
-#[expect(
-    dead_code,
-    reason = "the separate queued owner drives the callback controls"
-)]
 impl Control {
     pub(crate) fn new(wake: Thread) -> Self {
         Self {

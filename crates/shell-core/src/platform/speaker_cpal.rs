@@ -271,10 +271,6 @@ impl BackendStream {
 
 pub(crate) struct Transport(Owner);
 
-#[expect(
-    dead_code,
-    reason = "transport is passed to the queued owner in a separate change"
-)]
 impl Transport {
     pub(crate) fn control(&self) -> &Control {
         &self.0.submit().control
@@ -646,5 +642,25 @@ impl Playback {
             self.uncertain |= at.is_none();
             self.last_sound = self.last_sound.max(at);
         }
+    }
+}
+
+#[cfg(test)]
+pub(crate) struct FakePlayback(Playback);
+
+#[cfg(test)]
+impl FakePlayback {
+    pub(crate) fn open(control: Arc<Control>, occupied: &'static AtomicBool) -> (Transport, Self) {
+        let (submit, playback) = pair(SOURCE_RATE, 1, control);
+        let owner = Owner::new(
+            submit,
+            Permit::claim(occupied).expect("one fake stream test owns the pool"),
+            cleanup_sender().expect("fake stream retains its pool until callback drop"),
+        );
+        (Transport(owner), Self(playback))
+    }
+
+    pub(crate) fn fill(&mut self, out: &mut [f32], at: Duration) {
+        self.0.fill_at(out, Some(at));
     }
 }

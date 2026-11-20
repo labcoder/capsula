@@ -864,3 +864,75 @@ fn a_stale_open_result_cannot_advance_the_virtual_clock() {
     assert_eq!(engine.tick(ms(10)), Ok(None));
     assert_eq!(engine.progress.consumed, 240);
 }
+
+#[test]
+fn feeding_copies_only_unstaged_source_through_one_segment() {
+    let mut engine = Engine::new(RUN, LOGICAL);
+    engine.expect(ms(0));
+    let generation = engine.request(ms(0)).unwrap();
+    assert!(engine.opened(generation, Opened::Physical, ms(0)));
+    let mut first = segment(0, 481);
+    first.pcm.samples[480] = 23;
+    assert_eq!(
+        engine.offer(first, ms(0)),
+        Ok(Admission::Return(Credit {
+            origin: 1,
+            bytes: 50
+        }))
+    );
+    let mut second = segment(1, 3);
+    second.pcm.samples.fill(42);
+    assert!(matches!(
+        engine.offer(second, ms(0)),
+        Ok(Admission::Return(_))
+    ));
+    let mut out = [0; 480];
+    let offer = engine.feed(&mut out, None).unwrap();
+    assert_eq!(
+        (offer.segment, offer.at, offer.len, offer.last),
+        (SegmentId(0), 0, 480, false)
+    );
+    assert_eq!(out, [16_384; 480]);
+    assert_eq!(engine.progress.consumed, 0);
+    engine.staged(480);
+    let offer = engine.feed(&mut out, None).unwrap();
+    assert_eq!(
+        (offer.segment, offer.at, offer.len, offer.last),
+        (SegmentId(0), 480, 1, true)
+    );
+    assert_eq!(out[0], 23);
+    engine.staged(481);
+    let offer = engine.feed(&mut out, Some(SegmentId(0))).unwrap();
+    assert_eq!(
+        (offer.segment, offer.at, offer.len, offer.last),
+        (SegmentId(1), 481, 3, true)
+    );
+    assert_eq!(&out[..3], &[42; 3]);
+    engine.staged(484);
+    assert!(matches!(
+        engine.offer(segment(2, 0), ms(0)),
+        Ok(Admission::Return(_))
+    ));
+    let offer = engine.feed(&mut out, Some(SegmentId(1))).unwrap();
+    assert_eq!(
+        (offer.segment, offer.at, offer.len, offer.last),
+        (SegmentId(2), 484, 0, true)
+    );
+    assert!(engine.feed(&mut out, Some(SegmentId(2))).is_none());
+    assert_eq!(engine.progress.consumed, 0);
+}
+
+#[test]
+fn held_or_recovering_routes_cannot_offer_more_source() {
+    let (mut engine, generation) = observation_engine();
+    let mut out = [0; 480];
+    engine.pause(1, ms(0));
+    assert!(engine.feed(&mut out, None).is_none());
+    engine.resume(1, ms(0));
+    assert_eq!(engine.feed(&mut out, None).unwrap().len, 0);
+    assert_eq!(
+        engine.observe(presented(generation, 0, 1, 16, 10)),
+        Observation::Recover
+    );
+    assert!(engine.feed(&mut out, None).is_none());
+}
