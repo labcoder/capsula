@@ -16,6 +16,8 @@ use crate::platform::speaker_cpal::{
     Control, OutputError, OutputEvent, PacketKind, Source, TailAck, Transport,
 };
 
+mod gate;
+
 const COMMANDS: usize = 16;
 const SERVICE: usize = 8;
 
@@ -455,6 +457,9 @@ impl Worker {
                 },
             ) {
                 Ok(()) => {
+                    if feed.len != 0 {
+                        self.engine.queue.note_staged(feed.segment);
+                    }
                     self.engine
                         .staged(feed.at + u64::try_from(feed.len).expect("bounded source feed"));
                     if feed.last {

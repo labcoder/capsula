@@ -20,6 +20,11 @@ mod tests;
 
 const RATE: u32 = 24_000;
 const CAPACITY: usize = 480_000;
+const SEGMENT_SLOTS: usize = 256;
+const _: () = assert!(
+    MAX_SEGMENTS_PER_RUN == 256,
+    "source gate slots cover every wire segment"
+);
 const _: () = assert!(
     RATE * MAX_UNPLAYED_SECONDS == 480_000,
     "capacity follows the wire source window"
@@ -85,6 +90,8 @@ struct Queue {
     received: u64,
     next_segment: u32,
     completed: u32,
+    discarded: [bool; SEGMENT_SLOTS],
+    staged: [bool; SEGMENT_SLOTS],
     samples: VecDeque<i16>,
     segments: VecDeque<Segment>,
     held: Option<Packet>,
@@ -100,10 +107,36 @@ impl Queue {
             received: 0,
             next_segment: 0,
             completed: 0,
+            discarded: [false; SEGMENT_SLOTS],
+            staged: [false; SEGMENT_SLOTS],
             samples: VecDeque::with_capacity(CAPACITY),
             segments: VecDeque::new(),
             held: None,
         }
+    }
+
+    fn segment(&self, id: SegmentId) -> Option<&Segment> {
+        self.segments.iter().find(|segment| segment.id == id)
+    }
+
+    fn discarded(&self, id: SegmentId) -> bool {
+        usize::try_from(id.0)
+            .ok()
+            .and_then(|index| self.discarded.get(index))
+            .copied()
+            .unwrap_or(false)
+    }
+
+    fn note_staged(&mut self, id: SegmentId) {
+        if let Ok(index) = usize::try_from(id.0)
+            && let Some(staged) = self.staged.get_mut(index)
+        {
+            *staged = true;
+        }
+    }
+
+    fn was_staged(&self, id: SegmentId) -> bool {
+        usize::try_from(id.0).is_ok_and(|index| self.staged.get(index) == Some(&true))
     }
 
     fn current(&self, pcm: &SpeechPcm) -> bool {

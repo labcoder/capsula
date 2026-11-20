@@ -936,3 +936,77 @@ fn held_or_recovering_routes_cannot_offer_more_source() {
     );
     assert!(engine.feed(&mut out, None).is_none());
 }
+
+#[test]
+fn a_source_hold_stops_only_its_segment_and_releases_without_virtual_catchup() {
+    let (mut engine, generation) = observation_engine();
+    engine.hold(Some(SegmentId(1)), ms(0));
+    engine.offer(segment(1, 480), ms(0)).unwrap();
+    let mut out = [0; 480];
+    assert!(engine.feed(&mut out, Some(SegmentId(0))).is_none());
+    assert_eq!(
+        engine.observe(presented(generation, 0, 0, 480, 10)),
+        Observation::Accepted
+    );
+    assert_eq!(engine.tick(ms(10)), Ok(None));
+    assert_eq!(engine.progress.heard, 480);
+    engine.release(SegmentId(0), ms(10));
+    assert!(engine.feed(&mut out, Some(SegmentId(0))).is_none());
+    engine.release(SegmentId(1), ms(10));
+    let feed = engine.feed(&mut out, Some(SegmentId(0))).unwrap();
+    assert_eq!((feed.segment, feed.at, feed.len), (SegmentId(1), 480, 480));
+
+    let mut virtual_engine = Engine::new(RUN, LOGICAL);
+    virtual_engine.hold(Some(SegmentId(0)), ms(0));
+    virtual_engine.offer(segment(0, 480), ms(0)).unwrap();
+    assert_eq!(virtual_engine.tick(ms(20)), Ok(None));
+    assert_eq!(virtual_engine.progress.consumed, 0);
+    assert_eq!(virtual_engine.active_deadline(ms(20)), None);
+    virtual_engine.release(SegmentId(0), ms(40));
+    assert_eq!(virtual_engine.tick(ms(50)), Ok(None));
+    assert_eq!(virtual_engine.progress.consumed, 240);
+    assert_eq!(virtual_engine.progress.heard, 0);
+}
+
+#[test]
+fn a_discarded_segment_keeps_ingress_order_and_never_stages_late_pcm() {
+    let (mut engine, generation) = observation_engine();
+    let dropped = SegmentId(1);
+    engine.discard(dropped, ms(0));
+    let mut start = segment(1, 480);
+    start.pcm.last = None;
+    assert!(matches!(
+        engine.offer(start, ms(0)),
+        Ok(Admission::Return(_))
+    ));
+    assert!(engine.feed(&mut [0; 480], Some(SegmentId(0))).is_none());
+    assert_eq!(
+        engine.observe(presented(generation, 0, 0, 480, 10)),
+        Observation::Accepted
+    );
+    assert_eq!(engine.tick(ms(10)), Ok(None));
+    assert_eq!(engine.progress.consumed, 960);
+    assert_eq!(engine.progress.heard, 480);
+    assert_eq!(engine.progress.first_gap, Some(480));
+
+    let mut last = frame(1, 2, Some(482), 11);
+    last.pcm.segment = dropped;
+    assert_eq!(
+        engine.offer(last, ms(10)),
+        Ok(Admission::Return(Credit {
+            origin: 11,
+            bytes: 50
+        }))
+    );
+    assert_eq!(engine.progress.consumed, 962);
+    assert_eq!(engine.queue.completed, 2);
+    engine.offer(segment(2, 8), ms(10)).unwrap();
+    let feed = engine.feed(&mut [0; 480], Some(SegmentId(0))).unwrap();
+    assert_eq!((feed.segment, feed.at, feed.len), (SegmentId(2), 962, 8));
+    assert_eq!(engine.progress.heard, 480);
+    let limit = kumochi_protocol::message::MAX_SEGMENTS_PER_RUN;
+    engine.discard(SegmentId(limit - 1), ms(10));
+    engine.discard(SegmentId(limit), ms(10));
+    assert!(engine.queue.discarded(SegmentId(limit - 1)));
+    assert!(!engine.queue.discarded(SegmentId(limit)));
+}
