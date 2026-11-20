@@ -1556,3 +1556,191 @@ fn a_release_keeps_only_the_offer_its_press_was_seen_under(cx: &mut TestAppConte
         assert!(owner.voice.watched.is_none());
     });
 }
+
+/// The user's Off disqualifies the press it met even when the brain refuses to save it and the
+/// choice comes back on; the next press shares under the restored setting.
+#[gpui::test]
+fn an_off_whose_save_was_refused_keeps_its_press_off_and_the_next_press_shares(
+    cx: &mut TestAppContext,
+) {
+    use kumochi_protocol::message::{ErrorKey, SettingsOp};
+    let ready = screen_ready(Some(on(&luna())), cx);
+    press(&ready, 1, cx);
+    warm(&ready, 1, cx);
+    sent(&ready);
+    recognize(&ready.owner, 1, cx);
+    listening(&ready.owner, cx);
+    assert_eq!(sent(&ready), [screen_hold(1)]);
+    assert!(
+        ready
+            .owner
+            .update(cx, |owner, cx| owner.save_show_screen(false, cx))
+    );
+    assert_eq!(
+        sent(&ready),
+        [ControlToBrain::Settings(SettingsOp::SetShowScreen(false))]
+    );
+    let saved = ready.owner.read_with(cx, |owner, cx| {
+        owner
+            .settings
+            .read(cx)
+            .view()
+            .expect("a saved view")
+            .clone()
+    });
+    assert!(saved.show_screen);
+    receive(
+        &ready.owner,
+        LinkEvent::Error {
+            generation: 1,
+            error: ErrorKey::SettingsRefused.into(),
+        },
+        cx,
+    );
+    receive(
+        &ready.owner,
+        LinkEvent::Settings {
+            generation: 1,
+            view: saved,
+            answer: true,
+        },
+        cx,
+    );
+    ready.owner.read_with(cx, |owner, cx| {
+        let state = owner.settings.read(cx);
+        assert!(!state.show_screen_pending());
+        assert_eq!(state.show_screen_choice(), Some(true));
+    });
+    assert_eq!(notice(&ready, cx), "on");
+    release(&ready.owner, 1, Some(DOWN), cx);
+    assert_eq!(sent(&ready), []);
+    assert_eq!(
+        line(&ready, cx),
+        Some((Text::ScreenNotIncludedNotReady, None))
+    );
+    assert_eq!(lease(&ready, cx), (0, false));
+    ready.owner.read_with(cx, |owner, _| {
+        assert!(owner.voice.watched.is_none());
+    });
+    finish(&ready, 1, cx);
+
+    press(&ready, 2, cx);
+    warm(&ready, 2, cx);
+    sent(&ready);
+    recognize(&ready.owner, 2, cx);
+    listening(&ready.owner, cx);
+    assert_eq!(sent(&ready), [screen_hold(2)]);
+    release(&ready.owner, 2, Some(DOWN), cx);
+    assert_eq!(sent(&ready), [screen_release(2, 1, DOWN, &[])]);
+    assert_eq!(lease(&ready, cx), (1, true));
+    assert_eq!(line(&ready, cx), None);
+}
+
+/// Drains `controls`, the recorder a test swapped in.
+fn drained(controls: &async_channel::Receiver<ControlToBrain>) -> Vec<ControlToBrain> {
+    std::iter::from_fn(|| controls.try_recv().ok()).collect()
+}
+
+/// An Off the control queue can't take leaves the saved choice on, but the press it met never
+/// takes the screen, even once the queue has room before its release; the next press does.
+#[gpui::test]
+fn an_off_that_cant_be_queued_keeps_its_press_off_and_the_next_press_shares(
+    cx: &mut TestAppContext,
+) {
+    let ready = screen_ready(Some(on(&luna())), cx);
+    press(&ready, 1, cx);
+    warm(&ready, 1, cx);
+    sent(&ready);
+    recognize(&ready.owner, 1, cx);
+    listening(&ready.owner, cx);
+    assert_eq!(sent(&ready), [screen_hold(1)]);
+    let full = ready.owner.update(cx, |owner, _| {
+        let controls = owner.link.record_controls_bounded();
+        let session = owner.session.clone().expect("connected");
+        while owner.link.send_control(&session, ControlToBrain::Pong) {}
+        controls
+    });
+    assert!(
+        !ready
+            .owner
+            .update(cx, |owner, cx| owner.save_show_screen(false, cx))
+    );
+    ready.owner.read_with(cx, |owner, cx| {
+        let state = owner.settings.read(cx);
+        assert!(!state.show_screen_pending());
+        assert_eq!(state.show_screen_choice(), Some(true));
+        assert!(owner.session.as_ref().is_some_and(|session| session.open()));
+    });
+    assert_eq!(notice(&ready, cx), "on");
+    // The queue has room again before the keys come up.
+    assert!(
+        drained(&full)
+            .iter()
+            .all(|message| *message == ControlToBrain::Pong)
+    );
+    release(&ready.owner, 1, Some(DOWN), cx);
+    assert_eq!(drained(&full), []);
+    assert_eq!(
+        line(&ready, cx),
+        Some((Text::ScreenNotIncludedNotReady, None))
+    );
+    assert_eq!(lease(&ready, cx), (0, false));
+    ready.owner.read_with(cx, |owner, _| {
+        assert!(owner.voice.watched.is_none());
+    });
+    status(
+        &ready.owner,
+        1,
+        1,
+        HoldStatus::Failed(HoldFailure::Busy),
+        cx,
+    );
+    cx.run_until_parked();
+    ready.owner.read_with(cx, |owner, _| {
+        owner.link.accept_recorded_microphone_stop(1, GestureId(1));
+    });
+    assert_eq!(drained(&full), stopped(1));
+
+    press(&ready, 2, cx);
+    warm(&ready, 2, cx);
+    drained(&full);
+    recognize(&ready.owner, 2, cx);
+    listening(&ready.owner, cx);
+    assert_eq!(drained(&full), [screen_hold(2)]);
+    release(&ready.owner, 2, Some(DOWN), cx);
+    assert_eq!(drained(&full), [screen_release(2, 1, DOWN, &[])]);
+    assert_eq!(lease(&ready, cx), (1, true));
+}
+
+/// A main row read as pinned elsewhere on an earlier connection is no proof once that connection
+/// is gone: with Threads closed it doesn't veto the next press, which stays a candidate the brain
+/// proves. The same row read on this connection still does (the stored-model test above).
+#[gpui::test]
+fn a_row_read_before_a_reconnect_does_not_veto_the_next_press(cx: &mut TestAppContext) {
+    let ready = screen_ready(Some(on(&luna())), cx);
+    read_row(&ready, Some(choice(&sol(), Effort::Low)), cx);
+    assert_eq!(notice(&ready, cx), "own model");
+    ready.owner.update(cx, |owner, cx| {
+        owner.threads.update(cx, |state, _| {
+            state.hide();
+            state.disconnected();
+            state.connected();
+        });
+        owner.screen_changed(cx);
+    });
+    ready.owner.read_with(cx, |owner, cx| {
+        let threads = owner.threads.read(cx);
+        assert!(threads.row(ThreadId(1)).is_some(), "still cached");
+        assert!(threads.fresh_row(ThreadId(1)).is_none());
+    });
+    assert_eq!(notice(&ready, cx), "on");
+    press(&ready, 1, cx);
+    warm(&ready, 1, cx);
+    sent(&ready);
+    recognize(&ready.owner, 1, cx);
+    listening(&ready.owner, cx);
+    assert_eq!(sent(&ready), [screen_hold(1)]);
+    release(&ready.owner, 1, Some(DOWN), cx);
+    assert_eq!(sent(&ready), [screen_release(1, 1, DOWN, &[])]);
+    assert_eq!(lease(&ready, cx), (1, true));
+}

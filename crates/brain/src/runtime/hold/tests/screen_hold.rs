@@ -631,7 +631,9 @@ async fn a_display_release_requires_the_armed_recipient_once_prepared() {
 
     for prepared in [None, Some(other)] {
         held(&mut brain, Kind::Screen, ScreenPart::Armed);
+        let notice = brain.holds.notice;
         let hold = brain.holds.pending.as_mut().unwrap();
+        hold.armed_notice = notice;
         hold.snapshot.as_mut().unwrap().defaults.choice = prepared;
         assert!(brain.hold_control(&refused_release, &mut link).unwrap());
         assert_eq!(controls(&mut output), [failed(KEY.gesture)]);
@@ -645,7 +647,9 @@ async fn a_display_release_requires_the_armed_recipient_once_prepared() {
     }
 
     held(&mut brain, Kind::Screen, ScreenPart::Armed);
+    let notice = brain.holds.notice;
     let hold = brain.holds.pending.as_mut().unwrap();
+    hold.armed_notice = notice;
     hold.snapshot.as_mut().unwrap().defaults.choice = Some(ModelChoice {
         effort: Effort::High,
         ..sol
@@ -1031,5 +1035,41 @@ async fn a_pin_moved_while_the_recipient_is_read_ends_the_hold_without_a_capture
     let released = eligible(release(g, 100, 200, 0), brain.holds.notice);
     assert!(brain.hold_control(&released, &mut link).unwrap());
     assert_eq!(controls(&mut output), [failed(g)]);
+    brain.close().await;
+}
+
+/// A hold armed under one offer and released with the brain's newer revision for the same model,
+/// as a restamped release would carry, captures nothing: only the armed revision releases.
+#[tokio::test]
+async fn a_release_restamped_with_a_newer_offer_than_its_arm_captures_nothing() {
+    let scratch = Scratch::new("screen-hold-restamped");
+    let (mut brain, _rig, _keep) = desk(&scratch).await;
+    let (out, mut output) = mpsc::channel(64);
+    let queue = RefCell::new(DataQueue::new(crate::runtime::window()));
+    let ready_notify = Notify::new();
+    let mut tap = Tap::from_env();
+    let mut link = Link::new(&out, &queue, &ready_notify, &mut tap);
+    brain.coordinator.handle(signed_in(7)).unwrap();
+    brain.screen_holds_changed(&mut link).unwrap();
+    controls(&mut output);
+    let g = KEY.gesture;
+    let first = brain.holds.notice;
+    assert!(
+        brain
+            .hold_control(&eligible(recognized(g), first), &mut link)
+            .unwrap()
+    );
+    prepared(&mut brain);
+    brain.coordinator.handle(signed_in(8)).unwrap();
+    brain.screen_holds_changed(&mut link).unwrap();
+    controls(&mut output);
+    let newer = brain.holds.notice;
+    assert!(newer.is_some() && newer != first);
+    assert!(matches!(part(&brain), ScreenPart::Armed));
+    let released = eligible(release(g, 100, 200, 0), newer);
+    assert!(brain.hold_control(&released, &mut link).unwrap());
+    assert_eq!(controls(&mut output), [failed(g)]);
+    assert!(!matches!(part(&brain), ScreenPart::Capturing { .. }));
+    brain.holds.lost();
     brain.close().await;
 }

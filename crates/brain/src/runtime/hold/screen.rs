@@ -203,11 +203,13 @@ impl super::Holds {
         true
     }
 
-    /// Arms the pending hold `key`'s screen part; false when it isn't pending or has a part.
+    /// Arms the pending hold `key`'s screen part under offer `notice`; false when it isn't
+    /// pending or has a part.
     pub(super) fn arm_screen(
         &mut self,
         key: HoldKey,
         recipient: (ConnectionKind, ModelSlug),
+        notice: Option<NoticeRevision>,
     ) -> bool {
         let Some(hold) = self.pending.as_mut().filter(|hold| hold.key == key) else {
             return false;
@@ -217,6 +219,7 @@ impl super::Holds {
         }
         hold.screen = ScreenPart::Armed;
         hold.screen_recipient = Some(recipient);
+        hold.armed_notice = notice;
         true
     }
 
@@ -387,7 +390,7 @@ impl crate::runtime::Brain {
         let choice = choice.ok_or(NoScreen::Gate(ScreenOff::NotReady))?;
         if !self
             .holds
-            .arm_screen(key, (choice.connection, choice.model))
+            .arm_screen(key, (choice.connection, choice.model), notice)
         {
             return Err(NoScreen::NotStarted);
         }
@@ -471,7 +474,8 @@ impl crate::runtime::Brain {
         if let ScreenHolds::Off(off) = self.display_gate(choice.as_ref()) {
             return Err(NoScreen::Gate(off));
         }
-        if !self.offer_holds(notice) {
+        // Only the revision it was armed under, and only while that is still the current offer.
+        if notice != hold.armed_notice || !self.offer_holds(notice) {
             return Err(NoScreen::Unoffered);
         }
         // A recipient not read yet may be another model's: nothing starts until it is.

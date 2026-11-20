@@ -71,7 +71,7 @@ the pointer sampled once at recognition, the exclusion lease, the recognition ti
 appended `notice` ([notice revision](#notice-revision)). Its
 fields changed in place, not by appending: `pointer_display`, the display that held the pointer,
 was replaced by `selection` and a physical `pointer`, and its smallest encoding went from 9 bytes
-to 8. That was safe because nothing sent it then and the build-id handshake refuses mixed
+to 8, then back to 9 with the appended `notice` (one byte when none). That was safe because nothing sent it then and the build-id handshake refuses mixed
 binaries.
 
 The appended `HoldScreen { gesture, outcome }` says what a screen hold carried into its turn,
@@ -148,7 +148,10 @@ was seen under. The user's show-screen setting is the choice; `notice` binds a g
 offer that choice was under, not to anything drawn. The shell publishes its current offer for the
 native callback whenever a link event, a target change or the show-screen box changes it: the
 stored `On`'s revision, only while it names exactly the default model's route and slug, the box
-is on, and the target is new or a thread not read as pinned elsewhere. The offer is bound to the
+is on, and the target is new or a thread not read on this connection as pinned elsewhere. A row
+read on an earlier connection is no proof either way. Turning the box off ends the published
+offer at once, before the save is sent, so a save that can't be queued or is refused never gives
+a press seen under the old offer the screen. The offer is bound to the
 connection, the choice revision and the target, and a local epoch counts every change, so an
 offer that went and came back is another one. The native callback freezes the published offer at
 the gesture's key-down, before any delivery is deferred, and keeps it only for that key-down's
@@ -158,9 +161,10 @@ without the picture. A later offer never upgrades a gesture seen under none.
 
 A thread whose row wasn't read is a conditional candidate, not shell proof of the recipient or its
 capability. The brain arms a screen hold only for the revision it last sent while that offer
-still says what it would send now (route, slug and sign-in), and a release starts a capture only
-under the same check and once the hold's own read recipient is exactly the armed route and slug.
-None, an older revision, a new sign-in, an unread recipient or a different pin captures nothing.
+still says what it would send now (route, slug and sign-in), and keeps that revision. A release
+starts a capture only when its `notice` is the revision the hold was armed under, that offer
+still holds, and the hold's own read recipient is exactly the armed route and slug. None, an
+older or a newer revision, a new sign-in, an unread recipient or a different pin captures nothing.
 
 ## Screen release
 

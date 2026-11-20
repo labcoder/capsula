@@ -619,6 +619,7 @@ fn recording(brain: &mut Brain) {
         terminal: None,
         screen: ScreenPart::None,
         screen_recipient: None,
+        armed_notice: None,
         words: None,
     });
     brain.holds.debt = Some(KEY);
@@ -1581,6 +1582,7 @@ fn a_hold_dropped_with_a_live_screen_part_fails_in_tests() {
         terminal: None,
         screen: waiting(),
         screen_recipient: None,
+        armed_notice: None,
         words: None,
     });
 }

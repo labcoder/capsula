@@ -378,8 +378,8 @@ pub enum ControlToBrain {
         lease: LeaseGeneration,
         /// When the hold was recognized, in QPC ticks.
         t_qpc: u64,
-        /// The offer the user was shown before the hold began. The shell sends none, because
-        /// nothing it draws proves which offer that was.
+        /// The offer revision the hold's first input was seen under. The shell no longer sends
+        /// this message, and the brain takes it as a voice hold.
         notice: Option<NoticeRevision>,
     },
     /// The hold key was released.
@@ -500,7 +500,9 @@ pub enum ControlToBrain {
         selection: u64,
         /// When the hold was recognized, in QPC ticks.
         t_qpc: u64,
-        /// As in [`Self::HoldRecognized`].
+        /// The offer revision the hold's first input was seen under: eligibility under the
+        /// user's standing show-screen setting, not proof that a notice was seen. None is a hold
+        /// that may not show the screen.
         notice: Option<NoticeRevision>,
     },
     /// A screen hold's keys were released: the shell took an exclusion lease and asks for one
@@ -520,7 +522,8 @@ pub enum ControlToBrain {
         pointer: ReleasePointer,
         /// The pointer's path over the hold; empty when it never moved.
         path: PointerPath,
-        /// As in [`Self::HoldRecognized`].
+        /// The recognition's `notice`. The brain captures only for the revision the hold was
+        /// armed under, while that is still its current offer.
         notice: Option<NoticeRevision>,
     },
     /// The shell skipped a screen scene because the screen may have changed since its picture.

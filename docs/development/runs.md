@@ -659,8 +659,10 @@ hold, and that refusal is final: nothing builds the hold's release later, even i
 `On` again. `releases_screen` asks the same question, with the same finality, without building
 anything, so the shell can ask before it takes the lease. The model is never told that a hold
 is listening: the shell cancels a hold released before then, and a cancelled hold is no longer
-the current one. `Presence::recognize_voice` and `release_screen` are their callers. Neither
-message carries a notice revision: nothing the shell shows proves which offer the user saw
+the current one. `Presence::recognize_voice` and `release_screen` are their callers. Both
+messages carry, as `notice`, the offer revision the gesture's first input was seen under, which
+the caller passes to `begin_screen_hold`; a hold begun with none is a voice hold. It is
+eligibility under the user's standing setting, not proof that a notice was seen
 ([ipc](ipc.md#notice-revision)).
 
 A screen hold has no line while it is held. `hold_screen` puts the brain's refusal on it, once,

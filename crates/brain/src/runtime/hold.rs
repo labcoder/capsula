@@ -163,6 +163,8 @@ struct Hold {
     terminal: Option<HoldStatus>,
     screen: ScreenPart,
     screen_recipient: Option<(ConnectionKind, ModelSlug)>,
+    /// The offer revision an armed screen part was armed under; its release must carry it.
+    armed_notice: Option<NoticeRevision>,
     /// The transcript, while it waits for a screen hold's picture.
     words: Option<String>,
 }
@@ -607,6 +609,7 @@ impl Brain {
             terminal: None,
             screen: ScreenPart::None,
             screen_recipient: None,
+            armed_notice: None,
             words: None,
         });
         if state == PartState::Loading {

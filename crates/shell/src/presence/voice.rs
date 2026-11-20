@@ -424,11 +424,11 @@ impl Presence {
     /// screen read these, so the icon never names a model the picture won't reach.
     fn screen_inputs<'a>(&self, cx: &'a gpui_kit::App) -> (bool, Option<&'a ModelName>) {
         let settings = self.settings.read(cx);
-        // shortcut: an unread row shows as on the default model (OSC-763); a hold on it is only a candidate the brain proves before capture.
+        // shortcut: a row not read on this connection shows as on the default model (OSC-763); a hold on it is only a candidate the brain proves before capture.
         let own = self
             .runs
             .thread()
-            .and_then(|thread| self.threads.read(cx).row(thread))
+            .and_then(|thread| self.threads.read(cx).fresh_row(thread))
             .and_then(|row| row.choice.as_ref());
         (settings.own_model(own), settings.default_model_name())
     }
