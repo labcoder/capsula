@@ -83,7 +83,8 @@ fn refuses_existing_images_and_a_missing_user() {
 #[test]
 fn pictured_seed_bounds_accept_the_combined_maximum_and_count_escapes() {
     let escaped = "\"\\\n\t\u{0001}é";
-    let text = "a".repeat(524_288 - 136 - 16) + escaped;
+    let mut text = "a".repeat(524_288 - 136 - 16);
+    text.push_str(escaped);
     let exact = request(vec![message(Role::User, &text)]);
     let mut jpeg = vec![0; 2_097_152];
     jpeg[..JPEG.len()].copy_from_slice(JPEG);
@@ -97,7 +98,8 @@ fn pictured_seed_bounds_accept_the_combined_maximum_and_count_escapes() {
             .any(|b| b == escaped_wire)
     );
 
-    let over = request(vec![message(Role::User, &(text + "a"))]);
+    text.push('a');
+    let over = request(vec![message(Role::User, &text)]);
     assert_eq!(
         encode(&over, &[], JPEG, [1, 1]).unwrap_err(),
         PictureSeedError::NonImageSize,
