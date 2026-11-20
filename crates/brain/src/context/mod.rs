@@ -422,6 +422,7 @@ pub(crate) enum ImageRefused {
 impl ModelRequest {
     /// Adds `image` right after the newest user message, for a live check's own `ChatGPT`
     /// request: any other route refuses here. The body's ceiling is checked when it's serialised.
+    #[cfg(any(test, debug_assertions))]
     pub(crate) fn attach(&mut self, image: Jpeg) -> Result<(), ImageRefused> {
         self.insert_image(image, takes_images(self.choice.as_ref()))
     }
