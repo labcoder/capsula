@@ -77,8 +77,13 @@ fn screen_hold_states_append_a_redacted_control_tag() {
         super::ModelName::new(&"\u{1F600}".repeat(super::MAX_MODEL_NAME_CHARS)).expect("valid");
     for (state, size) in [
         (
-            super::ScreenHolds::On { model },
-            1 + 1 + 2 + 4 * super::MAX_MODEL_NAME_CHARS,
+            super::ScreenHolds::On {
+                model,
+                connection: super::ConnectionKind::ClaudeCode,
+                slug: super::ModelSlug::new(&"a".repeat(super::MAX_SLUG_BYTES)).expect("valid"),
+                revision: super::NoticeRevision(std::num::NonZeroU64::MAX),
+            },
+            1 + 1 + 2 + 4 * super::MAX_MODEL_NAME_CHARS + 1 + 1 + super::MAX_SLUG_BYTES + 10,
         ),
         (super::ScreenHolds::Off(super::ScreenOff::ModelCantSee), 3),
         (super::ScreenHolds::Off(super::ScreenOff::NotReady), 3),
@@ -94,6 +99,11 @@ fn screen_hold_states_append_a_redacted_control_tag() {
         postcard::to_allocvec(&super::ScreenHolds::Off(super::ScreenOff::TurnedOff))
             .expect("encodes"),
         [1, 3]
+    );
+    assert!(postcard::from_bytes::<super::NoticeRevision>(&[0]).is_err());
+    assert_eq!(
+        postcard::from_bytes::<super::NoticeRevision>(&[1]),
+        Ok(super::NoticeRevision::FIRST)
     );
 }
 
@@ -199,9 +209,10 @@ fn largest_hold_controls_round_trip_fit_the_cap_and_stay_redacted() {
                 pointer: PhysicalPoint([i32::MIN, i32::MAX]),
                 lease: LEASE,
                 t_qpc: u64::MAX,
+                notice: Some(super::NoticeRevision(std::num::NonZeroU64::MAX)),
             },
             "HoldRecognized",
-            52,
+            63,
         ),
         (
             ControlToBrain::KeyDown {
@@ -258,9 +269,10 @@ fn largest_hold_controls_round_trip_fit_the_cap_and_stay_redacted() {
             pointer: PhysicalPoint([0; 2]),
             lease: LeaseGeneration(0),
             t_qpc: 0,
+            notice: None,
         },
         Pipe::Control,
-        8,
+        9,
     );
 }
 
@@ -395,6 +407,7 @@ fn a_screen_holds_controls_append_redacted_tags_and_fit_the_control_cap() {
         thread: Some(ThreadId(u64::MAX)),
         selection: u64::MAX,
         t_qpc: u64::MAX,
+        notice: Some(super::NoticeRevision(std::num::NonZeroU64::MAX)),
     };
     let corner = PhysicalPoint([i32::MIN, i32::MAX]);
     let release = ControlToBrain::ScreenRelease {
@@ -404,10 +417,11 @@ fn a_screen_holds_controls_append_redacted_tags_and_fit_the_control_cap() {
         excluded_qpc: u64::MAX,
         pointer: ReleasePointer(corner),
         path: PointerPath(vec![corner; 2_048]),
+        notice: Some(super::NoticeRevision(std::num::NonZeroU64::MAX)),
     };
     for (message, tag, size, op) in [
-        (recognized, 29, 37, "ScreenHoldRecognized"),
-        (release, 30, 20_523, "ScreenRelease"),
+        (recognized, 29, 48, "ScreenHoldRecognized"),
+        (release, 30, 20_534, "ScreenRelease"),
     ] {
         assert_eq!(postcard::to_allocvec(&message).expect("encodes")[0], tag);
         round_trip(&message, Pipe::Control, size);
@@ -418,10 +432,11 @@ fn a_screen_holds_controls_append_redacted_tags_and_fit_the_control_cap() {
         thread: None,
         selection: 2,
         t_qpc: 3,
+        notice: Some(super::NoticeRevision::FIRST.next()),
     };
     assert_eq!(
         postcard::to_allocvec(&recognized).expect("encodes"),
-        [29, 1, 0, 2, 3]
+        [29, 1, 0, 2, 3, 1, 2]
     );
     let release = |path| ControlToBrain::ScreenRelease {
         gesture: GestureId(1),
@@ -430,12 +445,13 @@ fn a_screen_holds_controls_append_redacted_tags_and_fit_the_control_cap() {
         excluded_qpc: 4,
         pointer: ReleasePointer(PhysicalPoint([5, -6])),
         path: PointerPath(path),
+        notice: None,
     };
     for (path, bytes) in [
-        (Vec::new(), &[30, 1, 2, 3, 4, 10, 11, 0][..]),
+        (Vec::new(), &[30, 1, 2, 3, 4, 10, 11, 0, 0][..]),
         (
             vec![PhysicalPoint([7, 8]), PhysicalPoint([-1, 0])],
-            &[30, 1, 2, 3, 4, 10, 11, 2, 14, 16, 1, 0][..],
+            &[30, 1, 2, 3, 4, 10, 11, 2, 14, 16, 1, 0, 0][..],
         ),
     ] {
         let message = release(path);
@@ -463,11 +479,12 @@ fn where_the_user_pointed_is_absent_from_debug_and_from_the_tap() {
         excluded_qpc: 4,
         pointer: ReleasePointer(PhysicalPoint([AT_RELEASE, AT_RELEASE])),
         path: PointerPath(vec![PhysicalPoint([IN_PATH, IN_PATH])]),
+        notice: None,
     };
     assert_eq!(
         format!("{message:?}"),
         "ScreenRelease { gesture: GestureId(1), lease: LeaseGeneration(2), t_qpc: 3, \
-         excluded_qpc: 4, pointer: ReleasePointer { .. }, path: PointerPath(1) }"
+         excluded_qpc: 4, pointer: ReleasePointer { .. }, path: PointerPath(1), notice: None }"
     );
     let payload = postcard::to_allocvec(&message).expect("encodes");
     let record =

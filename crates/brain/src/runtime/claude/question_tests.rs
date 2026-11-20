@@ -3228,3 +3228,44 @@ async fn the_brains_grant_keeps_only_the_asked_claude_code_picture_and_never_a_k
         brain.close().await;
     }
 }
+
+/// A generation move is a new offer: the brain sends its screen gate again even when the state it
+/// would send hasn't changed, so the shell's next hold carries a revision minted after the move.
+#[tokio::test]
+async fn a_generation_move_sends_the_screen_gate_again() {
+    let script = synthetic_signed_in().held_until("go");
+    let mut rig = Rig::new("question-gate-generation", &script).await;
+    rig.claude.take_picture_loss();
+    let scratch = crate::test_support::Scratch::new("question-gate-generation");
+    let mut brain = crate::test_support::brain(&scratch, "");
+    std::mem::swap(&mut brain.claude, &mut rig.claude);
+    let (out, mut output) = mpsc::channel(16);
+    let queue = std::cell::RefCell::new(crate::runtime::data::DataQueue::new(
+        crate::runtime::window(),
+    ));
+    let ready = tokio::sync::Notify::new();
+    let mut tap = crate::tap::Tap::from_env();
+    let mut link = crate::runtime::Link::new(&out, &queue, &ready, &mut tap);
+    let mut gates = || {
+        std::iter::from_fn(|| output.try_recv().ok())
+            .filter(|bytes| {
+                matches!(
+                    kumochi_protocol::frame::decode(&bytes[kumochi_protocol::frame::HEADER_LEN..]),
+                    Ok(kumochi_protocol::message::ControlToShell::ScreenHolds(_))
+                )
+            })
+            .count()
+    };
+    brain.screen_holds_changed(&mut link).expect("room");
+    brain.screen_holds_changed(&mut link).expect("room");
+    assert_eq!(gates(), 1, "an unchanged gate goes once");
+    brain
+        .claude_op(ConnectionOp::FindClaudeCode, None)
+        .expect("no link");
+    brain.screen_holds_changed(&mut link).expect("room");
+    assert_eq!(gates(), 1, "a generation move is a new offer");
+    drop(link);
+    std::mem::swap(&mut brain.claude, &mut rig.claude);
+    rig.close().await;
+    brain.close().await;
+}

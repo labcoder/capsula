@@ -63,7 +63,7 @@ pub(super) fn claude(
                 model: info.display_name.clone(),
                 connection: choice.connection,
                 slug: choice.model.clone(),
-                revision: NoticeRevision::default(),
+                revision: NoticeRevision::FIRST,
             }
         })
 }

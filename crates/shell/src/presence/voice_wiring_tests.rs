@@ -382,6 +382,9 @@ fn screen_hold_events_are_stored_from_this_connection_only_and_change_no_hold(
     let (owner, _data, controls) = ready(cx);
     let on = ScreenHolds::On {
         model: ModelName::new("GPT-5.5").unwrap(),
+        connection: kumochi_protocol::message::ConnectionKind::ChatGpt,
+        slug: kumochi_protocol::message::ModelSlug::new("gpt-5.5").unwrap(),
+        revision: kumochi_protocol::message::NoticeRevision::FIRST,
     };
     let apply = |event, cx: &mut TestAppContext| {
         owner.update(cx, |owner, cx| {

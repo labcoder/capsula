@@ -74,6 +74,7 @@ pub(in crate::runtime) fn recognized(gesture: GestureId) -> ControlToBrain {
         thread: None,
         selection: 1,
         t_qpc: 1,
+        notice: None,
     }
 }
 
@@ -90,6 +91,7 @@ pub(in crate::runtime) fn release(
         excluded_qpc,
         pointer: ReleasePointer(PhysicalPoint([5, 5])),
         path: PointerPath(vec![PhysicalPoint([5, 5]); points]),
+        notice: None,
     }
 }
 

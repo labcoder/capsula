@@ -113,10 +113,21 @@ pub struct RunId(pub u64);
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GestureId(pub u32);
 
-/// Which `ScreenHolds::On` the shell showed: the brain counts it up on each connection whenever the
-/// offer's authorization changes. 0 is never sent.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct NoticeRevision(pub u64);
+/// Which `ScreenHolds::On` the shell showed: the brain counts it up on each connection, from
+/// [`Self::FIRST`], whenever the offer's authorization changes. 0 never decodes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NoticeRevision(pub std::num::NonZeroU64);
+
+impl NoticeRevision {
+    /// A connection's first revision.
+    pub const FIRST: Self = Self(std::num::NonZeroU64::MIN);
+
+    /// The revision after this one.
+    #[must_use]
+    pub const fn next(self) -> Self {
+        Self(self.0.saturating_add(1))
+    }
+}
 
 /// An exclusion lease generation, counted up by the shell on each connection.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

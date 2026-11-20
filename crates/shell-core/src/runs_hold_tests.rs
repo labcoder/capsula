@@ -607,6 +607,7 @@ fn a_hold_is_a_screen_hold_only_when_it_is_given_a_screen() {
             pointer: kumochi_protocol::geometry::PhysicalPoint([-1_234_567, 7_654_321]),
             lease: kumochi_protocol::message::LeaseGeneration(424_242),
             t_qpc: 515_151_515,
+            notice: None,
         })
     );
     assert_eq!(runs.hold_screen_line(), Some(ScreenLine::WillSee));
@@ -707,6 +708,9 @@ fn the_screen_holds_state_lasts_one_connection() {
     use kumochi_protocol::message::{ModelName, ScreenHolds, ScreenOff};
     let on = ScreenHolds::On {
         model: ModelName::new("GPT-5.5").expect("valid"),
+        connection: kumochi_protocol::message::ConnectionKind::ChatGpt,
+        slug: kumochi_protocol::message::ModelSlug::new("fixture").expect("valid"),
+        revision: kumochi_protocol::message::NoticeRevision::FIRST.next(),
     };
     let mut runs = ready();
     assert_eq!(runs.screen_holds(), None);
@@ -733,6 +737,9 @@ fn the_standing_notice_gives_way_in_order_and_names_only_the_newest_default() {
     let on = |model: &ModelName| {
         Some(ScreenHolds::On {
             model: model.clone(),
+            connection: kumochi_protocol::message::ConnectionKind::ChatGpt,
+            slug: kumochi_protocol::message::ModelSlug::new("fixture").expect("valid"),
+            revision: kumochi_protocol::message::NoticeRevision::FIRST.next(),
         })
     };
     let off = |why| Some(ScreenHolds::Off(why));
@@ -827,6 +834,52 @@ fn a_holds_prediction_names_the_notices_model_and_goes_quiet_when_the_notice_cha
     }
 }
 
+/// A hold carries the revision of the `On` showing when the user began it to its release, never a
+/// later one, and none when no `On` was showing.
+#[test]
+fn a_hold_carries_the_notice_it_began_under_to_its_release() {
+    use kumochi_protocol::message::{
+        ConnectionKind, ModelSlug, NoticeRevision, ScreenHolds, ScreenOff,
+    };
+    let mut runs = ready();
+    let luna = shown_to_luna(&mut runs);
+    let on = Some(&luna);
+    let shown = Some(NoticeRevision::FIRST.next());
+    let notice = |message: Option<ControlToBrain>| match message {
+        Some(
+            ControlToBrain::HoldRecognized { notice, .. }
+            | ControlToBrain::ScreenHoldRecognized { notice, .. }
+            | ControlToBrain::ScreenRelease { notice, .. },
+        ) => notice,
+        other => panic!("not a screen hold's control: {other:?}"),
+    };
+    assert_eq!(
+        notice(runs.begin_hold(GestureId(1), Some(SCREEN)).ok()),
+        shown
+    );
+    runs.cancel_hold();
+    assert_eq!(runs.take_hold_cancel(), cancel(1));
+    let begun = runs.begin_screen_hold(GestureId(2), 1, false, on).ok();
+    assert_eq!(notice(begun), shown);
+    runs.set_screen_holds(ScreenHolds::On {
+        model: luna.clone(),
+        connection: ConnectionKind::ChatGpt,
+        slug: ModelSlug::new("fixture").expect("valid"),
+        revision: NoticeRevision::FIRST.next().next(),
+    });
+    assert_eq!(
+        notice(runs.screen_release(GestureId(2), false, on, release())),
+        shown
+    );
+    runs.cancel_hold();
+    assert_eq!(runs.take_hold_cancel(), cancel(2));
+    runs.set_screen_holds(ScreenHolds::Off(ScreenOff::ModelCantSee));
+    assert_eq!(
+        notice(runs.begin_hold(GestureId(3), Some(SCREEN)).ok()),
+        None
+    );
+}
+
 fn release() -> HoldRelease {
     use kumochi_protocol::geometry::{PhysicalPoint, PointerPath};
     HoldRelease {
@@ -845,6 +898,9 @@ fn shown_to_luna(runs: &mut Runs) -> kumochi_protocol::message::ModelName {
     let model = ModelName::new("GPT-6 Luna").expect("valid");
     runs.set_screen_holds(ScreenHolds::On {
         model: model.clone(),
+        connection: kumochi_protocol::message::ConnectionKind::ChatGpt,
+        slug: kumochi_protocol::message::ModelSlug::new("fixture").expect("valid"),
+        revision: kumochi_protocol::message::NoticeRevision::FIRST.next(),
     });
     model
 }
@@ -863,6 +919,7 @@ fn a_hold_that_shows_the_screen_at_release_is_admitted_as_any_hold_is() {
             thread: Some(ThreadId(1)),
             selection: 1,
             t_qpc: 515_151_515,
+            notice: Some(kumochi_protocol::message::NoticeRevision::FIRST.next()),
         })
     );
     // It predicts nothing, so it has no line unless something refuses its screen.
@@ -898,6 +955,7 @@ fn a_hold_that_shows_the_screen_at_release_is_admitted_as_any_hold_is() {
             thread: None,
             selection,
             t_qpc: 2,
+            notice: Some(kumochi_protocol::message::NoticeRevision::FIRST.next()),
         })
     );
     assert!(state(&mut runs, 1, 9, 6, Phase::Thinking).visible);
@@ -911,6 +969,9 @@ fn a_hold_begun_while_the_notice_is_not_on_is_voice_only_and_never_releases_the_
     let sol = ModelName::new("GPT-6 Sol").expect("valid");
     let on = ScreenHolds::On {
         model: luna.clone(),
+        connection: kumochi_protocol::message::ConnectionKind::ChatGpt,
+        slug: kumochi_protocol::message::ModelSlug::new("fixture").expect("valid"),
+        revision: kumochi_protocol::message::NoticeRevision::FIRST.next(),
     };
     let off = |why| Some(ScreenHolds::Off(why));
     // (what the brain said, the target thread has its own model, the default's name)
@@ -1008,6 +1069,7 @@ fn only_the_current_hold_of_that_kind_builds_one_screen_release_while_the_notice
             excluded_qpc: 717_171_717,
             pointer: ReleasePointer(PhysicalPoint([-2_345_678, 8_765_432])),
             path: PointerPath(vec![PhysicalPoint([3_456_789, -9_876_543])]),
+            notice: Some(kumochi_protocol::message::NoticeRevision::FIRST.next()),
         })
     );
     let (model, sent) = (format!("{runs:?}"), format!("{message:?}"));
@@ -1113,6 +1175,9 @@ fn a_release_the_notice_refuses_is_refused_for_good() {
     let sol = ModelName::new("GPT-6 Sol").expect("valid");
     let on = ScreenHolds::On {
         model: luna.clone(),
+        connection: kumochi_protocol::message::ConnectionKind::ChatGpt,
+        slug: kumochi_protocol::message::ModelSlug::new("fixture").expect("valid"),
+        revision: kumochi_protocol::message::NoticeRevision::FIRST.next(),
     };
     let off = |why| Some(ScreenHolds::Off(why));
     // What changed while the keys were down: (what the brain says now, the target thread has

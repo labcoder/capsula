@@ -1858,6 +1858,7 @@ async fn a_screen_hold_shares_the_voice_admission_and_releases_its_lease_when_re
         pointer: kumochi_protocol::geometry::PhysicalPoint([5, 5]),
         lease: LEASE,
         t_qpc: 1,
+        notice: None,
     };
     let failed = ControlToShell::CaptureFailed {
         capture_for: kumochi_protocol::message::CaptureFor::Gesture(KEY.gesture),
@@ -1902,6 +1903,7 @@ async fn a_screen_part_starts_only_while_its_ticket_ends_within_the_lease() {
         pointer: kumochi_protocol::geometry::PhysicalPoint([5, 5]),
         lease: LEASE,
         t_qpc,
+        notice: None,
     };
     let (unaged, late, in_time) = (GestureId(8), GestureId(9), GestureId(10));
     let failed = |gesture| ControlToShell::CaptureFailed {
@@ -2402,7 +2404,10 @@ async fn the_gate_is_sent_once_per_connection_and_again_only_when_it_changes() {
     assert_eq!(
         control(&mut output),
         ControlToShell::ScreenHolds(ScreenHolds::On {
-            model: ModelName::new("GPT-6 Sol").unwrap()
+            model: ModelName::new("GPT-6 Sol").unwrap(),
+            connection: kumochi_protocol::message::ConnectionKind::ChatGpt,
+            slug: kumochi_protocol::message::ModelSlug::new("gpt-6-sol").unwrap(),
+            revision: kumochi_protocol::message::NoticeRevision::FIRST,
         })
     );
     brain.screen_holds_changed(&mut link).unwrap();
@@ -2422,6 +2427,62 @@ async fn the_gate_is_sent_once_per_connection_and_again_only_when_it_changes() {
         "a new connection gets the state again"
     );
     assert!(output.is_empty());
+    brain.close().await;
+}
+
+/// The revision counts up only when what the offer authorizes changes: a new name for the same
+/// model keeps it, a gate that closed and opened again takes a new one, and a new connection
+/// starts again from the first.
+#[tokio::test]
+async fn only_a_change_in_what_the_offer_authorizes_counts_its_revision_up() {
+    use kumochi_protocol::message::{
+        ConnectionKind, Effort, EffortSet, ModelInfo, ModelName, NoticeRevision, ScreenHolds,
+    };
+    let scratch = Scratch::new("hold-screen-revision");
+    let (mut brain, _release, _decoded, _fetch) =
+        crate::runtime::tests::holds::input(&scratch, Vec::new(), "not submitted").await;
+    let (out, mut output) = mpsc::channel(16);
+    let queue = RefCell::new(DataQueue::new(super::super::window()));
+    let ready_notify = Notify::new();
+    let mut tap = Tap::from_env();
+    let mut link = Link::new(&out, &queue, &ready_notify, &mut tap);
+    let (_rig, sol, _luna) = sees_on_sol(&mut brain);
+    let on = |name: &str, revision| {
+        [ScreenHolds::On {
+            model: ModelName::new(name).unwrap(),
+            connection: ConnectionKind::ChatGpt,
+            slug: sol.model.clone(),
+            revision,
+        }]
+    };
+    brain.screen_holds_changed(&mut link).unwrap();
+    assert_eq!(gates(&mut output), on("GPT-6 Sol", NoticeRevision::FIRST));
+    brain.account.read_catalog(
+        vec![ModelInfo {
+            slug: sol.model.clone(),
+            display_name: ModelName::new("Sol renamed").unwrap(),
+            supported_efforts: EffortSet::new([Effort::Low, Effort::High]),
+        }],
+        vec![sol.model.clone()],
+    );
+    brain.screen_holds_changed(&mut link).unwrap();
+    assert_eq!(
+        gates(&mut output),
+        on("Sol renamed", NoticeRevision::FIRST),
+        "a new name alone"
+    );
+    set(&mut brain, SettingsOp::SetScreenHolds(false));
+    brain.screen_holds_changed(&mut link).unwrap();
+    gates(&mut output);
+    set(&mut brain, SettingsOp::SetScreenHolds(true));
+    brain.screen_holds_changed(&mut link).unwrap();
+    assert_eq!(
+        gates(&mut output),
+        on("Sol renamed", NoticeRevision::FIRST.next().next())
+    );
+    brain.holds.opened();
+    brain.screen_holds_changed(&mut link).unwrap();
+    assert_eq!(gates(&mut output), on("Sol renamed", NoticeRevision::FIRST));
     brain.close().await;
 }
 
@@ -2457,6 +2518,7 @@ async fn a_screen_hold_repeating_a_voice_holds_gesture_adds_no_part_to_it() {
         pointer: kumochi_protocol::geometry::PhysicalPoint([5, 5]),
         lease: LEASE,
         t_qpc: 1,
+        notice: None,
     };
     assert!(brain.hold_control(&screen, &mut link).unwrap());
     assert_eq!(
@@ -2799,7 +2861,10 @@ async fn a_connection_control_sends_the_screen_notice_it_changed_at_once() {
     assert_eq!(
         gates(&mut output),
         [ScreenHolds::On {
-            model: ModelName::new("Seen").unwrap()
+            model: ModelName::new("Seen").unwrap(),
+            connection: kumochi_protocol::message::ConnectionKind::ClaudeCode,
+            slug: kumochi_protocol::message::ModelSlug::new("seen").unwrap(),
+            revision: kumochi_protocol::message::NoticeRevision::FIRST,
         }]
     );
     let mut ping = None;

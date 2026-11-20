@@ -78,6 +78,7 @@ fn staged_hold_controls_do_not_admit_or_change_a_run() {
             pointer: PhysicalPoint([-1, 2]),
             lease,
             t_qpc: u64::MAX,
+            notice: None,
         },
         ControlToBrain::KeyDown { gesture, t_qpc: 1 },
         ControlToBrain::KeyUp {
@@ -107,6 +108,7 @@ fn a_screen_holds_controls_never_become_coordinator_input() {
             thread: Some(ThreadId(1)),
             selection: 5,
             t_qpc: 1,
+            notice: None,
         },
         ControlToBrain::ScreenRelease {
             gesture,
@@ -115,6 +117,7 @@ fn a_screen_holds_controls_never_become_coordinator_input() {
             excluded_qpc: 3,
             pointer: ReleasePointer(PhysicalPoint([-1, 2])),
             path: PointerPath(vec![PhysicalPoint([-1, 2])]),
+            notice: None,
         },
     ] {
         assert_eq!(super::controls::control_input(message), Ok(None));

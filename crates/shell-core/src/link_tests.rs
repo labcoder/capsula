@@ -199,6 +199,9 @@ fn screen_hold_messages_cross_the_real_control_pipe_with_reader_generation() {
     for state in [
         ScreenHolds::On {
             model: ModelName::new("GPT-5.5").expect("valid"),
+            connection: kumochi_protocol::message::ConnectionKind::ChatGpt,
+            slug: kumochi_protocol::message::ModelSlug::new("gpt-5.5").expect("valid"),
+            revision: kumochi_protocol::message::NoticeRevision::FIRST,
         },
         ScreenHolds::Off(ScreenOff::TurnedOff),
     ] {

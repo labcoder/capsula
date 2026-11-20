@@ -470,7 +470,7 @@ impl Accounts {
                     model: info.display_name.clone(),
                     connection: choice.connection,
                     slug: choice.model.clone(),
-                    revision: kumochi_protocol::message::NoticeRevision::default(),
+                    revision: kumochi_protocol::message::NoticeRevision::FIRST,
                 }
             })
     }

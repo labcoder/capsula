@@ -659,7 +659,9 @@ hold, and that refusal is final: nothing builds the hold's release later, even i
 `On` again. `releases_screen` asks the same question, with the same finality, without building
 anything, so the shell can ask before it takes the lease. The model is never told that a hold
 is listening: the shell cancels a hold released before then, and a cancelled hold is no longer
-the current one. `Presence::recognize_voice` and `release_screen` are their callers.
+the current one. `Presence::recognize_voice` and `release_screen` are their callers. Each hold
+keeps the revision of the `On` showing when it began, or none, and its recognition and its one
+`ScreenRelease` both carry that ([ipc](ipc.md#notice-revision)).
 
 A screen hold has no line while it is held. `hold_screen` puts the brain's refusal on it, once,
 and `releases_screen` puts the notice's reason on it, with its own line for a setting switched

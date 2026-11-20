@@ -66,6 +66,9 @@ fn choice(model: &ModelInfo, effort: Effort) -> ModelChoice {
 pub(super) fn on(model: &ModelInfo) -> ScreenHolds {
     ScreenHolds::On {
         model: model.display_name.clone(),
+        connection: kumochi_protocol::message::ConnectionKind::ChatGpt,
+        slug: model.slug.clone(),
+        revision: kumochi_protocol::message::NoticeRevision::FIRST,
     }
 }
 
@@ -273,6 +276,7 @@ pub(super) fn screen_hold(id: u32) -> ControlToBrain {
         thread: Some(ThreadId(1)),
         selection: 1,
         t_qpc: QPC,
+        notice: Some(kumochi_protocol::message::NoticeRevision::FIRST),
     }
 }
 
@@ -289,6 +293,7 @@ pub(super) fn screen_release(
         excluded_qpc: STAMP,
         pointer: ReleasePointer(pointer),
         path: PointerPath(path.to_vec()),
+        notice: Some(kumochi_protocol::message::NoticeRevision::FIRST),
     }
 }
 

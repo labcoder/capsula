@@ -214,6 +214,7 @@ mod tests {
             pointer: kumochi_protocol::geometry::PhysicalPoint([0; 2]),
             lease: kumochi_protocol::message::LeaseGeneration(1),
             t_qpc: 0,
+            notice: None,
         };
         assert!(shared.queue_voice_control(&out, recognized.clone()));
         assert_eq!(queue.try_recv(), Ok(recognized.clone()));

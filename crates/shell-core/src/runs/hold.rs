@@ -101,7 +101,7 @@ impl Runs {
     }
 
     /// The revision of the `On` showing now, which a hold the user begins now carries.
-    fn shown(&self) -> Option<NoticeRevision> {
+    fn shown_revision(&self) -> Option<NoticeRevision> {
         match &self.screen_holds {
             Some(ScreenHolds::On { revision, .. }) => Some(*revision),
             _ => None,
@@ -125,7 +125,9 @@ impl Runs {
             Some(ScreenHolds::Off(ScreenOff::Unsupported)) => ScreenNotice::Hidden,
             Some(ScreenHolds::Off(ScreenOff::TurnedOff)) => ScreenNotice::TurnedOff,
             _ if own_model => ScreenNotice::OwnModel,
-            Some(ScreenHolds::On { model, .. }) if Some(model) == default => ScreenNotice::On(model),
+            Some(ScreenHolds::On { model, .. }) if Some(model) == default => {
+                ScreenNotice::On(model)
+            }
             Some(ScreenHolds::Off(ScreenOff::ModelCantSee)) => {
                 default.map_or(ScreenNotice::NotReady, ScreenNotice::ModelCantSee)
             }
@@ -244,7 +246,7 @@ impl Runs {
         gesture: GestureId,
         screen: Option<ScreenHold>,
     ) -> Result<ControlToBrain, Refused> {
-        let notice = screen.and(self.shown());
+        let notice = screen.and(self.shown_revision());
         let hold = self.admit_hold(gesture)?;
         hold.screen = screen.map(|_| ScreenLine::WillSee);
         hold.notice = notice;
@@ -287,7 +289,7 @@ impl Runs {
         default: Option<&ModelName>,
     ) -> Result<ControlToBrain, Refused> {
         let on = matches!(self.screen_notice(own_model, default), ScreenNotice::On(_));
-        let notice = self.shown().filter(|_| on);
+        let notice = self.shown_revision().filter(|_| on);
         let hold = self.admit_hold(gesture)?;
         hold.at_release = on;
         hold.release_due = on;

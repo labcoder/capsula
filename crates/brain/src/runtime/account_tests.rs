@@ -1754,6 +1754,9 @@ async fn the_image_gate_opens_only_for_a_listed_image_model_where_windows_can_be
         accounts.screen_holds(Some(&sol), true, true),
         ScreenHolds::On {
             model: ModelName::new("GPT-6 Sol").expect("name"),
+            connection: kumochi_protocol::message::ConnectionKind::ChatGpt,
+            slug: kumochi_protocol::message::ModelSlug::new("gpt-6-sol").expect("slug"),
+            revision: kumochi_protocol::message::NoticeRevision::FIRST,
         }
     );
     assert_eq!(

@@ -55,7 +55,9 @@ its length, and the tap records the op name only. See
 ## Screen holds
 
 The appended `ScreenHolds` tells the shell whether a hold also sends the model a picture of the
-screen ([screen release](#screen-release)): `On { model }` with the model's display name, or `Off` with `ModelCantSee`,
+screen ([screen release](#screen-release)): `On { model, connection, slug, revision }` with the model's display
+name, the route and model a hold's picture goes to and the offer's
+[revision](#notice-revision), or `Off` with `ModelCantSee`,
 `NotReady` (the catalog isn't read, or no model is chosen), `Unsupported` (no window capture on
 this platform, or the worker found at the session's first screen hold that this system can't
 capture) or the appended `TurnedOff` (the user's switch, `show_screen`). It's for the standing
@@ -64,7 +66,8 @@ otherwise `VoiceHoldRecognized`. It spoke for `screen_holds` and the window unde
 until the shell began sending screen holds. Both changed in one commit, so the notice never spoke
 for one setting while a hold sent what the other governs. `HoldRecognized` is that earlier hold,
 which the shell no longer sends. It carries the gesture, the thread, the selection revision,
-the pointer sampled once at recognition, the exclusion lease and the recognition time. Its
+the pointer sampled once at recognition, the exclusion lease, the recognition time and the
+appended `notice` ([notice revision](#notice-revision)). Its
 fields changed in place, not by appending: `pointer_display`, the display that held the pointer,
 was replaced by `selection` and a physical `pointer`, and its smallest encoding went from 9 bytes
 to 8. That was safe because nothing sent it then and the build-id handshake refuses mixed
@@ -103,7 +106,8 @@ mixed binaries.
 
 The brain sends `ScreenHolds` for the default model once a connection opens, after `Welcome` and
 the voice view, and again only when a saved settings change, a catalog read or an account
-operation the shell sent (a sign-out clears the catalog at once) moves it. In the running phase
+operation the shell sent (a sign-out clears the catalog at once) moves it, or when the route's
+sign-in or Claude Code's generation changes under it. In the running phase
 the shell keeps a connection's last `ScreenHolds` until that connection ends, and a
 `HoldScreen` that refuses the current hold's picture sets that hold's line, once; either one
 from another connection is dropped. Before `Welcome` the shell rejects either one and ends the connection.
@@ -130,23 +134,35 @@ holding while they are down. Only a yes at release takes the
 that gesture. The brain checks its own gate at admission and again at release, so an
 out-of-date `On` costs at most the lease.
 
+## Notice revision
+
+`NoticeRevision` names one `On`. The brain counts it up on each connection, from 1, whenever what
+the gate authorizes changes: a different route or model, the gate closing, a new sign-in on the
+route, or a move of Claude Code's generation. A new display name alone keeps it, and a new
+connection starts again from 1. A 0 doesn't decode.
+
+The shell stamps a hold at recognition with the revision of the `On` showing then, never a later
+one, or none when no `On` was showing. `HoldRecognized` and `ScreenHoldRecognized` carry it as
+`notice`, and `ScreenRelease` carries the recognition's again. The brain doesn't read the stamp
+yet: a hold, its picture and the notice behave as they did before the field was added.
+
 ## Screen release
 
 A hold shows the model one picture of the screen, taken when the keys are released
 ([presence](presence.md#a-screen-holds-pointer-line) has the shell's side).
 
-The appended `ScreenHoldRecognized { gesture, thread, selection, t_qpc }` (tag 29) is a
+The appended `ScreenHoldRecognized { gesture, thread, selection, t_qpc, notice }` (tag 29) is a
 recognized hold of that kind. It carries no lease and no pointer, because nothing of the screen
 is taken while the keys are down. The appended
-`ScreenRelease { gesture, lease, t_qpc, excluded_qpc, pointer, path }` (tag 30) is its release:
+`ScreenRelease { gesture, lease, t_qpc, excluded_qpc, pointer, path, notice }` (tag 30) is its release:
 the exclusion lease the shell took at release, the release time, the time the lease's last window
 was excluded from capture (a frame drawn before it may still show the shell), the pointer, which
-picks the display, and the pointer's path over the hold.
+picks the display, the pointer's path over the hold, and the recognition's `notice`.
 
 - `PointerPath` holds at most 2,048 `PhysicalPoint`s (`MAX_PATH_POINTS`), oldest first, and is
   empty when the pointer never moved. `PointerPath::check` refuses a longer one, and whoever
   receives a path calls it before using the points.
-- A point is two varints of up to five bytes each, so the largest `ScreenRelease` is 20,523
+- A point is two varints of up to five bytes each, so the largest `ScreenRelease` is 20,534
   payload bytes. It's the largest control, and inside the 64 KiB control cap.
 - Where the user pointed is theirs. `PointerPath`'s `Debug` prints only its count and
   `ReleasePointer`'s prints no numbers. Neither message is on the tap's content-free list, so a
@@ -620,7 +636,7 @@ or above the primary display. `WindowRef(u64)` is an opaque HWND on Windows or C
 
 | Direction | Control message | Fields |
 | --- | --- | --- |
-| Shell to brain | `HoldRecognized` | `gesture`, optional `thread`, `selection`, `pointer`, `lease`, `t_qpc` |
+| Shell to brain | `HoldRecognized` | `gesture`, optional `thread`, `selection`, `pointer`, `lease`, `t_qpc`, optional `notice` |
 | Shell to brain | `KeyDown` | `gesture`, `t_qpc`; it only warms speech input, never starts a run |
 | Shell to brain | `KeyUp` | `gesture`, `t_qpc`, `chunks`: the `MicPcm` chunks the hold sent |
 | Shell to brain | `GestureCancel` | `gesture` |

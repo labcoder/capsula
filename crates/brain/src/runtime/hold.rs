@@ -142,7 +142,7 @@ pub(super) struct Holds {
     /// The gate's state last sent on this connection, unstamped, with the sign-in it spoke for.
     screen_sent: Option<(ScreenHolds, Option<crate::context::ConnectionTag>)>,
     /// The revision of the last offer sent on this connection.
-    notice: u64,
+    notice: Option<NoticeRevision>,
     /// How long ago a shell's input stamp was taken; tests replace the clock.
     stamp_age: fn(u64) -> Option<Duration>,
     /// Where each hold's screen task sends its answers.
@@ -223,7 +223,7 @@ impl Default for Holds {
             screen: None,
             window_capture: crate::platform::WINDOW_CAPTURE,
             screen_sent: None,
-            notice: 0,
+            notice: None,
             stamp_age: crate::platform::qpc_age,
             screen_events,
             screen_answers,
@@ -284,7 +284,7 @@ impl Holds {
     pub(super) fn opened(&mut self) {
         self.high = 0;
         self.screen_sent = None;
-        self.notice = 0;
+        self.notice = None;
     }
 
     /// None when the shell process could not be checked, so the receipt stays unacknowledged.
@@ -998,12 +998,13 @@ impl Brain {
         }
         let choice = self.config.view().default_model.clone();
         let state = self.display_gate(choice.as_ref());
-        let tag = choice.and_then(
-            |choice| match self.coordinator.availability_of(choice.connection) {
-                crate::coordinator::Availability::Ready(ready) => Some(ready.connection),
-                _ => None,
-            },
-        );
+        let tag =
+            choice.and_then(
+                |choice| match self.coordinator.availability_of(choice.connection) {
+                    crate::coordinator::Availability::Ready(ready) => Some(ready.connection),
+                    _ => None,
+                },
+            );
         let offer = |state: &ScreenHolds| match state {
             ScreenHolds::On {
                 connection, slug, ..
@@ -1015,12 +1016,15 @@ impl Brain {
             return Ok(());
         }
         // Only a change in what the offer authorizes counts the revision up; a new label doesn't.
-        if !sent.is_some_and(|sent| sent.1 == tag && offer(&sent.0) == offer(&state)) {
-            self.holds.notice += 1;
-        }
+        let same = sent.is_some_and(|sent| sent.1 == tag && offer(&sent.0) == offer(&state));
+        let notice = match self.holds.notice {
+            Some(notice) if same => notice,
+            last => last.map_or(NoticeRevision::FIRST, NoticeRevision::next),
+        };
+        self.holds.notice = Some(notice);
         let mut stamped = state.clone();
         if let ScreenHolds::On { revision, .. } = &mut stamped {
-            *revision = NoticeRevision(self.holds.notice);
+            *revision = notice;
         }
         link.control(&ControlToShell::ScreenHolds(stamped))?;
         self.holds.screen_sent = Some((state, tag));
