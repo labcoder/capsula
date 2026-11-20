@@ -487,5 +487,6 @@ error-voice-load = Voice couldn't start.
 error-voice-model-path = The speech model folder goes through a link or network location, or has unsafe permissions. Use an ordinary local folder.
 error-drawing-replacement-failed = The replacement couldn't be drawn. Your previous drawings were removed.
 error-drawing-not-returned = No drawing came back.
-error-screen-unavailable = The screen is no longer available, so this held turn wasn't sent.
+error-screen-unavailable = The screen is no longer available, so this turn was stopped.
+error-screen-picture-stopped = This model stopped accepting screenshots during this answer, so the answer was stopped. The screenshot may already have reached the model.
 error-voice-unavailable = Voice can't be installed, loaded or removed right now.

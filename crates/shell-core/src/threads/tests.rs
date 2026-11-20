@@ -2283,3 +2283,80 @@ fn a_screen_note_waits_for_the_open_conversations_first_page() {
         })
     );
 }
+
+/// A marker for the open thread reads its newest page again and replaces every cached row, so a
+/// turn on an older loaded page reloads through pagination instead of keeping what it read before
+/// its picture was marked sent. Another thread's marker reads nothing, and one arriving while the
+/// read is in flight earns exactly one more.
+#[test]
+fn an_events_change_rereads_the_open_thread_and_drops_its_older_cached_rows() {
+    let mut state = Threads::chat();
+    state.connected();
+    state.show_for(Some(ThreadId(3)));
+    let requests = state.requests();
+    state.apply(reply(request_id(&requests[0]), &[3], None));
+    state.apply(DataToShell::Page {
+        request: 2,
+        thread: ThreadId(3),
+        events: vec![event(9)],
+        before: Some(EventId(9)),
+    });
+    state.older_events();
+    let older = state.requests();
+    state.apply(DataToShell::Page {
+        request: request_id(&older[0]),
+        thread: ThreadId(3),
+        events: vec![event(4)],
+        before: None,
+    });
+    assert_eq!(state.events, [event(9), event(4)]);
+    state.events_changed(ThreadId(5));
+    assert_eq!(state.requests(), []);
+    state.events_changed(ThreadId(3));
+    state.run_state(ThreadId(3));
+    let refresh = state.requests();
+    assert_eq!(
+        refresh,
+        [DataToBrain::PageRequest {
+            request: request_id(&refresh[0]),
+            page: PageOf::Events {
+                thread: ThreadId(3),
+                before: None
+            },
+        }]
+    );
+    state.events_changed(ThreadId(3));
+    assert_eq!(state.requests(), [], "one read in flight");
+    state.apply(DataToShell::Page {
+        request: request_id(&refresh[0]),
+        thread: ThreadId(3),
+        events: vec![event(9)],
+        before: Some(EventId(9)),
+    });
+    assert_eq!(state.events, [event(9)], "the older cached row goes");
+    assert_eq!(state.before, Some(EventId(9)));
+    let again = state.requests();
+    assert_eq!(again.len(), 1, "the marker during the read earns one more");
+    state.apply(DataToShell::Page {
+        request: request_id(&again[0]),
+        thread: ThreadId(3),
+        events: vec![event(9)],
+        before: Some(EventId(9)),
+    });
+    assert_eq!(state.requests(), []);
+    state.older_events();
+    let reload = state.requests();
+    let sent = PageEvent {
+        kind: PageEventKind::HeldTurn {
+            screen: kumochi_protocol::message::HeldScreen::Attached,
+        },
+        ..event(4)
+    };
+    state.apply(DataToShell::Page {
+        request: request_id(&reload[0]),
+        thread: ThreadId(3),
+        events: vec![sent.clone()],
+        before: None,
+    });
+    assert_eq!(state.events, [event(9), sent]);
+}

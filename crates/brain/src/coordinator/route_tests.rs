@@ -605,7 +605,7 @@ impl Coordinator {
     pub(crate) fn picture_lost_for_test(&self, run: RunId) -> bool {
         self.current
             .as_ref()
-            .is_some_and(|current| current.id == run && current.screen_lost)
+            .is_some_and(|current| current.id == run && current.screen_lost.is_some())
     }
 }
 
@@ -978,12 +978,13 @@ fn a_granted_picture_lost_and_back_stays_shut_and_a_written_one_never_goes_again
         let permit = core.picture_grant(lease).expect("a revocable grant");
         the_fact_goes_and_comes_back(&mut core);
         assert!(!permit.is_open(), "{unsent}");
-        core.handle(if unsent {
-            Input::SendUnsent { lease }
-        } else {
-            Input::SendSettled { lease }
-        })
-        .expect("current");
+        let settled = core
+            .handle(if unsent {
+                Input::SendUnsent { lease }
+            } else {
+                Input::SendSettled { lease }
+            })
+            .expect("current");
         if unsent {
             let again = super::engine_key(&core, R);
             assert_ne!(again, key(), "built again");
@@ -993,22 +994,210 @@ fn a_granted_picture_lost_and_back_stays_shut_and_a_written_one_never_goes_again
             assert_eq!(started_input(&rebuilt), Some(vec![user(), line(CANT_SEE)]));
             continue;
         }
+        assert_eq!(written_settlement(&settled), (1, 1, 1));
         let refused = core.handle(ask).expect("current");
-        assert!(
-            !refused
-                .iter()
-                .any(|effect| matches!(effect, Effect::Grant(_)))
-        );
+        assert_ended_without_a_send(&refused);
         assert_eq!(told_cant_see(&refused), 0);
-        let again = super::engine_key(&core, R);
-        assert_ne!(again, key(), "built again");
-        let rebuilt = core
-            .handle(built_for(again, &choice(KEY, "m")))
-            .expect("current");
-        assert_eq!(started_input(&rebuilt), None);
         assert_eq!(
-            failure(&rebuilt),
-            Some(kumochi_protocol::message::ErrorKey::ScreenUnavailable.into())
+            failure(&refused),
+            Some(kumochi_protocol::message::ErrorKey::ScreenPictureStopped.into())
         );
     }
+}
+
+fn lease_of(effects: &[Effect]) -> crate::coordinator::LeaseId {
+    effects
+        .iter()
+        .find_map(|effect| match effect {
+            Effect::Grant(lease) => Some(*lease),
+            _ => None,
+        })
+        .expect("granted")
+}
+
+/// How many `HoldScreen`, `SentScreen` and `EventsChanged` a written settlement of run R's
+/// hold pushed, after checking the marker comes after the store op.
+fn written_settlement(effects: &[Effect]) -> (usize, usize, usize) {
+    let hold = HoldKey {
+        epoch: 0,
+        gesture: GestureId(1),
+    };
+    let sent = Effect::Store(StoreOp::SentScreen { run: R });
+    let marker = Effect::EventsChanged { hold, thread: T };
+    let at = |wanted: &Effect| effects.iter().position(|effect| effect == wanted);
+    if let (Some(sent), Some(marker)) = (at(&sent), at(&marker)) {
+        assert!(sent < marker, "the marker follows the store op");
+    }
+    let count =
+        |wanted: &dyn Fn(&Effect) -> bool| effects.iter().filter(|effect| wanted(effect)).count();
+    (
+        count(&|effect| matches!(effect, Effect::HoldScreen { hold: held, .. } if *held == hold)),
+        count(&|effect| *effect == sent),
+        count(&|effect| *effect == marker),
+    )
+}
+
+fn assert_ended_without_a_send(refused: &[Effect]) {
+    assert!(refused.contains(&Effect::Rebuild(SendKey::Build(key()))));
+    assert!(!refused.iter().any(|effect| matches!(
+        effect,
+        Effect::Grant(_) | Effect::Store(StoreOp::BuildContext(_)) | Effect::StartEngine { .. }
+    )));
+}
+
+/// A picture lost after its grant took it ends the run by the first cause recorded: a Claude Code
+/// generation move as the model being unavailable, a lost capability as the picture stopping. The
+/// lease still unsettled then settles for real once its run has gone.
+#[test]
+fn a_written_picture_lost_ends_its_run_by_its_first_cause_and_its_lease_settles_after() {
+    use crate::coordinator::PictureRoutes;
+    for generation_first in [true, false] {
+        let (mut core, _) = pictured_run(CLAUDE, PictureRoutes::new(true, true));
+        let ask = Input::SendReady {
+            key: SendKey::Build(key()),
+            hold: None,
+        };
+        let lease = lease_of(&core.handle(ask.clone()).expect("current"));
+        let fact = |core: &mut Coordinator| {
+            for images in [&[][..], &["m"]] {
+                core.handle(Input::Engines(CLAUDE, pictured(5, images)))
+                    .expect("an availability is never stale");
+            }
+        };
+        if generation_first {
+            core.lose_pictures(Some(CLAUDE));
+            fact(&mut core);
+        } else {
+            fact(&mut core);
+            core.lose_pictures(Some(CLAUDE));
+        }
+        let refused = core.handle(ask).expect("current");
+        assert_ended_without_a_send(&refused);
+        let expected = if generation_first {
+            model_unavailable()
+        } else {
+            kumochi_protocol::message::ErrorKey::ScreenPictureStopped.into()
+        };
+        assert_eq!(failure(&refused), Some(expected), "{generation_first}");
+        core.handle(Input::RunStored { run: R })
+            .expect("its end is stored");
+        assert_eq!(core.ending_runs(), 0, "the run has gone");
+        let settled = core
+            .handle(Input::SendSettled { lease })
+            .expect("a lease outlives its run");
+        assert_eq!(
+            written_settlement(&settled),
+            (1, 1, 1),
+            "{generation_first}"
+        );
+    }
+}
+
+/// A written settlement tells the shell nothing for a thread whose delete it holds, and lets
+/// that delete go.
+#[test]
+fn a_written_settlement_sends_no_marker_for_a_thread_being_deleted_and_releases_its_delete() {
+    use crate::coordinator::PictureRoutes;
+    let (mut core, _) = pictured_run(KEY, PictureRoutes::new(true, false));
+    let lease = lease_of(
+        &core
+            .handle(Input::SendReady {
+                key: SendKey::Build(key()),
+                hold: None,
+            })
+            .expect("current"),
+    );
+    core.handle(Input::Delete {
+        thread: T,
+        after_turns: 1,
+        resend: false,
+    })
+    .expect("a delete is never stale");
+    assert_eq!(core.held_deletes(), vec![T]);
+    let settled = core.handle(Input::SendSettled { lease }).expect("settled");
+    assert_eq!(written_settlement(&settled), (1, 1, 0));
+    assert_eq!(core.held_deletes(), Vec::<ThreadId>::new());
+}
+
+/// A `ChatGPT` picture's written settlement stays as on main: no marker.
+#[test]
+fn a_chatgpt_written_settlement_sends_no_marker() {
+    let (mut core, hold) = held(
+        vec![ready(CHATGPT, 7, &["m"])],
+        choice(CHATGPT, "m"),
+        Some(T),
+    );
+    core.submit_hold(
+        hold,
+        "words".into(),
+        Some(crate::context::Screen::Image(jpeg())),
+    )
+    .expect("admitted");
+    core.handle(Input::TurnStored { run: R }).expect("current");
+    core.handle(built_for(key(), &choice(CHATGPT, "m")))
+        .expect("current");
+    let lease = lease_of(
+        &core
+            .handle(Input::SendReady {
+                key: SendKey::Build(key()),
+                hold: None,
+            })
+            .expect("current"),
+    );
+    let settled = core.handle(Input::SendSettled { lease }).expect("settled");
+    assert_eq!(written_settlement(&settled), (1, 1, 0));
+}
+
+/// Turning screen sharing off after a send carried the picture stops the key run with the
+/// neutral screen line, and history keeps what was carried.
+#[test]
+fn screen_sharing_turned_off_after_a_write_stops_the_turn_and_keeps_its_history() {
+    use crate::coordinator::PictureRoutes;
+    let (mut core, _) = pictured_run(KEY, PictureRoutes::new(true, false));
+    let lease = lease_of(
+        &core
+            .handle(Input::SendReady {
+                key: SendKey::Build(key()),
+                hold: None,
+            })
+            .expect("current"),
+    );
+    core.handle(Input::SendSettled { lease }).expect("settled");
+    let off = core.handle(Input::ScreenHoldsOff).expect("the setting");
+    assert_eq!(
+        failure(&off),
+        Some(kumochi_protocol::message::ErrorKey::ScreenUnavailable.into())
+    );
+    assert!(
+        !off.iter()
+            .any(|effect| matches!(effect, Effect::Store(StoreOp::WithdrawScreen { .. })))
+    );
+}
+
+/// A later build of a run whose picture a send carried, lost since, ends as the picture stopping
+/// instead of claiming the turn wasn't sent.
+#[test]
+fn a_later_build_of_a_written_picture_lost_since_ends_as_the_picture_stopping() {
+    use crate::coordinator::PictureRoutes;
+    let (mut core, _) = pictured_run(KEY, PictureRoutes::new(true, false));
+    let lease = lease_of(
+        &core
+            .handle(Input::SendReady {
+                key: SendKey::Build(key()),
+                hold: None,
+            })
+            .expect("current"),
+    );
+    core.handle(Input::SendSettled { lease }).expect("settled");
+    the_fact_goes_and_comes_back(&mut core);
+    let mut effects = Vec::new();
+    core.build(R, 2, &mut effects);
+    let rebuilt = core
+        .handle(built_for(super::engine_key(&core, R), &choice(KEY, "m")))
+        .expect("current");
+    assert_eq!(started_input(&rebuilt), None);
+    assert_eq!(
+        failure(&rebuilt),
+        Some(kumochi_protocol::message::ErrorKey::ScreenPictureStopped.into())
+    );
 }

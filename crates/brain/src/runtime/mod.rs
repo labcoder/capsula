@@ -1240,6 +1240,15 @@ impl Brain {
                         link = None;
                     }
                 }
+                Effect::EventsChanged { hold, thread } => {
+                    if hold.epoch == self.epoch
+                        && let Some(shell) = link.as_deref_mut()
+                        && shell.data(&DataToShell::EventsChanged { thread }).is_err()
+                    {
+                        full = true;
+                        link = None;
+                    }
+                }
                 Effect::HoldScreen { hold, outcome } => {
                     if hold.epoch == self.epoch
                         && let Some(shell) = link.as_deref_mut()
@@ -1707,7 +1716,8 @@ impl<'a, 't> Link<'a, 't> {
             | DataToShell::IssueCard(_)
             | DataToShell::IssueReview { .. }
             | DataToShell::HoldWords { .. }
-            | DataToShell::HoldStored { .. } => Owner::Marker,
+            | DataToShell::HoldStored { .. }
+            | DataToShell::EventsChanged { .. } => Owner::Marker,
             DataToShell::SceneSnapshot { scene, .. }
             | DataToShell::SceneBegin { scene, .. }
             | DataToShell::SceneStepCommit { scene, .. }

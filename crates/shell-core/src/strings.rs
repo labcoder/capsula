@@ -675,6 +675,7 @@ const fn error_id(key: ErrorKey) -> &'static str {
         ErrorKey::DrawingReplacementFailed => "error-drawing-replacement-failed",
         ErrorKey::DrawingNotReturned => "error-drawing-not-returned",
         ErrorKey::ScreenUnavailable => "error-screen-unavailable",
+        ErrorKey::ScreenPictureStopped => "error-screen-picture-stopped",
         ErrorKey::ConnectionNeeded => "error-connection-needed",
     }
 }
@@ -814,6 +815,20 @@ mod tests {
         )
         .expect("within the limits");
         assert_eq!(strings.error(&error), "Wait 30 s for 3 more");
+    }
+
+    #[test]
+    fn the_screen_lines_say_what_happened_without_claiming_more() {
+        let strings = Strings::english();
+        let text = |key: ErrorKey| strings.error(&key.into());
+        assert_eq!(
+            text(ErrorKey::ScreenUnavailable),
+            "The screen is no longer available, so this turn was stopped."
+        );
+        assert_eq!(
+            text(ErrorKey::ScreenPictureStopped),
+            "This model stopped accepting screenshots during this answer, so the answer was stopped. The screenshot may already have reached the model."
+        );
     }
 
     #[test]

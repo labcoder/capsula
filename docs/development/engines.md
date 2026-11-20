@@ -380,17 +380,24 @@ has attempted a write, the build goes without it: the model gets "The screen was
 this model can't be sent images.", the shell hears `HoldScreen` as `NotIncluded(ModelCantSee)`,
 and the turn's `screen` becomes `model_cant_see`. A pending hold's picture closes the same way as
 soon as its recipient stops taking pictures, and stays closed if the fact comes back. Once a
-request is built, a loss is caught at the grant and only there: the grant asks again, and a
-revoked picture grant whose send wrote nothing builds again the same way ("The send lease"). A
-send that may have written settles without building again. A loss sticks to the run: once its
-recipient stops taking pictures, or Claude Code's account generation moves while the picture is
-held for Claude Code, no later build carries that picture, even if the fact comes back. A
-pending hold's picture closes as `ModelCantSee` on either. The grant judges the request the
-engine holds, built with the picture or not, never the run's account of its screen, so a
-pictured request whose picture was lost and came back before its grant builds again without it,
-or, once a send may have written it, is never granted and its replacement fails with
-`ScreenUnavailable`, as it does with no user message left. The direct connection control runs
-the pending hold's check at once. What the hold carried goes in the run's row
+request is built, availability and generation latch the loss; admission and the send grant
+enforce it: the grant asks again, and a revoked picture grant whose send wrote nothing builds again the same way ("The send lease"). A
+send that may have written settles without building again. A loss sticks to the run, with its
+first cause: once its recipient stops taking pictures, or Claude Code's account generation moves
+while the picture is held for Claude Code, no later build carries that picture, even if the fact
+comes back. A pending hold's picture closes as `ModelCantSee` on either. The grant judges the
+request the engine holds, built with the picture or not, never the run's account of its screen,
+so a pictured request whose picture was lost and came back before its grant builds again without
+it. Once the grant took the picture, so a send may have written it, the ask is answered
+`Rebuild` and the run ends: `ModelUnavailable` for a generation move, `ScreenPictureStopped`
+("This model stopped accepting screenshots during this answer…") for a lost capability. A later
+build still holding the picture ends the same way. Earlier leases settle on their own, so
+history and held deletes follow what was actually written. Turning screen sharing off is the
+user's choice, not the model's, so it ends a run as `ScreenUnavailable`, whose line ("The screen
+is no longer available, so this turn was stopped.") makes no claim about what was sent. The
+direct connection control runs the pending hold's check at once. On a route behind a picture
+switch, a written settlement also sends the shell `EventsChanged { thread }` (ipc.md) after the
+mark is queued, so a shown page of that thread is read again. What the hold carried goes in the run's row
 with its turn (store.md, `runs.screen`), and the shell hears it once as `HoldScreen`: an image
 when a send carrying it settles after attempting a write ("The send lease"), anything else when
 the run's first request starts. An inline compaction's send carries only text, so it doesn't

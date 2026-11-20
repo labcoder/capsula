@@ -111,7 +111,19 @@ impl super::Run {
             run: self.id,
             hold,
             outcome,
+            thread: self
+                .route
+                .is_some_and(|route| route.kind != ConnectionKind::ChatGpt)
+                .then_some(self.thread),
         })
+    }
+
+    /// Why the run ends when its picture may no longer go after a send may have written it.
+    pub(super) fn picture_stopped(&self) -> kumochi_protocol::message::UserError {
+        match self.screen_lost {
+            Some(super::Lost::Generation) => super::availability::model_unavailable(),
+            _ => kumochi_protocol::message::ErrorKey::ScreenPictureStopped.into(),
+        }
     }
 
     /// The run's picture may no longer go to its model. Before any send could have written it,

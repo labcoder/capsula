@@ -251,6 +251,7 @@ impl Tapped for DataToShell {
             Self::IssueReview { .. } => "IssueReview",
             Self::HoldWords { .. } => "HoldWords",
             Self::HoldStored { .. } => "HoldStored",
+            Self::EventsChanged { .. } => "EventsChanged",
         }
     }
 

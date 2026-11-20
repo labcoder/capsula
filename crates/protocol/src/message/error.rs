@@ -104,7 +104,7 @@ pub enum ErrorKey {
     DrawingReplacementFailed,
     /// A run that called `draw` finished with no committed step.
     DrawingNotReturned,
-    /// A held turn's screen couldn't go with its request, so the turn wasn't sent without it.
+    /// A held turn's screen couldn't go with its request, so the turn was stopped.
     ScreenUnavailable,
     /// No connection that can answer is set up, so nothing can answer until one is connected.
     ConnectionNeeded,
@@ -114,6 +114,9 @@ pub enum ErrorKey {
     ClaudeCodeBusy,
     /// Speech input cannot be manually loaded with Hold to talk off.
     HoldToTalkOff,
+    /// The model stopped accepting screenshots after one may have reached it, so the answer
+    /// was stopped.
+    ScreenPictureStopped,
 }
 
 macro_rules! catalog {
@@ -185,6 +188,7 @@ impl ErrorKey {
         DrawingReplacementFailed,
         DrawingNotReturned,
         ScreenUnavailable,
+        ScreenPictureStopped,
         ConnectionNeeded,
     }
 }
