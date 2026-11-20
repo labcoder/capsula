@@ -251,11 +251,12 @@ async fn send<C: Connect, L: Lease>(
                 .await
                 .map_err(|_| Failure::Transport)?,
         };
-        if !attempt.lease.as_ref().is_some_and(Lease::may_write) {
-            return Err(Failure::Rebuild);
-        }
+        let lease = &attempt.lease;
         let conn = attempt.conn.insert(ModelConn::new(io));
-        match conn.upload(&request).await? {
+        match conn
+            .upload(&request, || lease.as_ref().is_some_and(Lease::may_write))
+            .await?
+        {
             Upload::Flushed => Ok(()),
             Upload::Refused(head) => Err(Failure::Provider(refusal(conn, head).await?)),
         }

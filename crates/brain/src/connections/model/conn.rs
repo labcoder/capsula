@@ -161,10 +161,12 @@ impl<Io: AsyncRead + AsyncWrite + Unpin> ModelConn<Io> {
 
     /// Writes and flushes `request`. Interim heads that arrive meanwhile are skipped and a
     /// success head is kept for [`Self::head`], so writing goes on; any other final head stops it
-    /// for good.
+    /// for good. `may_write` is asked right before the first write attempt; `false` ends the
+    /// upload as [`Failure::Rebuild`] with nothing written.
     pub(in crate::connections) async fn upload(
         &mut self,
         request: &[u8],
+        may_write: impl Fn() -> bool,
     ) -> Result<Upload, Failure> {
         let mut written = 0;
         poll_fn(|cx| {
@@ -188,6 +190,9 @@ impl<Io: AsyncRead + AsyncWrite + Unpin> ModelConn<Io> {
                 }
             }
             while written < request.len() {
+                if !self.may_have_written && !may_write() {
+                    return Poll::Ready(Err(Failure::Rebuild));
+                }
                 self.may_have_written = true;
                 match ready!(Pin::new(&mut self.io).poll_write(cx, &request[written..])) {
                     Ok(0) | Err(_) => return Poll::Ready(Err(Failure::Transport)),
