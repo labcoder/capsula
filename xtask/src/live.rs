@@ -298,7 +298,7 @@ fn read_kept(mut output: impl Read) -> (String, io::Result<()>) {
 }
 
 /// Waits for `child` at most `limit`; `None` while it still runs.
-fn wait_bounded(child: &mut Child, limit: Duration) -> io::Result<Option<ExitStatus>> {
+pub(crate) fn wait_bounded(child: &mut Child, limit: Duration) -> io::Result<Option<ExitStatus>> {
     let end = Instant::now() + limit;
     loop {
         if let Some(status) = child.try_wait()? {

@@ -587,19 +587,40 @@ and never stops the fixture. A target that goes stale after admission
 and an OS `SendInput` refusal keep their own existing messages. The surrounding refusal still names
 the foreground executable and its PID, as before. The refusal remains terminal.
 Only tagged mouse input is allowed at this stage: no Alt-key trick, `AttachThreadInput`, or
-message/input to another app is used. The prepare doesn't trust the raise's return value: it
+message/input to another app is used. The unattended fixture is created topmost and shown without
+activation, so it starts above the foreground window. Without the foreground right, a topmost
+raise sent while another app's maximized window was in front returned success on Rez and still
+left the root below it; a root born topmost sat above that window and stayed there. The
+attended fixture keeps its normal band. The prepare doesn't trust the raise's return value: it
 reads the fixture's extended style back and, if the fixture isn't topmost, refuses with its own
 fixed code, before the guard is announced armed and before any hit test. Just before the prepare
 is sent, the runner reads, changing nothing, whether the root is visible and topmost, its Z-order
 word against the foreground window and the milliseconds since the runner found the root. Only a
-failed prepare and an `edit_not_at_point` refusal report that read. Finalization restores the
-fixture's prior topmost state.
+failed prepare and an `edit_not_at_point` refusal report that read. Finalization returns the
+fixture to the normal band, even though it was born topmost, because the rest of the session
+expects it below the product's own topmost windows. It reads the style back after the demotion,
+and a style it can't read or a fixture still topmost fails the finalization.
 If that request fails or cannot arrive, the run refuses and closes its owned fixture instead.
+The demotion follows only a raise, so a prepare that refuses before raising leaves the fixture
+in the band it was born in, and only ending the fixture takes it away. Any failed session ends
+its fixture promptly: a window the runner knows gets `WM_CLOSE` and 2 s to close, then the
+runner terminates the fixture through its own process handle and waits at most 1 s to see it
+exit. A fixture whose window discovery never found, such as one that showed only after
+discovery gave up, is terminated at once. So a topmost fixture outlives a failed opener by at
+most about 4 s: the 1 s limit on the uncover request, the 2 s close grace and the 1 s exit check.
+Only a clean session waits for the fixture until the session deadline.
 
 After the click's receipt, the runner waits up to 250 ms for the fixture's root to come to the
 front, because activation completes asynchronously. An empty front or another window of the
 fixture's own process keeps it waiting; a foreign foreground, any input or a moved pointer ends
 the wait at once and refuses. `opener.txt` records the wait as `root_wait_ms`.
+If the confirmation that ends the wait refuses, it names its readings, each against its condition:
+`look` is `calm` or the first obstruction's word, `pointer_offset` and `receipt_offset` are the
+pointer's and the receipt's offsets from the click point in pixels (`none` with no receipt),
+`receipts` is the EDIT's receipt count, and `foreground` says what held the front against the
+root (`fixture_root`, `fixture_other_window`, `foreign` or `nothing`). The refusal also gives
+the wait's `root_wait_ms` and the foreground window's class and executable basename, read at
+the confirmation. It reports no titles, window text, handles or absolute coordinates.
 
 The native fixture must acknowledge the tagged click and be the exact foreground window with
 its EDIT focused before publishing Ready. The click changes the last-input tick, so only its

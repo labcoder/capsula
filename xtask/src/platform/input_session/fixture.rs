@@ -7,7 +7,10 @@ use std::time::Duration;
 
 use anyhow::{Context as _, Result, ensure};
 use kumochi_protocol::constants::{DISPLAY_NAME, OBJECT_PREFIX};
-use windows::Win32::Foundation::{HANDLE, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
+use windows::Win32::Foundation::{
+    ERROR_SUCCESS, GetLastError, HANDLE, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT,
+    SetLastError, WPARAM,
+};
 use windows::Win32::Graphics::Gdi::{ClientToScreen, MONITOR_DEFAULTTONEAREST, MonitorFromPoint};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Performance::QueryPerformanceCounter;
@@ -160,7 +163,7 @@ thread_local! {
     static CONTROLS: Cell<Option<Controls>> = const { Cell::new(None) };
     static PRESS: Cell<Press> = Cell::new(Press::default());
     static ESCAPE_TOGGLES: Cell<u32> = const { Cell::new(0) };
-    static WAS_TOPMOST: Cell<Option<bool>> = const { Cell::new(None) };
+    static RAISED: Cell<bool> = const { Cell::new(false) };
     static START_FRAME: Cell<[i32; 4]> = const { Cell::new(FRAME) };
 }
 
@@ -342,10 +345,12 @@ fn prepare_idle(root: HWND, away_ms: usize) -> Result<()> {
     let queue = queued_input();
     ensure!(queue == 0, IdleRefusal(IdleRefusal::QUEUED_INPUT, queue));
     set_property(root, ACTIVATION, 1).context(IdleRefusal::ACTIVATION_MARKER)?;
-    // SAFETY: reads this thread's own window's extended style.
-    let style = unsafe { GetWindowLongPtrW(root, GWL_EXSTYLE) };
-    let topmost = isize::try_from(WS_EX_TOPMOST.0).context(IdleRefusal::TOPMOST)?;
-    WAS_TOPMOST.set(Some((style & topmost) != 0));
+    raise(root)
+}
+
+/// Moves the fixture into the topmost band and reads the style back.
+fn raise(root: HWND) -> Result<()> {
+    RAISED.set(true);
     band(root, HWND_TOPMOST).context(IdleRefusal::TOPMOST)?;
     // SAFETY: reads back this thread's own window's extended style; a failed read is zero.
     let raised = unsafe { GetWindowLongPtrW(root, GWL_EXSTYLE) };
@@ -353,18 +358,14 @@ fn prepare_idle(root: HWND, away_ms: usize) -> Result<()> {
     Ok(())
 }
 
-/// Ends the idle activation, used either way, back in the fixture's earlier band. Only a pending
+/// Ends the idle activation, used either way, back in the normal band. Only a pending
 /// activation the driver confirmed, whose one tagged EDIT click arrived with no stop, with the
 /// fixture foreground and its EDIT focused on this desktop, stamps the quiet second's input after
 /// that click and publishes Ready.
 fn finalize_idle(root: HWND, confirmed: usize) -> Result<()> {
     let pending = property(root, ACTIVATION) == 1;
     set_property(root, ACTIVATION, 2)?;
-    match WAS_TOPMOST.take() {
-        Some(true) => band(root, HWND_TOPMOST)?,
-        Some(false) => band(root, HWND_NOTOPMOST)?,
-        None => {}
-    }
+    restore(root)?;
     ensure!(
         pending && confirmed == 1 && property(root, ABORT) == 0 && property(root, CLICKS) == 1,
         "the activation isn't pending, confirmed and clicked exactly once"
@@ -378,6 +379,25 @@ fn finalize_idle(root: HWND, confirmed: usize) -> Result<()> {
         "the fixture EDIT isn't the focused foreground of this desktop"
     );
     arm(root, last_input()?, 0)
+}
+
+/// Returns a raised fixture to the normal band, even one born topmost: the rest of the session
+/// expects it there, below the product's own topmost windows.
+fn restore(root: HWND) -> Result<()> {
+    if RAISED.take() {
+        band(root, HWND_NOTOPMOST)?;
+        // SAFETY: clears this thread's error slot so a failed read is told from a zero style.
+        unsafe { SetLastError(ERROR_SUCCESS) };
+        // SAFETY: reads back this thread's own window's extended style.
+        let style = unsafe { GetWindowLongPtrW(root, GWL_EXSTYLE) };
+        // SAFETY: reads this thread's error slot straight after the read.
+        let unread = style == 0 && unsafe { GetLastError() } != ERROR_SUCCESS;
+        ensure!(
+            !unread && !has_ex(style, WS_EX_TOPMOST),
+            "the fixture isn't confirmed out of the topmost band"
+        );
+    }
+    Ok(())
 }
 
 /// Any idle activation failure stops the fixture for good.
@@ -884,7 +904,7 @@ fn open_fixture() -> Result<()> {
     // SAFETY: the registered class has a static callback; there is no borrowed creation data.
     let root = unsafe {
         CreateWindowExW(
-            WINDOW_EX_STYLE::default(),
+            root_ex_style(placement),
             &class_name,
             &title,
             WS_OVERLAPPEDWINDOW,
@@ -914,6 +934,16 @@ fn open_fixture() -> Result<()> {
         unsafe { DestroyWindow(root) }?;
     }
     result
+}
+
+/// The unattended fixture is born topmost: while another app's window is in front, a later topmost
+/// raise from a process without the foreground right can succeed and still leave it below.
+fn root_ex_style(placement: FixturePlacement) -> WINDOW_EX_STYLE {
+    if placement == FixturePlacement::AwayFromCursor {
+        WS_EX_TOPMOST
+    } else {
+        WINDOW_EX_STYLE::default()
+    }
 }
 
 fn child(
@@ -1083,13 +1113,18 @@ fn focus_edit() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        FRAME, IdleRefusal, POINT, RECT, current_queue_categories, frame_name, off_cursor_frame,
-        pack, published_frame,
+        FRAME, FixturePlacement, IdleRefusal, POINT, RECT, WINDOW_EX_STYLE, WS_EX_TOPMOST,
+        current_queue_categories, frame_name, has_ex, off_cursor_frame, pack, published_frame,
+        raise, restore, root_ex_style,
     };
     use windows::Win32::UI::Input::{
         MOUSE_MOVE_ABSOLUTE, MOUSE_MOVE_NOCOALESCE, RAWINPUT, RAWKEYBOARD, RAWMOUSE, RAWMOUSE_0,
         RIM_TYPEHID, RIM_TYPEKEYBOARD, RIM_TYPEMOUSE,
     };
+    use windows::Win32::UI::WindowsAndMessaging::{
+        CreateWindowExW, DestroyWindow, GWL_EXSTYLE, GetWindowLongPtrW, WS_POPUP,
+    };
+    use windows::core::w;
 
     use super::super::guard::{InputClass, PhysicalInput, physical_event};
     use kumochi_protocol::constants::FOCUS_INPUT_MARKER;
@@ -1105,6 +1140,52 @@ mod tests {
         assert_eq!(IdleRefusal::queue_mask(reply), Some((9, 0x0402)));
         assert_eq!(IdleRefusal::queue_mask(0x0004_0208), None);
         assert_eq!(IdleRefusal::queue_mask(9), None);
+    }
+
+    #[test]
+    fn only_the_unattended_fixture_is_born_topmost() {
+        assert_eq!(
+            root_ex_style(FixturePlacement::AwayFromCursor),
+            WS_EX_TOPMOST
+        );
+        assert_eq!(
+            root_ex_style(FixturePlacement::Default),
+            WINDOW_EX_STYLE::default()
+        );
+    }
+
+    #[test]
+    fn a_fixture_born_topmost_leaves_the_band_when_its_idle_activation_ends() {
+        // SAFETY: a hidden top-level STATIC owned by this test thread; it is never shown.
+        let root = unsafe {
+            CreateWindowExW(
+                root_ex_style(FixturePlacement::AwayFromCursor),
+                w!("STATIC"),
+                w!(""),
+                WS_POPUP,
+                0,
+                0,
+                1,
+                1,
+                None,
+                None,
+                None,
+                None,
+            )
+        }
+        .unwrap();
+        let topmost = || {
+            // SAFETY: reads this thread's own window's extended style.
+            let style = unsafe { GetWindowLongPtrW(root, GWL_EXSTYLE) };
+            has_ex(style, WS_EX_TOPMOST)
+        };
+        raise(root).unwrap();
+        assert!(topmost());
+        restore(root).unwrap();
+        let restored = topmost();
+        // SAFETY: the window was created on this thread and is still live.
+        unsafe { DestroyWindow(root) }.unwrap();
+        assert!(!restored);
     }
 
     #[test]

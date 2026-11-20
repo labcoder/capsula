@@ -218,6 +218,27 @@ impl Activation {
         let root = foreground == self.root;
         let confirmed = self.calm(look) && look.cursor == self.point && received && root;
         self.advance(Stage::Clicked, confirmed.then_some(Stage::Confirmed))
+            .with_context(|| {
+                let offset = |at: POINT| {
+                    format!(
+                        "{},{}",
+                        at.x.saturating_sub(self.point.x),
+                        at.y.saturating_sub(self.point.y)
+                    )
+                };
+                format!(
+                    "confirm look={} pointer_offset={} receipts={} receipt_offset={} foreground={}",
+                    self.obstruction(look).unwrap_or("calm"),
+                    offset(look.cursor),
+                    receipt.count,
+                    if receipt.count == 0 {
+                        "none".to_owned()
+                    } else {
+                        offset(receipt.point)
+                    },
+                    missed_hit(foreground, foreground.window, self.root)
+                )
+            })
     }
 
     /// Whether to keep waiting for the fixture's root to come to the front: all else is calm, the
@@ -761,6 +782,64 @@ mod tests {
             assert!(
                 activation.confirm(CALM, RECEIVED, ROOT).is_err(),
                 "{case}: then a valid confirmation"
+            );
+        }
+    }
+
+    #[test]
+    fn a_refused_confirmation_names_each_reading_against_its_condition() {
+        let off = |dx, dy| POINT {
+            x: AT.x + dx,
+            y: AT.y + dy,
+        };
+        for (look, receipt, foreground, expected) in [
+            (
+                CALM,
+                Receipt {
+                    count: 2,
+                    point: off(1, 0),
+                    ..RECEIVED
+                },
+                FOREIGN,
+                "confirm look=calm pointer_offset=0,0 receipts=2 receipt_offset=1,0 \
+                 foreground=foreign",
+            ),
+            (
+                Look {
+                    capture: Some(EDIT),
+                    cursor: off(0, -2),
+                    ..CALM
+                },
+                Receipt {
+                    count: 0,
+                    ..RECEIVED
+                },
+                ROOT,
+                "confirm look=mouse_capture pointer_offset=0,-2 receipts=0 receipt_offset=none \
+                 foreground=fixture_root",
+            ),
+            (
+                Look {
+                    foreign: Some("held_input"),
+                    ..CALM
+                },
+                RECEIVED,
+                EDIT,
+                "confirm look=held_input pointer_offset=0,0 receipts=1 receipt_offset=0,0 \
+                 foreground=fixture_other_window",
+            ),
+            (
+                CALM,
+                RECEIVED,
+                Owner { window: 0, pid: 0 },
+                "confirm look=calm pointer_offset=0,0 receipts=1 receipt_offset=0,0 \
+                 foreground=nothing",
+            ),
+        ] {
+            let error = upto(3).confirm(look, receipt, foreground).unwrap_err();
+            assert_eq!(
+                format!("{error:#}"),
+                format!("{expected}: the fixture activation was refused after Clicked; no retry")
             );
         }
     }

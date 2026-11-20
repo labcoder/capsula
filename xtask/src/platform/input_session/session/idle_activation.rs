@@ -189,7 +189,17 @@ impl Session {
         self.root_wait = waited.elapsed();
         self.activation
             .confirm(look, receipt, foreground)
-            .with_context(|| format!("root_wait_ms={}", self.root_wait.as_millis()))
+            .with_context(|| {
+                let front = HWND(std::ptr::with_exposed_provenance_mut(foreground.window));
+                format!(
+                    "root_wait_ms={} foreground_class={:?} foreground_process={:?}",
+                    self.root_wait.as_millis(),
+                    (!front.is_invalid())
+                        .then(|| class_name(front))
+                        .filter(|class| !class.is_empty()),
+                    foreground_process_name(foreground.pid).ok(),
+                )
+            })
     }
 
     /// Who owns `point`, where the pointer is, and whether anything foreign is active.
