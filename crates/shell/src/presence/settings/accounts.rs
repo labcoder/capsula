@@ -5,8 +5,8 @@ use gpui_kit::base::Link;
 use gpui_kit::component::button::Button;
 use gpui_kit::component::{ActiveTheme as _, Disableable as _, WindowExt as _};
 use gpui_kit::{
-    App, Context, FontWeight, InteractiveElement as _, IntoElement, ParentElement as _,
-    Styled as _, Window, div,
+    AnyElement, App, Context, Div, FontWeight, InteractiveElement as _, IntoElement,
+    ParentElement as _, Styled as _, Window, div,
 };
 use kumochi_protocol::message::{
     AccountOp, AccountRecovery, AccountView, Cleanup, ErrorKey, MANAGE_USAGE_URL, PlanState,
@@ -26,6 +26,7 @@ impl SettingsView {
         let fixture = false;
         let model = self.model.read(cx);
         let sign_out = Button::new("account-sign-out")
+            .debug_selector(|| "account-sign-out".into())
             .outline()
             .label(cx.global::<Strings>().get(Text::AccountSignOut))
             .disabled(!model.accounts.allows(AccountOp::SignOut))
@@ -38,7 +39,7 @@ impl SettingsView {
                 let _gone = owner.update(cx, |owner, cx| owner.settings_account_op(op, cx));
             },
             fixture,
-            Some(sign_out),
+            ProviderLayout::Settings(sign_out.into_any_element()),
             cx,
         )
     }
@@ -93,8 +94,27 @@ impl SettingsView {
     }
 }
 
+pub(in crate::presence) enum ProviderLayout<'a> {
+    Settings(AnyElement),
+    Onboarding(&'a mut Vec<Div>),
+}
+
+pub(super) fn provider_row(title: Div, status: Div, actions: Div) -> Div {
+    div()
+        .child(
+            div()
+                .flex()
+                .items_start()
+                .justify_between()
+                .gap_2()
+                .child(title.min_w_0())
+                .child(actions.flex_shrink_0()),
+        )
+        .child(status)
+}
+
 /// The `ChatGPT` section, for every view that shows the account. `route` sends a button's
-/// operation; `fixture` keeps Manage usage inert; `sign_out` shows while signed in.
+/// operation; `fixture` keeps Manage usage inert.
 #[expect(
     clippy::fn_params_excessive_bools,
     reason = "Settings' debug fixture flag, passed through"
@@ -103,9 +123,9 @@ pub(in crate::presence) fn account_section(
     model: &Settings,
     route: impl Fn(AccountOp, &mut App) + Clone + 'static,
     fixture: bool,
-    sign_out: Option<Button>,
+    layout: ProviderLayout<'_>,
     cx: &App,
-) -> impl IntoElement {
+) -> Div {
     let strings = cx.global::<Strings>();
     let state = &model.accounts;
     let (mut status, lines) = account_status(state);
@@ -137,37 +157,45 @@ pub(in crate::presence) fn account_section(
             )
         )
     });
-    div()
-        .flex()
-        .flex_col()
-        .gap_6()
-        .min_w_0()
-        .child(account_header(state, cx))
-        .child(
-            div()
-                .text_sm()
-                .font_weight(FontWeight::MEDIUM)
-                .child(strings.get(status)),
-        )
-        .children(lines.into_iter().map(|text| account_notice(text, cx)))
-        .children(
+    let header = account_header(state, cx);
+    let status = div()
+        .debug_selector(|| "account-status".into())
+        .text_sm()
+        .font_weight(FontWeight::MEDIUM)
+        .child(strings.get(status));
+    let actions = account_actions(state, route, fixture, cx);
+    let details = lines
+        .into_iter()
+        .map(|text| account_notice(text, cx))
+        .chain(
             state
                 .error
                 .as_ref()
                 .filter(|_| !duplicate)
                 .map(|error| account_error(error, cx)),
         )
-        .children(state.send_failed.then(|| {
+        .chain(state.send_failed.then(|| {
             div()
                 .text_sm()
                 .text_color(cx.theme().danger)
                 .child(strings.get(Text::AccountSendFailed))
-        }))
-        .child(account_actions(state, route, fixture, cx))
-        .children(
-            sign_out
-                .filter(|_| matches!(state.view, Some(AccountView::SignedIn { .. })))
-                .map(|sign_out| {
+        }));
+    match layout {
+        ProviderLayout::Onboarding(below) => {
+            below.extend(details);
+            provider_row(header, status, actions)
+        }
+        ProviderLayout::Settings(sign_out) => div()
+            .flex()
+            .flex_col()
+            .gap_6()
+            .min_w_0()
+            .child(header)
+            .child(status)
+            .children(details)
+            .child(actions)
+            .children(
+                matches!(state.view, Some(AccountView::SignedIn { .. })).then(|| {
                     div()
                         .flex()
                         .border_t_1()
@@ -175,7 +203,8 @@ pub(in crate::presence) fn account_section(
                         .pt_4()
                         .child(sign_out)
                 }),
-        )
+            ),
+    }
 }
 
 /// The section's buttons, each sending its operation through `route`, and Manage usage.
@@ -188,7 +217,7 @@ fn account_actions(
     route: impl Fn(AccountOp, &mut App) + Clone + 'static,
     fixture: bool,
     cx: &App,
-) -> impl IntoElement {
+) -> Div {
     let strings = cx.global::<Strings>();
     let button = |id: &'static str, label: Text, op: AccountOp| {
         let route = route.clone();
@@ -284,7 +313,7 @@ fn account_actions(
     actions
 }
 
-fn account_header(state: &Accounts, cx: &App) -> impl IntoElement {
+fn account_header(state: &Accounts, cx: &App) -> Div {
     let strings = cx.global::<Strings>();
     let identity = match &state.view {
         Some(AccountView::SignedIn { email, .. }) => Some(email.as_ref().map_or_else(
@@ -294,6 +323,8 @@ fn account_header(state: &Accounts, cx: &App) -> impl IntoElement {
         _ => None,
     };
     div()
+        .debug_selector(|| "account-provider".into())
+        .min_w_0()
         .flex()
         .items_center()
         .gap_3()
@@ -309,6 +340,7 @@ fn account_header(state: &Accounts, cx: &App) -> impl IntoElement {
             div()
                 .flex()
                 .flex_col()
+                .min_w_0()
                 .gap_1()
                 .child(
                     div()
@@ -325,7 +357,7 @@ fn account_header(state: &Accounts, cx: &App) -> impl IntoElement {
         )
 }
 
-fn account_error(error: &kumochi_protocol::message::UserError, cx: &App) -> impl IntoElement {
+fn account_error(error: &kumochi_protocol::message::UserError, cx: &App) -> Div {
     let strings = cx.global::<Strings>();
     if error.key() == ErrorKey::RevocationBacklog {
         div()
@@ -360,7 +392,7 @@ fn account_error(error: &kumochi_protocol::message::UserError, cx: &App) -> impl
     }
 }
 
-fn account_notice(text: Text, cx: &App) -> impl IntoElement {
+fn account_notice(text: Text, cx: &App) -> Div {
     let strings = cx.global::<Strings>();
     let mut notice = div().flex().flex_col().gap_2().text_sm();
     if matches!(text, Text::AccountCleanupRefused | Text::AccountNotDurable) {

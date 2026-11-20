@@ -24,8 +24,9 @@ brain decides whether onboarding is owed and remembers which steps were complete
   window (`onboarding_chatgpt`, `onboarding_claude`) and one for Settings; `presence/sign_ins.rs`
   moves them on each view and error, and sends the cancels.
 - `presence/onboarding/accounts.rs` draws the account step from Settings' own sections
-  (`account_section`, `claude_section`) without Sign out or Disconnect, routes their buttons
-  through the marks.
+  (`account_section`, `claude_section`) without Sign out or Disconnect, and routes their buttons
+  through the marks. Both provider rows come before the notices, with the actions beside each
+  heading and status. The scrollbar stays visible when details overflow, and the footer stays put.
 - `presence/onboarding.rs` owns the window (`Presence.onboarding`), the launch decision, and
   whether it may still open this run (`Presence.onboarding_run`, put off by Finish later).
 

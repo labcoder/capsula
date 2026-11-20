@@ -2,14 +2,15 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use gpui_kit::{
-    AnyWindowHandle, AppContext as _, Entity, Focusable as _, TestAppContext, VisualTestContext,
-    WindowOptions,
+    AnyWindowHandle, AppContext as _, Entity, Focusable as _, Modifiers, Pixels, Point,
+    ScrollDelta, ScrollEvent, Size, TestAppContext, VisualTestContext, WindowOptions, point, px,
+    size,
 };
 use kumochi_protocol::message::{
-    AccountOp, AccountView, Action, AssistantName, ClaudeCodeView, ClaudeVersion, ConnectionOp,
-    ConnectionsView, ControlToBrain, DockPosition, ErrorKey, GestureId, Incarnation, KeyView,
-    MaxFrameRate, NameError, OnboardingStep, PlanState, SettingsOp, SettingsView, SttUnload,
-    ThreadId, UserError, UserName,
+    AccountEmail, AccountOp, AccountRecovery, AccountView, Action, AssistantName, ClaudeCodeView,
+    ClaudeVersion, ConnectionOp, ConnectionsView, ControlToBrain, DockPosition, ErrorKey,
+    GestureId, Incarnation, KeyView, MaxFrameRate, NameError, OnboardingStep, PlanState,
+    SettingsOp, SettingsView, SttUnload, ThreadId, UserError, UserName,
 };
 
 use super::{OnboardingPanel, OnboardingView, Select};
@@ -935,6 +936,190 @@ const COMPLETE: AccountView = AccountView::SignedIn {
     plan: PlanState::Enabled,
     recovery: None,
 };
+
+fn open_account_step(
+    cx: &mut TestAppContext,
+) -> (
+    Entity<Presence>,
+    AnyWindowHandle,
+    async_channel::Receiver<ControlToBrain>,
+) {
+    let (owner, controls) = connected(cx);
+    account(&owner, 7, SIGNED_OUT, cx);
+    claude(&owner, 7, CLAUDE_OUT, cx);
+    let window = open_at(&owner, OnboardingStep::Accounts, cx);
+    focus_input(&owner, window, cx);
+    (owner, window, controls)
+}
+
+fn draw_account_step(frame: &mut VisualTestContext, smaller_viewport: Option<Size<Pixels>>) {
+    frame.simulate_scale_factor_change(1.0);
+    let viewport = smaller_viewport.unwrap_or_else(|| {
+        let rem = frame.update(|window, _| window.rem_size());
+        size(rem * super::SIZE_REMS[0], rem * super::SIZE_REMS[1])
+    });
+    frame.simulate_resize(viewport);
+    frame.run_until_parked();
+    frame.update(|window, cx| window.draw(cx).clear(cx));
+}
+
+fn visible_account_control(frame: &mut VisualTestContext, selector: &'static str) -> Point<Pixels> {
+    let viewport = frame
+        .debug_bounds("onboarding-accounts")
+        .expect("account viewport");
+    let bounds = frame.debug_bounds(selector).expect(selector);
+    assert_eq!(
+        bounds.intersect(&viewport),
+        bounds,
+        "{selector} is clipped by the account viewport"
+    );
+    bounds.center()
+}
+
+#[gpui::test]
+fn signed_out_onboarding_can_start_chatgpt_sign_in_without_scrolling(cx: &mut TestAppContext) {
+    for viewport in [None, Some(size(px(470.0), px(343.0)))] {
+        let (_owner, window, controls) = open_account_step(cx);
+        let mut frame = VisualTestContext::from_window(window, cx);
+        draw_account_step(&mut frame, viewport);
+        let sign_in = visible_account_control(&mut frame, "account-sign-in");
+        for selector in [
+            "account-provider",
+            "account-status",
+            "claude-provider",
+            "claude-status",
+            "claude-review",
+        ] {
+            visible_account_control(&mut frame, selector);
+        }
+        frame.simulate_click(sign_in, Modifiers::default());
+        frame.run_until_parked();
+        assert_eq!(
+            drain(&controls),
+            [ControlToBrain::AccountOp(AccountOp::SignIn)]
+        );
+    }
+}
+
+#[gpui::test]
+fn other_chatgpt_sign_in_actions_also_work_before_scrolling(cx: &mut TestAppContext) {
+    for (view, failure, selector, op) in [
+        (
+            AccountView::SignedOut {
+                revocation_unconfirmed: true,
+            },
+            None,
+            "account-sign-in",
+            AccountOp::SignIn,
+        ),
+        (
+            AccountView::SigningIn,
+            None,
+            "account-open-again",
+            AccountOp::SignIn,
+        ),
+        (
+            AccountView::SignedIn {
+                email: Some(
+                    AccountEmail::new("an-extremely-long-test-account-address@example.test")
+                        .unwrap(),
+                ),
+                plan: PlanState::Enabled,
+                recovery: Some(AccountRecovery::SignInAgain),
+            },
+            None,
+            "account-sign-in-again",
+            AccountOp::SignIn,
+        ),
+        (
+            COMPLETE,
+            Some(ErrorKey::SessionEnded),
+            "account-sign-in-again",
+            AccountOp::SignIn,
+        ),
+        (
+            AccountView::SignedIn {
+                email: None,
+                plan: PlanState::Declined,
+                recovery: None,
+            },
+            None,
+            "account-enable",
+            AccountOp::EnablePlan,
+        ),
+    ] {
+        let (owner, window, controls) = open_account_step(cx);
+        account(&owner, 7, view, cx);
+        if let Some(key) = failure {
+            error(&owner, key, Action::SignIn, cx);
+        }
+        let mut frame = VisualTestContext::from_window(window, cx);
+        draw_account_step(&mut frame, None);
+        let action = visible_account_control(&mut frame, selector);
+        frame.simulate_click(action, Modifiers::default());
+        frame.run_until_parked();
+        assert_eq!(
+            drain(&controls),
+            [ControlToBrain::AccountOp(op)],
+            "{selector}"
+        );
+    }
+}
+
+#[gpui::test]
+fn claude_code_review_keeps_its_disclosures_before_connect(cx: &mut TestAppContext) {
+    let (owner, window, controls) = open_account_step(cx);
+    let mut frame = VisualTestContext::from_window(window, cx);
+    draw_account_step(&mut frame, None);
+    let footer = frame.debug_bounds("onboarding-continue").expect("footer");
+    let viewport = frame
+        .debug_bounds("onboarding-accounts")
+        .expect("account viewport");
+    let review = visible_account_control(&mut frame, "claude-review");
+    frame.simulate_click(review, Modifiers::default());
+    frame.run_until_parked();
+    frame.update(|window, cx| window.draw(cx).clear(cx));
+    assert_eq!(
+        drain(&controls),
+        [],
+        "review alone does not start a sign-in"
+    );
+    assert!(frame.debug_bounds("claude-connect").unwrap().top() > viewport.bottom());
+    frame.simulate_event(ScrollEvent {
+        position: viewport.center(),
+        delta: ScrollDelta::Pixels(point(px(0.0), px(-1000.0))),
+        ..Default::default()
+    });
+    frame.run_until_parked();
+    frame.update(|window, cx| window.draw(cx).clear(cx));
+    let connect = visible_account_control(&mut frame, "claude-connect");
+    frame.simulate_click(connect, Modifiers::default());
+    frame.run_until_parked();
+    assert_eq!(frame.debug_bounds("onboarding-continue"), Some(footer));
+    assert_eq!(
+        drain(&controls),
+        [ControlToBrain::Connection(ConnectionOp::ConnectClaudeCode)]
+    );
+
+    account(&owner, 7, COMPLETE, cx);
+    claude(
+        &owner,
+        7,
+        ClaudeCodeView::Ready {
+            version: ClaudeVersion {
+                major: 2,
+                minor: 1,
+                patch: 306,
+            },
+            analytics_on: false,
+        },
+        cx,
+    );
+    let mut frame = VisualTestContext::from_window(window, cx);
+    draw_account_step(&mut frame, None);
+    assert_eq!(frame.debug_bounds("account-sign-out"), None);
+    assert_eq!(frame.debug_bounds("claude-disconnect"), None);
+}
 
 #[gpui::test]
 fn enter_on_the_account_step_starts_nothing(cx: &mut TestAppContext) {

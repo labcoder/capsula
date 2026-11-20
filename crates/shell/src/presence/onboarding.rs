@@ -15,7 +15,8 @@ use gpui_kit::component::{ActiveTheme as _, Disableable as _, Sizable as _};
 use gpui_kit::{
     AnyElement, AnyWindowHandle, App, AppContext as _, Context, Entity, FocusHandle,
     Focusable as _, InteractiveElement as _, IntoElement, KeyBinding, ParentElement as _, Render,
-    RenderImage, Styled as _, Subscription, Task, WeakEntity, Window, div, img, px, rems,
+    RenderImage, ScrollHandle, Styled as _, Subscription, Task, WeakEntity, Window, div, img, px,
+    rems,
 };
 use kumochi_protocol::constants;
 use kumochi_protocol::message::ControlToBrain;
@@ -58,6 +59,7 @@ pub(super) struct OnboardingView {
     _kumo_bake: Task<()>,
     /// A `ChatGPT` sign-in this window asked for completed: the plan line shows.
     plan: bool,
+    account_scroll: ScrollHandle,
     _events: Vec<Subscription>,
     _watch: Subscription,
     _focus_lost: Subscription,
@@ -158,6 +160,7 @@ impl OnboardingView {
             kumo: None,
             _kumo_bake: kumo_bake,
             plan: false,
+            account_scroll: ScrollHandle::new(),
             _events: subscriptions,
             _watch: watch,
             _focus_lost: focus_lost,
@@ -439,7 +442,7 @@ impl Render for OnboardingView {
                     .flex_col()
                     .gap_2()
                     .child(body)
-                    .child(
+                    .children((step != Step::Accounts || status.is_some()).then(|| {
                         div()
                             .h(rems(1.25))
                             .text_sm()
@@ -448,8 +451,8 @@ impl Render for OnboardingView {
                             } else {
                                 cx.theme().muted_foreground
                             })
-                            .children(status),
-                    ),
+                            .children(status)
+                    })),
             )
             .child(self.footer(cx))
     }
