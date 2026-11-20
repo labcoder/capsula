@@ -852,6 +852,23 @@ An already-cut scene is left alone on a later Esc; a user clear goes through
 separate host clear event removes the scene from the visible recovery set.
 Prepared display residency is not an admission input.
 
+The dormant presenter conductor binds only a step whose picture waits for speech.
+It chooses one Speech-start head at a time in stable scene order, after the authored
+time and replacement guard allow it. Now and After never create a presenter binding;
+they use their authored visual timing whether they have narration or not. The conductor
+doesn't scan past an uninstalled authored head to reach a later Speech step.
+An opt-in caller supplies the session clock origin and assignment lookup; unresolved isn't
+the same as unassigned. No live link or shell path enables it.
+
+The presenter schedules the keyed onset once, acknowledges only an accepted paint of the
+installed epoch and fences locally on Stop, cut, replacement or session loss. An older stamped
+owner loss can't override a newer route; keyed unstamped loss still can. Retirement cancels
+the old onset. Silent timing alone does not end a binding. A keyed end or owner loss releases it;
+an unshown step keeps its authored start permission without another worker message. There is
+no presenter timeout. After paint, this layer uses the authored clock, not speech motion.
+An authored successor can replace an unpainted Speech picture on time. That visual
+replacement doesn't end the installed Speech binding or credit the successor's paint to it.
+
 ## Caps
 
 Admission enforces the logical caps below, independently of prepared residency.

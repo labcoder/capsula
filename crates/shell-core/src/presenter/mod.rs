@@ -29,6 +29,11 @@
 
 mod activation;
 mod admit;
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "unit four supplies the dormant conductor ports")
+)]
+mod conduction;
 pub mod overlay_input;
 mod paint;
 mod placement;
@@ -142,6 +147,7 @@ pub enum Effect {
 /// Every v1 scene the shell mirrors, and the work preparing them.
 pub struct Presenter {
     draw_timing: Option<Box<dyn FnMut(DrawTiming)>>,
+    conduction: Option<Box<conduction::Conduction>>,
     pub input: overlay_input::OverlayOwner,
     surface: SurfaceGeometry,
     drawing_stage: Option<kumochi_scene::geom::Rect>,
@@ -197,6 +203,7 @@ impl Presenter {
     pub fn new(surface: SurfaceGeometry, theme: Arc<Theme>, stage: Box<dyn Stage>) -> Self {
         Self {
             draw_timing: None,
+            conduction: None,
             input: overlay_input::OverlayOwner::default(),
             surface,
             drawing_stage: None,
@@ -245,6 +252,7 @@ impl Presenter {
 
     /// The connection ended: every job is cancelled and every scene, charge and held frame goes.
     pub fn disconnected(&mut self) {
+        self.conduction = None;
         self.ready.clear();
         self.discard_replacement();
         if let Phase::Recovering(recovery) = std::mem::replace(&mut self.phase, Phase::Offline) {
@@ -652,6 +660,9 @@ impl Presenter {
             }
         }
         self.discard_owned_replacement(run);
+        if let Some(state) = &mut self.conduction {
+            state.fence(|key| key.run == run || owned.contains(&Some(key.scene)));
+        }
         let mut cuts = Vec::new();
         for id in owned.into_iter().flatten() {
             let scene = self.scenes.get_mut(&id).expect("owned installed scene");
@@ -983,6 +994,9 @@ impl Presenter {
         scene.activation.retain(scene.state.view());
         scene.cut = Cut::Applied;
         scene.skipping = false;
+        if let Some(state) = &mut self.conduction {
+            state.fence(|key| key.scene == id);
+        }
         let stopped = scene.stopped_ms.take();
         // An unlogged cut of a view at rest when its Stop started leaves the view and frame
         // current; a moving, delayed or spinning view takes the cut path to its end values.
