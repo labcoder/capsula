@@ -649,4 +649,4 @@ impl Port {
 }
 
 #[cfg(test)]
-mod tests;
+pub(super) mod tests;

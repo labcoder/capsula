@@ -61,6 +61,10 @@ impl Control {
         self.gate.fetch_or(STOPPED, Ordering::AcqRel);
     }
 
+    pub(crate) fn stopped(&self) -> bool {
+        self.gate.load(Ordering::Acquire) & STOPPED != 0
+    }
+
     pub(crate) fn inhibit(&self) {
         self.gate.fetch_or(INHIBITED, Ordering::AcqRel);
     }
