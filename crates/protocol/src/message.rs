@@ -113,6 +113,11 @@ pub struct RunId(pub u64);
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GestureId(pub u32);
 
+/// Which `ScreenHolds::On` the shell showed: the brain counts it up on each connection whenever the
+/// offer's authorization changes. 0 is never sent.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NoticeRevision(pub u64);
+
 /// An exclusion lease generation, counted up by the shell on each connection.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LeaseGeneration(pub u32);
@@ -362,6 +367,8 @@ pub enum ControlToBrain {
         lease: LeaseGeneration,
         /// When the hold was recognized, in QPC ticks.
         t_qpc: u64,
+        /// The `On` showing when the user began the hold; none never allows a capture.
+        notice: Option<NoticeRevision>,
     },
     /// The hold key was released.
     KeyUp {
@@ -481,6 +488,8 @@ pub enum ControlToBrain {
         selection: u64,
         /// When the hold was recognized, in QPC ticks.
         t_qpc: u64,
+        /// As in [`Self::HoldRecognized`].
+        notice: Option<NoticeRevision>,
     },
     /// A screen hold's keys were released: the shell took an exclusion lease and asks for one
     /// picture of the display under the pointer. Answered by one [`ControlToShell::CaptureDone`]
@@ -499,6 +508,8 @@ pub enum ControlToBrain {
         pointer: ReleasePointer,
         /// The pointer's path over the hold; empty when it never moved.
         path: PointerPath,
+        /// The hold's notice from its recognition, never a later one.
+        notice: Option<NoticeRevision>,
     },
     /// The shell skipped a screen scene because the screen may have changed since its picture.
     /// Nothing of it was shown. Appended.
@@ -829,6 +840,12 @@ pub enum ScreenHolds {
     On {
         /// The chosen model's display name.
         model: ModelName,
+        /// The route a hold's picture goes on.
+        connection: ConnectionKind,
+        /// The model a hold's picture goes to.
+        slug: ModelSlug,
+        /// This offer's revision, which a hold the user began under it carries.
+        revision: NoticeRevision,
     },
     /// Holds are voice only.
     Off(ScreenOff),

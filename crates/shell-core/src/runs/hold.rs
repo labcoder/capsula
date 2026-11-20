@@ -1,7 +1,7 @@
 use kumochi_protocol::geometry::{PhysicalPoint, PointerPath, ReleasePointer};
 use kumochi_protocol::message::{
-    ControlToBrain, GestureId, HeldScreen, LeaseGeneration, ModelName, RunId, RunOrigin,
-    ScreenClass, ScreenHolds, ScreenOff, ThreadId,
+    ControlToBrain, GestureId, HeldScreen, LeaseGeneration, ModelName, NoticeRevision, RunId,
+    RunOrigin, ScreenClass, ScreenHolds, ScreenOff, ThreadId,
 };
 
 use super::{Applied, Refused, Runs, Target};
@@ -73,6 +73,8 @@ impl ScreenNotice<'_> {
 pub(super) struct Hold {
     pub(super) gesture: GestureId,
     pub(super) revision: u64,
+    /// The `On` showing when the user began the hold, kept for its release.
+    pub(super) notice: Option<NoticeRevision>,
     pub(super) thread: Option<ThreadId>,
     pub(super) run: Option<RunId>,
     /// Set for a window hold, and for a hold whose screen was refused. Never the pointer:
@@ -98,6 +100,14 @@ impl Runs {
         self.screen_holds.as_ref()
     }
 
+    /// The revision of the `On` showing now, which a hold the user begins now carries.
+    fn shown(&self) -> Option<NoticeRevision> {
+        match &self.screen_holds {
+            Some(ScreenHolds::On { revision, .. }) => Some(*revision),
+            _ => None,
+        }
+    }
+
     /// The notice for a hold on the current target. `own_model` says the target thread runs on
     /// a model other than the default; `default` is the newest default model's name in the
     /// shell's own catalog. A stored `On` naming any other model is out of date, because the
@@ -115,7 +125,7 @@ impl Runs {
             Some(ScreenHolds::Off(ScreenOff::Unsupported)) => ScreenNotice::Hidden,
             Some(ScreenHolds::Off(ScreenOff::TurnedOff)) => ScreenNotice::TurnedOff,
             _ if own_model => ScreenNotice::OwnModel,
-            Some(ScreenHolds::On { model }) if Some(model) == default => ScreenNotice::On(model),
+            Some(ScreenHolds::On { model, .. }) if Some(model) == default => ScreenNotice::On(model),
             Some(ScreenHolds::Off(ScreenOff::ModelCantSee)) => {
                 default.map_or(ScreenNotice::NotReady, ScreenNotice::ModelCantSee)
             }
@@ -218,6 +228,7 @@ impl Runs {
         Ok(self.hold.insert(Hold {
             gesture,
             revision: self.revision,
+            notice: None,
             thread,
             run: None,
             screen: None,
@@ -233,8 +244,10 @@ impl Runs {
         gesture: GestureId,
         screen: Option<ScreenHold>,
     ) -> Result<ControlToBrain, Refused> {
+        let notice = screen.and(self.shown());
         let hold = self.admit_hold(gesture)?;
         hold.screen = screen.map(|_| ScreenLine::WillSee);
+        hold.notice = notice;
         let (thread, selection) = (hold.thread, hold.revision);
         Ok(match screen {
             Some(ScreenHold {
@@ -248,6 +261,7 @@ impl Runs {
                 pointer,
                 lease,
                 t_qpc,
+                notice,
             },
             None => ControlToBrain::VoiceHoldRecognized {
                 gesture,
@@ -273,9 +287,11 @@ impl Runs {
         default: Option<&ModelName>,
     ) -> Result<ControlToBrain, Refused> {
         let on = matches!(self.screen_notice(own_model, default), ScreenNotice::On(_));
+        let notice = self.shown().filter(|_| on);
         let hold = self.admit_hold(gesture)?;
         hold.at_release = on;
         hold.release_due = on;
+        hold.notice = notice;
         let (thread, selection) = (hold.thread, hold.revision);
         Ok(if on {
             ControlToBrain::ScreenHoldRecognized {
@@ -283,6 +299,7 @@ impl Runs {
                 thread,
                 selection,
                 t_qpc,
+                notice,
             }
         } else {
             ControlToBrain::VoiceHoldRecognized {
@@ -338,9 +355,10 @@ impl Runs {
         if !self.releases_screen(gesture, own_model, default) {
             return None;
         }
-        if let Some(hold) = &mut self.hold {
+        let notice = self.hold.as_mut().and_then(|hold| {
             hold.release_due = false;
-        }
+            hold.notice
+        });
         let HoldRelease {
             pointer,
             path,
@@ -355,6 +373,7 @@ impl Runs {
             excluded_qpc,
             pointer: ReleasePointer(pointer),
             path,
+            notice,
         })
     }
 

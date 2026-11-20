@@ -15,8 +15,8 @@ use kumochi_protocol::geometry::PhysicalPoint;
 use kumochi_protocol::message::{
     CaptureFailure, CaptureFor, ConnectionKind, ControlToBrain, ControlToShell, DataToShell,
     HOLD_DRAIN_TIMEOUT_MS, HOLD_START_TIMEOUT_MS, HoldFailure, HoldStatus, LeaseGeneration,
-    MAX_HOLD_CHUNKS, MAX_TRANSCRIPT_BYTES, MicPcm, ModelChoice, ModelSlug, PartState, ScreenClass,
-    ScreenHolds, ScreenOff, SettingsOp, ThreadId, ThreadOp,
+    MAX_HOLD_CHUNKS, MAX_TRANSCRIPT_BYTES, MicPcm, ModelChoice, ModelSlug, NoticeRevision,
+    PartState, ScreenClass, ScreenHolds, ScreenOff, SettingsOp, ThreadId, ThreadOp,
 };
 use tokio::sync::{Notify, mpsc, oneshot};
 use tokio::time::Instant;
@@ -139,8 +139,10 @@ pub(super) struct Holds {
     screen: Option<Arc<HoldClient>>,
     /// Whether this platform captures one window; a client alone doesn't say so.
     window_capture: bool,
-    /// The gate's state last sent on this connection.
-    screen_sent: Option<ScreenHolds>,
+    /// The gate's state last sent on this connection, unstamped, with the sign-in it spoke for.
+    screen_sent: Option<(ScreenHolds, Option<crate::context::ConnectionTag>)>,
+    /// The revision of the last offer sent on this connection.
+    notice: u64,
     /// How long ago a shell's input stamp was taken; tests replace the clock.
     stamp_age: fn(u64) -> Option<Duration>,
     /// Where each hold's screen task sends its answers.
@@ -221,6 +223,7 @@ impl Default for Holds {
             screen: None,
             window_capture: crate::platform::WINDOW_CAPTURE,
             screen_sent: None,
+            notice: 0,
             stamp_age: crate::platform::qpc_age,
             screen_events,
             screen_answers,
@@ -281,6 +284,7 @@ impl Holds {
     pub(super) fn opened(&mut self) {
         self.high = 0;
         self.screen_sent = None;
+        self.notice = 0;
     }
 
     /// None when the shell process could not be checked, so the receipt stays unacknowledged.
@@ -416,6 +420,7 @@ impl Brain {
             pointer,
             lease,
             t_qpc,
+            ..
         } = message
         {
             let held = key(*gesture);
@@ -971,6 +976,8 @@ impl Brain {
         }
         self.coordinator
             .lose_pictures(Some(ConnectionKind::ClaudeCode));
+        // A new generation is a new offer, even for the same model.
+        self.holds.screen_sent = None;
     }
 
     /// Sends the gate's state for the default model once per connection, then whenever it
@@ -991,11 +998,32 @@ impl Brain {
         }
         let choice = self.config.view().default_model.clone();
         let state = self.display_gate(choice.as_ref());
-        if self.holds.screen_sent.as_ref() == Some(&state) {
+        let tag = choice.and_then(
+            |choice| match self.coordinator.availability_of(choice.connection) {
+                crate::coordinator::Availability::Ready(ready) => Some(ready.connection),
+                _ => None,
+            },
+        );
+        let offer = |state: &ScreenHolds| match state {
+            ScreenHolds::On {
+                connection, slug, ..
+            } => Some((*connection, slug.clone())),
+            ScreenHolds::Off(_) => None,
+        };
+        let sent = self.holds.screen_sent.as_ref();
+        if sent.is_some_and(|sent| sent.0 == state && sent.1 == tag) {
             return Ok(());
         }
-        link.control(&ControlToShell::ScreenHolds(state.clone()))?;
-        self.holds.screen_sent = Some(state);
+        // Only a change in what the offer authorizes counts the revision up; a new label doesn't.
+        if !sent.is_some_and(|sent| sent.1 == tag && offer(&sent.0) == offer(&state)) {
+            self.holds.notice += 1;
+        }
+        let mut stamped = state.clone();
+        if let ScreenHolds::On { revision, .. } = &mut stamped {
+            *revision = NoticeRevision(self.holds.notice);
+        }
+        link.control(&ControlToShell::ScreenHolds(stamped))?;
+        self.holds.screen_sent = Some((state, tag));
         Ok(())
     }
 
