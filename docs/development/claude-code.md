@@ -337,7 +337,14 @@ one at a time. A run whose choice names Claude Code starts one through `Claude::
 - **Pipes.** stdin and stdout are bounded channels of `PIPE_QUEUE` (4) chunks. stdout's chunks
   are at most `CHUNK` (64 KiB). stdout never parks in a blocking send: on a full channel it retries every
   `POLL`, and once the round lets go it drops what it reads until EOF. stderr is drained and
-  dropped.
+  dropped. The stdout and stderr read buffers and stdout's chunks are zeroed when they drop: a
+  queued chunk when the round's receiver drops or takes it, a chunk the pump holds while the queue
+  is full when it's queued or discarded, and a read buffer only when its pump returns. A pump
+  blocked in a read holds its buffer until the child's pipe ends, so a release or cancellation
+  isn't proof that every drop has run. The framer grows lazily, doubling up to `MAX_LINE` plus
+  one `CHUNK` (bigger only for a bigger push), by copying into a zeroed replacement and dropping
+  the old allocation, which zeroes it. Compaction clears the bytes it vacates; consumed lines stay
+  until the next push or the framer's drop.
 - **The stdin writer.** The round writes stdin only through the launch's one `StdinWriter`
   (`Pipes::writer()` gives it once). The two control lines share `MAX_CONTROL` (4 KiB). The one
   seed is checked whole against `MAX_SEED` (16 MiB, the encoded line and its newline) before its
@@ -361,8 +368,11 @@ one at a time. A run whose choice names Claude Code starts one through `Claude::
   count. Picture chunks are zeroed on drop, including queued chunks the pump discards. No alias
   fact or switch is enabled here.
   Stdin is the only picture sink: never argv, environment, files or chat history. A structured
-  picture echo or oversized stdout fails closed without forwarding its contents, but the read
-  buffer, queue and framer do not wipe echoed bytes. The owner-only launch
+  picture echo or oversized stdout fails closed without forwarding its contents. The read buffers,
+  stdout's chunks and the framer zero their own storage as described under Pipes, but the
+  parser's copies (JSON values such as a control response's body, strings and errors), memory
+  other code already freed, and the child's and the OS's pipe buffers are not wiped, so echoed
+  picture bytes are still not fully wiped. The owner-only launch
   folder is removed best effort after confirmed teardown, not securely erased. This is not a
   sandbox or a guarantee about what the CLI or provider retains.
 - **The held send.** The round moves its seed's `SendLease` into the launch (`hold_send`) before

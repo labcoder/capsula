@@ -591,6 +591,136 @@ fn stdout_of_exactly_the_budget_passes_and_one_more_byte_fails() {
     assert_eq!(framer.push(b"x"), Err(ClaudeStreamFailure::Budget));
 }
 
+fn count(held: &[u8], marker: &[u8]) -> usize {
+    held.windows(marker.len()).filter(|at| *at == marker).count()
+}
+
+#[test]
+fn compaction_keeps_one_copy_of_the_unread_bytes_and_clears_what_it_vacates() {
+    let marker = b"vacated-marker";
+    let first = [&[b'a'; 100][..], marker, b"\n"].concat();
+    // Longer than the consumed line, so the move overlaps itself.
+    let partial = [&[b'b'; 200][..], marker].concat();
+    let mut framer = LineFramer::default();
+    framer.push(&[&first[..], &partial].concat()).expect("push");
+    assert_eq!(
+        framer.next_line().map(|line| line.map(<[u8]>::len)),
+        Ok(Some(114))
+    );
+    assert_eq!(framer.next_line(), Ok(None));
+    assert_eq!(count(framer.held(), marker), 2, "the consumed line is still owned");
+
+    framer.push(b"\n").expect("push");
+    let held = framer.held();
+    assert_eq!(held.len(), 329, "compacted in place");
+    assert_eq!(count(held, marker), 1, "only the unread copy is left");
+    assert_eq!(held[215..], [0; 114]);
+    assert_eq!(framer.next_line(), Ok(Some(&partial[..])));
+    assert!(!framer.has_partial());
+}
+
+#[test]
+fn growth_doubles_from_the_first_read_and_stops_at_a_full_line_and_one_read() {
+    let mut framer = LineFramer::default();
+    framer.push(&[b'a'; 1000]).expect("push");
+    assert_eq!(framer.held().len(), 1000, "sized to the first read");
+    framer.push(&[b'a'; 10]).expect("push");
+    assert_eq!(framer.held().len(), 2000, "doubled");
+    framer.push(b"\n").expect("push");
+    assert_eq!(framer.held().len(), 2000, "fits");
+    assert_eq!(
+        framer.next_line().map(|line| line.map(<[u8]>::len)),
+        Ok(Some(1010))
+    );
+
+    let mut framer = LineFramer::default();
+    for chunk in vec![b'a'; MAX_LINE].chunks(CHUNK) {
+        framer.push(chunk).expect("push");
+        assert_eq!(framer.next_line(), Ok(None));
+    }
+    assert_eq!(framer.held().len(), MAX_LINE);
+    let read = [&b"\n"[..], &vec![b'b'; CHUNK - 1]].concat();
+    framer.push(&read).expect("push");
+    assert_eq!(framer.held().len(), MAX_LINE + CHUNK, "the bound, not double");
+    assert_eq!(
+        framer.next_line().map(|line| line.map(<[u8]>::len)),
+        Ok(Some(MAX_LINE))
+    );
+    assert_eq!(framer.next_line(), Ok(None));
+    assert!(framer.has_partial());
+
+    let mut framer = LineFramer::default();
+    for chunk in vec![b'a'; MAX_LINE].chunks(CHUNK) {
+        framer.push(chunk).expect("push");
+        assert_eq!(framer.next_line(), Ok(None));
+    }
+    framer.push(b"a").expect("push");
+    assert_eq!(framer.next_line(), Err(ClaudeStreamFailure::LineTooLong));
+}
+
+#[test]
+fn ordinary_text_maps_the_same_and_holds_no_more_than_double_its_longest_need() {
+    let read = 512;
+    let longest = TEXT.split(|&byte| byte == b'\n').map(<[u8]>::len).max();
+    let need = longest.expect("lines") + 1 + read;
+    let mut framer = LineFramer::default();
+    let mut mapper = StreamMapper::default();
+    let mut out = Vec::new();
+    for chunk in TEXT.chunks(read) {
+        framer.push(chunk).expect("within the budget");
+        while let Some(line) = framer.next_line().expect("frames") {
+            match mapper.line(line).expect("maps") {
+                Mapped::Ignored => {}
+                other => out.push(other),
+            }
+        }
+    }
+    assert_eq!(Ok(out), map(&[TEXT]).0);
+    assert!(framer.held().len() <= 2 * need, "{}", framer.held().len());
+}
+
+#[test]
+fn a_pictured_echo_of_exactly_the_line_bound_fails_closed_and_one_more_byte_is_too_long() {
+    let head = br#"{"type":"user","message":{"role":"user","content":[{"type":"text","text":"look"},{"type":"image","source":{"data":""#;
+    let tail = br#""}}]}}"#;
+    let echo = |len: usize| {
+        let pad = vec![b'A'; len - head.len() - tail.len()];
+        [&head[..], &pad, tail, b"\n"].concat()
+    };
+    let mut framer = LineFramer::default();
+    let mut mapper = StreamMapper::default();
+    mapper.refuse_picture_echo();
+    let tool = br#"{"type":"user","message":{"content":[{"type":"tool_result","content":"x"}]}}"#;
+    framer.push(tool).expect("push");
+    framer.push(b"\n").expect("push");
+    let mut mapped = Vec::new();
+    for chunk in echo(MAX_LINE).chunks(CHUNK) {
+        framer.push(chunk).expect("push");
+        while let Some(line) = framer.next_line().expect("frames") {
+            mapped.push((line.len(), mapper.line(line)));
+        }
+    }
+    assert_eq!(
+        mapped,
+        [
+            (tool.len(), Ok(Mapped::Ignored)),
+            (MAX_LINE, Err(ClaudeStreamFailure::PictureEcho))
+        ]
+    );
+    assert!(framer.held().len() <= MAX_LINE + CHUNK);
+
+    let mut framer = LineFramer::default();
+    let mut result = Ok(None);
+    for chunk in echo(MAX_LINE + 1).chunks(CHUNK) {
+        framer.push(chunk).expect("push");
+        result = framer.next_line().map(|line| line.map(<[u8]>::len));
+        if result.is_err() {
+            break;
+        }
+    }
+    assert_eq!(result, Err(ClaudeStreamFailure::LineTooLong));
+}
+
 /// Why `text` can't sit in a committed recording: an absolute path in Windows, UNC or POSIX
 /// spelling, `Users\`, or a UUID other than the all-zero placeholder. Checked on decoded JSON
 /// strings, so escaped spellings count too.

@@ -10,8 +10,10 @@ use std::fmt;
 use serde::de::{self, MapAccess, Visitor};
 use serde::{Deserialize, Deserializer};
 use serde_json::Value;
+use zeroize::{Zeroize, Zeroizing};
 
 use super::super::{ClaudeStreamFailure, EngineFailure, Finish, Tokens, TurnEvent, Usage};
+use super::supervisor::CHUNK;
 
 /// The longest line taken, line feed excluded.
 pub(crate) const MAX_LINE: usize = 1 << 20;
@@ -20,12 +22,21 @@ pub(crate) const MAX_STDOUT: u64 = 16 << 20;
 /// The native requests one question may make: the launch policy's verified `--max-turns 8`.
 pub(crate) const MAX_NATIVE_TURNS: u8 = 8;
 
+/// Where the framer stops doubling: a partial line of [`MAX_LINE`] and one [`CHUNK`] read.
+const MAX_HELD: usize = MAX_LINE + CHUNK;
+
 /// Splits stdout into lines, charging every byte to [`MAX_STDOUT`] before it's framed.
+///
+/// Its storage grows lazily, by copying into a zeroed replacement and dropping the old one, which
+/// zeroes it. Compaction clears the bytes it vacates; consumed lines stay in place until the next
+/// push or the drop. Parser copies of a line are not covered.
 #[derive(Default)]
 pub(crate) struct LineFramer {
-    buf: Vec<u8>,
+    /// All initialized: past `end` it's zero.
+    buf: Zeroizing<Vec<u8>>,
     start: usize,
     searched: usize,
+    end: usize,
     charged: u64,
     #[cfg(test)]
     scanned: usize,
@@ -34,7 +45,7 @@ pub(crate) struct LineFramer {
 impl fmt::Debug for LineFramer {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("LineFramer")
-            .field("unread", &(self.buf.len() - self.start))
+            .field("unread", &(self.end - self.start))
             .field("charged", &self.charged)
             .finish_non_exhaustive()
     }
@@ -50,10 +61,22 @@ impl LineFramer {
         if self.charged > MAX_STDOUT {
             return Err(ClaudeStreamFailure::Budget);
         }
-        self.buf.drain(..self.start);
+        let unread = self.end - self.start;
+        let end = unread + bytes.len();
+        if end > self.buf.len() {
+            let held = (self.buf.len() * 2).clamp(end, MAX_HELD.max(end));
+            let mut grown = Zeroizing::new(vec![0; held]);
+            grown[..unread].copy_from_slice(&self.buf[self.start..self.end]);
+            grown[unread..end].copy_from_slice(bytes);
+            self.buf = grown;
+        } else {
+            self.buf.copy_within(self.start..self.end, 0);
+            self.buf[unread..end].copy_from_slice(bytes);
+            self.buf[end.min(self.end)..self.end].zeroize();
+        }
         self.searched -= self.start;
         self.start = 0;
-        self.buf.extend_from_slice(bytes);
+        self.end = end;
         Ok(())
     }
 
@@ -62,14 +85,14 @@ impl LineFramer {
     /// # Errors
     /// [`ClaudeStreamFailure::LineTooLong`] for a line over [`MAX_LINE`], complete or not.
     pub(crate) fn next_line(&mut self) -> Result<Option<&[u8]>, ClaudeStreamFailure> {
-        let rest = &self.buf[self.searched..];
+        let rest = &self.buf[self.searched..self.end];
         let end = rest.iter().position(|&byte| byte == b'\n');
         #[cfg(test)]
         {
             self.scanned += end.map_or(rest.len(), |end| end + 1);
         }
         let Some(end) = end else {
-            self.searched = self.buf.len();
+            self.searched = self.end;
             if self.searched - self.start > MAX_LINE {
                 return Err(ClaudeStreamFailure::LineTooLong);
             }
@@ -87,7 +110,13 @@ impl LineFramer {
 
     /// Whether a partial line is left: at EOF, the stream was cut.
     pub(crate) fn has_partial(&self) -> bool {
-        self.start < self.buf.len()
+        self.start < self.end
+    }
+
+    /// Everything it owns, consumed and vacated bytes included.
+    #[cfg(test)]
+    pub(crate) fn held(&self) -> &[u8] {
+        &self.buf
     }
 }
 
