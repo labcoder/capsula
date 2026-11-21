@@ -104,7 +104,11 @@ impl Presence {
             }
             Route::Accounts => self.open_accounts(cx)?,
             Route::Settings => self.open_general(cx)?,
-            Route::Usage => cx.open_url(MANAGE_USAGE_URL),
+            Route::Usage => {
+                if self.settings.read(cx).accounts.waiting.is_none() {
+                    cx.open_url(MANAGE_USAGE_URL);
+                }
+            }
         }
         Ok(())
     }
@@ -141,7 +145,8 @@ impl TextView {
                     }
                     Route::Account(op) => connected && settings.accounts.allows(op),
                     Route::SettingsRetry(field) => connected && !settings.field(field).saving,
-                    Route::Accounts | Route::Settings | Route::Usage => true,
+                    Route::Usage => settings.accounts.waiting.is_none(),
+                    Route::Accounts | Route::Settings => true,
                 };
                 let owner = self.owner.clone();
                 let rendered = Rc::clone(notice);
@@ -151,6 +156,7 @@ impl TextView {
                         Link::new(("chat-recovery", ix))
                             .debug_selector(move || format!("chat-recovery-action-{ix}"))
                             .href(MANAGE_USAGE_URL)
+                            .disabled(!enabled)
                             .text_color(cx.theme().link)
                             .underline()
                             .open_with(move |_, _, _, cx| {
