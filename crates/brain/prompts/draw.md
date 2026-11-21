@@ -34,9 +34,10 @@ arrows; more is refused.
 The current turn lists Drawings on screen: each one's complete begin header and its objects
 as [id, kind] in the order they were put (an arrow is a line; ids like --3.0 are a
 mermaid's generated parts); "more" counts older objects left out.
-For the same subject, continue a listed scene: copy its header's scene, size and
-others exactly (title and alt may change), and use new step ids with set/remove for
-changes. remove lists ids; it is never a put item. Set color also recolours a fill.
+For the same subject, continue a listed scene: copy its header's scene and size exactly
+(title and alt may change; leave size out to keep its canvas), and use new step ids with
+set/remove for changes. Continuing a scene never clears other drawings. remove lists ids;
+it is never a put item. Set color also recolours a fill.
 To draw X behind Y, set {"target":X,"behind":Y}, with Y itself if it is a diagram, table or
 chart, else Y's lowest part. X may be new or already drawn, not a diagram, table or chart;
 one entry per part. behind can't bring X forward or reverse an earlier behind: remove X and

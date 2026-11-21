@@ -99,7 +99,8 @@ pub struct Begin {
 }
 impl Begin {
     /// Whether this header continues a scene stored under `stored`. Title and alt describe the
-    /// drawing and may be restated differently; every other field identifies it.
+    /// drawing and may be restated differently, `others` acts only when a scene is created, and
+    /// a left-out size keeps the stored canvas; every other field identifies it.
     #[must_use]
     pub fn continues(&self, stored: &Self) -> bool {
         // shortcut: the stored title and alt keep their first text and can go stale after an edit; store the latest once a stale description shows.
@@ -110,14 +111,13 @@ impl Begin {
             size,
             title: _,
             alt: _,
-            others,
+            others: _,
             display,
         } = self;
         *v == stored.v
             && *scene == stored.scene
             && *surface == stored.surface
-            && *size == stored.size
-            && *others == stored.others
+            && (size.is_none() || *size == stored.size)
             && *display == stored.display
     }
 }

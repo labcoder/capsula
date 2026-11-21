@@ -482,6 +482,20 @@ fn lifetime_steps_include_dropped_steps_and_duplicate_is_still_a_noop_at_cap() {
 }
 
 #[test]
+fn a_continuation_may_leave_out_size_and_restate_others() {
+    let Record::Begin(stored) = record(
+        r#"{"begin":{"v":1,"scene":"scene","surface":"overlay","alt":"","size":[600,400]}}"#,
+    ) else {
+        panic!("begin fixture");
+    };
+    let continuation =
+        record(r#"{"begin":{"v":1,"scene":"scene","surface":"overlay","alt":"","others":"keep"}}"#);
+    CallState::default()
+        .accept(&continuation, &stored)
+        .expect("the stored header keeps its canvas and others");
+}
+
+#[test]
 fn call_guards_allow_typed_equal_continuations_but_not_records_after_end() {
     let header = header();
     let mut call = CallState::default();
@@ -503,10 +517,6 @@ fn call_guards_allow_typed_equal_continuations_but_not_records_after_end() {
         (
             r#"{"begin":{"v":1,"scene":"scene","surface":"inline","alt":""}}"#,
             "same scene needs the same surface",
-        ),
-        (
-            r#"{"begin":{"v":1,"scene":"scene","surface":"overlay","alt":"","others":"keep"}}"#,
-            "same scene needs the same others",
         ),
         (
             r#"{"begin":{"v":1,"scene":"other","surface":"overlay","alt":""}}"#,
