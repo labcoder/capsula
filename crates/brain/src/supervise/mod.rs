@@ -291,6 +291,12 @@ impl<K: Kind> Handle<K> {
         self.notices.exits.clone()
     }
 
+    /// Makes the supervisor fatal as an unconfirmed exit does, without publishing that exit.
+    #[cfg(test)]
+    pub(crate) fn test_fatal(&self) {
+        self.notices.fatal.store(true, Ordering::Release);
+    }
+
     /// Submits one request, answered by `until` or not at all. `until` is absolute: it covers
     /// queueing, an exit confirmation or respawn in progress and every chunk. A full queue or
     /// backoff fails fast, and an unconfirmed exit refuses for good. The reply comes with the
