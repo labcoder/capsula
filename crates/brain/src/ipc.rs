@@ -32,7 +32,7 @@ pub use crate::runtime::audio_fixture::AudioProbe;
 pub use audio_fixture::{
     offline_audio_peer, offline_authored_then_narrated_peer, offline_narrated_peer,
     offline_narrated_replacement_chain_peer, offline_narrated_replacement_peer,
-    offline_narrated_stopped_replacement_peer, offline_plain_peer,
+    offline_narrated_stopped_replacement_peer, offline_plain_peer, offline_text_peer,
 };
 
 /// How long a connected client has to complete each step of the handshake.

@@ -20,13 +20,18 @@ settings, recovery, and cleanup keep their existing paths. A duplicate registrat
 Legacy announcement, current-output withdrawal, or failed receipt enqueue ends the pair.
 The receipt isn't proof of playback, silence, or the shell having received it.
 
-The queued shell link registers only after talk-back Settings and accepts the exact registration
-receipt once, by the original startup deadline. Its data reader can wait on one charged Plain
+The queued shell link registers its logical output after the first Settings, even with Talk-back
+off. It accepts the exact registration receipt once, by the original startup deadline. A change
+to Talk-back ends the pair rather than changing its audio contract in place; output failure
+doesn't turn an audio-required pair into a text-only pair. Its data reader can wait on one charged Plain
 announcement or PCM frame until the control reader names that run. Control stays available while
 the data head waits, and the session owner wakes that head on binding, returned capacity, revocation
 or close. In Plain mode, Speech-start announcements and scene speech promises end
 the pair without credit.
-Each run uses the existing per-run worker. A Stop fences that run's late PCM, and a replacement
+Talk-back-off typed turns bind the same run identity but start no speaker worker. They owe
+no audio receipts. Unexpected speech ends a silent pair without credit, before waiting for a
+run to be named or draining a stopped or ended run.
+Speaking runs use the existing per-run worker. A Stop fences that run's late PCM, and a replacement
 cannot use closing a pipe or freeing a device permit as proof of quiet.
 Esc fences the scene before offering Stop or StopScenes to its exact session's control mailbox.
 A SceneFailed caused by host refusal follows in that same mailbox; neither offer takes the

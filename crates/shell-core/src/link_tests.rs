@@ -2948,6 +2948,281 @@ fn queued_text(turn: u32, text: &str) -> DataToBrain {
 }
 
 #[test]
+fn authenticated_queued_text_replies_with_talk_back_off() {
+    use kumochi_protocol::message::AudioSession;
+
+    let _device = serialize_playback();
+    let (id, hello, probe, brain) =
+        kumochi_brain::ipc::offline_text_peer("0 text A written reply.".into());
+    let pipe = authenticated_primed(id, hello);
+    let events = patient(pipe.events);
+    let session = connected(next(&events));
+    let generation = session.generation();
+    let settings = events
+        .recv_timeout(PATIENCE)
+        .expect("Talk-back off must not tear down the authenticated queued pair");
+    let LinkEvent::Settings { view, .. } = settings else {
+        panic!("the first application frame is Settings");
+    };
+    assert!(!view.talk_back);
+    assert_eq!(pipe.handle.audio_session(), AudioSession::QueuedRequired);
+    assert!(!pipe.handle.admits_text(Some(&session)));
+    assert!(!pipe.handle.send_data(&session, queued_text(1, "early")));
+
+    probe.release_ack();
+    probe.release_run();
+    probe.allow_data_credit();
+    let deadline = Instant::now() + PATIENCE;
+    while !pipe.handle.admits_text(Some(&session)) {
+        assert!(
+            Instant::now() < deadline && session.open(),
+            "matching registration"
+        );
+        thread::sleep(Duration::from_millis(2));
+    }
+    for turn in 1..=2 {
+        let id = RunId(u64::from(turn));
+        assert!(pipe.handle.send_data(&session, queued_text(turn, "write")));
+        let mut answer = String::new();
+        let (mut named, mut done, mut ended) = (false, false, false);
+        while !(named && done && ended) {
+            match next(&events) {
+                LinkEvent::RunState {
+                    generation: connected,
+                    run,
+                    phase: Phase::Thinking,
+                    origin,
+                    ..
+                } => {
+                    assert_eq!(
+                        (connected, run, origin),
+                        (generation, id, Some(RunOrigin::Typed { turn }))
+                    );
+                    named = true;
+                }
+                LinkEvent::RunState {
+                    run,
+                    phase: Phase::Done,
+                    ..
+                } => {
+                    assert_eq!(run, id);
+                    done = true;
+                }
+                LinkEvent::Data { message, bytes, .. } => {
+                    match message {
+                        DataToShell::AssistantText { run, delta } => {
+                            assert_eq!(run, id);
+                            answer.push_str(delta.as_str());
+                        }
+                        DataToShell::RunEnd { run } => {
+                            assert_eq!(run, id);
+                            ended = true;
+                        }
+                        _ => {}
+                    }
+                    session.grant(bytes);
+                }
+                LinkEvent::TurnRefused { .. } | LinkEvent::Error { .. } => {
+                    panic!("the text turn must finish normally")
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(answer, "A written reply.");
+        assert!(probe.received_retirements(id).is_empty());
+    }
+    assert!(session.open());
+    pipe.handle.end(&session);
+    assert!(pipe.link.join().unwrap());
+    assert!(brain.join().unwrap());
+    drop(pipe.handle);
+    assert!(matches!(
+        pipe.playback.recv_timeout(PATIENCE),
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected)
+    ));
+    assert_eq!(probe.heard(), 0);
+    assert_eq!(probe.quiet_receipt(), None);
+}
+
+#[derive(Clone, Copy)]
+enum SilentSpeechAt {
+    Live,
+    Stopped,
+    Ended,
+    Future,
+}
+
+#[test]
+fn queued_speech_on_a_talk_back_off_run_closes_without_credit() {
+    assert_silent_speech_refused("queued-silent-live", SilentSpeechAt::Live);
+}
+
+#[test]
+fn queued_speech_on_a_talk_back_off_run_after_stop_closes_without_credit() {
+    assert_silent_speech_refused("queued-silent-stopped", SilentSpeechAt::Stopped);
+}
+
+#[test]
+fn queued_speech_on_a_talk_back_off_run_after_end_closes_without_credit() {
+    assert_silent_speech_refused("queued-silent-ended", SilentSpeechAt::Ended);
+}
+
+#[test]
+fn queued_speech_on_a_talk_back_off_run_before_its_name_closes_without_waiting() {
+    assert_silent_speech_refused("queued-silent-future", SilentSpeechAt::Future);
+}
+
+#[expect(
+    clippy::too_many_lines,
+    reason = "one attended pair exercises each boundary from registration to teardown"
+)]
+fn assert_silent_speech_refused(label: &str, at: SilentSpeechAt) {
+    use kumochi_protocol::message::{SegmentId, SegmentStart};
+
+    let _device = serialize_playback();
+    let (device, playback) = std::sync::mpsc::sync_channel(1);
+    let link = attended_queued_shared(
+        label,
+        Arc::new(Shared {
+            fake_playback: Some(device),
+            prime_fake_playback: std::sync::atomic::AtomicBool::new(true),
+            ..Shared::default()
+        }),
+    );
+    let events = patient(link.events);
+    let session = connected(next(&events));
+    frame::write(
+        &mut &link.control,
+        &ControlToShell::Settings {
+            view: settings_view(),
+            answer: false,
+        },
+        Pipe::Control,
+    )
+    .expect("send Talk-back-off settings");
+    let Some(ControlToBrain::QueuedAudioOutput(24_000, output_generation)) =
+        frame::read(&mut &link.control, Pipe::Control).expect("read logical registration")
+    else {
+        panic!("expected the logical queued output");
+    };
+    acknowledge_queued(&link.control, output_generation);
+    assert!(
+        matches!(next(&events), LinkEvent::Settings { .. }),
+        "the authenticated pair forwards Settings"
+    );
+    let text = queued_text(1, "write");
+    assert!(
+        link.handle.send_data(&session, text.clone()),
+        "the registered pair accepts text"
+    );
+    assert_eq!(
+        frame::read(&mut &*link.data, Pipe::Data).expect("read the first turn"),
+        Some(text),
+        "the first typed turn reaches the peer unchanged"
+    );
+    frame::write(
+        &mut &link.control,
+        &run_state(
+            1,
+            ThreadId(1),
+            Phase::Thinking,
+            Some(RunOrigin::Typed { turn: 1 }),
+        ),
+        Pipe::Control,
+    )
+    .expect("name the first typed run");
+    assert!(
+        matches!(next(&events), LinkEvent::RunState { run: RunId(1), .. }),
+        "the output owner binds the first run before its data"
+    );
+    let mut run = RunId(1);
+    match at {
+        SilentSpeechAt::Live => {}
+        SilentSpeechAt::Stopped => {
+            let stop = ControlToBrain::Stop {
+                run,
+                revealed: Vec::new(),
+            };
+            assert!(
+                link.handle.send_control(&session, stop.clone()),
+                "the local Stop reaches the peer"
+            );
+            assert_eq!(
+                link.handle.output().stop(session.generation(), run),
+                Ok(()),
+                "local Stop fences the run without waiting for RunEnd"
+            );
+            assert_eq!(
+                frame::read(&mut &link.control, Pipe::Control).expect("read local Stop"),
+                Some(stop),
+                "no audio report precedes Stop"
+            );
+        }
+        SilentSpeechAt::Ended => {
+            let end = DataToShell::RunEnd { run };
+            frame::write(&mut &*link.data, &end, Pipe::Data).expect("send RunEnd");
+            let LinkEvent::Data { message, bytes, .. } = next(&events) else {
+                panic!("the data reader must finish the run before the first announcement");
+            };
+            assert_eq!(message, end, "the test observes the ordered RunEnd");
+            session.grant(bytes);
+            assert_eq!(
+                frame::read(&mut &*link.data, Pipe::Data).expect("read credit for RunEnd"),
+                Some(DataToBrain::Credit { bytes }),
+                "legitimate non-speech data still returns credit"
+            );
+        }
+        SilentSpeechAt::Future => {
+            let text = queued_text(2, "next");
+            assert!(
+                link.handle.send_data(&session, text.clone()),
+                "the successor is pending but unnamed"
+            );
+            assert_eq!(
+                frame::read(&mut &*link.data, Pipe::Data).expect("read the second turn"),
+                Some(text),
+                "the peer knows the successor submit"
+            );
+            run = RunId(2);
+        }
+    }
+    frame::write(
+        &mut &*link.data,
+        &DataToShell::SegmentQueued {
+            run,
+            segment: SegmentId(0),
+            step: None,
+            start: SegmentStart::Plain,
+            output_generation,
+        },
+        Pipe::Data,
+    )
+    .expect("send the first unexpected plain announcement");
+    link.data.set_timeout(Some(Duration::from_secs(2)));
+    assert_eq!(
+        frame::read::<DataToBrain>(&mut &*link.data, Pipe::Data)
+            .expect("silent speech must be rejected before the input-ready deadline"),
+        None,
+        "unexpected speech must close the data pipe without credit"
+    );
+    queued_pair_closed(link.link, &link.control, &link.data);
+    assert!(
+        !link
+            .handle
+            .send_data(&session, queued_text(3, "after refusal")),
+        "neither pipe remains available for another turn"
+    );
+    drop(link.handle);
+    assert!(
+        matches!(
+            playback.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Disconnected)
+        ),
+        "the silent pair never tried to prime its fake device"
+    );
+}
+
+#[test]
 fn refused_queued_stop_closes_admission_before_background_pair_teardown() {
     use super::output::Denied;
 
