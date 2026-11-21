@@ -1,5 +1,7 @@
+use std::num::NonZeroU64;
+
 use kumochi_protocol::message::{
-    MAX_SEGMENTS_PER_RUN, SegmentId, SegmentStart, SpeechPromise, StepRef,
+    MAX_SEGMENTS_PER_RUN, SceneId, SegmentId, SegmentStart, SpeechPromise, StepRef,
 };
 
 use super::{
@@ -21,6 +23,7 @@ pub(super) enum MetadataFrame {
 #[derive(Default)]
 pub(super) struct Reader {
     announced: Option<(RunId, u32)>,
+    retirements: u64,
 }
 
 impl Reader {
@@ -75,11 +78,16 @@ impl Reader {
                 output_generation,
                 ..
             } => (run, segment, output_generation, None),
-            DataToShell::ScenesReplaced {
-                ref scenes,
-                successor,
-            } if narrated.is_some_and(|bridge| !bridge.replaced(scenes, successor)) => {
-                return Err(());
+            DataToShell::ScenesRemoved { ref scenes }
+            | DataToShell::ScenesReplaced { ref scenes, .. }
+                if narrated.is_some() =>
+            {
+                let successor = match &message {
+                    DataToShell::ScenesReplaced { successor, .. } => Some(*successor),
+                    _ => None,
+                };
+                self.retirement(narrated.ok_or(())?, scenes, successor)?;
+                return Ok(Some(message));
             }
             DataToShell::SpeechPcm(pcm) => (
                 pcm.run,
@@ -125,6 +133,24 @@ impl Reader {
         Ok(None)
     }
 
+    fn retirement(
+        &mut self,
+        narrated: &Narrated,
+        scenes: &[SceneId],
+        successor: Option<SceneId>,
+    ) -> Result<(), ()> {
+        let ordinal = self
+            .retirements
+            .checked_add(1)
+            .and_then(NonZeroU64::new)
+            .ok_or(())?;
+        if !narrated.retiring(scenes, successor, ordinal) {
+            return Err(());
+        }
+        self.retirements = ordinal.get();
+        Ok(())
+    }
+
     fn metadata(
         owner: &OutputOwner,
         narrated: &Narrated,
@@ -154,7 +180,7 @@ impl Reader {
         speech: Option<SpeechPromise>,
     ) -> Result<(), ()> {
         let Some(promise) = speech else {
-            return narrated.unassigned(key).then_some(()).ok_or(());
+            return wait_for(|| narrated.unassigned(key));
         };
         let assignment = Assignment {
             session,

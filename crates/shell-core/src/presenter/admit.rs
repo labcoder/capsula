@@ -179,7 +179,10 @@ impl Presenter {
             match &**frame {
                 DataToShell::SceneBegin { scene, .. } => begun.push(*scene),
                 DataToShell::ScenesRemoved { scenes }
-                | DataToShell::ScenesReplaced { scenes, .. } => self.removed(scenes, now, out)?,
+                | DataToShell::ScenesReplaced { scenes, .. } => {
+                    self.removed(scenes, now, out)?;
+                    self.narration_retirement_consumed();
+                }
                 _ => {}
             }
         }

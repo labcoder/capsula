@@ -28,6 +28,12 @@ recovery doesn't turn restored drawing records into Chat text or promise live sp
 live commit only promises narration for a speech-start step whose segment was actually
 announced. That metadata doesn't change presentation timing.
 
+On narrated links, a commit without a promise remains distinguishable from an
+unresolved promise while its scene can still use it. The Presenter acknowledges
+a wire removal or replacement only when it applies that FIFO frame, including
+frames held behind admission. Reading it off the pipe doesn't reclaim the older
+keys: earlier commits may still need them.
+
 The brain's provider path uses the existing cursor tokenizer and public 2D `parse_draw_record`
 gate for each closed record, then the drawing reducer's order/semantic admission and store FIFO.
 Complete-call/MCP typed preflight stays whole-envelope. A committed provider prefix can outlive

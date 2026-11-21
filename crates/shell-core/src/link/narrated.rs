@@ -1,3 +1,4 @@
+use std::num::NonZeroU64;
 use std::sync::{
     Arc, Mutex, OnceLock, TryLockError, Weak,
     atomic::{AtomicBool, AtomicU64, Ordering},
@@ -55,6 +56,7 @@ pub(crate) struct Narrated {
     stopped: AtomicU64,
     current: AtomicU64,
     wire_ended: AtomicU64,
+    consumed_retirements: AtomicU64,
     busy: AtomicBool,
     retrying: AtomicBool,
     state: Mutex<State>,
@@ -68,7 +70,7 @@ struct State {
     promised: Option<Assignment>,
     replaced_before_promise: [Option<SceneId>; MAX_VISIBLE_SCENES],
     retired: bool,
-    unassigned: Vec<DrawKey>,
+    absences: Absences,
     assignment: Option<Assignment>,
     wake: Option<Arc<RunWake>>,
     handed_off: bool,
@@ -81,6 +83,32 @@ struct State {
     ended: Option<Binding>,
     worker_ended: bool,
     worker: Option<(RunId, Thread)>,
+}
+
+#[derive(Debug, Default)]
+struct Absences {
+    keys: Vec<Absence>,
+    reclaimed: u64,
+}
+
+#[derive(Debug)]
+struct Absence {
+    key: DrawKey,
+    retired_by: Option<NonZeroU64>,
+}
+
+impl Absences {
+    fn contains(&self, key: DrawKey) -> bool {
+        self.keys.iter().any(|entry| entry.key == key)
+    }
+
+    fn reclaim(&mut self, consumed: u64) {
+        if consumed != self.reclaimed {
+            self.keys
+                .retain(|entry| entry.retired_by.is_none_or(|at| at.get() > consumed));
+            self.reclaimed = consumed;
+        }
+    }
 }
 
 impl State {
@@ -139,6 +167,7 @@ impl Narrated {
             stopped: AtomicU64::new(0),
             current: AtomicU64::new(0),
             wire_ended: AtomicU64::new(0),
+            consumed_retirements: AtomicU64::new(0),
             busy: AtomicBool::new(false),
             retrying: AtomicBool::new(false),
             state: Mutex::default(),
@@ -196,12 +225,16 @@ impl Narrated {
         }
     }
 
-    pub(super) fn can_promise(&self, run: RunId) -> Result<bool, ()> {
-        if self.pair.get().is_some_and(|pair| {
+    fn closing(&self) -> bool {
+        self.pair.get().is_some_and(|pair| {
             pair.closing
                 .upgrade()
                 .is_none_or(|closing| closing.load(Ordering::Acquire))
-        }) {
+        })
+    }
+
+    pub(super) fn can_promise(&self, run: RunId) -> Result<bool, ()> {
+        if self.closing() {
             return Err(());
         }
         let state = self.state.lock().map_err(|_| ())?;
@@ -285,7 +318,10 @@ impl Narrated {
                 if self.stopped(assignment.run) {
                     return true;
                 }
-                if state.unassigned.contains(&key) {
+                state
+                    .absences
+                    .reclaim(self.consumed_retirements.load(Ordering::Acquire));
+                if state.absences.contains(key) {
                     return false;
                 }
                 if let Some(old) = state.promised {
@@ -301,7 +337,7 @@ impl Narrated {
                         return false;
                     }
                     *state = State {
-                        unassigned: std::mem::take(&mut state.unassigned),
+                        absences: std::mem::take(&mut state.absences),
                         replaced_before_promise: state.replaced_before_promise,
                         retired_decision: debt.or(state.retired_decision),
                         worker: state.worker.take(),
@@ -319,39 +355,77 @@ impl Narrated {
             })
     }
 
-    pub(super) fn replaced(&self, scenes: &[SceneId], successor: SceneId) -> bool {
-        if scenes.is_empty()
-            || scenes.len() > MAX_VISIBLE_SCENES
-            || scenes.contains(&successor)
-            || scenes
-                .iter()
-                .enumerate()
-                .any(|(at, id)| scenes[..at].contains(id))
+    pub(super) fn retiring(
+        &self,
+        scenes: &[SceneId],
+        successor: Option<SceneId>,
+        ordinal: NonZeroU64,
+    ) -> bool {
+        if scenes.len() > MAX_VISIBLE_SCENES
+            || successor.is_some_and(|successor| {
+                scenes.is_empty()
+                    || scenes.contains(&successor)
+                    || scenes
+                        .iter()
+                        .enumerate()
+                        .any(|(at, id)| scenes[..at].contains(id))
+            })
         {
             return false;
         }
         self.state.lock().is_ok_and(|mut state| {
-            if let Some(assignment) = state.promised.filter(|a| !self.stopped(a.run)) {
-                state.retired |= scenes.contains(&assignment.step.scene);
-            } else {
-                state.replaced_before_promise = std::array::from_fn(|at| scenes.get(at).copied());
+            if successor.is_some() {
+                if let Some(assignment) = state.promised.filter(|a| !self.stopped(a.run)) {
+                    state.retired |= scenes.contains(&assignment.step.scene);
+                } else {
+                    state.replaced_before_promise =
+                        std::array::from_fn(|at| scenes.get(at).copied());
+                }
+            }
+            state
+                .absences
+                .reclaim(self.consumed_retirements.load(Ordering::Acquire));
+            for entry in &mut state.absences.keys {
+                if scenes.contains(&entry.key.scene) {
+                    entry.retired_by.get_or_insert(ordinal);
+                }
             }
             true
         })
     }
 
-    pub(super) fn unassigned(&self, key: DrawKey) -> bool {
-        valid_key(key)
-            && self.state.lock().is_ok_and(|mut state| {
-                if state.promised.is_some_and(|a| draw_key(a) == key)
-                    || state.unassigned.len() == MAX_VISIBLE_SCENES * MAX_STEPS
-                    || state.unassigned.contains(&key)
-                {
-                    return false;
-                }
-                state.unassigned.push(key);
-                true
-            })
+    fn retirement_consumed(&self) {
+        self.consumed_retirements.fetch_add(1, Ordering::Release);
+        if let Some(reader) = self.pair.get().and_then(|pair| pair.reader.get()) {
+            reader.unpark();
+        }
+    }
+
+    pub(super) fn unassigned(&self, key: DrawKey) -> Result<bool, ()> {
+        if !valid_key(key) || self.closing() {
+            return Err(());
+        }
+        let mut state = self.state.lock().map_err(|_| ())?;
+        state
+            .absences
+            .reclaim(self.consumed_retirements.load(Ordering::Acquire));
+        if state.promised.is_some_and(|a| draw_key(a) == key) || state.absences.contains(key) {
+            return Err(());
+        }
+        if state.absences.keys.len() == MAX_VISIBLE_SCENES * MAX_STEPS {
+            return state
+                .absences
+                .keys
+                .iter()
+                .any(|key| key.retired_by.is_some())
+                .then_some(false)
+                .ok_or(());
+        }
+        state.absences.keys.push(Absence {
+            key,
+            retired_by: None,
+        });
+        Ok(true)
     }
 
     pub(super) fn announce(&self, assignment: Assignment) -> bool {
@@ -397,13 +471,18 @@ impl Narrated {
         {
             Ok(Some(assignment))
         } else {
-            state.unassigned.contains(&key).then_some(None).ok_or(())
+            state.absences.contains(key).then_some(None).ok_or(())
         }
     }
 
     pub(crate) fn attach(self: &Arc<Self>, presenter: &mut Presenter) {
         let bridge = Arc::clone(self);
-        presenter.start_conduction(self.origin, move |key| bridge.assignment(key));
+        let retire = Arc::clone(self);
+        presenter.start_conduction(
+            self.origin,
+            move |key| bridge.assignment(key),
+            move || retire.retirement_consumed(),
+        );
     }
 
     fn offer_gate(
@@ -747,6 +826,49 @@ mod tests {
     }
 
     #[test]
+    fn a_full_absence_table_waits_only_for_an_ordered_retirement() {
+        let bridge = Narrated::new();
+        let first = DrawKey {
+            run: RunId(7),
+            scene: SceneId(1),
+            index: 0,
+        };
+        for scene in 1..=4 {
+            for index in 0..64 {
+                assert_eq!(
+                    bridge.unassigned(DrawKey {
+                        scene: SceneId(scene),
+                        index,
+                        ..first
+                    }),
+                    Ok(true)
+                );
+            }
+        }
+        let next = DrawKey {
+            scene: SceneId(5),
+            ..first
+        };
+        assert_eq!(bridge.unassigned(next), Err(()));
+        assert!(bridge.retiring(&[first.scene], None, NonZeroU64::MIN));
+        assert_eq!(bridge.unassigned(next), Ok(false));
+        assert_eq!(bridge.assignment(first), Ok(None));
+        assert_eq!(bridge.unassigned(first), Err(()));
+
+        bridge.retirement_consumed();
+        assert_eq!(bridge.unassigned(next), Ok(true));
+        assert_eq!(bridge.assignment(first), Err(()));
+        assert_eq!(bridge.assignment(next), Ok(None));
+        assert_eq!(
+            bridge.unassigned(DrawKey {
+                scene: SceneId(2),
+                ..first
+            }),
+            Err(())
+        );
+    }
+
+    #[test]
     fn wire_replacement_fences_only_the_victim_and_keeps_its_exact_metadata() {
         for marker_first in [false, true] {
             let bridge = Narrated::new();
@@ -769,15 +891,15 @@ mod tests {
             if !marker_first {
                 assert!(bridge.promised(promised));
                 assert!(bridge.announce(promised));
-                assert!(!bridge.replaced(&[old, old], successor));
+                assert!(!bridge.retiring(&[old, old], Some(successor), NonZeroU64::MIN));
                 assert_eq!(bridge.assignment(old_key), Ok(Some(promised)));
             }
-            assert!(bridge.replaced(&[old], successor));
+            assert!(bridge.retiring(&[old], Some(successor), NonZeroU64::MIN));
             if marker_first {
                 assert!(bridge.promised(promised));
                 assert!(bridge.announce(promised));
             }
-            assert!(bridge.unassigned(next_key));
+            assert_eq!(bridge.unassigned(next_key), Ok(true));
             assert_eq!(bridge.assignment(old_key), Err(()));
             assert_eq!(bridge.assignment(next_key), Ok(None));
         }

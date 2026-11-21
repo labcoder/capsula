@@ -880,9 +880,15 @@ impl Presenter {
                 revision,
                 cut,
             } => self.cut_applied(*scene, *revision, cut, out),
-            DataToShell::ScenesRemoved { scenes } => self.removed(scenes, now, out),
+            DataToShell::ScenesRemoved { scenes } => {
+                self.removed(scenes, now, out)?;
+                self.narration_retirement_consumed();
+                Ok(())
+            }
             DataToShell::ScenesReplaced { scenes, successor } => {
-                self.replaced(scenes, *successor, now, out)
+                self.replaced(scenes, *successor, now, out)?;
+                self.narration_retirement_consumed();
+                Ok(())
             }
             _ => Ok(()),
         }

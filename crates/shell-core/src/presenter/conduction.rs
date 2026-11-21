@@ -13,6 +13,7 @@ type Lookup = dyn Fn(DrawKey) -> Result<Option<Assignment>, ()>;
 pub(super) struct Conduction {
     origin: Instant,
     lookup: Box<Lookup>,
+    retirement_consumed: Box<dyn Fn()>,
     nonce: u64,
     current: Option<Current>,
     changed: bool,
@@ -111,17 +112,25 @@ impl Presenter {
         &mut self,
         origin: Instant,
         lookup: impl Fn(DrawKey) -> Result<Option<Assignment>, ()> + 'static,
+        retirement_consumed: impl Fn() + 'static,
     ) {
         self.conduction.get_or_insert_with(|| {
             Box::new(Conduction {
                 origin,
                 lookup: Box::new(lookup),
+                retirement_consumed: Box::new(retirement_consumed),
                 nonce: 0,
                 current: None,
                 changed: false,
                 detached: [None; MAX_VISIBLE_SCENES],
             })
         });
+    }
+
+    pub(super) fn narration_retirement_consumed(&self) {
+        if let Some(state) = &self.conduction {
+            (state.retirement_consumed)();
+        }
     }
 
     fn local_view(&self, key: DrawKey, scene: &Scene, current: Current, now: Instant) -> View {

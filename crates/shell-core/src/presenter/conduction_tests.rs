@@ -30,11 +30,15 @@ fn drawing() -> Step {
 
 fn fixture<const N: usize>(offered: [Assignment; N]) -> (Presenter, Instant) {
     let (mut presenter, now) = live();
-    presenter.start_conduction(now, move |key| {
-        Ok(offered
-            .into_iter()
-            .find(|a| a.run == key.run && a.step.scene == key.scene && a.step.index == key.index))
-    });
+    presenter.start_conduction(
+        now,
+        move |key| {
+            Ok(offered.into_iter().find(|a| {
+                a.run == key.run && a.step.scene == key.scene && a.step.index == key.index
+            }))
+        },
+        || {},
+    );
     (presenter, now)
 }
 
@@ -1083,7 +1087,7 @@ fn ended_wait_releases_while_preparing_and_shows_on_local_readiness() {
     let (mut p, now) = live();
     let lookup = Rc::new(Cell::new(Ok(Some(key))));
     let offered = Rc::clone(&lookup);
-    p.start_conduction(now, move |_| offered.get());
+    p.start_conduction(now, move |_| offered.get(), || {});
     let job = submit(&mut p, LIVE, now);
     let level = p.conductor_view(now).expect("preparing");
     assert_eq!(level.view, View::Preparing);

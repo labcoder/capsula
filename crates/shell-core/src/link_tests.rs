@@ -3791,6 +3791,182 @@ fn narrated_attended(label: &str) -> Attended {
 
 #[cfg(debug_assertions)]
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one pair through delayed delivery, retirement, successor, and live duplicate"
+)]
+fn narrated_absence_survives_delayed_delivery_and_reclaims_retired_scenes() {
+    use crate::presenter::{Presenter, fixture};
+    use crate::speaker::conductor::Assignment;
+    use kumochi_protocol::message::{SceneId, SegmentId, SegmentStart, SpeechPromise, StepRef};
+    use std::io::Write as _;
+
+    let link = narrated_attended("narrated-absence-retirement");
+    let events = patient(link.events.clone());
+    let (session, output) = queued_named_run(&link, &events);
+    let generation = session.generation();
+    let now = Instant::now();
+    let mut presenter = fixture::presenter();
+    presenter.connected(generation);
+    presenter
+        .described(generation, &kumochi_scene::text::Bounded::default(), now)
+        .unwrap();
+    session.attach_narration(&mut presenter);
+
+    let run = RunId(7);
+    let authored = fixture::step(
+        r#"{"step":{"id":"authored","start":"speech","say":"words","put":[{"shape":{"id":"r","kind":"rect","box":[0,0,10,10],"enter":"none"}}]}}"#,
+    );
+    let begin = |scene| DataToShell::SceneBegin {
+        scene,
+        header: fixture::header(),
+    };
+    let commit = |scene| DataToShell::SceneStepCommit {
+        run,
+        scene,
+        index: 0,
+        step: authored.clone(),
+        speech: None,
+    };
+    let send = |message: &DataToShell| {
+        let encoded = frame::encode(message, Pipe::Data).unwrap();
+        (&*link.data).write_all(&encoded).unwrap();
+        u32::try_from(encoded.len()).unwrap()
+    };
+    let credit = |bytes| {
+        assert_eq!(
+            frame::read::<DataToBrain>(&mut &*link.data, Pipe::Data).unwrap(),
+            Some(DataToBrain::Credit { bytes })
+        );
+    };
+    let arrive = |message: DataToShell| {
+        let expected = send(&message);
+        let event = events.recv_timeout(PATIENCE).unwrap_or_else(|error| {
+            panic!("the attended reader did not deliver {message:?}: {error}")
+        });
+        assert!(
+            matches!(&event, LinkEvent::SceneData { generation: seen, frame, bytes }
+                if (*seen, &**frame, *bytes) == (generation, &message, expected)),
+            "the attended reader delivered {message:?}, got {event:?}"
+        );
+        event
+    };
+    let deliver = |presenter: &mut Presenter, event| {
+        let LinkEvent::SceneData { frame, bytes, .. } = event else {
+            unreachable!()
+        };
+        (
+            presenter.data(generation, frame, bytes, now).unwrap(),
+            bytes,
+        )
+    };
+    let settle = |presenter: &mut Presenter, effects, bytes| {
+        let effects = fixture::settle(presenter, effects, now).unwrap();
+        assert_eq!(fixture::credit(&effects), bytes);
+        assert!(fixture::controls(&effects).is_empty());
+        session.grant(bytes);
+        credit(bytes);
+        for job in fixture::jobs(effects) {
+            assert!(
+                presenter
+                    .completed(job.run(&mut fixture::Shaper), now)
+                    .unwrap()
+                    .is_empty()
+            );
+        }
+    };
+    let apply = |presenter: &mut Presenter, event| {
+        let (effects, bytes) = deliver(presenter, event);
+        settle(presenter, effects, bytes);
+    };
+    let activate = |presenter: &mut Presenter, scene| {
+        assert!(presenter.advance(generation, now).unwrap().is_empty());
+        assert_eq!(fixture::activated(presenter, scene), 1);
+    };
+
+    for id in 1..=257 {
+        let scene = SceneId(id);
+        apply(&mut presenter, arrive(begin(scene)));
+        assert_eq!(fixture::scene_ids(&presenter), [scene]);
+        let absent = arrive(commit(scene));
+        if id == 2 {
+            let (admitting, commit_bytes) = deliver(&mut presenter, absent);
+            let (held, removal_bytes) = deliver(
+                &mut presenter,
+                arrive(DataToShell::ScenesRemoved {
+                    scenes: vec![scene],
+                }),
+            );
+            assert!(held.is_empty(), "the removal is behind admission");
+            assert_eq!(fixture::credit(&admitting), 0);
+            assert_eq!(fixture::scene_ids(&presenter), [scene]);
+            settle(&mut presenter, admitting, commit_bytes + removal_bytes);
+            assert!(fixture::scene_ids(&presenter).is_empty());
+            continue;
+        }
+        let replace = || {
+            arrive(DataToShell::ScenesReplaced {
+                scenes: vec![scene],
+                successor: SceneId(id + 1),
+            })
+        };
+        let queued_replacement = (id == 1).then(replace);
+        apply(&mut presenter, absent);
+        activate(&mut presenter, scene);
+        apply(&mut presenter, queued_replacement.unwrap_or_else(replace));
+        assert!(fixture::scene_ids(&presenter).is_empty());
+    }
+
+    let scene = SceneId(258);
+    apply(&mut presenter, arrive(begin(scene)));
+    apply(&mut presenter, arrive(commit(scene)));
+    activate(&mut presenter, scene);
+    let segment = SegmentId(0);
+    let step = StepRef { scene, index: 1 };
+    apply(
+        &mut presenter,
+        arrive(DataToShell::SceneStepCommit {
+            run,
+            scene,
+            index: step.index,
+            step: fixture::step(r#"{"step":{"id":"promised","start":"speech","say":"next"}}"#),
+            speech: Some(SpeechPromise {
+                output_generation: output,
+                segment,
+            }),
+        }),
+    );
+    credit(send(&DataToShell::SegmentQueued {
+        run,
+        segment,
+        start: SegmentStart::Speech,
+        output_generation: output,
+        step: Some(step),
+    }));
+    let LinkEvent::NarrationReady(wake) = next(&events) else {
+        panic!("the matching promise is ready")
+    };
+    assert!(session.accepts_narration(wake));
+    assert_eq!(
+        presenter
+            .conductor_view(now)
+            .map(|level| level.binding.assignment),
+        Some(Assignment {
+            session: generation,
+            output,
+            run,
+            segment,
+            step,
+        })
+    );
+    assert!(session.open());
+
+    send(&commit(scene));
+    queued_pair_closed(link.link, &link.control, &link.data);
+}
+
+#[cfg(debug_assertions)]
+#[test]
 fn stopped_narrated_run_drains_only_its_valid_late_announcement() {
     use kumochi_protocol::message::{SceneId, SegmentId, SegmentStart, SpeechPromise, StepRef};
     use kumochi_scene::{Record, parse_record};
