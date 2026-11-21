@@ -274,6 +274,184 @@ fn an_account_that_isnt_one_object_is_mistyped() {
     );
 }
 
+const MARKER: &str = "pictured-payload-marker";
+
+fn control_line(response: &str) -> String {
+    format!(r#"{{"type":"control_response","response":{response}}}"#)
+}
+
+fn user_line(content: &str) -> String {
+    format!(r#"{{"type":"user","message":{{"content":{content}}}}}"#)
+}
+
+#[test]
+fn a_string_in_a_selected_outer_place_is_mistyped_without_its_text_in_the_error() {
+    let text = format!("\"{MARKER}\"");
+    let body =
+        |body: &str| format!(r#"{{"subtype":"success","request_id":"r","response":{body}}}"#);
+    for line in [
+        control_line(&text),
+        control_line(&body(&text)),
+        control_line(&format!(r#"["success","r",{text}]"#)),
+        control_line(&body(&format!(r#"{{"account":{text}}}"#))),
+    ] {
+        let Err(error) = serde_json::from_str::<ControlLine>(&line) else {
+            panic!("a wrong-shaped control was taken");
+        };
+        assert_eq!(error.classify(), serde_json::error::Category::Data);
+        assert!(
+            !error.to_string().contains(MARKER),
+            "the string reached a control's error"
+        );
+        assert_eq!(
+            StreamMapper::default().line(line.as_bytes()),
+            Err(ClaudeStreamFailure::Mistyped)
+        );
+    }
+    let line = user_line(&text);
+    let Err(error) = serde_json::from_str::<UserLine>(&line) else {
+        panic!("a string content was taken");
+    };
+    assert_eq!(error.classify(), serde_json::error::Category::Data);
+    assert!(
+        !error.to_string().contains(MARKER),
+        "the string reached a user line's error"
+    );
+    let mut mapper = StreamMapper::default();
+    mapper.refuse_picture_echo();
+    assert_eq!(
+        mapper.line(line.as_bytes()),
+        Err(ClaudeStreamFailure::Mistyped)
+    );
+}
+
+#[test]
+fn control_responses_keep_their_accepted_shapes_and_error_classes() {
+    let control = |rest: Value, account: Option<Account>| {
+        Ok(Mapped::Control(ControlResponse {
+            subtype: "success".into(),
+            request_id: "r".into(),
+            response: ControlBody { account, rest },
+        }))
+    };
+    let body =
+        |body: &str| format!(r#"{{"subtype":"success","request_id":"r","response":{body}}}"#);
+    let mistyped = || -> Result<Mapped, ClaudeStreamFailure> { Err(ClaudeStreamFailure::Mistyped) };
+    let not_json = || -> Result<Mapped, ClaudeStreamFailure> { Err(ClaudeStreamFailure::NotJson) };
+    let rows = [
+        (
+            r#"{"subtype":"success","request_id":"r"}"#.to_owned(),
+            control(Value::Null, None),
+        ),
+        (body("{}"), control(json!({}), None)),
+        (r#"["success","r"]"#.to_owned(), control(Value::Null, None)),
+        (
+            r#"["success","r",{"a":1}]"#.to_owned(),
+            control(json!({"a": 1}), None),
+        ),
+        (body(r#"{"a":1,"a":2}"#), control(json!({"a": 2}), None)),
+        (
+            body(r#"{"account":{}}"#),
+            control(json!({}), Some(Account::default())),
+        ),
+        (
+            body(r#"{"x":{"$serde_json::private::RawValue":"[1]"}}"#),
+            control(json!({"x": [1]}), None),
+        ),
+        (
+            body(r#"{"x":{"$serde_json::private::RawValue":"[1"}}"#),
+            mistyped(),
+        ),
+        (r#"["success"]"#.to_owned(), mistyped()),
+        ("[]".to_owned(), mistyped()),
+        ("5".to_owned(), mistyped()),
+        ("null".to_owned(), mistyped()),
+        (r#"{"subtype":5,"request_id":"r"}"#.to_owned(), mistyped()),
+        (r#"{"subtype":"success"}"#.to_owned(), mistyped()),
+        (
+            r#"{"subtype":"success","subtype":"success","request_id":"r"}"#.to_owned(),
+            mistyped(),
+        ),
+        (body("null"), mistyped()),
+        (body("[]"), mistyped()),
+        (body(r#"[{"a":1}]"#), mistyped()),
+        (body("7"), mistyped()),
+        (body(r#"{"account":null}"#), mistyped()),
+        (body(r#"{"account":[]}"#), mistyped()),
+        (body("1e400"), not_json()),
+        (body(r#""\x""#), not_json()),
+        (body(r#""\ud800""#), not_json()),
+        (r#""\ud800""#.to_owned(), not_json()),
+        (body(r#"{"x":"\ud800"}"#), not_json()),
+        (body(r#""unterminated"#), not_json()),
+    ];
+    for (response, expected) in rows {
+        let line = control_line(&response);
+        for pictured in [false, true] {
+            let mut mapper = StreamMapper::default();
+            if pictured {
+                mapper.refuse_picture_echo();
+            }
+            assert_eq!(
+                mapper.line(line.as_bytes()),
+                expected,
+                "{response} {pictured}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_pictured_user_message_reads_every_block_before_it_judges_an_image() {
+    let rows = [
+        (
+            r#"[{"type":"text"},{"type":"image"}]"#,
+            Err(ClaudeStreamFailure::PictureEcho),
+        ),
+        (
+            r#"[{"type":"image"},{"type":5}]"#,
+            Err(ClaudeStreamFailure::Mistyped),
+        ),
+        (
+            r#"[{"type":"image"},{}]"#,
+            Err(ClaudeStreamFailure::Mistyped),
+        ),
+        (
+            r#"[{"type":"image"},"x"]"#,
+            Err(ClaudeStreamFailure::Mistyped),
+        ),
+        (
+            r#"[{"type":"image"},{"type":"text"]"#,
+            Err(ClaudeStreamFailure::NotJson),
+        ),
+        (
+            r#"[{"type":"image"},{"type":"\ud800"}]"#,
+            Err(ClaudeStreamFailure::NotJson),
+        ),
+        (
+            r#"[{"type":"\u0069mage"}]"#,
+            Err(ClaudeStreamFailure::Mistyped),
+        ),
+        (r#"{"type":"image"}"#, Err(ClaudeStreamFailure::Mistyped)),
+        ("null", Err(ClaudeStreamFailure::Mistyped)),
+        (r#""\ud800""#, Err(ClaudeStreamFailure::NotJson)),
+        ("[]", Ok(Mapped::Ignored)),
+        (r#"[{"type":"text","image":true}]"#, Ok(Mapped::Ignored)),
+    ];
+    for (content, expected) in rows {
+        let line = user_line(content);
+        let mut mapper = StreamMapper::default();
+        mapper.refuse_picture_echo();
+        assert_eq!(mapper.line(line.as_bytes()), expected, "{content}");
+    }
+    let mut mapper = StreamMapper::default();
+    mapper.refuse_picture_echo();
+    assert_eq!(
+        mapper.line(br#"{"type":"user","message":{}}"#),
+        Err(ClaudeStreamFailure::Mistyped)
+    );
+}
+
 #[test]
 fn control_responses_before_input_come_back_in_order() {
     let (out, _) = map(&[FACTS]);

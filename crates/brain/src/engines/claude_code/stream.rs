@@ -7,7 +7,7 @@
 
 use std::fmt;
 
-use serde::de::{self, MapAccess, Visitor};
+use serde::de::{self, MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer};
 use serde_json::Value;
 use zeroize::{Zeroize, Zeroizing};
@@ -199,7 +199,42 @@ impl<'de> Deserialize<'de> for Field {
 
 impl<'de> Deserialize<'de> for ControlBody {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        deserializer.deserialize_map(BodyVisitor)
+        deserializer.deserialize_any(BodyVisitor)
+    }
+}
+
+/// The type error for a string where a map or a list belongs. It names only the kind:
+/// `deserialize_map` or `deserialize_seq` would copy the whole string into the error.
+fn no_string<E: de::Error>(expected: &dyn de::Expected) -> E {
+    E::invalid_type(de::Unexpected::Other("string"), expected)
+}
+
+/// [`ControlResponse`] by its derive, from a map or a positional list as before.
+fn response_object<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<ControlResponse, D::Error> {
+    deserializer.deserialize_any(ResponseVisitor)
+}
+
+struct ResponseVisitor;
+
+impl<'de> Visitor<'de> for ResponseVisitor {
+    type Value = ControlResponse;
+
+    fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("a control response")
+    }
+
+    fn visit_map<A: MapAccess<'de>>(self, map: A) -> Result<ControlResponse, A::Error> {
+        ControlResponse::deserialize(de::value::MapAccessDeserializer::new(map))
+    }
+
+    fn visit_seq<A: SeqAccess<'de>>(self, seq: A) -> Result<ControlResponse, A::Error> {
+        ControlResponse::deserialize(de::value::SeqAccessDeserializer::new(seq))
+    }
+
+    fn visit_str<E: de::Error>(self, _: &str) -> Result<ControlResponse, E> {
+        Err(no_string(&self))
     }
 }
 
@@ -208,7 +243,7 @@ struct AccountObject(Account);
 
 impl<'de> Deserialize<'de> for AccountObject {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        deserializer.deserialize_map(AccountVisitor).map(Self)
+        deserializer.deserialize_any(AccountVisitor).map(Self)
     }
 }
 
@@ -223,6 +258,10 @@ impl<'de> Visitor<'de> for AccountVisitor {
 
     fn visit_map<A: MapAccess<'de>>(self, map: A) -> Result<Account, A::Error> {
         Account::deserialize(de::value::MapAccessDeserializer::new(map))
+    }
+
+    fn visit_str<E: de::Error>(self, _: &str) -> Result<Account, E> {
+        Err(no_string(&self))
     }
 }
 
@@ -252,6 +291,10 @@ impl<'de> Visitor<'de> for BodyVisitor {
             account,
             rest: Value::Object(rest),
         })
+    }
+
+    fn visit_str<E: de::Error>(self, _: &str) -> Result<ControlBody, E> {
+        Err(no_string(&self))
     }
 }
 
@@ -429,13 +472,7 @@ impl StreamMapper {
             "system" if head.subtype == Some("init") => Mapped::Init(parse(line)?),
             "control_response" => Mapped::Control(parse::<ControlLine>(line)?.response),
             "user" if self.pictured => {
-                let user: UserLine<'_> = parse(line)?;
-                if user
-                    .message
-                    .content
-                    .iter()
-                    .any(|block| block.kind == "image")
-                {
+                if parse::<UserLine>(line)?.message.content.image {
                     self.ended = true;
                     return Err(ClaudeStreamFailure::PictureEcho);
                 }
@@ -532,15 +569,46 @@ struct Head<'a> {
 }
 
 #[derive(Deserialize)]
-struct UserLine<'a> {
-    #[serde(borrow)]
-    message: UserMessage<'a>,
+struct UserLine {
+    message: UserMessage,
 }
 
 #[derive(Deserialize)]
-struct UserMessage<'a> {
-    #[serde(borrow)]
-    content: Vec<UserBlock<'a>>,
+struct UserMessage {
+    content: Blocks,
+}
+
+/// Whether a user message's blocks hold an image, with every block read as a [`UserBlock`] first.
+struct Blocks {
+    image: bool,
+}
+
+impl<'de> Deserialize<'de> for Blocks {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        deserializer.deserialize_any(BlocksVisitor)
+    }
+}
+
+struct BlocksVisitor;
+
+impl<'de> Visitor<'de> for BlocksVisitor {
+    type Value = Blocks;
+
+    fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("a list of content blocks")
+    }
+
+    fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Blocks, A::Error> {
+        let mut image = false;
+        while let Some(block) = seq.next_element::<UserBlock<'de>>()? {
+            image |= block.kind == "image";
+        }
+        Ok(Blocks { image })
+    }
+
+    fn visit_str<E: de::Error>(self, _: &str) -> Result<Blocks, E> {
+        Err(no_string(&self))
+    }
 }
 
 #[derive(Deserialize)]
@@ -556,6 +624,7 @@ struct Wrapped {
 
 #[derive(Deserialize)]
 struct ControlLine {
+    #[serde(deserialize_with = "response_object")]
     response: ControlResponse,
 }
 
