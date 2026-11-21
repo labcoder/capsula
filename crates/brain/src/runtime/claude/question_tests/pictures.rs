@@ -400,6 +400,137 @@ async fn a_bound_find_keeps_the_round_until_its_picture_settles_unsent() {
     brain.close().await;
 }
 
+/// A sealed capture is already in its built request when Claude Code's generation moves after the
+/// launch binds and before its grant: the ask is refused, the fake child gets no picture byte, and
+/// the run builds again text-only under the same route and choice.
+#[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one ordered launch, refusal and rebuild"
+)]
+async fn a_generation_move_before_the_grant_refuses_the_picture_and_rebuilds_text_only() {
+    use crate::coordinator::{Effect, StoreOp, built_for, pictured_claude_run};
+
+    let script = synthetic_signed_in()
+        .pre_tools(BOTH_TOOLS)
+        .post_tools(BOTH_TOOLS);
+    let mut rig = Rig::new("picture-pregrant-find", &script).await;
+    let scratch = Scratch::new("picture-pregrant-find");
+    let mut brain = brain_on(&mut rig, &scratch);
+    brain.claude.fixture_picture = Some(ModelSlug::new("haiku").expect("alias"));
+    let (coordinator, effects) = pictured_claude_run(
+        brain.claude.availability(),
+        ScreenContext::fixture(PICTURE_JPEG).into_jpeg(),
+    );
+    *brain.coordinator = coordinator;
+    let Some(Effect::StartEngine { request }) = effects.last() else {
+        panic!("pictured request was not admitted");
+    };
+    assert!(
+        request
+            .request
+            .input
+            .iter()
+            .any(|item| matches!(item, InputItem::Image(_))),
+        "the sealed capture is in the built request"
+    );
+    let SendKey::Build(key) = request.key else {
+        panic!("pictured build")
+    };
+    let choice = request.request.choice.clone().expect("run choice");
+    let config = brain
+        .config
+        .stage(kumochi_protocol::message::SettingsOp::SetDefaultModel(
+            choice.clone(),
+        ))
+        .unwrap();
+    brain.config.commit(config);
+    brain.apply(effects, None).expect("launch");
+    let note = timeout(WAIT, brain.claude.notes.1.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(note, Note::Bind(_)), "expected a bind");
+    brain.claude_done(Wake::Note(note), None).expect("bound");
+    let launch = brain.claude.launches.last().expect("launch").id;
+    let folder = rig.base.owned().join(ENGINE_DIR).join(launch.hex());
+    let ask = timeout(WAIT, brain.inputs.recv()).await.unwrap().unwrap();
+    assert!(matches!(
+        ask,
+        Input::SendReady {
+            key: SendKey::Build(asked),
+            ..
+        } if asked == key
+    ));
+
+    let generation = brain.claude.generation;
+    brain
+        .claude_op(ConnectionOp::FindClaudeCode, None)
+        .expect("find");
+    assert_eq!(brain.claude.generation, generation + 1);
+    let refused = brain.handle(ask).expect("refusal effects");
+    assert!(
+        !refused
+            .iter()
+            .any(|effect| matches!(effect, Effect::Grant(_))),
+        "no grant after the generation moved"
+    );
+    assert!(refused.contains(&Effect::Rebuild(SendKey::Build(key))));
+    let Some(Effect::Store(StoreOp::BuildContext(again))) = refused.last() else {
+        panic!("no text-only rebuild");
+    };
+    let again = again.key;
+    assert_eq!(
+        again,
+        crate::coordinator::BuildKey {
+            attempt: key.attempt + 1,
+            ..key
+        }
+    );
+    brain.apply(refused, None).expect("refusal");
+    until("refused launch removed", || !folder.exists()).await;
+    assert_eq!(rig.stdin(), ["1 initialize", "1 mcp_status"]);
+    let scan = || {
+        fixture_has_marker(&folder)
+            || [
+                "starts.log",
+                "stdin.log",
+                "seed.1",
+                "picture-shape.1",
+                "picture-sibling",
+            ]
+            .iter()
+            .any(|name| fixture_has_marker(&rig.base.0.join(name)))
+    };
+    assert!(!scan());
+    let sibling = rig.base.0.join("picture-sibling");
+    fs::write(&sibling, &PICTURE_JPEG[3..]).expect("positive control");
+    assert!(scan(), "the named sibling is in scope");
+    fs::remove_file(sibling).expect("remove test copy");
+
+    let rebuilt = brain.handle(built_for(again, &choice)).expect("rebuilt");
+    let Some(Effect::StartEngine { request }) = rebuilt.last() else {
+        panic!("text rebuild was not admitted");
+    };
+    assert_eq!(request.key, SendKey::Build(again));
+    assert_eq!(request.request.choice, Some(choice));
+    let text = |role, text: &str| InputItem::Message {
+        role,
+        text: text.into(),
+    };
+    assert_eq!(
+        request.request.input,
+        [
+            text(Role::User, "words"),
+            text(
+                Role::Developer,
+                "The screen was not included: this model can't be sent images."
+            ),
+        ]
+    );
+    brain.close().await;
+}
+
 #[tokio::test]
 async fn pictured_child_loss_or_echo_retires_without_forwarding_a_picture() {
     for (action, size, finish) in [
