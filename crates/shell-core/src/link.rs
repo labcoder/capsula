@@ -613,7 +613,7 @@ struct Shared {
     narrated: bool,
     #[cfg(any(test, feature = "test-support"))]
     hold_control_writer: std::sync::atomic::AtomicU8,
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     hold_pcm_writer: std::sync::atomic::AtomicU8,
     #[cfg(any(test, feature = "test-support"))]
     fake_playback: Option<std::sync::mpsc::SyncSender<speaker::queued::FixturePlayback>>,
@@ -2591,7 +2591,7 @@ fn write_data(
                     let DataToBrain::MicPcm(packet) = message else {
                         return true;
                     };
-                    #[cfg(test)]
+                    #[cfg(any(test, feature = "test-support"))]
                     if shared.hold_pcm_writer.load(Ordering::Acquire) != 0 {
                         shared.hold_pcm_writer.store(2, Ordering::Release);
                         while shared.hold_pcm_writer.load(Ordering::Acquire) != 0
