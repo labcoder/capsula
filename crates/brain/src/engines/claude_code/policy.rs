@@ -7,6 +7,7 @@ use std::ffi::OsString;
 use std::fmt;
 use std::path::{Path, PathBuf};
 
+use kumochi_protocol::constants::CLAUDE_ONE_TURN_ENV;
 use kumochi_protocol::message::{ClaudeVersion, PolicyFailed, Unsupported};
 
 use super::audit::AuditSchema;
@@ -135,7 +136,21 @@ pub(crate) enum EntryPoint<'a> {
         model: &'a str,
         /// From C5b's snapshot; `None` leaves Claude Code's default.
         effort: Option<&'a str>,
+        /// [`native_turns`]: `--max-turns`; 1 also drops the allow list and adds `dontAsk`.
+        max_turns: u8,
     },
+}
+
+/// Claude Code's `--max-turns` for every launch, title jobs included: [`MAX_NATIVE_TURNS`], or 1 in
+/// a dev build whose environment sets [`CLAUDE_ONE_TURN_ENV`], to request one native turn for the
+/// desk's picture check. It doesn't bound provider requests: one native turn can retry its request
+/// (`fixtures/claude-code/retry.jsonl`). Release builds and unflagged dev builds keep the stock 8.
+pub(crate) fn native_turns() -> u8 {
+    if cfg!(debug_assertions) && std::env::var_os(CLAUDE_ONE_TURN_ENV).is_some() {
+        1
+    } else {
+        MAX_NATIVE_TURNS
+    }
 }
 
 /// A launch's arguments and whole environment, owned, so the caller can borrow them into
@@ -189,6 +204,7 @@ pub(crate) fn launch_data(
             allowed_tools,
             model,
             effort,
+            max_turns,
         } => {
             // P0's order: `--allowedTools` takes every value up to the next switch.
             let mut args = words(&["-p", "--restricted", "--strict-mcp-config", "--mcp-config"]);
@@ -199,7 +215,11 @@ pub(crate) fn launch_data(
                 "",
                 "--no-session-persistence",
             ]));
-            if !allowed_tools.is_empty() {
+            // One turn can't carry a tool's result back, so the one-turn check passes no allow list
+            // and asks Claude Code to deny prompts.
+            if max_turns == 1 {
+                args.extend(words(&["--permission-mode", "dontAsk"]));
+            } else if !allowed_tools.is_empty() {
                 args.push("--allowedTools".into());
                 args.extend(allowed_tools.iter().map(OsString::from));
             }
@@ -212,7 +232,7 @@ pub(crate) fn launch_data(
                 "--include-partial-messages",
                 "--max-turns",
             ]));
-            args.push(MAX_NATIVE_TURNS.to_string().into());
+            args.push(max_turns.to_string().into());
             args.extend(words(&[
                 "--exclude-dynamic-system-prompt-sections",
                 "--model",

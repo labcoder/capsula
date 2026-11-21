@@ -98,6 +98,7 @@ fn each_entry_point_gets_exactly_its_arguments() {
         allowed_tools: &tools,
         model: "sonnet",
         effort,
+        max_turns: MAX_NATIVE_TURNS,
     };
     let head = [
         "-p",
@@ -147,6 +148,7 @@ fn each_entry_point_gets_exactly_its_arguments() {
             allowed_tools: &none,
             model: "haiku",
             effort: None,
+            max_turns: MAX_NATIVE_TURNS,
         },
     );
     let without_tools: Vec<&str> = head
@@ -162,6 +164,73 @@ fn each_entry_point_gets_exactly_its_arguments() {
         without_tools,
         "no tools, no switch to swallow the next one, and the built-in tools still off"
     );
+}
+
+/// The desk's picture check: one native turn, no Kumochi tool even with tools frozen for the
+/// launch, and `dontAsk`, so anything that would prompt is denied; every other word as a stock
+/// question has. A stock question keeps 8 and no permission mode.
+#[test]
+fn a_one_turn_question_permits_no_tool() {
+    let tools: BTreeSet<String> = ["mcp__kumochi__see", "mcp__kumochi__draw"]
+        .map(String::from)
+        .into();
+    let mcp = PathBuf::from(r"C:\k\engine\0a\work\mcp.json");
+    let args = |max_turns| {
+        launch_data(
+            &folders(),
+            &system(),
+            &EntryPoint::Question {
+                mcp_config: &mcp,
+                allowed_tools: &tools,
+                model: "haiku",
+                effort: Some("low"),
+                max_turns,
+            },
+        )
+        .args
+    };
+    assert_eq!(
+        strings(&args(1)),
+        [
+            "-p",
+            "--restricted",
+            "--strict-mcp-config",
+            "--mcp-config",
+            r"C:\k\engine\0a\work\mcp.json",
+            "--disable-slash-commands",
+            "--tools",
+            "",
+            "--no-session-persistence",
+            "--permission-mode",
+            "dontAsk",
+            "--input-format",
+            "stream-json",
+            "--output-format",
+            "stream-json",
+            "--verbose",
+            "--include-partial-messages",
+            "--max-turns",
+            "1",
+            "--exclude-dynamic-system-prompt-sections",
+            "--model",
+            "haiku",
+            "--effort",
+            "low",
+        ]
+    );
+    let stock = args(MAX_NATIVE_TURNS);
+    let stock = strings(&stock);
+    assert_eq!(
+        native_turns(),
+        8,
+        "a test brain's environment never sets the check"
+    );
+    assert_eq!(
+        stock[9..12],
+        ["--allowedTools", "mcp__kumochi__draw", "mcp__kumochi__see"]
+    );
+    assert_eq!(stock[18..20], ["--max-turns", "8"]);
+    assert!(!stock.contains(&"--permission-mode"));
 }
 
 #[test]
@@ -200,6 +269,7 @@ fn every_entry_point_gets_the_same_exact_environment() {
             allowed_tools: &tools,
             model: "opus",
             effort: None,
+            max_turns: MAX_NATIVE_TURNS,
         },
     ] {
         let env = launch_data(&folders(), &system(), &entry).env;
@@ -263,6 +333,7 @@ fn the_system_values_come_from_the_os_and_no_parent_path_entry_reaches_the_child
             allowed_tools: &tools,
             model: "opus",
             effort: None,
+            max_turns: MAX_NATIVE_TURNS,
         },
     );
     for (name, value) in &data.env {
@@ -331,6 +402,7 @@ fn launch_data_debug_prints_counts_only() {
             allowed_tools: &tools,
             model: "planted",
             effort: None,
+            max_turns: MAX_NATIVE_TURNS,
         },
     );
     let printed = format!("{data:?}");

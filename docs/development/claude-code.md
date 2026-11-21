@@ -137,7 +137,12 @@ version: its launch policy and the facts its audit expects. Any other version is
   --input-format stream-json --output-format stream-json --verbose --include-partial-messages
   --max-turns 8 --exclude-dynamic-system-prompt-sections --model <model>`, then `--effort` when the
   snapshot names one. `--allowedTools` takes every value up to the next switch, so it never comes
-  last.
+  last. A dev brain whose environment sets `KUMOCHI_CLAUDE_ONE_TURN` (`policy::native_turns`)
+  passes every Claude Code launch, title jobs included, `--max-turns 1` to request one native
+  turn, `--permission-mode dontAsk` in place of `--allowedTools`, and an empty tool offer, so its
+  MCP server, both audits and its seed expect no tool. That's for the desk's picture check;
+  release builds and unflagged dev builds launch as before. It doesn't bound provider requests:
+  one native turn can retry its request (`system:api_retry`).
 - **Environment, built and never inherited.** `CLAUDE_CONFIG_DIR`, `USERPROFILE`, `HOME`,
   `APPDATA`, `LOCALAPPDATA`, `TEMP`, `TMP` and `CLAUDE_CODE_TMPDIR` point at Kumochi's own
   folders. Six documented switches are `1`: `DISABLE_AUTOUPDATER`, `DISABLE_TELEMETRY`,
