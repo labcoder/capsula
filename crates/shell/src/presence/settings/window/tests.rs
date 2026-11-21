@@ -513,30 +513,90 @@ fn recovery_settings_clicks_open_the_exact_tab_through_the_hidden_panel_path(
 
 #[gpui::test]
 fn recovery_usage_click_opens_the_public_usage_destination(cx: &mut TestAppContext) {
-    use crate::chat_notice::Source;
+    use gpui_kit::{MouseButton, MouseDownEvent, MouseUpEvent, PlatformInput};
     use kumochi_protocol::message::{Action, ErrorKey, MANAGE_USAGE_URL, UserError};
 
-    let owner = test_fixture::presence(cx);
+    let _area = crate::platform::work_area_fixture::set([0, 0, 2560, 1400]);
+    let (owner, _data, controls) = crate::presence::voice_wiring_tests::ready(cx);
+    let account = || LinkEvent::Account {
+        generation: 1,
+        view: AccountView::SignedOut {
+            revocation_unconfirmed: false,
+        },
+    };
     let window = owner.update(cx, |owner, cx| {
-        owner.chat_notice.present(
-            UserError::new(ErrorKey::UsageLimit, Vec::new(), vec![Action::ManageUsage])
-                .expect("bounded usage recovery"),
-            Source::Account,
-        );
-        owner.refresh_conversation(cx);
+        owner.open_text(cx).expect("open chat");
+        owner
+            .link_events(
+                Batch::Plain(vec![
+                    account(),
+                    LinkEvent::Error {
+                        generation: 1,
+                        error: UserError::new(
+                            ErrorKey::UsageLimit,
+                            Vec::new(),
+                            vec![Action::ManageUsage],
+                        )
+                        .expect("bounded usage recovery"),
+                    },
+                ]),
+                cx,
+            )
+            .expect("current account and usage notice");
         owner.text.as_ref().expect("typing fixture").window
     });
     cx.run_until_parked();
-    assert_eq!(cx.opened_url(), None);
-    {
-        let mut frame = gpui_kit::VisualTestContext::from_window(window, cx);
-        let bounds = frame
-            .debug_bounds("chat-recovery-action-0")
-            .expect("Manage usage link");
-        frame.simulate_click(bounds.center(), gpui_kit::Modifiers::default());
-    }
-    cx.run_until_parked();
+    let position = VisualTestContext::from_window(window, cx)
+        .debug_bounds("chat-recovery-action-0")
+        .expect("painted Manage usage link")
+        .center();
+    cx.update(|cx| {
+        owner.update(cx, |owner, cx| {
+            assert!(owner.account_op(AccountOp::SignIn, cx));
+        });
+        window
+            .update(cx, |_, window, cx| {
+                window.dispatch_event(
+                    PlatformInput::MouseDown(MouseDownEvent {
+                        position,
+                        button: MouseButton::Left,
+                        click_count: 1,
+                        ..MouseDownEvent::default()
+                    }),
+                    cx,
+                );
+                window.dispatch_event(
+                    PlatformInput::MouseUp(MouseUpEvent {
+                        position,
+                        button: MouseButton::Left,
+                        click_count: 1,
+                        ..MouseUpEvent::default()
+                    }),
+                    cx,
+                );
+            })
+            .expect("click the last painted link before repaint");
+    });
+    assert_eq!(
+        controls.try_recv(),
+        Ok(ControlToBrain::AccountOp(AccountOp::SignIn))
+    );
+    assert_eq!(
+        cx.opened_url(),
+        None,
+        "the stale link cannot open while waiting"
+    );
+
+    click_github(window, "chat-recovery-action-0", cx);
+    assert_eq!(cx.opened_url(), None, "the repainted link stays disabled");
+    owner.update(cx, |owner, cx| {
+        owner
+            .link_events(Batch::Plain(vec![account()]), cx)
+            .expect("authoritative account answer");
+    });
+    click_github(window, "chat-recovery-action-0", cx);
     assert_eq!(cx.opened_url().as_deref(), Some(MANAGE_USAGE_URL));
+    assert!(controls.is_empty());
 }
 
 #[gpui::test]
