@@ -57,7 +57,8 @@ pub(super) struct Queued {
 pub(super) struct Write {
     epoch: u64,
     model: bool,
-    disables_hold: bool,
+    /// The user's change being written, if it is one.
+    op: Option<SettingsOp>,
     voice: Option<VoiceWrite>,
     github: Option<GitHubWrite>,
     handle: JoinHandle<(Pending, Result<(), ConfigError>)>,
@@ -99,18 +100,25 @@ pub(super) type Written = (
 );
 
 impl Brain {
+    /// Whether `off` is queued or being written, so its setting already counts as off.
+    fn turning_off(&self, off: &SettingsOp) -> bool {
+        self.config_write
+            .as_ref()
+            .is_some_and(|write| write.op.as_ref() == Some(off))
+            || self
+                .settings_ops
+                .iter()
+                .any(|queued| matches!(&queued.change, Change::User(op) if op == off))
+    }
+
     pub(super) fn hold_to_talk_enabled(&self) -> bool {
-        self.config.view().hold_to_talk
-            && self
-                .config_write
-                .as_ref()
-                .is_none_or(|write| !write.disables_hold)
-            && !self.settings_ops.iter().any(|queued| {
-                matches!(
-                    queued.change,
-                    Change::User(SettingsOp::SetHoldToTalk(false))
-                )
-            })
+        self.config.view().hold_to_talk && !self.turning_off(&SettingsOp::SetHoldToTalk(false))
+    }
+
+    /// Show-screen as display admission reads it: off from the moment an Off is taken until it
+    /// fails, so neither a slow save nor a queued On lets a fresh hold capture early.
+    pub(super) fn show_screen_enabled(&self) -> bool {
+        self.config.view().show_screen && !self.turning_off(&SettingsOp::SetShowScreen(false))
     }
 
     pub(super) fn changing_model(&self) -> bool {
@@ -165,16 +173,12 @@ impl Brain {
         }
     }
 
-    #[expect(
-        clippy::fn_params_excessive_bools,
-        reason = "the model-operation bit remains in flight through this settings write"
-    )]
     fn start_settings_write(
         &mut self,
         pending: Pending,
         epoch: u64,
         model: bool,
-        disables_hold: bool,
+        op: Option<SettingsOp>,
         voice: Option<VoiceWrite>,
         github: Option<GitHubWrite>,
     ) {
@@ -195,7 +199,7 @@ impl Brain {
         self.config_write = Some(Write {
             epoch,
             model,
-            disables_hold,
+            op,
             voice,
             github,
             handle,
@@ -256,7 +260,10 @@ impl Brain {
                 *choice = repaired;
             }
             let model = matches!(&change, Change::User(SettingsOp::SetDefaultModel(_)));
-            let disables_hold = matches!(&change, Change::User(SettingsOp::SetHoldToTalk(false)));
+            let op = match &change {
+                Change::User(op) => Some(op.clone()),
+                _ => None,
+            };
             if model {
                 self.holds
                     .invalidate(kumochi_protocol::message::HoldStatus::Failed(
@@ -356,7 +363,7 @@ impl Brain {
             };
             match staged {
                 Ok(pending) => {
-                    self.start_settings_write(pending, epoch, model, disables_hold, voice, github);
+                    self.start_settings_write(pending, epoch, model, op, voice, github);
                 }
                 Err(error) => {
                     tracing::warn!(%error, "settings change refused");

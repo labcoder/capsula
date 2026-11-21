@@ -123,10 +123,10 @@ async fn the_screen_gate_is_sent_at_connect_and_after_a_change_that_moves_it() {
         shell.send(&op(SettingsOp::SetShowScreen(false))).await;
         assert_eq!(
             gate_or_settings(&mut shell).await,
-            "Settings answer=true",
-            "the window choice going off didn't move the gate"
+            "Off(TurnedOff)",
+            "the gate didn't close as Off was taken, before its save"
         );
-        assert_eq!(gate_or_settings(&mut shell).await, "Off(TurnedOff)");
+        assert_eq!(gate_or_settings(&mut shell).await, "Settings answer=true");
         shell.send(&op(SettingsOp::SetScreenHolds(true))).await;
         assert_eq!(gate_or_settings(&mut shell).await, "Settings answer=true");
         shell.send(&op(SettingsOp::SetShowScreen(true))).await;
