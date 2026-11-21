@@ -416,7 +416,7 @@ fn queued_plain_escape_stops_active_audio_while_brain_data_credit_is_exhausted(
                         assert_eq!(handed, before + 48, "source advances by one exact block");
                         assert_eq!(samples.map(f32::to_bits), PCM);
                     }
-                } else if !requested {
+                } else {
                     playback.render(&mut []);
                 }
                 let next = Instant::now() + CALLBACK_PERIOD;
