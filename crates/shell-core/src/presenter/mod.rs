@@ -29,13 +29,6 @@
 
 mod activation;
 mod admit;
-#[cfg_attr(
-    all(
-        not(test),
-        not(all(windows, debug_assertions, feature = "test-support"))
-    ),
-    expect(dead_code, reason = "only the offline test fixture selects conduction")
-)]
 mod conduction;
 pub mod overlay_input;
 mod paint;

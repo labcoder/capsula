@@ -205,6 +205,7 @@ fn run(method: Method, label: &str) {
         let (events, received) = async_channel::unbounded();
         let credit = super::SessionIo {
             queued: false,
+            narrated: None,
             control: None,
             bytes: std::sync::atomic::AtomicU32::new(0),
             wake: async_channel::bounded(1).0.downgrade(),

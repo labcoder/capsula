@@ -392,7 +392,41 @@ impl Presence {
         }
     }
 
+    pub(super) fn reconcile_narration_at(&mut self, now: Instant, cx: &mut Context<'_, Self>) {
+        if self.session.as_ref().is_some_and(|session| {
+            session.has_narration()
+                && !session.update_narration(&self.link, &mut self.presenter, now)
+        }) {
+            self.end_scene_connection(cx);
+        }
+    }
+
     pub(super) fn draw_changed_at(&mut self, now: Instant, cx: &mut Context<'_, Self>) -> bool {
+        let moving = self.draw_current_at(now, cx);
+        if let Some(session) = self.session.as_ref()
+            && session.has_narration()
+            && let Some(retry) = session.retry_narration()
+        {
+            let waiting = session.clone();
+            let ready = cx.background_executor().spawn(async move { retry() });
+            cx.spawn(async move |this, cx| {
+                ready.await;
+                let _updated = this.update(cx, |this, cx| {
+                    if this
+                        .session
+                        .as_ref()
+                        .is_some_and(|s| s.resumes_narration(&waiting))
+                    {
+                        this.scene_effects(Ok(Vec::new()), cx);
+                    }
+                });
+            })
+            .detach();
+        }
+        moving
+    }
+
+    fn draw_current_at(&mut self, now: Instant, cx: &mut Context<'_, Self>) -> bool {
         if self.presenter.placement_due(now) {
             self.place_drawings(cx.weak_entity(), cx);
         }
@@ -404,6 +438,9 @@ impl Presence {
                     return self.scene_effects_at(effects, now, cx);
                 }
             }
+        }
+        if self.presenter.take_narration_change() {
+            self.reconcile_narration_at(now, cx);
         }
         let (sample, effects) = match self.presenter.sample_at(now) {
             Ok(sampled) => sampled,

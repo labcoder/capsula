@@ -145,13 +145,13 @@ fn authenticated_narration(case: NarratedCase) {
             kumochi_brain::ipc::offline_narrated_peer(40)
         }
     };
-    let (pipe, narration) = fixture::authenticated_narrated(id, hello);
+    let pipe = fixture::authenticated_narrated(id, hello);
     let events = fixture::patient(pipe.events);
     let session = fixture::connected(fixture::next(&events));
     let generation = session.generation();
     let mut presenter = presenter_fixture::presenter();
     presenter.connected(generation);
-    narration.attach(&mut presenter);
+    session.attach_narration(&mut presenter);
     let submit = || {
         pipe.handle.send_data(
             &session,
@@ -386,7 +386,7 @@ fn authenticated_narration(case: NarratedCase) {
                             panic!("one replaced scene")
                         };
                         if !contend {
-                            assert!(narration.update(&pipe.handle, &session, &mut presenter, now));
+                            assert!(session.update_narration(&pipe.handle, &mut presenter, now));
                         }
                         let effects = presenter.advance(generation, now).unwrap();
                         settle(&mut presenter, effects, now);
@@ -424,7 +424,7 @@ fn authenticated_narration(case: NarratedCase) {
             }
             if let Some((old, successor)) = boundary {
                 if !contend {
-                    assert!(narration.update(&pipe.handle, &session, &mut presenter, now));
+                    assert!(session.update_narration(&pipe.handle, &mut presenter, now));
                 }
                 let effects = presenter.advance(generation, now).unwrap();
                 settle(&mut presenter, effects, now);
@@ -463,14 +463,14 @@ fn authenticated_narration(case: NarratedCase) {
         if contend {
             fixture::with_outbox_and_output_held(&pipe.handle, &session, || {
                 assert!(
-                    narration.update(&pipe.handle, &session, &mut presenter, Instant::now()),
+                    session.update_narration(&pipe.handle, &mut presenter, Instant::now()),
                     "a busy output lock must defer the unbound Discard, not close the pair"
                 );
                 assert!(session.open());
                 assert_eq!(producer.speech_decision(), None);
             });
             wait("exact Discard after releasing the output lock", &mut || {
-                assert!(narration.update(&pipe.handle, &session, &mut presenter, Instant::now()));
+                assert!(session.update_narration(&pipe.handle, &mut presenter, Instant::now()));
                 producer.speech_decision() == Some((dispatch, SpeechDecision::Discard))
             });
         }
@@ -544,7 +544,7 @@ fn authenticated_narration(case: NarratedCase) {
             segment: promise.segment,
         };
         let now = Instant::now();
-        assert!(narration.update(&pipe.handle, &session, &mut presenter, now));
+        assert!(session.update_narration(&pipe.handle, &mut presenter, now));
         assert_eq!(
             producer.speech_decision(),
             None,
@@ -566,13 +566,13 @@ fn authenticated_narration(case: NarratedCase) {
         settle(&mut presenter, effects, now);
         assert!(!presenter.scenes.contains_key(&scene));
         wait("keyed discard before first binding", &mut || {
-            assert!(narration.update(&pipe.handle, &session, &mut presenter, Instant::now()));
+            assert!(session.update_narration(&pipe.handle, &mut presenter, Instant::now()));
             producer.speech_decision() == Some((key, SpeechDecision::Discard))
         });
         wait(
             "Brain run end after the pending speech decision",
             &mut || {
-                assert!(narration.update(&pipe.handle, &session, &mut presenter, Instant::now()));
+                assert!(session.update_narration(&pipe.handle, &mut presenter, Instant::now()));
                 match events.try_recv() {
                     Ok(LinkEvent::Data {
                         message: DataToShell::RunEnd { run: ended },
@@ -621,7 +621,7 @@ fn authenticated_narration(case: NarratedCase) {
     );
     let mut playback = None;
     wait("physical open after authorization", &mut || {
-        assert!(narration.update(&pipe.handle, &session, &mut presenter, Instant::now()));
+        assert!(session.update_narration(&pipe.handle, &mut presenter, Instant::now()));
         playback = pipe.playback.try_recv().ok();
         playback.is_some()
     });
@@ -633,7 +633,7 @@ fn authenticated_narration(case: NarratedCase) {
     assert!(audible.iter().any(|sample| sample.abs() > 0.01));
     wait("matched scene onset", &mut || {
         let now = Instant::now();
-        assert!(narration.update(&pipe.handle, &session, &mut presenter, now));
+        assert!(session.update_narration(&pipe.handle, &mut presenter, now));
         let effects = presenter.advance(generation, now).unwrap();
         settle(&mut presenter, effects, now);
         bound(&presenter, scene) == 2
@@ -654,13 +654,13 @@ fn authenticated_narration(case: NarratedCase) {
     wait("local Stop after ordered control", &mut || {
         pipe.handle.output().stop(generation, run).is_ok()
     });
-    assert!(narration.update(&pipe.handle, &session, &mut presenter, now));
+    assert!(session.update_narration(&pipe.handle, &mut presenter, now));
     assert_eq!(producer.quiet(), RunId(0), "no original tail callback yet");
     wait("callback fence", &mut || playback.stopped());
     playback.render(&mut [0.0; 480]);
     wait("original callback quiet", &mut || producer.quiet() == run);
     presenter.connected(generation + 1);
-    assert!(narration.update(&pipe.handle, &session, &mut presenter, now));
+    assert!(session.update_narration(&pipe.handle, &mut presenter, now));
     assert!(
         presenter
             .take_shown(generation + 1)
@@ -952,6 +952,42 @@ fn authored_fallback_does_not_replace_a_binding_before_audio_ends() {
     );
     assert_eq!(level.view, View::Shown);
     assert_eq!(bound(&p, later), 0);
+}
+
+#[test]
+fn natural_audio_handoff_keeps_the_installed_steps_unpainted_receipt() {
+    let assigned = assignment(LIVE, 0);
+    let (mut p, now) = fixture([assigned]);
+    let job = submit(&mut p, LIVE, now);
+    prepared(&mut p, job, now);
+    let binding = p.conductor_view(now).unwrap().binding;
+    assert!(
+        !p.conductor_handoff(assigned),
+        "the waiting head still needs its onset"
+    );
+    owned(
+        &mut p,
+        binding,
+        RouteStamp::Live(1),
+        Picture::At(std::time::Duration::ZERO),
+        now,
+    );
+    p.advance(GENERATION, now).unwrap();
+    assert_eq!(bound(&p, LIVE), 1);
+    assert!(p.conductor_handoff(assigned));
+    assert_eq!(p.conductor_view(now), None);
+    assert_eq!(p.take_shown(GENERATION), [None; 4]);
+    assert!(p.sample_at(now).unwrap().0.visible);
+    paint_shown(&mut p, now);
+    assert_eq!(
+        p.take_shown(GENERATION)
+            .into_iter()
+            .flatten()
+            .map(|r| (r.run, r.scene, r.index))
+            .collect::<Vec<_>>(),
+        [(assigned.run, LIVE, 0)]
+    );
+    assert_eq!(p.take_shown(GENERATION), [None; 4]);
 }
 
 #[test]

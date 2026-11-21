@@ -114,6 +114,7 @@ pub struct AudioProbe {
     speech: Mutex<SpeechEvidence>,
     scene_failed: std::sync::Mutex<Option<(RunId, SceneId)>>,
     decision: std::sync::Mutex<Option<(SpeechDispatch, SpeechDecision)>>,
+    shown: Mutex<Vec<(RunId, SceneId, u32)>>,
 }
 
 #[derive(Debug, Default)]
@@ -299,6 +300,16 @@ impl AudioProbe {
             .expect("the fixture decision recorder is healthy")
     }
 
+    /// The paint receipts received on the real control pipe, in order.
+    /// # Panics
+    /// Panics if the fixture's paint recorder is poisoned.
+    pub fn shown(&self) -> Vec<(RunId, SceneId, u32)> {
+        self.shown
+            .lock()
+            .expect("the paint recorder is healthy")
+            .clone()
+    }
+
     pub(super) async fn before_control(&self, bytes: &[u8]) {
         let mut bytes = bytes;
         let gate = match frame::read::<ControlToShell>(&mut bytes, Pipe::Control) {
@@ -315,6 +326,12 @@ impl AudioProbe {
 
     pub(super) fn control(&self, message: &ControlToBrain) {
         match message {
+            ControlToBrain::StepShown { run, scene, index } => {
+                self.shown
+                    .lock()
+                    .expect("the paint recorder is healthy")
+                    .push((*run, *scene, *index));
+            }
             ControlToBrain::SpeechDecision(key, decision) => {
                 *self
                     .decision

@@ -1,57 +1,65 @@
 use std::sync::{
-    Arc, Mutex,
-    atomic::{AtomicU64, Ordering},
+    Arc, Mutex, OnceLock, TryLockError, Weak,
+    atomic::{AtomicBool, AtomicU64, Ordering},
 };
-#[cfg(all(windows, debug_assertions))]
-#[cfg(any(test, feature = "test-support"))]
-use std::sync::{OnceLock, Weak};
 use std::thread::{self, Thread};
 use std::time::Instant;
 
-#[cfg(all(windows, debug_assertions))]
-#[cfg(any(test, feature = "test-support"))]
 use kumochi_protocol::message::{ControlToBrain, SpeechDecision};
 use kumochi_protocol::message::{MAX_VISIBLE_SCENES, RunId, SceneId, SpeechDispatch};
 use kumochi_scene::limits::MAX_STEPS;
 
-#[cfg(all(windows, debug_assertions))]
-#[cfg(any(test, feature = "test-support"))]
-use super::{
-    LinkHandle, Session, SessionIo,
-    output::{Abort, Denied},
-};
+use super::{LinkEvent, LinkHandle, Session, SessionIo, Shared, output::Denied};
 use crate::presenter::DrawKey;
-#[cfg(all(windows, debug_assertions))]
-#[cfg(any(test, feature = "test-support"))]
 use crate::presenter::Presenter;
 use crate::speaker::conductor::{Assignment, Binding, PictureLevel, ViewLevel};
-#[cfg(all(windows, debug_assertions))]
-#[cfg(any(test, feature = "test-support"))]
 use crate::speaker::conductor::{Picture, PictureState, RouteStamp, View};
-#[cfg(all(windows, debug_assertions))]
-#[cfg(any(test, feature = "test-support"))]
 use crate::speaker::queued::Command;
 use crate::speaker::queued::{DrawingIo, Ordered, OwnerExit};
 
-#[cfg(all(windows, debug_assertions))]
-#[cfg(any(test, feature = "test-support"))]
 #[derive(Debug)]
 struct Pair {
     io: Weak<SessionIo>,
-    abort: Weak<dyn Fn() + Send + Sync>,
+    shared: Weak<Shared>,
+    closing: Weak<AtomicBool>,
+    reader: Arc<OnceLock<Thread>>,
+    events: async_channel::WeakSender<LinkEvent>,
+}
+
+#[derive(Debug)]
+struct RunWake {
+    run: RunId,
+    pending: AtomicBool,
+}
+
+/// One outstanding notification for a run, never authority to install a picture.
+pub struct Wake {
+    io: Weak<SessionIo>,
+    run: Arc<RunWake>,
+}
+
+impl Wake {
+    pub(super) fn take(self, io: &Arc<SessionIo>) -> bool {
+        self.run.pending.store(false, Ordering::Release);
+        self.io.as_ptr() == Arc::as_ptr(io)
+            && io.narrated.as_ref().is_some_and(|bridge| {
+                bridge.current.load(Ordering::Acquire) == self.run.run.0
+                    && !bridge.stopped(self.run.run)
+            })
+    }
 }
 
 #[derive(Debug)]
 pub(crate) struct Narrated {
     pub(super) origin: Instant,
     stopped: AtomicU64,
+    current: AtomicU64,
+    wire_ended: AtomicU64,
+    busy: AtomicBool,
+    retrying: AtomicBool,
     state: Mutex<State>,
     send: async_channel::Sender<Ordered>,
-    #[cfg(all(windows, debug_assertions))]
-    #[cfg(any(test, feature = "test-support"))]
     reports: async_channel::Receiver<Ordered>,
-    #[cfg(all(windows, debug_assertions))]
-    #[cfg(any(test, feature = "test-support"))]
     pair: OnceLock<Pair>,
 }
 
@@ -62,27 +70,28 @@ struct State {
     retired: bool,
     unassigned: Vec<DrawKey>,
     assignment: Option<Assignment>,
+    wake: Option<Arc<RunWake>>,
+    handed_off: bool,
     view: Option<ViewLevel>,
     picture: Option<PictureLevel>,
-    #[cfg(all(windows, debug_assertions))]
-    #[cfg(any(test, feature = "test-support"))]
     applied: Option<Binding>,
     decision: Option<SpeechDispatch>,
     retired_decision: Option<(u64, SpeechDispatch)>,
-    #[cfg(all(windows, debug_assertions))]
-    #[cfg(any(test, feature = "test-support"))]
-    decided: bool,
-    #[cfg(all(windows, debug_assertions))]
-    #[cfg(any(test, feature = "test-support"))]
+    decided: Option<SpeechDecision>,
     ended: Option<Binding>,
-    worker: Option<Thread>,
+    worker_ended: bool,
+    worker: Option<(RunId, Thread)>,
 }
 
-#[cfg(all(windows, debug_assertions))]
-#[cfg(any(test, feature = "test-support"))]
 impl State {
     fn picture_for(&self, view: Option<ViewLevel>) -> Option<PictureLevel> {
-        self.ended.map_or(self.picture, |binding| {
+        let ended = self.ended.or_else(|| {
+            view.filter(|view| {
+                self.worker_ended && Some(view.binding.assignment) == self.assignment
+            })
+            .map(|view| view.binding)
+        });
+        ended.map_or(self.picture, |binding| {
             let pending_onset = view
                 .is_some_and(|level| level.binding == binding && level.view == View::Eligible)
                 && self.picture.is_some_and(|level| {
@@ -102,8 +111,6 @@ impl State {
     }
 }
 
-#[cfg(all(windows, debug_assertions))]
-#[cfg(any(test, feature = "test-support"))]
 fn dispatch(a: Assignment) -> SpeechDispatch {
     SpeechDispatch {
         run: a.run,
@@ -125,13 +132,15 @@ pub(super) fn valid_key(key: DrawKey) -> bool {
 }
 
 impl Narrated {
-    #[cfg(all(windows, debug_assertions))]
-    #[cfg(any(test, feature = "test-support"))]
     pub(super) fn new() -> Self {
         let (send, reports) = async_channel::bounded(4);
         Self {
             origin: Instant::now(),
             stopped: AtomicU64::new(0),
+            current: AtomicU64::new(0),
+            wire_ended: AtomicU64::new(0),
+            busy: AtomicBool::new(false),
+            retrying: AtomicBool::new(false),
             state: Mutex::default(),
             send,
             reports,
@@ -139,15 +148,126 @@ impl Narrated {
         }
     }
 
-    #[cfg(all(windows, debug_assertions))]
-    #[cfg(any(test, feature = "test-support"))]
-    pub(super) fn register_pair(&self, io: &Arc<SessionIo>, abort: &Abort) -> bool {
-        self.pair
-            .set(Pair {
-                io: Arc::downgrade(io),
-                abort: Arc::downgrade(abort),
-            })
-            .is_ok()
+    pub(super) fn register_pair(
+        &self,
+        io: &Arc<SessionIo>,
+        shared: &Arc<Shared>,
+        closing: &Arc<AtomicBool>,
+        reader: &Arc<OnceLock<Thread>>,
+        events: &async_channel::Sender<LinkEvent>,
+    ) -> bool {
+        events.capacity().is_none()
+            && self
+                .pair
+                .set(Pair {
+                    io: Arc::downgrade(io),
+                    shared: Arc::downgrade(shared),
+                    closing: Arc::downgrade(closing),
+                    reader: Arc::clone(reader),
+                    events: events.downgrade(),
+                })
+                .is_ok()
+    }
+
+    fn notify(&self, state: &State) {
+        if let Some(pair) = self.pair.get()
+            && let Some(run) = &state.wake
+            && !self.stopped(run.run)
+            && pair
+                .closing
+                .upgrade()
+                .is_some_and(|closing| !closing.load(Ordering::Acquire))
+            && let Some(out) = pair.events.upgrade()
+            && !run.pending.swap(true, Ordering::AcqRel)
+        {
+            let _offered = out.try_send(LinkEvent::NarrationReady(Wake {
+                io: Weak::clone(&pair.io),
+                run: Arc::clone(run),
+            }));
+        }
+    }
+
+    pub(super) fn run_end(&self, run: RunId) {
+        if let Ok(state) = self.state.lock()
+            && state.promised.is_some_and(|a| a.run == run)
+        {
+            self.wire_ended.store(run.0, Ordering::Release);
+            self.notify(&state);
+        }
+    }
+
+    pub(super) fn can_promise(&self, run: RunId) -> Result<bool, ()> {
+        if self.pair.get().is_some_and(|pair| {
+            pair.closing
+                .upgrade()
+                .is_none_or(|closing| closing.load(Ordering::Acquire))
+        }) {
+            return Err(());
+        }
+        let state = self.state.lock().map_err(|_| ())?;
+        Ok(state.promised.is_none_or(|old| {
+            run <= old.run
+                || self.stopped(old.run)
+                || self.wire_ended.load(Ordering::Acquire) != old.run.0
+                || state.handed_off
+        }))
+    }
+
+    pub(super) fn handoff(&self, session: &Session, presenter: &mut Presenter) {
+        let run = self.current.load(Ordering::Acquire);
+        if run == 0 || self.wire_ended.load(Ordering::Acquire) != run || !session.open() {
+            return;
+        }
+        if let Ok(mut state) = self.try_state()
+            && state.promised.is_some_and(|a| a.run.0 == run)
+            && !state.handed_off
+            && (self.stopped(RunId(run))
+                || state.retired && (state.assignment.is_none() || state.decided.is_some())
+                || (state.decided != Some(SpeechDecision::Allow)
+                    || state.ended.is_some()
+                    || state.worker_ended)
+                    && !state.retired
+                    && state
+                        .assignment
+                        .is_none_or(|a| presenter.conductor_handoff(a)))
+        {
+            state.handed_off = true;
+            if let Some(reader) = self.pair.get().and_then(|pair| pair.reader.get()) {
+                reader.unpark();
+            }
+        }
+    }
+
+    fn try_state(&self) -> Result<std::sync::MutexGuard<'_, State>, ()> {
+        self.state.try_lock().map_err(|error| {
+            if matches!(error, TryLockError::WouldBlock) {
+                self.busy.store(true, Ordering::Release);
+            }
+        })
+    }
+
+    pub(super) fn retry(
+        self: &Arc<Self>,
+        session: &Session,
+    ) -> Option<impl FnOnce() + Send + use<>> {
+        if !session.open()
+            || !self.busy.load(Ordering::Acquire)
+            || self.retrying.swap(true, Ordering::AcqRel)
+        {
+            return None;
+        }
+        self.busy.store(false, Ordering::Release);
+        let bridge = Arc::clone(self);
+        Some(move || {
+            if let Some(shared) = bridge.pair.get().and_then(|pair| pair.shared.upgrade()) {
+                shared.output.wait_narrated_gate();
+            }
+            drop(bridge.state.lock());
+        })
+    }
+
+    pub(super) fn resume(&self) -> bool {
+        self.retrying.swap(false, Ordering::AcqRel)
     }
 
     pub(super) fn stop(&self, run: RunId) {
@@ -169,7 +289,11 @@ impl Narrated {
                     return false;
                 }
                 if let Some(old) = state.promised {
-                    if old.run >= assignment.run || !self.stopped(old.run) {
+                    if old.run >= assignment.run
+                        || (!self.stopped(old.run)
+                            && (self.wire_ended.load(Ordering::Acquire) != old.run.0
+                                || !state.handed_off))
+                    {
                         return false;
                     }
                     let debt = state.decision.map(|key| (old.session, key));
@@ -180,11 +304,17 @@ impl Narrated {
                         unassigned: std::mem::take(&mut state.unassigned),
                         replaced_before_promise: state.replaced_before_promise,
                         retired_decision: debt.or(state.retired_decision),
+                        worker: state.worker.take(),
                         ..State::default()
                     };
                 }
                 state.retired = state.replaced_before_promise.contains(&Some(key.scene));
                 state.promised = Some(assignment);
+                state.wake = Some(Arc::new(RunWake {
+                    run: assignment.run,
+                    pending: AtomicBool::new(false),
+                }));
+                self.current.store(assignment.run.0, Ordering::Release);
                 true
             })
     }
@@ -233,6 +363,7 @@ impl Narrated {
                 return false;
             }
             state.assignment = Some(assignment);
+            self.notify(&state);
             true
         })
     }
@@ -255,16 +386,14 @@ impl Narrated {
         })
     }
 
-    #[cfg(all(windows, debug_assertions))]
-    #[cfg(any(test, feature = "test-support"))]
     fn assignment(&self, key: DrawKey) -> Result<Option<Assignment>, ()> {
         if self.stopped(key.run) {
             return Err(());
         }
-        let state = self.state.try_lock().map_err(|_| ())?;
+        let state = self.try_state()?;
         if let Some(assignment) = state
             .assignment
-            .filter(|&a| !state.retired && draw_key(a) == key)
+            .filter(|&a| !state.retired && !state.handed_off && draw_key(a) == key)
         {
             Ok(Some(assignment))
         } else {
@@ -272,15 +401,27 @@ impl Narrated {
         }
     }
 
-    #[cfg(all(windows, debug_assertions))]
-    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn attach(self: &Arc<Self>, presenter: &mut Presenter) {
         let bridge = Arc::clone(self);
         presenter.start_conduction(self.origin, move |key| bridge.assignment(key));
     }
 
-    #[cfg(all(windows, debug_assertions))]
-    #[cfg(any(test, feature = "test-support"))]
+    fn offer_gate(
+        &self,
+        link: &LinkHandle,
+        command: Command,
+        before: impl FnOnce() -> bool,
+    ) -> Result<bool, ()> {
+        match link.shared.output.narrated_gate(command, before) {
+            Ok(()) => Ok(true),
+            Err(Denied::Busy) => {
+                self.busy.store(true, Ordering::Release);
+                Ok(false)
+            }
+            Err(_) => Err(()),
+        }
+    }
+
     pub(crate) fn update(
         &self,
         link: &LinkHandle,
@@ -288,28 +429,21 @@ impl Narrated {
         presenter: &mut Presenter,
         now: Instant,
     ) -> Result<(), ()> {
-        if !link
-            .shared
-            .narrated
-            .as_deref()
-            .is_some_and(|mode| std::ptr::eq(mode, self))
-            || !self
-                .pair
-                .get()
-                .is_some_and(|pair| std::ptr::eq(pair.io.as_ptr(), Arc::as_ptr(&session.io)))
-        {
+        if !self.pair.get().is_some_and(|pair| {
+            pair.io.as_ptr() == Arc::as_ptr(&session.io)
+                && pair.shared.as_ptr() == Arc::as_ptr(&link.shared)
+        }) {
             return Err(());
         }
         self.drain_reports(session, presenter)?;
         let view = presenter.conductor_view(now);
-        let (picture, refused) = {
-            let Ok(mut state) = self.state.try_lock() else {
+        let picture = {
+            let Ok(mut state) = self.try_state() else {
                 return Ok(());
             };
-            let Some(assignment) = state
-                .assignment
-                .filter(|a| session.open() && a.session == session.generation())
-            else {
+            let Some(assignment) = state.assignment.filter(|a| {
+                session.open() && a.session == session.generation() && !state.handed_off
+            }) else {
                 return Ok(());
             };
             if self.stopped(assignment.run) {
@@ -318,8 +452,9 @@ impl Narrated {
                 }
                 return Ok(());
             }
-            let removed = state.retired
-                || presenter.conductor_removed(session.generation(), assignment.step.scene);
+            state.retired |=
+                presenter.conductor_removed(session.generation(), assignment.step.scene);
+            let removed = state.retired;
             let view = if removed {
                 if let Some(level) = view {
                     presenter.conductor_fence(level.binding);
@@ -328,70 +463,65 @@ impl Narrated {
             } else {
                 view
             };
-            if state.view.is_none() && !state.decided && removed {
-                let revoked = link
-                    .shared
-                    .output
-                    .narrated_gate(Command::RevokeSource(assignment));
-                if revoked == Err(Denied::Busy) {
+            let ended = self.wire_ended.load(Ordering::Acquire) == assignment.run.0;
+            if (state.view.is_none() || ended) && state.decided.is_none() && removed {
+                if !self.offer_gate(link, Command::RevokeSource(assignment), || true)? {
                     return Ok(());
                 }
-                if revoked.is_err()
-                    || !Self::decide(&mut state, session, assignment, SpeechDecision::Discard)
-                {
-                    drop(state);
-                    self.refuse(session);
+                if !Self::decide(&mut state, session, assignment, SpeechDecision::Discard) {
                     return Err(());
                 }
+            }
+            if ended {
+                let picture = (!removed).then(|| state.picture_for(view)).flatten();
+                drop(state);
+                presenter.conductor_picture(Ok(picture), now);
+                return Ok(());
             }
             let fenced = state.view.filter(|old| {
                 old.view != View::Fenced
                     && view
                         .is_none_or(|next| next.view == View::Fenced || next.binding != old.binding)
             });
-            let fence_accepted = fenced.is_none_or(|old| {
-                link.shared
-                    .output
-                    .narrated_gate(Command::Revoke(old.binding))
-                    .is_ok()
-            });
+            if let Some(old) = fenced
+                && !self.offer_gate(link, Command::Revoke(old.binding), || true)?
+            {
+                return Ok(());
+            }
             if state.view != view {
                 state.view = view;
-                if let Some(owner) = &state.worker {
+                if let Some((_, owner)) = state
+                    .worker
+                    .as_ref()
+                    .filter(|(run, _)| *run == assignment.run)
+                {
                     owner.unpark();
                 }
             }
             let allow = state.applied.filter(|&binding| {
                 view.is_some_and(|view| view.binding == binding && view.view == View::Eligible)
             });
-            let allow_accepted = fence_accepted
-                && allow.is_none_or(|binding| {
-                    state.applied = None;
+            if let Some(binding) = allow {
+                if !self.offer_gate(link, Command::Allow(binding), || {
                     Self::decide(
                         &mut state,
                         session,
                         binding.assignment,
                         SpeechDecision::Allow,
-                    ) && link
-                        .shared
-                        .output
-                        .narrated_gate(Command::Allow(binding))
-                        .is_ok()
-                });
-            (state.picture_for(view), !fence_accepted || !allow_accepted)
+                    )
+                })? {
+                    return Ok(());
+                }
+                state.applied = None;
+            }
+            state.picture_for(view)
         };
-        if refused {
-            self.refuse(session);
-            return Err(());
-        }
         presenter.conductor_picture(Ok(picture), now);
         Ok(())
     }
 
-    #[cfg(all(windows, debug_assertions))]
-    #[cfg(any(test, feature = "test-support"))]
     fn drain_reports(&self, session: &Session, presenter: &mut Presenter) -> Result<(), ()> {
-        while let Ok(mut state) = self.state.try_lock() {
+        while let Ok(mut state) = self.try_state() {
             if !session.open()
                 || state
                     .assignment
@@ -417,7 +547,7 @@ impl Narrated {
                 }
                 Ordered::Fenced(_) => {
                     state.applied = None;
-                    let accepted = state.decided
+                    let accepted = state.decided.is_some()
                         || Self::decide(
                             &mut state,
                             session,
@@ -427,7 +557,6 @@ impl Narrated {
                     drop(state);
                     presenter.conductor_fence(binding);
                     if !accepted {
-                        self.refuse(session);
                         return Err(());
                     }
                 }
@@ -440,8 +569,6 @@ impl Narrated {
         Ok(())
     }
 
-    #[cfg(all(windows, debug_assertions))]
-    #[cfg(any(test, feature = "test-support"))]
     fn decide(
         state: &mut State,
         session: &Session,
@@ -450,7 +577,7 @@ impl Narrated {
     ) -> bool {
         let key = dispatch(assignment);
         state.decision = Some(key);
-        state.decided = true;
+        state.decided = Some(decision);
         session
             .io
             .control
@@ -464,24 +591,15 @@ impl Narrated {
             })
     }
 
-    #[cfg(all(windows, debug_assertions))]
-    #[cfg(any(test, feature = "test-support"))]
-    fn refuse(&self, session: &Session) {
-        session.close();
-        if let Some(abort) = self.pair.get().and_then(|pair| pair.abort.upgrade()) {
-            abort();
-        }
-    }
-
     pub(super) fn worker(
         self: &Arc<Self>,
-        assignment_session: u64,
+        run: RunId,
         event_failure: impl FnMut() + Send + 'static,
         exit: impl FnMut(bool) + Send + 'static,
     ) -> impl DrawingIo {
         Io {
             bridge: Arc::clone(self),
-            session: assignment_session,
+            run,
             event_failure,
             exit,
         }
@@ -490,7 +608,7 @@ impl Narrated {
 
 struct Io<F, E> {
     bridge: Arc<Narrated>,
-    session: u64,
+    run: RunId,
     event_failure: F,
     exit: E,
 }
@@ -502,19 +620,22 @@ impl<F: FnMut() + Send + 'static, E: FnMut(bool) + Send + 'static> DrawingIo for
 
     fn view(&mut self) -> Result<Option<ViewLevel>, ()> {
         let mut state = self.bridge.state.lock().map_err(|_| ())?;
-        state.worker.get_or_insert_with(thread::current);
+        if state.worker.as_ref().is_none_or(|(run, _)| *run < self.run) {
+            state.worker = Some((self.run, thread::current()));
+        }
         Ok(state.view.filter(|view| {
-            view.binding.assignment.session == self.session
-                && !self.bridge.stopped(view.binding.assignment.run)
+            view.binding.assignment.run == self.run && !self.bridge.stopped(self.run)
         }))
     }
 
     fn picture(&mut self, key: Binding, level: Option<PictureLevel>) {
-        if let Ok(mut state) = self.bridge.state.lock()
+        if self.run == key.assignment.run
+            && let Ok(mut state) = self.bridge.state.lock()
             && state.assignment == Some(key.assignment)
             && !self.bridge.stopped(key.assignment.run)
         {
             state.picture = level;
+            self.bridge.notify(&state);
         }
     }
 
@@ -522,12 +643,28 @@ impl<F: FnMut() + Send + 'static, E: FnMut(bool) + Send + 'static> DrawingIo for
         let refused = exit == OwnerExit::ReportRefused;
         if refused {
             (self.event_failure)();
+        } else if let Ok(mut state) = self.bridge.state.lock()
+            && state.assignment.is_some_and(|a| a.run == self.run)
+            && !self.bridge.stopped(self.run)
+        {
+            state.worker_ended = true;
+            self.bridge.notify(&state);
         }
         (self.exit)(refused);
     }
 
     fn ordered(&mut self, event: Ordered) -> bool {
-        self.bridge.send.try_send(event).is_ok()
+        let Ok(state) = self.bridge.state.lock() else {
+            return false;
+        };
+        if state.assignment.is_none_or(|a| a.run != self.run) || self.bridge.stopped(self.run) {
+            return true;
+        }
+        if self.bridge.send.try_send(event).is_err() {
+            return false;
+        }
+        self.bridge.notify(&state);
+        true
     }
 }
 
@@ -536,6 +673,47 @@ mod tests {
     use kumochi_protocol::message::{OutputGeneration, RunId, SegmentId, StepRef};
 
     use super::*;
+
+    #[test]
+    fn an_empty_contended_pass_rearms_once_and_only_on_its_pair() {
+        use crate::link::fixture::{attended_queued_shared, connected};
+
+        let pipe = attended_queued_shared(
+            "narration-empty-rearm",
+            Arc::new(Shared {
+                narrated: true,
+                ..Shared::default()
+            }),
+        );
+        let session = connected(pipe.events.recv_blocking().unwrap());
+        let other = Session::detached(session.generation(), session.incarnation());
+        let bridge = session.io.narrated.as_ref().unwrap();
+        let mut presenter = crate::presenter::fixture::presenter();
+        presenter.connected(session.generation());
+        session.attach_narration(&mut presenter);
+        let held = bridge.state.lock().unwrap();
+        assert!(session.update_narration(&pipe.handle, &mut presenter, Instant::now()));
+        let retry = session
+            .retry_narration()
+            .expect("contention needs a new scene pass");
+        assert!(
+            session.retry_narration().is_none(),
+            "only one wait is in flight"
+        );
+        assert!(
+            pipe.events.is_empty(),
+            "no queued message can rescue the interrupted pass"
+        );
+        drop(held);
+        retry();
+        assert!(!other.resumes_narration(&session));
+        assert!(session.resumes_narration(&session));
+        assert!(!session.resumes_narration(&session));
+        assert!(session.update_narration(&pipe.handle, &mut presenter, Instant::now()));
+        assert!(session.retry_narration().is_none());
+        pipe.handle.end(&session);
+        assert!(pipe.link.join().unwrap());
+    }
 
     #[test]
     fn stopped_assignment_loses_authority_but_keeps_its_own_decision_receipt() {

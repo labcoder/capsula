@@ -15,6 +15,7 @@ pub(super) struct Conduction {
     lookup: Box<Lookup>,
     nonce: u64,
     current: Option<Current>,
+    changed: bool,
     detached: [Option<Assignment>; MAX_VISIBLE_SCENES],
 }
 
@@ -67,14 +68,17 @@ impl Conduction {
             && draw_key(current.level.binding.assignment) == key
         {
             current.installed = true;
+            self.changed = true;
         }
     }
 
     pub(super) fn fence(&mut self, matches: impl Fn(DrawKey) -> bool) {
         if let Some(current) = &mut self.current
             && matches(draw_key(current.level.binding.assignment))
+            && current.level.view != View::Fenced
         {
             current.level.view = View::Fenced;
+            self.changed = true;
         }
         for slot in &mut self.detached {
             if slot.is_some_and(|a| matches(draw_key(a))) {
@@ -114,6 +118,7 @@ impl Presenter {
                 lookup: Box::new(lookup),
                 nonce: 0,
                 current: None,
+                changed: false,
                 detached: [None; MAX_VISIBLE_SCENES],
             })
         });
@@ -155,6 +160,7 @@ impl Presenter {
         let Some(mut state) = self.conduction.take() else {
             return;
         };
+        let previous = state.current.map(|current| current.level);
         let fenced = |key: DrawKey| {
             self.fenced.is_some_and(|run| key.run <= run)
                 || self
@@ -229,24 +235,31 @@ impl Presenter {
         } else if let Some(current) = state.current.as_mut() {
             current.level.view = view;
         }
+        state.changed |= previous != state.current.map(|current| current.level);
         self.conduction = Some(state);
+    }
+
+    /// Whether an existing scene pass changed the local binding or its readiness.
+    #[inline]
+    pub fn take_narration_change(&mut self) -> bool {
+        self.conduction
+            .as_mut()
+            .is_some_and(|state| std::mem::take(&mut state.changed))
     }
 
     pub(crate) fn conductor_view(&mut self, now: Instant) -> Option<ViewLevel> {
         self.sync_conduction(now);
-        let current = self.conduction.as_mut()?.current.as_mut()?;
+        let state = self.conduction.as_mut()?;
+        state.changed = false;
+        let current = state.current.as_mut()?;
         current.shown_reported |= current.level.view == View::Shown;
         Some(current.level)
     }
 
-    #[cfg(all(windows, debug_assertions))]
-    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn conductor_removed(&self, generation: u64, scene: SceneId) -> bool {
         self.generation == Some(generation) && self.cleared.contains(&scene)
     }
 
-    #[cfg(all(windows, debug_assertions))]
-    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn conductor_fence(&mut self, binding: Binding) {
         if let Some(current) = self
             .conduction
@@ -256,6 +269,20 @@ impl Presenter {
         {
             current.level.view = View::Fenced;
         }
+    }
+
+    /// Retires the audio binding without changing the installed frame or its paint receipt.
+    pub(crate) fn conductor_handoff(&mut self, assignment: Assignment) -> bool {
+        if let Some(state) = &mut self.conduction
+            && let Some(current) = state.current
+            && current.level.binding.assignment == assignment
+        {
+            if current.level.view != View::Fenced && !current.installed {
+                return false;
+            }
+            state.current = None;
+        }
+        true
     }
 
     /// Ok(None) is a coherent empty slot; Err is a torn read.

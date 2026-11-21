@@ -36,9 +36,11 @@ use crate::platform::{self, PipeClient};
 use crate::speaker::{self, Command, Data, Opener, Outlet, Packet, Speaker};
 
 mod microphone;
-pub(crate) mod narrated;
+mod narrated;
 pub mod output;
 mod queued;
+
+pub use narrated::Wake as NarrationWake;
 
 /// How long one connection attempt may take, starting the brain included.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -113,6 +115,8 @@ pub enum LinkEvent {
     State(LinkState),
     /// A new connection, and the session the UI sends and grants credit through.
     Connected(Session),
+    /// Coalesced drawing evidence from the exact narrated pair and run.
+    NarrationReady(NarrationWake),
     Settings {
         generation: u64,
         view: SettingsView,
@@ -337,6 +341,55 @@ impl Session {
         self.issue_origin
     }
 
+    #[inline]
+    pub fn has_narration(&self) -> bool {
+        self.io.narrated.is_some()
+    }
+
+    pub fn attach_narration(&self, presenter: &mut crate::presenter::Presenter) {
+        if let Some(bridge) = &self.io.narrated {
+            bridge.attach(presenter);
+        }
+    }
+
+    #[must_use]
+    pub fn accepts_narration(&self, wake: NarrationWake) -> bool {
+        self.open() && wake.take(&self.io)
+    }
+
+    /// Reconciles current evidence without waiting for either the reader or speaker.
+    #[must_use]
+    pub fn update_narration(
+        &self,
+        link: &LinkHandle,
+        presenter: &mut crate::presenter::Presenter,
+        now: Instant,
+    ) -> bool {
+        self.io.narrated.as_ref().is_none_or(|bridge| {
+            if !self.open() || bridge.update(link, self, presenter, now).is_err() {
+                return false;
+            }
+            bridge.handoff(self, presenter);
+            true
+        })
+    }
+
+    pub fn retry_narration(&self) -> Option<impl FnOnce() + Send + use<>> {
+        self.io.narrated.as_ref()?.retry(self)
+    }
+
+    /// Resumes an interrupted scene pass only on the same pair, not by generation alone.
+    #[must_use]
+    pub fn resumes_narration(&self, waiting: &Self) -> bool {
+        self.open()
+            && Arc::ptr_eq(&self.io, &waiting.io)
+            && self
+                .io
+                .narrated
+                .as_ref()
+                .is_some_and(|bridge| bridge.resume())
+    }
+
     /// Grants this connection's brain `bytes` more of data frames, once the UI has taken a frame
     /// that size. Grants add up until the data writer sends them. Never blocks or locks.
     pub fn grant(&self, bytes: u32) {
@@ -362,6 +415,7 @@ impl SessionIo {
 #[derive(Debug)]
 struct SessionIo {
     queued: bool,
+    narrated: Option<Arc<narrated::Narrated>>,
     control: Option<WeakSender<ControlToBrain>>,
     bytes: AtomicU32,
     wake: WeakSender<DataOut>,
@@ -517,7 +571,7 @@ struct Shared {
     /// The last connection's generation.
     generations: AtomicU64,
     output: output::OutputOwner,
-    narrated: Option<Arc<narrated::Narrated>>,
+    narrated: bool,
     #[cfg(any(test, feature = "test-support"))]
     hold_control_writer: std::sync::atomic::AtomicU8,
     #[cfg(any(test, feature = "test-support"))]
@@ -969,6 +1023,7 @@ impl Session {
             generation,
             io: Arc::new(SessionIo {
                 queued: false,
+                narrated: None,
                 control: None,
                 bytes: AtomicU32::new(0),
                 wake: wake.downgrade(),
@@ -1195,8 +1250,11 @@ impl Link {
             shared: Arc::clone(&self.shared),
             queued: queued.then_some(generation),
         };
+        let narrated =
+            (queued && self.shared.narrated).then(|| Arc::new(narrated::Narrated::new()));
         let credit = Arc::new(SessionIo {
             queued,
+            narrated,
             control: Some(control_out.downgrade()),
             bytes: AtomicU32::new(0),
             wake: data_out.downgrade(),
@@ -1225,10 +1283,8 @@ impl Link {
                     reader.unpark();
                 }
             });
-            #[cfg(all(windows, debug_assertions))]
-            #[cfg(any(test, feature = "test-support"))]
-            if let Some(mode) = &self.shared.narrated
-                && !mode.register_pair(&credit, &abort)
+            if let Some(mode) = &credit.narrated
+                && !mode.register_pair(&credit, &self.shared, &closing, reader, events)
             {
                 return Attendance::Ended;
             }
@@ -1240,7 +1296,7 @@ impl Link {
                     ack,
                     Arc::clone(reader),
                     Arc::clone(&closing),
-                    self.shared.narrated.clone(),
+                    credit.narrated.clone(),
                 ),
             ) {
                 return Attendance::Retry;
@@ -1381,7 +1437,7 @@ impl Link {
                         generation,
                         input.as_ref(),
                         &credit,
-                        queued.then_some((&ended.shared.output, ended.shared.narrated.as_deref())),
+                        queued.then_some((&ended.shared.output, credit.narrated.as_deref())),
                     );
                 }
             })
@@ -1624,9 +1680,8 @@ fn watch(
         match frame::read::<ControlToShell>(&mut &*control, Pipe::Control) {
             Ok(None) => return,
             Ok(Some(ControlToShell::SpeechDecisionTaken(key))) => {
-                if !shared
-                    .narrated
-                    .as_ref()
+                if !queued
+                    .and_then(|io| io.narrated.as_ref())
                     .is_some_and(|mode| mode.taken(generation, key))
                 {
                     return;

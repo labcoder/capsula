@@ -146,6 +146,7 @@ impl Presence {
                 }
             }
         }
+        self.reconcile_narration_at(now, cx);
         self.draw_changed_at(now, cx)
     }
 

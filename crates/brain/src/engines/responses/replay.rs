@@ -33,7 +33,7 @@ pub(crate) struct Replay {
     recipe: Arc<Wire>,
     followup: Option<(Arc<Wire>, Arc<Notify>)>,
     receipt: Arc<Observation>,
-    run: OnceLock<RunId>,
+    run: Option<OnceLock<RunId>>,
 }
 
 impl Replay {
@@ -42,7 +42,7 @@ impl Replay {
             recipe: Arc::new(Wire::drawing(Recipe::Plain)?),
             followup: None,
             receipt: Arc::clone(receipt),
-            run: OnceLock::new(),
+            run: Some(OnceLock::new()),
         })
     }
 
@@ -90,7 +90,7 @@ impl Replay {
                 gate,
             )),
             receipt: Observation::silent_replay(),
-            run: OnceLock::new(),
+            run: Some(OnceLock::new()),
         }
     }
 
@@ -100,7 +100,7 @@ impl Replay {
             recipe: Arc::new(Wire::drawing(recipe)?),
             followup: None,
             receipt: Observation::silent_replay(),
-            run: OnceLock::new(),
+            run: (recipe != Recipe::Narrated).then(OnceLock::new),
         })
     }
 }
@@ -114,10 +114,22 @@ impl fmt::Debug for Replay {
 impl Engine for Replay {
     fn start(&self, request: RunRequest, events: mpsc::Sender<TurnEvent>, gate: SendGate) -> Round {
         let (wire, hold) = match request.key {
-            SendKey::Build(key) if key.round == 1 && self.run.set(request.run).is_ok() => {
+            SendKey::Build(key)
+                if key.round == 1
+                    && self
+                        .run
+                        .as_ref()
+                        .is_none_or(|run| run.set(request.run).is_ok()) =>
+            {
                 (Some(Arc::clone(&self.recipe)), None)
             }
-            SendKey::Build(key) if key.round == 2 && self.run.get() == Some(&request.run) => {
+            SendKey::Build(key)
+                if key.round == 2
+                    && self
+                        .run
+                        .as_ref()
+                        .is_none_or(|run| run.get() == Some(&request.run)) =>
+            {
                 self.followup.as_ref().map_or_else(
                     || (Some(Arc::new(Wire::http(COMPLETED, Vec::new()))), None),
                     |(wire, hold)| (Some(Arc::clone(wire)), Some(Arc::clone(hold))),
@@ -126,7 +138,10 @@ impl Engine for Replay {
             SendKey::Build(key)
                 if key.round == 3
                     && self.followup.is_some()
-                    && self.run.get() == Some(&request.run) =>
+                    && self
+                        .run
+                        .as_ref()
+                        .is_some_and(|run| run.get() == Some(&request.run)) =>
             {
                 (Some(Arc::new(Wire::http(COMPLETED, Vec::new()))), None)
             }

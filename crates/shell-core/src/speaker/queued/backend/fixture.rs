@@ -16,8 +16,13 @@ pub fn serialize_playback() -> std::sync::MutexGuard<'static, ()> {
     let permit = EXCLUSIVE
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    wait_for_playback_disposal(&[&NATIVE, &OCCUPIED]);
+    await_fake_disposal();
     permit
+}
+
+/// Waits for a previous route under the fixture's existing serialization guard.
+pub fn await_fake_disposal() {
+    wait_for_playback_disposal(&[&NATIVE, &OCCUPIED]);
 }
 
 pub(super) fn wait_for_playback_disposal(permits: &[&AtomicBool]) {

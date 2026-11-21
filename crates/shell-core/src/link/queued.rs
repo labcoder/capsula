@@ -92,6 +92,9 @@ impl Reader {
                 speech: Some(_), ..
             } => return Err(()),
             DataToShell::RunEnd { run } => {
+                if let Some(bridge) = narrated {
+                    bridge.run_end(run);
+                }
                 return owner
                     .end_queued_run(session, run)
                     .then_some(Some(message))
@@ -128,6 +131,9 @@ impl Reader {
         assignment: Assignment,
         frame: MetadataFrame,
     ) -> Result<bool, ()> {
+        if matches!(frame, MetadataFrame::Commit) && !narrated.can_promise(assignment.run)? {
+            return Ok(false);
+        }
         match owner.narrated_metadata(assignment, frame)? {
             NarratedReservation::Waiting => Ok(false),
             NarratedReservation::Reserved => match frame {

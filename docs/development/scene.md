@@ -859,15 +859,19 @@ It chooses one Speech-start head at a time in stable scene order, after the auth
 time and replacement guard allow it. Now and After never create a presenter binding;
 they use their authored visual timing whether they have narration or not. The conductor
 doesn't scan past an uninstalled authored head to reach a later Speech step.
-An opt-in caller supplies the session clock origin and assignment lookup; unresolved isn't
-the same as unassigned. No live link or shell path enables it.
+Presence attaches the authenticated pair's bridge after resetting its presenter on Connect.
+The bridge supplies the pair clock and assignment lookup; unresolved isn't the same as
+unassigned. Only the offline narrated fixture selects the bridge. Normal launches are unchanged.
 
 The presenter schedules the keyed onset once, acknowledges only an accepted paint of the
 installed epoch and fences locally on Stop, cut, replacement or session loss. An older stamped
 owner loss can't override a newer route; keyed unstamped loss still can. Retirement cancels
 the old onset. Silent timing alone does not end a binding. A keyed end or owner loss releases it;
 an unshown step keeps its authored start permission without another worker message. There is
-no presenter timeout. After paint, this layer uses the authored clock, not speech motion.
+no presenter timeout. A coalesced event from the current pair and run brings already-ready
+scenes out of rest on new audio evidence, reusing the same scene update and its one-shot
+watchdog. An interrupted scene pass waits for the contended owners off the UI thread before
+rechecking the current pair. After paint, this layer uses the authored clock, not speech motion.
 An authored successor can replace an unpainted Speech picture on time. That visual
 replacement doesn't end the installed Speech binding or credit the successor's paint to it.
 

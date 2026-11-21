@@ -231,9 +231,9 @@ fallback even when a device opens as virtual pacing exhausts it. Retirement stil
 keeps the existing rebuild grace. Ready PCM arms the hold during a pending device
 open, so expiry can release it to virtual pacing without another packet.
 Missing owner, backend startup failure and worker exit
-are reported to the future link, which supplies keyed Unavailable. Unit 4 must ensure
-the worker has seen the matching binding before forwarding that assignment's first PCM,
-for example by using the keyed picture as acknowledgment. An unresolved assignment is
+are reported to the pair's bridge, which supplies keyed Unavailable when there's no
+onset to preserve. An ordered Applied for the exact binding lets the bridge send
+Allow; only then can that assignment's PCM reach the worker. An unresolved assignment is
 not unassigned. No link or opener uses this adapter yet.
 
 ## Reports
