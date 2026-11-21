@@ -11,7 +11,7 @@ use kumochi_protocol::frame::Pipe;
 use kumochi_protocol::tap::{self as record, Direction, Record, Tapped};
 
 /// An open recording, or nothing.
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub(crate) struct Tap(Option<File>);
 
 impl Tap {

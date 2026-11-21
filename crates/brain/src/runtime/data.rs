@@ -269,6 +269,18 @@ impl DataQueue {
         self.bytes
     }
 
+    #[cfg(all(windows, debug_assertions, feature = "test-support"))]
+    pub(super) fn credit_blocked(&self) -> bool {
+        self.frames
+            .front()
+            .is_some_and(|(_, frame)| frame.len() > self.credit)
+    }
+
+    #[cfg(all(windows, debug_assertions, feature = "test-support"))]
+    pub(super) fn granted_credit(&self) -> usize {
+        self.credit
+    }
+
     #[cfg(test)]
     pub(super) fn frames_for_tests(&self) -> usize {
         self.frames.len()

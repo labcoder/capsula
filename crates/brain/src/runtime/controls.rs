@@ -50,11 +50,10 @@ impl Registration {
             ControlToBrain::KeyDown { .. }
             | ControlToBrain::HoldRecognized { .. }
             | ControlToBrain::VoiceHoldRecognized { .. }
-            | ControlToBrain::ScreenHoldRecognized { .. }
-                if self == Self::Awaiting =>
-            {
-                Err(Ended::Broken("hold before queued audio registration"))
-            }
+            | ControlToBrain::ScreenHoldRecognized { .. } => Err(Ended::Broken(match self {
+                Self::Awaiting => "hold before queued audio registration",
+                Self::Applied(_) => "hold on a Plain queued connection",
+            })),
             _ => Ok(None),
         }
     }
@@ -356,6 +355,10 @@ impl Brain {
                     .map_err(|Full| Ended::Lost)?;
             }
             return Ok(None);
+        }
+        #[cfg(all(windows, debug_assertions, feature = "test-support"))]
+        if let Some(probe) = super::audio_fixture::probe() {
+            probe.control(&message);
         }
         control_input(message)
     }

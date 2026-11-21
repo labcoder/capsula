@@ -562,6 +562,8 @@ impl Reply {
         found.played = receipt.heard;
         state.next_segment += u32::from(receipt.final_segment);
         state.heard_gap |= receipt.heard < sample;
+        #[cfg(all(windows, debug_assertions, feature = "test-support"))]
+        crate::runtime::audio_fixture::accepted_retirement(receipt);
         self.progressed(out);
         self.pump(out);
         Ok(())
@@ -626,6 +628,8 @@ impl Reply {
                 }
             }
             self.quiet = true;
+            #[cfg(all(windows, debug_assertions, feature = "test-support"))]
+            crate::runtime::audio_fixture::accepted_quiet(self.run, cursor);
             return Ok(());
         }
         if let Some(cursor) = cursor {

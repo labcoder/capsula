@@ -38,6 +38,9 @@ pub(crate) struct Control {
     wake: Option<Thread>,
     tail: AtomicU64,
     handoff: AtomicU64,
+    #[cfg(all(windows, debug_assertions))]
+    #[cfg(any(test, feature = "test-support"))]
+    presented_prefix: AtomicU64,
     callbacks: AtomicU64,
     overflow: AtomicBool,
     clock: OnceLock<(StreamInstant, Duration)>,
@@ -103,6 +106,18 @@ impl Control {
 
     pub(super) fn handed(&self) -> u64 {
         self.handoff.load(Ordering::Acquire)
+    }
+
+    #[cfg(all(windows, debug_assertions))]
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn record_presented_prefix(&self, through: u64) {
+        self.presented_prefix.store(through, Ordering::Release);
+    }
+
+    #[cfg(all(windows, debug_assertions))]
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn presented_prefix(&self) -> u64 {
+        self.presented_prefix.load(Ordering::Acquire)
     }
 
     pub(super) fn handed_through(&self, through: u64) {

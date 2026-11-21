@@ -1453,6 +1453,184 @@ fn a_refused_host_show_reports_a_scene_failure_instead_of_a_user_clear(
     close_callback_scene(&owner, cx);
 }
 
+#[cfg(all(windows, debug_assertions))]
+#[gpui::test]
+fn queued_escape_offers_stop_then_host_refusal_without_waiting_for_outbox(
+    cx: &mut gpui_kit::TestAppContext,
+) {
+    queued_scene_escape(EscScene::HostRefusal, cx);
+}
+
+#[cfg(all(windows, debug_assertions))]
+#[gpui::test]
+fn queued_escape_fences_a_broken_scene_without_waiting_for_link_locks(
+    cx: &mut gpui_kit::TestAppContext,
+) {
+    queued_scene_escape(EscScene::Broken, cx);
+}
+
+#[cfg(all(windows, debug_assertions))]
+#[derive(Clone, Copy)]
+enum EscScene {
+    HostRefusal,
+    Broken,
+}
+
+#[cfg(all(windows, debug_assertions))]
+#[expect(
+    clippy::too_many_lines,
+    reason = "real queued link and the two scene faults share the active Esc fixture"
+)]
+fn queued_scene_escape(case: EscScene, cx: &mut gpui_kit::TestAppContext) {
+    use crate::link::{LinkEvent, fixture};
+    use kumochi_protocol::message::{
+        AudioSession, DataToBrain, DataToShell, Phase, SceneId, ScreenChoice,
+    };
+    use kumochi_scene::{Record, parse_record};
+    use kumochi_shell_core::presenter::fixture as scene;
+    use std::time::{Duration, Instant};
+
+    const STATIC: &[u8] = br#"{"step":{"id":"static","put":[{"shape":{"id":"box","kind":"rect","box":[0,0,30,30],"enter":"none"}}]}}"#;
+    let broken = matches!(case, EscScene::Broken);
+    let owner = crate::presence::test_fixture::presence(cx);
+    let (id, hello, probe, brain) =
+        kumochi_brain::ipc::offline_plain_peer("5000 text Never.".into(), 8);
+    probe.release_ack();
+    probe.release_run();
+    let pipe = fixture::authenticated(id, hello, AudioSession::QueuedRequired);
+    let events = fixture::patient(pipe.events);
+    let session = fixture::connected(fixture::next(&events));
+    let main = loop {
+        if let LinkEvent::Settings { view, .. } = fixture::next(&events) {
+            break view.main_thread;
+        }
+    };
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while !pipe.handle.admits_text(Some(&session)) {
+        assert!(Instant::now() < deadline, "the exact queued ACK arrived");
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    assert!(pipe.handle.send_data(
+        &session,
+        DataToBrain::TextSubmit {
+            turn: 1,
+            thread: Some(main),
+            screen: ScreenChoice::None,
+            text: "arm the scene fixture".into(),
+        }
+    ));
+    let run = loop {
+        if let LinkEvent::RunState {
+            run,
+            phase: Phase::Thinking,
+            ..
+        } = fixture::next(&events)
+        {
+            break run;
+        }
+    };
+    let mut held_admission = None;
+    owner.update(cx, |this, _| {
+        let now = Instant::now();
+        let mut presenter = super::begun_at(
+            Box::new(crate::presence::paint_cache::Stager(size_of::<
+                crate::presence::paint_cache::Stager,
+            >())),
+            now,
+        );
+        super::prepare_run_scene_step_at(&mut presenter, run, SceneId(1), 0, STATIC, now);
+        assert!(presenter.advance(1, now).unwrap().is_empty());
+        this.presenter = presenter;
+        this.link = pipe.handle.clone();
+        this.session = Some(session.clone());
+        this.runs.connected(session.generation());
+        this.runs.settings(main);
+        this.runs.apply_state(run, main, Phase::Answering, None);
+        if broken {
+            let Record::Step(step) = parse_record(STATIC).unwrap() else {
+                panic!("the fixture has a step");
+            };
+            let input = DataToShell::SceneStepCommit {
+                run,
+                scene: SceneId(1),
+                index: 1,
+                step,
+                speech: None,
+            };
+            held_admission = Some(scene::only_admission(
+                scene::arrive(&mut this.presenter, input, now).unwrap(),
+            ));
+            let duplicate = DataToShell::SceneBegin {
+                scene: SceneId(1),
+                header: scene::header(),
+            };
+            assert!(
+                scene::arrive(&mut this.presenter, duplicate, now)
+                    .unwrap()
+                    .is_empty(),
+                "the duplicate stays behind admission until Esc examines membership"
+            );
+        }
+    });
+    let esc = || {
+        owner.update(cx, |this, cx| {
+            this.activity = crate::presence::Presence::activity(
+                &this.runs,
+                crate::escape::Panel::Closed,
+                &this.presenter,
+            );
+            this.escape(cx).expect("real Presence Escape");
+            assert_eq!(this.runs.stoppable(), None);
+            assert!(!this.presenter.holds_scenes());
+            if broken {
+                assert!(
+                    !session.open(),
+                    "broken scene fences the exact session immediately"
+                );
+                assert!(this.session.is_none(), "the UI forgets that scene owner");
+            }
+        });
+    };
+    if broken {
+        fixture::with_outbox_and_output_held(&pipe.handle, &session, esc);
+        cx.run_until_parked();
+        assert_ne!(
+            probe.stop(),
+            run,
+            "a broken membership can't generate a guessed Stop"
+        );
+    } else {
+        let script = HostGuard::install(&[
+            Step(Operation::Configure, Outcome::Success),
+            Step(Operation::Show, Outcome::NotWin32),
+            Step(Operation::Hide, Outcome::Success),
+        ]);
+        fixture::with_outbox_held(&pipe.handle, &session, esc);
+        script.finish();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while probe.scene_failed().is_none() {
+            assert!(
+                Instant::now() < deadline,
+                "Brain receives the real SceneFailed"
+            );
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        assert_eq!(
+            probe.scene_failed(),
+            Some((run, SceneId(1))),
+            "Brain took Stop before the ordered host failure"
+        );
+        pipe.handle.end(&session);
+    }
+    drop(held_admission);
+    assert!(pipe.link.join().expect("the Shell pair joined"));
+    assert!(
+        brain
+            .join()
+            .expect("Brain lost the exact authenticated pair")
+    );
+}
+
 #[gpui::test]
 fn a_failure_after_success_is_drained_before_any_paint_acknowledgement(
     cx: &mut gpui_kit::TestAppContext,
@@ -1703,7 +1881,7 @@ fn close_callback_scene(
     cx: &mut gpui_kit::TestAppContext,
 ) {
     owner.update(cx, |this, cx| {
-        this.end_scene_connection();
+        this.end_scene_connection(cx);
         if let Some(host) = this.overlay.window() {
             host.window
                 .update(cx, |_, window, _| window.remove_window())

@@ -269,10 +269,14 @@ impl Filing {
 
 impl Brain {
     pub(crate) fn prepare_issue_session(&mut self, incarnation: Incarnation) -> IssueSession {
-        self.filing.cancel_reviews();
         let session = self.reserve_issue_session(incarnation);
-        self.filing.session = Some(session);
+        self.install_issue_session(session);
         session
+    }
+
+    pub(crate) fn install_issue_session(&mut self, session: IssueSession) {
+        self.filing.cancel_reviews();
+        self.filing.session = Some(session);
     }
 
     pub(crate) fn reserve_issue_session(&mut self, incarnation: Incarnation) -> IssueSession {

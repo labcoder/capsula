@@ -245,6 +245,15 @@ stateDiagram-v2
   - after a disconnect or Quit, the point is the last one received;
   - a failed write leaves NULL too, and nothing answers it.
 
+The authenticated Plain/Esc test drives the fake device while Presence takes run and drawing
+events. A test-only witness on that exact route tells the test when the worker settles 480
+contiguous source samples. After real Brain data credit exhaustion, a final identifiable
+48-sample block must also settle before the pump hands over the device. Zero-length callbacks
+keep the device live without advancing source while the worker settles the last anchor.
+Presence presses Esc without another callback after handoff. Because 528 samples are below
+the live retirement batch, the test checks the exact Brain retirement and quiet cursor after
+Stop rather than waiting for a wire receipt before Esc.
+
 ### The pump and the resampler
 
 **`voice::pump`** is the brain's one reader of TTS. It holds the current Speak's receiver and

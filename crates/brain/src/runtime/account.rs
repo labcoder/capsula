@@ -181,7 +181,7 @@ impl Accounts {
         Self::spawn_with_github(worker, net, github::GitHub::new())
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, all(windows, debug_assertions, feature = "test-support")))]
     pub(crate) fn spawn_unconfigured<S: CredentialStore + 'static>(
         worker: Worker<S>,
         net: Net,

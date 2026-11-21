@@ -4,7 +4,7 @@ use std::time::Instant;
 
 use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::{Context, Window};
-use kumochi_protocol::message::ControlToBrain;
+use kumochi_protocol::message::{AudioSession, ControlToBrain};
 
 use super::line::on_next_frame;
 use super::{EscapePanel, OpenError, Presence};
@@ -101,7 +101,7 @@ impl Presence {
             Ok(effects) => effects,
             Err(error) => {
                 tracing::warn!(%error, "invalid scene stream; ending the connection");
-                self.end_scene_connection();
+                self.end_scene_connection(cx);
                 return self.draw_changed_at(now, cx);
             }
         };
@@ -220,9 +220,13 @@ impl Presence {
         }));
     }
 
-    pub(super) fn end_scene_connection(&mut self) {
+    pub(super) fn end_scene_connection(&mut self, cx: &mut Context<'_, Self>) {
         if let Some(session) = &self.session {
-            self.link.end(session);
+            if self.link.audio_session() == AudioSession::QueuedRequired {
+                self.end_session(session, cx).detach();
+            } else {
+                self.link.end(session);
+            }
         }
         self.forget_scene_connection();
     }

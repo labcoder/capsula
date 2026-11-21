@@ -21,6 +21,8 @@ mod handoff;
 mod lifetime;
 mod source;
 
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) mod playback_fixture;
 #[cfg(test)]
 pub(crate) mod tests;
 

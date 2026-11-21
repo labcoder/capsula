@@ -1,5 +1,4 @@
 use std::sync::atomic::AtomicUsize;
-use std::sync::{Mutex, PoisonError};
 use std::time::Duration;
 
 use kumochi_protocol::message::ControlToBrain;
@@ -13,7 +12,6 @@ use super::super::worker::{
 use super::*;
 
 const WAIT: Duration = Duration::from_secs(5);
-static EXCLUSIVE: Mutex<()> = Mutex::new(());
 
 struct Device {
     _playback: FakePlayback,
@@ -42,7 +40,7 @@ fn power(device: &Device, power: Power) -> bool {
 fn stopped_open_disposes_without_play_and_excludes_other_opens_until_drop() {
     static FIRST_POOL: AtomicBool = AtomicBool::new(false);
     static NEXT_POOL: AtomicBool = AtomicBool::new(false);
-    let _serial = EXCLUSIVE.lock().unwrap_or_else(PoisonError::into_inner);
+    let _serial = serialize_playback();
     let (entered, first_entered) = mpsc::sync_channel(1);
     let (release, finish) = mpsc::sync_channel(1);
     let (dropping, starts_drop) = mpsc::sync_channel(1);
@@ -144,7 +142,7 @@ fn detached_worker_cannot_give_a_successor_its_pending_native_permit() {
     static LATE_POOL: AtomicBool = AtomicBool::new(false);
     static NEXT_POOLS: [AtomicBool; 2] = [const { AtomicBool::new(false) }; 2];
 
-    let _serial = EXCLUSIVE.lock().unwrap_or_else(PoisonError::into_inner);
+    let _serial = serialize_playback();
     let (reports, receipts) = mpsc::channel();
     let actor = open_actor(move |message| reports.send(message).is_ok());
     let (entered, pending) = mpsc::sync_channel(1);
