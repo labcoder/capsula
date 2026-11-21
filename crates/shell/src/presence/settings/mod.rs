@@ -108,7 +108,7 @@ impl SettingsView {
                     )
             }) && let Some((_, dialog)) = view.confirmation.take()
             {
-                dialog.dismiss(window, cx);
+                dialog.dismiss_owned(window, cx);
             }
             for (field, input) in [Field::Assistant, Field::User]
                 .into_iter()
@@ -214,6 +214,7 @@ impl SettingsView {
         self.taskbar_notice = None;
         self.hold_notice = None;
         self.confirmation = None;
+        crate::confirmation::retire_in(window, cx);
         window.close_all_dialogs(cx);
         self.editing = None;
         window.focus(&self.focus, cx);
@@ -320,6 +321,7 @@ impl SettingsView {
                 view.taskbar_notice = None;
                 view.hold_notice = None;
                 view.confirmation = None;
+                crate::confirmation::retire_in(window, cx);
                 window.close_all_dialogs(cx);
                 view.tab = *tab;
                 cx.notify();

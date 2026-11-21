@@ -884,6 +884,48 @@ fn sign_out_confirmation_can_reopen_during_the_previous_exit(cx: &mut TestAppCon
 }
 
 #[gpui::test]
+fn sign_out_confirmation_invalidation_closes_owned_dialog_with_focus_elsewhere(
+    cx: &mut TestAppContext,
+) {
+    use gpui_kit::component::WindowExt as _;
+
+    let (window, owner, controls) = accounts_panel(cx);
+    account_views(&owner, vec![chatgpt(SIGNED_IN)], cx);
+    cx.update(|cx| cx.set_reduce_motion(true));
+    let view = owner.read_with(cx, |owner, _| {
+        owner.settings_panel.as_ref().unwrap().view.clone()
+    });
+    click_github(window, "account-sign-out", cx);
+    let mut frame = VisualTestContext::from_window(window, cx);
+    let outside = frame.update(|window, cx| {
+        let outside = view.read(cx).focus.clone();
+        assert_ne!(window.focused(cx), Some(outside.clone()));
+        window.focus(&outside, cx);
+        assert!(window.has_active_dialog(cx));
+        assert_eq!(window.focused(cx), Some(outside.clone()));
+        outside
+    });
+
+    account_views(
+        &owner,
+        vec![chatgpt(AccountView::SignedOut {
+            revocation_unconfirmed: false,
+        })],
+        cx,
+    );
+    let mut frame = VisualTestContext::from_window(window, cx);
+    frame.update(|window, cx| {
+        assert!(
+            !window.has_active_dialog(cx),
+            "the invalid owned alert must close"
+        );
+        assert!(view.read(cx).confirmation.is_none());
+        assert_eq!(window.focused(cx), Some(outside));
+    });
+    assert_eq!(drain(&controls), []);
+}
+
+#[gpui::test]
 fn sign_out_confirmation_ownership_ends_on_refusal_tab_change_and_dismissal(
     cx: &mut TestAppContext,
 ) {
@@ -919,6 +961,24 @@ fn sign_out_confirmation_ownership_ends_on_refusal_tab_change_and_dismissal(
         assert!(owner.settings_open());
     });
     assert!(view.read_with(cx, |view, _| view.confirmation.is_none()));
+    let mut frame = VisualTestContext::from_window(window, cx);
+    let other_focus = frame.update(|window, cx| {
+        window.open_alert_dialog(cx, |alert, _, _| alert.title("Other"));
+        window.focused(cx).expect("the unrelated dialog owns focus")
+    });
+    account_views(
+        &owner,
+        vec![chatgpt(AccountView::SignedOut {
+            revocation_unconfirmed: false,
+        })],
+        cx,
+    );
+    VisualTestContext::from_window(window, cx).update(|window, cx| {
+        assert!(window.has_active_dialog(cx));
+        assert_eq!(window.focused(cx), Some(other_focus));
+        window.close_dialog(cx);
+    });
+    account_views(&owner, vec![chatgpt(SIGNED_IN)], cx);
     click_github(window, "account-sign-out", cx);
     owner.update(cx, |owner, cx| owner.dismiss_settings(cx).unwrap());
     assert!(view.read_with(cx, |view, _| view.confirmation.is_none()));
