@@ -4,8 +4,8 @@ use std::sync::{Arc, Mutex};
 use kumochi_protocol::frame::{self, Pipe};
 use kumochi_protocol::message::{
     CaptureFor, ConnectionKind, ControlToBrain, ControlToShell, DataToBrain, DataToShell, Effort,
-    GestureId, HoldFailure, HoldStatus, MicPcm, ModelChoice, ModelSlug, RunId, RunOrigin, ThreadId,
-    ThreadOp,
+    GestureId, HoldFailure, HoldStatus, MicPcm, ModelChoice, ModelSlug, PageOf, Phase, RunId,
+    RunOrigin, ThreadId, ThreadOp,
 };
 use tokio::io::AsyncWriteExt as _;
 use tokio::sync::mpsc;
@@ -1167,6 +1167,7 @@ async fn cancellation_and_new_explicit_input_fence_an_already_running_decode() {
     for typed in [false, true] {
         let scratch = Scratch::new("hold-late-decode");
         let (mut brain, release, mut decoded, _) = input(&scratch, vec![7, -190], "obsolete").await;
+        let pending = pending_results(brain.hold_voice().1.unwrap());
         let ((control, data), mut shell) = duplex();
         let mut tap = Tap::from_env();
         let client = async {
@@ -1184,14 +1185,51 @@ async fn cancellation_and_new_explicit_input_fence_an_already_running_decode() {
                     .await;
             }
             status(&mut shell, HoldStatus::Cancelled).await;
+            assert_eq!(pending(), 1);
             release.send(()).unwrap();
-            if typed {
-                let (run, _) = shell.state().await;
-                shell.read_to_end(run).await;
+            while pending() != 0 {
+                tokio::task::yield_now().await;
             }
+            if typed {
+                assert!(matches!(
+                    shell.control().await,
+                    Some(ControlToShell::RunState {
+                        run: RunId(1),
+                        origin: Some(RunOrigin::Typed { turn: 1 }),
+                        phase: Phase::Thinking,
+                        ..
+                    })
+                ));
+                assert_eq!(shell.state().await, (RunId(1), Phase::Answering));
+                assert_eq!(shell.state().await, (RunId(1), Phase::Done));
+                shell.read_to_end(RunId(1)).await;
+            }
+            let page = DataToBrain::PageRequest {
+                request: 7,
+                page: PageOf::Threads {
+                    search: None,
+                    after: None,
+                },
+            };
+            shell
+                .data_out
+                .write_all(&frame::encode(&page, Pipe::Data).unwrap())
+                .await
+                .unwrap();
+            let reply = shell.data().await;
+            assert!(
+                matches!(reply, DataToShell::ThreadList { request: 7, .. }),
+                "{reply:?}"
+            );
+            source_stopped(&mut shell, G).await;
             drop(shell);
         };
-        let (_, ()) = tokio::join!(brain.serve(control, data, &mut tap), client);
+        let (ended, ()) = tokio::time::timeout(super::PATIENCE, async {
+            tokio::join!(brain.serve(control, data, &mut tap), client)
+        })
+        .await
+        .unwrap();
+        assert_eq!(ended, Ended::Lost);
         brain.close().await;
         assert_eq!(
             users(&scratch),
