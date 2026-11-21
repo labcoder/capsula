@@ -456,7 +456,7 @@ captures no new screen hold, behind another save or with an On queued after it; 
 reopens the offer under a new revision, so a hold must be offered again. Each withdraws only the pictures it allowed: the run's own copy drops at once, and the bytes are zeroed
 when the last copy drops. The run's next build fails with `ScreenUnavailable`, and a request that has
 started keeps its copy until its round ends but is refused at the send, failing the run the same
-way. A `ChatGPT` upload already writing the picture is cut at its next write poll: it settles as
+way. A `ChatGPT` or Anthropic key upload already writing the picture is cut at its next write poll: it settles as
 possibly written, its connection closes, nothing is sent again, and the run ends as
 `ScreenUnavailable`; one cut by a lost capability ends as `ScreenPictureStopped`. If no send carrying the image has attempted a write yet, the turn's `screen` becomes
 `withdrawn`; once one has, it stays `attached` or `screen`. A held run that ends any other way
@@ -465,8 +465,8 @@ records no screen: a turn not
 yet written is written without it, and a written one is cleared by a store write queued behind
 the turn's. Known limits:
 - **A granted send can't be recalled.** Turning screen holds off refuses a request's send that
-  hasn't been granted yet; a body already granted may still go with its image. A `ChatGPT`
-  upload stops at its next write poll, though bytes already admitted may continue.
+  hasn't been granted yet; a body already granted may still go with its image. A `ChatGPT` or
+  Anthropic key upload stops at its next write poll, though bytes already admitted may continue.
 - **History can show a window that never left.** A write that was attempted marks the screen
   sent even if no byte was accepted. Kumochi exiting before the send outcome is recorded while the picture is pending, including after a
   send proved unsent while its run could still send again, and a failed write of the mark or of
