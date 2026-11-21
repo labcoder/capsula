@@ -1762,7 +1762,8 @@ fn stop_or_clear_before_replacement_submission_never_writes_the_first_step() {
 
 #[test]
 fn clear_or_stop_after_submission_settles_replacement_even_before_reply_delivery() {
-    for clear in [false, true] {
+    let victims: Vec<_> = (1..=4).map(SceneId).collect();
+    for cleared in [0, 1, victims.len()] {
         for committed in [false, true] {
             let mut drawing = Drawing::default();
             let mut store = Store::default();
@@ -1773,14 +1774,15 @@ fn clear_or_stop_after_submission_settles_replacement_even_before_reply_delivery
             let answer = store.answer(&sent(&lookup).expect("lookup").1);
             let pending = reply(&mut drawing, &lookup, Ok(answer));
             let write = sent(&pending).expect("first-step write").1;
+            assert!(matches!(&write, Write::Step { clear, .. } if *clear == victims));
             let saved = committed.then(|| store.answer(&write));
-            if clear {
+            let earlier = if cleared != 0 {
                 store.run(
                     &mut drawing,
                     Input::Clear {
-                        scenes: (1..=4).map(SceneId).collect(),
+                        scenes: victims[..cleared].to_vec(),
                     },
-                );
+                )
             } else {
                 store.run(
                     &mut drawing,
@@ -1798,21 +1800,47 @@ fn clear_or_stop_after_submission_settles_replacement_even_before_reply_delivery
                         cuts: SceneCuts::default(),
                     },
                 );
-            }
+                Output::default()
+            };
             let answer = saved.unwrap_or_else(|| store.answer(&write));
             let out = reply(&mut drawing, &pending, Ok(answer));
-            if clear {
-                assert!(
-                    !trace(&out)
-                        .iter()
-                        .any(|item| item.starts_with("begin ") || item.starts_with("step "))
+            let out = store.settle(&mut drawing, out);
+            if cleared != 0 {
+                let retirements: Vec<_> = earlier
+                    .effects
+                    .iter()
+                    .chain(&out.effects)
+                    .filter_map(|effect| match effect {
+                        Effect::RetireScenes { scenes, successor } => {
+                            Some((scenes.as_slice(), *successor))
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                let expected: Vec<_> = [&victims[..cleared], &victims[cleared..]]
+                    .into_iter()
+                    .filter(|scenes| !scenes.is_empty())
+                    .map(|scenes| (scenes, None))
+                    .collect();
+                assert_eq!(
+                    retirements, expected,
+                    "cleared={cleared}, committed={committed}"
                 );
+                assert!(
+                    !earlier
+                        .effects
+                        .iter()
+                        .chain(&out.effects)
+                        .any(|effect| matches!(effect, Effect::Data(_)))
+                );
+                assert!(earlier.calls.is_empty());
+                assert_eq!(out.calls.len(), 1);
+                assert_eq!(out.calls[0].error, Some(CallError::Interrupted));
             }
-            store.settle(&mut drawing, out);
             assert_eq!(
                 drawing.scenes.len(),
                 0,
-                "clear={clear} committed={committed}"
+                "cleared={cleared} committed={committed}"
             );
             assert_eq!(
                 drawing.global.usage(),

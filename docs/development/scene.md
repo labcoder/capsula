@@ -41,7 +41,9 @@ gate for each closed record, then the drawing reducer's order/semantic admission
 Complete-call/MCP typed preflight stays whole-envelope. A committed provider prefix can outlive
 a malformed tail or interrupted owner; it is not evidence of whole-call success. Interrupted
 submitted steps retain their own acknowledgement/scene-state owner, distinct from deletion's
-discard fence. See `tools.md` for argument identity, result delivery and completion ordering.
+discard fence. If a clear races an in-flight replacement, the store reply still settles every
+reserved victim. The reply publishes retirement only for victims not already fenced.
+See `tools.md` for argument identity, result delivery and completion ordering.
 
 A drawing call is `{"records":[begin, step, ..., end]}`. Each record is externally
 tagged, for example:

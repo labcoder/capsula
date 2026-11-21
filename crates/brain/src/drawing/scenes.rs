@@ -156,10 +156,19 @@ impl Drawing {
                 let installed = (*admission)
                     .settle(&mut states, &mut self.global, disposition)
                     .expect("the pending replacement sealed every victim and the global budget");
-                self.scenes.retain(|held| !victims.contains(&held.scene));
-                if !victims.is_empty() {
+                let mut retiring = victims;
+                self.scenes.retain(|held| {
+                    let Some(at) = retiring.iter().position(|scene| *scene == held.scene) else {
+                        return true;
+                    };
+                    if held.gone {
+                        retiring.remove(at);
+                    }
+                    false
+                });
+                if !retiring.is_empty() {
                     out.effects.push(Effect::RetireScenes {
-                        scenes: victims,
+                        scenes: retiring,
                         successor: installed.is_some().then_some(id),
                     });
                 }
