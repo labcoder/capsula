@@ -1433,3 +1433,81 @@ fn a_key_send_withheld_by_its_grant_ends_by_the_grants_first_cause() {
         )
     );
 }
+
+/// Show Screen or screen holds turned off while a key run's admitted write is pending, as the
+/// runtime hands either to the coordinator: the run ends at once as the picture unavailable and
+/// its grant admits no later write. The send's Withheld terminal and written settlement then end
+/// nothing again and start nothing on any route, and the fact coming back doesn't reopen the grant.
+#[test]
+fn turning_the_screen_off_mid_key_write_ends_the_run_and_admits_nothing_after() {
+    use crate::connections::anthropic::error::Failure;
+    use crate::context::{Geometry, Screen};
+    use crate::coordinator::PictureRoutes;
+    use crate::engines::{EngineFailure, Finish, TurnEvent};
+    let sends = |effects: &[Effect]| {
+        effects.iter().any(|effect| {
+            matches!(
+                effect,
+                Effect::StartEngine { .. } | Effect::Store(StoreOp::BuildContext(_))
+            )
+        })
+    };
+    for (screen, off) in [
+        (
+            Screen::Picture(jpeg(), None, Geometry::FIXTURE),
+            Input::ShowScreenOff,
+        ),
+        (Screen::Image(jpeg()), Input::ScreenHoldsOff),
+    ] {
+        let (mut core, hold) = held(
+            vec![
+                ready(CHATGPT, 7, &["m"]),
+                Input::Engines(KEY, pictured(5, &["m"])),
+            ],
+            choice(KEY, "m"),
+            Some(T),
+        );
+        core.set_pictures(PictureRoutes::new(true, false));
+        core.submit_hold(hold, "words".into(), Some(screen))
+            .expect("admitted");
+        core.handle(Input::TurnStored { run: R }).expect("current");
+        core.handle(built_for(key(), &choice(KEY, "m")))
+            .expect("current");
+        let lease = lease_of(
+            &core
+                .handle(Input::SendReady {
+                    key: SendKey::Build(key()),
+                    hold: None,
+                })
+                .expect("current"),
+        );
+        let engine = super::engine_key(&core, R);
+        let grant = core.picture_grant(lease).expect("a revocable grant");
+        let write = grant.reserve_write().expect("an admitted writer poll");
+        let stopped = core.handle(off).expect("the setting");
+        assert_eq!(failure(&stopped), Some(ErrorKey::ScreenUnavailable.into()));
+        assert!(!grant.is_open());
+        assert!(grant.reserve_write().is_none(), "no later writer poll");
+        drop(write);
+        let withheld =
+            TurnEvent::Finished(Finish::Failed(EngineFailure::Anthropic(Failure::Withheld)));
+        let mut ended = core
+            .handle(super::engine(engine, withheld))
+            .unwrap_or_default();
+        ended.extend(
+            core.handle(Input::SendSettled { lease })
+                .unwrap_or_default(),
+        );
+        ended.extend(
+            core.handle(Input::Engines(KEY, pictured(5, &["m"])))
+                .unwrap_or_default(),
+        );
+        assert_eq!(failure(&ended), None, "it ended once");
+        assert!(!sends(&ended), "nothing goes again, on any route");
+        assert_eq!(written_settlement(&ended), (1, 1, 1));
+        assert!(
+            grant.reserve_write().is_none(),
+            "the fact back reopens nothing"
+        );
+    }
+}
