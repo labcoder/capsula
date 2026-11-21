@@ -99,7 +99,7 @@ fn rig(owner: &OutputOwner, session: u64) -> Rig<'_> {
         .opened(
             generation,
             fake::open(outlet, Arc::clone(&script)),
-            &AtomicBool::new(false),
+            || false,
             &AtomicBool::new(true),
         )
         .expect("fenced")
@@ -438,12 +438,7 @@ fn a_stream_that_retires_before_its_open_returns_leaves_the_session_retired() {
     });
     assert_eq!(viewed(&owner).key, None, "still opening");
     let speaker = owner
-        .opened(
-            generation,
-            Some(speaker),
-            &AtomicBool::new(false),
-            &AtomicBool::new(true),
-        )
+        .opened(generation, Some(speaker), || false, &AtomicBool::new(true))
         .expect("fenced")
         .expect("kept");
     let key = viewed(&owner).key.expect("a key");
@@ -481,12 +476,7 @@ fn a_refused_open_whose_thread_outlives_its_caller_settles_on_its_own_last_wake(
     assert!(refused.is_none(), "not started in time");
     assert!(
         matches!(
-            owner.opened(
-                generation,
-                refused,
-                &AtomicBool::new(false),
-                &AtomicBool::new(true)
-            ),
+            owner.opened(generation, refused, || false, &AtomicBool::new(true)),
             Ok(None)
         ),
         "refused"
@@ -779,6 +769,21 @@ fn only_the_bound_microphone_collects_under_a_claim() {
     for release in [release, release_bound] {
         release.send(()).expect("still running");
     }
+}
+
+#[test]
+fn queued_reconnect_refuses_a_bound_inhibit_that_did_not_survive_session_loss() {
+    let owner = OutputOwner::default();
+    let (token, _gate, _mic) = bound(&owner, 1);
+    let refused = owner.begin_queued(
+        2,
+        Arc::new(|| {}),
+        Instant::now() + PATIENCE,
+        || panic!("an unrelated inhibit is a hard refusal, not a wait"),
+        |_| panic!("no registration"),
+    );
+    assert_eq!(refused, None);
+    owner.retire(token, Retirement::Unstarted).unwrap();
 }
 
 #[test]

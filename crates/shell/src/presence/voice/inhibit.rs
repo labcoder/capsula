@@ -532,9 +532,10 @@ impl Presence {
                 After::Start(reserved) => self.open_microphone(reserved, cx),
                 // The link keeps the proof owed, and replays it on the next connection.
                 After::Stopped(gesture, session) => {
-                    if !self
-                        .link
-                        .send_control(&session, ControlToBrain::VoiceHoldStopped { gesture })
+                    if !self.link.is_quitting()
+                        && !self
+                            .link
+                            .send_control(&session, ControlToBrain::VoiceHoldStopped { gesture })
                         && self
                             .session
                             .as_ref()

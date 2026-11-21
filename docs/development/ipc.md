@@ -647,8 +647,11 @@ sequenceDiagram
   answer moves the watermark to this connection. When the answer arrives, the shell drops a
   resend it hasn't queued yet. A brain that restarted knows nothing of a delete and runs it
   again, and a thread that's already gone answers `Removed` with no `last_run`.
-- **Quit.** The shell queues every held delete before `Quitting`, and the brain's quit waits
-  for deletes in flight as it does for ending runs. A delete that hid nothing, or a ninth
+- **Quit.** The connected shutdown owner queues the active gesture's cancellation, held deletes
+  in order, then `Quitting`. A failed cancellation aborts the control pipe. Any locally
+  aborted control pipe refuses shutdown even if its mailbox has room again. Local queue
+  acceptance otherwise doesn't guarantee that the brain read the frames. The brain's quit
+  waits for deletes in flight as it does for ending runs. A delete that hid nothing, or a ninth
   refused on that connection, makes the quit incomplete. A delete read with the control pipe's end is still applied.
 
 ## The shell's side
@@ -1034,6 +1037,23 @@ a shell that can't resolve the data folder or open the lock refuses to start. If
 answers, the shell starts `kumochid.exe` detached, outside its own job where the job allows it,
 and retries for up to ten seconds. A shell started by hand finds a running brain the same way, so
 after a shell crash nothing needs restarting.
+
+If a closed session still owns a bound microphone, queued connection startup waits on the
+link thread for that exact inhibit to retire, using the time left in the ten-second
+connection attempt. Opens and peer checks are bracketed by that deadline. Each queued
+handshake pipe transfer takes the smaller of its existing timeout and the remaining attempt
+budget. A retry or successful handshake can't extend the budget. Cancellation is not
+retirement; a different inhibit or unresolved output debt still refuses admission.
+
+The final deadline and Quit checks decide admission before the link publishes the outbox or
+offers Connected. The UI can consume that event later; this isn't a real-time delivery
+guarantee. A timely admission starts a separate five-second registration budget and allows the
+existing metadata-only Stop replay on the authenticated pair.
+
+If the user quits before publication, a fully authenticated queued pair sends held deletes in
+order (with no turns on that pair), then Quitting. It starts no session or playback, and it
+doesn't replay or settle microphone Stop debt. A partial or unauthenticated pair never carries
+these shutdown frames. Stock selection and queued Hold admission are unchanged.
 
 ## Debugging
 

@@ -402,6 +402,23 @@ impl Presence {
         self.drain_voice_cancel();
     }
 
+    pub(super) fn stop_voice_for_quit(&mut self) {
+        self.voice.paused.set(true);
+        self.voice.gates.follow(false);
+        self.voice.recovery = None;
+        self.voice.status = None;
+        self.voice.watched = None;
+        drop(self.ink.borrow_mut().take());
+        if let Some(hold) = self.voice.pending.take()
+            && matches!(hold.source, Source::Waiting)
+        {
+            self.unused_voice(&hold.token, None);
+        }
+        self.talk_escape.release();
+        self.runs.cancel_hold();
+        let _cancel = self.runs.take_hold_cancel();
+    }
+
     /// Ends the pending hold if `gesture` is it, and says whether it did.
     pub(super) fn cancel_voice_gesture(
         &mut self,
@@ -814,6 +831,16 @@ impl Presence {
         input: Option<&ReleaseInput>,
         cx: &mut Context<'_, Self>,
     ) {
+        if self.link.is_quitting() {
+            if let Intent::Recognized {
+                generation: Ok(token),
+                ..
+            } = intent
+            {
+                self.unused_voice(&token, None);
+            }
+            return;
+        }
         match intent {
             Intent::Warm(gesture) => {
                 if let Some(reason) = self

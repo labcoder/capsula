@@ -605,10 +605,10 @@ impl Presence {
     }
 
     fn quit(&mut self, cx: &mut Context<'_, Self>) {
-        self.cancel_voice(cx);
         if !self.link.begin_quit() {
             return;
         }
+        self.stop_voice_for_quit();
         self.revoke_exclusion(cx);
         self.end_pull(cx);
         self.end_selection(

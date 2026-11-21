@@ -969,7 +969,9 @@ fn real_handshake_writer_preserves_legacy_order_and_echoes_queued_welcome() {
                     build_id: "b".into(),
                     capability: Secret::new([7; CAPABILITY_LEN]),
                 };
-                super::handshake_pair(control, hello, mode, || {
+                let attempt =
+                    (mode == AudioSession::QueuedRequired).then(|| Instant::now() + PATIENCE);
+                super::handshake_pair(control, hello, mode, attempt, || {
                     assert!(allowed.load(Ordering::Acquire), "data opens after Welcome");
                     Ok(data)
                 })
@@ -1259,7 +1261,7 @@ fn no_visual_cannot_replace_the_authenticated_welcome() {
     )
     .expect("unexpected first frame");
     assert!(matches!(
-        welcome(&shell_control),
+        welcome(&mut &shell_control),
         Err(super::LinkError::Rejected)
     ));
 }
@@ -1519,7 +1521,7 @@ fn a_github_error_cannot_replace_the_initial_welcome() {
     )
     .unwrap();
     assert!(matches!(
-        welcome(&shell_control),
+        welcome(&mut &shell_control),
         Err(super::LinkError::Rejected)
     ));
 }
@@ -1645,7 +1647,7 @@ fn the_brain_s_first_frames_with_the_account_view_keep_the_connection() {
     ] {
         frame::write(&mut &control, &message, Pipe::Control).expect("written");
     }
-    let issue_session = welcome(&shell_control).expect("the handshake takes Welcome");
+    let issue_session = welcome(&mut &shell_control).expect("the handshake takes Welcome");
     assert_eq!(
         issue_session,
         IssueSession {
@@ -3738,6 +3740,590 @@ fn stage_queued_pcm(
         "all staged ingress is credited before holding the tail"
     );
     source.expect("the original callback opened")
+}
+
+#[test]
+fn queued_reconnect_waits_for_the_exact_microphone_retirement() {
+    use super::output::{Denied, Retirement};
+    use kumochi_protocol::message::GestureId;
+    use windows::Win32::Foundation::ERROR_TIMEOUT;
+
+    let (link, inhibit, reserved) = lost_quiet_mic();
+    let (control, _data, connection) = replacement_pair("mic-wait");
+    frame::write(
+        &mut &control,
+        &ControlToShell::Settings {
+            view: settings_view(),
+            answer: false,
+        },
+        Pipe::Control,
+    )
+    .unwrap();
+    let (events, received) = async_channel::unbounded();
+    let (handle, start) = start(link, events);
+    let output = handle.output();
+
+    let foreign = super::output::OutputOwner::default()
+        .acquire(GestureId(93))
+        .unwrap();
+    assert_eq!(
+        output.retire(foreign, Retirement::NoMic).unwrap_err().1,
+        Denied::Stale
+    );
+    let (inhibit, denied) = output.retire(inhibit, Retirement::Retired).unwrap_err();
+    assert_eq!(denied, Denied::Inhibited, "cancel is not retirement");
+    let worker = thread::spawn(move || start.link.attend(connection, &start.events));
+    control.set_timeout(Some(Duration::from_millis(500)));
+    let early = frame::read::<ControlToBrain>(&mut &control, Pipe::Control);
+    assert!(
+        matches!(&early, Err(frame::FrameError::Io(error)) if error.raw_os_error() == Some(ERROR_TIMEOUT.to_hresult().0)),
+        "the pair waits without registering or closing: {early:?}"
+    );
+    assert!(received.is_empty());
+    assert!(handle.shared.outbox.lock().unwrap().is_none());
+
+    let received = patient(received);
+    drop(reserved);
+    *handle.shared.microphone_stop.lock().unwrap() = Some(super::microphone::Stop::Received {
+        gesture: GestureId(1),
+        sent_on: Some(1),
+    });
+    output.retire(inhibit, Retirement::Retired).unwrap();
+    let session = connected(next(&received));
+    assert_eq!(session.generation(), 2);
+    let LinkEvent::Settings { generation, .. } = next(&received) else {
+        panic!("the recovered pair publishes its settings");
+    };
+    assert_eq!(generation, session.generation());
+    control.set_timeout(Some(PATIENCE));
+    assert_eq!(
+        frame::read(&mut &control, Pipe::Control).unwrap(),
+        Some(ControlToBrain::VoiceHoldStopped {
+            gesture: GestureId(1)
+        }),
+        "replay only the exact retired microphone's metadata"
+    );
+    frame::write(
+        &mut &control,
+        &ControlToShell::VoiceHoldStopAccepted {
+            gesture: GestureId(1),
+        },
+        Pipe::Control,
+    )
+    .unwrap();
+    let Some(ControlToBrain::QueuedAudioOutput(_, key)) =
+        frame::read(&mut &control, Pipe::Control).unwrap()
+    else {
+        panic!("the recovered pair starts its own registration");
+    };
+    acknowledge_queued(&control, key);
+    assert!(handle.admits_text(Some(&session)));
+    assert!(!handle.voice_stop_pending());
+    handle.end(&session);
+    assert_eq!(worker.join().unwrap(), Attendance::Lost);
+}
+
+#[test]
+fn queued_reconnect_expires_without_retiring_an_unproved_microphone() {
+    use super::output::{Denied, Retirement};
+    use kumochi_protocol::message::GestureId;
+
+    let (link, inhibit, reserved) = lost_quiet_mic();
+    let (control, data, connection) = replacement_pair("mic-expired");
+    let (events, received) = async_channel::unbounded();
+    let deadline = Instant::now() + Duration::from_millis(100);
+    assert_eq!(
+        link.attend_until(connection, &events, deadline),
+        Attendance::Retry
+    );
+    assert!(Instant::now() >= deadline);
+    assert!(received.is_empty());
+    assert!(link.shared.outbox.lock().unwrap().is_none());
+    assert_eq!(
+        frame::read::<ControlToBrain>(&mut &control, Pipe::Control).unwrap(),
+        None
+    );
+    assert_eq!(
+        frame::read::<DataToBrain>(&mut &data, Pipe::Data).unwrap(),
+        None
+    );
+    let output = &link.shared.output;
+    assert_eq!(output.acquire(GestureId(2)), Err(Denied::Inhibited));
+    let (inhibit, denied) = output.retire(inhibit, Retirement::Retired).unwrap_err();
+    assert_eq!(denied, Denied::Inhibited);
+    drop(reserved);
+    output.retire(inhibit, Retirement::Retired).unwrap();
+}
+
+#[test]
+fn queued_reconnect_rejects_a_successful_late_handshake_or_late_attendance() {
+    use super::output::Retirement;
+
+    for at_connector in [true, false] {
+        let (link, inhibit, reserved) = lost_quiet_mic();
+        let label = if at_connector {
+            "late-hello"
+        } else {
+            "late-attend"
+        };
+        let (control, data, shell_control, shell_data) = queued_hello_pipes(label);
+        let (events, received) = async_channel::unbounded();
+        let (handle, start) = start(link, events);
+        let worker = thread::spawn(move || {
+            let end = Instant::now() + Duration::from_secs(1);
+            let connection = start.link.connect_with(
+                end,
+                queued_fixture_connector(shell_control, at_connector.then_some(end), || {
+                    Ok(shell_data)
+                }),
+            );
+            if at_connector {
+                assert!(
+                    matches!(connection, Err(super::LinkError::ConnectExpired)),
+                    "the real connector did not refuse a successful late handshake: {connection:?}"
+                );
+                return Attendance::Retry;
+            }
+            let connection =
+                connection.expect("the handshake completed before the attempt deadline");
+            start
+                .link
+                .attend_until(connection, &start.events, Instant::now())
+        });
+        let output = handle.output();
+        drop(reserved);
+        output.retire(inhibit, Retirement::Retired).unwrap();
+        read_queued_fixture_hello(&control, &data);
+        if !at_connector {
+            let _offered = frame::write(
+                &mut &control,
+                &ControlToShell::Settings {
+                    view: settings_view(),
+                    answer: false,
+                },
+                Pipe::Control,
+            );
+        }
+        let next = frame::read::<ControlToBrain>(&mut &control, Pipe::Control).unwrap();
+        assert_eq!(next, None, "the expired pair sends no work");
+        assert_eq!(
+            frame::read::<DataToBrain>(&mut &data, Pipe::Data).unwrap(),
+            None
+        );
+        assert!(received.is_empty(), "the expired pair is never published");
+        assert!(handle.shared.outbox.lock().unwrap().is_none());
+        assert_eq!(worker.join().unwrap(), Attendance::Retry);
+    }
+}
+
+#[test]
+fn queued_reconnect_cuts_off_a_stalled_real_welcome_payload() {
+    use std::io::Write as _;
+    use windows::Win32::Foundation::ERROR_TIMEOUT;
+
+    let (control, data, shell_control, shell_data) = queued_hello_pipes("stall-welcome");
+    let link = Link {
+        audio: super::AudioSession::QueuedRequired,
+        ..bare_link()
+    };
+    let (events, received) = async_channel::unbounded();
+    let (handle, start) = start(link, events);
+    handle.delete(ThreadId(11));
+    let (finished, outcome) = std::sync::mpsc::channel();
+    let worker = thread::spawn(move || {
+        let mut handshake = queued_fixture_connector(shell_control, None, || {
+            drop(shell_data);
+            panic!("an incomplete Welcome cannot open the data leg")
+        });
+        let end = Instant::now() + Duration::from_millis(750);
+        let result = start.link.connect_with(end, |attempt| {
+            let result = handshake(attempt);
+            assert!(
+                matches!(
+                    &result,
+                    Err(super::LinkError::Frame(frame::FrameError::Io(error)))
+                        if error.raw_os_error() == Some(ERROR_TIMEOUT.to_hresult().0)
+                ),
+                "the actual blocked pipe transfer timed out: {result:?}"
+            );
+            result
+        });
+        finished.send(result).unwrap();
+    });
+    assert!(matches!(
+        frame::read(&mut &control, Pipe::Control).unwrap(),
+        Some(ControlToBrain::QueuedHello(_))
+    ));
+    let welcome = frame::encode(&queued_fixture_welcome(), Pipe::Control).unwrap();
+    (&control).write_all(&welcome[..frame::HEADER_LEN]).unwrap();
+    assert!(handle.begin_quit());
+    assert!(
+        matches!(
+            outcome.recv_timeout(Duration::from_secs(2)),
+            Ok(Err(super::LinkError::Quitting))
+        ),
+        "the stalled leg must not consume a fresh five-second timeout"
+    );
+    worker.join().unwrap();
+    assert_eq!(
+        frame::read::<ControlToBrain>(&mut &control, Pipe::Control).unwrap(),
+        None
+    );
+    assert_eq!(
+        frame::read::<DataToBrain>(&mut &data, Pipe::Data).unwrap(),
+        None
+    );
+    assert!(received.is_empty());
+    assert!(handle.shared.outbox.lock().unwrap().is_none());
+}
+
+#[test]
+fn queued_reconnect_does_not_start_a_handshake_at_or_after_the_deadline() {
+    let link = Link {
+        audio: super::AudioSession::QueuedRequired,
+        ..bare_link()
+    };
+    assert!(matches!(
+        link.connect_with(Instant::now(), |_| panic!("the attempt is already expired")),
+        Err(super::LinkError::ConnectExpired)
+    ));
+    let end = Instant::now() + super::RETRY_DELAY;
+    let mut calls = 0;
+    let result = link.connect_with(end, |attempt| {
+        assert_eq!(attempt, Some(end));
+        calls += 1;
+        assert_eq!(calls, 1, "the retry delay has used the remaining budget");
+        Err(super::LinkError::Busy)
+    });
+    assert!(matches!(result, Err(super::LinkError::ConnectExpired)));
+}
+
+#[test]
+fn queued_reconnect_can_be_observed_after_the_timely_admission_decision() {
+    use super::output::Retirement;
+
+    let (link, inhibit, reserved) = lost_quiet_mic();
+    let (control, data, shell_control, shell_data) = queued_hello_pipes("observed-late");
+    let (events, received) = async_channel::unbounded();
+    let (handle, start) = start(link, events);
+    drop(reserved);
+    handle
+        .output()
+        .retire(inhibit, Retirement::Retired)
+        .unwrap();
+    handle.delete(ThreadId(11));
+    let end = Instant::now() + Duration::from_secs(1);
+    let worker = thread::spawn(move || {
+        let connection = start
+            .link
+            .connect_with(
+                end,
+                queued_fixture_connector(shell_control, None, || Ok(shell_data)),
+            )
+            .unwrap();
+        let result = start.link.attend_until(connection, &start.events, end);
+        drop(start.alive);
+        result
+    });
+    read_queued_fixture_hello(&control, &data);
+    frame::write(
+        &mut &control,
+        &ControlToShell::Settings {
+            view: settings_view(),
+            answer: false,
+        },
+        Pipe::Control,
+    )
+    .unwrap();
+    let Some(ControlToBrain::QueuedAudioOutput(_, key)) =
+        frame::read(&mut &control, Pipe::Control).unwrap()
+    else {
+        panic!("the admitted pair began registration before the UI consumed Connected");
+    };
+    thread::sleep(end.saturating_duration_since(Instant::now()));
+    assert!(Instant::now() >= end);
+    let session = connected(received.try_recv().unwrap());
+    assert_eq!(session.generation(), 2);
+    assert_eq!(
+        session.issue_session(),
+        IssueSession {
+            incarnation: Incarnation(1),
+            epoch: 2
+        }
+    );
+    assert!(!handle.admits_text(Some(&session)));
+    acknowledge_queued(&control, key);
+    assert!(
+        handle.admits_text(Some(&session)),
+        "registration has its own deadline"
+    );
+    assert!(handle.begin_quit());
+    let finish = thread::spawn(move || handle.finish_quit());
+    assert_eq!(
+        frame::read(&mut &control, Pipe::Control).unwrap(),
+        Some(ControlToBrain::DeleteThread {
+            thread: ThreadId(11),
+            after_turns: 0,
+            resend: false
+        })
+    );
+    assert_eq!(
+        frame::read(&mut &control, Pipe::Control).unwrap(),
+        Some(ControlToBrain::Quitting)
+    );
+    drop(control);
+    assert_eq!(worker.join().unwrap(), Attendance::Lost);
+    finish.join().unwrap();
+}
+
+#[test]
+fn queued_reconnect_quits_its_authenticated_parked_pair_after_held_deletes() {
+    use super::output::{Denied, Retirement};
+    use kumochi_protocol::message::GestureId;
+    use windows::Win32::Foundation::ERROR_TIMEOUT;
+
+    let (link, inhibit, reserved) = lost_quiet_mic();
+    let (control, data, shell_control, shell_data) = queued_hello_pipes("parked-quit");
+    let (events, received) = async_channel::unbounded();
+    let (handle, start) = start(link, events);
+    handle.delete(ThreadId(11));
+    handle.delete(ThreadId(12));
+    handle.shared.deletes()[0].sent_on = Some(1);
+    *handle.shared.microphone_stop.lock().unwrap() = Some(super::microphone::Stop::Received {
+        gesture: GestureId(1),
+        sent_on: Some(1),
+    });
+    let worker = thread::spawn(move || {
+        let end = Instant::now() + PATIENCE;
+        let connection = start
+            .link
+            .connect_with(
+                end,
+                queued_fixture_connector(shell_control, None, || Ok(shell_data)),
+            )
+            .unwrap();
+        start.link.attend_until(connection, &start.events, end)
+    });
+    read_queued_fixture_hello(&control, &data);
+    control.set_timeout(Some(Duration::from_millis(250)));
+    assert!(
+        matches!(frame::read::<ControlToBrain>(&mut &control, Pipe::Control),
+        Err(frame::FrameError::Io(error)) if error.raw_os_error() == Some(ERROR_TIMEOUT.to_hresult().0))
+    );
+    assert!(handle.shared.outbox.lock().unwrap().is_none());
+    assert!(handle.begin_quit());
+    control.set_timeout(Some(PATIENCE));
+    for (thread, resend) in [(ThreadId(11), true), (ThreadId(12), false)] {
+        assert_eq!(
+            frame::read(&mut &control, Pipe::Control).unwrap(),
+            Some(ControlToBrain::DeleteThread {
+                thread,
+                after_turns: 0,
+                resend
+            })
+        );
+    }
+    assert_eq!(
+        frame::read(&mut &control, Pipe::Control).unwrap(),
+        Some(ControlToBrain::Quitting)
+    );
+    assert_eq!(worker.join().unwrap(), Attendance::Ended);
+    assert_eq!(
+        frame::read::<ControlToBrain>(&mut &control, Pipe::Control).unwrap(),
+        None
+    );
+    assert_eq!(
+        frame::read::<DataToBrain>(&mut &data, Pipe::Data).unwrap(),
+        None
+    );
+    assert!(received.is_empty());
+    assert!(handle.shared.outbox.lock().unwrap().is_none());
+    assert!(
+        handle.voice_stop_pending(),
+        "Quit must not settle the old Stop"
+    );
+    assert_eq!(
+        handle.output().acquire(GestureId(2)),
+        Err(Denied::Inhibited)
+    );
+    let (inhibit, denied) = handle
+        .output()
+        .retire(inhibit, Retirement::Retired)
+        .unwrap_err();
+    assert_eq!(denied, Denied::Inhibited);
+    drop(reserved);
+    handle
+        .output()
+        .retire(inhibit, Retirement::Retired)
+        .unwrap();
+}
+
+#[test]
+fn queued_reconnect_does_not_send_shutdown_to_unknown_or_partial_pairs() {
+    for greeted in [false, true] {
+        let label = if greeted {
+            "partial-quit"
+        } else {
+            "unknown-quit"
+        };
+        let (control, data, shell_control, shell_data) = queued_hello_pipes(label);
+        let link = Link {
+            audio: super::AudioSession::QueuedRequired,
+            ..bare_link()
+        };
+        let (events, received) = async_channel::unbounded();
+        let (handle, start) = start(link, events);
+        handle.delete(ThreadId(11));
+        let worker = thread::spawn(move || {
+            let end = Instant::now() + PATIENCE;
+            start.link.connect_with(
+                end,
+                queued_fixture_connector(shell_control, None, || {
+                    drop(shell_data);
+                    Err(super::LinkError::NotOurBrain(PathBuf::from("foreign")))
+                }),
+            )
+        });
+        assert!(matches!(
+            frame::read(&mut &control, Pipe::Control).unwrap(),
+            Some(ControlToBrain::QueuedHello(_))
+        ));
+        assert!(handle.begin_quit());
+        let reply = if greeted {
+            queued_fixture_welcome()
+        } else {
+            ControlToShell::Ping
+        };
+        frame::write(&mut &control, &reply, Pipe::Control).unwrap();
+        assert!(worker.join().unwrap().is_err());
+        assert_eq!(
+            frame::read::<ControlToBrain>(&mut &control, Pipe::Control).unwrap(),
+            None
+        );
+        assert_eq!(
+            frame::read::<DataToBrain>(&mut &data, Pipe::Data).unwrap(),
+            None
+        );
+        assert!(received.is_empty());
+        assert!(handle.shared.outbox.lock().unwrap().is_none());
+    }
+}
+
+fn queued_fixture_connector(
+    control: PipeClient,
+    wait_through: Option<Instant>,
+    open_data: impl FnOnce() -> Result<PipeClient, super::LinkError>,
+) -> impl FnMut(Option<Instant>) -> Result<Connection, super::LinkError> {
+    let mut opening = Some((control, open_data));
+    move |attempt| {
+        let (control, open_data) = opening.take().expect("one fixture attempt");
+        let connection = super::handshake_pair(
+            control,
+            queued_fixture_hello(),
+            super::AudioSession::QueuedRequired,
+            attempt,
+            open_data,
+        )?;
+        if let Some(end) = wait_through {
+            thread::sleep(end.saturating_duration_since(Instant::now()));
+        }
+        Ok(connection)
+    }
+}
+
+fn queued_hello_pipes(label: &str) -> (PipeClient, PipeClient, PipeClient, PipeClient) {
+    let (control, shell_control) = pair(&format!("queued-reconnect-{label}-c"));
+    let (data, shell_data) = pair(&format!("queued-reconnect-{label}-d"));
+    for pipe in [&control, &data, &shell_control, &shell_data] {
+        pipe.set_timeout(Some(PATIENCE));
+    }
+    (control, data, shell_control, shell_data)
+}
+
+fn queued_fixture_hello() -> kumochi_protocol::message::Hello {
+    kumochi_protocol::message::Hello {
+        build_id: kumochi_protocol::BUILD_ID.into(),
+        capability: kumochi_protocol::Secret::new([7; kumochi_protocol::message::CAPABILITY_LEN]),
+    }
+}
+
+fn queued_fixture_welcome() -> ControlToShell {
+    ControlToShell::Welcome {
+        incarnation: Incarnation(1),
+        issue_epoch: 2,
+    }
+}
+
+fn read_queued_fixture_hello(control: &PipeClient, data: &PipeClient) {
+    assert!(
+        matches!(
+            frame::read(&mut &*control, Pipe::Control).expect("control hello"),
+            Some(ControlToBrain::QueuedHello(_))
+        ),
+        "expected a queued control hello"
+    );
+    frame::write(&mut &*control, &queued_fixture_welcome(), Pipe::Control).expect("Welcome");
+    assert!(
+        matches!(
+            frame::read(&mut &*data, Pipe::Data).expect("data hello"),
+            Some(DataToBrain::QueuedHello(
+                _,
+                IssueSession {
+                    incarnation: Incarnation(1),
+                    epoch: 2
+                }
+            ))
+        ),
+        "the data hello names this exact pair"
+    );
+}
+
+fn lost_quiet_mic() -> (
+    Link,
+    super::output::InhibitToken,
+    crate::platform::microphone::Reserved,
+) {
+    use kumochi_protocol::message::{AudioSession, GestureId};
+    use std::sync::atomic::Ordering;
+
+    let link = Link {
+        audio: AudioSession::QueuedRequired,
+        ..bare_link()
+    };
+    link.shared.generations.store(1, Ordering::Release);
+    let output = &link.shared.output;
+    assert!(output.begin(1, None).is_none(), "no native opener");
+    let gesture = GestureId(1);
+    let mic = link
+        .shared
+        .microphone
+        .arm(gesture)
+        .expect("arm the old mic");
+    let inhibit = output.acquire(gesture).expect("acquire the quiet inhibit");
+    output.bind_mic(&inhibit, &mic).expect("bind the old mic");
+    let claim = output.claim(&inhibit, 1).expect("claim the quiet output");
+    let reserved = output.start_mic(&claim).expect("reserve without opening");
+    output.end(1);
+    (link, inhibit, reserved)
+}
+
+fn replacement_pair(label: &str) -> (PipeClient, PipeClient, Connection) {
+    let (control, shell_control) = pair(&format!("queued-replacement-{label}-c"));
+    let (data, shell_data) = pair(&format!("queued-replacement-{label}-d"));
+    control.set_timeout(Some(PATIENCE));
+    data.set_timeout(Some(PATIENCE));
+    (
+        control,
+        data,
+        Connection {
+            control: Arc::new(shell_control),
+            data: Arc::new(shell_data),
+            issue_origin: IssueSession {
+                incarnation: Incarnation(1),
+                epoch: 2,
+            },
+        },
+    )
 }
 
 fn assert_refused_queued_replacement(handle: &LinkHandle) {

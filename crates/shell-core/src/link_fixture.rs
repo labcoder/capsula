@@ -5,6 +5,8 @@ use std::path::PathBuf;
 use std::sync::{Arc, mpsc};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
+#[cfg(debug_assertions)]
+use std::time::Instant;
 
 use async_channel::Receiver;
 use kumochi_protocol::message::{AudioSession, Incarnation, IssueSession};
@@ -149,12 +151,14 @@ fn authenticated_with_output(
     };
     let (handle, start) = start(link, sender);
     let link = thread::spawn(move || {
-        let open = |pipe: Pipe| super::open(&pipe.name(id), &start.link.brain);
+        let end = Instant::now() + super::CONNECT_TIMEOUT;
+        let attempt = (mode == AudioSession::QueuedRequired).then_some(end);
+        let open = |pipe: Pipe| super::open(&pipe.name(id), &start.link.brain, attempt);
         let control = open(Pipe::Control).expect("the fixture control pipe");
         control.set_timeout(Some(PATIENCE));
-        let connection = super::handshake_pair(control, hello, mode, || open(Pipe::Data))
+        let connection = super::handshake_pair(control, hello, mode, attempt, || open(Pipe::Data))
             .expect("authenticate both fixture legs");
-        start.link.attend(connection, &start.events) == Attendance::Lost
+        start.link.attend_until(connection, &start.events, end) == Attendance::Lost
     });
     Authenticated {
         handle,
@@ -175,7 +179,7 @@ pub(crate) fn pair(label: &str) -> (PipeClient, PipeClient) {
 
 /// A connection the link attends on its own thread, and the brain's ends of its pipes.
 #[cfg_attr(
-    not(test),
+    not(any(test, debug_assertions)),
     expect(dead_code, reason = "only this crate's tests read the brain's ends")
 )]
 pub struct Attended {
@@ -185,6 +189,40 @@ pub struct Attended {
     pub(crate) data: Arc<PipeClient>,
     /// Returns whether the UI was still there when the connection ended.
     pub link: JoinHandle<bool>,
+}
+
+#[cfg(debug_assertions)]
+impl Attended {
+    /// Checks the peer's exact shutdown frames, closes the peer and joins the link.
+    /// # Panics
+    /// Panics on an unexpected frame, pipe error or link failure.
+    pub fn verify_quit(self, expected: [kumochi_protocol::message::ControlToBrain; 3]) {
+        use kumochi_protocol::frame::{self, FrameError, Pipe};
+        use kumochi_protocol::message::ControlToBrain;
+        use windows::Win32::Foundation::ERROR_TIMEOUT;
+
+        for message in expected {
+            assert_eq!(
+                frame::read(&mut &self.control, Pipe::Control).expect("a shutdown frame"),
+                Some(message),
+                "only the expected shutdown control is written"
+            );
+        }
+        self.control.set_timeout(Some(Duration::from_millis(100)));
+        assert!(
+            matches!(
+                frame::read::<ControlToBrain>(&mut &self.control, Pipe::Control),
+                Err(FrameError::Io(error)) if error.raw_os_error() == Some(ERROR_TIMEOUT.to_hresult().0)
+            ),
+            "no later control follows Quitting"
+        );
+        drop(self.control);
+        drop(self.data);
+        assert!(
+            self.link.join().expect("link joined"),
+            "the peer closed after Quit"
+        );
+    }
 }
 
 pub fn attended(label: &str) -> Attended {
@@ -266,8 +304,11 @@ fn attended_with(
             epoch: 91,
         },
     };
-    let link =
-        thread::spawn(move || start.link.attend(connection, &start.events) == Attendance::Lost);
+    let link = thread::spawn(move || {
+        let result = start.link.attend(connection, &start.events);
+        drop(start.alive);
+        result == Attendance::Lost
+    });
     Attended {
         handle,
         events,

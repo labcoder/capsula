@@ -1455,6 +1455,99 @@ fn a_refused_host_show_reports_a_scene_failure_instead_of_a_user_clear(
 
 #[cfg(all(windows, debug_assertions))]
 #[gpui::test]
+fn actual_quit_discards_the_screen_line_without_reopening_a_refused_host(
+    cx: &mut gpui_kit::TestAppContext,
+) {
+    use crate::input::path::PathRecorder;
+    use crate::link::fixture;
+    use crate::platform::microphone::MicError;
+    use crate::presence::{PresenceApp, ink};
+    use kumochi_protocol::geometry::{PhysicalPoint, PhysicalRect};
+    use kumochi_protocol::message::{ControlToBrain, GestureId, ThreadId};
+    use std::time::Instant;
+
+    let now = Instant::now();
+    let (owner, _old_controls) = callback_scene(
+        br#"{"step":{"id":"static","put":[{"shape":{"id":"box","kind":"rect","box":[0,0,30,30],"enter":"none"}}]}}"#,
+        now, cx,
+    );
+    cx.update(|cx| {
+        cx.set_global(PresenceApp {
+            _owner: owner.clone(),
+        });
+    });
+    let pipe = fixture::attended("legacy-quit-drawn-line");
+    let session = fixture::connected(fixture::next(&fixture::patient(pipe.events.clone())));
+    let link = pipe.handle.clone();
+    let gesture = GestureId(7);
+    link.delete(ThreadId(11));
+    let token = link.microphone_gate().arm(gesture).unwrap();
+    link.track_input(gesture);
+    owner.update(cx, |this, _| {
+        this.link = link.clone();
+        this.session = Some(session.clone());
+        assert!(this.presenter.sample_at(now).unwrap().0.visible);
+        assert!(this.overlay.window().is_none());
+        let display = PhysicalRect {
+            origin: [0, 0],
+            size: [4_000, 4_000],
+        };
+        let mut sampler = ink::Sampler::new(
+            gesture,
+            PathRecorder::new(PhysicalPoint([10, 10]), 1.0, display),
+        );
+        assert!(sampler.sample(PhysicalPoint([80, 60]), now));
+        *this.ink.borrow_mut() = Some(sampler);
+        assert!(ink::drawn(&this.ink));
+    });
+    let observed = Observer::install();
+    let refused = HostGuard::install(&[
+        Step(Operation::Configure, Outcome::Success),
+        Step(Operation::Show, Outcome::NotWin32),
+        Step(Operation::Hide, Outcome::Success),
+    ]);
+    let peer = std::thread::spawn(move || {
+        pipe.verify_quit([
+            ControlToBrain::GestureCancel { gesture },
+            ControlToBrain::DeleteThread {
+                thread: ThreadId(11),
+                after_turns: 0,
+                resend: false,
+            },
+            ControlToBrain::Quitting,
+        ]);
+    });
+    fixture::with_outbox_held(&link, &session, || {
+        owner.update(cx, |this, cx| {
+            this.quit(cx);
+            assert!(this.ink.borrow().is_none());
+            assert!(this.overlay.window().is_none());
+            assert!(!this.presenter.holds_scenes());
+            assert_eq!(
+                token.mode(&session.alive(), Instant::now()),
+                Err(MicError::Cancelled)
+            );
+        });
+    });
+    cx.run_until_parked();
+    assert_eq!(
+        observed.snapshot().len,
+        0,
+        "Quit never paints a diagnostic frame"
+    );
+    HOST.with(|host| {
+        assert_eq!(
+            host.borrow().as_ref().unwrap().used,
+            0,
+            "Quit never tries the refused host"
+        );
+    });
+    drop(refused);
+    peer.join().unwrap();
+}
+
+#[cfg(all(windows, debug_assertions))]
+#[gpui::test]
 fn queued_escape_offers_stop_then_host_refusal_without_waiting_for_outbox(
     cx: &mut gpui_kit::TestAppContext,
 ) {
