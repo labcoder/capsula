@@ -9,7 +9,7 @@ use kumochi_protocol::message::{ControlToShell, ErrorKey, SettingsOp, VoiceView}
 use kumochi_protocol::voice::VoicePart;
 use tokio::task::{JoinError, JoinHandle};
 
-use super::{Brain, Full, Link};
+use super::{Brain, Full, Link, controls::Registration};
 use crate::config::{ConfigError, Pending};
 use crate::connections::github::device::DefaultRepo;
 use crate::voice::installer::{Folder, Installer, RemoveAnswer};
@@ -111,6 +111,30 @@ impl Brain {
                 .any(|queued| matches!(&queued.change, Change::User(op) if op == off))
     }
 
+    pub(super) fn hold_pair_supported(&self, link: &Link<'_, '_>) -> bool {
+        if link.registration.is_none() {
+            return true;
+        }
+        let changes_consent = |op: &SettingsOp| {
+            matches!(
+                op,
+                SettingsOp::SetTalkBack(_) | SettingsOp::SetShowScreen(_)
+            )
+        };
+        Registration::admits(link.registration)
+            && link.queued_silent
+            && self.config.queued_hold_preferences_off()
+            && !self
+                .config_write
+                .as_ref()
+                .and_then(|write| write.op.as_ref())
+                .is_some_and(changes_consent)
+            && !self
+                .settings_ops
+                .iter()
+                .any(|queued| matches!(&queued.change, Change::User(op) if changes_consent(op)))
+    }
+
     pub(super) fn hold_to_talk_enabled(&self) -> bool {
         self.config.view().hold_to_talk && !self.turning_off(&SettingsOp::SetHoldToTalk(false))
     }
@@ -158,6 +182,9 @@ impl Brain {
         let Some(link) = link else {
             return Ok(());
         };
+        if self.config.view().talk_back {
+            link.queued_silent = false;
+        }
         if epoch == self.epoch {
             if let Outcome::Refused(key) = outcome {
                 link.control(&ControlToShell::Error(key.into()))?;

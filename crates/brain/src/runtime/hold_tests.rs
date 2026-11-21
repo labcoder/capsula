@@ -391,6 +391,71 @@ async fn first_speech_setup_loads_and_holds_without_restarting_the_brain() {
 }
 
 #[tokio::test]
+async fn queued_hold_refuses_pending_and_saved_show_screen_on() {
+    use kumochi_protocol::constants::CONFIG_FILE;
+    use kumochi_protocol::message::{AudioSession, OutputGeneration, SettingsOp};
+
+    let scratch = Scratch::new("queued-hold-preferences");
+    std::fs::create_dir_all(scratch.dir()).unwrap();
+    std::fs::write(
+        scratch.dir().join(CONFIG_FILE),
+        "[voice]\ntalk_back = false\nshow_screen = false\nhold_to_talk = true\n",
+    )
+    .unwrap();
+    let (mut brain, _release, mut decoded, _) =
+        input(&scratch, Vec::new(), "must not decode").await;
+    let save = brain.hold_config_write();
+    let ((control, data), mut shell) = duplex();
+    let mut tap = Tap::from_env();
+    let client = async {
+        opened(&mut shell).await;
+        let output = OutputGeneration(7);
+        shell
+            .send(&ControlToBrain::QueuedAudioOutput(24_000, output))
+            .await;
+        assert_eq!(
+            shell.control().await,
+            Some(ControlToShell::QueuedAudioRegistered(output))
+        );
+        shell
+            .send(&ControlToBrain::Settings(SettingsOp::SetShowScreen(true)))
+            .await;
+        recognize_for(&mut shell, G).await;
+        status(&mut shell, HoldStatus::Failed(HoldFailure::ChoiceChanged)).await;
+        save.send(super::super::settings::Gate::Write).unwrap();
+        loop {
+            if let Some(ControlToShell::Settings { view, answer: true }) =
+                shell.next_control().await.unwrap()
+            {
+                assert!(view.show_screen);
+                break;
+            }
+        }
+        let next = GestureId(G.0 + 1);
+        recognize_for(&mut shell, next).await;
+        status_for(
+            &mut shell,
+            next,
+            HoldStatus::Failed(HoldFailure::ChoiceChanged),
+        )
+        .await;
+        assert!(decoded.try_recv().is_err());
+        drop(shell);
+    };
+    let (ended, ()) = tokio::time::timeout(super::PATIENCE, async {
+        tokio::join!(
+            brain.serve_with_audio(control, data, &mut tap, AudioSession::QueuedRequired),
+            client
+        )
+    })
+    .await
+    .unwrap();
+    assert_eq!(ended, Ended::Lost);
+    brain.close().await;
+    assert!(users(&scratch).is_empty());
+}
+
+#[tokio::test]
 async fn exact_ordered_pcm_and_independent_resampling_tail_reach_one_real_hold_run() {
     for controls_first in [false, true] {
         for resampled in [false, true] {

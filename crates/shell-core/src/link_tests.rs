@@ -2950,6 +2950,293 @@ fn queued_text(turn: u32, text: &str) -> DataToBrain {
 }
 
 #[test]
+fn queued_hold_waits_for_its_saved_preferences_and_rejects_another_run_origin() {
+    use kumochi_protocol::message::{GestureId, HoldStatus, OutputGeneration, SettingsOp};
+
+    let link = attended_queued("queued-hold-consent");
+    let events = patient(link.events);
+    let session = connected(next(&events));
+    let generation = session.generation();
+    let gesture = GestureId(41);
+    let recognized = ControlToBrain::VoiceHoldRecognized {
+        gesture,
+        thread: None,
+        selection: 1,
+    };
+    let send = |msg| frame::write(&mut &link.control, &msg, Pipe::Control).unwrap();
+    let receive = || frame::read(&mut &link.control, Pipe::Control).unwrap();
+    let settings = |show_screen, answer| {
+        send(ControlToShell::Settings {
+            view: kumochi_protocol::message::SettingsView {
+                show_screen,
+                ..settings_view()
+            },
+            answer,
+        });
+        assert!(
+            matches!(next(&events), LinkEvent::Settings { generation: actual, .. } if actual == generation)
+        );
+    };
+
+    link.handle.track_input(gesture);
+    assert!(
+        !link.handle.admits_voice(generation),
+        "settings are unknown"
+    );
+    assert!(!link.handle.send_control(&session, recognized.clone()));
+    assert!(
+        link.handle
+            .send_control(&session, ControlToBrain::VoiceHoldStopped { gesture })
+    );
+    link.handle.clear_input(gesture);
+    settings(true, false);
+    let Some(ControlToBrain::QueuedAudioOutput(_, output)) = receive() else {
+        panic!("the pair offers its logical output");
+    };
+    assert_ne!(output, OutputGeneration(0));
+    acknowledge_queued(&link.control, output);
+    assert!(!link.handle.admits_voice(generation), "Show Screen is on");
+
+    for op in [
+        SettingsOp::SetTaskbar(false),
+        SettingsOp::SetShowScreen(false),
+    ] {
+        let command = ControlToBrain::Settings(op);
+        assert!(link.handle.send_control(&session, command.clone()));
+        assert_eq!(receive(), Some(command));
+    }
+    link.handle.track_input(gesture);
+    settings(false, false);
+    settings(false, true);
+    assert!(
+        !link.handle.admits_voice(generation),
+        "the earlier settings answer didn't settle Show Screen"
+    );
+    assert!(!link.handle.send_control(&session, recognized.clone()));
+    assert!(
+        !link.handle.voice_stop_pending(),
+        "a refused offer owns no microphone debt"
+    );
+    settings(false, true);
+    assert!(link.handle.admits_voice(generation));
+    assert!(
+        !link.handle.admits_voice(generation + 1),
+        "a different pair cannot use those preferences"
+    );
+    link.handle.track_input(gesture);
+    assert!(link.handle.send_control(&session, recognized.clone()));
+    assert_eq!(receive(), Some(recognized));
+
+    send(ControlToShell::VoiceHoldStatus {
+        gesture,
+        status: HoldStatus::Admitted,
+    });
+    assert!(
+        matches!(next(&events), LinkEvent::VoiceHold { gesture: key, status: HoldStatus::Admitted, .. } if key == gesture)
+    );
+    let released = ControlToBrain::KeyUp {
+        gesture,
+        t_qpc: 5,
+        chunks: 0,
+    };
+    assert!(link.handle.send_control(&session, released.clone()));
+    assert_eq!(receive(), Some(released));
+    send(run_state(
+        1,
+        ThreadId(1),
+        Phase::Thinking,
+        Some(RunOrigin::Hold {
+            gesture: GestureId(42),
+        }),
+    ));
+    queued_pair_closed(link.link, &link.control, &link.data);
+    assert!(!session.open());
+    assert!(
+        link.handle.voice_stop_pending(),
+        "closing the pair didn't settle the real microphone debt"
+    );
+}
+
+#[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one authenticated pair proves cancel, release and reply in order"
+)]
+fn authenticated_queued_hold_cancels_or_transfers_only_the_released_gesture() {
+    use kumochi_protocol::message::{GestureId, HoldStatus, MicPcm};
+
+    let _device = serialize_playback();
+    let (id, hello, probe, brain) = kumochi_brain::ipc::offline_hold_peer();
+    let pipe = authenticated_primed(id, hello);
+    let events = patient(pipe.events);
+    let session = connected(next(&events));
+    let generation = session.generation();
+    let LinkEvent::Settings { view, .. } = next(&events) else {
+        panic!("the paired Brain first reports the saved settings");
+    };
+    assert!(!view.talk_back && !view.show_screen && view.hold_to_talk);
+    let recognized = |gesture| ControlToBrain::VoiceHoldRecognized {
+        gesture,
+        thread: None,
+        selection: 1,
+    };
+    let packet = |gesture| {
+        DataToBrain::MicPcm(MicPcm {
+            gesture,
+            rate: 16_000,
+            seq: 0,
+            last: true,
+            samples: vec![173, -19],
+        })
+    };
+    let handle = &pipe.handle;
+    let cancelled = GestureId(17);
+    handle.track_input(cancelled);
+    assert!(!handle.send_control(&session, recognized(cancelled)));
+    assert!(!handle.send_data(&session, packet(cancelled)));
+    assert!(!handle.voice_stop_pending());
+    probe.release_ack();
+    probe.release_run();
+    probe.allow_data_credit();
+
+    let until = Instant::now() + PATIENCE;
+    while !handle.admits_voice(generation) {
+        assert!(Instant::now() < until && session.open());
+        thread::sleep(Duration::from_millis(2));
+    }
+    let expect_status = |gesture, status| loop {
+        match next(&events) {
+            LinkEvent::VoiceHold {
+                generation: from,
+                gesture: key,
+                status: seen,
+            } => {
+                assert_eq!((from, key, seen), (generation, gesture, status));
+                break;
+            }
+            LinkEvent::RunState { .. } | LinkEvent::CaptureDone { .. } => {
+                panic!("an unsubmitted Hold creates neither a run nor a capture");
+            }
+            _ => {}
+        }
+    };
+    let stop = |gesture| {
+        assert!(handle.send_control(&session, ControlToBrain::VoiceHoldStopped { gesture }));
+        let until = Instant::now() + PATIENCE;
+        while handle.voice_stop_pending() {
+            assert!(Instant::now() < until && session.open());
+            thread::sleep(Duration::from_millis(2));
+        }
+    };
+
+    assert!(handle.send_control(&session, recognized(cancelled)));
+    expect_status(cancelled, HoldStatus::Admitted);
+    assert!(handle.send_control(
+        &session,
+        ControlToBrain::GestureCancel { gesture: cancelled }
+    ));
+    assert!(!handle.send_data(&session, packet(cancelled)));
+    expect_status(cancelled, HoldStatus::Cancelled);
+    assert!(handle.voice_stop_pending());
+    stop(cancelled);
+    assert_eq!(probe.decoded(), 0);
+
+    let gesture = GestureId(18);
+    handle.track_input(gesture);
+    assert!(handle.send_control(&session, recognized(gesture)));
+    expect_status(gesture, HoldStatus::Admitted);
+    assert!(!handle.send_data(&session, packet(cancelled)));
+    assert!(handle.send_data(&session, packet(gesture)));
+    stop(gesture);
+    assert!(
+        !handle.admits_text(Some(&session)),
+        "a mic receipt is not a run transfer"
+    );
+    let released = |gesture| ControlToBrain::KeyUp {
+        gesture,
+        t_qpc: 2,
+        chunks: 1,
+    };
+    assert!(!handle.send_control(&session, released(cancelled)));
+    assert!(handle.send_control(&session, released(gesture)));
+    assert!(!handle.send_data(&session, packet(gesture)));
+
+    let mut answer = String::new();
+    let (mut named, mut done, mut ended, mut held) = (false, false, false, false);
+    let expected_run = RunId(1);
+    while !(named && done && ended && held) {
+        match next(&events) {
+            LinkEvent::RunState {
+                generation: from,
+                run,
+                phase: Phase::Thinking,
+                origin,
+                ..
+            } => {
+                assert!(!named);
+                assert_eq!(
+                    (from, run, origin),
+                    (generation, expected_run, Some(RunOrigin::Hold { gesture }))
+                );
+                named = true;
+            }
+            LinkEvent::RunState {
+                run,
+                phase: Phase::Done,
+                ..
+            } => {
+                assert_eq!(run, expected_run);
+                done = true;
+            }
+            LinkEvent::Data { message, bytes, .. } => {
+                match message {
+                    DataToShell::AssistantText { run, delta } => {
+                        assert_eq!(run, expected_run);
+                        answer.push_str(delta.as_str());
+                    }
+                    DataToShell::HoldWords {
+                        gesture: key,
+                        words,
+                    } => {
+                        assert_eq!((key, words.as_str()), (gesture, "synthetic held words"));
+                        held = true;
+                    }
+                    DataToShell::RunEnd { run } => {
+                        assert_eq!(run, expected_run);
+                        ended = true;
+                    }
+                    DataToShell::SegmentQueued { .. } | DataToShell::SpeechPcm(_) => {
+                        panic!("a silent Hold emits no speaker work");
+                    }
+                    _ => {}
+                }
+                session.grant(bytes);
+            }
+            LinkEvent::TurnRefused { .. }
+            | LinkEvent::Error { .. }
+            | LinkEvent::CaptureDone { .. } => {
+                panic!("the ordinary Hold finishes without a refusal or a capture");
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(answer, "An offline voice reply.");
+    assert_eq!(probe.decoded(), 1);
+    assert!(probe.received_retirements(expected_run).is_empty());
+    assert!(handle.admits_text(Some(&session)));
+    handle.end(&session);
+    assert!(!handle.send_control(&session, recognized(GestureId(19))));
+    assert!(!handle.send_data(&session, packet(gesture)));
+    assert!(pipe.link.join().unwrap());
+    assert!(brain.join().unwrap());
+    drop(pipe.handle);
+    assert!(matches!(
+        pipe.playback.recv_timeout(PATIENCE),
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected)
+    ));
+}
+
+#[test]
 fn authenticated_queued_text_replies_with_talk_back_off() {
     use kumochi_protocol::message::AudioSession;
 

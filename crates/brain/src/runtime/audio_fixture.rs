@@ -19,7 +19,10 @@ use crate::connections::vault::Vault;
 use crate::engines::fixture::Fixture;
 use crate::engines::responses::replay::Turns;
 use crate::platform::credential::{CredentialStore, CredentialStoreError, SecretBytes};
+use crate::voice::download::{DownloadError, Fetch, Progress};
+use crate::voice::installer::{Durable, Installer};
 use crate::voice::pump::{OutputMode, Pump};
+use crate::voice::stt::SttHandle;
 use crate::voice::tts::{Engine, TtsError, TtsHandle};
 use crate::voice::{LoadEvent, Reports};
 
@@ -60,7 +63,20 @@ pub(crate) fn accepted_quiet(run: RunId, cursor: Option<Cursor>) {
     }
 }
 
+#[derive(Debug)]
 struct Offline;
+
+impl Fetch for Offline {
+    fn fetch<'a>(
+        &'a self,
+        _: kumochi_protocol::voice::VoicePart,
+        _: &'a tokio::sync::watch::Sender<Progress>,
+        _: &'a tokio::sync::watch::Receiver<bool>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), DownloadError>> + Send + 'a>>
+    {
+        panic!("the offline fixture never fetches voice models")
+    }
+}
 
 impl Launcher for Offline {
     fn launch(&self, _: &LaunchTarget) -> Result<(), LaunchError> {
@@ -99,6 +115,8 @@ impl Engine for Tone {
 #[derive(Debug, Default)]
 pub struct AudioProbe {
     text_only: bool,
+    hold: bool,
+    decoded: AtomicU32,
     narrated: bool,
     initial_credit: Option<u32>,
     replacement_chain: Option<Arc<Notify>>,
@@ -148,6 +166,19 @@ impl AudioProbe {
             text_only: true,
             ..Self::default()
         }
+    }
+
+    pub(crate) fn silent_hold() -> Self {
+        Self {
+            hold: true,
+            ..Self::text_only()
+        }
+    }
+
+    /// Number of synthetic utterances the offline recognizer actually decoded.
+    #[must_use]
+    pub fn decoded(&self) -> u32 {
+        self.decoded.load(Ordering::Acquire)
     }
 
     pub(crate) fn narrated() -> Self {
@@ -559,6 +590,50 @@ impl AudioProbe {
     }
 }
 
+async fn attach_hold_input(brain: &mut Brain, dir: &Path, probe: Arc<AudioProbe>) {
+    let (reports, heard) = Reports::new();
+    let (_, tts) = Reports::new();
+    let stt = SttHandle::offline(reports, move |rate, samples| {
+        assert_eq!(rate, 16_000, "the recognizer receives canonical-rate PCM");
+        assert_eq!(
+            samples,
+            [173, -19],
+            "only the released gesture reaches decode"
+        );
+        probe.decoded.fetch_add(1, Ordering::Release);
+        "synthetic held words".into()
+    });
+    brain.attach_voice(
+        dir.join("models"),
+        &[],
+        (Some(stt), None),
+        [heard, tts],
+        Arc::new(Offline),
+    );
+    let (installed, effects) = Installer::start(
+        [Durable::Installed, Durable::Absent],
+        [Ok(true); 2],
+        [true, false],
+        &[],
+        true,
+    );
+    brain
+        .voice_op(
+            |current| {
+                *current = installed;
+                effects
+            },
+            None,
+        )
+        .expect("load the offline recognizer");
+    let event = tokio::time::timeout(Duration::from_secs(3), super::voice::next(&mut brain.voice))
+        .await
+        .expect("offline recognizer ready");
+    brain
+        .voice_event(event, None)
+        .expect("record offline recognizer state");
+}
+
 pub(crate) async fn brain(dir: &Path, script: &str, tone_chunks: usize) -> Brain {
     let mut store = Store::open(&dir.join("store.db")).expect("open the test store");
     store.recover().expect("recover the test store");
@@ -573,6 +648,8 @@ pub(crate) async fn brain(dir: &Path, script: &str, tone_chunks: usize) -> Brain
         format!(
             "default_model = {{ model = \"{replay}\", effort = \"Low\", connection = \"ChatGpt\" }}\n[voice]\ntalk_back = true\n"
         )
+    } else if probe.as_ref().is_some_and(|probe| probe.hold) {
+        "[voice]\ntalk_back = false\nshow_screen = false\nhold_to_talk = true\n".into()
     } else if text_only {
         "[voice]\ntalk_back = false\n".into()
     } else {
@@ -623,6 +700,9 @@ pub(crate) async fn brain(dir: &Path, script: &str, tone_chunks: usize) -> Brain
     let mut brain = Brain::new(store, main, high, scenes, engine, config, accounts)
         .expect("start the fixture Brain");
     if text_only {
+        if let Some(probe) = probe.filter(|probe| probe.hold) {
+            attach_hold_input(&mut brain, dir, probe).await;
+        }
         return brain;
     }
     let (reports, mut loaded) = Reports::new();

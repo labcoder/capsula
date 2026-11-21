@@ -648,6 +648,43 @@ impl Shared {
             .map(use_it)
     }
 
+    fn queue_control(
+        &self,
+        session: &Session,
+        out: &Sender<ControlToBrain>,
+        message: ControlToBrain,
+    ) -> bool {
+        if !session.io.queued {
+            return self.queue_voice_control(out, message);
+        }
+        let generation = session.generation;
+        if let ControlToBrain::Settings(op) = message {
+            return self.output.queued_settings(generation, op, out);
+        }
+        match &message {
+            ControlToBrain::KeyDown { .. } => {
+                self.output.queued_hold_ready(generation) && out.try_send(message).is_ok()
+            }
+            ControlToBrain::VoiceHoldRecognized { gesture, .. } => {
+                self.input.load(Ordering::Acquire) == u64::from(gesture.0)
+                    && self.output.begin_queued_hold(generation, *gesture, || {
+                        self.queue_voice_control(out, message)
+                    })
+            }
+            ControlToBrain::KeyUp { gesture, .. } => self.output.queued_hold_input(
+                generation,
+                *gesture,
+                output::HoldInput::Release,
+                || out.try_send(message).is_ok(),
+            ),
+            ControlToBrain::GestureCancel { gesture } => {
+                self.output
+                    .cancel_queued_hold(generation, *gesture, || out.try_send(message).is_ok())
+            }
+            _ => self.queue_voice_control(out, message),
+        }
+    }
+
     fn deletes(&self) -> std::sync::MutexGuard<'_, Vec<Held>> {
         self.deletes.lock().unwrap_or_else(PoisonError::into_inner)
     }
@@ -715,6 +752,12 @@ impl LinkHandle {
                         .output
                         .queued_turn(session.generation, None, || true)
             })
+    }
+
+    /// Whether this connection can attempt ordinary voice input without changing its audio mode.
+    pub fn admits_voice(&self, generation: u64) -> bool {
+        self.audio_session() == AudioSession::Legacy
+            || self.shared.output.queued_hold_ready(generation)
     }
 
     pub fn output(&self) -> &output::OutputOwner {
@@ -854,19 +897,20 @@ impl LinkHandle {
         if session.io.queued
             && matches!(
                 &message,
-                ControlToBrain::KeyDown { .. }
-                    | ControlToBrain::HoldRecognized { .. }
-                    | ControlToBrain::VoiceHoldRecognized { .. }
+                ControlToBrain::HoldRecognized { .. }
                     | ControlToBrain::ScreenHoldRecognized { .. }
                     | ControlToBrain::Warm { .. }
             )
         {
             return false;
         }
-        if let ControlToBrain::VoiceHoldStopped { gesture } = &message
-            && let Some(retained) = self.retain_microphone_stop(session, *gesture)
-        {
-            return retained;
+        if let ControlToBrain::VoiceHoldStopped { gesture } = &message {
+            if let Some(retained) = self.retain_microphone_stop(session, *gesture) {
+                return retained;
+            }
+            if session.io.queued {
+                return true;
+            }
         }
         if !session.open() {
             return false;
@@ -900,7 +944,11 @@ impl LinkHandle {
                 )
                 | ControlToBrain::AccountOp(_)
                 | ControlToBrain::Connection(_)
-        );
+        ) || session.io.queued
+            && matches!(
+                &message,
+                ControlToBrain::Settings(SettingsOp::SetTalkBack(_) | SettingsOp::SetShowScreen(_))
+            );
         let send = |out: &Sender<ControlToBrain>| {
             if mutation {
                 let cancelled = shared.revoke_input();
@@ -910,14 +958,17 @@ impl LinkHandle {
                 });
                 if revision.is_err()
                     || cancelled.is_some_and(|gesture| {
-                        out.try_send(ControlToBrain::GestureCancel { gesture })
-                            .is_err()
+                        !shared.queue_control(
+                            session,
+                            out,
+                            ControlToBrain::GestureCancel { gesture },
+                        )
                     })
                 {
                     return false;
                 }
             }
-            shared.queue_voice_control(out, message)
+            shared.queue_control(session, out, message)
         };
         #[cfg(any(test, feature = "test-support"))]
         if let Some(recording) = &self.control_recording {
@@ -966,24 +1017,24 @@ impl LinkHandle {
     /// connection instead.
     pub fn send_data(&self, session: &Session, message: DataToBrain) -> bool {
         use kumochi_protocol::message::ScreenChoice;
-        let mic = matches!(&message, DataToBrain::MicPcm(_));
+        let mic = if let DataToBrain::MicPcm(packet) = &message {
+            Some(packet.gesture)
+        } else {
+            None
+        };
         let plain_turn = match &message {
             DataToBrain::TextSubmit {
                 turn,
                 screen: ScreenChoice::None,
                 ..
             } => Some(*turn),
-            DataToBrain::TextSubmit { .. }
-            | DataToBrain::AskAbout { .. }
-            | DataToBrain::MicPcm(_)
-                if session.io.queued =>
-            {
+            DataToBrain::TextSubmit { .. } | DataToBrain::AskAbout { .. } if session.io.queued => {
                 return false;
             }
             _ => None,
         };
         let out = DataOut::Submit(message);
-        if !session.open() || (mic && self.is_quitting()) {
+        if !session.open() || (mic.is_some() && self.is_quitting()) {
             return false;
         }
         #[cfg(any(test, feature = "test-support"))]
@@ -999,7 +1050,7 @@ impl LinkHandle {
         }
         self.shared
             .outbox(session, |outbox| {
-                if mic && self.is_quitting() {
+                if mic.is_some() && self.is_quitting() {
                     return false;
                 }
                 let turn = matches!(
@@ -1018,6 +1069,14 @@ impl LinkHandle {
                         .queued_turn(session.generation, plain_turn, || {
                             session.open() && enqueue()
                         })
+                } else if let Some(gesture) = mic.filter(|_| session.io.queued) {
+                    self.input_is(gesture)
+                        && self.shared.output.queued_hold_input(
+                            session.generation,
+                            gesture,
+                            output::HoldInput::Pcm,
+                            enqueue,
+                        )
                 } else {
                     enqueue()
                 };
@@ -1896,7 +1955,16 @@ fn watch(
                 }
             }
             Ok(Some(ControlToShell::Settings { view, answer })) => {
-                if queued.is_some() && !shared.output.register_queued(generation, &view, out) {
+                let update = if answer {
+                    crate::settings::Update::Answer
+                } else {
+                    crate::settings::Update::Unsolicited
+                };
+                if queued.is_some()
+                    && !shared
+                        .output
+                        .register_queued(generation, &view, update, out)
+                {
                     return;
                 }
                 if events
@@ -2087,8 +2155,14 @@ fn watch(
                         HoldStatus::Empty | HoldStatus::Cancelled | HoldStatus::Failed(_)
                     )
                 {
+                    if queued.is_some() {
+                        shared.output.queued_hold_refused(generation, gesture);
+                    }
                     shared.microphone.cancel(gesture);
                     shared.clear_input(gesture);
+                }
+                if queued.is_some() && status == HoldStatus::Admitted {
+                    shared.output.queued_hold_admitted(generation, gesture);
                 }
                 let event = LinkEvent::VoiceHold {
                     generation,

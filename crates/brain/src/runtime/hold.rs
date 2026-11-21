@@ -556,6 +556,12 @@ impl Brain {
                 }
             }
             ControlToBrain::ExclusionLapsed { lease } if self.holds.lease_lapsed(*lease) => {}
+            ControlToBrain::Settings(SettingsOp::SetTalkBack(_) | SettingsOp::SetShowScreen(_))
+                if link.registration.is_some() =>
+            {
+                self.hold_end(HoldStatus::Failed(HoldFailure::ChoiceChanged), link)?;
+                return Ok(false);
+            }
             ControlToBrain::Settings(SettingsOp::SetDefaultModel(_))
             | ControlToBrain::AccountOp(_)
             | ControlToBrain::Connection(_) => {
@@ -590,6 +596,10 @@ impl Brain {
             return Ok(false);
         }
         self.holds.high = key.gesture.0;
+        if !self.hold_pair_supported(link) {
+            Self::hold_status(key, HoldStatus::Failed(HoldFailure::ChoiceChanged), link)?;
+            return Ok(false);
+        }
         if !self.hold_to_talk_enabled() {
             Self::hold_status(key, HoldStatus::Failed(HoldFailure::NotLoaded), link)?;
             return Ok(false);
@@ -924,6 +934,9 @@ impl Brain {
 
     /// Hands the pending hold's transcript and screen to its run.
     fn hold_submit(&mut self, text: String, link: &mut Link<'_, '_>) -> Result<(), Full> {
+        if !self.hold_pair_supported(link) {
+            return self.hold_end(HoldStatus::Failed(HoldFailure::ChoiceChanged), link);
+        }
         // shortcut: busy transfer discards the hold; retain its bounded cancellable owner until admission opens when queued voice is needed.
         if !self.admits_turn(link) {
             return self.hold_end(HoldStatus::Failed(HoldFailure::Busy), link);
