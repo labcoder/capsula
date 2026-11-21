@@ -835,8 +835,8 @@ impl Drawing {
         }
     }
 
-    /// The call's arguments ended: complete if its guard saw `end`. Text after its closed records
-    /// array, once every record in it was accepted, stands in for a missing `end`.
+    /// The call's arguments ended: complete if its guard saw `end`. A closed records array, with
+    /// or without text after it, stands in for a missing `end` once all its records were accepted.
     pub(super) fn finish(
         &mut self,
         run: RunId,
@@ -848,7 +848,7 @@ impl Drawing {
             return;
         };
         let after_records = error == Some(CallError::Token(TokenError::AfterRecords));
-        if after_records && self.calls[at].guard.finish().is_err() {
+        if (error.is_none() || after_records) && self.calls[at].guard.finish().is_err() {
             self.record(run, id, Record::End(End {}), out);
         }
         let Some(at) = self.open_call(run, id) else {

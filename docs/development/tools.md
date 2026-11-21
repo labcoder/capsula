@@ -171,13 +171,17 @@ step the brain refuses as `drawing.TooMuchToPaint` at admission, before anything
 (scene.md, "The brain's count"). The coordinator's
 round and tool-call budgets are not reflected.
 
-Arguments that go on after a closed records array, such as an `end` object or a second
-`records` key placed after it, are the tokenizer's `AfterRecords`. On the complete and the
-streamed path alike, the brain then ends the call as complete once every record in the array
-was accepted: the text stands in for a missing `end`, is never read, applied or echoed, and the
-result is `drawn: [...]; text after the records array was ignored`, with no stop, phrase or
-repair round. A malformed record inside the array, or an array that never closes, still stops
-the call. An empty array with text after it still fails as `scene.BeforeBegin`. A call
+A closed records array stands in for a missing `end`: on the complete and the streamed path
+alike, the brain ends the call as complete once every record in the array was accepted.
+Truncated arguments never complete: a streamed call reaches its finish only after its whole
+arguments arrived and closed, so a stream cut off mid-call ends as truncated or interrupted.
+That rests on the arguments' final bytes and call identity; the Responses mapper doesn't check a
+call item's own status. Arguments that go on after
+the closed array, such as an `end` object or a second `records` key placed after it, are the
+tokenizer's `AfterRecords`: the text is never read, applied or echoed, and the result is
+`drawn: [...]; text after the records array was ignored`, with no stop, phrase or repair round.
+A malformed record inside the array, or an array that never closes, still stops the call.
+An empty array with text after it still fails as `scene.BeforeBegin`. A call
 interrupted before its records ran ends as interrupted, never as complete.
 
 A complete call's result waits until the shell answers for the last step that call committed,
