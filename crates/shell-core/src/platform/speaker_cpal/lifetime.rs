@@ -119,24 +119,24 @@ impl<S> Drop for OwnedStream<S> {
 
 pub(super) fn cleanup_sender() -> Option<SyncSender<Retired>> {
     static CLEANUP: OnceLock<Option<SyncSender<Retired>>> = OnceLock::new();
-    CLEANUP
-        .get_or_init(|| {
-            let (sender, receiver) = mpsc::sync_channel::<Retired>(1);
-            std::thread::Builder::new()
-                .name("speaker-retirement".into())
-                .spawn(move || {
-                    while let Ok(mut retained) = receiver.recv() {
-                        // Wait for the backend's closures, not its public handle. A stuck
-                        // backend retains at most one pool (8 blocks, at most 4 MiB of PCM);
-                        // Each poll wipes newly exclusive blocks. Blocks still held by the
-                        // callback or a ready slot stay pinned; late callbacks cannot play them.
-                        while !retained.poll_retirement() {
-                            std::thread::sleep(Duration::from_millis(100));
-                        }
-                    }
-                })
-                .ok()?;
-            Some(sender)
+    CLEANUP.get_or_init(start_cleanup).clone()
+}
+
+pub(super) fn start_cleanup() -> Option<SyncSender<Retired>> {
+    let (sender, receiver) = mpsc::sync_channel::<Retired>(1);
+    std::thread::Builder::new()
+        .name("speaker-retirement".into())
+        .spawn(move || {
+            while let Ok(mut retained) = receiver.recv() {
+                // Wait for the backend's closures, not its public handle. A stuck
+                // backend retains at most one pool (8 blocks, at most 4 MiB of PCM);
+                // Each poll wipes newly exclusive blocks. Blocks still held by the
+                // callback or a ready slot stay pinned; late callbacks cannot play them.
+                while !retained.poll_retirement() {
+                    std::thread::sleep(Duration::from_millis(100));
+                }
+            }
         })
-        .clone()
+        .ok()?;
+    Some(sender)
 }

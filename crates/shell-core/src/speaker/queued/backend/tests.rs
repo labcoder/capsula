@@ -37,6 +37,21 @@ fn power(device: &Device, power: Power) -> bool {
 }
 
 #[test]
+fn independent_playback_pools_return_all_permits_after_callback_drop() {
+    static POOLS: [AtomicBool; 3] = [const { AtomicBool::new(false) }; 3];
+
+    let callbacks = POOLS.each_ref().map(|pool| {
+        let (transport, callback) = FakePlayback::open(Arc::default(), pool);
+        drop(transport);
+        callback
+    });
+    assert!(POOLS.iter().all(|pool| pool.load(Ordering::Acquire)));
+
+    drop(callbacks);
+    wait_for_playback_disposal(&[&POOLS[0], &POOLS[1], &POOLS[2]]);
+}
+
+#[test]
 fn stopped_open_disposes_without_play_and_excludes_other_opens_until_drop() {
     static FIRST_POOL: AtomicBool = AtomicBool::new(false);
     static NEXT_POOL: AtomicBool = AtomicBool::new(false);
