@@ -67,7 +67,8 @@ pub(crate) enum BodyError {
     #[error("a call and its result aren't paired")]
     Pairing,
     /// An image this body can't carry: pictures are off for this route, the image isn't one
-    /// sealed capture within its cap, or it's a second one.
+    /// sealed capture within its cap, it's a second one, or a result would follow it in its
+    /// message.
     #[error("this body can't carry the image")]
     Image,
     /// The serialised body is over the request's bound.
@@ -201,7 +202,7 @@ pub(crate) fn body(
 
 /// [`body`], its one image carried only while `routes` lets this route carry pictures. The
 /// lease's picture grant still decides whether a byte of it is written.
-fn body_under(
+pub(crate) fn body_under(
     request: &ModelRequest,
     tag: ConnectionTag,
     routes: PictureRoutes,
@@ -363,6 +364,10 @@ fn json(
                 (Role::Assistant, written(&block)?)
             }
             InputItem::FunctionOutput { call, output } => {
+                // A result joining the picture's message would follow it, and results lead.
+                if placed.is_some_and(|(_, message, _)| message + 1 == messages.len()) {
+                    return Err(BodyError::Image);
+                }
                 (Role::User, written(&tool_result(id(call)?, output))?)
             }
             // Only this connection's own items reach here; the build filters the rest.

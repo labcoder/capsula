@@ -108,7 +108,13 @@ flushes or the socket closes, including early refusal and cancellation. It's tol
 once one was attempted on the connection, so a send that never wrote settles unsent. Each writer
 poll goes through the lease's admission, which a closed picture grant refuses. A pictured body
 under a lease with no picture grant is refused as a request failure, before any budget is spent
-or a connection opens.
+or a connection opens. A refusal before any poll was admitted ends the send as `Rebuild` with
+nothing written, and the round as `ReceiptOrdered`, so the unsent receipt decides what follows
+and the stream's end can't read as a truncation. A refusal after an admitted poll ends it as
+`Withheld` and settles it as written, and the coordinator ends the run by why the grant first
+closed; a connection that fails on its own stays `Transport`. The reservation orders writes only:
+it doesn't check who receives the bytes, and it can't recall bytes an admitted poll already handed
+to TLS or the kernel.
 
 Headers and body reads have a 60-second byte-idle deadline; pings reset it. A separate
 10-minute content-idle shortcut prevents an empty ping stream from living forever, pending
@@ -193,14 +199,18 @@ it carries no authority, and a user who types it is still the user. Nothing is b
 - a call that isn't answered exactly once by the results that open the next user message, a
   result anywhere else, or an id called twice. Nothing is moved to make a pair;
 - an image while the key's picture switch is off, which it is in every build; an image that isn't
-  one sealed capture of at most 2 MiB; or a second image;
+  one sealed capture of at most 2 MiB; a second image; or an image a result would follow in its
+  message, since results lead it;
 - a serialised body over the 512 KiB bound, counted without its picture.
 
 The picture never sits in a `Value` or a plain string. The bound and the envelope check see the
 body without it. Then its block, fixed JSON and base64 that need no escaping, is written into one
 zeroing buffer of the final length (`MessagesBody::spliced`), and the body is marked as pictured.
 The 16 MiB request cap still holds, and a compile-time check shows a body at its bound with the
-largest picture fits under it.
+largest picture fits under it. These checks cover the bodies the encoder writes: the bound and the
+envelope see its skeleton, and only a body it marked as pictured meets the transport's grant
+check. The raw constructors aren't a way around that: `MessagesBody::new` exists only in tests,
+and `from_json` only for the encoder.
 
 ### Tool rounds
 

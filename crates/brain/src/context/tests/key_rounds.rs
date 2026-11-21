@@ -452,7 +452,7 @@ async fn a_later_round_without_its_continuation_is_refused_unsent() {
     let second = request(&world, run, 2);
     assert_eq!(
         peer.play(&fresh, &second, |_| Answer::Rebuild).await,
-        (None, Vec::new())
+        (Some(Finish::ReceiptOrdered), Vec::new())
     );
     assert_eq!(
         peer.play(&fresh, &second, Answer::Grant).await,
@@ -1036,4 +1036,100 @@ async fn a_run_allowance_outlives_its_owner_and_refuses_the_next_attempt_unsent(
     assert_eq!(peer.play(&other, &first, Answer::Grant).await.0, done);
     assert_eq!(peer.script.lock().expect("script").starts, 1);
     assert_eq!(allowance.spent(next), Some(1));
+}
+
+/// A pictured key turn's background compaction, inline rewrite and title, built from the store
+/// that turn left, carry no image block and no trace of its picture, with pictures on.
+#[test]
+fn a_pictured_key_turns_compaction_rewrite_and_title_carry_no_picture() {
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
+
+    let on = crate::coordinator::PictureRoutes::new(true, false);
+    let sentinel = crate::test_support::SENTINEL.as_bytes();
+    let bytes = [&[0xFF, 0xD8, 0xFF, 0xE0][..], sentinel, &[0xFF, 0xD9]].concat();
+    // The sentinel itself, and its base64 at each of the three alignments, its edges cut.
+    let traces: Vec<String> = std::iter::once(crate::test_support::SENTINEL.to_owned())
+        .chain((0..3).map(|pad| {
+            let encoded = STANDARD.encode([&vec![0; pad][..], sentinel].concat());
+            encoded[4..encoded.len() - 4].to_owned()
+        }))
+        .collect();
+    let jpeg = Jpeg::sealed(
+        Zeroizing::new(bytes.clone()),
+        [8, 8],
+        #[cfg(windows)]
+        None,
+    );
+    let mut world = world("key-pictured-jobs");
+    let main = world.main;
+    let (_, pictured) = world.run(Some(main), "look at this", None);
+    let run = on_key(TAG);
+    let mut built = world
+        .build(&run, (main, pictured), Supplied::default(), BOUND)
+        .expect("built");
+    built
+        .request
+        .add_screen(&Screen::Picture(jpeg, None, Geometry::FIXTURE), true)
+        .expect("pictured");
+    let (sent, _) =
+        crate::engines::anthropic::encode::body_under(&built.request, ConnectionTag(TAG), on)
+            .expect("a pictured body");
+    let sent = String::from_utf8_lossy(sent.sent()).into_owned();
+    assert!(
+        sent.contains(&STANDARD.encode(&bytes)),
+        "the turn sent its picture"
+    );
+    world.runs(main, RAW_RUNS, 400);
+
+    let compaction = world
+        .compact(&run, main, 1)
+        .expect("a compaction")
+        .built
+        .request;
+    assert!(
+        compaction.input.iter().any(
+            |item| matches!(item, InputItem::Message { text, .. } if text.contains("look at this"))
+        ),
+        "the compaction covers the pictured turn"
+    );
+    let events = world.events(main);
+    assert!(
+        world
+            .store
+            .store_summary(
+                main,
+                crate::store::Generation(0),
+                (events[0], events[1]),
+                "they looked at the screen",
+                None
+            )
+            .expect("stored")
+    );
+    let reader = Connection::open(world.scratch.db()).expect("reader");
+    let read = Snapshot::begin(&reader).expect("snapshot");
+    let (rewrite, _) = compact::rewrite(&read, &run, main, 4096)
+        .expect("read")
+        .expect("rewritten");
+    let title = crate::jobs::title_request(&run, "look at this");
+    for (job, request) in [
+        ("compaction", compaction),
+        ("rewrite", rewrite.built.request),
+        ("title", title),
+    ] {
+        assert!(
+            !request
+                .input
+                .iter()
+                .any(|item| matches!(item, InputItem::Image(_))),
+            "{job}"
+        );
+        let (sent, _) =
+            crate::engines::anthropic::encode::body_under(&request, ConnectionTag(TAG), on)
+                .expect(job);
+        let sent = String::from_utf8_lossy(sent.sent()).into_owned();
+        assert!(!sent.contains(r#""type":"image""#), "{job}");
+        for trace in &traces {
+            assert!(!sent.contains(trace.as_str()), "{job}");
+        }
+    }
 }

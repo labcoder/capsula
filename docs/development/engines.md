@@ -185,7 +185,8 @@ sequenceDiagram
 - **Write admission.** The Responses transport asks the lease to admit each poll of the request's
   writer, every write and the flush, and holds that admission for the one poll. The Messages
   transport admits its polls the same way, and refuses a pictured body before connecting when the
-  lease has no picture grant. A send without a
+  lease has no picture grant. Its refusal before any admitted poll ends the round `ReceiptOrdered`,
+  and one after ends it `Withheld`, which the coordinator reads as it reads the Responses one. A send without a
   picture grant admits every poll; one with a grant admits a poll only while it can reserve the
   grant. A refusal stops every later poll: before any poll was admitted, the send ends as
   `Rebuild` with nothing written; after one, it fails as `Withheld` and its connection is

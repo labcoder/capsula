@@ -119,8 +119,9 @@ impl Live {
         *held = None;
     }
 
-    /// Plays one round of `request` and returns its ending; `None` when the coordinator said
-    /// rebuild, so nothing was sent, or nobody listens any more. Each read's events go out before
+    /// Plays one round of `request` and returns its ending: `ReceiptOrdered` when the send was
+    /// refused before any write, so its unsent receipt orders what follows, and `None` when nobody
+    /// listens any more. Each read's events go out before
     /// the next read, except items: once the round completed, each call goes out as its stored
     /// `tool_use` item, and the reply stays here for the next round. Signed thinking never leaves.
     pub(crate) async fn round(
@@ -167,7 +168,7 @@ impl Live {
             .await;
         drop(body);
         if matches!(read, Err(Failure::Rebuild)) {
-            return None;
+            return Some(Finish::ReceiptOrdered);
         }
         let tool_use = matches!(read, Ok(StopReason::ToolUse));
         let ended = state.ended.take();

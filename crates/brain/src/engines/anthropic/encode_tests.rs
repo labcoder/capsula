@@ -1240,6 +1240,15 @@ fn a_picture_the_body_cant_carry_builds_nothing() {
         (input(vec![unsealed]), ON),
         (input(vec![sealed(64), sealed(64)]), ON),
         (input(vec![sealed(crate::screen::JPEG_CAP + 1)]), ON),
+        (
+            request(vec![
+                message(Role::User, "look"),
+                call("toolu_1", "list_tasks", "{}"),
+                InputItem::Image(sealed(64)),
+                output("toolu_1", "three tasks"),
+            ]),
+            ON,
+        ),
     ] {
         assert_eq!(
             body_under(&request, TAG, pictures).err(),
@@ -1273,5 +1282,58 @@ fn a_tool_round_keeps_its_picture_once_and_only_while_pictures_are_on() {
         assert_eq!(read["messages"][0]["content"][1], image_block(&image));
         let bytes = String::from_utf8_lossy(sent.sent()).into_owned();
         assert_eq!(bytes.matches(r#"{"type":"image""#).count(), 1);
+    }
+}
+
+/// Text that spells an image block stays an escaped string beside the one real block, and the
+/// conversation a tool round keeps holds no copy of the picture: only the sent body has it.
+#[test]
+fn a_look_alike_stays_text_and_only_the_sent_body_holds_the_picture() {
+    use base64::Engine as _;
+
+    let image = sealed(64);
+    let block = image_block(&image);
+    let look_alike = json!({"type": "image", "source": {"type": "base64",
+        "media_type": "image/jpeg", "data": "AAAA"}})
+    .to_string();
+    let input = vec![
+        message(Role::User, &look_alike),
+        call("toolu_1", "list_tasks", "{}"),
+        output("toolu_1", &look_alike),
+        message(Role::User, "look"),
+        InputItem::Image(image.clone()),
+    ];
+    let (sent, conversation) = body_under(&request(input), TAG, ON).expect("a body");
+    let read: Value = serde_json::from_slice(sent.sent()).expect("json");
+    assert_eq!(
+        read["messages"],
+        json!([
+            {"role": "user", "content": [{"type": "text", "text": look_alike}]},
+            {"role": "assistant", "content": [
+                {"type": "tool_use", "id": "toolu_1", "name": "list_tasks", "input": {}}]},
+            {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "toolu_1", "content": look_alike},
+                {"type": "text", "text": "look"},
+                block,
+            ]},
+        ])
+    );
+    let data = base64::engine::general_purpose::STANDARD.encode(image.capture().expect("sealed").0);
+    let bytes = String::from_utf8_lossy(sent.sent()).into_owned();
+    assert_eq!(bytes.matches(r#"{"type":"image""#).count(), 1);
+    assert_eq!(bytes.matches(data.as_str()).count(), 1);
+    let (unpictured, at) = conversation.wire().expect("wire");
+    let kept = [
+        String::from_utf8(unpictured).expect("UTF-8"),
+        conversation.messages.concat(),
+        serde_json::to_string(&conversation.head).expect("json"),
+        format!("{sent:?} {conversation:?}"),
+    ];
+    assert!(at.is_some());
+    for kept in kept {
+        assert!(
+            !kept.contains("TU1N") && !kept.contains(r#"{"type":"image""#),
+            "{kept}"
+        );
     }
 }

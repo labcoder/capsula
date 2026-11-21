@@ -35,6 +35,9 @@ struct State {
     events: Vec<String>,
     block_out: bool,
     close_out: bool,
+    /// Bytes the peer still takes before its writes wait; unbounded when `None`.
+    room: Option<usize>,
+    write_polls: usize,
 }
 
 type Shared = Arc<Mutex<State>>;
@@ -68,14 +71,22 @@ impl AsyncWrite for Io {
         bytes: &[u8],
     ) -> Poll<io::Result<usize>> {
         let mut state = self.0.lock().expect("peer state");
+        state.write_polls += 1;
         if state.hold_write {
             return Poll::Pending;
         }
         if state.fail_write {
             return Poll::Ready(Err(io::ErrorKind::BrokenPipe.into()));
         }
-        state.written.extend_from_slice(bytes);
-        Poll::Ready(Ok(bytes.len()))
+        let taken = state.room.map_or(bytes.len(), |room| room.min(bytes.len()));
+        if taken == 0 {
+            return Poll::Pending;
+        }
+        if let Some(room) = &mut state.room {
+            *room -= taken;
+        }
+        state.written.extend_from_slice(&bytes[..taken]);
+        Poll::Ready(Ok(taken))
     }
 
     fn poll_flush(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> {
@@ -750,18 +761,67 @@ fn send_lease(
     (lease, received)
 }
 
+/// A real sealed JPEG's body from the production encoder, with the key's pictures on, and the
+/// picture's base64.
+fn pictured() -> (MessagesBody, String) {
+    use crate::context::{ConnectionTag, InputItem, Jpeg, ModelRequest, Role};
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
+    use kumochi_protocol::message::{ConnectionKind, Effort, ModelChoice, ModelSlug};
+    let bytes = [
+        &[0xFF, 0xD8, 0xFF, 0xE0][..],
+        b"SYNTHETIC_PICTURE",
+        &[0xFF, 0xD9],
+    ]
+    .concat();
+    let data = STANDARD.encode(&bytes);
+    let jpeg = Jpeg::sealed(
+        Zeroizing::new(bytes),
+        [8, 8],
+        #[cfg(windows)]
+        None,
+    );
+    let request = ModelRequest {
+        choice: Some(ModelChoice {
+            model: ModelSlug::new("claude-sonnet-5-5").expect("slug"),
+            effort: Effort::Low,
+            connection: ConnectionKind::AnthropicKey,
+        }),
+        instructions: "synthetic".to_owned(),
+        input: vec![
+            InputItem::Message {
+                role: Role::User,
+                text: "look".to_owned(),
+            },
+            InputItem::Image(jpeg),
+        ],
+        tools: Vec::new(),
+    };
+    let (body, _) = crate::engines::anthropic::encode::body_under(
+        &request,
+        ConnectionTag(1),
+        crate::coordinator::PictureRoutes::new(true, false),
+    )
+    .expect("a pictured body");
+    (body, data)
+}
+
+/// The fixed request head for `key` and a body of `length` bytes.
+fn wire_head(key: &Secret<AnthropicKey>, length: usize) -> String {
+    let key = key.expose().as_str();
+    format!(
+        "POST /v1/messages HTTP/1.1\r\nHost: api.anthropic.com\r\nAuthorization: Bearer {key}\r\nanthropic-version: 2023-06-01\r\nContent-Type: application/json\r\nAccept: text/event-stream\r\nAccept-Encoding: identity\r\nConnection: close\r\nContent-Length: {length}\r\n\r\n"
+    )
+}
+
 /// A pictured body goes only under a lease with a picture grant: without one nothing connects;
 /// with one closed before the first write nothing is written and the send settles unsent; with
-/// one open the whole request goes and the send settles as written. A text body's send settles
-/// as written too.
+/// one open the exact request goes, head then body, and the send settles as written. A text
+/// body's send settles as written too.
 #[tokio::test]
 async fn a_pictured_body_writes_only_under_its_open_picture_grant() {
     use crate::coordinator::{Input, PictureGrant};
     let harness = Harness::new(response(200, END));
-    let pictured = harness
-        .body
-        .spliced(0, 0, |_| Ok::<(), ()>(()))
-        .expect("a pictured copy");
+    let (pictured, data) = pictured();
     let run = Budget::limited(None);
     let live = Budget::limited(None);
     let call = |body, lease| {
@@ -799,16 +859,89 @@ async fn a_pictured_body_writes_only_under_its_open_picture_grant() {
     assert_eq!(reset(), (1, Vec::new()));
     assert!(matches!(received.try_recv(), Ok(Input::SendUnsent { .. })));
 
-    for (body, grant) in [
-        (&pictured, Some(PictureGrant::open_for_tests())),
-        (&harness.body, None),
+    for (body, grant, pictures) in [
+        (&pictured, Some(PictureGrant::open_for_tests()), 1),
+        (&harness.body, None, 0),
     ] {
         let (lease, mut received) = send_lease(grant);
         let sent = call(body, lease).await;
         assert!(matches!(sent, Ok(StopReason::EndTurn)), "{sent:?}");
         let (connects, written) = reset();
         assert_eq!(connects, 1);
-        assert!(written.ends_with(body.bytes()));
+        assert_eq!(
+            written,
+            [
+                wire_head(&harness.key, body.bytes().len()).as_bytes(),
+                body.bytes()
+            ]
+            .concat()
+        );
+        let text = String::from_utf8_lossy(&written);
+        assert_eq!(text.matches(data.as_str()).count(), pictures);
         assert!(matches!(received.try_recv(), Ok(Input::SendSettled { .. })));
+    }
+}
+
+/// A picture grant closed after the first admitted writer poll stops every later poll, whether
+/// that poll was pending, wrote part of the request, or was the flush: the send ends `Withheld`,
+/// writes nothing more, and settles as written, never unsent.
+#[tokio::test]
+async fn a_picture_grant_closed_after_a_writer_poll_writes_no_more_and_settles_written() {
+    use crate::coordinator::{Input, PictureGrant};
+    let (body, _) = pictured();
+    let key = Harness::new(Vec::new()).key;
+    let request = [wire_head(&key, body.bytes().len()).as_bytes(), body.bytes()].concat();
+    for (case, kept) in [
+        ("pending", &request[..0]),
+        ("partial", &request[..16]),
+        ("flush", &request[..]),
+    ] {
+        let harness = Harness::new(response(200, END));
+        {
+            let mut state = harness.state.lock().expect("peer state");
+            match case {
+                "pending" => state.hold_write = true,
+                "partial" => state.room = Some(16),
+                _ => state.hold_flush = true,
+            }
+        }
+        let grant = PictureGrant::open_for_tests();
+        let (lease, mut received) = send_lease(Some(grant.clone()));
+        let run = Budget::limited(None);
+        let live = Budget::limited(None);
+        let mut call = std::pin::pin!(tokio::task::unconstrained(stream(
+            &harness.client,
+            &body,
+            &harness.key,
+            ready(Some(lease)),
+            &run,
+            &live,
+            Capture::Nothing,
+            Sink(Arc::clone(&harness.state)),
+        )));
+        assert!(poll(call.as_mut()).is_pending(), "{case}");
+        let polls = harness.state.lock().expect("peer state").write_polls;
+        assert!(polls > 0, "{case}");
+        grant.close();
+        {
+            let mut state = harness.state.lock().expect("peer state");
+            state.hold_write = false;
+            state.hold_flush = false;
+            state.room = None;
+        }
+        let ended = poll(call.as_mut());
+        assert!(
+            matches!(ended, Poll::Ready(Err(Failure::Withheld))),
+            "{case}: {ended:?}"
+        );
+        let state = harness.state.lock().expect("peer state");
+        assert_eq!(state.write_polls, polls, "{case}: no poll after the close");
+        assert_eq!(state.written, kept, "{case}");
+        assert_eq!(state.flushes, Vec::<usize>::new(), "{case}");
+        drop(state);
+        assert!(
+            matches!(received.try_recv(), Ok(Input::SendSettled { .. })),
+            "{case}"
+        );
     }
 }

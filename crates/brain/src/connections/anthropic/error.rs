@@ -153,6 +153,9 @@ pub enum Failure {
     Spent,
     /// I/O failed or stalled.
     Transport,
+    /// The send's own lease stopped admitting writes after one may have written. Only its
+    /// picture's grant refuses, so the coordinator names why; it's never sent again on its own.
+    Withheld,
     /// Invalid framing, event shape or byte bound.
     Protocol,
     /// The transport ended before the answer completed.
@@ -214,6 +217,7 @@ impl Failure {
                 user_error(ErrorKey::AnthropicUnreachable, Some(Action::Retry))
             }
             Self::Protocol => user_error(ErrorKey::ResponseUnreadable, Some(Action::Retry)),
+            Self::Withheld => user_error(ErrorKey::ScreenPictureStopped, None),
             Self::Exhausted => user_error(ErrorKey::AnthropicAnswerLimit, None),
             Self::Request | Self::Spent | Self::Refused => {
                 user_error(ErrorKey::RequestRefused, None)
@@ -233,7 +237,8 @@ impl From<model::error::Failure> for Failure {
             model::error::Failure::Credential => Self::Credential,
             model::error::Failure::Rebuild => Self::Rebuild,
             model::error::Failure::Spent => Self::Spent,
-            model::error::Failure::Transport | model::error::Failure::Withheld => Self::Transport,
+            model::error::Failure::Transport => Self::Transport,
+            model::error::Failure::Withheld => Self::Withheld,
             model::error::Failure::Incomplete | model::error::Failure::Truncated => Self::Truncated,
             model::error::Failure::Protocol | model::error::Failure::Provider(_) => Self::Protocol,
         }
@@ -249,6 +254,7 @@ impl fmt::Debug for Failure {
             Self::Rebuild => f.write_str("Rebuild"),
             Self::Spent => f.write_str("Spent"),
             Self::Transport => f.write_str("Transport"),
+            Self::Withheld => f.write_str("Withheld"),
             Self::Protocol => f.write_str("Protocol"),
             Self::Truncated => f.write_str("Truncated"),
             Self::Exhausted => f.write_str("Exhausted"),

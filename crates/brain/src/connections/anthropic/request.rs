@@ -19,13 +19,14 @@ impl MessagesBody {
     ///
     /// # Errors
     /// [`Failure::Request`] for an invalid envelope or more than 16 MiB of JSON.
-    pub fn new(request: &Value) -> Result<Self, Failure> {
+    #[cfg(test)]
+    pub(crate) fn new(request: &Value) -> Result<Self, Failure> {
         check(request)?;
         let bytes = encode(request, MAX_REQUEST_BYTES).map_err(|()| Failure::Request)?;
         Ok(Self(Secret::new(bytes), false))
     }
 
-    /// Checks serialized JSON as [`MessagesBody::new`] checks a value, read by [`literal`], then
+    /// Checks serialized JSON's envelope and cache breakpoint, read by [`literal`], then
     /// keeps these exact bytes, so a number in them is sent as it was written. Only the Messages
     /// encoder sends a body it wrote this way.
     pub(crate) fn from_json(bytes: Zeroizing<Vec<u8>>) -> Result<Self, Failure> {
