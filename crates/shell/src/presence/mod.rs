@@ -101,7 +101,7 @@ use frame_rate::FrameLoop;
 use geometry::{Layout, PanelVisibility, Position};
 use kumo::Mood;
 use kumo_view::KumoView;
-pub(crate) use launch::Launch;
+pub(crate) use launch::{Launch, LaunchError};
 use line::{Dock, Line, LineFrame, Placement};
 pub(crate) use observer::Observer;
 use observer::{Drawn, Surface};
@@ -862,20 +862,6 @@ pub(crate) enum OpenError {
     Gpui(#[source] Box<dyn std::error::Error + Send + Sync>),
     #[error(transparent)]
     Native(#[from] platform::PresenceError),
-    #[error("--quit-after-ms must be between 1 and 120000")]
-    QuitDelay,
-    #[error("--esc-fixture needs --quit-after-ms or --smoke, so global Esc is always given back")]
-    EscFixtureDeadline,
-    #[error("--gate-observer and --receipt-fixture need --quit-after-ms or --smoke")]
-    ObserverDeadline,
-    #[error("--receipt-fixture needs --gate-observer and comes at most once")]
-    ReceiptFixture,
-    #[error(
-        "--draw-timing requires --gate-observer, cannot accompany --receipt-fixture, and comes at most once"
-    )]
-    DrawTiming,
-    #[error("--accounts-fixture needs a debug build, one fixed state and a quit deadline")]
-    AccountsFixture,
     #[error("the scene dropper thread couldn't start")]
     Dropper(#[source] std::io::Error),
 }

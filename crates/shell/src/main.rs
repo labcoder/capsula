@@ -34,20 +34,20 @@ use kumochi_shell_core::{
 use strings::Strings;
 
 fn main() -> ExitCode {
-    let Ok(flags) = presence::Launch::parse(std::env::args().skip(1)) else {
-        return ExitCode::FAILURE;
-    };
+    let launch = presence::Launch::parse(std::env::args().skip(1));
     #[cfg(debug_assertions)]
-    if let Some(state) = flags.accounts_fixture {
+    if let Ok(flags) = &launch
+        && let Some(state) = flags.accounts_fixture
+    {
         let delay = flags
             .quit_delay
             .expect("fixture parsing requires a deadline");
         presence::run_accounts_fixture(state, flags.accounts_appearance, delay);
         return ExitCode::SUCCESS;
     }
-    if logging::init(constants::SHELL_LOG).is_err() {
+    let Some(flags) = launch_with_logging(launch, || logging::init(constants::SHELL_LOG)) else {
         return ExitCode::FAILURE;
-    }
+    };
     let Some(data_dir) = platform::data_dir() else {
         tracing::error!("can't find the data folder for the single-instance lock");
         return ExitCode::FAILURE;
@@ -132,4 +132,96 @@ fn main() -> ExitCode {
             }
         });
     ExitCode::SUCCESS
+}
+
+fn launch_with_logging(
+    launch: Result<presence::Launch, presence::LaunchError>,
+    init_logging: impl FnOnce() -> Result<(), logging::LoggingError>,
+) -> Option<presence::Launch> {
+    init_logging().ok()?;
+    launch
+        .inspect_err(|error| tracing::error!(%error, "invalid launch flags"))
+        .ok()
+}
+
+#[cfg(test)]
+mod launch_tests {
+    use std::sync::{Arc, Mutex};
+
+    use super::*;
+
+    struct Captured(Arc<Mutex<Vec<u8>>>);
+
+    impl std::io::Write for Captured {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn invalid_launch_flags_get_one_actionable_redacted_diagnostic() {
+        for (args, reason) in [
+            (
+                &["--accounts-fixture=private-fixture-value", "--smoke"][..],
+                Some(
+                    "--accounts-fixture requires a debug build, one fixed state and a quit deadline",
+                ),
+            ),
+            (
+                &[
+                    "--accounts-fixture=enabled",
+                    "--accounts-appearance=private-fixture-value",
+                    "--smoke",
+                ][..],
+                Some(
+                    "--accounts-appearance is optional and accepts light, dark, large or constrained once",
+                ),
+            ),
+            (
+                &[
+                    "--gate-observer=C:/private-fixture-value/observer.log",
+                    "--quit-after-ms=private-fixture-value",
+                ][..],
+                Some("--quit-after-ms must be between 1 and 120000"),
+            ),
+            (&[][..], None),
+        ] {
+            let out = Arc::new(Mutex::new(Vec::new()));
+            let mut logger = None;
+            let parsed = presence::Launch::parse(args.iter().map(|arg| (*arg).to_owned()));
+            let flags = launch_with_logging(parsed, || {
+                logger = Some(tracing::subscriber::set_default(
+                    tracing_subscriber::fmt()
+                        .without_time()
+                        .with_ansi(false)
+                        .with_target(false)
+                        .with_writer({
+                            let out = Arc::clone(&out);
+                            move || Captured(Arc::clone(&out))
+                        })
+                        .finish(),
+                ));
+                Ok(())
+            });
+            drop(logger);
+            let bytes = out.lock().unwrap();
+            let log = std::str::from_utf8(&bytes).unwrap();
+            if let Some(reason) = reason {
+                assert_eq!(flags, None);
+                assert_eq!(log.lines().count(), 1, "expected one startup diagnostic");
+                assert!(log.contains("invalid launch flags"));
+                assert!(log.contains(reason));
+                assert!(!log.contains("private-fixture-value"));
+                assert!(!log.contains("observer.log"));
+            } else {
+                assert_eq!(flags, Some(presence::Launch::default()));
+                assert_eq!(log, "");
+            }
+        }
+    }
 }
