@@ -130,6 +130,9 @@ pub(super) struct Holds {
     pending: Option<Hold>,
     debt: Option<HoldKey>,
     debt_peer: Option<ShellProcess>,
+    /// A stop receipt this connection sent while its shell process couldn't be checked; the
+    /// connection's tick checks it again, idle or not.
+    unacked: Option<HoldKey>,
     peer: Option<ShellProcess>,
     gate: Arc<Gate>,
     send: mpsc::Sender<Packet>,
@@ -217,6 +220,7 @@ impl Default for Holds {
             pending: None,
             debt: None,
             debt_peer: None,
+            unacked: None,
             peer: None,
             gate: Arc::default(),
             send,
@@ -240,6 +244,7 @@ impl Holds {
 
     fn connected(&mut self, peer: ShellProcess) {
         self.retire_exited_peer();
+        self.unacked = None;
         self.peer = Some(peer);
     }
 
@@ -288,7 +293,8 @@ impl Holds {
         self.notice = None;
     }
 
-    /// None when the shell process could not be checked, so the receipt stays unacknowledged.
+    /// None when the shell process could not be checked, so the receipt stays unacknowledged
+    /// until its connection's tick checks it again.
     pub(super) fn stopped(&mut self, key: HoldKey) -> Option<bool> {
         let Some(debt) = self.debt.filter(|debt| debt.gesture == key.gesture) else {
             return Some(false);
@@ -345,6 +351,28 @@ pub(super) async fn next(holds: &mut Holds) -> Event {
 impl Brain {
     pub(crate) fn connected_shell(&mut self, peer: ShellProcess) {
         self.holds.connected(peer);
+    }
+
+    /// Whether a stop receipt of this connection waits for its shell process to be checked again.
+    pub(super) fn owes_stop(&self) -> bool {
+        self.holds
+            .unacked
+            .is_some_and(|stop| stop.epoch == self.epoch)
+    }
+
+    /// Checks again a stop receipt whose shell process couldn't be checked when it came, and
+    /// answers it once the check gives an answer, as its own arrival would have.
+    pub(super) fn retry_stop(&mut self, link: &mut Link<'_, '_>) -> Result<(), Full> {
+        let Some(stop) = self.holds.unacked.filter(|stop| stop.epoch == self.epoch) else {
+            return Ok(());
+        };
+        if self.holds.stopped(stop).is_none() {
+            return Ok(());
+        }
+        self.holds.unacked = None;
+        link.control(&ControlToShell::VoiceHoldStopAccepted {
+            gesture: stop.gesture,
+        })
     }
 
     /// Gives screen holds the client of the brain's one screen worker.
@@ -478,8 +506,12 @@ impl Brain {
                 let key = key(*gesture);
                 if matches!(message, ControlToBrain::VoiceHoldStopped { .. }) {
                     let Some(accepted) = self.holds.stopped(key) else {
+                        self.holds.unacked = Some(key);
                         return Ok(true);
                     };
+                    if self.holds.unacked == Some(key) {
+                        self.holds.unacked = None;
+                    }
                     link.control(&ControlToShell::VoiceHoldStopAccepted { gesture: *gesture })?;
                     if !accepted
                         && self

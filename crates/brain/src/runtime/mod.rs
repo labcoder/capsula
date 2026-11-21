@@ -998,7 +998,14 @@ impl Brain {
                     tracing::warn!("the visible scenes didn't settle in time; ending the connection");
                     return Ended::Unavailable;
                 }
-                _ = ticks.tick(), if running.is_some() => {
+                // The tick also runs, with no watchdog, while an unanswered stop receipt waits.
+                _ = ticks.tick(), if running.is_some() || self.owes_stop() => {
+                    if self.retry_stop(&mut link).is_err() {
+                        return Ended::Lost;
+                    }
+                    if running.is_none() {
+                        continue;
+                    }
                     match watchdog(&mut ping_sent, running, &mut link) {
                         Ok(Some(input)) => input,
                         Ok(None) => continue,

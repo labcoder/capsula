@@ -1509,3 +1509,76 @@ async fn a_replayed_receipt_from_the_same_live_shell_admits_the_next_hold() {
     assert_eq!(ended, Ended::Lost);
     brain.close().await;
 }
+
+/// Control frames the brain sends within `window`, past voice, settings and connection state.
+async fn sent_within(
+    shell: &mut Shell<tokio::io::DuplexStream>,
+    window: std::time::Duration,
+) -> Vec<ControlToShell> {
+    let until = tokio::time::Instant::now() + window;
+    let mut sent = Vec::new();
+    while let Ok(frame) = tokio::time::timeout_at(until, shell.next_control()).await {
+        match frame.expect("readable") {
+            Some(
+                ControlToShell::Voice(_)
+                | ControlToShell::Settings { .. }
+                | ControlToShell::Account(_)
+                | ControlToShell::Connections(_)
+                | ControlToShell::ScreenHolds(_),
+            ) => {}
+            Some(other) => sent.push(other),
+            None => break,
+        }
+    }
+    sent
+}
+
+/// A replayed receipt whose shell process can't be read, on an idle connection with no run and so
+/// no ping, is checked again on the connection's own tick: nothing goes while the process can't be
+/// read, one acceptance once it can, the next hold is admitted, and no tick work is left.
+#[tokio::test]
+async fn an_unreadable_replayed_receipt_is_accepted_on_the_idle_connections_tick() {
+    use crate::platform::ShellProcess;
+    use std::sync::atomic::AtomicU8;
+    let window = std::time::Duration::from_millis(1200);
+    let scratch = Scratch::new("hold-replay-unreadable-idle");
+    let (mut brain, _release, _decoded, _) = input(&scratch, Vec::new(), "must not decode").await;
+    let live = Arc::new(AtomicU8::new(0));
+    let mut tap = Tap::from_env();
+    brain.connected_shell(ShellProcess::fixture(10, Arc::clone(&live)));
+    let ((control, data), mut shell) = duplex();
+    let client = async {
+        opened(&mut shell).await;
+        recognize(&mut shell).await;
+        drop(shell);
+    };
+    let (ended, ()) = tokio::join!(brain.serve(control, data, &mut tap), client);
+    assert_eq!(ended, Ended::Lost);
+    brain.connected_shell(ShellProcess::fixture(10, Arc::clone(&live)));
+    let ((control, data), mut shell) = duplex();
+    let client = async {
+        opened(&mut shell).await;
+        live.store(2, Ordering::Release);
+        shell
+            .send(&ControlToBrain::VoiceHoldStopped { gesture: G })
+            .await;
+        assert_eq!(
+            sent_within(&mut shell, window).await,
+            [],
+            "nothing while the process can't be read"
+        );
+        live.store(0, Ordering::Release);
+        assert_eq!(
+            sent_within(&mut shell, window).await,
+            [ControlToShell::VoiceHoldStopAccepted { gesture: G }],
+            "one acceptance, and no ping"
+        );
+        recognize_for(&mut shell, GestureId(18)).await;
+        status_for(&mut shell, GestureId(18), HoldStatus::Admitted).await;
+        drop(shell);
+    };
+    let (ended, ()) = tokio::join!(brain.serve(control, data, &mut tap), client);
+    assert_eq!(ended, Ended::Lost);
+    assert!(!brain.owes_stop(), "no tick work is left");
+    brain.close().await;
+}
