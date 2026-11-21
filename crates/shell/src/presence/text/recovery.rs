@@ -3,8 +3,10 @@
 #[cfg(test)]
 mod tests;
 
+use std::rc::Rc;
+
 use super::{Context, OpenError, Presence, TextView, submission_notice};
-use crate::chat_notice::{Route, Source};
+use crate::chat_notice::{Notice, Route, Source};
 use crate::runs::Refused;
 use crate::strings::{Strings, Text};
 use gpui_kit::base::Link;
@@ -16,6 +18,26 @@ use gpui_kit::{InteractiveElement as _, IntoElement as _, ParentElement as _, St
 use kumochi_protocol::message::{Action, MANAGE_USAGE_URL};
 
 impl Presence {
+    fn is_current_recovery(&self, notice: &Rc<Notice>) -> bool {
+        self.refusal.is_none()
+            && self
+                .chat_notice
+                .for_thread(self.runs.thread())
+                .is_some_and(|current| Rc::ptr_eq(current, notice))
+    }
+
+    fn recover_rendered(
+        &mut self,
+        notice: &Rc<Notice>,
+        action: Action,
+        cx: &mut Context<'_, Self>,
+    ) -> Result<(), OpenError> {
+        if !self.is_current_recovery(notice) {
+            return Ok(());
+        }
+        self.recover(notice.source, action, cx)
+    }
+
     fn dismiss_recovery(&mut self, source: Source, cx: &mut Context<'_, Self>) {
         if self
             .chat_notice
@@ -45,6 +67,9 @@ impl Presence {
         };
         match route {
             Route::RunRetry(run) => {
+                if !self.runs.retry_ready(run) {
+                    return Ok(());
+                }
                 self.cancel_voice(cx);
                 self.dismiss_recovery_notice(cx);
                 let Some(input) = self.text.as_ref().map(|text| text.input.clone()) else {
@@ -101,75 +126,76 @@ impl TextView {
         let strings = cx.global::<Strings>();
         let settings = self.settings.read(cx);
         let connected = self.model.read(cx).online();
-        let source = notice.source;
         let actions = notice
             .error
             .actions()
             .iter()
             .copied()
             .enumerate()
-            .map(|(ix, action)| {
-                let route = notice.route(action);
+            .filter_map(|(ix, action)| {
+                let route = notice.route(action)?;
                 let enabled = match route {
-                    Some(Route::RunRetry(_)) => {
-                        connected
-                            && self.retry
-                            && self.draft_empty
-                            && settings.accounts.waiting.is_none()
+                    Route::RunRetry(_) if !self.retry => return None,
+                    Route::RunRetry(_) => {
+                        connected && self.draft_empty && settings.accounts.waiting.is_none()
                     }
-                    Some(Route::Account(op)) => connected && settings.accounts.allows(op),
-                    Some(Route::SettingsRetry(field)) => connected && !settings.field(field).saving,
-                    Some(Route::Accounts | Route::Settings | Route::Usage) => true,
-                    None => false,
+                    Route::Account(op) => connected && settings.accounts.allows(op),
+                    Route::SettingsRetry(field) => connected && !settings.field(field).saving,
+                    Route::Accounts | Route::Settings | Route::Usage => true,
                 };
                 let owner = self.owner.clone();
+                let rendered = Rc::clone(notice);
                 let input = self.input.clone();
-                if route == Some(Route::Usage) {
-                    return Link::new(("chat-recovery", ix))
-                        .debug_selector(move || format!("chat-recovery-action-{ix}"))
-                        .href(MANAGE_USAGE_URL)
-                        .text_color(cx.theme().link)
-                        .underline()
-                        .open_with(move |_, _, _, cx| {
-                            if let Ok(Err(_)) =
-                                owner.update(cx, |this, cx| this.recover(source, action, cx))
-                            {
-                                tracing::warn!("can't open chat recovery");
-                            }
-                        })
-                        .child(strings.get(Text::AccountManageUsage))
-                        .into_any_element();
+                if route == Route::Usage {
+                    return Some(
+                        Link::new(("chat-recovery", ix))
+                            .debug_selector(move || format!("chat-recovery-action-{ix}"))
+                            .href(MANAGE_USAGE_URL)
+                            .text_color(cx.theme().link)
+                            .underline()
+                            .open_with(move |_, _, _, cx| {
+                                if let Ok(Err(_)) = owner.update(cx, |this, cx| {
+                                    this.recover_rendered(&rendered, action, cx)
+                                }) {
+                                    tracing::warn!("can't open chat recovery");
+                                }
+                            })
+                            .child(strings.get(Text::AccountManageUsage))
+                            .into_any_element(),
+                    );
                 }
                 let label = match action {
                     Action::Retry => Text::Retry,
-                    Action::SignIn if matches!(route, Some(Route::Account(_))) => {
-                        Text::RecoverySignIn
-                    }
+                    Action::SignIn if matches!(route, Route::Account(_)) => Text::RecoverySignIn,
                     Action::SignIn | Action::OpenSettings => Text::OpenSettings,
                     Action::Enable => Text::AccountEnable,
                     Action::ManageUsage => Text::AccountManageUsage,
                 };
-                Button::new(("chat-recovery", ix))
-                    .debug_selector(move || format!("chat-recovery-action-{ix}"))
-                    .label(strings.get(label))
-                    .disabled(!enabled)
-                    .on_click(move |_, window, cx| {
-                        let owner = owner.clone();
-                        // Settings hides this window, which GPUI can't update mid-click.
-                        cx.defer(move |cx| {
-                            if let Ok(Err(_)) =
-                                owner.update(cx, |this, cx| this.recover(source, action, cx))
-                            {
-                                tracing::warn!("can't apply chat recovery");
+                Some(
+                    Button::new(("chat-recovery", ix))
+                        .debug_selector(move || format!("chat-recovery-action-{ix}"))
+                        .label(strings.get(label))
+                        .disabled(!enabled)
+                        .on_click(move |_, window, cx| {
+                            let owner = owner.clone();
+                            let rendered = Rc::clone(&rendered);
+                            // Settings hides this window, which GPUI can't update mid-click.
+                            cx.defer(move |cx| {
+                                if let Ok(Err(_)) = owner.update(cx, |this, cx| {
+                                    this.recover_rendered(&rendered, action, cx)
+                                }) {
+                                    tracing::warn!("can't apply chat recovery");
+                                }
+                            });
+                            if action == Action::Retry {
+                                input.update(cx, |input, cx| input.focus(window, cx));
                             }
-                        });
-                        if action == Action::Retry {
-                            input.update(cx, |input, cx| input.focus(window, cx));
-                        }
-                    })
-                    .into_any_element()
+                        })
+                        .into_any_element(),
+                )
             });
         let owner = self.owner.clone();
+        let rendered = Rc::clone(notice);
         let input = self.input.clone();
         Some(
             div()
@@ -191,8 +217,11 @@ impl TextView {
                                 .ghost()
                                 .label(strings.get(Text::DismissNotice))
                                 .on_click(move |_, window, cx| {
-                                    let _gone = owner
-                                        .update(cx, |this, cx| this.dismiss_recovery(source, cx));
+                                    let _gone = owner.update(cx, |this, cx| {
+                                        if this.is_current_recovery(&rendered) {
+                                            this.dismiss_recovery(rendered.source, cx);
+                                        }
+                                    });
                                     input.update(cx, |input, cx| input.focus(window, cx));
                                 }),
                         ),

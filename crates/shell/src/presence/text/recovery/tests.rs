@@ -413,6 +413,179 @@ fn recovery_buttons_follow_live_drafts_and_dispatch_then_dismiss_the_named_failu
 }
 
 #[gpui::test]
+fn stale_retry_without_a_route_is_not_rendered(cx: &mut TestAppContext) {
+    let (owner, data, control) = ready(cx);
+    receive(
+        &owner,
+        vec![LinkEvent::Error {
+            generation: 1,
+            error: UserError::new(
+                ErrorKey::SettingsRefused,
+                vec![],
+                vec![Action::Retry, Action::OpenSettings],
+            )
+            .expect("bounded settings refusal without a pending field"),
+        }],
+        cx,
+    );
+    let window = owner.read_with(cx, |owner, _| {
+        let notice = owner.chat_notice.shown().expect("settings refusal");
+        assert!(matches!(notice.source, Source::Settings(None)));
+        owner.text.as_ref().expect("typing fixture").window
+    });
+    let mut frame = gpui_kit::VisualTestContext::from_window(window, cx);
+    frame.update(|window, cx| window.draw(cx).clear(cx));
+    assert!(frame.debug_bounds("chat-recovery-action-1").is_some());
+    assert!(frame.debug_bounds("chat-recovery-dismiss").is_some());
+    assert!(
+        frame.debug_bounds("chat-recovery-action-0").is_none(),
+        "unrouteable Retry"
+    );
+    assert!(data.is_empty());
+    assert!(control.is_empty());
+}
+
+#[gpui::test]
+fn stale_retry_is_not_rendered_after_escape_clear(cx: &mut TestAppContext) {
+    use kumochi_protocol::message::{DataToShell, SceneDescriptor, SceneId};
+
+    assert_retired_retry(cx, |owner, cx| {
+        receive(
+            owner,
+            vec![LinkEvent::Data {
+                generation: 1,
+                message: DataToShell::RunEnd { run: RunId(1) },
+                bytes: 17,
+            }],
+            cx,
+        );
+        owner.update(cx, |owner, cx| {
+            owner
+                .runs
+                .apply_scenes(&[SceneDescriptor {
+                    scene: SceneId(3),
+                    revision: 2,
+                    committed: 2,
+                }])
+                .expect("recoverable drawing");
+            owner.runs_changed(cx).expect("shown drawing");
+            assert!(!owner.activity.working);
+            assert!(owner.activity.drawing);
+            owner.escape(cx).expect("headless Esc Clear");
+        });
+        Some(ControlToBrain::ClearDrawing {
+            scene_ids: vec![SceneId(3)],
+        })
+    });
+}
+
+#[gpui::test]
+fn stale_retry_is_not_rendered_after_switching_tasks(cx: &mut TestAppContext) {
+    use kumochi_protocol::message::{ThreadKind, ThreadRow};
+
+    assert_retired_retry(cx, |owner, cx| {
+        owner.update(cx, |owner, cx| {
+            owner.switch_thread(
+                &ThreadRow {
+                    id: ThreadId(2),
+                    title: "another task".into(),
+                    updated_ms: 0,
+                    kind: ThreadKind::Thread,
+                    choice: None,
+                },
+                cx,
+            );
+            assert_eq!(owner.runs.thread(), Some(ThreadId(2)));
+        });
+        None
+    });
+}
+
+#[gpui::test]
+fn stale_retry_is_not_rendered_after_a_main_task_change(cx: &mut TestAppContext) {
+    assert_retired_retry(cx, |owner, cx| {
+        for (main, retry_ready) in [
+            (ThreadId(1), true),
+            (ThreadId(2), false),
+            (ThreadId(1), false),
+        ] {
+            receive_main_settings(owner, main, cx);
+            owner.read_with(cx, |owner, _| {
+                assert_eq!(owner.runs.retry_ready(RunId(1)), retry_ready);
+            });
+        }
+        None
+    });
+}
+
+fn assert_retired_retry(
+    cx: &mut TestAppContext,
+    retire: impl FnOnce(&Entity<Presence>, &mut TestAppContext) -> Option<ControlToBrain>,
+) {
+    let (owner, data, control) = ready(cx);
+    let window = owner.update(cx, |owner, _| {
+        let text = owner.text.as_mut().expect("typing fixture");
+        text.typing.open();
+        text.window
+    });
+    draft(&owner, "original turn", cx);
+    owner.update(cx, |owner, cx| owner.submit(cx).expect("submit"));
+    assert_eq!(
+        data.try_recv(),
+        Ok(DataToBrain::TextSubmit {
+            turn: 1,
+            screen: ScreenChoice::None,
+            thread: Some(ThreadId(1)),
+            text: "original turn".into(),
+        })
+    );
+    receive(&owner, retry_failure(1, 1), cx);
+    draft(&owner, "keep this draft", cx);
+    let mut frame = gpui_kit::VisualTestContext::from_window(window, cx);
+    frame.update(|window, cx| window.draw(cx).clear(cx));
+    assert!(
+        frame.debug_bounds("chat-recovery-action-0").is_some(),
+        "draft protection keeps a valid Retry visible"
+    );
+    let expected_control = retire(&owner, cx);
+    frame.run_until_parked();
+    frame.update(|window, cx| window.draw(cx).clear(cx));
+    assert!(
+        frame.debug_bounds("chat-recovery").is_some(),
+        "error copy remains"
+    );
+    assert!(frame.debug_bounds("chat-recovery-dismiss").is_some());
+    assert!(
+        frame.debug_bounds("chat-recovery-action-0").is_none(),
+        "retired run Retry"
+    );
+    owner.read_with(cx, |owner, cx| {
+        assert!(!owner.runs.retry_ready(RunId(1)));
+        assert_eq!(
+            owner.text.as_ref().unwrap().input.read(cx).value().as_ref(),
+            "keep this draft"
+        );
+    });
+    owner.update(cx, |owner, cx| {
+        let same_notice = owner.chat_notice.shown().cloned().expect("retained notice");
+        owner
+            .recover(Source::Run(RunId(1)), Action::Retry, cx)
+            .expect("deferred Retry with a retired run is ignored");
+        assert_eq!(owner.chat_notice.shown(), Some(&same_notice));
+        assert_eq!(
+            owner.text.as_ref().unwrap().input.read(cx).value().as_ref(),
+            "keep this draft"
+        );
+    });
+    assert_eq!(control.try_recv().ok(), expected_control);
+    assert!(control.is_empty());
+    assert!(
+        std::iter::from_fn(|| data.try_recv().ok())
+            .all(|message| matches!(message, DataToBrain::PageRequest { .. }))
+    );
+}
+
+#[gpui::test]
 fn settings_only_waiting_changes_disable_and_reenable_the_retained_run_retry(
     cx: &mut TestAppContext,
 ) {
@@ -826,6 +999,99 @@ fn account_actions_use_the_shared_admission_and_never_resubmit_a_turn(cx: &mut T
     assert!(data.is_empty());
 }
 
+#[gpui::test]
+fn a_deferred_account_retry_cannot_dispatch_for_a_replacement_notice(cx: &mut TestAppContext) {
+    use gpui_kit::{Modifiers, MouseButton, MouseDownEvent, MouseUpEvent, PlatformInput};
+
+    for returned in [None, Some(ErrorKey::AccountOffline)] {
+        let (owner, data, control) = ready(cx);
+        let window = owner.read_with(cx, |owner, _| {
+            owner.text.as_ref().expect("typing fixture").window
+        });
+        let retry_error = |key| LinkEvent::Error {
+            generation: 1,
+            error: UserError::new(key, Vec::new(), vec![Action::Retry]).expect("bounded error"),
+        };
+        draft(&owner, "retain the current draft", cx);
+        receive(
+            &owner,
+            vec![
+                LinkEvent::Account {
+                    generation: 1,
+                    view: AccountView::Busy,
+                },
+                retry_error(ErrorKey::AccountOffline),
+            ],
+            cx,
+        );
+        cx.run_until_parked();
+        let position = gpui_kit::VisualTestContext::from_window(window, cx)
+            .debug_bounds("chat-recovery-action-0")
+            .expect("original rendered Retry")
+            .center();
+
+        cx.update(|cx| {
+            window
+                .update(cx, |_, window, cx| {
+                    window.dispatch_event(
+                        PlatformInput::MouseDown(MouseDownEvent {
+                            position,
+                            modifiers: Modifiers::default(),
+                            button: MouseButton::Left,
+                            click_count: 1,
+                            first_mouse: false,
+                        }),
+                        cx,
+                    );
+                    window.dispatch_event(
+                        PlatformInput::MouseUp(MouseUpEvent {
+                            position,
+                            modifiers: Modifiers::default(),
+                            button: MouseButton::Left,
+                            click_count: 1,
+                        }),
+                        cx,
+                    );
+                })
+                .expect("typing window");
+            assert!(control.is_empty(), "Retry dispatch is still deferred");
+            owner.update(cx, |owner, cx| {
+                let errors = std::iter::once(ErrorKey::TrustStoreUnavailable)
+                    .chain(returned)
+                    .map(retry_error)
+                    .collect();
+                owner
+                    .link_events(Batch::Plain(errors), cx)
+                    .expect("replacement link event");
+                let notice = owner.chat_notice.shown().expect("replacement notice");
+                assert!(matches!(notice.source, Source::Account));
+                assert_eq!(
+                    notice.error.key(),
+                    returned.unwrap_or(ErrorKey::TrustStoreUnavailable)
+                );
+                assert_eq!(notice.error.actions(), &[Action::Retry]);
+            });
+        });
+
+        assert_eq!(
+            control.try_recv(),
+            Err(async_channel::TryRecvError::Empty),
+            "the old button cannot retry the replacement"
+        );
+        click_recovery(window, "chat-recovery-action-0", cx);
+        assert_eq!(
+            control.try_recv().expect("fresh Retry dispatch"),
+            ControlToBrain::AccountOp(AccountOp::Retry)
+        );
+        assert!(control.is_empty());
+        assert!(data.is_empty());
+        owner.read_with(cx, |owner, cx| {
+            let input = &owner.text.as_ref().expect("typing fixture").input;
+            assert_eq!(input.read(cx).value().as_ref(), "retain the current draft");
+        });
+    }
+}
+
 fn renewal_general() -> LinkEvent {
     LinkEvent::Error {
         generation: 1,
@@ -838,25 +1104,28 @@ fn renewal_general() -> LinkEvent {
     }
 }
 
-#[gpui::test]
-#[expect(
-    clippy::too_many_lines,
-    reason = "one settings retry, from the refusal to the captured field's resend"
-)]
-fn settings_retry_rechecks_its_captured_field_and_waits_for_the_matching_answer(
-    cx: &mut TestAppContext,
-) {
-    use crate::settings::{Completion, Field, Update};
-    use kumochi_protocol::message::{
-        AssistantName, DockPosition, MaxFrameRate, SettingsOp, SettingsView,
-    };
-    let (owner, data, control) = ready(cx);
-    let saved = SettingsView {
+fn receive_main_settings(owner: &Entity<Presence>, main: ThreadId, cx: &mut TestAppContext) {
+    receive(
+        owner,
+        vec![LinkEvent::Settings {
+            generation: 1,
+            view: recovery_settings(main),
+            answer: false,
+        }],
+        cx,
+    );
+    owner.read_with(cx, |owner, _| assert_eq!(owner.runs.thread(), Some(main)));
+}
+
+fn recovery_settings(main_thread: ThreadId) -> kumochi_protocol::message::SettingsView {
+    use kumochi_protocol::message::{AssistantName, DockPosition, MaxFrameRate, SettingsView};
+
+    SettingsView {
         assistant_name: AssistantName::new("Kumo").expect("valid name"),
         user_name: None,
         onboarded: true,
         onboarding_from: kumochi_protocol::message::OnboardingStep::Welcome,
-        main_thread: ThreadId(1),
+        main_thread,
         max_frame_rate: MaxFrameRate::AUTOMATIC,
         default_model: None,
         dock_position: DockPosition::TopCenter,
@@ -866,7 +1135,17 @@ fn settings_retry_rechecks_its_captured_field_and_waits_for_the_matching_answer(
         hold_to_talk: kumochi_protocol::message::DEFAULT_HOLD_TO_TALK,
         screen_holds: kumochi_protocol::message::DEFAULT_SCREEN_HOLDS,
         show_screen: kumochi_protocol::message::DEFAULT_SHOW_SCREEN,
-    };
+    }
+}
+
+#[gpui::test]
+fn settings_retry_rechecks_its_captured_field_and_waits_for_the_matching_answer(
+    cx: &mut TestAppContext,
+) {
+    use crate::settings::{Completion, Field, Update};
+    use kumochi_protocol::message::{AssistantName, SettingsOp};
+    let (owner, data, control) = ready(cx);
+    let saved = recovery_settings(ThreadId(1));
     owner.update(cx, |owner, cx| {
         owner.settings.update(cx, |state, _| {
             assert_eq!(state.set_view(saved.clone(), Update::Unsolicited), None);
@@ -1700,14 +1979,22 @@ fn an_accepted_run_retry_starts_the_next_renewal_incident(cx: &mut TestAppContex
                 phase: Phase::Answering,
                 error: None,
             },
+            renewal_general(),
             renewal_run(),
         ],
         cx,
     );
+    let window = owner.read_with(cx, |owner, _| {
+        let notice = owner.chat_notice.shown().expect("promoted renewal");
+        assert!(matches!(notice.source, Source::Run(RunId(1))));
+        assert_eq!(notice.error.actions(), [Action::SignIn, Action::Retry]);
+        owner.text.as_ref().expect("typing fixture").window
+    });
+    click_recovery(window, "chat-recovery-action-1", cx);
     owner.update(cx, |owner, cx| {
         owner
             .recover(Source::Run(RunId(1)), Action::Retry, cx)
-            .expect("explicit retry");
+            .expect("used retry");
     });
     assert_eq!(
         data.try_recv().expect("retried turn"),
@@ -1910,6 +2197,140 @@ fn actual_escape_stops_then_clears_then_dismisses_without_changing_the_draft(
     }
     owner.read_with(cx, |owner, _| assert!(!owner.text_open()));
     assert!(data.is_empty());
+    assert!(control.is_empty());
+}
+
+#[gpui::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one event sequence follows notice replacement, slot retirement, and stale dispatch"
+)]
+fn late_run_renewal_preserves_newer_recovery_and_cannot_retry_behind_it(cx: &mut TestAppContext) {
+    use crate::chat_notice::Notice;
+
+    let (owner, data, control) = ready(cx);
+    let window = owner.update(cx, |owner, _| {
+        let text = owner.text.as_mut().expect("typing fixture");
+        text.typing.open();
+        text.window
+    });
+    draft(&owner, "the earlier turn", cx);
+    owner.update(cx, |owner, cx| owner.submit(cx).expect("original turn"));
+    assert_eq!(
+        data.try_recv().expect("original turn"),
+        DataToBrain::TextSubmit {
+            turn: 1,
+            screen: ScreenChoice::None,
+            thread: Some(ThreadId(1)),
+            text: "the earlier turn".into(),
+        }
+    );
+    receive(
+        &owner,
+        vec![
+            LinkEvent::RunState {
+                generation: 1,
+                origin: Some(RunOrigin::Typed { turn: 1 }),
+                run: RunId(1),
+                thread: ThreadId(1),
+                phase: Phase::Answering,
+                error: None,
+            },
+            renewal_general(),
+        ],
+        cx,
+    );
+    owner.read_with(cx, |owner, _| {
+        let notice = owner.chat_notice.shown().expect("initial renewal");
+        assert_eq!(notice.error.key(), ErrorKey::RenewalUnconfirmed);
+        assert!(matches!(notice.source, Source::Account));
+    });
+
+    let newer = Notice {
+        error: UserError::new(
+            ErrorKey::SettingsRefused,
+            vec![],
+            vec![Action::OpenSettings],
+        )
+        .expect("bounded settings error"),
+        source: Source::Settings(None),
+    };
+    receive(
+        &owner,
+        vec![LinkEvent::Error {
+            generation: 1,
+            error: newer.error.clone(),
+        }],
+        cx,
+    );
+    draft(&owner, "leave the newer draft alone", cx);
+    cx.run_until_parked();
+    let mut frame = gpui_kit::VisualTestContext::from_window(window, cx);
+    frame.update(|window, cx| window.draw(cx).clear(cx));
+    assert!(frame.debug_bounds("chat-recovery-action-0").is_some());
+    owner.read_with(cx, |owner, cx| {
+        let view = owner.text.as_ref().expect("typing fixture").view.read(cx);
+        assert_eq!(view.recovery.as_deref(), Some(&newer));
+    });
+
+    receive(&owner, vec![renewal_run()], cx);
+    owner.read_with(cx, |owner, cx| {
+        assert_eq!(owner.chat_notice.shown(), Some(&newer));
+        let text = owner.text.as_ref().expect("typing fixture");
+        assert_eq!(text.view.read(cx).recovery.as_deref(), Some(&newer));
+        assert!(!text.view.read(cx).retry);
+        assert_eq!(
+            text.input.read(cx).value().as_ref(),
+            "leave the newer draft alone"
+        );
+        assert!(owner.runs.retry_ready(RunId(1)));
+    });
+    frame.run_until_parked();
+    frame.update(|window, cx| window.draw(cx).clear(cx));
+    assert!(frame.debug_bounds("chat-recovery-action-0").is_some());
+    assert!(frame.debug_bounds("chat-recovery-action-1").is_none());
+    draft(&owner, "", cx);
+    owner.update(cx, |owner, cx| {
+        owner
+            .recover(Source::Run(RunId(1)), Action::Retry, cx)
+            .expect("an action from the hidden renewal is ignored");
+        assert_eq!(owner.chat_notice.shown(), Some(&newer));
+        assert!(owner.runs.retry_ready(RunId(1)));
+    });
+    assert!(data.is_empty());
+    draft(&owner, "leave the newer draft alone", cx);
+    receive_main_settings(&owner, ThreadId(2), cx);
+    receive_main_settings(&owner, ThreadId(1), cx);
+    receive(&owner, vec![renewal_general(), renewal_run()], cx);
+    owner.update(cx, |owner, cx| {
+        assert!(
+            !owner.runs.retry_ready(RunId(1)),
+            "returning to the old main must not restore Retry"
+        );
+        assert_eq!(owner.chat_notice.shown(), Some(&newer));
+        owner
+            .recover(Source::Run(RunId(1)), Action::Retry, cx)
+            .expect("retired callback stays inert");
+        assert_eq!(
+            owner
+                .text
+                .as_ref()
+                .expect("typing fixture")
+                .input
+                .read(cx)
+                .value()
+                .as_ref(),
+            "leave the newer draft alone"
+        );
+    });
+    frame.run_until_parked();
+    frame.update(|window, cx| window.draw(cx).clear(cx));
+    assert!(frame.debug_bounds("chat-recovery-action-0").is_some());
+    assert!(frame.debug_bounds("chat-recovery-action-1").is_none());
+    assert!(
+        std::iter::from_fn(|| data.try_recv().ok())
+            .all(|message| matches!(message, DataToBrain::PageRequest { .. }))
+    );
     assert!(control.is_empty());
 }
 

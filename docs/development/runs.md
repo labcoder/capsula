@@ -40,7 +40,11 @@ run-owned recovery slot. Automatic restore and this transfer are exclusive: a dr
 returned to the input has no second retained copy. `Runs::retry` takes the matching slot
 before checking its captured revision, thread and the current draft, or attempting delivery.
 Refusal consumes it too. New's named run establishes the stored thread before capture can
-be retried; Retry never submits another unbound New turn. Dismissal also drops the slot.
+be retried; Retry never submits another unbound New turn. Dismissal drops the slot, as does
+a settings update that changes the input's target. Switching back doesn't revive it.
+Chat keeps the notice but omits actions that have no route or whose run lost its Retry slot.
+A valid Retry can still be temporarily disabled by a newer draft, pending account work, or
+the connection state.
 
 `shell-core/chat_notice.rs` retains the typed error and its run, account or settings-field owner.
 Presence pushes that notice into the composer. Its render reads Settings, so GPUI tracks
@@ -48,17 +52,20 @@ that dependency and invalidates the window on settings-only enabled-state change
 an explicit Settings observer. Input observation notifies the composer only when draft
 emptiness changes; typing within a nonempty draft and caret blinking emit no extra composer
 notification. Input still invalidates its window; this does not cache the window's render tree.
-The recovery dispatcher rechecks the owner and declared action,
-then uses the existing run, account or settings admission. An account Retry cannot resend
-run text. Public usage links use the existing URL, and settings routes select their exact
-tab without toggling a visible settings window closed.
+Recovery controls apply only to the still-current notice they rendered from. Replacing,
+clearing or dismissing the notice invalidates its callbacks, even if the same error returns.
+Dispatch then checks the declared action and uses the existing run, account or settings
+admission. An account Retry cannot resend run text. Public usage links use the existing URL,
+and settings routes select their exact tab without toggling a visible settings window closed.
 Retry and Dismiss return focus to the retained composer so typing and its Escape
 handling continue after the recovery control disappears.
 
 Renewal warnings coalesce within the connection lifetime. A named run promotes a general
-warning to run ownership; later duplicates cannot demote or resurrect a dismissed incident.
-The Accounts diagnostic remains independent. Authoritative account recovery, an accepted
-new turn or a connection reset starts the next incident. No timer correlates the frames.
+warning to run ownership, replacing the composer notice only if that renewal is still showing.
+A newer unrelated notice, or an empty composer after its dismissal, stays undisturbed. Later
+duplicates cannot demote or resurrect the incident. The Accounts diagnostic remains independent.
+Authoritative account recovery, an accepted new turn or a connection reset starts the next
+incident. No timer correlates the frames.
 
 Answering is ordered before a later Failed on the control pipe. It suppresses automatic
 restoration even if text on the data pipe is delayed: authentication can fail on a later

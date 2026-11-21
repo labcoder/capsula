@@ -1,6 +1,6 @@
 //! Typed composer recovery routes and connection-scoped renewal notice coalescing.
 
-use std::fmt;
+use std::{fmt, rc::Rc};
 
 use kumochi_protocol::message::{AccountOp, Action, ErrorKey, RunId, ThreadId, UserError};
 
@@ -77,13 +77,13 @@ enum Renewal {
     #[default]
     Fresh,
     AccountShown,
-    RunOwnedShown,
+    RunOwned,
     Dismissed,
 }
 
 #[derive(Default)]
 pub struct ChatNotice {
-    shown: Option<Notice>,
+    shown: Option<Rc<Notice>>,
     renewal: Renewal,
 }
 
@@ -97,25 +97,40 @@ impl fmt::Debug for ChatNotice {
 }
 
 impl ChatNotice {
-    pub fn for_thread(&self, thread: Option<ThreadId>) -> Option<&Notice> {
+    pub fn for_thread(&self, thread: Option<ThreadId>) -> Option<&Rc<Notice>> {
         self.shown.as_ref().filter(|notice| {
             !matches!(notice.source, Source::Drawing { thread: owner, .. } if Some(owner) != thread)
         })
     }
 
     pub fn shown(&self) -> Option<&Notice> {
-        self.shown.as_ref()
+        self.shown.as_deref()
     }
 
     pub fn present(&mut self, error: UserError, source: Source) {
         if error.key() == ErrorKey::RenewalUnconfirmed {
+            let promoting = matches!(
+                (&self.renewal, source),
+                (Renewal::AccountShown, Source::Run(_))
+            );
             self.renewal = match (&self.renewal, source) {
-                (Renewal::Fresh | Renewal::AccountShown, Source::Run(_)) => Renewal::RunOwnedShown,
+                (Renewal::Fresh | Renewal::AccountShown, Source::Run(_)) => Renewal::RunOwned,
                 (Renewal::Fresh, _) => Renewal::AccountShown,
                 _ => return,
             };
+            if promoting
+                && self
+                    .shown
+                    .as_ref()
+                    .is_none_or(|notice| notice.error.key() != ErrorKey::RenewalUnconfirmed)
+            {
+                return;
+            }
         }
-        self.shown = Some(Notice { error, source });
+        let notice = Notice { error, source };
+        if self.shown() != Some(&notice) {
+            self.shown = Some(Rc::new(notice));
+        }
     }
 
     pub fn dismiss(&mut self) {
@@ -147,6 +162,8 @@ impl ChatNotice {
 
 #[cfg(test)]
 mod tests {
+    use std::rc::Rc;
+
     use kumochi_protocol::message::{AccountOp, Action, ErrorArg, ErrorKey, RunId};
 
     use super::{ChatNotice, Notice, Route, Source};
@@ -163,7 +180,7 @@ mod tests {
         assert_eq!(notices.for_thread(Some(ThreadId(8))), None);
         assert_eq!(notices.for_thread(None), None);
         assert_eq!(
-            notices.for_thread(Some(ThreadId(7))),
+            notices.for_thread(Some(ThreadId(7))).map(Rc::as_ref),
             Some(&Notice {
                 error: ErrorKey::DrawingReplacementFailed.into(),
                 source,
@@ -172,6 +189,26 @@ mod tests {
         notices.clear();
         assert_eq!(notices.for_thread(Some(ThreadId(7))), None);
     }
+    #[test]
+    fn equal_payload_gets_new_identity_only_after_the_notice_changes() {
+        let mut notices = ChatNotice::default();
+        let present_offline = |notices: &mut ChatNotice| {
+            notices.present(ErrorKey::AccountOffline.into(), Source::Account);
+            Rc::clone(notices.for_thread(None).expect("offline notice"))
+        };
+        let original = present_offline(&mut notices);
+        assert!(Rc::ptr_eq(&original, &present_offline(&mut notices)));
+        notices.present(ErrorKey::TrustStoreUnavailable.into(), Source::Account);
+        let restored = present_offline(&mut notices);
+        assert_eq!(original, restored);
+        assert!(!Rc::ptr_eq(&original, &restored));
+
+        notices.clear();
+        let next = present_offline(&mut notices);
+        assert_eq!(restored, next);
+        assert!(!Rc::ptr_eq(&restored, &next));
+    }
+
     use crate::settings::Field;
 
     #[test]
@@ -253,6 +290,29 @@ mod tests {
             );
             reset(&mut notices);
             assert_eq!(notices.shown(), None);
+        }
+    }
+
+    #[test]
+    fn late_run_renewal_does_not_replace_or_restore_a_displaced_notice() {
+        for dismiss_newer in [false, true] {
+            let mut notices = ChatNotice::default();
+            let unrelated = Notice {
+                error: ErrorKey::SettingsRefused.into(),
+                source: Source::Settings(None),
+            };
+            notices.present(ErrorKey::RenewalUnconfirmed.into(), Source::Account);
+            notices.present(unrelated.error.clone(), unrelated.source);
+            if dismiss_newer {
+                notices.dismiss();
+            }
+            let expected = (!dismiss_newer).then_some(&unrelated);
+            notices.present(ErrorKey::RenewalUnconfirmed.into(), Source::Run(RunId(7)));
+            assert_eq!(notices.shown(), expected);
+            assert!(matches!(notices.renewal, super::Renewal::RunOwned));
+            notices.present(ErrorKey::RenewalUnconfirmed.into(), Source::Run(RunId(8)));
+            notices.present(ErrorKey::RenewalUnconfirmed.into(), Source::Account);
+            assert_eq!(notices.shown(), expected);
         }
     }
 
