@@ -931,3 +931,162 @@ fn the_privacy_tab_holds_the_screen_toggle_which_sends_once_and_waits_for_the_sa
     });
     assert!(controls.is_empty());
 }
+
+/// Which Privacy help the frame draws.
+fn shown(frame: &mut gpui_kit::VisualTestContext) -> Vec<&'static str> {
+    frame.update(|window, cx| window.draw(cx).clear(cx));
+    ["show-screen-help", "show-screen-help-claude-code"]
+        .into_iter()
+        .filter(|selector| frame.debug_bounds(selector).is_some())
+        .collect()
+}
+/// A connected presence whose default is Claude Code's Haiku, under the brain's offer for
+/// it, with its Privacy tab open and a count of the tab's redraw requests.
+fn privacy_under_claude_code(
+    cx: &mut TestAppContext,
+) -> (
+    crate::presence::screen_hold_tests::Ready,
+    gpui_kit::VisualTestContext,
+    std::rc::Rc<std::cell::Cell<usize>>,
+    gpui_kit::Subscription,
+) {
+    use crate::link::LinkEvent;
+    use crate::presence::screen_hold_tests::{receive, screen_ready};
+    use gpui_kit::{
+        AppContext as _, Bounds, Point, VisualTestContext, WindowBounds, WindowOptions, px, size,
+    };
+    use kumochi_protocol::message::{
+        ConnectionKind, Effort, ModelChoice, ModelInfo, ModelName, ModelSlug, NoticeRevision,
+        ScreenHolds,
+    };
+
+    let haiku = ModelInfo {
+        slug: ModelSlug::new("haiku").expect("valid"),
+        display_name: ModelName::new("Claude Haiku").expect("valid"),
+        supported_efforts: None,
+    };
+    let ready = screen_ready(None, cx);
+    let owner = ready.owner.clone();
+    let (model, weak, events) = owner.update(cx, |owner, cx| {
+        owner.settings.update(cx, |settings, _| {
+            settings.set_models(ConnectionKind::ClaudeCode, vec![haiku.clone()]);
+            let mut view = settings.view().expect("connected").clone();
+            view.default_model = Some(ModelChoice {
+                model: haiku.slug.clone(),
+                effort: Effort::Low,
+                connection: ConnectionKind::ClaudeCode,
+            });
+            view.show_screen = true;
+            settings.set_view(view, crate::settings::Update::Unsolicited);
+        });
+        (
+            owner.settings.clone(),
+            cx.weak_entity(),
+            owner.events.clone(),
+        )
+    });
+    let options = WindowOptions {
+        window_bounds: Some(WindowBounds::Windowed(Bounds {
+            origin: Point::default(),
+            size: size(px(480.), px(640.)),
+        })),
+        ..Default::default()
+    };
+    let (window, view) = cx.update(|cx| {
+        gpui_kit::open_window(options, cx, |window, cx| {
+            cx.new(|cx| {
+                let mut view = super::super::SettingsView::new(model, weak, events, window, cx);
+                view.tab = 3;
+                view
+            })
+        })
+        .expect("settings window")
+    });
+    receive(
+        &owner,
+        LinkEvent::ScreenHolds {
+            generation: 1,
+            state: ScreenHolds::On {
+                model: haiku.display_name,
+                connection: ConnectionKind::ClaudeCode,
+                slug: haiku.slug,
+                revision: NoticeRevision::FIRST,
+            },
+        },
+        cx,
+    );
+    let mut frame = VisualTestContext::from_window(window, cx);
+    frame.run_until_parked();
+    assert_eq!(shown(&mut frame), ["show-screen-help-claude-code"]);
+    let notified = std::rc::Rc::new(std::cell::Cell::new(0));
+    let watch = cx.update(|cx| {
+        let notified = std::rc::Rc::clone(&notified);
+        cx.observe(&view, move |_, _| notified.set(notified.get() + 1))
+    });
+    (ready, frame, notified, watch)
+}
+
+/// The Privacy tab's help follows the offer the shortcut could be seen under now: unchecking the
+/// box, or asking for another default model, ends Claude Code's words before the brain replies, as
+/// a removed offer or a lost connection does, and each change repaints the open tab.
+#[gpui::test]
+fn the_privacy_help_follows_the_shortcuts_current_offer(cx: &mut TestAppContext) {
+    use crate::link::{LinkEvent, LinkState};
+    use crate::presence::screen_hold_tests::{luna, on, receive};
+    use kumochi_protocol::message::{ConnectionKind, ScreenHolds, ScreenOff};
+
+    let unchecked = {
+        let (_ready, mut frame, notified, _watch) = privacy_under_claude_code(cx);
+        let point = frame
+            .debug_bounds("show-screen")
+            .expect("the checkbox")
+            .center();
+        frame.simulate_click(point, gpui_kit::Modifiers::default());
+        frame.run_until_parked();
+        (notified.get(), shown(&mut frame))
+    };
+    assert!(unchecked.0 > 0, "the click repaints the tab");
+    assert_eq!(unchecked.1, ["show-screen-help"], "unchecked, still saving");
+
+    let another_default = {
+        let (ready, mut frame, notified, _watch) = privacy_under_claude_code(cx);
+        ready.owner.update(cx, |owner, cx| {
+            owner.save_default_model(ConnectionKind::ChatGpt, luna().slug, cx);
+        });
+        frame.run_until_parked();
+        (notified.get(), shown(&mut frame))
+    };
+    assert!(another_default.0 > 0, "the new default repaints the tab");
+    assert_eq!(
+        another_default.1,
+        ["show-screen-help"],
+        "another default, still saving"
+    );
+
+    for (case, event) in [
+        (
+            "the offer moved to another route",
+            LinkEvent::ScreenHolds {
+                generation: 1,
+                state: on(&luna()),
+            },
+        ),
+        (
+            "the offer was withdrawn",
+            LinkEvent::ScreenHolds {
+                generation: 1,
+                state: ScreenHolds::Off(ScreenOff::NotReady),
+            },
+        ),
+        (
+            "the connection was lost",
+            LinkEvent::State(LinkState::Reconnecting),
+        ),
+    ] {
+        let (ready, mut frame, notified, _watch) = privacy_under_claude_code(cx);
+        receive(&ready.owner, event, cx);
+        frame.run_until_parked();
+        assert!(notified.get() > 0, "{case}: repaints the tab");
+        assert_eq!(shown(&mut frame), ["show-screen-help"], "{case}");
+    }
+}

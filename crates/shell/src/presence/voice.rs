@@ -433,47 +433,49 @@ impl Presence {
         (settings.own_model(own), settings.default_model_name())
     }
 
-    /// Publishes the offer a first input may be seen under now, and returns it: the brain's `On`
-    /// for exactly the default model while the show-screen choice is on, for a target that is
-    /// new or not read on this connection as pinned elsewhere. An unread row leaves a candidate
-    /// only: the brain proves its recipient before any capture.
+    /// Publishes [`Presence::current_offer`] and returns it.
     pub(super) fn publish_offer(&self, cx: &gpui_kit::App) -> Option<inhibit::Offer> {
-        let offer = || {
-            let session = self.session.as_ref().filter(|session| session.open())?;
-            let Some(kumochi_protocol::message::ScreenHolds::On {
-                connection,
-                slug,
-                revision,
-                ..
-            }) = self.runs.screen_holds()
-            else {
-                return None;
-            };
-            let settings = self.settings.read(cx);
-            let default = settings.default_model_choice()?;
-            let thread = self.runs.thread();
-            let target = matches!(self.runs.target(), crate::runs::Target::New)
-                || thread
-                    .and_then(|thread| self.threads.read(cx).fresh_row(thread))
-                    .is_none_or(|row| {
-                        row.choice
-                            .as_ref()
-                            .is_none_or(|pin| pin.connection == *connection && pin.model == *slug)
-                    });
-            (target
-                && settings.show_screen_choice() == Some(true)
-                && default.connection == *connection
-                && default.model == *slug
-                && matches!(self.screen_notice(cx), ScreenNotice::On(_)))
-            .then(|| inhibit::Offer {
-                session: session.generation(),
-                choice: self.link.choice_revision(),
-                target: (thread, self.runs.revision()),
-                revision: *revision,
-                epoch: 0,
-            })
+        self.voice.gates.publish(self.current_offer(cx))
+    }
+
+    /// The offer a first input may be seen under now, read only: the brain's `On` for exactly
+    /// the default model while the show-screen choice is on, for a target that is new or not read
+    /// on this connection as pinned elsewhere. An unread row leaves a candidate only: the brain
+    /// proves its recipient before any capture.
+    pub(super) fn current_offer(&self, cx: &gpui_kit::App) -> Option<inhibit::Offer> {
+        let session = self.session.as_ref().filter(|session| session.open())?;
+        let Some(kumochi_protocol::message::ScreenHolds::On {
+            connection,
+            slug,
+            revision,
+            ..
+        }) = self.runs.screen_holds()
+        else {
+            return None;
         };
-        self.voice.gates.publish(offer())
+        let settings = self.settings.read(cx);
+        let default = settings.default_model_choice()?;
+        let thread = self.runs.thread();
+        let target = matches!(self.runs.target(), crate::runs::Target::New)
+            || thread
+                .and_then(|thread| self.threads.read(cx).fresh_row(thread))
+                .is_none_or(|row| {
+                    row.choice
+                        .as_ref()
+                        .is_none_or(|pin| pin.connection == *connection && pin.model == *slug)
+                });
+        (target
+            && settings.show_screen_choice() == Some(true)
+            && default.connection == *connection
+            && default.model == *slug
+            && matches!(self.screen_notice(cx), ScreenNotice::On(_)))
+        .then(|| inhibit::Offer {
+            session: session.generation(),
+            choice: self.link.choice_revision(),
+            target: (thread, self.runs.revision()),
+            revision: *revision,
+            epoch: 0,
+        })
     }
 
     /// What a hold on the current target does with the screen.

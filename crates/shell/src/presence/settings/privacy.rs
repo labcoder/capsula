@@ -15,6 +15,13 @@ impl SettingsView {
     pub(super) fn privacy(&self, cx: &Context<'_, Self>) -> impl IntoElement {
         let state = self.model.read(cx);
         let strings = cx.global::<Strings>();
+        let help = self
+            .owner
+            .upgrade()
+            .map_or(Text::show_screen_help(None), |owner| {
+                let owner = owner.read(cx);
+                Text::show_screen_help(owner.current_offer(cx).and(owner.runs.screen_holds()))
+            });
         let assistant = state.view().map_or(
             kumochi_protocol::constants::DEFAULT_ASSISTANT_NAME,
             |view| view.assistant_name.as_str(),
@@ -46,7 +53,18 @@ impl SettingsView {
                 div()
                     .text_xs()
                     .text_color(cx.theme().muted_foreground)
-                    .child(strings.show_screen_help()),
+                    .child(strings.show_screen_help(help))
+                    .map(|line| {
+                        #[cfg(test)]
+                        let line = line.debug_selector(|| {
+                            match help {
+                                Text::ShowScreenHelpClaudeCode => "show-screen-help-claude-code",
+                                _ => "show-screen-help",
+                            }
+                            .into()
+                        });
+                        line
+                    }),
             )
             .children(
                 state
