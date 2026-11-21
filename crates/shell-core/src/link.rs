@@ -57,6 +57,7 @@ const REPEAT_WINDOW: Duration = Duration::from_secs(60);
 /// Control messages waiting for the brain to read them before a send fails [guess]. The shell
 /// sends a handful at a time: Stop, `ClearDrawing`, `Pong`, up to four deletes and `Quitting`.
 const CONTROL_QUEUE: usize = 64;
+const QUIT_INPUT: u64 = 1 << 32;
 /// Data messages waiting for the brain to read them: the turns the shell may leave unanswered,
 /// and room for credit.
 const DATA_QUEUE: usize = MAX_PENDING_TURNS + 8;
@@ -452,6 +453,8 @@ enum LinkError {
     Capability(#[from] CredentialError),
     #[error("the brain closed the connection during the handshake")]
     Rejected,
+    #[error("the queued connection attempt expired")]
+    ConnectExpired,
     #[error("the brain is from another build")]
     BuildMismatch,
     #[error("quitting")]
@@ -560,10 +563,9 @@ fn queue_on(
 struct Shared {
     microphone: CollectionGate,
     microphone_stop: Mutex<Option<microphone::Stop>>,
-    input: AtomicU32,
+    input: AtomicU64,
     choice: AtomicU64,
-    /// Set once the user chose Quit, so a closing brain isn't restarted.
-    quitting: AtomicBool,
+    quit_sent: AtomicBool,
     /// The control pipe while connected, so Quit can bound its writes.
     control: Mutex<Option<Arc<PipeClient>>>,
     outbox: Mutex<Option<Outbox>>,
@@ -594,12 +596,34 @@ impl Shared {
     }
 
     fn revoke_input(&self) -> Option<GestureId> {
-        let gesture = GestureId(self.input.swap(0, Ordering::AcqRel));
-        if gesture.0 == 0 {
-            return None;
-        }
+        let gesture = self
+            .input
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |input| {
+                (input != 0 && input < QUIT_INPUT).then_some(0)
+            })
+            .ok()?;
+        let gesture = GestureId(u32::try_from(gesture).expect("gesture fits in the input word"));
         self.microphone.cancel(gesture);
         Some(gesture)
+    }
+
+    fn quitting(&self) -> bool {
+        self.input.load(Ordering::SeqCst) & QUIT_INPUT != 0
+    }
+
+    fn take_quit_input(&self) -> Option<GestureId> {
+        let gesture = self.input.fetch_and(QUIT_INPUT, Ordering::SeqCst) & !QUIT_INPUT;
+        (gesture != 0)
+            .then(|| GestureId(u32::try_from(gesture).expect("gesture fits in the input word")))
+    }
+
+    fn clear_input(&self, gesture: GestureId) {
+        let _cleared = self.input.compare_exchange(
+            u64::from(gesture.0),
+            0,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        );
     }
 
     /// Uses the outbox to send on `session`, only while it is open (alive and not closing).
@@ -617,7 +641,9 @@ impl Shared {
             .unwrap_or_else(PoisonError::into_inner)
             .as_ref()
             .filter(|outbox| {
-                outbox.generation == session.generation && session.alive.load(Ordering::Acquire)
+                !outbox.pipe.is_aborted()
+                    && outbox.generation == session.generation
+                    && session.alive.load(Ordering::Acquire)
             })
             .map(use_it)
     }
@@ -632,11 +658,29 @@ impl Shared {
     fn tell_quit(&self) -> bool {
         // The one send that skips the closed check: a brain never told Quit relaunches the shell.
         let outbox = self.outbox.lock().unwrap_or_else(PoisonError::into_inner);
-        let Some(outbox) = outbox.as_ref() else {
+        if self.quit_sent.load(Ordering::Acquire) {
+            return true;
+        }
+        let Some(outbox) = outbox.as_ref().filter(|outbox| !outbox.pipe.is_aborted()) else {
             return false;
         };
-        queue_deletes(outbox, &mut self.deletes())
-            && outbox.control.try_send(ControlToBrain::Quitting).is_ok()
+        if let Some(gesture) = self.take_quit_input()
+            && outbox
+                .control
+                .try_send(ControlToBrain::GestureCancel { gesture })
+                .is_err()
+        {
+            outbox.pipe.abort();
+            return false;
+        }
+        if !queue_deletes(outbox, &mut self.deletes())
+            || outbox.control.try_send(ControlToBrain::Quitting).is_err()
+            || outbox.pipe.is_aborted()
+        {
+            return false;
+        }
+        self.quit_sent.store(true, Ordering::Release);
+        true
     }
 }
 
@@ -686,14 +730,18 @@ impl LinkHandle {
         self.shared.generations.load(Ordering::Acquire)
     }
     pub fn track_input(&self, gesture: GestureId) {
-        self.shared.input.store(gesture.0, Ordering::Release);
+        let _tracked =
+            self.shared
+                .input
+                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |input| {
+                    (input < QUIT_INPUT).then_some(u64::from(gesture.0))
+                });
     }
     pub fn input_is(&self, gesture: GestureId) -> bool {
-        gesture.0 != 0 && self.shared.input.load(Ordering::Acquire) == gesture.0
+        gesture.0 != 0 && self.shared.input.load(Ordering::Acquire) == u64::from(gesture.0)
     }
     pub fn clear_input(&self, gesture: GestureId) {
-        let input = &self.shared.input;
-        let _changed = input.compare_exchange(gesture.0, 0, Ordering::AcqRel, Ordering::Acquire);
+        self.shared.clear_input(gesture);
     }
     pub fn cancel_input(&self) -> bool {
         self.cancel_input_gesture().is_some()
@@ -717,15 +765,19 @@ impl LinkHandle {
     }
 
     /// Marks Quit, so the link starts no brain from here on and no speaker opening now is
-    /// accepted. Cheap enough for the UI thread: the output owner's sections are short.
+    /// accepted. Does not wait on the output owner, outbox or pipe.
     /// Returns false when Quit was already under way.
     pub fn begin_quit(&self) -> bool {
-        self.cancel_input();
-        let first = !self.shared.quitting.swap(true, Ordering::SeqCst);
-        self.shared.output.cancelled();
+        let first = self.shared.input.fetch_or(QUIT_INPUT, Ordering::SeqCst) & QUIT_INPUT == 0;
+        self.shared.microphone.cancel_current();
         // Wakes a link waiting for Retry, so it sees Quit and ends.
         let _woken = self.retry.try_send(());
         first
+    }
+
+    /// Whether Quit has revoked input and reserved its last tracked gesture for shutdown.
+    pub fn is_quitting(&self) -> bool {
+        self.shared.quitting()
     }
 
     /// Tells a connected brain the user quit, after every delete the user confirmed that it
@@ -755,7 +807,7 @@ impl LinkHandle {
             }
             thread::sleep(Duration::from_millis(10));
         }
-        if !told {
+        if !told && !self.shared.quit_sent.load(Ordering::Acquire) {
             tracing::warn!("couldn't tell the brain about Quit");
         }
         if !self.done.is_closed() {
@@ -914,6 +966,7 @@ impl LinkHandle {
     /// connection instead.
     pub fn send_data(&self, session: &Session, message: DataToBrain) -> bool {
         use kumochi_protocol::message::ScreenChoice;
+        let mic = matches!(&message, DataToBrain::MicPcm(_));
         let plain_turn = match &message {
             DataToBrain::TextSubmit {
                 turn,
@@ -930,7 +983,7 @@ impl LinkHandle {
             _ => None,
         };
         let out = DataOut::Submit(message);
-        if !session.open() {
+        if !session.open() || (mic && self.is_quitting()) {
             return false;
         }
         #[cfg(any(test, feature = "test-support"))]
@@ -946,6 +999,9 @@ impl LinkHandle {
         }
         self.shared
             .outbox(session, |outbox| {
+                if mic && self.is_quitting() {
+                    return false;
+                }
                 let turn = matches!(
                     &out,
                     DataOut::Submit(DataToBrain::TextSubmit { .. } | DataToBrain::AskAbout { .. })
@@ -1135,7 +1191,8 @@ impl Link {
             if self.quitting() || events.send_blocking(LinkEvent::State(state)).is_err() {
                 return;
             }
-            let connection = match self.connect() {
+            let reconnect_by = Instant::now() + CONNECT_TIMEOUT;
+            let connection = match self.connect(reconnect_by) {
                 Ok(connection) => connection,
                 Err(_) if self.quitting() => return,
                 Err(error) => {
@@ -1148,7 +1205,7 @@ impl Link {
                 }
             };
             tracing::info!(incarnation = ?connection.issue_origin.incarnation, "connected to the brain");
-            let attended = self.attend(connection, events);
+            let attended = self.attend_until(connection, events, reconnect_by);
             if attended == Attendance::Ended || self.quitting() {
                 return;
             }
@@ -1190,7 +1247,48 @@ impl Link {
     }
 
     fn quitting(&self) -> bool {
-        self.shared.quitting.load(Ordering::SeqCst)
+        self.shared.quitting()
+    }
+
+    fn quit_parked(&self, control: &PipeClient) {
+        self.shared.take_quit_input();
+        let generation = 0;
+        let (sender, pending) = async_channel::bounded(CONTROL_QUEUE);
+        if !queue_on(&sender, generation, 0, &mut self.shared.deletes())
+            || sender.try_send(ControlToBrain::Quitting).is_err()
+        {
+            return;
+        }
+        drop(sender);
+        let deadline = Instant::now() + QUIT_TIMEOUT;
+        while let Ok(message) = pending.try_recv() {
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return;
+            }
+            control.set_timeout(Some(left));
+            if let Err(error) = frame::write(&mut &*control, &message, Pipe::Control) {
+                tracing::debug!(%error, "parked control pipe shutdown write failed");
+                return;
+            }
+        }
+        self.shared.quit_sent.store(true, Ordering::Release);
+    }
+
+    fn queued_start_refusal(
+        &self,
+        control: &PipeClient,
+        events: &Sender<LinkEvent>,
+        reconnect_by: Instant,
+    ) -> Option<Attendance> {
+        if self.quitting() {
+            self.quit_parked(control);
+            Some(Attendance::Ended)
+        } else if events.is_closed() {
+            Some(Attendance::Ended)
+        } else {
+            (Instant::now() >= reconnect_by).then_some(Attendance::Retry)
+        }
     }
 
     /// The connection's speaker for the generation its output owner reserved; it announces its
@@ -1219,18 +1317,33 @@ impl Link {
         Some(speaker)
     }
 
+    #[cfg(windows)]
+    #[cfg(any(test, feature = "test-support"))]
+    fn attend(&self, connection: Connection, events: &Sender<LinkEvent>) -> Attendance {
+        self.attend_until(connection, events, Instant::now() + CONNECT_TIMEOUT)
+    }
+
     /// Serves one connection until it ends: starts the writers, says Connected, then reads data
     /// on its own thread and control here. A refused output needs explicit retry.
     #[expect(
         clippy::too_many_lines,
         reason = "one connection keeps its scoped readers and writers together"
     )]
-    fn attend(&self, connection: Connection, events: &Sender<LinkEvent>) -> Attendance {
+    fn attend_until(
+        &self,
+        connection: Connection,
+        events: &Sender<LinkEvent>,
+        reconnect_by: Instant,
+    ) -> Attendance {
         let Connection {
             control,
             data,
             issue_origin,
         } = connection;
+        let queued = self.audio == AudioSession::QueuedRequired;
+        if queued && let Some(refused) = self.queued_start_refusal(&control, events, reconnect_by) {
+            return refused;
+        }
         let (control_out, control_queue) = async_channel::bounded(CONTROL_QUEUE);
         let (data_out, data_queue) = async_channel::bounded(DATA_QUEUE);
         let Ok(previous) =
@@ -1244,7 +1357,6 @@ impl Link {
             return Attendance::Ended;
         };
         let generation = previous + 1;
-        let queued = self.audio == AudioSession::QueuedRequired;
         let ended = EndSession {
             alive: Arc::new(AtomicBool::new(true)),
             shared: Arc::clone(&self.shared),
@@ -1262,8 +1374,7 @@ impl Link {
         let mut helpers = Vec::new();
         let closing = Arc::<AtomicBool>::default();
         let reader = queued.then(Arc::<OnceLock<Thread>>::default);
-        if let Some(reader) = &reader {
-            let deadline = Instant::now() + HANDSHAKE_TIMEOUT;
+        let registration = if let Some(reader) = &reader {
             let (ack, started) = std::sync::mpsc::sync_channel(1);
             let pipes = [Arc::downgrade(&control), Arc::downgrade(&data)];
             let (close, c, d) = (
@@ -1288,66 +1399,63 @@ impl Link {
             {
                 return Attendance::Ended;
             }
-            if !self.shared.output.begin_queued(
+            let cancelled = || self.quitting() || events.is_closed();
+            let Some(deadline) = self.shared.output.begin_queued(
                 generation,
                 abort,
-                output::Queued::new(
-                    deadline,
-                    ack,
-                    Arc::clone(reader),
-                    Arc::clone(&closing),
-                    credit.narrated.clone(),
-                ),
-            ) {
-                return Attendance::Retry;
-            }
-            let shared = Arc::clone(&self.shared);
-            if spawn_helper("queued-start-deadline", &mut helpers, move || {
-                if started
-                    .recv_timeout(deadline.saturating_duration_since(Instant::now()))
-                    .is_err()
-                {
-                    shared.output.end(generation);
-                }
-            })
-            .is_err()
-            {
-                return Attendance::Retry;
-            }
-        }
-        let spawned = spawn_helper("link-control-writer", &mut helpers, {
-            let control = Arc::clone(&control);
-            let ended = ended.clone();
-            move || {
-                write_control(
-                    &control,
-                    &control_queue,
-                    #[cfg(any(test, feature = "test-support"))]
-                    &ended.shared.hold_control_writer,
-                );
-                drop(ended);
-            }
-        })
-        .and_then(|()| {
-            spawn_helper("link-data-writer", &mut helpers, {
-                let (data, credit) = (Arc::clone(&data), Arc::clone(&credit));
-                let ended = ended.clone();
-                move || {
-                    let _ended = ended;
-                    write_data(&data, &data_queue, &credit);
-                }
-            })
+                reconnect_by,
+                cancelled,
+                |deadline| {
+                    output::Queued::new(
+                        deadline,
+                        ack,
+                        Arc::clone(reader),
+                        Arc::clone(&closing),
+                        credit.narrated.clone(),
+                    )
+                },
+            ) else {
+                return self
+                    .queued_start_refusal(&control, events, reconnect_by)
+                    .unwrap_or(Attendance::Retry);
+            };
+            Some((started, deadline))
+        } else {
+            None
+        };
+        let connected = LinkEvent::Connected(Session {
+            alive: Arc::clone(&ended.alive),
+            closing: Arc::clone(&closing),
+            generation,
+            io: Arc::clone(&credit),
+            issue_origin,
         });
-        *self
+        let mut control_slot = self
             .shared
             .control
             .lock()
-            .unwrap_or_else(PoisonError::into_inner) = Some(Arc::clone(&control));
-        *self
+            .unwrap_or_else(PoisonError::into_inner);
+        let mut outbox = self
             .shared
             .outbox
             .lock()
-            .unwrap_or_else(PoisonError::into_inner) = Some(Outbox {
+            .unwrap_or_else(PoisonError::into_inner);
+        let legacy_connected = if !queued {
+            Some(connected)
+        } else if Instant::now() >= reconnect_by
+            || self.quitting()
+            || events.try_send(connected).is_err()
+        {
+            drop(outbox);
+            drop(control_slot);
+            return self
+                .queued_start_refusal(&control, events, reconnect_by)
+                .unwrap_or(Attendance::Retry);
+        } else {
+            None
+        };
+        *control_slot = Some(Arc::clone(&control));
+        *outbox = Some(Outbox {
             generation,
             control: control_out.clone(),
             data: data_out,
@@ -1355,6 +1463,8 @@ impl Link {
             submits: AtomicU32::new(0),
             closing: Arc::clone(&closing),
         });
+        drop(outbox);
+        drop(control_slot);
         self.shared.replay_microphone_stop();
         // Quit may have come while connecting, when there was no pipe to send it on; held
         // deletes go first. A full queue is retried by Quit's wait.
@@ -1362,6 +1472,40 @@ impl Link {
             control.set_timeout(Some(QUIT_TIMEOUT));
             let _told = self.shared.tell_quit();
         }
+        let spawned = (|| {
+            if let Some((started, deadline)) = registration {
+                let shared = Arc::clone(&self.shared);
+                spawn_helper("queued-start-deadline", &mut helpers, move || {
+                    if started
+                        .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                        .is_err()
+                    {
+                        shared.output.end(generation);
+                    }
+                })?;
+            }
+            spawn_helper("link-control-writer", &mut helpers, {
+                let control = Arc::clone(&control);
+                let ended = ended.clone();
+                move || {
+                    write_control(
+                        &control,
+                        &control_queue,
+                        #[cfg(any(test, feature = "test-support"))]
+                        &ended.shared.hold_control_writer,
+                    );
+                    drop(ended);
+                }
+            })?;
+            spawn_helper("link-data-writer", &mut helpers, {
+                let (data, credit) = (Arc::clone(&data), Arc::clone(&credit));
+                let ended = ended.clone();
+                move || {
+                    write_data(&data, &data_queue, &credit, &ended.shared);
+                    drop(ended);
+                }
+            })
+        })();
         // Before Connected, so nothing can claim the session's output before its owner knows it.
         let opening = (!queued)
             .then(|| {
@@ -1376,15 +1520,7 @@ impl Link {
                 )
             })
             .flatten();
-        let open = events
-            .send_blocking(LinkEvent::Connected(Session {
-                alive: Arc::clone(&ended.alive),
-                closing,
-                generation,
-                io: Arc::clone(&credit),
-                issue_origin,
-            }))
-            .is_ok();
+        let open = legacy_connected.is_none_or(|connected| events.send_blocking(connected).is_ok());
         // Only on a live session, so a speaker never outlives a connection that didn't start, and
         // fenced before its reader starts.
         let mut speaker = match opening {
@@ -1394,7 +1530,7 @@ impl Link {
                 let kept = self
                     .shared
                     .output
-                    .opened(output, opened, &self.shared.quitting, &ended.alive)
+                    .opened(output, opened, || self.quitting(), &ended.alive)
                     .unwrap_or_else(|speaker| {
                         drop(speaker);
                         control.abort();
@@ -1491,16 +1627,32 @@ impl Link {
     }
 
     /// Connects, starting the brain once if none answers, until [`CONNECT_TIMEOUT`].
-    fn connect(&self) -> Result<Connection, LinkError> {
-        let deadline = Instant::now() + CONNECT_TIMEOUT;
+    fn connect(&self, deadline: Instant) -> Result<Connection, LinkError> {
+        self.connect_with(deadline, |attempt| self.handshake(attempt))
+    }
+
+    fn connect_with(
+        &self,
+        deadline: Instant,
+        mut handshake: impl FnMut(Option<Instant>) -> Result<Connection, LinkError>,
+    ) -> Result<Connection, LinkError> {
+        let attempt = (self.audio == AudioSession::QueuedRequired).then_some(deadline);
         let mut launched = false;
         loop {
-            let error = match self.handshake() {
+            check_attempt(attempt)?;
+            let error = match handshake(attempt) {
+                Ok(connection) if check_attempt(attempt).is_err() => {
+                    if self.quitting() {
+                        self.quit_parked(&connection.control);
+                    }
+                    return Err(LinkError::ConnectExpired);
+                }
                 Ok(connection) => return Ok(connection),
                 Err(LinkError::NoBrain) if self.quitting() && !launched => {
                     return Err(LinkError::Quitting);
                 }
                 Err(LinkError::NoBrain) if !launched => {
+                    check_attempt(attempt)?;
                     platform::launch_detached(&self.brain).map_err(LinkError::Launch)?;
                     launched = true;
                     continue;
@@ -1523,20 +1675,22 @@ impl Link {
                 return Err(error);
             }
             tracing::debug!(%error, "retrying");
-            thread::sleep(RETRY_DELAY);
+            thread::sleep(attempt.map_or(RETRY_DELAY, |end| {
+                RETRY_DELAY.min(end.saturating_duration_since(Instant::now()))
+            }));
         }
     }
 
-    fn handshake(&self) -> Result<Connection, LinkError> {
-        let control = open(&Pipe::Control.name(self.session), &self.brain)?;
+    fn handshake(&self, attempt: Option<Instant>) -> Result<Connection, LinkError> {
+        let control = open(&Pipe::Control.name(self.session), &self.brain, attempt)?;
         // A brain that hangs mid-handshake must not hang the shell with it.
         control.set_timeout(Some(HANDSHAKE_TIMEOUT));
         let hello = Hello {
             build_id: BUILD_ID.to_owned(),
             capability: credential::read(self.session)?,
         };
-        handshake_pair(control, hello, self.audio, || {
-            open(&Pipe::Data.name(self.session), &self.brain)
+        handshake_pair(control, hello, self.audio, attempt, || {
+            open(&Pipe::Data.name(self.session), &self.brain, attempt)
         })
     }
 }
@@ -1545,14 +1699,17 @@ fn handshake_pair(
     control: PipeClient,
     hello: Hello,
     audio: AudioSession,
+    attempt: Option<Instant>,
     open_data: impl FnOnce() -> Result<PipeClient, LinkError>,
 ) -> Result<Connection, LinkError> {
     let greeting = match audio {
         AudioSession::Legacy => ControlToBrain::Hello(hello.clone()),
         AudioSession::QueuedRequired => ControlToBrain::QueuedHello(hello.clone()),
     };
-    frame::write(&mut &control, &greeting, Pipe::Control)?;
-    let issue_origin = welcome(&control)?;
+    let mut handshake = HandshakeIo(&control, attempt);
+    frame::write(&mut handshake, &greeting, Pipe::Control)?;
+    let issue_origin = welcome(&mut handshake)?;
+    check_attempt(attempt)?;
     let data = open_data()?;
     let greeting = match audio {
         AudioSession::Legacy => DataToBrain::Hello(hello),
@@ -1561,7 +1718,7 @@ fn handshake_pair(
             DataToBrain::QueuedHello(hello, issue_origin)
         }
     };
-    frame::write(&mut &data, &greeting, Pipe::Data)?;
+    frame::write(&mut HandshakeIo(&data, attempt), &greeting, Pipe::Data)?;
     if audio == AudioSession::QueuedRequired {
         data.set_timeout(None);
     }
@@ -1573,9 +1730,47 @@ fn handshake_pair(
     })
 }
 
+fn check_attempt(attempt: Option<Instant>) -> Result<(), LinkError> {
+    if attempt.is_some_and(|end| Instant::now() >= end) {
+        return Err(LinkError::ConnectExpired);
+    }
+    Ok(())
+}
+
+struct HandshakeIo<'a>(&'a PipeClient, Option<Instant>);
+
+impl<'a> HandshakeIo<'a> {
+    fn bounded(&self) -> std::io::Result<&'a PipeClient> {
+        if let Some(end) = self.1 {
+            let remaining = end.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(std::io::ErrorKind::TimedOut.into());
+            }
+            self.0.set_timeout(Some(remaining.min(HANDSHAKE_TIMEOUT)));
+        }
+        Ok(self.0)
+    }
+}
+
+impl Read for HandshakeIo<'_> {
+    fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
+        self.bounded()?.read(bytes)
+    }
+}
+
+impl Write for HandshakeIo<'_> {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.bounded()?.write(bytes)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
 /// The brain's answer to Hello: its issue session, or why this brain can't be used.
-fn welcome(control: &PipeClient) -> Result<IssueSession, LinkError> {
-    match frame::read::<ControlToShell>(&mut &*control, Pipe::Control)? {
+fn welcome(control: &mut impl Read) -> Result<IssueSession, LinkError> {
+    match frame::read::<ControlToShell>(control, Pipe::Control)? {
         None
         | Some(
             ControlToShell::RunState { .. }
@@ -1650,16 +1845,19 @@ fn wait_for_retry(events: &Sender<LinkEvent>, retries: &Receiver<()>) -> bool {
 }
 
 /// Opens a pipe and checks that the brain beside the shell serves it.
-fn open(name: &str, brain: &Path) -> Result<PipeClient, LinkError> {
+fn open(name: &str, brain: &Path, attempt: Option<Instant>) -> Result<PipeClient, LinkError> {
+    check_attempt(attempt)?;
     let pipe = PipeClient::open(name).map_err(|error| match error.raw_os_error() {
         _ if error.kind() == std::io::ErrorKind::NotFound => LinkError::NoBrain,
         Some(PIPE_BUSY) => LinkError::Busy,
         _ => LinkError::Io(error),
     })?;
+    check_attempt(attempt)?;
     let server = pipe.server_image().map_err(LinkError::Io)?;
     if !server.as_os_str().eq_ignore_ascii_case(brain.as_os_str()) {
         return Err(LinkError::NotOurBrain(server));
     }
+    check_attempt(attempt)?;
     Ok(pipe)
 }
 
@@ -1890,9 +2088,7 @@ fn watch(
                     )
                 {
                     shared.microphone.cancel(gesture);
-                    let input = &shared.input;
-                    let _cleared =
-                        input.compare_exchange(gesture.0, 0, Ordering::AcqRel, Ordering::Acquire);
+                    shared.clear_input(gesture);
                 }
                 let event = LinkEvent::VoiceHold {
                     generation,
@@ -2187,10 +2383,11 @@ fn write_control(
 
 /// Writes queued turns in order, and after each wake-up any credit that has added up, until the
 /// queue closes or the pipe fails.
-fn write_data(data: &PipeClient, queue: &Receiver<DataOut>, credit: &SessionIo) {
+fn write_data(data: &PipeClient, queue: &Receiver<DataOut>, credit: &SessionIo, shared: &Shared) {
     let mut encoded = Zeroizing::new(Vec::new());
     while let Ok(out) = queue.recv_blocking() {
         let submitted = match &out {
+            DataOut::Submit(DataToBrain::MicPcm(_)) if shared.quitting() => Ok(()),
             DataOut::Submit(message) => write_data_frame(&mut &*data, message, &mut encoded),
             DataOut::Credit => Ok(()),
         };

@@ -938,6 +938,11 @@ delivery, not worker/native copies or physical retirement.
 
 ### Voice-only held turns
 
+Quit immediately cancels collection and fences the last tracked gesture for the
+background shutdown owner. No new microphone packets are admitted, and the
+data writer discards buffered PCM it takes after Quit. A transfer already in
+progress is not recalled. Ordinary Esc still uses its normal cancellation path.
+
 `voice.hold_to_talk` defaults on, including older files without the key. Settings → Voice
 persists its separate `SetHoldToTalk` operation; changing the idle policy leaves it alone.
 The Brain refuses held input and key-down reloads while it is off or an off save is queued

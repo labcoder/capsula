@@ -176,6 +176,7 @@ impl Presence {
                 0
             };
             if receipt.is_ok()
+                && !link.is_quitting()
                 && !link.send_control(&session, ControlToBrain::VoiceHoldStopped { gesture })
             {
                 tracing::warn!(stage = ?FailureStage::CaptureReceipt, reason = ?FailureReason::StopSend, "held speech input failed");

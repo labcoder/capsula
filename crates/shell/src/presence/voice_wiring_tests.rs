@@ -15,6 +15,53 @@ use crate::link::{Batch, LinkEvent, LinkHandle, Session};
 use crate::platform::microphone::{Generation, Mode};
 use crate::strings::Text;
 
+#[gpui::test]
+fn actual_quit_revokes_legacy_capture_without_waiting_for_the_outbox(cx: &mut TestAppContext) {
+    use crate::link::fixture;
+    use crate::platform::microphone::MicError;
+
+    let pipe = fixture::attended("legacy-presence-quit");
+    let events = fixture::patient(pipe.events.clone());
+    let session = fixture::connected(fixture::next(&events));
+    let owner = test_fixture::presence(cx);
+    cx.update(|cx| {
+        cx.set_global(super::PresenceApp {
+            _owner: owner.clone(),
+        });
+    });
+    let gesture = GestureId(7);
+    let token = pipe.handle.microphone_gate().arm(gesture).unwrap();
+    pipe.handle.track_input(gesture);
+    owner.update(cx, |this, _| {
+        this.link = pipe.handle.clone();
+        this.session = Some(session.clone());
+    });
+    fixture::with_outbox_held(&pipe.handle, &session, || {
+        owner.update(cx, Presence::quit);
+        assert!(!pipe.handle.input_is(gesture));
+        assert_eq!(
+            token.mode(&session.alive(), Instant::now()),
+            Err(MicError::Cancelled)
+        );
+        owner.read_with(cx, |this, _| assert!(this.voice.paused.get()));
+        assert!(
+            !pipe.handle.send_data(
+                &session,
+                DataToBrain::MicPcm(kumochi_protocol::message::MicPcm {
+                    gesture,
+                    seq: 0,
+                    rate: 48_000,
+                    last: false,
+                    samples: vec![5; 960],
+                },)
+            ),
+            "stale PCM does not wait for the outbox after Quit"
+        );
+    });
+    drop(pipe);
+    cx.run_until_parked();
+}
+
 pub(super) fn ready(
     cx: &mut TestAppContext,
 ) -> (

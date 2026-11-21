@@ -77,6 +77,9 @@ matches those receipts even when Done made the later quiet report stale to the B
 The queued link keeps its authenticated pair in the existing output owner. This does not reserve a
 legacy tail, grant capture, or accept turns before the matching registration receipt. Ending or withdrawing
 that pair drops its run input before aborting both pipes and closing both writer mailboxes.
+On reconnect, an otherwise admissible queued pair waits for the exact retired-microphone proof
+while an old bound inhibit still owns capture. Nothing registers or starts during this bounded
+wait. A missing proof never drops the inhibit, and audio tail debt still refuses admission.
 A worker's exact known-tail stop report can still pay its local quiet debt after disconnection.
 It cannot send that old receipt to another pair. A live pair needs the report queued before
 admitting another turn; a refused live report ends the pair. After an earlier retirement report

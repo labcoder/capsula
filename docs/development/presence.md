@@ -108,8 +108,10 @@ placement calls `bounds_changed` afterwards so GPUI receives its otherwise-dropp
 
 The native tray menu offers position, Retry and Quit. Position is deliberately session-local
 until the brain's settings flow and Settings → General arrive. No settings file is written by
-the shell. Closing a transient panel is not Quit. Quit uses the existing idempotent link
-shutdown and waits off the UI thread before exiting.
+the shell. Closing a transient panel is not Quit. Quit immediately revokes local capture and
+leaves wire cancellation and shutdown to the background link owner, without waiting for the
+outbox on the UI thread. It also drops the screen line locally before presenter disconnection,
+without trying to repaint, open a host, or report a scene failure on the closing pair.
 
 `kumochi --smoke` shows the panel programmatically after one second and requests the same
 graceful Quit after ten seconds, without moving the pointer or sending input. Initial surfaces are

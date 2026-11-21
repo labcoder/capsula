@@ -6,13 +6,16 @@
 use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering, fence};
 use std::sync::mpsc::SyncSender;
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError, TryLockError};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError, TryLockError};
+use std::time::Instant;
 
 use async_channel::{Receiver, Sender};
 use kumochi_protocol::message::{GestureId, OutputGeneration, RunId};
 
 use crate::platform::microphone::{Generation, MicOwner, Reserved, Running};
 use crate::speaker::{Command, FAULT, RELEASED, Speaker, Tail, UNKNOWN};
+
+use super::{HANDSHAKE_TIMEOUT, RETRY_DELAY};
 
 mod queued;
 pub(super) use queued::{NarratedReservation, Queued, RefusedTail};
@@ -38,6 +41,7 @@ pub type Witness = Box<dyn FnMut(&Command) + Send>;
 // replaces its handle, even in turn, while deferred timers or completions survive.
 pub struct OutputOwner {
     state: Mutex<State>,
+    mic_retired: Condvar,
     changed: Sender<()>,
     changes: Receiver<()>,
     /// Runs as `opened` is entered, before its decision: a test's point between the link's own
@@ -54,6 +58,7 @@ impl Default for OutputOwner {
         let (sender, changes) = async_channel::bounded(1);
         Self {
             state: Mutex::default(),
+            mic_retired: Condvar::new(),
             changed: sender,
             changes,
             #[cfg(any(test, feature = "test-support"))]
@@ -126,6 +131,7 @@ struct Inhibit {
     gesture: GestureId,
     revision: u32,
     mic: Option<Generation>,
+    retiring: bool,
 }
 
 impl Inhibit {
@@ -471,32 +477,63 @@ impl OutputOwner {
         begun
     }
 
-    pub(super) fn begin_queued(&self, session: u64, abort: Abort, queued: Queued) -> bool {
+    pub(super) fn begin_queued(
+        &self,
+        session: u64,
+        abort: Abort,
+        reconnect_by: Instant,
+        cancelled: impl Fn() -> bool,
+        queued: impl FnOnce(Instant) -> Queued,
+    ) -> Option<Instant> {
         let mut state = self.lock();
-        if state.session.is_some()
-            || state.off
-            || state.inhibit.is_some()
-            || state.ledger.iter().any(Option::is_some)
-            || state.queued.as_ref().is_some_and(Queued::owes)
-        {
-            return false;
-        }
-        let Some(generation) = state.generations.checked_add(1) else {
-            return false;
+        let mut waiting = None;
+        let generation = loop {
+            if Instant::now() >= reconnect_by
+                || state.session.is_some()
+                || state.off
+                || state.ledger.iter().any(Option::is_some)
+                || state.queued.as_ref().is_some_and(Queued::owes)
+            {
+                return None;
+            }
+            let generation = state.generations.checked_add(1)?;
+            let Some(inhibit) = &state.inhibit else {
+                break generation;
+            };
+            if !inhibit.retiring
+                || waiting.is_some_and(|serial| serial != inhibit.serial)
+                || cancelled()
+            {
+                return None;
+            }
+            let left = reconnect_by.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return None;
+            }
+            waiting = Some(inhibit.serial);
+            (state, _) = self
+                .mic_retired
+                .wait_timeout(state, left.min(RETRY_DELAY))
+                .unwrap_or_else(PoisonError::into_inner);
+            state.settle();
         };
+        let startup = Instant::now();
+        if startup >= reconnect_by || cancelled() {
+            return None;
+        }
+        let registration_by = startup + HANDSHAKE_TIMEOUT;
         state.generations = generation;
         state.session = Some(session);
         state.output = Output::Queued(OutputGeneration(generation));
         state.abort = Some(abort);
-        state.queued = Some(queued);
-        true
+        state.queued = Some(queued(registration_by));
+        Some(registration_by)
     }
 
     /// The link thread's open of `generation` returned, before its reader starts. Under the owner's
-    /// lock it reads whether Quit began and whether its session is still `alive`; Quit and
-    /// session loss pass through [`OutputOwner::cancelled`] after setting those, so this decision
-    /// and theirs are ordered. A refused speaker is never accepted, so it announces nothing, and is
-    /// let go after the lock. A kept speaker is fenced first: withdrawn when talk-back went off,
+    /// lock it reads whether Quit began and whether its session is still `alive`. These reads
+    /// decide whether the opening wins against Quit or session loss. A refused speaker announces
+    /// nothing and is let go after the lock. A kept speaker is fenced first: withdrawn when talk-back went off,
     /// else paused under a held inhibit, and only then accepted, so its announcement can't
     /// precede its fence. An `Err` speaker couldn't be fenced: the link drops it and ends the
     /// session. A stream that retired before this keeps its entry until now, so the session never
@@ -508,7 +545,7 @@ impl OutputOwner {
         &self,
         generation: OutputGeneration,
         speaker: Option<Speaker>,
-        quitting: &AtomicBool,
+        quitting: impl FnOnce() -> bool,
         alive: &AtomicBool,
     ) -> Result<Option<Speaker>, Speaker> {
         #[cfg(any(test, feature = "test-support"))]
@@ -522,7 +559,7 @@ impl OutputOwner {
         }
         let mut state = self.lock();
         let opening = state.output == Output::Opening(generation);
-        let current = !quitting.load(Ordering::SeqCst) && alive.load(Ordering::Acquire);
+        let current = !quitting() && alive.load(Ordering::Acquire);
         let mut refused = None;
         let opened = match speaker {
             None => {
@@ -566,8 +603,7 @@ impl OutputOwner {
         opened
     }
 
-    /// Quit began or a session was lost, as the caller already published: returns once no open
-    /// is mid-decision, so every later [`OutputOwner::opened`] sees it.
+    /// The session was lost, as the caller already published: waits for any opening decision.
     pub(super) fn cancelled(&self) {
         drop(self.state.lock().unwrap_or_else(PoisonError::into_inner));
     }
@@ -603,11 +639,10 @@ impl OutputOwner {
         if let Some(owner) = &mut state.queued {
             owner.close();
         }
-        if let Some(mic) = state
-            .inhibit
-            .as_ref()
-            .and_then(|inhibit| inhibit.mic.as_ref())
+        if let Some(inhibit) = &mut state.inhibit
+            && let Some(mic) = &inhibit.mic
         {
+            inhibit.retiring = true;
             mic.cancel();
         }
         let released = (state.commands.take(), state.abort.take());
@@ -645,6 +680,7 @@ impl OutputOwner {
                 gesture,
                 revision: 0,
                 mic: None,
+                retiring: false,
             };
             let token = inhibit.token();
             state.inhibit = Some(inhibit);
@@ -808,6 +844,7 @@ impl OutputOwner {
         state.inhibit = None;
         let abort = state.command(Command::Resume(token.serial));
         drop(state);
+        self.mic_retired.notify_one();
         self.after(abort);
         Ok(())
     }

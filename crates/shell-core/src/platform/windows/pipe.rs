@@ -81,6 +81,11 @@ impl PipeClient {
         }
     }
 
+    /// Whether a local abort has permanently disabled transfers on this handle.
+    pub(crate) fn is_aborted(&self) -> bool {
+        self.aborted.load(Ordering::SeqCst)
+    }
+
     /// The executable of the process serving this pipe.
     ///
     /// # Errors
@@ -119,7 +124,7 @@ impl PipeClient {
             hEvent: HANDLE(event.as_raw_handle()),
             ..Default::default()
         };
-        if self.aborted.load(Ordering::SeqCst) {
+        if self.is_aborted() {
             return Err(ERROR_OPERATION_ABORTED.to_hresult().into());
         }
         if let Err(error) = start(self.raw(), &raw mut overlapped)
@@ -128,7 +133,7 @@ impl PipeClient {
             return Err(error);
         }
         // An abort between the check above and the start found nothing to cancel.
-        if self.aborted.load(Ordering::SeqCst) {
+        if self.is_aborted() {
             // SAFETY: cancels only this operation; the wait below lets it finish before
             // `overlapped` and the buffer go away.
             if let Err(error) = unsafe { CancelIoEx(self.raw(), Some(&raw const overlapped)) } {

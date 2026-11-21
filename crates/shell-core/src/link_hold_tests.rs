@@ -426,6 +426,32 @@ fn hotkey_delivery_can_mark_escape_after_the_raw_edge_already_cancelled_input() 
 }
 
 #[test]
+fn quitting_discards_previous_pcm_before_the_writer_takes_it() {
+    let (peer, data) = pair("quit-buffered-pcm");
+    peer.set_timeout(Some(PATIENCE));
+    let (send, queue) = async_channel::bounded(1);
+    send.try_send(DataOut::Submit(DataToBrain::MicPcm(MicPcm {
+        gesture: GestureId(1),
+        seq: 0,
+        rate: 48_000,
+        last: false,
+        samples: vec![23; 960],
+    })))
+    .unwrap();
+    drop(send);
+    let link = LinkHandle::detached();
+    link.track_input(GestureId(1));
+    assert!(link.begin_quit());
+    let session = Session::detached(1, Incarnation(1));
+    super::super::write_data(&data, &queue, &session.io, &link.shared);
+    drop(data);
+    assert_eq!(
+        frame::read::<DataToBrain>(&mut &peer, Pipe::Data).unwrap(),
+        None
+    );
+}
+
+#[test]
 fn matching_clear_and_escape_cancel_preserve_cancel_stop_order() {
     let mut link = LinkHandle::detached();
     let queue = link.record_controls();
