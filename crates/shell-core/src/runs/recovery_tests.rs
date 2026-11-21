@@ -106,6 +106,36 @@ fn each_reconnect_key_restores_the_exact_text_once() {
 }
 
 #[test]
+fn a_failed_queued_enqueue_preserves_the_older_recovery_until_a_turn_is_accepted() {
+    use kumochi_protocol::message::AudioSession;
+
+    for accepted in [false, true] {
+        let mut runs = ready();
+        submit(&mut runs, "older");
+        thinking(&mut runs, 1, 1, 1);
+        let attempt = runs.submit_with_audio("new", AudioSession::QueuedRequired, |frame| {
+            assert!(matches!(
+                frame,
+                kumochi_protocol::message::DataToBrain::TextSubmit { turn: 2, .. }
+            ));
+            accepted
+        });
+        assert_eq!(
+            attempt,
+            if accepted {
+                Ok(())
+            } else {
+                Err(Refused::Offline)
+            }
+        );
+        assert_eq!(
+            failed(&mut runs, 1, 1, ErrorKey::SessionEnded, None),
+            (!accepted).then(|| Content::from("older"))
+        );
+    }
+}
+
+#[test]
 fn reconnect_after_answering_never_restores_an_already_started_turn() {
     for key in RECONNECT {
         let mut runs = ready();

@@ -1618,6 +1618,35 @@ fn renewal_run() -> LinkEvent {
 }
 
 #[gpui::test]
+fn queued_pre_ack_send_preserves_the_composer_and_older_recovery(cx: &mut TestAppContext) {
+    use crate::strings::Text;
+    use kumochi_protocol::message::AudioSession;
+
+    let (owner, data, control) = ready(cx);
+    draft(&owner, "unsent draft", cx);
+    owner.update(cx, |owner, cx| {
+        owner
+            .runs
+            .submit("older", |_| true)
+            .expect("older turn saved for recovery");
+        let (events, _receiver) = async_channel::unbounded();
+        let (queued, _not_started) = crate::link::prepare(events, AudioSession::QueuedRequired)
+            .expect("prepare without opening IPC");
+        owner.link = queued;
+        owner.voice.lost = Some(Text::VoiceRestartRequired);
+        owner.submit(cx).expect("early intent is ignored");
+        assert_eq!(owner.voice.lost, Some(Text::VoiceRestartRequired));
+        assert_eq!(owner.runs.kept(), [5]);
+        assert_eq!(
+            owner.text.as_ref().unwrap().input.read(cx).value().as_ref(),
+            "unsent draft"
+        );
+    });
+    assert!(data.is_empty());
+    assert!(control.is_empty());
+}
+
+#[gpui::test]
 fn an_accepted_submit_starts_the_next_renewal_incident(cx: &mut TestAppContext) {
     let (owner, data, control) = ready(cx);
     receive(&owner, vec![renewal_general()], cx);

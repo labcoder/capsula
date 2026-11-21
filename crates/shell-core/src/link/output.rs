@@ -14,6 +14,9 @@ use kumochi_protocol::message::{GestureId, OutputGeneration, RunId};
 use crate::platform::microphone::{Generation, MicOwner, Reserved, Running};
 use crate::speaker::{Command, FAULT, RELEASED, Speaker, Tail, UNKNOWN};
 
+mod queued;
+pub(super) use queued::{Queued, RefusedTail};
+
 #[cfg(test)]
 #[path = "output_tests.rs"]
 mod tests;
@@ -70,6 +73,7 @@ impl fmt::Debug for OutputOwner {
 #[derive(Default)]
 struct State {
     session: Option<u64>,
+    queued: Option<Queued>,
     output: Output,
     commands: Option<SyncSender<Command>>,
     abort: Option<Abort>,
@@ -95,6 +99,7 @@ enum Output {
     Opening(OutputGeneration),
     Live(OutputGeneration),
     Lost(OutputGeneration),
+    Queued(OutputGeneration),
 }
 
 /// Why a session has no output.
@@ -466,6 +471,27 @@ impl OutputOwner {
         begun
     }
 
+    pub(super) fn begin_queued(&self, session: u64, abort: Abort, queued: Queued) -> bool {
+        let mut state = self.lock();
+        if state.session.is_some()
+            || state.off
+            || state.inhibit.is_some()
+            || state.ledger.iter().any(Option::is_some)
+            || state.queued.as_ref().is_some_and(Queued::owes)
+        {
+            return false;
+        }
+        let Some(generation) = state.generations.checked_add(1) else {
+            return false;
+        };
+        state.generations = generation;
+        state.session = Some(session);
+        state.output = Output::Queued(OutputGeneration(generation));
+        state.abort = Some(abort);
+        state.queued = Some(queued);
+        true
+    }
+
     /// The link thread's open of `generation` returned, before its reader starts. Under the owner's
     /// lock it reads whether Quit began and whether its session is still `alive`; Quit and
     /// session loss pass through [`OutputOwner::cancelled`] after setting those, so this decision
@@ -555,6 +581,13 @@ impl OutputOwner {
             .unwrap_or_else(PoisonError::into_inner) = Some(hook);
     }
 
+    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(all(windows, debug_assertions))]
+    pub(super) fn with_locked<T>(&self, run: impl FnOnce() -> T) -> T {
+        let _held = self.lock();
+        run()
+    }
+
     /// Ends `session`, from [`LinkHandle::end`] or first in the link thread's teardown, whichever
     /// comes first: claims stop matching, a bound microphone is cancelled, and the speaker's queue
     /// and the abort are let go here. Pending tails stay in the ledger; the inhibit stays for the
@@ -564,8 +597,12 @@ impl OutputOwner {
         if state.session != Some(session) {
             return;
         }
+        let queued = matches!(state.output, Output::Queued(_));
         state.session = None;
         state.output = Output::Closed;
+        if let Some(owner) = &mut state.queued {
+            owner.close();
+        }
         if let Some(mic) = state
             .inhibit
             .as_ref()
@@ -575,8 +612,12 @@ impl OutputOwner {
         }
         let released = (state.commands.take(), state.abort.take());
         drop(state);
-        drop(released);
-        self.wake();
+        if queued {
+            self.after(released.1);
+        } else {
+            drop(released);
+            self.wake();
+        }
     }
 
     /// Takes the capture inhibit for `gesture` and pauses a live speaker under its serial. Never
@@ -587,7 +628,10 @@ impl OutputOwner {
     /// couldn't take the pause, which ends the session.
     pub fn acquire(&self, gesture: GestureId) -> Result<InhibitToken, Denied> {
         let mut state = self.try_lock()?;
-        if state.inhibit.is_some() {
+        if state.inhibit.is_some()
+            || matches!(state.output, Output::Queued(_))
+            || state.queued.as_ref().is_some_and(Queued::owes)
+        {
             return Err(Denied::Inhibited);
         }
         let serial = state.serials.checked_add(1).ok_or(Denied::Overflow)?;
@@ -657,6 +701,7 @@ impl OutputOwner {
             Output::Quiet { epoch, .. } => OutputKey::NoOutput(epoch),
             Output::Opening(_) => return Err(Denied::Opening),
             Output::Closed | Output::Lost(_) => return Err(Denied::Stale),
+            Output::Queued(_) => return Err(Denied::Unqualified),
         };
         let claim = Claim {
             session,
@@ -784,11 +829,21 @@ impl OutputOwner {
     ///
     /// # Errors
     /// [`Denied::Busy`] on contention, [`Denied::Stale`] when `session` isn't current, and
-    /// [`Denied::Lost`] when the speaker couldn't take it, which ends the session.
+    /// [`Denied::Lost`] when the speaker couldn't take it. Queued admission closes immediately;
+    /// its caller schedules the session teardown off the UI thread.
     pub fn stop(&self, session: u64, run: RunId) -> Result<(), Denied> {
         let mut state = self.try_lock()?;
         if state.session != Some(session) {
             return Err(Denied::Stale);
+        }
+        if matches!(state.output, Output::Queued(_))
+            && let Some(queued) = &mut state.queued
+        {
+            if queued.stop(run) {
+                return Ok(());
+            }
+            queued.refuse();
+            return Err(Denied::Lost);
         }
         let abort = state.command(Command::Stop(run));
         drop(state);
@@ -818,6 +873,13 @@ impl OutputOwner {
     pub fn withdraw(&self) {
         let mut state = self.lock();
         if std::mem::replace(&mut state.off, true) {
+            return;
+        }
+        if matches!(state.output, Output::Queued(_))
+            && let Some(session) = state.session
+        {
+            drop(state);
+            self.end(session);
             return;
         }
         let abort = state.command(Command::Withdraw);

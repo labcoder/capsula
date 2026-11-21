@@ -53,6 +53,9 @@ use crate::engines::{self, Answer, Asks, Cancel, Engine, SendGate, SendLease};
 use crate::ipc;
 use crate::store::{SceneState, Store};
 use crate::tap::Tap;
+
+#[cfg(all(windows, debug_assertions, feature = "test-support"))]
+pub(crate) mod audio_fixture;
 use crate::voice::pump::Pump;
 use crate::voice::tts::{TtsError, TtsEvent};
 use account::Accounts;
@@ -669,6 +672,7 @@ impl Brain {
     /// own read goes on for [`QUIT_GRACE`], so a `Quitting` already in the pipe, even one
     /// partly read, is still accepted; the controls it forwards meanwhile keep being applied, so
     /// its channel never fills. Controls forwarded before the Quit apply before `serve` returns.
+    #[cfg(test)]
     pub(crate) async fn serve<C, D>(&mut self, control: C, data: D, tap: &mut Tap) -> Ended
     where
         C: AsyncRead + AsyncWrite + Unpin,
@@ -678,7 +682,7 @@ impl Brain {
             .await
     }
 
-    async fn serve_with_audio<C, D>(
+    pub(crate) async fn serve_with_audio<C, D>(
         &mut self,
         control: C,
         data: D,
@@ -1540,13 +1544,15 @@ async fn read_data(
     pcm: Option<&hold::Ingress>,
     registration: Option<&Cell<Registration>>,
 ) -> Ended {
+    #[cfg(all(windows, debug_assertions, feature = "test-support"))]
+    let probe = audio_fixture::probe();
     loop {
         match ipc::read::<DataToBrain>(pipe, Pipe::Data).await {
             Ok(Some(DataToBrain::Hello(_) | DataToBrain::QueuedHello(..))) => {
                 return Ended::Broken("Hello sent twice");
             }
             Ok(Some(DataToBrain::MicPcm(mut chunk))) => {
-                if let Some(pcm) = pcm {
+                if let Some(pcm) = pcm.filter(|_| registration.is_none()) {
                     pcm.push(chunk);
                 } else {
                     zeroize::Zeroize::zeroize(&mut chunk.samples);
@@ -1556,6 +1562,11 @@ async fn read_data(
                 tracing::debug!(op = message.op(), "issue data ignored");
             }
             Ok(Some(DataToBrain::Credit { bytes })) => {
+                #[cfg(all(windows, debug_assertions, feature = "test-support"))]
+                if let Some(probe) = &probe {
+                    probe.credit(queue, ready, bytes);
+                    continue;
+                }
                 queue.borrow_mut().grant(bytes);
                 ready.notify_one();
             }
@@ -1594,6 +1605,13 @@ async fn read_data(
             {
                 return Ended::Broken("turn before queued audio registration");
             }
+            Ok(Some(
+                DataToBrain::AskAbout { .. }
+                | DataToBrain::TextSubmit {
+                    screen: kumochi_protocol::message::ScreenChoice::Include { .. },
+                    ..
+                },
+            )) if registration.is_some() => return Ended::Broken("non-Plain queued turn"),
             Ok(Some(DataToBrain::TextSubmit {
                 turn, thread, text, ..
             })) => {
@@ -1630,7 +1648,13 @@ async fn write_control(
     pipe: &mut (impl AsyncWrite + Unpin),
     out: &mut mpsc::Receiver<Vec<u8>>,
 ) -> Ended {
+    #[cfg(all(windows, debug_assertions, feature = "test-support"))]
+    let probe = audio_fixture::probe();
     while let Some(frame) = out.recv().await {
+        #[cfg(all(windows, debug_assertions, feature = "test-support"))]
+        if let Some(probe) = &probe {
+            probe.before_control(&frame).await;
+        }
         if let Err(error) = pipe.write_all(&frame).await {
             tracing::warn!(%error, "control pipe failed");
             return Ended::Lost;
@@ -1646,6 +1670,8 @@ async fn write_data(
     ready: &Notify,
     room: &Notify,
 ) -> Ended {
+    #[cfg(all(windows, debug_assertions, feature = "test-support"))]
+    let probe = audio_fixture::probe();
     let mut ticks = tokio::time::interval(crate::recall::control::POLL);
     ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
@@ -1658,6 +1684,14 @@ async fn write_data(
             room.notify_one();
         }
         let Some(frame) = next else {
+            #[cfg(all(windows, debug_assertions, feature = "test-support"))]
+            if let Some(probe) = &probe
+                && queue.borrow().credit_blocked()
+            {
+                probe
+                    .data_blocked
+                    .store(true, std::sync::atomic::Ordering::Release);
+            }
             tokio::select! {
                 () = ready.notified() => {},
                 _ = ticks.tick(), if queue.borrow().has_reads() => {},

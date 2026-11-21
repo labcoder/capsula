@@ -333,6 +333,9 @@ impl Presence {
 
 impl Presence {
     pub(super) fn submit(&mut self, cx: &mut Context<'_, Self>) -> Result<(), OpenError> {
+        if !self.link.admits_text(self.session.as_ref()) {
+            return Ok(());
+        }
         self.cancel_voice(cx);
         self.voice.lost = None;
         let Some(text) = &self.text else {
@@ -340,11 +343,13 @@ impl Presence {
         };
         let draft = text.input.read(cx).value();
         let (link, session) = (&self.link, &self.session);
-        let result = self.runs.submit(&draft, |turn| {
-            session
-                .as_ref()
-                .is_some_and(|session| link.send_data(session, turn))
-        });
+        let result = self
+            .runs
+            .submit_with_audio(&draft, link.audio_session(), |turn| {
+                session
+                    .as_ref()
+                    .is_some_and(|session| link.send_data(session, turn))
+            });
         diagnostics::record(cx, format_args!("submit sent={}", result.is_ok()));
         let previous = (self.error.clone(), self.refusal);
         submission_notice(&mut self.error, &mut self.refusal, result);

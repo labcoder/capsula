@@ -1,6 +1,6 @@
 # The pipes and the handshake
 
-## Queued-required session mode (dormant)
+## Queued-required session mode (internal)
 
 The shipped shell selects Legacy: control Hello, Welcome, then data Hello, with their
 existing bytes. The internal queued-required selection instead sends the appended QueuedHello
@@ -9,15 +9,39 @@ checks the executable, matching build and capability on both legs and the existi
 pairing. It refuses a mixed mode or a data Hello from another session. The queued second leg
 has one deadline for connecting and reading; refusal renews both pipe instances.
 
-This negotiates a requirement, not an installed audio output. Both production endpoints
-still refuse queued-required before serving or attending, with no fallback to Legacy.
-The dormant Brain serving path starts each queued pair closed to turns. It sends
+This negotiates a requirement, not an installed audio output. An authenticated queued pair
+installs the exact reserved issue session. Both pipes return to regular I/O after their bounded
+handshake. Ordinary launch still selects Legacy, with no queued-to-Legacy fallback.
+The Brain starts each queued pair closed to turns. It sends
 `QueuedAudioRegistered(output)` once, only after a valid `QueuedAudioOutput` installs the
 exact logical output in Queued mode. It opens admission only if that receipt queues.
 Early typed/Ask frames and new hold intent end the pair without buffering for later;
 settings, recovery, and cleanup keep their existing paths. A duplicate registration,
 Legacy announcement, current-output withdrawal, or failed receipt enqueue ends the pair.
 The receipt isn't proof of playback, silence, or the shell having received it.
+
+The queued shell link registers only after talk-back Settings and accepts the exact registration
+receipt once, by the original startup deadline. Its data reader can wait on one charged Plain
+announcement or PCM frame until the control reader names that run. Control stays available while
+the data head waits, and the session owner wakes that head on binding, returned capacity, revocation
+or close. Speech-start announcements and scene speech promises end the queued pair without credit.
+Each run uses the existing per-run worker. A Stop fences that run's late PCM, and a replacement
+cannot use closing a pipe or freeing a device permit as proof of quiet.
+Esc fences the scene before offering Stop or StopScenes to its exact session's control mailbox.
+A SceneFailed caused by host refusal follows in that same mailbox; neither offer takes the
+outbox mutex. If the scene stream is broken or the mailbox or queued speaker refuses Stop,
+admission closes on that session before background teardown aborts either pipe. A new pair
+refused for unproved quiet waits for explicit Retry. A refused speech retirement aborts the
+original pair immediately and seals wire reporting. The old worker has one bounded drain to
+prove its callback quiet locally; only then does the link offer Retry. If it can't prove quiet,
+the connection remains unavailable until restart. No old receipt goes to a replacement pair.
+
+The queued shell checks fresh typed intent before changing the composer or its recovery state.
+Enter while admission is closed does not submit; it keeps the draft and does not replay it when
+the pair becomes ready. It checks the same owner again while offering the turn to the outbox.
+A refused enqueue reserves no turn and does not discard older recovery. One accepted offer can
+name one run, or be refused by its own turn number. The Plain path does not admit voice holds,
+AskAbout or screen capture, and refuses conducted Speech rather than treating it as Plain.
 
 ## Voice-only hold messages
 
@@ -706,9 +730,9 @@ records only their operation and length.
 | Shell to brain | control | `SpeechProgress` | `run`, `segment`, `sample`, `t_qpc` |
 | Shell to brain | control | `SegmentPlayed` | `run`, `segment`, `samples` |
 | Shell to brain | control | `SpeechStopped` | `run`, optional `cursor` (`Cursor { segment, sample }`) |
-| Shell to brain | control | `SpeechRetired` (dormant queued output) | `run`, logical `output`, `segment`, cumulative `retired`, `heard`, `final_segment` |
+| Shell to brain | control | `SpeechRetired` (internal queued output) | `run`, logical `output`, `segment`, cumulative `retired`, `heard`, `final_segment` |
 | Shell to brain | control | `AudioOutput` | `rate`, `generation` |
-| Shell to brain | control | `QueuedAudioOutput` (dormant) | `rate`, `generation`; selects retirement receipts before a run is admitted |
+| Shell to brain | control | `QueuedAudioOutput` (internal) | `rate`, `generation`; selects retirement receipts before a run is admitted |
 | Shell to brain | control | `SpeechDecision` (dormant) | `run`, logical `output`, `segment`, Allow or Discard |
 | Brain to shell | control | `SpeechDecisionTaken` (dormant) | the same run, output and segment, after consumption or terminal |
 | Shell to brain | control | `AudioOutputUnavailable` | `generation` |
