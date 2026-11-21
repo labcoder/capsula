@@ -1387,3 +1387,49 @@ fn a_key_run_that_may_have_written_its_picture_starts_no_inline_rewrite() {
     written(&mut core);
     assert_eq!(count(&hungry(&mut core), rewrites), 1, "ChatGPT");
 }
+
+/// A key send its own lease stopped after a write ends its run by why the grant first closed, as a
+/// Responses send does, never as the key being unreachable or the picture stopping.
+#[test]
+fn a_key_send_withheld_by_its_grant_ends_by_the_grants_first_cause() {
+    use crate::connections::anthropic::error::Failure;
+    use crate::coordinator::PictureRoutes;
+    use crate::engines::{EngineFailure, Finish, TurnEvent};
+    let (mut core, _) = pictured_run(KEY, PictureRoutes::new(true, false));
+    let lease = lease_of(
+        &core
+            .handle(Input::SendReady {
+                key: SendKey::Build(key()),
+                hold: None,
+            })
+            .expect("current"),
+    );
+    let grant = core.picture_grant(lease).expect("a revocable grant");
+    let write = grant.reserve_write().expect("an admitted writer poll");
+    core.lose_pictures(Some(KEY));
+    let lost = core
+        .handle(Input::Engines(KEY, pictured(5, &[])))
+        .expect("an availability is never stale");
+    assert_eq!(failure(&lost), None, "the send's terminal decides");
+    assert!(!grant.is_open());
+    drop(write);
+    let withheld = TurnEvent::Finished(Finish::Failed(EngineFailure::Anthropic(Failure::Withheld)));
+    let mut ended = core
+        .handle(super::engine(super::engine_key(&core, R), withheld))
+        .expect("current");
+    ended.extend(
+        core.handle(Input::SendSettled { lease })
+            .unwrap_or_default(),
+    );
+    assert_eq!(
+        failure(&ended),
+        Some(
+            UserError::new(
+                ErrorKey::ScreenConnectionChanged,
+                Vec::new(),
+                vec![Action::OpenSettings],
+            )
+            .unwrap()
+        )
+    );
+}

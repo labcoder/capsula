@@ -200,10 +200,17 @@ impl Coordinator {
         finish: crate::engines::Finish,
     ) -> Option<kumochi_protocol::message::UserError> {
         let run = self.current.as_ref().filter(|run| run.id == key.run);
-        let withheld = crate::engines::Finish::Failed(crate::engines::EngineFailure::Stream(
-            crate::connections::model::error::Failure::Withheld,
-        ));
-        if finish == withheld
+        let withheld = matches!(
+            finish,
+            crate::engines::Finish::Failed(
+                crate::engines::EngineFailure::Stream(
+                    crate::connections::model::error::Failure::Withheld
+                ) | crate::engines::EngineFailure::Anthropic(
+                    crate::connections::anthropic::error::Failure::Withheld
+                )
+            )
+        );
+        if withheld
             && let Some((_, cause)) = run
                 .and_then(|run| run.grant_closed.as_ref())
                 .filter(|(closed, _)| *closed == key)

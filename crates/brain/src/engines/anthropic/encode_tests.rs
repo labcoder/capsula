@@ -4,12 +4,16 @@
 use kumochi_protocol::message::{ConnectionKind, Effort, ModelChoice, ModelSlug};
 use serde_json::{Value, json};
 
-use super::{BodyError, Conversation, body, next};
+use super::{BodyError, Conversation, body, body_under, next, next_under};
 use crate::connections::anthropic::{error::Failure, sse_map::Reader};
 use crate::connections::model::sse::Progress;
 use crate::context::{BOUND, ConnectionTag, InputItem, Jpeg, ModelRequest, Role, ToolSchema};
+use crate::coordinator::PictureRoutes;
 use crate::engines::anthropic::{Mapper, Reply};
 use crate::engines::{CallId, EngineFailure, Finish, Opaque, TurnEvent};
+
+const ON: PictureRoutes = PictureRoutes::new(true, false);
+const OFF: PictureRoutes = PictureRoutes::new(false, false);
 
 const TAG: ConnectionTag = ConnectionTag(41);
 
@@ -68,7 +72,7 @@ fn built(request: &ModelRequest) -> Value {
 
 /// The body a conversation sends, read back.
 fn sent(conversation: &Conversation) -> Value {
-    serde_json::from_slice(&conversation.wire().expect("json")).expect("a body")
+    serde_json::from_slice(&conversation.wire().expect("json").0).expect("a body")
 }
 
 fn error(request: &ModelRequest) -> Option<BodyError> {
@@ -580,7 +584,7 @@ fn called(id: &str) -> Vec<String> {
 #[test]
 fn a_mapped_reply_continues_its_request_with_every_block_as_it_came() {
     let first = first("draw a box");
-    let round_one = first.wire().expect("json");
+    let round_one = first.wire().expect("json").0;
     let mut mapper = Mapper::answering(&first);
     streamed(&mut mapper, &signed_round());
     let queued = mapper.take();
@@ -1140,4 +1144,196 @@ fn built_refused_and_replied_carriers_print_no_content() {
         !debug.contains(&format!("{:?}", marker.as_bytes())),
         "bytes leaked: {debug}"
     );
+}
+
+/// A sealed synthetic JPEG with a marker in it, `len` bytes long.
+fn sealed(len: usize) -> Jpeg {
+    let mut bytes = vec![b'M'; len];
+    bytes[..4].copy_from_slice(&[0xFF, 0xD8, 0xFF, 0xE0]);
+    Jpeg::sealed(
+        zeroize::Zeroizing::new(bytes),
+        [8, 8],
+        #[cfg(windows)]
+        None,
+    )
+}
+
+fn image_block(image: &Jpeg) -> Value {
+    use base64::Engine as _;
+    let (jpeg, _) = image.capture().expect("sealed");
+    json!({"type": "image", "source": {"type": "base64", "media_type": "image/jpeg",
+        "data": base64::engine::general_purpose::STANDARD.encode(jpeg)}})
+}
+
+/// An authorized picture goes as exactly one image block, at its place among the user's blocks,
+/// and a body or conversation's Debug says only that it has one.
+#[test]
+fn an_authorized_picture_goes_once_as_one_image_block_at_its_place() {
+    let image = sealed(64);
+    let block = image_block(&image);
+    let text = |text: &str| json!({"type": "text", "text": text});
+    let cases = [
+        (
+            vec![message(Role::User, "look"), InputItem::Image(image.clone())],
+            json!([{"role": "user", "content": [text("look"), block]}]),
+        ),
+        (
+            vec![
+                message(Role::User, "look"),
+                InputItem::Image(image.clone()),
+                message(Role::Developer, "pointed"),
+            ],
+            json!([{"role": "user", "content": [text("look"), block, text("Kumochi note:\npointed")]}]),
+        ),
+        (
+            vec![
+                message(Role::User, "hi"),
+                message(Role::Assistant, "yes"),
+                InputItem::Image(image.clone()),
+                message(Role::Developer, "pointed"),
+            ],
+            json!([
+                {"role": "user", "content": [text("hi")]},
+                {"role": "assistant", "content": [text("yes")]},
+                {"role": "user", "content": [block, text("Kumochi note:\npointed")]},
+            ]),
+        ),
+        (
+            vec![
+                message(Role::User, "hi"),
+                message(Role::Assistant, "yes"),
+                InputItem::Image(image),
+            ],
+            json!([
+                {"role": "user", "content": [text("hi")]},
+                {"role": "assistant", "content": [text("yes")]},
+                {"role": "user", "content": [block]},
+            ]),
+        ),
+    ];
+    for (input, messages) in cases {
+        let (sent, conversation) = body_under(&request(input), TAG, ON).expect("a body");
+        let read: Value = serde_json::from_slice(sent.sent()).expect("json");
+        assert_eq!(read["messages"], messages);
+        let bytes = String::from_utf8_lossy(sent.sent()).into_owned();
+        assert_eq!(bytes.matches(r#"{"type":"image""#).count(), 1);
+        let shown = format!("{sent:?} {conversation:?}");
+        assert!(
+            !shown.contains("TU1N") && !shown.contains("image/jpeg"),
+            "{shown}"
+        );
+    }
+}
+
+/// With the route's switch off, an unsealed image, a second image or one over the cap, no body
+/// is built; a JPEG at the cap goes.
+#[test]
+fn a_picture_the_body_cant_carry_builds_nothing() {
+    let input = |images: Vec<Jpeg>| {
+        let mut input = vec![message(Role::User, "look")];
+        input.extend(images.into_iter().map(InputItem::Image));
+        request(input)
+    };
+    let unsealed = Jpeg::new(vec![0xFF, 0xD8, 0xFF, 0xE0]).expect("a JPEG's start");
+    for (request, pictures) in [
+        (input(vec![sealed(64)]), OFF),
+        (input(vec![unsealed]), ON),
+        (input(vec![sealed(64), sealed(64)]), ON),
+        (input(vec![sealed(crate::screen::JPEG_CAP + 1)]), ON),
+        (
+            request(vec![
+                message(Role::User, "look"),
+                call("toolu_1", "list_tasks", "{}"),
+                InputItem::Image(sealed(64)),
+                output("toolu_1", "three tasks"),
+            ]),
+            ON,
+        ),
+    ] {
+        assert_eq!(
+            body_under(&request, TAG, pictures).err(),
+            Some(BodyError::Image)
+        );
+    }
+    assert!(body_under(&input(vec![sealed(crate::screen::JPEG_CAP)]), TAG, ON).is_ok());
+}
+
+/// A tool round keeps the picture where it went, once, and only while the switch is on.
+#[test]
+fn a_tool_round_keeps_its_picture_once_and_only_while_pictures_are_on() {
+    let image = sealed(64);
+    let pictured = request(vec![
+        message(Role::User, "look"),
+        InputItem::Image(image.clone()),
+    ]);
+    for pictures in [ON, OFF] {
+        let (_, first) = body_under(&pictured, TAG, ON).expect("a body");
+        let mut mapper = Mapper::answering(&first);
+        streamed(&mut mapper, &called("toolu_1"));
+        let reply = mapper.reply().expect("a whole reply");
+        let model = slug("claude-sonnet-5-5");
+        let next = next_under(first, TAG, &model, reply, &results(&["toolu_1"]), pictures);
+        if pictures == OFF {
+            assert_eq!(next.err(), Some(BodyError::Image));
+            continue;
+        }
+        let (sent, _) = next.expect("continues");
+        let read: Value = serde_json::from_slice(sent.sent()).expect("json");
+        assert_eq!(read["messages"][0]["content"][1], image_block(&image));
+        let bytes = String::from_utf8_lossy(sent.sent()).into_owned();
+        assert_eq!(bytes.matches(r#"{"type":"image""#).count(), 1);
+    }
+}
+
+/// Text that spells an image block stays an escaped string beside the one real block, and the
+/// conversation a tool round keeps holds no copy of the picture: only the sent body has it.
+#[test]
+fn a_look_alike_stays_text_and_only_the_sent_body_holds_the_picture() {
+    use base64::Engine as _;
+
+    let image = sealed(64);
+    let block = image_block(&image);
+    let look_alike = json!({"type": "image", "source": {"type": "base64",
+        "media_type": "image/jpeg", "data": "AAAA"}})
+    .to_string();
+    let input = vec![
+        message(Role::User, &look_alike),
+        call("toolu_1", "list_tasks", "{}"),
+        output("toolu_1", &look_alike),
+        message(Role::User, "look"),
+        InputItem::Image(image.clone()),
+    ];
+    let (sent, conversation) = body_under(&request(input), TAG, ON).expect("a body");
+    let read: Value = serde_json::from_slice(sent.sent()).expect("json");
+    assert_eq!(
+        read["messages"],
+        json!([
+            {"role": "user", "content": [{"type": "text", "text": look_alike}]},
+            {"role": "assistant", "content": [
+                {"type": "tool_use", "id": "toolu_1", "name": "list_tasks", "input": {}}]},
+            {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "toolu_1", "content": look_alike},
+                {"type": "text", "text": "look"},
+                block,
+            ]},
+        ])
+    );
+    let data = base64::engine::general_purpose::STANDARD.encode(image.capture().expect("sealed").0);
+    let bytes = String::from_utf8_lossy(sent.sent()).into_owned();
+    assert_eq!(bytes.matches(r#"{"type":"image""#).count(), 1);
+    assert_eq!(bytes.matches(data.as_str()).count(), 1);
+    let (unpictured, at) = conversation.wire().expect("wire");
+    let kept = [
+        String::from_utf8(unpictured).expect("UTF-8"),
+        conversation.messages.concat(),
+        serde_json::to_string(&conversation.head).expect("json"),
+        format!("{sent:?} {conversation:?}"),
+    ];
+    assert!(at.is_some());
+    for kept in kept {
+        assert!(
+            !kept.contains("TU1N") && !kept.contains(r#"{"type":"image""#),
+            "{kept}"
+        );
+    }
 }

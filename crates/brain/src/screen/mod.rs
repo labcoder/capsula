@@ -43,7 +43,6 @@ pub(crate) use elements::{
     ElementPlatform, ElementReader, ElementSource, LIMITS, NodeProps, SourceError, TopWindow, Wake,
     excluded_image,
 };
-#[cfg(debug_assertions)]
 pub(crate) use encode::JPEG_CAP;
 pub(crate) use frame::RawFrame;
 pub(crate) use ink::InkBounds;

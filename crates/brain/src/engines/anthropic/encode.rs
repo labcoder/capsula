@@ -6,6 +6,7 @@ use std::collections::BTreeSet;
 use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use kumochi_protocol::message::{ConnectionKind, ModelSlug};
 use serde_json::{Map, Value, json};
 use zeroize::Zeroizing;
@@ -14,9 +15,12 @@ use super::{Mapper, Reply};
 use crate::connections::anthropic::messages::MessagesBody;
 use crate::connections::anthropic::request::{literal, members, object_within_depth};
 use crate::connections::anthropic::sse_map::Capture;
-use crate::context::{BOUND, ConnectionTag, InputItem, ModelRequest, Role};
+use crate::connections::model::MAX_REQUEST_BYTES;
+use crate::context::{BOUND, ConnectionTag, InputItem, Jpeg, ModelRequest, Role};
+use crate::coordinator::PictureRoutes;
 use crate::engines::responses::effort;
 use crate::engines::{CallId, Opaque};
+use crate::screen::JPEG_CAP;
 
 /// Every request's output cap, including thinking; the transport's envelope requires it.
 const MAX_TOKENS: u64 = 2048;
@@ -28,6 +32,14 @@ const NAME_BYTES: usize = 64;
 /// Tool-input containers, including the root object. Leaves headroom for the five enclosing
 /// request containers under `serde_json`'s recursion limit.
 const MAX_TOOL_INPUT_DEPTH: usize = 96;
+const IMAGE_START: &[u8] =
+    br#"{"type":"image","source":{"type":"base64","media_type":"image/jpeg","data":""#;
+const IMAGE_END: &[u8] = br#""}}"#;
+// A body at its bound with the largest picture still fits the transport's request cap.
+const _: () = assert!(
+    BOUND + 1 + IMAGE_START.len() + JPEG_CAP.div_ceil(3) * 4 + IMAGE_END.len() <= MAX_REQUEST_BYTES,
+    "a bound body with the largest picture is over the request cap"
+);
 
 /// Why no body was built.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
@@ -54,8 +66,10 @@ pub(crate) enum BodyError {
     /// answers no such call.
     #[error("a call and its result aren't paired")]
     Pairing,
-    /// An image reached a route that doesn't carry them yet.
-    #[error("this route can't carry images")]
+    /// An image this body can't carry: pictures are off for this route, the image isn't one
+    /// sealed capture within its cap, it's a second one, or a result would follow it in its
+    /// message.
+    #[error("this body can't carry the image")]
     Image,
     /// The serialised body is over the request's bound.
     #[error("the request body is over its size bound")]
@@ -80,17 +94,62 @@ pub(crate) struct Conversation {
     messages: Vec<String>,
     tag: ConnectionTag,
     prefix: Prefix,
+    picture: Option<Picture>,
+}
+
+/// The one picture a body carries, kept out of `messages` so no plain string ever holds it: the
+/// sealed JPEG, and where in its message, and between which commas, its block goes.
+struct Picture {
+    jpeg: Jpeg,
+    message: usize,
+    at: usize,
+    before: &'static [u8],
+    after: &'static [u8],
+}
+
+impl Picture {
+    fn len(&self, jpeg: &[u8]) -> usize {
+        self.before.len()
+            + IMAGE_START.len()
+            + jpeg.len().div_ceil(3) * 4
+            + IMAGE_END.len()
+            + self.after.len()
+    }
+
+    /// Writes the block into `out`, exactly [`Self::len`] bytes.
+    fn write(&self, jpeg: &[u8], out: &mut [u8]) -> Result<(), BodyError> {
+        let (head, rest) = out.split_at_mut(self.before.len() + IMAGE_START.len());
+        let (data, end) = rest.split_at_mut(rest.len() - IMAGE_END.len() - self.after.len());
+        head[..self.before.len()].copy_from_slice(self.before);
+        head[self.before.len()..].copy_from_slice(IMAGE_START);
+        STANDARD
+            .encode_slice(jpeg, data)
+            .map_err(|_| BodyError::Image)?;
+        end[..IMAGE_END.len()].copy_from_slice(IMAGE_END);
+        end[IMAGE_END.len()..].copy_from_slice(self.after);
+        Ok(())
+    }
 }
 
 impl Conversation {
-    /// The body's JSON: the head's fields, then the messages as they were written.
-    fn wire(&self) -> Result<Vec<u8>, BodyError> {
+    /// The body's JSON: the head's fields, then the messages as they were written, and where in
+    /// it the picture goes.
+    fn wire(&self) -> Result<(Vec<u8>, Option<usize>), BodyError> {
         let mut bytes = serde_json::to_vec(&self.head).map_err(|_| BodyError::Envelope)?;
         bytes.pop();
         bytes.extend_from_slice(b",\"messages\":[");
-        bytes.extend_from_slice(self.messages.join(",").as_bytes());
+        let mut at = None;
+        for (index, message) in self.messages.iter().enumerate() {
+            if index > 0 {
+                bytes.push(b',');
+            }
+            if let Some(picture) = self.picture.as_ref().filter(|p| p.message == index) {
+                at = Some(bytes.len() + picture.at);
+            }
+            bytes.extend_from_slice(message.as_bytes());
+        }
         bytes.extend_from_slice(b"]}");
-        Ok(bytes)
+        Ok((bytes, at))
     }
 }
 
@@ -100,6 +159,7 @@ impl fmt::Debug for Conversation {
             .field("messages", &self.messages.len())
             .field("tag", &self.tag)
             .field("prefix", &self.prefix)
+            .field("pictured", &self.picture.is_some())
             .finish_non_exhaustive()
     }
 }
@@ -137,11 +197,21 @@ pub(crate) fn body(
     request: &ModelRequest,
     tag: ConnectionTag,
 ) -> Result<(MessagesBody, Conversation), BodyError> {
-    let (Value::Object(mut head), messages) = json(request)? else {
+    body_under(request, tag, PictureRoutes::SHIPPED)
+}
+
+/// [`body`], its one image carried only while `routes` lets this route carry pictures. The
+/// lease's picture grant still decides whether a byte of it is written.
+pub(crate) fn body_under(
+    request: &ModelRequest,
+    tag: ConnectionTag,
+    routes: PictureRoutes,
+) -> Result<(MessagesBody, Conversation), BodyError> {
+    let (Value::Object(mut head), messages, picture) = json(request, routes)? else {
         return Err(BodyError::Envelope);
     };
     head.remove("messages");
-    sealed(head, messages, tag)
+    sealed(head, messages, tag, picture)
 }
 
 /// The next request of a tool loop: `conversation` unchanged, then `reply` as the assistant's
@@ -154,12 +224,35 @@ pub(crate) fn next(
     reply: Reply,
     results: &[(CallId, String)],
 ) -> Result<(MessagesBody, Conversation), BodyError> {
+    next_under(
+        conversation,
+        tag,
+        model,
+        reply,
+        results,
+        PictureRoutes::SHIPPED,
+    )
+}
+
+/// [`next`], a retained picture going again only while `routes` lets this route carry it.
+fn next_under(
+    conversation: Conversation,
+    tag: ConnectionTag,
+    model: &ModelSlug,
+    reply: Reply,
+    results: &[(CallId, String)],
+    routes: PictureRoutes,
+) -> Result<(MessagesBody, Conversation), BodyError> {
     let Conversation {
         head,
         mut messages,
         tag: built,
         prefix,
+        picture,
     } = conversation;
+    if picture.is_some() && !routes.allows(ConnectionKind::AnthropicKey) {
+        return Err(BodyError::Image);
+    }
     let Reply {
         prefix: answered,
         blocks,
@@ -187,18 +280,21 @@ pub(crate) fn next(
         .map(|(call, output)| Ok(tool_result(id(call)?, output)))
         .collect::<Result<Vec<_>, BodyError>>()?;
     messages.push(written(&json!({ "role": "user", "content": results }))?);
-    sealed(head, messages, tag)
+    sealed(head, messages, tag, picture)
 }
 
 fn written(value: &Value) -> Result<String, BodyError> {
     serde_json::to_string(value).map_err(|_| BodyError::Envelope)
 }
 
-/// Checks a whole body and hands its exact bytes to the transport's envelope.
+/// Checks a whole body and hands its exact bytes to the transport's envelope. The envelope and
+/// the bound see the body without its picture, whose block is then spliced in: fixed JSON and
+/// base64, so it needs no escaping and no reparse.
 fn sealed(
     head: Map<String, Value>,
     messages: Vec<String>,
     tag: ConnectionTag,
+    picture: Option<Picture>,
 ) -> Result<(MessagesBody, Conversation), BodyError> {
     // Read back only to check pairs and roles; what's sent is `messages` as written.
     let read = messages
@@ -214,19 +310,30 @@ fn sealed(
         messages,
         tag,
         prefix: Prefix(PREFIXES.fetch_add(1, Ordering::Relaxed)),
+        picture,
     };
-    let bytes = conversation.wire()?;
+    let (bytes, at) = conversation.wire()?;
     if bytes.len() > BOUND {
         return Err(BodyError::TooLarge);
     }
-    let sent = MessagesBody::from_json(Zeroizing::new(bytes)).map_err(|_| BodyError::Envelope)?;
+    let mut sent =
+        MessagesBody::from_json(Zeroizing::new(bytes)).map_err(|_| BodyError::Envelope)?;
+    if let (Some(picture), Some(at)) = (&conversation.picture, at) {
+        let (jpeg, _) = picture.jpeg.capture().ok_or(BodyError::Image)?;
+        sent = sent
+            .spliced(at, picture.len(jpeg), |out| picture.write(jpeg, out))
+            .map_err(|_| BodyError::Image)?;
+    }
     Ok((sent, conversation))
 }
 
 /// The request's JSON, its messages written beside it: the instructions as the one system block,
 /// which ends the cached prefix after the tools; then the input, neighbouring blocks of one role
 /// merged into one message, as Messages wants roles to alternate.
-fn json(request: &ModelRequest) -> Result<(Value, Vec<String>), BodyError> {
+fn json(
+    request: &ModelRequest,
+    routes: PictureRoutes,
+) -> Result<(Value, Vec<String>, Option<Picture>), BodyError> {
     let choice = request.choice.as_ref().ok_or(BodyError::NoModel)?;
     if choice.connection != ConnectionKind::AnthropicKey {
         return Err(BodyError::Route);
@@ -235,6 +342,7 @@ fn json(request: &ModelRequest) -> Result<(Value, Vec<String>), BodyError> {
         return Err(BodyError::NoInstructions);
     }
     let mut messages: Vec<(Role, Vec<String>)> = Vec::new();
+    let mut placed: Option<(&Jpeg, usize, usize)> = None;
     for item in &request.input {
         let (role, block) = match item {
             InputItem::Message { text, .. } if text.is_empty() => continue,
@@ -256,28 +364,35 @@ fn json(request: &ModelRequest) -> Result<(Value, Vec<String>), BodyError> {
                 (Role::Assistant, written(&block)?)
             }
             InputItem::FunctionOutput { call, output } => {
+                // A result joining the picture's message would follow it, and results lead.
+                if placed.is_some_and(|(_, message, _)| message + 1 == messages.len()) {
+                    return Err(BodyError::Image);
+                }
                 (Role::User, written(&tool_result(id(call)?, output))?)
             }
             // Only this connection's own items reach here; the build filters the rest.
             InputItem::Native(item) => (Role::Assistant, native(item)?),
-            InputItem::Image(_) => return Err(BodyError::Image),
+            InputItem::Image(image) => {
+                let sealed = image
+                    .capture()
+                    .is_some_and(|(jpeg, _)| jpeg.len() <= JPEG_CAP);
+                if !routes.allows(ConnectionKind::AnthropicKey) || !sealed || placed.is_some() {
+                    return Err(BodyError::Image);
+                }
+                if messages.last().is_none_or(|(role, _)| *role != Role::User) {
+                    messages.push((Role::User, Vec::new()));
+                }
+                let blocks = messages.last().map_or(0, |(_, blocks)| blocks.len());
+                placed = Some((image, messages.len() - 1, blocks));
+                continue;
+            }
         };
         match messages.last_mut() {
             Some((last, blocks)) if *last == role => blocks.push(block),
             _ => messages.push((role, vec![block])),
         }
     }
-    let messages = messages
-        .into_iter()
-        .map(|(role, content)| {
-            let role = if role == Role::Assistant {
-                "assistant"
-            } else {
-                "user"
-            };
-            format!(r#"{{"role":"{role}","content":[{}]}}"#, content.join(","))
-        })
-        .collect();
+    let (written, picture) = messages_written(messages, placed);
     let mut body = json!({
         "model": choice.model.as_str(),
         "max_tokens": MAX_TOKENS,
@@ -303,7 +418,40 @@ fn json(request: &ModelRequest) -> Result<(Value, Vec<String>), BodyError> {
             })
             .collect();
     }
-    Ok((body, messages))
+    Ok((body, written, picture))
+}
+
+/// The messages as written, neighbouring blocks already merged, and where among them the placed
+/// picture's block goes: its message, and how many blocks precede it there.
+fn messages_written(
+    messages: Vec<(Role, Vec<String>)>,
+    placed: Option<(&Jpeg, usize, usize)>,
+) -> (Vec<String>, Option<Picture>) {
+    let mut picture = None;
+    let mut written = Vec::with_capacity(messages.len());
+    for (index, (role, content)) in messages.into_iter().enumerate() {
+        let role = if role == Role::Assistant {
+            "assistant"
+        } else {
+            "user"
+        };
+        let head = format!(r#"{{"role":"{role}","content":["#);
+        if let Some((jpeg, _, block)) = placed.filter(|(_, message, _)| *message == index) {
+            picture = Some(Picture {
+                jpeg: jpeg.clone(),
+                message: index,
+                at: head.len() + content[..block].join(",").len(),
+                before: if block > 0 { b"," } else { b"" },
+                after: if block == 0 && !content.is_empty() {
+                    b","
+                } else {
+                    b""
+                },
+            });
+        }
+        written.push(format!("{head}{}]}}", content.join(",")));
+    }
+    (written, picture)
 }
 
 fn text_block(text: &str) -> Value {
