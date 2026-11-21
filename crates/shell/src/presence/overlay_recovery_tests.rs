@@ -2057,7 +2057,8 @@ fn a_late_first_paint_starts_the_entrance_from_its_initial_pose(cx: &mut gpui_ki
 fn narration_wakes_resting_presence_for_each_natural_reply(cx: &mut gpui_kit::TestAppContext) {
     use crate::link::{Batch, LinkEvent, fixture};
     use crate::presence::{run_fence_tests::submit_draft, test_fixture};
-    use kumochi_protocol::message::{DataToShell, Phase, RunId};
+    use kumochi_protocol::message::{ControlToBrain, DataToShell, Phase, RunId, SceneId};
+    use kumochi_shell_core::presenter::{DrawKey, DrawTiming};
     use std::time::{Duration, Instant};
 
     const TONE: [u32; 48] = [(15_430.0_f32 / 32_768.0).to_bits(); 48];
@@ -2071,7 +2072,16 @@ fn narration_wakes_resting_presence_for_each_natural_reply(cx: &mut gpui_kit::Te
     let events = fixture::patient(pipe.events);
     let owner = test_fixture::presence(cx);
     let session = fixture::connected(fixture::next(&events));
-    owner.update(cx, |this, _| this.link = pipe.handle.clone());
+    let accepted = Rc::new(RefCell::new(Vec::new()));
+    owner.update(cx, |this, _| {
+        this.link = pipe.handle.clone();
+        let accepted = Rc::clone(&accepted);
+        this.presenter.observe_draw_timing(move |timing| {
+            if let DrawTiming::Shown { key, epoch } = timing {
+                accepted.borrow_mut().push((key, epoch));
+            }
+        });
+    });
     let apply = |event, cx: &mut gpui_kit::TestAppContext| {
         owner.update(cx, |this, cx| {
             this.link_events(Batch::Plain(vec![event]), cx).unwrap();
@@ -2101,6 +2111,7 @@ fn narration_wakes_resting_presence_for_each_natural_reply(cx: &mut gpui_kit::Te
         Step(Operation::Show, Outcome::Success),
     ]);
     let mut expected = Vec::new();
+    let mut expected_paints = Vec::new();
     let mut prior = RunId(0);
     for (turn, draft) in ["first narrated reply", "second narrated reply"]
         .into_iter()
@@ -2164,18 +2175,25 @@ fn narration_wakes_resting_presence_for_each_natural_reply(cx: &mut gpui_kit::Te
         prior = run;
         let mut playback = playback.unwrap();
         paint(cx);
-        owner.read_with(cx, |this, _| {
+        let prefix_epoch = owner.read_with(cx, |this, _| {
             assert!(
                 !this.presenter.animating(Instant::now()),
                 "silent prefix has come to rest"
             );
-            assert_eq!(
-                crate::presenter::tests::painted(&this.presenter.frames().borrow(), scene)
-                    .unwrap()
-                    .1,
-                1
-            );
+            let (epoch, bound) =
+                crate::presenter::tests::painted(&this.presenter.frames().borrow(), scene).unwrap();
+            assert_eq!(bound, 1);
+            epoch
         });
+        expected_paints.push((
+            DrawKey {
+                run,
+                scene,
+                index: 0,
+            },
+            prefix_epoch,
+        ));
+        assert_eq!(*accepted.borrow(), expected_paints);
         expected.push((run, scene, 0));
         for event in events.try_iter() {
             apply(event, cx);
@@ -2197,29 +2215,56 @@ fn narration_wakes_resting_presence_for_each_natural_reply(cx: &mut gpui_kit::Te
             );
             held.push(event);
         };
-        owner.update(cx, |this, cx| {
+        let fence_scene = SceneId(u64::MAX - run.0);
+        assert!(scene < fence_scene);
+        let before = owner.update(cx, |this, cx| {
             this.link_events(Batch::Plain(vec![wake]), cx).unwrap();
             assert_eq!(
                 crate::presenter::tests::painted(&this.presenter.frames().borrow(), scene),
                 None,
                 "the wake installed a fresh, unpainted sample"
             );
-        });
-        assert!(
-            !probe.shown().contains(&(run, scene, 1)),
-            "a callback alone cannot acknowledge a paint"
-        );
-        let before = Instant::now();
-        paint(cx);
-        let after = Instant::now();
-        owner.read_with(cx, |this, _| {
+            this.paint_observed(false, cx).unwrap();
             assert_eq!(
-                crate::presenter::tests::painted(&this.presenter.frames().borrow(), scene)
-                    .unwrap()
-                    .1,
-                2
+                *accepted.borrow(),
+                expected_paints,
+                "the callback and a stale paint notice cannot acknowledge an unpainted sample"
             );
+            assert!(
+                pipe.handle
+                    .send_control(&session, ControlToBrain::SceneFailed { scene: fence_scene })
+            );
+            let deadline = Instant::now() + Duration::from_secs(1);
+            while probe.scene_failed() != Some((RunId(0), fence_scene)) {
+                assert!(
+                    Instant::now() < deadline,
+                    "Brain reads the no-op for an unknown scene"
+                );
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            assert_eq!(
+                probe.shown(),
+                expected,
+                "no wire receipt before the matching paint"
+            );
+            Instant::now()
         });
+        let after = Instant::now();
+        let (epoch, bound) = owner.read_with(cx, |this, _| {
+            crate::presenter::tests::painted(&this.presenter.frames().borrow(), scene)
+                .expect("GPUI paints the dirty overlay as the update returns")
+        });
+        assert_eq!(bound, 2);
+        assert_ne!(epoch, prefix_epoch);
+        expected_paints.push((
+            DrawKey {
+                run,
+                scene,
+                index: 1,
+            },
+            epoch,
+        ));
+        assert_eq!(*accepted.borrow(), expected_paints);
         let first = retained_x(&owner, cx).len();
         owner.update(cx, |this, cx| {
             this.draw_changed_at(before + Duration::from_millis(148), cx)
@@ -2270,6 +2315,7 @@ fn narration_wakes_resting_presence_for_each_natural_reply(cx: &mut gpui_kit::Te
             expected,
             "repainting never sends a second receipt"
         );
+        assert_eq!(*accepted.borrow(), expected_paints);
         assert!(pipe.handle.admits_text(Some(&session)));
         drop(playback);
         fixture::await_fake_disposal();
