@@ -42,7 +42,11 @@ impl<T> Producer<T> {
         self.publish(value, || {})
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "only core unit tests pause publication")
+    )]
     pub(super) fn push_before_publish(
         &mut self,
         value: T,
@@ -80,7 +84,7 @@ impl<T> Consumer<T> {
         value
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(super) fn len(&self) -> usize {
         self.slots
             .iter()

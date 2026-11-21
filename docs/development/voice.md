@@ -245,6 +245,12 @@ stateDiagram-v2
   - after a disconnect or Quit, the point is the last one received;
   - a failed write leaves NULL too, and nothing answers it.
 
+The authenticated Plain/Esc test drives the real fake callback on a separate thread while
+Presence takes run and drawing events. After real Brain data credit exhaustion and accepted
+presentation, the pump keeps rendering through any underfill until it hands over the same
+device with a full, identifiable source block. Presence presses Esc without another callback,
+so the stop tail stays unconfirmed until the test explicitly renders it.
+
 ### The pump and the resampler
 
 **`voice::pump`** is the brain's one reader of TTS. It holds the current Speak's receiver and

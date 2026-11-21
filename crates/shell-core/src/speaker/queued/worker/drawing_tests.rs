@@ -422,14 +422,16 @@ fn failed_backend_start_and_idle_exit_notify_without_an_ingress_packet() {
         let mut reports = Vec::new();
         own(
             &port,
-            worker.engine,
-            origin,
+            (worker.engine, origin),
             drawing,
             |_| panic!("no credit"),
-            |report| {
-                reports.push(report);
-                true
-            },
+            (
+                |report| {
+                    reports.push(report);
+                    true
+                },
+                |_| panic!("the healthy worker did not refuse a report"),
+            ),
             |_, provided| {
                 assert_eq!(provided, origin);
                 if fail {
@@ -438,6 +440,7 @@ fn failed_backend_start_and_idle_exit_notify_without_an_ingress_packet() {
                     Ok((worker.send, worker.replies))
                 }
             },
+            FixtureStart::OnDemand,
         );
         assert!(port.closed.load(Ordering::Acquire));
         assert_eq!(io.exits(), [OwnerExit::Closed]);
@@ -501,6 +504,7 @@ fn refused_ordered_delivery_closes_ingress_and_preserves_only_the_accepted_prefi
                 attempts += 1;
                 send.try_send(report).is_ok()
             },
+            None::<fn(bool)>,
         );
         assert_eq!(attempts, capacity + 1);
         assert_eq!(received.try_iter().collect::<Vec<_>>(), ordered[..capacity]);

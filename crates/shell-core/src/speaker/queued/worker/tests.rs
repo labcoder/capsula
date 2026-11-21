@@ -61,7 +61,7 @@ pub(in crate::speaker::queued) fn open_actor(
     let (worker, mut input, port, requests, replies) = fake();
     let (exit, done) = mpsc::sync_channel(1);
     let owner = thread::spawn(move || {
-        worker.serve(&port, Instant::now(), |_| {}, report);
+        worker.serve(&port, Instant::now(), |_| {}, report, None::<fn(bool)>);
         exit.send(()).unwrap();
     });
     input.worker = owner.thread().clone();
@@ -101,6 +101,7 @@ fn stop_is_processed_while_the_open_and_ingress_mailboxes_are_busy() {
                 credits.send(credit).unwrap();
             },
             |_| true,
+            None::<fn(bool)>,
         );
         closed.send(()).unwrap();
     });
@@ -233,6 +234,7 @@ fn dropping_input_keeps_a_worker_alive_until_its_known_quiet_deadline() {
             reports.push((origin.elapsed(), message));
             true
         },
+        None::<fn(bool)>,
     );
     assert_eq!(reports.len(), 2, "{reports:?}");
     assert!(matches!(reports[0].1, ControlToBrain::SpeechRetired(_)));
@@ -466,6 +468,7 @@ fn malformed_input_reports_disconnected_instead_of_staying_full() {
                 panic!("malformed ingress does not earn credit");
             },
             |_| true,
+            None::<fn(bool)>,
         );
     });
     input.worker = owner.thread().clone();

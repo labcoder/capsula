@@ -7,6 +7,13 @@ use std::time::Instant;
 
 use crate::platform::speaker_cpal::{BackendStream, Control, OutputError, Transport};
 
+#[cfg(any(test, feature = "test-support"))]
+pub(super) use fixture::spawn_fake;
+#[cfg(any(test, feature = "test-support"))]
+pub use fixture::{FixturePlayback, serialize_playback};
+#[cfg(any(test, feature = "test-support"))]
+mod fixture;
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum Power {
     Playing,

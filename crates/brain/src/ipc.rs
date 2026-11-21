@@ -23,6 +23,14 @@ use crate::platform::{self, Instance, PipeServer};
 use crate::runtime::{Brain, Ended};
 use crate::tap::Tap;
 
+#[cfg(all(windows, debug_assertions, feature = "test-support"))]
+#[path = "ipc/audio_fixture.rs"]
+mod audio_fixture;
+#[cfg(all(windows, debug_assertions, feature = "test-support"))]
+pub use crate::runtime::audio_fixture::AudioProbe;
+#[cfg(all(windows, debug_assertions, feature = "test-support"))]
+pub use audio_fixture::{offline_audio_peer, offline_plain_peer};
+
 /// How long a connected client has to complete each step of the handshake.
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 /// How long the brain waits with no shell before exiting [guess]. A shell that gave up on it,
@@ -86,8 +94,6 @@ enum SessionError {
     NotHello,
     #[error("wrong capability")]
     WrongCapability,
-    #[error("queued output is not available for this session")]
-    QueuedUnavailable,
     #[error("protocol error: {0}")]
     Protocol(&'static str),
     #[error("the visible scenes didn't settle in time")]
@@ -259,13 +265,16 @@ impl Pipes {
         }
         let process = platform::shell_connection(&self.control, &self.data, &identity.shell_image)?;
         if audio == AudioSession::QueuedRequired {
-            return Err(SessionError::QueuedUnavailable);
+            brain.install_issue_session(session);
         }
         let _shell_identity = process.register();
         brain.connected_shell(process);
         tracing::info!("shell connected");
         Ok(
-            match brain.serve(&mut self.control, &mut self.data, tap).await {
+            match brain
+                .serve_with_audio(&mut self.control, &mut self.data, tap, audio)
+                .await
+            {
                 Ended::Quit { deadline } => Session::Quit { deadline },
                 Ended::Lost => Session::ShellLost,
                 Ended::Broken(reason) => return Err(SessionError::Protocol(reason)),
@@ -427,6 +436,7 @@ mod tests {
 
     #[tokio::test]
     async fn paired_handshake_accepts_only_matching_authenticated_queued_legs() {
+        use kumochi_protocol::message::{DraftId, IssueOp, OutputGeneration};
         let mut id = identity();
         id.shell_image = std::env::current_exe().unwrap();
         let scratch = Scratch::new("queued-hello-pair");
@@ -468,6 +478,47 @@ mod tests {
                     .write_all(&frame::encode(&message, Pipe::Data).unwrap())
                     .await
                     .unwrap();
+                if index == 0 {
+                    assert!(matches!(
+                        super::read::<ControlToShell>(&mut peer_control, Pipe::Control)
+                            .await
+                            .unwrap(),
+                        Some(ControlToShell::Settings { .. })
+                    ));
+                    let output = OutputGeneration(1);
+                    for message in [
+                        ControlToBrain::Issue {
+                            session: welcomed,
+                            request: 2,
+                            op: Box::new(IssueOp::CancelReview {
+                                draft: DraftId(1),
+                                review: 1,
+                            }),
+                        },
+                        ControlToBrain::QueuedAudioOutput(24_000, output),
+                    ] {
+                        peer_control
+                            .write_all(&frame::encode(&message, Pipe::Control).unwrap())
+                            .await
+                            .unwrap();
+                    }
+                    loop {
+                        let message =
+                            super::read::<ControlToShell>(&mut peer_control, Pipe::Control)
+                                .await
+                                .unwrap()
+                                .expect("the reserved issue session was accepted");
+                        if message == ControlToShell::QueuedAudioRegistered(output) {
+                            break;
+                        }
+                    }
+                    peer_control
+                        .write_all(
+                            &frame::encode(&ControlToBrain::Quitting, Pipe::Control).unwrap(),
+                        )
+                        .await
+                        .unwrap();
+                }
             };
             let (result, ()) = timeout(std::time::Duration::from_secs(7), async {
                 tokio::join!(pipes.session(&id, &mut brain, &mut tap), peer)
@@ -475,7 +526,7 @@ mod tests {
             .await
             .unwrap();
             match index {
-                0 => assert!(matches!(result, Err(SessionError::QueuedUnavailable))),
+                0 => assert!(matches!(result, Ok(Session::Quit { .. }))),
                 3 => assert!(matches!(result, Err(SessionError::WrongCapability))),
                 _ => assert!(matches!(
                     result,
@@ -488,6 +539,26 @@ mod tests {
 
     #[tokio::test]
     async fn reconnect_cannot_replay_a_data_leg_and_refusal_closes_both_pipes() {
+        async fn connect(
+            session: u32,
+            replay: Option<IssueSession>,
+        ) -> (
+            IssueSession,
+            crate::platform::PipeClient,
+            crate::platform::PipeClient,
+        ) {
+            let mut control = ClientOptions::new()
+                .open(Pipe::Control.name(session))
+                .unwrap();
+            let welcome = request_audio(&mut control, AudioSession::QueuedRequired).await;
+            let mut data = ClientOptions::new().open(Pipe::Data.name(session)).unwrap();
+            let message = DataToBrain::QueuedHello(hello(1, BUILD_ID), replay.unwrap_or(welcome));
+            data.write_all(&frame::encode(&message, Pipe::Data).unwrap())
+                .await
+                .unwrap();
+            (welcome, control, data)
+        }
+
         let session = u32::MAX - 17 - std::process::id();
         let mut pipes = Pipes::create(session).unwrap();
         let mut id = identity();
@@ -495,60 +566,68 @@ mod tests {
         let scratch = Scratch::new("queued-hello-reconnect");
         let mut brain = test_support::brain(&scratch, "");
         let mut tap = Tap::from_env();
-        let (finished, exit) = oneshot::channel();
-        let mut launched = Some(exit);
-        let peer = async {
-            let mut previous: Option<IssueSession> = None;
-            for _ in 0..2 {
-                let mut control = ClientOptions::new()
-                    .open(Pipe::Control.name(session))
-                    .unwrap();
-                let welcome = request_audio(&mut control, AudioSession::QueuedRequired).await;
-                if let Some(old) = previous {
-                    assert_eq!(welcome.incarnation, old.incarnation);
-                    assert_eq!(welcome.epoch, old.epoch + 1);
-                }
-                let mut data = ClientOptions::new().open(Pipe::Data.name(session)).unwrap();
-                let message =
-                    DataToBrain::QueuedHello(hello(1, BUILD_ID), previous.unwrap_or(welcome));
-                data.write_all(&frame::encode(&message, Pipe::Data).unwrap())
-                    .await
-                    .unwrap();
-                assert_eq!(
-                    super::read::<ControlToShell>(&mut control, Pipe::Control)
-                        .await
-                        .unwrap(),
-                    None
-                );
-                assert_eq!(
-                    super::read::<DataToShell>(&mut data, Pipe::Data)
-                        .await
-                        .unwrap(),
-                    None
-                );
-                previous = Some(welcome);
-            }
-            let mut control = ClientOptions::new()
-                .open(Pipe::Control.name(session))
-                .unwrap();
-            request_audio(&mut control, AudioSession::QueuedRequired).await;
-            assert_eq!(
+        let mut launched = None;
+        let first_peer = async {
+            let (welcome, mut control, _data) = connect(session, None).await;
+            assert!(matches!(
                 super::read::<ControlToShell>(&mut control, Pipe::Control)
                     .await
                     .unwrap(),
-                None
-            );
-            finished.send(()).unwrap();
+                Some(ControlToShell::Settings { .. })
+            ));
+            welcome
         };
-        let (result, ()) = timeout(std::time::Duration::from_secs(9), async {
+        let (result, old) = timeout(std::time::Duration::from_secs(7), async {
             tokio::join!(
                 pipes.next_session(&id, &mut brain, &mut tap, &mut launched),
-                peer
+                first_peer
             )
         })
         .await
         .unwrap();
         assert_eq!(result.unwrap(), Session::ShellLost);
+
+        let reconnect = async {
+            let (welcome, mut control, mut data) = connect(session, Some(old)).await;
+            assert_eq!(welcome.incarnation, old.incarnation);
+            assert_eq!(welcome.epoch, old.epoch + 1);
+            assert_eq!(
+                super::read::<ControlToShell>(&mut control, Pipe::Control)
+                    .await
+                    .unwrap(),
+                None,
+                "a replayed data hello must close control without serving"
+            );
+            assert_eq!(
+                super::read::<DataToShell>(&mut data, Pipe::Data)
+                    .await
+                    .unwrap(),
+                None,
+                "a replayed data hello must also close data"
+            );
+            let (renewed, mut control, _data) = connect(session, None).await;
+            assert_eq!(renewed.incarnation, old.incarnation);
+            assert_eq!(renewed.epoch, old.epoch + 2);
+            assert!(matches!(
+                super::read::<ControlToShell>(&mut control, Pipe::Control)
+                    .await
+                    .unwrap(),
+                Some(ControlToShell::Settings { .. })
+            ));
+            control
+                .write_all(&frame::encode(&ControlToBrain::Quitting, Pipe::Control).unwrap())
+                .await
+                .unwrap();
+        };
+        let (result, ()) = timeout(std::time::Duration::from_secs(9), async {
+            tokio::join!(
+                pipes.next_session(&id, &mut brain, &mut tap, &mut launched),
+                reconnect
+            )
+        })
+        .await
+        .unwrap();
+        assert!(matches!(result.unwrap(), Session::Quit { .. }));
         brain.close().await;
     }
 

@@ -38,6 +38,7 @@ texts! {
     Connected => "status-connected",
     Reconnecting => "status-reconnecting",
     Failed => "status-failed",
+    OutputUnavailable => "status-output-unavailable",
     Retry => "action-retry",
     Stop => "action-stop",
     Quit => "action-quit",

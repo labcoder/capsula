@@ -141,7 +141,7 @@ pub(in crate::connections) struct ModelConn<Io> {
     answer: Option<Head>,
     /// A write of the request was attempted, so bytes of it may have left, even if no write
     /// returned a count: TLS can write a record and then fail in the same call.
-    pub(super) may_have_written: bool,
+    pub(in crate::connections) may_have_written: bool,
 }
 
 impl<Io> fmt::Debug for ModelConn<Io> {
