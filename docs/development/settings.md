@@ -200,8 +200,10 @@ and NotDurable say “hasn't confirmed yet”; only SignedOut says “didn't con
 
 Sign out opens a Kit confirmation through `confirmation.rs`, with Cancel explicitly focused
 and generic Enter-to-confirm disabled. Acceptance rechecks the session and state before
-sending SignOut. Leaving SignedIn, disconnecting, switching tabs or hiding Settings closes
-the confirmation. Kit restores focus; a removed trigger falls back to the Settings region.
+sending SignOut. Cancel, Esc and Confirm release the dialog's ownership; a refused open never
+takes it. Leaving SignedIn, disconnecting, switching tabs or hiding Settings closes the
+confirmation. Kit restores focus; a removed trigger falls back to the Settings region. Sign out
+can open a new confirmation over a previous dialog's noninteractive exit.
 Manage usage uses the fixed protocol URL and GPUI open_url through a keyboard-capable Base
 Link. No new platform adapter or credential access is added.
 

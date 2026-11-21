@@ -2,7 +2,6 @@
 
 use std::{
     cell::RefCell,
-    collections::HashMap,
     rc::{Rc, Weak},
 };
 
@@ -15,7 +14,7 @@ use gpui_kit::prelude::*;
 use gpui_kit::{App, FocusHandle, Global, SharedString, Window, WindowId};
 
 #[derive(Default)]
-struct Confirmations(HashMap<WindowId, Weak<()>>);
+struct Confirmations(Vec<(WindowId, Weak<()>)>);
 
 impl Global for Confirmations {}
 
@@ -76,18 +75,59 @@ pub(crate) fn open_content(
     confirm: SharedString,
     on_decision: impl FnOnce(bool, &mut Window, &mut App) + 'static,
 ) -> Option<Handle> {
+    open_dialog(
+        window,
+        cx,
+        title,
+        content,
+        (cancel, confirm),
+        false,
+        on_decision,
+    )
+}
+
+/// Opens a new confirmation above an inert exit transition, never above a live dialog.
+pub(crate) fn open_during_exit(
+    window: &mut Window,
+    cx: &mut App,
+    title: SharedString,
+    body: SharedString,
+    cancel: SharedString,
+    confirm: SharedString,
+    on_decision: impl FnOnce(bool, &mut Window, &mut App) + 'static,
+) -> Option<Handle> {
+    open_dialog(
+        window,
+        cx,
+        title,
+        move |alert, _, _| alert.description(body.clone()),
+        (cancel, confirm),
+        true,
+        on_decision,
+    )
+}
+
+fn open_dialog(
+    window: &mut Window,
+    cx: &mut App,
+    title: SharedString,
+    content: impl Fn(AlertDialog, &mut Window, &mut App) -> AlertDialog + 'static,
+    (cancel, confirm): (SharedString, SharedString),
+    allow_during_exit: bool,
+    on_decision: impl FnOnce(bool, &mut Window, &mut App) + 'static,
+) -> Option<Handle> {
     if window.has_active_dialog(cx) {
         return None;
     }
     let id = window.window_handle().window_id();
     let guards = cx.default_global::<Confirmations>();
-    guards.0.retain(|_, guard| guard.strong_count() > 0);
-    if guards.0.contains_key(&id) {
+    guards.0.retain(|(_, guard)| guard.strong_count() > 0);
+    if !allow_during_exit && guards.0.iter().any(|(window, _)| *window == id) {
         return None;
     }
     let lifetime = Rc::new(());
     let weak = Rc::downgrade(&lifetime);
-    guards.0.insert(id, Weak::clone(&weak));
+    guards.0.push((id, Weak::clone(&weak)));
     let cancel_focus = cx.focus_handle().tab_stop(true);
     let confirm_focus = cx.focus_handle().tab_stop(true);
     let focus = cancel_focus.clone();

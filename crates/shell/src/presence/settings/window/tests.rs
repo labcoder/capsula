@@ -793,6 +793,139 @@ fn account_status_hides_only_errors_the_status_already_explains(cx: &mut TestApp
     }
 }
 
+const SIGNED_IN: AccountView = AccountView::SignedIn {
+    email: None,
+    plan: PlanState::Enabled,
+    recovery: None,
+};
+
+#[gpui::test]
+fn resolved_sign_out_confirmation_does_not_steal_focus_on_account_change(cx: &mut TestAppContext) {
+    use gpui_kit::component::WindowExt as _;
+
+    for decision in [
+        Some("confirmation-cancel"),
+        None,
+        Some("confirmation-danger"),
+    ] {
+        let (window, owner, controls) = accounts_panel(cx);
+        account_views(&owner, vec![chatgpt(SIGNED_IN)], cx);
+        cx.update(|cx| cx.set_reduce_motion(true));
+        click_github(window, "account-sign-out", cx);
+        let mut frame = VisualTestContext::from_window(window, cx);
+        assert!(frame.update(|window, cx| window.has_active_dialog(cx)));
+        if let Some(selector) = decision {
+            click_github(window, selector, cx);
+        } else {
+            frame.simulate_keystrokes("escape");
+        }
+        cx.run_until_parked();
+        let expected = (decision == Some("confirmation-danger"))
+            .then_some(ControlToBrain::AccountOp(AccountOp::SignOut));
+        assert_eq!(drain(&controls), expected.into_iter().collect::<Vec<_>>());
+        assert!(owner.read_with(cx, |owner, _| owner.settings_open()));
+        let view = owner.read_with(cx, |owner, _| {
+            owner.settings_panel.as_ref().unwrap().view.clone()
+        });
+        let mut frame = VisualTestContext::from_window(window, cx);
+        let focus = frame.update(|window, cx| {
+            assert!(!window.has_active_dialog(cx));
+            window.draw(cx).clear(cx);
+            window.focus_next(cx);
+            let focus = window.focused(cx).expect("a Settings control");
+            assert_ne!(focus, view.read(cx).focus);
+            focus
+        });
+        owner.update(cx, |owner, cx| {
+            owner.settings.update(cx, |state, cx| {
+                assert!(state.accounts.receive(Some(8), 8, SIGNED_IN));
+                cx.notify();
+            });
+        });
+        cx.run_until_parked();
+        let mut frame = VisualTestContext::from_window(window, cx);
+        assert_eq!(frame.update(|window, cx| window.focused(cx)), Some(focus));
+        assert_eq!(drain(&controls), []);
+    }
+}
+
+#[gpui::test]
+fn sign_out_confirmation_can_reopen_during_the_previous_exit(cx: &mut TestAppContext) {
+    use gpui_kit::component::WindowExt as _;
+
+    let (window, owner, controls) = accounts_panel(cx);
+    account_views(&owner, vec![chatgpt(SIGNED_IN)], cx);
+    cx.update(|cx| cx.set_reduce_motion(false));
+    click_github(window, "account-sign-out", cx);
+    cx.background_executor
+        .advance_clock(std::time::Duration::from_millis(500));
+    click_github(window, "confirmation-cancel", cx);
+    let mut frame = VisualTestContext::from_window(window, cx);
+    frame.update(|window, cx| {
+        window.draw(cx).clear(cx);
+        assert!(!window.has_active_dialog(cx));
+    });
+    assert!(
+        frame.debug_bounds("dialog-layer").is_some(),
+        "the old dialog is exiting"
+    );
+    assert_eq!(drain(&controls), []);
+
+    click_github(window, "account-sign-out", cx);
+    let mut frame = VisualTestContext::from_window(window, cx);
+    assert!(frame.update(|window, cx| window.has_active_dialog(cx)));
+    assert_eq!(drain(&controls), []);
+    frame.simulate_keystrokes("tab enter");
+    frame.run_until_parked();
+    assert_eq!(
+        drain(&controls),
+        [ControlToBrain::AccountOp(AccountOp::SignOut)]
+    );
+}
+
+#[gpui::test]
+fn sign_out_confirmation_ownership_ends_on_refusal_tab_change_and_dismissal(
+    cx: &mut TestAppContext,
+) {
+    use gpui_kit::component::WindowExt as _;
+
+    let (window, owner, controls) = accounts_panel(cx);
+    account_views(&owner, vec![chatgpt(SIGNED_IN)], cx);
+    cx.update(|cx| cx.set_reduce_motion(true));
+    let view = owner.read_with(cx, |owner, _| {
+        owner.settings_panel.as_ref().unwrap().view.clone()
+    });
+    let mut frame = VisualTestContext::from_window(window, cx);
+    frame.update(|window, cx| {
+        window.open_alert_dialog(cx, |alert, _, _| alert.title("Other"));
+        let other_focus = window.focused(cx);
+        view.update(cx, |view, cx| view.confirm_sign_out(window, cx));
+        assert!(view.read(cx).confirmation.is_none());
+        assert_eq!(window.focused(cx), other_focus);
+        window.close_dialog(cx);
+    });
+    click_github(window, "account-sign-out", cx);
+    let mut frame = VisualTestContext::from_window(window, cx);
+    frame.update(|window, cx| {
+        assert!(window.has_active_dialog(cx));
+        view.update(cx, |view, cx| view.select_tab(0, window, cx));
+        assert!(!window.has_active_dialog(cx));
+        assert!(view.read(cx).confirmation.is_none());
+        view.update(cx, |view, cx| view.select_tab(1, window, cx));
+    });
+    click_github(window, "account-sign-out", cx);
+    owner.update(cx, |owner, cx| {
+        assert!(owner.dismiss_account_confirmation(cx));
+        assert!(owner.settings_open());
+    });
+    assert!(view.read_with(cx, |view, _| view.confirmation.is_none()));
+    click_github(window, "account-sign-out", cx);
+    owner.update(cx, |owner, cx| owner.dismiss_settings(cx).unwrap());
+    assert!(view.read_with(cx, |view, _| view.confirmation.is_none()));
+    assert!(!owner.read_with(cx, |owner, _| owner.settings_open()));
+    assert_eq!(drain(&controls), []);
+}
+
 /// Both sign-ins started from Settings' own buttons.
 fn start_both(
     window: AnyWindowHandle,

@@ -34,7 +34,7 @@ const SHOW_ANTHROPIC_KEY_ROW: bool = true;
 pub(super) struct SettingsView {
     pub(super) model: Entity<Settings>,
     pub(super) owner: WeakEntity<Presence>,
-    pub(super) confirmation: Option<u64>,
+    pub(super) confirmation: Option<(u64, crate::confirmation::Handle)>,
     #[cfg(debug_assertions)]
     pub(super) fixture: bool,
     #[cfg(test)]
@@ -100,16 +100,15 @@ impl SettingsView {
         let watch = cx.observe_in(&model, window, |view, _, window, cx| {
             view.sync_github(window, cx);
             let account = &view.model.read(cx).accounts;
-            if view.confirmation.is_some_and(|generation| {
-                account.generation != Some(generation)
+            if view.confirmation.as_ref().is_some_and(|(generation, _)| {
+                account.generation != Some(*generation)
                     || !matches!(
                         account.view,
                         Some(kumochi_protocol::message::AccountView::SignedIn { .. })
                     )
-            }) {
-                view.confirmation = None;
-                window.close_dialog(cx);
-                window.focus(&view.focus, cx);
+            }) && let Some((_, dialog)) = view.confirmation.take()
+            {
+                dialog.dismiss(window, cx);
             }
             for (field, input) in [Field::Assistant, Field::User]
                 .into_iter()
