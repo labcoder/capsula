@@ -422,8 +422,7 @@ fn failed_backend_start_and_idle_exit_notify_without_an_ingress_packet() {
         let mut reports = Vec::new();
         own(
             &port,
-            worker.engine,
-            origin,
+            (worker.engine, origin),
             drawing,
             |_| panic!("no credit"),
             (
@@ -441,6 +440,7 @@ fn failed_backend_start_and_idle_exit_notify_without_an_ingress_packet() {
                     Ok((worker.send, worker.replies))
                 }
             },
+            FixtureStart::OnDemand,
         );
         assert!(port.closed.load(Ordering::Acquire));
         assert_eq!(io.exits(), [OwnerExit::Closed]);

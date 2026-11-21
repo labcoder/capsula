@@ -273,9 +273,15 @@ impl OutputOwner {
         let link_thread = thread::current();
         let reporter = Weak::clone(&shared);
         #[cfg(any(test, feature = "test-support"))]
-        let fake = shared
-            .upgrade()
-            .and_then(|owner| owner.fake_playback.clone());
+        let fake = shared.upgrade().and_then(|owner| {
+            owner
+                .fake_playback
+                .clone()
+                .map(|sender| crate::speaker::queued::FakeOutput {
+                    sender,
+                    prime: owner.prime_fake_playback.swap(false, Ordering::AcqRel),
+                })
+        });
         let Ok(input) = spawn_plain(
             run,
             output,

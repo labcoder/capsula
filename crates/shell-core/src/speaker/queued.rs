@@ -22,6 +22,8 @@ pub use backend::{FixturePlayback, serialize_playback};
 #[cfg(test)]
 mod tests;
 
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) use worker::FakeOutput;
 pub(crate) use worker::{Input, spawn_plain};
 pub(crate) const RATE: u32 = 24_000;
 const CAPACITY: usize = 480_000;

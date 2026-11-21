@@ -65,6 +65,13 @@ reroute replaces the stream instead of assuming that old endpoint timing still a
 An xrun rechecks refill readiness on every tick, even without new ingress.
 Only an authoritative typed RunState starts this worker on an internally selected queued pair.
 
+The offline Plain tests that require a positive heard prefix open the first fake
+route before the worker admits PCM. A callback can render identifiable samples
+after virtual playback has already left an unheard gap, so rendered samples alone
+don't establish a heard prefix. These tests separately check the first source
+handoff and the original run's retirements accepted by the Brain. The quiet cursor
+matches those receipts even when Done made the later quiet report stale to the Brain.
+
 The queued link keeps its authenticated pair in the existing output owner. This does not reserve a
 legacy tail, grant capture, or accept turns before the matching registration receipt. Ending or withdrawing
 that pair drops its run input before aborting both pipes and closing both writer mailboxes.

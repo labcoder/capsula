@@ -89,17 +89,39 @@ pub fn authenticated(
     hello: kumochi_protocol::message::Hello,
     mode: AudioSession,
 ) -> Authenticated {
+    authenticated_with_output(id, hello, mode, Shared::default())
+}
+
+/// Gives the first named run an open fake device before it can prime any source.
+#[cfg(debug_assertions)]
+pub fn authenticated_primed(id: u32, hello: kumochi_protocol::message::Hello) -> Authenticated {
+    authenticated_with_output(
+        id,
+        hello,
+        AudioSession::QueuedRequired,
+        Shared {
+            prime_fake_playback: std::sync::atomic::AtomicBool::new(true),
+            ..Shared::default()
+        },
+    )
+}
+
+#[cfg(debug_assertions)]
+fn authenticated_with_output(
+    id: u32,
+    hello: kumochi_protocol::message::Hello,
+    mode: AudioSession,
+    mut shared: Shared,
+) -> Authenticated {
     use kumochi_protocol::frame::Pipe;
     let (sender, events) = async_channel::unbounded();
     let (output, playback) = mpsc::sync_channel(1);
+    shared.fake_playback = Some(output);
     let link = Link {
         brain: std::env::current_exe().expect("the fixture shares the test image"),
         session: id,
         audio: mode,
-        shared: Arc::new(Shared {
-            fake_playback: Some(output),
-            ..Shared::default()
-        }),
+        shared: Arc::new(shared),
         speaker: None,
     };
     let (handle, start) = start(link, sender);

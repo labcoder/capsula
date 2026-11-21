@@ -1,11 +1,13 @@
 use std::path::Path;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use kumochi_protocol::constants::{CONFIG_FILE, SESSION_LOCK};
 use kumochi_protocol::frame::{self, Pipe};
-use kumochi_protocol::message::{ControlToBrain, ControlToShell, RunId, SceneId};
+use kumochi_protocol::message::{
+    ControlToBrain, ControlToShell, Cursor, RunId, SceneId, SpeechRetirement,
+};
 use tokio::sync::Notify;
 
 use crate::connections::account::Worker;
@@ -33,6 +35,27 @@ pub(crate) fn install(probe: Arc<AudioProbe>) {
 
 pub(super) fn probe() -> Option<Arc<AudioProbe>> {
     PROBE.with(|slot| slot.get().cloned())
+}
+
+pub(crate) fn accepted_retirement(receipt: SpeechRetirement) {
+    if let Some(probe) = probe() {
+        probe
+            .speech
+            .lock()
+            .expect("the audio probe is healthy")
+            .retired
+            .push(receipt);
+    }
+}
+
+pub(crate) fn accepted_quiet(run: RunId, cursor: Option<Cursor>) {
+    if let Some(probe) = probe() {
+        probe
+            .speech
+            .lock()
+            .expect("the audio probe is healthy")
+            .accepted_quiet = Some((run, cursor));
+    }
 }
 
 struct Offline;
@@ -81,9 +104,16 @@ pub struct AudioProbe {
     received_credit: AtomicU64,
     applied_credit: AtomicU64,
     stop: AtomicU64,
-    quiet: AtomicU64,
     heard: AtomicU32,
+    speech: Mutex<SpeechEvidence>,
     scene_failed: std::sync::Mutex<Option<(RunId, SceneId)>>,
+}
+
+#[derive(Debug, Default)]
+struct SpeechEvidence {
+    retired: Vec<SpeechRetirement>,
+    received_quiet: Option<(RunId, Option<Cursor>)>,
+    accepted_quiet: Option<(RunId, Option<Cursor>)>,
 }
 
 impl AudioProbe {
@@ -136,13 +166,49 @@ impl AudioProbe {
     }
 
     /// The run named by the last quiet receipt received on control, or zero.
+    /// # Panics
+    /// Panics if the fixture audio recorder is poisoned.
     pub fn quiet(&self) -> RunId {
-        RunId(self.quiet.load(Ordering::Acquire))
+        self.quiet_receipt().map_or(RunId(0), |(run, _)| run)
     }
 
     /// Largest heard prefix received on control; this is synthetic audio only.
     pub fn heard(&self) -> u32 {
         self.heard.load(Ordering::Acquire)
+    }
+
+    /// The exact last quiet report taken on control, including after natural completion.
+    /// # Panics
+    /// Panics if the fixture audio recorder is poisoned.
+    pub fn quiet_receipt(&self) -> Option<(RunId, Option<Cursor>)> {
+        self.speech
+            .lock()
+            .expect("the audio probe is healthy")
+            .received_quiet
+    }
+
+    /// The exact retirement frames that changed this run's Brain speech ledger.
+    /// # Panics
+    /// Panics if the fixture audio recorder is poisoned.
+    pub fn retired(&self, run: RunId) -> Vec<SpeechRetirement> {
+        self.speech
+            .lock()
+            .expect("the audio probe is healthy")
+            .retired
+            .iter()
+            .copied()
+            .filter(|receipt| receipt.run == run)
+            .collect()
+    }
+
+    /// The last quiet receipt accepted by the Brain, with its exact cursor.
+    /// # Panics
+    /// Panics if the fixture audio recorder is poisoned.
+    pub fn accepted_quiet(&self) -> Option<(RunId, Option<Cursor>)> {
+        self.speech
+            .lock()
+            .expect("the audio probe is healthy")
+            .accepted_quiet
     }
 
     /// The last refused host scene and the Stop already received for it.
@@ -175,7 +241,12 @@ impl AudioProbe {
             ControlToBrain::Stop { run, .. } | ControlToBrain::StopScenes { run, .. } => {
                 self.stop.store(run.0, Ordering::Release);
             }
-            ControlToBrain::SpeechStopped { run, .. } => self.quiet.store(run.0, Ordering::Release),
+            ControlToBrain::SpeechStopped { run, cursor } => {
+                self.speech
+                    .lock()
+                    .expect("the audio probe is healthy")
+                    .received_quiet = Some((*run, *cursor));
+            }
             ControlToBrain::SpeechRetired(receipt) => {
                 self.heard.fetch_max(receipt.heard, Ordering::AcqRel);
             }

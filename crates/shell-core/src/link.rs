@@ -521,6 +521,8 @@ struct Shared {
     #[cfg(any(test, feature = "test-support"))]
     fake_playback: Option<std::sync::mpsc::SyncSender<speaker::queued::FixturePlayback>>,
     #[cfg(any(test, feature = "test-support"))]
+    prime_fake_playback: AtomicBool,
+    #[cfg(any(test, feature = "test-support"))]
     #[cfg(windows)]
     refused_retirement: Mutex<Option<kumochi_protocol::message::SpeechRetirement>>,
     /// Locked only after `outbox`, so a delete and a turn are counted in the order they're

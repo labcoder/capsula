@@ -300,7 +300,7 @@ fn queued_plain_escape_stops_active_audio_while_brain_data_credit_is_exhausted(
     cx: &mut TestAppContext,
 ) {
     use crate::link::{Batch, LinkEvent, fixture};
-    use kumochi_protocol::message::{AudioSession, DataToShell};
+    use kumochi_protocol::message::DataToShell;
     use std::time::{Duration, Instant};
 
     const WAIT: Duration = Duration::from_secs(3);
@@ -317,7 +317,7 @@ fn queued_plain_escape_stops_active_audio_while_brain_data_credit_is_exhausted(
     let _device = fixture::serialize_playback();
     let script = "0 text Distinct sound. More\n0 step kept\n1800 step too late\n5000 text Never.";
     let (id, hello, probe, brain) = kumochi_brain::ipc::offline_plain_peer(script.into(), 2_200);
-    let pipe = fixture::authenticated(id, hello, AudioSession::QueuedRequired);
+    let pipe = fixture::authenticated_primed(id, hello);
     let events = fixture::patient(pipe.events);
     let owner = super::test_fixture::presence(cx);
     owner.update(cx, |owner, _| owner.link = pipe.handle.clone());
@@ -395,6 +395,11 @@ fn queued_plain_escape_stops_active_audio_while_brain_data_credit_is_exhausted(
         samples.map(f32::to_bits),
         [(15_430.0_f32 / 32_768.0).to_bits(); 48]
     );
+    assert_eq!(
+        playback.handed(),
+        48,
+        "the first callback starts at source sample zero"
+    );
     wait("Brain data queue exhausts its credit", || {
         if playback.ready() {
             playback.render(&mut samples);
@@ -450,11 +455,13 @@ fn queued_plain_escape_stops_active_audio_while_brain_data_credit_is_exhausted(
     assert!(after[119..].iter().all(|sample| sample.to_bits() == 0));
     playback.render(&mut after);
     assert_eq!(after.map(f32::to_bits), [0; 128]);
-    wait("original run's quiet receipt", || probe.quiet() == run);
-    assert!(
-        probe.heard() > 0,
-        "the original run reports the prefix it actually rendered"
-    );
+    wait("Brain accepts the original run's quiet receipt", || {
+        probe
+            .accepted_quiet()
+            .is_some_and(|(stopped, _)| stopped == run)
+    });
+    let cursor = assert_heard_prefix(&probe, run);
+    assert_eq!(probe.accepted_quiet(), Some((run, Some(cursor))));
     loop {
         let event = fixture::next(&events);
         let interrupted = matches!(&event, LinkEvent::RunState { run: current, phase: Phase::Interrupted, .. } if *current == run);
@@ -477,7 +484,7 @@ fn queued_plain_escape_stops_active_audio_while_brain_data_credit_is_exhausted(
 )]
 fn queued_authenticated_natural_completion_admits_a_fresh_typed_turn(cx: &mut TestAppContext) {
     use crate::link::{Batch, LinkEvent, fixture};
-    use kumochi_protocol::message::{AudioSession, DataToShell, RunOrigin};
+    use kumochi_protocol::message::{DataToShell, RunOrigin};
     use std::time::{Duration, Instant};
 
     let _device = fixture::serialize_playback();
@@ -486,7 +493,7 @@ fn queued_authenticated_natural_completion_admits_a_fresh_typed_turn(cx: &mut Te
     probe.release_ack();
     probe.release_run();
     probe.allow_data_credit();
-    let pipe = fixture::authenticated(id, hello, AudioSession::QueuedRequired);
+    let pipe = fixture::authenticated_primed(id, hello);
     let events = fixture::patient(pipe.events);
     let owner = super::test_fixture::presence(cx);
     let session = fixture::connected(fixture::next(&events));
@@ -534,14 +541,14 @@ fn queued_authenticated_natural_completion_admits_a_fresh_typed_turn(cx: &mut Te
             );
         });
         let (mut named, mut done, mut ended) = (None, None, None);
-        let (mut playback, mut heard) = (None, false);
+        let (mut playback, mut rendered) = (None, false);
         let mut last_phase = None;
         let deadline = Instant::now() + Duration::from_secs(4);
         let run = loop {
             assert!(
                 Instant::now() < deadline,
-                "turn {turn} finishes without Esc: named={named:?}, phase={last_phase:?}, done={done:?}, ended={ended:?}, quiet={:?}, open={}, heard={heard}, playback={}, credits={:?}",
-                probe.quiet(),
+                "turn {turn} finishes without Esc: named={named:?}, phase={last_phase:?}, done={done:?}, ended={ended:?}, quiet={:?}, open={}, rendered={rendered}, playback={}, credits={:?}",
+                probe.quiet_receipt(),
                 session.open(),
                 playback.is_some(),
                 probe.data_credits()
@@ -588,14 +595,29 @@ fn queued_authenticated_natural_completion_admits_a_fresh_typed_turn(cx: &mut Te
             {
                 let mut samples = [0.0; 48];
                 playback.render(&mut samples);
-                heard |= samples.contains(&(15_430.0_f32 / 32_768.0));
+                if !rendered && samples.contains(&(15_430.0_f32 / 32_768.0)) {
+                    if turn == 1 {
+                        assert_eq!(
+                            playback.handed(),
+                            48,
+                            "the first callback starts at source sample zero"
+                        );
+                    }
+                    rendered = true;
+                }
             }
             std::thread::sleep(Duration::from_millis(2));
         };
         if turn == 1 {
             assert!(
-                heard && probe.heard() > 0,
-                "the first naturally completed run rendered its source and reported a heard prefix"
+                rendered,
+                "the first naturally completed run rendered its source"
+            );
+            assert_heard_prefix(&probe, run);
+            assert_eq!(
+                probe.accepted_quiet(),
+                None,
+                "the natural quiet frame follows completed speech"
             );
         }
         assert!(run > prior);
@@ -608,6 +630,33 @@ fn queued_authenticated_natural_completion_admits_a_fresh_typed_turn(cx: &mut Te
     pipe.handle.end(&session);
     assert!(pipe.link.join().expect("Shell link joined"));
     assert!(brain.join().expect("Brain joined"));
+}
+
+#[cfg(all(windows, debug_assertions))]
+fn assert_heard_prefix(
+    probe: &kumochi_brain::ipc::AudioProbe,
+    run: RunId,
+) -> kumochi_protocol::message::Cursor {
+    use kumochi_protocol::message::{Cursor, SegmentId};
+
+    let retired = probe.retired(run);
+    assert!(
+        retired
+            .iter()
+            .any(|receipt| receipt.segment == SegmentId(0) && receipt.heard >= 48),
+        "Brain accepted the presented source prefix from sample zero: {retired:?}"
+    );
+    let last = retired
+        .iter()
+        .rev()
+        .find(|receipt| receipt.heard != 0)
+        .expect("the Brain accepted a heard prefix");
+    let cursor = Cursor {
+        segment: last.segment,
+        sample: last.heard,
+    };
+    assert_eq!(probe.quiet_receipt(), Some((run, Some(cursor))));
+    cursor
 }
 
 fn escape(owner: &Entity<Presence>, cx: &mut TestAppContext) {

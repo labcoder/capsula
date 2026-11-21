@@ -50,6 +50,19 @@ pub(crate) struct Input {
     closed: Arc<AtomicBool>,
 }
 
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) struct FakeOutput {
+    pub(crate) sender: SyncSender<super::FixturePlayback>,
+    pub(crate) prime: bool,
+}
+
+#[cfg(any(test, feature = "test-support"))]
+#[derive(Clone, Copy)]
+enum FixtureStart {
+    OnDemand,
+    Primed,
+}
+
 impl Input {
     pub(super) fn wake(&self) {
         self.worker.unpark();
@@ -102,7 +115,7 @@ pub(crate) fn spawn_plain(
         impl FnOnce(bool) + Send + 'static,
     ),
     exit: impl FnMut(bool) + Send + 'static,
-    #[cfg(any(test, feature = "test-support"))] fake: Option<SyncSender<super::FixturePlayback>>,
+    #[cfg(any(test, feature = "test-support"))] fake: Option<FakeOutput>,
 ) -> io::Result<Input> {
     spawn(
         run,
@@ -184,7 +197,7 @@ pub(super) fn spawn(
         impl FnMut(ControlToBrain) -> bool + Send + 'static,
         impl FnOnce(bool) + Send + 'static,
     ),
-    #[cfg(any(test, feature = "test-support"))] fake: Option<SyncSender<super::FixturePlayback>>,
+    #[cfg(any(test, feature = "test-support"))] fake: Option<FakeOutput>,
 ) -> io::Result<Input> {
     let (commands, pending) = mpsc::sync_channel(COMMANDS);
     let (packets, data) = mpsc::sync_channel(1);
@@ -202,9 +215,15 @@ pub(super) fn spawn(
     #[cfg(not(any(test, feature = "test-support")))]
     let start = backend::spawn;
     #[cfg(any(test, feature = "test-support"))]
+    let fixture = if fake.as_ref().is_some_and(|output| output.prime) {
+        FixtureStart::Primed
+    } else {
+        FixtureStart::OnDemand
+    };
+    #[cfg(any(test, feature = "test-support"))]
     let start = |owner, origin| {
         if let Some(fake) = fake {
-            return backend::spawn_fake(owner, origin, fake);
+            return backend::spawn_fake(owner, origin, fake.sender);
         }
         backend::spawn(owner, origin)
     };
@@ -213,12 +232,13 @@ pub(super) fn spawn(
         .spawn(move || {
             own(
                 &port,
-                Engine::new(run, generation),
-                origin,
+                (Engine::new(run, generation), origin),
                 drawing,
                 give,
                 reports,
                 start,
+                #[cfg(any(test, feature = "test-support"))]
+                fixture,
             );
         })?;
     let worker = task.thread().clone();
@@ -234,17 +254,17 @@ pub(super) fn spawn(
 
 fn own(
     port: &Port,
-    engine: Engine,
-    origin: Instant,
+    (engine, origin): (Engine, Instant),
     drawing: Drawing,
     give: impl FnMut(Credit),
     (report, refused_tail): (impl FnMut(ControlToBrain) -> bool, impl FnOnce(bool)),
     start: impl FnOnce(Thread, Instant) -> io::Result<(SyncSender<Request>, Receiver<Reply>)>,
+    #[cfg(any(test, feature = "test-support"))] fixture: FixtureStart,
 ) {
     let Ok((send, replies)) = start(thread::current(), origin) else {
         return;
     };
-    Worker {
+    let worker = Worker {
         engine,
         physical: None,
         job: None,
@@ -255,11 +275,34 @@ fn own(
         retired_route: None,
         virtual_route: false,
         drawing: Some(drawing),
-    }
-    .serve(port, origin, give, report, Some(refused_tail));
+    };
+    #[cfg(any(test, feature = "test-support"))]
+    let worker = if matches!(fixture, FixtureStart::Primed) {
+        worker.prime_fake(origin)
+    } else {
+        worker
+    };
+    worker.serve(port, origin, give, report, Some(refused_tail));
 }
 
 impl Worker {
+    #[cfg(any(test, feature = "test-support"))]
+    fn prime_fake(mut self, origin: Instant) -> Self {
+        let now = origin.elapsed();
+        self.engine.expect(now);
+        self.drive(now);
+        let opened = self
+            .replies
+            .recv_timeout(Duration::from_secs(3))
+            .expect("the fake device answers before source admission");
+        self.apply_backend_reply(Ok(opened), origin.elapsed());
+        assert!(
+            self.physical.is_some(),
+            "the worker owns the primed fake route"
+        );
+        self
+    }
+
     fn serve(
         mut self,
         port: &Port,
@@ -415,7 +458,11 @@ impl Worker {
     }
 
     fn backend_reply(&mut self, now: Duration) {
-        match self.replies.try_recv() {
+        self.apply_backend_reply(self.replies.try_recv(), now);
+    }
+
+    fn apply_backend_reply(&mut self, reply: Result<Reply, TryRecvError>, now: Duration) {
+        match reply {
             Ok(Reply::Opened(generation, transport)) => {
                 let Some(Request::Open(pending, _)) = self.job.take() else {
                     return;

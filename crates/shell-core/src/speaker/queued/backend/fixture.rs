@@ -42,6 +42,11 @@ impl FixturePlayback {
         self.callback.fill(samples, self.origin.elapsed());
     }
 
+    /// Exclusive source position handed to this callback, not a heard receipt.
+    pub fn handed(&self) -> u64 {
+        self.callback.handed()
+    }
+
     pub fn stopped(&self) -> bool {
         self.control.stopped()
     }

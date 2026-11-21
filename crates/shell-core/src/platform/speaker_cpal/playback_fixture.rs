@@ -30,4 +30,8 @@ impl FakePlayback {
     pub(crate) fn ready(&self) -> bool {
         self.0.current.is_some() || self.0.ready.len() != 0
     }
+
+    pub(crate) fn handed(&self) -> u64 {
+        self.0.control.handed()
+    }
 }
