@@ -2060,6 +2060,8 @@ fn narration_wakes_resting_presence_for_each_natural_reply(cx: &mut gpui_kit::Te
     use kumochi_protocol::message::{DataToShell, Phase, RunId};
     use std::time::{Duration, Instant};
 
+    const TONE: [u32; 48] = [(15_430.0_f32 / 32_768.0).to_bits(); 48];
+    const TOTAL: u64 = 3_840;
     let _device = fixture::serialize_playback();
     let (id, hello, probe, brain) = kumochi_brain::ipc::offline_narrated_peer(16);
     probe.release_ack();
@@ -2107,6 +2109,7 @@ fn narration_wakes_resting_presence_for_each_natural_reply(cx: &mut gpui_kit::Te
         if turn == 1 {
             owner.update(cx, |this, _| assert!(this.runs.select_thread(None)));
         }
+        fixture::prime_next_playback(&pipe.handle);
         submit_draft(&owner, draft, cx);
         owner.read_with(cx, |this, cx| {
             assert!(
@@ -2179,7 +2182,7 @@ fn narration_wakes_resting_presence_for_each_natural_reply(cx: &mut gpui_kit::Te
         }
         let mut samples = [0.0; 48];
         playback.render(&mut samples);
-        assert!(samples.iter().all(|sample| sample.abs() > 0.01));
+        assert_eq!(samples.map(f32::to_bits), TONE);
         assert_eq!(playback.handed(), 48, "this reply supplies its own onset");
         std::thread::sleep(Duration::from_millis(30));
         let mut held = Vec::new();
@@ -2261,6 +2264,7 @@ fn narration_wakes_resting_presence_for_each_natural_reply(cx: &mut gpui_kit::Te
             std::thread::sleep(Duration::from_millis(2));
         }
         assert_eq!(ended, Some(run));
+        assert_eq!(playback.presented_prefix(), TOTAL);
         assert_eq!(
             probe.shown(),
             expected,

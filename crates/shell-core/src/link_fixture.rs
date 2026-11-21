@@ -82,6 +82,15 @@ pub struct Authenticated {
     pub link: JoinHandle<bool>,
 }
 
+/// Opens the next run's fake device before its worker admits PCM.
+#[cfg(debug_assertions)]
+pub fn prime_next_playback(handle: &LinkHandle) {
+    handle
+        .shared
+        .prime_fake_playback
+        .store(true, std::sync::atomic::Ordering::Release);
+}
+
 /// The real authenticated Shell path, without opening the vault or a physical device.
 #[cfg(debug_assertions)]
 pub fn authenticated(

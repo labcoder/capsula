@@ -591,7 +591,7 @@ fn fake_queued_output(shared: &Weak<Shared>) -> Option<crate::speaker::queued::F
     let owner = shared.upgrade()?;
     Some(crate::speaker::queued::FakeOutput {
         sender: owner.fake_playback.clone()?,
-        prime: !owner.narrated && owner.prime_fake_playback.swap(false, Ordering::AcqRel),
+        prime: owner.prime_fake_playback.swap(false, Ordering::AcqRel),
     })
 }
 

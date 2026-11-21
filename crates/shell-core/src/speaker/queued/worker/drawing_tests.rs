@@ -948,6 +948,84 @@ fn a_pending_open_arms_the_hold_for_ready_pcm_and_releases_it_to_virtual_pacing(
 }
 
 #[test]
+fn late_open_copies_the_remaining_line_at_its_original_source_position() {
+    static OCCUPIED: [AtomicBool; 2] = [const { AtomicBool::new(false) }; 2];
+    for ((open_at, skipped, handed, heard, played), occupied) in [
+        (Duration::ZERO, 0, 48, 64, true),
+        (Duration::from_micros(42), 1, 49, 0, false),
+    ]
+    .into_iter()
+    .zip(&OCCUPIED)
+    {
+        let (mut worker, input, port, requests, replies) = fake();
+        let io = FakeIo::attach(&mut worker, &port);
+        io.0.lock().unwrap().requires_narration = true;
+        let binding = io.view(1, 0, View::Eligible);
+        input.command(Command::Expect).unwrap();
+        input.narrate(binding.assignment).unwrap();
+        step(&mut worker, &port, INSTANT);
+        let Request::Open(generation, control) = requests.try_recv().unwrap() else {
+            panic!("expected a pending open");
+        };
+        assert!(input.allow(binding));
+        let mut line = packet(7, 0, 64, Some(64));
+        let pcm: Vec<i16> = (32..96).map(|n| n * 256).collect();
+        line.pcm.samples.copy_from_slice(&pcm);
+        input.submit(line).unwrap();
+        step(&mut worker, &port, INSTANT);
+
+        let (transport, mut playback) = FakePlayback::open(control, occupied);
+        assert!(
+            replies
+                .send(Reply::Opened(generation, Some(transport)))
+                .is_ok()
+        );
+        step(&mut worker, &port, open_at);
+        assert_eq!(worker.engine.progress.consumed, skipped);
+        assert_eq!(worker.engine.progress.heard, 0);
+        io.picture(
+            binding,
+            RouteStamp::Live(generation),
+            PictureState::Owned(Picture::Wait),
+        );
+
+        let mut out = [0.0; 48];
+        playback.fill(&mut out, ms(10));
+        let start = usize::try_from(skipped).unwrap();
+        assert_eq!(
+            out.map(f32::to_bits),
+            std::array::from_fn(|index| (f32::from(pcm[start + index]) / 32_768.0).to_bits())
+        );
+        assert_eq!(playback.handed(), handed);
+        step(&mut worker, &port, ms(2));
+        io.picture(
+            binding,
+            RouteStamp::Live(generation),
+            PictureState::Owned(Picture::At(ms(10))),
+        );
+
+        playback.fill(&mut out, ms(12));
+        assert_eq!(
+            out.map(f32::to_bits),
+            std::array::from_fn(|index| pcm
+                .get(start + 48 + index)
+                .map_or(0, |&sample| (f32::from(sample) / 32_768.0).to_bits()))
+        );
+        assert_eq!(playback.handed(), 64);
+        step(&mut worker, &port, ms(20));
+        assert_eq!(worker.engine.progress.consumed, 64);
+        assert_eq!(worker.engine.progress.heard, heard);
+        assert_eq!(
+            io.0.lock().unwrap().ordered,
+            [
+                Ordered::Applied(binding),
+                Ordered::Ended { binding, played },
+            ]
+        );
+    }
+}
+
+#[test]
 fn opening_after_the_eligible_line_is_consumed_uses_silent_fallback_without_ending() {
     static OCCUPIED: AtomicBool = AtomicBool::new(false);
     let (mut worker, input, port, requests, replies) = fake();
