@@ -608,9 +608,11 @@ serialize drawing content into logs, or trace a model-facing tool reply.
 
 `SceneState::begin` validates positive optional canvas dimensions. `CallState`
 guards one call's begin/step/end order; a new call gets a fresh guard and must repeat the
-stored header's `v`, `scene`, `surface`, `size` and `others` (`Begin::continues`). Its
-`title` and `alt` may be restated differently: they describe the drawing, and the stored
-header keeps its first text, so the description can go stale after an edit (`shortcut:`).
+stored header's `v`, `scene` and `surface` (`Begin::continues`). It may leave out `size`,
+which keeps the stored canvas, but a size it gives must match. Its `others` is ignored,
+since only a new scene applies it. Its `title` and `alt` may be restated differently: they
+describe the drawing, and the stored header keeps its first text, so the description can go
+stale after an edit (`shortcut:`).
 Racing calls that begin one new name use the same comparison. Ending a call does not end
 its scene.
 
