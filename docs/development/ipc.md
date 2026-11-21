@@ -51,8 +51,12 @@ only with Talk-back and Show Screen confirmed off on that registered pair. A pen
 either preference closes Hold admission; this includes settings and installer writes that can
 change an inherited value. The brain cancels an in-flight Hold when it takes such a change
 before submit. The shell keeps the recognized gesture and its release in the same ordered
-outbox. The data writer rechecks the original input's authority before starting a queued PCM
-frame, so cancellation discards waiting PCM but a normal release can send its tail.
+outbox. Revocation closes capture and enqueue for that gesture. Before writing a queued PCM
+frame the data writer rechecks its authority, so a normal release can send its tail. The
+check and write are separate: a frame already captured can still cross the local pipe.
+When cancellation wins before decode admission, the brain drops audio it has already received
+and rejects late PCM for that gesture. If decode has already been admitted, cancellation
+that wins before the Brain handles its result discards the words instead.
 The mic Stop receipt clears microphone debt, not the reservation. Only the
 matching Hold run after release consumes that reservation, or a matching terminal Hold status
 clears it. A silent Hold starts no speaker and asks for no picture. AskAbout, screen capture and
