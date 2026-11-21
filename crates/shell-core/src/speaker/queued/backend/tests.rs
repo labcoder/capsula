@@ -9,7 +9,7 @@ use super::super::worker::{
     Command,
     tests::{RUN, open_actor},
 };
-use super::*;
+use super::{fixture::wait_for_playback_disposal, *};
 
 const WAIT: Duration = Duration::from_secs(5);
 
@@ -117,6 +117,7 @@ fn stopped_open_disposes_without_play_and_excludes_other_opens_until_drop() {
         "a stopped open must not call play"
     );
 
+    wait_for_playback_disposal(&[&FIRST_POOL]);
     let allowed = Arc::<Control>::default();
     allowed.inhibit();
     second.send(Request::Open(4, allowed)).unwrap();
@@ -131,6 +132,7 @@ fn stopped_open_disposes_without_play_and_excludes_other_opens_until_drop() {
         second_reply.recv_timeout(WAIT),
         Ok(Reply::Retired(4))
     ));
+    wait_for_playback_disposal(&[&NEXT_POOL]);
 }
 
 #[test]
@@ -239,6 +241,7 @@ fn detached_worker_cannot_give_a_successor_its_pending_native_permit() {
         Err(mpsc::TryRecvError::Disconnected)
     );
     assert_eq!(plays.load(Ordering::Relaxed), 0);
+    wait_for_playback_disposal(&[&LATE_POOL]);
 
     next.send(Request::Open(4, Arc::default())).unwrap();
     let Reply::Opened(4, Some(transport)) = results.recv_timeout(WAIT).unwrap() else {
@@ -277,6 +280,7 @@ fn detached_worker_cannot_give_a_successor_its_pending_native_permit() {
     drop(transport);
     next.send(Request::Retire(4)).unwrap();
     assert!(matches!(results.recv_timeout(WAIT), Ok(Reply::Retired(4))));
+    wait_for_playback_disposal(&[&NEXT_POOLS[0]]);
     refusing.send(Request::Open(6, Arc::default())).unwrap();
     assert!(matches!(
         refusals.recv_timeout(WAIT),
@@ -296,6 +300,7 @@ fn detached_worker_cannot_give_a_successor_its_pending_native_permit() {
     drop(transport);
     next.send(Request::Retire(7)).unwrap();
     assert!(matches!(results.recv_timeout(WAIT), Ok(Reply::Retired(7))));
+    wait_for_playback_disposal(&[&NEXT_POOLS[1]]);
     assert!(!NATIVE.load(Ordering::Acquire));
     drop((next, refusing));
     assert!(matches!(

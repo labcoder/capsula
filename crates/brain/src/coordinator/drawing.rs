@@ -253,7 +253,8 @@ impl Coordinator {
     }
 
     pub(super) fn drawing_output(&mut self, output: Output, effects: &mut Vec<Effect>) {
-        for effect in output.effects {
+        let mut pending = output.effects.into_iter().peekable();
+        while let Some(effect) = pending.next() {
             if let Effect::Data(message) = &effect
                 && let Some(thread) = scene_id(message).and_then(|scene| self.drawing.thread(scene))
                 && self.deleting_thread(thread)
@@ -270,7 +271,29 @@ impl Coordinator {
                 continue;
             }
             if let Effect::RevokeScenes { scenes } = effect {
-                self.drawing_revoke(scenes, effects);
+                let successor = match pending.peek() {
+                    Some(Effect::Data(DataToShell::ScenesReplaced {
+                        scenes: victims,
+                        successor,
+                    })) if *victims == scenes
+                        && self
+                            .current
+                            .as_ref()
+                            .and_then(|run| run.reply.as_ref())
+                            .is_some_and(|reply| reply.has_narration_in(&scenes))
+                        && !self
+                            .drawing
+                            .thread(*successor)
+                            .is_some_and(|thread| self.deleting_thread(thread)) =>
+                    {
+                        Some(*successor)
+                    }
+                    _ => None,
+                };
+                if successor.is_some() {
+                    pending.next();
+                }
+                self.drawing_revoke(scenes, successor, effects);
                 continue;
             }
             if let Effect::DrawingReplyText { key, text } = effect {
@@ -461,7 +484,12 @@ impl Coordinator {
         }
     }
 
-    fn drawing_revoke(&mut self, scenes: Vec<SceneId>, effects: &mut Vec<Effect>) {
+    fn drawing_revoke(
+        &mut self,
+        scenes: Vec<SceneId>,
+        successor: Option<SceneId>,
+        effects: &mut Vec<Effect>,
+    ) {
         self.drawing_held.retain_mut(|(_, frame, end)| {
             if scene_id(frame).is_some_and(|scene| scenes.contains(&scene)) {
                 let Some(run) = end.take() else {
@@ -471,6 +499,12 @@ impl Coordinator {
             }
             true
         });
+        if let Some(successor) = successor {
+            effects.push(Effect::ReplaceNarratedScenes {
+                scenes: scenes.clone(),
+                successor,
+            });
+        }
         if let Some(run) = &mut self.current
             && let Some(reply) = &mut run.reply
         {
@@ -478,7 +512,9 @@ impl Coordinator {
             reply.scenes_removed(&scenes, &mut out);
             speech::carry(run, out, effects);
         }
-        effects.push(Effect::RevokeScenes { scenes });
+        if successor.is_none() {
+            effects.push(Effect::RevokeScenes { scenes });
+        }
         let mut at = 0;
         while at < self.drawing_held.len() {
             if let DataToShell::RunEnd { run } = self.drawing_held[at].1 {

@@ -9,7 +9,7 @@ use std::task::{Context, Poll};
 use kumochi_protocol::message::RunId;
 use serde_json::{Value, json, value::RawValue};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
-use tokio::sync::mpsc;
+use tokio::sync::{Notify, mpsc};
 
 use super::engine::replay_round;
 use crate::connections::model::conn::Connect;
@@ -31,6 +31,7 @@ const COMPLETED: &str = "data: {\"type\":\"response.completed\"}\n\n";
 
 pub(crate) struct Replay {
     recipe: Arc<Wire>,
+    followup: Option<(Arc<Wire>, Arc<Notify>)>,
     receipt: Arc<Observation>,
     run: OnceLock<RunId>,
 }
@@ -38,8 +39,67 @@ pub(crate) struct Replay {
 impl Replay {
     pub(crate) fn new(receipt: &Arc<Observation>) -> io::Result<Self> {
         Ok(Self {
-            recipe: Arc::new(Wire::drawing()?),
+            recipe: Arc::new(Wire::drawing(Recipe::Plain)?),
+            followup: None,
             receipt: Arc::clone(receipt),
+            run: OnceLock::new(),
+        })
+    }
+
+    #[cfg(feature = "test-support")]
+    pub(crate) fn narrated() -> io::Result<Self> {
+        Self::offline(Recipe::Narrated)
+    }
+
+    #[cfg(feature = "test-support")]
+    pub(crate) fn replacing() -> io::Result<Self> {
+        Self::offline(Recipe::Replacement)
+    }
+
+    #[cfg(feature = "test-support")]
+    pub(crate) fn replacement_chain(gate: Arc<Notify>) -> Self {
+        let round = |draws: &[(&str, &str, bool)]| {
+            let mut sse = String::new();
+            for (index, &(id, fill, speech)) in draws.iter().enumerate() {
+                let args = json!({"records":[
+                    {"begin":{"v":1,"scene":id,"surface":"overlay","alt":"","others":if id == "final" { "clear" } else { "keep" }}},
+                    {"step":{
+                        "id":id,"start":if speech { "speech" } else { "now" },
+                        "say":if speech { Some("fixture speech") } else { None },
+                        "put":[{"shape":{"id":id,"kind":"rect","box":[0,0,15,15],"fill":fill,"enter":"none"}}]
+                    }},
+                    {"end":{}}
+                ]});
+                append_draw(&mut sse, index, id, &args.to_string());
+            }
+            sse.push_str(COMPLETED);
+            Arc::new(Wire::http(&sse, Vec::new()))
+        };
+        Self {
+            recipe: round(&[
+                ("first", "#aa0000", false),
+                ("middle", "#00bb00", false),
+                ("third", "#0000cc", false),
+            ]),
+            followup: Some((
+                round(&[
+                    ("spoken", "#999999", true),
+                    ("eviction", "#dddd00", false),
+                    ("final", "#00eeee", false),
+                ]),
+                gate,
+            )),
+            receipt: Observation::silent_replay(),
+            run: OnceLock::new(),
+        }
+    }
+
+    #[cfg(feature = "test-support")]
+    fn offline(recipe: Recipe) -> io::Result<Self> {
+        Ok(Self {
+            recipe: Arc::new(Wire::drawing(recipe)?),
+            followup: None,
+            receipt: Observation::silent_replay(),
             run: OnceLock::new(),
         })
     }
@@ -53,17 +113,30 @@ impl fmt::Debug for Replay {
 
 impl Engine for Replay {
     fn start(&self, request: RunRequest, events: mpsc::Sender<TurnEvent>, gate: SendGate) -> Round {
-        let wire = match request.key {
+        let (wire, hold) = match request.key {
             SendKey::Build(key) if key.round == 1 && self.run.set(request.run).is_ok() => {
-                Some(Arc::clone(&self.recipe))
+                (Some(Arc::clone(&self.recipe)), None)
             }
             SendKey::Build(key) if key.round == 2 && self.run.get() == Some(&request.run) => {
-                Some(Arc::new(Wire::http(COMPLETED, Vec::new())))
+                self.followup.as_ref().map_or_else(
+                    || (Some(Arc::new(Wire::http(COMPLETED, Vec::new()))), None),
+                    |(wire, hold)| (Some(Arc::clone(wire)), Some(Arc::clone(hold))),
+                )
             }
-            _ => None,
+            SendKey::Build(key)
+                if key.round == 3
+                    && self.followup.is_some()
+                    && self.run.get() == Some(&request.run) =>
+            {
+                (Some(Arc::new(Wire::http(COMPLETED, Vec::new()))), None)
+            }
+            _ => (None, None),
         };
         let receipt = Arc::clone(&self.receipt);
         Box::pin(async move {
+            if let Some(hold) = hold {
+                hold.notified().await;
+            }
             let finish = if let Some(wire) = wire {
                 let connect = ReplayConnect {
                     wire,
@@ -79,13 +152,22 @@ impl Engine for Replay {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Recipe {
+    Plain,
+    #[cfg(feature = "test-support")]
+    Narrated,
+    #[cfg(feature = "test-support")]
+    Replacement,
+}
+
 struct Wire {
     bytes: Vec<u8>,
     marks: Vec<(usize, DrawStage<'static>)>,
 }
 
 impl Wire {
-    fn drawing() -> io::Result<Self> {
+    fn drawing(recipe: Recipe) -> io::Result<Self> {
         #[derive(serde::Deserialize)]
         struct Records<'a> {
             #[serde(borrow)]
@@ -125,12 +207,39 @@ impl Wire {
             arguments.push_str(data);
         };
         delta(&format!("{{\"records\":[{},", begin.get()), None);
-        for (index, data) in std::iter::once(recorded.get()).chain(STAGED).enumerate() {
-            let record: Value = serde_json::from_str(data)?;
+        #[cfg(feature = "test-support")]
+        let narrated = recipe != Recipe::Plain;
+        #[cfg(feature = "test-support")]
+        let replacing = recipe == Recipe::Replacement;
+        #[cfg(not(feature = "test-support"))]
+        let Recipe::Plain = recipe;
+        #[cfg(not(feature = "test-support"))]
+        let narrated = false;
+        #[cfg(not(feature = "test-support"))]
+        let replacing = false;
+        let mut records = [
+            (0, recorded.get()),
+            (1, STAGED[0]),
+            (2, STAGED[1]),
+            (3, STAGED[2]),
+        ];
+        if narrated {
+            records.swap(1, 2);
+        }
+        for (index, data) in records {
+            if replacing && index != 1 || narrated && !matches!(index, 1 | 2) {
+                continue;
+            }
+            let mut record: Value = serde_json::from_str(data)?;
             if record["step"]["id"].as_str() != Some(REPLAY_STEPS[index]) {
                 return Err(io::Error::other("drawing replay step identifiers changed"));
             }
-            delta(data, Some(index));
+            if narrated && index == 1 {
+                record["step"]["start"] = Value::String("speech".into());
+                delta(&record.to_string(), Some(index));
+            } else {
+                delta(data, Some(index));
+            }
             delta(",", None);
         }
         delta(&format!("{}]}}", end.get()), None);
@@ -140,6 +249,9 @@ impl Wire {
                 "type": "response.output_item.done", "output_index": 0, "item": item(&arguments),
             }),
         );
+        if replacing {
+            append_replacement(&mut sse);
+        }
         sse.push_str(COMPLETED);
         Ok(Self::http(&sse, marks))
     }
@@ -156,6 +268,31 @@ impl Wire {
         bytes.extend_from_slice(sse.as_bytes());
         Self { bytes, marks }
     }
+}
+
+fn append_replacement(sse: &mut String) {
+    const ARGS: &str = r#"{"records":[{"begin":{"v":1,"scene":"replacement","surface":"overlay","alt":""}},{"step":{"id":"fresh","start":"now","put":[{"shape":{"id":"box","kind":"rect","box":[0,0,15,15],"enter":"none"}}]}},{"end":{}}]}"#;
+    append_draw(sse, 1, "fixture-replacement", ARGS);
+}
+
+fn append_draw(sse: &mut String, index: usize, id: &str, args: &str) {
+    let item = |arguments: &str| {
+        json!({
+            "type": "function_call", "id": id, "call_id": id, "name": "draw", "arguments": arguments,
+        })
+    };
+    append(
+        sse,
+        &json!({"type":"response.output_item.added","output_index":index,"item":item("")}),
+    );
+    append(
+        sse,
+        &json!({"type":"response.function_call_arguments.delta","item_id":id,"delta":args}),
+    );
+    append(
+        sse,
+        &json!({"type":"response.output_item.done","output_index":index,"item":item(args)}),
+    );
 }
 
 fn append(sse: &mut String, event: &Value) {
@@ -244,7 +381,7 @@ impl AsyncWrite for ReplayIo {
 
 #[cfg(test)]
 mod tests {
-    use super::{DrawStage, RECORDED, REPLAY_STEPS, STAGED, Wire};
+    use super::{DrawStage, RECORDED, REPLAY_STEPS, Recipe, STAGED, Wire};
 
     #[test]
     fn staged_step_has_new_pixels_in_the_first_sample() {
@@ -320,7 +457,7 @@ mod tests {
 
     #[test]
     fn stamps_name_record_bytes_even_when_the_event_spans_reads() {
-        let wire = Wire::drawing().unwrap();
+        let wire = Wire::drawing(Recipe::Plain).unwrap();
         assert_eq!(wire.marks.len(), 5);
         assert!(matches!(wire.marks[0], (at, DrawStage::Call) if wire.bytes[at] == b'{'));
         for (index, &(start, stage)) in wire.marks[1..].iter().enumerate() {

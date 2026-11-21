@@ -194,11 +194,17 @@ impl Engine {
         if valid {
             self.settle(now);
         }
+        let segment = packet.pcm.segment;
+        let carries_source = !packet.pcm.samples.is_empty();
         let admission = self.queue.offer(packet)?;
         if valid && matches!(admission, Admission::Return(_)) {
             self.skip_discarded(now);
-            self.warm(now);
-            self.active_at = now;
+            if !self.queue.discarded(segment) {
+                if carries_source {
+                    self.warm(now);
+                }
+                self.active_at = now;
+            }
             self.ready(now);
         }
         Ok(admission)

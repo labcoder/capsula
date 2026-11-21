@@ -3778,6 +3778,479 @@ fn queued_speech_start_or_scene_promise_closes_without_data_credit() {
     }
 }
 
+#[cfg(debug_assertions)]
+fn narrated_attended(label: &str) -> (Attended, std::sync::Arc<super::narrated::Narrated>) {
+    let narration = Arc::new(super::narrated::Narrated::new());
+    let paired = attended_queued_shared(
+        label,
+        Arc::new(super::Shared {
+            narrated: Some(Arc::clone(&narration)),
+            ..super::Shared::default()
+        }),
+    );
+    (paired, narration)
+}
+
+#[cfg(debug_assertions)]
+#[test]
+fn stopped_narrated_run_drains_only_its_valid_late_announcement() {
+    use kumochi_protocol::message::{SceneId, SegmentId, SegmentStart, SpeechPromise, StepRef};
+    use kumochi_scene::{Record, parse_record};
+
+    let (link, _) = narrated_attended("queued-late-narrated");
+    let events = patient(link.events.clone());
+    let (session, output) = queued_named_run(&link, &events);
+    let run = RunId(7);
+    let scene = SceneId(1);
+    let segment = SegmentId(0);
+    let Record::Step(step) =
+        parse_record(br#"{"step":{"id":"speech-step","say":"test"}}"#).unwrap()
+    else {
+        panic!("step");
+    };
+    frame::write(
+        &mut &*link.data,
+        &DataToShell::SceneStepCommit {
+            run,
+            scene,
+            index: 0,
+            step,
+            speech: Some(SpeechPromise {
+                output_generation: output,
+                segment,
+            }),
+        },
+        Pipe::Data,
+    )
+    .unwrap();
+    assert!(matches!(next(&events), LinkEvent::SceneData { .. }));
+    assert!(link.handle.output().stop(session.generation(), run).is_ok());
+    let mut announcement = DataToShell::SegmentQueued {
+        run,
+        segment,
+        step: Some(StepRef { scene, index: 0 }),
+        start: SegmentStart::Speech,
+        output_generation: output,
+    };
+    frame::write(&mut &*link.data, &announcement, Pipe::Data).unwrap();
+    let marker = DataToShell::AssistantText {
+        run,
+        delta: "after".into(),
+    };
+    let _sent = frame::write(&mut &*link.data, &marker, Pipe::Data);
+    assert!(
+        matches!(
+            events.recv_timeout(PATIENCE),
+            Ok(LinkEvent::Data { message, .. }) if message == marker
+        ),
+        "valid named-run metadata after Stop keeps the data reader live"
+    );
+    assert!(session.open());
+    let DataToShell::SegmentQueued { step, .. } = &mut announcement else {
+        unreachable!()
+    };
+    *step = Some(StepRef { scene, index: 1 });
+    frame::write(&mut &*link.data, &announcement, Pipe::Data).unwrap();
+    link.data.set_timeout(Some(PATIENCE));
+    assert!(link.link.join().unwrap());
+    assert!(!session.open(), "unrelated metadata still closes the pair");
+}
+
+#[cfg(debug_assertions)]
+#[test]
+fn narrated_pump_rejects_foreign_equal_generations_without_sending_or_aborting() {
+    let (first, narration) = narrated_attended("narrated-own-pair");
+    let (second, _) = narrated_attended("narrated-foreign-pair");
+    let events_a = patient(first.events.clone());
+    let events_b = patient(second.events.clone());
+    let (a, _) = queued_named_run(&first, &events_a);
+    let (b, _) = queued_named_run(&second, &events_b);
+    assert_eq!(a.generation(), b.generation());
+    let now = Instant::now();
+    let mut presenter = crate::presenter::fixture::presenter();
+    presenter.connected(a.generation());
+    narration.attach(&mut presenter);
+    for (handle, session) in [
+        (&first.handle, &b),
+        (&second.handle, &a),
+        (&second.handle, &b),
+    ] {
+        assert_eq!(
+            narration.update(handle, session, &mut presenter, now),
+            Err(()),
+            "a matching generation counter is not the original pair"
+        );
+    }
+    for (link, session, events) in [(first, a, events_a), (second, b, events_b)] {
+        assert!(session.open());
+        let marker = DataToShell::AssistantText {
+            run: RunId(7),
+            delta: "alive".into(),
+        };
+        frame::write(&mut &*link.data, &marker, Pipe::Data).unwrap();
+        assert!(matches!(next(&events), LinkEvent::Data { message, .. } if message == marker));
+        frame::write(&mut &link.control, &ControlToShell::Ping, Pipe::Control).unwrap();
+        assert_eq!(
+            frame::read::<ControlToBrain>(&mut &link.control, Pipe::Control).unwrap(),
+            Some(ControlToBrain::Pong),
+            "no foreign control offer before Pong"
+        );
+        link.handle.end(&session);
+        assert!(link.link.join().unwrap());
+    }
+}
+
+#[cfg(debug_assertions)]
+#[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "the same split-pipe fixture covers both run lifetimes and exact metadata verdicts"
+)]
+fn an_in_flight_old_promise_drains_only_once_after_the_next_named_run() {
+    use crate::{presenter::fixture, runs::RunDisposition};
+    use kumochi_protocol::message::{
+        SceneId, SegmentId, SegmentStart, SpeechPcm, SpeechPromise, StepRef,
+    };
+    use kumochi_scene::{Record, parse_record};
+    use std::cell::RefCell;
+    use std::io::Write as _;
+
+    #[derive(Clone, Copy, Debug)]
+    enum Pause {
+        Commit,
+        Announcement,
+        After,
+        Lone,
+        Empty,
+        Wrong,
+        Unpromised,
+        Duplicate,
+    }
+
+    use Pause as At;
+    let cases = [At::Commit, At::Announcement, At::After]
+        .into_iter()
+        .flat_map(|at| [(at, true), (at, false)])
+        .chain(
+            [
+                At::Lone,
+                At::Empty,
+                At::Wrong,
+                At::Unpromised,
+                At::Duplicate,
+            ]
+            .map(|at| (at, true)),
+        );
+    for (at, stop_successor) in cases {
+        let narration = Arc::new(super::narrated::Narrated::new());
+        let (device, opened) = std::sync::mpsc::sync_channel(1);
+        let link = attended_queued_shared(
+            &format!("late-queued-{at:?}-{stop_successor}"),
+            Arc::new(Shared {
+                narrated: Some(Arc::clone(&narration)),
+                fake_playback: Some(device),
+                ..Shared::default()
+            }),
+        );
+        let events = patient(link.events.clone());
+        let (session, output) = queued_named_run(&link, &events);
+        let (old, new) = (RunId(7), RunId(8));
+        let scene = SceneId(2);
+        let segment = SegmentId(0);
+        let now = Instant::now();
+        let presenter = RefCell::new(fixture::presenter());
+        {
+            let mut presenter = presenter.borrow_mut();
+            presenter.connected(session.generation());
+            presenter
+                .described(
+                    session.generation(),
+                    &kumochi_scene::text::Bounded::default(),
+                    now,
+                )
+                .unwrap();
+            narration.attach(&mut presenter);
+            presenter
+                .data(
+                    session.generation(),
+                    kumochi_scene::deferred::Deferred::new(
+                        DataToShell::SceneBegin {
+                            scene,
+                            header: fixture::header(),
+                        },
+                        0,
+                    ),
+                    0,
+                    now,
+                )
+                .unwrap();
+        }
+        let Record::Step(authored) = parse_record(br#"{"step":{"id":"old","say":"old"}}"#).unwrap()
+        else {
+            panic!("old drawing step")
+        };
+        let speech = Some(SpeechPromise {
+            output_generation: output,
+            segment,
+        });
+        let commit_for = |run, scene| {
+            frame::encode(
+                &DataToShell::SceneStepCommit {
+                    run,
+                    scene,
+                    index: 0,
+                    step: authored.clone(),
+                    speech,
+                },
+                Pipe::Data,
+            )
+            .unwrap()
+        };
+        let announce_for = |run, scene, index| {
+            frame::encode(
+                &DataToShell::SegmentQueued {
+                    run,
+                    segment,
+                    start: SegmentStart::Speech,
+                    output_generation: output,
+                    step: Some(StepRef { scene, index }),
+                },
+                Pipe::Data,
+            )
+            .unwrap()
+        };
+        let commit = commit_for(old, scene);
+        let announcement = announce_for(old, scene, u32::from(matches!(at, At::Wrong)));
+        let send = |bytes: &[u8]| (&*link.data).write_all(bytes).unwrap();
+        let credit = |len| {
+            assert_eq!(
+                frame::read::<DataToBrain>(&mut &*link.data, Pipe::Data).unwrap(),
+                Some(DataToBrain::Credit {
+                    bytes: u32::try_from(len).unwrap()
+                }),
+                "exact credit for {at:?}, B stopped: {stop_successor}"
+            );
+        };
+        let grant_commit = || {
+            let event = next(&events);
+            let LinkEvent::SceneData { frame, bytes, .. } = event else {
+                panic!(
+                    "A's exact commit must reach admission after {at:?}, B stopped: {stop_successor}"
+                );
+            };
+            assert!(
+                matches!(&*frame, DataToShell::SceneStepCommit { run, scene: id, index: 0, speech: promised, .. }
+                if (*run, *id, *promised) == (old, scene, speech))
+            );
+            assert_eq!(usize::try_from(bytes).unwrap(), commit.len());
+            if matches!(at, At::Commit | At::Lone) {
+                let mut presenter = presenter.borrow_mut();
+                let effects = presenter
+                    .data_with_disposition(
+                        session.generation(),
+                        frame,
+                        bytes,
+                        RunDisposition::Stopped,
+                        now,
+                    )
+                    .unwrap();
+                let effects = fixture::settle(&mut presenter, effects, now).unwrap();
+                assert_eq!(
+                    fixture::first_logged_step(&presenter, scene).id.as_str(),
+                    "old"
+                );
+                assert_eq!(
+                    fixture::controls(&effects),
+                    [&ControlToBrain::StepFailed {
+                        run: old,
+                        scene,
+                        index: 0,
+                        reason: kumochi_protocol::message::SceneFailure::Cancelled,
+                        cut: fixture::zero_cut(),
+                    }]
+                );
+                assert_eq!(fixture::activated(&presenter, scene), 0);
+                assert_eq!(fixture::painted(&presenter.frames().borrow(), scene), None);
+                assert_eq!(fixture::credit(&effects), bytes);
+                session.grant(fixture::credit(&effects));
+            } else {
+                session.grant(bytes);
+            }
+            credit(commit.len());
+        };
+        let stop = |run| {
+            let stop = ControlToBrain::Stop {
+                run,
+                revealed: Vec::new(),
+            };
+            assert!(link.handle.send_control(&session, stop.clone()));
+            assert_eq!(link.handle.output().stop(session.generation(), run), Ok(()));
+            assert_eq!(
+                frame::read::<ControlToBrain>(&mut &link.control, Pipe::Control).unwrap(),
+                Some(stop)
+            );
+            assert_eq!(
+                frame::read::<ControlToBrain>(&mut &link.control, Pipe::Control).unwrap(),
+                Some(ControlToBrain::SpeechStopped { run, cursor: None }),
+                "the actual worker proves quiet before releasing the data suffix"
+            );
+        };
+        let split = |bytes: &[u8]| bytes.len() - 1;
+        match at {
+            At::Commit | At::Lone => send(&commit[..split(&commit)]),
+            At::Empty | At::Unpromised => {}
+            _ => {
+                send(&commit);
+                grant_commit();
+            }
+        }
+        match at {
+            At::Announcement | At::Wrong | At::Unpromised | At::Duplicate => {
+                send(&announcement[..split(&announcement)]);
+            }
+            At::After => {
+                send(&announcement);
+                credit(announcement.len());
+            }
+            _ => {}
+        }
+        stop(old);
+        let submit = queued_text(2, "new owner");
+        assert!(link.handle.send_data(&session, submit.clone()));
+        assert_eq!(
+            frame::read::<DataToBrain>(&mut &*link.data, Pipe::Data).unwrap(),
+            Some(submit)
+        );
+        frame::write(
+            &mut &link.control,
+            &run_state(
+                new.0,
+                ThreadId(1),
+                Phase::Thinking,
+                Some(RunOrigin::Typed { turn: 2 }),
+            ),
+            Pipe::Control,
+        )
+        .unwrap();
+        assert!(matches!(next(&events), LinkEvent::RunState { run, .. } if run == new));
+        if stop_successor {
+            stop(new);
+        }
+
+        match at {
+            At::Commit | At::Lone => {
+                send(&commit[split(&commit)..]);
+                grant_commit();
+                if matches!(at, At::Commit) {
+                    send(&announcement);
+                    credit(announcement.len());
+                }
+            }
+            At::Announcement | At::Wrong | At::Unpromised | At::Duplicate => {
+                send(&announcement[split(&announcement)..]);
+                if matches!(at, At::Wrong | At::Unpromised) {
+                    queued_pair_closed(link.link, &link.control, &link.data);
+                    continue;
+                }
+                credit(announcement.len());
+                if matches!(at, At::Duplicate) {
+                    send(&announcement);
+                    queued_pair_closed(link.link, &link.control, &link.data);
+                    continue;
+                }
+            }
+            At::After | At::Empty => {}
+        }
+        if matches!(at, At::Lone) {
+            let new_scene = SceneId(3);
+            let commit = commit_for(new, new_scene);
+            send(&commit);
+            let LinkEvent::SceneData { frame, bytes, .. } = next(&events) else {
+                panic!("B's own stopped commit is independent of A's outstanding promise");
+            };
+            assert!(
+                matches!(&*frame, DataToShell::SceneStepCommit { run, scene, .. }
+                if (*run, *scene) == (new, new_scene))
+            );
+            session.grant(bytes);
+            credit(commit.len());
+            let announcement = announce_for(new, new_scene, 0);
+            send(&announcement);
+            credit(announcement.len());
+        }
+        if matches!(at, At::Commit | At::Announcement | At::After) {
+            let pcm = frame::encode(
+                &DataToShell::SpeechPcm(SpeechPcm {
+                    run: old,
+                    segment,
+                    output_generation: output,
+                    seq: 0,
+                    samples: vec![125; 240],
+                    last: Some(240),
+                }),
+                Pipe::Data,
+            )
+            .unwrap();
+            send(&pcm);
+            credit(pcm.len());
+            assert!(matches!(
+                opened.try_recv(),
+                Err(std::sync::mpsc::TryRecvError::Empty)
+            ));
+        }
+        assert_eq!(
+            narration.update(&link.handle, &session, &mut presenter.borrow_mut(), now),
+            Ok(())
+        );
+        let marker = DataToShell::AssistantText {
+            run: new,
+            delta: "new data".into(),
+        };
+        frame::write(&mut &*link.data, &marker, Pipe::Data).unwrap();
+        assert!(matches!(next(&events), LinkEvent::Data { message, .. } if message == marker));
+        frame::write(&mut &link.control, &ControlToShell::Ping, Pipe::Control).unwrap();
+        assert_eq!(
+            frame::read::<ControlToBrain>(&mut &link.control, Pipe::Control).unwrap(),
+            Some(ControlToBrain::Pong)
+        );
+        assert!(session.open());
+        if !stop_successor {
+            stop(new);
+        }
+        let end = |id| {
+            frame::write(
+                &mut &*link.data,
+                &DataToShell::RunEnd { run: id },
+                Pipe::Data,
+            )
+            .unwrap();
+            assert!(
+                matches!(next(&events), LinkEvent::Data { message: DataToShell::RunEnd { run }, .. } if run == id)
+            );
+        };
+        end(new);
+        let draft = queued_text(3, "preserved draft");
+        assert!(
+            !link.handle.admits_text(Some(&session)),
+            "B's RunEnd and quiet do not settle A"
+        );
+        assert!(!link.handle.send_data(&session, draft.clone()));
+        end(old);
+        assert!(link.handle.admits_text(Some(&session)));
+        assert!(link.handle.send_data(&session, draft.clone()));
+        assert_eq!(
+            frame::read::<DataToBrain>(&mut &*link.data, Pipe::Data).unwrap(),
+            Some(draft)
+        );
+        send(if matches!(at, At::Empty | At::Lone) {
+            &commit
+        } else {
+            &announcement
+        });
+        queued_pair_closed(link.link, &link.control, &link.data);
+    }
+}
+
 fn queued_pair_closed(link: thread::JoinHandle<bool>, control: &PipeClient, data: &PipeClient) {
     let (done, joined) = std::sync::mpsc::channel();
     thread::spawn(move || {

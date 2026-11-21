@@ -127,6 +127,11 @@ impl Observation {
         }))
     }
 
+    #[cfg(all(windows, debug_assertions, feature = "test-support"))]
+    pub(crate) fn silent_replay() -> Arc<Self> {
+        Self::start_mode(std::io::sink(), 1, None).expect("the offline replay has a clock")
+    }
+
     fn record(&self, at: Option<u64>, append: impl FnOnce(&mut Counts, u64) -> bool) {
         if self.invalid.load(Ordering::Acquire) {
             return;

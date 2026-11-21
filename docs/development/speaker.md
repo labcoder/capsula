@@ -194,6 +194,19 @@ or replaced. No opener or production caller enables this gate yet.
 
 ## Dormant drawing conductor
 
+The internal narrated fixture uses an exact source reservation at queued ingress.
+A matching presenter level can be replaced or disappear, but cannot erase ownership
+of its unallowed bytes. The worker applies the gate after its command drain and Stop
+check, and a separate keyed Allow permits PCM. A fence retires and credits never-staged
+PCM without playback; already-staged PCM keeps the line's commitment and original tail.
+Fence and terminal reports are ordered;
+the onset level is accepted by the presenter only for the same binding and live
+physical route, even if the segment finishes before the presenter reads the onset.
+An empty final validates the segment, returns credit and retires metadata without
+opening an idle route. It does not shorten an already committed physical tail, and
+neither it nor virtual source proves Played. Quiet remains a separate result from
+the original route's tail. Plain and Legacy do not select this mode.
+
 The dormant drawing conductor decides only an assignment's audio gate and picture timing.
 The presenter supplies readiness and fences, the worker supplies actual handoff and the
 current physical route's source span, the link reports worker absence, and the brain supplies

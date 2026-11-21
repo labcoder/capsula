@@ -31,7 +31,7 @@ use kumochi_protocol::frame::{self, Pipe};
 use kumochi_protocol::message::{
     AudioSession, ConnectionKind, ControlToBrain, ControlToShell, DATA_WINDOW, DataToBrain,
     DataToShell, Deleted, MAX_PENDING_TURNS, MAX_VISIBLE_SCENES, RunId, SceneDescriptor, SceneId,
-    SpeechPcm, ThreadId, Transcript,
+    SegmentStart, SpeechPcm, ThreadId, Transcript,
 };
 use kumochi_protocol::tap::{Direction, Tapped as _};
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt as _};
@@ -1409,6 +1409,14 @@ impl Brain {
                         link.queue.borrow_mut().revoke_scenes(&scenes);
                     }
                 }
+                Effect::ReplaceNarratedScenes { scenes, successor } => {
+                    if let Some(shell) = link.as_deref_mut()
+                        && shell.replace_narrated_scenes(scenes, successor).is_err()
+                    {
+                        full = true;
+                        link = None;
+                    }
+                }
                 Effect::CancelEngine { run } => {
                     self.retire_key_run(run);
                     if self.round.as_ref().is_some_and(|(round, _)| *round == run) {
@@ -1699,6 +1707,13 @@ async fn write_data(
             continue;
         };
         room.notify_one();
+        #[cfg(all(windows, debug_assertions, feature = "test-support"))]
+        if let Some(probe) = &probe {
+            probe.sent.fetch_add(
+                u64::try_from(frame.len()).expect("encoded test data length fits"),
+                std::sync::atomic::Ordering::Release,
+            );
+        }
         let writing = pipe.write_all(&frame);
         tokio::pin!(writing);
         loop {
@@ -1788,9 +1803,51 @@ impl<'a, 't> Link<'a, 't> {
         }
     }
 
+    fn replace_narrated_scenes(
+        &mut self,
+        scenes: Vec<SceneId>,
+        successor: SceneId,
+    ) -> Result<(), Full> {
+        if let Some(recovery) = &mut self.recovery {
+            recovery.drop_scenes(&scenes);
+        }
+        let message = DataToShell::ScenesReplaced { scenes, successor };
+        let frame = frame::encode(&message, Pipe::Data).map_err(|_| Full)?;
+        let DataToShell::ScenesReplaced { scenes, .. } = message else {
+            unreachable!("the replacement frame was constructed above");
+        };
+        if self.registration.is_some() {
+            self.queue.borrow_mut().replace_scenes(&scenes, frame);
+        } else {
+            let mut queue = self.queue.borrow_mut();
+            queue.revoke_scenes(&scenes);
+            queue.push(Owner::Presentation, frame);
+        }
+        #[cfg(all(windows, debug_assertions, feature = "test-support"))]
+        if let Some(probe) = audio_fixture::probe() {
+            probe
+                .replacement_queued
+                .store(true, std::sync::atomic::Ordering::Release);
+        }
+        self.ready.notify_one();
+        Ok(())
+    }
+
     /// Data frames carry content, so the tap never records them.
     fn data(&mut self, message: &DataToShell) -> Result<(), Full> {
+        let queued = self.registration.is_some();
         let owner = match message {
+            DataToShell::SceneStepCommit {
+                scene,
+                speech: Some(_),
+                ..
+            } if queued => Owner::SpeechPromise(*scene),
+            DataToShell::SegmentQueued {
+                run,
+                start: SegmentStart::Speech,
+                step: Some(step),
+                ..
+            } if queued => Owner::SpeechAnnouncement(*run, step.scene),
             DataToShell::AssistantText { run, .. }
             | DataToShell::StepCommit { run, .. }
             | DataToShell::RunEnd { run }
@@ -1802,9 +1859,10 @@ impl<'a, 't> Link<'a, 't> {
             | DataToShell::PageFailed { .. }
             | DataToShell::IssueCardRead { .. }
             | DataToShell::IssueCardsDone { .. } => return Err(Full),
-            DataToShell::ScenesRemoved { .. }
-            | DataToShell::ScenesReplaced { .. }
-            | DataToShell::Models { .. }
+            DataToShell::ScenesRemoved { .. } | DataToShell::ScenesReplaced { .. } => {
+                Owner::Presentation
+            }
+            DataToShell::Models { .. }
             | DataToShell::IssueCard(_)
             | DataToShell::IssueReview { .. }
             | DataToShell::HoldWords { .. }

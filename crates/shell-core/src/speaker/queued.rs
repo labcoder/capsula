@@ -22,9 +22,12 @@ pub use backend::{FixturePlayback, serialize_playback};
 #[cfg(test)]
 mod tests;
 
+#[cfg(all(windows, debug_assertions))]
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) use worker::Command;
 #[cfg(any(test, feature = "test-support"))]
 pub(crate) use worker::FakeOutput;
-pub(crate) use worker::{Input, spawn_plain};
+pub(crate) use worker::{DrawingIo, Input, Ordered, OwnerExit, spawn, spawn_plain};
 pub(crate) const RATE: u32 = 24_000;
 const CAPACITY: usize = 480_000;
 const SEGMENT_SLOTS: usize = 256;
@@ -80,6 +83,7 @@ enum Admission {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Fault {
+    Delivery,
     Order,
     Size,
 }

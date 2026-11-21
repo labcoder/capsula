@@ -83,6 +83,596 @@ fn bound(presenter: &Presenter, scene: SceneId) -> u32 {
     presenter.scenes[&scene].view.activated()
 }
 
+#[cfg(all(windows, debug_assertions))]
+#[test]
+fn authenticated_silent_step_advances_then_narration_waits_for_its_source() {
+    authenticated_narration(NarratedCase::Onset);
+}
+
+#[cfg(all(windows, debug_assertions))]
+#[test]
+fn authenticated_removed_scene_discards_its_pending_unbound_decision() {
+    authenticated_narration(NarratedCase::Removed);
+}
+
+#[cfg(all(windows, debug_assertions))]
+#[test]
+fn authenticated_same_run_replacement_preserves_the_pair_with_and_without_credit() {
+    for (credit, contend) in [
+        (0, false),
+        (kumochi_protocol::message::DATA_WINDOW, false),
+        (0, true),
+    ] {
+        authenticated_narration(NarratedCase::Replaced { credit, contend });
+    }
+}
+
+#[cfg(all(windows, debug_assertions))]
+#[test]
+fn authenticated_replacement_chain_does_not_paint_the_earliest_victim_with_the_successor() {
+    authenticated_narration(NarratedCase::Chain);
+}
+
+#[cfg(all(windows, debug_assertions))]
+#[derive(Clone, Copy)]
+enum NarratedCase {
+    Onset,
+    Removed,
+    Replaced { credit: u32, contend: bool },
+    Chain,
+}
+
+#[cfg(all(windows, debug_assertions))]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one authenticated pair through its real producer, fake callback and presenter"
+)]
+fn authenticated_narration(case: NarratedCase) {
+    use crate::link::{LinkEvent, fixture};
+    use crate::presenter::{Effect, fixture as presenter_fixture};
+    use kumochi_protocol::message::{
+        DataToBrain, RunId, ScreenChoice, SpeechDecision, SpeechDispatch, ThreadId,
+    };
+    use std::time::Duration;
+
+    let _device = fixture::serialize_playback();
+    let (id, hello, producer, brain) = match case {
+        NarratedCase::Replaced { credit, .. } => {
+            kumochi_brain::ipc::offline_narrated_replacement_peer(credit)
+        }
+        NarratedCase::Chain => kumochi_brain::ipc::offline_narrated_replacement_chain_peer(),
+        NarratedCase::Onset | NarratedCase::Removed => {
+            kumochi_brain::ipc::offline_narrated_peer(40)
+        }
+    };
+    let (pipe, narration) = fixture::authenticated_narrated(id, hello);
+    let events = fixture::patient(pipe.events);
+    let session = fixture::connected(fixture::next(&events));
+    let generation = session.generation();
+    let mut presenter = presenter_fixture::presenter();
+    presenter.connected(generation);
+    narration.attach(&mut presenter);
+    let submit = || {
+        pipe.handle.send_data(
+            &session,
+            DataToBrain::TextSubmit {
+                turn: 1,
+                thread: Some(ThreadId(1)),
+                screen: ScreenChoice::None,
+                text: "draw".into(),
+            },
+        )
+    };
+    let withheld = Cell::new(matches!(case, NarratedCase::Chain).then_some(0_u32));
+    let grant = |bytes| {
+        if let Some(previous) = withheld.get() {
+            withheld.set(Some(previous + bytes));
+        } else {
+            session.grant(bytes);
+        }
+    };
+    let settle = |presenter: &mut Presenter, mut effects: Vec<Effect>, now| {
+        effects.reverse();
+        while let Some(effect) = effects.pop() {
+            let more = match effect {
+                Effect::Credit(bytes) => {
+                    grant(bytes);
+                    continue;
+                }
+                Effect::Control(message) => {
+                    assert!(pipe.handle.send_control(&session, message));
+                    continue;
+                }
+                Effect::Admit(job) => presenter.completed(job.run(), now),
+                Effect::Prepare(job) => presenter.completed(job.run(&mut Shaper), now),
+                Effect::Recover(job) => presenter.completed(job.run(&mut Shaper), now),
+                Effect::ConsumptionReady { scene, index } => {
+                    presenter.consumption_ready(generation, scene, index, now)
+                }
+            }
+            .expect("settle the presenter");
+            effects.extend(more.into_iter().rev());
+        }
+    };
+    let mut settings = false;
+    while !settings || !presenter.membership_ready() {
+        let event = fixture::next(&events);
+        match event {
+            LinkEvent::Settings { .. } => settings = true,
+            LinkEvent::Scenes(_) => {
+                let now = Instant::now();
+                let effects = presenter
+                    .described(generation, &Bounded::default(), now)
+                    .unwrap();
+                settle(&mut presenter, effects, now);
+            }
+            LinkEvent::ScenesV1 { scenes, .. } => {
+                let now = Instant::now();
+                let effects = presenter.described(generation, &scenes, now).unwrap();
+                settle(&mut presenter, effects, now);
+            }
+            _ => {}
+        }
+    }
+    assert!(!submit());
+    assert!(pipe.playback.try_recv().is_err());
+    if !matches!(case, NarratedCase::Chain) {
+        producer.allow_data_credit();
+    }
+    producer.release_run();
+    producer.release_ack();
+    let wait = |label: &str, check: &mut dyn FnMut() -> bool| {
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while !check() {
+            assert!(Instant::now() < deadline, "fixture did not reach {label}");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    };
+    wait("exact registration", &mut || {
+        pipe.handle.admits_text(Some(&session))
+    });
+    assert!(submit());
+    if matches!(case, NarratedCase::Chain) {
+        use kumochi_scene::display::Prim;
+
+        let paint = |presenter: &mut Presenter, now| {
+            let (sample, effects) = presenter.sample_at(now).unwrap();
+            settle(presenter, effects, now);
+            assert!(sample.visible);
+            let mut fills = Vec::new();
+            presenter.frames.borrow_mut().shown = true;
+            assert!(!presenter.frames.borrow().paint(|frame, _| {
+                fills.extend(frame.items().iter().flat_map(|item| {
+                    item.primitives
+                        .iter()
+                        .filter_map(|primitive| match primitive {
+                            Prim::Rect {
+                                fill: Some(fill), ..
+                            } => Some(fill.rgb.get()),
+                            _ => None,
+                        })
+                }));
+                Ok::<_, ()>(())
+            }));
+            presenter.begin_painted(now);
+            fills
+        };
+        let deliver = |presenter: &mut Presenter, event, now| {
+            match event {
+                LinkEvent::SceneData {
+                    generation: incoming,
+                    frame,
+                    bytes,
+                } => {
+                    assert_eq!(incoming, generation);
+                    let effects = presenter.data(generation, frame, bytes, now).unwrap();
+                    settle(presenter, effects, now);
+                }
+                LinkEvent::Data { bytes, .. } => grant(bytes),
+                _ => {}
+            }
+            let effects = presenter.advance(generation, now).unwrap();
+            settle(presenter, effects, now);
+        };
+        let now = Instant::now();
+        while presenter.scenes.len() != 3
+            || !presenter
+                .scenes
+                .keys()
+                .all(|&id| bound(&presenter, id) == 1)
+        {
+            deliver(&mut presenter, fixture::next(&events), now);
+        }
+        assert_eq!(
+            paint(&mut presenter, now),
+            [0xaa_0000, 0x00_bb00, 0x00_00cc]
+        );
+        let prefix = presenter.take_shown(generation);
+        assert_eq!(prefix.iter().flatten().count(), 3);
+        let earliest = prefix.into_iter().flatten().next().unwrap().scene;
+        let prefix_bytes = withheld
+            .get()
+            .expect("the initial prefix is credited together");
+        assert!(prefix_bytes > 0);
+        session.grant(prefix_bytes);
+        wait("credit-held replacement chain", &mut || {
+            producer.replacement_queued() && producer.data_blocked()
+        });
+        assert_eq!(producer.data_credits(), (u64::from(prefix_bytes), 0));
+        session.grant(kumochi_protocol::message::DATA_WINDOW);
+        withheld.set(None);
+
+        let now = Instant::now();
+        let mut replacements = Vec::new();
+        loop {
+            let event = fixture::next(&events);
+            if let LinkEvent::SceneData { frame, .. } = &event
+                && let DataToShell::ScenesReplaced { scenes, successor } = &**frame
+            {
+                replacements.push((scenes.clone(), *successor));
+            }
+            let final_scene = match &event {
+                LinkEvent::SceneData { frame, .. } => match &**frame {
+                    DataToShell::SceneStepCommit {
+                        run,
+                        scene,
+                        step,
+                        speech: None,
+                        ..
+                    } if step.id.as_str() == "final" => Some((*run, *scene)),
+                    _ => None,
+                },
+                _ => None,
+            };
+            deliver(&mut presenter, event, now);
+            if let Some((run, scene)) = final_scene {
+                assert_eq!(bound(&presenter, scene), 1);
+                assert_eq!(
+                    paint(&mut presenter, now),
+                    [0x00_eeee],
+                    "the final successor's first paint must not include the earlier eviction victim"
+                );
+                let shown: Vec<_> = presenter
+                    .take_shown(generation)
+                    .into_iter()
+                    .flatten()
+                    .map(|shown| (shown.run, shown.scene, shown.index))
+                    .collect();
+                assert_eq!(shown, [(run, scene, 0)]);
+                let [(evicted, intermediate), (cleared, final_successor)] = replacements.as_slice()
+                else {
+                    panic!("the two real replacement markers");
+                };
+                assert_eq!(evicted, &[earliest]);
+                assert!(cleared.contains(intermediate));
+                assert_eq!(*final_successor, scene);
+                break;
+            }
+        }
+        assert!(session.open());
+        assert!(pipe.playback.try_recv().is_err());
+        pipe.handle.end(&session);
+        assert!(pipe.link.join().unwrap());
+        assert!(brain.join().unwrap());
+        return;
+    }
+    if let NarratedCase::Replaced {
+        credit: initial,
+        contend,
+    } = case
+    {
+        wait("real replacement queued", &mut || {
+            producer.replacement_queued()
+        });
+        if initial == 0 {
+            wait("real data credit blocked", &mut || producer.data_blocked());
+            assert_eq!(producer.data_credits(), (0, 0));
+            session.grant(kumochi_protocol::message::DATA_WINDOW);
+        }
+        let mut boundary = None;
+        let mut promised = None;
+        let mut painted = None;
+        let ended = loop {
+            let now = Instant::now();
+            match fixture::next(&events) {
+                LinkEvent::SceneData {
+                    generation: incoming,
+                    frame,
+                    bytes,
+                } => {
+                    assert_eq!(incoming, generation);
+                    if let DataToShell::ScenesReplaced { scenes, successor } = &*frame {
+                        let [old] = scenes.as_slice() else {
+                            panic!("one replaced scene")
+                        };
+                        if !contend {
+                            assert!(narration.update(&pipe.handle, &session, &mut presenter, now));
+                        }
+                        let effects = presenter.advance(generation, now).unwrap();
+                        settle(&mut presenter, effects, now);
+                        if presenter.scenes.contains_key(old) {
+                            assert_eq!(
+                                bound(&presenter, *old),
+                                0,
+                                "wire fence beats delayed presenter removal"
+                            );
+                        }
+                        boundary = Some((*old, *successor));
+                    }
+                    if let DataToShell::SceneStepCommit {
+                        run,
+                        scene,
+                        speech: Some(speech),
+                        ..
+                    } = &*frame
+                    {
+                        promised = Some((*run, *scene, *speech));
+                    }
+                    let effects = presenter.data(generation, frame, bytes, now).unwrap();
+                    settle(&mut presenter, effects, now);
+                }
+                LinkEvent::Data {
+                    message: DataToShell::RunEnd { run },
+                    bytes,
+                    ..
+                } => {
+                    session.grant(bytes);
+                    break run;
+                }
+                LinkEvent::Data { bytes, .. } => session.grant(bytes),
+                _ => {}
+            }
+            if let Some((old, successor)) = boundary {
+                if !contend {
+                    assert!(narration.update(&pipe.handle, &session, &mut presenter, now));
+                }
+                let effects = presenter.advance(generation, now).unwrap();
+                settle(&mut presenter, effects, now);
+                assert!(
+                    !presenter.scenes.contains_key(&old),
+                    "the protected promise cannot restore its scene"
+                );
+                if painted.is_none()
+                    && presenter.scenes.contains_key(&successor)
+                    && bound(&presenter, successor) == 1
+                {
+                    let (sample, effects) = presenter.sample_at(now).unwrap();
+                    settle(&mut presenter, effects, now);
+                    assert!(sample.visible);
+                    paint_shown(&mut presenter, now);
+                    painted = presenter
+                        .take_shown(generation)
+                        .into_iter()
+                        .flatten()
+                        .next();
+                }
+            }
+        };
+        let (old, successor) = boundary.expect("real replacement frame");
+        let (run, promised_scene, promise) = promised.expect("preserved exact old promise");
+        assert_eq!((ended, promised_scene), (run, old));
+        assert_eq!(
+            painted.map(|r| (r.run, r.scene, r.index)),
+            Some((run, successor, 0))
+        );
+        let dispatch = SpeechDispatch {
+            run,
+            output: promise.output_generation,
+            segment: promise.segment,
+        };
+        if contend {
+            fixture::with_outbox_and_output_held(&pipe.handle, &session, || {
+                assert!(
+                    narration.update(&pipe.handle, &session, &mut presenter, Instant::now()),
+                    "a busy output lock must defer the unbound Discard, not close the pair"
+                );
+                assert!(session.open());
+                assert_eq!(producer.speech_decision(), None);
+            });
+            wait("exact Discard after releasing the output lock", &mut || {
+                assert!(narration.update(&pipe.handle, &session, &mut presenter, Instant::now()));
+                producer.speech_decision() == Some((dispatch, SpeechDecision::Discard))
+            });
+        }
+        assert_ne!(
+            producer.speech_decision(),
+            Some((dispatch, SpeechDecision::Allow))
+        );
+        assert_eq!(producer.heard(), 0);
+        assert!(
+            pipe.playback.try_recv().is_err(),
+            "no fake device opens for revoked empty source"
+        );
+        let seed = if initial == 0 {
+            u64::from(kumochi_protocol::message::DATA_WINDOW)
+        } else {
+            0
+        };
+        wait("all exact data credit returned", &mut || {
+            let expected = producer.sent_bytes() + seed;
+            producer.data_credits() == (expected, expected)
+        });
+        assert!(session.open(), "replacement must not tear down the pair");
+        pipe.handle.end(&session);
+        assert!(pipe.link.join().unwrap());
+        assert!(brain.join().unwrap());
+        return;
+    }
+    let mut commit = None;
+    let (run, scene, promise) = loop {
+        let now = Instant::now();
+        match fixture::next(&events) {
+            LinkEvent::SceneData {
+                generation: incoming,
+                frame,
+                bytes,
+            } => {
+                assert_eq!(incoming, generation);
+                let narrated = match &*frame {
+                    DataToShell::SceneStepCommit {
+                        run,
+                        scene,
+                        index: 1,
+                        speech: Some(promise),
+                        ..
+                    } => Some((*run, *scene, *promise)),
+                    _ => None,
+                };
+                let effects = presenter.data(generation, frame, bytes, now).unwrap();
+                settle(&mut presenter, effects, now);
+                commit = narrated.or(commit);
+            }
+            LinkEvent::Data { bytes, .. } => session.grant(bytes),
+            _ => {}
+        }
+        if let Some((run, scene, promise)) = commit
+            && presenter.scenes.contains_key(&scene)
+        {
+            break (run, scene, promise);
+        }
+    };
+    assert_eq!(bound(&presenter, scene), 0);
+    assert_eq!(producer.heard(), 0);
+    assert!(
+        pipe.playback.try_recv().is_err(),
+        "no callback before local apply and Allow"
+    );
+    if matches!(case, NarratedCase::Removed) {
+        let key = SpeechDispatch {
+            run,
+            output: promise.output_generation,
+            segment: promise.segment,
+        };
+        let now = Instant::now();
+        assert!(narration.update(&pipe.handle, &session, &mut presenter, now));
+        assert_eq!(
+            producer.speech_decision(),
+            None,
+            "an unresolved view does not discard"
+        );
+        let effects = presenter
+            .data(
+                generation,
+                kumochi_scene::deferred::Deferred::new(
+                    DataToShell::ScenesRemoved {
+                        scenes: vec![scene],
+                    },
+                    0,
+                ),
+                0,
+                now,
+            )
+            .unwrap();
+        settle(&mut presenter, effects, now);
+        assert!(!presenter.scenes.contains_key(&scene));
+        wait("keyed discard before first binding", &mut || {
+            assert!(narration.update(&pipe.handle, &session, &mut presenter, Instant::now()));
+            producer.speech_decision() == Some((key, SpeechDecision::Discard))
+        });
+        wait(
+            "Brain run end after the pending speech decision",
+            &mut || {
+                assert!(narration.update(&pipe.handle, &session, &mut presenter, Instant::now()));
+                match events.try_recv() {
+                    Ok(LinkEvent::Data {
+                        message: DataToShell::RunEnd { run: ended },
+                        bytes,
+                        ..
+                    }) => {
+                        assert_eq!(ended, run);
+                        session.grant(bytes);
+                        true
+                    }
+                    Ok(LinkEvent::Data { bytes, .. } | LinkEvent::SceneData { bytes, .. }) => {
+                        session.grant(bytes);
+                        false
+                    }
+                    _ => false,
+                }
+            },
+        );
+        assert_eq!(producer.heard(), 0);
+        assert!(pipe.playback.try_recv().is_err());
+        assert!(session.open());
+        pipe.handle.end(&session);
+        assert!(pipe.link.join().unwrap());
+        assert!(brain.join().unwrap());
+        return;
+    }
+    let now = Instant::now();
+    let effects = presenter.advance(generation, now).unwrap();
+    settle(&mut presenter, effects, now);
+    assert_eq!(
+        bound(&presenter, scene),
+        1,
+        "durable speech absence releases only the silent head"
+    );
+    assert_eq!(producer.speech_decision(), None);
+    let _silent = presenter.sample_at(now).unwrap();
+    paint_shown(&mut presenter, now);
+    assert_eq!(
+        presenter
+            .take_shown(generation)
+            .into_iter()
+            .flatten()
+            .next()
+            .map(|r| r.index),
+        Some(0)
+    );
+    let mut playback = None;
+    wait("physical open after authorization", &mut || {
+        assert!(narration.update(&pipe.handle, &session, &mut presenter, Instant::now()));
+        playback = pipe.playback.try_recv().ok();
+        playback.is_some()
+    });
+    let mut playback = playback.unwrap();
+    wait("physical staging", &mut || playback.ready());
+    assert_eq!(bound(&presenter, scene), 1, "staging is not onset");
+    let mut audible = [0.0; 8];
+    playback.render(&mut audible);
+    assert!(audible.iter().any(|sample| sample.abs() > 0.01));
+    wait("matched scene onset", &mut || {
+        let now = Instant::now();
+        assert!(narration.update(&pipe.handle, &session, &mut presenter, now));
+        let effects = presenter.advance(generation, now).unwrap();
+        settle(&mut presenter, effects, now);
+        bound(&presenter, scene) == 2
+    });
+    let now = Instant::now();
+    let _sample = presenter.sample_at(now).unwrap();
+    paint_shown(&mut presenter, now);
+    let shown = presenter.take_shown(generation);
+    let [receipt] = shown
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .try_into()
+        .unwrap();
+    assert_eq!((receipt.run, receipt.scene, receipt.index), (run, scene, 1));
+    let effects = presenter.stop_owned(run, now).unwrap();
+    settle(&mut presenter, effects, now);
+    wait("local Stop after ordered control", &mut || {
+        pipe.handle.output().stop(generation, run).is_ok()
+    });
+    assert!(narration.update(&pipe.handle, &session, &mut presenter, now));
+    assert_eq!(producer.quiet(), RunId(0), "no original tail callback yet");
+    wait("callback fence", &mut || playback.stopped());
+    playback.render(&mut [0.0; 480]);
+    wait("original callback quiet", &mut || producer.quiet() == run);
+    presenter.connected(generation + 1);
+    assert!(narration.update(&pipe.handle, &session, &mut presenter, now));
+    assert!(
+        presenter
+            .take_shown(generation + 1)
+            .iter()
+            .all(Option::is_none)
+    );
+    pipe.handle.end(&session);
+    drop(playback);
+    assert!(pipe.link.join().unwrap());
+    assert!(brain.join().unwrap());
+}
+
 #[test]
 fn onset_installs_once_and_only_accepted_paint_reports_shown() {
     let key = assignment(LIVE, 0);

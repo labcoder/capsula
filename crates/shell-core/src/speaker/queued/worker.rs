@@ -8,9 +8,9 @@ use std::time::{Duration, Instant};
 use kumochi_protocol::message::{ControlToBrain, OutputGeneration, RunId, SegmentId};
 use zeroize::Zeroizing;
 
-use self::drawing::Drawing;
-pub(super) use self::drawing::DrawingIo;
-use super::super::conductor::Binding;
+use self::drawing::{Drawing, ViewRead};
+pub(crate) use self::drawing::{DrawingIo, Ordered};
+use super::super::conductor::{Assignment, Binding};
 use super::super::{DRAIN, STALL};
 use super::backend::{self, Power, Reply, Request};
 use super::receipts::Receipts;
@@ -27,17 +27,20 @@ const COMMANDS: usize = 16;
 const SERVICE: usize = 8;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum OwnerExit {
+pub(crate) enum OwnerExit {
     Closed,
     ReportRefused,
 }
 
 #[derive(Clone, Copy, Debug)]
-pub(super) enum Command {
+pub(crate) enum Command {
     Expect,
     Pause(u64),
     Resume(u64),
+    Narrate(Assignment),
+    Allow(Binding),
     Revoke(Binding),
+    RevokeSource(Assignment),
     Stop,
 }
 
@@ -85,6 +88,22 @@ impl Input {
         self.command(Command::Stop).is_ok()
     }
 
+    pub(crate) fn narrate(&self, assignment: Assignment) -> Result<(), TrySendError<Command>> {
+        self.command(Command::Narrate(assignment))
+    }
+
+    pub(crate) fn allow(&self, binding: Binding) -> bool {
+        self.command(Command::Allow(binding)).is_ok()
+    }
+
+    pub(crate) fn revoke(&self, binding: Binding) -> bool {
+        self.command(Command::Revoke(binding)).is_ok()
+    }
+
+    pub(crate) fn revoke_source(&self, assignment: Assignment) -> bool {
+        self.command(Command::RevokeSource(assignment)).is_ok()
+    }
+
     pub(crate) fn submit(&self, packet: Packet) -> Result<(), TrySendError<Packet>> {
         if self.closed.load(Ordering::Acquire) {
             return Err(TrySendError::Disconnected(packet));
@@ -109,7 +128,7 @@ pub(crate) fn spawn_plain(
     run: RunId,
     output: OutputGeneration,
     session: u64,
-    mut grant: impl FnMut(u32) + Send + 'static,
+    grant: impl FnMut(u32) + Send + 'static,
     reports: (
         impl FnMut(ControlToBrain) -> bool + Send + 'static,
         impl FnOnce(bool) + Send + 'static,
@@ -123,7 +142,7 @@ pub(crate) fn spawn_plain(
         session,
         Instant::now(),
         Plain(exit),
-        move |credit| grant(credit.bytes),
+        grant,
         reports,
         #[cfg(any(test, feature = "test-support"))]
         fake,
@@ -186,13 +205,13 @@ struct Worker {
         reason = "the test-only device factory is an extra argument"
     )
 )]
-pub(super) fn spawn(
+pub(crate) fn spawn(
     run: RunId,
     generation: OutputGeneration,
     session: u64,
     origin: Instant,
     drawing: impl DrawingIo,
-    give: impl FnMut(Credit) + Send + 'static,
+    mut grant: impl FnMut(u32) + Send + 'static,
     reports: (
         impl FnMut(ControlToBrain) -> bool + Send + 'static,
         impl FnOnce(bool) + Send + 'static,
@@ -234,7 +253,7 @@ pub(super) fn spawn(
                 &port,
                 (Engine::new(run, generation), origin),
                 drawing,
-                give,
+                move |credit| grant(credit.bytes),
                 reports,
                 start,
                 #[cfg(any(test, feature = "test-support"))]
@@ -316,21 +335,24 @@ impl Worker {
         loop {
             let now = origin.elapsed();
             let closing = port.closed.load(Ordering::Acquire);
-            let again = self
-                .step(port, &mut source, &mut give, now)
-                .unwrap_or_else(|_| {
+            let again = match self.step(port, &mut source, &mut give, now) {
+                Ok(again) => Some(again),
+                Err(Fault::Delivery) => None,
+                Err(_) => {
                     port.closed.store(true, Ordering::Release);
                     self.stop(now, &mut |credit| port.credit(credit, &mut give));
-                    true
-                });
+                    Some(true)
+                }
+            };
             #[cfg(all(windows, debug_assertions))]
             #[cfg(any(test, feature = "test-support"))]
-            if let Some(route) = &self.physical
+            if again.is_some()
+                && let Some(route) = &self.physical
                 && let Some(through) = self.engine.settled_prefix(route.generation)
             {
                 route.transport.control().record_presented_prefix(through);
             }
-            if !receipts.publish(&self.engine, now, &mut report) {
+            if again.is_none() || !receipts.publish(&self.engine, now, &mut report) {
                 port.closed.store(true, Ordering::Release);
                 let now = origin.elapsed();
                 self.stop(now, &mut |_| {});
@@ -342,7 +364,7 @@ impl Worker {
                 }
                 return;
             }
-            if again {
+            if again == Some(true) {
                 continue;
             }
             let quiet = receipts.deadline(&self.engine);
@@ -427,6 +449,23 @@ impl Worker {
                     self.engine.resume(serial, now);
                     self.inhibit();
                 }
+                Ok(Command::Narrate(assignment)) => {
+                    self.drawing
+                        .as_mut()
+                        .ok_or(Fault::Delivery)?
+                        .narrate(assignment, &self.engine)?;
+                }
+                Ok(Command::Allow(binding)) => {
+                    self.drawing
+                        .as_mut()
+                        .ok_or(Fault::Delivery)?
+                        .allow(binding)?;
+                }
+                Ok(Command::RevokeSource(assignment)) => {
+                    if let Some(drawing) = &mut self.drawing {
+                        drawing.revoke_source(assignment);
+                    }
+                }
                 Ok(Command::Revoke(binding)) => {
                     if let Some(drawing) = &mut self.drawing {
                         drawing.revoke(binding, &self.engine);
@@ -443,10 +482,24 @@ impl Worker {
             return Ok(true);
         }
         self.apply_stop(port, give, now);
+        self.apply_narration(
+            if coherent_view {
+                ViewRead::Current
+            } else {
+                ViewRead::Unavailable
+            },
+            now,
+        )?;
         if let Some(credit) = self.engine.tick(now)? {
             port.credit(credit, give);
         }
-        if let Some(packet) = self.pending_packet.take()
+        if self.pending_packet.as_ref().is_some_and(|packet| {
+            self.engine.queue.stopped
+                || self
+                    .drawing
+                    .as_ref()
+                    .is_none_or(|drawing| drawing.admits(packet))
+        }) && let Some(packet) = self.pending_packet.take()
             && let Admission::Return(credit) = self.engine.offer(packet, now)?
         {
             port.credit(credit, give);
@@ -461,6 +514,7 @@ impl Worker {
         if self.retired_route != retired {
             self.update_drawing(now);
         }
+        self.finish_narration()?;
         Ok(false)
     }
 

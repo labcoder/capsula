@@ -1163,6 +1163,306 @@ async fn unspoken_invalidated_attempt_leaves_no_reply_in_rebuild_history_or_sear
 }
 
 #[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "the same real replacement runs at each data-writer boundary"
+)]
+async fn same_run_replacement_keeps_the_promised_delivery_boundary() {
+    use super::data::Owner;
+
+    const END: &str = r#",{"end":{}}]}"#;
+
+    for handed in 0..=2 {
+        let scratch = Scratch::new("queued-speech-replacement");
+        let mut brain = brain(&scratch);
+        let output = OutputGeneration(17);
+        brain.offline(Input::SpokenReplies { loaded: true });
+        brain.offline(Input::QueuedAudioOutput(24_000, output));
+        let (out, _controls) = mpsc::channel(64);
+        let queue = RefCell::new(DataQueue::new(window()));
+        let ready = Notify::new();
+        let mut tap = Tap::from_env();
+        let registration = std::cell::Cell::new(super::Registration::Applied(output));
+        let mut link = Link::new(&out, &queue, &ready, &mut tap);
+        link.registration = Some(&registration);
+        link.recovery = brain.describe(&mut link).expect("initial membership");
+        if handed == 0 {
+            queue.borrow_mut().push(Owner::Marker, vec![0; window()]);
+            assert_eq!(
+                queue
+                    .borrow_mut()
+                    .pop(std::time::Instant::now())
+                    .unwrap()
+                    .len(),
+                window()
+            );
+            queue.borrow_mut().wrote();
+        }
+        let key = start(&mut brain, &mut link).await;
+        let run = key.run;
+        let first = submit_narrating_step(&mut brain, &mut link, key, "Narrate this.");
+        let old = step_landed(&mut brain, &mut link).await;
+        let label = |message: &DataToShell| match message {
+            DataToShell::SceneStepCommit {
+                run: r,
+                scene,
+                index: 0,
+                speech: Some(promise),
+                ..
+            } if *r == run
+                && *scene == old
+                && *promise
+                    == (SpeechPromise {
+                        output_generation: output,
+                        segment: SegmentId(0),
+                    }) =>
+            {
+                Some("promise")
+            }
+            DataToShell::SegmentQueued {
+                run: r,
+                segment: SegmentId(0),
+                start: SegmentStart::Speech,
+                step: Some(step),
+                output_generation,
+            } if *r == run
+                && step.scene == old
+                && step.index == 0
+                && *output_generation == output =>
+            {
+                Some("announcement")
+            }
+            DataToShell::SpeechPcm(pcm)
+                if pcm.run == run
+                    && pcm.output_generation == output
+                    && pcm.segment == SegmentId(0)
+                    && pcm.seq == 0
+                    && pcm.samples.is_empty()
+                    && pcm.last == Some(0) =>
+            {
+                Some("empty final")
+            }
+            DataToShell::ScenesReplaced { scenes, .. } if scenes.as_slice() == [old] => {
+                Some("replacement")
+            }
+            DataToShell::SceneStepCommit {
+                run: r,
+                scene,
+                speech: None,
+                ..
+            } if *r == run && *scene != old => Some("successor"),
+            _ => None,
+        };
+        let now = std::time::Instant::now();
+        if handed == 0 {
+            assert_eq!(
+                queue.borrow_mut().pop(now),
+                None,
+                "no initial credit remains"
+            );
+        } else {
+            let mut metadata = Vec::new();
+            while metadata.len() < handed {
+                let next = queue.borrow_mut().pop(now).expect("credited metadata");
+                let message = frame::read::<DataToShell>(&mut next.as_slice(), Pipe::Data)
+                    .unwrap()
+                    .unwrap();
+                metadata.extend(label(&message));
+                if metadata.len() < handed {
+                    queue.borrow_mut().wrote();
+                }
+            }
+            assert_eq!(metadata, ["promise", "announcement"][..handed]);
+        }
+
+        apply(
+            &mut brain,
+            &mut link,
+            Input::Engine {
+                key,
+                event: delta(END),
+            },
+        );
+        let replace = CallId::new("replace-in-run").unwrap();
+        let argument = FIRST.replace("diagram", "successor");
+        for event in [
+            TurnEvent::ToolCallReady {
+                call: CallId::new("provider-draw").unwrap(),
+                args: format!("{first}{END}"),
+            },
+            TurnEvent::ToolCallStarted {
+                call: replace.clone(),
+                name: ToolName::Draw,
+            },
+            TurnEvent::ToolArgsDelta {
+                call: replace,
+                delta: argument,
+            },
+        ] {
+            apply(&mut brain, &mut link, Input::Engine { key, event });
+        }
+        assert_ne!(step_landed(&mut brain, &mut link).await, old);
+        if handed == 0 {
+            assert_eq!(
+                queue.borrow_mut().pop(now),
+                None,
+                "replacement must not mint credit"
+            );
+            queue.borrow_mut().grant(u32::try_from(window()).unwrap());
+        } else {
+            queue.borrow_mut().wrote();
+        }
+        let retained = all_frames(&queue);
+        let mut expected = vec!["replacement"];
+        expected.extend_from_slice(&["promise", "announcement"][handed..]);
+        expected.extend_from_slice(&["empty final", "successor"]);
+        assert_eq!(
+            retained.iter().filter_map(label).collect::<Vec<_>>(),
+            expected,
+            "replacement must fence the retained speech obligation: {handed} handed out"
+        );
+        assert!(
+            !retained.iter().any(
+                |frame| matches!(frame, DataToShell::SceneBegin { scene, .. } if *scene == old)
+            )
+        );
+        brain.close().await;
+    }
+}
+
+#[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "the producer and successor run through the same three serialized writer boundaries"
+)]
+async fn stopped_narrated_run_end_follows_surviving_metadata_even_when_a_successor_is_named() {
+    use kumochi_protocol::message::RunOrigin;
+
+    for handed in 0..=2 {
+        let scratch = Scratch::new("queued-speech-run-end");
+        let mut brain = brain(&scratch);
+        let output = OutputGeneration(17);
+        brain.offline(Input::SpokenReplies { loaded: true });
+        brain.offline(Input::QueuedAudioOutput(24_000, output));
+        let (out, mut controls) = mpsc::channel(64);
+        let queue = RefCell::new(DataQueue::new(window()));
+        let ready = Notify::new();
+        let mut tap = Tap::from_env();
+        let registration = std::cell::Cell::new(super::Registration::Applied(output));
+        let mut link = Link::new(&out, &queue, &ready, &mut tap);
+        link.registration = Some(&registration);
+        link.recovery = brain.describe(&mut link).expect("initial membership");
+        let key = start(&mut brain, &mut link).await;
+        let run = key.run;
+        submit_narrating_step(&mut brain, &mut link, key, "Narrate this.");
+        let scene = step_landed(&mut brain, &mut link).await;
+        let label = |frame: &DataToShell| match frame {
+            DataToShell::SceneStepCommit {
+                run: source,
+                scene: target,
+                index: 0,
+                speech: Some(promise),
+                ..
+            } if (*source, *target, *promise)
+                == (
+                    run,
+                    scene,
+                    SpeechPromise {
+                        output_generation: output,
+                        segment: SegmentId(0),
+                    },
+                ) =>
+            {
+                Some("promise")
+            }
+            DataToShell::SegmentQueued {
+                run: source,
+                output_generation,
+                segment: SegmentId(0),
+                start: SegmentStart::Speech,
+                step:
+                    Some(StepRef {
+                        scene: target,
+                        index: 0,
+                    }),
+            } if (*source, *output_generation, *target) == (run, output, scene) => {
+                Some("announcement")
+            }
+            DataToShell::RunEnd { run: ended } if *ended == run => Some("end"),
+            _ => None,
+        };
+        let now = std::time::Instant::now();
+        let mut popped = Vec::new();
+        while popped.len() < handed {
+            let next = queue.borrow_mut().pop(now).expect("credited metadata");
+            let frame = frame::read::<DataToShell>(&mut next.as_slice(), Pipe::Data)
+                .unwrap()
+                .unwrap();
+            popped.extend(label(&frame));
+            if popped.len() < handed {
+                queue.borrow_mut().wrote();
+            }
+        }
+        assert_eq!(popped, ["promise", "announcement"][..handed]);
+        apply(
+            &mut brain,
+            &mut link,
+            Input::Stop {
+                run,
+                revealed: Vec::new(),
+            },
+        );
+        apply(
+            &mut brain,
+            &mut link,
+            Input::SpeechStopped { run, cursor: None },
+        );
+        apply(
+            &mut brain,
+            &mut link,
+            Input::Turn {
+                turn: 2,
+                thread: None,
+                text: "next".into(),
+            },
+        );
+        let successor = brain.coordinator.current_run().expect("successor");
+        assert!(successor > run);
+        let named = |bytes: Vec<u8>| {
+            matches!(
+                frame::read::<ControlToShell>(&mut bytes.as_slice(), Pipe::Control).unwrap(),
+                Some(ControlToShell::RunState { run, origin: Some(RunOrigin::Typed { turn: 2 }), .. })
+                    if run == successor
+            )
+        };
+        while !std::iter::from_fn(|| controls.try_recv().ok()).any(named) {
+            let next = reply(&mut brain).await;
+            apply(&mut brain, &mut link, next);
+        }
+        while brain.coordinator.ending_runs() != 0 {
+            let next = reply(&mut brain).await;
+            apply(&mut brain, &mut link, next);
+        }
+        if handed > 0 {
+            queue.borrow_mut().wrote();
+        }
+        assert_eq!(
+            all_frames(&queue)
+                .iter()
+                .filter_map(label)
+                .collect::<Vec<_>>(),
+            if handed == 0 {
+                &["promise", "end"][..]
+            } else {
+                &["end"][..]
+            },
+            "revoke the unstarted announcement and fence A's surviving metadata"
+        );
+        brain.close().await;
+    }
+}
+
+#[tokio::test]
 async fn narrated_class_survives_scene_revocation_on_the_shared_fifo() {
     for (authored, class, revoke) in [
         (json!("speech"), SegmentStart::Speech, true),

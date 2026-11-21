@@ -35,6 +35,64 @@ pub fn offline_plain_peer(
     (session, hello, probe, task)
 }
 
+/// Starts the real paired Brain with the offline replay's narrated step.
+/// # Panics
+/// Panics if the private test namespace or the fixture Brain cannot start.
+pub fn offline_narrated_peer(
+    tone_chunks: usize,
+) -> (
+    u32,
+    Hello,
+    std::sync::Arc<audio_fixture::AudioProbe>,
+    JoinHandle<bool>,
+) {
+    offline_draw_peer(tone_chunks, audio_fixture::AudioProbe::narrated())
+}
+
+/// Starts one same-run narrated replacement with controlled initial data credit.
+/// # Panics
+/// Panics if the private test namespace or the fixture Brain cannot start.
+pub fn offline_narrated_replacement_peer(
+    credit: u32,
+) -> (
+    u32,
+    Hello,
+    std::sync::Arc<audio_fixture::AudioProbe>,
+    JoinHandle<bool>,
+) {
+    offline_draw_peer(8, audio_fixture::AudioProbe::replacing(credit))
+}
+
+/// Starts a narrated replacement chain after returning the initial painted prefix's credit.
+/// # Panics
+/// Panics if the private test namespace or the fixture Brain cannot start.
+pub fn offline_narrated_replacement_chain_peer() -> (
+    u32,
+    Hello,
+    std::sync::Arc<audio_fixture::AudioProbe>,
+    JoinHandle<bool>,
+) {
+    offline_draw_peer(8, audio_fixture::AudioProbe::chaining_replacements())
+}
+
+fn offline_draw_peer(
+    tone_chunks: usize,
+    probe: audio_fixture::AudioProbe,
+) -> (
+    u32,
+    Hello,
+    std::sync::Arc<audio_fixture::AudioProbe>,
+    JoinHandle<bool>,
+) {
+    let probe = std::sync::Arc::new(probe);
+    let (session, hello, task) = offline_peer(
+        String::new(),
+        tone_chunks,
+        Some(std::sync::Arc::clone(&probe)),
+    );
+    (session, hello, probe, task)
+}
+
 fn offline_peer(
     script: String,
     tone_chunks: usize,

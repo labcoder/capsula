@@ -30,8 +30,11 @@
 mod activation;
 mod admit;
 #[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "unit four supplies the dormant conductor ports")
+    all(
+        not(test),
+        not(all(windows, debug_assertions, feature = "test-support"))
+    ),
+    expect(dead_code, reason = "only the offline test fixture selects conduction")
 )]
 mod conduction;
 pub mod overlay_input;
