@@ -340,7 +340,9 @@ impl SttHandle {
                 request
             }) {
                 Ok(generation) => generation,
-                Err(error @ SpeechError::Native(_)) => return Err(error),
+                Err(error @ (SpeechError::Native(_) | SpeechError::ExitUnconfirmed)) => {
+                    return Err(error);
+                }
                 Err(_) => {
                     runtime.block_on({
                         let request = released(&mut receipt, &mut exits, &retirement);
