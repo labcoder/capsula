@@ -1124,6 +1124,10 @@ fn captures_nothing(
 /// offer; a saved Off keeps it closed until the On is saved. The old offer never comes back, and
 /// the window choice and voice holds go on throughout.
 #[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one Off through its queue, a reconnect and its save, in order"
+)]
 async fn show_screen_off_closes_display_admission_until_its_save_fails() {
     use crate::runtime::settings::{Gate, written};
     for (ahead, save) in [

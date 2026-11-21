@@ -173,6 +173,10 @@ impl Brain {
         }
     }
 
+    #[expect(
+        clippy::fn_params_excessive_bools,
+        reason = "the model-operation bit remains in flight through this settings write"
+    )]
     fn start_settings_write(
         &mut self,
         pending: Pending,
