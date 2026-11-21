@@ -41,7 +41,7 @@ pub(crate) enum Owner {
     CardsDone(u64),
     /// A scene's snapshot or v1 live frame: Stop never drops it, but a scene clear does.
     Scene(SceneId),
-    /// A durable promise that must accompany its queued announcement through replacement.
+    /// A durable promise that must accompany its queued announcement through scene retirement.
     SpeechPromise(SceneId),
     /// A run-owned announcement whose scene replacement marker must precede it if still queued.
     SpeechAnnouncement(RunId, SceneId),
@@ -310,20 +310,11 @@ impl DataQueue {
 
     /// Drops the snapshot chunks of cleared scenes that haven't started writing.
     pub(crate) fn revoke_scenes(&mut self, scenes: &[SceneId]) {
-        self.retain(|owner| !matches!(owner, Owner::Scene(scene) | Owner::SpeechPromise(scene) if scenes.contains(scene)));
-    }
-
-    pub(super) fn owes_narration_in(&self, victims: &[SceneId]) -> bool {
-        self.frames.iter().any(|(owner, _)| match owner {
-            Owner::SpeechPromise(scene) | Owner::SpeechAnnouncement(_, scene) => {
-                victims.contains(scene)
-            }
-            _ => false,
-        })
+        self.retain(|owner| !matches!(owner, Owner::Scene(scene) if scenes.contains(scene)));
     }
 
     pub(super) fn retire_scenes(&mut self, victims: &[SceneId], frame: Vec<u8>) {
-        self.retain(|owner| !matches!(owner, Owner::Scene(scene) if victims.contains(scene)));
+        self.revoke_scenes(victims);
         let at = self
             .frames
             .iter()
@@ -598,8 +589,6 @@ mod tests {
             queue.push(Owner::Presentation, vec![4]);
             queue.push(Owner::Run(run), vec![5]);
             queue.push(Owner::Scene(SceneId(2)), vec![6]);
-            assert!(queue.owes_narration_in(&[scene]));
-            assert!(!queue.owes_narration_in(&[SceneId(2)]));
             queue.retire_scenes(&[scene], vec![7]);
             if crossed_writer {
                 queue.wrote();

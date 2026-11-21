@@ -1,7 +1,9 @@
 use std::num::NonZeroU64;
 
+use crate::presenter::RetirementLane;
+
 use kumochi_protocol::message::{
-    MAX_SEGMENTS_PER_RUN, SceneId, SegmentId, SegmentStart, SpeechPromise, StepRef,
+    MAX_SEGMENTS_PER_RUN, SegmentId, SegmentStart, SpeechPromise, StepRef,
 };
 
 use super::{
@@ -23,7 +25,7 @@ pub(super) enum MetadataFrame {
 #[derive(Default)]
 pub(super) struct Reader {
     announced: Option<(RunId, u32)>,
-    retirements: u64,
+    retirements: [u64; 2],
 }
 
 impl Reader {
@@ -78,17 +80,6 @@ impl Reader {
                 output_generation,
                 ..
             } => (run, segment, output_generation, None),
-            DataToShell::ScenesRemoved { ref scenes }
-            | DataToShell::ScenesReplaced { ref scenes, .. }
-                if narrated.is_some() =>
-            {
-                let successor = match &message {
-                    DataToShell::ScenesReplaced { successor, .. } => Some(*successor),
-                    _ => None,
-                };
-                self.retirement(narrated.ok_or(())?, scenes, successor)?;
-                return Ok(Some(message));
-            }
             DataToShell::SpeechPcm(pcm) => (
                 pcm.run,
                 pcm.segment,
@@ -108,7 +99,12 @@ impl Reader {
                     .then_some(Some(message))
                     .ok_or(());
             }
-            _ => return Ok(Some(message)),
+            _ => {
+                if let Some(bridge) = narrated {
+                    self.retirement(bridge, &message)?;
+                }
+                return Ok(Some(message));
+            }
         };
         let pcm = packet.is_some();
         let cursor = self.accept_segment(run, segment, packet.as_ref())?;
@@ -133,21 +129,25 @@ impl Reader {
         Ok(None)
     }
 
-    fn retirement(
-        &mut self,
-        narrated: &Narrated,
-        scenes: &[SceneId],
-        successor: Option<SceneId>,
-    ) -> Result<(), ()> {
-        let ordinal = self
-            .retirements
-            .checked_add(1)
-            .and_then(NonZeroU64::new)
-            .ok_or(())?;
-        if !narrated.retiring(scenes, successor, ordinal) {
+    fn retirement(&mut self, narrated: &Narrated, message: &DataToShell) -> Result<(), ()> {
+        let (scenes, successor, lane) = match message {
+            DataToShell::ScenesRemoved { scenes } => {
+                (scenes.as_slice(), None, RetirementLane::Scenes)
+            }
+            DataToShell::ScenesReplaced { scenes, successor } => {
+                (scenes.as_slice(), Some(*successor), RetirementLane::Scenes)
+            }
+            DataToShell::SceneCutApplied { scene, cut, .. } if cut.activated == 0 => {
+                (std::slice::from_ref(scene), None, RetirementLane::Cut)
+            }
+            _ => return Ok(()),
+        };
+        let pending = &mut self.retirements[lane.slot()];
+        let ordinal = pending.checked_add(1).and_then(NonZeroU64::new).ok_or(())?;
+        if !narrated.retiring(scenes, successor, lane, ordinal) {
             return Err(());
         }
-        self.retirements = ordinal.get();
+        *pending = ordinal.get();
         Ok(())
     }
 

@@ -30,6 +30,7 @@
 mod activation;
 mod admit;
 mod conduction;
+pub(crate) use conduction::RetirementLane;
 pub mod overlay_input;
 mod paint;
 mod placement;
@@ -882,12 +883,12 @@ impl Presenter {
             } => self.cut_applied(*scene, *revision, cut, out),
             DataToShell::ScenesRemoved { scenes } => {
                 self.removed(scenes, now, out)?;
-                self.narration_retirement_consumed();
+                self.narration_retirement_consumed(RetirementLane::Scenes);
                 Ok(())
             }
             DataToShell::ScenesReplaced { scenes, successor } => {
                 self.replaced(scenes, *successor, now, out)?;
-                self.narration_retirement_consumed();
+                self.narration_retirement_consumed(RetirementLane::Scenes);
                 Ok(())
             }
             _ => Ok(()),
@@ -982,6 +983,9 @@ impl Presenter {
         out: &mut Out,
     ) -> Result<(), Broken> {
         let Some(scene) = self.scenes.get_mut(&id) else {
+            if cut.activated == 0 {
+                self.narration_retirement_consumed(RetirementLane::Cut);
+            }
             return Ok(());
         };
         if scene.state.view().revision() != revision {
@@ -1050,6 +1054,9 @@ impl Presenter {
             } else {
                 self.remember(id);
             }
+        }
+        if cut.activated == 0 {
+            self.narration_retirement_consumed(RetirementLane::Cut);
         }
         Ok(())
     }

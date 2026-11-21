@@ -10,10 +10,25 @@ use crate::speaker::conductor::{
 
 type Lookup = dyn Fn(DrawKey) -> Result<Option<Assignment>, ()>;
 
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum RetirementLane {
+    Scenes,
+    Cut,
+}
+
+impl RetirementLane {
+    pub(crate) const fn slot(self) -> usize {
+        match self {
+            Self::Scenes => 0,
+            Self::Cut => 1,
+        }
+    }
+}
+
 pub(super) struct Conduction {
     origin: Instant,
     lookup: Box<Lookup>,
-    retirement_consumed: Box<dyn Fn()>,
+    retirement_consumed: Box<dyn Fn(RetirementLane)>,
     nonce: u64,
     current: Option<Current>,
     changed: bool,
@@ -112,7 +127,7 @@ impl Presenter {
         &mut self,
         origin: Instant,
         lookup: impl Fn(DrawKey) -> Result<Option<Assignment>, ()> + 'static,
-        retirement_consumed: impl Fn() + 'static,
+        retirement_consumed: impl Fn(RetirementLane) + 'static,
     ) {
         self.conduction.get_or_insert_with(|| {
             Box::new(Conduction {
@@ -127,9 +142,9 @@ impl Presenter {
         });
     }
 
-    pub(super) fn narration_retirement_consumed(&self) {
+    pub(super) fn narration_retirement_consumed(&self, lane: RetirementLane) {
         if let Some(state) = &self.conduction {
-            (state.retirement_consumed)();
+            (state.retirement_consumed)(lane);
         }
     }
 

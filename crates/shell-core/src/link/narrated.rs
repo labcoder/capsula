@@ -11,8 +11,7 @@ use kumochi_protocol::message::{MAX_VISIBLE_SCENES, RunId, SceneId, SpeechDispat
 use kumochi_scene::limits::MAX_STEPS;
 
 use super::{LinkEvent, LinkHandle, Session, SessionIo, Shared, output::Denied};
-use crate::presenter::DrawKey;
-use crate::presenter::Presenter;
+use crate::presenter::{DrawKey, Presenter, RetirementLane};
 use crate::speaker::conductor::{Assignment, Binding, PictureLevel, ViewLevel};
 use crate::speaker::conductor::{Picture, PictureState, RouteStamp, View};
 use crate::speaker::queued::Command;
@@ -56,7 +55,7 @@ pub(crate) struct Narrated {
     stopped: AtomicU64,
     current: AtomicU64,
     wire_ended: AtomicU64,
-    consumed_retirements: AtomicU64,
+    consumed_retirements: [AtomicU64; 2],
     busy: AtomicBool,
     retrying: AtomicBool,
     state: Mutex<State>,
@@ -88,13 +87,13 @@ struct State {
 #[derive(Debug, Default)]
 struct Absences {
     keys: Vec<Absence>,
-    reclaimed: u64,
+    reclaimed: [u64; 2],
 }
 
 #[derive(Debug)]
 struct Absence {
     key: DrawKey,
-    retired_by: Option<NonZeroU64>,
+    retired_by: Option<(RetirementLane, NonZeroU64)>,
 }
 
 impl Absences {
@@ -102,10 +101,13 @@ impl Absences {
         self.keys.iter().any(|entry| entry.key == key)
     }
 
-    fn reclaim(&mut self, consumed: u64) {
+    fn reclaim(&mut self, consumed: [u64; 2]) {
         if consumed != self.reclaimed {
-            self.keys
-                .retain(|entry| entry.retired_by.is_none_or(|at| at.get() > consumed));
+            self.keys.retain(|entry| {
+                entry
+                    .retired_by
+                    .is_none_or(|(lane, at)| at.get() > consumed[lane.slot()])
+            });
             self.reclaimed = consumed;
         }
     }
@@ -167,7 +169,7 @@ impl Narrated {
             stopped: AtomicU64::new(0),
             current: AtomicU64::new(0),
             wire_ended: AtomicU64::new(0),
-            consumed_retirements: AtomicU64::new(0),
+            consumed_retirements: Default::default(),
             busy: AtomicBool::new(false),
             retrying: AtomicBool::new(false),
             state: Mutex::default(),
@@ -318,9 +320,7 @@ impl Narrated {
                 if self.stopped(assignment.run) {
                     return true;
                 }
-                state
-                    .absences
-                    .reclaim(self.consumed_retirements.load(Ordering::Acquire));
+                state.absences.reclaim(self.consumed());
                 if state.absences.contains(key) {
                     return false;
                 }
@@ -355,10 +355,17 @@ impl Narrated {
             })
     }
 
+    fn consumed(&self) -> [u64; 2] {
+        self.consumed_retirements
+            .each_ref()
+            .map(|at| at.load(Ordering::Acquire))
+    }
+
     pub(super) fn retiring(
         &self,
         scenes: &[SceneId],
         successor: Option<SceneId>,
+        lane: RetirementLane,
         ordinal: NonZeroU64,
     ) -> bool {
         if scenes.len() > MAX_VISIBLE_SCENES
@@ -382,20 +389,18 @@ impl Narrated {
                         std::array::from_fn(|at| scenes.get(at).copied());
                 }
             }
-            state
-                .absences
-                .reclaim(self.consumed_retirements.load(Ordering::Acquire));
+            state.absences.reclaim(self.consumed());
             for entry in &mut state.absences.keys {
                 if scenes.contains(&entry.key.scene) {
-                    entry.retired_by.get_or_insert(ordinal);
+                    entry.retired_by.get_or_insert((lane, ordinal));
                 }
             }
             true
         })
     }
 
-    fn retirement_consumed(&self) {
-        self.consumed_retirements.fetch_add(1, Ordering::Release);
+    fn retirement_consumed(&self, lane: RetirementLane) {
+        self.consumed_retirements[lane.slot()].fetch_add(1, Ordering::Release);
         if let Some(reader) = self.pair.get().and_then(|pair| pair.reader.get()) {
             reader.unpark();
         }
@@ -406,9 +411,7 @@ impl Narrated {
             return Err(());
         }
         let mut state = self.state.lock().map_err(|_| ())?;
-        state
-            .absences
-            .reclaim(self.consumed_retirements.load(Ordering::Acquire));
+        state.absences.reclaim(self.consumed());
         if state.promised.is_some_and(|a| draw_key(a) == key) || state.absences.contains(key) {
             return Err(());
         }
@@ -481,7 +484,7 @@ impl Narrated {
         presenter.start_conduction(
             self.origin,
             move |key| bridge.assignment(key),
-            move || retire.retirement_consumed(),
+            move |lane| retire.retirement_consumed(lane),
         );
     }
 
@@ -850,12 +853,17 @@ mod tests {
             ..first
         };
         assert_eq!(bridge.unassigned(next), Err(()));
-        assert!(bridge.retiring(&[first.scene], None, NonZeroU64::MIN));
+        assert!(bridge.retiring(
+            &[first.scene],
+            None,
+            RetirementLane::Scenes,
+            NonZeroU64::MIN
+        ));
         assert_eq!(bridge.unassigned(next), Ok(false));
         assert_eq!(bridge.assignment(first), Ok(None));
         assert_eq!(bridge.unassigned(first), Err(()));
 
-        bridge.retirement_consumed();
+        bridge.retirement_consumed(RetirementLane::Scenes);
         assert_eq!(bridge.unassigned(next), Ok(true));
         assert_eq!(bridge.assignment(first), Err(()));
         assert_eq!(bridge.assignment(next), Ok(None));
@@ -866,6 +874,42 @@ mod tests {
             }),
             Err(())
         );
+    }
+
+    #[test]
+    fn an_applied_removal_does_not_acknowledge_a_held_zero_cut() {
+        let bridge = Narrated::new();
+        let cut = DrawKey {
+            run: RunId(7),
+            scene: SceneId(1),
+            index: 0,
+        };
+        let removed = DrawKey {
+            scene: SceneId(2),
+            ..cut
+        };
+        let live = DrawKey {
+            scene: SceneId(3),
+            ..cut
+        };
+        for key in [cut, removed, live] {
+            assert_eq!(bridge.unassigned(key), Ok(true));
+        }
+        assert!(bridge.retiring(&[cut.scene], None, RetirementLane::Cut, NonZeroU64::MIN));
+        assert!(bridge.retiring(
+            &[removed.scene],
+            None,
+            RetirementLane::Scenes,
+            NonZeroU64::MIN
+        ));
+        bridge.retirement_consumed(RetirementLane::Scenes);
+        assert_eq!(bridge.unassigned(live), Err(()));
+        assert_eq!(bridge.assignment(cut), Ok(None));
+        assert_eq!(bridge.assignment(removed), Err(()));
+        bridge.retirement_consumed(RetirementLane::Cut);
+        assert_eq!(bridge.unassigned(live), Err(()));
+        assert_eq!(bridge.assignment(cut), Err(()));
+        assert_eq!(bridge.assignment(live), Ok(None));
     }
 
     #[test]
@@ -891,10 +935,20 @@ mod tests {
             if !marker_first {
                 assert!(bridge.promised(promised));
                 assert!(bridge.announce(promised));
-                assert!(!bridge.retiring(&[old, old], Some(successor), NonZeroU64::MIN));
+                assert!(!bridge.retiring(
+                    &[old, old],
+                    Some(successor),
+                    RetirementLane::Scenes,
+                    NonZeroU64::MIN
+                ));
                 assert_eq!(bridge.assignment(old_key), Ok(Some(promised)));
             }
-            assert!(bridge.retiring(&[old], Some(successor), NonZeroU64::MIN));
+            assert!(bridge.retiring(
+                &[old],
+                Some(successor),
+                RetirementLane::Scenes,
+                NonZeroU64::MIN
+            ));
             if marker_first {
                 assert!(bridge.promised(promised));
                 assert!(bridge.announce(promised));

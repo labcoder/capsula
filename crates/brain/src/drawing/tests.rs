@@ -206,7 +206,7 @@ fn a_second_clear_supersedes_pending_covering_cuts_without_cutting_a_later_scene
             scenes: vec![SceneId(1), SceneId(2)],
         },
     );
-    assert_eq!(trace(&clear), ["revoke 1,2", "clear 1,2"]);
+    assert_eq!(trace(&clear), ["removed 1,2", "clear 1,2"]);
     let out = store.settle(&mut drawing, out);
     assert_eq!(trace(&out), ["write cut 1@1:0"]);
     assert_eq!(store.cleared, [SceneId(1), SceneId(2)]);
@@ -312,7 +312,7 @@ fn a_scene_refusal_never_cancels_an_unrelated_pending_replacement() {
     assert_eq!(clear, &[SceneId(2)]);
 
     let refused = store.run(&mut drawing, Input::SceneFailed { scene: SceneId(1) });
-    assert_eq!(trace(&refused), ["revoke 1", "clear 1"]);
+    assert_eq!(trace(&refused), ["removed 1", "clear 1"]);
     assert_eq!(refused.calls, []);
     for scene in [SceneId(1), SceneId(99), SceneId(1)] {
         let stale = drawing
@@ -326,13 +326,7 @@ fn a_scene_refusal_never_cancels_an_unrelated_pending_replacement() {
     let committed = store.settle(&mut drawing, committed);
     assert_eq!(
         trace(&committed),
-        [
-            "revoke 2",
-            "replaced 2 by 3",
-            "begin 3",
-            "step 3#0",
-            "end 3 true"
-        ]
+        ["replaced 2 by 3", "begin 3", "step 3#0", "end 3 true"]
     );
     assert_eq!(committed.calls.len(), 1);
     assert_eq!(committed.calls[0].run, RunId(2));
@@ -1370,13 +1364,14 @@ fn trace(out: &Output) -> Vec<String> {
             Effect::Store(StoreOp::ClearScenes { scenes }) => {
                 Some(format!("clear {}", ids(scenes)))
             }
-            Effect::RevokeScenes { scenes } => Some(format!("revoke {}", ids(scenes))),
-            Effect::Data(DataToShell::ScenesRemoved { scenes }) => {
-                Some(format!("removed {}", ids(scenes)))
-            }
-            Effect::Data(DataToShell::ScenesReplaced { scenes, successor }) => {
-                Some(format!("replaced {} by {}", ids(scenes), successor.0))
-            }
+            Effect::RetireScenes {
+                scenes,
+                successor: None,
+            } => Some(format!("removed {}", ids(scenes))),
+            Effect::RetireScenes {
+                scenes,
+                successor: Some(successor),
+            } => Some(format!("replaced {} by {}", ids(scenes), successor.0)),
             Effect::Data(DataToShell::SceneBegin { scene, .. }) => {
                 Some(format!("begin {}", scene.0))
             }
@@ -1642,7 +1637,7 @@ fn unsaved_default_replacements_preserve_existing_drawings() {
         assert!(
             !out.effects
                 .iter()
-                .any(|effect| matches!(effect, Effect::Data(_) | Effect::RevokeScenes { .. }))
+                .any(|effect| matches!(effect, Effect::Data(_) | Effect::RetireScenes { .. }))
         );
         assert_eq!(out.calls.len(), 1);
         assert_eq!(
@@ -1690,7 +1685,6 @@ fn default_replacement_clears_once_but_continuing_its_header_preserves_a_kept_sc
         [
             "lookup",
             "write step 1",
-            "revoke 1,2,3,4",
             "replaced 1,2,3,4 by 5",
             "begin 5",
             "step 5#0",
@@ -1864,11 +1858,7 @@ fn deleted_replacement_settles_a_cross_thread_cap_victim_only_when_the_write_com
         let out = reply(&mut drawing, &pending, answer);
         assert_eq!(
             trace(&out),
-            if committed {
-                vec!["revoke 1", "removed 1"]
-            } else {
-                vec![]
-            }
+            if committed { vec!["removed 1"] } else { vec![] }
         );
         assert_eq!(
             drawing
@@ -2172,7 +2162,7 @@ fn a_cleared_scene_name_is_refused() {
             scenes: vec![SceneId(1), SceneId(9)],
         },
     );
-    assert_eq!(trace(&out), ["revoke 1", "clear 1"]);
+    assert_eq!(trace(&out), ["removed 1", "clear 1"]);
     assert_eq!(
         drawing.global.usage().objects,
         0,
@@ -2314,7 +2304,7 @@ fn a_clear_during_a_step_write_drops_the_step_s_frames() {
             scenes: vec![SceneId(1)],
         })
         .expect("a clear");
-    assert_eq!(trace(&clear), ["revoke 1", "clear 1"]);
+    assert_eq!(trace(&clear), ["removed 1", "clear 1"]);
     let write = sent(&out).expect("the step").1;
     let out = reply(&mut drawing, &out, Ok(store.answer(&write)));
     assert!(
@@ -2615,7 +2605,7 @@ fn a_deletion_removes_the_thread_s_scenes_at_once() {
     let mut store = Store::default();
     four(&mut store, &mut drawing);
     let out = store.run(&mut drawing, Input::ThreadDeleted { thread: THREAD });
-    assert_eq!(trace(&out), ["revoke 1,2,3,4", "removed 1,2,3,4"]);
+    assert_eq!(trace(&out), ["removed 1,2,3,4"]);
     assert!(drawing.scenes.is_empty());
 }
 
@@ -2677,7 +2667,6 @@ fn a_failed_fifth_scene_write_preserves_its_victim_and_a_new_call_can_replace_it
         [
             "lookup",
             "write step 1",
-            "revoke 1",
             "replaced 1 by 5",
             "begin 5",
             "step 5#0",

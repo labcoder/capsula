@@ -3889,15 +3889,24 @@ fn narrated_absence_survives_delayed_delivery_and_reclaims_retired_scenes() {
         apply(&mut presenter, arrive(begin(scene)));
         assert_eq!(fixture::scene_ids(&presenter), [scene]);
         let absent = arrive(commit(scene));
-        if id == 2 {
+        if matches!(id, 2 | 3) {
             let (admitting, commit_bytes) = deliver(&mut presenter, absent);
-            let (held, removal_bytes) = deliver(
-                &mut presenter,
-                arrive(DataToShell::ScenesRemoved {
+            let boundary = if id == 2 {
+                DataToShell::ScenesRemoved {
                     scenes: vec![scene],
-                }),
-            );
-            assert!(held.is_empty(), "the removal is behind admission");
+                }
+            } else {
+                DataToShell::SceneCutApplied {
+                    scene,
+                    revision: 1,
+                    cut: kumochi_scene::StopCut {
+                        activated: 0,
+                        revealed: kumochi_scene::text::Bounded::default(),
+                    },
+                }
+            };
+            let (held, removal_bytes) = deliver(&mut presenter, arrive(boundary));
+            assert!(held.is_empty(), "the terminal boundary is behind admission");
             assert_eq!(fixture::credit(&admitting), 0);
             assert_eq!(fixture::scene_ids(&presenter), [scene]);
             settle(&mut presenter, admitting, commit_bytes + removal_bytes);

@@ -2514,6 +2514,214 @@ fn refused_scene_paint_does_not_orphan_queued_narration(cx: &mut gpui_kit::TestA
     assert!(brain.join().unwrap());
 }
 
+#[cfg(all(windows, debug_assertions))]
+#[gpui::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one real pair through each idle Esc clear and the next speech promise"
+)]
+fn settled_esc_clears_reclaim_absence_on_the_same_pair(cx: &mut gpui_kit::TestAppContext) {
+    use crate::link::{Batch, LinkEvent, fixture};
+    use crate::presence::{run_fence_tests::submit_draft, test_fixture};
+    use kumochi_protocol::message::{DataToShell, Phase, RunId};
+    use std::{
+        cell::Cell,
+        time::{Duration, Instant},
+    };
+
+    let _device = fixture::serialize_playback();
+    let (id, hello, probe, brain) = kumochi_brain::ipc::offline_authored_then_narrated_peer();
+    probe.release_ack();
+    probe.release_run();
+    probe.allow_data_credit();
+    let pipe = fixture::authenticated_narrated(id, hello);
+    let events = fixture::patient(pipe.events);
+    let owner = test_fixture::presence(cx);
+    let session = fixture::connected(fixture::next(&events));
+    owner.update(cx, |this, _| this.link = pipe.handle.clone());
+    let removed = RefCell::new(Vec::new());
+    let expected = RefCell::new(Vec::new());
+    let apply = |event, cx: &mut gpui_kit::TestAppContext| {
+        if let LinkEvent::SceneData { frame, .. } = &event
+            && let DataToShell::ScenesRemoved { scenes } = &**frame
+        {
+            let mut removed = removed.borrow_mut();
+            assert_eq!(scenes.len(), 1);
+            assert_eq!(expected.borrow().get(removed.len()), scenes.first());
+            removed.push(scenes[0]);
+        }
+        owner.update(cx, |this, cx| {
+            this.link_events(Batch::Plain(vec![event]), cx).unwrap();
+        });
+        cx.run_until_parked();
+    };
+    apply(LinkEvent::Connected(session.clone()), cx);
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while !owner.read_with(cx, |this, _| this.presenter.membership_ready())
+        || !pipe.handle.admits_text(Some(&session))
+    {
+        assert!(
+            Instant::now() < deadline,
+            "the real narrated pair becomes ready"
+        );
+        if let Ok(event) = events.recv_timeout(Duration::from_millis(5)) {
+            apply(event, cx);
+        }
+    }
+
+    let mut prior = RunId(0);
+    for turn in 1..=257 {
+        let host = HostGuard::install(&[
+            Step(Operation::Configure, Outcome::Success),
+            Step(Operation::Show, Outcome::Success),
+            Step(Operation::Hide, Outcome::Success),
+        ]);
+        if turn != 1 {
+            owner.update(cx, |this, _| assert!(this.runs.select_thread(None)));
+        }
+        submit_draft(&owner, "make one authored mark", cx);
+        let deadline = Instant::now() + Duration::from_secs(3);
+        let (mut key, mut done, mut ended) = (None, None, None);
+        let paint_requested = Cell::new(false);
+        let (run, scene) = loop {
+            assert!(
+                session.open(),
+                "pair closed during authored turn {turn} after {} real clears and {} wire removals",
+                probe.clears(),
+                removed.borrow().len()
+            );
+            assert!(
+                Instant::now() < deadline,
+                "settled authored turn {turn}: {key:?}, done={done:?}, ended={ended:?}"
+            );
+            if let Ok(event) = events.recv_timeout(Duration::from_millis(3)) {
+                match &event {
+                    LinkEvent::SceneData { frame, .. } => match &**frame {
+                        DataToShell::SceneStepCommit {
+                            run,
+                            scene,
+                            index,
+                            speech,
+                            ..
+                        } => {
+                            assert!(*run > prior);
+                            assert_eq!((*index, *speech), (0, None));
+                            assert_eq!(key.replace((*run, *scene)), None);
+                        }
+                        DataToShell::ScenesReplaced { .. } => {
+                            panic!("a clear is not a replacement")
+                        }
+                        _ => {}
+                    },
+                    LinkEvent::RunState {
+                        run,
+                        phase: Phase::Done,
+                        ..
+                    } => done = Some(*run),
+                    LinkEvent::RunState {
+                        phase: Phase::Failed,
+                        ..
+                    } => panic!("authored run failed"),
+                    LinkEvent::Data {
+                        message: DataToShell::RunEnd { run },
+                        ..
+                    } => {
+                        assert_eq!(ended.replace(*run), None);
+                    }
+                    _ => {}
+                }
+                apply(event, cx);
+            }
+            if let Some((run, scene)) = key {
+                if done == Some(run)
+                    && ended == Some(run)
+                    && probe.shown().last() == Some(&(run, scene, 0))
+                    && pipe.handle.admits_text(Some(&session))
+                {
+                    break (run, scene);
+                }
+                if !paint_requested.get()
+                    && let Some(window) =
+                        owner.read_with(cx, |this, _| this.overlay.window().map(|w| w.window))
+                {
+                    paint_requested.set(true);
+                    let mut visual = gpui_kit::VisualTestContext::from_window(window, cx);
+                    visual.update(|window, cx| window.draw(cx).clear(cx));
+                } else {
+                    cx.run_until_parked();
+                }
+            }
+        };
+        prior = run;
+        assert!(!expected.borrow().contains(&scene));
+        expected.borrow_mut().push(scene);
+        owner.update(cx, |this, cx| {
+            assert_eq!(this.runs.stoppable(), None);
+            assert!(!this.activity.working && this.activity.drawing);
+            this.escape(cx).unwrap();
+            assert!(!this.presenter.holds_scenes());
+        });
+        cx.run_until_parked();
+        host.finish();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while probe.clears() != turn {
+            assert!(
+                session.open() && Instant::now() < deadline,
+                "Brain took ClearDrawing {turn}"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        assert!(
+            session.open() && Instant::now() < deadline,
+            "each clear has one ordered boundary and one credit"
+        );
+        if let Ok(event) = events.recv_timeout(Duration::from_millis(5)) {
+            apply(event, cx);
+        }
+        let sent = probe.sent_bytes();
+        if removed.borrow().len() == 257 && probe.data_credits() == (sent, sent) {
+            break;
+        }
+    }
+    assert_eq!(*removed.borrow(), *expected.borrow());
+    assert_eq!(probe.shown().len(), 257);
+    assert_eq!(probe.stop(), RunId(0));
+    assert!(pipe.playback.try_recv().is_err());
+
+    let host = HostGuard::install(&[
+        Step(Operation::Configure, Outcome::Success),
+        Step(Operation::Show, Outcome::Success),
+        Step(Operation::Hide, Outcome::Success),
+    ]);
+    owner.update(cx, |this, _| assert!(this.runs.select_thread(None)));
+    submit_draft(&owner, "show and narrate on the same pair", cx);
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        assert!(
+            session.open() && Instant::now() < deadline,
+            "the next run can still promise speech"
+        );
+        let event = fixture::next(&events);
+        let promised = matches!(&event, LinkEvent::SceneData { frame, .. }
+            if matches!(&**frame, DataToShell::SceneStepCommit {
+                run, scene, index: 1, speech: Some(_), ..
+            } if *run > prior && !expected.borrow().contains(scene)));
+        apply(event, cx);
+        if promised {
+            break;
+        }
+    }
+    apply(LinkEvent::State(crate::link::LinkState::Connecting), cx);
+    host.finish();
+    pipe.handle.end(&session);
+    assert!(pipe.link.join().unwrap());
+    assert!(brain.join().unwrap());
+}
+
 /// A step whose only object appears 200 ms in, reached by a wake that runs at 300 ms: the kept
 /// first sample is the object's initial pose at 200 ms, and its 800 ms entrance runs from the
 /// paint observed at 400 ms.

@@ -37,7 +37,7 @@ fn fixture<const N: usize>(offered: [Assignment; N]) -> (Presenter, Instant) {
                 a.run == key.run && a.step.scene == key.scene && a.step.index == key.index
             }))
         },
-        || {},
+        |_| {},
     );
     (presenter, now)
 }
@@ -118,12 +118,19 @@ fn authenticated_replacement_chain_does_not_paint_the_earliest_victim_with_the_s
 }
 
 #[cfg(all(windows, debug_assertions))]
+#[test]
+fn authenticated_stopped_narration_keeps_the_painted_prefix_until_silent_replacement() {
+    authenticated_narration(NarratedCase::StoppedReplacement);
+}
+
+#[cfg(all(windows, debug_assertions))]
 #[derive(Clone, Copy)]
 enum NarratedCase {
     Onset,
     Removed,
     Replaced { credit: u32, contend: bool },
     Chain,
+    StoppedReplacement,
 }
 
 #[cfg(all(windows, debug_assertions))]
@@ -145,6 +152,9 @@ fn authenticated_narration(case: NarratedCase) {
             kumochi_brain::ipc::offline_narrated_replacement_peer(credit)
         }
         NarratedCase::Chain => kumochi_brain::ipc::offline_narrated_replacement_chain_peer(),
+        NarratedCase::StoppedReplacement => {
+            kumochi_brain::ipc::offline_narrated_stopped_replacement_peer()
+        }
         NarratedCase::Onset | NarratedCase::Removed => {
             kumochi_brain::ipc::offline_narrated_peer(40)
         }
@@ -156,11 +166,11 @@ fn authenticated_narration(case: NarratedCase) {
     let mut presenter = presenter_fixture::presenter();
     presenter.connected(generation);
     session.attach_narration(&mut presenter);
-    let submit = || {
+    let submit = |turn| {
         pipe.handle.send_data(
             &session,
             DataToBrain::TextSubmit {
-                turn: 1,
+                turn,
                 thread: Some(ThreadId(1)),
                 screen: ScreenChoice::None,
                 text: "draw".into(),
@@ -218,9 +228,11 @@ fn authenticated_narration(case: NarratedCase) {
             _ => {}
         }
     }
-    assert!(!submit());
+    assert!(!submit(1));
     assert!(pipe.playback.try_recv().is_err());
-    if !matches!(case, NarratedCase::Chain) {
+    if matches!(case, NarratedCase::StoppedReplacement) {
+        producer.hold_after_scene_prefix();
+    } else if !matches!(case, NarratedCase::Chain) {
         producer.allow_data_credit();
     }
     producer.release_run();
@@ -235,7 +247,298 @@ fn authenticated_narration(case: NarratedCase) {
     wait("exact registration", &mut || {
         pipe.handle.admits_text(Some(&session))
     });
-    assert!(submit());
+    assert!(submit(1));
+    if matches!(case, NarratedCase::StoppedReplacement) {
+        use kumochi_protocol::message::{ControlToBrain, DATA_WINDOW, Phase, RunOrigin};
+        use kumochi_scene::display::Prim;
+
+        let now = Instant::now();
+        let deliver = |presenter: &mut Presenter, event| {
+            match event {
+                LinkEvent::SceneData {
+                    generation: incoming,
+                    frame,
+                    bytes,
+                } => {
+                    assert_eq!(incoming, generation);
+                    let effects = presenter.data(generation, frame, bytes, now).unwrap();
+                    settle(presenter, effects, now);
+                }
+                LinkEvent::Data { bytes, .. } => grant(bytes),
+                _ => {}
+            }
+            let effects = presenter.advance(generation, now).unwrap();
+            settle(presenter, effects, now);
+        };
+        let picture = |presenter: &Presenter| {
+            let mut items = Vec::new();
+            assert!(!presenter.frames.borrow().paint(|frame, _| {
+                items.extend_from_slice(frame.items());
+                Ok::<_, ()>(())
+            }));
+            items
+        };
+        let acknowledge = |presenter: &mut Presenter, run, scene| {
+            presenter.begin_painted(now);
+            let [receipt] = presenter
+                .take_shown(generation)
+                .into_iter()
+                .flatten()
+                .collect::<Vec<_>>()
+                .try_into()
+                .expect("one accepted step paint");
+            assert_eq!(
+                (
+                    receipt.generation,
+                    receipt.run,
+                    receipt.scene,
+                    receipt.index
+                ),
+                (generation, run, scene, 0)
+            );
+            assert!(pipe.handle.send_control(
+                &session,
+                ControlToBrain::StepShown {
+                    run,
+                    scene,
+                    index: 0
+                }
+            ));
+        };
+        let (stopped, old) = loop {
+            let event = fixture::next(&events);
+            let prefix = match &event {
+                LinkEvent::SceneData { frame, .. } => match &**frame {
+                    DataToShell::SceneStepCommit {
+                        run,
+                        scene,
+                        index: 0,
+                        speech: None,
+                        ..
+                    } => Some((*run, *scene)),
+                    _ => None,
+                },
+                _ => None,
+            };
+            deliver(&mut presenter, event);
+            if let Some(prefix) = prefix {
+                break prefix;
+            }
+        };
+        assert_eq!(bound(&presenter, old), 1);
+        let (sample, effects) = presenter.sample_at(now).unwrap();
+        settle(&mut presenter, effects, now);
+        assert!(sample.visible);
+        presenter.frames.borrow_mut().shown = true;
+        let prefix = picture(&presenter);
+        assert_eq!(prefix.len(), 1);
+        acknowledge(&mut presenter, stopped, old);
+        let prefix_bytes = producer.sent_bytes();
+        wait(
+            "written prefix and credit-held keyed narration",
+            &mut || {
+                producer.data_blocked()
+                    && producer.held_narration().is_some()
+                    && producer.data_credits() == (prefix_bytes, 0)
+                    && producer.shown() == [(stopped, old, 0)]
+            },
+        );
+        let (step, dispatch) = producer
+            .held_narration()
+            .expect("exact promised announcement");
+        assert_eq!(
+            (step, dispatch.run),
+            (
+                StepRef {
+                    scene: old,
+                    index: 1
+                },
+                stopped
+            )
+        );
+        assert_eq!(producer.held_tail(), (0, 0));
+        assert!(pipe.playback.try_recv().is_err());
+
+        let effects = presenter.stop(stopped, now).unwrap();
+        let [ControlToBrain::StopScenes { run, cuts }] = super::controls(&effects).as_slice()
+        else {
+            panic!("one real StopScenes for the painted prefix");
+        };
+        let [cut] = &cuts[..] else {
+            panic!("one preserved scene cut")
+        };
+        assert_eq!((*run, cut.scene, cut.cut.activated), (stopped, old, 1));
+        settle(&mut presenter, effects, now);
+        wait(
+            "local output Stop after the Brain Stop was sent",
+            &mut || pipe.handle.output().stop(generation, stopped).is_ok(),
+        );
+        wait(
+            "accepted empty quiet and one queued stopped RunEnd",
+            &mut || {
+                producer.accepted_quiet() == Some((stopped, None))
+                    && producer.held_tail() == (1, 0)
+                    && pipe.handle.admits_text(Some(&session))
+            },
+        );
+        assert_eq!(producer.stop(), stopped);
+        assert_eq!(producer.sent_bytes(), prefix_bytes);
+        assert_eq!(producer.data_credits(), (prefix_bytes, 0));
+        assert_eq!(picture(&presenter), prefix);
+
+        assert!(submit(2));
+        let next = loop {
+            match fixture::next(&events) {
+                LinkEvent::RunState {
+                    run,
+                    origin: Some(RunOrigin::Typed { turn: 2 }),
+                    ..
+                } => break run,
+                LinkEvent::RunState {
+                    phase: Phase::Failed,
+                    ..
+                } => panic!("the same pair must admit the successor"),
+                LinkEvent::Data { .. } | LinkEvent::SceneData { .. } => {
+                    panic!("writer credit must still be held")
+                }
+                _ => {}
+            }
+        };
+        assert!(next > stopped);
+        wait(
+            "silent successor commit queued behind the same held credit",
+            &mut || producer.held_successor().is_some(),
+        );
+        let (run, fresh) = producer.held_successor().unwrap();
+        assert_eq!(run, next);
+        assert_ne!(fresh, old);
+        assert!(
+            !pipe.handle.admits_text(Some(&session)),
+            "the stopped tail still owns the predecessor slot"
+        );
+        assert_eq!(producer.sent_bytes(), prefix_bytes);
+        assert_eq!(producer.data_credits(), (prefix_bytes, 0));
+        assert_eq!(picture(&presenter), prefix);
+
+        producer.allow_data_credit();
+        session.grant(DATA_WINDOW);
+        let mut replaced = false;
+        let mut promised = false;
+        let mut painted = false;
+        let mut ended = Vec::new();
+        while ended.last() != Some(&next) {
+            let event = fixture::next(&events);
+            let mut paint_successor = false;
+            match &event {
+                LinkEvent::SceneData { frame, .. } => match &**frame {
+                    DataToShell::ScenesRemoved { .. } => {
+                        panic!(
+                            "standalone ScenesRemoved erases the painted prefix before replacement"
+                        );
+                    }
+                    DataToShell::ScenesReplaced { scenes, successor } => {
+                        assert!(!std::mem::replace(&mut replaced, true));
+                        assert_eq!((scenes.as_slice(), *successor), ([old].as_slice(), fresh));
+                        assert!(
+                            !promised && ended.is_empty(),
+                            "boundary precedes the stopped tail"
+                        );
+                    }
+                    DataToShell::SceneStepCommit {
+                        run,
+                        scene,
+                        index,
+                        speech,
+                        ..
+                    } if *run == stopped => {
+                        assert!(replaced && ended.is_empty());
+                        assert!(!std::mem::replace(&mut promised, true));
+                        let speech = speech.expect("the unwritten promise survives Stop");
+                        assert_eq!(
+                            (*scene, *index, speech.output_generation, speech.segment),
+                            (old, step.index, dispatch.output, dispatch.segment)
+                        );
+                    }
+                    DataToShell::SceneStepCommit {
+                        run,
+                        scene,
+                        index,
+                        speech,
+                        ..
+                    } => {
+                        assert!(replaced);
+                        assert_eq!((*run, *scene, *index, *speech), (next, fresh, 0, None));
+                        assert!(!painted);
+                        paint_successor = true;
+                    }
+                    _ => {}
+                },
+                LinkEvent::Data {
+                    message: DataToShell::RunEnd { run },
+                    ..
+                } => {
+                    assert!(promised, "RunEnd cannot strand the promise");
+                    ended.push(*run);
+                    assert!(ended.len() <= 2);
+                }
+                LinkEvent::RunState {
+                    phase: Phase::Failed,
+                    ..
+                } => panic!("the replacement run must succeed"),
+                _ => {}
+            }
+            deliver(&mut presenter, event);
+            if !painted {
+                assert_eq!(
+                    picture(&presenter),
+                    prefix,
+                    "only fresh accepted paint replaces the prefix"
+                );
+                assert!(presenter.take_shown(generation).iter().all(Option::is_none));
+            }
+            if paint_successor {
+                assert_eq!(bound(&presenter, fresh), 1);
+                let (sample, effects) = presenter.sample_at(now).unwrap();
+                settle(&mut presenter, effects, now);
+                assert!(sample.visible);
+                let items = picture(&presenter);
+                let [item] = items.as_slice() else {
+                    panic!("only the successor is painted")
+                };
+                assert!(
+                    matches!(&item.primitives[..], [Prim::Rect { fill: Some(fill), .. }] if fill.rgb.get() == 0x00_eeee)
+                );
+                acknowledge(&mut presenter, next, fresh);
+                painted = true;
+            }
+        }
+        assert!(replaced && promised && painted);
+        assert_eq!(ended, [stopped, next]);
+        let seed = u64::from(DATA_WINDOW);
+        wait(
+            "both paint receipts and the exact returned credit",
+            &mut || {
+                let sent = producer.sent_bytes();
+                producer.data_credits() == (sent + seed, sent - prefix_bytes + seed)
+                    && producer.shown() == [(stopped, old, 0), (next, fresh, 0)]
+                    && pipe.handle.admits_text(Some(&session))
+            },
+        );
+        assert_eq!(
+            producer.held_tail(),
+            (1, 0),
+            "Stop removed the queued announcement; one RunEnd settled the tail"
+        );
+        assert_eq!(producer.speech_decision(), None);
+        assert!(producer.received_retirements(stopped).is_empty());
+        assert_eq!(producer.heard(), 0);
+        assert!(pipe.playback.try_recv().is_err());
+        assert!(session.open());
+        pipe.handle.end(&session);
+        assert!(pipe.link.join().unwrap());
+        assert!(brain.join().unwrap());
+        return;
+    }
     if matches!(case, NarratedCase::Chain) {
         use kumochi_scene::display::Prim;
 
@@ -1087,7 +1390,7 @@ fn ended_wait_releases_while_preparing_and_shows_on_local_readiness() {
     let (mut p, now) = live();
     let lookup = Rc::new(Cell::new(Ok(Some(key))));
     let offered = Rc::clone(&lookup);
-    p.start_conduction(now, move |_| offered.get(), || {});
+    p.start_conduction(now, move |_| offered.get(), |_| {});
     let job = submit(&mut p, LIVE, now);
     let level = p.conductor_view(now).expect("preparing");
     assert_eq!(level.view, View::Preparing);

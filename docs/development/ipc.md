@@ -51,13 +51,17 @@ announcement on that registered session before passing either authority or PCM t
 worker. It sends the existing decision only when the worker has applied the exact local
 binding. The brain's decision-taken frame settles decision consumption; it never
 authorizes local staging. A durable absent promise permits authored timing for that
-step; a promised step stays unresolved until its announcement matches. Removing a
-committed scene before it binds sends an exact Discard. If a scene is removed
-while its narration metadata is still queued, the brain puts the removal before
-the retained metadata that hasn't entered the writer. The removed step cannot
-paint or play, but its announced segment still returns the ordered empty
-retirement. A replacement marker fences the victim assignment at the data
-reader, even before the presenter applies the removal. A busy output owner defers an unbound Discard without lifting that fence.
+step; a promised step stays unresolved until its announcement matches. The v1
+drawing reducer chooses the presentation boundary. A replacement uses only
+`ScenesReplaced`: it keeps the victim's last paint until the successor takes over.
+A clear, scene failure, discarded replacement, or deletion uses `ScenesRemoved`,
+even when no narration is queued. These markers precede any retained narration
+metadata that hasn't entered the writer. A removed segment still owes its empty
+retirement and an unbound live assignment sends an exact Discard. A replacement
+fences the victim assignment at the data reader; a busy output owner defers the
+Discard without lifting that fence. Stop alone revokes run output, not the scene
+boundary. A durable `SceneCutApplied` to zero is terminal and stays after the
+commits it names; a cut that keeps paint is not terminal.
 An explicitly stopped run's commit can still reach the reader after the next run
 has been named or stopped. The commit goes to the stopped scene mirror; a matching
 announcement returns credit once without binding or sending a speech decision. The

@@ -262,8 +262,9 @@ fn removal(core: &mut Coordinator, scene: SceneId, route: SceneRemoval) -> Vec<E
         },
     };
     let effects = core.handle(input).unwrap();
-    assert!(effects.contains(&Effect::RevokeScenes {
-        scenes: vec![scene]
+    assert!(effects.contains(&Effect::RetireScenes {
+        scenes: vec![scene],
+        successor: None,
     }));
     assert_eq!(core.current_run(), Some(R));
     speech_crossing(effects)

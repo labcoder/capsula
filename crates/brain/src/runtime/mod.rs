@@ -1222,8 +1222,7 @@ impl Brain {
         let shell = link.is_some();
         let mut full = false;
         let mut broken = None;
-        let mut effects = effects.into_iter().peekable();
-        while let Some(effect) = effects.next() {
+        for effect in effects {
             match effect {
                 Effect::DrawingReplyText { .. } => {
                     unreachable!("drawing reply text is released by the coordinator")
@@ -1404,33 +1403,15 @@ impl Brain {
                 }
                 Effect::RevokeScenes { scenes } => {
                     if let Some(shell) = link.as_deref_mut() {
-                        let owes_narration = shell.queue.borrow().owes_narration_in(&scenes);
-                        if owes_narration {
-                            if matches!(effects.peek(), Some(Effect::Data(DataToShell::ScenesRemoved { scenes: removed })) if *removed == scenes)
-                            {
-                                effects.next();
-                            }
-                            if shell.retire_narrated_scenes(&scenes, None).is_err() {
-                                full = true;
-                                link = None;
-                            }
-                        } else {
-                            if let Some(recovery) = &mut shell.recovery {
-                                recovery.drop_scenes(&scenes);
-                            }
-                            shell.queue.borrow_mut().revoke_scenes(&scenes);
+                        if let Some(recovery) = &mut shell.recovery {
+                            recovery.drop_scenes(&scenes);
                         }
-                        #[cfg(all(windows, debug_assertions, feature = "test-support"))]
-                        if let Some(probe) = audio_fixture::probe() {
-                            probe.applied_scene_revoke(&scenes);
-                        }
+                        shell.queue.borrow_mut().revoke_scenes(&scenes);
                     }
                 }
-                Effect::ReplaceNarratedScenes { scenes, successor } => {
+                Effect::RetireScenes { scenes, successor } => {
                     if let Some(shell) = link.as_deref_mut()
-                        && shell
-                            .retire_narrated_scenes(&scenes, Some(successor))
-                            .is_err()
+                        && shell.retire_scenes(scenes, successor).is_err()
                     {
                         full = true;
                         link = None;
@@ -1823,38 +1804,34 @@ impl<'a, 't> Link<'a, 't> {
         }
     }
 
-    fn retire_narrated_scenes(
+    fn retire_scenes(
         &mut self,
-        scenes: &[SceneId],
+        scenes: Vec<SceneId>,
         successor: Option<SceneId>,
     ) -> Result<(), Full> {
-        if let Some(recovery) = &mut self.recovery {
-            recovery.drop_scenes(scenes);
-        }
         let message = match successor {
-            Some(successor) => DataToShell::ScenesReplaced {
-                scenes: scenes.to_vec(),
-                successor,
-            },
-            None => DataToShell::ScenesRemoved {
-                scenes: scenes.to_vec(),
-            },
+            Some(successor) => DataToShell::ScenesReplaced { scenes, successor },
+            None => DataToShell::ScenesRemoved { scenes },
         };
         let frame = frame::encode(&message, Pipe::Data).map_err(|_| Full)?;
-        if self.registration.is_some() {
-            self.queue.borrow_mut().retire_scenes(scenes, frame);
-        } else {
-            let mut queue = self.queue.borrow_mut();
-            queue.revoke_scenes(scenes);
-            queue.push(Owner::Presentation, frame);
+        let (DataToShell::ScenesRemoved { scenes } | DataToShell::ScenesReplaced { scenes, .. }) =
+            message
+        else {
+            unreachable!("the retirement marker was constructed above");
+        };
+        if let Some(recovery) = &mut self.recovery {
+            recovery.drop_scenes(&scenes);
         }
+        self.queue.borrow_mut().retire_scenes(&scenes, frame);
         #[cfg(all(windows, debug_assertions, feature = "test-support"))]
-        if successor.is_some()
-            && let Some(probe) = audio_fixture::probe()
-        {
-            probe
-                .replacement_queued
-                .store(true, std::sync::atomic::Ordering::Release);
+        if let Some(probe) = audio_fixture::probe() {
+            if successor.is_some() {
+                probe
+                    .replacement_queued
+                    .store(true, std::sync::atomic::Ordering::Release);
+            } else {
+                probe.applied_scene_revoke(&scenes);
+            }
         }
         self.ready.notify_one();
         Ok(())
@@ -1889,6 +1866,7 @@ impl<'a, 't> Link<'a, 't> {
             DataToShell::ScenesRemoved { .. } | DataToShell::ScenesReplaced { .. } => {
                 Owner::Presentation
             }
+            DataToShell::SceneCutApplied { cut, .. } if cut.activated == 0 => Owner::Marker,
             DataToShell::Models { .. }
             | DataToShell::IssueCard(_)
             | DataToShell::IssueReview { .. }

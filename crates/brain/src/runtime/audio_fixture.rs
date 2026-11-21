@@ -17,6 +17,7 @@ use crate::connections::http_client::HttpError;
 use crate::connections::oauth::{LaunchError, LaunchTarget, Launcher};
 use crate::connections::vault::Vault;
 use crate::engines::fixture::Fixture;
+use crate::engines::responses::replay::Turns;
 use crate::platform::credential::{CredentialStore, CredentialStoreError, SecretBytes};
 use crate::voice::pump::{OutputMode, Pump};
 use crate::voice::tts::{Engine, TtsError, TtsHandle};
@@ -100,6 +101,7 @@ pub struct AudioProbe {
     narrated: bool,
     initial_credit: Option<u32>,
     replacement_chain: Option<Arc<Notify>>,
+    changing_turns: Option<Turns>,
     pub(super) replacement_queued: AtomicBool,
     hold_after_prefix: AtomicBool,
     scene_revoke: Mutex<SceneRevoke>,
@@ -112,6 +114,7 @@ pub struct AudioProbe {
     applied_credit: AtomicU64,
     pub(super) sent: AtomicU64,
     stop: AtomicU64,
+    clears: AtomicU32,
     heard: AtomicU32,
     speech: Mutex<SpeechEvidence>,
     scene_failed: std::sync::Mutex<Option<(RunId, SceneId)>>,
@@ -125,6 +128,9 @@ struct SceneRevoke {
     promise: Option<(StepRef, SpeechDispatch)>,
     announcement: Option<(StepRef, SpeechDispatch)>,
     revoked: bool,
+    ends: u32,
+    written_announcements: u32,
+    successor: Option<(RunId, SceneId)>,
 }
 
 #[derive(Debug, Default)]
@@ -155,6 +161,24 @@ impl AudioProbe {
             replacement_chain: Some(Arc::new(Notify::new())),
             ..Self::narrated()
         }
+    }
+
+    pub(crate) fn stopped_replacement() -> Self {
+        Self {
+            changing_turns: Some(Turns::StoppedReplacement),
+            ..Self::narrated()
+        }
+    }
+
+    pub(crate) fn authored_then_narrated() -> Self {
+        Self {
+            changing_turns: Some(Turns::AuthoredThenNarrated),
+            ..Self::narrated()
+        }
+    }
+
+    pub(crate) fn many_turns(&self) -> bool {
+        matches!(self.changing_turns, Some(Turns::AuthoredThenNarrated))
     }
 
     pub(super) fn initial_credit(&self) -> Option<u32> {
@@ -202,6 +226,29 @@ impl AudioProbe {
             self.scene_revoke.lock().expect("scene probe").prefix = Some(scene);
             self.hold_after_prefix.store(false, Ordering::Release);
         }
+        if matches!(self.changing_turns, Some(Turns::StoppedReplacement))
+            && let Ok(DataToShell::SegmentQueued {
+                run,
+                step: Some(step),
+                segment,
+                start: SegmentStart::Speech,
+                output_generation: output,
+            }) = frame::decode(&frame[frame::HEADER_LEN..])
+        {
+            let mut facts = self.scene_revoke.lock().expect("scene probe");
+            if facts.announcement
+                == Some((
+                    step,
+                    SpeechDispatch {
+                        run,
+                        output,
+                        segment,
+                    },
+                ))
+            {
+                facts.written_announcements += 1;
+            }
+        }
     }
 
     pub(super) fn queued_scene_data(&self, message: &DataToShell) {
@@ -244,6 +291,22 @@ impl AudioProbe {
                     },
                 ));
             }
+            DataToShell::RunEnd { run }
+                if facts
+                    .promise
+                    .is_some_and(|(_, promise)| promise.run == *run) =>
+            {
+                facts.ends += 1;
+            }
+            DataToShell::SceneStepCommit {
+                run,
+                scene,
+                index: 0,
+                speech: None,
+                ..
+            } if facts.prefix.is_some_and(|prefix| prefix != *scene) => {
+                facts.successor = Some((*run, *scene));
+            }
             _ => {}
         }
     }
@@ -262,6 +325,21 @@ impl AudioProbe {
         facts
             .promise
             .filter(|promise| Some(*promise) == facts.announcement)
+    }
+
+    /// The stopped run's queued end count and written matching announcement count.
+    /// # Panics
+    /// Panics if the scene probe is poisoned.
+    pub fn held_tail(&self) -> (u32, u32) {
+        let facts = self.scene_revoke.lock().expect("scene probe");
+        (facts.ends, facts.written_announcements)
+    }
+
+    /// The next silent scene committed while the prefix's writer credit is held.
+    /// # Panics
+    /// Panics if the scene probe is poisoned.
+    pub fn held_successor(&self) -> Option<(RunId, SceneId)> {
+        self.scene_revoke.lock().expect("scene probe").successor
     }
 
     /// Whether the real queue applied a revoke for the held scene.
@@ -314,6 +392,12 @@ impl AudioProbe {
     /// The run named by the last Stop received on control, or zero.
     pub fn stop(&self) -> RunId {
         RunId(self.stop.load(Ordering::Acquire))
+    }
+
+    /// Single-scene clears received on the real Brain control pipe.
+    #[must_use]
+    pub fn clears(&self) -> u32 {
+        self.clears.load(Ordering::Acquire)
     }
 
     /// The run named by the last quiet receipt received on control, or zero.
@@ -439,6 +523,9 @@ impl AudioProbe {
             ControlToBrain::Stop { run, .. } | ControlToBrain::StopScenes { run, .. } => {
                 self.stop.store(run.0, Ordering::Release);
             }
+            ControlToBrain::ClearDrawing { scene_ids } if scene_ids.len() == 1 => {
+                self.clears.fetch_add(1, Ordering::Release);
+            }
             ControlToBrain::SpeechStopped { run, cursor } => {
                 self.speech
                     .lock()
@@ -500,7 +587,9 @@ pub(crate) async fn brain(dir: &Path, script: &str, tone_chunks: usize) -> Brain
     .expect("start offline accounts");
     let engine = if narrated {
         Selected::DrawReplay(Box::new(
-            if let Some(hold) = probe
+            if let Some(turns) = probe.as_ref().and_then(|probe| probe.changing_turns) {
+                crate::engines::responses::replay::Replay::changing_turns(turns)
+            } else if let Some(hold) = probe
                 .as_ref()
                 .and_then(|probe| probe.replacement_chain.clone())
             {
