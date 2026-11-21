@@ -387,27 +387,35 @@ fn queued_plain_escape_stops_active_audio_while_brain_data_credit_is_exhausted(
                 .expect("the real worker opened its fake device");
             let limit = Instant::now() + WAIT;
             let mut first = true;
+            let mut requested = false;
             let mut samples = [0.0; 48];
             loop {
                 assert!(Instant::now() < limit, "Esc takes the original fake device");
                 assert!(!playback.stopped(), "the original fake device stays live");
+                let before = playback.handed();
                 playback.render(&mut samples);
-                if first && playback.handed() != 0 {
+                let handed = playback.handed();
+                if first && handed != 0 {
                     assert_eq!(samples.map(f32::to_bits), PCM);
                     assert_eq!(
-                        playback.handed(),
-                        48,
+                        handed, 48,
                         "the first callback starts at source sample zero"
                     );
                     first = false;
                 }
-                match listen.recv_timeout(CALLBACK_PERIOD) {
-                    Ok(()) => {
-                        assert!(!first, "the device rendered source before Esc");
-                        return playback;
+                if requested && handed == before + 48 && samples.map(f32::to_bits) == PCM {
+                    return playback;
+                }
+                let next = Instant::now() + CALLBACK_PERIOD;
+                loop {
+                    match listen.recv_timeout(next.saturating_duration_since(Instant::now())) {
+                        Ok(()) => {
+                            assert!(!first, "the device rendered source before Esc");
+                            requested = true;
+                        }
+                        Err(mpsc::RecvTimeoutError::Disconnected) => return playback,
+                        Err(mpsc::RecvTimeoutError::Timeout) => break,
                     }
-                    Err(mpsc::RecvTimeoutError::Disconnected) => return playback,
-                    Err(mpsc::RecvTimeoutError::Timeout) => {}
                 }
             }
         });
@@ -455,14 +463,6 @@ fn queued_plain_escape_stops_active_audio_while_brain_data_credit_is_exhausted(
                 playback.insert(pump.join().expect("the callback pump returns its device"));
             assert!(session.open());
             assert!(!playback.stopped());
-            assert!(playback.ready(), "source remains after credit exhaustion");
-            let mut samples = [0.0; 48];
-            playback.render(&mut samples);
-            assert_eq!(
-                samples.map(f32::to_bits),
-                PCM,
-                "the callback still renders the identifiable source immediately before Esc"
-            );
             escape(&owner, cx);
             owner.read_with(cx, |owner, _| {
                 assert_eq!(
