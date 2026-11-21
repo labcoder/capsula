@@ -283,12 +283,19 @@ fn local_and_reused_transport_failures_remain_closed() {
         &[Action::Retry],
         Recovery::RetryLater,
     );
+    check(
+        &Failure::Withheld,
+        ErrorKey::ScreenPictureStopped,
+        &[],
+        Recovery::FixRequest,
+    );
     for (source, expected) in [
         (model::error::Failure::Request, "Request"),
         (model::error::Failure::Credential, "Credential"),
         (model::error::Failure::Spent, "Spent"),
         (model::error::Failure::Rebuild, "Rebuild"),
         (model::error::Failure::Transport, "Transport"),
+        (model::error::Failure::Withheld, "Withheld"),
         (model::error::Failure::Incomplete, "Truncated"),
         (model::error::Failure::Truncated, "Truncated"),
         (model::error::Failure::Protocol, "Protocol"),

@@ -287,3 +287,38 @@ fn members_are_read_in_order_each_value_exactly_as_written() {
         assert_eq!(super::members(refused), None, "{refused}");
     }
 }
+
+/// A splice fills exactly its range of one new buffer, and refuses before writing a place past
+/// the body or a total over the request cap; a failed write is a request failure.
+#[test]
+fn a_splice_writes_only_inside_the_body_and_the_request_cap() {
+    let body = MessagesBody::new(&request()).expect("envelope");
+    let old = body.bytes().to_vec();
+    let at = old.len() - 2;
+    let filled = |out: &mut [u8]| {
+        out.fill(b'x');
+        Ok::<(), ()>(())
+    };
+    let spliced = body.spliced(at, 3, filled).expect("spliced");
+    assert_eq!(
+        spliced.bytes(),
+        [&old[..at], b"xxx", &old[at..]].concat().as_slice()
+    );
+    assert!(spliced.pictured() && !body.pictured());
+    let room = MAX_REQUEST_BYTES - old.len();
+    let full = body.spliced(at, room, filled).expect("at the cap");
+    assert_eq!(full.bytes().len(), MAX_REQUEST_BYTES);
+    let unwritten = |_: &mut [u8]| -> Result<(), ()> { panic!("written past a refusal") };
+    assert!(matches!(
+        body.spliced(at, room + 1, unwritten),
+        Err(Failure::Request)
+    ));
+    assert!(matches!(
+        body.spliced(old.len() + 1, 0, unwritten),
+        Err(Failure::Request)
+    ));
+    assert!(matches!(
+        body.spliced(at, 3, |_| Err(())),
+        Err(Failure::Request)
+    ));
+}

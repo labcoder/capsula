@@ -179,10 +179,14 @@ sequenceDiagram
   request was attempted: it sets one flag right before its first write poll, so a write that
   errors, returns 0 or is pending counts, even if no byte was accepted, while the upload budget
   spent, a connect failure, its deadline while connecting, and a final head or EOF read before
-  the first write all leave it unsent. The Claude Code stdin pump marks only a pictured seed,
-  after the held grant's final check and just before its first write attempt.
+  the first write all leave it unsent. The Messages transport reads the same flag on the same
+  connection type, so the same cases leave it unsent. The Claude Code stdin pump marks only a
+  pictured seed, after the held grant's final check and just before its first write attempt.
 - **Write admission.** The Responses transport asks the lease to admit each poll of the request's
-  writer, every write and the flush, and holds that admission for the one poll. A send without a
+  writer, every write and the flush, and holds that admission for the one poll. The Messages
+  transport admits its polls the same way, and refuses a pictured body before connecting when the
+  lease has no picture grant. Its refusal before any admitted poll ends the round `ReceiptOrdered`,
+  and one after ends it `Withheld`, which the coordinator reads as it reads the Responses one. A send without a
   picture grant admits every poll; one with a grant admits a poll only while it can reserve the
   grant. A refusal stops every later poll: before any poll was admitted, the send ends as
   `Rebuild` with nothing written; after one, it fails as `Withheld` and its connection is
@@ -452,7 +456,7 @@ captures no new screen hold, behind another save or with an On queued after it; 
 reopens the offer under a new revision, so a hold must be offered again. Each withdraws only the pictures it allowed: the run's own copy drops at once, and the bytes are zeroed
 when the last copy drops. The run's next build fails with `ScreenUnavailable`, and a request that has
 started keeps its copy until its round ends but is refused at the send, failing the run the same
-way. A `ChatGPT` upload already writing the picture is cut at its next write poll: it settles as
+way. A `ChatGPT` or Anthropic key upload already writing the picture is cut at its next write poll: it settles as
 possibly written, its connection closes, nothing is sent again, and the run ends as
 `ScreenUnavailable`; one cut by a lost capability ends as `ScreenPictureStopped`. If no send carrying the image has attempted a write yet, the turn's `screen` becomes
 `withdrawn`; once one has, it stays `attached` or `screen`. A held run that ends any other way
@@ -461,8 +465,8 @@ records no screen: a turn not
 yet written is written without it, and a written one is cleared by a store write queued behind
 the turn's. Known limits:
 - **A granted send can't be recalled.** Turning screen holds off refuses a request's send that
-  hasn't been granted yet; a body already granted may still go with its image. A `ChatGPT`
-  upload stops at its next write poll, though bytes already admitted may continue.
+  hasn't been granted yet; a body already granted may still go with its image. A `ChatGPT` or
+  Anthropic key upload stops at its next write poll, though bytes already admitted may continue.
 - **History can show a window that never left.** A write that was attempted marks the screen
   sent even if no byte was accepted. Kumochi exiting before the send outcome is recorded while the picture is pending, including after a
   send proved unsent while its run could still send again, and a failed write of the mark or of
