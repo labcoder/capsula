@@ -681,6 +681,72 @@ fn accounts_panel(
     (window, owner, controls)
 }
 
+#[gpui::test]
+fn account_status_hides_only_errors_the_status_already_explains(cx: &mut TestAppContext) {
+    use kumochi_protocol::message::{AccountRecovery, Cleanup, ErrorKey, UserError};
+
+    let signed_in = |recovery| AccountView::SignedIn {
+        email: None,
+        plan: PlanState::Unavailable,
+        recovery,
+    };
+    let signing_out = |cleanup| AccountView::SigningOut {
+        cleanup,
+        revocation_unconfirmed: false,
+    };
+    let sign_in_again = Some(AccountRecovery::SignInAgain);
+    for (view, key, shown) in [
+        (signed_in(sign_in_again), ErrorKey::SessionEnded, false),
+        (signed_in(None), ErrorKey::SessionEnded, true),
+        (signed_in(None), ErrorKey::PlanUnavailable, false),
+        (signed_in(sign_in_again), ErrorKey::PlanUnavailable, true),
+        (
+            signing_out(Cleanup::NotDurable),
+            ErrorKey::SignOutNotDurable,
+            false,
+        ),
+        (
+            signing_out(Cleanup::Refused),
+            ErrorKey::SignOutNotDurable,
+            true,
+        ),
+    ] {
+        let (window, owner, controls) = accounts_panel(cx);
+        account_views(
+            &owner,
+            vec![
+                chatgpt(view.clone()),
+                LinkEvent::Error {
+                    generation: 7,
+                    error: key.into(),
+                },
+            ],
+            cx,
+        );
+        owner.read_with(cx, |owner, cx| {
+            assert_eq!(
+                owner
+                    .settings
+                    .read(cx)
+                    .accounts
+                    .error
+                    .as_ref()
+                    .map(UserError::key),
+                Some(key)
+            );
+        });
+        let mut frame = VisualTestContext::from_window(window, cx);
+        frame.update(|window, cx| window.draw(cx).clear(cx));
+        assert!(frame.debug_bounds("account-status").is_some());
+        assert_eq!(
+            frame.debug_bounds("chatgpt-account-error").is_some(),
+            shown,
+            "{view:?}, {key:?}"
+        );
+        assert_eq!(drain(&controls), []);
+    }
+}
+
 /// Both sign-ins started from Settings' own buttons.
 fn start_both(
     window: AnyWindowHandle,

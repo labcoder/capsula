@@ -252,15 +252,39 @@ fn snapshots_follow_the_current_session_and_generic_errors_stay_with_accounts(
         );
         owner
             .link_events(
-                Batch::Plain(vec![LinkEvent::Connected(Session::detached(
-                    8,
-                    Incarnation(1),
-                ))]),
+                Batch::Plain(vec![
+                    LinkEvent::State(LinkState::Reconnecting),
+                    LinkEvent::Connected(Session::detached(8, Incarnation(1))),
+                ]),
                 cx,
             )
             .expect("replacement");
         assert_eq!(owner.settings.read(cx).github.generation, None);
         assert_eq!(owner.settings.read(cx).github.view, None);
+        let previous_notice = owner.settings.read(cx).notice().cloned();
+        let error: UserError = ErrorKey::SessionEnded.into();
+        for (generation, expected) in [(7, None), (8, Some(&error))] {
+            owner
+                .link_events(
+                    Batch::Plain(vec![LinkEvent::Error {
+                        generation,
+                        error: error.clone(),
+                    }]),
+                    cx,
+                )
+                .expect("generic error after reconnect");
+            let settings = owner.settings.read(cx);
+            assert_eq!(
+                settings.accounts.error.as_ref(),
+                expected,
+                "generation {generation}"
+            );
+            assert_eq!(settings.notice(), expected.or(previous_notice.as_ref()));
+            assert_eq!(
+                owner.chat_notice.shown().map(|notice| &notice.error),
+                expected
+            );
+        }
         owner
             .link_events(
                 Batch::Plain(vec![
