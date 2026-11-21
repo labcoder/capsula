@@ -1610,12 +1610,6 @@ fn unsaved_default_replacements_preserve_existing_drawings() {
             Some(ErrorCode::BeforeBegin),
             vec![],
         ),
-        (
-            br#"{"records":[{"begin":{"v":1,"scene":"new","surface":"overlay","alt":""}}]}"#
-                .to_vec(),
-            Some(ErrorCode::MissingField),
-            vec!["lookup"],
-        ),
         (replacement_args("new", &[]), None, vec!["lookup"]),
     ] {
         let mut drawing = Drawing::default();

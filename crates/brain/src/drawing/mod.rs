@@ -99,7 +99,8 @@ pub enum Input {
         /// The record's JSON.
         bytes: Vec<u8>,
     },
-    /// A streamed call's arguments ended; `error` when they were malformed or truncated.
+    /// A streamed call's arguments ended: `None` once they closed, `error` when they were malformed
+    /// or truncated.
     CallFinished {
         /// The thread.
         thread: ThreadId,

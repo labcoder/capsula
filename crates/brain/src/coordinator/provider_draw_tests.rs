@@ -349,6 +349,34 @@ fn text_after_the_records_array_completes_the_call_and_draws_nothing_more() {
 }
 
 #[test]
+fn a_closed_records_array_without_end_completes_the_call() {
+    let bytes = format!("{PREFIX}]}}");
+    for streamed in [true, false] {
+        let scratch = Scratch::new("draw-closed-without-end");
+        let mut store = store(&scratch);
+        let mut core = offered(vec![T]);
+        let effects = if streamed {
+            start(&mut core, "closed");
+            let mut effects = delta(&mut core, "closed", &bytes);
+            effects.extend(ready(&mut core, "closed", &bytes));
+            let mut effects = drain(&mut core, &mut store, effects);
+            effects.extend(send(&mut core, TurnEvent::Finished(Finish::Completed)));
+            effects
+        } else {
+            let (dispatch, effects) = call(&mut core, "closed", bytes.as_bytes());
+            assert_eq!(dispatch, Dispatch::Committing);
+            drain(&mut core, &mut store, effects)
+        };
+        assert_eq!(
+            result(&effects).output,
+            ToolOutput::Text("drawn: [s1]".into())
+        );
+        assert_eq!(ends(&effects), [true]);
+        assert_prefix(&store, &["s1"]);
+    }
+}
+
+#[test]
 fn an_empty_records_array_with_text_after_it_draws_nothing() {
     let bytes = r#"{"records":[]}x"#;
     for streamed in [true, false] {
