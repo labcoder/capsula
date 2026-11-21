@@ -48,7 +48,8 @@ impl FixturePlayback {
     }
 
     /// The contiguous source prefix the worker settled on this original physical route.
-    #[cfg(all(windows, debug_assertions, feature = "test-support"))]
+    #[cfg(all(windows, debug_assertions))]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn presented_prefix(&self) -> u64 {
         self.control.presented_prefix()
     }

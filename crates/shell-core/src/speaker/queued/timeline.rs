@@ -83,7 +83,8 @@ pub(super) struct Engine {
     quiet_at: Duration,
     anchors: VecDeque<Anchor>,
     last_anchor_at: Option<Duration>,
-    #[cfg(all(windows, debug_assertions, feature = "test-support"))]
+    #[cfg(all(windows, debug_assertions))]
+    #[cfg(any(test, feature = "test-support"))]
     settled_prefix: Option<(u64, u64)>,
     retry_at: Duration,
     virtual_at: Duration,
@@ -108,7 +109,8 @@ impl Engine {
             quiet_at: Duration::ZERO,
             anchors: VecDeque::with_capacity(ANCHORS),
             last_anchor_at: None,
-            #[cfg(all(windows, debug_assertions, feature = "test-support"))]
+            #[cfg(all(windows, debug_assertions))]
+            #[cfg(any(test, feature = "test-support"))]
             settled_prefix: None,
             retry_at: Duration::ZERO,
             virtual_at: Duration::ZERO,
@@ -512,7 +514,8 @@ impl Engine {
                 break;
             };
             self.consume(anchor.through, Evidence::Device, now);
-            #[cfg(all(windows, debug_assertions, feature = "test-support"))]
+            #[cfg(all(windows, debug_assertions))]
+            #[cfg(any(test, feature = "test-support"))]
             if self.progress.heard == anchor.through
                 && (anchor.first == 0
                     || self.settled_prefix == Some((anchor.generation, anchor.first)))
@@ -522,7 +525,8 @@ impl Engine {
         }
     }
 
-    #[cfg(all(windows, debug_assertions, feature = "test-support"))]
+    #[cfg(all(windows, debug_assertions))]
+    #[cfg(any(test, feature = "test-support"))]
     pub(super) fn settled_prefix(&self, generation: u64) -> Option<u64> {
         self.settled_prefix
             .filter(|(route, _)| *route == generation)

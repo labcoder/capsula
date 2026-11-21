@@ -323,7 +323,8 @@ impl Worker {
                     self.stop(now, &mut |credit| port.credit(credit, &mut give));
                     true
                 });
-            #[cfg(all(windows, debug_assertions, feature = "test-support"))]
+            #[cfg(all(windows, debug_assertions))]
+            #[cfg(any(test, feature = "test-support"))]
             if let Some(route) = &self.physical
                 && let Some(through) = self.engine.settled_prefix(route.generation)
             {
