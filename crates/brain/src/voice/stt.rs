@@ -258,6 +258,30 @@ pub(crate) struct SttHandle {
 }
 
 impl SttHandle {
+    #[cfg(all(windows, debug_assertions, feature = "test-support"))]
+    pub(crate) fn offline(
+        reports: Reports,
+        decode: impl Fn(u32, &[i16]) -> String + Send + Sync + 'static,
+    ) -> Self {
+        struct Offline<F>(F);
+        impl<F: Fn(u32, &[i16]) -> String + Sync> Decoder for Offline<F> {
+            fn decode(&self, rate: u32, samples: &[i16]) -> Result<String, SpeechError> {
+                Ok((self.0)(rate, samples))
+            }
+        }
+        let (_, losses) = broadcast::channel(4);
+        let decoder = Offline(decode);
+        Self::spawn_with(reports, losses, move |_, serve| {
+            assert_eq!(
+                serve(Generation(0), &decoder),
+                Served::Released,
+                "the offline recognizer shuts down normally"
+            );
+            Ok(())
+        })
+        .expect("offline recognizer starts")
+    }
+
     pub(crate) fn admit_use(&self) -> Result<u64, HoldFailure> {
         self.control.update(|state| {
             let ask = state.current.ok_or(HoldFailure::NotLoaded)?;

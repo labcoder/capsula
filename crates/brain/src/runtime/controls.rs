@@ -47,13 +47,17 @@ impl Registration {
             {
                 Err(Ended::Broken("queued audio output withdrawn"))
             }
-            ControlToBrain::KeyDown { .. }
-            | ControlToBrain::HoldRecognized { .. }
-            | ControlToBrain::VoiceHoldRecognized { .. }
-            | ControlToBrain::ScreenHoldRecognized { .. } => Err(Ended::Broken(match self {
-                Self::Awaiting => "hold before queued audio registration",
-                Self::Applied(_) => "hold on a Plain queued connection",
-            })),
+            ControlToBrain::KeyDown { .. } | ControlToBrain::VoiceHoldRecognized { .. }
+                if self == Self::Awaiting =>
+            {
+                Err(Ended::Broken("hold before queued audio registration"))
+            }
+            ControlToBrain::HoldRecognized { .. } | ControlToBrain::ScreenHoldRecognized { .. } => {
+                Err(Ended::Broken(match self {
+                    Self::Awaiting => "hold before queued audio registration",
+                    Self::Applied(_) => "hold on a Plain queued connection",
+                }))
+            }
             _ => Ok(None),
         }
     }
@@ -350,7 +354,7 @@ impl Brain {
             return Ok(None);
         }
         if let ControlToBrain::KeyDown { .. } = message {
-            if self.hold_to_talk_enabled() {
+            if self.hold_to_talk_enabled() && self.hold_pair_supported(link) {
                 self.voice_op(Installer::reload_input, Some(link))
                     .map_err(|Full| Ended::Lost)?;
             }
