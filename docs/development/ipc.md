@@ -91,7 +91,9 @@ The appended `VoiceHoldStopAccepted` acknowledges a processed receipt. The Shell
 one reserved/completed receipt until acceptance of its gesture on the connection that last carried it,
 replaying only completed metadata on reconnect, never audio or input. Brain device debt
 keeps its authenticated process handle: a matching same-live-process receipt or confirmed
-old-process exit can release it, not a timeout or connection replacement.
+old-process exit can release it, not a timeout or connection replacement. A receipt whose
+process can't be checked stays unanswered, and the connection's existing 500 ms tick checks it
+again until it can answer, even with no run; it sends no ping and ends nothing while idle.
 The provisional 10-second startup and 2-second final-PCM drain bounds are unmeasured;
 expiry is terminal but never releases an unconfirmed device owner.
 
