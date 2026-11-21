@@ -1088,6 +1088,36 @@ async fn a_failed_termination_keeps_everything() {
         .expect("the test ends the fake");
 }
 
+/// A picture the child keeps in its temporary folder is inside its launch folder, and goes with it
+/// whether the child exits, crashes or is stopped. A brain that dies leaves the launch folder to
+/// the next sweep (`a_restarted_lane_sweeps_leftover_launches`).
+#[tokio::test]
+async fn a_picture_in_the_childs_temp_goes_with_its_launch() {
+    for how in ["exit", "crash", "stop"] {
+        let base = Base::new("launch-temp-picture");
+        let lane = found(&base, &format!("picture:{how}")).await;
+        let (start, mut launch) = admit(question(Duration::from_secs(20))).expect("a launch id");
+        let control = start.control();
+        queue(&lane, start);
+        let _pipes = pipes(&mut launch).await;
+        let kept = || {
+            tree(&base)
+                .iter()
+                .any(|(path, _)| path.ends_with(r"tmp\images\picture.jpg"))
+        };
+        until("the picture is in the launch's temp", kept).await;
+        if how == "stop" {
+            assert_eq!(launch.lease().revoke(), Revoked::Idle);
+        } else {
+            fs::write(base.0.join("release"), b"").expect("release the child");
+            until("the exit ends it", || control.is_ended()).await;
+        }
+        assert_eq!(end(launch).await, Teardown::Done, "{how}");
+        assert!(launch_dirs(&base).is_empty(), "{how}");
+        assert!(!kept(), "{how}");
+    }
+}
+
 /// Empty, truncated and lingering: the job is ended even when the root exits on its own.
 #[tokio::test]
 async fn a_child_that_exits_or_lingers_is_ended_with_its_job() {
