@@ -371,7 +371,7 @@ desktop:
 cargo test -p kumochi-brain --lib native_window_probe -- --ignored --exact --nocapture
 ```
 
-## Display under a point (dormant)
+## Display under a point
 
 `Capturer::capture_display` takes one frame of the monitor nearest a point, with the pointer
 drawn. It reads the monitor's bounds and effective DPI, makes a capture item for that monitor,
@@ -413,6 +413,17 @@ Two ignored native checks keep pixels in memory and are run by hand on Rez:
 `first_display_frame_against_its_session_start` prints each first frame's draw time minus its
 session's start, cold and warm, and is run on a still screen; `primary_display_cold_and_warm_samples`
 times the capture.
+
+### Release-capture gate scope
+
+The hold takes one picture of the display under the pointer at release. It paints the pointer
+path into the picture before sealing it. The old moving-window follow and scroll/reflow/close
+rows are retired: the path is part of a still picture, not an anchor tracking a window or element.
+Screen marks in the answer have their own lifetime and native placement checks.
+
+The old multi-image tool budget, staged overview/crop/element fallback, and crash recovery of
+image assets are retired as well. The hold supplies one capped JPEG, exposes no capture tools and
+does not keep the pixels in history. Recovery covers only whether a picture may have been sent.
 
 ## Sealing a hold's image
 
