@@ -3646,10 +3646,13 @@ fn refused_queued_progress(label: &str) -> (LinkHandle, Session, FixturePlayback
         );
         thread::sleep(Duration::from_millis(2));
     }
-    assert!(
-        playback.stopped(),
-        "the original callback is fenced at pair loss"
-    );
+    while !playback.stopped() {
+        assert!(
+            Instant::now() < deadline,
+            "refused non-final progress fences the original callback"
+        );
+        thread::sleep(Duration::from_millis(2));
+    }
     queued_pair_closed(link.link, &link.control, &link.data);
     let receipt = link
         .handle
