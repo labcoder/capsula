@@ -16,7 +16,7 @@ use crate::platform::{PipeClient, test_pair};
 pub(crate) const PATIENCE: Duration = Duration::from_secs(5);
 
 #[cfg(debug_assertions)]
-pub use crate::speaker::queued::{FixturePlayback, serialize_playback};
+pub use crate::speaker::queued::{FixturePlayback, await_fake_disposal, serialize_playback};
 
 #[cfg(debug_assertions)]
 pub fn with_outbox_held(handle: &LinkHandle, session: &Session, run: impl FnOnce()) {
@@ -82,6 +82,15 @@ pub struct Authenticated {
     pub link: JoinHandle<bool>,
 }
 
+/// Opens the next run's fake device before its worker admits PCM.
+#[cfg(debug_assertions)]
+pub fn prime_next_playback(handle: &LinkHandle) {
+    handle
+        .shared
+        .prime_fake_playback
+        .store(true, std::sync::atomic::Ordering::Release);
+}
+
 /// The real authenticated Shell path, without opening the vault or a physical device.
 #[cfg(debug_assertions)]
 pub fn authenticated(
@@ -107,47 +116,16 @@ pub fn authenticated_primed(id: u32, hello: kumochi_protocol::message::Hello) ->
 }
 
 #[cfg(debug_assertions)]
-/// Drives the narrated presenter side of the offline authenticated pair.
-pub struct NarratedFixture(Arc<super::narrated::Narrated>);
-
-#[cfg(debug_assertions)]
-impl NarratedFixture {
-    /// Enables conduction in the fixture's presenter.
-    pub fn attach(&self, presenter: &mut crate::presenter::Presenter) {
-        self.0.attach(presenter);
-    }
-
-    /// Pumps this pair without waiting. A foreign pair is rejected without touching either pair.
-    #[must_use]
-    pub fn update(
-        &self,
-        link: &LinkHandle,
-        session: &Session,
-        presenter: &mut crate::presenter::Presenter,
-        now: std::time::Instant,
-    ) -> bool {
-        self.0.update(link, session, presenter, now).is_ok()
-    }
-}
-
-#[cfg(debug_assertions)]
 /// Selects narration exclusively for the offline authenticated test pair.
-pub fn authenticated_narrated(
-    id: u32,
-    hello: kumochi_protocol::message::Hello,
-) -> (Authenticated, NarratedFixture) {
-    let bridge = Arc::new(super::narrated::Narrated::new());
-    (
-        authenticated_with_output(
-            id,
-            hello,
-            AudioSession::QueuedRequired,
-            Shared {
-                narrated: Some(Arc::clone(&bridge)),
-                ..Shared::default()
-            },
-        ),
-        NarratedFixture(bridge),
+pub fn authenticated_narrated(id: u32, hello: kumochi_protocol::message::Hello) -> Authenticated {
+    authenticated_with_output(
+        id,
+        hello,
+        AudioSession::QueuedRequired,
+        Shared {
+            narrated: true,
+            ..Shared::default()
+        },
     )
 }
 

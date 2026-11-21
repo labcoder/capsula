@@ -1,5 +1,6 @@
 use std::sync::mpsc;
 use std::thread::{self, JoinHandle};
+use std::time::Duration;
 
 use kumochi_protocol::{BUILD_ID, Secret};
 
@@ -75,6 +76,30 @@ pub fn offline_narrated_replacement_chain_peer() -> (
     offline_draw_peer(8, audio_fixture::AudioProbe::chaining_replacements())
 }
 
+/// Starts a narrated turn followed by a silent replacement on the same pair.
+/// # Panics
+/// Panics if the private test namespace or the fixture Brain cannot start.
+pub fn offline_narrated_stopped_replacement_peer() -> (
+    u32,
+    Hello,
+    std::sync::Arc<audio_fixture::AudioProbe>,
+    JoinHandle<bool>,
+) {
+    offline_draw_peer(8, audio_fixture::AudioProbe::stopped_replacement())
+}
+
+/// Starts 257 authored-only turns followed by a narrated turn on the same pair.
+/// # Panics
+/// Panics if the private test namespace or the fixture Brain cannot start.
+pub fn offline_authored_then_narrated_peer() -> (
+    u32,
+    Hello,
+    std::sync::Arc<audio_fixture::AudioProbe>,
+    JoinHandle<bool>,
+) {
+    offline_draw_peer(8, audio_fixture::AudioProbe::authored_then_narrated())
+}
+
 fn offline_draw_peer(
     tone_chunks: usize,
     probe: audio_fixture::AudioProbe,
@@ -111,6 +136,11 @@ fn offline_peer(
         capability: identity.capability.clone(),
     };
     let (ready, waiting) = mpsc::sync_channel(1);
+    let deadline = if probe.as_ref().is_some_and(|probe| probe.many_turns()) {
+        Duration::from_secs(120)
+    } else {
+        HANDSHAKE_TIMEOUT * 3
+    };
     let task = thread::Builder::new()
         .name("audio-fixture-brain".into())
         .spawn(move || {
@@ -127,7 +157,7 @@ fn offline_peer(
                 let mut pipes = Pipes::create(session).expect("owner-only test pipes");
                 ready.send(()).expect("waiting test peer");
                 let mut tap = Tap::default();
-                let result = timeout(HANDSHAKE_TIMEOUT * 3, async {
+                let result = timeout(deadline, async {
                     pipes
                         .control
                         .connect()

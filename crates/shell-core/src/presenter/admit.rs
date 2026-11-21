@@ -15,8 +15,8 @@ use kumochi_protocol::message::{DataToShell, RunId, SceneId};
 use kumochi_scene::deferred::Deferred;
 
 use super::{
-    AdmitJob, Broken, DEADLINE, Effect, MAX_WORKERS, Out, Phase, Presenter, RunDisposition,
-    wire_bytes,
+    AdmitJob, Broken, DEADLINE, Effect, MAX_WORKERS, Out, Phase, Presenter, RetirementLane,
+    RunDisposition, wire_bytes,
 };
 
 pub(super) struct Lane {
@@ -179,7 +179,14 @@ impl Presenter {
             match &**frame {
                 DataToShell::SceneBegin { scene, .. } => begun.push(*scene),
                 DataToShell::ScenesRemoved { scenes }
-                | DataToShell::ScenesReplaced { scenes, .. } => self.removed(scenes, now, out)?,
+                | DataToShell::ScenesReplaced { scenes, .. } => {
+                    self.removed(scenes, now, out)?;
+                    self.narration_retirement_consumed(RetirementLane::Scenes);
+                }
+                DataToShell::SceneCutApplied { scene, cut, .. } if cut.activated == 0 => {
+                    self.removed(std::slice::from_ref(scene), now, out)?;
+                    self.narration_retirement_consumed(RetirementLane::Cut);
+                }
                 _ => {}
             }
         }

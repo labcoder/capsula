@@ -10,7 +10,7 @@ use crate::platform::speaker_cpal::{BackendStream, Control, OutputError, Transpo
 #[cfg(any(test, feature = "test-support"))]
 pub(super) use fixture::spawn_fake;
 #[cfg(any(test, feature = "test-support"))]
-pub use fixture::{FixturePlayback, serialize_playback};
+pub use fixture::{FixturePlayback, await_fake_disposal, serialize_playback};
 #[cfg(any(test, feature = "test-support"))]
 mod fixture;
 

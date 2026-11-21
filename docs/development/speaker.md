@@ -65,11 +65,12 @@ reroute replaces the stream instead of assuming that old endpoint timing still a
 An xrun rechecks refill readiness on every tick, even without new ingress.
 Only an authoritative typed RunState starts this worker on an internally selected queued pair.
 
-The offline Plain tests that require a positive heard prefix open the first fake
-route before the worker admits PCM. Each fake playback has its own retirement queue so
+The offline tests that require a positive heard prefix open the fake route before the
+worker admits PCM: the first run for Plain, and each run in the two-reply Presence
+onset test. Each fake playback has its own retirement queue so
 independent fixture pools can't fill the single native queue. A callback can render
 identifiable samples after virtual playback has left an unheard gap, so rendered samples alone
-don't establish a heard prefix. These tests separately check the first source
+don't establish a heard prefix. The Plain tests separately check the first source
 handoff and the original run's retirements accepted by the Brain. The quiet cursor
 matches those receipts even when Done made the later quiet report stale to the Brain.
 
@@ -231,9 +232,9 @@ fallback even when a device opens as virtual pacing exhausts it. Retirement stil
 keeps the existing rebuild grace. Ready PCM arms the hold during a pending device
 open, so expiry can release it to virtual pacing without another packet.
 Missing owner, backend startup failure and worker exit
-are reported to the future link, which supplies keyed Unavailable. Unit 4 must ensure
-the worker has seen the matching binding before forwarding that assignment's first PCM,
-for example by using the keyed picture as acknowledgment. An unresolved assignment is
+are reported to the pair's bridge, which supplies keyed Unavailable when there's no
+onset to preserve. An ordered Applied for the exact binding lets the bridge send
+Allow; only then can that assignment's PCM reach the worker. An unresolved assignment is
 not unassigned. No link or opener uses this adapter yet.
 
 ## Reports

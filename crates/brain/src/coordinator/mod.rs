@@ -510,12 +510,12 @@ pub enum Effect {
         /// The scenes.
         scenes: Vec<SceneId>,
     },
-    /// Retire the victim geometry without severing its queued narration metadata.
-    ReplaceNarratedScenes {
+    /// Publish the v1 drawing reducer's single ordered retirement, preserving narration debt.
+    RetireScenes {
         /// The victims.
         scenes: Vec<SceneId>,
-        /// The new scene.
-        successor: SceneId,
+        /// Only an installed replacement retains the old paint until this successor handoff.
+        successor: Option<SceneId>,
     },
     /// Report `Retry` after `after`, replacing any earlier `ArmRetry`.
     ArmRetry {

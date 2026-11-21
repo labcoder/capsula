@@ -1,3 +1,7 @@
+use std::num::NonZeroU64;
+
+use crate::presenter::RetirementLane;
+
 use kumochi_protocol::message::{
     MAX_SEGMENTS_PER_RUN, SegmentId, SegmentStart, SpeechPromise, StepRef,
 };
@@ -21,6 +25,7 @@ pub(super) enum MetadataFrame {
 #[derive(Default)]
 pub(super) struct Reader {
     announced: Option<(RunId, u32)>,
+    retirements: [u64; 2],
 }
 
 impl Reader {
@@ -75,12 +80,6 @@ impl Reader {
                 output_generation,
                 ..
             } => (run, segment, output_generation, None),
-            DataToShell::ScenesReplaced {
-                ref scenes,
-                successor,
-            } if narrated.is_some_and(|bridge| !bridge.replaced(scenes, successor)) => {
-                return Err(());
-            }
             DataToShell::SpeechPcm(pcm) => (
                 pcm.run,
                 pcm.segment,
@@ -92,12 +91,20 @@ impl Reader {
                 speech: Some(_), ..
             } => return Err(()),
             DataToShell::RunEnd { run } => {
+                if let Some(bridge) = narrated {
+                    bridge.run_end(run);
+                }
                 return owner
                     .end_queued_run(session, run)
                     .then_some(Some(message))
                     .ok_or(());
             }
-            _ => return Ok(Some(message)),
+            _ => {
+                if let Some(bridge) = narrated {
+                    self.retirement(bridge, &message)?;
+                }
+                return Ok(Some(message));
+            }
         };
         let pcm = packet.is_some();
         let cursor = self.accept_segment(run, segment, packet.as_ref())?;
@@ -122,12 +129,37 @@ impl Reader {
         Ok(None)
     }
 
+    fn retirement(&mut self, narrated: &Narrated, message: &DataToShell) -> Result<(), ()> {
+        let (scenes, successor, lane) = match message {
+            DataToShell::ScenesRemoved { scenes } => {
+                (scenes.as_slice(), None, RetirementLane::Scenes)
+            }
+            DataToShell::ScenesReplaced { scenes, successor } => {
+                (scenes.as_slice(), Some(*successor), RetirementLane::Scenes)
+            }
+            DataToShell::SceneCutApplied { scene, cut, .. } if cut.activated == 0 => {
+                (std::slice::from_ref(scene), None, RetirementLane::Cut)
+            }
+            _ => return Ok(()),
+        };
+        let pending = &mut self.retirements[lane.slot()];
+        let ordinal = pending.checked_add(1).and_then(NonZeroU64::new).ok_or(())?;
+        if !narrated.retiring(scenes, successor, lane, ordinal) {
+            return Err(());
+        }
+        *pending = ordinal.get();
+        Ok(())
+    }
+
     fn metadata(
         owner: &OutputOwner,
         narrated: &Narrated,
         assignment: Assignment,
         frame: MetadataFrame,
     ) -> Result<bool, ()> {
+        if matches!(frame, MetadataFrame::Commit) && !narrated.can_promise(assignment.run)? {
+            return Ok(false);
+        }
         match owner.narrated_metadata(assignment, frame)? {
             NarratedReservation::Waiting => Ok(false),
             NarratedReservation::Reserved => match frame {
@@ -148,7 +180,7 @@ impl Reader {
         speech: Option<SpeechPromise>,
     ) -> Result<(), ()> {
         let Some(promise) = speech else {
-            return narrated.unassigned(key).then_some(()).ok_or(());
+            return wait_for(|| narrated.unassigned(key));
         };
         let assignment = Assignment {
             session,

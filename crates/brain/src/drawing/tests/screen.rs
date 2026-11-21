@@ -640,7 +640,7 @@ fn a_skipped_screen_scene_ends_its_open_call_as_changed_and_closes_its_run_s_scr
         texts(&[&skipped]),
         [format!("drawn: [s1]; stopped: {CHANGED}{NOT_KEPT}")]
     );
-    assert_eq!(trace(&skipped), ["end 1 false", "revoke 1", "clear 1"]);
+    assert_eq!(trace(&skipped), ["end 1 false", "removed 1", "clear 1"]);
     assert!(drawing.scenes.iter().all(|held| held.gone));
     assert!(
         !drawing.drew_nothing(RunId(1)),

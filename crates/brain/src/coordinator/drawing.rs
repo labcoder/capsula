@@ -253,16 +253,11 @@ impl Coordinator {
     }
 
     pub(super) fn drawing_output(&mut self, output: Output, effects: &mut Vec<Effect>) {
-        let mut pending = output.effects.into_iter().peekable();
-        while let Some(effect) = pending.next() {
+        for effect in output.effects {
             if let Effect::Data(message) = &effect
                 && let Some(thread) = scene_id(message).and_then(|scene| self.drawing.thread(scene))
                 && self.deleting_thread(thread)
             {
-                if let Effect::Data(DataToShell::ScenesReplaced { scenes, .. }) = effect {
-                    effects.push(Effect::Data(DataToShell::ScenesRemoved { scenes }));
-                    continue;
-                }
                 if self.drawing_held.len() >= MAX_RESULTS {
                     effects.push(Effect::Broken("too many drawing frames await deletion"));
                 } else if let Effect::Data(message) = effect {
@@ -270,29 +265,13 @@ impl Coordinator {
                 }
                 continue;
             }
-            if let Effect::RevokeScenes { scenes } = effect {
-                let successor = match pending.peek() {
-                    Some(Effect::Data(DataToShell::ScenesReplaced {
-                        scenes: victims,
-                        successor,
-                    })) if *victims == scenes
-                        && self
-                            .current
-                            .as_ref()
-                            .and_then(|run| run.reply.as_ref())
-                            .is_some_and(|reply| reply.has_narration_in(&scenes))
-                        && !self
-                            .drawing
-                            .thread(*successor)
-                            .is_some_and(|thread| self.deleting_thread(thread)) =>
-                    {
-                        Some(*successor)
-                    }
-                    _ => None,
-                };
-                if successor.is_some() {
-                    pending.next();
-                }
+            if let Effect::RetireScenes { scenes, successor } = effect {
+                let successor = successor.filter(|scene| {
+                    !self
+                        .drawing
+                        .thread(*scene)
+                        .is_some_and(|thread| self.deleting_thread(thread))
+                });
                 self.drawing_revoke(scenes, successor, effects);
                 continue;
             }
@@ -499,21 +478,13 @@ impl Coordinator {
             }
             true
         });
-        if let Some(successor) = successor {
-            effects.push(Effect::ReplaceNarratedScenes {
-                scenes: scenes.clone(),
-                successor,
-            });
+        let mut speech = Vec::new();
+        if let Some(reply) = self.current.as_mut().and_then(|run| run.reply.as_mut()) {
+            reply.scenes_removed(&scenes, &mut speech);
         }
-        if let Some(run) = &mut self.current
-            && let Some(reply) = &mut run.reply
-        {
-            let mut out = Vec::new();
-            reply.scenes_removed(&scenes, &mut out);
-            speech::carry(run, out, effects);
-        }
-        if successor.is_none() {
-            effects.push(Effect::RevokeScenes { scenes });
+        effects.push(Effect::RetireScenes { scenes, successor });
+        if let Some(run) = &mut self.current {
+            speech::carry(run, speech, effects);
         }
         let mut at = 0;
         while at < self.drawing_held.len() {
@@ -594,10 +565,7 @@ impl Coordinator {
 fn scene_id(message: &kumochi_protocol::message::DataToShell) -> Option<SceneId> {
     use kumochi_protocol::message::DataToShell;
     match message {
-        DataToShell::ScenesReplaced {
-            successor: scene, ..
-        }
-        | DataToShell::SceneBegin { scene, .. }
+        DataToShell::SceneBegin { scene, .. }
         | DataToShell::SceneStepCommit { scene, .. }
         | DataToShell::SceneCutApplied { scene, .. }
         | DataToShell::SceneEnd { scene, .. } => Some(*scene),

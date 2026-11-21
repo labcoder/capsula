@@ -45,15 +45,23 @@ name one run, or be refused by its own turn number. The Plain path does not admi
 AskAbout or screen capture, and refuses conducted Speech rather than treating it as Plain.
 
 The offline narrated fixture selects a separate internal adapter on the same authenticated
-pair. It matches the scene's durable speech promise to the ordered announcement on that
-registered session before passing either authority or PCM to the queued worker. That
-adapter sends the existing decision only when the worker has applied the exact local
+pair. Each attendance owns a fresh bridge; neither a reconnect nor a new run inherits the
+old speaker's wake. The bridge matches the scene's durable speech promise to the ordered
+announcement on that registered session before passing either authority or PCM to the queued
+worker. It sends the existing decision only when the worker has applied the exact local
 binding. The brain's decision-taken frame settles decision consumption; it never
 authorizes local staging. A durable absent promise permits authored timing for that
-step; a promised step stays unresolved until its announcement matches. Removing a
-committed scene before it binds sends an exact Discard. A replacement marker fences
-the victim assignment at the data reader, even before the presenter applies the
-removal. A busy output owner defers an unbound Discard without lifting that fence.
+step; a promised step stays unresolved until its announcement matches. The v1
+drawing reducer chooses the presentation boundary. A replacement uses only
+`ScenesReplaced`: it keeps the victim's last paint until the successor takes over.
+A clear, scene failure, discarded replacement, or deletion uses `ScenesRemoved`,
+even when no narration is queued. These markers precede any retained narration
+metadata that hasn't entered the writer. A removed segment still owes its empty
+retirement and an unbound live assignment sends an exact Discard. A replacement
+fences the victim assignment at the data reader; a busy output owner defers the
+Discard without lifting that fence. Stop alone revokes run output, not the scene
+boundary. A durable `SceneCutApplied` to zero is terminal and stays after the
+commits it names; a cut that keeps paint is not terminal.
 An explicitly stopped run's commit can still reach the reader after the next run
 has been named or stopped. The commit goes to the stopped scene mirror; a matching
 announcement returns credit once without binding or sending a speech decision. The
@@ -61,8 +69,10 @@ pair keeps at most one stopped predecessor until the data reader sees that run's
 `RunEnd` or the pair closes. A commit can arrive on its own if Stop revoked the
 announcement before the writer started it. The next typed intent keeps its draft
 while both slots are occupied; neither quiet nor a different run's marker releases
-the predecessor. Decision receipts remain on the control pipe. There is no
-production selector for the narrated adapter.
+the predecessor. For a natural end, the exact data `RunEnd` and settled drawing binding
+release the single narration slot for the next reply. That releases the audio binding, not an
+already installed frame or its outstanding paint receipt. Decision receipts remain on the
+control pipe. There is no production selector for the narrated adapter.
 
 ## Voice-only hold messages
 

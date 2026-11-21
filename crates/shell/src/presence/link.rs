@@ -75,6 +75,16 @@ impl Presence {
                     self.session = Some(session);
                     self.link_state(LinkState::Connected, cx);
                 }
+                LinkEvent::NarrationReady(wake) => {
+                    if !self
+                        .session
+                        .as_ref()
+                        .is_some_and(|session| session.accepts_narration(wake))
+                    {
+                        continue;
+                    }
+                    self.scene_effects(Ok(Vec::new()), cx);
+                }
                 LinkEvent::Settings {
                     generation,
                     view,
@@ -875,6 +885,7 @@ impl Presence {
             self.runs.met(session.incarnation());
             self.runs.connected(session.generation());
             self.presenter.connected(session.generation());
+            session.attach_narration(&mut self.presenter);
             // Recovered drawings start on a cleared screen, so none keeps the old stage.
             self.drawing_placement = None;
             for model in [&self.threads, &self.chat] {

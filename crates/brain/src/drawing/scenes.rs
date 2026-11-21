@@ -156,20 +156,21 @@ impl Drawing {
                 let installed = (*admission)
                     .settle(&mut states, &mut self.global, disposition)
                     .expect("the pending replacement sealed every victim and the global budget");
-                self.scenes.retain(|held| !victims.contains(&held.scene));
-                if !victims.is_empty() {
-                    out.effects.push(Effect::RevokeScenes {
-                        scenes: victims.clone(),
-                    });
-                    let message = if installed.is_some() {
-                        DataToShell::ScenesReplaced {
-                            scenes: victims,
-                            successor: id,
-                        }
-                    } else {
-                        DataToShell::ScenesRemoved { scenes: victims }
+                let mut retiring = victims;
+                self.scenes.retain(|held| {
+                    let Some(at) = retiring.iter().position(|scene| *scene == held.scene) else {
+                        return true;
                     };
-                    out.effects.push(Effect::Data(message));
+                    if held.gone {
+                        retiring.remove(at);
+                    }
+                    false
+                });
+                if !retiring.is_empty() {
+                    out.effects.push(Effect::RetireScenes {
+                        scenes: retiring,
+                        successor: installed.is_some().then_some(id),
+                    });
                 }
                 let Some((state, committed)) = installed else {
                     self.drew(run, &call, id, &step);
@@ -402,8 +403,9 @@ impl Drawing {
         if left.is_empty() {
             return;
         }
-        out.effects.push(Effect::RevokeScenes {
+        out.effects.push(Effect::RetireScenes {
             scenes: left.clone(),
+            successor: None,
         });
         self.clear_stored(left, out);
     }
@@ -438,11 +440,10 @@ impl Drawing {
         if left.is_empty() {
             return;
         }
-        out.effects.push(Effect::RevokeScenes {
-            scenes: left.clone(),
+        out.effects.push(Effect::RetireScenes {
+            scenes: left,
+            successor: None,
         });
-        out.effects
-            .push(Effect::Data(DataToShell::ScenesRemoved { scenes: left }));
     }
 
     /// Marks scenes as gone, so none of their frames goes out again. An owed cut of one is

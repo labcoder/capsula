@@ -11,10 +11,7 @@ use super::{Arc, Ordering, Output, OutputGeneration, OutputOwner, RunId, State, 
 use crate::link::{Shared, narrated::Narrated, queued::MetadataFrame};
 use crate::speaker::DRAIN;
 use crate::speaker::conductor::Assignment;
-#[cfg(all(windows, debug_assertions))]
-#[cfg(any(test, feature = "test-support"))]
-use crate::speaker::queued::Command;
-use crate::speaker::queued::{Input, Packet, RATE, spawn, spawn_plain};
+use crate::speaker::queued::{Command, Input, Packet, RATE, spawn, spawn_plain};
 
 const LOCAL_QUIET: u8 = 1;
 const RECEIPT_QUEUED: u8 = 2;
@@ -313,7 +310,7 @@ impl OutputOwner {
         shared: Weak<Shared>,
     ) -> bool {
         let proof = Arc::new(AtomicU8::new(0));
-        let (output, wake) = {
+        let (output, wake, narrated) = {
             let mut state = self.lock();
             let Some((output, owner)) = state.queue(session).filter(|(_, q)| {
                 q.ready() && !q.owes_proof(RECEIPT_QUEUED) && q.predecessor.is_none()
@@ -343,14 +340,13 @@ impl OutputOwner {
                 delivery: (owner.narrated.is_some() && !ended).then_some(Delivery::Unpromised),
                 locally_stopped: false,
             });
-            (output, Arc::clone(&owner.wake))
+            (output, Arc::clone(&owner.wake), owner.narrated.clone())
         };
         let out = out.clone();
         let exit = Arc::clone(&proof);
         let tail = Arc::clone(&proof);
         let link_thread = thread::current();
         let reporter = Weak::clone(&shared);
-        let narrated = shared.upgrade().and_then(|owner| owner.narrated.clone());
         #[cfg(any(test, feature = "test-support"))]
         let fake = fake_queued_output(&shared);
         let fault = Arc::clone(&proof);
@@ -385,7 +381,7 @@ impl OutputOwner {
                 session,
                 mode.origin,
                 mode.worker(
-                    session,
+                    run,
                     move || {
                         fault.fetch_or(REPORT_REFUSED, Ordering::AcqRel);
                     },
@@ -465,9 +461,15 @@ impl OutputOwner {
         Ok(outcome)
     }
 
-    #[cfg(all(windows, debug_assertions))]
-    #[cfg(any(test, feature = "test-support"))]
-    pub(in crate::link) fn narrated_gate(&self, command: Command) -> Result<(), super::Denied> {
+    pub(in crate::link) fn wait_narrated_gate(&self) {
+        drop(self.state.lock());
+    }
+
+    pub(in crate::link) fn narrated_gate(
+        &self,
+        command: Command,
+        before: impl FnOnce() -> bool,
+    ) -> Result<(), super::Denied> {
         use super::Denied;
 
         let a = match command {
@@ -488,11 +490,14 @@ impl OutputOwner {
             .as_ref()
             .filter(|active| active.id == a.run && a.run > owner.stopped)
             .and_then(|active| active.input.as_ref())
-            .is_some_and(|input| match command {
-                Command::Allow(binding) => input.allow(binding),
-                Command::Revoke(binding) => input.revoke(binding),
-                Command::RevokeSource(assignment) => input.revoke_source(assignment),
-                _ => false,
+            .is_some_and(|input| {
+                before()
+                    && match command {
+                        Command::Allow(binding) => input.allow(binding),
+                        Command::Revoke(binding) => input.revoke(binding),
+                        Command::RevokeSource(assignment) => input.revoke_source(assignment),
+                        _ => false,
+                    }
             })
             .then_some(())
             .ok_or(Denied::Lost)
@@ -586,7 +591,7 @@ fn fake_queued_output(shared: &Weak<Shared>) -> Option<crate::speaker::queued::F
     let owner = shared.upgrade()?;
     Some(crate::speaker::queued::FakeOutput {
         sender: owner.fake_playback.clone()?,
-        prime: owner.narrated.is_none() && owner.prime_fake_playback.swap(false, Ordering::AcqRel),
+        prime: owner.prime_fake_playback.swap(false, Ordering::AcqRel),
     })
 }
 

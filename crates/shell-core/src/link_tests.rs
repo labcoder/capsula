@@ -3779,16 +3779,199 @@ fn queued_speech_start_or_scene_promise_closes_without_data_credit() {
 }
 
 #[cfg(debug_assertions)]
-fn narrated_attended(label: &str) -> (Attended, std::sync::Arc<super::narrated::Narrated>) {
-    let narration = Arc::new(super::narrated::Narrated::new());
-    let paired = attended_queued_shared(
+fn narrated_attended(label: &str) -> Attended {
+    attended_queued_shared(
         label,
         Arc::new(super::Shared {
-            narrated: Some(Arc::clone(&narration)),
+            narrated: true,
             ..super::Shared::default()
         }),
+    )
+}
+
+#[cfg(debug_assertions)]
+#[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one pair through delayed delivery, retirement, successor, and live duplicate"
+)]
+fn narrated_absence_survives_delayed_delivery_and_reclaims_retired_scenes() {
+    use crate::presenter::{Presenter, fixture};
+    use crate::speaker::conductor::Assignment;
+    use kumochi_protocol::message::{SceneId, SegmentId, SegmentStart, SpeechPromise, StepRef};
+    use std::io::Write as _;
+
+    let link = narrated_attended("narrated-absence-retirement");
+    let events = patient(link.events.clone());
+    let (session, output) = queued_named_run(&link, &events);
+    let generation = session.generation();
+    let now = Instant::now();
+    let mut presenter = fixture::presenter();
+    presenter.connected(generation);
+    presenter
+        .described(generation, &kumochi_scene::text::Bounded::default(), now)
+        .unwrap();
+    session.attach_narration(&mut presenter);
+
+    let run = RunId(7);
+    let authored = fixture::step(
+        r#"{"step":{"id":"authored","start":"speech","say":"words","put":[{"shape":{"id":"r","kind":"rect","box":[0,0,10,10],"enter":"none"}}]}}"#,
     );
-    (paired, narration)
+    let begin = |scene| DataToShell::SceneBegin {
+        scene,
+        header: fixture::header(),
+    };
+    let commit = |scene| DataToShell::SceneStepCommit {
+        run,
+        scene,
+        index: 0,
+        step: authored.clone(),
+        speech: None,
+    };
+    let send = |message: &DataToShell| {
+        let encoded = frame::encode(message, Pipe::Data).unwrap();
+        (&*link.data).write_all(&encoded).unwrap();
+        u32::try_from(encoded.len()).unwrap()
+    };
+    let credit = |bytes| {
+        assert_eq!(
+            frame::read::<DataToBrain>(&mut &*link.data, Pipe::Data).unwrap(),
+            Some(DataToBrain::Credit { bytes })
+        );
+    };
+    let arrive = |message: DataToShell| {
+        let expected = send(&message);
+        let event = events.recv_timeout(PATIENCE).unwrap_or_else(|error| {
+            panic!("the attended reader did not deliver {message:?}: {error}")
+        });
+        assert!(
+            matches!(&event, LinkEvent::SceneData { generation: seen, frame, bytes }
+                if (*seen, &**frame, *bytes) == (generation, &message, expected)),
+            "the attended reader delivered {message:?}, got {event:?}"
+        );
+        event
+    };
+    let deliver = |presenter: &mut Presenter, event| {
+        let LinkEvent::SceneData { frame, bytes, .. } = event else {
+            unreachable!()
+        };
+        (
+            presenter.data(generation, frame, bytes, now).unwrap(),
+            bytes,
+        )
+    };
+    let settle = |presenter: &mut Presenter, effects, bytes| {
+        let effects = fixture::settle(presenter, effects, now).unwrap();
+        assert_eq!(fixture::credit(&effects), bytes);
+        assert!(fixture::controls(&effects).is_empty());
+        session.grant(bytes);
+        credit(bytes);
+        for job in fixture::jobs(effects) {
+            assert!(
+                presenter
+                    .completed(job.run(&mut fixture::Shaper), now)
+                    .unwrap()
+                    .is_empty()
+            );
+        }
+    };
+    let apply = |presenter: &mut Presenter, event| {
+        let (effects, bytes) = deliver(presenter, event);
+        settle(presenter, effects, bytes);
+    };
+    let activate = |presenter: &mut Presenter, scene| {
+        assert!(presenter.advance(generation, now).unwrap().is_empty());
+        assert_eq!(fixture::activated(presenter, scene), 1);
+    };
+
+    for id in 1..=257 {
+        let scene = SceneId(id);
+        apply(&mut presenter, arrive(begin(scene)));
+        assert_eq!(fixture::scene_ids(&presenter), [scene]);
+        let absent = arrive(commit(scene));
+        if matches!(id, 2 | 3) {
+            let (admitting, commit_bytes) = deliver(&mut presenter, absent);
+            let boundary = if id == 2 {
+                DataToShell::ScenesRemoved {
+                    scenes: vec![scene],
+                }
+            } else {
+                DataToShell::SceneCutApplied {
+                    scene,
+                    revision: 1,
+                    cut: kumochi_scene::StopCut {
+                        activated: 0,
+                        revealed: kumochi_scene::text::Bounded::default(),
+                    },
+                }
+            };
+            let (held, removal_bytes) = deliver(&mut presenter, arrive(boundary));
+            assert!(held.is_empty(), "the terminal boundary is behind admission");
+            assert_eq!(fixture::credit(&admitting), 0);
+            assert_eq!(fixture::scene_ids(&presenter), [scene]);
+            settle(&mut presenter, admitting, commit_bytes + removal_bytes);
+            assert!(fixture::scene_ids(&presenter).is_empty());
+            continue;
+        }
+        let replace = || {
+            arrive(DataToShell::ScenesReplaced {
+                scenes: vec![scene],
+                successor: SceneId(id + 1),
+            })
+        };
+        let queued_replacement = (id == 1).then(replace);
+        apply(&mut presenter, absent);
+        activate(&mut presenter, scene);
+        apply(&mut presenter, queued_replacement.unwrap_or_else(replace));
+        assert!(fixture::scene_ids(&presenter).is_empty());
+    }
+
+    let scene = SceneId(258);
+    apply(&mut presenter, arrive(begin(scene)));
+    apply(&mut presenter, arrive(commit(scene)));
+    activate(&mut presenter, scene);
+    let segment = SegmentId(0);
+    let step = StepRef { scene, index: 1 };
+    apply(
+        &mut presenter,
+        arrive(DataToShell::SceneStepCommit {
+            run,
+            scene,
+            index: step.index,
+            step: fixture::step(r#"{"step":{"id":"promised","start":"speech","say":"next"}}"#),
+            speech: Some(SpeechPromise {
+                output_generation: output,
+                segment,
+            }),
+        }),
+    );
+    credit(send(&DataToShell::SegmentQueued {
+        run,
+        segment,
+        start: SegmentStart::Speech,
+        output_generation: output,
+        step: Some(step),
+    }));
+    let LinkEvent::NarrationReady(wake) = next(&events) else {
+        panic!("the matching promise is ready")
+    };
+    assert!(session.accepts_narration(wake));
+    assert_eq!(
+        presenter
+            .conductor_view(now)
+            .map(|level| level.binding.assignment),
+        Some(Assignment {
+            session: generation,
+            output,
+            run,
+            segment,
+            step,
+        })
+    );
+    assert!(session.open());
+
+    send(&commit(scene));
+    queued_pair_closed(link.link, &link.control, &link.data);
 }
 
 #[cfg(debug_assertions)]
@@ -3797,7 +3980,7 @@ fn stopped_narrated_run_drains_only_its_valid_late_announcement() {
     use kumochi_protocol::message::{SceneId, SegmentId, SegmentStart, SpeechPromise, StepRef};
     use kumochi_scene::{Record, parse_record};
 
-    let (link, _) = narrated_attended("queued-late-narrated");
+    let link = narrated_attended("queued-late-narrated");
     let events = patient(link.events.clone());
     let (session, output) = queued_named_run(&link, &events);
     let run = RunId(7);
@@ -3859,12 +4042,16 @@ fn stopped_narrated_run_drains_only_its_valid_late_announcement() {
 #[cfg(debug_assertions)]
 #[test]
 fn narrated_pump_rejects_foreign_equal_generations_without_sending_or_aborting() {
-    let (first, narration) = narrated_attended("narrated-own-pair");
-    let (second, _) = narrated_attended("narrated-foreign-pair");
+    use crate::speaker::{conductor::Assignment, queued::DrawingIo as _};
+    use kumochi_protocol::message::{OutputGeneration, SceneId, SegmentId, StepRef};
+    let first = narrated_attended("narrated-own-pair");
+    let second = narrated_attended("narrated-foreign-pair");
     let events_a = patient(first.events.clone());
     let events_b = patient(second.events.clone());
     let (a, _) = queued_named_run(&first, &events_a);
     let (b, _) = queued_named_run(&second, &events_b);
+    let narration = Arc::clone(a.io.narrated.as_ref().unwrap());
+    let shared = Arc::clone(&first.handle.shared);
     assert_eq!(a.generation(), b.generation());
     let now = Instant::now();
     let mut presenter = crate::presenter::fixture::presenter();
@@ -3881,6 +4068,53 @@ fn narrated_pump_rejects_foreign_equal_generations_without_sending_or_aborting()
             "a matching generation counter is not the original pair"
         );
     }
+    let old = Assignment {
+        session: a.generation(),
+        output: OutputGeneration(1),
+        run: RunId(7),
+        segment: SegmentId(0),
+        step: StepRef {
+            scene: SceneId(1),
+            index: 0,
+        },
+    };
+    let fresh = Assignment {
+        run: RunId(8),
+        ..old
+    };
+    assert!(narration.promised(old));
+    assert!(narration.announce(old));
+    narration.run_end(old.run);
+    let LinkEvent::NarrationReady(stale) = next(&events_a) else {
+        panic!("the announcement and end share one wake");
+    };
+    narration.stop(old.run);
+    assert!(narration.promised(fresh));
+    assert!(narration.announce(fresh));
+    let LinkEvent::NarrationReady(current) = next(&events_a) else {
+        panic!("the new run has its own wake");
+    };
+    assert!(!a.accepts_narration(stale));
+    assert!(a.accepts_narration(current));
+    let mut old_worker = narration.worker(old.run, || {}, |_| {});
+    assert_eq!(old_worker.view(), Ok(None));
+    narration.run_end(fresh.run);
+    let LinkEvent::NarrationReady(current) = next(&events_a) else {
+        panic!("the run can wake again after its slot is taken");
+    };
+    assert!(
+        !b.accepts_narration(current),
+        "another pair cannot take an equal-generation wake"
+    );
+    assert!(matches!(
+        events_a.try_recv(),
+        Err(std::sync::mpsc::TryRecvError::Empty)
+    ));
+    drop(old_worker);
+    narration.run_end(fresh.run);
+    let LinkEvent::NarrationReady(before_reconnect) = next(&events_a) else {
+        panic!("leave a current-run wake in flight across reconnect");
+    };
     for (link, session, events) in [(first, a, events_a), (second, b, events_b)] {
         assert!(session.open());
         let marker = DataToShell::AssistantText {
@@ -3898,6 +4132,16 @@ fn narrated_pump_rejects_foreign_equal_generations_without_sending_or_aborting()
         link.handle.end(&session);
         assert!(link.link.join().unwrap());
     }
+    let reconnected = attended_queued_shared("narrated-pair-reconnected", shared);
+    let current = connected(reconnected.events.recv_blocking().unwrap());
+    assert_eq!(current.generation(), old.session + 1);
+    assert!(!Arc::ptr_eq(
+        &narration,
+        current.io.narrated.as_ref().unwrap()
+    ));
+    assert!(!current.accepts_narration(before_reconnect));
+    reconnected.handle.end(&current);
+    assert!(reconnected.link.join().unwrap());
 }
 
 #[cfg(debug_assertions)]
@@ -3942,18 +4186,18 @@ fn an_in_flight_old_promise_drains_only_once_after_the_next_named_run() {
             .map(|at| (at, true)),
         );
     for (at, stop_successor) in cases {
-        let narration = Arc::new(super::narrated::Narrated::new());
         let (device, opened) = std::sync::mpsc::sync_channel(1);
         let link = attended_queued_shared(
             &format!("late-queued-{at:?}-{stop_successor}"),
             Arc::new(Shared {
-                narrated: Some(Arc::clone(&narration)),
+                narrated: true,
                 fake_playback: Some(device),
                 ..Shared::default()
             }),
         );
         let events = patient(link.events.clone());
         let (session, output) = queued_named_run(&link, &events);
+        let narration = session.io.narrated.as_ref().unwrap();
         let (old, new) = (RunId(7), RunId(8));
         let scene = SceneId(2);
         let segment = SegmentId(0);
@@ -4133,7 +4377,15 @@ fn an_in_flight_old_promise_drains_only_once_after_the_next_named_run() {
             Pipe::Control,
         )
         .unwrap();
-        assert!(matches!(next(&events), LinkEvent::RunState { run, .. } if run == new));
+        let mut event = next(&events);
+        while let LinkEvent::NarrationReady(wake) = event {
+            assert!(
+                !session.accepts_narration(wake),
+                "A was stopped before B was named"
+            );
+            event = next(&events);
+        }
+        assert!(matches!(event, LinkEvent::RunState { run, .. } if run == new));
         if stop_successor {
             stop(new);
         }

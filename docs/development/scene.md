@@ -28,12 +28,22 @@ recovery doesn't turn restored drawing records into Chat text or promise live sp
 live commit only promises narration for a speech-start step whose segment was actually
 announced. That metadata doesn't change presentation timing.
 
+On narrated links, a commit without a promise remains distinguishable from an
+unresolved promise while its scene can still use it. The Presenter acknowledges
+a wire removal, replacement, or durable cut to zero only when it applies or
+discards that frame at its lifecycle boundary. Reading it off the pipe doesn't
+reclaim older keys: earlier commits may still need them. Removal and replacement
+can apply during recovery while a cut waits for its commits, so those two orders
+are acknowledged separately.
+
 The brain's provider path uses the existing cursor tokenizer and public 2D `parse_draw_record`
 gate for each closed record, then the drawing reducer's order/semantic admission and store FIFO.
 Complete-call/MCP typed preflight stays whole-envelope. A committed provider prefix can outlive
 a malformed tail or interrupted owner; it is not evidence of whole-call success. Interrupted
 submitted steps retain their own acknowledgement/scene-state owner, distinct from deletion's
-discard fence. See `tools.md` for argument identity, result delivery and completion ordering.
+discard fence. If a clear races an in-flight replacement, the store reply still settles every
+reserved victim. The reply publishes retirement only for victims not already fenced.
+See `tools.md` for argument identity, result delivery and completion ordering.
 
 A drawing call is `{"records":[begin, step, ..., end]}`. Each record is externally
 tagged, for example:
@@ -859,15 +869,19 @@ It chooses one Speech-start head at a time in stable scene order, after the auth
 time and replacement guard allow it. Now and After never create a presenter binding;
 they use their authored visual timing whether they have narration or not. The conductor
 doesn't scan past an uninstalled authored head to reach a later Speech step.
-An opt-in caller supplies the session clock origin and assignment lookup; unresolved isn't
-the same as unassigned. No live link or shell path enables it.
+Presence attaches the authenticated pair's bridge after resetting its presenter on Connect.
+The bridge supplies the pair clock and assignment lookup; unresolved isn't the same as
+unassigned. Only the offline narrated fixture selects the bridge. Normal launches are unchanged.
 
 The presenter schedules the keyed onset once, acknowledges only an accepted paint of the
 installed epoch and fences locally on Stop, cut, replacement or session loss. An older stamped
 owner loss can't override a newer route; keyed unstamped loss still can. Retirement cancels
 the old onset. Silent timing alone does not end a binding. A keyed end or owner loss releases it;
 an unshown step keeps its authored start permission without another worker message. There is
-no presenter timeout. After paint, this layer uses the authored clock, not speech motion.
+no presenter timeout. A coalesced event from the current pair and run brings already-ready
+scenes out of rest on new audio evidence, reusing the same scene update and its one-shot
+watchdog. An interrupted scene pass waits for the contended owners off the UI thread before
+rechecking the current pair. After paint, this layer uses the authored clock, not speech motion.
 An authored successor can replace an unpainted Speech picture on time. That visual
 replacement doesn't end the installed Speech binding or credit the successor's paint to it.
 

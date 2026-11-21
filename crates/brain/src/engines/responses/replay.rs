@@ -29,20 +29,31 @@ const STAGED: [&str; 3] = [
 ];
 const COMPLETED: &str = "data: {\"type\":\"response.completed\"}\n\n";
 
+#[cfg(feature = "test-support")]
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum Turns {
+    StoppedReplacement,
+    AuthoredThenNarrated,
+}
+
 pub(crate) struct Replay {
     recipe: Arc<Wire>,
+    #[cfg(feature = "test-support")]
+    later: Option<(std::sync::atomic::AtomicUsize, Arc<Wire>)>,
     followup: Option<(Arc<Wire>, Arc<Notify>)>,
     receipt: Arc<Observation>,
-    run: OnceLock<RunId>,
+    run: Option<OnceLock<RunId>>,
 }
 
 impl Replay {
     pub(crate) fn new(receipt: &Arc<Observation>) -> io::Result<Self> {
         Ok(Self {
             recipe: Arc::new(Wire::drawing(Recipe::Plain)?),
+            #[cfg(feature = "test-support")]
+            later: None,
             followup: None,
             receipt: Arc::clone(receipt),
-            run: OnceLock::new(),
+            run: Some(OnceLock::new()),
         })
     }
 
@@ -81,6 +92,7 @@ impl Replay {
                 ("middle", "#00bb00", false),
                 ("third", "#0000cc", false),
             ]),
+            later: None,
             followup: Some((
                 round(&[
                     ("spoken", "#999999", true),
@@ -90,7 +102,7 @@ impl Replay {
                 gate,
             )),
             receipt: Observation::silent_replay(),
-            run: OnceLock::new(),
+            run: Some(OnceLock::new()),
         }
     }
 
@@ -98,10 +110,30 @@ impl Replay {
     fn offline(recipe: Recipe) -> io::Result<Self> {
         Ok(Self {
             recipe: Arc::new(Wire::drawing(recipe)?),
+            later: None,
             followup: None,
             receipt: Observation::silent_replay(),
-            run: OnceLock::new(),
+            run: (recipe != Recipe::Narrated).then(OnceLock::new),
         })
+    }
+
+    #[cfg(feature = "test-support")]
+    pub(crate) fn changing_turns(turns: Turns) -> io::Result<Self> {
+        const SILENT: &str = r##"{"records":[{"begin":{"v":1,"scene":"replacement","surface":"overlay","alt":"","others":"clear"}},{"step":{"id":"fresh","start":"now","put":[{"shape":{"id":"box","kind":"rect","box":[0,0,15,15],"fill":"#00eeee","enter":"none"}}]}},{"end":{}}]}"##;
+        let mut replay = Self::narrated()?;
+        let mut sse = String::new();
+        append_draw(&mut sse, 0, "fixture-replacement", SILENT);
+        sse.push_str(COMPLETED);
+        let mut silent = Arc::new(Wire::http(&sse, Vec::new()));
+        let first_turns = match turns {
+            Turns::StoppedReplacement => 1,
+            Turns::AuthoredThenNarrated => {
+                std::mem::swap(&mut replay.recipe, &mut silent);
+                257
+            }
+        };
+        replay.later = Some((std::sync::atomic::AtomicUsize::new(first_turns), silent));
+        Ok(replay)
     }
 }
 
@@ -114,10 +146,37 @@ impl fmt::Debug for Replay {
 impl Engine for Replay {
     fn start(&self, request: RunRequest, events: mpsc::Sender<TurnEvent>, gate: SendGate) -> Round {
         let (wire, hold) = match request.key {
-            SendKey::Build(key) if key.round == 1 && self.run.set(request.run).is_ok() => {
-                (Some(Arc::clone(&self.recipe)), None)
+            SendKey::Build(key)
+                if key.round == 1
+                    && self
+                        .run
+                        .as_ref()
+                        .is_none_or(|run| run.set(request.run).is_ok()) =>
+            {
+                #[cfg(feature = "test-support")]
+                let later = self.later.as_ref().and_then(|(remaining, wire)| {
+                    use std::sync::atomic::Ordering;
+
+                    remaining
+                        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |left| {
+                            left.checked_sub(1)
+                        })
+                        .is_err()
+                        .then_some(wire)
+                });
+                #[cfg(feature = "test-support")]
+                let recipe = later.unwrap_or(&self.recipe);
+                #[cfg(not(feature = "test-support"))]
+                let recipe = &self.recipe;
+                (Some(Arc::clone(recipe)), None)
             }
-            SendKey::Build(key) if key.round == 2 && self.run.get() == Some(&request.run) => {
+            SendKey::Build(key)
+                if key.round == 2
+                    && self
+                        .run
+                        .as_ref()
+                        .is_none_or(|run| run.get() == Some(&request.run)) =>
+            {
                 self.followup.as_ref().map_or_else(
                     || (Some(Arc::new(Wire::http(COMPLETED, Vec::new()))), None),
                     |(wire, hold)| (Some(Arc::clone(wire)), Some(Arc::clone(hold))),
@@ -126,7 +185,10 @@ impl Engine for Replay {
             SendKey::Build(key)
                 if key.round == 3
                     && self.followup.is_some()
-                    && self.run.get() == Some(&request.run) =>
+                    && self
+                        .run
+                        .as_ref()
+                        .is_some_and(|run| run.get() == Some(&request.run)) =>
             {
                 (Some(Arc::new(Wire::http(COMPLETED, Vec::new()))), None)
             }

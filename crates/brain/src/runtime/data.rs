@@ -41,7 +41,7 @@ pub(crate) enum Owner {
     CardsDone(u64),
     /// A scene's snapshot or v1 live frame: Stop never drops it, but a scene clear does.
     Scene(SceneId),
-    /// A durable promise that must accompany its queued announcement through replacement.
+    /// A durable promise that must accompany its queued announcement through scene retirement.
     SpeechPromise(SceneId),
     /// A run-owned announcement whose scene replacement marker must precede it if still queued.
     SpeechAnnouncement(RunId, SceneId),
@@ -310,11 +310,11 @@ impl DataQueue {
 
     /// Drops the snapshot chunks of cleared scenes that haven't started writing.
     pub(crate) fn revoke_scenes(&mut self, scenes: &[SceneId]) {
-        self.retain(|owner| !matches!(owner, Owner::Scene(scene) | Owner::SpeechPromise(scene) if scenes.contains(scene)));
+        self.retain(|owner| !matches!(owner, Owner::Scene(scene) if scenes.contains(scene)));
     }
 
-    pub(crate) fn replace_scenes(&mut self, victims: &[SceneId], frame: Vec<u8>) {
-        self.retain(|owner| !matches!(owner, Owner::Scene(scene) if victims.contains(scene)));
+    pub(super) fn retire_scenes(&mut self, victims: &[SceneId], frame: Vec<u8>) {
+        self.revoke_scenes(victims);
         let at = self
             .frames
             .iter()
@@ -571,6 +571,41 @@ mod tests {
         assert_eq!(queue.bytes(), 3 * (1 + ENTRY));
         let sent: Vec<_> = std::iter::from_fn(|| queue.pop(Instant::now())).collect();
         assert_eq!(sent, [vec![2], vec![3], vec![4]]);
+    }
+
+    #[test]
+    fn retiring_geometry_keeps_owed_narration_after_the_boundary() {
+        let scene = SceneId(1);
+        let run = RunId(3);
+        let now = Instant::now();
+        for crossed_writer in [false, true] {
+            let mut queue = DataQueue::new(100);
+            queue.push(Owner::SpeechPromise(scene), vec![1]);
+            if crossed_writer {
+                assert_eq!(queue.pop(now), Some(vec![1]));
+            }
+            queue.push(Owner::SpeechAnnouncement(run, scene), vec![2]);
+            queue.push(Owner::Scene(scene), vec![3]);
+            queue.push(Owner::Presentation, vec![4]);
+            queue.push(Owner::Run(run), vec![5]);
+            queue.push(Owner::Scene(SceneId(2)), vec![6]);
+            queue.retire_scenes(&[scene], vec![7]);
+            if crossed_writer {
+                queue.wrote();
+            }
+            let sent: Vec<_> = std::iter::from_fn(|| {
+                let frame = queue.pop(now);
+                queue.wrote();
+                frame
+            })
+            .collect();
+            if crossed_writer {
+                assert_eq!(sent, [vec![4], vec![7], vec![2], vec![5], vec![6]]);
+            } else {
+                assert_eq!(sent, [vec![4], vec![7], vec![1], vec![2], vec![5], vec![6]]);
+            }
+            assert_eq!(queue.credit, 94);
+        }
     }
 
     #[test]

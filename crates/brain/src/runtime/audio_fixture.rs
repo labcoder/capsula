@@ -6,8 +6,8 @@ use std::time::Duration;
 use kumochi_protocol::constants::{CONFIG_FILE, SESSION_LOCK};
 use kumochi_protocol::frame::{self, Pipe};
 use kumochi_protocol::message::{
-    ControlToBrain, ControlToShell, Cursor, RunId, SceneId, SpeechDecision, SpeechDispatch,
-    SpeechRetirement,
+    ControlToBrain, ControlToShell, Cursor, DataToShell, RunId, SceneId, SegmentStart,
+    SpeechDecision, SpeechDispatch, SpeechRetirement, StepRef,
 };
 use tokio::sync::Notify;
 
@@ -17,6 +17,7 @@ use crate::connections::http_client::HttpError;
 use crate::connections::oauth::{LaunchError, LaunchTarget, Launcher};
 use crate::connections::vault::Vault;
 use crate::engines::fixture::Fixture;
+use crate::engines::responses::replay::Turns;
 use crate::platform::credential::{CredentialStore, CredentialStoreError, SecretBytes};
 use crate::voice::pump::{OutputMode, Pump};
 use crate::voice::tts::{Engine, TtsError, TtsHandle};
@@ -100,7 +101,10 @@ pub struct AudioProbe {
     narrated: bool,
     initial_credit: Option<u32>,
     replacement_chain: Option<Arc<Notify>>,
+    changing_turns: Option<Turns>,
     pub(super) replacement_queued: AtomicBool,
+    hold_after_prefix: AtomicBool,
+    scene_revoke: Mutex<SceneRevoke>,
     ack: AtomicBool,
     name: AtomicBool,
     control: Notify,
@@ -110,10 +114,23 @@ pub struct AudioProbe {
     applied_credit: AtomicU64,
     pub(super) sent: AtomicU64,
     stop: AtomicU64,
+    clears: AtomicU32,
     heard: AtomicU32,
     speech: Mutex<SpeechEvidence>,
     scene_failed: std::sync::Mutex<Option<(RunId, SceneId)>>,
     decision: std::sync::Mutex<Option<(SpeechDispatch, SpeechDecision)>>,
+    shown: Mutex<Vec<(RunId, SceneId, u32)>>,
+}
+
+#[derive(Debug, Default)]
+struct SceneRevoke {
+    prefix: Option<SceneId>,
+    promise: Option<(StepRef, SpeechDispatch)>,
+    announcement: Option<(StepRef, SpeechDispatch)>,
+    revoked: bool,
+    ends: u32,
+    written_announcements: u32,
+    successor: Option<(RunId, SceneId)>,
 }
 
 #[derive(Debug, Default)]
@@ -146,6 +163,24 @@ impl AudioProbe {
         }
     }
 
+    pub(crate) fn stopped_replacement() -> Self {
+        Self {
+            changing_turns: Some(Turns::StoppedReplacement),
+            ..Self::narrated()
+        }
+    }
+
+    pub(crate) fn authored_then_narrated() -> Self {
+        Self {
+            changing_turns: Some(Turns::AuthoredThenNarrated),
+            ..Self::narrated()
+        }
+    }
+
+    pub(crate) fn many_turns(&self) -> bool {
+        matches!(self.changing_turns, Some(Turns::AuthoredThenNarrated))
+    }
+
     pub(super) fn initial_credit(&self) -> Option<u32> {
         self.initial_credit
     }
@@ -171,6 +206,148 @@ impl AudioProbe {
     /// The real data writer saw a frame larger than its remaining credit.
     pub fn data_blocked(&self) -> bool {
         self.data_blocked.load(Ordering::Acquire)
+    }
+
+    /// Holds the real writer's credit after the next unpromised first step enters its write.
+    pub fn hold_after_scene_prefix(&self) {
+        self.hold_after_prefix.store(true, Ordering::Release);
+    }
+
+    pub(super) fn writing_scene_prefix(&self, queue: &std::cell::RefCell<DataQueue>, frame: &[u8]) {
+        if self.hold_after_prefix.load(Ordering::Acquire)
+            && let Ok(DataToShell::SceneStepCommit {
+                scene,
+                index: 0,
+                speech: None,
+                ..
+            }) = frame::decode(&frame[frame::HEADER_LEN..])
+        {
+            queue.borrow_mut().hold_fixture_credit();
+            self.scene_revoke.lock().expect("scene probe").prefix = Some(scene);
+            self.hold_after_prefix.store(false, Ordering::Release);
+        }
+        if matches!(self.changing_turns, Some(Turns::StoppedReplacement))
+            && let Ok(DataToShell::SegmentQueued {
+                run,
+                step: Some(step),
+                segment,
+                start: SegmentStart::Speech,
+                output_generation: output,
+            }) = frame::decode(&frame[frame::HEADER_LEN..])
+        {
+            let mut facts = self.scene_revoke.lock().expect("scene probe");
+            if facts.announcement
+                == Some((
+                    step,
+                    SpeechDispatch {
+                        run,
+                        output,
+                        segment,
+                    },
+                ))
+            {
+                facts.written_announcements += 1;
+            }
+        }
+    }
+
+    pub(super) fn queued_scene_data(&self, message: &DataToShell) {
+        let mut facts = self.scene_revoke.lock().expect("scene probe");
+        match message {
+            DataToShell::SceneStepCommit {
+                run,
+                scene,
+                index,
+                speech: Some(promise),
+                ..
+            } if self.hold_after_prefix.load(Ordering::Acquire) || facts.prefix == Some(*scene) => {
+                facts.promise = Some((
+                    StepRef {
+                        scene: *scene,
+                        index: *index,
+                    },
+                    SpeechDispatch {
+                        run: *run,
+                        output: promise.output_generation,
+                        segment: promise.segment,
+                    },
+                ));
+            }
+            DataToShell::SegmentQueued {
+                run,
+                step: Some(step),
+                segment,
+                start: SegmentStart::Speech,
+                output_generation,
+            } if self.hold_after_prefix.load(Ordering::Acquire)
+                || facts.prefix == Some(step.scene) =>
+            {
+                facts.announcement = Some((
+                    *step,
+                    SpeechDispatch {
+                        run: *run,
+                        output: *output_generation,
+                        segment: *segment,
+                    },
+                ));
+            }
+            DataToShell::RunEnd { run }
+                if facts
+                    .promise
+                    .is_some_and(|(_, promise)| promise.run == *run) =>
+            {
+                facts.ends += 1;
+            }
+            DataToShell::SceneStepCommit {
+                run,
+                scene,
+                index: 0,
+                speech: None,
+                ..
+            } if facts.prefix.is_some_and(|prefix| prefix != *scene) => {
+                facts.successor = Some((*run, *scene));
+            }
+            _ => {}
+        }
+    }
+
+    pub(super) fn applied_scene_revoke(&self, scenes: &[SceneId]) {
+        let mut facts = self.scene_revoke.lock().expect("scene probe");
+        facts.revoked |= facts.prefix.is_some_and(|prefix| scenes.contains(&prefix));
+    }
+
+    /// The exact promise and matching announcement queued behind the held prefix.
+    ///
+    /// # Panics
+    /// Panics if the scene probe is poisoned.
+    pub fn held_narration(&self) -> Option<(StepRef, SpeechDispatch)> {
+        let facts = self.scene_revoke.lock().expect("scene probe");
+        facts
+            .promise
+            .filter(|promise| Some(*promise) == facts.announcement)
+    }
+
+    /// The stopped run's queued end count and written matching announcement count.
+    /// # Panics
+    /// Panics if the scene probe is poisoned.
+    pub fn held_tail(&self) -> (u32, u32) {
+        let facts = self.scene_revoke.lock().expect("scene probe");
+        (facts.ends, facts.written_announcements)
+    }
+
+    /// The next silent scene committed while the prefix's writer credit is held.
+    /// # Panics
+    /// Panics if the scene probe is poisoned.
+    pub fn held_successor(&self) -> Option<(RunId, SceneId)> {
+        self.scene_revoke.lock().expect("scene probe").successor
+    }
+
+    /// Whether the real queue applied a revoke for the held scene.
+    ///
+    /// # Panics
+    /// Panics if the scene probe is poisoned.
+    pub fn applied_held_scene_revoke(&self) -> bool {
+        self.scene_revoke.lock().expect("scene probe").revoked
     }
 
     /// Applies subsequent wire grants to the real Brain data queue.
@@ -215,6 +392,12 @@ impl AudioProbe {
     /// The run named by the last Stop received on control, or zero.
     pub fn stop(&self) -> RunId {
         RunId(self.stop.load(Ordering::Acquire))
+    }
+
+    /// Single-scene clears received on the real Brain control pipe.
+    #[must_use]
+    pub fn clears(&self) -> u32 {
+        self.clears.load(Ordering::Acquire)
     }
 
     /// The run named by the last quiet receipt received on control, or zero.
@@ -299,6 +482,16 @@ impl AudioProbe {
             .expect("the fixture decision recorder is healthy")
     }
 
+    /// The paint receipts received on the real control pipe, in order.
+    /// # Panics
+    /// Panics if the fixture's paint recorder is poisoned.
+    pub fn shown(&self) -> Vec<(RunId, SceneId, u32)> {
+        self.shown
+            .lock()
+            .expect("the paint recorder is healthy")
+            .clone()
+    }
+
     pub(super) async fn before_control(&self, bytes: &[u8]) {
         let mut bytes = bytes;
         let gate = match frame::read::<ControlToShell>(&mut bytes, Pipe::Control) {
@@ -315,6 +508,12 @@ impl AudioProbe {
 
     pub(super) fn control(&self, message: &ControlToBrain) {
         match message {
+            ControlToBrain::StepShown { run, scene, index } => {
+                self.shown
+                    .lock()
+                    .expect("the paint recorder is healthy")
+                    .push((*run, *scene, *index));
+            }
             ControlToBrain::SpeechDecision(key, decision) => {
                 *self
                     .decision
@@ -323,6 +522,9 @@ impl AudioProbe {
             }
             ControlToBrain::Stop { run, .. } | ControlToBrain::StopScenes { run, .. } => {
                 self.stop.store(run.0, Ordering::Release);
+            }
+            ControlToBrain::ClearDrawing { scene_ids } if scene_ids.len() == 1 => {
+                self.clears.fetch_add(1, Ordering::Release);
             }
             ControlToBrain::SpeechStopped { run, cursor } => {
                 self.speech
@@ -385,7 +587,9 @@ pub(crate) async fn brain(dir: &Path, script: &str, tone_chunks: usize) -> Brain
     .expect("start offline accounts");
     let engine = if narrated {
         Selected::DrawReplay(Box::new(
-            if let Some(hold) = probe
+            if let Some(turns) = probe.as_ref().and_then(|probe| probe.changing_turns) {
+                crate::engines::responses::replay::Replay::changing_turns(turns)
+            } else if let Some(hold) = probe
                 .as_ref()
                 .and_then(|probe| probe.replacement_chain.clone())
             {
