@@ -95,7 +95,7 @@ fn bind_ax_click(button: Button, click: impl Fn(&mut Window, &mut App) + 'static
 
     StatefulButton(button)
         .on_a11y_action(AccessibleAction::Click, move |_, window, cx| {
-            click(window, cx)
+            click(window, cx);
         })
         .0
 }
@@ -142,7 +142,7 @@ pub(crate) fn open_content(
         title,
         content,
         (cancel, confirm),
-        false,
+        DuringExit::Wait,
         on_decision,
     )
 }
@@ -163,18 +163,28 @@ pub(crate) fn open_during_exit(
         title,
         move |alert, _, _| alert.description(body.clone()),
         (cancel, confirm),
-        true,
+        DuringExit::Allow,
         on_decision,
     )
 }
 
+#[derive(Clone, Copy)]
+enum DuringExit {
+    Wait,
+    Allow,
+}
+
+#[expect(
+    clippy::too_many_lines,
+    reason = "the dialog instance owns its focus and each path that consumes the decision"
+)]
 fn open_dialog(
     window: &mut Window,
     cx: &mut App,
     title: SharedString,
     content: impl Fn(AlertDialog, &mut Window, &mut App) -> AlertDialog + 'static,
     (cancel, confirm): (SharedString, SharedString),
-    allow_during_exit: bool,
+    during_exit: DuringExit,
     on_decision: impl FnOnce(bool, &mut Window, &mut App) + 'static,
 ) -> Option<Handle> {
     if window.has_active_dialog(cx) {
@@ -183,7 +193,7 @@ fn open_dialog(
     let id = window.window_handle().window_id();
     let guards = cx.default_global::<Confirmations>();
     guards.0.retain(|(_, guard)| guard.strong_count() > 0);
-    if !allow_during_exit && guards.0.iter().any(|(window, _)| *window == id) {
+    if matches!(during_exit, DuringExit::Wait) && guards.0.iter().any(|(window, _)| *window == id) {
         return None;
     }
     let callback: Decision = Box::new(on_decision);

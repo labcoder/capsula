@@ -801,7 +801,7 @@ const SIGNED_IN: AccountView = AccountView::SignedIn {
 
 #[gpui::test]
 fn resolved_sign_out_confirmation_does_not_steal_focus_on_account_change(cx: &mut TestAppContext) {
-    use gpui_kit::component::WindowExt as _;
+    use gpui_kit::component::WindowExt;
 
     for decision in [
         Some("confirmation-cancel"),
@@ -813,7 +813,7 @@ fn resolved_sign_out_confirmation_does_not_steal_focus_on_account_change(cx: &mu
         cx.update(|cx| cx.set_reduce_motion(true));
         click_github(window, "account-sign-out", cx);
         let mut frame = VisualTestContext::from_window(window, cx);
-        assert!(frame.update(|window, cx| window.has_active_dialog(cx)));
+        assert!(frame.update(WindowExt::has_active_dialog));
         if let Some(selector) = decision {
             click_github(window, selector, cx);
         } else {
@@ -851,7 +851,7 @@ fn resolved_sign_out_confirmation_does_not_steal_focus_on_account_change(cx: &mu
 
 #[gpui::test]
 fn sign_out_confirmation_can_reopen_during_the_previous_exit(cx: &mut TestAppContext) {
-    use gpui_kit::component::WindowExt as _;
+    use gpui_kit::component::WindowExt;
 
     let (window, owner, controls) = accounts_panel(cx);
     account_views(&owner, vec![chatgpt(SIGNED_IN)], cx);
@@ -873,7 +873,7 @@ fn sign_out_confirmation_can_reopen_during_the_previous_exit(cx: &mut TestAppCon
 
     click_github(window, "account-sign-out", cx);
     let mut frame = VisualTestContext::from_window(window, cx);
-    assert!(frame.update(|window, cx| window.has_active_dialog(cx)));
+    assert!(frame.update(WindowExt::has_active_dialog));
     assert_eq!(drain(&controls), []);
     frame.simulate_keystrokes("tab enter");
     frame.run_until_parked();
