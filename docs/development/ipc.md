@@ -48,10 +48,12 @@ the pair becomes ready. It checks the same owner again while offering the turn t
 A refused enqueue reserves no turn and does not discard older recovery. One accepted offer can
 name one run, or be refused by its own turn number. The Plain path admits an ordinary voice Hold
 only with Talk-back and Show Screen confirmed off on that registered pair. A pending change to
-either preference closes Hold admission; the brain also checks its saved preferences and queued
-writes. An in-flight Hold is cancelled if either preference changes before it submits. The shell
-reserves the recognized gesture, then admits only its PCM after Brain admission and only its
-matching release. The mic Stop receipt clears microphone debt, not the reservation. Only the
+either preference closes Hold admission; this includes settings and installer writes that can
+change an inherited value. The brain cancels an in-flight Hold when it takes such a change
+before submit. The shell keeps the recognized gesture and its release in the same ordered
+outbox. The data writer rechecks the original input's authority before starting a queued PCM
+frame, so cancellation discards waiting PCM but a normal release can send its tail.
+The mic Stop receipt clears microphone debt, not the reservation. Only the
 matching Hold run after release consumes that reservation, or a matching terminal Hold status
 clears it. A silent Hold starts no speaker and asks for no picture. AskAbout, screen capture and
 conducted Speech are still unsupported on Plain queued pairs.

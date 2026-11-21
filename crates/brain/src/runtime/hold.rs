@@ -113,6 +113,10 @@ pub(super) struct Ingress {
 
 impl Ingress {
     pub(super) fn push(&self, chunk: MicPcm) {
+        #[cfg(all(windows, debug_assertions, feature = "test-support"))]
+        if let Some(probe) = super::audio_fixture::probe() {
+            probe.mic_received();
+        }
         let packet = Packet(chunk);
         let gesture = packet.0.gesture.0;
         if gesture == 0 || self.gate.active.load(Ordering::SeqCst) != gesture {
@@ -556,8 +560,8 @@ impl Brain {
                 }
             }
             ControlToBrain::ExclusionLapsed { lease } if self.holds.lease_lapsed(*lease) => {}
-            ControlToBrain::Settings(SettingsOp::SetTalkBack(_) | SettingsOp::SetShowScreen(_))
-                if link.registration.is_some() =>
+            ControlToBrain::Settings(op)
+                if link.registration.is_some() && super::settings::changes_hold_consent(op) =>
             {
                 self.hold_end(HoldStatus::Failed(HoldFailure::ChoiceChanged), link)?;
                 return Ok(false);

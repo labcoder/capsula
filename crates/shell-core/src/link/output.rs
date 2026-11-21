@@ -18,7 +18,7 @@ use crate::speaker::{Command, FAULT, RELEASED, Speaker, Tail, UNKNOWN};
 use super::{HANDSHAKE_TIMEOUT, RETRY_DELAY};
 
 mod queued;
-pub(super) use queued::{HoldInput, NarratedReservation, Queued, RefusedTail};
+pub(super) use queued::{NarratedReservation, Queued, RefusedTail};
 
 #[cfg(test)]
 #[path = "output_tests.rs"]

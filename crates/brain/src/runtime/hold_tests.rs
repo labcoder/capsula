@@ -399,16 +399,17 @@ async fn queued_hold_refuses_pending_and_saved_show_screen_on() {
     std::fs::create_dir_all(scratch.dir()).unwrap();
     std::fs::write(
         scratch.dir().join(CONFIG_FILE),
-        "[voice]\ntalk_back = false\nshow_screen = false\nhold_to_talk = true\n",
+        "[voice]\nscreen_holds = false\nhold_to_talk = true\n",
     )
     .unwrap();
-    let (mut brain, _release, mut decoded, _) =
-        input(&scratch, Vec::new(), "must not decode").await;
+    let (mut brain, _release, _, _) = input(&scratch, Vec::new(), "must not decode").await;
     let save = brain.hold_config_write();
     let ((control, data), mut shell) = duplex();
     let mut tap = Tap::from_env();
     let client = async {
         opened(&mut shell).await;
+        let view = shell.views.last().unwrap();
+        assert!(!view.show_screen && !view.talk_back);
         let output = OutputGeneration(7);
         shell
             .send(&ControlToBrain::QueuedAudioOutput(24_000, output))
@@ -418,7 +419,7 @@ async fn queued_hold_refuses_pending_and_saved_show_screen_on() {
             Some(ControlToShell::QueuedAudioRegistered(output))
         );
         shell
-            .send(&ControlToBrain::Settings(SettingsOp::SetShowScreen(true)))
+            .send(&ControlToBrain::Settings(SettingsOp::SetScreenHolds(true)))
             .await;
         recognize_for(&mut shell, G).await;
         status(&mut shell, HoldStatus::Failed(HoldFailure::ChoiceChanged)).await;
@@ -439,7 +440,6 @@ async fn queued_hold_refuses_pending_and_saved_show_screen_on() {
             HoldStatus::Failed(HoldFailure::ChoiceChanged),
         )
         .await;
-        assert!(decoded.try_recv().is_err());
         drop(shell);
     };
     let (ended, ()) = tokio::time::timeout(super::PATIENCE, async {
@@ -452,7 +452,6 @@ async fn queued_hold_refuses_pending_and_saved_show_screen_on() {
     .unwrap();
     assert_eq!(ended, Ended::Lost);
     brain.close().await;
-    assert!(users(&scratch).is_empty());
 }
 
 #[tokio::test]

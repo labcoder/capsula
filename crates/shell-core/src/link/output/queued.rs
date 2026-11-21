@@ -5,13 +5,10 @@ use std::thread::{self, Thread};
 use std::time::Instant;
 
 use async_channel::Sender;
-use kumochi_protocol::message::{
-    ControlToBrain, GestureId, RunOrigin, SegmentId, SettingsOp, SettingsView,
-};
+use kumochi_protocol::message::{ControlToBrain, RunOrigin, SegmentId, SettingsView};
 
 use super::{Arc, Ordering, Output, OutputGeneration, OutputOwner, RunId, State, SyncSender};
 use crate::link::{Shared, narrated::Narrated, queued::MetadataFrame};
-use crate::settings::Update;
 use crate::speaker::DRAIN;
 use crate::speaker::conductor::Assignment;
 use crate::speaker::queued::{Command, Input, Packet, RATE, spawn, spawn_plain};
@@ -26,12 +23,6 @@ const TAIL_UNAVAILABLE: u8 = 16;
 pub(in crate::link) enum RefusedTail {
     Quiet,
     Unavailable,
-}
-
-#[derive(Clone, Copy)]
-pub(in crate::link) enum HoldInput {
-    Pcm,
-    Release,
 }
 
 pub(in crate::link) enum NarratedReservation {
@@ -52,24 +43,13 @@ pub(in crate::link) struct Queued {
     ack: Option<SyncSender<()>>,
     talk_back: Option<bool>,
     show_screen: Option<bool>,
-    settings_answers: u32,
-    consent_answers: u32,
     wake: Arc<OnceLock<Thread>>,
     stopped: RunId,
     narrated: Option<Arc<Narrated>>,
     predecessor: Option<(RunId, Delivery)>,
     early_end: Option<RunId>,
-    pending: Option<Pending>,
+    pending: Option<u32>,
     active: Option<Active>,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Pending {
-    Text(u32),
-    Recognized(GestureId),
-    Listening(GestureId),
-    Released(GestureId),
-    Cancelled(GestureId),
 }
 
 enum Delivery {
@@ -106,8 +86,6 @@ impl Queued {
             ack: Some(ack),
             talk_back: None,
             show_screen: None,
-            settings_answers: 0,
-            consent_answers: 0,
             wake,
             stopped: RunId(0),
             narrated,
@@ -185,7 +163,6 @@ impl Queued {
         self.ready()
             && self.talk_back == Some(false)
             && self.show_screen == Some(false)
-            && self.consent_answers == 0
             && !self.closing.load(Ordering::Acquire)
     }
 
@@ -300,16 +277,14 @@ impl OutputOwner {
                 if !send() {
                     return false;
                 }
-                owner.pending = turn.map(Pending::Text);
+                owner.pending = turn;
                 true
             })
     }
 
     pub(in crate::link) fn queued_refused(&self, session: u64, turn: u32) {
         if let Some((_, owner)) = self.lock().queue(session) {
-            let _pending = owner
-                .pending
-                .take_if(|pending| *pending == Pending::Text(turn));
+            let _pending = owner.pending.take_if(|pending| *pending == turn);
         }
     }
 
@@ -318,118 +293,18 @@ impl OutputOwner {
             .is_ok_and(|state| state.session == Some(session) && state.silent_queued().is_some())
     }
 
-    pub(in crate::link) fn begin_queued_hold(
-        &self,
-        session: u64,
-        gesture: GestureId,
-        send: impl FnOnce() -> bool,
-    ) -> bool {
+    pub(in crate::link) fn can_reserve_hold(&self, session: u64) -> bool {
         self.try_lock()
             .ok()
             .as_mut()
             .and_then(|state| state.queue(session))
-            .is_some_and(|(_, owner)| {
-                if !owner.silent_hold() || owner.pending.is_some() || !send() {
-                    return false;
-                }
-                owner.pending = Some(Pending::Recognized(gesture));
-                true
-            })
-    }
-
-    pub(in crate::link) fn queued_hold_input(
-        &self,
-        session: u64,
-        gesture: GestureId,
-        input: HoldInput,
-        send: impl FnOnce() -> bool,
-    ) -> bool {
-        self.try_lock()
-            .ok()
-            .as_mut()
-            .and_then(|state| state.queue(session))
-            .is_some_and(|(_, owner)| {
-                if owner.pending != Some(Pending::Listening(gesture))
-                    || !owner.silent_hold()
-                    || !send()
-                {
-                    return false;
-                }
-                if matches!(input, HoldInput::Release) {
-                    owner.pending = Some(Pending::Released(gesture));
-                }
-                true
-            })
-    }
-
-    pub(in crate::link) fn cancel_queued_hold(
-        &self,
-        session: u64,
-        gesture: GestureId,
-        send: impl FnOnce() -> bool,
-    ) -> bool {
-        let mut state = self.lock();
-        if !send() {
-            return false;
-        }
-        if let Some((_, owner)) = state.queue(session)
-            && matches!(owner.pending, Some(Pending::Recognized(id) | Pending::Listening(id)) if id == gesture)
-        {
-            owner.pending = Some(Pending::Cancelled(gesture));
-        }
-        true
-    }
-
-    pub(in crate::link) fn queued_hold_admitted(&self, session: u64, gesture: GestureId) {
-        if let Some((_, owner)) = self.lock().queue(session)
-            && owner.pending == Some(Pending::Recognized(gesture))
-        {
-            owner.pending = Some(Pending::Listening(gesture));
-        }
-    }
-
-    pub(in crate::link) fn queued_hold_refused(&self, session: u64, gesture: GestureId) {
-        if let Some((_, owner)) = self.lock().queue(session) {
-            let _pending = owner.pending.take_if(|pending| {
-                matches!(pending, Pending::Recognized(id) | Pending::Listening(id) | Pending::Released(id) | Pending::Cancelled(id) if *id == gesture)
-            });
-        }
-    }
-
-    pub(in crate::link) fn queued_settings(
-        &self,
-        session: u64,
-        op: SettingsOp,
-        out: &Sender<ControlToBrain>,
-    ) -> bool {
-        self.try_lock()
-            .ok()
-            .as_mut()
-            .and_then(|state| state.queue(session))
-            .is_some_and(|(_, owner)| {
-                let Some(answers) = owner.settings_answers.checked_add(1) else {
-                    return false;
-                };
-                let consent = matches!(
-                    op,
-                    SettingsOp::SetTalkBack(_) | SettingsOp::SetShowScreen(_)
-                );
-                if out.try_send(ControlToBrain::Settings(op)).is_err() {
-                    return false;
-                }
-                owner.settings_answers = answers;
-                if consent {
-                    owner.consent_answers = answers;
-                }
-                true
-            })
+            .is_some_and(|(_, owner)| owner.silent_hold() && owner.pending.is_none())
     }
 
     pub(in crate::link) fn register_queued(
         &self,
         session: u64,
         settings: &SettingsView,
-        update: Update,
         out: &Sender<ControlToBrain>,
     ) -> bool {
         let mut state = self.lock();
@@ -444,10 +319,6 @@ impl OutputOwner {
             return false;
         }
         owner.show_screen = Some(settings.show_screen);
-        if update == Update::Answer {
-            owner.settings_answers = owner.settings_answers.saturating_sub(1);
-            owner.consent_answers = owner.consent_answers.saturating_sub(1);
-        }
         if owner.talk_back.is_some() {
             return true;
         }
@@ -505,10 +376,10 @@ impl OutputOwner {
                 return false;
             };
             let offered = match turn {
-                RunOrigin::Typed { turn } => Pending::Text(turn),
-                RunOrigin::Hold { gesture } => Pending::Released(gesture),
+                RunOrigin::Typed { turn } => owner.pending == Some(turn),
+                RunOrigin::Hold { .. } => owner.talk_back == Some(false) && owner.pending.is_none(),
             };
-            if owner.pending != Some(offered) {
+            if !offered {
                 return false;
             }
             owner.pending = None;

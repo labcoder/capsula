@@ -511,8 +511,45 @@ struct Outbox {
     pipe: Arc<PipeClient>,
     /// The `TextSubmit`s queued on this connection, which a delete's `after_turns` counts.
     submits: AtomicU32,
+    queued_input: QueuedInput,
     /// Its session's [`Session::close`].
     closing: Arc<AtomicBool>,
+}
+
+#[derive(Debug, Default)]
+struct QueuedInput {
+    hold: Option<QueuedHold>,
+    settings_answers: u32,
+    consent_answers: u32,
+}
+
+fn changes_hold_consent(op: &SettingsOp) -> bool {
+    matches!(
+        op,
+        SettingsOp::SetTalkBack(_)
+            | SettingsOp::SetShowScreen(_)
+            | SettingsOp::SetScreenHolds(_)
+            | SettingsOp::InstallVoice(VoicePart::SpokenReplies)
+    )
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum QueuedHold {
+    Recognized(GestureId),
+    Listening(GestureId),
+    Released(GestureId),
+    Cancelled(GestureId),
+}
+
+impl QueuedHold {
+    fn gesture(self) -> GestureId {
+        match self {
+            Self::Recognized(id)
+            | Self::Listening(id)
+            | Self::Released(id)
+            | Self::Cancelled(id) => id,
+        }
+    }
 }
 
 /// A delete the user confirmed, until the brain answers it.
@@ -576,6 +613,8 @@ struct Shared {
     narrated: bool,
     #[cfg(any(test, feature = "test-support"))]
     hold_control_writer: std::sync::atomic::AtomicU8,
+    #[cfg(test)]
+    hold_pcm_writer: std::sync::atomic::AtomicU8,
     #[cfg(any(test, feature = "test-support"))]
     fake_playback: Option<std::sync::mpsc::SyncSender<speaker::queued::FixturePlayback>>,
     #[cfg(any(test, feature = "test-support"))]
@@ -617,6 +656,10 @@ impl Shared {
             .then(|| GestureId(u32::try_from(gesture).expect("gesture fits in the input word")))
     }
 
+    fn input_is(&self, gesture: GestureId) -> bool {
+        gesture.0 != 0 && self.input.load(Ordering::Acquire) == u64::from(gesture.0)
+    }
+
     fn clear_input(&self, gesture: GestureId) {
         let _cleared = self.input.compare_exchange(
             u64::from(gesture.0),
@@ -627,7 +670,7 @@ impl Shared {
     }
 
     /// Uses the outbox to send on `session`, only while it is open (alive and not closing).
-    fn outbox<T>(&self, session: &Session, use_it: impl FnOnce(&Outbox) -> T) -> Option<T> {
+    fn outbox<T>(&self, session: &Session, use_it: impl FnOnce(&mut Outbox) -> T) -> Option<T> {
         if !session.open() {
             return None;
         }
@@ -635,11 +678,11 @@ impl Shared {
     }
 
     /// Uses the outbox if it's still `session`'s connection's, closing or not.
-    fn connection<T>(&self, session: &Session, use_it: impl FnOnce(&Outbox) -> T) -> Option<T> {
+    fn connection<T>(&self, session: &Session, use_it: impl FnOnce(&mut Outbox) -> T) -> Option<T> {
         self.outbox
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .as_ref()
+            .as_mut()
             .filter(|outbox| {
                 !outbox.pipe.is_aborted()
                     && outbox.generation == session.generation
@@ -648,41 +691,79 @@ impl Shared {
             .map(use_it)
     }
 
+    fn with_queued_input<T>(
+        &self,
+        generation: u64,
+        update: impl FnOnce(&mut QueuedInput) -> T,
+    ) -> Option<T> {
+        self.outbox
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .as_mut()
+            .filter(|outbox| outbox.generation == generation)
+            .map(|outbox| update(&mut outbox.queued_input))
+    }
+
     fn queue_control(
         &self,
         session: &Session,
         out: &Sender<ControlToBrain>,
+        input: &mut QueuedInput,
         message: ControlToBrain,
     ) -> bool {
         if !session.io.queued {
             return self.queue_voice_control(out, message);
         }
         let generation = session.generation;
-        if let ControlToBrain::Settings(op) = message {
-            return self.output.queued_settings(generation, op, out);
+        if let ControlToBrain::Settings(op) = &message {
+            let Some(answers) = input.settings_answers.checked_add(1) else {
+                return false;
+            };
+            let consent = changes_hold_consent(op);
+            if out.try_send(message).is_err() {
+                return false;
+            }
+            input.settings_answers = answers;
+            if consent {
+                input.consent_answers = answers;
+            }
+            return true;
         }
-        match &message {
+        let hold = &mut input.hold;
+        let replacement = match &message {
             ControlToBrain::KeyDown { .. } => {
-                self.output.queued_hold_ready(generation) && out.try_send(message).is_ok()
+                return input.consent_answers == 0
+                    && self.output.queued_hold_ready(generation)
+                    && out.try_send(message).is_ok();
             }
             ControlToBrain::VoiceHoldRecognized { gesture, .. } => {
-                self.input.load(Ordering::Acquire) == u64::from(gesture.0)
-                    && self.output.begin_queued_hold(generation, *gesture, || {
-                        self.queue_voice_control(out, message)
-                    })
+                if hold.is_some()
+                    || input.consent_answers != 0
+                    || !self.input_is(*gesture)
+                    || !self.output.can_reserve_hold(generation)
+                {
+                    return false;
+                }
+                Some(QueuedHold::Recognized(*gesture))
             }
-            ControlToBrain::KeyUp { gesture, .. } => self.output.queued_hold_input(
-                generation,
-                *gesture,
-                output::HoldInput::Release,
-                || out.try_send(message).is_ok(),
-            ),
-            ControlToBrain::GestureCancel { gesture } => {
-                self.output
-                    .cancel_queued_hold(generation, *gesture, || out.try_send(message).is_ok())
+            ControlToBrain::KeyUp { gesture, .. } => {
+                if *hold != Some(QueuedHold::Listening(*gesture)) || !self.input_is(*gesture) {
+                    return false;
+                }
+                Some(QueuedHold::Released(*gesture))
             }
-            _ => self.queue_voice_control(out, message),
+            ControlToBrain::GestureCancel { gesture } if matches!(hold, Some(QueuedHold::Recognized(id) | QueuedHold::Listening(id)) if id == gesture) => {
+                Some(QueuedHold::Cancelled(*gesture))
+            }
+            _ => None,
+        };
+        if !self.queue_voice_control(out, message) {
+            return false;
         }
+        if let Some(replacement) = replacement {
+            *hold = Some(replacement);
+        }
+        true
     }
 
     fn deletes(&self) -> std::sync::MutexGuard<'_, Vec<Held>> {
@@ -747,17 +828,29 @@ impl LinkHandle {
         self.audio_session() == AudioSession::Legacy
             || session.is_some_and(|session| {
                 session.open()
-                    && self
-                        .shared
-                        .output
-                        .queued_turn(session.generation, None, || true)
+                    && self.shared.outbox.try_lock().is_ok_and(|outbox| {
+                        outbox.as_ref().is_some_and(|outbox| {
+                            outbox.generation == session.generation
+                                && outbox.queued_input.hold.is_none()
+                                && self
+                                    .shared
+                                    .output
+                                    .queued_turn(session.generation, None, || true)
+                        })
+                    })
             })
     }
 
     /// Whether this connection can attempt ordinary voice input without changing its audio mode.
     pub fn admits_voice(&self, generation: u64) -> bool {
         self.audio_session() == AudioSession::Legacy
-            || self.shared.output.queued_hold_ready(generation)
+            || self.shared.outbox.try_lock().is_ok_and(|outbox| {
+                outbox.as_ref().is_some_and(|outbox| {
+                    outbox.generation == generation
+                        && outbox.queued_input.consent_answers == 0
+                        && self.shared.output.queued_hold_ready(generation)
+                })
+            })
     }
 
     pub fn output(&self) -> &output::OutputOwner {
@@ -781,7 +874,7 @@ impl LinkHandle {
                 });
     }
     pub fn input_is(&self, gesture: GestureId) -> bool {
-        gesture.0 != 0 && self.shared.input.load(Ordering::Acquire) == u64::from(gesture.0)
+        self.shared.input_is(gesture)
     }
     pub fn clear_input(&self, gesture: GestureId) {
         self.shared.clear_input(gesture);
@@ -945,11 +1038,15 @@ impl LinkHandle {
                 | ControlToBrain::AccountOp(_)
                 | ControlToBrain::Connection(_)
         ) || session.io.queued
-            && matches!(
-                &message,
-                ControlToBrain::Settings(SettingsOp::SetTalkBack(_) | SettingsOp::SetShowScreen(_))
-            );
-        let send = |out: &Sender<ControlToBrain>| {
+            && matches!(&message, ControlToBrain::Settings(op) if changes_hold_consent(op));
+        if session.io.queued
+            && session.generation == self.link_generation()
+            && let ControlToBrain::GestureCancel { gesture } = &message
+        {
+            shared.clear_input(*gesture);
+            shared.microphone.cancel(*gesture);
+        }
+        let send = |out: &Sender<ControlToBrain>, input: &mut QueuedInput| {
             if mutation {
                 let cancelled = shared.revoke_input();
                 let choice = &shared.choice;
@@ -961,6 +1058,7 @@ impl LinkHandle {
                         !shared.queue_control(
                             session,
                             out,
+                            input,
                             ControlToBrain::GestureCancel { gesture },
                         )
                     })
@@ -968,11 +1066,11 @@ impl LinkHandle {
                     return false;
                 }
             }
-            shared.queue_control(session, out, message)
+            shared.queue_control(session, out, input, message)
         };
         #[cfg(any(test, feature = "test-support"))]
         if let Some(recording) = &self.control_recording {
-            let queued = send(recording);
+            let queued = send(recording, &mut QueuedInput::default());
             if !queued && mutation {
                 shared.lose(&session.alive);
             }
@@ -980,7 +1078,7 @@ impl LinkHandle {
         }
         shared
             .outbox(session, |outbox| {
-                let queued = send(&outbox.control);
+                let queued = send(&outbox.control, &mut outbox.queued_input);
                 if !queued && mutation {
                     shared.lose(&session.alive);
                     outbox.pipe.abort();
@@ -1064,19 +1162,17 @@ impl LinkHandle {
                 }
                 let enqueue = || outbox.data.try_send(out).is_ok();
                 let queued = if session.io.queued && plain_turn.is_some() {
-                    self.shared
-                        .output
-                        .queued_turn(session.generation, plain_turn, || {
-                            session.open() && enqueue()
-                        })
+                    outbox.queued_input.hold.is_none()
+                        && self
+                            .shared
+                            .output
+                            .queued_turn(session.generation, plain_turn, || {
+                                session.open() && enqueue()
+                            })
                 } else if let Some(gesture) = mic.filter(|_| session.io.queued) {
-                    self.input_is(gesture)
-                        && self.shared.output.queued_hold_input(
-                            session.generation,
-                            gesture,
-                            output::HoldInput::Pcm,
-                            enqueue,
-                        )
+                    outbox.queued_input.hold == Some(QueuedHold::Listening(gesture))
+                        && self.input_is(gesture)
+                        && enqueue()
                 } else {
                     enqueue()
                 };
@@ -1520,6 +1616,7 @@ impl Link {
             data: data_out,
             pipe: Arc::clone(&control),
             submits: AtomicU32::new(0),
+            queued_input: QueuedInput::default(),
             closing: Arc::clone(&closing),
         });
         drop(outbox);
@@ -1559,8 +1656,11 @@ impl Link {
             spawn_helper("link-data-writer", &mut helpers, {
                 let (data, credit) = (Arc::clone(&data), Arc::clone(&credit));
                 let ended = ended.clone();
+                let closing = Arc::clone(&closing);
                 move || {
-                    write_data(&data, &data_queue, &credit, &ended.shared);
+                    write_data(&data, &data_queue, &credit, &ended.shared, || {
+                        ended.alive.load(Ordering::Acquire) && !closing.load(Ordering::Acquire)
+                    });
                     drop(ended);
                 }
             })
@@ -1955,17 +2055,19 @@ fn watch(
                 }
             }
             Ok(Some(ControlToShell::Settings { view, answer })) => {
-                let update = if answer {
-                    crate::settings::Update::Answer
-                } else {
-                    crate::settings::Update::Unsolicited
-                };
-                if queued.is_some()
-                    && !shared
-                        .output
-                        .register_queued(generation, &view, update, out)
-                {
-                    return;
+                if queued.is_some() {
+                    if view.talk_back || view.show_screen {
+                        let _revoked = shared.revoke_input();
+                    }
+                    if !shared.output.register_queued(generation, &view, out) {
+                        return;
+                    }
+                    if answer {
+                        shared.with_queued_input(generation, |input| {
+                            input.settings_answers = input.settings_answers.saturating_sub(1);
+                            input.consent_answers = input.consent_answers.saturating_sub(1);
+                        });
+                    }
                 }
                 if events
                     .send_blocking(LinkEvent::Settings {
@@ -2003,6 +2105,13 @@ fn watch(
                         let Some(origin) = origin else {
                             return;
                         };
+                        if let RunOrigin::Hold { gesture } = origin
+                            && shared.with_queued_input(generation, |input| {
+                                input.hold == Some(QueuedHold::Released(gesture))
+                            }) != Some(true)
+                        {
+                            return;
+                        }
                         let credit = Arc::clone(credit);
                         if !shared.output.bind_queued(
                             generation,
@@ -2013,6 +2122,9 @@ fn watch(
                             Arc::downgrade(shared),
                         ) {
                             return;
+                        }
+                        if matches!(origin, RunOrigin::Hold { .. }) {
+                            shared.with_queued_input(generation, |input| input.hold = None);
                         }
                     }
                     if speaker.is_some_and(|speaker| !speaker.command(Command::Name(run))) {
@@ -2155,14 +2267,20 @@ fn watch(
                         HoldStatus::Empty | HoldStatus::Cancelled | HoldStatus::Failed(_)
                     )
                 {
-                    if queued.is_some() {
-                        shared.output.queued_hold_refused(generation, gesture);
-                    }
                     shared.microphone.cancel(gesture);
                     shared.clear_input(gesture);
+                    if queued.is_some() {
+                        shared.with_queued_input(generation, |input| {
+                            let _cleared = input.hold.take_if(|hold| hold.gesture() == gesture);
+                        });
+                    }
                 }
                 if queued.is_some() && status == HoldStatus::Admitted {
-                    shared.output.queued_hold_admitted(generation, gesture);
+                    shared.with_queued_input(generation, |input| {
+                        if input.hold == Some(QueuedHold::Recognized(gesture)) {
+                            input.hold = Some(QueuedHold::Listening(gesture));
+                        }
+                    });
                 }
                 let event = LinkEvent::VoiceHold {
                     generation,
@@ -2457,12 +2575,35 @@ fn write_control(
 
 /// Writes queued turns in order, and after each wake-up any credit that has added up, until the
 /// queue closes or the pipe fails.
-fn write_data(data: &PipeClient, queue: &Receiver<DataOut>, credit: &SessionIo, shared: &Shared) {
+fn write_data(
+    data: &PipeClient,
+    queue: &Receiver<DataOut>,
+    credit: &SessionIo,
+    shared: &Shared,
+    open: impl Fn() -> bool,
+) {
     let mut encoded = Zeroizing::new(Vec::new());
     while let Ok(out) = queue.recv_blocking() {
         let submitted = match &out {
             DataOut::Submit(DataToBrain::MicPcm(_)) if shared.quitting() => Ok(()),
-            DataOut::Submit(message) => write_data_frame(&mut &*data, message, &mut encoded),
+            DataOut::Submit(message) => {
+                write_data_frame(&mut &*data, message, &mut encoded, || {
+                    let DataToBrain::MicPcm(packet) = message else {
+                        return true;
+                    };
+                    #[cfg(test)]
+                    if shared.hold_pcm_writer.load(Ordering::Acquire) != 0 {
+                        shared.hold_pcm_writer.store(2, Ordering::Release);
+                        while shared.hold_pcm_writer.load(Ordering::Acquire) != 0
+                            && !queue.is_closed()
+                        {
+                            thread::park_timeout(Duration::from_millis(1));
+                        }
+                    }
+                    !shared.quitting()
+                        && (!credit.queued || (open() && shared.input_is(packet.gesture)))
+                })
+            }
             DataOut::Credit => Ok(()),
         };
         drop(out);
@@ -2488,9 +2629,15 @@ fn write_data_frame(
     writer: &mut impl Write,
     message: &DataToBrain,
     encoded: &mut Zeroizing<Vec<u8>>,
+    admitted: impl FnOnce() -> bool,
 ) -> Result<(), FrameError> {
-    let result = frame::encode_into(message, Pipe::Data, encoded)
-        .and_then(|()| writer.write_all(encoded).map_err(FrameError::from));
+    let result = frame::encode_into(message, Pipe::Data, encoded).and_then(|()| {
+        if admitted() {
+            writer.write_all(encoded).map_err(FrameError::from)
+        } else {
+            Ok(())
+        }
+    });
     encoded.as_mut_slice().zeroize();
     encoded.clear();
     result

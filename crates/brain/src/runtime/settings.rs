@@ -99,6 +99,16 @@ pub(super) type Written = (
     Result<(Pending, Result<(), ConfigError>), JoinError>,
 );
 
+pub(super) fn changes_hold_consent(op: &SettingsOp) -> bool {
+    matches!(
+        op,
+        SettingsOp::SetTalkBack(_)
+            | SettingsOp::SetShowScreen(_)
+            | SettingsOp::SetScreenHolds(_)
+            | SettingsOp::InstallVoice(VoicePart::SpokenReplies)
+    )
+}
+
 impl Brain {
     /// Whether `off` is queued or being written, so its setting already counts as off.
     fn turning_off(&self, off: &SettingsOp) -> bool {
@@ -115,24 +125,30 @@ impl Brain {
         if link.registration.is_none() {
             return true;
         }
-        let changes_consent = |op: &SettingsOp| {
-            matches!(
-                op,
-                SettingsOp::SetTalkBack(_) | SettingsOp::SetShowScreen(_)
-            )
-        };
         Registration::admits(link.registration)
             && link.queued_silent
             && self.config.queued_hold_preferences_off()
-            && !self
-                .config_write
-                .as_ref()
-                .and_then(|write| write.op.as_ref())
-                .is_some_and(changes_consent)
-            && !self
-                .settings_ops
-                .iter()
-                .any(|queued| matches!(&queued.change, Change::User(op) if changes_consent(op)))
+            && !self.hold_consent_pending()
+    }
+
+    pub(super) fn hold_consent_pending(&self) -> bool {
+        let activates_talk_back = |write| {
+            matches!(
+                write,
+                VoiceWrite::Activate {
+                    part: VoicePart::SpokenReplies,
+                    ..
+                }
+            ) && self.config.implicit_talk_back()
+        };
+        self.config_write.as_ref().is_some_and(|write| {
+            write.op.as_ref().is_some_and(changes_hold_consent)
+                || write.voice.is_some_and(activates_talk_back)
+        }) || self.settings_ops.iter().any(|queued| match &queued.change {
+            Change::User(op) => changes_hold_consent(op),
+            Change::Voice(write) => activates_talk_back(*write),
+            _ => false,
+        })
     }
 
     pub(super) fn hold_to_talk_enabled(&self) -> bool {

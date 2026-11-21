@@ -1153,8 +1153,7 @@ impl Presence {
             return;
         };
         if let (Source::Joined(chunks), Some(t_qpc)) = (hold.source, hold.released) {
-            hold.source = Source::Sent;
-            if !self.link.send_control(
+            if self.link.send_control(
                 &hold.session,
                 ControlToBrain::KeyUp {
                     gesture: hold.token.gesture(),
@@ -1162,6 +1161,10 @@ impl Presence {
                     chunks,
                 },
             ) {
+                hold.source = Source::Sent;
+            } else if self.link.audio_session() == kumochi_protocol::message::AudioSession::Legacy
+                || self.link.input_is(hold.token.gesture())
+            {
                 tracing::warn!(stage = ?FailureStage::Release, reason = ?FailureReason::ReleaseSend, "held speech input failed");
                 self.link.end(&hold.session);
             }

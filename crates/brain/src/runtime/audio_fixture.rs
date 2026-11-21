@@ -117,6 +117,7 @@ pub struct AudioProbe {
     text_only: bool,
     hold: bool,
     decoded: AtomicU32,
+    received_mic: AtomicU32,
     narrated: bool,
     initial_credit: Option<u32>,
     replacement_chain: Option<Arc<Notify>>,
@@ -179,6 +180,16 @@ impl AudioProbe {
     #[must_use]
     pub fn decoded(&self) -> u32 {
         self.decoded.load(Ordering::Acquire)
+    }
+
+    pub(super) fn mic_received(&self) {
+        self.received_mic.fetch_add(1, Ordering::Release);
+    }
+
+    /// Number of mic packets received on the data pipe before the ingress gate.
+    #[must_use]
+    pub fn received_mic(&self) -> u32 {
+        self.received_mic.load(Ordering::Acquire)
     }
 
     pub(crate) fn narrated() -> Self {

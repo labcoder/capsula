@@ -264,6 +264,7 @@ fn lapse_notification_is_only_session_fenced_bounded_queue_acceptance() {
         data,
         pipe: Arc::new(pipe),
         submits: std::sync::atomic::AtomicU32::new(0),
+        queued_input: super::QueuedInput::default(),
         closing: Arc::default(),
     });
     assert!(link.send_control(&session, ControlToBrain::Pong));
@@ -3121,6 +3122,10 @@ fn authenticated_queued_hold_cancels_or_transfers_only_the_released_gesture() {
         }
     };
     let stop = |gesture| {
+        assert!(
+            handle.voice_stop_pending(),
+            "only an owed Stop may be offered"
+        );
         assert!(handle.send_control(&session, ControlToBrain::VoiceHoldStopped { gesture }));
         let until = Instant::now() + PATIENCE;
         while handle.voice_stop_pending() {
@@ -3131,13 +3136,25 @@ fn authenticated_queued_hold_cancels_or_transfers_only_the_released_gesture() {
 
     assert!(handle.send_control(&session, recognized(cancelled)));
     expect_status(cancelled, HoldStatus::Admitted);
-    assert!(handle.send_control(
+    let writer = &handle.shared.hold_pcm_writer;
+    writer.store(1, std::sync::atomic::Ordering::Release);
+    assert!(handle.send_data(&session, packet(cancelled)));
+    let until = Instant::now() + PATIENCE;
+    while writer.load(std::sync::atomic::Ordering::Acquire) != 2 {
+        assert!(
+            Instant::now() < until && session.open(),
+            "the encoded PCM hasn't reached the pipe"
+        );
+        thread::sleep(Duration::from_millis(1));
+    }
+    let cancelled_sent = handle.send_control(
         &session,
-        ControlToBrain::GestureCancel { gesture: cancelled }
-    ));
+        ControlToBrain::GestureCancel { gesture: cancelled },
+    );
+    writer.store(0, std::sync::atomic::Ordering::Release);
+    assert!(cancelled_sent);
     assert!(!handle.send_data(&session, packet(cancelled)));
     expect_status(cancelled, HoldStatus::Cancelled);
-    assert!(handle.voice_stop_pending());
     stop(cancelled);
     assert_eq!(probe.decoded(), 0);
 
@@ -3146,7 +3163,9 @@ fn authenticated_queued_hold_cancels_or_transfers_only_the_released_gesture() {
     assert!(handle.send_control(&session, recognized(gesture)));
     expect_status(gesture, HoldStatus::Admitted);
     assert!(!handle.send_data(&session, packet(cancelled)));
-    assert!(handle.send_data(&session, packet(gesture)));
+    handle
+        .output()
+        .with_locked(|| assert!(handle.send_data(&session, packet(gesture))));
     stop(gesture);
     assert!(
         !handle.admits_text(Some(&session)),
@@ -3158,13 +3177,16 @@ fn authenticated_queued_hold_cancels_or_transfers_only_the_released_gesture() {
         chunks: 1,
     };
     assert!(!handle.send_control(&session, released(cancelled)));
-    assert!(handle.send_control(&session, released(gesture)));
+    handle
+        .output()
+        .with_locked(|| assert!(handle.send_control(&session, released(gesture))));
     assert!(!handle.send_data(&session, packet(gesture)));
 
     let mut answer = String::new();
     let (mut named, mut done, mut ended, mut held) = (false, false, false, false);
     let expected_run = RunId(1);
-    while !(named && done && ended && held) {
+    let (mut sent_barriers, mut control_barrier, mut data_barrier) = (false, false, false);
+    while !(control_barrier && data_barrier) {
         match next(&events) {
             LinkEvent::RunState {
                 generation: from,
@@ -3185,6 +3207,7 @@ fn authenticated_queued_hold_cancels_or_transfers_only_the_released_gesture() {
                 phase: Phase::Done,
                 ..
             } => {
+                assert!(!done, "one Done before the later control reply");
                 assert_eq!(run, expected_run);
                 done = true;
             }
@@ -3202,9 +3225,11 @@ fn authenticated_queued_hold_cancels_or_transfers_only_the_released_gesture() {
                         held = true;
                     }
                     DataToShell::RunEnd { run } => {
+                        assert!(!ended, "one RunEnd before the later data reply");
                         assert_eq!(run, expected_run);
                         ended = true;
                     }
+                    DataToShell::ThreadList { request: 37, .. } => data_barrier = true,
                     DataToShell::SegmentQueued { .. } | DataToShell::SpeechPcm(_) => {
                         panic!("a silent Hold emits no speaker work");
                     }
@@ -3212,6 +3237,7 @@ fn authenticated_queued_hold_cancels_or_transfers_only_the_released_gesture() {
                 }
                 session.grant(bytes);
             }
+            LinkEvent::Settings { answer: true, .. } => control_barrier = true,
             LinkEvent::TurnRefused { .. }
             | LinkEvent::Error { .. }
             | LinkEvent::CaptureDone { .. } => {
@@ -3219,9 +3245,31 @@ fn authenticated_queued_hold_cancels_or_transfers_only_the_released_gesture() {
             }
             _ => {}
         }
+        if named && done && ended && held && !sent_barriers {
+            sent_barriers = true;
+            assert!(handle.send_control(
+                &session,
+                ControlToBrain::Settings(super::SettingsOp::SetTaskbar(false))
+            ));
+            assert!(handle.send_data(
+                &session,
+                DataToBrain::PageRequest {
+                    request: 37,
+                    page: PageOf::Threads {
+                        search: None,
+                        after: None
+                    },
+                }
+            ));
+        }
     }
     assert_eq!(answer, "An offline voice reply.");
     assert_eq!(probe.decoded(), 1);
+    assert_eq!(
+        probe.received_mic(),
+        1,
+        "only the released gesture's PCM crossed the actual data pipe"
+    );
     assert!(probe.received_retirements(expected_run).is_empty());
     assert!(handle.admits_text(Some(&session)));
     handle.end(&session);
