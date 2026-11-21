@@ -2,8 +2,9 @@
 //! no network, no account and no credential store.
 
 use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, mpsc as std_mpsc};
 use std::time::{Duration, Instant};
 
@@ -666,7 +667,10 @@ async fn end_closes_stdin_and_the_child_exits() {
         .expect("room");
     pipes.raw().try_send(Input::End).expect("room");
     let echoed_back = timeout(WAIT, pipes.stdout.recv()).await.expect("output");
-    assert_eq!(echoed_back.as_deref(), Some(&b"hello"[..]));
+    assert_eq!(
+        echoed_back.as_deref().map(Vec::as_slice),
+        Some(&b"hello"[..])
+    );
     until("the child's exit ends it", || control.is_ended()).await;
     assert_eq!(end(launch).await, Teardown::Done);
     assert_eq!(echoed(&base), [5]);
@@ -779,6 +783,98 @@ async fn both_pumps_end_with_their_endpoints_still_held() {
         ]
     );
     drop(pipes);
+}
+
+/// Serves `data` reads of three bytes each, `a`, `b` and so on, then EOF, counting its reads.
+struct Lettered {
+    served: Arc<AtomicUsize>,
+    data: usize,
+}
+
+impl io::Read for Lettered {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let at = self.served.fetch_add(1, Ordering::SeqCst);
+        if at == self.data {
+            return Ok(0);
+        }
+        buf[..3].fill(b'a' + u8::try_from(at).expect("few reads"));
+        Ok(3)
+    }
+}
+
+/// With the queue full and one chunk pending, a release or a closed queue drops that chunk, and
+/// the reader still reads through EOF.
+#[test]
+fn a_full_stdout_queue_drops_its_pending_chunk_on_release_or_close() {
+    for close in [false, true] {
+        let (start, _launch) = admit(question(Duration::from_secs(20))).expect("a launch id");
+        let control = start.control();
+        let (output, mut stdout) = mpsc::channel(PIPE_QUEUE);
+        let served = Arc::new(AtomicUsize::new(0));
+        let pipe = Lettered {
+            served: Arc::clone(&served),
+            data: PIPE_QUEUE + 3,
+        };
+        let (done, ended) = std_mpsc::channel();
+        let reader = Arc::clone(&control);
+        std::thread::spawn(move || {
+            super::read_output(pipe, &output, &reader);
+            done.send(()).ok();
+        });
+        let began = Instant::now();
+        while served.load(Ordering::SeqCst) < PIPE_QUEUE + 1 || stdout.len() < PIPE_QUEUE {
+            assert!(began.elapsed() < WAIT, "the queue never filled");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(!control.output_closed.load(Ordering::Acquire), "{close}");
+        if close {
+            stdout.close();
+        } else {
+            control.released.store(true, Ordering::Release);
+        }
+        assert_eq!(ended.recv_timeout(WAIT), Ok(()), "{close}");
+        assert_eq!(
+            served.load(Ordering::SeqCst),
+            PIPE_QUEUE + 4,
+            "read through EOF"
+        );
+        assert!(control.output_closed.load(Ordering::Acquire));
+        let mut chunks = Vec::new();
+        while let Ok(chunk) = stdout.try_recv() {
+            chunks.push(chunk.to_vec());
+        }
+        assert_eq!(chunks, [b"aaa", b"bbb", b"ccc", b"ddd"], "{close}");
+    }
+}
+
+/// Replays `reads`, counting every call, past its end too.
+struct Scripted {
+    reads: std::vec::IntoIter<io::Result<usize>>,
+    calls: usize,
+}
+
+impl io::Read for Scripted {
+    fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
+        self.calls += 1;
+        self.reads.next().unwrap_or(Ok(0))
+    }
+}
+
+#[test]
+fn stderr_is_read_through_interruptions_to_eof_or_an_error() {
+    let interrupted = || Err(io::ErrorKind::Interrupted.into());
+    for reads in [
+        vec![Ok(5), interrupted(), Ok(8192), Ok(0)],
+        vec![Ok(5), interrupted(), Err(io::ErrorKind::BrokenPipe.into())],
+    ] {
+        let script = reads.len();
+        let mut pipe = Scripted {
+            reads: reads.into_iter(),
+            calls: 0,
+        };
+        super::drain_stderr(&mut pipe);
+        assert_eq!(pipe.calls, script, "read to its end and no further");
+    }
 }
 
 /// The stdout bound: a round that never reads holds exactly four chunks of at most 64 KiB.

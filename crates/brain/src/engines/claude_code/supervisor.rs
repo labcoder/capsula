@@ -114,7 +114,7 @@ impl fmt::Debug for Input {
 pub(crate) struct Pipes {
     stdin: Option<mpsc::Sender<Input>>,
     control: Arc<Control>,
-    pub(crate) stdout: mpsc::Receiver<Vec<u8>>,
+    pub(crate) stdout: mpsc::Receiver<Zeroizing<Vec<u8>>>,
 }
 
 impl Pipes {
@@ -854,7 +854,7 @@ fn pumps(
     stdin: mpsc::Receiver<Input>,
     control: &Arc<Control>,
     #[cfg(test)] hooks: tests::Pumps,
-) -> Result<mpsc::Receiver<Vec<u8>>, LaunchFailed> {
+) -> Result<mpsc::Receiver<Zeroizing<Vec<u8>>>, LaunchFailed> {
     let (Some(child_stdin), Some(child_stdout), Some(child_stderr)) = child_pipes else {
         return Err(LaunchFailed::Spawn);
     };
@@ -896,11 +896,7 @@ fn pumps(
     running.pumps.push(
         pump(
             "claude-code-stderr",
-            move || {
-                let mut stderr = child_stderr;
-                // Read and dropped: nothing Claude Code prints there is kept.
-                io::copy(&mut stderr, &mut io::sink()).ok();
-            },
+            move || drain_stderr(child_stderr),
             #[cfg(test)]
             (report, fails),
         )
@@ -1163,9 +1159,14 @@ fn write_picture(
 }
 
 /// stdout, in chunks of at most [`CHUNK`], until its end. A full channel is retried every
-/// [`POLL`], never waited on, and once the round has let go what's read is dropped.
-fn read_output(mut pipe: impl io::Read, output: &mpsc::Sender<Vec<u8>>, control: &Control) {
-    let mut buffer = vec![0; CHUNK];
+/// [`POLL`], never waited on, and once the round has let go what's read is dropped. The read
+/// buffer and every chunk, queued or pending, are zeroed when they drop.
+fn read_output(
+    mut pipe: impl io::Read,
+    output: &mpsc::Sender<Zeroizing<Vec<u8>>>,
+    control: &Control,
+) {
+    let mut buffer = Zeroizing::new(vec![0; CHUNK]);
     let mut wanted = true;
     loop {
         let read = match pipe.read(&mut buffer) {
@@ -1179,7 +1180,7 @@ fn read_output(mut pipe: impl io::Read, output: &mpsc::Sender<Vec<u8>>, control:
         if !wanted {
             continue;
         }
-        let mut chunk = buffer[..read].to_vec();
+        let mut chunk = Zeroizing::new(buffer[..read].to_vec());
         loop {
             if control.released.load(Ordering::Acquire) {
                 wanted = false;
@@ -1196,6 +1197,19 @@ fn read_output(mut pipe: impl io::Read, output: &mpsc::Sender<Vec<u8>>, control:
                     std::thread::sleep(POLL);
                 }
             }
+        }
+    }
+}
+
+/// stderr, read to its end and dropped: nothing Claude Code prints there is kept, and the buffer
+/// is zeroed when it drops.
+fn drain_stderr(mut pipe: impl io::Read) {
+    let mut buffer = Zeroizing::new(vec![0; 8 * 1024]);
+    loop {
+        match pipe.read(&mut buffer) {
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+            Ok(0) | Err(_) => return,
+            Ok(_) => {}
         }
     }
 }
