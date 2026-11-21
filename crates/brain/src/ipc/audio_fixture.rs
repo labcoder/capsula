@@ -36,6 +36,23 @@ pub fn offline_plain_peer(
     (session, hello, probe, task)
 }
 
+/// Starts the same authenticated peer with Talk-back off and no synthesis worker.
+/// # Panics
+/// Panics if the private test namespace or the fixture Brain cannot start.
+#[must_use]
+pub fn offline_text_peer(
+    script: String,
+) -> (
+    u32,
+    Hello,
+    std::sync::Arc<audio_fixture::AudioProbe>,
+    JoinHandle<bool>,
+) {
+    let probe = std::sync::Arc::new(audio_fixture::AudioProbe::text_only());
+    let (session, hello, task) = offline_peer(script, 0, Some(std::sync::Arc::clone(&probe)));
+    (session, hello, probe, task)
+}
+
 /// Starts the real paired Brain with the offline replay's narrated step.
 /// # Panics
 /// Panics if the private test namespace or the fixture Brain cannot start.

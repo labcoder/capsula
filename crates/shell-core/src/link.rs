@@ -1698,9 +1698,7 @@ fn watch(
                 }
             }
             Ok(Some(ControlToShell::Settings { view, answer })) => {
-                if queued.is_some()
-                    && (!view.talk_back || !shared.output.register_queued(generation, out))
-                {
+                if queued.is_some() && !shared.output.register_queued(generation, &view, out) {
                     return;
                 }
                 if events

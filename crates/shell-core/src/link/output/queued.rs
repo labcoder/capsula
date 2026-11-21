@@ -5,7 +5,7 @@ use std::thread::{self, Thread};
 use std::time::Instant;
 
 use async_channel::Sender;
-use kumochi_protocol::message::{ControlToBrain, SegmentId};
+use kumochi_protocol::message::{ControlToBrain, SegmentId, SettingsView};
 
 use super::{Arc, Ordering, Output, OutputGeneration, OutputOwner, RunId, State, SyncSender};
 use crate::link::{Shared, narrated::Narrated, queued::MetadataFrame};
@@ -41,7 +41,7 @@ pub(in crate::link) struct Queued {
     closing: Arc<AtomicBool>,
     deadline: Instant,
     ack: Option<SyncSender<()>>,
-    announced: bool,
+    talk_back: Option<bool>,
     wake: Arc<OnceLock<Thread>>,
     stopped: RunId,
     narrated: Option<Arc<Narrated>>,
@@ -83,7 +83,7 @@ impl Queued {
             closing,
             deadline,
             ack: Some(ack),
-            announced: false,
+            talk_back: None,
             wake,
             stopped: RunId(0),
             narrated,
@@ -99,9 +99,11 @@ impl Queued {
     }
 
     fn owes_proof(&self, bit: u8) -> bool {
-        self.active
-            .as_ref()
-            .is_some_and(|run| run.proof.load(Ordering::Acquire) & bit == 0)
+        self.talk_back == Some(true)
+            && self
+                .active
+                .as_ref()
+                .is_some_and(|run| run.proof.load(Ordering::Acquire) & bit == 0)
     }
 
     pub(super) fn close(&mut self) {
@@ -152,7 +154,7 @@ impl Queued {
     }
 
     fn ready(&self) -> bool {
-        self.announced && self.ack.is_none()
+        self.talk_back.is_some() && self.ack.is_none()
     }
 
     fn delivery(&mut self, run: RunId) -> Result<DeliveryTarget<'_>, ()> {
@@ -189,6 +191,11 @@ impl State {
             .as_mut()
             .filter(|owner| !owner.closing.load(Ordering::Acquire))
             .map(|owner| (output, owner))
+    }
+
+    fn speech_queue(&mut self, session: u64) -> Option<(OutputGeneration, &mut Queued)> {
+        self.queue(session)
+            .filter(|(_, owner)| owner.talk_back == Some(true) && owner.ready())
     }
 }
 
@@ -264,18 +271,24 @@ impl OutputOwner {
     pub(in crate::link) fn register_queued(
         &self,
         session: u64,
+        settings: &SettingsView,
         out: &Sender<ControlToBrain>,
     ) -> bool {
         let mut state = self.lock();
         let Some((output, owner)) = state.queue(session) else {
             return false;
         };
-        if !owner.announced {
-            owner.announced = out
-                .try_send(ControlToBrain::QueuedAudioOutput(RATE, output))
-                .is_ok();
+        if let Some(registered) = owner.talk_back {
+            return registered == settings.talk_back;
         }
-        owner.announced
+        if out
+            .try_send(ControlToBrain::QueuedAudioOutput(RATE, output))
+            .is_err()
+        {
+            return false;
+        }
+        owner.talk_back = Some(settings.talk_back);
+        true
     }
 
     pub(in crate::link) fn acknowledge_queued(
@@ -285,7 +298,7 @@ impl OutputOwner {
     ) -> bool {
         let mut state = self.lock();
         let Some((_, owner)) = state.queue(session).filter(|(key, owner)| {
-            *key == output && owner.announced && Instant::now() < owner.deadline
+            *key == output && owner.talk_back.is_some() && Instant::now() < owner.deadline
         }) else {
             return false;
         };
@@ -300,6 +313,10 @@ impl OutputOwner {
         true
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one transition binds either kind of run before deciding whether to start playback"
+    )]
     pub(in crate::link) fn bind_queued(
         &self,
         session: u64,
@@ -333,13 +350,19 @@ impl OutputOwner {
                 owner.stopped = run;
                 owner.early_end = None;
             }
+            let silent = owner.talk_back == Some(false);
             owner.active = Some(Active {
                 id: run,
                 input: None,
                 proof: Arc::clone(&proof),
-                delivery: (owner.narrated.is_some() && !ended).then_some(Delivery::Unpromised),
+                delivery: (!silent && owner.narrated.is_some() && !ended)
+                    .then_some(Delivery::Unpromised),
                 locally_stopped: false,
             });
+            if silent {
+                owner.wake();
+                return true;
+            }
             (output, Arc::clone(&owner.wake), owner.narrated.clone())
         };
         let out = out.clone();
@@ -431,8 +454,8 @@ impl OutputOwner {
     ) -> Result<NarratedReservation, ()> {
         let mut state = self.lock();
         let (_, owner) = state
-            .queue(assignment.session)
-            .filter(|(output, owner)| *output == assignment.output && owner.ready())
+            .speech_queue(assignment.session)
+            .filter(|(output, _)| *output == assignment.output)
             .ok_or(())?;
         let (delivery, input, outcome) = match owner.delivery(assignment.run)? {
             DeliveryTarget::Waiting => return Ok(NarratedReservation::Waiting),
@@ -513,8 +536,8 @@ impl OutputOwner {
     ) -> Result<bool, ()> {
         let mut state = self.lock();
         let (_, owner) = state
-            .queue(session)
-            .filter(|(key, q)| *key == output && q.ready())
+            .speech_queue(session)
+            .filter(|(key, _)| *key == output)
             .ok_or(())?;
         if owner.narrated.is_some() {
             let delivery = owner
@@ -561,7 +584,7 @@ impl OutputOwner {
 
     pub(in crate::link) fn revoke_queued(&self, session: u64, run: RunId) -> bool {
         self.lock()
-            .queue(session)
+            .speech_queue(session)
             .is_some_and(|(_, owner)| owner.stop(run, StopOrigin::Brain))
     }
 

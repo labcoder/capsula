@@ -98,6 +98,7 @@ impl Engine for Tone {
 /// Observations and barriers for one synthetic, same-process Brain peer.
 #[derive(Debug, Default)]
 pub struct AudioProbe {
+    text_only: bool,
     narrated: bool,
     initial_credit: Option<u32>,
     replacement_chain: Option<Arc<Notify>>,
@@ -142,6 +143,13 @@ struct SpeechEvidence {
 }
 
 impl AudioProbe {
+    pub(crate) fn text_only() -> Self {
+        Self {
+            text_only: true,
+            ..Self::default()
+        }
+    }
+
     pub(crate) fn narrated() -> Self {
         Self {
             narrated: true,
@@ -559,11 +567,14 @@ pub(crate) async fn brain(dir: &Path, script: &str, tone_chunks: usize) -> Brain
     let scenes = store.scenes().expect("test store scenes");
     let probe = probe();
     let narrated = probe.as_ref().is_some_and(|probe| probe.narrated);
+    let text_only = probe.as_ref().is_some_and(|probe| probe.text_only);
     let replay = crate::engines::responses::replay::MODEL;
     let config_source = if narrated {
         format!(
             "default_model = {{ model = \"{replay}\", effort = \"Low\", connection = \"ChatGpt\" }}\n[voice]\ntalk_back = true\n"
         )
+    } else if text_only {
+        "[voice]\ntalk_back = false\n".into()
     } else {
         "[voice]\ntalk_back = true\n".into()
     };
@@ -611,6 +622,9 @@ pub(crate) async fn brain(dir: &Path, script: &str, tone_chunks: usize) -> Brain
     };
     let mut brain = Brain::new(store, main, high, scenes, engine, config, accounts)
         .expect("start the fixture Brain");
+    if text_only {
+        return brain;
+    }
     let (reports, mut loaded) = Reports::new();
     let tts = TtsHandle::spawn_with(tokio::runtime::Handle::current(), reports, move |_| {
         Ok(Tone(tone_chunks))
