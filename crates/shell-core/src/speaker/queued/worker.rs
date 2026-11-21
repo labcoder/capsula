@@ -10,11 +10,11 @@ use zeroize::Zeroizing;
 
 use self::drawing::Drawing;
 pub(super) use self::drawing::DrawingIo;
-use super::super::STALL;
 use super::super::conductor::Binding;
+use super::super::{DRAIN, STALL};
 use super::backend::{self, Power, Reply, Request};
 use super::receipts::Receipts;
-use super::timeline::{Anchor, Engine, Observation, Opened, Phase};
+use super::timeline::{Anchor, Engine, Observation, Opened, Phase, Tail};
 use super::{Admission, Credit, Fault, Packet};
 use crate::platform::speaker_cpal::{
     Control, OutputError, OutputEvent, PacketKind, Source, TailAck, Transport,
@@ -41,7 +41,7 @@ pub(super) enum Command {
     Stop,
 }
 
-pub(super) struct Input {
+pub(crate) struct Input {
     worker: Thread,
     commands: SyncSender<Command>,
     packets: SyncSender<Packet>,
@@ -68,7 +68,11 @@ impl Input {
         Ok(())
     }
 
-    pub(super) fn submit(&self, packet: Packet) -> Result<(), TrySendError<Packet>> {
+    pub(crate) fn stop(&self) -> bool {
+        self.command(Command::Stop).is_ok()
+    }
+
+    pub(crate) fn submit(&self, packet: Packet) -> Result<(), TrySendError<Packet>> {
         if self.closed.load(Ordering::Acquire) {
             return Err(TrySendError::Disconnected(packet));
         }
@@ -85,6 +89,43 @@ impl Input {
                 Err(err)
             }
         }
+    }
+}
+
+pub(crate) fn spawn_plain(
+    run: RunId,
+    output: OutputGeneration,
+    session: u64,
+    mut grant: impl FnMut(u32) + Send + 'static,
+    reports: (
+        impl FnMut(ControlToBrain) -> bool + Send + 'static,
+        impl FnOnce(bool) + Send + 'static,
+    ),
+    exit: impl FnMut(bool) + Send + 'static,
+    #[cfg(any(test, feature = "test-support"))] fake: Option<SyncSender<super::FixturePlayback>>,
+) -> io::Result<Input> {
+    spawn(
+        run,
+        output,
+        session,
+        Instant::now(),
+        Plain(exit),
+        move |credit| grant(credit.bytes),
+        reports,
+        #[cfg(any(test, feature = "test-support"))]
+        fake,
+    )
+}
+
+struct Plain<F>(F);
+
+impl<F: FnMut(bool) + Send + 'static> DrawingIo for Plain<F> {
+    fn view(&mut self) -> Result<Option<super::super::conductor::ViewLevel>, ()> {
+        Ok(None)
+    }
+    fn picture(&mut self, _: Binding, _: Option<super::super::conductor::PictureLevel>) {}
+    fn owner_exited(&mut self, exit: OwnerExit) {
+        (self.0)(exit == OwnerExit::ReportRefused);
     }
 }
 
@@ -125,6 +166,13 @@ struct Worker {
     drawing: Option<Drawing>,
 }
 
+#[cfg_attr(
+    any(test, feature = "test-support"),
+    expect(
+        clippy::too_many_arguments,
+        reason = "the test-only device factory is an extra argument"
+    )
+)]
 pub(super) fn spawn(
     run: RunId,
     generation: OutputGeneration,
@@ -132,7 +180,11 @@ pub(super) fn spawn(
     origin: Instant,
     drawing: impl DrawingIo,
     give: impl FnMut(Credit) + Send + 'static,
-    report: impl FnMut(ControlToBrain) -> bool + Send + 'static,
+    reports: (
+        impl FnMut(ControlToBrain) -> bool + Send + 'static,
+        impl FnOnce(bool) + Send + 'static,
+    ),
+    #[cfg(any(test, feature = "test-support"))] fake: Option<SyncSender<super::FixturePlayback>>,
 ) -> io::Result<Input> {
     let (commands, pending) = mpsc::sync_channel(COMMANDS);
     let (packets, data) = mpsc::sync_channel(1);
@@ -147,6 +199,15 @@ pub(super) fn spawn(
         closed: Arc::clone(&closed),
     };
     let drawing = Drawing::new(session, Arc::clone(&closed), drawing);
+    #[cfg(not(any(test, feature = "test-support")))]
+    let start = backend::spawn;
+    #[cfg(any(test, feature = "test-support"))]
+    let start = |owner, origin| {
+        if let Some(fake) = fake {
+            return backend::spawn_fake(owner, origin, fake);
+        }
+        backend::spawn(owner, origin)
+    };
     let task = thread::Builder::new()
         .name("speaker-owner".into())
         .spawn(move || {
@@ -156,8 +217,8 @@ pub(super) fn spawn(
                 origin,
                 drawing,
                 give,
-                report,
-                backend::spawn,
+                reports,
+                start,
             );
         })?;
     let worker = task.thread().clone();
@@ -177,7 +238,7 @@ fn own(
     origin: Instant,
     drawing: Drawing,
     give: impl FnMut(Credit),
-    report: impl FnMut(ControlToBrain) -> bool,
+    (report, refused_tail): (impl FnMut(ControlToBrain) -> bool, impl FnOnce(bool)),
     start: impl FnOnce(Thread, Instant) -> io::Result<(SyncSender<Request>, Receiver<Reply>)>,
 ) {
     let Ok((send, replies)) = start(thread::current(), origin) else {
@@ -195,7 +256,7 @@ fn own(
         virtual_route: false,
         drawing: Some(drawing),
     }
-    .serve(port, origin, give, report);
+    .serve(port, origin, give, report, Some(refused_tail));
 }
 
 impl Worker {
@@ -205,6 +266,7 @@ impl Worker {
         origin: Instant,
         mut give: impl FnMut(Credit),
         mut report: impl FnMut(ControlToBrain) -> bool,
+        refused_tail: Option<impl FnOnce(bool)>,
     ) {
         let mut source = Zeroizing::new([0; 480]);
         let mut receipts = Receipts::default();
@@ -220,9 +282,13 @@ impl Worker {
                 });
             if !receipts.publish(&self.engine, now, &mut report) {
                 port.closed.store(true, Ordering::Release);
-                self.stop(now, &mut |credit| port.credit(credit, &mut give));
-                if let Some(drawing) = &mut self.drawing {
+                let now = origin.elapsed();
+                self.stop(now, &mut |_| {});
+                if let Some(mut drawing) = self.drawing.take() {
                     drawing.report_refused();
+                }
+                if let Some(settled) = refused_tail {
+                    settled(self.observe_refused_tail(origin, now.saturating_add(DRAIN)));
                 }
                 return;
             }
@@ -245,6 +311,26 @@ impl Worker {
             } else {
                 thread::park();
             }
+        }
+    }
+
+    fn observe_refused_tail(&mut self, origin: Instant, deadline: Duration) -> bool {
+        loop {
+            let now = origin.elapsed();
+            self.backend_reply(now);
+            self.drive(now);
+            if self.engine.final_at(now.min(deadline)) {
+                return true;
+            }
+            if now >= deadline {
+                return false;
+            }
+            let next = match self.engine.tail() {
+                Tail::At(at) => at.min(deadline),
+                Tail::Unknown if self.physical.is_none() => return false,
+                Tail::Unknown => deadline,
+            };
+            thread::park_timeout(next.saturating_sub(origin.elapsed()));
         }
     }
 
@@ -631,7 +717,7 @@ impl Physical {
         self.transport.control().stop();
         self.watchdog = None;
         self.retire_deadline
-            .get_or_insert(now.saturating_add(super::super::DRAIN));
+            .get_or_insert(now.saturating_add(DRAIN));
     }
 }
 

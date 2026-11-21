@@ -10,7 +10,7 @@ use kumochi_protocol::message::{
 };
 
 use super::fixture::*;
-use super::{Connection, Link, LinkEvent, LinkHandle, Session, Shared, start, welcome};
+use super::{Attendance, Connection, Link, LinkEvent, LinkHandle, Session, Shared, start, welcome};
 use crate::platform::PipeClient;
 use crate::runs::{Refused, Runs, Shown};
 use crate::threads::Threads;
@@ -459,13 +459,9 @@ fn a_raw_segment_announcement_keeps_its_class_and_output_generation() {
     assert!(link.link.join().expect("joined"));
 }
 
-#[test]
-fn settings_frames_keep_their_connection_generation_and_authoritative_view() {
+fn settings_view() -> kumochi_protocol::message::SettingsView {
     use kumochi_protocol::message::{AssistantName, SettingsView};
-    let link = attended("settings-view");
-    let events = patient(link.events);
-    let session = connected(next(&events));
-    let expected = SettingsView {
+    SettingsView {
         assistant_name: AssistantName::new("Cloud").expect("valid"),
         user_name: None,
         onboarded: true,
@@ -480,7 +476,15 @@ fn settings_frames_keep_their_connection_generation_and_authoritative_view() {
         hold_to_talk: kumochi_protocol::message::DEFAULT_HOLD_TO_TALK,
         screen_holds: kumochi_protocol::message::DEFAULT_SCREEN_HOLDS,
         show_screen: kumochi_protocol::message::DEFAULT_SHOW_SCREEN,
-    };
+    }
+}
+
+#[test]
+fn settings_frames_keep_their_connection_generation_and_authoritative_view() {
+    let link = attended("settings-view");
+    let events = patient(link.events);
+    let session = connected(next(&events));
+    let expected = settings_view();
     frame::write(
         &mut &link.control,
         &ControlToShell::Settings {
@@ -998,19 +1002,13 @@ fn real_handshake_writer_preserves_legacy_order_and_echoes_queued_welcome() {
         got.resize(data_bytes.len(), 0);
         (&peer_data).read_exact(&mut got).unwrap();
         assert_eq!(got, data_bytes);
-        let result = connect.join().unwrap();
-        match mode {
-            AudioSession::Legacy => assert_eq!(
-                result.unwrap().issue_origin,
-                IssueSession {
-                    incarnation: Incarnation(5),
-                    epoch: 128
-                },
-            ),
-            AudioSession::QueuedRequired => {
-                assert!(matches!(result, Err(super::LinkError::QueuedUnavailable)));
+        assert_eq!(
+            connect.join().unwrap().unwrap().issue_origin,
+            IssueSession {
+                incarnation: Incarnation(5),
+                epoch: 128
             }
-        }
+        );
     }
 }
 
@@ -1663,7 +1661,8 @@ fn the_brain_s_first_frames_with_the_account_view_keep_the_connection() {
         data: Arc::new(shell_data),
         issue_origin: issue_session,
     };
-    let link = thread::spawn(move || start.link.attend(connection, &start.events));
+    let link =
+        thread::spawn(move || start.link.attend(connection, &start.events) == Attendance::Lost);
     let events = patient(events);
     let session = connected(next(&events));
     assert_eq!(session.generation(), 1);
@@ -1755,7 +1754,7 @@ fn an_ended_connection_s_sends_and_credit_never_reach_the_next() {
                     epoch,
                 },
             };
-            start.link.attend(connection, &start.events)
+            start.link.attend(connection, &start.events) == Attendance::Lost
         })
     });
     let events = patient(events);
@@ -2072,7 +2071,7 @@ fn a_delete_answered_before_a_new_brain_never_fences_the_new_brain_s_runs() {
                     epoch: 1,
                 },
             };
-            start.link.attend(connection, &start.events)
+            start.link.attend(connection, &start.events) == Attendance::Lost
         })
     });
     let events = patient(events);
@@ -2844,4 +2843,960 @@ fn a_normal_session_has_no_output_and_still_lets_a_voice_hold_start() {
     );
     drop(link.control);
     assert!(link.link.join().expect("joined"), "the UI was still there");
+}
+#[test]
+fn queued_owner_refuses_turns_and_ends_both_pipes_on_withdrawal() {
+    use crate::link::output::Denied;
+    use kumochi_protocol::message::{GestureId, ScreenChoice};
+
+    let link = attended_queued("queued-owner-withdrawal");
+    let events = patient(link.events);
+    let session = connected(next(&events));
+    assert!(session.open());
+    assert_eq!(link.handle.output().view().unwrap().key, None);
+    assert!(matches!(
+        link.handle.output().acquire(GestureId(3)),
+        Err(Denied::Inhibited)
+    ));
+    assert!(!link.handle.send_data(
+        &session,
+        DataToBrain::TextSubmit {
+            turn: 1,
+            thread: None,
+            screen: ScreenChoice::None,
+            text: "early".into(),
+        }
+    ));
+    link.handle.output().end(session.generation() + 1);
+    assert!(session.open(), "a stale end cannot affect this pair");
+    link.handle.output().withdraw();
+    assert!(
+        !session.open(),
+        "withdrawal closes sends before waking the pipes"
+    );
+    queued_pair_closed(link.link, &link.control, &link.data);
+}
+
+#[test]
+fn queued_owner_start_deadline_is_not_extended_by_control_traffic() {
+    let start = Instant::now();
+    let link = attended_queued("queued-owner-deadline");
+    let events = patient(link.events);
+    let session = connected(next(&events));
+    let mut pongs = 0;
+    while session.open() {
+        assert!(
+            start.elapsed() < PATIENCE * 2,
+            "the startup deadline is absolute"
+        );
+        if frame::write(&mut &link.control, &ControlToShell::Ping, Pipe::Control).is_err() {
+            break;
+        }
+        match frame::read(&mut &link.control, Pipe::Control).unwrap() {
+            Some(ControlToBrain::Pong) => pongs += 1,
+            None => break,
+            Some(other) => panic!("unexpected control before registration: {other:?}"),
+        }
+        thread::sleep(Duration::from_millis(25));
+    }
+    assert!(pongs > 0, "the control reader was active before expiry");
+    queued_pair_closed(link.link, &link.control, &link.data);
+    assert!(!session.open());
+}
+
+fn queued_registration(control: &PipeClient) -> kumochi_protocol::message::OutputGeneration {
+    frame::write(
+        &mut &*control,
+        &ControlToShell::Settings {
+            view: kumochi_protocol::message::SettingsView {
+                talk_back: true,
+                ..settings_view()
+            },
+            answer: false,
+        },
+        Pipe::Control,
+    )
+    .expect("talk-back settings written");
+    match frame::read(&mut &*control, Pipe::Control).expect("read registration") {
+        Some(ControlToBrain::QueuedAudioOutput(24_000, output)) => output,
+        other => panic!("a 24 kHz queued registration, got {other:?}"),
+    }
+}
+
+fn acknowledge_queued(control: &PipeClient, output: kumochi_protocol::message::OutputGeneration) {
+    frame::write(
+        &mut &*control,
+        &ControlToShell::QueuedAudioRegistered(output),
+        Pipe::Control,
+    )
+    .expect("registered");
+    frame::write(&mut &*control, &ControlToShell::Ping, Pipe::Control).expect("ping");
+    assert_eq!(
+        frame::read(&mut &*control, Pipe::Control).expect("peer reads Pong"),
+        Some(ControlToBrain::Pong),
+        "the control reader has handled the prior ACK"
+    );
+}
+
+fn queued_text(turn: u32, text: &str) -> DataToBrain {
+    DataToBrain::TextSubmit {
+        turn,
+        thread: Some(ThreadId(1)),
+        screen: kumochi_protocol::message::ScreenChoice::None,
+        text: text.into(),
+    }
+}
+
+#[test]
+fn refused_queued_stop_closes_admission_before_background_pair_teardown() {
+    use super::output::Denied;
+
+    let link = attended_queued("queued-stop-refused");
+    let events = patient(link.events);
+    let session = connected(next(&events));
+    acknowledge_queued(&link.control, queued_registration(&link.control));
+    assert!(link.handle.admits_text(Some(&session)));
+    assert_eq!(
+        link.handle.output().stop(session.generation(), RunId(42)),
+        Err(Denied::Lost),
+    );
+    assert!(!session.open(), "the old pair cannot accept another send");
+    assert!(
+        !link
+            .handle
+            .send_data(&session, queued_text(1, "after failure"))
+    );
+    frame::write(&mut &link.control, &ControlToShell::Ping, Pipe::Control)
+        .expect("the OS pipe is still open");
+    assert_eq!(
+        frame::read(&mut &link.control, Pipe::Control).unwrap(),
+        Some(ControlToBrain::Pong)
+    );
+
+    let teardown = thread::spawn(move || link.handle.end(&session));
+    queued_pair_closed(link.link, &link.control, &link.data);
+    teardown.join().unwrap();
+}
+
+#[test]
+fn queued_replacement_with_unproved_quiet_needs_retry_without_clearing_debt() {
+    let _device = serialize_playback();
+    let (device, playback) = std::sync::mpsc::sync_channel(1);
+    let link = attended_queued_shared(
+        "queued-debt-old",
+        Arc::new(Shared {
+            fake_playback: Some(device),
+            ..Shared::default()
+        }),
+    );
+    let events = patient(link.events.clone());
+    let (session, output_generation) = queued_named_run(&link, &events);
+    let mut playback = stage_queued_pcm(&link.data, &playback, output_generation);
+    let deadline = Instant::now() + PATIENCE;
+    while !playback.ready() {
+        assert!(Instant::now() < deadline, "the old route stages audio");
+        thread::sleep(Duration::from_millis(2));
+    }
+    let mut samples = [0.0; 48];
+    playback.render(&mut samples);
+    assert_eq!(
+        samples.map(f32::to_bits),
+        [(9_000.0_f32 / 32_768.0).to_bits(); 48]
+    );
+    drop(link.control);
+    assert!(link.link.join().unwrap());
+
+    assert_refused_queued_replacement(&link.handle);
+    let deadline = Instant::now() + PATIENCE;
+    while !playback.stopped() {
+        assert!(
+            Instant::now() < deadline,
+            "the lost connection stops the original route"
+        );
+        thread::sleep(Duration::from_millis(2));
+    }
+    let mut tail = [99.0; 128];
+    playback.render(&mut tail);
+    assert!(tail[119..].iter().all(|sample| sample.to_bits() == 0));
+    assert_queued_retry_after_local_quiet(&link.handle, &session, "queued-debt-proven");
+}
+
+#[test]
+fn queued_no_source_disconnect_allows_retry_before_or_after_wire_quiet() {
+    for revoke_first in [false, true] {
+        let link = attended_queued("queued-no-source-old");
+        let events = patient(link.events.clone());
+        let (session, _) = queued_named_run(&link, &events);
+        assert!(!link.handle.admits_text(Some(&session)));
+        if revoke_first {
+            frame::write(
+                &mut &link.control,
+                &ControlToShell::SpeechRevoked { run: RunId(7) },
+                Pipe::Control,
+            )
+            .unwrap();
+            assert_eq!(
+                frame::read(&mut &link.control, Pipe::Control).unwrap(),
+                Some(ControlToBrain::SpeechStopped {
+                    run: RunId(7),
+                    cursor: None
+                })
+            );
+        }
+        drop(link.control);
+        assert!(link.link.join().unwrap());
+        assert_queued_retry_after_local_quiet(&link.handle, &session, "queued-no-source-retry");
+    }
+}
+
+fn queued_named_run(
+    link: &Attended,
+    events: &std::sync::mpsc::Receiver<LinkEvent>,
+) -> (Session, kumochi_protocol::message::OutputGeneration) {
+    let session = connected(next(events));
+    let output = queued_registration(&link.control);
+    acknowledge_queued(&link.control, output);
+    let text = queued_text(1, "old owner");
+    assert!(
+        link.handle.send_data(&session, text.clone()),
+        "the old pair admits its first turn"
+    );
+    assert_eq!(
+        frame::read(&mut &*link.data, Pipe::Data).expect("the old data pipe"),
+        Some(text),
+        "the old peer sees the exact typed submit"
+    );
+    frame::write(
+        &mut &link.control,
+        &run_state(
+            7,
+            ThreadId(1),
+            Phase::Thinking,
+            Some(RunOrigin::Typed { turn: 1 }),
+        ),
+        Pipe::Control,
+    )
+    .expect("the old peer names the accepted turn");
+    assert!(
+        matches!(next(events), LinkEvent::Settings { .. }),
+        "settings preceded the run"
+    );
+    assert!(
+        matches!(next(events), LinkEvent::RunState { run: RunId(7), .. }),
+        "the Shell bound the old worker"
+    );
+    (session, output)
+}
+
+fn assert_queued_retry_after_local_quiet(old: &LinkHandle, lost: &Session, label: &str) {
+    use super::output::{Denied, Retirement};
+    use kumochi_protocol::message::GestureId;
+
+    let deadline = Instant::now() + PATIENCE;
+    let output = old.output();
+    let mut token = loop {
+        match output.acquire(GestureId(1)) {
+            Ok(token) => break token,
+            Err(Denied::Busy | Denied::Inhibited) => {
+                assert!(
+                    Instant::now() < deadline,
+                    "the old run proved quiet locally"
+                );
+                thread::sleep(Duration::from_millis(2));
+            }
+            Err(reason) => panic!("unexpected capture refusal after disconnect: {reason:?}"),
+        }
+    };
+    while let Err((held, reason)) = output.retire(token, Retirement::NoMic) {
+        assert_eq!(
+            reason,
+            Denied::Busy,
+            "only brief owner contention may delay retirement"
+        );
+        assert!(Instant::now() < deadline, "the test inhibit retires");
+        token = held;
+        thread::sleep(Duration::from_millis(2));
+    }
+    let next_pair = attended_queued_shared(label, Arc::clone(&old.shared));
+    let events = patient(next_pair.events);
+    let session = connected(next(&events));
+    assert!(
+        session.generation() > lost.generation(),
+        "Retry admitted a new exact pair"
+    );
+    acknowledge_queued(&next_pair.control, queued_registration(&next_pair.control));
+    assert!(
+        !old.send_control(
+            lost,
+            ControlToBrain::Stop {
+                run: RunId(7),
+                revealed: Vec::new()
+            }
+        ),
+        "a stale Stop never reaches the replacement"
+    );
+    old.end(lost);
+    let text = queued_text(1, "fresh replacement");
+    assert!(
+        next_pair.handle.send_data(&session, text.clone()),
+        "the new owner accepts fresh intent"
+    );
+    assert_eq!(
+        frame::read(&mut &*next_pair.data, Pipe::Data).expect("the replacement data pipe"),
+        Some(text),
+        "the old pair's teardown did not close the new one"
+    );
+    next_pair.handle.end(&session);
+    queued_pair_closed(next_pair.link, &next_pair.control, &next_pair.data);
+}
+
+#[test]
+fn queued_report_refusal_closes_the_full_control_mailbox_and_parked_data_head() {
+    use kumochi_protocol::message::{SegmentId, SegmentStart};
+    use std::sync::atomic::Ordering;
+
+    let link = attended_queued("queued-report-refused");
+    let events = patient(link.events.clone());
+    let session = connected(next(&events));
+    let output_generation = queued_registration(&link.control);
+    acknowledge_queued(&link.control, output_generation);
+    let sent = queued_text(1, "old run");
+    assert!(link.handle.send_data(&session, sent.clone()));
+    assert_eq!(
+        frame::read(&mut &*link.data, Pipe::Data).unwrap(),
+        Some(sent)
+    );
+    frame::write(
+        &mut &link.control,
+        &run_state(
+            7,
+            ThreadId(1),
+            Phase::Thinking,
+            Some(RunOrigin::Typed { turn: 1 }),
+        ),
+        Pipe::Control,
+    )
+    .unwrap();
+    assert!(matches!(next(&events), LinkEvent::Settings { .. }));
+    assert!(matches!(
+        next(&events),
+        LinkEvent::RunState { run: RunId(7), .. }
+    ));
+
+    frame::write(
+        &mut &*link.data,
+        &DataToShell::SegmentQueued {
+            run: RunId(8),
+            segment: SegmentId(0),
+            step: None,
+            start: SegmentStart::Plain,
+            output_generation,
+        },
+        Pipe::Data,
+    )
+    .unwrap();
+    link.data.set_timeout(Some(Duration::from_millis(75)));
+    assert!(matches!(
+        frame::read::<DataToBrain>(&mut &*link.data, Pipe::Data),
+        Err(frame::FrameError::Io(_))
+    ));
+    link.data.set_timeout(Some(PATIENCE));
+    fill_queued_control_mailbox(&link, &session);
+
+    frame::write(
+        &mut &link.control,
+        &ControlToShell::SpeechRevoked { run: RunId(7) },
+        Pipe::Control,
+    )
+    .unwrap();
+    let limit = Instant::now() + Duration::from_secs(1);
+    while session.open() {
+        assert!(
+            Instant::now() < limit,
+            "refused old-run quiet must abort before the data head times out"
+        );
+        thread::sleep(Duration::from_millis(2));
+    }
+    queued_pair_closed(link.link, &link.control, &link.data);
+    link.handle
+        .shared
+        .hold_control_writer
+        .store(0, Ordering::Release);
+    assert_queued_retry_after_local_quiet(&link.handle, &session, "queued-report-refusal-retry");
+}
+
+fn fill_queued_control_mailbox(link: &Attended, session: &Session) {
+    use super::CONTROL_QUEUE;
+    use std::sync::atomic::Ordering;
+
+    let hold = &link.handle.shared.hold_control_writer;
+    hold.store(1, Ordering::Release);
+    frame::write(&mut &link.control, &ControlToShell::Ping, Pipe::Control)
+        .expect("trigger the exact control writer");
+    let limit = Instant::now() + Duration::from_secs(1);
+    while hold.load(Ordering::Acquire) != 2 {
+        assert!(
+            Instant::now() < limit,
+            "the real control writer parks before its next dequeue"
+        );
+        thread::sleep(Duration::from_millis(2));
+    }
+    for _ in 0..CONTROL_QUEUE {
+        assert!(
+            link.handle.send_control(session, ControlToBrain::Pong),
+            "the parked mailbox accepts its bounded capacity"
+        );
+    }
+    assert!(
+        !link.handle.send_control(session, ControlToBrain::Pong),
+        "the mailbox is saturated before reporting"
+    );
+}
+
+#[test]
+fn queued_refused_progress_preserves_only_the_original_callback_quiet() {
+    let _device = serialize_playback();
+    let (handle, lost, mut playback) = refused_queued_progress("queued-refused-progress");
+    assert_refused_queued_replacement(&handle);
+
+    let mut tail = [99.0; 128];
+    playback.render(&mut tail);
+    assert!(
+        tail[0] > 0.0,
+        "the original callback renders a real stop ramp"
+    );
+    assert!(
+        tail[119..].iter().all(|sample| sample.to_bits() == 0),
+        "the original ramp reaches silence"
+    );
+    assert_queued_retry_after_local_quiet(&handle, &lost, "queued-refused-progress-proven");
+    playback.render(&mut tail);
+    assert_eq!(
+        tail.map(f32::to_bits),
+        [0; 128],
+        "no old suffix after quiet"
+    );
+}
+
+#[test]
+fn queued_refused_progress_without_tail_becomes_unavailable() {
+    use super::{LinkState, output::RefusedTail};
+    use kumochi_protocol::message::AudioSession;
+
+    let _device = serialize_playback();
+    let (handle, _lost, mut playback) = refused_queued_progress("queued-unproved-progress");
+    let link = Link {
+        audio: AudioSession::QueuedRequired,
+        shared: Arc::clone(&handle.shared),
+        ..bare_link()
+    };
+    let (events, states) = async_channel::unbounded();
+    let (retry, retries) = async_channel::bounded(1);
+    retry
+        .try_send(())
+        .expect("queue a Retry before any quiet proof");
+    assert_eq!(
+        link.after_loss(&events, &retries, Attendance::Lost, None),
+        None,
+        "terminal loss does not choose a reconnect state"
+    );
+    assert!(
+        matches!(
+            states.try_recv(),
+            Ok(LinkEvent::State(LinkState::OutputUnavailable))
+        ),
+        "the normal link loop publishes terminal output status"
+    );
+    assert!(
+        matches!(states.try_recv(), Err(async_channel::TryRecvError::Empty)),
+        "terminal output publishes no Retry state"
+    );
+    assert_eq!(
+        retries.try_recv(),
+        Ok(()),
+        "terminal loss ignores even buffered Retry"
+    );
+    playback.render(&mut [0.0; 128]);
+    assert_eq!(
+        handle.output().wait_for_refused_tail(),
+        Some(RefusedTail::Unavailable),
+        "a callback delivered after the bound cannot reopen admission"
+    );
+    assert_refused_queued_replacement(&handle);
+}
+
+fn refused_queued_progress(label: &str) -> (LinkHandle, Session, FixturePlayback) {
+    use kumochi_protocol::message::{PROGRESS_INTERVAL_MS, SegmentId, SpeechRetirement};
+    use std::sync::atomic::Ordering;
+
+    let (device, opened) = std::sync::mpsc::sync_channel(1);
+    let link = attended_queued_shared(
+        label,
+        Arc::new(Shared {
+            fake_playback: Some(device),
+            ..Shared::default()
+        }),
+    );
+    let events = patient(link.events.clone());
+    let (session, output_generation) = queued_named_run(&link, &events);
+    fill_queued_control_mailbox(&link, &session);
+    let mut playback = stage_queued_pcm(&link.data, &opened, output_generation);
+    let start = Instant::now();
+    for _ in 0..=PROGRESS_INTERVAL_MS / 20 {
+        assert!(
+            session.open(),
+            "the mailbox remains full below the progress threshold"
+        );
+        while !playback.ready() {
+            assert!(
+                start.elapsed() < PATIENCE,
+                "the original worker stages real PCM"
+            );
+            thread::sleep(Duration::from_millis(2));
+        }
+        let mut frames = [0.0; 480];
+        playback.render(&mut frames);
+        assert_eq!(
+            frames.map(f32::to_bits),
+            [(9_000.0_f32 / 32_768.0).to_bits(); 480],
+            "all callback frames come from the original nonzero source"
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
+    let deadline = Instant::now() + Duration::from_secs(1);
+    while session.open() {
+        assert!(
+            Instant::now() < deadline,
+            "refused non-final progress aborts the old pair"
+        );
+        thread::sleep(Duration::from_millis(2));
+    }
+    assert!(
+        playback.stopped(),
+        "the original callback is fenced at pair loss"
+    );
+    queued_pair_closed(link.link, &link.control, &link.data);
+    let receipt = link
+        .handle
+        .shared
+        .refused_retirement
+        .lock()
+        .expect("the fixture report recorder is healthy")
+        .take()
+        .expect("the first refusal was SpeechRetired");
+    assert_eq!(
+        receipt,
+        SpeechRetirement {
+            run: RunId(7),
+            output: output_generation,
+            segment: SegmentId(0),
+            retired: 6_240,
+            heard: 6_240,
+            final_segment: false,
+        },
+        "the full mailbox refused non-final retirement for the original callback"
+    );
+    link.handle
+        .shared
+        .hold_control_writer
+        .store(0, Ordering::Release);
+    (link.handle, session, playback)
+}
+
+fn stage_queued_pcm(
+    mut data: &PipeClient,
+    opened: &std::sync::mpsc::Receiver<FixturePlayback>,
+    output_generation: kumochi_protocol::message::OutputGeneration,
+) -> FixturePlayback {
+    use kumochi_protocol::message::{SegmentId, SegmentStart, SpeechPcm};
+    use std::io::Write;
+
+    let (run, segment) = (RunId(7), SegmentId(0));
+    let announcement = DataToShell::SegmentQueued {
+        run,
+        segment,
+        step: None,
+        start: SegmentStart::Plain,
+        output_generation,
+    };
+    let pcm = (0..5).map(|seq| {
+        DataToShell::SpeechPcm(SpeechPcm {
+            run,
+            segment,
+            output_generation,
+            seq,
+            samples: vec![9_000; if seq == 0 { 480 } else { 2_400 }],
+            last: None,
+        })
+    });
+    let mut source = None;
+    let mut total = 0;
+    for (at, message) in std::iter::once(announcement).chain(pcm).enumerate() {
+        let bytes = frame::encode(&message, Pipe::Data).expect("bounded ingress frame");
+        total += u32::try_from(bytes.len()).expect("bounded frame length");
+        data.write_all(&bytes)
+            .expect("the original data pipe accepts PCM");
+        if at == 1 {
+            source = Some(
+                opened
+                    .recv_timeout(PATIENCE)
+                    .expect("the worker opens while still priming"),
+            );
+            thread::sleep(Duration::from_millis(20));
+        }
+    }
+    let mut credited = 0;
+    while credited < total {
+        let Some(DataToBrain::Credit { bytes }) =
+            frame::read(&mut data, Pipe::Data).expect("read the original data pipe")
+        else {
+            panic!("the original pair returns the staged ingress credit");
+        };
+        assert!(bytes > 0, "each ingress credit makes progress");
+        credited += bytes;
+    }
+    assert_eq!(
+        credited, total,
+        "all staged ingress is credited before holding the tail"
+    );
+    source.expect("the original callback opened")
+}
+
+fn assert_refused_queued_replacement(handle: &LinkHandle) {
+    use super::output::Denied;
+    use kumochi_protocol::message::{AudioSession, GestureId};
+
+    let (control, shell_control) = pair("queued-refused-tail-control");
+    let (data, shell_data) = pair("queued-refused-tail-data");
+    control.set_timeout(Some(PATIENCE));
+    data.set_timeout(Some(PATIENCE));
+    let (sender, receiver) = async_channel::unbounded();
+    let link = Link {
+        audio: AudioSession::QueuedRequired,
+        shared: Arc::clone(&handle.shared),
+        ..bare_link()
+    };
+    assert_eq!(
+        link.attend(
+            Connection {
+                control: Arc::new(shell_control),
+                data: Arc::new(shell_data),
+                issue_origin: IssueSession {
+                    incarnation: Incarnation(1),
+                    epoch: 93
+                },
+            },
+            &sender
+        ),
+        Attendance::Retry,
+        "the low-level pair cannot install an owner while local quiet is unproved"
+    );
+    assert!(
+        matches!(receiver.try_recv(), Err(async_channel::TryRecvError::Empty)),
+        "no connected state escaped the admission check"
+    );
+    assert_eq!(
+        frame::read::<ControlToBrain>(&mut &control, Pipe::Control)
+            .expect("read replacement control"),
+        None,
+        "no old speech report and no new registration on the refused pair"
+    );
+    assert_eq!(
+        frame::read::<DataToBrain>(&mut &data, Pipe::Data).expect("read replacement data"),
+        None,
+        "the refused pair has no data admission"
+    );
+    assert!(
+        matches!(
+            handle.output().acquire(GestureId(1)),
+            Err(Denied::Inhibited)
+        ),
+        "capture remains fenced until the exact callback proves its tail"
+    );
+}
+
+#[test]
+fn queued_fresh_intent_and_full_enqueue_do_not_replay_or_reserve_a_turn() {
+    use super::DataOut;
+
+    let link = attended_queued("queued-intent");
+    let events = patient(link.events);
+    let session = connected(next(&events));
+    let output = queued_registration(&link.control);
+    assert!(
+        !link.handle.admits_text(Some(&session)),
+        "registration is not an ACK"
+    );
+    assert!(!link.handle.send_data(&session, queued_text(1, "early")));
+    acknowledge_queued(&link.control, output);
+    assert!(link.handle.admits_text(Some(&session)));
+
+    let (full, blocked) = async_channel::bounded(1);
+    assert!(full.try_send(DataOut::Credit).is_ok());
+    let data = {
+        let mut outbox = link.handle.shared.outbox.lock().unwrap();
+        std::mem::replace(&mut outbox.as_mut().unwrap().data, full)
+    };
+    assert!(!link.handle.send_data(&session, queued_text(1, "full")));
+    assert!(matches!(blocked.try_recv(), Ok(DataOut::Credit)));
+    assert!(matches!(
+        blocked.try_recv(),
+        Err(async_channel::TryRecvError::Empty)
+    ));
+    assert!(
+        link.handle.admits_text(Some(&session)),
+        "failed enqueue must not reserve a turn"
+    );
+    link.handle
+        .shared
+        .outbox
+        .lock()
+        .unwrap()
+        .as_mut()
+        .unwrap()
+        .data = data;
+
+    assert!(link.handle.send_data(&session, queued_text(1, "fresh")));
+    assert_eq!(
+        frame::read(&mut &*link.data, Pipe::Data).unwrap(),
+        Some(queued_text(1, "fresh"))
+    );
+    assert!(
+        !link.handle.admits_text(Some(&session)),
+        "successful enqueue reserves exactly one turn"
+    );
+    assert!(!link.handle.send_data(&session, queued_text(2, "overlap")));
+    drop(link.control);
+    assert!(link.link.join().expect("joined"));
+}
+
+#[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one attended pair covers control progress, exact head credit, and its late PCM"
+)]
+fn queued_plain_head_waits_for_the_exact_named_run_without_blocking_control() {
+    use kumochi_protocol::message::{SegmentId, SegmentStart, SpeechPcm};
+
+    let link = attended_queued("queued-bind-head");
+    let events = patient(link.events);
+    let session = connected(next(&events));
+    let output_generation = queued_registration(&link.control);
+    assert!(matches!(next(&events), LinkEvent::Settings { .. }));
+    acknowledge_queued(&link.control, output_generation);
+    let head = DataToShell::SegmentQueued {
+        run: RunId(8),
+        segment: SegmentId(0),
+        step: None,
+        start: SegmentStart::Plain,
+        output_generation,
+    };
+    let bytes = u32::try_from(frame::encode(&head, Pipe::Data).expect("frame").len()).unwrap();
+    frame::write(&mut &*link.data, &head, Pipe::Data).expect("early head");
+    link.data.set_timeout(Some(Duration::from_millis(75)));
+    let no_credit = || {
+        let outcome = frame::read::<DataToBrain>(&mut &*link.data, Pipe::Data);
+        assert!(
+            matches!(outcome, Err(frame::FrameError::Io(_))),
+            "the read must time out, not return a frame or EOF: {outcome:?}"
+        );
+    };
+    no_credit();
+    frame::write(&mut &link.control, &ControlToShell::Ping, Pipe::Control).expect("ping");
+    assert_eq!(
+        frame::read(&mut &link.control, Pipe::Control).unwrap(),
+        Some(ControlToBrain::Pong)
+    );
+    for (turn, run) in [(1, 7), (2, 8)] {
+        let text = queued_text(turn, "name this run");
+        assert!(link.handle.send_data(&session, text.clone()));
+        assert_eq!(
+            frame::read(&mut &*link.data, Pipe::Data).unwrap(),
+            Some(text)
+        );
+        frame::write(
+            &mut &link.control,
+            &run_state(
+                run,
+                ThreadId(1),
+                Phase::Thinking,
+                Some(RunOrigin::Typed { turn }),
+            ),
+            Pipe::Control,
+        )
+        .expect("name");
+        assert!(
+            matches!(next(&events), LinkEvent::RunState { run: RunId(actual), .. } if actual == run)
+        );
+        if run == 7 {
+            no_credit();
+            frame::write(
+                &mut &link.control,
+                &ControlToShell::SpeechRevoked { run: RunId(7) },
+                Pipe::Control,
+            )
+            .expect("stop the first run");
+            assert!(matches!(
+                frame::read::<ControlToBrain>(&mut &link.control, Pipe::Control).unwrap(),
+                Some(ControlToBrain::SpeechStopped { run: RunId(7), .. })
+            ));
+        }
+    }
+    link.data.set_timeout(Some(PATIENCE));
+    assert_eq!(
+        frame::read(&mut &*link.data, Pipe::Data).unwrap(),
+        Some(DataToBrain::Credit { bytes })
+    );
+    link.data.set_timeout(Some(Duration::from_millis(75)));
+    no_credit();
+    frame::write(
+        &mut &link.control,
+        &ControlToShell::SpeechRevoked { run: RunId(8) },
+        Pipe::Control,
+    )
+    .expect("revoke the bound run");
+    assert_eq!(
+        frame::read::<ControlToBrain>(&mut &link.control, Pipe::Control).unwrap(),
+        Some(ControlToBrain::SpeechStopped {
+            run: RunId(8),
+            cursor: None
+        })
+    );
+    let late = DataToShell::SpeechPcm(SpeechPcm {
+        run: RunId(8),
+        segment: SegmentId(0),
+        output_generation,
+        seq: 0,
+        samples: Vec::new(),
+        last: None,
+    });
+    link.data.set_timeout(Some(PATIENCE));
+    frame::write(&mut &*link.data, &late, Pipe::Data).expect("late already-charged PCM");
+    assert_eq!(
+        frame::read::<DataToBrain>(&mut &*link.data, Pipe::Data).unwrap(),
+        Some(DataToBrain::Credit {
+            bytes: u32::try_from(frame::encode(&late, Pipe::Data).unwrap().len()).unwrap(),
+        })
+    );
+    drop(link.control);
+    assert!(link.link.join().expect("joined"));
+}
+
+#[test]
+fn queued_wrong_or_duplicate_registration_ack_ends_the_pair() {
+    use kumochi_protocol::message::OutputGeneration;
+
+    for duplicate in [false, true] {
+        let link = attended_queued(if duplicate {
+            "queued-ack-duplicate"
+        } else {
+            "queued-ack-wrong"
+        });
+        let events = patient(link.events);
+        let _session = connected(next(&events));
+        let output = queued_registration(&link.control);
+        if duplicate {
+            frame::write(
+                &mut &link.control,
+                &ControlToShell::QueuedAudioRegistered(output),
+                Pipe::Control,
+            )
+            .expect("first ack");
+        }
+        let invalid = if duplicate {
+            output
+        } else {
+            OutputGeneration(output.0 + 1)
+        };
+        frame::write(
+            &mut &link.control,
+            &ControlToShell::QueuedAudioRegistered(invalid),
+            Pipe::Control,
+        )
+        .expect("invalid ack");
+        queued_pair_closed(link.link, &link.control, &link.data);
+    }
+}
+
+#[test]
+fn queued_speech_start_or_scene_promise_closes_without_data_credit() {
+    use kumochi_protocol::message::{SceneId, SegmentId, SegmentStart, SpeechPromise};
+    use kumochi_scene::{Record, parse_record};
+
+    let Record::Step(step) = parse_record(br#"{"step":{"id":"speech-step"}}"#).unwrap() else {
+        panic!("step");
+    };
+    for promise in [false, true] {
+        let link = attended_queued(if promise {
+            "queued-promise"
+        } else {
+            "queued-speech-start"
+        });
+        let events = patient(link.events);
+        let _session = connected(next(&events));
+        let output = queued_registration(&link.control);
+        frame::write(
+            &mut &link.control,
+            &ControlToShell::QueuedAudioRegistered(output),
+            Pipe::Control,
+        )
+        .expect("registered");
+        frame::write(&mut &link.control, &ControlToShell::Ping, Pipe::Control).expect("ping");
+        assert_eq!(
+            frame::read(&mut &link.control, Pipe::Control).unwrap(),
+            Some(ControlToBrain::Pong)
+        );
+        let segment = SegmentId(0);
+        let run = RunId(8);
+        let unsupported = if promise {
+            DataToShell::SceneStepCommit {
+                run,
+                scene: SceneId(1),
+                index: 0,
+                step: step.clone(),
+                speech: Some(SpeechPromise {
+                    output_generation: output,
+                    segment,
+                }),
+            }
+        } else {
+            DataToShell::SegmentQueued {
+                run,
+                segment,
+                step: None,
+                start: SegmentStart::Speech,
+                output_generation: output,
+            }
+        };
+        frame::write(&mut &*link.data, &unsupported, Pipe::Data).expect("unsupported frame");
+        queued_pair_closed(link.link, &link.control, &link.data);
+        assert!(matches!(next(&events), LinkEvent::Settings { .. }));
+        assert!(matches!(
+            events.recv_timeout(PATIENCE),
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected)
+        ));
+    }
+}
+
+fn queued_pair_closed(link: thread::JoinHandle<bool>, control: &PipeClient, data: &PipeClient) {
+    let (done, joined) = std::sync::mpsc::channel();
+    thread::spawn(move || {
+        let _finished = done.send(link.join().expect("the attended link didn't panic"));
+    });
+    assert_eq!(
+        joined.recv_timeout(PATIENCE),
+        Ok(true),
+        "the link completed pair teardown without UI help"
+    );
+    assert_eq!(
+        frame::read::<ControlToBrain>(&mut &*control, Pipe::Control)
+            .expect("the peer reads control EOF"),
+        None,
+        "the original control pipe was closed"
+    );
+    assert_eq!(
+        frame::read::<DataToBrain>(&mut &*data, Pipe::Data).expect("the peer reads data EOF"),
+        None,
+        "the original data pipe was closed"
+    );
 }

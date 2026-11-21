@@ -1,6 +1,6 @@
 # The speaker
 
-The dormant cpal seam does not change normal startup or the legacy test opener. Its owning
+The internal queued CPAL path does not change normal startup or the legacy test opener. Its owning
 worker can open a paused float stream at the default endpoint rate and feed bounded 24 kHz
 mono packets. It converts on the worker through `kumochi-audio`, which also serves brain
 speech and microphone input, then fills a preallocated pool of device-format blocks. The
@@ -20,10 +20,10 @@ source it accepted. The callback publishes those observations into a bounded rin
 latches the last non-silent frame independently, including the ramp; missing timing stays
 unknown. Neither filler nor the ramp advances the source cursor.
 
-The dormant `speaker::queued` state keeps one bounded source queue. Admission or stale
+The `speaker::queued` state keeps one bounded source queue per run. Admission or stale
 discard returns ingress byte credit once; consumption or discard frees source capacity.
-An old logical output generation returns its credit before run-order checks and cannot take
-a sequence slot. Timed commands settle the prior playback interval before changing
+An old logical output generation reaching the worker cannot take a sequence slot; the link
+rejects queued frames from a mismatched output owner. Timed commands settle the prior playback interval before changing
 eligibility: Pause keeps fractional virtual time, and Stop settles only due evidence before
 discarding and never admits more input. Stale open results do not settle the clock.
 
@@ -63,7 +63,19 @@ without waiting for the device call to return or starting a second stream.
 Loss, an invalid observation, or overflow enters the same fenced recovery path. A
 reroute replaces the stream instead of assuming that old endpoint timing still applies.
 An xrun rechecks refill readiness on every tick, even without new ingress.
-No production opener starts this owner, and no wire message or hold admission changes here.
+Only an authoritative typed RunState starts this worker on an internally selected queued pair.
+
+The queued link keeps its authenticated pair in the existing output owner. This does not reserve a
+legacy tail, grant capture, or accept turns before the matching registration receipt. Ending or withdrawing
+that pair drops its run input before aborting both pipes and closing both writer mailboxes.
+A worker's exact known-tail stop report can still pay its local quiet debt after disconnection.
+It cannot send that old receipt to another pair. A live pair needs the report queued before
+admitting another turn; a refused live report ends the pair. After an earlier retirement report
+is refused, the original worker can observe its fenced callback for at most 500 ms without
+feeding audio or sending another report. That local proof doesn't release the device permit;
+the backend still owns disposal. Unknown tails still block replacement. An
+absolute startup deadline ends the same pair even while control traffic continues. Ordinary
+launch still selects Legacy; there is no user-facing queued selector or fallback.
 
 `kumochi_shell_core::speaker` owns one connection's output device: it keeps the run's queued
 speech, writes it to the device, and decides from the device's own clock which samples played.

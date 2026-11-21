@@ -203,7 +203,9 @@ fn run(method: Method, label: &str) {
         let (brain_data, shell_data) = pair(&format!("{label}-{workload}-data"));
         let (brain_control, shell_control) = pair(&format!("{label}-{workload}-control"));
         let (events, received) = async_channel::unbounded();
-        let credit = super::Credit {
+        let credit = super::SessionIo {
+            queued: false,
+            control: None,
             bytes: std::sync::atomic::AtomicU32::new(0),
             wake: async_channel::bounded(1).0.downgrade(),
         };
@@ -212,11 +214,12 @@ fn run(method: Method, label: &str) {
             Method::Current => {
                 super::read_data(
                     &shell_data,
-                    &shell_control,
+                    || shell_control.abort(),
                     &events,
                     GENERATION,
                     None,
                     &credit,
+                    None,
                 );
             }
         });

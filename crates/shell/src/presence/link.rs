@@ -9,8 +9,8 @@ use crate::drawing::{Broken, Chunk, Effect};
 use crate::link::{Batch, LinkEvent, LinkState};
 use crate::settings::Update;
 use kumochi_protocol::message::{
-    AccountView, ConnectionsView, ControlToBrain, DataToShell, HeldScreen, Phase, RunId, RunOrigin,
-    ScreenHolds, ScreenOff, SettingsView, ThreadId, UserError,
+    AccountView, AudioSession, ConnectionsView, ControlToBrain, DataToShell, HeldScreen, Phase,
+    RunId, RunOrigin, ScreenHolds, ScreenOff, SettingsView, ThreadId, UserError,
 };
 use kumochi_scene::deferred::Deferred;
 use kumochi_shell_core::link::output::Denied;
@@ -762,7 +762,11 @@ impl Presence {
                         Self::after_stop(&this, cx);
                     })
                 }
-                Err(Denied::Busy) => {
+                Err(reason)
+                    if reason == Denied::Busy
+                        || reason == Denied::Lost
+                            && self.link.audio_session() == AudioSession::QueuedRequired =>
+                {
                     *tries = 0;
                     let session = session.clone();
                     let end = self.end_session(&session, cx);

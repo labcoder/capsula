@@ -242,6 +242,7 @@ fn any_session_owner_ending_revokes_only_its_own_live_flag() {
     let old = Session::detached(1, Incarnation(1));
     let current = Session::detached(2, Incarnation(1));
     let writer = EndSession {
+        queued: None,
         alive: old.alive(),
         shared: Arc::default(),
     };

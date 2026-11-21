@@ -6,6 +6,7 @@ status-connecting = Starting…
 status-connected = Ready
 status-reconnecting = Reconnecting…
 status-failed = Can't reach Kumochi's background process.
+status-output-unavailable = Couldn't confirm that speech stopped. Restart the app to reconnect.
 action-retry = Retry
 action-stop = Stop
 action-quit = Quit

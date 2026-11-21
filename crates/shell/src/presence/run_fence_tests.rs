@@ -217,6 +217,399 @@ fn escape_stops_the_speaker_after_the_brain_and_never_without_it(cx: &mut TestAp
     assert_eq!(stops(&commands), [], "the brain wasn't told");
 }
 
+#[cfg(all(windows, debug_assertions))]
+#[test]
+fn legacy_authenticated_pair_still_admits_and_stops_a_typed_run() {
+    use crate::link::{LinkEvent, fixture};
+    use kumochi_protocol::message::{AudioSession, DataToBrain, RunOrigin, ScreenChoice};
+
+    let (id, hello, brain) = kumochi_brain::ipc::offline_audio_peer("5000 text Late.".into());
+    let pipe = fixture::authenticated(id, hello, AudioSession::Legacy);
+    let events = fixture::patient(pipe.events);
+    let session = fixture::connected(fixture::next(&events));
+    let thread = loop {
+        if let LinkEvent::Settings { view, .. } = fixture::next(&events) {
+            break view.main_thread;
+        }
+    };
+    assert!(pipe.handle.send_data(
+        &session,
+        DataToBrain::TextSubmit {
+            turn: 1,
+            thread: Some(thread),
+            screen: ScreenChoice::None,
+            text: "legacy turn".into(),
+        }
+    ));
+    let run = loop {
+        if let LinkEvent::RunState {
+            run, phase, origin, ..
+        } = fixture::next(&events)
+        {
+            assert_eq!(
+                (phase, origin),
+                (Phase::Thinking, Some(RunOrigin::Typed { turn: 1 }))
+            );
+            break run;
+        }
+    };
+    assert!(pipe.handle.send_control(
+        &session,
+        ControlToBrain::Stop {
+            run,
+            revealed: Vec::new()
+        }
+    ));
+    loop {
+        if let LinkEvent::RunState {
+            run: current,
+            phase,
+            ..
+        } = fixture::next(&events)
+        {
+            assert_eq!((current, phase), (run, Phase::Interrupted));
+            break;
+        }
+    }
+    pipe.handle.end(&session);
+    assert!(pipe.link.join().expect("Shell link joined"));
+    assert!(brain.join().expect("Brain joined"));
+}
+
+#[cfg(all(windows, debug_assertions))]
+fn submit_draft(owner: &Entity<Presence>, draft: &'static str, cx: &mut TestAppContext) {
+    owner.update(cx, |owner, cx| {
+        let text = owner.text.as_ref().unwrap();
+        text.window
+            .update(cx, |_, window, cx| {
+                text.input
+                    .update(cx, |input, cx| input.set_value(draft, window, cx));
+            })
+            .unwrap();
+        owner.submit(cx).expect("one fresh composer action");
+    });
+}
+
+#[cfg(all(windows, debug_assertions))]
+#[gpui::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one authenticated session from early intent through active playback and Esc"
+)]
+fn queued_plain_escape_stops_active_audio_while_brain_data_credit_is_exhausted(
+    cx: &mut TestAppContext,
+) {
+    use crate::link::{Batch, LinkEvent, fixture};
+    use kumochi_protocol::message::{AudioSession, DataToShell};
+    use std::time::{Duration, Instant};
+
+    const WAIT: Duration = Duration::from_secs(3);
+    fn wait(label: &str, mut ready: impl FnMut() -> bool) {
+        let limit = Instant::now() + WAIT;
+        while !ready() {
+            assert!(
+                Instant::now() < limit,
+                "{label} before the fixture deadline"
+            );
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    }
+    let _device = fixture::serialize_playback();
+    let script = "0 text Distinct sound. More\n0 step kept\n1800 step too late\n5000 text Never.";
+    let (id, hello, probe, brain) = kumochi_brain::ipc::offline_plain_peer(script.into(), 2_200);
+    let pipe = fixture::authenticated(id, hello, AudioSession::QueuedRequired);
+    let events = fixture::patient(pipe.events);
+    let owner = super::test_fixture::presence(cx);
+    owner.update(cx, |owner, _| owner.link = pipe.handle.clone());
+    let apply = |event, cx: &mut TestAppContext| {
+        owner.update(cx, |owner, cx| {
+            owner.link_events(Batch::Plain(vec![event]), cx).unwrap();
+        });
+    };
+    let session = fixture::connected(fixture::next(&events));
+    apply(LinkEvent::Connected(session.clone()), cx);
+    loop {
+        let event = fixture::next(&events);
+        let settings = matches!(&event, LinkEvent::Settings { .. });
+        apply(event, cx);
+        if settings {
+            break;
+        }
+    }
+    assert!(
+        !pipe.handle.admits_text(Some(&session)),
+        "the actual ACK is still withheld"
+    );
+    submit_draft(&owner, "before ACK", cx);
+    owner.read_with(cx, |owner, cx| {
+        assert_eq!(
+            owner.text.as_ref().unwrap().input.read(cx).value().as_ref(),
+            "before ACK"
+        );
+    });
+    probe.release_ack();
+    wait("exact ACK", || pipe.handle.admits_text(Some(&session)));
+    std::thread::sleep(Duration::from_millis(5_100));
+    assert!(
+        session.open(),
+        "an idle data read outlives the handshake timeout"
+    );
+    submit_draft(&owner, "after ACK", cx);
+
+    let run = loop {
+        let event = fixture::next(&events);
+        assert!(!matches!(event, LinkEvent::RunState { .. }));
+        let early = match &event {
+            LinkEvent::Data {
+                message: DataToShell::AssistantText { run, .. },
+                ..
+            } => Some(*run),
+            _ => None,
+        };
+        apply(event, cx);
+        if let Some(run) = early {
+            break run;
+        }
+    };
+    assert!(matches!(
+        pipe.playback.try_recv(),
+        Err(std::sync::mpsc::TryRecvError::Empty)
+    ));
+    probe.release_run();
+    let (mut answering, mut drawn) = (false, false);
+    while !answering || !drawn {
+        let event = fixture::next(&events);
+        answering |= matches!(&event, LinkEvent::RunState { run: current, phase: Phase::Answering, .. } if *current == run);
+        drawn |= matches!(&event, LinkEvent::Data { message: DataToShell::StepCommit { run: current, .. }, .. } if *current == run);
+        apply(event, cx);
+    }
+    owner.read_with(cx, |owner, _| assert!(owner.runs.drawing()));
+    let mut playback = pipe
+        .playback
+        .recv_timeout(WAIT)
+        .expect("the real worker opened its fake device");
+    let mut samples = [0.0; 48];
+    wait("worker stages real PCM", || playback.ready());
+    playback.render(&mut samples);
+    assert_eq!(
+        samples.map(f32::to_bits),
+        [(15_430.0_f32 / 32_768.0).to_bits(); 48]
+    );
+    wait("Brain data queue exhausts its credit", || {
+        if playback.ready() {
+            playback.render(&mut samples);
+        }
+        probe.data_blocked()
+    });
+    assert!(!playback.stopped());
+    owner.read_with(cx, |owner, _| assert_eq!(owner.runs.stoppable(), Some(run)));
+    assert!(!pipe.handle.admits_text(Some(&session)));
+    wait("returned Shell credit reaches Brain", || {
+        probe.data_credits().0 > 0
+    });
+    assert_eq!(probe.data_credits().1, 0);
+    wait(
+        "source remains after Brain data credit is exhausted",
+        || playback.ready(),
+    );
+    fixture::with_outbox_held(&pipe.handle, &session, || {
+        playback.render(&mut samples);
+        assert_eq!(
+            samples.map(f32::to_bits),
+            [(15_430.0_f32 / 32_768.0).to_bits(); 48],
+            "the callback still renders the identifiable source immediately before Esc"
+        );
+        escape(&owner, cx);
+        owner.read_with(cx, |owner, _| {
+            assert_eq!(
+                owner.runs.stoppable(),
+                None,
+                "Esc fenced the drawn run while the exact outbox was still locked"
+            );
+        });
+    });
+    wait("local fence and Brain Stop on control", || {
+        playback.stopped() && probe.stop() == run
+    });
+    assert_eq!(
+        probe.data_credits().1,
+        0,
+        "Brain took Stop before applying credit"
+    );
+    assert_eq!(
+        probe.quiet(),
+        RunId(0),
+        "the physical tail has not been confirmed"
+    );
+    assert!(
+        !pipe.handle.admits_text(Some(&session)),
+        "the unconfirmed tail still owns output"
+    );
+    let mut after = [99.0; 128];
+    playback.render(&mut after);
+    assert!(after[119..].iter().all(|sample| sample.to_bits() == 0));
+    playback.render(&mut after);
+    assert_eq!(after.map(f32::to_bits), [0; 128]);
+    wait("original run's quiet receipt", || probe.quiet() == run);
+    assert!(
+        probe.heard() > 0,
+        "the original run reports the prefix it actually rendered"
+    );
+    loop {
+        let event = fixture::next(&events);
+        let interrupted = matches!(&event, LinkEvent::RunState { run: current, phase: Phase::Interrupted, .. } if *current == run);
+        apply(event, cx);
+        if interrupted {
+            break;
+        }
+    }
+
+    pipe.handle.end(&session);
+    assert!(pipe.link.join().expect("Shell link joined"));
+    assert!(brain.join().expect("Brain joined"));
+}
+
+#[cfg(all(windows, debug_assertions))]
+#[gpui::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "both naturally completed turns share one real authenticated session"
+)]
+fn queued_authenticated_natural_completion_admits_a_fresh_typed_turn(cx: &mut TestAppContext) {
+    use crate::link::{Batch, LinkEvent, fixture};
+    use kumochi_protocol::message::{AudioSession, DataToShell, RunOrigin};
+    use std::time::{Duration, Instant};
+
+    let _device = fixture::serialize_playback();
+    let (id, hello, probe, brain) =
+        kumochi_brain::ipc::offline_plain_peer("0 text Distinct sound. End.".into(), 8);
+    probe.release_ack();
+    probe.release_run();
+    probe.allow_data_credit();
+    let pipe = fixture::authenticated(id, hello, AudioSession::QueuedRequired);
+    let events = fixture::patient(pipe.events);
+    let owner = super::test_fixture::presence(cx);
+    let session = fixture::connected(fixture::next(&events));
+    owner.update(cx, |owner, cx| {
+        owner.link = pipe.handle.clone();
+        owner
+            .link_events(
+                Batch::Plain(vec![LinkEvent::Connected(session.clone())]),
+                cx,
+            )
+            .unwrap();
+    });
+    let apply = |event, cx: &mut TestAppContext| {
+        owner.update(cx, |owner, cx| {
+            owner.link_events(Batch::Plain(vec![event]), cx).unwrap();
+        });
+    };
+    let ready = Instant::now() + Duration::from_secs(3);
+    let mut settings = false;
+    while !settings || !pipe.handle.admits_text(Some(&session)) {
+        assert!(
+            Instant::now() < ready,
+            "Presence applies Settings and the exact ACK arrives"
+        );
+        if let Ok(event) = events.recv_timeout(Duration::from_millis(5)) {
+            settings |= matches!(&event, LinkEvent::Settings { .. });
+            apply(event, cx);
+        }
+    }
+    let mut prior = RunId(0);
+    for (turn, draft) in [(1, "the first turn"), (2, "a fresh second turn")] {
+        submit_draft(&owner, draft, cx);
+        owner.read_with(cx, |owner, cx| {
+            assert!(
+                owner
+                    .text
+                    .as_ref()
+                    .unwrap()
+                    .input
+                    .read(cx)
+                    .value()
+                    .is_empty(),
+                "the exact session accepted typed turn {turn}; refusal = {:?}",
+                owner.refusal
+            );
+        });
+        let (mut named, mut done, mut ended) = (None, None, None);
+        let (mut playback, mut heard) = (None, false);
+        let mut last_phase = None;
+        let deadline = Instant::now() + Duration::from_secs(4);
+        let run = loop {
+            assert!(
+                Instant::now() < deadline,
+                "turn {turn} finishes without Esc: named={named:?}, phase={last_phase:?}, done={done:?}, ended={ended:?}, quiet={:?}, open={}, heard={heard}, playback={}, credits={:?}",
+                probe.quiet(),
+                session.open(),
+                playback.is_some(),
+                probe.data_credits()
+            );
+            for event in events.try_iter() {
+                if let LinkEvent::RunState { phase, .. } = &event {
+                    last_phase = Some(*phase);
+                }
+                match &event {
+                    LinkEvent::RunState {
+                        run,
+                        phase: Phase::Thinking,
+                        origin,
+                        ..
+                    } => {
+                        assert_eq!(*origin, Some(RunOrigin::Typed { turn }));
+                        named = Some(*run);
+                    }
+                    LinkEvent::RunState {
+                        run,
+                        phase: Phase::Done,
+                        ..
+                    } => done = Some(*run),
+                    LinkEvent::Data {
+                        message: DataToShell::RunEnd { run },
+                        ..
+                    } => ended = Some(*run),
+                    _ => {}
+                }
+                apply(event, cx);
+            }
+            if let Some(run) = named
+                && done == Some(run)
+                && ended == Some(run)
+                && probe.quiet() == run
+            {
+                break run;
+            }
+            if playback.is_none() {
+                playback = pipe.playback.try_recv().ok();
+            }
+            if let Some(playback) = &mut playback
+                && (playback.ready() || playback.stopped())
+            {
+                let mut samples = [0.0; 48];
+                playback.render(&mut samples);
+                heard |= samples.contains(&(15_430.0_f32 / 32_768.0));
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        };
+        if turn == 1 {
+            assert!(
+                heard && probe.heard() > 0,
+                "the first naturally completed run rendered its source and reported a heard prefix"
+            );
+        }
+        assert!(run > prior);
+        assert!(pipe.handle.admits_text(Some(&session)));
+        prior = run;
+    }
+    let (received, applied) = probe.data_credits();
+    assert!(applied > 0 && received >= applied);
+    assert_eq!(probe.stop(), RunId(0), "both runs finished naturally");
+    pipe.handle.end(&session);
+    assert!(pipe.link.join().expect("Shell link joined"));
+    assert!(brain.join().expect("Brain joined"));
+}
+
 fn escape(owner: &Entity<Presence>, cx: &mut TestAppContext) {
     owner.update(cx, |owner, cx| {
         owner.activity =

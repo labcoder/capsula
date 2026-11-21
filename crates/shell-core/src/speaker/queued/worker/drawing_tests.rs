@@ -426,10 +426,13 @@ fn failed_backend_start_and_idle_exit_notify_without_an_ingress_packet() {
             origin,
             drawing,
             |_| panic!("no credit"),
-            |report| {
-                reports.push(report);
-                true
-            },
+            (
+                |report| {
+                    reports.push(report);
+                    true
+                },
+                |_| panic!("the healthy worker did not refuse a report"),
+            ),
             |_, provided| {
                 assert_eq!(provided, origin);
                 if fail {
@@ -501,6 +504,7 @@ fn refused_ordered_delivery_closes_ingress_and_preserves_only_the_accepted_prefi
                 attempts += 1;
                 send.try_send(report).is_ok()
             },
+            None::<fn(bool)>,
         );
         assert_eq!(attempts, capacity + 1);
         assert_eq!(received.try_iter().collect::<Vec<_>>(), ordered[..capacity]);

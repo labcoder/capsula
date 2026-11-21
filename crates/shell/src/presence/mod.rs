@@ -431,7 +431,7 @@ impl Presence {
         }
         self.activity = activity;
         if let Err(error) = self.sync_escape(cx) {
-            self.end_scene_connection();
+            self.end_scene_connection(cx);
             self.runs.disconnected();
             self.draw_changed_at(now, cx);
             self.activity = Activity {
@@ -849,6 +849,7 @@ fn status_text(state: LinkState) -> Text {
         LinkState::Connected => Text::Connected,
         LinkState::Reconnecting => Text::Reconnecting,
         LinkState::Failed => Text::Failed,
+        LinkState::OutputUnavailable => Text::OutputUnavailable,
     }
 }
 
