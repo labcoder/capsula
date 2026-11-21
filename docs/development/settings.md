@@ -235,7 +235,9 @@ SettingsView over synthetic snapshots with no Presence owner. Account commands c
 Manage usage is inert. State and appearance flags reject missing, mistyped or duplicate
 values; the fixture requires a bounded quit deadline and quits automatically. The module,
 snapshot factory and fixture-only view state are excluded from release builds, which refuse
-the fixture flags. These renders prove UI states, not real authentication or credential cleanup.
+the fixture flags. Valid Accounts fixtures bypass ordinary logging. If diagnostic flags are invalid
+and the shell log can be opened, it records one fixed reason with no argument values before exiting.
+These renders prove UI states, not real authentication or credential cleanup.
 `constrained` keeps the normal 768×544 logical window while using 24 px base text, rather
 than growing the window with the text. The existing Settings content region owns scrolling.
 

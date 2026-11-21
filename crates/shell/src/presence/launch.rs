@@ -4,8 +4,28 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use super::OpenError;
 use super::geometry::Position;
+
+/// Why the shell refused these diagnostic flags; no argument values are retained.
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum LaunchError {
+    #[error("--quit-after-ms must be between 1 and 120000")]
+    QuitDelay,
+    #[error("--esc-fixture needs --quit-after-ms or --smoke, so global Esc is always given back")]
+    EscFixtureDeadline,
+    #[error("--gate-observer and --receipt-fixture need --quit-after-ms or --smoke")]
+    ObserverDeadline,
+    #[error("--receipt-fixture needs --gate-observer and comes at most once")]
+    ReceiptFixture,
+    #[error(
+        "--draw-timing requires --gate-observer, cannot accompany --receipt-fixture, and comes at most once"
+    )]
+    DrawTiming,
+    #[error(
+        "--accounts-fixture requires a debug build, one fixed state and a quit deadline; --accounts-appearance is optional and accepts light, dark, large or constrained once"
+    )]
+    AccountsFixture,
+}
 
 #[derive(Debug, Default, PartialEq, Eq)]
 pub(crate) struct Launch {
@@ -29,29 +49,29 @@ impl Launch {
     /// # Errors
     /// Fails on a bad value, a fixture or observer without a quit deadline, a repeated fixture
     /// or timing flag, or either receipt mode without its required observer.
-    pub(crate) fn parse(args: impl Iterator<Item = String>) -> Result<Self, OpenError> {
+    pub(crate) fn parse(args: impl Iterator<Item = String>) -> Result<Self, LaunchError> {
         let mut launch = Self::default();
         for arg in args {
             if arg == "--accounts-fixture" || arg.starts_with("--accounts-fixture=") {
                 #[cfg(debug_assertions)]
                 {
                     if launch.accounts_fixture.is_some() {
-                        return Err(OpenError::AccountsFixture);
+                        return Err(LaunchError::AccountsFixture);
                     }
                     launch.accounts_fixture = Some(
                         arg.strip_prefix("--accounts-fixture=")
                             .and_then(super::accounts_fixture::State::parse)
-                            .ok_or(OpenError::AccountsFixture)?,
+                            .ok_or(LaunchError::AccountsFixture)?,
                     );
                 }
                 #[cfg(not(debug_assertions))]
-                return Err(OpenError::AccountsFixture);
+                return Err(LaunchError::AccountsFixture);
             } else if arg == "--accounts-appearance" || arg.starts_with("--accounts-appearance=") {
                 #[cfg(debug_assertions)]
                 {
                     use super::accounts_fixture::Appearance;
                     if launch.accounts_appearance.is_some() {
-                        return Err(OpenError::AccountsFixture);
+                        return Err(LaunchError::AccountsFixture);
                     }
                     launch.accounts_appearance =
                         Some(match arg.strip_prefix("--accounts-appearance=") {
@@ -59,11 +79,11 @@ impl Launch {
                             Some("dark") => Appearance::Dark,
                             Some("large") => Appearance::Large,
                             Some("constrained") => Appearance::Constrained,
-                            _ => return Err(OpenError::AccountsFixture),
+                            _ => return Err(LaunchError::AccountsFixture),
                         });
                 }
                 #[cfg(not(debug_assertions))]
-                return Err(OpenError::AccountsFixture);
+                return Err(LaunchError::AccountsFixture);
             } else if arg == "--smoke" {
                 launch.quit_delay = Some(Duration::from_secs(10));
             } else if arg == "--esc-fixture" {
@@ -72,43 +92,43 @@ impl Launch {
                 launch.observer = Some(PathBuf::from(path));
             } else if arg == "--draw-timing" {
                 if launch.draw_timing {
-                    return Err(OpenError::DrawTiming);
+                    return Err(LaunchError::DrawTiming);
                 }
                 launch.draw_timing = true;
             } else if arg == "--receipt-fixture" {
                 if launch.receipt_fixture {
-                    return Err(OpenError::ReceiptFixture);
+                    return Err(LaunchError::ReceiptFixture);
                 }
                 launch.receipt_fixture = true;
             } else if let Some(value) = arg.strip_prefix("--quit-after-ms=") {
-                let millis = value.parse::<u64>().map_err(|_| OpenError::QuitDelay)?;
+                let millis = value.parse::<u64>().map_err(|_| LaunchError::QuitDelay)?;
                 if !(1..=120_000).contains(&millis) {
-                    return Err(OpenError::QuitDelay);
+                    return Err(LaunchError::QuitDelay);
                 }
                 launch.quit_delay = Some(Duration::from_millis(millis));
             }
         }
         #[cfg(debug_assertions)]
         if launch.accounts_appearance.is_some() && launch.accounts_fixture.is_none() {
-            return Err(OpenError::AccountsFixture);
+            return Err(LaunchError::AccountsFixture);
         }
         if launch.quit_delay.is_none() {
             #[cfg(debug_assertions)]
             if launch.accounts_fixture.is_some() {
-                return Err(OpenError::AccountsFixture);
+                return Err(LaunchError::AccountsFixture);
             }
             if launch.escape_fixture {
-                return Err(OpenError::EscFixtureDeadline);
+                return Err(LaunchError::EscFixtureDeadline);
             }
             if launch.observer.is_some() || launch.receipt_fixture {
-                return Err(OpenError::ObserverDeadline);
+                return Err(LaunchError::ObserverDeadline);
             }
         }
         if launch.receipt_fixture && launch.observer.is_none() {
-            return Err(OpenError::ReceiptFixture);
+            return Err(LaunchError::ReceiptFixture);
         }
         if launch.draw_timing && (launch.observer.is_none() || launch.receipt_fixture) {
-            return Err(OpenError::DrawTiming);
+            return Err(LaunchError::DrawTiming);
         }
         Ok(launch)
     }
@@ -128,10 +148,10 @@ mod tests {
     use std::path::PathBuf;
     use std::time::Duration;
 
-    use super::{Launch, OpenError};
+    use super::{Launch, LaunchError};
     use crate::presence::geometry::Position;
 
-    fn launch(args: impl Iterator<Item = String>) -> Result<Launch, OpenError> {
+    fn launch(args: impl Iterator<Item = String>) -> Result<Launch, LaunchError> {
         Launch::parse(args)
     }
 
@@ -161,7 +181,7 @@ mod tests {
     fn the_esc_fixture_only_runs_with_a_quit_deadline() {
         assert!(matches!(
             launch(args(&["--esc-fixture"])),
-            Err(OpenError::EscFixtureDeadline)
+            Err(LaunchError::EscFixtureDeadline)
         ));
         assert_eq!(
             launch(args(&["--esc-fixture", "--quit-after-ms=500"])).unwrap(),
@@ -187,7 +207,7 @@ mod tests {
         ] {
             assert!(matches!(
                 launch(args(flags)),
-                Err(OpenError::ObserverDeadline)
+                Err(LaunchError::ObserverDeadline)
             ));
         }
         let flags = launch(args(&[
@@ -215,7 +235,7 @@ mod tests {
     fn the_receipt_fixture_needs_the_observer_and_comes_once() {
         assert!(matches!(
             launch(args(&["--receipt-fixture", "--smoke"])),
-            Err(OpenError::ReceiptFixture)
+            Err(LaunchError::ReceiptFixture)
         ));
         assert!(matches!(
             launch(args(&[
@@ -224,7 +244,7 @@ mod tests {
                 "--receipt-fixture",
                 "--smoke",
             ])),
-            Err(OpenError::ReceiptFixture)
+            Err(LaunchError::ReceiptFixture)
         ));
     }
 
@@ -240,14 +260,17 @@ mod tests {
         );
         assert!(matches!(
             launch(args(&[observer, timing])),
-            Err(OpenError::ObserverDeadline)
+            Err(LaunchError::ObserverDeadline)
         ));
         for invalid in [
             &[timing, "--smoke"][..],
             &[observer, timing, timing, "--smoke"][..],
             &[observer, timing, "--receipt-fixture", "--smoke"][..],
         ] {
-            assert!(matches!(launch(args(invalid)), Err(OpenError::DrawTiming)));
+            assert!(matches!(
+                launch(args(invalid)),
+                Err(LaunchError::DrawTiming)
+            ));
         }
     }
 
@@ -282,7 +305,7 @@ mod tests {
         ] {
             assert!(matches!(
                 launch(args(&flags)),
-                Err(OpenError::AccountsFixture)
+                Err(LaunchError::AccountsFixture)
             ));
         }
         for invalid in ["", "0", "120001", "-1", "later", "1ms"] {
@@ -294,7 +317,7 @@ mod tests {
                     ]
                     .into_iter()
                 ),
-                Err(OpenError::QuitDelay)
+                Err(LaunchError::QuitDelay)
             ));
         }
     }
@@ -304,11 +327,11 @@ mod tests {
     fn accounts_fixture_is_refused_in_release() {
         assert!(matches!(
             launch(args(&["--accounts-fixture=enabled", "--smoke"])),
-            Err(OpenError::AccountsFixture)
+            Err(LaunchError::AccountsFixture)
         ));
         assert!(matches!(
             launch(args(&["--accounts-appearance=constrained", "--smoke"])),
-            Err(OpenError::AccountsFixture)
+            Err(LaunchError::AccountsFixture)
         ));
     }
 
@@ -385,7 +408,7 @@ mod tests {
         ] {
             assert!(matches!(
                 launch(args(&flags)),
-                Err(OpenError::AccountsFixture)
+                Err(LaunchError::AccountsFixture)
             ));
         }
     }
