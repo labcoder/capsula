@@ -343,6 +343,14 @@ impl Reply {
         self.drop_says(|step, _| step.scene == scene, out);
     }
 
+    pub(crate) fn has_narration_in(&self, scenes: &[SceneId]) -> bool {
+        !self.revoked()
+            && self.segments.iter().any(|segment| {
+                segment.decision.is_some()
+                    && matches!(segment.source, Source::Say(step) if scenes.contains(&step.scene))
+            })
+    }
+
     /// A whole-scene removal takes away only the queued Speech assignments in those scenes.
     pub(crate) fn scenes_removed(&mut self, scenes: &[SceneId], out: &mut Vec<Speech>) {
         if self.retirement.is_some() {

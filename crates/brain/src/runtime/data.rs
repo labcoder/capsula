@@ -41,8 +41,13 @@ pub(crate) enum Owner {
     CardsDone(u64),
     /// A scene's snapshot or v1 live frame: Stop never drops it, but a scene clear does.
     Scene(SceneId),
-    /// A frame nothing revokes: a deleted thread's `ScenesRemoved`, one per delete, or the model
-    /// catalog.
+    /// A durable promise that must accompany its queued announcement through replacement.
+    SpeechPromise(SceneId),
+    /// A run-owned announcement whose scene replacement marker must precede it if still queued.
+    SpeechAnnouncement(RunId, SceneId),
+    /// A scene removal or replacement; presentation boundaries keep their original order.
+    Presentation,
+    /// A frame nothing revokes, such as the model catalog.
     Marker,
 }
 
@@ -81,16 +86,28 @@ struct Admitted {
 impl DataQueue {
     /// A queue that may send `window` bytes before the first grant.
     pub(crate) fn new(window: usize) -> Self {
+        let credit = window;
+        #[cfg(all(windows, debug_assertions, feature = "test-support"))]
+        let credit = super::audio_fixture::probe()
+            .and_then(|probe| probe.initial_credit())
+            .map_or(credit, |bytes| {
+                usize::try_from(bytes).unwrap_or(credit).min(credit)
+            });
         Self {
             frames: VecDeque::new(),
             pages: Vec::new(),
             token: 0,
             writing: None,
             bytes: 0,
-            credit: window,
+            credit,
             window,
             waiting_since: None,
         }
+    }
+
+    #[cfg(all(windows, debug_assertions, feature = "test-support"))]
+    pub(super) fn hold_fixture_credit(&mut self) {
+        self.credit = 0;
     }
 
     pub(crate) fn push(&mut self, owner: Owner, frame: Vec<u8>) {
@@ -288,12 +305,37 @@ impl DataQueue {
 
     /// Drops a stopped run's frames that haven't started writing; the shell would drop them.
     pub(crate) fn revoke(&mut self, run: RunId) {
-        self.retain(|owner| *owner != Owner::Run(run));
+        self.retain(|owner| !matches!(owner, Owner::Run(id) | Owner::SpeechAnnouncement(id, _) if *id == run));
     }
 
     /// Drops the snapshot chunks of cleared scenes that haven't started writing.
     pub(crate) fn revoke_scenes(&mut self, scenes: &[SceneId]) {
-        self.retain(|owner| !matches!(owner, Owner::Scene(scene) if scenes.contains(scene)));
+        self.retain(|owner| !matches!(owner, Owner::Scene(scene) | Owner::SpeechPromise(scene) if scenes.contains(scene)));
+    }
+
+    pub(crate) fn replace_scenes(&mut self, victims: &[SceneId], frame: Vec<u8>) {
+        self.retain(|owner| !matches!(owner, Owner::Scene(scene) if victims.contains(scene)));
+        let at = self
+            .frames
+            .iter()
+            .position(|(owner, _)| match owner {
+                Owner::SpeechPromise(scene) | Owner::SpeechAnnouncement(_, scene) => {
+                    victims.contains(scene)
+                }
+                _ => false,
+            })
+            .unwrap_or(self.frames.len());
+        let mut suffix = self.frames.split_off(at);
+        for _ in 0..suffix.len() {
+            let entry = suffix.pop_front().expect("one entry per unsorted slot");
+            if entry.0 == Owner::Presentation {
+                self.frames.push_back(entry);
+            } else {
+                suffix.push_back(entry);
+            }
+        }
+        self.push(Owner::Presentation, frame);
+        self.frames.append(&mut suffix);
     }
 
     fn retain(&mut self, keep: impl Fn(&Owner) -> bool) {

@@ -6,7 +6,8 @@ use std::time::Duration;
 use kumochi_protocol::constants::{CONFIG_FILE, SESSION_LOCK};
 use kumochi_protocol::frame::{self, Pipe};
 use kumochi_protocol::message::{
-    ControlToBrain, ControlToShell, Cursor, RunId, SceneId, SpeechRetirement,
+    ControlToBrain, ControlToShell, Cursor, RunId, SceneId, SpeechDecision, SpeechDispatch,
+    SpeechRetirement,
 };
 use tokio::sync::Notify;
 
@@ -96,6 +97,10 @@ impl Engine for Tone {
 /// Observations and barriers for one synthetic, same-process Brain peer.
 #[derive(Debug, Default)]
 pub struct AudioProbe {
+    narrated: bool,
+    initial_credit: Option<u32>,
+    replacement_chain: Option<Arc<Notify>>,
+    pub(super) replacement_queued: AtomicBool,
     ack: AtomicBool,
     name: AtomicBool,
     control: Notify,
@@ -103,10 +108,12 @@ pub struct AudioProbe {
     apply_credit: AtomicBool,
     received_credit: AtomicU64,
     applied_credit: AtomicU64,
+    pub(super) sent: AtomicU64,
     stop: AtomicU64,
     heard: AtomicU32,
     speech: Mutex<SpeechEvidence>,
     scene_failed: std::sync::Mutex<Option<(RunId, SceneId)>>,
+    decision: std::sync::Mutex<Option<(SpeechDispatch, SpeechDecision)>>,
 }
 
 #[derive(Debug, Default)]
@@ -118,6 +125,37 @@ struct SpeechEvidence {
 }
 
 impl AudioProbe {
+    pub(crate) fn narrated() -> Self {
+        Self {
+            narrated: true,
+            ..Self::default()
+        }
+    }
+
+    pub(crate) fn replacing(credit: u32) -> Self {
+        Self {
+            initial_credit: Some(credit),
+            ..Self::narrated()
+        }
+    }
+
+    pub(crate) fn chaining_replacements() -> Self {
+        Self {
+            replacement_chain: Some(Arc::new(Notify::new())),
+            ..Self::narrated()
+        }
+    }
+
+    pub(super) fn initial_credit(&self) -> Option<u32> {
+        self.initial_credit
+    }
+
+    /// Whether the Brain has put the real replacement boundary in its data queue.
+    #[must_use]
+    pub fn replacement_queued(&self) -> bool {
+        self.replacement_queued.load(Ordering::Acquire)
+    }
+
     /// Lets the Brain write the registration receipt it already queued.
     pub fn release_ack(&self) {
         self.ack.store(true, Ordering::Release);
@@ -140,6 +178,12 @@ impl AudioProbe {
         self.apply_credit.store(true, Ordering::Release);
     }
 
+    /// Encoded data bytes handed to the pipe, including audio metadata.
+    #[must_use]
+    pub fn sent_bytes(&self) -> u64 {
+        self.sent.load(Ordering::Acquire)
+    }
+
     /// The bytes acknowledged by the Shell on the wire and the bytes the queue actually gained.
     pub fn data_credits(&self) -> (u64, u64) {
         (
@@ -151,6 +195,13 @@ impl AudioProbe {
     pub(super) fn credit(&self, queue: &std::cell::RefCell<DataQueue>, ready: &Notify, bytes: u32) {
         self.received_credit
             .fetch_add(u64::from(bytes), Ordering::Release);
+        if let Some(hold) = &self.replacement_chain
+            && !self.apply_credit.swap(true, Ordering::AcqRel)
+        {
+            queue.borrow_mut().hold_fixture_credit();
+            hold.notify_one();
+            return;
+        }
         if self.apply_credit.load(Ordering::Acquire) {
             let mut queue = queue.borrow_mut();
             let before = queue.granted_credit();
@@ -237,6 +288,17 @@ impl AudioProbe {
             .expect("the fixture scene recorder is healthy")
     }
 
+    /// The latest exact speech decision received on the real control pipe.
+    ///
+    /// # Panics
+    /// Panics if the fixture's decision recorder is poisoned.
+    pub fn speech_decision(&self) -> Option<(SpeechDispatch, SpeechDecision)> {
+        *self
+            .decision
+            .lock()
+            .expect("the fixture decision recorder is healthy")
+    }
+
     pub(super) async fn before_control(&self, bytes: &[u8]) {
         let mut bytes = bytes;
         let gate = match frame::read::<ControlToShell>(&mut bytes, Pipe::Control) {
@@ -253,6 +315,12 @@ impl AudioProbe {
 
     pub(super) fn control(&self, message: &ControlToBrain) {
         match message {
+            ControlToBrain::SpeechDecision(key, decision) => {
+                *self
+                    .decision
+                    .lock()
+                    .expect("the fixture decision recorder is healthy") = Some((*key, *decision));
+            }
             ControlToBrain::Stop { run, .. } | ControlToBrain::StopScenes { run, .. } => {
                 self.stop.store(run.0, Ordering::Release);
             }
@@ -287,7 +355,17 @@ pub(crate) async fn brain(dir: &Path, script: &str, tone_chunks: usize) -> Brain
     let main = store.main_thread().expect("test store main thread");
     let high = store.high_water().expect("test store high water");
     let scenes = store.scenes().expect("test store scenes");
-    std::fs::write(dir.join(CONFIG_FILE), "[voice]\ntalk_back = true\n")
+    let probe = probe();
+    let narrated = probe.as_ref().is_some_and(|probe| probe.narrated);
+    let replay = crate::engines::responses::replay::MODEL;
+    let config_source = if narrated {
+        format!(
+            "default_model = {{ model = \"{replay}\", effort = \"Low\", connection = \"ChatGpt\" }}\n[voice]\ntalk_back = true\n"
+        )
+    } else {
+        "[voice]\ntalk_back = true\n".into()
+    };
+    std::fs::write(dir.join(CONFIG_FILE), config_source)
         .expect("configure Talk Back in this fixture");
     let config = Config::load(Some(dir.to_path_buf()), main);
     let clock: Arc<dyn Clock> = Arc::new(SystemClock);
@@ -305,17 +383,30 @@ pub(crate) async fn brain(dir: &Path, script: &str, tone_chunks: usize) -> Brain
         },
     )
     .expect("start offline accounts");
-    let fixture = Fixture::parse(script).expect("read the answer fixture");
-    let mut brain = Brain::new(
-        store,
-        main,
-        high,
-        scenes,
-        Selected::Fixture(Box::new(fixture)),
-        config,
-        accounts,
-    )
-    .expect("start the fixture Brain");
+    let engine = if narrated {
+        Selected::DrawReplay(Box::new(
+            if let Some(hold) = probe
+                .as_ref()
+                .and_then(|probe| probe.replacement_chain.clone())
+            {
+                Ok(crate::engines::responses::replay::Replay::replacement_chain(hold))
+            } else if probe
+                .as_ref()
+                .is_some_and(|probe| probe.initial_credit.is_some())
+            {
+                crate::engines::responses::replay::Replay::replacing()
+            } else {
+                crate::engines::responses::replay::Replay::narrated()
+            }
+            .expect("read the narrated fixture"),
+        ))
+    } else {
+        Selected::Fixture(Box::new(
+            Fixture::parse(script).expect("read the answer fixture"),
+        ))
+    };
+    let mut brain = Brain::new(store, main, high, scenes, engine, config, accounts)
+        .expect("start the fixture Brain");
     let (reports, mut loaded) = Reports::new();
     let tts = TtsHandle::spawn_with(tokio::runtime::Handle::current(), reports, move |_| {
         Ok(Tone(tone_chunks))
@@ -331,7 +422,14 @@ pub(crate) async fn brain(dir: &Path, script: &str, tone_chunks: usize) -> Brain
         (1, LoadEvent::Loaded),
         "the fake model must be ready"
     );
-    brain.pump = Some(Pump::new(tts, OutputMode::Legacy));
+    brain.pump = Some(Pump::new(
+        tts,
+        if narrated {
+            OutputMode::Conducted
+        } else {
+            OutputMode::Legacy
+        },
+    ));
     brain.offline(Input::SpokenReplies { loaded: true });
     brain
 }

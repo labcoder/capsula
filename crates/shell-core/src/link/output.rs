@@ -15,7 +15,7 @@ use crate::platform::microphone::{Generation, MicOwner, Reserved, Running};
 use crate::speaker::{Command, FAULT, RELEASED, Speaker, Tail, UNKNOWN};
 
 mod queued;
-pub(super) use queued::{Queued, RefusedTail};
+pub(super) use queued::{NarratedReservation, Queued, RefusedTail};
 
 #[cfg(test)]
 #[path = "output_tests.rs"]
@@ -839,7 +839,7 @@ impl OutputOwner {
         if matches!(state.output, Output::Queued(_))
             && let Some(queued) = &mut state.queued
         {
-            if queued.stop(run) {
+            if queued.stop(run, self::queued::StopOrigin::Local) {
                 return Ok(());
             }
             queued.refuse();

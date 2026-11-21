@@ -16,6 +16,8 @@ struct Levels {
     picture: Option<PictureLevel>,
     writes: usize,
     exits: Vec<OwnerExit>,
+    ordered: Vec<Ordered>,
+    requires_narration: bool,
 }
 
 #[derive(Clone, Default)]
@@ -41,6 +43,15 @@ impl DrawingIo for FakeIo {
 
     fn owner_exited(&mut self, exit: OwnerExit) {
         self.0.lock().unwrap().exits.push(exit);
+    }
+
+    fn ordered(&mut self, event: Ordered) -> bool {
+        self.0.lock().unwrap().ordered.push(event);
+        true
+    }
+
+    fn requires_narration(&self) -> bool {
+        self.0.lock().unwrap().requires_narration
     }
 }
 
@@ -103,6 +114,281 @@ const fn ms(value: u64) -> Duration {
 
 fn step(worker: &mut Worker, port: &Port, now: Duration) {
     assert!(!worker.step(port, &mut [0; 480], &mut |_| {}, now).unwrap());
+}
+
+#[test]
+fn reserved_source_survives_a_coalesced_empty_or_newer_view_before_revoke() {
+    static OCCUPIED: AtomicBool = AtomicBool::new(false);
+    for replacement in [None, Some(1)] {
+        let (mut worker, input, port, requests, replies) = fake();
+        let io = FakeIo::attach(&mut worker, &port);
+        io.0.lock().unwrap().requires_narration = true;
+        input.command(Command::Expect).unwrap();
+        step(&mut worker, &port, ms(0));
+        let Request::Open(generation, control) = requests.try_recv().unwrap() else {
+            panic!("expected a fake open");
+        };
+        let (transport, mut playback) = FakePlayback::open(control, &OCCUPIED);
+        assert!(
+            replies
+                .send(Reply::Opened(generation, Some(transport)))
+                .is_ok()
+        );
+        let binding = io.view(2, 0, View::Eligible);
+        assert!(worker.read_drawing());
+        input.narrate(binding.assignment).unwrap();
+        input.submit(packet(7, 0, 480, Some(480))).unwrap();
+        input.command(Command::Revoke(binding)).unwrap();
+        if let Some(id) = replacement {
+            io.view(3, id, View::Eligible);
+        } else {
+            io.0.lock().unwrap().view = None;
+        }
+        step(&mut worker, &port, ms(1));
+        playback.fill(&mut [0.0; 240], ms(2));
+        step(&mut worker, &port, ms(30));
+        assert!(!worker.engine.queue.was_staged(SegmentId(0)));
+        assert_eq!(
+            worker.engine.progress.consumed, 480,
+            "fence retires the rejected bytes"
+        );
+        assert_eq!(worker.engine.progress.heard, 0);
+        assert!(worker.engine.queue.has_unheard(SegmentId(0)));
+        assert_eq!(io.0.lock().unwrap().ordered, [Ordered::Fenced(binding)]);
+        assert_eq!(io.latest(), None);
+    }
+}
+
+#[test]
+fn fenced_in_flight_pcm_returns_credit_and_releases_the_next_frame() {
+    fenced_pcm_progress(0);
+}
+
+#[test]
+fn fenced_staged_pcm_keeps_its_line_and_releases_the_next_frame() {
+    fenced_pcm_progress(1_440);
+}
+
+fn fenced_pcm_progress(staged: u32) {
+    static OCCUPIED: [AtomicBool; 2] = [const { AtomicBool::new(false) }; 2];
+    let (mut worker, input, port, _requests, _replies) = fake();
+    let io = FakeIo::attach(&mut worker, &port);
+    io.0.lock().unwrap().requires_narration = true;
+    let binding = io.view(1, 0, View::Eligible);
+    worker.engine.expect(ms(0));
+    let generation = worker.engine.request(ms(0)).unwrap();
+    assert!(worker.engine.opened(generation, Opened::Physical, ms(0)));
+    let mut playback = physical(&mut worker, generation, &OCCUPIED[usize::from(staged != 0)]);
+    input.narrate(binding.assignment).unwrap();
+    step(&mut worker, &port, ms(0));
+    assert!(input.allow(binding));
+    if staged != 0 {
+        input
+            .submit(packet(7, 0, usize::try_from(staged).unwrap(), None))
+            .unwrap();
+    }
+    step(&mut worker, &port, ms(1));
+    assert_eq!(worker.engine.queue.was_staged(SegmentId(0)), staged != 0);
+
+    let late = packet(8, u32::from(staged != 0), 480, Some(staged + 480));
+    if staged == 0 {
+        input.submit(late).unwrap();
+        assert!(input.revoke(binding));
+    } else {
+        assert!(input.revoke(binding));
+        input.submit(late).unwrap();
+    }
+    io.0.lock().unwrap().view = None;
+    let mut returned = Vec::new();
+    worker
+        .step(&port, &mut [0; 480], &mut |c| returned.push(c), ms(2))
+        .unwrap();
+    assert_eq!(
+        returned,
+        [Credit {
+            origin: 8,
+            bytes: 50
+        }],
+        "return fenced PCM credit once"
+    );
+    let mut next = packet(9, 0, 0, Some(0));
+    next.pcm.segment = SegmentId(1);
+    input
+        .submit(next)
+        .expect("the next frame is not blocked by fenced PCM");
+    worker
+        .step(&port, &mut [0; 480], &mut |c| returned.push(c), ms(3))
+        .unwrap();
+    assert_eq!(
+        returned,
+        [
+            Credit {
+                origin: 8,
+                bytes: 50
+            },
+            Credit {
+                origin: 9,
+                bytes: 50
+            }
+        ]
+    );
+    assert_eq!(worker.engine.queue.next_segment, 2);
+    assert_eq!(worker.engine.queue.discarded(SegmentId(0)), staged == 0);
+    let mut samples = [0.0; 480];
+    playback.fill(&mut samples, ms(20));
+    assert_eq!(
+        samples.map(f32::to_bits),
+        [if staged == 0 { 0 } else { 0.5f32.to_bits() }; 480]
+    );
+    assert_eq!(
+        io.0.lock().unwrap().ordered,
+        [Ordered::Applied(binding), Ordered::Fenced(binding)]
+    );
+    assert!(
+        io.latest()
+            .is_none_or(|level| !matches!(level.state, PictureState::Owned(Picture::At(_))))
+    );
+    if staged != 0 {
+        assert!(input.stop());
+        step(&mut worker, &port, ms(21));
+        assert!(
+            !worker.engine.final_at(ms(21)),
+            "the original callback still owes its tail"
+        );
+        playback.fill(&mut samples, ms(22));
+        step(&mut worker, &port, ms(22));
+        assert!(
+            worker.engine.final_at(ms(50)),
+            "the original callback settles its own tail"
+        );
+    }
+}
+
+#[test]
+fn narrated_pcm_waits_for_local_application_and_exact_allow() {
+    let (mut worker, input, port, _requests, _replies) = fake();
+    let io = FakeIo::attach(&mut worker, &port);
+    io.0.lock().unwrap().requires_narration = true;
+    let binding = io.view(1, 0, View::Eligible);
+    input.narrate(binding.assignment).unwrap();
+    input.submit(packet(7, 0, 480, Some(480))).unwrap();
+    step(&mut worker, &port, ms(0));
+    step(&mut worker, &port, ms(22));
+    assert_eq!(worker.engine.progress.consumed, 0);
+    assert_eq!(worker.engine.queue.received, 0);
+    assert_eq!(io.latest(), None);
+    assert_eq!(io.0.lock().unwrap().ordered, [Ordered::Applied(binding)]);
+    assert!(input.allow(binding));
+    step(&mut worker, &port, ms(23));
+    step(&mut worker, &port, ms(44));
+    assert_eq!(worker.engine.progress.consumed, 480);
+    assert_eq!(worker.engine.progress.heard, 0);
+    assert_eq!(
+        io.0.lock().unwrap().ordered,
+        [
+            Ordered::Applied(binding),
+            Ordered::Ended {
+                binding,
+                played: false
+            }
+        ]
+    );
+}
+
+#[test]
+fn narrated_completion_preserves_the_unseen_physical_onset() {
+    static OCCUPIED: AtomicBool = AtomicBool::new(false);
+    let (mut worker, input, port, _requests, _replies) = fake();
+    let io = FakeIo::attach(&mut worker, &port);
+    io.0.lock().unwrap().requires_narration = true;
+    let binding = io.view(1, 0, View::Eligible);
+    worker.engine.expect(ms(0));
+    let generation = worker.engine.request(ms(0)).unwrap();
+    assert!(worker.engine.opened(generation, Opened::Physical, ms(0)));
+    let mut playback = physical(&mut worker, generation, &OCCUPIED);
+    input.narrate(binding.assignment).unwrap();
+    step(&mut worker, &port, ms(0));
+    assert!(input.allow(binding));
+    input.submit(packet(7, 0, 480, Some(480))).unwrap();
+    step(&mut worker, &port, ms(1));
+    let mut samples = [0.0; 480];
+    playback.fill(&mut samples, ms(20));
+    assert_eq!(samples[0].to_bits(), 0.5f32.to_bits());
+    step(&mut worker, &port, ms(2));
+    step(&mut worker, &port, ms(40));
+    assert_eq!(
+        io.0.lock().unwrap().ordered,
+        [
+            Ordered::Applied(binding),
+            Ordered::Ended {
+                binding,
+                played: true
+            }
+        ]
+    );
+    io.picture(
+        binding,
+        RouteStamp::Live(generation),
+        PictureState::Owned(Picture::At(ms(20))),
+    );
+}
+
+#[test]
+fn a_reserved_empty_final_retires_credit_without_opening_an_idle_route() {
+    let (mut worker, input, port, requests, _replies) = fake();
+    let io = FakeIo::attach(&mut worker, &port);
+    io.0.lock().unwrap().requires_narration = true;
+    let binding = io.view(1, 0, View::Eligible);
+    io.0.lock().unwrap().view = None;
+    input.narrate(binding.assignment).unwrap();
+    input.submit(packet(7, 0, 0, Some(0))).unwrap();
+    let mut credit = Vec::new();
+    worker
+        .step(&port, &mut [0; 480], &mut |c| credit.push(c), ms(1))
+        .unwrap();
+    assert_eq!(
+        credit,
+        [Credit {
+            origin: 7,
+            bytes: 50
+        }]
+    );
+    assert_eq!(worker.engine.queue.completed, 1);
+    assert_eq!(worker.engine.queue.completed_samples[0], 0);
+    assert_eq!(worker.engine.progress.heard, 0);
+    assert!(
+        requests.try_recv().is_err(),
+        "reserved empty final must not open the idle route"
+    );
+    assert!(io.0.lock().unwrap().ordered.is_empty());
+    assert_eq!(io.latest(), None);
+}
+
+#[test]
+fn narrated_empty_final_ends_without_fabricating_played() {
+    let (mut worker, input, port, _requests, _replies) = fake();
+    let io = FakeIo::attach(&mut worker, &port);
+    io.0.lock().unwrap().requires_narration = true;
+    let binding = io.view(1, 0, View::Eligible);
+    input.narrate(binding.assignment).unwrap();
+    step(&mut worker, &port, ms(0));
+    assert!(input.allow(binding));
+    input.submit(packet(7, 0, 0, Some(0))).unwrap();
+    step(&mut worker, &port, ms(1));
+    assert_eq!(worker.engine.progress.heard, 0);
+    assert_eq!(worker.engine.progress.consumed, 0);
+    assert!(!worker.engine.queue.was_staged(SegmentId(0)));
+    assert!(!worker.engine.final_at(ms(1)));
+    assert_eq!(
+        io.0.lock().unwrap().ordered,
+        [
+            Ordered::Applied(binding),
+            Ordered::Ended {
+                binding,
+                played: false
+            }
+        ]
+    );
 }
 
 #[test]

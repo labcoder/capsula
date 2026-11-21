@@ -6,16 +6,52 @@ use kumochi_protocol::message::MAX_SEGMENTS_PER_RUN;
 use kumochi_scene::record::Start;
 
 use super::gate::DropOutcome;
-use super::{Anchor, Engine, OwnerExit, Worker};
+use super::{Anchor, Engine, Fault, OwnerExit, Packet, Worker};
 use crate::speaker::conductor::{
-    Binding, Completion, Conductor, Gate, Handoff, Head, Motion, Picture, PictureLevel,
+    Assignment, Binding, Completion, Conductor, Gate, Handoff, Head, Motion, Picture, PictureLevel,
     PictureState, Playback, Route, RouteStamp, SynthesisFinal, View, ViewLevel,
 };
 
-pub(in crate::speaker::queued) trait DrawingIo: Send + 'static {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Ordered {
+    Applied(Binding),
+    Fenced(Binding),
+    Ended { binding: Binding, played: bool },
+}
+
+pub(crate) trait DrawingIo: Send + 'static {
     fn view(&mut self) -> Result<Option<ViewLevel>, ()>;
     fn picture(&mut self, binding: Binding, level: Option<PictureLevel>);
     fn owner_exited(&mut self, exit: OwnerExit);
+    fn ordered(&mut self, _: Ordered) -> bool {
+        false
+    }
+
+    fn requires_narration(&self) -> bool {
+        false
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SourceState {
+    Reserved,
+    Applied,
+    Allowed,
+    Revoked,
+    Fenced,
+    Settled,
+}
+
+struct Narration {
+    assignment: Assignment,
+    binding: Option<Binding>,
+    state: SourceState,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum ViewRead {
+    Current,
+    Unavailable,
 }
 
 pub(super) struct Drawing {
@@ -28,6 +64,7 @@ pub(super) struct Drawing {
     pending_revoke: Option<Binding>,
     bound: Option<Bound>,
     published: Option<PictureLevel>,
+    narration: Option<Narration>,
 }
 
 struct Bound {
@@ -49,11 +86,50 @@ impl Drawing {
             pending_revoke: None,
             bound: None,
             published: None,
+            narration: None,
         }
     }
 
     pub(super) fn report_refused(&mut self) {
         self.exit = OwnerExit::ReportRefused;
+    }
+
+    pub(super) fn narrate(&mut self, assignment: Assignment, engine: &Engine) -> Result<(), Fault> {
+        if !self.accepts(
+            Binding {
+                assignment,
+                nonce: 0,
+            },
+            engine,
+        ) || self.narration.as_ref().is_some_and(|old| {
+            !matches!(old.state, SourceState::Fenced | SourceState::Settled)
+                || old.assignment.segment >= assignment.segment
+        }) {
+            return Err(Fault::Delivery);
+        }
+        self.narration = Some(Narration {
+            assignment,
+            binding: None,
+            state: SourceState::Reserved,
+        });
+        Ok(())
+    }
+
+    pub(super) fn allow(&mut self, binding: Binding) -> Result<(), Fault> {
+        let source = self.narration.as_mut().ok_or(Fault::Delivery)?;
+        if source.binding != Some(binding) || source.state != SourceState::Applied {
+            return Err(Fault::Delivery);
+        }
+        source.state = SourceState::Allowed;
+        Ok(())
+    }
+
+    pub(super) fn admits(&self, packet: &Packet) -> bool {
+        self.narration.as_ref().is_none_or(|source| {
+            source.assignment.segment != packet.pcm.segment
+                || matches!(source.state, SourceState::Allowed | SourceState::Fenced)
+                || packet.pcm.samples.is_empty()
+        })
     }
 
     fn accepts(&self, key: Binding, engine: &Engine) -> bool {
@@ -87,8 +163,26 @@ impl Drawing {
         true
     }
 
+    pub(super) fn revoke_source(&mut self, assignment: Assignment) {
+        if let Some(source) = &mut self.narration
+            && source.assignment == assignment
+            && !matches!(source.state, SourceState::Fenced | SourceState::Settled)
+        {
+            source.state = SourceState::Revoked;
+        }
+    }
+
     pub(super) fn revoke(&mut self, key: Binding, engine: &Engine) {
         if !self.accepts(key, engine) {
+            return;
+        }
+        if let Some(source) = &mut self.narration
+            && source.assignment == key.assignment
+            && source.binding.is_none_or(|bound| bound == key)
+            && !matches!(source.state, SourceState::Fenced | SourceState::Settled)
+        {
+            source.binding = Some(key);
+            source.state = SourceState::Revoked;
             return;
         }
         if let Some(bound) = &mut self.bound
@@ -181,6 +275,96 @@ impl Drop for Drawing {
 }
 
 impl Worker {
+    pub(super) fn apply_narration(&mut self, read: ViewRead, now: Duration) -> Result<(), Fault> {
+        let Some(drawing) = &mut self.drawing else {
+            return Ok(());
+        };
+        let Some(source) = &mut drawing.narration else {
+            return Ok(());
+        };
+        let Some(view) = drawing
+            .wanted
+            .filter(|view| view.speech && view.binding.assignment == source.assignment)
+        else {
+            if read == ViewRead::Current
+                && source.binding.is_some()
+                && !matches!(source.state, SourceState::Fenced | SourceState::Settled)
+            {
+                source.state = SourceState::Revoked;
+            }
+            return self.fence_narration(now);
+        };
+        if !matches!(source.state, SourceState::Fenced | SourceState::Settled)
+            && (self.engine.queue.stopped
+                || view.view == View::Fenced
+                || source.binding.is_some_and(|bound| bound != view.binding))
+        {
+            source.binding.get_or_insert(view.binding);
+            source.state = SourceState::Revoked;
+        }
+        if source.state == SourceState::Reserved && read == ViewRead::Current {
+            self.engine.hold(Some(source.assignment.segment), now);
+            if !drawing.io.ordered(Ordered::Applied(view.binding)) {
+                return Err(Fault::Delivery);
+            }
+            source.binding = Some(view.binding);
+            source.state = SourceState::Applied;
+        }
+        self.fence_narration(now)
+    }
+
+    fn fence_narration(&mut self, now: Duration) -> Result<(), Fault> {
+        let Some(drawing) = &mut self.drawing else {
+            return Ok(());
+        };
+        let Some(source) = &mut drawing.narration else {
+            return Ok(());
+        };
+        if source.state == SourceState::Revoked {
+            let id = source.assignment.segment;
+            if self.engine.queue.was_staged(id) {
+                self.engine.release(id, now);
+            } else {
+                self.engine.discard(id, now);
+            }
+            if let Some(binding) = source.binding
+                && !drawing.io.ordered(Ordered::Fenced(binding))
+            {
+                return Err(Fault::Delivery);
+            }
+            source.state = SourceState::Fenced;
+        }
+        Ok(())
+    }
+
+    pub(super) fn finish_narration(&mut self) -> Result<(), Fault> {
+        let Some(drawing) = &mut self.drawing else {
+            return Ok(());
+        };
+        let Some(source) = &mut drawing.narration else {
+            return Ok(());
+        };
+        let id = source.assignment.segment;
+        if source.state == SourceState::Allowed
+            && self.engine.queue.completed > id.0
+            && let Some(binding) = source.binding
+        {
+            let played = self.engine.queue.completed_samples
+                [usize::try_from(id.0).expect("bounded segment")]
+                != 0
+                && !self.engine.queue.has_unheard(id)
+                && drawing
+                    .bound
+                    .as_ref()
+                    .is_some_and(|b| b.key == binding && b.handoff.is_some());
+            if !drawing.io.ordered(Ordered::Ended { binding, played }) {
+                return Err(Fault::Delivery);
+            }
+            source.state = SourceState::Settled;
+        }
+        Ok(())
+    }
+
     pub(super) fn read_drawing(&mut self) -> bool {
         self.drawing
             .as_mut()
@@ -195,13 +379,24 @@ impl Worker {
     }
 
     fn apply_drawing(&mut self, drawing: &mut Drawing, now: Duration) {
+        if drawing.narration.is_none() && drawing.io.requires_narration() {
+            return;
+        }
+        if drawing.narration.as_ref().is_some_and(|source| {
+            source.state != SourceState::Allowed
+                || drawing.wanted.is_none_or(|view| {
+                    Some(view.binding) != source.binding || view.view == View::Fenced
+                })
+        }) {
+            return;
+        }
         let mut bound = drawing.bound.take();
         if bound
             .as_ref()
             .is_some_and(|old| drawing.wanted.is_none_or(|next| next.binding != old.key))
             && let Some(mut old) = bound.take()
         {
-            self.reduce_drawing(&mut old, View::Fenced, now);
+            self.reduce_drawing(&mut old, View::Fenced, now, None);
         }
         let Some(next) = drawing.wanted else {
             drawing.clear();
@@ -232,7 +427,8 @@ impl Worker {
         } else {
             next.view
         };
-        let (route, picture) = self.reduce_drawing(&mut bound, view, now);
+        let (route, picture) =
+            self.reduce_drawing(&mut bound, view, now, drawing.narration.as_ref());
         drawing.publish(bound.key, route, picture, bound.core.completion());
         drawing.bound = Some(bound);
     }
@@ -242,14 +438,23 @@ impl Worker {
         bound: &mut Bound,
         view: View,
         now: Duration,
+        narration: Option<&Narration>,
     ) -> (RouteStamp, Picture) {
         let id = bound.key.assignment.segment;
         let segment = self.engine.queue.segment(id);
         let unheard = self.engine.queue.has_unheard(id);
         let fully_retired = self.engine.queue.completed > id.0;
+        let retain_onset = view == View::Eligible
+            && bound.handoff.is_some()
+            && narration.is_some_and(|source| source.binding == Some(bound.key));
         let head = if bound.revoked || self.engine.queue.discarded(id) {
             Head::Revoked
-        } else if fully_retired && !unheard {
+        } else if fully_retired
+            && !retain_onset
+            && !unheard
+            && self.engine.queue.completed_samples[usize::try_from(id.0).expect("bounded segment")]
+                != 0
+        {
             Head::Played
         } else if self.engine.queue.completed < id.0 {
             Head::AdvancingPredecessor
@@ -265,6 +470,13 @@ impl Worker {
             .map(|value| SynthesisFinal {
                 segment: id,
                 samples: value.samples,
+            })
+            .or_else(|| {
+                fully_retired.then(|| SynthesisFinal {
+                    segment: id,
+                    samples: self.engine.queue.completed_samples
+                        [usize::try_from(id.0).expect("bounded segment")],
+                })
             });
         let (stamp, mut route) = self.drawing_route();
         if unheard

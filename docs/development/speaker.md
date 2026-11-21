@@ -9,7 +9,7 @@ worker. The fixed single-producer/single-consumer rings return slot IDs for reus
 Closing either the backend handle or the transport cancels the callback. Backend
 destruction starts only after cancellation; a later callback writes silence. Worker-side retirement retains the pool and rings
 until the backend actually destroys its callback closures, then wipes and frees them off
-the audio thread. At most one pool may be live or awaiting retirement; if a backend never
+the audio thread. At most one native pool may be live or awaiting retirement; if a backend never
 releases its closures, that pool stays retained and new opens are refused. The worker clears
 converter history at close and scrubs blocks as they become exclusively owned while waiting.
 The callback checks an atomic fence before each bounded copy. A denied copy ends that
@@ -66,8 +66,9 @@ An xrun rechecks refill readiness on every tick, even without new ingress.
 Only an authoritative typed RunState starts this worker on an internally selected queued pair.
 
 The offline Plain tests that require a positive heard prefix open the first fake
-route before the worker admits PCM. A callback can render identifiable samples
-after virtual playback has already left an unheard gap, so rendered samples alone
+route before the worker admits PCM. Each fake playback has its own retirement queue so
+independent fixture pools can't fill the single native queue. A callback can render
+identifiable samples after virtual playback has left an unheard gap, so rendered samples alone
 don't establish a heard prefix. These tests separately check the first source
 handoff and the original run's retirements accepted by the Brain. The quiet cursor
 matches those receipts even when Done made the later quiet report stale to the Brain.
@@ -193,6 +194,19 @@ line can wait seconds during a pause and play on resume unless its run is stoppe
 or replaced. No opener or production caller enables this gate yet.
 
 ## Dormant drawing conductor
+
+The internal narrated fixture uses an exact source reservation at queued ingress.
+A matching presenter level can be replaced or disappear, but cannot erase ownership
+of its unallowed bytes. The worker applies the gate after its command drain and Stop
+check, and a separate keyed Allow permits PCM. A fence retires and credits never-staged
+PCM without playback; already-staged PCM keeps the line's commitment and original tail.
+Fence and terminal reports are ordered;
+the onset level is accepted by the presenter only for the same binding and live
+physical route, even if the segment finishes before the presenter reads the onset.
+An empty final validates the segment, returns credit and retires metadata without
+opening an idle route. It does not shorten an already committed physical tail, and
+neither it nor virtual source proves Played. Quiet remains a separate result from
+the original route's tail. Plain and Legacy do not select this mode.
 
 The dormant drawing conductor decides only an assignment's audio gate and picture timing.
 The presenter supplies readiness and fences, the worker supplies actual handoff and the

@@ -36,6 +36,7 @@ use crate::platform::{self, PipeClient};
 use crate::speaker::{self, Command, Data, Opener, Outlet, Packet, Speaker};
 
 mod microphone;
+pub(crate) mod narrated;
 pub mod output;
 mod queued;
 
@@ -516,6 +517,7 @@ struct Shared {
     /// The last connection's generation.
     generations: AtomicU64,
     output: output::OutputOwner,
+    narrated: Option<Arc<narrated::Narrated>>,
     #[cfg(any(test, feature = "test-support"))]
     hold_control_writer: std::sync::atomic::AtomicU8,
     #[cfg(any(test, feature = "test-support"))]
@@ -1212,7 +1214,7 @@ impl Link {
                 data_queue.clone(),
             );
             let wake = Arc::clone(reader);
-            let abort = Arc::new(move || {
+            let abort: output::Abort = Arc::new(move || {
                 close.store(true, Ordering::Release);
                 c.close();
                 d.close();
@@ -1223,10 +1225,23 @@ impl Link {
                     reader.unpark();
                 }
             });
+            #[cfg(all(windows, debug_assertions))]
+            #[cfg(any(test, feature = "test-support"))]
+            if let Some(mode) = &self.shared.narrated
+                && !mode.register_pair(&credit, &abort)
+            {
+                return Attendance::Ended;
+            }
             if !self.shared.output.begin_queued(
                 generation,
                 abort,
-                output::Queued::new(deadline, ack, Arc::clone(reader), Arc::clone(&closing)),
+                output::Queued::new(
+                    deadline,
+                    ack,
+                    Arc::clone(reader),
+                    Arc::clone(&closing),
+                    self.shared.narrated.clone(),
+                ),
             ) {
                 return Attendance::Retry;
             }
@@ -1366,7 +1381,7 @@ impl Link {
                         generation,
                         input.as_ref(),
                         &credit,
-                        queued.then_some(&ended.shared.output),
+                        queued.then_some((&ended.shared.output, ended.shared.narrated.as_deref())),
                     );
                 }
             })
@@ -1607,7 +1622,16 @@ fn watch(
     let mut named = RunId(0);
     loop {
         match frame::read::<ControlToShell>(&mut &*control, Pipe::Control) {
-            Ok(None | Some(ControlToShell::SpeechDecisionTaken(..))) => return,
+            Ok(None) => return,
+            Ok(Some(ControlToShell::SpeechDecisionTaken(key))) => {
+                if !shared
+                    .narrated
+                    .as_ref()
+                    .is_some_and(|mode| mode.taken(generation, key))
+                {
+                    return;
+                }
+            }
             Ok(Some(ControlToShell::QueuedAudioRegistered(output))) => {
                 if queued.is_none() || !shared.output.acknowledge_queued(generation, output) {
                     return;
@@ -2001,7 +2025,7 @@ fn read_data(
     generation: u64,
     speaker: Option<&speaker::Input>,
     credit: &SessionIo,
-    queued: Option<&output::OutputOwner>,
+    queued: Option<(&output::OutputOwner, Option<&narrated::Narrated>)>,
 ) {
     let mut ingress = queued::Reader::default();
     let mut reader = Counted {
@@ -2014,8 +2038,8 @@ fn read_data(
             Ok(Some(message)) => {
                 // At most the data cap and a header.
                 let bytes = u32::try_from(reader.bytes).unwrap_or(u32::MAX);
-                let message = if let Some(owner) = queued {
-                    match ingress.frame(owner, generation, message, bytes, credit) {
+                let message = if let Some((owner, narrated)) = queued {
+                    match ingress.frame(owner, generation, message, bytes, credit, narrated) {
                         Ok(Some(message)) => message,
                         Ok(None) => continue,
                         Err(()) => break,

@@ -29,7 +29,10 @@ mod audio_fixture;
 #[cfg(all(windows, debug_assertions, feature = "test-support"))]
 pub use crate::runtime::audio_fixture::AudioProbe;
 #[cfg(all(windows, debug_assertions, feature = "test-support"))]
-pub use audio_fixture::{offline_audio_peer, offline_plain_peer};
+pub use audio_fixture::{
+    offline_audio_peer, offline_narrated_peer, offline_narrated_replacement_chain_peer,
+    offline_narrated_replacement_peer, offline_plain_peer,
+};
 
 /// How long a connected client has to complete each step of the handshake.
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);

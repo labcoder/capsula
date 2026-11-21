@@ -16,15 +16,19 @@ pub fn serialize_playback() -> std::sync::MutexGuard<'static, ()> {
     let permit = EXCLUSIVE
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
+    wait_for_playback_disposal(&[&NATIVE, &OCCUPIED]);
+    permit
+}
+
+pub(super) fn wait_for_playback_disposal(permits: &[&AtomicBool]) {
     let deadline = Instant::now() + Duration::from_secs(5);
-    while NATIVE.load(Ordering::Acquire) || OCCUPIED.load(Ordering::Acquire) {
+    while permits.iter().any(|permit| permit.load(Ordering::Acquire)) {
         assert!(
             Instant::now() < deadline,
             "the previous playback fixture returns its permits"
         );
         thread::sleep(Duration::from_millis(2));
     }
-    permit
 }
 
 pub struct FixturePlayback {

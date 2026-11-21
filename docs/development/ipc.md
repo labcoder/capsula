@@ -24,7 +24,8 @@ The queued shell link registers only after talk-back Settings and accepts the ex
 receipt once, by the original startup deadline. Its data reader can wait on one charged Plain
 announcement or PCM frame until the control reader names that run. Control stays available while
 the data head waits, and the session owner wakes that head on binding, returned capacity, revocation
-or close. Speech-start announcements and scene speech promises end the queued pair without credit.
+or close. In Plain mode, Speech-start announcements and scene speech promises end
+the pair without credit.
 Each run uses the existing per-run worker. A Stop fences that run's late PCM, and a replacement
 cannot use closing a pipe or freeing a device permit as proof of quiet.
 Esc fences the scene before offering Stop or StopScenes to its exact session's control mailbox.
@@ -42,6 +43,26 @@ the pair becomes ready. It checks the same owner again while offering the turn t
 A refused enqueue reserves no turn and does not discard older recovery. One accepted offer can
 name one run, or be refused by its own turn number. The Plain path does not admit voice holds,
 AskAbout or screen capture, and refuses conducted Speech rather than treating it as Plain.
+
+The offline narrated fixture selects a separate internal adapter on the same authenticated
+pair. It matches the scene's durable speech promise to the ordered announcement on that
+registered session before passing either authority or PCM to the queued worker. That
+adapter sends the existing decision only when the worker has applied the exact local
+binding. The brain's decision-taken frame settles decision consumption; it never
+authorizes local staging. A durable absent promise permits authored timing for that
+step; a promised step stays unresolved until its announcement matches. Removing a
+committed scene before it binds sends an exact Discard. A replacement marker fences
+the victim assignment at the data reader, even before the presenter applies the
+removal. A busy output owner defers an unbound Discard without lifting that fence.
+An explicitly stopped run's commit can still reach the reader after the next run
+has been named or stopped. The commit goes to the stopped scene mirror; a matching
+announcement returns credit once without binding or sending a speech decision. The
+pair keeps at most one stopped predecessor until the data reader sees that run's
+`RunEnd` or the pair closes. A commit can arrive on its own if Stop revoked the
+announcement before the writer started it. The next typed intent keeps its draft
+while both slots are occupied; neither quiet nor a different run's marker releases
+the predecessor. Decision receipts remain on the control pipe. There is no
+production selector for the narrated adapter.
 
 ## Voice-only hold messages
 
@@ -945,6 +966,12 @@ non-revocable FIFO removal marker, so clearing the scene cannot discard the remo
 marker only when the successor will be delivered; fenced, cleared or deletion-held successors
 use immediate `ScenesRemoved`. The shell validates the victim count, uniqueness, distinct
 successor and connection generation. Retaining a frozen picture never retains semantic membership.
+In the narrated path, a same-run replacement drops unsent victim drawing frames
+but keeps the victim's exact speech-promise commit and announcement if they are
+still queued. The marker precedes whichever of those frames are still queued,
+without overtaking earlier removal or replacement markers or a frame already
+writing. The speech final follows the announcement. The shell drains the retained
+commit without recreating the removed scene.
 The shell drains fenced commits into its semantic mirror without preparing or activating them,
 then applies the acknowledged cut. While any cut is outstanding, no run activates more work in
 that scene. A cut for an already removed scene is stale. The shell sends at most one cut per

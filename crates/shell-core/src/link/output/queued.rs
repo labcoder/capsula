@@ -5,12 +5,16 @@ use std::thread::{self, Thread};
 use std::time::Instant;
 
 use async_channel::Sender;
-use kumochi_protocol::message::ControlToBrain;
+use kumochi_protocol::message::{ControlToBrain, SegmentId};
 
 use super::{Arc, Ordering, Output, OutputGeneration, OutputOwner, RunId, State, SyncSender};
-use crate::link::Shared;
+use crate::link::{Shared, narrated::Narrated, queued::MetadataFrame};
 use crate::speaker::DRAIN;
-use crate::speaker::queued::{Input, Packet, RATE, spawn_plain};
+use crate::speaker::conductor::Assignment;
+#[cfg(all(windows, debug_assertions))]
+#[cfg(any(test, feature = "test-support"))]
+use crate::speaker::queued::Command;
+use crate::speaker::queued::{Input, Packet, RATE, spawn, spawn_plain};
 
 const LOCAL_QUIET: u8 = 1;
 const RECEIPT_QUEUED: u8 = 2;
@@ -24,6 +28,18 @@ pub(in crate::link) enum RefusedTail {
     Unavailable,
 }
 
+pub(in crate::link) enum NarratedReservation {
+    Waiting,
+    Reserved,
+    Drained,
+}
+
+#[derive(Clone, Copy)]
+pub(super) enum StopOrigin {
+    Local,
+    Brain,
+}
+
 pub(in crate::link) struct Queued {
     closing: Arc<AtomicBool>,
     deadline: Instant,
@@ -31,15 +47,31 @@ pub(in crate::link) struct Queued {
     announced: bool,
     wake: Arc<OnceLock<Thread>>,
     stopped: RunId,
+    narrated: Option<Arc<Narrated>>,
+    predecessor: Option<(RunId, Delivery)>,
     early_end: Option<RunId>,
     pending: Option<u32>,
     active: Option<Active>,
+}
+
+enum Delivery {
+    Unpromised,
+    Promised(Assignment),
+    Announced,
+}
+
+enum DeliveryTarget<'a> {
+    Waiting,
+    Live(&'a mut Delivery, Option<&'a Input>),
+    Draining(&'a mut Delivery),
 }
 
 struct Active {
     id: RunId,
     input: Option<Input>,
     proof: Arc<AtomicU8>,
+    delivery: Option<Delivery>,
+    locally_stopped: bool,
 }
 
 impl Queued {
@@ -48,6 +80,7 @@ impl Queued {
         ack: SyncSender<()>,
         wake: Arc<OnceLock<Thread>>,
         closing: Arc<AtomicBool>,
+        narrated: Option<Arc<Narrated>>,
     ) -> Self {
         Self {
             closing,
@@ -56,6 +89,8 @@ impl Queued {
             announced: false,
             wake,
             stopped: RunId(0),
+            narrated,
+            predecessor: None,
             early_end: None,
             pending: None,
             active: None,
@@ -74,6 +109,10 @@ impl Queued {
 
     pub(super) fn close(&mut self) {
         self.ack = None;
+        self.predecessor = None;
+        if let Some(active) = &mut self.active {
+            active.delivery = None;
+        }
         self.retire();
     }
 
@@ -89,16 +128,24 @@ impl Queued {
         self.wake();
     }
 
-    pub(super) fn stop(&mut self, run: RunId) -> bool {
-        let Some(active) = self.active.as_ref().filter(|active| run <= active.id) else {
+    pub(super) fn stop(&mut self, run: RunId, origin: StopOrigin) -> bool {
+        let Some(active) = self.active.as_mut().filter(|active| run <= active.id) else {
             return false;
         };
         if run != active.id {
             return true;
         }
         self.stopped = run;
+        let accepted = active.input.as_ref().is_none_or(Input::stop);
+        if accepted
+            && matches!(origin, StopOrigin::Local)
+            && let Some(bridge) = &self.narrated
+        {
+            active.locally_stopped = true;
+            bridge.stop(run);
+        }
         self.wake();
-        active.input.as_ref().is_none_or(Input::stop)
+        accepted
     }
 
     fn wake(&self) {
@@ -109,6 +156,27 @@ impl Queued {
 
     fn ready(&self) -> bool {
         self.announced && self.ack.is_none()
+    }
+
+    fn delivery(&mut self, run: RunId) -> Result<DeliveryTarget<'_>, ()> {
+        if let Some((_, delivery)) = self.predecessor.as_mut().filter(|(id, _)| *id == run) {
+            return Ok(DeliveryTarget::Draining(delivery));
+        }
+        let current = self.active.as_ref().map_or(RunId(0), |active| active.id);
+        if run > current && self.pending.is_some() && self.early_end != Some(run) {
+            return Ok(DeliveryTarget::Waiting);
+        }
+        let active = self
+            .active
+            .as_mut()
+            .filter(|active| active.id == run)
+            .ok_or(())?;
+        let delivery = active.delivery.as_mut().ok_or(())?;
+        if run <= self.stopped {
+            Ok(DeliveryTarget::Draining(delivery))
+        } else {
+            Ok(DeliveryTarget::Live(delivery, active.input.as_ref()))
+        }
     }
 }
 
@@ -176,7 +244,10 @@ impl OutputOwner {
             .as_mut()
             .and_then(|state| state.queue(session))
             .filter(|(_, owner)| {
-                owner.ready() && !owner.owes_proof(RECEIPT_QUEUED) && owner.pending.is_none()
+                owner.ready()
+                    && !owner.owes_proof(RECEIPT_QUEUED)
+                    && owner.pending.is_none()
+                    && owner.predecessor.is_none()
             })
             .is_some_and(|(_, owner)| {
                 if !send() {
@@ -244,10 +315,9 @@ impl OutputOwner {
         let proof = Arc::new(AtomicU8::new(0));
         let (output, wake) = {
             let mut state = self.lock();
-            let Some((output, owner)) = state
-                .queue(session)
-                .filter(|(_, q)| q.ready() && !q.owes_proof(RECEIPT_QUEUED))
-            else {
+            let Some((output, owner)) = state.queue(session).filter(|(_, q)| {
+                q.ready() && !q.owes_proof(RECEIPT_QUEUED) && q.predecessor.is_none()
+            }) else {
                 return false;
             };
             if !matches!(turn, kumochi_protocol::message::RunOrigin::Typed { turn } if owner.pending == Some(turn))
@@ -256,7 +326,13 @@ impl OutputOwner {
             }
             owner.pending = None;
             owner.retire();
-            if owner.early_end == Some(run) {
+            if let Some(old) = owner.active.take().filter(|old| old.locally_stopped)
+                && let Some(delivery) = old.delivery
+            {
+                owner.predecessor = Some((old.id, delivery));
+            }
+            let ended = owner.early_end == Some(run);
+            if ended {
                 owner.stopped = run;
                 owner.early_end = None;
             }
@@ -264,6 +340,8 @@ impl OutputOwner {
                 id: run,
                 input: None,
                 proof: Arc::clone(&proof),
+                delivery: (owner.narrated.is_some() && !ended).then_some(Delivery::Unpromised),
+                locally_stopped: false,
             });
             (output, Arc::clone(&owner.wake))
         };
@@ -272,50 +350,68 @@ impl OutputOwner {
         let tail = Arc::clone(&proof);
         let link_thread = thread::current();
         let reporter = Weak::clone(&shared);
+        let narrated = shared.upgrade().and_then(|owner| owner.narrated.clone());
         #[cfg(any(test, feature = "test-support"))]
-        let fake = shared.upgrade().and_then(|owner| {
-            owner
-                .fake_playback
-                .clone()
-                .map(|sender| crate::speaker::queued::FakeOutput {
-                    sender,
-                    prime: owner.prime_fake_playback.swap(false, Ordering::AcqRel),
-                })
-        });
-        let Ok(input) = spawn_plain(
-            run,
-            output,
-            session,
-            move |bytes| {
-                credit(bytes);
-                if let Some(reader) = wake.get() {
-                    reader.unpark();
-                }
-            },
-            (
-                move |report| offer_queued_report(&reporter, &proof, session, run, &out, report),
-                move |quiet| {
-                    let bit = if quiet { LOCAL_QUIET } else { TAIL_UNAVAILABLE };
-                    let _updated =
-                        tail.fetch_update(Ordering::AcqRel, Ordering::Acquire, |flags| {
-                            (flags & REPORT_REFUSED != 0 && flags & TAIL_UNAVAILABLE == 0)
-                                .then_some(flags | bit)
-                        });
-                    link_thread.unpark();
-                },
-            ),
-            move |refused| {
-                if (refused || exit.load(Ordering::Acquire) & RETIRING == 0)
-                    && let Some(shared) = shared.upgrade()
-                {
-                    shared.output.end(session);
-                }
-            },
-            #[cfg(any(test, feature = "test-support"))]
-            fake,
-        ) else {
-            return false;
+        let fake = fake_queued_output(&shared);
+        let fault = Arc::clone(&proof);
+        let grant = move |bytes| {
+            credit(bytes);
+            if let Some(reader) = wake.get() {
+                reader.unpark();
+            }
         };
+        let reports = (
+            move |report| offer_queued_report(&reporter, &proof, session, run, &out, report),
+            move |quiet| {
+                let bit = if quiet { LOCAL_QUIET } else { TAIL_UNAVAILABLE };
+                let _updated = tail.fetch_update(Ordering::AcqRel, Ordering::Acquire, |flags| {
+                    (flags & REPORT_REFUSED != 0 && flags & TAIL_UNAVAILABLE == 0)
+                        .then_some(flags | bit)
+                });
+                link_thread.unpark();
+            },
+        );
+        let exit = move |refused| {
+            if (refused || exit.load(Ordering::Acquire) & RETIRING == 0)
+                && let Some(shared) = shared.upgrade()
+            {
+                shared.output.end(session);
+            }
+        };
+        let result = if let Some(mode) = narrated {
+            spawn(
+                run,
+                output,
+                session,
+                mode.origin,
+                mode.worker(
+                    session,
+                    move || {
+                        fault.fetch_or(REPORT_REFUSED, Ordering::AcqRel);
+                    },
+                    exit,
+                ),
+                grant,
+                reports,
+                #[cfg(any(test, feature = "test-support"))]
+                fake,
+            )
+        } else {
+            spawn_plain(
+                run,
+                output,
+                session,
+                grant,
+                reports,
+                exit,
+                #[cfg(any(test, feature = "test-support"))]
+                fake,
+            )
+        };
+        result.is_ok_and(|input| self.install_queued_input(session, run, input))
+    }
+
+    fn install_queued_input(&self, session: u64, run: RunId, input: Input) -> bool {
         let mut state = self.lock();
         let Some((_, owner)) = state.queue(session) else {
             return false;
@@ -332,11 +428,82 @@ impl OutputOwner {
         true
     }
 
+    pub(in crate::link) fn narrated_metadata(
+        &self,
+        assignment: Assignment,
+        frame: MetadataFrame,
+    ) -> Result<NarratedReservation, ()> {
+        let mut state = self.lock();
+        let (_, owner) = state
+            .queue(assignment.session)
+            .filter(|(output, owner)| *output == assignment.output && owner.ready())
+            .ok_or(())?;
+        let (delivery, input, outcome) = match owner.delivery(assignment.run)? {
+            DeliveryTarget::Waiting => return Ok(NarratedReservation::Waiting),
+            DeliveryTarget::Live(delivery, input) => {
+                (delivery, input, NarratedReservation::Reserved)
+            }
+            DeliveryTarget::Draining(delivery) => (delivery, None, NarratedReservation::Drained),
+        };
+        match (&*delivery, frame) {
+            (Delivery::Unpromised, MetadataFrame::Commit) => {
+                *delivery = Delivery::Promised(assignment);
+            }
+            (Delivery::Promised(expected), MetadataFrame::Announcement)
+                if *expected == assignment =>
+            {
+                if matches!(outcome, NarratedReservation::Reserved) {
+                    let Some(input) = input else {
+                        return Ok(NarratedReservation::Waiting);
+                    };
+                    input.narrate(assignment).map_err(|_| ())?;
+                }
+                *delivery = Delivery::Announced;
+            }
+            _ => return Err(()),
+        }
+        Ok(outcome)
+    }
+
+    #[cfg(all(windows, debug_assertions))]
+    #[cfg(any(test, feature = "test-support"))]
+    pub(in crate::link) fn narrated_gate(&self, command: Command) -> Result<(), super::Denied> {
+        use super::Denied;
+
+        let a = match command {
+            Command::Allow(binding) | Command::Revoke(binding) => binding.assignment,
+            Command::RevokeSource(assignment) => assignment,
+            _ => return Err(Denied::Stale),
+        };
+        let mut state = self.try_lock()?;
+        let (_, owner) = state
+            .queue(a.session)
+            .filter(|(output, owner)| *output == a.output && owner.ready())
+            .ok_or(Denied::Stale)?;
+        if !matches!(command, Command::Allow(_)) && a.run <= owner.stopped {
+            return Ok(());
+        }
+        owner
+            .active
+            .as_ref()
+            .filter(|active| active.id == a.run && a.run > owner.stopped)
+            .and_then(|active| active.input.as_ref())
+            .is_some_and(|input| match command {
+                Command::Allow(binding) => input.allow(binding),
+                Command::Revoke(binding) => input.revoke(binding),
+                Command::RevokeSource(assignment) => input.revoke_source(assignment),
+                _ => false,
+            })
+            .then_some(())
+            .ok_or(Denied::Lost)
+    }
+
     pub(in crate::link) fn queued_feed(
         &self,
         session: u64,
         run: RunId,
         output: OutputGeneration,
+        segment: SegmentId,
         packet: &mut Option<Packet>,
     ) -> Result<bool, ()> {
         let mut state = self.lock();
@@ -344,6 +511,24 @@ impl OutputOwner {
             .queue(session)
             .filter(|(key, q)| *key == output && q.ready())
             .ok_or(())?;
+        if owner.narrated.is_some() {
+            let delivery = owner
+                .predecessor
+                .as_ref()
+                .filter(|(id, _)| *id == run)
+                .map(|(_, delivery)| delivery)
+                .or_else(|| {
+                    owner
+                        .active
+                        .as_ref()
+                        .filter(|active| active.id == run)?
+                        .delivery
+                        .as_ref()
+                });
+            if matches!(delivery, Some(Delivery::Promised(a)) if a.segment == segment) {
+                return Err(());
+            }
+        }
         let Some(active) = &owner.active else {
             return Ok(false);
         };
@@ -372,7 +557,7 @@ impl OutputOwner {
     pub(in crate::link) fn revoke_queued(&self, session: u64, run: RunId) -> bool {
         self.lock()
             .queue(session)
-            .is_some_and(|(_, owner)| owner.stop(run))
+            .is_some_and(|(_, owner)| owner.stop(run, StopOrigin::Brain))
     }
 
     pub(in crate::link) fn end_queued_run(&self, session: u64, run: RunId) -> bool {
@@ -380,8 +565,12 @@ impl OutputOwner {
         let Some((_, owner)) = state.queue(session) else {
             return false;
         };
+        if owner.predecessor.take_if(|(id, _)| *id == run).is_some() {
+            return true;
+        }
         let current = owner.active.as_ref().map_or(RunId(0), |active| active.id);
-        if run == current {
+        if let Some(active) = owner.active.as_mut().filter(|active| active.id == run) {
+            active.delivery = None;
             owner.retire();
             owner.stopped = run;
             owner.wake();
@@ -390,6 +579,15 @@ impl OutputOwner {
         }
         true
     }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+fn fake_queued_output(shared: &Weak<Shared>) -> Option<crate::speaker::queued::FakeOutput> {
+    let owner = shared.upgrade()?;
+    Some(crate::speaker::queued::FakeOutput {
+        sender: owner.fake_playback.clone()?,
+        prime: owner.narrated.is_none() && owner.prime_fake_playback.swap(false, Ordering::AcqRel),
+    })
 }
 
 fn offer_queued_report(

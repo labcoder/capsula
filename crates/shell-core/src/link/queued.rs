@@ -1,9 +1,22 @@
-use kumochi_protocol::message::{MAX_SEGMENTS_PER_RUN, SegmentStart};
+use kumochi_protocol::message::{
+    MAX_SEGMENTS_PER_RUN, SegmentId, SegmentStart, SpeechPromise, StepRef,
+};
 
 use super::{
-    DataToShell, HANDSHAKE_TIMEOUT, Instant, RunId, SessionIo, output::OutputOwner, thread,
+    DataToShell, HANDSHAKE_TIMEOUT, Instant, RunId, SessionIo,
+    narrated::{Narrated, valid_key},
+    output::{NarratedReservation, OutputOwner},
+    thread,
 };
+use crate::presenter::DrawKey;
+use crate::speaker::conductor::Assignment;
 use crate::speaker::queued::Packet;
+
+#[derive(Clone, Copy)]
+pub(super) enum MetadataFrame {
+    Commit,
+    Announcement,
+}
 
 #[derive(Default)]
 pub(super) struct Reader {
@@ -18,8 +31,43 @@ impl Reader {
         message: DataToShell,
         bytes: u32,
         credit: &SessionIo,
+        narrated: Option<&Narrated>,
     ) -> Result<Option<DataToShell>, ()> {
+        let mut assignment = None;
         let (run, segment, output, mut packet) = match message {
+            DataToShell::SceneStepCommit {
+                run,
+                scene,
+                index,
+                speech,
+                ..
+            } if narrated.is_some() => {
+                Self::commit(
+                    owner,
+                    narrated.ok_or(())?,
+                    session,
+                    DrawKey { run, scene, index },
+                    speech,
+                )?;
+                return Ok(Some(message));
+            }
+            DataToShell::SegmentQueued {
+                start: SegmentStart::Speech,
+                run,
+                segment,
+                output_generation,
+                step: Some(step),
+            } if narrated.is_some() => {
+                let expected = Assignment {
+                    session,
+                    output: output_generation,
+                    run,
+                    segment,
+                    step,
+                };
+                assignment = Some(expected);
+                (run, segment, output_generation, None)
+            }
             DataToShell::SegmentQueued {
                 start: SegmentStart::Plain,
                 run,
@@ -27,6 +75,12 @@ impl Reader {
                 output_generation,
                 ..
             } => (run, segment, output_generation, None),
+            DataToShell::ScenesReplaced {
+                ref scenes,
+                successor,
+            } if narrated.is_some_and(|bridge| !bridge.replaced(scenes, successor)) => {
+                return Err(());
+            }
             DataToShell::SpeechPcm(pcm) => (
                 pcm.run,
                 pcm.segment,
@@ -46,6 +100,78 @@ impl Reader {
             _ => return Ok(Some(message)),
         };
         let pcm = packet.is_some();
+        let cursor = self.accept_segment(run, segment, packet.as_ref())?;
+        wait_for(|| {
+            if let Some(assignment) = assignment {
+                Self::metadata(
+                    owner,
+                    narrated.ok_or(())?,
+                    assignment,
+                    MetadataFrame::Announcement,
+                )
+            } else {
+                owner.queued_feed(session, run, output, segment, &mut packet)
+            }
+        })?;
+        if !pcm && let Some((_, next)) = cursor {
+            *next += 1;
+        }
+        if !pcm || packet.is_some() {
+            credit.grant(bytes);
+        }
+        Ok(None)
+    }
+
+    fn metadata(
+        owner: &OutputOwner,
+        narrated: &Narrated,
+        assignment: Assignment,
+        frame: MetadataFrame,
+    ) -> Result<bool, ()> {
+        match owner.narrated_metadata(assignment, frame)? {
+            NarratedReservation::Waiting => Ok(false),
+            NarratedReservation::Reserved => match frame {
+                MetadataFrame::Commit => narrated.promised(assignment),
+                MetadataFrame::Announcement => narrated.announce(assignment),
+            }
+            .then_some(true)
+            .ok_or(()),
+            NarratedReservation::Drained => Ok(true),
+        }
+    }
+
+    fn commit(
+        owner: &OutputOwner,
+        narrated: &Narrated,
+        session: u64,
+        key: DrawKey,
+        speech: Option<SpeechPromise>,
+    ) -> Result<(), ()> {
+        let Some(promise) = speech else {
+            return narrated.unassigned(key).then_some(()).ok_or(());
+        };
+        let assignment = Assignment {
+            session,
+            output: promise.output_generation,
+            run: key.run,
+            segment: promise.segment,
+            step: StepRef {
+                scene: key.scene,
+                index: key.index,
+            },
+        };
+        if assignment.segment.0 >= MAX_SEGMENTS_PER_RUN || !valid_key(key) {
+            return Err(());
+        }
+        wait_for(|| Self::metadata(owner, narrated, assignment, MetadataFrame::Commit))
+    }
+
+    fn accept_segment(
+        &mut self,
+        run: RunId,
+        segment: SegmentId,
+        packet: Option<&Packet>,
+    ) -> Result<Option<&mut (RunId, u32)>, ()> {
         if segment.0 >= MAX_SEGMENTS_PER_RUN {
             return Err(());
         }
@@ -57,7 +183,7 @@ impl Reader {
             .as_mut()
             .filter(|(current, _)| run == *current);
         if cursor.as_ref().is_some_and(|(_, next)| {
-            if pcm {
+            if packet.is_some() {
                 segment.0 >= *next
             } else {
                 segment.0 != *next
@@ -65,22 +191,20 @@ impl Reader {
         }) {
             return Err(());
         }
-        let deadline = Instant::now() + HANDSHAKE_TIMEOUT;
-        loop {
-            let left = deadline.saturating_duration_since(Instant::now());
-            if left.is_zero() {
-                return Err(());
-            }
-            if owner.queued_feed(session, run, output, &mut packet)? {
-                if !pcm && let Some((_, next)) = cursor {
-                    *next += 1;
-                }
-                if !pcm || packet.is_some() {
-                    credit.grant(bytes);
-                }
-                return Ok(None);
-            }
-            thread::park_timeout(left);
+        Ok(cursor)
+    }
+}
+
+fn wait_for(mut ready: impl FnMut() -> Result<bool, ()>) -> Result<(), ()> {
+    let deadline = Instant::now() + HANDSHAKE_TIMEOUT;
+    loop {
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return Err(());
         }
+        if ready()? {
+            return Ok(());
+        }
+        thread::park_timeout(left);
     }
 }

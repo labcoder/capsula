@@ -107,6 +107,51 @@ pub fn authenticated_primed(id: u32, hello: kumochi_protocol::message::Hello) ->
 }
 
 #[cfg(debug_assertions)]
+/// Drives the narrated presenter side of the offline authenticated pair.
+pub struct NarratedFixture(Arc<super::narrated::Narrated>);
+
+#[cfg(debug_assertions)]
+impl NarratedFixture {
+    /// Enables conduction in the fixture's presenter.
+    pub fn attach(&self, presenter: &mut crate::presenter::Presenter) {
+        self.0.attach(presenter);
+    }
+
+    /// Pumps this pair without waiting. A foreign pair is rejected without touching either pair.
+    #[must_use]
+    pub fn update(
+        &self,
+        link: &LinkHandle,
+        session: &Session,
+        presenter: &mut crate::presenter::Presenter,
+        now: std::time::Instant,
+    ) -> bool {
+        self.0.update(link, session, presenter, now).is_ok()
+    }
+}
+
+#[cfg(debug_assertions)]
+/// Selects narration exclusively for the offline authenticated test pair.
+pub fn authenticated_narrated(
+    id: u32,
+    hello: kumochi_protocol::message::Hello,
+) -> (Authenticated, NarratedFixture) {
+    let bridge = Arc::new(super::narrated::Narrated::new());
+    (
+        authenticated_with_output(
+            id,
+            hello,
+            AudioSession::QueuedRequired,
+            Shared {
+                narrated: Some(Arc::clone(&bridge)),
+                ..Shared::default()
+            },
+        ),
+        NarratedFixture(bridge),
+    )
+}
+
+#[cfg(debug_assertions)]
 fn authenticated_with_output(
     id: u32,
     hello: kumochi_protocol::message::Hello,

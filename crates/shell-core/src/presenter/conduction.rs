@@ -239,6 +239,25 @@ impl Presenter {
         Some(current.level)
     }
 
+    #[cfg(all(windows, debug_assertions))]
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn conductor_removed(&self, generation: u64, scene: SceneId) -> bool {
+        self.generation == Some(generation) && self.cleared.contains(&scene)
+    }
+
+    #[cfg(all(windows, debug_assertions))]
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn conductor_fence(&mut self, binding: Binding) {
+        if let Some(current) = self
+            .conduction
+            .as_mut()
+            .and_then(|state| state.current.as_mut())
+            && current.level.binding == binding
+        {
+            current.level.view = View::Fenced;
+        }
+    }
+
     /// Ok(None) is a coherent empty slot; Err is a torn read.
     pub(crate) fn conductor_picture(
         &mut self,

@@ -1,4 +1,5 @@
-use super::{Arc, AtomicBool, Control, Owner, Permit, Transport, cleanup_sender};
+use super::lifetime::start_cleanup;
+use super::{Arc, AtomicBool, Control, Owner, Permit, Transport};
 
 pub(crate) struct FakePlayback(super::Playback);
 
@@ -18,8 +19,9 @@ impl FakePlayback {
         occupied: &'static AtomicBool,
     ) -> Option<(Transport, Self)> {
         let permit = Permit::claim(occupied)?;
+        let cleanup = start_cleanup()?;
         let (submit, playback) = super::pair(super::SOURCE_RATE, 1, control);
-        let owner = Owner::new(submit, permit, cleanup_sender()?);
+        let owner = Owner::new(submit, permit, cleanup);
         Some((Transport(owner), Self(playback)))
     }
 

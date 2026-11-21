@@ -510,6 +510,13 @@ pub enum Effect {
         /// The scenes.
         scenes: Vec<SceneId>,
     },
+    /// Retire the victim geometry without severing its queued narration metadata.
+    ReplaceNarratedScenes {
+        /// The victims.
+        scenes: Vec<SceneId>,
+        /// The new scene.
+        successor: SceneId,
+    },
     /// Report `Retry` after `after`, replacing any earlier `ArmRetry`.
     ArmRetry {
         /// How long from now.
