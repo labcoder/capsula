@@ -4115,6 +4115,7 @@ fn an_in_flight_old_promise_drains_only_once_after_the_next_named_run() {
             _ => {}
         }
         stop(old);
+        link.handle.output().with_locked(|| {});
         let submit = queued_text(2, "new owner");
         assert!(link.handle.send_data(&session, submit.clone()));
         assert_eq!(
