@@ -655,9 +655,12 @@ impl Claude {
             Effort::XHigh => "xhigh",
             Effort::Max => "max",
         };
+        // The one-turn check offers no tool, so its allow list, server, audits and seed have none.
         let offer = match request.key {
-            SendKey::Build(_) => Offer::authorized(request.origin, &request.request.tools),
-            SendKey::Job(_) => Offer::Nothing,
+            SendKey::Build(_) if policy::native_turns() > 1 => {
+                Offer::authorized(request.origin, &request.request.tools)
+            }
+            SendKey::Build(_) | SendKey::Job(_) => Offer::Nothing,
         };
         let snapshot = self.snapshot(
             request.thread,

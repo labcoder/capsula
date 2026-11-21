@@ -46,7 +46,10 @@ flowchart LR
 - `KUMOCHI_LIVE_BUDGET` and `KUMOCHI_CLAUDE_QUESTIONS` are set on the brain's environment only.
   The client checks set both to 0, except that `claude-question` sets the second to the questions
   its plan asks, and first-text sets the first to its explicitly supplied cap. Each budget
-  refuses its requests once its cap is spent.
+  refuses its requests once its cap is spent. `KUMOCHI_CLAUDE_ONE_TURN`, set on a dev brain's
+  environment, passes every Claude Code launch, title jobs included, `--max-turns 1` to request
+  one native turn, with no tool offered and `--permission-mode dontAsk`; it doesn't bound
+  provider requests, and no check sets it yet.
 - Every brain a check starts, `catalog-provenance`, `image` and `marks` included, gets
   `KUMOCHI_LIVE_KEY_CATALOG_BUDGET=0` and `KUMOCHI_LIVE_KEY_MESSAGES_BUDGET=0`, so no Anthropic
   key request can go out, except `anthropic-key`, which starts each launch's brain with its slice

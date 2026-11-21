@@ -798,6 +798,7 @@ fn begin(
             allowed_tools: &allowed,
             model: &question.model,
             effort: question.effort.as_deref(),
+            max_turns: policy::native_turns(),
         },
     );
     let args: Vec<OsString> = program.prefix.iter().cloned().chain(data.args).collect();

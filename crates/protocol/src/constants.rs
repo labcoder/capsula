@@ -310,6 +310,10 @@ pub const LIVE_CHATGPT_TEXT_STAMPS_FILE: &str = "chatgpt-text.stamps";
 /// Dev builds only: the most Claude Code questions the brain may seed. A value that isn't a
 /// count allows none.
 pub const CLAUDE_QUESTIONS_ENV: &str = "KUMOCHI_CLAUDE_QUESTIONS";
+/// Dev builds only: when set, to any value, every Claude Code launch, title jobs included, passes
+/// `--max-turns 1` to request one native turn, with `--permission-mode dontAsk` and no Kumochi
+/// tool, for the desk's picture check. It doesn't bound provider requests. Release builds ignore it.
+pub const CLAUDE_ONE_TURN_ENV: &str = "KUMOCHI_CLAUDE_ONE_TURN";
 
 /// Dev builds only: presence denies issue filing and recovery before either can start a job.
 #[cfg(debug_assertions)]
