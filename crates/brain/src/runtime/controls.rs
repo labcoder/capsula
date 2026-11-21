@@ -303,9 +303,15 @@ impl Brain {
                 Ok(true) => return Ok(None),
                 Err(Full) => return Err(Ended::Lost),
             }
+            // Off closes the offer as it's taken; only a finished save opens it again.
+            let off = op == SettingsOp::SetShowScreen(false);
             self.queue_settings(op);
             hold.map_err(|Full| Ended::Lost)?;
             self.pump_settings(Some(link)).map_err(|Full| Ended::Lost)?;
+            if off {
+                self.screen_holds_changed(link)
+                    .map_err(|Full| Ended::Lost)?;
+            }
             return Ok(None);
         }
         if hold.map_err(|Full| Ended::Lost)? {

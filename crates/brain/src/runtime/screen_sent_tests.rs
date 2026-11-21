@@ -4,10 +4,11 @@
 use std::cell::RefCell;
 use std::io;
 use std::pin::Pin;
-use std::task::{Context, Poll};
+use std::sync::atomic::AtomicUsize;
+use std::task::{Context, Poll, Waker};
 
 use kumochi_protocol::Secret;
-use kumochi_protocol::message::{HeldScreen, PageEventKind, PageOf, Phase};
+use kumochi_protocol::message::{ErrorKey, HeldScreen, PageEventKind, PageOf, Phase, SettingsOp};
 use serde_json::json;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use zeroize::Zeroizing;
@@ -20,6 +21,7 @@ use crate::coordinator::{Effect, HoldKey};
 use crate::engines::{Answer, EngineFailure, Finish, TurnEvent};
 use crate::runtime::Link;
 use crate::runtime::data::DataQueue;
+use crate::runtime::settings::Gate;
 
 /// How the scripted connection treats the request.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -44,22 +46,30 @@ struct Scripted {
     wire: Wire,
     /// Hears each attempted write.
     wrote: mpsc::UnboundedSender<()>,
+    stall: Option<Arc<Stall>>,
 }
 
 impl Connect for Scripted {
     type Io = ScriptedIo;
 
     fn connect(&self) -> impl std::future::Future<Output = io::Result<ScriptedIo>> + Send {
-        std::future::ready(if self.wire == Wire::Refused {
-            Err(io::ErrorKind::ConnectionRefused.into())
-        } else {
-            Ok(ScriptedIo {
-                wire: self.wire,
-                flushed: false,
-                answered: false,
-                wrote: self.wrote.clone(),
-            })
-        })
+        let (wire, wrote, stall) = (self.wire, self.wrote.clone(), self.stall.clone());
+        async move {
+            if let Some(stall) = &stall {
+                std::future::poll_fn(|cx| stall.hold(At::Connect, cx)).await;
+            }
+            if wire == Wire::Refused {
+                Err(io::ErrorKind::ConnectionRefused.into())
+            } else {
+                Ok(ScriptedIo {
+                    wire,
+                    flushed: false,
+                    answered: false,
+                    wrote,
+                    stall,
+                })
+            }
+        }
     }
 }
 
@@ -68,6 +78,63 @@ struct ScriptedIo {
     flushed: bool,
     answered: bool,
     wrote: mpsc::UnboundedSender<()>,
+    stall: Option<Arc<Stall>>,
+}
+
+/// Where a send waits until the test lets it go.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum At {
+    /// Its connection, before any write poll.
+    Connect,
+    /// Its first write poll, which is admitted and returns `Pending`.
+    Write,
+    /// Its flush poll, after every byte was written.
+    Flush,
+}
+
+/// Holds a send at one point, counting every write and flush poll its connection gets.
+struct Stall {
+    at: At,
+    polls: AtomicUsize,
+    reached: mpsc::UnboundedSender<At>,
+    gate: std::sync::Mutex<(bool, Option<Waker>)>,
+}
+
+impl Stall {
+    fn new(at: At) -> (Arc<Self>, mpsc::UnboundedReceiver<At>) {
+        let (reached, heard) = mpsc::unbounded_channel();
+        let stall = Self {
+            at,
+            polls: AtomicUsize::new(0),
+            reached,
+            gate: std::sync::Mutex::new((false, None)),
+        };
+        (Arc::new(stall), heard)
+    }
+
+    fn hold(&self, at: At, cx: &mut Context<'_>) -> Poll<()> {
+        let mut gate = self.gate.lock().unwrap();
+        if at != self.at || gate.0 {
+            return Poll::Ready(());
+        }
+        if gate.1.is_none() {
+            self.reached.send(at).ok();
+        }
+        gate.1 = Some(cx.waker().clone());
+        Poll::Pending
+    }
+
+    fn release(&self) {
+        let mut gate = self.gate.lock().unwrap();
+        gate.0 = true;
+        if let Some(waker) = gate.1.take() {
+            waker.wake();
+        }
+    }
+
+    fn polls(&self) -> usize {
+        self.polls.load(Ordering::SeqCst)
+    }
 }
 
 const REFUSAL: &[u8] =
@@ -94,18 +161,30 @@ impl AsyncRead for ScriptedIo {
 impl AsyncWrite for ScriptedIo {
     fn poll_write(
         self: Pin<&mut Self>,
-        _: &mut Context<'_>,
+        cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
         self.wrote.send(()).ok();
+        if let Some(stall) = &self.stall {
+            stall.polls.fetch_add(1, Ordering::SeqCst);
+            if stall.hold(At::Write, cx).is_pending() {
+                return Poll::Pending;
+            }
+        }
         match self.wire {
             Wire::WriteFails => Poll::Ready(Err(io::ErrorKind::BrokenPipe.into())),
             _ => Poll::Ready(Ok(buf.len())),
         }
     }
 
-    fn poll_flush(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> {
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         let this = self.get_mut();
+        if let Some(stall) = &this.stall {
+            stall.polls.fetch_add(1, Ordering::SeqCst);
+            if stall.hold(At::Flush, cx).is_pending() {
+                return Poll::Pending;
+            }
+        }
         if this.wire == Wire::FlushHeld {
             return Poll::Pending;
         }
@@ -247,6 +326,10 @@ async fn played(wire: Wire) -> (Vec<ControlToShell>, Vec<Option<String>>) {
 /// Plays a screen hold whose picture is sealed and whose send meets `wire`; the `HoldScreen`s
 /// the shell was told, the run's stored screen, and for [`Wire::Kept`] the user turn the history
 /// read after Stop showed.
+#[expect(
+    clippy::too_many_lines,
+    reason = "one scripted send through a whole hold"
+)]
 async fn play(
     wire: Wire,
 ) -> (
@@ -272,7 +355,11 @@ async fn play(
         Box::new(Kept(keep))
     } else {
         Box::new(Transported {
-            client: Arc::new(ModelClient::new(Scripted { wire, wrote })),
+            client: Arc::new(ModelClient::new(Scripted {
+                wire,
+                wrote,
+                stall: None,
+            })),
             budget: Arc::new(Budget::limited((wire == Wire::Spent).then_some(0))),
         })
     };
@@ -439,4 +526,238 @@ async fn a_hold_screen_reaches_only_its_hold_s_own_connection() {
     );
     assert!(output.try_recv().is_err(), "only the hold's own connection");
     brain.close().await;
+}
+
+/// What a send held at `at` came to when show-screen Off arrived while its save was held.
+#[derive(Debug, PartialEq)]
+struct OffMidSend {
+    /// Write and flush polls before Off, and after the send was let go.
+    polls: (usize, usize),
+    /// The run's failure.
+    error: Option<kumochi_protocol::message::UserError>,
+    told: Vec<ControlToShell>,
+    /// `show_screen` in the answer to Off, then in the answer to a later On.
+    answers: (bool, bool),
+    /// Polls once On was answered.
+    after_on: usize,
+    screens: Vec<Option<String>>,
+}
+
+/// A screen hold's send held at `at`, then show-screen Off with its save held, then the send let
+/// go, then the save finished by `save`, then show-screen On.
+#[expect(
+    clippy::too_many_lines,
+    reason = "one hold, one send and two settings, in order"
+)]
+async fn off_mid_send(at: At, save: Gate) -> OffMidSend {
+    use crate::runtime::hold::tests::screen_hold::{recognized, release as released, seeing};
+    type Request = <crate::screen::Holds as crate::supervise::Kind>::Request;
+    type Reply = <crate::screen::Holds as crate::supervise::Kind>::Reply;
+    let scratch = Scratch::new(&format!(
+        "hold-screen-off-{at:?}-{}",
+        matches!(save, Gate::Panic)
+    ));
+    let (mut brain, release, mut decoded, _fetch) =
+        input(&scratch, vec![105, -5], "words and a picture").await;
+    let mut rig = seeing(&mut brain);
+    brain.fixture = Some(crate::coordinator::Ready {
+        images: vec![kumochi_protocol::message::ModelSlug::new("gpt-6-sol").unwrap()],
+        ..crate::coordinator::Ready::fixture()
+    });
+    let mut observed = brain.observe();
+    let (wrote, _writes) = mpsc::unbounded_channel();
+    let (stall, mut reached) = Stall::new(at);
+    brain.engine = Box::new(Transported {
+        client: Arc::new(ModelClient::new(Scripted {
+            wire: Wire::Answered500,
+            wrote,
+            stall: Some(Arc::clone(&stall)),
+        })),
+        budget: Arc::new(Budget::limited(None)),
+    });
+    let saving = brain.hold_config_write();
+    let ((control, data), mut shell) = duplex();
+    let mut tap = Tap::from_env();
+    let mut seen = None;
+    let client = async {
+        opened(&mut shell).await;
+        shell.send(&recognized(G)).await;
+        status(&mut shell, HoldStatus::Admitted).await;
+        shell.send(&released(G, 100, 200, 2)).await;
+        let (id, display) = rig.next().await;
+        crate::screen::hold_frame(&rig, id, display).await;
+        assert_eq!(
+            shell.control().await,
+            Some(ControlToShell::CaptureDone {
+                capture_for: CaptureFor::Gesture(G)
+            })
+        );
+        let (id, seal) = rig.next().await;
+        let Request::Seal(key) = seal else {
+            panic!("not a seal: {seal:?}")
+        };
+        let sealed = Reply::Sealed(key, crate::screen::ScreenContext::fixture(PICTURE));
+        rig.reply(id, &sealed).await;
+        while !matches!(observed.recv().await, Some(Seen::PictureSealed)) {}
+        packet(&mut shell, 16_000, 0, true, vec![105, -5]).await;
+        release_source(&mut shell, 1).await;
+        status(&mut shell, HoldStatus::Transcribing).await;
+        assert_eq!(decoded.recv().await, Some(()));
+        release.send(()).unwrap();
+        let (run, _) = shell.state().await;
+        assert!(matches!(shell.data().await, DataToShell::Models { .. }));
+        shell.held(G, "words and a picture").await;
+        assert_eq!(reached.recv().await, Some(at));
+        let before = stall.polls();
+        shell
+            .send(&ControlToBrain::Settings(SettingsOp::SetShowScreen(false)))
+            .await;
+        // Taken in order on the control pipe, so Off has been taken once this stale Stop has.
+        shell.stop(RunId(0)).await;
+        while observed.recv().await != Some(Seen::ControlApplied) {}
+        stall.release();
+        let mut told = Vec::new();
+        let error = loop {
+            match next_frame(&mut shell).await {
+                Some(message @ ControlToShell::HoldScreen { .. }) => told.push(message),
+                Some(ControlToShell::RunState {
+                    run: of,
+                    phase: Phase::Failed | Phase::Interrupted | Phase::Done,
+                    error,
+                    ..
+                }) if of == run => break error,
+                Some(other) => assert!(
+                    !matches!(other, ControlToShell::Settings { answer: true, .. }),
+                    "Off was answered while its save was held"
+                ),
+                None => panic!("the shell's pipe ended"),
+            }
+        };
+        let after = stall.polls();
+        saving.send(save).unwrap();
+        let off = show_screen_answer(&mut shell).await;
+        shell
+            .send(&ControlToBrain::Settings(SettingsOp::SetShowScreen(true)))
+            .await;
+        let on = show_screen_answer(&mut shell).await;
+        seen = Some(OffMidSend {
+            polls: (before, after),
+            error,
+            told,
+            answers: (off, on),
+            after_on: stall.polls(),
+            screens: Vec::new(),
+        });
+        drop(shell);
+    };
+    tokio::time::timeout(super::super::PATIENCE, async {
+        tokio::join!(brain.serve(control, data, &mut tap), client)
+    })
+    .await
+    .unwrap();
+    brain.close().await;
+    let mut seen = seen.expect("the client finished");
+    seen.screens = Store::open(&scratch.db())
+        .unwrap()
+        .conn_for_tests()
+        .prepare("SELECT screen FROM runs ORDER BY id")
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    seen
+}
+
+/// The next control frame, settings included, answering pings on the way.
+async fn next_frame(shell: &mut Shell<tokio::io::DuplexStream>) -> Option<ControlToShell> {
+    loop {
+        match tokio::time::timeout(super::super::PATIENCE, shell.next_control())
+            .await
+            .expect("in time")
+            .expect("readable")
+        {
+            Some(ControlToShell::Ping) => {
+                let pong = kumochi_protocol::frame::encode(
+                    &ControlToBrain::Pong,
+                    kumochi_protocol::frame::Pipe::Control,
+                )
+                .expect("encodes");
+                tokio::io::AsyncWriteExt::write_all(&mut shell.control_out, &pong)
+                    .await
+                    .expect("sent");
+            }
+            Some(
+                ControlToShell::Account(_)
+                | ControlToShell::Connections(_)
+                | ControlToShell::ScreenHolds(_),
+            ) => {}
+            other => return other,
+        }
+    }
+}
+
+/// `show_screen` in the next settings answer.
+async fn show_screen_answer(shell: &mut Shell<tokio::io::DuplexStream>) -> bool {
+    loop {
+        match next_frame(shell).await {
+            Some(ControlToShell::Settings { view, answer: true }) => return view.show_screen,
+            None => panic!("the shell's pipe ended"),
+            Some(_) => {}
+        }
+    }
+}
+
+fn unavailable() -> kumochi_protocol::message::UserError {
+    kumochi_protocol::message::UserError::new(ErrorKey::ScreenUnavailable, Vec::new(), Vec::new())
+        .expect("valid")
+}
+
+/// Off while an admitted write or flush poll is pending and the save is held: the send is cut at
+/// its next poll, settles as possibly written and ends as the picture unavailable. A refused save
+/// leaves the preference On, and neither it nor a later On gets the send going again.
+#[tokio::test]
+async fn show_screen_off_cuts_an_admitted_send_before_its_save_finishes() {
+    let told = vec![ControlToShell::HoldScreen {
+        gesture: G,
+        outcome: HeldScreen::Screen,
+    }];
+    for (at, polls) in [(At::Write, 1), (At::Flush, 2)] {
+        for (save, answers) in [(Gate::Panic, (true, true)), (Gate::Write, (false, true))] {
+            let refused = matches!(save, Gate::Panic);
+            assert_eq!(
+                Box::pin(off_mid_send(at, save)).await,
+                OffMidSend {
+                    polls: (polls, polls),
+                    error: Some(unavailable()),
+                    told: told.clone(),
+                    answers,
+                    after_on: polls,
+                    screens: vec![Some("screen".to_owned())],
+                },
+                "{at:?} refused={refused}"
+            );
+        }
+    }
+}
+
+/// Off while the send is still connecting and the save is held: no write poll is ever admitted,
+/// so the picture is withdrawn unsent and nothing says it was sent.
+#[tokio::test]
+async fn show_screen_off_before_any_write_leaves_the_picture_unsent() {
+    for (save, answers) in [(Gate::Panic, (true, true)), (Gate::Write, (false, true))] {
+        let refused = matches!(save, Gate::Panic);
+        assert_eq!(
+            Box::pin(off_mid_send(At::Connect, save)).await,
+            OffMidSend {
+                polls: (0, 0),
+                error: Some(unavailable()),
+                told: Vec::new(),
+                answers,
+                after_on: 0,
+                screens: vec![Some("withdrawn".to_owned())],
+            },
+            "refused={refused}"
+        );
+    }
 }

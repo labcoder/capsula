@@ -1073,3 +1073,175 @@ async fn a_release_restamped_with_a_newer_offer_than_its_arm_captures_nothing() 
     brain.holds.lost();
     brain.close().await;
 }
+
+/// The connected shell's settings change, taken as the brain takes it.
+fn taken(brain: &mut Brain, link: &mut Link<'_, '_>, op: SettingsOp) {
+    assert_eq!(
+        brain.control_frame(ControlToBrain::Settings(op), 0, link, &mut None),
+        Ok(None)
+    );
+}
+
+/// A fresh screen hold `gesture` under `notice` arms nothing, and its release captures nothing;
+/// it goes on as voice.
+fn captures_nothing(
+    brain: &mut Brain,
+    link: &mut Link<'_, '_>,
+    output: &mut mpsc::Receiver<Vec<u8>>,
+    gesture: u32,
+    notice: Option<kumochi_protocol::message::NoticeRevision>,
+) {
+    let g = GestureId(gesture);
+    brain.holds.debt = None;
+    assert!(
+        brain
+            .hold_control(&eligible(recognized(g), notice), link)
+            .unwrap()
+    );
+    assert!(
+        matches!(part(brain), ScreenPart::None),
+        "{gesture}: {:?}",
+        part(brain)
+    );
+    controls(output);
+    assert!(
+        brain
+            .hold_control(&eligible(release(g, 100, 200, 2), notice), link)
+            .unwrap()
+    );
+    assert_eq!(controls(output), [failed(g)], "{gesture}");
+    assert!(
+        matches!(part(brain), ScreenPart::None),
+        "{gesture}: {:?}",
+        part(brain)
+    );
+    brain.holds.lost();
+}
+
+/// Show-screen Off closes display admission as it's taken, through a save ahead of it, its own
+/// save, a new connection and an On queued behind it: a fresh hold under the old offer or the
+/// current one arms and captures nothing. A refused save opens it again at once under a new
+/// offer; a saved Off keeps it closed until the On is saved. The old offer never comes back, and
+/// the window choice and voice holds go on throughout.
+#[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one Off through its queue, a reconnect and its save, in order"
+)]
+async fn show_screen_off_closes_display_admission_until_its_save_fails() {
+    use crate::runtime::settings::{Gate, written};
+    for (ahead, save) in [
+        (false, Gate::Panic),
+        (true, Gate::Panic),
+        (false, Gate::Write),
+        (true, Gate::Write),
+    ] {
+        let refused = matches!(save, Gate::Panic);
+        let case = format!("ahead={ahead} refused={refused}");
+        let scratch = Scratch::new(&format!("screen-hold-off-pending-{ahead}-{refused}"));
+        let (mut brain, mut rig, _keep) = desk(&scratch).await;
+        let (out, mut output) = mpsc::channel(64);
+        let queue = RefCell::new(DataQueue::new(crate::runtime::window()));
+        let ready_notify = Notify::new();
+        let mut tap = Tap::from_env();
+        let mut link = Link::new(&out, &queue, &ready_notify, &mut tap);
+        brain.screen_holds_changed(&mut link).unwrap();
+        let old = brain.holds.notice;
+        let choice = brain.config.view().default_model.clone();
+        controls(&mut output);
+        let first = brain.hold_config_write();
+        if ahead {
+            taken(&mut brain, &mut link, SettingsOp::SetTaskbar(true));
+        }
+        taken(&mut brain, &mut link, SettingsOp::SetShowScreen(false));
+        taken(&mut brain, &mut link, SettingsOp::SetShowScreen(true));
+        assert_eq!(
+            gates(&mut output),
+            [ScreenHolds::Off(ScreenOff::TurnedOff)],
+            "{case}"
+        );
+        assert!(
+            matches!(brain.screen_gate(choice.as_ref()), ScreenHolds::On { .. }),
+            "{case}"
+        );
+        assert!(brain.hold_to_talk_enabled(), "{case}");
+        captures_nothing(&mut brain, &mut link, &mut output, 50, old);
+        let current = brain.holds.notice;
+        captures_nothing(&mut brain, &mut link, &mut output, 51, current);
+        let held = if ahead {
+            let own = brain.hold_config_write();
+            first.send(Gate::Write).unwrap();
+            let done = written(&mut brain.config_write).await;
+            brain.settings_done(done, Some(&mut link)).unwrap();
+            brain.screen_holds_changed(&mut link).unwrap();
+            captures_nothing(&mut brain, &mut link, &mut output, 52, old);
+            own
+        } else {
+            first
+        };
+        brain.epoch += 1;
+        brain.holds.opened();
+        brain.screen_holds_changed(&mut link).unwrap();
+        assert_eq!(
+            gates(&mut output),
+            [ScreenHolds::Off(ScreenOff::TurnedOff)],
+            "{case}"
+        );
+        captures_nothing(&mut brain, &mut link, &mut output, 1, old);
+        let current = brain.holds.notice;
+        captures_nothing(&mut brain, &mut link, &mut output, 2, current);
+        held.send(save).unwrap();
+        let done = written(&mut brain.config_write).await;
+        brain.settings_done(done, Some(&mut link)).unwrap();
+        brain.screen_holds_changed(&mut link).unwrap();
+        assert_eq!(brain.show_screen_enabled(), refused, "{case}");
+        if !refused {
+            captures_nothing(&mut brain, &mut link, &mut output, 3, old);
+            let current = brain.holds.notice;
+            captures_nothing(&mut brain, &mut link, &mut output, 4, current);
+        }
+        while brain.config_write.is_some() {
+            let done = written(&mut brain.config_write).await;
+            brain.settings_done(done, Some(&mut link)).unwrap();
+        }
+        brain.screen_holds_changed(&mut link).unwrap();
+        let fresh = brain.holds.notice;
+        assert!(
+            matches!(gates(&mut output).last(), Some(ScreenHolds::On { revision, .. }) if Some(*revision) == fresh),
+            "{case}"
+        );
+        assert_ne!(fresh, old, "{case}");
+        captures_nothing(&mut brain, &mut link, &mut output, 5, old);
+        let g = GestureId(6);
+        brain.holds.debt = None;
+        assert!(
+            brain
+                .hold_control(&eligible(recognized(g), fresh), &mut link)
+                .unwrap()
+        );
+        assert!(matches!(part(&brain), ScreenPart::Armed), "{case}");
+        prepared(&mut brain);
+        controls(&mut output);
+        assert!(
+            brain
+                .hold_control(&eligible(release(g, 100, 200, 2), fresh), &mut link)
+                .unwrap()
+        );
+        assert!(
+            matches!(part(&brain), ScreenPart::Capturing { .. }),
+            "{case}"
+        );
+        let (_id, request) = rig.next().await;
+        assert!(matches!(request, Request::Display { .. }), "{request:?}");
+        brain.holds.lost();
+        crate::screen::release_next(
+            &mut rig,
+            HoldKey {
+                epoch: brain.epoch,
+                gesture: g,
+            },
+        )
+        .await;
+        brain.close().await;
+    }
+}

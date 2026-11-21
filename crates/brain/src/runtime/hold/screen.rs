@@ -510,7 +510,7 @@ impl crate::runtime::Brain {
     /// Whether a screen hold on `choice` may show the model the screen now, or why not. The
     /// display capture runs on the platforms that capture a window.
     pub(super) fn display_gate(&self, choice: Option<&ModelChoice>) -> ScreenHolds {
-        self.picture_gate(choice, self.config.view().show_screen)
+        self.picture_gate(choice, self.show_screen_enabled())
     }
 }
 
