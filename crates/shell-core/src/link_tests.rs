@@ -4744,7 +4744,22 @@ fn narrated_absence_survives_delayed_delivery_and_reclaims_retired_scenes() {
         settle(presenter, effects, bytes);
     };
     let activate = |presenter: &mut Presenter, scene| {
-        assert!(presenter.advance(generation, now).unwrap().is_empty());
+        let deadline = Instant::now() + PATIENCE;
+        loop {
+            assert!(presenter.advance(generation, now).unwrap().is_empty());
+            if fixture::activated(presenter, scene) != 0 {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the scene activates after contention"
+            );
+            let ready = session
+                .retry_narration()
+                .expect("only bridge contention defers activation");
+            ready();
+            assert!(session.resumes_narration(&session));
+        }
         assert_eq!(fixture::activated(presenter, scene), 1);
     };
 
