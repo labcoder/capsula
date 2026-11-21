@@ -300,13 +300,17 @@ fn queued_plain_escape_stops_active_audio_while_brain_data_credit_is_exhausted(
     cx: &mut TestAppContext,
 ) {
     use crate::link::{Batch, LinkEvent, fixture};
-    use kumochi_protocol::message::{DataToShell, SegmentId};
+    use kumochi_protocol::message::{
+        Cursor, DataToShell, OutputGeneration, SegmentId, SpeechRetirement,
+    };
     use std::sync::mpsc;
     use std::time::{Duration, Instant};
 
     const WAIT: Duration = Duration::from_secs(3);
     const CALLBACK_PERIOD: Duration = Duration::from_millis(2);
     const PCM: [u32; 48] = [(15_430.0_f32 / 32_768.0).to_bits(); 48];
+    const PREFIX: u64 = 480;
+    const FINAL: u64 = PREFIX + 48;
     fn wait(label: &str, mut ready: impl FnMut() -> bool) {
         let limit = Instant::now() + WAIT;
         while !ready() {
@@ -380,37 +384,46 @@ fn queued_plain_escape_stops_active_audio_while_brain_data_credit_is_exhausted(
     ));
     let mut playback = std::thread::scope(|scope| {
         let (handoff, listen) = mpsc::channel();
+        let (presented, confirm) = mpsc::channel();
         let pump = scope.spawn(move || {
             let mut playback = pipe
                 .playback
                 .recv_timeout(WAIT)
                 .expect("the real worker opened its fake device");
             let limit = Instant::now() + WAIT;
-            let mut first = true;
+            let mut notice = Some(presented);
             let mut requested = false;
             let mut samples = [0.0; 48];
             loop {
                 assert!(Instant::now() < limit, "Esc takes the original fake device");
                 assert!(!playback.stopped(), "the original fake device stays live");
-                let before = playback.handed();
-                playback.render(&mut samples);
-                let handed = playback.handed();
-                if first && handed != 0 {
-                    assert_eq!(samples.map(f32::to_bits), PCM);
-                    assert_eq!(
-                        handed, 48,
-                        "the first callback starts at source sample zero"
-                    );
-                    first = false;
+                let settled = playback.presented_prefix();
+                if settled == PREFIX
+                    && let Some(notice) = notice.take()
+                {
+                    notice
+                        .send(())
+                        .expect("Presence waits for due presentation");
                 }
-                if requested && handed == before + 48 && samples.map(f32::to_bits) == PCM {
+                if requested && settled == FINAL {
                     return playback;
+                }
+                let before = playback.handed();
+                if before < PREFIX || (requested && before == PREFIX) {
+                    playback.render(&mut samples);
+                    let handed = playback.handed();
+                    if handed != before {
+                        assert_eq!(handed, before + 48, "source advances by one exact block");
+                        assert_eq!(samples.map(f32::to_bits), PCM);
+                    }
+                } else if !requested {
+                    playback.render(&mut []);
                 }
                 let next = Instant::now() + CALLBACK_PERIOD;
                 loop {
                     match listen.recv_timeout(next.saturating_duration_since(Instant::now())) {
                         Ok(()) => {
-                            assert!(!first, "the device rendered source before Esc");
+                            assert_eq!(playback.presented_prefix(), PREFIX);
                             requested = true;
                         }
                         Err(mpsc::RecvTimeoutError::Disconnected) => return playback,
@@ -420,23 +433,20 @@ fn queued_plain_escape_stops_active_audio_while_brain_data_credit_is_exhausted(
             }
         });
         probe.release_run();
-        let (mut answering, mut drawn) = (false, false);
+        let (mut answering, mut drawn, mut presented) = (false, false, false);
         let limit = Instant::now() + WAIT;
         loop {
             let blocked = probe.data_blocked();
             let credits = probe.data_credits();
-            let heard = probe
-                .retired(run)
-                .iter()
-                .any(|receipt| receipt.segment == SegmentId(0) && receipt.heard >= 48);
+            presented |= confirm.try_recv().is_ok();
             assert!(
                 session.open() && Instant::now() < limit && !pump.is_finished(),
-                "still waiting for Esc: answering={answering} drawn={drawn} blocked={blocked} credits={credits:?} heard={heard} open={} pump_done={}",
+                "still waiting for Esc: answering={answering} drawn={drawn} blocked={blocked} credits={credits:?} presented={presented} open={} pump_done={}",
                 session.open(),
                 pump.is_finished()
             );
             assert_eq!(credits.1, 0);
-            if answering && drawn && blocked && credits.0 > 0 && heard {
+            if answering && drawn && blocked && credits.0 > 0 && presented {
                 break;
             }
             match events.recv_timeout(CALLBACK_PERIOD) {
@@ -463,6 +473,15 @@ fn queued_plain_escape_stops_active_audio_while_brain_data_credit_is_exhausted(
                 playback.insert(pump.join().expect("the callback pump returns its device"));
             assert!(session.open());
             assert!(!playback.stopped());
+            assert_eq!(playback.handed(), FINAL);
+            assert_eq!(playback.presented_prefix(), FINAL);
+            assert!(probe.data_blocked());
+            let (returned, applied) = probe.data_credits();
+            assert!(returned > 0);
+            assert_eq!(applied, 0);
+            assert_eq!(probe.stop(), RunId(0));
+            assert!(probe.received_retirements(run).is_empty());
+            assert!(probe.retired(run).is_empty());
             escape(&owner, cx);
             owner.read_with(cx, |owner, _| {
                 assert_eq!(
@@ -487,12 +506,14 @@ fn queued_plain_escape_stops_active_audio_while_brain_data_credit_is_exhausted(
         RunId(0),
         "the physical tail has not been confirmed"
     );
+    assert_eq!(probe.accepted_quiet(), None);
     assert!(
         !pipe.handle.admits_text(Some(&session)),
         "the unconfirmed tail still owns output"
     );
     let mut after = [99.0; 128];
     playback.render(&mut after);
+    assert!(after[0] > 0.0 && after[0] < f32::from_bits(PCM[0]));
     assert!(after[119..].iter().all(|sample| sample.to_bits() == 0));
     playback.render(&mut after);
     assert_eq!(after.map(f32::to_bits), [0; 128]);
@@ -501,8 +522,25 @@ fn queued_plain_escape_stops_active_audio_while_brain_data_credit_is_exhausted(
             .accepted_quiet()
             .is_some_and(|(stopped, _)| stopped == run)
     });
-    let cursor = assert_heard_prefix(&probe, run);
-    assert_eq!(probe.accepted_quiet(), Some((run, Some(cursor))));
+    let retirement = SpeechRetirement {
+        run,
+        output: OutputGeneration(1),
+        segment: SegmentId(0),
+        retired: 528,
+        heard: 528,
+        final_segment: false,
+    };
+    let quiet = Some((
+        run,
+        Some(Cursor {
+            segment: SegmentId(0),
+            sample: 528,
+        }),
+    ));
+    assert_eq!(probe.received_retirements(run), [retirement]);
+    assert_eq!(probe.retired(run), [retirement]);
+    assert_eq!(probe.quiet_receipt(), quiet);
+    assert_eq!(probe.accepted_quiet(), quiet);
     loop {
         let event = fixture::next(&events);
         let interrupted = matches!(&event, LinkEvent::RunState { run: current, phase: Phase::Interrupted, .. } if *current == run);

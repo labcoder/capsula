@@ -323,6 +323,12 @@ impl Worker {
                     self.stop(now, &mut |credit| port.credit(credit, &mut give));
                     true
                 });
+            #[cfg(all(windows, debug_assertions, feature = "test-support"))]
+            if let Some(route) = &self.physical
+                && let Some(through) = self.engine.settled_prefix(route.generation)
+            {
+                route.transport.control().record_presented_prefix(through);
+            }
             if !receipts.publish(&self.engine, now, &mut report) {
                 port.closed.store(true, Ordering::Release);
                 let now = origin.elapsed();

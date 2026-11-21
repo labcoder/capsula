@@ -47,6 +47,12 @@ impl FixturePlayback {
         self.callback.handed()
     }
 
+    /// The contiguous source prefix the worker settled on this original physical route.
+    #[cfg(all(windows, debug_assertions, feature = "test-support"))]
+    pub fn presented_prefix(&self) -> u64 {
+        self.control.presented_prefix()
+    }
+
     pub fn stopped(&self) -> bool {
         self.control.stopped()
     }

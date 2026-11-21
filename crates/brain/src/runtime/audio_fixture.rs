@@ -112,6 +112,7 @@ pub struct AudioProbe {
 #[derive(Debug, Default)]
 struct SpeechEvidence {
     retired: Vec<SpeechRetirement>,
+    received_retirements: Vec<SpeechRetirement>,
     received_quiet: Option<(RunId, Option<Cursor>)>,
     accepted_quiet: Option<(RunId, Option<Cursor>)>,
 }
@@ -201,6 +202,20 @@ impl AudioProbe {
             .collect()
     }
 
+    /// The retirement frames received on control for this run, including stale or refused ones.
+    /// # Panics
+    /// Panics if the fixture audio recorder is poisoned.
+    pub fn received_retirements(&self, run: RunId) -> Vec<SpeechRetirement> {
+        self.speech
+            .lock()
+            .expect("the audio probe is healthy")
+            .received_retirements
+            .iter()
+            .copied()
+            .filter(|receipt| receipt.run == run)
+            .collect()
+    }
+
     /// The last quiet receipt accepted by the Brain, with its exact cursor.
     /// # Panics
     /// Panics if the fixture audio recorder is poisoned.
@@ -249,6 +264,11 @@ impl AudioProbe {
             }
             ControlToBrain::SpeechRetired(receipt) => {
                 self.heard.fetch_max(receipt.heard, Ordering::AcqRel);
+                self.speech
+                    .lock()
+                    .expect("the audio probe is healthy")
+                    .received_retirements
+                    .push(*receipt);
             }
             ControlToBrain::SceneFailed { scene } => {
                 *self
