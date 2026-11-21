@@ -381,6 +381,14 @@ one at a time. A run whose choice names Claude Code starts one through `Claude::
   doesn't copy the string into it. The pictured check reads every block before it judges an
   image. Accepted controls still build `rest: Value` and `Field`. Other type errors, serde_json's
   scratch and the child's or OS's copies can still hold echoed text.
+  While the shortcut's current offer goes to Claude Code (`Presence::current_offer`, the check
+  the shortcut publishes, so an unchecked box or another default model ends it before the brain
+  replies), the Privacy tab's help gives this route's narrower promise
+  (`show-screen-help-claude-code`) instead of the general one: stdin rather than the
+  command line, nothing in chat history, a private temporary folder removed best effort, and no
+  guarantee about copies Claude Code or its provider keeps. The history icon's text is
+  route-neutral: a stored turn doesn't record its route, so it says only that the picture may
+  have been sent and that Kumochi doesn't save the image in chat history.
 - **The held send.** The round moves its seed's `SendLease` into the launch (`hold_send`) before
   the first seed chunk, and asks for it with `SendGate::ask_held`, whose deadline is the launch's
   lifetime plus `SETTLE` (15 s [guess]). Claude Code sends the user message again on each native

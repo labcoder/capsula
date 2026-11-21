@@ -1,7 +1,9 @@
 //! User-facing text, from `locales/en/`. English only for now.
 
 use fluent_bundle::{FluentArgs, FluentBundle, FluentResource};
-use kumochi_protocol::message::{ErrorArg, ErrorKey, HeldScreen, ScreenClass, UserError};
+use kumochi_protocol::message::{
+    ConnectionKind, ErrorArg, ErrorKey, HeldScreen, ScreenClass, ScreenHolds, UserError,
+};
 use unic_langid::LanguageIdentifier;
 
 const ENGLISH: &str = include_str!("../../../locales/en/shell.ftl");
@@ -217,6 +219,7 @@ texts! {
     ShowScreenHistory => "show-screen-history",
     ShowScreen => "show-screen",
     ShowScreenHelp => "show-screen-help",
+    ShowScreenHelpClaudeCode => "show-screen-help-claude-code",
     ShowScreenChanged => "show-screen-changed",
     ScreenNotIncludedPictureTooLarge => "screen-not-included-picture-too-large",
     ScreenHistoryChanged => "screen-history-changed",
@@ -386,6 +389,18 @@ impl Text {
         }
     }
 
+    /// The Privacy tab's help for `offered`. Claude Code, a program running as the user, gets its
+    /// own narrower promise while the offer goes to it.
+    pub const fn show_screen_help(offered: Option<&ScreenHolds>) -> Self {
+        match offered {
+            Some(ScreenHolds::On {
+                connection: ConnectionKind::ClaudeCode,
+                ..
+            }) => Self::ShowScreenHelpClaudeCode,
+            _ => Self::ShowScreenHelp,
+        }
+    }
+
     /// The history line under a held turn saying why its screen hold's picture wasn't included.
     /// None for a turn whose picture was taken, which [`Strings::pictured`] speaks for.
     pub const fn held_screen(screen: HeldScreen) -> Option<Self> {
@@ -420,7 +435,7 @@ impl Strings {
         self.format(Text::SettingsTaskbar.id(), Some(&args))
     }
 
-    /// What the icon under a held turn says: which picture was sent with the turn. None for a
+    /// What the icon under a held turn says: which picture may have been sent with the turn. None for a
     /// turn with no picture. The brain clears a picture no request carried, so this over-reports
     /// only for a request that failed before its upload began, or after a crash before the
     /// clear. The catalog may name the app.
@@ -442,11 +457,12 @@ impl Strings {
         self.format(Text::ShowScreen.id(), Some(&args))
     }
 
-    /// What that setting sends and where, with the product name.
-    pub fn show_screen_help(&self) -> String {
+    /// What that setting sends and where, with the product name: `help` is
+    /// [`Text::show_screen_help`] for the offer.
+    pub fn show_screen_help(&self, help: Text) -> String {
         let mut args = FluentArgs::new();
         args.set("app", kumochi_protocol::constants::DISPLAY_NAME);
-        self.format(Text::ShowScreenHelp.id(), Some(&args))
+        self.format(help.id(), Some(&args))
     }
 
     /// Loads the English catalog compiled into the binary.
@@ -686,7 +702,10 @@ const fn error_id(key: ErrorKey) -> &'static str {
 mod tests {
     use super::{Strings, Text, error_id};
     use fluent_bundle::{FluentBundle, FluentResource};
-    use kumochi_protocol::message::{ErrorArg, ErrorKey, UserError};
+    use kumochi_protocol::message::{
+        ConnectionKind, ErrorArg, ErrorKey, ModelName, ModelSlug, NoticeRevision, ScreenHolds,
+        ScreenOff, UserError,
+    };
 
     #[test]
     fn model_paths_explain_the_local_folder_requirement_without_a_path() {
@@ -882,13 +901,6 @@ mod tests {
         );
         assert_eq!(strings.get(Text::Privacy), "Privacy");
         assert_eq!(strings.show_screen("Cloud"), "Cloud can see what you see");
-        let app = kumochi_protocol::constants::DISPLAY_NAME;
-        assert_eq!(
-            strings.show_screen_help(),
-            format!(
-                "When you let go of the shortcut, {app} sends one screenshot of the screen your pointer is on, as it is, with your words to the model you're using. It sends it nowhere else and keeps no copy once the answer is done."
-            )
-        );
         // A held turn's history says one thing: why no picture was included, as a line, or
         // which picture was taken, on its icon.
         let app = kumochi_protocol::constants::DISPLAY_NAME;
@@ -897,14 +909,14 @@ mod tests {
                 HeldScreen::Attached,
                 None,
                 Some(format!(
-                    "A screenshot of the window under your pointer was sent in this message. {app} keeps no copy."
+                    "A screenshot of the window under your pointer may have been sent with this message. {app} does not save the image in chat history."
                 )),
             ),
             (
                 HeldScreen::Screen,
                 None,
                 Some(format!(
-                    "A screenshot of your screen was sent in this message. {app} keeps no copy."
+                    "A screenshot of your screen may have been sent with this message. {app} does not save the image in chat history."
                 )),
             ),
             // A stored turn doesn't say which flow it came from, so these two read true of both.
@@ -932,6 +944,38 @@ mod tests {
             let shown = Text::held_screen(screen).map(|text| strings.get(text));
             assert_eq!(shown.as_deref(), line, "{screen:?}");
             assert_eq!(strings.pictured(screen), icon, "{screen:?}");
+        }
+    }
+
+    /// Claude Code's own words only while the offer goes to it; any other offer, a closed one or
+    /// none keeps the general promise.
+    #[test]
+    fn the_privacy_help_follows_the_offers_route() {
+        let strings = Strings::english();
+        let app = kumochi_protocol::constants::DISPLAY_NAME;
+        let general = format!(
+            "When you let go of the shortcut, {app} sends one screenshot of the screen your pointer is on, as it is, with your words to the model you're using. It sends it nowhere else and keeps no copy once the answer is done."
+        );
+        let offer = |connection| ScreenHolds::On {
+            model: ModelName::new("Fixture model").expect("valid"),
+            connection,
+            slug: ModelSlug::new("fixture").expect("valid"),
+            revision: NoticeRevision::FIRST,
+        };
+        for (offered, help) in [
+            (None, &general),
+            (Some(offer(ConnectionKind::ChatGpt)), &general),
+            (Some(offer(ConnectionKind::AnthropicKey)), &general),
+            (Some(ScreenHolds::Off(ScreenOff::TurnedOff)), &general),
+            (
+                Some(offer(ConnectionKind::ClaudeCode)),
+                &format!(
+                    "{app} passes the picture to Claude Code on standard input, not on the command line, and does not save the image in chat history. It gives each question a private temporary folder and tries to remove it after the process stops. Cleanup can be delayed or fail. {app} cannot guarantee what copies Claude Code or its provider retains."
+                ),
+            ),
+        ] {
+            let text = Text::show_screen_help(offered.as_ref());
+            assert_eq!(&strings.show_screen_help(text), help, "{offered:?}");
         }
     }
 

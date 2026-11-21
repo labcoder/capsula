@@ -111,10 +111,11 @@ the run has ended. A send that may have written it marks it sent, and the brain 
 run ends before any write of a request carrying it was attempted
 ([engines](engines.md#the-bound)). The shell shows a `HeldTurn`
 as a user turn with one thing under it. A turn whose picture is recorded (`Attached`, `Screen`)
-gets an icon whose tooltip and accessible label say which picture was sent and that the app
-keeps no copy. The icon can appear only after history refreshes: while a run is active a loaded
-turn stays plain until history is read again, so a missing icon doesn't prove no picture was
-sent. It over-reports where the store does: a write that was attempted but may not have been
+gets an icon whose tooltip and accessible label say which picture may have been sent and that the
+app doesn't save the image in chat history. The icon can appear only after history refreshes:
+while a run is active a loaded turn stays plain until history is read again, so a missing icon
+doesn't prove no picture was sent. It over-reports where the store does: a write that was
+attempted but may not have been
 accepted, Kumochi exiting before the send outcome is recorded, and a failed write of the mark or
 of its clear. A late unsent settlement after the run ended leaves a loaded row saying sent until
 a re-read. Any other turn gets one line saying why no

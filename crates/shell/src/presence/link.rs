@@ -132,6 +132,8 @@ impl Presence {
                 LinkEvent::ScreenHolds { state, .. } => {
                     let off = matches!(state, ScreenHolds::Off(ScreenOff::TurnedOff));
                     self.runs.set_screen_holds(state);
+                    // The Privacy tab's help follows the offer's route.
+                    self.settings.update(cx, |_, cx| cx.notify());
                     if off {
                         self.marks_off(cx);
                     }
