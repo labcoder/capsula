@@ -55,8 +55,9 @@ notification. Input still invalidates its window; this does not cache the window
 Recovery controls apply only to the still-current notice they rendered from. Replacing,
 clearing or dismissing the notice invalidates its callbacks, even if the same error returns.
 Dispatch then checks the declared action and uses the existing run, account or settings
-admission. An account Retry cannot resend run text. Public usage links use the existing URL,
-and settings routes select their exact tab without toggling a visible settings window closed.
+admission. An account Retry cannot resend run text. Manage usage opens the existing URL only
+when no account operation is pending, even if the click arrived before the link repainted.
+Settings routes select their exact tab without toggling a visible settings window closed.
 Retry and Dismiss return focus to the retained composer so typing and its Escape
 handling continue after the recovery control disappears.
 
