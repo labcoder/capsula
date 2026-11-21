@@ -300,10 +300,13 @@ fn queued_plain_escape_stops_active_audio_while_brain_data_credit_is_exhausted(
     cx: &mut TestAppContext,
 ) {
     use crate::link::{Batch, LinkEvent, fixture};
-    use kumochi_protocol::message::DataToShell;
+    use kumochi_protocol::message::{DataToShell, SegmentId};
+    use std::sync::mpsc;
     use std::time::{Duration, Instant};
 
     const WAIT: Duration = Duration::from_secs(3);
+    const CALLBACK_PERIOD: Duration = Duration::from_millis(2);
+    const PCM: [u32; 48] = [(15_430.0_f32 / 32_768.0).to_bits(); 48];
     fn wait(label: &str, mut ready: impl FnMut() -> bool) {
         let limit = Instant::now() + WAIT;
         while !ready() {
@@ -373,65 +376,103 @@ fn queued_plain_escape_stops_active_audio_while_brain_data_credit_is_exhausted(
     };
     assert!(matches!(
         pipe.playback.try_recv(),
-        Err(std::sync::mpsc::TryRecvError::Empty)
+        Err(mpsc::TryRecvError::Empty)
     ));
-    probe.release_run();
-    let (mut answering, mut drawn) = (false, false);
-    while !answering || !drawn {
-        let event = fixture::next(&events);
-        answering |= matches!(&event, LinkEvent::RunState { run: current, phase: Phase::Answering, .. } if *current == run);
-        drawn |= matches!(&event, LinkEvent::Data { message: DataToShell::StepCommit { run: current, .. }, .. } if *current == run);
-        apply(event, cx);
-    }
-    owner.read_with(cx, |owner, _| assert!(owner.runs.drawing()));
-    let mut playback = pipe
-        .playback
-        .recv_timeout(WAIT)
-        .expect("the real worker opened its fake device");
-    let mut samples = [0.0; 48];
-    wait("worker stages real PCM", || playback.ready());
-    playback.render(&mut samples);
-    assert_eq!(
-        samples.map(f32::to_bits),
-        [(15_430.0_f32 / 32_768.0).to_bits(); 48]
-    );
-    assert_eq!(
-        playback.handed(),
-        48,
-        "the first callback starts at source sample zero"
-    );
-    wait("Brain data queue exhausts its credit", || {
-        if playback.ready() {
-            playback.render(&mut samples);
-        }
-        probe.data_blocked()
-    });
-    assert!(!playback.stopped());
-    owner.read_with(cx, |owner, _| assert_eq!(owner.runs.stoppable(), Some(run)));
-    assert!(!pipe.handle.admits_text(Some(&session)));
-    wait("returned Shell credit reaches Brain", || {
-        probe.data_credits().0 > 0
-    });
-    assert_eq!(probe.data_credits().1, 0);
-    wait(
-        "source remains after Brain data credit is exhausted",
-        || playback.ready(),
-    );
-    fixture::with_outbox_held(&pipe.handle, &session, || {
-        playback.render(&mut samples);
-        assert_eq!(
-            samples.map(f32::to_bits),
-            [(15_430.0_f32 / 32_768.0).to_bits(); 48],
-            "the callback still renders the identifiable source immediately before Esc"
-        );
-        escape(&owner, cx);
-        owner.read_with(cx, |owner, _| {
-            assert_eq!(
-                owner.runs.stoppable(),
-                None,
-                "Esc fenced the drawn run while the exact outbox was still locked"
-            );
+    let mut playback = std::thread::scope(|scope| {
+        let (handoff, listen) = mpsc::channel();
+        let pump = scope.spawn(move || {
+            let mut playback = pipe
+                .playback
+                .recv_timeout(WAIT)
+                .expect("the real worker opened its fake device");
+            let limit = Instant::now() + WAIT;
+            let mut first = true;
+            let mut samples = [0.0; 48];
+            loop {
+                assert!(Instant::now() < limit, "Esc takes the original fake device");
+                assert!(!playback.stopped(), "the original fake device stays live");
+                playback.render(&mut samples);
+                if first && playback.handed() != 0 {
+                    assert_eq!(samples.map(f32::to_bits), PCM);
+                    assert_eq!(
+                        playback.handed(),
+                        48,
+                        "the first callback starts at source sample zero"
+                    );
+                    first = false;
+                }
+                match listen.recv_timeout(CALLBACK_PERIOD) {
+                    Ok(()) => {
+                        assert!(!first, "the device rendered source before Esc");
+                        return playback;
+                    }
+                    Err(mpsc::RecvTimeoutError::Disconnected) => return playback,
+                    Err(mpsc::RecvTimeoutError::Timeout) => {}
+                }
+            }
         });
+        probe.release_run();
+        let (mut answering, mut drawn) = (false, false);
+        let limit = Instant::now() + WAIT;
+        loop {
+            let blocked = probe.data_blocked();
+            let credits = probe.data_credits();
+            let heard = probe
+                .retired(run)
+                .iter()
+                .any(|receipt| receipt.segment == SegmentId(0) && receipt.heard >= 48);
+            assert!(
+                session.open() && Instant::now() < limit && !pump.is_finished(),
+                "still waiting for Esc: answering={answering} drawn={drawn} blocked={blocked} credits={credits:?} heard={heard} open={} pump_done={}",
+                session.open(),
+                pump.is_finished()
+            );
+            assert_eq!(credits.1, 0);
+            if answering && drawn && blocked && credits.0 > 0 && heard {
+                break;
+            }
+            match events.recv_timeout(CALLBACK_PERIOD) {
+                Ok(event) => {
+                    answering |= matches!(&event, LinkEvent::RunState { run: current, phase: Phase::Answering, .. } if *current == run);
+                    drawn |= matches!(&event, LinkEvent::Data { message: DataToShell::StepCommit { run: current, .. }, .. } if *current == run);
+                    apply(event, cx);
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    panic!("events disconnected: answering={answering} drawn={drawn}");
+                }
+            }
+        }
+        owner.read_with(cx, |owner, _| {
+            assert!(owner.runs.drawing());
+            assert_eq!(owner.runs.stoppable(), Some(run));
+        });
+        assert!(!pipe.handle.admits_text(Some(&session)));
+        let mut playback = None;
+        fixture::with_outbox_held(&pipe.handle, &session, || {
+            handoff.send(()).expect("the callback pump is still active");
+            let playback =
+                playback.insert(pump.join().expect("the callback pump returns its device"));
+            assert!(session.open());
+            assert!(!playback.stopped());
+            assert!(playback.ready(), "source remains after credit exhaustion");
+            let mut samples = [0.0; 48];
+            playback.render(&mut samples);
+            assert_eq!(
+                samples.map(f32::to_bits),
+                PCM,
+                "the callback still renders the identifiable source immediately before Esc"
+            );
+            escape(&owner, cx);
+            owner.read_with(cx, |owner, _| {
+                assert_eq!(
+                    owner.runs.stoppable(),
+                    None,
+                    "Esc fenced the drawn run while the exact outbox was still locked"
+                );
+            });
+        });
+        playback.expect("Esc takes the original fake device")
     });
     wait("local fence and Brain Stop on control", || {
         playback.stopped() && probe.stop() == run
