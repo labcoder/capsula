@@ -131,6 +131,35 @@ async fn a_failed_load_request_cannot_delete_or_reinstall_until_its_worker_exit_
     assert_eq!(installer.reported(SpeechInput, lost), []);
 }
 
+/// A supervisor made fatal without a new exit, as when an idle worker's exit goes unconfirmed or a
+/// replacement's threads don't start, refuses each later load before dispatch: speech input
+/// reports itself unavailable, not lost.
+#[tokio::test]
+async fn a_load_refused_by_a_fatal_supervisor_reports_speech_input_unavailable() {
+    let (inner, _requests) = supervise::detached::<Speech>();
+    inner.test_fatal();
+    let speech = SpeechHandle {
+        inner,
+        deadlines: DEADLINES,
+    };
+    let (reports, mut observed) = Reports::new();
+    let owner = SttHandle::spawn(
+        tokio::runtime::Handle::current(),
+        speech,
+        PathBuf::from("natives"),
+        reports,
+    )
+    .expect("owner starts");
+    owner.load(PathBuf::from("models"), 1);
+    assert_eq!(
+        report(&mut observed).await,
+        LoadReport {
+            ask: 1,
+            event: LoadEvent::Unavailable
+        }
+    );
+}
+
 #[tokio::test]
 async fn an_unload_reply_from_another_generation_does_not_release_the_loaded_model() {
     let (inner, mut requests) = supervise::detached::<Speech>();
