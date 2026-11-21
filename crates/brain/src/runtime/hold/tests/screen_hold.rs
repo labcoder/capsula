@@ -449,6 +449,82 @@ async fn words_go_on_at_once_with_an_armed_part_and_wait_for_a_capturing_one() {
 }
 
 #[tokio::test]
+async fn a_hung_display_capture_lets_the_words_go_at_the_release_budget() {
+    use crate::store::Store;
+    use kumochi_protocol::message::RunId;
+
+    let scratch = Scratch::new("screen-hold-hung-display");
+    let (mut brain, mut rig, _keep) = desk(&scratch).await;
+    let (out, _output) = mpsc::channel(64);
+    let queue = RefCell::new(DataQueue::new(crate::runtime::window()));
+    let ready_notify = Notify::new();
+    let mut tap = Tap::from_env();
+    let mut link = Link::new(&out, &queue, &ready_notify, &mut tap);
+    link.recovery = Some(crate::runtime::Recovery::new(&[], 1024));
+    assert!(
+        brain
+            .hold_control(&recognized(KEY.gesture), &mut link)
+            .unwrap()
+    );
+    prepared(&mut brain);
+
+    tokio::time::pause();
+    let at = Instant::now();
+    assert!(
+        brain
+            .hold_control(&release(KEY.gesture, 100, 200, 2), &mut link)
+            .unwrap()
+    );
+    let (_, display) = rig.next().await;
+    assert!(matches!(display, Request::Display { .. }));
+    assert_eq!(
+        Instant::now(),
+        at,
+        "the worker took the request before time advanced"
+    );
+    let words = "the words without the picture";
+    brain
+        .hold_event(
+            Event::Decoded(KEY, SttResult::Text(words.into())),
+            &mut link,
+        )
+        .unwrap();
+    assert!(
+        tokio::time::timeout_at(at + Duration::from_millis(1499), next(&mut brain.holds))
+            .await
+            .is_err(),
+        "the unanswered capture does not end the wait early"
+    );
+    assert_eq!(brain.coordinator.current_run(), None);
+
+    let event = tokio::time::timeout_at(at + Duration::from_millis(1501), next(&mut brain.holds))
+        .await
+        .expect("the hold timer fires within one clock tick of the screen deadline");
+    assert!(matches!(event, Event::Deadline));
+    brain.hold_event(event, &mut link).unwrap();
+    assert_eq!(brain.coordinator.current_run(), Some(RunId(1)));
+    assert!(matches!(
+        brain.coordinator.current_screen(),
+        Some(Screen::PictureNotIncluded(ScreenClass::NotReady))
+    ));
+
+    tokio::time::resume();
+    rig.held().await;
+    rig.confirm.send(true).unwrap();
+    brain.close().await;
+    let store = Store::open(&scratch.db()).unwrap();
+    let submitted: String = store
+        .conn_for_tests()
+        .query_row(
+            "SELECT text FROM events WHERE run = 1 AND kind = 'user'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(submitted, words);
+}
+
+#[tokio::test]
 async fn a_cancel_or_a_lost_shell_during_the_wait_ends_the_hold_and_retires_the_frame() {
     let scratch = Scratch::new("screen-hold-words-cancel");
     let mut brain = test_support::brain(&scratch, "");
