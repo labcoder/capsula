@@ -385,10 +385,10 @@ fn account_error(error: &kumochi_protocol::message::UserError, cx: &App) -> Div 
                 }),
             )
     } else {
-        div()
-            .text_sm()
-            .text_color(cx.theme().danger)
-            .child(strings.error(error))
+        let row = div().text_sm().text_color(cx.theme().danger);
+        #[cfg(test)]
+        let row = row.debug_selector(|| "chatgpt-account-error".into());
+        row.child(strings.error(error))
     }
 }
 
@@ -506,7 +506,42 @@ fn cleanup_notice(view: &AccountView) -> Option<Text> {
 
 #[cfg(test)]
 mod tests {
-    use super::{AccountView, Accounts, Cleanup, Text, account_status, cleanup_notice};
+    use super::{
+        AccountRecovery, AccountView, Accounts, Cleanup, PlanState, Text, account_status,
+        cleanup_notice,
+    };
+
+    #[test]
+    fn account_status_prefers_recovery_to_each_plan_state() {
+        for plan in [
+            PlanState::Enabled,
+            PlanState::Declined,
+            PlanState::Unavailable,
+        ] {
+            for (recovery, expected) in [
+                (
+                    AccountRecovery::SignInAgain,
+                    (Text::AccountSessionEnded, vec![]),
+                ),
+                (
+                    AccountRecovery::Retry,
+                    (Text::AccountAttention, vec![Text::AccountRetryHelp]),
+                ),
+            ] {
+                let mut state = Accounts::default();
+                assert!(state.receive(
+                    Some(7),
+                    7,
+                    AccountView::SignedIn {
+                        email: None,
+                        plan,
+                        recovery: Some(recovery),
+                    },
+                ));
+                assert_eq!(account_status(&state), expected, "{plan:?}, {recovery:?}");
+            }
+        }
+    }
 
     #[test]
     fn remote_sign_out_copy_follows_the_cleanup_phase() {
@@ -556,6 +591,17 @@ mod tests {
                     lines
                 )
             );
+        }
+        for (revocation_unconfirmed, line) in [
+            (false, Text::AccountUsePlan),
+            (true, Text::AccountRevocationUnconfirmed),
+        ] {
+            let view = AccountView::SignedOut {
+                revocation_unconfirmed,
+            };
+            let mut state = Accounts::default();
+            assert!(state.receive(Some(7), 7, view));
+            assert_eq!(account_status(&state), (Text::AccountSignedOut, vec![line]));
         }
     }
 }
