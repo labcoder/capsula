@@ -297,7 +297,11 @@ impl Runs {
     }
 
     pub fn settings(&mut self, main: ThreadId) {
+        let previous = self.thread();
         self.main = Some(main);
+        if self.thread() != previous {
+            self.dismiss_retry();
+        }
     }
 
     pub fn back_to_kumo(&mut self) {

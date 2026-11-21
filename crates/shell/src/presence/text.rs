@@ -2,6 +2,8 @@
 
 mod recovery;
 
+use std::rc::Rc;
+
 use async_channel::Sender;
 use gpui_kit::component::input::{Escape as EscapeKey, Input, InputEvent};
 use gpui_kit::component::{ActiveTheme as _, Disableable as _, button::Button};
@@ -442,9 +444,9 @@ impl Presence {
         };
         let answer = self.runs.shown();
         let target = self.runs.target();
-        let recovery = self.chat_notice.for_thread(self.runs.thread()).cloned();
+        let recovery = self.chat_notice.for_thread(self.runs.thread());
         let notice = typing_notice(
-            recovery.as_ref().and(self.error.as_ref()),
+            recovery.and(self.error.as_ref()),
             self.refusal,
             cx.global::<Strings>(),
         )
@@ -459,26 +461,27 @@ impl Presence {
             let (text, model) = self.panel.read(cx).screen_line.as_ref()?;
             Some(super::voice::screen_text(cx.global::<Strings>(), *text, model.as_ref()).into())
         });
-        let retry = recovery.as_ref().is_some_and(
+        let retry = recovery.is_some_and(
             |notice| matches!(notice.source, Source::Run(run) if self.runs.retry_ready(run)),
         );
         let refusal = self.refusal;
         text.view.update(cx, |view, cx| {
             view.messages
                 .update(cx, |messages, cx| messages.live(answer, cx));
+            let recovery_changed =
+                view.recovery.as_ref().map(Rc::as_ptr) != recovery.map(Rc::as_ptr);
             if view.target != target
-                || view.recovery != recovery
+                || recovery_changed
                 || view.retry != retry
                 || view.refusal != refusal
                 || view.notice != notice
             {
                 view.target = target;
-                if view.recovery != recovery {
-                    view.recovery_text = recovery
-                        .as_ref()
-                        .map(|notice| cx.global::<Strings>().error(&notice.error).into());
+                if recovery_changed {
+                    view.recovery_text =
+                        recovery.map(|notice| cx.global::<Strings>().error(&notice.error).into());
+                    view.recovery = recovery.cloned();
                 }
-                view.recovery = recovery;
                 view.retry = retry;
                 view.refusal = refusal;
                 view.notice = notice;
@@ -495,7 +498,7 @@ pub(super) struct TextView {
     pub(super) stop: bool,
     model: Entity<Threads>,
     settings: Entity<Settings>,
-    recovery: Option<Notice>,
+    recovery: Option<Rc<Notice>>,
     recovery_text: Option<SharedString>,
     retry: bool,
     draft_empty: bool,

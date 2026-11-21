@@ -307,6 +307,35 @@ fn retry_rechecks_the_captured_main_thread_after_a_settings_change() {
 }
 
 #[test]
+fn stale_retry_does_not_return_when_the_main_setting_changes_back() {
+    use kumochi_protocol::message::Action;
+
+    let mut runs = ready();
+    submit(&mut runs, "belongs to the original main");
+    runs.apply_run_state(
+        RunId(1),
+        ThreadId(1),
+        Phase::Failed,
+        Some(UserError::new(ErrorKey::AccountOffline, vec![], vec![Action::Retry]).unwrap()),
+        Some(RunOrigin::Typed { turn: 1 }),
+    );
+    runs.settings(ThreadId(1));
+    assert!(runs.retry_ready(RunId(1)), "same target keeps recovery");
+    runs.settings(ThreadId(2));
+    assert!(!runs.retry_ready(RunId(1)));
+    runs.settings(ThreadId(1));
+    assert!(
+        !runs.retry_ready(RunId(1)),
+        "returning must not revive recovery"
+    );
+    assert_eq!(runs.kept(), Vec::<usize>::new());
+    assert_eq!(
+        runs.retry(RunId(1), "", |_| panic!("a retired run must not send")),
+        Err(Refused::Busy),
+    );
+}
+
+#[test]
 fn a_stale_selection_revision_cannot_dispatch_retained_retry_text() {
     use kumochi_protocol::message::Action;
     let mut runs = ready();
