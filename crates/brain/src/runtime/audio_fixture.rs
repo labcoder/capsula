@@ -6,8 +6,8 @@ use std::time::Duration;
 use kumochi_protocol::constants::{CONFIG_FILE, SESSION_LOCK};
 use kumochi_protocol::frame::{self, Pipe};
 use kumochi_protocol::message::{
-    ControlToBrain, ControlToShell, Cursor, RunId, SceneId, SpeechDecision, SpeechDispatch,
-    SpeechRetirement,
+    ControlToBrain, ControlToShell, Cursor, DataToShell, RunId, SceneId, SegmentStart,
+    SpeechDecision, SpeechDispatch, SpeechRetirement, StepRef,
 };
 use tokio::sync::Notify;
 
@@ -101,6 +101,8 @@ pub struct AudioProbe {
     initial_credit: Option<u32>,
     replacement_chain: Option<Arc<Notify>>,
     pub(super) replacement_queued: AtomicBool,
+    hold_after_prefix: AtomicBool,
+    scene_revoke: Mutex<SceneRevoke>,
     ack: AtomicBool,
     name: AtomicBool,
     control: Notify,
@@ -115,6 +117,14 @@ pub struct AudioProbe {
     scene_failed: std::sync::Mutex<Option<(RunId, SceneId)>>,
     decision: std::sync::Mutex<Option<(SpeechDispatch, SpeechDecision)>>,
     shown: Mutex<Vec<(RunId, SceneId, u32)>>,
+}
+
+#[derive(Debug, Default)]
+struct SceneRevoke {
+    prefix: Option<SceneId>,
+    promise: Option<(StepRef, SpeechDispatch)>,
+    announcement: Option<(StepRef, SpeechDispatch)>,
+    revoked: bool,
 }
 
 #[derive(Debug, Default)]
@@ -172,6 +182,94 @@ impl AudioProbe {
     /// The real data writer saw a frame larger than its remaining credit.
     pub fn data_blocked(&self) -> bool {
         self.data_blocked.load(Ordering::Acquire)
+    }
+
+    /// Holds the real writer's credit after the next unpromised first step enters its write.
+    pub fn hold_after_scene_prefix(&self) {
+        self.hold_after_prefix.store(true, Ordering::Release);
+    }
+
+    pub(super) fn writing_scene_prefix(&self, queue: &std::cell::RefCell<DataQueue>, frame: &[u8]) {
+        if self.hold_after_prefix.load(Ordering::Acquire)
+            && let Ok(DataToShell::SceneStepCommit {
+                scene,
+                index: 0,
+                speech: None,
+                ..
+            }) = frame::decode(&frame[frame::HEADER_LEN..])
+        {
+            queue.borrow_mut().hold_fixture_credit();
+            self.scene_revoke.lock().expect("scene probe").prefix = Some(scene);
+            self.hold_after_prefix.store(false, Ordering::Release);
+        }
+    }
+
+    pub(super) fn queued_scene_data(&self, message: &DataToShell) {
+        let mut facts = self.scene_revoke.lock().expect("scene probe");
+        match message {
+            DataToShell::SceneStepCommit {
+                run,
+                scene,
+                index,
+                speech: Some(promise),
+                ..
+            } if self.hold_after_prefix.load(Ordering::Acquire) || facts.prefix == Some(*scene) => {
+                facts.promise = Some((
+                    StepRef {
+                        scene: *scene,
+                        index: *index,
+                    },
+                    SpeechDispatch {
+                        run: *run,
+                        output: promise.output_generation,
+                        segment: promise.segment,
+                    },
+                ));
+            }
+            DataToShell::SegmentQueued {
+                run,
+                step: Some(step),
+                segment,
+                start: SegmentStart::Speech,
+                output_generation,
+            } if self.hold_after_prefix.load(Ordering::Acquire)
+                || facts.prefix == Some(step.scene) =>
+            {
+                facts.announcement = Some((
+                    *step,
+                    SpeechDispatch {
+                        run: *run,
+                        output: *output_generation,
+                        segment: *segment,
+                    },
+                ));
+            }
+            _ => {}
+        }
+    }
+
+    pub(super) fn applied_scene_revoke(&self, scenes: &[SceneId]) {
+        let mut facts = self.scene_revoke.lock().expect("scene probe");
+        facts.revoked |= facts.prefix.is_some_and(|prefix| scenes.contains(&prefix));
+    }
+
+    /// The exact promise and matching announcement queued behind the held prefix.
+    ///
+    /// # Panics
+    /// Panics if the scene probe is poisoned.
+    pub fn held_narration(&self) -> Option<(StepRef, SpeechDispatch)> {
+        let facts = self.scene_revoke.lock().expect("scene probe");
+        facts
+            .promise
+            .filter(|promise| Some(*promise) == facts.announcement)
+    }
+
+    /// Whether the real queue applied a revoke for the held scene.
+    ///
+    /// # Panics
+    /// Panics if the scene probe is poisoned.
+    pub fn applied_held_scene_revoke(&self) -> bool {
+        self.scene_revoke.lock().expect("scene probe").revoked
     }
 
     /// Applies subsequent wire grants to the real Brain data queue.

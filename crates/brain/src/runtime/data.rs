@@ -313,7 +313,16 @@ impl DataQueue {
         self.retain(|owner| !matches!(owner, Owner::Scene(scene) | Owner::SpeechPromise(scene) if scenes.contains(scene)));
     }
 
-    pub(crate) fn replace_scenes(&mut self, victims: &[SceneId], frame: Vec<u8>) {
+    pub(super) fn owes_narration_in(&self, victims: &[SceneId]) -> bool {
+        self.frames.iter().any(|(owner, _)| match owner {
+            Owner::SpeechPromise(scene) | Owner::SpeechAnnouncement(_, scene) => {
+                victims.contains(scene)
+            }
+            _ => false,
+        })
+    }
+
+    pub(super) fn retire_scenes(&mut self, victims: &[SceneId], frame: Vec<u8>) {
         self.retain(|owner| !matches!(owner, Owner::Scene(scene) if victims.contains(scene)));
         let at = self
             .frames
@@ -571,6 +580,43 @@ mod tests {
         assert_eq!(queue.bytes(), 3 * (1 + ENTRY));
         let sent: Vec<_> = std::iter::from_fn(|| queue.pop(Instant::now())).collect();
         assert_eq!(sent, [vec![2], vec![3], vec![4]]);
+    }
+
+    #[test]
+    fn retiring_geometry_keeps_owed_narration_after_the_boundary() {
+        let scene = SceneId(1);
+        let run = RunId(3);
+        let now = Instant::now();
+        for crossed_writer in [false, true] {
+            let mut queue = DataQueue::new(100);
+            queue.push(Owner::SpeechPromise(scene), vec![1]);
+            if crossed_writer {
+                assert_eq!(queue.pop(now), Some(vec![1]));
+            }
+            queue.push(Owner::SpeechAnnouncement(run, scene), vec![2]);
+            queue.push(Owner::Scene(scene), vec![3]);
+            queue.push(Owner::Presentation, vec![4]);
+            queue.push(Owner::Run(run), vec![5]);
+            queue.push(Owner::Scene(SceneId(2)), vec![6]);
+            assert!(queue.owes_narration_in(&[scene]));
+            assert!(!queue.owes_narration_in(&[SceneId(2)]));
+            queue.retire_scenes(&[scene], vec![7]);
+            if crossed_writer {
+                queue.wrote();
+            }
+            let sent: Vec<_> = std::iter::from_fn(|| {
+                let frame = queue.pop(now);
+                queue.wrote();
+                frame
+            })
+            .collect();
+            if crossed_writer {
+                assert_eq!(sent, [vec![4], vec![7], vec![2], vec![5], vec![6]]);
+            } else {
+                assert_eq!(sent, [vec![4], vec![7], vec![1], vec![2], vec![5], vec![6]]);
+            }
+            assert_eq!(queue.credit, 94);
+        }
     }
 
     #[test]

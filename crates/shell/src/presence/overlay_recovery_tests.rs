@@ -2281,6 +2281,239 @@ fn narration_wakes_resting_presence_for_each_natural_reply(cx: &mut gpui_kit::Te
     assert!(brain.join().unwrap());
 }
 
+#[cfg(all(windows, debug_assertions))]
+#[gpui::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one real pair spans paint failure, returned credit and the next turn"
+)]
+fn refused_scene_paint_does_not_orphan_queued_narration(cx: &mut gpui_kit::TestAppContext) {
+    use crate::link::{Batch, LinkEvent, fixture};
+    use crate::presence::{run_fence_tests::submit_draft, test_fixture};
+    use kumochi_protocol::message::{
+        DATA_WINDOW, DataToShell, RunId, SpeechDecision, SpeechRetirement, StepRef,
+    };
+    use std::time::{Duration, Instant};
+
+    let _device = fixture::serialize_playback();
+    let (id, hello, probe, brain) = kumochi_brain::ipc::offline_narrated_peer(8);
+    probe.release_ack();
+    probe.release_run();
+    probe.hold_after_scene_prefix();
+    let pipe = fixture::authenticated_narrated(id, hello);
+    let events = fixture::patient(pipe.events);
+    let owner = test_fixture::presence(cx);
+    let session = fixture::connected(fixture::next(&events));
+    owner.update(cx, |this, _| this.link = pipe.handle.clone());
+    let apply = |event, cx: &mut gpui_kit::TestAppContext| {
+        owner.update(cx, |this, cx| {
+            this.link_events(Batch::Plain(vec![event]), cx).unwrap();
+        });
+        cx.run_until_parked();
+    };
+    apply(LinkEvent::Connected(session.clone()), cx);
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while !owner.read_with(cx, |this, _| this.presenter.membership_ready())
+        || !pipe.handle.admits_text(Some(&session))
+    {
+        assert!(Instant::now() < deadline, "the paired Presence is ready");
+        if let Ok(event) = events.recv_timeout(Duration::from_millis(5)) {
+            apply(event, cx);
+        }
+    }
+    let host = HostGuard::install(&[
+        Step(Operation::Configure, Outcome::Success),
+        Step(Operation::Show, Outcome::Success),
+        Step(Operation::Hide, Outcome::Success),
+    ]);
+    submit_draft(&owner, "fail the installed scene", cx);
+    let deadline = Instant::now() + Duration::from_secs(3);
+    let (run, scene) = loop {
+        assert!(
+            Instant::now() < deadline,
+            "the real unpromised step arrived"
+        );
+        let event = fixture::next(&events);
+        let prefix = match &event {
+            LinkEvent::SceneData { frame, .. } => match &**frame {
+                DataToShell::SceneStepCommit {
+                    run,
+                    scene,
+                    index: 0,
+                    speech: None,
+                    ..
+                } => Some((*run, *scene)),
+                _ => None,
+            },
+            _ => None,
+        };
+        apply(event, cx);
+        if let Some(key) = prefix {
+            break key;
+        }
+    };
+    let prefix_bytes = probe.sent_bytes();
+    let (step, dispatch) = loop {
+        assert!(
+            Instant::now() < deadline,
+            "the exact promise and announcement are queued"
+        );
+        if let Some(pair) = probe.held_narration()
+            && probe.data_blocked()
+            && probe.data_credits() == (prefix_bytes, 0)
+            && probe.shown() == [(run, scene, 0)]
+        {
+            break pair;
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    };
+    assert_eq!(step, StepRef { scene, index: 1 });
+    assert_eq!(dispatch.run, run);
+    assert_eq!(probe.sent_bytes(), prefix_bytes);
+    owner.update(cx, |this, cx| {
+        let frames = this.presenter.frames();
+        assert_eq!(
+            crate::presenter::tests::painted(&frames.borrow(), scene)
+                .unwrap()
+                .1,
+            1
+        );
+        assert!(frames.borrow().paint(|frame, _| {
+            assert!(frame.generation().is_some(), "the real prefix was sampled");
+            Err::<(), ()>(())
+        }));
+        this.paint_observed(true, cx).unwrap();
+    });
+    cx.run_until_parked();
+    host.finish();
+    let deadline = Instant::now() + Duration::from_secs(1);
+    while !probe.applied_held_scene_revoke() || probe.data_credits() != (prefix_bytes, 0) {
+        assert!(
+            Instant::now() < deadline,
+            "Brain applied the real scene revoke and consumed the prefix credit: failure={:?}, applied={}, sent={}, credit={:?}, open={}",
+            probe.scene_failed(),
+            probe.applied_held_scene_revoke(),
+            probe.sent_bytes(),
+            probe.data_credits(),
+            session.open()
+        );
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    assert_eq!(probe.scene_failed(), Some((RunId(0), scene)));
+    assert_eq!(probe.sent_bytes(), prefix_bytes);
+    assert_eq!(probe.shown(), [(run, scene, 0)]);
+    assert_eq!(probe.speech_decision(), None);
+    assert!(pipe.playback.try_recv().is_err());
+    assert!(session.open());
+    owner.read_with(cx, |this, _| assert!(!this.presenter.holds_scenes()));
+
+    probe.allow_data_credit();
+    session.grant(DATA_WINDOW);
+    let seed = u64::from(DATA_WINDOW);
+    let deadline = Instant::now() + Duration::from_secs(3);
+    let mut ended = None;
+    let mut removed = false;
+    let mut retained_promise = false;
+    loop {
+        assert!(
+            session.open(),
+            "the queued announcement must not outlive its unwritten promise"
+        );
+        assert!(
+            Instant::now() < deadline,
+            "the first RunEnd and exact credit arrive"
+        );
+        if let Ok(event) = events.recv_timeout(Duration::from_millis(5)) {
+            match &event {
+                LinkEvent::Data {
+                    message: DataToShell::RunEnd { run: end },
+                    ..
+                } => {
+                    assert_eq!(ended.replace(*end), None);
+                }
+                LinkEvent::SceneData { frame, .. } => match &**frame {
+                    DataToShell::ScenesRemoved { scenes } => {
+                        assert_eq!(scenes, &[scene]);
+                        assert!(!std::mem::replace(&mut removed, true));
+                    }
+                    DataToShell::SceneStepCommit {
+                        run: who,
+                        scene: victim,
+                        index,
+                        speech,
+                        ..
+                    } if *victim == scene => {
+                        assert!(removed, "removal precedes its preserved speech promise");
+                        assert!(!std::mem::replace(&mut retained_promise, true));
+                        let promise = speech.expect("the wire retirement still owes a promise");
+                        assert_eq!(
+                            (*who, *index, promise.output_generation, promise.segment),
+                            (run, step.index, dispatch.output, dispatch.segment)
+                        );
+                    }
+                    _ => {}
+                },
+                _ => {}
+            }
+            apply(event, cx);
+        }
+        let total = probe.sent_bytes();
+        if ended == Some(run) && probe.data_credits() == (total + seed, total - prefix_bytes + seed)
+        {
+            break;
+        }
+    }
+    assert!(removed && retained_promise);
+    assert_eq!(probe.shown(), [(run, scene, 0)]);
+    assert_eq!(
+        probe.speech_decision(),
+        Some((dispatch, SpeechDecision::Discard))
+    );
+    assert_eq!(
+        probe.retired(run),
+        [SpeechRetirement {
+            run,
+            output: dispatch.output,
+            segment: dispatch.segment,
+            retired: 0,
+            heard: 0,
+            final_segment: true,
+        }]
+    );
+    assert!(pipe.playback.try_recv().is_err());
+    assert_eq!(probe.stop(), RunId(0));
+
+    let host = HostGuard::install(&[
+        Step(Operation::Configure, Outcome::Success),
+        Step(Operation::Show, Outcome::Success),
+        Step(Operation::Hide, Outcome::Success),
+    ]);
+    owner.update(cx, |this, _| assert!(this.runs.select_thread(None)));
+    submit_draft(&owner, "a fresh turn on the same pair", cx);
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        assert!(session.open());
+        assert!(
+            Instant::now() < deadline,
+            "the successor's durable promise arrives on the same pair"
+        );
+        let event = fixture::next(&events);
+        let successor = matches!(&event, LinkEvent::SceneData { frame, .. }
+            if matches!(&**frame, DataToShell::SceneStepCommit {
+                run: next, scene: new, index: 1, speech: Some(_), ..
+            } if *next > run && *new != scene));
+        apply(event, cx);
+        if successor {
+            break;
+        }
+    }
+    apply(LinkEvent::State(crate::link::LinkState::Connecting), cx);
+    host.finish();
+    pipe.handle.end(&session);
+    assert!(pipe.link.join().unwrap());
+    assert!(brain.join().unwrap());
+}
+
 /// A step whose only object appears 200 ms in, reached by a wake that runs at 300 ms: the kept
 /// first sample is the object's initial pose at 200 ms, and its 800 ms entrance runs from the
 /// paint observed at 400 ms.

@@ -52,9 +52,12 @@ worker. It sends the existing decision only when the worker has applied the exac
 binding. The brain's decision-taken frame settles decision consumption; it never
 authorizes local staging. A durable absent promise permits authored timing for that
 step; a promised step stays unresolved until its announcement matches. Removing a
-committed scene before it binds sends an exact Discard. A replacement marker fences
-the victim assignment at the data reader, even before the presenter applies the
-removal. A busy output owner defers an unbound Discard without lifting that fence.
+committed scene before it binds sends an exact Discard. If a scene is removed
+while its narration metadata is still queued, the brain puts the removal before
+the retained metadata that hasn't entered the writer. The removed step cannot
+paint or play, but its announced segment still returns the ordered empty
+retirement. A replacement marker fences the victim assignment at the data
+reader, even before the presenter applies the removal. A busy output owner defers an unbound Discard without lifting that fence.
 An explicitly stopped run's commit can still reach the reader after the next run
 has been named or stopped. The commit goes to the stopped scene mirror; a matching
 announcement returns credit once without binding or sending a speech decision. The
