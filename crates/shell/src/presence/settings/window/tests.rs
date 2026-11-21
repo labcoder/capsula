@@ -578,32 +578,77 @@ fn recovery_openers_select_the_exact_tab_without_toggling_a_visible_window_close
 
 #[gpui::test]
 fn open_settings_in_the_chat_recovery_swaps_the_chat_for_settings(cx: &mut TestAppContext) {
+    use gpui_kit::{MouseButton, MouseDownEvent, MouseUpEvent, PlatformInput};
     use kumochi_protocol::message::{Action, ErrorKey, UserError};
     let _area = crate::platform::work_area_fixture::set([0, 0, 2560, 1400]);
     let owner = test_fixture::presence(cx);
     let (window, view) = super::super::general::tests::open(cx);
+    let notice = |key, action| {
+        Batch::Plain(vec![LinkEvent::Error {
+            generation: 7,
+            error: UserError::new(key, Vec::new(), vec![action]).expect("bounded error"),
+        }])
+    };
+    let opener = || notice(ErrorKey::ConnectionNeeded, Action::OpenSettings);
     let chat = owner.update(cx, |owner, cx| {
         owner.settings_panel = Some(SettingsPanel {
             window,
-            view,
+            view: view.clone(),
             visible: false,
             focused: false,
             bounds: [0; 4],
             previous: None,
             activation: None,
         });
+        owner.session = Some(Session::detached(7, Incarnation(1)));
         owner.open_text(cx).expect("open chat");
-        owner.chat_notice.present(
-            UserError::new(
-                ErrorKey::ModelUnavailable,
-                Vec::new(),
-                vec![Action::OpenSettings],
-            )
-            .expect("bounded settings recovery"),
-            crate::chat_notice::Source::Settings(None),
-        );
-        owner.refresh_conversation(cx);
+        owner.link_events(opener(), cx).expect("current opener");
+        assert!(owner.text_open());
+        assert!(!owner.settings_open());
         owner.text.as_ref().expect("typing fixture").window
+    });
+    cx.run_until_parked();
+    let position = VisualTestContext::from_window(chat, cx)
+        .debug_bounds("chat-recovery-action-0")
+        .expect("painted Accounts opener")
+        .center();
+    cx.update(|cx| {
+        owner.update(cx, |owner, cx| {
+            owner
+                .link_events(notice(ErrorKey::TrustStoreUnavailable, Action::SignIn), cx)
+                .expect("replace the opener before the next paint");
+        });
+        chat.update(cx, |_, window, cx| {
+            window.dispatch_event(
+                PlatformInput::MouseDown(MouseDownEvent {
+                    position,
+                    button: MouseButton::Left,
+                    click_count: 1,
+                    ..MouseDownEvent::default()
+                }),
+                cx,
+            );
+            window.dispatch_event(
+                PlatformInput::MouseUp(MouseUpEvent {
+                    position,
+                    button: MouseButton::Left,
+                    click_count: 1,
+                    ..MouseUpEvent::default()
+                }),
+                cx,
+            );
+        })
+        .expect("click the opener on the last painted frame");
+    });
+    owner.update(cx, |owner, cx| {
+        assert!(
+            !owner.settings_open(),
+            "the stale click must not open Settings"
+        );
+        assert!(owner.text_open());
+        owner
+            .link_events(opener(), cx)
+            .expect("fresh Accounts opener");
     });
     cx.run_until_parked();
     {
@@ -614,9 +659,10 @@ fn open_settings_in_the_chat_recovery_swaps_the_chat_for_settings(cx: &mut TestA
         frame.simulate_click(bounds.center(), gpui_kit::Modifiers::default());
     }
     cx.run_until_parked();
-    owner.read_with(cx, |owner, _| {
+    owner.read_with(cx, |owner, cx| {
         assert!(owner.settings_open(), "Settings is shown");
         assert!(!owner.text_open(), "the chat is hidden");
+        assert_eq!(view.read(cx).tab, 1);
     });
 }
 
