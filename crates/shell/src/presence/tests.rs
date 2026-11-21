@@ -717,3 +717,48 @@ fn a_reconnect_failure_restores_its_turn_only_into_an_empty_composer(cx: &mut Te
         });
     }
 }
+
+/// A delete that fails before hiding rereads its thread's open page, since the brain sends no
+/// events marker for a thread while it is deleting; another thread's failed delete reads nothing.
+#[gpui::test]
+fn a_delete_that_fails_before_hiding_rereads_only_its_open_thread(cx: &mut TestAppContext) {
+    use kumochi_protocol::message::{DataToBrain, Deleted, PageOf};
+    for (deleted, reread) in [(ThreadId(1), true), (ThreadId(2), false)] {
+        let owner = test_fixture::presence(cx);
+        let requests = owner.update(cx, |owner, cx| {
+            let (link, requests) = crate::link::LinkHandle::recording();
+            owner.link = link;
+            owner.session = Some(Session::detached(1, Incarnation(1)));
+            owner.chat.update(cx, |state, _| {
+                state.connected();
+                state.show_for(Some(ThreadId(1)));
+                assert_eq!(state.requests().len(), 2);
+                state.receive(
+                    DataToShell::Page {
+                        request: 2,
+                        thread: ThreadId(1),
+                        events: Vec::new(),
+                        before: None,
+                    },
+                    0,
+                );
+                assert!(!state.reading());
+            });
+            assert!(owner.runs.confirm_delete(deleted));
+            owner.sync_deletes(cx);
+            requests
+        });
+        owner.update(cx, |owner, cx| {
+            owner.thread_deleted(deleted, Deleted::NotHidden, None, cx);
+        });
+        let sent: Vec<_> = std::iter::from_fn(|| requests.try_recv().ok()).collect();
+        let expected = reread.then_some(DataToBrain::PageRequest {
+            request: 3,
+            page: PageOf::Events {
+                thread: ThreadId(1),
+                before: None,
+            },
+        });
+        assert_eq!(sent, Vec::from_iter(expected), "deleted {deleted:?}");
+    }
+}
