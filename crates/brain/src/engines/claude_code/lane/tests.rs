@@ -49,7 +49,7 @@ pub(crate) const V: ClaudeVersion = ClaudeVersion {
 /// bytes), `other` and `older` (`--version` prints an unreviewed 2.1.307 or 2.1.305), `status:N` (the status JSON padded to N bytes), `stderr:N` (N bytes of stderr first),
 /// `exit:N` (status exits N), `linger:PATH` (leaves a grandchild holding PATH and stdout),
 /// `loginhang` (`auth login` never ends) and `logoutfail` (`auth logout` exits 3). A question
-/// (`-p`) runs as [`question`] says. Whatever the
+/// (`-p`) runs as [`question`] says, or as [`picture`] says in mode `picture:HOW`. Whatever the
 /// mode, `auth login` leaves a sign-in in the config folder, which `auth status` then reports and
 /// `auth logout` removes, noting whether the Disconnect marker was down.
 pub(crate) fn fake(args: Vec<OsString>) -> i32 {
@@ -79,7 +79,11 @@ pub(crate) fn fake(args: Vec<OsString>) -> i32 {
         _ => {}
     }
     if rest.first().is_some_and(|word| word == "-p") {
-        return question(kind);
+        return if kind == "picture" {
+            picture(value)
+        } else {
+            question(kind)
+        };
     }
     let mut stdout = std::io::stdout();
     if rest.first().is_none_or(|word| word != "auth") {
@@ -146,6 +150,21 @@ fn base_dir() -> PathBuf {
         .nth(2)
         .expect("the config folder is two below the base")
         .to_owned()
+}
+
+/// A question that keeps [`PICTURE_JPEG`] at `images\picture.jpg` in its temporary folder, as
+/// Claude Code keeps a session's pictures, then waits for the base's `release` and exits: `crash`
+/// with an access violation's status, any other HOW with 0. Unreleased, it waits up to 60 s.
+fn picture(how: &str) -> i32 {
+    let images = PathBuf::from(std::env::var_os("CLAUDE_CODE_TMPDIR").expect("the launch sets it"))
+        .join("images");
+    fs::create_dir(&images).expect("an images folder");
+    fs::write(images.join("picture.jpg"), PICTURE_JPEG).expect("the picture");
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while !base_dir().join("release").exists() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    if how == "crash" { -1_073_741_819 } else { 0 }
 }
 
 /// A question: `echo` copies stdin to stdout and logs each read's length to `echo.log`,
