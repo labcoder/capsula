@@ -71,26 +71,38 @@ impl SettingsView {
             body.push_str("\n\n");
             body.push_str(&strings.get(Text::AccountSignOutRegistration));
         }
-        let model = self.model.clone();
-        let owner = self.owner.clone();
+        let view = cx.weak_entity();
         let title = strings.get(Text::AccountSignOutTitle).into();
         let cancel = strings.get(Text::AccountDialogCancel).into();
         let confirm = strings.get(Text::AccountSignOutConfirm).into();
-        self.confirmation = Some(generation);
-        let _focus = crate::confirmation::open(
+        let dialog = crate::confirmation::open_during_exit(
             window,
             cx,
             title,
             body.into(),
             cancel,
             confirm,
-            move |_, cx: &mut App| {
-                if model.read(cx).accounts.generation == Some(generation) {
-                    let _gone =
-                        owner.update(cx, |owner, cx| owner.account_op(AccountOp::SignOut, cx));
-                }
+            move |confirmed, _, cx| {
+                let _gone = view.update(cx, |view, cx| {
+                    if view
+                        .confirmation
+                        .as_ref()
+                        .is_none_or(|(current, _)| *current != generation)
+                    {
+                        return;
+                    }
+                    view.confirmation = None;
+                    if confirmed && view.model.read(cx).accounts.generation == Some(generation) {
+                        let _gone = view
+                            .owner
+                            .update(cx, |owner, cx| owner.account_op(AccountOp::SignOut, cx));
+                    }
+                });
             },
         );
+        if let Some(dialog) = dialog {
+            self.confirmation = Some((generation, dialog));
+        }
     }
 }
 
