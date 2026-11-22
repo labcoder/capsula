@@ -942,9 +942,10 @@ delivery, not worker/native copies or physical retirement.
 
 ### Voice-only held turns
 
-On a registered Plain queued pair with Show Screen confirmed off and Talk-back unchanged,
+On a registered Plain queued pair with Talk-back unchanged,
 the Shell sends a speaking Hold's KeyUp only once both its Joined receipt and the successful
-retirement of that gesture's own capture inhibit have arrived, in either order. The reply can
+retirement of that gesture's own capture inhibit have arrived, in either order. A screen hold's
+`ScreenRelease` doesn't wait: it goes at the release, so the picture is of that moment. The reply can
 start as soon as the Brain has the release, so the microphone's own stop is not enough while the
 inhibit still owns capture. Any other end of the Hold before then sends nothing. Revocation closes the Shell's capture and enqueue for the gesture. A frame already
 captured may still cross the local pipe: the writer checks authority before writing,

@@ -172,7 +172,7 @@ impl Queued {
     /// A speaking pair also needs the previous run's delivered quiet receipt and nothing reserved.
     fn hold_ready(&self) -> bool {
         self.ready()
-            && self.show_screen == Some(false)
+            && self.show_screen.is_some()
             && !self.closing.load(Ordering::Acquire)
             && (self.talk_back == Some(false)
                 || self.narrated.is_none()
@@ -353,6 +353,13 @@ impl OutputOwner {
         }
         owner.switching = Some(on);
         Ok(())
+    }
+
+    /// Whether the pair's registered Show Screen differs from `show_screen`.
+    pub(in crate::link) fn show_screen_changes(&self, session: u64, show_screen: bool) -> bool {
+        self.lock()
+            .queue(session)
+            .is_some_and(|(_, owner)| owner.show_screen.is_some_and(|known| known != show_screen))
     }
 
     #[expect(
