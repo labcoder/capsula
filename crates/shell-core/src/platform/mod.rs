@@ -5,13 +5,6 @@ pub mod clipboard;
 pub mod credential;
 pub mod host;
 pub mod input;
-#[cfg_attr(
-    not(windows),
-    expect(
-        dead_code,
-        reason = "native capture is not built here; tests exercise its PCM and worker policy"
-    )
-)]
 pub mod microphone;
 pub mod screen_watch;
 #[cfg(any(windows, target_os = "macos", target_os = "linux"))]
