@@ -2,13 +2,14 @@
 
 use std::fs;
 use std::sync::mpsc as std_mpsc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use kumochi_protocol::constants::ENGINE_DIR;
 
 use super::tests::{WAIT, end, found, launch_dirs, pipes, question, queue};
 use super::{Teardown, admit};
 use crate::engines::claude_code::lane::tests::{Base, locked};
+use crate::platform::pause_after_check;
 
 /// OSC-740: a handle another process of the launch closes after the first delete attempt, as the
 /// bridge may after Claude Code exits, no longer leaves the folder for the sweep.
@@ -23,20 +24,31 @@ async fn a_folder_freed_during_teardown_is_still_deleted() {
     let _pipes = pipes(&mut launch).await;
     let id = id.recv_timeout(WAIT).expect("the id");
     let work = base.owned().join(ENGINE_DIR).join(id.hex()).join("work");
-    // Listed before the held file, so the first attempt deletes it and then stops at the lock.
-    let marker = work.join("a-marker");
-    fs::write(&marker, b"").expect("a marker in the launch folder");
     let file = work.join("held");
     fs::write(&file, b"").expect("a file in the launch folder");
     let held = locked(&file);
-    let release = std::thread::spawn(move || {
-        let until = Instant::now() + WAIT;
-        while marker.exists() && Instant::now() < until {
-            std::thread::sleep(Duration::from_millis(1));
-        }
-        drop(held);
-    });
+    let (released_tx, released) = std_mpsc::channel();
+    let again = work.clone();
+    // A second walk of the folder means the first attempt failed; only then does the hold go,
+    // and the signal says the held file outlived that attempt.
+    pause_after_check(
+        work,
+        Box::new(move || {
+            pause_after_check(
+                again,
+                Box::new(move || {
+                    let outlived = file.exists();
+                    drop(held);
+                    released_tx.send(outlived).ok();
+                }),
+            );
+        }),
+    );
     assert_eq!(end(launch).await, Teardown::Done);
-    release.join().expect("the lock is released");
+    assert_eq!(
+        released.try_recv(),
+        Ok(true),
+        "a retry found the file the first attempt couldn't delete, then released it"
+    );
     assert_eq!(launch_dirs(&base), Vec::<String>::new());
 }

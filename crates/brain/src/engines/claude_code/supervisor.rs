@@ -1012,12 +1012,16 @@ impl Running {
         // Claude Code; only a folder that stays held past the grace is left for the sweep.
         let deadline = Instant::now() + PIPE_GRACE;
         loop {
+            // Each retry is the same checked walk, by a name drawn at random for this launch in a
+            // folder held owner-only throughout, so retrying adds no exposure the first try lacks.
             match platform::remove_tree(dir) {
                 Ok(()) => return Teardown::Done,
-                Err(platform::Untrusted::Io) if Instant::now() < deadline => {
-                    std::thread::sleep(POLL);
-                }
+                Err(platform::Untrusted::Io) => {}
                 Err(_) => return Teardown::FolderLeft,
+            }
+            std::thread::sleep(POLL.min(deadline.saturating_duration_since(Instant::now())));
+            if Instant::now() >= deadline {
+                return Teardown::FolderLeft;
             }
         }
     }
