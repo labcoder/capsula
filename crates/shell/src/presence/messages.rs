@@ -532,7 +532,10 @@ fn row(
         };
     }
     let label = match kind {
-        PageEventKind::User | PageEventKind::HeldTurn { .. } => Some(strings.get(Text::ThreadUser)),
+        PageEventKind::User
+        | PageEventKind::HeldTurn { .. }
+        | PageEventKind::FailedUser
+        | PageEventKind::FailedHeldTurn { .. } => Some(strings.get(Text::ThreadUser)),
         PageEventKind::AssistantText => Some(strings.assistant(state.settings.as_ref().map_or(
             kumochi_protocol::constants::DEFAULT_ASSISTANT_NAME,
             |settings| settings.assistant_name.as_str(),
@@ -546,6 +549,12 @@ fn row(
         PageEventKind::TaskDeleted => strings.get(Text::ThreadDeleted),
         _ => text.to_owned(),
     };
+    let screen = match kind {
+        PageEventKind::HeldTurn { screen } | PageEventKind::FailedHeldTurn { screen } => {
+            Some(screen)
+        }
+        _ => None,
+    };
     Row {
         id,
         draft: None,
@@ -557,16 +566,12 @@ fn row(
         warning: None,
         feedback: None,
         cut: cut.map(|text| strings.get(text).into()),
-        screen: match kind {
-            PageEventKind::HeldTurn { screen } => {
-                Text::held_screen(screen).map(|text| strings.get(text).into())
-            }
-            _ => None,
-        },
-        pictured: match kind {
-            PageEventKind::HeldTurn { screen } => strings.pictured(screen).map(Into::into),
-            _ => None,
-        },
+        screen: screen
+            .and_then(Text::held_screen)
+            .map(|text| strings.get(text).into()),
+        pictured: screen
+            .and_then(|screen| strings.pictured(screen))
+            .map(Into::into),
     }
 }
 
@@ -973,6 +978,59 @@ mod tests {
         view.read_with(cx, |view, _| {
             assert_eq!(view.reveal_older, None);
             assert_eq!(view.list.logical_scroll_top().item_ix, 0);
+        });
+    }
+
+    #[gpui::test]
+    fn saved_failure_keeps_the_user_row_and_its_screen_without_a_delivery_claim(
+        cx: &mut TestAppContext,
+    ) {
+        use kumochi_protocol::message::{HeldScreen, ScreenClass};
+
+        cx.update(|cx| {
+            cx.set_global(Strings::english());
+            let state = Threads::chat_for_tests();
+            for (normal, failed) in [
+                (PageEventKind::User, PageEventKind::FailedUser),
+                (
+                    PageEventKind::HeldTurn {
+                        screen: HeldScreen::Screen,
+                    },
+                    PageEventKind::FailedHeldTurn {
+                        screen: HeldScreen::Screen,
+                    },
+                ),
+                (
+                    PageEventKind::HeldTurn {
+                        screen: HeldScreen::NotIncluded(ScreenClass::Changed),
+                    },
+                    PageEventKind::FailedHeldTurn {
+                        screen: HeldScreen::NotIncluded(ScreenClass::Changed),
+                    },
+                ),
+            ] {
+                let make = |kind| {
+                    row(
+                        ("message", 1),
+                        Some(RunId(2)),
+                        kind,
+                        "words",
+                        None,
+                        &state,
+                        cx,
+                    )
+                };
+                let ordinary = make(normal);
+                let failure = make(failed);
+                assert!(!failure.assistant);
+                assert_eq!(failure.run, Some(RunId(2)));
+                assert_eq!(failure.label, ordinary.label);
+                assert_eq!(failure.text, ordinary.text);
+                assert_eq!(failure.screen, ordinary.screen);
+                assert_eq!(failure.pictured, ordinary.pictured);
+                assert_eq!(failure.warning, None);
+                assert_eq!(failure.feedback, None);
+            }
         });
     }
 
