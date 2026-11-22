@@ -6,7 +6,7 @@ use gpui_kit::component::WindowExt as _;
 use gpui_kit::{AnyWindowHandle, AppContext as _};
 use kumochi_protocol::message::{DraftId, IssueCard, IssueOp};
 
-mod machine;
+use kumochi_shell_core::presence::messages::consent::machine;
 mod presentation;
 
 pub(super) use presentation::{Labels, Preview, controls};

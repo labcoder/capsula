@@ -4,7 +4,7 @@ use kumochi_protocol::message::{DraftId, IssueCard, IssueOp};
 use std::cell::Cell;
 use std::rc::Rc;
 
-mod machine;
+use kumochi_shell_core::presence::issue_review::machine;
 
 use machine::{Effect, Reviews};
 
