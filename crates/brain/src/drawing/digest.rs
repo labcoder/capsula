@@ -4,11 +4,19 @@
 
 use std::fmt;
 
-use kumochi_protocol::message::ThreadId;
+use kumochi_protocol::message::{SceneId, ThreadId};
 use serde_json::json;
 
-use super::{Author, Drawing, Held};
+use super::{Author, Drawing, Held, Job};
 use crate::context::PictureRecipient;
+
+/// One private scene's exact state when a protected digest listed it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct PrivateScene {
+    pub(crate) scene: SceneId,
+    pub(crate) revision: u32,
+    pub(crate) log_len: usize,
+}
 
 /// Bytes the listed `[id, kind]` pairs of every scene in one line take together, a comma each
 /// (first value).
@@ -80,6 +88,22 @@ impl fmt::Debug for Digest {
 }
 
 impl Drawing {
+    fn pending_cut(&self, held: &Held) -> bool {
+        self.queue.iter().any(|job| match job {
+            Job::Cut { scene, .. } => *scene == held.scene,
+            Job::Unseen { run, named } => {
+                !named.contains(&held.scene)
+                    && held.state.activated() == 0
+                    && held.committers.contains(&Some(*run))
+            }
+            _ => false,
+        })
+    }
+
+    fn private_visible(&self, held: &Held) -> bool {
+        !held.gone && !held.state.is_cleared() && !self.pending_cut(held)
+    }
+
     /// `thread`'s visible scenes, each with its objects in the order they were put. Scenes take
     /// room in [`DIGEST_CAP`] newest first, each from its newest object back to the first pair
     /// that doesn't fit, so an older scene may still list small pairs after a newer one ran out.
@@ -90,7 +114,7 @@ impl Drawing {
         for recipient in self
             .scenes
             .iter()
-            .filter(|held| held.thread == thread && !held.gone)
+            .filter(|held| held.thread == thread && self.private_visible(held))
             .filter_map(|held| match &held.author {
                 Author::Private(recipient) => Some(recipient),
                 Author::Public | Author::Unknown => None,
@@ -99,7 +123,8 @@ impl Drawing {
             if !screens.iter().any(|(kept, _)| kept == recipient) {
                 let line = self.line(thread, |held| {
                     public(held)
-                        || matches!(&held.author, Author::Private(held) if held == recipient)
+                        || (self.private_visible(held)
+                            && matches!(&held.author, Author::Private(held) if held == recipient))
                 });
                 screens.push((recipient.clone(), line));
             }
@@ -115,9 +140,50 @@ impl Drawing {
     pub(crate) fn visible_to(&self, thread: ThreadId, recipient: &PictureRecipient) -> bool {
         self.scenes.iter().any(|held| {
             held.thread == thread
-                && !held.gone
+                && self.private_visible(held)
                 && matches!(&held.author, Author::Private(held) if held == recipient)
         })
+    }
+
+    pub(crate) fn private_scenes(
+        &self,
+        thread: ThreadId,
+        recipient: &PictureRecipient,
+    ) -> Vec<PrivateScene> {
+        self.scenes
+            .iter()
+            .filter(|held| {
+                held.thread == thread
+                    && self.private_visible(held)
+                    && matches!(&held.author, Author::Private(held) if held == recipient)
+            })
+            .map(|held| PrivateScene {
+                scene: held.scene,
+                revision: held.state.revision(),
+                log_len: held.state.recovery_log().len(),
+            })
+            .collect()
+    }
+
+    /// Whether every private scene carried for `recipient` on `thread` is still live, still
+    /// eligible for outbound digests to `recipient`, and unchanged since it was captured.
+    pub(crate) fn private_scenes_current(
+        &self,
+        thread: ThreadId,
+        recipient: &PictureRecipient,
+        carried: &[PrivateScene],
+    ) -> bool {
+        !carried.is_empty()
+            && carried.iter().all(|expected| {
+                self.scenes.iter().any(|held| {
+                    held.scene == expected.scene
+                        && held.thread == thread
+                        && self.private_visible(held)
+                        && matches!(&held.author, Author::Private(held) if held == recipient)
+                        && held.state.revision() == expected.revision
+                        && held.state.recovery_log().len() == expected.log_len
+                })
+            })
     }
 
     /// One line of [`Self::digest`]: the scenes on a surface it keeps.
