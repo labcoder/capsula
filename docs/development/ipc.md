@@ -50,8 +50,9 @@ name one run, or be refused by its own turn number. Typed admission checks the o
 under their short state locks, so contention alone doesn't drop Enter. The native eligibility probe
 never waits for those locks: it refuses the press if it can't check eligibility. The owner checks saved
 consent again before offering the Hold. The Plain path admits an ordinary voice Hold only with
-Talk-back and Show Screen confirmed off on that registered pair. A pending change to
-either preference closes Hold admission; this includes settings and installer writes that can
+Show Screen confirmed off on that registered pair, and with Talk-back unchanged since the pair
+opened: its first change in either direction ends the pair's Hold admission. A pending
+change to either preference closes Hold admission; this includes settings and installer writes that can
 change an inherited value. The brain cancels an in-flight Hold when it takes such a change
 before submit. The shell keeps the recognized gesture and its release in the same ordered
 outbox. Revocation closes capture and enqueue for that gesture. Before writing a queued PCM

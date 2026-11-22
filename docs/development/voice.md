@@ -943,8 +943,11 @@ delivery, not worker/native copies or physical retirement.
 
 ### Voice-only held turns
 
-On a registered Plain queued pair with Talk-back and Show Screen confirmed off,
-revocation closes the Shell's capture and enqueue for the gesture. A frame already
+On a registered Plain queued pair with Show Screen confirmed off and Talk-back unchanged,
+the Shell sends a speaking Hold's KeyUp only once both its Joined receipt and the successful
+retirement of that gesture's own capture inhibit have arrived, in either order. The reply can
+start as soon as the Brain has the release, so the microphone's own stop is not enough while the
+inhibit still owns capture. Any other end of the Hold before then sends nothing. Revocation closes the Shell's capture and enqueue for the gesture. A frame already
 captured may still cross the local pipe: the writer checks authority before writing,
 but that check and the write are separate. If cancellation reaches the Brain before
 decode admission, it discards accumulated or queued audio and rejects later frames

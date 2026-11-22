@@ -474,6 +474,7 @@ impl Gates {
 /// What the dispatcher does once no gate is borrowed.
 enum After {
     End(GestureId, Text),
+    Retired(GestureId),
     Start(Reserved),
     Stopped(GestureId, Session),
     Unconfirmed,
@@ -530,6 +531,17 @@ impl Presence {
                     }
                 }
                 After::Start(reserved) => self.open_microphone(reserved, cx),
+                After::Retired(gesture) => {
+                    if let Some(hold) = self
+                        .voice
+                        .pending
+                        .as_mut()
+                        .filter(|hold| hold.token.gesture() == gesture)
+                    {
+                        hold.unretired = false;
+                        self.finish_voice();
+                    }
+                }
                 // The link keeps the proof owed, and replays it on the next connection.
                 After::Stopped(gesture, session) => {
                     if !self.link.is_quitting()
@@ -713,8 +725,13 @@ impl Presence {
             return true;
         }
         match self.link.output().retire(token, how) {
+            Ok(()) => {
+                after.push(After::Retired(gate.gesture));
+                forget(gate, after);
+                false
+            }
             // A stale token's owner let it go: its unstarted generation is still discarded here.
-            Ok(()) | Err((_, Denied::Stale)) => {
+            Err((_, Denied::Stale)) => {
                 forget(gate, after);
                 false
             }

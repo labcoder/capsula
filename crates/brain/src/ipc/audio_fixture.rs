@@ -73,6 +73,26 @@ pub fn offline_hold_peer() -> (
     (session, hello, probe, task)
 }
 
+/// Starts the authenticated Plain peer with Talk-back on, synthesis and a synthetic recognizer.
+///
+/// # Panics
+/// Panics if the private test namespace or the fixture Brain cannot start.
+#[must_use]
+pub fn offline_speaking_hold_peer(
+    script: String,
+    tone_chunks: usize,
+) -> (
+    u32,
+    Hello,
+    std::sync::Arc<audio_fixture::AudioProbe>,
+    JoinHandle<bool>,
+) {
+    let probe = std::sync::Arc::new(audio_fixture::AudioProbe::speaking_hold());
+    let (session, hello, task) =
+        offline_peer(script, tone_chunks, Some(std::sync::Arc::clone(&probe)));
+    (session, hello, probe, task)
+}
+
 /// Starts the real paired Brain with the offline replay's narrated step.
 /// # Panics
 /// Panics if the private test namespace or the fixture Brain cannot start.
