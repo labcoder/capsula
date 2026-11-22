@@ -479,6 +479,7 @@ enum Attendance {
     Ended,
     Lost,
     Retry,
+    TalkBackChanged,
 }
 
 /// What the data writer sends.
@@ -616,6 +617,8 @@ struct Shared {
     hold_control_writer: std::sync::atomic::AtomicU8,
     #[cfg(any(test, feature = "test-support"))]
     hold_pcm_writer: std::sync::atomic::AtomicU8,
+    #[cfg(any(test, feature = "test-support"))]
+    hold_text_writer: std::sync::atomic::AtomicU8,
     #[cfg(any(test, feature = "test-support"))]
     fake_playback: Option<std::sync::mpsc::SyncSender<speaker::queued::FixturePlayback>>,
     #[cfg(any(test, feature = "test-support"))]
@@ -1009,6 +1012,7 @@ impl LinkHandle {
                 ControlToBrain::HoldRecognized { .. }
                     | ControlToBrain::ScreenHoldRecognized { .. }
                     | ControlToBrain::Warm { .. }
+                    | ControlToBrain::Settings(SettingsOp::SetTalkBack(_))
             )
         {
             return false;
@@ -1102,6 +1106,41 @@ impl LinkHandle {
                 queued
             })
             .unwrap_or(false)
+    }
+
+    /// Offers the preference without interrupting a queued pair's work.
+    ///
+    /// # Errors
+    /// Busy if the pair is not idle; otherwise Stale or Lost if it cannot take the offer.
+    #[expect(
+        clippy::fn_params_excessive_bools,
+        reason = "the wire preference is a boolean"
+    )]
+    pub fn send_talk_back(&self, session: &Session, on: bool) -> Result<(), output::Denied> {
+        use output::Denied;
+
+        let message = ControlToBrain::Settings(SettingsOp::SetTalkBack(on));
+        if !session.io.queued {
+            return self
+                .send_control(session, message)
+                .then_some(())
+                .ok_or(Denied::Lost);
+        }
+        let shared = &self.shared;
+        shared
+            .outbox(session, |outbox| {
+                let input = &mut outbox.queued_input;
+                if input.hold.is_some() || input.settings_answers != 0 || self.voice_stop_pending()
+                {
+                    return Err(Denied::Busy);
+                }
+                shared.output.switch_talk_back(session.generation, on, || {
+                    session.open()
+                        && !shared.quitting()
+                        && shared.queue_control(session, &outbox.control, input, message)
+                })
+            })
+            .unwrap_or(Err(Denied::Stale))
     }
 
     /// Ends `session`'s connection, as a malformed frame does, so the link reconnects. Nothing
@@ -1377,7 +1416,9 @@ impl Link {
             if attended == Attendance::Ended || self.quitting() {
                 return;
             }
-            tracing::warn!("lost the brain");
+            if attended != Attendance::TalkBackChanged {
+                tracing::warn!("lost the brain");
+            }
             let Some(next) = self.after_loss(events, retries, attended, last_loss) else {
                 return;
             };
@@ -1403,6 +1444,9 @@ impl Link {
         if refused_tail == Some(output::RefusedTail::Unavailable) {
             let _notified = events.send_blocking(LinkEvent::State(LinkState::OutputUnavailable));
             return None;
+        }
+        if attended == Attendance::TalkBackChanged && refused_tail.is_none() {
+            return Some((LinkState::Reconnecting, last_loss));
         }
         let now = Instant::now();
         if attended == Attendance::Retry
@@ -1683,6 +1727,7 @@ impl Link {
                 }
             })
         });
+        let mut attendance = Attendance::Lost;
         match read {
             Ok(()) if open => watch(
                 &control,
@@ -1691,6 +1736,7 @@ impl Link {
                 generation,
                 &self.shared,
                 queued.then_some(&credit),
+                &mut attendance,
             ),
             Ok(()) => {}
             Err(error) => tracing::error!(%error, "can't start the link's threads"),
@@ -1719,11 +1765,7 @@ impl Link {
                 tracing::error!("a link thread panicked");
             }
         }
-        if open {
-            Attendance::Lost
-        } else {
-            Attendance::Ended
-        }
+        if open { attendance } else { Attendance::Ended }
     }
 
     /// Connects, starting the brain once if none answers, until [`CONNECT_TIMEOUT`].
@@ -1971,8 +2013,9 @@ fn watch(
     generation: u64,
     shared: &Arc<Shared>,
     queued: Option<&Arc<SessionIo>>,
+    attendance: &mut Attendance,
 ) {
-    let mut named = RunId(0);
+    let mut named = (RunId(0), ThreadId(0));
     loop {
         match frame::read::<ControlToShell>(&mut &*control, Pipe::Control) {
             Ok(None) => return,
@@ -1999,7 +2042,11 @@ fn watch(
                     if view.show_screen {
                         let _revoked = shared.revoke_input();
                     }
-                    if !shared.output.register_queued(generation, &view, out) {
+                    if let Err(reason) = shared
+                        .output
+                        .register_queued(generation, &view, answer, out)
+                    {
+                        *attendance = reason;
                         return;
                     }
                     if answer {
@@ -2039,8 +2086,8 @@ fn watch(
                 origin,
             })) => {
                 // The speaker plays a run's frames only once control has named it.
-                if run > named {
-                    named = run;
+                if run > named.0 {
+                    named = (run, thread);
                     if let Some(credit) = queued {
                         let Some(origin) = origin else {
                             return;
@@ -2067,6 +2114,11 @@ fn watch(
                             shared.with_queued_input(generation, |input| input.hold = None);
                         }
                     }
+                }
+                if queued.is_some()
+                    && matches!(phase, Phase::Done | Phase::Interrupted | Phase::Failed)
+                {
+                    shared.output.queued_terminal(generation, run);
                 }
                 if events
                     .send_blocking(LinkEvent::RunState {
@@ -2100,6 +2152,13 @@ fn watch(
                 outcome,
                 last_run,
             })) => {
+                if queued.is_some()
+                    && matches!(outcome, Deleted::Hidden | Deleted::Removed)
+                    && let Some(run) = last_run
+                    && named == (run, thread)
+                {
+                    shared.output.queued_terminal(generation, run);
+                }
                 let deleted = LinkEvent::ThreadDeleted {
                     thread,
                     outcome,
@@ -2508,6 +2567,19 @@ fn write_data(
             DataOut::Submit(message) => {
                 write_data_frame(&mut &*data, message, &mut encoded, || {
                     let DataToBrain::MicPcm(packet) = message else {
+                        #[cfg(any(test, feature = "test-support"))]
+                        if matches!(message, DataToBrain::TextSubmit { .. })
+                            && shared.hold_text_writer.load(Ordering::Acquire) != 0
+                        {
+                            shared.hold_text_writer.store(2, Ordering::Release);
+                            while shared.hold_text_writer.load(Ordering::Acquire) != 0
+                                && open()
+                                && !queue.is_closed()
+                            {
+                                thread::park_timeout(Duration::from_millis(1));
+                            }
+                            return open() && !queue.is_closed();
+                        }
                         return true;
                     };
                     #[cfg(any(test, feature = "test-support"))]

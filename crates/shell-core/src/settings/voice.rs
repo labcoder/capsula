@@ -119,20 +119,20 @@ impl Settings {
             .and(self.notice.as_ref())
     }
 
-    pub fn talk_back_send_failed(&self) -> bool {
-        self.talk_back_send_failed
+    pub fn talk_back_send_error(&self) -> Option<Text> {
+        self.talk_back_send_error
     }
 
     #[expect(
         clippy::fn_params_excessive_bools,
         reason = "the checkbox and wire setter carry this boolean unchanged"
     )]
-    pub fn send_talk_back(&mut self, on: bool, send: impl FnOnce(SettingsOp) -> bool) {
+    pub fn send_talk_back(&mut self, on: bool, send: impl FnOnce() -> Result<(), Text>) {
         if self.talk_back_pending() || self.talk_back_choice().is_none_or(|old| old == on) {
             return;
         }
-        self.talk_back_send_failed = !send(SettingsOp::SetTalkBack(on));
-        if !self.talk_back_send_failed {
+        self.talk_back_send_error = send().err();
+        if self.talk_back_send_error.is_none() {
             self.pending.push_back(Pending {
                 slot: Slot::TalkBack(on),
                 failed: false,
