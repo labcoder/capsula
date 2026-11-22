@@ -986,9 +986,9 @@ impl Running {
     /// Fails the gate and closes stdin, seals the held send, aborts the listener and waits up to
     /// [`PIPE_GRACE`] for its task to end, ends the job and confirms it empty, waits for the pumps,
     /// and only then settles the send and, once the child has finished exiting or a further
-    /// [`PIPE_GRACE`] has passed, deletes the folder. Anything not confirmed ended never
-    /// falls through to either: its send is abandoned unsettled, so its sources stay held until
-    /// its deadline fails it closed.
+    /// [`PIPE_GRACE`] has passed, deletes the folder, retrying for one more [`PIPE_GRACE`] while a
+    /// handle still holds it. Anything not confirmed ended never falls through to either: its send
+    /// is abandoned unsettled, so its sources stay held until its deadline fails it closed.
     fn stop(mut self, host: &Host) -> Teardown {
         self.control.revoke();
         let send = self.control.seal_send();
@@ -1000,14 +1000,29 @@ impl Running {
         }
         // Nothing the launch started can send any more.
         drop(send);
-        drop(self.held);
         // The job reads empty before the child's handles close; a failed wait shows as FolderLeft.
         if let Some(child) = &self.child {
             child.exits_within(PIPE_GRACE).ok();
         }
-        match self.dir.as_deref().map(platform::remove_tree) {
-            None | Some(Ok(())) => Teardown::Done,
-            Some(Err(_)) => Teardown::FolderLeft,
+        drop(self.held);
+        let Some(dir) = self.dir.as_deref() else {
+            return Teardown::Done;
+        };
+        // A process the launch started may still be closing its handles, as the bridge may after
+        // Claude Code; only a folder that stays held past the grace is left for the sweep.
+        let deadline = Instant::now() + PIPE_GRACE;
+        loop {
+            // A retry is the first attempt's checked walk again: the name is a fresh 128-bit id,
+            // and the parent stays trust-checked and held without delete sharing through each one.
+            match platform::remove_tree(dir) {
+                Ok(()) => return Teardown::Done,
+                Err(platform::Untrusted::Io) => {}
+                Err(_) => return Teardown::FolderLeft,
+            }
+            std::thread::sleep(POLL.min(deadline.saturating_duration_since(Instant::now())));
+            if Instant::now() >= deadline {
+                return Teardown::FolderLeft;
+            }
         }
     }
 
@@ -1231,5 +1246,7 @@ fn mcp_json(brain_exe: &Path, id: LaunchId) -> Option<Vec<u8>> {
 
 #[cfg(test)]
 mod stdin_tests;
+#[cfg(test)]
+mod teardown_tests;
 #[cfg(test)]
 pub(crate) mod tests;

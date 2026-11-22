@@ -417,7 +417,7 @@ stateDiagram-v2
     Live --> Stopping: revoked, closing, deadline, or the process exited
     Stopping --> Stuck: job not confirmed empty, or a pump didn't end
     Stopping --> Settled: job empty and all three pumps ended
-    Settled --> FolderLeft: deletion failed (swept later, under the lock)
+    Settled --> FolderLeft: deletion still failing after a grace (swept later, under the lock)
     Settled --> Ended: folder deleted (Done)
 ```
 
@@ -429,8 +429,12 @@ listener task that didn't end is `Stuck`: the job is still terminated, but the l
 keeps the lock and the folder, and refuses the next call. Only a settled launch drops its
 folder's handles and deletes it, after waiting up to `PIPE_GRACE` more for Claude Code's own
 process to finish exiting: Windows counts a process out of its job before it closes the process's
-handles, its working folder among them, so a deletion in between would fail. A pump thread
-that can't start fails the launch as `Spawn` through the same stop.
+handles, its working folder among them, so a deletion in between would fail. A delete that fails
+with an I/O error, as on a file still in use, is retried every 20 ms until one more `PIPE_GRACE`
+has passed, and none starts after it, since another process the launch started, such as the
+bridge, may close its handles after Claude Code; any other failure, or one that lasts past that
+grace, is `FolderLeft`. A pump thread that can't start fails the launch as `Spawn` through the
+same stop.
 
 **The folder is the crash record.** Every launch process sits in the kill-on-close brain job, so a
 crash leaves only files under `engine\`, which is reserved for launch folders. `settle()` takes
