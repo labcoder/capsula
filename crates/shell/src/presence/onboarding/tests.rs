@@ -760,7 +760,7 @@ fn a_hold_held_as_onboarding_opens_ends_as_refused_and_the_next_one_after_close_
     let stopped = ControlToBrain::VoiceHoldStopped {
         gesture: GestureId(1),
     };
-    assert_eq!(ended, [cancel.clone(), cancel, stopped]);
+    assert_eq!(ended, [cancel, stopped]);
     owner.read_with(cx, |owner, _| {
         assert!(owner.voice.pending.is_none());
         assert_eq!(owner.voice.status, Some(Text::HoldCancelled));

@@ -609,6 +609,8 @@ struct Shared {
     input_generation: AtomicU64,
     /// The gesture whose held words the UI keeps, with `REVOKED` once its input was revoked.
     recovery: AtomicU64,
+    /// The last gesture whose input was revoked: the revoke sent, or dispatches, its wire cancel.
+    revoked: AtomicU64,
     choice: AtomicU64,
     quit_sent: AtomicBool,
     /// The control pipe while connected, so Quit can bound its writes.
@@ -651,6 +653,7 @@ impl Shared {
                 (input != 0 && input < QUIT_INPUT).then_some(0)
             })
             .ok()?;
+        self.revoked.store(gesture, Ordering::Release);
         let _marked = self.recovery.compare_exchange(
             gesture,
             gesture | REVOKED,
@@ -945,6 +948,10 @@ impl LinkHandle {
     /// Whether the watched `gesture`'s input was revoked since it was watched.
     pub fn was_revoked(&self, gesture: GestureId) -> bool {
         self.shared.recovery.load(Ordering::Acquire) == u64::from(gesture.0) | REVOKED
+    }
+    /// Whether `gesture`'s input was revoked, so the brain is already told its cancel.
+    pub fn input_revoked(&self, gesture: GestureId) -> bool {
+        gesture.0 != 0 && self.shared.revoked.load(Ordering::Acquire) == u64::from(gesture.0)
     }
     pub fn cancel_input(&self) -> bool {
         self.cancel_input_gesture().is_some()

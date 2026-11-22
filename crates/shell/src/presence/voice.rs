@@ -351,7 +351,13 @@ impl Presence {
     }
 
     fn drain_voice_cancel(&mut self) -> bool {
-        self.runs.take_hold_cancel().is_none_or(|message| {
+        let cancel = self.runs.take_hold_cancel().filter(|message| {
+            let ControlToBrain::GestureCancel { gesture } = message else {
+                return true;
+            };
+            !self.link.input_revoked(*gesture)
+        });
+        cancel.is_none_or(|message| {
             self.session.as_ref().is_some_and(|s| {
                 let sent = self.link.send_control(s, message);
                 if !sent {
