@@ -11,6 +11,7 @@ mod tests;
 
 use std::fmt;
 use std::net::Ipv4Addr;
+use std::sync::Arc;
 use std::time::Duration;
 
 use kumochi_protocol::{Secret, constants};
@@ -110,10 +111,9 @@ pub struct SystemBrowser;
 impl Launcher for SystemBrowser {
     #[expect(
         clippy::disallowed_methods,
-        reason = "webbrowser spawns with std Command; held under spawn_lock"
+        reason = "the attempt's launch admission holds spawn_lock"
     )]
     fn launch(&self, target: &LaunchTarget) -> Result<(), LaunchError> {
-        let _spawning = crate::platform::spawn_lock();
         webbrowser::open(target.url()).map_err(|_| LaunchError::Launch)
     }
 }
@@ -221,11 +221,37 @@ impl SignIn {
     ///
     /// # Errors
     /// Fails if the attempt expired or the launcher refuses the target.
-    pub fn open_browser(&self, launcher: &(impl Launcher + ?Sized)) -> Result<(), LaunchError> {
-        if Instant::now() >= self.deadline {
+    pub async fn open_browser(
+        &self,
+        launcher: Arc<dyn Launcher + Send + Sync>,
+    ) -> Result<(), LaunchError> {
+        let deadline = self.deadline;
+        if Instant::now() >= deadline {
             return Err(LaunchError::Expired);
         }
-        launcher.launch(&self.target)
+        let alive = Arc::new(());
+        let pending = Arc::downgrade(&alive);
+        let target = LaunchTarget(self.target.0.clone());
+        let launch = tokio::task::spawn_blocking(move || {
+            let remaining = || {
+                pending.upgrade()?;
+                deadline
+                    .checked_duration_since(Instant::now())
+                    .filter(|left| !left.is_zero())
+            };
+            let _spawning =
+                crate::platform::spawn_lock_until(&remaining).map_err(|_| LaunchError::Expired)?;
+            remaining().ok_or(LaunchError::Expired)?;
+            launcher.launch(&target)
+        });
+        let opened = tokio::time::timeout_at(deadline, launch).await;
+        drop(alive);
+        if Instant::now() >= deadline {
+            return Err(LaunchError::Expired);
+        }
+        opened
+            .map_err(|_| LaunchError::Expired)?
+            .map_err(|_| LaunchError::Launch)?
     }
 
     /// Wait for one matching callback. Invalid or stale requests don't consume the attempt.

@@ -78,7 +78,6 @@ pub fn spawn_lock() -> std::sync::MutexGuard<'static, ()> {
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
-#[cfg(windows)]
 pub(crate) fn spawn_lock_until(
     remaining: &dyn Fn() -> Option<std::time::Duration>,
 ) -> std::io::Result<std::sync::MutexGuard<'static, ()>> {

@@ -54,8 +54,10 @@ sequenceDiagram
 
 **One deadline before settlement.** Ten seconds from the grant cover the connect, any replacement
 of a stale idle connection, the upload, the flush and an early refusal. They're never reset, so they
-stay under the coordinator's own send deadline. After settlement, each read waits at most 60 s, and
-an error body gets its own 10 s.
+stay under the coordinator's own send deadline. After settlement, each read waits at most
+`idle_s` (60 s by default), and an error body gets `error_body_s` (10 s by default). A refusal
+that arrives before the upload finishes can use only what remains of the upload deadline, even
+if its body budget would otherwise run longer.
 
 **No replay.** Once any request byte has been written, a write, flush or read failure ends the
 request as `Transport`: it may have arrived, so it's never sent again on its own. The one

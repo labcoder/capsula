@@ -7,6 +7,7 @@ mod tests;
 use std::time::Duration;
 
 use kumochi_protocol::Secret;
+use tokio::time::{Instant, timeout_at};
 use zeroize::Zeroizing;
 
 use super::RESOURCE;
@@ -22,7 +23,7 @@ pub const DEADLINE: Duration = Duration::from_secs(30);
 ///
 /// # Errors
 /// Refuses empty or oversized inputs before sending; then as an exchange, with the deadline
-/// firing as a timeout.
+/// firing as a distinct unsent error before dispatch or an uncertain timeout after it.
 ///
 /// # Cancellation safety
 /// Once sent, dropping this future doesn't prove the token didn't rotate; the caller keeps the
@@ -31,7 +32,7 @@ pub async fn refresh(
     http: &impl Http,
     client: &str,
     refresh_token: &str,
-    limit: Duration,
+    deadline: Instant,
 ) -> Result<TokenSet, ExchangeError> {
     if client.is_empty()
         || client.len() > MAX_ID_BYTES
@@ -49,12 +50,18 @@ pub async fn refresh(
     .into_iter()
     .map(|(key, value)| (key, Secret::new(Zeroizing::new(value.to_owned()))))
     .collect();
-    let request = http.execute(Request {
-        endpoint: Endpoint::Token,
-        fields,
-    });
-    let response = tokio::time::timeout(limit, request)
-        .await
-        .map_err(|_| HttpError::Timeout)??;
+    let response = timeout_at(deadline, async {
+        if Instant::now() >= deadline {
+            return Err(ExchangeError::PreDispatchTimeout);
+        }
+        Ok(http
+            .execute(Request {
+                endpoint: Endpoint::Token,
+                fields,
+            })
+            .await?)
+    })
+    .await
+    .map_err(|_| HttpError::Timeout)??;
     parse_response(&response)
 }

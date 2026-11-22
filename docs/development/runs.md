@@ -428,16 +428,18 @@ after every op and wake; while it's being found that's `Finding`, which reads as
   report wins: `Finding` keeps it (forgetting a sign-in found before), Ready records that
   sign-in in its arrival, and any other report drops it and that sign-in, so its first build
   ends it with its own choice's reason. If its first build finds a Claude Code choice and no
-  sign-in for it, the run waits, up to 30 s after the turn is
+  sign-in for it, the run waits up to `finding_wait_s` (30 s by default) after the turn is
   read, with no build and no snapshot, while the shell keeps showing Thinking and Esc, a delete,
   a new turn or a lost shell end it as they end any run before its first build. The next report
-  that isn't `Finding` releases it into a new first build (120 s again, the choice read again):
-  Ready answers it, anything else refuses it with that report's reason. The 30 s fails it with
+  that isn't `Finding` and arrives before the wait ends releases it into a new first build:
+  Ready answers it, anything else refuses it with that report's reason. The wait fails it with
   `ModelUnavailable` and Open Settings, without reading the choice. The 30 s uses the run's own
-  deadline slot: the runtime holds one deadline, every `ArmDeadline` replaces it, and the loop
+  deadline slot: the runtime holds one deadline, an arm effect replaces it, and the loop
   pass that delivers a deadline clears it, so a superseded deadline is never delivered; a change
-  that queues deadlines must add a generation. The run's store reads keep the end set at arrival (arrival + 120 s). Turns
-  from a capture hold don't wait.
+  that queues deadlines must add a generation. On discovery release, the new first build and
+  the runtime timer share one absolute deadline, set from `wall_clock_s` (120 s by default)
+  at release. Existing cancellation still applies, and the previous build stays cancelled.
+  Turns from a capture hold don't wait.
 - **Holds and jobs.** A hold records the same arrival when it's prepared and answers on its
   choice's route, checked when its read returns and again before each send. A change to another
   kind leaves it, a change to its own kind ends it, and while its read is still out a change to

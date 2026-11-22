@@ -1447,6 +1447,7 @@ impl Brain {
                 Effect::ArmDeadline { run, after } => {
                     self.deadline = Some((run, Instant::now() + after));
                 }
+                Effect::ArmDeadlineAt { run, at } => self.deadline = Some((run, at)),
                 Effect::Broken(reason) => broken = Some(reason),
                 speech @ (Effect::Speak { .. }
                 | Effect::Credit { .. }

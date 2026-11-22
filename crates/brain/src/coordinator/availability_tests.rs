@@ -685,6 +685,66 @@ fn waiting() -> Coordinator {
     waiting_after(vec![chatgpt_signed_out()])
 }
 
+#[tokio::test(start_paused = true)]
+async fn discovery_release_admits_a_real_store_read_after_the_original_run_deadline() {
+    use std::time::Duration;
+    use tokio::time::{Instant, advance};
+
+    for (delay, release) in [(40, true), (60, false)] {
+        let mut core = Coordinator::new(ThreadId(1), ThreadId(3), RunId(9), Vec::new());
+        core.tuning.wall_clock = Duration::from_secs(30);
+        core.tuning.finding_wait = Duration::from_secs(60);
+        core.handle(chatgpt_signed_out()).unwrap();
+        core.handle(claude(Availability::Finding)).unwrap();
+        core.handle(Input::Turn {
+            turn: 1,
+            thread: None,
+            text: "hi".into(),
+        })
+        .unwrap();
+        core.handle(Input::TurnStored { run: R }).unwrap();
+        core.handle(built_on(CLAUDE, "haiku")).unwrap();
+        advance(Duration::from_secs(delay)).await;
+        let now = Instant::now();
+        let effects = core.handle(claude_ready(5)).unwrap();
+        if !release {
+            assert!(effects.is_empty(), "Ready at the finding deadline is stale");
+            let expired = core.handle(Input::Deadline { run: R }).unwrap();
+            assert_eq!(end_of(&expired, R), Some(RunEnd::Failed(Failure::Engine)));
+            continue;
+        }
+        let [
+            Effect::ArmDeadlineAt { run: R, at },
+            Effect::Store(StoreOp::BuildContext(build)),
+        ] = effects.as_slice()
+        else {
+            panic!("discovery should release the run: {effects:?}");
+        };
+        assert_eq!(*at, now + Duration::from_secs(30));
+        *build.control.test.time.lock().unwrap() = Some(now.into_std());
+        let scratch = crate::test_support::Scratch::new("discovery-store-deadline");
+        let store = crate::store::Store::open(&scratch.db()).unwrap();
+        let side = store.side();
+        assert_eq!(
+            side.read_until(&build.control, |conn, _| {
+                Ok::<_, crate::store::StoreError>(
+                    conn.query_row("SELECT 1", [], |row| row.get::<_, i64>(0))?,
+                )
+            })
+            .unwrap(),
+            1
+        );
+        assert_eq!(build.control.end, at.into_std());
+        core.handle(Input::Stop {
+            run: R,
+            revealed: Vec::new(),
+        })
+        .unwrap();
+        assert_eq!(build.control.check(), Err(crate::recall::Error::Ended));
+        assert!(core.handle(claude_ready(6)).unwrap().is_empty());
+    }
+}
+
 /// `input`, a build result, as `run`'s first-round attempt `attempt`.
 fn keyed(input: Input, run: RunId, attempt: u64) -> Input {
     let Input::ContextBuilt(mut built) = input else {
@@ -702,16 +762,14 @@ fn keyed(input: Input, run: RunId, attempt: u64) -> Input {
 /// else.
 fn released(effects: &[Effect], run: RunId) {
     let [
-        Effect::ArmDeadline {
-            run: armed,
-            after: crate::coordinator::WALL_CLOCK,
-        },
+        Effect::ArmDeadlineAt { run: armed, at },
         Effect::Store(StoreOp::BuildContext(build)),
     ] = effects
     else {
         panic!("not a release: {effects:?}");
     };
     assert_eq!((*armed, build.key.run), (run, run));
+    assert_eq!(at.into_std(), build.control.end);
     assert!(build.first && build.snapshot.is_none(), "a first build");
 }
 
@@ -1211,7 +1269,9 @@ fn a_delete_answered_during_the_wait_builds_nothing() {
         assert!(
             !effects.iter().any(|effect| matches!(
                 effect,
-                Effect::Store(StoreOp::BuildContext(_)) | Effect::ArmDeadline { .. }
+                Effect::Store(StoreOp::BuildContext(_))
+                    | Effect::ArmDeadline { .. }
+                    | Effect::ArmDeadlineAt { .. }
             )),
             "{effects:?}"
         );

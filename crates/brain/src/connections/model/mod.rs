@@ -28,6 +28,7 @@ use self::conn::{Connect, ModelClient, ModelConn, Upload};
 use self::error::{Failure, ProviderError};
 use self::sse::{Progress, Reader, SseEvent};
 use self::wire::{Body, Head, Media};
+use crate::config::tuning::ModelTuning;
 use crate::connections::http_client::MAX_BODY_BYTES;
 
 /// The largest request body [guess].
@@ -269,9 +270,7 @@ async fn send<C: Connect, L: Lease>(
             .await?
         {
             Upload::Flushed => Ok(()),
-            Upload::Refused(head) => {
-                Err(Failure::Provider(refusal(conn, head, tuning.idle).await?))
-            }
+            Upload::Refused(head) => Err(Failure::Provider(refusal(conn, head, tuning).await?)),
         }
     });
     upload.await.map_err(|_| Failure::Transport)??;
@@ -284,8 +283,7 @@ async fn send<C: Connect, L: Lease>(
         .expect("an upload that flushed holds its connection");
     let head = conn.head(tuning.idle).await?;
     if !(200..300).contains(&head.status) {
-        let refused = timeout(tuning.error_body, refusal(conn, head, tuning.idle)).await;
-        return Err(Failure::Provider(refused.map_err(|_| Failure::Transport)??));
+        return Err(Failure::Provider(refusal(conn, head, tuning).await?));
     }
     let mut events = Reader::default();
     let mut body = Body::new(head.framing);
@@ -367,7 +365,7 @@ where
 async fn refusal<Io>(
     conn: &mut ModelConn<Io>,
     head: Head,
-    idle: Duration,
+    tuning: ModelTuning,
 ) -> Result<ProviderError, Failure>
 where
     Io: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
@@ -375,14 +373,18 @@ where
     if head.status < 400 {
         return Err(Failure::Protocol);
     }
-    let mut body = Body::new(head.framing);
-    let mut bytes = Zeroizing::new(Vec::new());
-    while let Some(length) = conn.next(&mut body, idle).await? {
-        if length > MAX_BODY_BYTES - bytes.len() {
-            return Err(Failure::Protocol);
+    timeout(tuning.error_body, async {
+        let mut body = Body::new(head.framing);
+        let mut bytes = Zeroizing::new(Vec::new());
+        while let Some(length) = conn.next(&mut body, tuning.idle).await? {
+            if length > MAX_BODY_BYTES - bytes.len() {
+                return Err(Failure::Protocol);
+            }
+            bytes.extend_from_slice(&conn.buf[..length]);
+            conn.buf.drain(..length);
         }
-        bytes.extend_from_slice(&conn.buf[..length]);
-        conn.buf.drain(..length);
-    }
-    Ok(ProviderError::answered(head.status, &bytes))
+        Ok(ProviderError::answered(head.status, &bytes))
+    })
+    .await
+    .map_err(|_| Failure::Transport)?
 }
