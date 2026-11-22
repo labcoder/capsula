@@ -12,13 +12,8 @@ impl Presence {
         speech: Option<(u64, RunId)>,
         cx: &mut Context<'_, Self>,
     ) -> Result<(), OpenError> {
-        // A press that saw another session's speech is that session's, and nothing here is.
-        if speech.is_some_and(|(session, _)| {
-            self.session
-                .as_ref()
-                .is_none_or(|current| current.generation() != session)
-        }) {
-            return Ok(());
+        if let Some((session, run)) = speech.filter(|_| gesture.is_none()) {
+            return self.speech_escape(session, run, cx);
         }
         self.voice.gates.forget_runs();
         // This press revoked the input of a hold that is already torn down: by its cancelled
@@ -42,7 +37,7 @@ impl Presence {
                 return if self.voice_working() {
                     Ok(())
                 } else {
-                    self.escape_for(speech, cx)
+                    self.escape(cx)
                 };
             };
             self.discard_voice_recovery(gesture);
@@ -82,12 +77,35 @@ impl Presence {
         // Marks that are up go at this press, and `escape` takes them before it ends a hold.
         // A hold is still pending here when its first mark came before its run's `Answering`.
         if self.presenter.marks_shown().is_some() {
-            return self.escape_for(speech, cx);
+            return self.escape(cx);
         }
         if self.voice_working() {
             return Ok(());
         }
-        self.escape_for(speech, cx)
+        self.escape(cx)
+    }
+
+    /// A hotkey Esc taken for speech: stops exactly the run whose speech it saw, and nothing else.
+    fn speech_escape(
+        &mut self,
+        session: u64,
+        run: RunId,
+        cx: &mut Context<'_, Self>,
+    ) -> Result<(), OpenError> {
+        let Some(current) = self
+            .session
+            .clone()
+            .filter(|current| current.generation() == session)
+        else {
+            return Ok(());
+        };
+        // Done comes on control before RunEnd on data, so an ended run can still speak.
+        if self.runs.state_ended(run) || self.moving_run(std::time::Instant::now()) != Some(run) {
+            self.stop_speech_locally(current, run, cx);
+        } else {
+            self.fence_spoken(run, &current, cx);
+        }
+        self.runs_changed(cx)
     }
 
     /// Stops `run`, which was speaking when a hold's keys went down, before that hold starts:
@@ -171,28 +189,13 @@ impl Presence {
         }
     }
 
-    /// One Esc press from the typing panel or Stop, targeting the speech lease that holds now.
-    pub(super) fn escape(&mut self, cx: &mut Context<'_, Self>) -> Result<(), OpenError> {
-        let now = std::time::Instant::now();
-        let session = self.session.as_ref().map(Session::generation);
-        let speech = self
-            .speech
-            .get()
-            .filter(|(held, _, until)| Some(*held) == session && *until > now);
-        self.escape_for(speech.map(|(session, run, _)| (session, run)), cx)
-    }
-
-    /// One Esc press. The local effect happens here, and only then is `Stop` or `ClearDrawing`
-    /// queued for the brain, which nothing waits on.
+    /// One Esc press, from the hotkey, the typing panel or Stop. The local effect happens here,
+    /// and only then is `Stop` or `ClearDrawing` queued for the brain, which nothing waits on.
     #[expect(
         clippy::too_many_lines,
         reason = "one Esc press keeps its local decision and every effect of it in order"
     )]
-    fn escape_for(
-        &mut self,
-        speech: Option<(u64, RunId)>,
-        cx: &mut Context<'_, Self>,
-    ) -> Result<(), OpenError> {
+    pub(super) fn escape(&mut self, cx: &mut Context<'_, Self>) -> Result<(), OpenError> {
         self.voice.gates.forget_runs();
         // Esc is a key like any other to screen marks: they go at the first press, whatever
         // else that press stops. When they are a running answer's, the same press stops that
@@ -245,11 +248,7 @@ impl Presence {
         } else {
             EscapePanel::Closed
         };
-        let activity = Activity {
-            speaking: speech.is_some(),
-            ..self.activity
-        };
-        let action = local_decision(activity, panel, &self.presenter);
+        let action = local_decision(self.activity, panel, &self.presenter);
         let tell = match action {
             Escape::CancelPull => {
                 self.kumo
@@ -258,24 +257,7 @@ impl Presence {
                 answer.and_then(|_| self.runs.stop())
             }
             Escape::Stop => {
-                if let Some((session, run)) = speech {
-                    let current = self
-                        .session
-                        .clone()
-                        .filter(|current| current.generation() == session);
-                    if let Some(current) = current {
-                        // Done comes on control before RunEnd on data, so an ended run can still speak.
-                        if self.runs.state_ended(run)
-                            || self.moving_run(std::time::Instant::now()) != Some(run)
-                        {
-                            self.stop_speech_locally(current, run, cx);
-                        } else {
-                            self.fence_spoken(run, &current, cx);
-                        }
-                    }
-                } else {
-                    self.stop_moving(cx);
-                }
+                self.stop_moving(cx);
                 None
             }
             Escape::Clear => {
