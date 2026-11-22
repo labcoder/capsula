@@ -956,7 +956,16 @@ the Shell sends a speaking Hold's KeyUp only once both its Joined receipt and th
 retirement of that gesture's own capture inhibit have arrived, in either order. A screen hold's
 `ScreenRelease` doesn't wait: it goes at the release, so the picture is of that moment. The reply can
 start as soon as the Brain has the release, so the microphone's own stop is not enough while the
-inhibit still owns capture. Any other end of the Hold before then sends nothing. Revocation closes the Shell's capture and enqueue for the gesture. A frame already
+inhibit still owns capture. Any other end of the Hold before then sends nothing.
+A narrated pair admits a speaking Hold too, but only after the previous run's exact RunEnd has
+cleared its narration delivery and any promised step has been handed off, so Esc before the first
+promise doesn't free the pair early. If Stop or terminal control arrives and that RunEnd doesn't
+follow within the handshake timeout (5 s), the Shell tears the pair down rather than reopening capture.
+A stopped run that a typed successor replaced keeps that bound until its own RunEnd. The 5 s bound
+is unmeasured: a data pipe still draining scene frames after Stop could exceed it, so the RunEnd
+tail must be measured before conducted narration is switched on.
+A released Hold's early speech promise waits within the data reader's bounded wait and is accepted
+only once control binds that gesture's run. Revocation closes the Shell's capture and enqueue for the gesture. A frame already
 captured may still cross the local pipe: the writer checks authority before writing,
 but that check and the write are separate. If cancellation reaches the Brain before
 decode admission, it discards accumulated or queued audio and rejects later frames
