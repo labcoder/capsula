@@ -23,8 +23,9 @@ Switching to another window also hides the typing box and keeps your draft, with
 the previous app back. Esc and the box's close request still return focus to the previous app
 only if the box still has it.
 
-Kumochi takes Esc from other apps while held speech is active or while a drawing is on screen,
-including steps shown in the open typing box. Spoken replies don't take Esc yet. Cancelling held
-speech consumes that press without also dismissing the typing box.
+Kumochi takes Esc from other apps while held speech is active, while a drawing is on screen,
+including steps shown in the open typing box, or while a reply is playing out loud. If one of
+Kumochi's own panels is focused while it speaks, that panel keeps Esc, and its first press stops
+the speech. Cancelling held speech consumes that press without also dismissing the typing box.
 If Windows won't give Kumochi the Esc key when it needs it, the dock's panel opens and stays open
 with a Stop button that does the same thing. The typing panel shows Stop too while it's open.

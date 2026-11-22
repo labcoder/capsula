@@ -567,6 +567,7 @@ impl Presence {
                 }
             }
         }
+        self.refresh_speech(cx);
     }
 
     fn step(

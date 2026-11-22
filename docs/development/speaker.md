@@ -168,6 +168,9 @@ the session, output key and token before the microphone starts or collects. Endi
 session cancels its bound microphone but keeps the inhibit until the owner sees proof of
 retirement. See [the capture inhibit](voice.md#the-capture-inhibit) for the input lifecycle.
 
+The worker also publishes a `Speech` lease for Esc: positive presentation evidence that
+expires on its own. [Esc](input.md#esc) describes it. It never stands in for a quiet receipt.
+
 Once the brain's Stop has been queued, a queued stop closes admission immediately. If the
 owner is busy, Presence can offer the same stop again; an undeliverable stop ends the pair.
 Talk-back off also ends a queued pair. The link closes run input before aborting both pipes.

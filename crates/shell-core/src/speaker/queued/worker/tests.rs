@@ -27,6 +27,7 @@ fn fake() -> (Worker, Input, Port, Receiver<Request>, SyncSender<Reply>) {
             retired_route: None,
             virtual_route: false,
             drawing: None,
+            speech: Speech::new(async_channel::bounded(1).0),
         },
         Input {
             worker: thread::current(),

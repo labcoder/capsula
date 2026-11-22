@@ -2,6 +2,9 @@
 
 use std::collections::VecDeque;
 use std::fmt;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 use kumochi_protocol::message::{
     MAX_AHEAD_SEGMENTS, MAX_SEGMENTS_PER_RUN, MAX_UNPLAYED_SECONDS, OutputGeneration, RunId,
@@ -69,6 +72,53 @@ impl fmt::Debug for Packet {
 impl Drop for Packet {
     fn drop(&mut self) {
         self.pcm.samples.zeroize();
+    }
+}
+
+/// Positive, expiring evidence that a run's audio is presenting on its native route: held from
+/// accepted presentation reports, cleared when the route goes. It holds Esc, never admits a
+/// microphone or a turn.
+#[derive(Clone)]
+pub(crate) struct Speech {
+    base: Instant,
+    until: Arc<AtomicU64>,
+    changed: async_channel::Sender<()>,
+}
+
+impl Speech {
+    pub(crate) fn new(changed: async_channel::Sender<()>) -> Self {
+        Self {
+            base: Instant::now(),
+            until: Arc::default(),
+            changed,
+        }
+    }
+
+    /// Extends the evidence to `until`, waking the shell when it starts again.
+    fn hold(&self, until: Instant) {
+        let nanos = u64::try_from(until.saturating_duration_since(self.base).as_nanos())
+            .unwrap_or(u64::MAX)
+            .max(1);
+        let before = self.at(self.until.swap(nanos, Ordering::AcqRel));
+        if before.is_none_or(|at| at <= Instant::now()) {
+            let _woken = self.changed.try_send(());
+        }
+    }
+
+    fn clear(&self) {
+        if self.until.swap(0, Ordering::AcqRel) != 0 {
+            let _woken = self.changed.try_send(());
+        }
+    }
+
+    /// When the evidence runs out, while it still holds.
+    pub(crate) fn until(&self) -> Option<Instant> {
+        self.at(self.until.load(Ordering::Acquire))
+            .filter(|at| *at > Instant::now())
+    }
+
+    fn at(&self, nanos: u64) -> Option<Instant> {
+        (nanos != 0).then(|| self.base + Duration::from_nanos(nanos))
     }
 }
 
