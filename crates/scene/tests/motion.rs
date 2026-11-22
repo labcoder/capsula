@@ -500,16 +500,19 @@ fn frame_debug_summarizes_counts_instead_of_drawing_properties() {
 
 #[test]
 fn step_and_numeric_debug_do_not_expose_drawing_arguments() {
-    let inspect = |color: &str| {
-        let value = json!({"id":"sentinels","start":{"after":"earlier","ms":54321},"put":[
+    let inspect = |color: &str,
+                   axis: f64,
+                   point: f32,
+                   [start, word, delay, duration, repeat]: [u32; 5]| {
+        let value = json!({"id":"sentinels","start":{"after":"earlier","ms":start},"put":[
             {"table":{"id":"table","cols":["Value","Flag"]}},
-            {"row":{"id":"row","in":"table","cells":[123_456.5,true]}},
-            {"chart":{"id":"chart","kind":"line","box":[0,300,400,300],"y":{"min":123_456.5}}},
-            {"series":{"id":"series","in":"chart","data":[123_456.5]}},
+            {"row":{"id":"row","in":"table","cells":[axis,true]}},
+            {"chart":{"id":"chart","kind":"line","box":[0,300,400,300],"y":{"min":axis}}},
+            {"series":{"id":"series","in":"chart","data":[axis]}},
             {"chart":{"id":"scatter","kind":"scatter","box":[400,300,400,300]}},
-            {"series":{"id":"points","in":"scatter","data":[[1234.5,123_456.5]]}},
-            {"line":{"id":"line","from":[1234.5,0],"to":[1234.5,10],"color":color,"delay":34567,"dur":45678,"at_word":23456}},
-            {"anim":{"target":"line","track":"x","keys":[[0,1234.5]],"repeat":56789}},
+            {"series":{"id":"points","in":"scatter","data":[[point,axis]]}},
+            {"line":{"id":"line","from":[point,0],"to":[point,10],"color":color,"delay":delay,"dur":duration,"at_word":word}},
+            {"anim":{"target":"line","track":"x","keys":[[0,point]],"repeat":repeat}},
             {"anim":{"target":"line","track":"color","keys":[[0,color]]}}
         ]});
         let bytes = serde_json::to_vec(&json!({"step":value})).expect("step JSON");
@@ -521,7 +524,7 @@ fn step_and_numeric_debug_do_not_expose_drawing_arguments() {
         };
         assert_eq!(
             chart.y.min.expect("axis numeric sentinel").get().to_bits(),
-            123_456.5_f64.to_bits()
+            axis.to_bits()
         );
         let kumochi_scene::Op::Line(line) = &step.put[6] else {
             panic!("line fixture");
@@ -529,8 +532,8 @@ fn step_and_numeric_debug_do_not_expose_drawing_arguments() {
         let kumochi_scene::record::Anchor::At(from) = &line.from else {
             panic!("coordinate sentinel");
         };
-        assert_eq!(from[0].get().to_bits(), 1234.5_f32.to_bits());
-        assert_eq!(line.delay.expect("timing sentinel").get(), 34567);
+        assert_eq!(from[0].get().to_bits(), point.to_bits());
+        assert_eq!(line.delay.expect("timing sentinel").get(), delay);
         [
             format!("{step:?}"),
             format!("{:?}", chart.y),
@@ -539,10 +542,21 @@ fn step_and_numeric_debug_do_not_expose_drawing_arguments() {
             format!("{:?}", line.delay),
         ]
     };
-    let outputs = inspect("#abcdef");
+    let outputs = inspect(
+        "#abcdef",
+        123_456.5,
+        1234.5,
+        [54_321, 23_456, 34_567, 45_678, 56_789],
+    );
     assert!(
-        outputs == inspect("#736251"),
-        "Debug must not depend on the authored colour"
+        outputs
+            == inspect(
+                "#736251",
+                678_925.25,
+                6278.75,
+                [20_315, 17_326, 26_437, 37_548, 48_659]
+            ),
+        "Debug must not depend on the authored colour or numbers"
     );
     for output in outputs {
         let output = output.to_ascii_lowercase();

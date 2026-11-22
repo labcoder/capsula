@@ -285,22 +285,39 @@ fn debug_and_the_tap_show_no_audio_or_text() {
         })
     };
     let sample: i16 = 12_345;
+    let other_sample: i16 = -23_456;
     let messages: [(String, Record); 3] = [
         {
-            let message = DataToBrain::MicPcm(MicPcm {
-                samples: vec![sample; 960],
-                ..mic(48_000, 960, 0)
-            });
+            let pcm = |value| {
+                DataToBrain::MicPcm(MicPcm {
+                    samples: vec![value; 960],
+                    ..mic(48_000, 960, 0)
+                })
+            };
+            let message = pcm(sample);
+            let debug = format!("{message:?}");
+            assert!(
+                debug == format!("{:?}", pcm(other_sample)),
+                "microphone samples affected voice Debug"
+            );
             let record = Record::of(Pipe::Data, Direction::ToBrain, &message, 10).expect("records");
-            (format!("{message:?}"), record)
+            (debug, record)
         },
         {
-            let message = DataToShell::SpeechPcm(SpeechPcm {
-                samples: vec![sample; 3],
-                ..speech(3, Some(3))
-            });
+            let pcm = |value| {
+                DataToShell::SpeechPcm(SpeechPcm {
+                    samples: vec![value; 3],
+                    ..speech(3, Some(3))
+                })
+            };
+            let message = pcm(sample);
+            let debug = format!("{message:?}");
+            assert!(
+                debug == format!("{:?}", pcm(other_sample)),
+                "speech samples affected voice Debug"
+            );
             let record = Record::of(Pipe::Data, Direction::ToShell, &message, 10).expect("records");
-            (format!("{message:?}"), record)
+            (debug, record)
         },
         {
             let message = transcript(marker);

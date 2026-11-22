@@ -489,13 +489,11 @@ fn new_state_types_never_debug_print_ids_or_drawing_text() {
         "Debug must not depend on the authored IDs or text"
     );
     for value in values {
-        let numbers = value
-            .split(|ch: char| !ch.is_ascii_digit())
-            .filter(|part| !part.is_empty())
-            .collect::<Vec<_>>();
-        assert!(
-            !value.contains("PRI") && !numbers.windows(3).any(|part| part == ["80", "82", "73"]),
-            "Debug must not expose a private prefix as text or bytes"
-        );
+        for sentinel in ["PRIVATE_STEP", "PRIVATE_OBJECT", "PRIVATE_CONTENT"] {
+            assert!(
+                !value.contains(sentinel),
+                "new Debug output is content-free"
+            );
+        }
     }
 }
