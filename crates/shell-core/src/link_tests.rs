@@ -5937,3 +5937,84 @@ fn a_lost_route_that_never_calls_back_goes_quiet_and_admits_the_next_turn() {
     assert!(pipe.link.join().unwrap());
     assert!(brain.join().unwrap());
 }
+
+/// A Show Screen write that settles after a reconnect revokes the live hold's input without
+/// telling its cancel, so the link doesn't remember it as told: the runs' recorded cancel is
+/// the one the brain hears, once.
+#[test]
+fn a_show_screen_write_settling_after_reconnect_leaves_the_hold_s_cancel_to_the_runs() {
+    use kumochi_protocol::message::{GestureId, SettingsOp, SettingsView};
+
+    let settings =
+        |control: &PipeClient, events: &std::sync::mpsc::Receiver<LinkEvent>, show_screen| {
+            let view = SettingsView {
+                show_screen,
+                ..settings_view()
+            };
+            let message = ControlToShell::Settings {
+                view,
+                answer: false,
+            };
+            frame::write(&mut &*control, &message, Pipe::Control).unwrap();
+            assert!(matches!(next(events), LinkEvent::Settings { .. }));
+        };
+    let register = |control: &PipeClient| {
+        let Some(ControlToBrain::QueuedAudioOutput(_, output)) =
+            frame::read(&mut &*control, Pipe::Control).unwrap()
+        else {
+            panic!("the pair offers its logical output");
+        };
+        acknowledge_queued(control, output);
+    };
+    let shared = Arc::new(Shared::default());
+    let first = attended_queued_shared("show-screen-reconnect-first", Arc::clone(&shared));
+    let events = patient(first.events);
+    let session = connected(next(&events));
+    settings(&first.control, &events, false);
+    register(&first.control);
+    let write = ControlToBrain::Settings(SettingsOp::SetShowScreen(true));
+    assert!(first.handle.send_control(&session, write.clone()));
+    assert_eq!(
+        frame::read(&mut &first.control, Pipe::Control).unwrap(),
+        Some(write)
+    );
+    first.handle.end(&session);
+    assert!(first.link.join().unwrap());
+
+    let second = attended_queued_shared("show-screen-reconnect-second", shared);
+    let events = patient(second.events);
+    let session = connected(next(&events));
+    settings(&second.control, &events, false);
+    register(&second.control);
+    let gesture = GestureId(51);
+    second.handle.track_input(gesture);
+    settings(&second.control, &events, true);
+    assert!(
+        !second.handle.input_is(gesture),
+        "the settled write revoked the hold's input"
+    );
+    assert!(
+        !second.handle.input_revoked(gesture),
+        "nothing told the brain the hold's cancel"
+    );
+    let cancel = ControlToBrain::GestureCancel { gesture };
+    assert!(second.handle.send_control(&session, cancel.clone()));
+    let mut told = Vec::new();
+    while told.last() != Some(&cancel) {
+        told.push(
+            frame::read::<ControlToBrain>(&mut &second.control, Pipe::Control)
+                .unwrap()
+                .expect("the runs' cancel"),
+        );
+    }
+    let cancels = told
+        .iter()
+        .filter(|message| matches!(message, ControlToBrain::GestureCancel { .. }))
+        .count();
+    assert_eq!(
+        cancels, 1,
+        "the brain hears the hold's cancel once: {told:?}"
+    );
+    second.handle.end(&session);
+    assert!(second.link.join().unwrap());
+}

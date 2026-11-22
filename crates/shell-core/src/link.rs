@@ -609,7 +609,7 @@ struct Shared {
     input_generation: AtomicU64,
     /// The gesture whose held words the UI keeps, with `REVOKED` once its input was revoked.
     recovery: AtomicU64,
-    /// The last gesture whose input was revoked: the revoke sent, or dispatches, its wire cancel.
+    /// The last gesture whose input a caller revoked to tell the brain its cancel itself.
     revoked: AtomicU64,
     choice: AtomicU64,
     quit_sent: AtomicBool,
@@ -653,7 +653,6 @@ impl Shared {
                 (input != 0 && input < QUIT_INPUT).then_some(0)
             })
             .ok()?;
-        self.revoked.store(gesture, Ordering::Release);
         let _marked = self.recovery.compare_exchange(
             gesture,
             gesture | REVOKED,
@@ -662,6 +661,13 @@ impl Shared {
         );
         let gesture = GestureId(u32::try_from(gesture).expect("gesture fits in the input word"));
         self.microphone.cancel(gesture);
+        Some(gesture)
+    }
+
+    /// Revokes the input for a caller that sends or dispatches its cancel, and remembers it.
+    fn revoke_input_to_tell(&self) -> Option<GestureId> {
+        let gesture = self.revoke_input()?;
+        self.revoked.store(u64::from(gesture.0), Ordering::Release);
         Some(gesture)
     }
 
@@ -957,7 +963,7 @@ impl LinkHandle {
         self.cancel_input_gesture().is_some()
     }
     pub fn cancel_input_gesture(&self) -> Option<GestureId> {
-        let gesture = self.shared.revoke_input()?;
+        let gesture = self.shared.revoke_input_to_tell()?;
         self.send_input_cancel(gesture, None);
         Some(gesture)
     }
@@ -965,7 +971,7 @@ impl LinkHandle {
     /// Revokes local input and microphone authority without touching the control outbox.
     pub fn revoke_input_for_dispatch(&self) -> Option<InputCancel> {
         let generation = self.shared.input_generation.load(Ordering::Relaxed);
-        let gesture = self.shared.revoke_input()?;
+        let gesture = self.shared.revoke_input_to_tell()?;
         Some(InputCancel {
             generation,
             gesture,
@@ -1152,7 +1158,7 @@ impl LinkHandle {
         }
         let send = |out: &Sender<ControlToBrain>, input: &mut QueuedInput| {
             if mutation {
-                let cancelled = shared.revoke_input();
+                let cancelled = shared.revoke_input_to_tell();
                 let choice = &shared.choice;
                 let revision = choice.fetch_update(Ordering::AcqRel, Ordering::Acquire, |old| {
                     old.checked_add(1)
