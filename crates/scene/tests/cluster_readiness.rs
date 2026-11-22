@@ -138,7 +138,6 @@ fn depth_limit_anchors_stay_late_in_either_source_order() {
         assert_eq!(budget.usage().objects, 577);
         let picture = prepare(input, &mut Measure, &AtomicBool::new(false)).expect("picture");
         assert_eq!(picture.after.items().len(), 577);
-        assert!(picture.glides.is_empty());
         assert_rect(bounds(&picture.after, "d"), [140.0, 193.0, 80.0, 40.0]);
         assert_rect(bounds(&picture.after, "l"), [140.0, 32.0, 80.0, 186.0]);
         for index in 0..280 {

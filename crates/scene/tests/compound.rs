@@ -239,7 +239,10 @@ fn clusters_measure_table_only_and_boxed_diagram_only_contents_before_ranking() 
         let left = bounds(&prepared.after, "left");
         let right = bounds(&prepared.after, "right");
         if table {
-            assert_rect(left, [19.0, 36.225], [180.0, 31.549_995]);
+            assert!((left.origin.x - 19.0).abs() < 0.01);
+            assert!((left.origin.y - 36.225).abs() < 0.01);
+            assert!((left.size.x - 180.0).abs() < 0.01);
+            assert!((left.size.y - 31.55).abs() < 0.01);
             assert_rect(right, [261.0, 32.0], [80.0, 40.0]);
         } else {
             assert_rect(left, [19.0, 32.0], [180.0, 120.0]);
@@ -741,11 +744,13 @@ fn dropping_a_cluster_ancestor_preserves_world_bounds_and_recovery() {
         None,
     )
     .expect("recovered cluster");
-    assert_eq!(detached.items().len(), 4);
-    assert_eq!(detached.items(), recovered.items());
-    for (name, expected) in survivors.into_iter().zip(expected) {
-        assert_eq!(bounds(&detached, name), expected);
-        assert_eq!(bounds(&recovered, name), expected);
+    for layout in [&detached, &recovered] {
+        assert_eq!(layout.items().len(), 4);
+        assert_eq!(layout.handle(&id("outer")), None);
+        for ((name, expected), handle) in survivors.into_iter().zip(expected).zip(revealed) {
+            assert_eq!(bounds(layout, name), expected);
+            assert_eq!(layout.handle(&id(name)), Some(handle));
+        }
     }
 }
 

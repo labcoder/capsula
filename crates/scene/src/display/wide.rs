@@ -245,7 +245,7 @@ mod tests {
     #[test]
     fn leading_spaces_open_no_break_and_text_that_fits_keeps_its_own_width() {
         assert_eq!(measure("     mmmmmmmmmm", Some(100.0)), [100.0, 30.0]);
-        assert_eq!(measure("mmm mmm", None), [63.1, 15.0]);
+        assert_eq!(measure("mmm mmm", Some(100.0)), [63.1, 15.0]);
     }
 
     #[test]

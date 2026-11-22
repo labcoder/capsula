@@ -634,7 +634,15 @@ mod tests {
         let put = commit(
             br#"{"step":{"id":"a","put":[{"view3d":{"id":"v"}},{"solid":{"in":"v","id":"s","shape":"box","size":[2,2,2]}}]}}"#,
         );
-        assert_eq!(put.preparation.views.len(), 1);
+        let [update] = put.preparation.views.as_slice() else {
+            panic!("one view update");
+        };
+        assert_eq!(update.id.as_str(), "v");
+        let input = update.input.as_ref().expect("live view");
+        let [solid] = input.solids.as_ref() else {
+            panic!("one solid in the view input");
+        };
+        assert_eq!(solid.record().id.as_str(), "s");
         let shaded = commit(br##"{"step":{"id":"b","set":[{"target":"s","color":"#ff0000"}]}}"##);
         assert!(
             shaded.preparation.views.is_empty(),

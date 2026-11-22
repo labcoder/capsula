@@ -149,10 +149,10 @@ mod tests {
             ..stroke(600)
         };
         assert_eq!(
-            pace(&[none, pop, other(250), grow]),
+            pace(&[pop, none, other(250), grow]),
             [
-                paced(0, Enter::None, 0),
                 paced(0, Enter::Pop, 900),
+                paced(540, Enter::None, 0),
                 paced(540, Enter::Fade, 250),
                 paced(690, Enter::Grow, 600),
             ]

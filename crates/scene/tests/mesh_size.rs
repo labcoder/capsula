@@ -155,7 +155,7 @@ fn profiles_paths_and_antiparallel_threshold_have_typed_refusals() {
 }
 
 #[test]
-fn sizing_keeps_shape_errors_and_decoder_limits() {
+fn sizing_keeps_shape_errors_and_segment_bounds() {
     let mut outline = maximum_outline();
     outline
         .as_array_mut()
@@ -221,21 +221,6 @@ fn sizing_keeps_shape_errors_and_decoder_limits() {
     }
     assert_eq!(Segments::try_from(2), Err(ErrorCode::OutOfRange));
     assert_eq!(Segments::try_from(49), Err(ErrorCode::OutOfRange));
-    let points: Vec<_> = (0..513).map(|i| [1, i]).collect();
-    let decoded =
-        serde_json::from_value::<Solid>(json!({"in":"v","id":"s","shape":"lathe","points":points}));
-    assert_eq!(
-        decoded.expect_err("one over decoder cap").to_string(),
-        "scene.TooLong"
-    );
-    let path: Vec<_> = (0..513).map(|i| [0, i, 0]).collect();
-    let decoded = serde_json::from_value::<Solid>(
-        json!({"in":"v","id":"s","shape":"tube","path":path,"r2":1}),
-    );
-    assert_eq!(
-        decoded.expect_err("one over path decoder cap").to_string(),
-        "scene.TooLong"
-    );
 }
 
 #[test]

@@ -2,9 +2,10 @@
 #[path = "support/allocation.rs"]
 mod allocation;
 use kumochi_scene::{
-    Admission, Begin, Frame, GlobalBudget, Record, SceneState, SceneView, StopCut,
+    Admission, Begin, Frame, GlobalBudget, Handle, Record, SceneState, SceneView, StopCut, WireId,
     display::{
-        MeasureError, PaintWork, TextMeasure, TextStyle, WideMeasure, fallback_corner_segments,
+        MeasureError, PaintWork, Prim, TextMeasure, TextStyle, WideMeasure,
+        fallback_corner_segments,
     },
     geom::{Affine, Rect, Vec2},
     layout::{LayoutState, PrepareInput, PreparedStep, SurfaceGeometry, place, prepare, recover},
@@ -89,16 +90,40 @@ fn prepared(
     prepare(input, measure, &AtomicBool::new(false)).expect("prepare")
 }
 
-fn assert_graph_placement(frame: &Frame, expected: Affine) {
-    assert_eq!(
-        frame.items().len(),
-        7,
-        "the recorded graph keeps every item"
-    );
+fn id(name: &str) -> WireId {
+    name.to_owned().try_into().expect("fixture ID")
+}
+
+fn at_rest(layout: &LayoutState) -> Frame {
+    let mut frame = Frame::new();
+    SceneView::new(layout, 0)
+        .frame(0, &mut frame)
+        .expect("resting frame");
+    frame
+}
+
+fn assert_graph_placement(
+    frame: &Frame,
+    handles: &[Handle],
+    expected: Affine,
+) -> Vec<(Handle, Arc<[Prim]>)> {
+    let mut actual: Vec<_> = frame
+        .paint_items()
+        .map(|(item, _, _)| {
+            assert_eq!(
+                item.transform, expected,
+                "fitted transform for {:?}",
+                item.handle
+            );
+            (item.handle, Arc::clone(&item.primitives))
+        })
+        .collect();
+    actual.sort_unstable_by_key(|(handle, _)| *handle);
     assert!(
-        frame.items().iter().all(|item| item.transform == expected),
-        "every recorded graph item uses the fitted transform"
+        actual.iter().map(|(handle, _)| handle).eq(handles),
+        "all seven authored graph objects paint"
     );
+    actual
 }
 
 #[test]
@@ -125,13 +150,24 @@ fn recorded_graph_stays_centered_through_activation_stop_recovery_and_stage_chan
     };
     let step = prepared(&mut scene, &mut budget, before, &step, &mut Measure);
     assert_eq!(step.after.fit_extent(), rect(16.0, -14.0, 473.0, 448.0));
+    let mut handles = [
+        "x_axis",
+        "y_axis",
+        "parabola",
+        "graph_label",
+        "x_label",
+        "y_label",
+        "origin_label",
+    ]
+    .map(|name| scene.handle(&id(name)).expect("authored object"));
+    handles.sort_unstable();
     let mut frame = Frame::new();
     view.activate(step, 0, 800, &mut frame).expect("activate");
     // Default entrances pace the recorded objects, so sample once the last has entered.
     let entered = view.entrance_end().expect("the step puts objects");
     view.frame(entered, &mut frame).expect("sample");
     let expected = Affine::pose(2.0, 0.0, Vec2::new(775.0, 354.0));
-    assert_graph_placement(&frame, expected);
+    assert_graph_placement(&frame, &handles, expected);
     let ((), activity) = allocation::activity(|| {
         for now in [0, 100, 400, 800, 1000, 60_000] {
             view.frame(now, &mut frame).expect("placed frame");
@@ -152,7 +188,7 @@ fn recorded_graph_stays_centered_through_activation_stop_recovery_and_stage_chan
     stopped.set_stage(stage);
     let mut rest_frame = Frame::new();
     stopped.frame(0, &mut rest_frame).expect("stopped frame");
-    assert_graph_placement(&rest_frame, expected);
+    assert_graph_placement(&rest_frame, &handles, expected);
     let (replayed, recovered) = recover(
         begin,
         scene.recovery_log(),
@@ -171,12 +207,7 @@ fn recorded_graph_stays_centered_through_activation_stop_recovery_and_stage_chan
     recovered_view
         .frame(0, &mut recovered_frame)
         .expect("recovered frame");
-    assert_graph_placement(&recovered_frame, expected);
-    let sources: Vec<_> = recovered
-        .items()
-        .iter()
-        .map(|item| Arc::clone(&item.primitives))
-        .collect();
+    let original_paint = assert_graph_placement(&recovered_frame, &handles, expected);
     let (changed, allocations) =
         allocation::count(|| recovered_view.set_stage(rect(10.0, 20.0, 473.0, 448.0)));
     assert!(changed);
@@ -184,18 +215,14 @@ fn recorded_graph_stays_centered_through_activation_stop_recovery_and_stage_chan
     recovered_view
         .frame(0, &mut recovered_frame)
         .expect("new stage");
-    assert_graph_placement(
-        &recovered_frame,
-        Affine::pose(1.0, 0.0, Vec2::new(-6.0, 34.0)),
-    );
-    assert_eq!(recovered_view.layout().items().len(), sources.len());
-    assert!(
-        recovered_view
-            .layout()
-            .items()
-            .iter()
-            .zip(&sources)
-            .all(|(item, source)| Arc::ptr_eq(&item.primitives, source))
+    assert_eq!(
+        assert_graph_placement(
+            &recovered_frame,
+            &handles,
+            Affine::pose(1.0, 0.0, Vec2::new(-6.0, 34.0))
+        ),
+        original_paint,
+        "changing the stage only changes where the graph paints"
     );
 }
 
@@ -438,9 +465,7 @@ fn four_plain_nodes_and_three_labelled_edges_fit_the_paint_budgets() {
 
 #[test]
 fn the_drift_allowance_comes_before_the_64_clamp() {
-    // g = 32 on the overlay reaches the 64 clamp. Radius 1.2671660184860229 sits just under the
-    // ten-piece threshold there, so each filled, bordered rect costs 4 · 11 + 1 points; applying
-    // the allowance after the clamp would cross it, to 49 each and 539 in all.
+    // The overlay projects g=32 at 2×, right at the clamp before the allowance.
     let mut put = vec![
         json!({"diagram":{"id":"d"}}),
         json!({"anim":{"target":"d","track":"scale","keys":[[0,32]]}}),
@@ -448,17 +473,19 @@ fn the_drift_allowance_comes_before_the_64_clamp() {
     put.extend((0..11).map(|index| {
         json!({"shape":{"id":format!("r{index}"),"in":"d","kind":"rect","box":[index * 4,0,3,3],"radius":1.267_166_f32,"fill":"blue"}})
     }));
-    let work = picture(header(Some([520.0, 320.0])), &json!(put)).paint_work();
-    assert_eq!(
-        work,
-        PaintWork {
-            dash_pieces: 0,
-            fill_vertices: 11 * 45,
-            largest_fill: 45,
-            outline_points: 11 * 45,
-            largest_outline: 45,
-        }
-    );
+    let layout = picture(header(Some([520.0, 320.0])), &json!(put));
+    let frame = at_rest(&layout);
+    for index in 0..11 {
+        let handle = layout
+            .handle(&id(&format!("r{index}")))
+            .expect("rounded rect");
+        let item = frame
+            .items()
+            .iter()
+            .find(|item| item.handle == handle)
+            .expect("painted rect");
+        assert_eq!(item.paint_scale.to_bits(), 64.0_f32.to_bits());
+    }
 }
 
 #[test]
@@ -483,18 +510,24 @@ fn a_rotated_chain_at_the_depth_limit_stays_within_its_charge() {
     view.set_stage(rect(0.0, 0.0, 2560.0, 1440.0));
     let mut frame = Frame::new();
     view.frame(0, &mut frame).expect("a fresh frame");
+    let handle = layout.handle(&id("r")).expect("authored rect");
     let item = frame
         .items()
         .iter()
-        .find(|item| !item.primitives.is_empty())
+        .find(|item| item.handle == handle)
         .expect("the rect");
     let [a, b, c, d, ..] = item.transform.0;
     let posed = (a * d - b * c).abs().sqrt();
     assert!((posed - 32.0).abs() < 1e-3, "posed at {posed}");
     assert!(b.abs() > 1.0, "turned, so the painter takes the fallback");
-    assert_eq!(fallback_corner_segments(radius, 32.0), 10);
-    assert_eq!(fallback_corner_segments(radius, item.paint_scale), 11);
-    assert!(fallback_corner_segments(radius, posed) <= 11);
+    assert_eq!(
+        item.paint_scale.to_bits(),
+        (32.0_f32 * (1.0 + 1.0 / 65_536.0)).to_bits()
+    );
+    assert!(
+        fallback_corner_segments(radius, posed)
+            <= fallback_corner_segments(radius, item.paint_scale)
+    );
 }
 
 #[test]
@@ -555,8 +588,7 @@ fn ordinary_illustrations_fit_the_paint_caps() {
         let x = f32::from(index) * 30.0;
         round(format!("part{index}"), [x, 200.0, 24.0, 18.0])
     }));
-    // A 30-step flowchart with labelled arrows fits the default and a tall authored canvas
-    // without changing its paint charge.
+    // A 30-step flowchart with labelled arrows fits the default and a tall authored canvas.
     let mut flow = vec![json!({"diagram":{"id":"d","dir":"down"}})];
     flow.extend(
         (0..30).map(|index| json!({"node":{"id":format!("n{index}"),"in":"d","label":"Step"}})),
@@ -565,16 +597,33 @@ fn ordinary_illustrations_fit_the_paint_caps() {
         json!({"edge":{"id":format!("e{index}"),"from":format!("n{}", index - 1),"to":format!("n{index}"),"label":"then"}})
     }));
     let flow = serde_json::Value::Array(flow);
-    let charge = |size, put: &serde_json::Value| {
-        let work = picture(header(size), put).paint_work();
+    let check = |size, put: &serde_json::Value| {
+        let layout = picture(header(size), put);
+        let work = layout.paint_work();
         assert_ne!(work, PaintWork::default(), "the scene has paint work");
+        assert!(work.within_limits());
         let wide = measured(header(size), put, &mut WideMeasure).paint_work();
         assert_eq!(wide.max(work), wide, "the brain's measure is conservative");
-        work
+        (layout, wide)
     };
-    charge(None, &serde_json::Value::Array(sky));
-    charge(None, &serde_json::Value::Array(mouse));
-    assert_eq!(charge(None, &flow), charge(Some([960.0, 4000.0]), &flow));
+    check(None, &serde_json::Value::Array(sky));
+    check(None, &serde_json::Value::Array(mouse));
+    let (default, default_wide) = check(None, &flow);
+    let (tall, tall_wide) = check(Some([960.0, 4000.0]), &flow);
+    let node_width = |layout: &LayoutState| {
+        layout
+            .bounds(&id("n0"))
+            .expect("valid bounds")
+            .expect("authored node")
+            .size
+            .x
+    };
+    assert!(node_width(&default) < node_width(&tall));
+    assert_eq!(
+        (default.paint_work(), default_wide),
+        (tall.paint_work(), tall_wide),
+        "both measures charge the diagram unshrunk"
+    );
 }
 
 /// A node a Stop keeps without its shrunk diagram takes the diagram's fit into its own transform,

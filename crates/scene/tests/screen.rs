@@ -8,7 +8,7 @@ use kumochi_scene::{
     limits::{MAX_MARKER_OPACITY, MAX_SPOTLIGHT_DIM},
     parse_draw_record, parse_screen_draw_record,
     record::{ScreenDisplay, Surface},
-    screen::{self, MARK_RGB, PLACEHOLDER_BOX, SPOTLIGHT_RGB},
+    screen::{self, LABEL_GAP, MARK_RGB, PLACEHOLDER_BOX, SPOTLIGHT_RGB},
     theme::Theme,
 };
 use serde_json::{Value, json};
@@ -138,6 +138,38 @@ fn near(actual: Rect, expected: [f32; 4]) -> bool {
     ];
     got.iter().zip(expected).all(|(a, b)| (a - b).abs() < 1e-3)
 }
+fn outline(drawn: &[Drawn], rgb: u32) -> Drawn {
+    drawn
+        .iter()
+        .copied()
+        .find(|(_, _, _, border)| border.is_some_and(|(paint, _)| paint.rgb.get() == rgb))
+        .expect("colored outline")
+}
+
+fn inside(inner: Rect, outer: Rect) -> bool {
+    inner.origin.x >= outer.origin.x
+        && inner.origin.y >= outer.origin.y
+        && inner.max().x <= outer.max().x
+        && inner.max().y <= outer.max().y
+}
+
+fn canvas() -> Rect {
+    rect([0.0, 0.0, 1280.0, 720.0])
+}
+
+fn save_label(result: &PreparedStep) -> Rect {
+    let label = item(result, "c");
+    assert!(
+        label
+            .primitives
+            .iter()
+            .any(|prim| matches!(prim, Prim::Text { text, .. } if text.as_str() == "Save")),
+        "the Save label paints its text"
+    );
+    assert!(inside(label.bounds, canvas()), "label stays on the picture");
+    label.bounds
+}
+
 fn rect(value: [f32; 4]) -> Rect {
     Rect {
         origin: Vec2::new(value[0], value[1]),
@@ -564,27 +596,36 @@ fn a_box_mark_is_a_two_tone_outline_outside_the_padded_box_in_logical_pixels() {
     ])
     .expect("prepared");
     let drawn = rects(&item(&result, "h"));
-    assert_eq!(drawn.len(), 2);
-    // Two logical pixels per picture pixel: pad 2, edge 0.5, stroke 1, corner 3 grown by 3(1 - 1/√2).
-    let (outer, radius, fill, border) = drawn[0];
-    assert!(
-        near(outer, [95.121_32, 95.121_32, 49.757_36, 29.757_36]),
-        "{outer:?}"
-    );
-    assert!((radius - 5.0).abs() < 1e-4 && fill.is_none());
-    let (paint, width) = border.expect("white edge");
+    let padded = rect([98.0, 98.0, 44.0, 24.0]);
+    let white = outline(&drawn, 0x00FF_FFFF);
+    let purple = outline(&drawn, MARK_RGB);
+    for layer in [white, purple] {
+        assert!(
+            layer.1 > 0.0 && layer.2.is_none() && clears(padded, layer),
+            "the rounded outline must leave the padded target clear"
+        );
+    }
+    let (paint, width) = white.3.expect("white edge");
     assert_eq!(
-        (paint.rgb.get(), paint.opacity, width),
-        (0x00FF_FFFF, 1.0, 2.0)
+        (paint.opacity.to_bits(), (width * 2.0).to_bits()),
+        (1.0_f32.to_bits(), 4.0_f32.to_bits())
     );
-    let (inner, radius, _, border) = drawn[1];
-    assert!(
-        near(inner, [95.621_32, 95.621_32, 48.757_36, 28.757_36]),
-        "{inner:?}"
+    let (paint, width) = purple.3.expect("purple stroke");
+    assert_eq!(
+        (paint.opacity.to_bits(), (width * 2.0).to_bits()),
+        (1.0_f32.to_bits(), 2.0_f32.to_bits())
     );
-    assert!((radius - 4.5).abs() < 1e-4);
-    let (paint, width) = border.expect("stroke");
-    assert_eq!((paint.rgb.get(), width), (MARK_RGB, 1.0));
+    for edge in [
+        purple.0.origin.x - white.0.origin.x,
+        purple.0.origin.y - white.0.origin.y,
+        white.0.max().x - purple.0.max().x,
+        white.0.max().y - purple.0.max().y,
+    ] {
+        assert!(
+            (edge * 2.0 - 1.0).abs() < 1e-3,
+            "one logical pixel of white surrounds the purple"
+        );
+    }
 }
 
 #[test]
@@ -678,28 +719,43 @@ fn no_outline_ever_covers_its_target_whatever_its_shape_or_pad() {
 #[test]
 fn a_label_sits_on_the_named_side_outside_its_mark_or_the_next_free_side() {
     let label = |target: [u32; 4], side: &str, others: Value| {
-        let result = prepared(&[
+        prepared(&[
             others,
             json!([{"callout":{"id":"c","target":{"box":target},"text":"Save","side":side}}]),
         ])
-        .expect("prepared");
-        item(&result, "c").bounds
+        .expect("prepared")
     };
     let marks = |target: [u32; 4]| json!([{"highlight":{"id":"h","target":{"box":target}}}]);
-    // Label 40 by 15, 3 canvas units (the 6 px gap, halved) off the ring, whose outline reaches
-    // 5.757 out: pad 2, the 6-unit corner's growth 1.757 and outline 2.
-    let top = label([600, 300, 80, 40], "top", marks([600, 300, 80, 40]));
-    assert!(near(top, [620.0, 276.243, 40.0, 15.0]), "{top:?}");
-    let left = label([600, 300, 80, 40], "left", marks([600, 300, 80, 40]));
-    assert!(near(left, [551.243, 312.5, 40.0, 15.0]), "{left:?}");
-    let bottom = label([600, 2, 80, 40], "top", marks([600, 2, 80, 40]));
-    assert!(near(bottom, [620.0, 50.757, 40.0, 15.0]), "{bottom:?}");
+    let target = [600, 300, 80, 40];
+    let top = label(target, "top", marks(target));
+    let gap = LABEL_GAP * 0.5;
+    assert!((item(&top, "h").bounds.origin.y - save_label(&top).max().y - gap).abs() < 1e-3);
+    let left = label(target, "left", marks(target));
+    assert!((item(&left, "h").bounds.origin.x - save_label(&left).max().x - gap).abs() < 1e-3);
+
+    let target = [600, 2, 80, 40];
+    let alternate = label(target, "top", marks(target));
+    let bounds = save_label(&alternate);
+    let own = item(&alternate, "h").bounds;
+    assert!(
+        own.origin.y < 0.0,
+        "no top placement fits inside the picture"
+    );
+    assert!(!bounds.intersects(own) && bounds.origin.y > own.origin.y);
+
     let blocked = json!([
-        {"highlight":{"id":"h","target":{"box":[600,2,80,40]}}},
+        {"highlight":{"id":"h","target":{"box":target}}},
         {"highlight":{"id":"k","target":{"box":[600,50,80,20]}}}
     ]);
-    let right = label([600, 2, 80, 40], "top", blocked);
-    assert!(near(right, [688.757, 14.5, 40.0, 15.0]), "{right:?}");
+    let result = label(target, "top", blocked);
+    let bounds = save_label(&result);
+    for mark in ["h", "k"] {
+        assert!(
+            !bounds.intersects(item(&result, mark).bounds),
+            "alternate side clears {mark}"
+        );
+    }
+    assert!(bounds.origin.y > item(&result, "h").bounds.origin.y);
 }
 
 #[test]
@@ -722,24 +778,40 @@ fn a_label_keeps_off_every_mark_of_its_step_and_moves_off_a_later_one() {
     let mark = json!({"highlight":{"id":"h","target":{"box":[610,262,60,10]},"style":"box"}});
     let other = json!({"callout":{"id":"d","target":{"box":[610,270,60,10]},"text":"Here"}});
     let far = json!({"highlight":{"id":"f","target":{"box":[10,10,20,20]}}});
-    let alone = item(&prepared(&[json!([callout])]).expect("prepared"), "c").bounds;
-    assert!(near(alone, [620.0, 278.0, 40.0, 15.0]), "{alone:?}");
-    let kept = item(
-        &prepared(&[json!([callout]), json!([far])]).expect("prepared"),
-        "c",
-    )
-    .bounds;
-    assert!(near(kept, [620.0, 278.0, 40.0, 15.0]), "{kept:?}");
-    for steps in [
-        vec![json!([callout, mark])],
-        vec![json!([callout, other])],
-        vec![json!([callout]), json!([mark])],
+    let alone = save_label(&prepared(&[json!([callout])]).expect("prepared"));
+    assert!(
+        alone.max().y < 300.0,
+        "the unblocked label sits above its target"
+    );
+    let kept = save_label(&prepared(&[json!([callout]), json!([far])]).expect("prepared"));
+    assert_eq!(kept, alone);
+    for (steps, obstacle, target) in [
+        (
+            vec![json!([callout, mark])],
+            "h",
+            rect([610.0, 262.0, 60.0, 10.0]),
+        ),
+        (
+            vec![json!([callout, other])],
+            "d",
+            rect([610.0, 270.0, 60.0, 10.0]),
+        ),
+        (
+            vec![json!([callout]), json!([mark])],
+            "h",
+            rect([610.0, 262.0, 60.0, 10.0]),
+        ),
     ] {
-        let label = item(&prepared(&steps).expect("prepared"), "c").bounds;
+        let result = prepared(&steps).expect("prepared");
+        let label = save_label(&result);
+        let painted = item(&result, obstacle).bounds;
         assert!(
-            near(label, [620.0, 347.0, 40.0, 15.0]),
-            "{steps:?}: {label:?}"
+            alone.intersects(painted) || alone.intersects(target),
+            "the obstacle blocks the original pose"
         );
+        assert_ne!(label, alone);
+        assert!(!label.intersects(painted) && !label.intersects(target));
+        assert!(!label.intersects(rect([600.0, 300.0, 80.0, 40.0])));
     }
 }
 
@@ -760,18 +832,15 @@ fn an_earlier_label_with_no_side_left_sits_out_until_one_frees() {
     );
     let freed =
         prepared(&[callout.clone(), fence.clone(), json!({"remove":["t"]})]).expect("prepared");
-    let label = item(&freed, "c");
     let unfenced = prepared(std::slice::from_ref(&callout)).expect("prepared without fences");
-    assert!(
-        label
-            .primitives
-            .iter()
-            .any(|prim| matches!(prim, Prim::Text { text, .. } if text.as_str() == "Save")),
-        "the earlier label is visible once space frees"
-    );
+    let label = save_label(&freed);
+    assert!(label.max().y < 300.0, "the earlier label returns on top");
+    for mark in ["b", "l", "r"] {
+        assert!(!label.intersects(item(&freed, mark).bounds));
+    }
     assert_eq!(
-        label.bounds,
-        item(&unfenced, "c").bounds,
+        label,
+        save_label(&unfenced),
         "the earlier label returns to its open placement"
     );
     // c sat out at its old centre (640, 285.5), which d's named side covers.

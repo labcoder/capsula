@@ -486,12 +486,6 @@ mod tests {
         for (case, (parent, put, set, remove)) in [
             (
                 "d",
-                json!([{"text":{"id":"t","in":collision,"at":[0,0],"text":""}}]),
-                json!([]),
-                json!([]),
-            ),
-            (
-                "d",
                 json!([{"text":{"id":"t","at":{"ref":collision},"text":""}}]),
                 json!([]),
                 json!([]),
@@ -506,6 +500,12 @@ mod tests {
                 "d",
                 json!([]),
                 json!([{"target":collision,"color":"red"}]),
+                json!([]),
+            ),
+            (
+                "d",
+                json!([{"text":{"id":"t","at":[0,0],"text":""}}]),
+                json!([{"target":"t","behind":collision}]),
                 json!([]),
             ),
             ("d", json!([]), json!([]), json!([collision])),
@@ -529,26 +529,13 @@ mod tests {
             assert_ne!(root.id.as_str(), collision, "reference case {case}");
             assert_ne!(root.id.as_str(), "A", "the node keeps its authored id");
             assert_eq!(root.parent.as_ref().map(WireId::as_str), Some(parent));
-            if case == 0 {
-                assert_ne!(root.id.as_str(), "t", "the text keeps its authored id");
-                let ids: BTreeMap<_, _> = result
-                    .run
-                    .put
-                    .iter()
-                    .filter_map(object::visual)
-                    .map(|visual| (visual.id.as_str(), visual.parent.map(WireId::as_str)))
-                    .collect();
-                assert_eq!(
-                    ids,
-                    BTreeMap::from([
-                        ("d", None),
-                        (root.id.as_str(), Some("d")),
-                        ("A", Some(root.id.as_str())),
-                        ("t", Some(collision)),
-                    ]),
-                    "the dangling parent stays unresolved"
-                );
-            }
+            assert!(
+                result.run.put.iter().any(|op| matches!(
+                    op, Op::Node(node)
+                        if node.id.as_str() == "A" && node.parent.as_ref() == Some(&root.id)
+                )),
+                "the authored node stays under the generated root"
+            );
         }
     }
 

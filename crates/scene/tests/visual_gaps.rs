@@ -1,7 +1,7 @@
 //! Literal geometry for alignment, initial fitting and incremental diagram views.
 use kumochi_scene::{
     GlobalBudget, StopCut,
-    display::Prim,
+    display::{Item, Prim, TextMeasure},
     geom::{Affine, Rect, Vec2},
     layout::{LayoutState, SurfaceGeometry},
     record::Align,
@@ -12,6 +12,57 @@ use serde_json::json;
 #[path = "support/scene.rs"]
 mod scene_support;
 use scene_support::{id, new_scene, prepared, prepared_on};
+
+fn item(layout: &LayoutState, name: &str) -> Item {
+    let handle = layout.handle(&id(name)).expect("prepared handle");
+    layout
+        .items()
+        .into_iter()
+        .find(|item| item.handle == handle)
+        .expect("prepared item")
+}
+
+fn bounds(layout: &LayoutState, name: &str) -> Rect {
+    layout
+        .bounds(&id(name))
+        .expect("valid world bounds")
+        .expect("prepared bounds")
+}
+
+fn near(actual: f32, expected: f32) {
+    assert!((actual - expected).abs() < 0.001, "{actual} vs {expected}");
+}
+
+fn ink(item: &Item, label: &str, measure: &mut impl TextMeasure) -> Rect {
+    item.primitives
+        .iter()
+        .find_map(|p| match p {
+            Prim::Text {
+                origin,
+                text,
+                style,
+                max_width,
+                align,
+                color,
+            } if text.as_str() == label && color.opacity > 0.0 => {
+                let [w, h] = measure
+                    .measure(label, *style, *max_width)
+                    .expect("measured ink");
+                let spare = max_width.unwrap_or(w) - w;
+                let x = match align {
+                    Align::Left => 0.0,
+                    Align::Center => spare * 0.5,
+                    Align::Right => spare,
+                };
+                Some(Rect {
+                    origin: *origin + Vec2::new(x, 0.0),
+                    size: Vec2::new(w, h),
+                })
+            }
+            _ => None,
+        })
+        .expect("painted label")
+}
 
 #[test]
 fn a_titled_group_frames_its_title_band_and_member_with_eight_pixel_padding() {
@@ -26,42 +77,37 @@ fn a_titled_group_frames_its_title_band_and_member_with_eight_pixel_padding() {
             {"mermaid":{"in":"diagram","src":"flowchart TB\nsubgraph g[Group]\nA\nend\n"}}
         ]}),
     );
-    let handle = scene.handle(&id("g")).expect("group");
-    let items = picture.after.items();
-    let group = items
+    let world = &picture.after;
+    let group = item(world, "g");
+    let (frame, radius, paint, width) = group
+        .primitives
         .iter()
-        .find(|item| item.handle == handle)
-        .expect("group item");
-    let Prim::Rect {
-        rect,
-        radius,
-        fill,
-        border,
-    } = &group.primitives[0]
-    else {
-        panic!("group frame precedes its title");
-    };
-    assert_eq!(
-        *rect,
-        Rect {
-            origin: Vec2::new(132.0, -18.0),
-            size: Vec2::new(96.0, 82.0)
-        }
-    );
-    assert_eq!(radius.to_bits(), 8.0_f32.to_bits());
-    assert_eq!(*fill, None);
-    assert_eq!(
-        *border,
-        Some((kumochi_scene::theme::Theme::default().line.into(), 1.0))
-    );
-    assert_eq!(group.bounds, *rect);
-    assert_eq!(
-        picture.after.bounds(&id("g")).expect("world frame"),
-        Some(Rect {
-            origin: Vec2::new(132.0, 32.0),
-            size: Vec2::new(96.0, 82.0)
+        .find_map(|p| match p {
+            Prim::Rect {
+                rect,
+                radius,
+                fill: None,
+                border: Some((paint, width)),
+            } => Some((*rect, *radius, *paint, *width)),
+            _ => None,
         })
+        .expect("unfilled group outline");
+    assert!(radius > 0.0);
+    assert_eq!(
+        (paint, width),
+        (kumochi_scene::theme::Theme::default().line.into(), 1.0)
     );
+    let title = ink(&group, "Group", &mut scene_support::Measure);
+    let frame_world = bounds(world, "g");
+    let title_world = title.origin + frame_world.origin - frame.origin;
+    let member = bounds(world, "A");
+    near(title_world.y - frame_world.origin.y, 8.0);
+    near(title_world.x + title.size.x * 0.5, frame_world.center().x);
+    near(member.origin.x - frame_world.origin.x, 8.0);
+    near(frame_world.max().x - member.max().x, 8.0);
+    near(frame_world.max().y - member.max().y, 8.0);
+    near(member.origin.y - (title_world.y + title.size.y), 16.0);
+    assert_eq!(group.bounds, frame);
 }
 
 fn labelled_pair(labels: [&str; 2]) -> serde_json::Value {
@@ -387,35 +433,46 @@ fn a_long_horizontal_edge_label_widens_the_second_rank_origin() {
             {"edge":{"id":"edge","in":"diagram","from":"a","to":"b","label":"abcdefgh"}}
         ]}),
     );
-    assert_eq!(
-        picture.after.bounds(&id("b")).expect("second rank"),
-        Some(Rect {
-            origin: Vec2::new(224.0, 16.0),
-            size: Vec2::new(80.0, 40.0)
-        })
+    let [a, b] = ["a", "b"].map(|name| bounds(&picture.after, name));
+    let label = ink(
+        &item(&picture.after, "edge"),
+        "abcdefgh",
+        &mut scene_support::Measure,
     );
+    near(b.origin.x - a.max().x, (label.size.x + 24.0).max(72.0));
+    near(b.center().y, a.center().y);
 }
 
 #[test]
 fn a_long_diamond_label_enlarges_both_square_dimensions() {
     let mut scene = new_scene("diamond_size");
     let before = LayoutState::new(&scene);
-    let picture = prepared(
+    let mut fixture = json!({"id":"diamond","put":[
+        {"diagram":{"id":"diagram","box":[0,0,360,300]}},
+        {"node":{"id":"diamond","in":"diagram","label":"abcdefghij","shape":"diamond"}}
+    ]});
+    let long = prepared(
         &mut scene,
         &mut GlobalBudget::default(),
         &before,
-        json!({"id":"diamond","put":[
-            {"diagram":{"id":"diagram","box":[0,0,360,300]}},
-            {"node":{"id":"diamond","in":"diagram","label":"abcdefghij","shape":"diamond"}}
-        ]}),
+        fixture.clone(),
     );
-    assert_eq!(
-        picture.after.bounds(&id("diamond")).expect("diamond"),
-        Some(Rect {
-            origin: Vec2::new(113.0, 16.0),
-            size: Vec2::new(134.0, 134.0)
-        })
-    );
+    let mut scene = new_scene("short_diamond");
+    let before = LayoutState::new(&scene);
+    fixture["put"][1]["node"]["label"] = json!("A");
+    let short = prepared(&mut scene, &mut GlobalBudget::default(), &before, fixture);
+    let long_node = item(&long.after, "diamond");
+    let short_node = item(&short.after, "diamond");
+    assert!(long_node.bounds.size.x > short_node.bounds.size.x);
+    assert!(long_node.bounds.size.y > short_node.bounds.size.y);
+    near(long_node.bounds.size.x, long_node.bounds.size.y);
+    let label = ink(&long_node, "abcdefghij", &mut scene_support::Measure);
+    let center = long_node.bounds.center();
+    for x in [label.origin.x - 12.0, label.max().x + 12.0] {
+        for y in [label.origin.y - 10.0, label.max().y + 10.0] {
+            assert!((x - center.x).abs() + (y - center.y).abs() <= long_node.bounds.size.x * 0.5);
+        }
+    }
 }
 
 #[test]
@@ -425,19 +482,13 @@ fn a_fitted_diagram_keeps_its_fit_and_old_local_nodes_when_it_grows() {
     let before = LayoutState::new(&scene);
     let surface = SurfaceGeometry::Inline { width: 522.0 };
     let first = prepared_on(&mut scene, &mut budget, &before, rightward_chain(), surface);
+    let a = item(&first.after, "a");
+    near(bounds(&first.after, "a").origin.x, 16.0);
+    near(bounds(&first.after, "last").max().x, 522.0 - 16.0);
+    let fit = item(&first.after, "diagram").transform;
     assert_eq!(
-        first.after.bounds(&id("a")).expect("world bounds"),
-        Some(Rect {
-            origin: Vec2::new(16.0, 16.0),
-            size: Vec2::new(91.0, 35.0)
-        })
-    );
-    assert_eq!(
-        first.after.bounds(&id("last")).expect("last world bounds"),
-        Some(Rect {
-            origin: Vec2::new(436.0, 16.0),
-            size: Vec2::new(70.0, 35.0)
-        })
+        fit.point(Vec2::new(1.0, 0.0)) - fit.point(Vec2::default()),
+        Vec2::new(0.875, 0.0)
     );
     let next = prepared_on(
         &mut scene,
@@ -449,28 +500,8 @@ fn a_fitted_diagram_keeps_its_fit_and_old_local_nodes_when_it_grows() {
         ]}),
         surface,
     );
-    let items = next.after.items();
-    let root = scene.handle(&id("diagram")).expect("diagram");
-    let first_node = scene.handle(&id("a")).expect("first node");
-    assert_eq!(
-        items
-            .iter()
-            .find(|item| item.handle == root)
-            .expect("root item")
-            .transform,
-        Affine([0.875, 0.0, 0.0, 0.875, 32.625, 2.0])
-    );
-    assert_eq!(
-        items
-            .iter()
-            .find(|item| item.handle == first_node)
-            .expect("node item")
-            .bounds,
-        Rect {
-            origin: Vec2::new(-19.0, 16.0),
-            size: Vec2::new(104.0, 40.0)
-        }
-    );
+    assert_eq!(item(&next.after, "diagram").transform, fit);
+    assert_eq!(item(&next.after, "a").bounds, a.bounds);
 }
 
 #[test]
@@ -534,17 +565,16 @@ fn updating_every_label_does_not_start_another_initial_fit() {
         ]}),
         surface,
     );
-    let root = scene.handle(&id("diagram")).expect("diagram");
-    let items = next.after.items();
     assert_eq!(
-        items
-            .iter()
-            .find(|item| item.handle == root)
-            .expect("root item")
-            .transform,
-        Affine([0.875, 0.0, 0.0, 0.875, 32.625, 2.0])
+        item(&next.after, "diagram").transform,
+        item(&first.after, "diagram").transform
     );
-    assert_eq!(next.glides.len(), 0);
+    let a = item(&next.after, "a");
+    assert_eq!(
+        ink(&a, "A", &mut scene_support::Measure).center(),
+        a.bounds.center()
+    );
+    assert!(next.glides.is_empty());
 }
 
 #[test]
@@ -648,52 +678,48 @@ fn a_small_model_scale_does_not_expand_a_new_slot_beyond_the_canvas() {
 
 #[test]
 fn an_empty_detached_diagram_keeps_its_absorbed_parent_transform() {
-    let mut scene = new_scene("detached_fit");
-    let mut budget = GlobalBudget::default();
-    let before = LayoutState::new(&scene);
-    let first = prepared(
-        &mut scene,
-        &mut budget,
-        &before,
-        json!({"id":"first","put":[
-            {"diagram":{"id":"root","box":[0,0,360,300]}},
-            {"diagram":{"id":"child","in":"root"}},
-            {"anim":{"target":"root","track":"pos","keys":[[0,[40,20]]]}}
-        ]}),
-    );
-    let child = scene.handle(&id("child")).expect("child diagram");
-    scene
-        .stop(
-            &StopCut {
-                activated: 1,
-                revealed: Bounded::new(vec![child]).expect("cut"),
-            },
+    let cut_and_append = |position| {
+        let mut scene = new_scene("detached_fit");
+        let mut budget = GlobalBudget::default();
+        let before = LayoutState::new(&scene);
+        let first = prepared(
+            &mut scene,
             &mut budget,
-        )
-        .expect("stop");
-    let cut = first.after.cut(&scene).expect("detached empty diagram");
-    assert_eq!(
-        cut.items()[0].transform,
-        Affine([1.0, 0.0, 0.0, 1.0, 220.0, 52.0])
-    );
-    let next = prepared(
-        &mut scene,
-        &mut budget,
-        &cut,
-        json!({"id":"again","put":[
-            {"node":{"id":"node","in":"child","label":"A"}}
-        ]}),
-    );
-    let items = next.after.items();
-    assert_eq!(
-        items
-            .iter()
-            .find(|item| item.handle == child)
-            .expect("child item")
-            .transform,
-        Affine([1.0, 0.0, 0.0, 1.0, 220.0, 52.0])
-    );
-    assert_eq!(scene.object_count(), 2);
+            &before,
+            json!({"id":"first","put":[
+                {"diagram":{"id":"root","box":[0,0,360,300]}},
+                {"diagram":{"id":"child","in":"root"}},
+                {"anim":{"target":"root","track":"pos","keys":[[0,position]]}}
+            ]}),
+        );
+        let anchor = bounds(&first.after, "child").origin;
+        let child = scene.handle(&id("child")).expect("child diagram");
+        scene
+            .stop(
+                &StopCut {
+                    activated: 1,
+                    revealed: Bounded::new(vec![child]).expect("cut"),
+                },
+                &mut budget,
+            )
+            .expect("stop");
+        let cut = first.after.cut(&scene).expect("detached empty diagram");
+        assert_eq!(bounds(&cut, "child").origin, anchor);
+        let next = prepared(
+            &mut scene,
+            &mut budget,
+            &cut,
+            json!({"id":"again","put":[
+                {"node":{"id":"node","in":"child","label":"A"}}
+            ]}),
+        );
+        assert_eq!(scene.object_count(), 2);
+        bounds(&next.after, "node")
+    };
+    let moved = cut_and_append([40, 20]);
+    let control = cut_and_append([0, 0]);
+    assert_eq!(moved.origin - control.origin, Vec2::new(40.0, 20.0));
+    assert_eq!(moved.size, control.size);
 }
 
 #[test]

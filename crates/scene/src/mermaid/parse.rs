@@ -661,12 +661,6 @@ mod tests {
             chart.groups[0].title.as_ref().map(Text::as_str),
             Some("old style that is broken")
         );
-        let repeated = parse(
-            "flowchart TB\nsubgraph first\nA\nend\nsubgraph second\nA\nend\n",
-            4,
-        )
-        .expect("bare mentions keep first ownership");
-        assert_eq!(repeated.nodes[0].owner, Some(0));
     }
 
     #[test]

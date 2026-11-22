@@ -552,10 +552,13 @@ fn place_table(
 mod tests {
     use super::*;
     #[test]
-    fn sub_centipixel_excess_stops_before_either_fitting_pass() {
-        let mut widths = [100.0, 100.0];
-        fit(&mut widths, &[true, false], 199.995, 14.0);
-        assert_eq!(widths.map(f32::to_bits), [100.0_f32.to_bits(); 2]);
+    fn widths_fit_to_a_centipixel_without_shrinking_the_numeric_column() {
+        for available in [199.995, 199.989] {
+            let mut widths = [100.0, 100.0];
+            fit(&mut widths, &[true, false], available, 14.0);
+            assert!((widths.iter().sum::<f32>() - available).abs() <= 0.01);
+            assert_eq!(widths[1].to_bits(), 100.0_f32.to_bits());
+        }
     }
     #[test]
     fn fractional_width_fitting_preserves_numeric_width_while_text_can_shrink() {
@@ -582,16 +585,26 @@ mod tests {
             assert_eq!(number(value), expected);
         }
         assert_eq!(number(1.0e308), "1.00e308");
-        assert_eq!(
-            number(1.0e299).len(),
-            399,
-            "the last grouped magnitude stays within the text cap"
+        let grouped = number(1.0e299);
+        assert_eq!(grouped.len(), 399);
+        let mut groups = grouped.split(',');
+        let leading = groups.next().expect("leading group");
+        assert!((1..=3).contains(&leading.len()));
+        assert!(leading.bytes().all(|byte| byte.is_ascii_digit()));
+        assert!(
+            groups.all(|group| group.len() == 3 && group.bytes().all(|byte| byte.is_ascii_digit()))
         );
         assert_eq!(
-            number(-1.0e299).len(),
-            400,
-            "the sign may reach the exact text cap"
+            grouped
+                .replace(',', "")
+                .parse::<f64>()
+                .expect("magnitude")
+                .to_bits(),
+            1.0e299_f64.to_bits()
         );
+        let signed = number(-1.0e299);
+        assert_eq!(signed.len(), 400);
+        assert_eq!(signed.strip_prefix('-'), Some(grouped.as_str()));
         assert_eq!(
             number(1.0e300),
             "1.00e300",
