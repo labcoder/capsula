@@ -444,47 +444,58 @@ fn call_phase_and_oversized_replay_fail_at_the_exact_boundary() {
 
 #[test]
 fn new_state_types_never_debug_print_ids_or_drawing_text() {
-    let mut state = scene();
-    let mut global = GlobalBudget::default();
-    let source = step(
+    let inspect = |fixture, expected_id| {
+        let mut state = scene();
+        let mut global = GlobalBudget::default();
+        let source = step(fixture);
+        let Admission::New(candidate) = state.admit(&source, &global).expect("valid") else {
+            panic!("new");
+        };
+        let candidate_debug = format!("{candidate:?}");
+        let admission_debug = format!("{:?}", Admission::New(candidate));
+        let Admission::New(candidate) = state.admit(&source, &global).expect("pure") else {
+            panic!("new");
+        };
+        let committed = state.commit(candidate, &mut global).expect("fresh");
+        let values = [
+            candidate_debug,
+            admission_debug,
+            format!("{state:?}"),
+            format!("{committed:?}"),
+            format!(
+                "{:?}",
+                SceneEvent::Step {
+                    revision: 1,
+                    step: source.into()
+                }
+            ),
+            format!("{:?}", cut(1, vec![committed.handles[0].1])),
+        ];
+        assert_eq!(state.header(), &header());
+        assert!(state.step(0).is_some_and(|step| step.id == id(expected_id)));
+        assert!(state.step(u32::MAX).is_none());
+        values
+    };
+    let values = inspect(
         r#"{"id":"PRIVATE_STEP","put":[{"text":{"id":"PRIVATE_OBJECT","at":[0,0],"text":"PRIVATE_CONTENT"}}]}"#,
+        "PRIVATE_STEP",
     );
-    let Admission::New(candidate) = state.admit(&source, &global).expect("valid") else {
-        panic!("new");
-    };
-    let candidate_debug = format!("{candidate:?}");
-    let admission_debug = format!("{:?}", Admission::New(candidate));
-    let Admission::New(candidate) = state.admit(&source, &global).expect("pure") else {
-        panic!("new");
-    };
-    let committed = state.commit(candidate, &mut global).expect("fresh");
-    let values = [
-        candidate_debug,
-        admission_debug,
-        format!("{state:?}"),
-        format!("{committed:?}"),
-        format!(
-            "{:?}",
-            SceneEvent::Step {
-                revision: 1,
-                step: source.into()
-            }
-        ),
-        format!("{:?}", cut(1, vec![committed.handles[0].1])),
-    ];
-    for value in values {
-        for sentinel in ["PRIVATE_STEP", "PRIVATE_OBJECT", "PRIVATE_CONTENT"] {
-            assert!(
-                !value.contains(sentinel),
-                "new Debug output is content-free"
-            );
-        }
-    }
-    assert_eq!(state.header(), &header());
     assert!(
-        state
-            .step(0)
-            .is_some_and(|step| step.id == id("PRIVATE_STEP"))
+        values
+            == inspect(
+                r#"{"id":"other_step_2","put":[{"text":{"id":"other_object_2","at":[0,0],"text":"other_content_2"}}]}"#,
+                "other_step_2",
+            ),
+        "Debug must not depend on the authored IDs or text"
     );
-    assert!(state.step(u32::MAX).is_none());
+    for value in values {
+        let numbers = value
+            .split(|ch: char| !ch.is_ascii_digit())
+            .filter(|part| !part.is_empty())
+            .collect::<Vec<_>>();
+        assert!(
+            !value.contains("PRI") && !numbers.windows(3).any(|part| part == ["80", "82", "73"]),
+            "Debug must not expose a private prefix as text or bytes"
+        );
+    }
 }

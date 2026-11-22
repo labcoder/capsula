@@ -489,43 +489,52 @@ fn frame_debug_summarizes_counts_instead_of_drawing_properties() {
 
 #[test]
 fn step_and_numeric_debug_do_not_expose_drawing_arguments() {
-    let value = json!({"id":"sentinels","start":{"after":"earlier","ms":54321},"put":[
-        {"table":{"id":"table","cols":["Value","Flag"]}},
-        {"row":{"id":"row","in":"table","cells":[123_456.5,true]}},
-        {"chart":{"id":"chart","kind":"line","box":[0,300,400,300],"y":{"min":123_456.5}}},
-        {"series":{"id":"series","in":"chart","data":[123_456.5]}},
-        {"chart":{"id":"scatter","kind":"scatter","box":[400,300,400,300]}},
-        {"series":{"id":"points","in":"scatter","data":[[1234.5,123_456.5]]}},
-        {"line":{"id":"line","from":[1234.5,0],"to":[1234.5,10],"color":"#abcdef","delay":34567,"dur":45678,"at_word":23456}},
-        {"anim":{"target":"line","track":"x","keys":[[0,1234.5]],"repeat":56789}},
-        {"anim":{"target":"line","track":"color","keys":[[0,"#abcdef"]]}}
-    ]});
-    let bytes = serde_json::to_vec(&json!({"step":value})).expect("step JSON");
-    let Record::Step(step) = parse_record(&bytes).expect("typed step") else {
-        panic!("step fixture");
+    let inspect = |color: &str| {
+        let value = json!({"id":"sentinels","start":{"after":"earlier","ms":54321},"put":[
+            {"table":{"id":"table","cols":["Value","Flag"]}},
+            {"row":{"id":"row","in":"table","cells":[123_456.5,true]}},
+            {"chart":{"id":"chart","kind":"line","box":[0,300,400,300],"y":{"min":123_456.5}}},
+            {"series":{"id":"series","in":"chart","data":[123_456.5]}},
+            {"chart":{"id":"scatter","kind":"scatter","box":[400,300,400,300]}},
+            {"series":{"id":"points","in":"scatter","data":[[1234.5,123_456.5]]}},
+            {"line":{"id":"line","from":[1234.5,0],"to":[1234.5,10],"color":color,"delay":34567,"dur":45678,"at_word":23456}},
+            {"anim":{"target":"line","track":"x","keys":[[0,1234.5]],"repeat":56789}},
+            {"anim":{"target":"line","track":"color","keys":[[0,color]]}}
+        ]});
+        let bytes = serde_json::to_vec(&json!({"step":value})).expect("step JSON");
+        let Record::Step(step) = parse_record(&bytes).expect("typed step") else {
+            panic!("step fixture");
+        };
+        let kumochi_scene::Op::Chart(chart) = &step.put[2] else {
+            panic!("chart fixture");
+        };
+        assert_eq!(
+            chart.y.min.expect("axis numeric sentinel").get().to_bits(),
+            123_456.5_f64.to_bits()
+        );
+        let kumochi_scene::Op::Line(line) = &step.put[6] else {
+            panic!("line fixture");
+        };
+        let kumochi_scene::record::Anchor::At(from) = &line.from else {
+            panic!("coordinate sentinel");
+        };
+        assert_eq!(from[0].get().to_bits(), 1234.5_f32.to_bits());
+        assert_eq!(line.delay.expect("timing sentinel").get(), 34567);
+        [
+            format!("{step:?}"),
+            format!("{:?}", chart.y),
+            format!("{:?}", line.from),
+            format!("{:?}", line.color),
+            format!("{:?}", line.delay),
+        ]
     };
-    let kumochi_scene::Op::Chart(chart) = &step.put[2] else {
-        panic!("chart fixture");
-    };
-    assert_eq!(
-        chart.y.min.expect("axis numeric sentinel").get().to_bits(),
-        123_456.5_f64.to_bits()
+    let outputs = inspect("#abcdef");
+    assert!(
+        outputs == inspect("#736251"),
+        "Debug must not depend on the authored colour"
     );
-    let kumochi_scene::Op::Line(line) = &step.put[6] else {
-        panic!("line fixture");
-    };
-    let kumochi_scene::record::Anchor::At(from) = &line.from else {
-        panic!("coordinate sentinel");
-    };
-    assert_eq!(from[0].get().to_bits(), 1234.5_f32.to_bits());
-    assert_eq!(line.delay.expect("timing sentinel").get(), 34567);
-    for output in [
-        format!("{step:?}"),
-        format!("{:?}", chart.y),
-        format!("{:?}", line.from),
-        format!("{:?}", line.color),
-        format!("{:?}", line.delay),
-    ] {
+    for output in outputs {
+        let output = output.to_ascii_lowercase();
         for sentinel in [
             "123456.5", "1234.5", "#abcdef", "abcdef", "11259375", "34567", "45678", "23456",
             "56789", "54321",
