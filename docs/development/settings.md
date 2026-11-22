@@ -98,6 +98,8 @@ not idle-policy writes. Its ordered answer settles just that request slot, never
 state and never proves cancellation or physical release; an accepted cancel can remain Loading
 or become Ready. Only generation-fenced Voice snapshots update the displayed model state.
 
+Settings keeps a named tab selection for recovery openers, keyboard navigation, and the selected
+content. Only the Kit tab bar takes a numeric selection and reports a clicked index.
 Scoped Ctrl+Tab and Ctrl+Shift+Tab actions cycle the four tabs through `select_tab`, wrapping
 in either direction and returning focus to the Settings frame, whose border shows that focus.
 The pinned Kit tabs are not keyboard focus targets. Tab and Shift+Tab reach the selected tab's
@@ -114,6 +116,9 @@ there (Retry is also in the dock's native menu). General has Quit on the same gu
 path as the tray. Opening the typing panel or Tasks, or choosing a tray position, uses the same
 dismissal path: save an active edit as a blur would, hide the window, and use the
 existing platform presence functions to restore the previous foreground when still owned.
+Reopening Settings from chat recovery selects the action's tab without resetting a pending
+edit. The ordered answer settles it as usual, including restoring the saved name and showing
+the error on refusal.
 Every one of those closes, a hold's start included, also cancels a `ChatGPT` or Claude Code
 sign-in that Settings' own buttons started and that hasn't ended (`settings_chatgpt` and
 `settings_claude`, with the marks and rules of [onboarding](onboarding.md#rules), but no

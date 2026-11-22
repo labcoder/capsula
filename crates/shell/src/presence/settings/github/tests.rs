@@ -1,3 +1,4 @@
+use super::super::SettingsTab;
 use super::*;
 use crate::link::{Batch, LinkEvent, Session};
 use crate::presence::Presence;
@@ -28,7 +29,7 @@ fn open(
         view.fixture = matches!(configuration, AppConfiguration::Fixture);
         view.github_configured =
             matches!(configuration, AppConfiguration::Unconfigured).then_some(false);
-        view.tab = 1;
+        view.tab = SettingsTab::Accounts;
         owner.update(cx, |owner, _| {
             owner.settings = view.model.clone();
             owner.session = Some(Session::detached(7, Incarnation(1)));
@@ -145,7 +146,7 @@ fn accounts_connect_uses_keyboard_and_cancel_uses_the_current_presence_session(
     let mut frame = VisualTestContext::from_window(window, cx);
     frame.update(|window, cx| {
         view.update(cx, |view, cx| {
-            view.tab = 0;
+            view.tab = SettingsTab::General;
             view.focus(window, cx);
             cx.notify();
         });
