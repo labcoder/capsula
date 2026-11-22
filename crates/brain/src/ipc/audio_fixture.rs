@@ -193,11 +193,8 @@ fn offline_peer(
         capability: identity.capability.clone(),
     };
     let (ready, waiting) = mpsc::sync_channel(1);
-    let deadline = if probe.as_ref().is_some_and(|probe| probe.many_turns()) {
-        Duration::from_secs(120)
-    } else {
-        HANDSHAKE_TIMEOUT * 3
-    };
+    // Bounds a hung fixture session, not test time: a starved runner spends seconds per step.
+    let deadline = Duration::from_secs(120);
     let task = thread::Builder::new()
         .name("audio-fixture-brain".into())
         .spawn(move || {
