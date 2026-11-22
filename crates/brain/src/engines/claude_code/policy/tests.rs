@@ -1,6 +1,6 @@
 use std::collections::BTreeSet;
 use std::ffi::OsString;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use super::*;
 
@@ -310,17 +310,20 @@ fn the_system_values_come_from_the_os_and_no_parent_path_entry_reaches_the_child
         "the system folder first"
     );
 
-    // Cargo puts the test binary's own folder on the parent's PATH: the planted entry.
+    // Cargo puts the test binary's own folder on the parent's PATH: the planted entry. It spells
+    // the folder as the target dir was given, so folders compare as case-folded paths.
+    let folded = |path: &Path| PathBuf::from(path.to_string_lossy().to_lowercase());
     let planted = std::env::current_exe().expect("test binary");
-    let planted = planted
-        .parent()
-        .expect("its folder")
-        .to_string_lossy()
-        .to_lowercase();
+    let planted = folded(planted.parent().expect("its folder"));
+    let on_path = |entry: &Path| folded(entry) == planted;
+    let respelled = planted.to_string_lossy().replace('\\', "/").to_uppercase();
+    assert!(
+        on_path(Path::new(&respelled)),
+        "a forward-slash, upper-case spelling is the same folder"
+    );
     let parent = std::env::var_os("PATH").expect("a parent PATH");
     assert!(
-        std::env::split_paths(&parent)
-            .any(|entry| entry.to_string_lossy().to_lowercase() == planted),
+        std::env::split_paths(&parent).any(|entry| on_path(&entry)),
         "precondition: the parent PATH holds the test binary's folder"
     );
     let tools = BTreeSet::new();
@@ -336,9 +339,11 @@ fn the_system_values_come_from_the_os_and_no_parent_path_entry_reaches_the_child
             max_turns: MAX_NATIVE_TURNS,
         },
     );
+    let planted = planted.to_string_lossy().replace('/', "\\");
     for (name, value) in &data.env {
+        let value = value.to_string_lossy().to_lowercase().replace('/', "\\");
         assert!(
-            !value.to_string_lossy().to_lowercase().contains(&planted),
+            !value.contains(&planted),
             "{name:?} carries a parent PATH entry"
         );
     }
