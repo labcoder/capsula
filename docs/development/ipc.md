@@ -1,17 +1,16 @@
 # The pipes and the handshake
 
-## Queued-required session mode (internal)
+## Queued-required session mode
 
-The shipped shell selects Legacy: control Hello, Welcome, then data Hello, with their
-existing bytes. The internal queued-required selection instead sends the appended QueuedHello
-on both pipes. Its data Hello echoes this Welcome's incarnation and issue epoch. The brain
+The shell selects queued-required and sends the appended QueuedHello on both pipes. The brain
+still accepts the Legacy mode: control Hello, Welcome, then data Hello, with their existing bytes. The queued data Hello echoes this Welcome's incarnation and issue epoch. The brain
 checks the executable, matching build and capability on both legs and the existing same-process
 pairing. It refuses a mixed mode or a data Hello from another session. The queued second leg
 has one deadline for connecting and reading; refusal renews both pipe instances.
 
 This negotiates a requirement, not an installed audio output. An authenticated queued pair
 installs the exact reserved issue session. Both pipes return to regular I/O after their bounded
-handshake. Ordinary launch still selects Legacy, with no queued-to-Legacy fallback.
+handshake. There is no queued-to-Legacy fallback.
 The Brain starts each queued pair closed to turns. It sends
 `QueuedAudioRegistered(output)` once, only after a valid `QueuedAudioOutput` installs the
 exact logical output in Queued mode. It opens admission only if that receipt queues.
@@ -794,9 +793,9 @@ records only their operation and length.
 | Shell to brain | control | `SpeechProgress` | `run`, `segment`, `sample`, `t_qpc` |
 | Shell to brain | control | `SegmentPlayed` | `run`, `segment`, `samples` |
 | Shell to brain | control | `SpeechStopped` | `run`, optional `cursor` (`Cursor { segment, sample }`) |
-| Shell to brain | control | `SpeechRetired` (internal queued output) | `run`, logical `output`, `segment`, cumulative `retired`, `heard`, `final_segment` |
+| Shell to brain | control | `SpeechRetired` (queued output) | `run`, logical `output`, `segment`, cumulative `retired`, `heard`, `final_segment` |
 | Shell to brain | control | `AudioOutput` | `rate`, `generation` |
-| Shell to brain | control | `QueuedAudioOutput` (internal) | `rate`, `generation`; selects retirement receipts before a run is admitted |
+| Shell to brain | control | `QueuedAudioOutput` | `rate`, `generation`; selects retirement receipts before a run is admitted |
 | Shell to brain | control | `SpeechDecision` (dormant) | `run`, logical `output`, `segment`, Allow or Discard |
 | Brain to shell | control | `SpeechDecisionTaken` (dormant) | the same run, output and segment, after consumption or terminal |
 | Shell to brain | control | `AudioOutputUnavailable` | `generation` |
@@ -821,7 +820,7 @@ records only their operation and length.
 - **Progress.** `SpeechProgress` goes out at most every 250 ms. `SpeechStopped` confirms that
   output for the run is quiet; `cursor` is `None` when nothing of it played.
 - **Out of bounds.** A `MicPcm` or an `AudioOutput` rate out of bounds ends the connection as
-  broken. A stock Legacy connection announces no audio output; unexpected speech PCM is
+  broken. A Legacy connection announces no audio output; unexpected speech PCM is
   wiped, credited and dropped. On a registered queued pair the worker handles PCM and revoke
   ([speaker.md](speaker.md)).
 
@@ -1079,7 +1078,7 @@ existing metadata-only Stop replay on the authenticated pair.
 If the user quits before publication, a fully authenticated queued pair sends held deletes in
 order (with no turns on that pair), then Quitting. It starts no session or playback, and it
 doesn't replay or settle microphone Stop debt. A partial or unauthenticated pair never carries
-these shutdown frames. Stock selection remains Legacy.
+these shutdown frames.
 
 ## Debugging
 

@@ -118,7 +118,7 @@ pub struct AudioProbe {
     hold: bool,
     decoded: AtomicU32,
     received_mic: AtomicU32,
-    narrated: bool,
+    narrated: Option<OutputMode>,
     initial_credit: Option<u32>,
     replacement_chain: Option<Arc<Notify>>,
     changing_turns: Option<Turns>,
@@ -201,8 +201,15 @@ impl AudioProbe {
 
     pub(crate) fn narrated() -> Self {
         Self {
-            narrated: true,
+            narrated: Some(OutputMode::Conducted),
             ..Self::default()
+        }
+    }
+
+    pub(crate) fn plain_narrated() -> Self {
+        Self {
+            narrated: Some(OutputMode::Legacy),
+            ..Self::narrated()
         }
     }
 
@@ -659,7 +666,8 @@ pub(crate) async fn brain(dir: &Path, script: &str, tone_chunks: usize) -> Brain
     let high = store.high_water().expect("test store high water");
     let scenes = store.scenes().expect("test store scenes");
     let probe = probe();
-    let narrated = probe.as_ref().is_some_and(|probe| probe.narrated);
+    let narration = probe.as_ref().and_then(|probe| probe.narrated);
+    let narrated = narration.is_some();
     let text_only = probe.as_ref().is_some_and(|probe| probe.text_only);
     let replay = crate::engines::responses::replay::MODEL;
     let config_source = if narrated {
@@ -741,14 +749,7 @@ pub(crate) async fn brain(dir: &Path, script: &str, tone_chunks: usize) -> Brain
         (1, LoadEvent::Loaded),
         "the fake model must be ready"
     );
-    brain.pump = Some(Pump::new(
-        tts,
-        if narrated {
-            OutputMode::Conducted
-        } else {
-            OutputMode::Legacy
-        },
-    ));
+    brain.pump = Some(Pump::new(tts, narration.unwrap_or(OutputMode::Legacy)));
     brain.offline(Input::SpokenReplies { loaded: true });
     brain
 }

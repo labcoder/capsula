@@ -64,7 +64,7 @@ route whose tail never arrived counts as quiet once the backend confirms its str
 since that stream can't play anything more. A
 reroute replaces the stream instead of assuming that old endpoint timing still applies.
 An xrun rechecks refill readiness on every tick, even without new ingress.
-Only an authoritative typed RunState starts this worker on an internally selected queued pair.
+An authoritative typed RunState, or a speaking Hold's RunState, starts this worker on a queued pair.
 
 The offline tests that require a positive heard prefix open the fake route before the
 worker admits PCM: the first run for Plain, and each run in the two-reply Presence
@@ -87,9 +87,9 @@ admitting another turn; a refused live report ends the pair. After an earlier re
 is refused, the original worker can observe its fenced callback for at most 500 ms without
 feeding audio or sending another report. That local proof doesn't release the device permit;
 the backend still owns disposal. Unknown tails still block replacement. An
-absolute startup deadline ends the same pair even while control traffic continues. Ordinary launch still selects Legacy. That session starts quiet and never opens a playback
-device. Unexpected speech PCM is wiped, credited and dropped; typed replies and voice input
-continue on the Legacy pair. There is no user-facing queued selector or fallback.
+absolute startup deadline ends the same pair even while control traffic continues. Every launch
+selects the queued pair, with no Legacy fallback. A Legacy session, which only tests still open,
+starts quiet and never opens a playback device; unexpected speech PCM is wiped, credited and dropped.
 
 ## Dormant segment gate
 
