@@ -85,6 +85,10 @@ fn lines_are_classified_by_envelope_method_and_id() {
             invalid(None, RpcError::InvalidRequest),
         ),
         (
+            r#"{"jsonrpc":"2.0","id":{"$serde_json::private::RawValue":"7"},"method":"ping"}"#,
+            invalid(None, RpcError::InvalidRequest),
+        ),
+        (
             r#"{"id":2,"method":"ping"}"#,
             invalid(Some(JsonRpcId::Number(2)), RpcError::InvalidRequest),
         ),

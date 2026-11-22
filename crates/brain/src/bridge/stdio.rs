@@ -166,6 +166,8 @@ pub(crate) fn classify(line: &[u8]) -> Incoming<'_> {
     };
     let id = match routing.id {
         None => None,
+        // An object id is invalid, and a generic parse could read a raw-value object as another id.
+        Some(raw) if raw.get().starts_with('{') => return invalid(None),
         Some(raw) => match serde_json::from_str::<Value>(raw.get())
             .ok()
             .as_ref()
