@@ -752,10 +752,10 @@ impl Threads {
                 read,
                 stale: false,
                 after: None,
-                proves: if read != Read::More {
-                    self.settled
-                } else {
+                proves: if read == Read::More {
                     None
+                } else {
+                    self.settled
                 },
             });
             requests.push(DataToBrain::PageRequest {
@@ -793,7 +793,6 @@ impl Threads {
         bytes
     }
 
-    #[expect(clippy::too_many_lines, reason = "one wire-frame dispatcher")]
     pub(crate) fn apply(&mut self, message: DataToShell) {
         if let DataToShell::IssueCardRead { request, card } = message {
             self.reads.borrow_mut().cards.full(request, card);

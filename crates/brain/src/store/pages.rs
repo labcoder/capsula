@@ -38,6 +38,23 @@ enum EventPage {
     After(EventId),
 }
 
+impl EventPage {
+    fn bounds(self) -> Option<(i64, i64, &'static str)> {
+        match self {
+            Self::Before(before) => {
+                let upper = before
+                    .and_then(|id| i64::try_from(id.0).ok())
+                    .map_or(i64::MAX, |id| id - 1);
+                Some((0, upper, "DESC"))
+            }
+            Self::After(after) => {
+                let lower = i64::try_from(after.0).ok()?.checked_add(1)?;
+                Some((lower, i64::MAX, "ASC"))
+            }
+        }
+    }
+}
+
 impl super::context::Snapshot<'_> {
     pub(crate) fn page(&self, request: u32, page: PageOf) -> Result<DataToShell, StoreError> {
         Pages(&self.0).read_page(request, page)
@@ -368,21 +385,8 @@ impl Pages<'_> {
         let Ok(thread) = i64::try_from(thread.0) else {
             return Ok((Vec::new(), None));
         };
-        let (lower, upper, order) = match page {
-            EventPage::Before(before) => (
-                0,
-                before
-                    .and_then(|id| i64::try_from(id.0).ok())
-                    .map_or(i64::MAX, |id| id - 1),
-                "DESC",
-            ),
-            EventPage::After(after) => {
-                let Some(lower) = i64::try_from(after.0).ok().and_then(|id| id.checked_add(1))
-                else {
-                    return Ok((Vec::new(), None));
-                };
-                (lower, i64::MAX, "ASC")
-            }
+        let Some((lower, upper, order)) = page.bounds() else {
+            return Ok((Vec::new(), None));
         };
         let limit = limit.clamp(1, MAX_PAGE_ROWS);
         let mut query = self
