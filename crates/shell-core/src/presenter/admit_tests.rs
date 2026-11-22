@@ -1392,6 +1392,56 @@ fn a_refused_consumption_drains_the_commit_held_behind_it() {
 }
 
 #[test]
+fn a_step_that_times_out_while_its_consumption_waits_drains_the_commit_held_behind_it() {
+    let (mut presenter, now) = live();
+    begin(&mut presenter, LIVE, now);
+    let first = only_job(commit(&mut presenter, LIVE, 0, rect("a"), now).expect("a step"));
+    presenter
+        .completed(first.run(&mut Shaper), now)
+        .expect("prepared");
+    let admission = only_admission(
+        arrive(&mut presenter, commit_frame(LIVE, 1, rect("b")), now).expect("admission"),
+    );
+    assert!(presenter.advance(GENERATION, now).expect("busy").is_empty());
+    assert!(
+        arrive(&mut presenter, commit_frame(LIVE, 2, rect("c")), now)
+            .expect("held commit")
+            .is_empty()
+    );
+    let _running = only_job(presenter.completed(admission.run(), now).expect("admitted"));
+    assert_eq!(presenter.scenes[&LIVE].pending_consumption, Some(0));
+    assert_eq!(presenter.held_bytes, FRAME);
+    assert_eq!(presenter.deadline(), Some(ms(now, 250)));
+
+    let early = presenter.tick(ms(now, 249)).expect("a tick");
+    assert!(controls(&early).is_empty());
+    assert_eq!(presenter.held_bytes, FRAME);
+    let mut effects = presenter.tick(ms(now, 250)).expect("a tick");
+    assert_eq!(
+        controls(&effects),
+        [&failed(LIVE, 1, SceneFailure::Timeout)]
+    );
+    let position = effects
+        .iter()
+        .position(|effect| matches!(effect, Effect::Admit(_)))
+        .expect("the held commit enters the lane in the same tick");
+    let Effect::Admit(admission) = effects.remove(position) else {
+        unreachable!()
+    };
+    assert!(presenter.held.is_empty());
+    assert_eq!(presenter.held_bytes, 0);
+    assert_eq!(presenter.scenes[&LIVE].pending_consumption, None);
+    let effects = presenter
+        .completed(admission.run(), ms(now, 250))
+        .expect("admitted after the timeout");
+    assert_eq!(credit(&effects), FRAME);
+    assert!(
+        jobs(effects).is_empty(),
+        "the failed scene prepares nothing before its cut is acknowledged"
+    );
+}
+
+#[test]
 fn a_cut_acknowledgement_that_arrives_mid_lane_waits_for_the_lane() {
     let (mut presenter, now) = live();
     begin(&mut presenter, LIVE, now);
