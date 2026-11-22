@@ -118,8 +118,11 @@ graceful Quit after ten seconds, without moving the pointer or sending input. In
 small even before placement, so a transparency failure cannot cover the desktop. This is a
 bounded launch check, not a performance benchmark or permission to inject input.
 
-For idle measurements, run `bench idle` as the gate identity (see
-[the gate identity](gate-identity.md)); it builds the release shell and brain it measures.
+For an idle measurement in a quiet hold, run `bench idle --prebuilt <shell-sha256> <brain-sha256>`
+with the [prepared release Gate images](gate-identity.md#prebuilt-idle-and-cold-start).
+It never starts Cargo, and it checks both children for the Gate identity and their pinned
+hashes before launch. Without `--prebuilt`, the task builds the shell and brain first;
+use that form outside the hold.
 Before launching the shell, the benchmark spins one thread in three two-second trials,
 measuring `QueryThreadCycleTime` divided by wall time and printing each rate and the highest.
 Each role and the process-tree total report calibrated cycle CPU as
@@ -135,7 +138,7 @@ set or peak memory. `--duration 1..60` shortens a harness smoke check, not an ac
 open; a gate launch is otherwise onboarded.
 The task checks that the same shell, brain and both workers survive the sample and waits for all
 four to exit. Run only in an agreed quiet window; the benchmark sends no input.
-`--baseline <release-directory>` samples older binaries with the same counters. After the sample,
+`--baseline <checkout>` builds and samples older Gate source with the same counters. After the sample,
 it sends `WM_CLOSE` to the spawned shell's presence proxy, which requests the normal graceful
 Quit path. Pre-dock binaries fall back to closing their single visible status window. Both
 paths verify the spawned shell's PID; neither targets another app.
