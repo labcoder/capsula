@@ -922,7 +922,7 @@ fn queued_bytes_include_event_overhead_and_reserved_final_usage_at_exact_limit()
         }
         let last = "x".repeat(64_448 + extra);
         delta(&mut m, 0, json!({"type":"text_delta", "text":last}));
-        if !with_usage {
+        if extra == 0 {
             start(
                 &mut m,
                 1,

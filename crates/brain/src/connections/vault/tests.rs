@@ -419,24 +419,22 @@ fn assert_key_removal_only_clears_its_names(
 /// transaction, and a retry commits a fresh generation.
 #[test]
 fn a_refused_head_update_rolls_back_the_whole_commit() {
-    use crate::connections::anthropic::{KeyError, KeyOp};
+    use crate::connections::anthropic::KeyOp;
 
     let (_scratch, path, service, store) = setup("vault-late-refusal");
     let mut vault = open(&store, &service, &path);
     committed(vault.save_account(&account("old")));
-    let key = b"sk-ant-api-fake-late-refusal";
-    vault.save_anthropic_key(key).expect("key");
-    let retained_key_is_exact = |vault: &mut Vault<FakeStore>| {
+    vault
+        .save_anthropic_key(b"sk-ant-api-fake-late-refusal")
+        .expect("key");
+    let read_key = |vault: &mut Vault<FakeStore>| {
         vault
             .anthropic(KeyOp::Load)
             .1
             .expect("read")
             .expect("saved key")
-            .expose()
-            .as_str()
-            .as_bytes()
-            == key
     };
+    let original_key = read_key(&mut vault);
     let old = current_names(&vault);
     let marker = vault.marker().expect("marker");
     let refuse = raw(&path);
@@ -464,10 +462,22 @@ fn a_refused_head_update_rolls_back_the_whole_commit() {
         "every write landed before the commit"
     );
     assert!(matches!(
-        vault.anthropic(KeyOp::Remove(vault.anthropic_revision())).1,
-        Err(KeyError::Vault(VaultError::Authority))
+        vault
+            .anthropic(crate::connections::anthropic::KeyOp::Remove(
+                vault.anthropic_revision()
+            ))
+            .1,
+        Err(crate::connections::anthropic::KeyError::Vault(
+            VaultError::Authority
+        ))
     ));
-    assert!(retained_key_is_exact(&mut vault));
+    assert!(
+        read_key(&mut vault)
+            .expose()
+            .as_str()
+            .bytes()
+            .eq(original_key.expose().as_str().bytes())
+    );
     refuse
         .execute_batch("DROP TRIGGER refuse_head;")
         .expect("drop refusal trigger");
@@ -475,22 +485,29 @@ fn a_refused_head_update_rolls_back_the_whole_commit() {
     let mut vault = open(&store, &service, &path);
     assert_eq!(current_names(&vault), old, "the head is unchanged");
     assert_eq!(vault.marker().expect("marker"), marker, "and the marker");
-    assert_eq!(
+    let email = |vault: &Vault<FakeStore>| {
         vault
             .load_account()
             .expect("read")
-            .expect("the old account")
+            .expect("stored account")
             .expose()
             .email
             .as_deref()
-            .map(String::as_str),
-        Some("old@example.invalid")
-    );
+            .map(String::as_str)
+            .map(str::to_owned)
+    };
+    assert_eq!(email(&vault).as_deref(), Some("old@example.invalid"));
     assert!(
         is_current(&vault, Kind::AnthropicKey),
         "the removal rolled back"
     );
-    assert!(retained_key_is_exact(&mut vault));
+    assert!(
+        read_key(&mut vault)
+            .expose()
+            .as_str()
+            .bytes()
+            .eq(original_key.expose().as_str().bytes())
+    );
     assert_key_removal_only_clears_its_names(&mut vault, &store, &old);
     committed(vault.save_account(&account("new")));
     let fresh = current_names(&vault);
@@ -501,17 +518,7 @@ fn a_refused_head_update_rolls_back_the_whole_commit() {
             .all(|name| !attempted.contains(name) && !old.contains(name)),
         "the retry commits a fresh generation"
     );
-    assert_eq!(
-        vault
-            .load_account()
-            .expect("read")
-            .expect("the new account")
-            .expose()
-            .email
-            .as_deref()
-            .map(String::as_str),
-        Some("new@example.invalid")
-    );
+    assert_eq!(email(&vault).as_deref(), Some("new@example.invalid"));
 }
 
 #[test]

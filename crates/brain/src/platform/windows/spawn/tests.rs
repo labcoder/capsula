@@ -22,10 +22,7 @@ fn exe() -> PathBuf {
 }
 
 fn probe_args(mode: &str, extra: &[OsString]) -> Vec<OsString> {
-    probe_args_for(PROBE, mode, extra)
-}
-
-fn probe_args_for(probe: &str, mode: &str, extra: &[OsString]) -> Vec<OsString> {
+    let probe = if mode == "echo" { WIRE_PROBE } else { PROBE };
     let harness = [
         "--exact",
         probe,
@@ -57,19 +54,10 @@ fn start(
     stdio: Stdio,
     job: &Job,
 ) -> io::Result<Spawned> {
-    start_with_args(&probe_args(mode, extra), env, stdio, job)
-}
-
-fn start_with_args(
-    args: &[OsString],
-    env: &[(OsString, OsString)],
-    stdio: Stdio,
-    job: &Job,
-) -> io::Result<Spawned> {
     let exe = exe();
     spawn(&Launch {
         exe: &exe,
-        args,
+        args: &probe_args(mode, extra),
         cwd: exe.parent().expect("folder"),
         env,
         stdio,
@@ -193,35 +181,13 @@ fn arguments_round_trip_through_the_command_line() {
     .into_iter()
     .map(OsString::from)
     .collect();
-    let original = exe();
-    let folder = original.parent().expect("executable folder");
-    let scratch = crate::scratch::Scratch::under(folder, "spawn argv0");
-    let exe = scratch.join(original.file_name().expect("executable name"));
-    std::fs::hard_link(&original, &exe).expect("same-volume executable alias with spaces");
-    let mut child = spawn(&Launch {
-        exe: &exe,
-        args: &probe_args_for(WIRE_PROBE, "report", &args),
-        cwd: folder,
-        env: &base_env(),
-        stdio: Stdio::Piped,
-        jobs: &[&job],
-    })
-    .expect("spawn");
-    let seen: Vec<_> = report(&mut child)
+    let mut child = start("report", &args, &base_env(), Stdio::Piped, &job).expect("spawn");
+    let args_seen: Vec<String> = report(&mut child)
         .into_iter()
         .filter(|line| line.starts_with("ARG "))
         .collect();
-    let expected: Vec<_> = std::iter::once(exe.as_os_str())
-        .chain(args.iter().map(OsString::as_os_str))
-        .map(|arg| format!("ARG {arg:?}"))
-        .collect();
-    assert_eq!(seen, expected);
-    assert!(
-        child
-            .process
-            .exits_within(Duration::from_secs(10))
-            .expect("wait for the alias to be unused")
-    );
+    let expected: Vec<String> = args.iter().map(|arg| format!("ARG {arg:?}")).collect();
+    assert_eq!(args_seen, expected);
 }
 
 #[test]
@@ -284,8 +250,7 @@ fn a_command_line_of_exactly_the_limit_starts_and_one_more_unit_is_refused() {
 #[test]
 fn pipes_carry_stdin_to_the_child_and_its_stdout_back() {
     let job = Job::new().expect("job");
-    let args = probe_args_for(WIRE_PROBE, "echo", &[]);
-    let mut child = start_with_args(&args, &base_env(), Stdio::Piped, &job).expect("spawn");
+    let mut child = start("echo", &[], &base_env(), Stdio::Piped, &job).expect("spawn");
     let ended = read_to_end(child.stdout.take().expect("stdout"));
     let mut stdin = child.stdin.take().expect("stdin");
     let payload = b"ping\r\n\x80\0pong\n";
@@ -470,6 +435,31 @@ fn units(text: &str) -> Vec<u16> {
     text.encode_utf16().collect()
 }
 
+#[test]
+fn quoting_follows_the_command_line_rules() {
+    let quoted = |arg: &str| {
+        let mut line = Vec::new();
+        push_quoted(&mut line, OsStr::new(arg));
+        String::from_utf16(&line).expect("utf-16")
+    };
+    assert_eq!(quoted("plain"), "plain");
+    assert_eq!(quoted(""), r#""""#);
+    assert_eq!(quoted("a b"), r#""a b""#);
+    assert_eq!(quoted("a\tb"), "\"a\tb\"");
+    assert_eq!(quoted(r#"say "hi""#), r#""say \"hi\"""#);
+    assert_eq!(quoted(r"no\space"), r"no\space");
+    assert_eq!(quoted(r"trail\ x\"), r#""trail\ x\\""#);
+    assert_eq!(quoted(r#"a\"b"#), r#""a\\\"b""#);
+}
+
+#[test]
+fn the_executable_is_quoted_and_a_quote_in_it_is_refused() {
+    let line = command_line(Path::new(r"C:\a b\c.exe"), &[OsString::from("x")]).expect("line");
+    assert_eq!(line, [units(r#""C:\a b\c.exe" x"#), vec![0]].concat());
+    let refused = command_line(Path::new(r#"C:\a"b.exe"#), &[]).expect_err("quote");
+    assert_eq!(refused.kind(), io::ErrorKind::InvalidInput);
+}
+
 fn env(pairs: &[(&str, &str)]) -> Vec<(OsString, OsString)> {
     pairs
         .iter()
@@ -524,8 +514,7 @@ fn a_nul_or_relative_path_is_refused_before_any_child_starts() {
     let sentinel: OsString = "later-sentinel".into();
     let nul_exe = PathBuf::from(format!("{}\0tail", exe.display()));
     let nul_cwd = PathBuf::from(format!("{}\0tail", folder.display()));
-    let cases: [(&Path, Vec<OsString>, &Path); 8] = [
-        (Path::new(r#"C:\a"b.exe"#), vec![], &folder),
+    let cases: [(&Path, Vec<OsString>, &Path); 7] = [
         (&exe, vec!["first\0tail".into(), sentinel.clone()], &folder),
         (&exe, vec!["\0first".into(), sentinel.clone()], &folder),
         (&nul_exe, vec![sentinel], &folder),
