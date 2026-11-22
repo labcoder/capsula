@@ -229,7 +229,11 @@ stateDiagram-v2
   ring or the worker's presentation timeline backs up, output is silent until there is room, and
   the next callback resumes at the same device frame. Stop still fences copying and starts the
   fade immediately. The worker drains receipts through their publication fence before sending the
-  terminal cursor, counting only presentation that was due at the original Stop cutoff.
+  terminal cursor, counting only presentation that was due at the original Stop cutoff. If the
+  publication deadline expires, already confirmed progress may still be reported, but a late
+  tail acknowledgement cannot turn that partial count into terminal quiet. The timeline's
+  stopped/accounted state is deferred until the Stop drain; new speech or drawing work must
+  treat the pending Stop cutoff as stopped even while the callback is finishing the fade.
 - **Speech-start admission (dormant).** The producer holds the next queued Speech-start segment
   until a keyed Allow or Discard joins it at the normal synthesis window. An early decision sticks
   to its announced segment; a duplicate cannot dispatch it again. Discard still owes the ordered
