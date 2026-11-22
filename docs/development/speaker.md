@@ -64,7 +64,9 @@ A native resume must return within the existing 200 ms stall interval, even if
 callbacks continue. Callback activity refreshes the deadline only for staged speech
 outside a pending resume. A stall fences the old route and allows virtual pacing
 without waiting for the device call to return or starting a second stream.
-Loss, an invalid observation, or overflow enters the same fenced recovery path. A
+Loss, an invalid observation, or overflow enters the same fenced recovery path. A retired
+route whose tail never arrived counts as quiet once the backend confirms its stream destroyed,
+since that stream can't play anything more. A
 reroute replaces the stream instead of assuming that old endpoint timing still applies.
 An xrun rechecks refill readiness on every tick, even without new ingress.
 Only an authoritative typed RunState starts this worker on an internally selected queued pair.
