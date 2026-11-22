@@ -308,16 +308,18 @@ mod tests {
                 .preparation;
             (scene, before, ticket)
         };
-        let (_scene, _before, ticket) = make_ticket(header.clone());
+        let (scene, before, mut ticket) = make_ticket(header.clone());
         assert_eq!(ticket.views.len(), 1);
         let attributed = ticket.attributed_bytes();
-        let ((), _, [_, released]) = allocation::usage(|| drop(ticket));
-        let (_shared, _, [allocated, temporary]) =
-            allocation::usage(|| (Arc::new(()), Arc::new(step.clone())));
+        let ((), _, [_, view_bytes]) =
+            allocation::usage(|| drop(std::mem::take(&mut ticket.views)));
+        drop(before);
+        drop(scene);
+        let ((), _, [_, remaining_bytes]) = allocation::usage(|| drop(ticket));
         assert_eq!(
             attributed,
-            released + allocated - temporary,
-            "charge the ticket's own allocations plus the owner and source it shares with the scene"
+            view_bytes + remaining_bytes,
+            "charge the ticket once, excluding view sources owned by the scene"
         );
 
         let (_scene, before, ticket) = make_ticket(header);

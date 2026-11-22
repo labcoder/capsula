@@ -1377,6 +1377,63 @@ mod tests {
             - HEADER_LEN
     }
 
+    #[test]
+    fn maximum_legacy_drawing_and_delete_frames_round_trip_on_their_pipes() {
+        use super::{Deleted, MAX_VISIBLE_SCENES, SceneDescriptor};
+
+        fn check<T>(message: T, pipe: Pipe)
+        where
+            T: serde::Serialize + serde::de::DeserializeOwned + PartialEq + std::fmt::Debug,
+        {
+            let bytes = frame::encode(&message, pipe).expect("fits the pipe's cap");
+            let mut reader = bytes.as_slice();
+            assert_eq!(
+                frame::read(&mut reader, pipe).expect("reads one frame"),
+                Some(message)
+            );
+            assert!(reader.is_empty());
+        }
+
+        let thread = ThreadId(u64::MAX);
+        for message in [
+            ControlToBrain::DeleteThread {
+                thread,
+                after_turns: u32::MAX,
+                resend: true,
+            },
+            ControlToBrain::ClearDrawing {
+                scene_ids: vec![SCENE; MAX_VISIBLE_SCENES],
+            },
+        ] {
+            check(message, Pipe::Control);
+        }
+        for message in [
+            ControlToShell::Scenes {
+                scenes: vec![
+                    SceneDescriptor {
+                        scene: SCENE,
+                        revision: u32::MAX,
+                        committed: u32::MAX,
+                    };
+                    MAX_VISIBLE_SCENES
+                ],
+            },
+            ControlToShell::ThreadDeleted {
+                thread,
+                outcome: Deleted::Removed,
+                last_run: Some(RunId(u64::MAX)),
+            },
+        ] {
+            check(message, Pipe::Control);
+        }
+        check(
+            DataToShell::ScenesRemoved {
+                scenes: vec![SCENE; MAX_VISIBLE_SCENES],
+            },
+            Pipe::Data,
+        );
+    }
+
     /// Titles are at most 80 characters when written, so only an older or planted one ever needs
     /// the page budget's shortening.
     #[test]

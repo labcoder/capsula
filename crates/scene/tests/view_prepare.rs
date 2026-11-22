@@ -701,6 +701,12 @@ fn prepared_rest_vertices_narrow_to_the_world_build_bit_for_bit() {
         let prepared_solid = &geometry.solids[index];
         let mesh = built(geometry, index);
         assert_eq!(mesh.triangles.len(), count, "{solid}");
+        for (i, vertex) in mesh.vertices.iter().enumerate() {
+            assert!(
+                !mesh.vertices[..i].contains(vertex),
+                "{solid}: duplicate local vertex {vertex:?}"
+            );
+        }
         let Op::Solid(record) = &*prepared_solid.source else {
             panic!("a solid record");
         };
