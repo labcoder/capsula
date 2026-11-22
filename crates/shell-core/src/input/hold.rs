@@ -465,7 +465,7 @@ mod tests {
             ]
         );
         let tap = at + Duration::from_secs(2);
-        let mut last = [None; 3];
+        let mut steps = Vec::new();
         for (key, edge, after) in [
             (Key::LeftControl, Edge::Down, 0),
             (Key::LeftAlt, Edge::Down, 0),
@@ -474,10 +474,21 @@ mod tests {
             (Key::LeftAlt, Edge::Up, 2),
         ] {
             let at = tap + Duration::from_millis(after);
-            last = fence
-                .reduce(&mut state, Event::Key { key, edge }, at, &Cell::new(false))
-                .effects;
+            steps.push(
+                fence
+                    .reduce(&mut state, Event::Key { key, edge }, at, &Cell::new(false))
+                    .effects,
+            );
         }
-        assert_eq!(last, [Some(Effect::Resting), Some(Effect::OpenInput), None]);
+        assert_eq!(
+            steps,
+            [
+                [None; 3],
+                [None; 3],
+                [Some(Effect::Resting), None, None],
+                [None; 3],
+                [Some(Effect::Resting), Some(Effect::OpenInput), None],
+            ]
+        );
     }
 }
