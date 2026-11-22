@@ -238,7 +238,7 @@ struct Held {
     thread: ThreadId,
     layout_version: u32,
     state: SceneState,
-    picture_recipient: Option<crate::context::PictureRecipient>,
+    author: Author,
     /// The run that committed each lifetime revision; `None` for recovered steps.
     committers: Vec<Option<RunId>>,
     /// Revisions a failed cut already counted as refused, so a later one counts only newer ones.
@@ -250,6 +250,30 @@ struct Held {
     /// Its wide layout and charge; `None` once a preparation failed for any reason but paint
     /// work, leaving the shell's guard as the scene's only check.
     paint: Option<Paint>,
+}
+
+/// Which model may read a scene's metadata, from the protected material the requests of the runs
+/// that drew it carried (a picture or a protected digest), whatever its surface.
+#[derive(Clone, PartialEq, Eq)]
+enum Author {
+    /// Every run that drew it carried none.
+    Public,
+    /// The runs that carried any carried it for this recipient alone.
+    Private(crate::context::PictureRecipient),
+    /// A screen scene with no recipient, or drawn for two recipients: no model gets it.
+    Unknown,
+}
+
+impl Author {
+    /// The author after a step from a run whose requests carried material for `recipient`.
+    fn and(self, recipient: Option<crate::context::PictureRecipient>) -> Self {
+        match (self, recipient) {
+            (author, None) => author,
+            (Self::Public, Some(recipient)) => Self::Private(recipient),
+            (Self::Private(held), Some(recipient)) if held == recipient => Self::Private(held),
+            _ => Self::Unknown,
+        }
+    }
 }
 
 /// Work that waits for the store to answer.
@@ -430,7 +454,8 @@ impl Drawing {
                 committers: vec![None; usize::try_from(state.revision()).unwrap_or_default()],
                 refused_through: 0,
                 state,
-                picture_recipient: None,
+                // shortcut: authors aren't stored, so a restored overlay is public; store them before Key pictures turn on.
+                author: Author::Public,
                 gone: false,
                 replaced: false,
                 paint: layout.map(Paint::at_rest),

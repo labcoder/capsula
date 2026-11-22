@@ -5,10 +5,9 @@
 use std::fmt;
 
 use kumochi_protocol::message::ThreadId;
-use kumochi_scene::record::Surface;
 use serde_json::json;
 
-use super::{Drawing, Held};
+use super::{Author, Drawing, Held};
 use crate::context::PictureRecipient;
 
 /// Bytes the listed `[id, kind]` pairs of every scene in one line take together, a comma each
@@ -86,17 +85,21 @@ impl Drawing {
     /// that doesn't fit, so an older scene may still list small pairs after a newer one ran out.
     /// A scene that lists fewer than it holds adds `"more"`, the count left out.
     pub(crate) fn digest(&self, thread: ThreadId) -> Digest {
-        let overlay = |held: &Held| held.state.header().surface != Surface::Screen;
+        let public = |held: &Held| held.author == Author::Public;
         let mut screens = Vec::new();
         for recipient in self
             .scenes
             .iter()
             .filter(|held| held.thread == thread && !held.gone)
-            .filter_map(|held| held.picture_recipient.as_ref())
+            .filter_map(|held| match &held.author {
+                Author::Private(recipient) => Some(recipient),
+                Author::Public | Author::Unknown => None,
+            })
         {
             if !screens.iter().any(|(kept, _)| kept == recipient) {
                 let line = self.line(thread, |held| {
-                    overlay(held) || held.picture_recipient.as_ref() == Some(recipient)
+                    public(held)
+                        || matches!(&held.author, Author::Private(held) if held == recipient)
                 });
                 screens.push((recipient.clone(), line));
             }
@@ -104,7 +107,7 @@ impl Drawing {
         Digest {
             #[cfg(test)]
             all: self.line(thread, |_| true),
-            off_screen: self.line(thread, overlay),
+            off_screen: self.line(thread, public),
             screens,
         }
     }
@@ -113,7 +116,7 @@ impl Drawing {
         self.scenes.iter().any(|held| {
             held.thread == thread
                 && !held.gone
-                && held.picture_recipient.as_ref() == Some(recipient)
+                && matches!(&held.author, Author::Private(held) if held == recipient)
         })
     }
 

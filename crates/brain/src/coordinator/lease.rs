@@ -383,6 +383,7 @@ impl Coordinator {
             self.rebuild_without_picture(key, &pending, effects);
             return;
         }
+        let protected = pictured || digest.is_some();
         if let Some(run) = self.current.as_mut()
             && let Some(route) = run.route
         {
@@ -392,14 +393,14 @@ impl Coordinator {
                     run.key_digest_recipient = digest;
                 }
             }
-            if pictured {
+            if protected {
                 run.picture_recipient = Some(crate::context::PictureRecipient {
                     route,
                     model: run
                         .snapshot
                         .as_ref()
                         .and_then(|snapshot| snapshot.choice.as_ref())
-                        .expect("a pictured request has a resolved model")
+                        .expect("a protected request has a resolved model")
                         .model
                         .clone(),
                 });

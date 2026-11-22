@@ -1901,14 +1901,47 @@ fn pictured_key() -> (Coordinator, RunSnapshot) {
 }
 
 fn pictured_key_call(core: &mut Coordinator, store: &mut Store) -> crate::dispatch::CommitCall {
+    key_call(core, store, (R, "pictured-draw"), KEY_MARKS)
+}
+
+/// `run`'s one streamed Key draw `call` of `marks`, through to its result.
+fn key_call(
+    core: &mut Coordinator,
+    store: &mut Store,
+    (run, call): (kumochi_protocol::message::RunId, &str),
+    marks: &str,
+) -> crate::dispatch::CommitCall {
+    use crate::engines::ToolName;
     use crate::engines::anthropic::encode::ToolUse;
 
-    start(core, "pictured-draw");
-    let mut streamed = delta(core, "pictured-draw", KEY_MARKS);
-    streamed.extend(ready(core, "pictured-draw", KEY_MARKS));
+    let send = |core: &mut Coordinator, event| {
+        let key = super::super::engine_key(core, run);
+        core.handle(Input::Engine { key, event })
+            .expect("current provider event")
+    };
+    let name = id(call);
+    let started = TurnEvent::ToolCallStarted {
+        call: name.clone(),
+        name: ToolName::Draw,
+    };
+    assert_eq!(send(core, started), Vec::new());
+    let mut streamed = send(
+        core,
+        TurnEvent::ToolArgsDelta {
+            call: name.clone(),
+            delta: marks.into(),
+        },
+    );
+    streamed.extend(send(
+        core,
+        TurnEvent::ToolCallReady {
+            call: name,
+            args: marks.into(),
+        },
+    ));
     let mut effects = drain(core, store, streamed);
     let call = ToolUse::projected(&format!(
-        r#"{{"type":"tool_use","id":"pictured-draw","name":"draw","input":{KEY_MARKS}}}"#
+        r#"{{"type":"tool_use","id":"{call}","name":"draw","input":{marks}}}"#
     ))
     .expect("a valid Key tool_use");
     assert!(send(core, TurnEvent::KeyCall { index: 0, call }).is_empty());
@@ -2153,7 +2186,7 @@ fn assert_pictured_key_switches(store: &mut Store, snapshot: &RunSnapshot) {
 fn interrupting_a_pictured_key_draw_leaves_only_a_scrubbed_early_result() {
     let scratch = Scratch::new("provider-draw-key-picture-stopped");
     let mut store = store(&scratch);
-    let (mut core, _) = pictured_key();
+    let (mut core, snapshot) = pictured_key();
     let call = pictured_key_call(&mut core, &mut store);
     assert_eq!(store.commit_call(&call).unwrap(), Committed::Done);
     let effects = core
@@ -2178,17 +2211,305 @@ fn interrupting_a_pictured_key_draw_leaves_only_a_scrubbed_early_result() {
             0
         )
     );
+    assert_interrupted_key_wires(&mut core, &mut store, &snapshot);
+}
+
+/// After the pictured draw was stopped, every later request's whole wire, for the recipient or
+/// not, carries no box, no raw result and no half of its call pair; only the recipient gets the
+/// scene's names.
+fn assert_interrupted_key_wires(core: &mut Coordinator, store: &mut Store, snapshot: &RunSnapshot) {
+    use crate::store::{Interruption, RunEnd};
+    use kumochi_protocol::message::{ConnectionKind, RunId};
+
+    store
+        .end_run(T, R, &[], RunEnd::Interrupted(Interruption::Stop))
+        .unwrap();
+    let run = RunId(R.0 + 1);
+    store
+        .begin_turn(T, None, run, "ordinary next turn")
+        .unwrap();
+    let drawings = core.drawing.digest(T);
+    for (connection, slug, capable) in [
+        (ConnectionKind::AnthropicKey, "m", true),
+        (ConnectionKind::AnthropicKey, "other-vision", true),
+        (ConnectionKind::AnthropicKey, "text-only", false),
+        (ConnectionKind::ChatGpt, "m", true),
+    ] {
+        let mut receiving = snapshot.clone();
+        receiving.choice = Some(super::super::routes::choice(connection, slug));
+        let pictured = capable.then(|| key_recipient(&receiving));
+        let request = built_key(
+            store,
+            &receiving,
+            run,
+            pictured.as_ref(),
+            &[],
+            drawings.clone(),
+        );
+        let wire = if connection == ConnectionKind::ChatGpt {
+            crate::engines::responses::body(&request)
+                .unwrap()
+                .to_string()
+        } else {
+            key_wire(&request, receiving.connection).to_string()
+        };
+        let recipient = connection == ConnectionKind::AnthropicKey && slug == "m";
+        for private in ["key_scene_private", "key_alt_private", "key_object_private"] {
+            assert_eq!(
+                wire.contains(private),
+                recipient,
+                "{connection:?} {slug} {private}"
+            );
+        }
+        for never in [
+            "pictured-draw",
+            "key_step_private",
+            "186,598,450,78",
+            "input_image",
+        ] {
+            assert!(!wire.contains(never), "{connection:?} {slug} {never}");
+        }
+        assert!(wire.contains("ordinary next turn"));
+    }
+}
+
+/// A typed Key turn with no picture of its own that is sent the earlier pictured turn's digest is
+/// marked as that turn was: its call history is stored scrubbed, a different model on the same
+/// key gets a neutral pair, and the overlay it drew reaches no other model.
+#[test]
+fn a_typed_key_turn_sent_a_protected_digest_stamps_what_it_authors() {
+    use crate::store::RunEnd;
+    use kumochi_protocol::message::{ModelSlug, RunId};
+
+    let scratch = Scratch::new("provider-draw-key-digest-only");
+    let mut store = store(&scratch);
+    let (mut core, snapshot) = pictured_key();
+    end_pictured_key_run(&mut core, &mut store, &snapshot);
+    let next = RunId(R.0 + 1);
+    admit_typed_key_turn(&mut core, &mut store, &snapshot, next);
+
+    let commit = key_call(
+        &mut core,
+        &mut store,
+        (next, "digest-draw"),
+        COPIED_KEY_OVERLAY,
+    );
+    assert_eq!(
+        commit.output,
+        ToolOutput::Text(crate::dispatch::PICTURE_RESULT.into())
+    );
+    assert_eq!(store.commit_call(&commit).unwrap(), Committed::Done);
+    let effects = core
+        .handle(Input::CallCommitted {
+            key: commit.key.clone(),
+            outcome: Committed::Done,
+            then: None,
+        })
+        .unwrap();
+    let [Effect::Store(StoreOp::RoundItems(round))] = effects.as_slice() else {
+        panic!("a completed round: {effects:?}");
+    };
+    assert_eq!(round.pictured_key_model.as_ref().unwrap().as_str(), "m");
+    store
+        .append_key_round_events(
+            (T, next),
+            snapshot.connection,
+            &[],
+            &round.key_calls,
+            &round.calls,
+            round.pictured_key_model.as_ref(),
+        )
+        .unwrap();
+    store.end_run(T, next, &[], RunEnd::Done).unwrap();
+    let drawings = core.drawing.digest(T);
+    assert!(!drawings.off_screen().contains("digest_copy_private"));
+
+    let later = RunId(R.0 + 2);
+    store
+        .begin_turn(T, None, later, "ordinary later turn")
+        .unwrap();
+    let mut other = snapshot;
+    other.choice.as_mut().unwrap().model = ModelSlug::new("other-vision").unwrap();
+    let body = key_wire(
+        &built_key(
+            &store,
+            &other,
+            later,
+            Some(&key_recipient(&other)),
+            &[],
+            drawings,
+        ),
+        other.connection,
+    );
+    let wire = body.to_string();
+    for private in [
+        "digest_copy_private",
+        "key_title_private",
+        "key_object_private",
+        "drawn: [d1]",
+    ] {
+        assert!(!wire.contains(private), "{private}");
+    }
+    let blocks: Vec<_> = body["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|message| message["content"].as_array().unwrap())
+        .collect();
+    for call in ["pictured-draw", "digest-draw"] {
+        let input = blocks.iter().find(|block| block["id"] == call).unwrap();
+        let output = blocks
+            .iter()
+            .find(|block| block["tool_use_id"] == call)
+            .unwrap();
+        assert_eq!(input["input"], json!({}), "{call}");
+        assert_eq!(
+            output["content"], "Tool result not available on this model.",
+            "{call}"
+        );
+        assert_eq!(wire.matches(call).count(), 2, "{call}");
+    }
+    assert!(wire.contains("ordinary later turn"));
+}
+
+const COPIED_KEY_OVERLAY: &str = r#"{"records":[{"begin":{"v":1,"scene":"digest_copy_private","surface":"overlay","alt":"key_title_private"}},{"step":{"id":"d1","put":[{"shape":{"id":"key_object_private","kind":"rect","box":[0,0,10,10]}}]}},{"end":{}}]}"#;
+
+/// Streams the pictured draw of `snapshot` through its round to the end of run `R`.
+fn end_pictured_key_run(core: &mut Coordinator, store: &mut Store, snapshot: &RunSnapshot) {
+    use crate::store::{Interruption, RunEnd};
+
+    let commit = pictured_key_call(core, store);
+    assert_eq!(store.commit_call(&commit).unwrap(), Committed::Done);
+    let effects = core
+        .handle(Input::CallCommitted {
+            key: commit.key.clone(),
+            outcome: Committed::Done,
+            then: None,
+        })
+        .unwrap();
+    let [Effect::Store(StoreOp::RoundItems(round))] = effects.as_slice() else {
+        panic!("a completed round: {effects:?}");
+    };
+    store
+        .append_key_round_events(
+            (T, R),
+            snapshot.connection,
+            &[],
+            &round.key_calls,
+            &round.calls,
+            round.pictured_key_model.as_ref(),
+        )
+        .unwrap();
+    core.handle(Input::RoundStored { run: R, round: 1 })
+        .unwrap();
+    let stopped = core
+        .handle(Input::Stop {
+            run: R,
+            revealed: Vec::new(),
+        })
+        .unwrap();
+    assert!(
+        stopped
+            .iter()
+            .any(|effect| matches!(effect, Effect::Store(StoreOp::EndRun { .. })))
+    );
+    store
+        .end_run(T, R, &[], RunEnd::Interrupted(Interruption::Stop))
+        .unwrap();
+    core.handle(Input::RunStored { run: R }).unwrap();
+    assert!(core.current.is_none());
+}
+
+/// Admits typed turn `next` on the pictured Key choice, sent the earlier run's digest.
+fn admit_typed_key_turn(
+    core: &mut Coordinator,
+    store: &mut Store,
+    snapshot: &RunSnapshot,
+    next: kumochi_protocol::message::RunId,
+) {
+    use crate::coordinator::SendKey;
+    use kumochi_protocol::message::ConnectionKind;
+
+    core.handle(Input::Turn {
+        turn: 2,
+        thread: Some(T),
+        text: "typed follow-up".into(),
+    })
+    .unwrap();
+    store.begin_turn(T, None, next, "typed follow-up").unwrap();
+    let key = core
+        .handle(Input::TurnStored { run: next })
+        .unwrap()
+        .into_iter()
+        .find_map(|effect| match effect {
+            Effect::Store(StoreOp::BuildContext(build)) => Some(build.key),
+            _ => None,
+        })
+        .expect("the typed turn's build");
+    let model = super::super::routes::choice(ConnectionKind::AnthropicKey, "m");
+    let Input::ContextBuilt(mut built) = super::super::routes::built_for(key, &model) else {
+        unreachable!()
+    };
+    built.snapshot = Some(snapshot.clone());
+    built.result.as_mut().unwrap().request.tools = crate::context::tools(snapshot.origin);
+    core.handle(Input::ContextBuilt(built)).unwrap();
+    let lease = core
+        .handle(Input::SendReady {
+            key: SendKey::Build(key),
+            hold: None,
+        })
+        .unwrap()
+        .into_iter()
+        .find_map(|effect| match effect {
+            Effect::Grant(lease) => Some(lease),
+            _ => None,
+        })
+        .expect("the digest-only Key round entered write admission");
+    core.handle(Input::SendSettled { lease }).unwrap();
 }
 
 #[test]
 fn pictured_key_scene_metadata_reaches_only_its_picture_recipient() {
+    assert_drawn_metadata_reaches_only_its_recipient(
+        "provider-draw-key-picture-digest",
+        KEY_MARKS,
+        &[
+            "key_scene_private",
+            "key_title_private",
+            "key_alt_private",
+            "key_object_private",
+            "1280.0,720.0",
+        ],
+    );
+}
+
+const KEY_OVERLAY: &str = r#"{"records":[{"begin":{"v":1,"scene":"key_overlay_private","surface":"overlay","title":"key_overlay_title_private","alt":"key_overlay_alt_private"}},{"step":{"id":"o1","put":[{"shape":{"id":"key_overlay_object_private","kind":"rect","box":[0,0,10,10]}}]}},{"end":{}}]}"#;
+
+/// An overlay drawn by a pictured turn is its picture recipient's, though it isn't on the screen.
+#[test]
+fn a_pictured_key_overlay_reaches_only_its_picture_recipient() {
+    assert_drawn_metadata_reaches_only_its_recipient(
+        "provider-draw-key-picture-overlay",
+        KEY_OVERLAY,
+        &[
+            "key_overlay_private",
+            "key_overlay_title_private",
+            "key_overlay_alt_private",
+            "key_overlay_object_private",
+        ],
+    );
+}
+
+/// A pictured Key turn draws `marks`; each later request's whole wire carries every `private`
+/// marker only for the exact recipient that saw the picture.
+fn assert_drawn_metadata_reaches_only_its_recipient(scratch: &str, marks: &str, private: &[&str]) {
     use crate::store::RunEnd;
     use kumochi_protocol::message::{ConnectionKind, RunId};
 
-    let scratch = Scratch::new("provider-draw-key-picture-digest");
+    let scratch = Scratch::new(scratch);
     let mut store = store(&scratch);
     let (mut core, snapshot) = pictured_key();
-    let commit = pictured_key_call(&mut core, &mut store);
+    let commit = key_call(&mut core, &mut store, (R, "pictured-draw"), marks);
     assert_eq!(store.commit_call(&commit).unwrap(), Committed::Done);
     store.end_run(T, R, &[], RunEnd::Done).unwrap();
     let drawings = core.drawing.digest(T);
@@ -2221,13 +2542,7 @@ fn pictured_key_scene_metadata_reaches_only_its_picture_recipient() {
         } else {
             key_wire(&request, receiving.connection).to_string()
         };
-        for mark in [
-            "key_scene_private",
-            "key_title_private",
-            "key_alt_private",
-            "key_object_private",
-            "1280.0,720.0",
-        ] {
+        for mark in private {
             assert_eq!(
                 wire.contains(mark),
                 keeps,

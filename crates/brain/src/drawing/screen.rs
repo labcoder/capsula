@@ -43,6 +43,18 @@ impl Drawing {
         }
     }
 
+    /// `run`'s requests carried protected material for `recipient`, so every scene it draws, on
+    /// any surface, is that recipient's. The first recipient stays for the rest of the run.
+    pub(crate) fn author(&mut self, run: RunId, recipient: Option<&PictureRecipient>) {
+        if run > self.closed
+            && let Some(recipient) = recipient
+        {
+            self.ledger(run)
+                .picture_recipient
+                .get_or_insert_with(|| recipient.clone());
+        }
+    }
+
     /// A call's screen `begin`, stamped with its run's picture size and display before a lookup
     /// or a continuation compares it. Refused with a fixed reason when the run sent no picture of
     /// a display that can be marked.

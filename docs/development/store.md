@@ -87,10 +87,12 @@ order, never step content, positions or labels. The pairs of every scene share o
 a comma each. Scenes take room newest first, each from its newest object back to the first
 pair that doesn't fit, so an older scene may still list small pairs after a newer one ran out.
 A scene that lists fewer than it holds adds `"more"`, the count left out. The reducer renders
-an overlay-only line and a line per visible screen-scene recipient, each with its own cap.
-Once the build knows the turn's model, it chooses a screen line only for the exact route,
-sign-in generation and model slug that received the picture, and only with a positive image fact.
-An unknown or mixed scene recipient gets no screen metadata. This does not filter user or
+a public line and a line per recipient of a stamped scene, each with its own cap. A scene is
+stamped, whatever its surface, when a run whose request carried a picture or a protected
+digest drew it. Once the build knows the turn's model, it chooses a stamped line only for the
+exact route, sign-in generation and model slug the material was sent to, and only with a
+positive image fact. An unknown or mixed scene recipient gets no metadata. Authors aren't
+stored, so an overlay restored after restart is public. This does not filter user or
 assistant prose, including screen-step narration re-read by recall or compaction, or same-account
 native ChatGPT replay, whose stored arguments can retain object ids and whose size-error result
 can contain picture dimensions. The line goes after Local time in the

@@ -984,3 +984,73 @@ fn the_line_without_screen_scenes_has_a_cap_of_its_own() {
     assert_eq!(off_screen[0]["objects"][0], json!(["o088", "text"]));
     assert_eq!(off_screen[0]["more"], json!(88));
 }
+
+fn recipient(slug: &str) -> crate::context::PictureRecipient {
+    crate::context::PictureRecipient {
+        route: crate::context::Route::chatgpt(7),
+        model: kumochi_protocol::message::ModelSlug::new(slug).unwrap(),
+    }
+}
+
+/// An overlay is its authoring runs' recipient's, as a screen scene is: one drawn only by runs
+/// that carried nothing protected goes to every model, a protected step makes it that
+/// recipient's, a later unprotected step can't undo that, and a second recipient's step makes it
+/// no model's. Authors aren't stored, so a restored overlay is public.
+#[test]
+fn an_overlay_belongs_to_what_its_authors_were_sent() {
+    let (seen, other) = (recipient("seen"), recipient("other"));
+    let mut drawing = Drawing::default();
+    let mut store = Store::default();
+    let mut draw = |drawing: &mut Drawing,
+                    run: u64,
+                    author: Option<&crate::context::PictureRecipient>,
+                    scene: &str,
+                    object: &str| {
+        drawing.author(RunId(run), author);
+        store.run(
+            drawing,
+            call(
+                run,
+                &format!("c{run}"),
+                envelope(&begin(scene, "kept_alt"), &[text(object, object)]),
+            ),
+        );
+    };
+    draw(&mut drawing, 1, None, "public_scene", "public_object");
+    draw(&mut drawing, 2, Some(&seen), "seen_scene", "seen_object");
+    let digest = drawing.digest(THREAD);
+    assert!(digest.off_screen().contains("public_object"));
+    assert!(!digest.off_screen().contains("seen_scene"));
+    assert!(!digest.off_screen().contains("seen_object"));
+    let line = digest.line_for(&seen).expect("the recipient's line");
+    assert!(line.contains("public_object") && line.contains("seen_object"));
+    assert_eq!(digest.line_for(&other), None);
+
+    draw(&mut drawing, 3, Some(&seen), "public_scene", "seen_later");
+    draw(&mut drawing, 4, None, "seen_scene", "public_later");
+    let digest = drawing.digest(THREAD);
+    assert_eq!(digest.off_screen(), "[]");
+    let line = digest.line_for(&seen).expect("the recipient's line");
+    for object in ["public_object", "seen_later", "seen_object", "public_later"] {
+        assert!(line.contains(object), "{object}");
+    }
+
+    draw(&mut drawing, 5, Some(&other), "seen_scene", "other_object");
+    let digest = drawing.digest(THREAD);
+    let line = digest
+        .line_for(&seen)
+        .expect("public_scene is still the recipient's");
+    assert!(line.contains("seen_later"));
+    assert!(!line.contains("seen_object") && !line.contains("other_object"));
+    assert_eq!(digest.line_for(&other), None);
+    assert_eq!(digest.off_screen(), "[]");
+
+    let (recovered, skipped) = Drawing::recover(store.visible());
+    assert_eq!(skipped, Vec::<SceneId>::new());
+    assert_eq!(recovered.snapshot().scenes.len(), 2, "both stay visible");
+    let digest = recovered.digest(THREAD);
+    assert!(
+        digest.off_screen().contains("public_scene") && digest.off_screen().contains("seen_scene")
+    );
+    assert_eq!(digest.recipients().count(), 0);
+}

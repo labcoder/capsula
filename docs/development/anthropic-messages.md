@@ -295,8 +295,8 @@ Once a key run has a send grant, withdrawal of a carried history source or scree
 and closes its fence. Rebuild, Stop, link loss, credential mutation and terminal completion retire
 the owner, including any reply it held between rounds. A late task cannot put one back.
 
-A Key run whose pictured write is granted is marked for the rest of the run, even after the
-picture is withdrawn. The call ledger and native round both store a fixed result instead of
+A Key run whose granted write carries protected material, a picture or a protected drawing
+digest, is marked for the rest of the run, even after the picture is withdrawn. The call ledger and native round both store a fixed result instead of
 the original result. A stored Draw call has an empty record array; other calls keep an empty
 input object because their free text can also be derived from the picture. The stored call's
 envelope records the model, outside the provider JSON. The coordinator keeps the original
@@ -311,11 +311,14 @@ transcript text without native items. This does not change conversation text: sc
 narration saved as assistant text can follow the thread through later context, recall and
 summaries. The Key picture switch stays off.
 
-The drawing digest lists a visible screen scene only for the same route, verified account
-generation and model that received its picture, and only while that model's catalog says
-it takes images. Other recipients get the overlay-only line. A scene edited by more than
-one recipient has no outbound screen digest. Screen scenes aren't revived from the store
-after restart, so the digest does not store or recover a recipient. Send admission rechecks
+The same mark stamps every scene the run draws, on the screen or an overlay, with that
+recipient: the route, verified account generation and model the protected material was sent
+to. The drawing digest lists a stamped scene only for that recipient, and only while that
+model's catalog says it takes images. Other recipients get the public line, which lists only
+scenes no protected run drew. A later step from a protected run stamps a public scene; an
+unprotected step never clears a stamp; a scene stamped for two recipients or a screen scene
+without one is in no outbound digest. Authors aren't stored yet, so an overlay restored after
+restart is public; Key pictures stay off until they are. Send admission rechecks
 the recipient's image fact and that it still has a visible scene. A Key continuation also
 checks the recipient of any digest in its held first request, because the continuation does
 not rebuild that request's prefix.
