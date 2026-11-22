@@ -234,10 +234,6 @@ impl AudioProbe {
         }
     }
 
-    pub(crate) fn many_turns(&self) -> bool {
-        matches!(self.changing_turns, Some(Turns::AuthoredThenNarrated))
-    }
-
     pub(super) fn initial_credit(&self) -> Option<u32> {
         self.initial_credit
     }
