@@ -3408,6 +3408,29 @@ fn assert_silent_speech_refused(label: &str, at: SilentSpeechAt) {
 }
 
 #[test]
+fn a_local_queued_stop_the_speaker_cannot_take_leaves_the_pair_open() {
+    let link = attended_queued("queued-stop-local");
+    let events = patient(link.events);
+    let session = connected(next(&events));
+    acknowledge_queued(&link.control, queued_registration(&link.control));
+    assert!(link.handle.admits_text(Some(&session)));
+    assert_eq!(
+        link.handle
+            .output()
+            .stop_locally(session.generation(), RunId(42)),
+        Ok(()),
+    );
+    assert!(session.open(), "a local stop never closes the pair");
+    assert!(
+        link.handle.admits_text(Some(&session)),
+        "and the pair still takes a turn"
+    );
+    let teardown = thread::spawn(move || link.handle.end(&session));
+    queued_pair_closed(link.link, &link.control, &link.data);
+    teardown.join().unwrap();
+}
+
+#[test]
 fn refused_queued_stop_closes_admission_before_background_pair_teardown() {
     use super::output::Denied;
 
