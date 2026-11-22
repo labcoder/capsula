@@ -5,7 +5,7 @@
 
 use std::collections::BTreeMap;
 
-use gpui_kit::Window;
+use raw_window_handle::HasWindowHandle;
 use windows::Win32::Foundation::HWND;
 use windows::Win32::UI::WindowsAndMessaging::{
     GWL_EXSTYLE, GetWindowLongPtrW, HWND_TOPMOST, IsWindow, LWA_ALPHA, SWP_NOACTIVATE, SWP_NOMOVE,
@@ -33,12 +33,19 @@ impl OverlayWindows {
         self.applied = None;
     }
 
-    pub(crate) fn bind(&mut self, layer: Layer, window: &Window) -> Result<(), PresenceError> {
+    pub(crate) fn bind(
+        &mut self,
+        layer: Layer,
+        window: &impl HasWindowHandle,
+    ) -> Result<(), PresenceError> {
         self.bind_hwnd(layer, hwnd_of(window)?)
     }
 
     #[cfg(test)]
-    pub(crate) fn check_drawing(dock: &Window, drawing: &Window) -> Result<(), PresenceError> {
+    pub(crate) fn check_drawing(
+        dock: &impl HasWindowHandle,
+        drawing: &impl HasWindowHandle,
+    ) -> Result<(), PresenceError> {
         native_tests::drawing(hwnd_of(dock)?, hwnd_of(drawing)?);
         Ok(())
     }
@@ -55,7 +62,11 @@ impl OverlayWindows {
         Ok(())
     }
 
-    pub(crate) fn region(&mut self, id: RegionId, window: &Window) -> Result<(), PresenceError> {
+    pub(crate) fn region(
+        &mut self,
+        id: RegionId,
+        window: &impl HasWindowHandle,
+    ) -> Result<(), PresenceError> {
         self.regions.insert(id, hwnd_of(window)?);
         self.applied = None;
         Ok(())

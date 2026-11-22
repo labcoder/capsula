@@ -7,7 +7,6 @@ use std::ffi::c_void;
 use std::rc::Rc;
 
 use async_channel::Sender;
-use gpui_kit::Window;
 use kumochi_protocol::constants::{FOCUS_INPUT_MARKER, OBJECT_PREFIX};
 use raw_window_handle::{HandleError, HasWindowHandle, RawWindowHandle};
 use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
@@ -566,7 +565,7 @@ pub(crate) enum PresenceSurface {
 /// # Errors
 /// Fails when the window has no Win32 handle or Windows refuses a change.
 pub(crate) fn configure_presence_window(
-    window: &mut Window,
+    window: &mut impl HasWindowHandle,
     surface: PresenceSurface,
     events: Sender<PresenceEvent>,
 ) -> Result<(), PresenceError> {
@@ -667,7 +666,7 @@ fn subclass_hover(
 /// # Errors
 /// Fails when the window has no Win32 handle or Windows refuses the move.
 pub(crate) fn place_presence_window(
-    window: &mut Window,
+    window: &mut impl HasWindowHandle,
     bounds: [i32; 4],
 ) -> Result<(), PresenceError> {
     #[cfg(test)]
@@ -681,7 +680,7 @@ pub(crate) fn place_presence_window(
 ///
 /// # Errors
 /// Fails when the window has no Win32 handle or Windows refuses.
-pub(crate) fn hide_presence_window(window: &mut Window) -> Result<(), PresenceError> {
+pub(crate) fn hide_presence_window(window: &mut impl HasWindowHandle) -> Result<(), PresenceError> {
     #[cfg(test)]
     if HasWindowHandle::window_handle(window).is_err() {
         return Ok(());
@@ -752,18 +751,21 @@ fn window_life(hwnd: HWND) -> Result<Rc<Cell<bool>>, PresenceError> {
     Ok(Rc::clone(&hover.destroyed))
 }
 
-pub(crate) fn window_affinity(window: &Window) -> Result<Affinity, PresenceError> {
+pub(crate) fn window_affinity(window: &impl HasWindowHandle) -> Result<Affinity, PresenceError> {
     let hwnd = hwnd_of(window)?;
     snapshot_affinity(hwnd, window_life(hwnd)?)
 }
 
-pub(crate) fn exclude_window(window: &Window, prior: &Affinity) -> Result<(), PresenceError> {
+pub(crate) fn exclude_window(
+    window: &impl HasWindowHandle,
+    prior: &Affinity,
+) -> Result<(), PresenceError> {
     let hwnd = hwnd_of(window)?;
     prior.apply(hwnd, &window_life(hwnd)?, WDA_EXCLUDEFROMCAPTURE)
 }
 
 pub(crate) fn restore_window_affinity(
-    window: &Window,
+    window: &impl HasWindowHandle,
     prior: &Affinity,
 ) -> Result<(), PresenceError> {
     if prior.gone() {
@@ -813,7 +815,7 @@ fn focus_input() -> INPUT {
 /// # Errors
 /// Fails when the window has no Win32 handle or Windows keeps the current foreground.
 pub(crate) fn activate_presence_window(
-    window: &Window,
+    window: &impl HasWindowHandle,
 ) -> Result<Option<Foreground>, PresenceError> {
     #[cfg(test)]
     if HasWindowHandle::window_handle(window).is_err() {
@@ -837,7 +839,7 @@ pub(crate) fn activate_presence_window(
 
 /// Gives the front back to `previous`, only while `window` still has it and `previous` is still
 /// the same process's window, so a window the user chose since is never overridden.
-pub(crate) fn restore_foreground(window: &Window, previous: Foreground) {
+pub(crate) fn restore_foreground(window: &impl HasWindowHandle, previous: Foreground) {
     let Ok(hwnd) = hwnd_of(window) else {
         return;
     };
@@ -912,7 +914,7 @@ fn place(hwnd: HWND, [x, y, width, height]: [i32; 4]) -> windows::core::Result<(
     unsafe { SetWindowPos(hwnd, Some(HWND_TOPMOST), x, y, width, height, flags) }
 }
 
-pub(super) fn hwnd_of(window: &Window) -> Result<HWND, PresenceError> {
+pub(super) fn hwnd_of(window: &impl HasWindowHandle) -> Result<HWND, PresenceError> {
     let RawWindowHandle::Win32(handle) = HasWindowHandle::window_handle(window)?.as_raw() else {
         return Err(PresenceError::NotWin32);
     };

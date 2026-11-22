@@ -2,8 +2,8 @@
 //! tagged clicks the moment it dispatches them, and the dock's paint posts it each frame's id.
 //! Without an observer the proxy ignores all three, so normal runs behave as before.
 
-use gpui_kit::Window;
 use kumochi_protocol::constants::{INPUT_SESSION_MARKER, OBSERVER_REPAINT_MESSAGE};
+use raw_window_handle::HasWindowHandle;
 use windows::Win32::Foundation::{HWND, LPARAM, POINT, WPARAM};
 use windows::Win32::Graphics::Gdi::ClientToScreen;
 use windows::Win32::System::Performance::QueryPerformanceFrequency;
@@ -108,9 +108,9 @@ pub(crate) fn performance_frequency() -> i64 {
 ///
 /// # Errors
 /// Fails when the window has no Win32 handle or Windows can't map the point.
-pub(crate) fn client_origin(window: &Window) -> Result<[i32; 2], PresenceError> {
+pub(crate) fn client_origin(window: &impl HasWindowHandle) -> Result<[i32; 2], PresenceError> {
     #[cfg(test)]
-    if raw_window_handle::HasWindowHandle::window_handle(window).is_err() {
+    if HasWindowHandle::window_handle(window).is_err() {
         return Ok([0, 0]);
     }
     let mut point = POINT::default();
@@ -123,6 +123,6 @@ pub(crate) fn client_origin(window: &Window) -> Result<[i32; 2], PresenceError> 
 ///
 /// # Errors
 /// Fails when the window has no Win32 handle.
-pub(crate) fn window_handle(window: &Window) -> Result<usize, PresenceError> {
+pub(crate) fn window_handle(window: &impl HasWindowHandle) -> Result<usize, PresenceError> {
     Ok(hwnd_of(window)?.0.expose_provenance())
 }
