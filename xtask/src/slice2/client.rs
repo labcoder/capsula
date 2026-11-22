@@ -347,6 +347,7 @@ fn paired(
     allowed: Option<usize>,
 ) -> Result<Arc<Shared>> {
     frame::write(&mut &data, &DataToBrain::Hello(hello), Pipe::Data)?;
+    frame::write(&mut &data, &DataToBrain::TextMetrics(None), Pipe::Data)?;
     Ok(Arc::new(Shared {
         control,
         data,

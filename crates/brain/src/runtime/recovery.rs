@@ -1,12 +1,54 @@
 //! One connection's recovery: after `Scenes`, the kept steps of every visible scene, copied so
 //! later changes can't alter a snapshot in flight, go to the data queue one chunk at a time.
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::{collections::VecDeque, fmt};
 
 use kumochi_protocol::frame::Pipe;
 use kumochi_protocol::message::{DataToShell, SceneId, SceneSnapshotChunk, Step};
 
-use crate::{drawing::CHUNK_TARGET, store::SceneState};
+use crate::drawing::{CHUNK_TARGET, ReaccountJob, Reaccounted};
+use crate::store::SceneState;
+
+/// One worker at a time across connection attempts, including a cancelled worker winding down.
+#[derive(Debug)]
+pub(super) struct Reaccount {
+    source: Arc<ReaccountJob>,
+    cancel: Arc<AtomicBool>,
+    task: tokio::task::JoinHandle<Option<Reaccounted>>,
+}
+
+impl Reaccount {
+    pub(super) fn start(source: ReaccountJob) -> Self {
+        let source = Arc::new(source);
+        let cancel = Arc::new(AtomicBool::new(false));
+        let job = Arc::clone(&source);
+        let signal = Arc::clone(&cancel);
+        let task = tokio::task::spawn_blocking(move || job.run(&signal));
+        Self {
+            source,
+            cancel,
+            task,
+        }
+    }
+
+    pub(super) fn cancel(&self) {
+        self.cancel.store(true, Ordering::Relaxed);
+        self.task.abort();
+    }
+}
+
+pub(super) async fn reaccounted(
+    pending: &mut Option<Reaccount>,
+) -> (Arc<ReaccountJob>, Option<Reaccounted>) {
+    let Some(replay) = pending.as_mut() else {
+        return std::future::pending().await;
+    };
+    let result = (&mut replay.task).await.ok().flatten();
+    let finished = pending.take().expect("a replay just finished");
+    (finished.source, result)
+}
 
 /// A step's encoding beyond its label: the label's length prefix, at most 2 bytes for a label
 /// under 16 KiB.

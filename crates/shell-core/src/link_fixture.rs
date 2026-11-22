@@ -180,8 +180,15 @@ fn authenticated_with_output(
         let open = |pipe: Pipe| super::open(&pipe.name(id), &start.link.brain, attempt);
         let control = open(Pipe::Control).expect("the fixture control pipe");
         control.set_timeout(Some(PATIENCE));
-        let connection = super::handshake_pair(control, hello, mode, attempt, || open(Pipe::Data))
-            .expect("authenticate both fixture legs");
+        let connection = super::handshake_pair(
+            control,
+            hello,
+            mode,
+            attempt,
+            super::DrawingText::default(),
+            || open(Pipe::Data),
+        )
+        .expect("authenticate both fixture legs");
         start.link.attend_until(connection, &start.events, end) == Attendance::Lost
     });
     Authenticated {
@@ -318,6 +325,7 @@ fn attended_with(
             incarnation,
             epoch: 91,
         },
+        drawing_font_family: None,
     };
     let link = thread::spawn(move || {
         let result = start.link.attend(connection, &start.events);

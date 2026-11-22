@@ -304,7 +304,7 @@ async fn held_page_output_retains_its_original_admission_end_and_owner() {
         let serving = async {
             tokio::select! { ended = core => ended, ended = writer => ended }
         };
-        let (ended, ()) = timeout(PATIENCE, async { tokio::join!(serving, stop) })
+        let (ended, ()) = Box::pin(timeout(PATIENCE, async { tokio::join!(serving, stop) }))
             .await
             .unwrap();
         assert_eq!(ended, Ended::Lost);

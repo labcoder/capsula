@@ -3,7 +3,8 @@
 ## Queued-required session mode (internal)
 
 The shipped shell selects Legacy: control Hello, Welcome, then data Hello, with their
-existing bytes. The internal queued-required selection instead sends the appended QueuedHello
+existing bytes. Both modes follow their data Hello with one drawing-font startup frame.
+The internal queued-required selection instead sends the appended QueuedHello
 on both pipes. Its data Hello echoes this Welcome's incarnation and issue epoch. The brain
 checks the executable, matching build and capability on both legs and the existing same-process
 pairing. It refuses a mixed mode or a data Hello from another session. The queued second leg
@@ -378,12 +379,23 @@ sequenceDiagram
   else match
     B-->>S: Welcome(incarnation)
     S->>B: open data pipe, Hello again
+    B->>B: validate both legs as one pair
+    S->>B: TextMetrics (or explicit None)
   end
 ```
 
 The capability is checked before anything else, so a client without it learns nothing, not even
 whether its build matches. A shell that meets a brain from another build waits for that brain to
 exit and starts the one beside itself.
+
+After authenticating both legs as one process, the brain reads that pair's single
+`TextMetrics` frame within the existing handshake deadline. It rejects a declared payload
+over 304 bytes before allocating or reading the body. The optional profile has 99 postcard
+`u16` values in 1/1024 em: advances for U+0020–U+007E in order, line height, then the CJK,
+remaining BMP and wide-exception maxima. An explicit `None` or a decoded profile with any
+out-of-range value selects the complete built-in measure. Missing, malformed, repeated and
+late frames are protocol failures. The Hello and mismatch bytes are unchanged; exact-build
+checking happens before either peer uses the new frame. No font name or text is sent.
 
 ## After the handshake
 
