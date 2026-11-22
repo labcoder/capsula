@@ -2619,7 +2619,6 @@ fn a_pictured_key_overlay_reaches_only_its_picture_recipient() {
 /// marker only for the exact recipient that saw the picture.
 fn assert_drawn_metadata_reaches_only_its_recipient(scratch: &str, marks: &str, private: &[&str]) {
     use crate::store::RunEnd;
-    use kumochi_protocol::message::{ConnectionKind, RunId};
 
     let scratch = Scratch::new(scratch);
     let mut store = store(&scratch);
@@ -2627,6 +2626,19 @@ fn assert_drawn_metadata_reaches_only_its_recipient(scratch: &str, marks: &str, 
     let commit = key_call(&mut core, &mut store, (R, "pictured-draw"), marks);
     assert_eq!(store.commit_call(&commit).unwrap(), Committed::Done);
     store.end_run(T, R, &[], RunEnd::Done).unwrap();
+    assert_next_wires_keep_only_for_recipient(&mut store, &core, &snapshot, private);
+}
+
+/// The next turn's whole wire, for the picture's exact recipient and for each other route, model
+/// and the text-only fallback, carries every `private` marker only for that exact recipient.
+fn assert_next_wires_keep_only_for_recipient(
+    store: &mut Store,
+    core: &Coordinator,
+    snapshot: &RunSnapshot,
+    private: &[&str],
+) {
+    use kumochi_protocol::message::{ConnectionKind, RunId};
+
     let drawings = core.drawing.digest(T);
     assert_eq!(drawings.recipients().count(), 1);
     let run = RunId(R.0 + 1);
@@ -2643,7 +2655,7 @@ fn assert_drawn_metadata_reaches_only_its_recipient(scratch: &str, marks: &str, 
         receiving.choice = Some(super::super::routes::choice(connection, slug));
         let pictured = capability.then(|| key_recipient(&receiving));
         let request = built_key(
-            &store,
+            store,
             &receiving,
             run,
             pictured.as_ref(),
@@ -2668,6 +2680,84 @@ fn assert_drawn_metadata_reaches_only_its_recipient(scratch: &str, marks: &str, 
         assert!(!wire.contains("186,598,450,78"));
         assert!(!wire.contains("input_image"));
     }
+}
+
+/// A protected overlay step whose write is acknowledged only after its run was stopped keeps
+/// its recipient: the settlement uses the recipient read when the step was admitted, not the
+/// run's ledger, which the stop removed.
+#[test]
+fn a_protected_step_acknowledged_after_its_run_ends_reaches_only_its_recipient() {
+    use crate::drawing::Write;
+    use crate::engines::ToolName;
+    use crate::store::{Interruption, RunEnd};
+
+    let scratch = Scratch::new("provider-draw-late-acknowledgment");
+    let mut store = store(&scratch);
+    let (mut core, snapshot) = pictured_key();
+    let send = |core: &mut Coordinator, event| {
+        let key = super::super::engine_key(core, R);
+        core.handle(Input::Engine { key, event })
+            .expect("current provider event")
+    };
+    let name = id("late-draw");
+    let started = TurnEvent::ToolCallStarted {
+        call: name.clone(),
+        name: ToolName::Draw,
+    };
+    assert_eq!(send(&mut core, started), Vec::new());
+    let mut effects = send(
+        &mut core,
+        TurnEvent::ToolArgsDelta {
+            call: name.clone(),
+            delta: KEY_OVERLAY.into(),
+        },
+    );
+    effects.extend(send(
+        &mut core,
+        TurnEvent::ToolCallReady {
+            call: name,
+            args: KEY_OVERLAY.into(),
+        },
+    ));
+    while let Some((_, write_op)) = pending(&effects) {
+        if matches!(write_op, Write::Step { .. }) {
+            break;
+        }
+        effects = write(&mut core, &mut store, &effects);
+    }
+    assert!(
+        matches!(
+            pending(&effects),
+            Some((
+                _,
+                Write::Step {
+                    protected: true,
+                    ..
+                }
+            ))
+        ),
+        "the protected step's write is held: {effects:?}"
+    );
+    core.handle(Input::Stop {
+        run: R,
+        revealed: Vec::new(),
+    })
+    .unwrap();
+    drain(&mut core, &mut store, effects);
+    store
+        .end_run(T, R, &[], RunEnd::Interrupted(Interruption::Stop))
+        .unwrap();
+    assert_next_wires_keep_only_for_recipient(
+        &mut store,
+        &core,
+        &snapshot,
+        &[
+            "key_overlay_private",
+            "key_overlay_title_private",
+            "key_overlay_alt_private",
+            "key_overlay_object_private",
+        ],
+    );
 }
 
 #[test]

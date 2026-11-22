@@ -114,14 +114,9 @@ impl Drawing {
             loss_dropped,
             interrupted,
             laid,
-            ..
+            recipient,
         } = write;
         let begun = matches!(scene, Pend::New { .. });
-        let recipient = self
-            .runs
-            .iter()
-            .find(|ledger| ledger.run == run)
-            .and_then(|ledger| ledger.picture_recipient.clone());
         let (scene, index) = match scene {
             Pend::Held { scene, admitted } => {
                 let Some(at) = self.live(scene) else {

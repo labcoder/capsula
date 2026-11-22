@@ -318,7 +318,9 @@ to. The drawing digest lists a stamped scene only for that recipient, and only w
 model's catalog says it takes images. Other recipients get the public line, which lists only
 scenes no protected run drew. A later step from a protected run stamps a public scene; an
 unprotected step never clears a stamp; a scene stamped for two recipients or a screen scene
-without one is in no outbound digest. After a restart a scene is public only when every run
+without one is in no outbound digest. A step's recipient is read once, when it is admitted,
+and both its stored marker and its live stamp use that value, so a run that ends while the
+step is being written can't leave the scene public. After a restart a scene is public only when every run
 that drew it is marked public ([store](store.md), `runs.protected`); any other stays visible
 and reaches no model. So a protected scene leaves context after a restart, even for the model
 it was drawn for. Scenes from before that marker lose their model context once, at the upgrade.

@@ -20,6 +20,18 @@ use crate::test_support::Scratch;
 /// A coordinator whose last ids were thread 4 and run 10, holding run 10's stored car in thread
 /// 4: solid "a" (handle 1/1) is labelled and solid "b" (handle 1/2) isn't.
 fn drawn(scratch: &Scratch) -> (Coordinator, SceneId) {
+    drawn_by(scratch, Drew::Public)
+}
+
+/// Whether the run that drew the car carried protected material.
+#[derive(Clone, Copy, PartialEq)]
+enum Drew {
+    Public,
+    Protected,
+}
+
+/// `drawn`, by a run that drew it `drew`.
+fn drawn_by(scratch: &Scratch, drew: Drew) -> (Coordinator, SceneId) {
     let mut store = Store::open(&scratch.db()).expect("store");
     store.recover().expect("recover");
     store.main_thread().expect("main");
@@ -38,7 +50,7 @@ fn drawn(scratch: &Scratch) -> (Coordinator, SceneId) {
             revision: 1,
             layout_version: 2,
             step: Arc::new(step),
-            protected: false,
+            protected: drew == Drew::Protected,
         })
         .expect("first step")
     else {
@@ -222,6 +234,16 @@ fn a_part_that_does_not_resolve_is_refused_without_a_run_or_an_id() {
     }
     core.handle(ask(scene, handle(1))).expect("not stale");
     assert_eq!(core.current_run(), Some(ASKED), "a refusal takes no id");
+}
+
+/// A part of a scene a protected run drew is never quoted into a turn, whose text every later
+/// model reads.
+#[test]
+fn a_part_of_a_protected_scene_is_refused_without_a_run() {
+    let scratch = Scratch::new("ask-protected");
+    let (mut core, scene) = drawn_by(&scratch, Drew::Protected);
+    assert_eq!(core.handle(ask(scene, handle(1))), Ok(refused()));
+    assert_eq!(core.current_run(), None);
 }
 
 #[test]

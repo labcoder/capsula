@@ -372,6 +372,9 @@ struct StepWait {
     /// The step's wide layout and its resident bytes, which the scene keeps once the write
     /// commits; `None` writes it uncounted.
     laid: Option<(LayoutState, usize)>,
+    /// Its run's recipient when the step was admitted, read once so the stored marker and the
+    /// live stamp agree even when the run closes before the write is acknowledged.
+    recipient: Option<crate::context::PictureRecipient>,
 }
 
 /// The scene a pending step goes into.
@@ -756,6 +759,10 @@ impl Drawing {
         element: kumochi_scene::Handle,
     ) -> Option<(ThreadId, &kumochi_scene::Text, kumochi_scene::Part<'_>)> {
         let held = &self.scenes[self.live(scene)?];
+        // The ask becomes stored turn text every later model reads, so only public scenes.
+        if held.author != Author::Public {
+            return None;
+        }
         let part = held.state.part(element)?;
         Some((held.thread, &held.state.header().alt, part))
     }
