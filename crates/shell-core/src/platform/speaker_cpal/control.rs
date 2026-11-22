@@ -42,6 +42,8 @@ pub(crate) struct Control {
     #[cfg(any(test, feature = "test-support"))]
     presented_prefix: AtomicU64,
     callbacks: AtomicU64,
+    #[cfg(any(test, feature = "test-support"))]
+    stall: AtomicU64,
     overflow: AtomicBool,
     clock: OnceLock<(StreamInstant, Duration)>,
 }
@@ -102,6 +104,27 @@ impl Control {
 
     pub(crate) fn callback_count(&self) -> u64 {
         self.callbacks.load(Ordering::Relaxed)
+    }
+
+    /// How long the worker waits for a callback before it recovers the route.
+    #[cfg_attr(
+        not(any(test, feature = "test-support")),
+        expect(
+            clippy::unused_self,
+            reason = "only fixture devices override the stall"
+        )
+    )]
+    pub(crate) fn stall(&self) -> Duration {
+        #[cfg(any(test, feature = "test-support"))]
+        if let millis @ 1.. = self.stall.load(Ordering::Relaxed) {
+            return Duration::from_millis(millis);
+        }
+        crate::speaker::STALL
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn set_stall(&self, millis: u64) {
+        self.stall.store(millis, Ordering::Relaxed);
     }
 
     pub(super) fn handed(&self) -> u64 {

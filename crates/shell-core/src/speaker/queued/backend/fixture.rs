@@ -6,6 +6,8 @@ use crate::platform::speaker_cpal::{OutputError, playback_fixture::FakePlayback}
 use std::time::Duration;
 
 static OCCUPIED: AtomicBool = AtomicBool::new(false);
+// A test thread renders a fake device's callbacks, and a loaded machine can starve it past STALL.
+const FIXTURE_STALL_MS: u64 = 30_000;
 
 /// Serializes fake sessions through disposal of the previous session's callback and device.
 ///
@@ -93,6 +95,7 @@ pub(in crate::speaker::queued) fn spawn_fake(
         owner,
         origin,
         move |control, origin| {
+            control.set_stall(FIXTURE_STALL_MS);
             let (transport, callback) = FakePlayback::try_open(Arc::clone(control), &OCCUPIED)
                 .ok_or(OutputError::Unavailable)?;
             opened
