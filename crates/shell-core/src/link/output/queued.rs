@@ -242,7 +242,12 @@ impl OutputOwner {
     /// # Errors
     /// `Busy` on contention: keep only a claim that hasn't run out.
     pub fn speech(&self, session: u64) -> Result<Option<(RunId, Instant)>, Denied> {
-        let mut state = self.try_lock()?;
+        // Not `try_lock`: this frequent read must not use up a test's scripted contention.
+        let mut state = match self.state.try_lock() {
+            Ok(state) => state,
+            Err(std::sync::TryLockError::Poisoned(state)) => state.into_inner(),
+            Err(std::sync::TryLockError::WouldBlock) => return Err(Denied::Busy),
+        };
         Ok(state.queue(session).and_then(|(_, owner)| {
             let active = owner.active.as_ref()?;
             Some((active.id, active.speech.until()?))
