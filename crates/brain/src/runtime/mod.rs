@@ -1041,7 +1041,7 @@ impl Brain {
     /// A connection's first frames: the settings and the account, then anything owed from while
     /// no shell was connected.
     fn open(&mut self, link: &mut Link<'_, '_>) -> Result<(), Ended> {
-        link.queued_silent = link.registration.is_some() && !self.config.view().talk_back;
+        link.queued_talk_back = link.registration.map(|_| self.config.view().talk_back);
         self.settings_now(link).map_err(|Full| Ended::Lost)?;
         self.pump_settings(Some(link)).map_err(|Full| Ended::Lost)?;
         self.account_input(AccountInput::Connected, Some(link))
@@ -1769,7 +1769,8 @@ struct Link<'a, 't> {
     ready: &'a Notify,
     tap: &'t mut Tap,
     registration: Option<&'a Cell<Registration>>,
-    queued_silent: bool,
+    /// The pair's opening Talk-back choice, until its first change in either direction.
+    queued_talk_back: Option<bool>,
     /// The snapshots still to send, once `Scenes` has gone.
     recovery: Option<Recovery>,
     /// Page replies waiting for room in the data queue.
@@ -1789,7 +1790,7 @@ impl<'a, 't> Link<'a, 't> {
             ready,
             tap,
             registration: None,
-            queued_silent: false,
+            queued_talk_back: None,
             recovery: None,
             held_pages: VecDeque::new(),
         }

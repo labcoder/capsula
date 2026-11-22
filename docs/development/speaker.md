@@ -399,9 +399,11 @@ sequenceDiagram
 ## The output owner
 
 A queued pair can lend the capture inhibit only after its exact logical output is registered,
-with Talk-back and Show Screen confirmed off and no pending change to either. Its claim is tied
-to that pair and logical output generation. It does not pause or start a speaker, and cannot use
-registration as proof that an earlier output or microphone retired.
+with Show Screen confirmed off and no pending change. With Talk-back on, the pair must be Plain,
+with no typed turn reserved, no draining predecessor, and the previous run's `SpeechStopped`
+accepted by the control queue; while the inhibit is held, no typed turn can reserve the pair.
+Its claim is tied to that pair and logical output generation. It does not pause or start a
+speaker, and cannot use registration as proof that an earlier output or microphone retired.
 
 `link::output::OutputOwner` is one per link, in its shared state, and the only place that knows
 whether a session has an output and whether an earlier generation still owes audio.
