@@ -26,6 +26,7 @@ use kumochi_protocol::message::MicPcm;
 use kumochi_protocol::message::{GestureId, HOLD_START_TIMEOUT_MS};
 use zeroize::Zeroize;
 
+#[cfg(windows)]
 pub(super) use pcm::{Format, Packetizer, Render, Sample};
 
 /// The capture pump's sleep while the endpoint is empty, one wire chunk long; the reaper and
@@ -63,6 +64,9 @@ pub enum MicError {
     Deadline,
     #[error("microphone is unavailable")]
     Unavailable,
+    #[cfg(not(windows))]
+    #[error("native microphone capture is unsupported on this platform")]
+    Unsupported,
     #[error("microphone format is unsupported")]
     Format,
     #[error("microphone data is discontinuous")]
@@ -497,6 +501,7 @@ impl MicOwner {
     }
 
     /// Starts a generation whose single start was claimed (see [`Generation::reserve`]).
+    #[cfg(windows)]
     pub fn start_reserved(
         mut reserved: Reserved,
         session: Arc<AtomicBool>,
@@ -508,6 +513,11 @@ impl MicOwner {
             });
         }
         Self::spawn(generation, session, super::windows::microphone::capture)
+    }
+
+    #[cfg(not(windows))]
+    pub fn start_reserved(_: Reserved, _: Arc<AtomicBool>) -> Result<Self, MicError> {
+        Err(MicError::Unsupported)
     }
 
     #[cfg(any(test, feature = "test-support"))]

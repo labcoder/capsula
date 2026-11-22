@@ -93,6 +93,8 @@ pub enum OutputError {
     /// The output cannot be opened or continued.
     #[error("output unavailable")]
     Unavailable,
+    #[error("native audio output is unsupported on this platform")]
+    Unsupported,
     /// The worker must retain this packet and retry after a callback recycles a block.
     #[error("output blocks are full")]
     Full,
@@ -204,6 +206,9 @@ impl BackendStream {
         control: &Arc<Control>,
         origin: Instant,
     ) -> Result<(Self, Transport), OutputError> {
+        if cfg!(target_os = "linux") {
+            return Err(OutputError::Unsupported);
+        }
         let device = cpal::default_host()
             .default_output_device()
             .ok_or(OutputError::Unavailable)?;
