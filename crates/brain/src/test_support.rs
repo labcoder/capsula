@@ -4,6 +4,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use kumochi_protocol::constants;
 use kumochi_protocol::message::ThreadId;
 
@@ -64,6 +65,37 @@ impl Scratch {
     /// a fresh store creates.
     pub(crate) fn config(&self) -> Config {
         Config::load(Some(self.case.clone()), ThreadId(1))
+    }
+}
+
+pub(crate) fn has_picture_marker(bytes: &[u8], jpeg: &[u8]) -> bool {
+    let marker = &jpeg[3..jpeg.len() - 2];
+    let contains = |needle: &[u8]| bytes.windows(needle.len()).any(|part| part == needle);
+    if contains(marker) || contains(format!("{marker:?}").trim_matches(['[', ']']).as_bytes()) {
+        return true;
+    }
+    (0..3).any(|alignment| {
+        let mut padded = vec![0; alignment];
+        padded.extend_from_slice(marker);
+        let encoded = STANDARD.encode(padded);
+        let start = if alignment == 0 { 0 } else { 4 };
+        let end = (alignment + marker.len()) / 3 * 4;
+        contains(&encoded.as_bytes()[start..end])
+    })
+}
+
+pub(crate) fn fixture_has_picture_marker(path: &Path, jpeg: &[u8]) -> bool {
+    match std::fs::symlink_metadata(path) {
+        Ok(meta) if crate::platform::test_is_link(&meta) => false,
+        Ok(meta) if meta.is_dir() => std::fs::read_dir(path)
+            .expect("owned test directory")
+            .any(|entry| fixture_has_picture_marker(&entry.expect("fixture entry").path(), jpeg)),
+        Ok(meta) if meta.is_file() => {
+            has_picture_marker(&std::fs::read(path).expect("owned test file"), jpeg)
+        }
+        Ok(_) => false,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => false,
+        Err(error) => panic!("fixture cannot be inspected: {error}"),
     }
 }
 

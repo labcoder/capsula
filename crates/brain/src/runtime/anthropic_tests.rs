@@ -1,5 +1,6 @@
 use std::sync::{Arc, Mutex};
 
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use kumochi_protocol::message::{Action, ErrorKey, KeyView, ScreenChoice};
 use serde_json::{Value, json};
 
@@ -59,10 +60,35 @@ fn answers(text: &str) -> Vec<u8> {
     ])
 }
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "one real shell session from catalog to transcript"
-)]
+fn replay_brain(scratch: &Scratch, store: FakeStore, peer: Scripted, count: u32) -> Brain {
+    let lock = scratch.db().with_file_name("offline-key-runtime.lock");
+    let worker = Worker::new(
+        Box::new(move || Vault::with_service(store.clone(), "offline-key-runtime", &lock)),
+        Arc::new(FixedClock(0)),
+    );
+    let mut accounts = Accounts::spawn_unconfigured(worker, test_support::net()).expect("worker");
+    accounts
+        .connections
+        .use_test_transport(Transport::offline(peer, 1, count));
+    let mut brain = test_support::brain_with(scratch, "", accounts);
+    brain.compact_at = u64::MAX;
+    brain
+}
+
+fn seed_key(scratch: &Scratch) -> FakeStore {
+    let store = FakeStore::default();
+    let lock = scratch.db().with_file_name("offline-key-runtime.lock");
+    Vault::with_service(store.clone(), "offline-key-runtime", &lock)
+        .expect("fake vault")
+        .save_anthropic_key(KEY.as_bytes())
+        .expect("synthetic key");
+    std::fs::write(
+        scratch.db().with_file_name(kumochi_protocol::constants::CONFIG_FILE),
+        format!("default_model = {{ connection = \"AnthropicKey\", model = \"{MODEL}\", effort = \"Medium\" }}\n"),
+    ).expect("settings");
+    store
+}
+
 async fn play(
     scratch: &Scratch,
     store: FakeStore,
@@ -77,17 +103,7 @@ async fn play(
             .collect(),
         ..Script::default()
     })));
-    let lock = scratch.db().with_file_name("offline-key-runtime.lock");
-    let worker = Worker::new(
-        Box::new(move || Vault::with_service(store.clone(), "offline-key-runtime", &lock)),
-        Arc::new(FixedClock(0)),
-    );
-    let mut accounts = Accounts::spawn_unconfigured(worker, test_support::net()).expect("worker");
-    accounts
-        .connections
-        .use_test_transport(Transport::offline(peer.clone(), 1, count));
-    let mut brain = test_support::brain_with(scratch, "", accounts);
-    brain.compact_at = u64::MAX;
+    let mut brain = replay_brain(scratch, store, peer.clone(), count);
     let ((control, data), mut shell) = duplex();
     let recording = scratch
         .db()
@@ -181,16 +197,7 @@ async fn play(
 #[tokio::test]
 async fn routed_key_rounds_continue_once_and_replay_only_under_the_verified_tag() {
     let scratch = Scratch::new("offline-key-round-owner");
-    let store = FakeStore::default();
-    let lock = scratch.db().with_file_name("offline-key-runtime.lock");
-    Vault::with_service(store.clone(), "offline-key-runtime", &lock)
-        .expect("fake vault")
-        .save_anthropic_key(KEY.as_bytes())
-        .expect("synthetic key");
-    std::fs::write(
-        scratch.db().with_file_name(kumochi_protocol::constants::CONFIG_FILE),
-        format!("default_model = {{ connection = \"AnthropicKey\", model = \"{MODEL}\", effort = \"Medium\" }}\n"),
-    ).expect("settings");
+    let store = seed_key(&scratch);
     let sent = Box::pin(play(
         &scratch,
         store.clone(),
@@ -247,6 +254,253 @@ async fn routed_key_rounds_continue_once_and_replay_only_under_the_verified_tag(
     for omitted in [CALL, SIG_1, SIG_2] {
         assert!(!restarted[0].contains(omitted));
     }
+}
+
+const KEY_PICTURE: &[u8] = b"\xff\xd8\xffoffline-key-picture-sentinel-91\xff\xd9";
+const PICTURE_WAIT: Duration = Duration::from_secs(10);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PictureEnd {
+    Success,
+    ProviderError,
+    Stop,
+    Quit,
+}
+
+async fn submit_pictured_hold(brain: &mut Brain) {
+    use crate::context::{Origin, Screen};
+    use crate::coordinator::{Effect, HoldKey, PictureRoutes};
+    use kumochi_protocol::message::GestureId;
+
+    brain
+        .coordinator
+        .set_pictures(PictureRoutes::new(true, false));
+    timeout(PICTURE_WAIT, async {
+        while brain.account.connections.anthropic() != KeyView::Ready {
+            let event = brain.account.next().await;
+            brain.account_input(event, None).expect("account event");
+        }
+    })
+    .await
+    .expect("the offline catalog is ready");
+    let read = brain
+        .coordinator
+        .prepare_hold(
+            HoldKey {
+                epoch: 0,
+                gesture: GestureId(1),
+            },
+            Some(ThreadId(1)),
+            1,
+            brain.snapshot(Origin::Kumo),
+            Arc::default(),
+        )
+        .expect("admit the held turn");
+    brain
+        .apply(vec![Effect::Store(read)], None)
+        .expect("read the hold");
+    let Some(Input::HoldPrepared {
+        result: Ok(hold), ..
+    }) = timeout(PICTURE_WAIT, brain.inputs.recv())
+        .await
+        .expect("held snapshot")
+    else {
+        panic!("the store did not prepare the held turn");
+    };
+    let image = crate::screen::ScreenContext::fixture(KEY_PICTURE);
+    let geometry = image.geometry();
+    let effects = brain
+        .coordinator
+        .submit_hold(
+            hold,
+            "look at this".into(),
+            Some(Screen::Picture(image.into_jpeg(), None, geometry)),
+        )
+        .expect("submit the pictured hold");
+    brain.apply(effects, None).expect("start the hold");
+}
+
+fn assert_key_picture_not_retained(scratch: &Scratch, captured: &test_support::Captured) {
+    assert!(
+        !test_support::fixture_has_picture_marker(scratch.dir(), KEY_PICTURE),
+        "the key route retained the picture in owned scratch"
+    );
+    assert!(
+        !test_support::has_picture_marker(captured.text().as_bytes(), KEY_PICTURE),
+        "the key route logged the picture"
+    );
+}
+
+#[expect(
+    clippy::too_many_lines,
+    reason = "one held request from send to durable history"
+)]
+async fn pictured_key_replay(ending: PictureEnd) {
+    use crate::coordinator::StoreOp;
+    use crate::runtime::{Quit, Seen};
+
+    let captured = test_support::Captured::default();
+    let _logs = captured.install();
+    let scratch = Scratch::new("offline-key-picture-lifetime");
+    let store = seed_key(&scratch);
+    let catalog = json!({
+        "data": [{"type": "model", "id": MODEL, "display_name": "Synthetic model",
+                  "capabilities": {"image_input": {"supported": true}}}],
+        "has_more": false
+    });
+    let peer = Scripted(Arc::new(Mutex::new(Script {
+        responses: [http("application/json", &catalog.to_string())].into(),
+        ..Script::default()
+    })));
+    let mut brain = replay_brain(&scratch, store.clone(), peer.clone(), 1);
+    let mut observed = brain.observe();
+    submit_pictured_hold(&mut brain).await;
+    let (reader, mut reply) = tokio::io::duplex(4096);
+    peer.0.lock().expect("peer").reader = Some(Box::new(reader));
+    let upload = async {
+        let encoded = STANDARD.encode(KEY_PICTURE);
+        loop {
+            {
+                let script = peer.0.lock().expect("peer");
+                if let Some(post) = script.requests.get(1).filter(|post| post.ends_with(b"}")) {
+                    let post = std::str::from_utf8(post).expect("UTF-8 Messages request");
+                    let (_, body) = post.split_once("\r\n\r\n").expect("HTTP headers");
+                    assert!(post.starts_with("POST /v1/messages "));
+                    assert_eq!(body.matches("\"type\":\"image\"").count(), 1);
+                    assert_eq!(body.matches(encoded.as_str()).count(), 1);
+                    assert_eq!(
+                        script.drops, 1,
+                        "only the catalog is closed before termination"
+                    );
+                    return post.len();
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    };
+    let sent = tokio::select! {
+        () = brain.idle() => unreachable!("idle does not return"),
+        sent = timeout(PICTURE_WAIT, upload) => sent.expect("pictured upload reached the peer"),
+    };
+
+    let closed = async {
+        loop {
+            if peer.0.lock().expect("peer").drops == 2 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    };
+    if ending == PictureEnd::Quit {
+        assert_eq!(
+            brain.quit(tokio::time::Instant::now() + PATIENCE).await,
+            Quit::Complete
+        );
+        timeout(PICTURE_WAIT, closed)
+            .await
+            .expect("Quit closed the pictured POST");
+    } else {
+        match ending {
+            PictureEnd::Success => reply.write_all(&answers("Seen.")).await.expect("answer"),
+            PictureEnd::ProviderError => reply
+                .write_all(&sse(&[
+                    json!({"type": "error", "error": {"type": "api_error"}}),
+                ]))
+                .await
+                .expect("provider error"),
+            PictureEnd::Stop => brain.offline(Input::Stop {
+                run: RunId(1),
+                revealed: Vec::new(),
+            }),
+            PictureEnd::Quit => unreachable!(),
+        }
+        let ended = async {
+            while !matches!(
+                observed.recv().await.expect("runtime observation"),
+                Seen::StoreOpQueued(StoreOp::EndRun { run: RunId(1), .. })
+            ) {}
+        };
+        tokio::select! {
+            () = brain.idle() => unreachable!("idle does not return"),
+            ended = timeout(PICTURE_WAIT, async { tokio::join!(ended, closed); }) =>
+                ended.expect("run ended and closed the pictured POST"),
+        }
+        brain.close().await;
+    }
+    {
+        let script = peer.0.lock().expect("peer");
+        assert_eq!((script.starts, script.drops), (2, 2));
+        assert_eq!(
+            script.requests[1].len(),
+            sent,
+            "no later upload after termination"
+        );
+    }
+    assert_eq!(
+        reply
+            .write_all(b"x")
+            .await
+            .expect_err("closed response pipe")
+            .kind(),
+        std::io::ErrorKind::BrokenPipe
+    );
+
+    let db = Store::open(&scratch.db()).expect("reopen durable store");
+    let (state, reason, screen): (String, Option<String>, String) = db
+        .conn_for_tests()
+        .query_row(
+            "SELECT state, reason, screen FROM runs WHERE id = 1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .expect("the pictured turn");
+    let expected = match ending {
+        PictureEnd::Success => ("done", None),
+        PictureEnd::ProviderError => ("failed", Some("engine")),
+        PictureEnd::Stop => ("interrupted", Some("stop")),
+        PictureEnd::Quit => ("interrupted", Some("shell_lost")),
+    };
+    assert_eq!((state.as_str(), reason.as_deref()), expected);
+    assert_eq!(screen, "screen", "history records only that it was sent");
+    drop(db);
+    let next = Box::pin(play(
+        &scratch,
+        store,
+        &[(1, 2, "after restart")],
+        vec![answers("Again.")],
+    ))
+    .await;
+    assert_eq!(next.len(), 1);
+    assert!(next[0].contains("after restart") && next[0].contains("look at this"));
+    if ending == PictureEnd::Success {
+        assert!(next[0].contains("Seen."));
+    }
+    assert!(
+        !next[0].contains("\"type\":\"image\"")
+            && !test_support::has_picture_marker(next[0].as_bytes(), KEY_PICTURE),
+        "the reopened request contained the picture"
+    );
+    assert_key_picture_not_retained(&scratch, &captured);
+}
+
+#[tokio::test]
+async fn pictured_key_success_reopens_with_only_text_and_a_screen_mark() {
+    Box::pin(pictured_key_replay(PictureEnd::Success)).await;
+}
+
+#[tokio::test]
+async fn pictured_key_provider_error_closes_without_retaining_the_picture() {
+    Box::pin(pictured_key_replay(PictureEnd::ProviderError)).await;
+}
+
+#[tokio::test]
+async fn pictured_key_stop_closes_the_post_without_retaining_the_picture() {
+    Box::pin(pictured_key_replay(PictureEnd::Stop)).await;
+}
+
+#[tokio::test]
+async fn pictured_key_quit_closes_the_post_without_retaining_the_picture() {
+    Box::pin(pictured_key_replay(PictureEnd::Quit)).await;
 }
 
 /// A task's end takes the run's last attempt for its title; the title write hands over to the same

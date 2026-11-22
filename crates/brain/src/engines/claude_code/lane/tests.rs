@@ -156,15 +156,19 @@ fn base_dir() -> PathBuf {
 /// Claude Code keeps a session's pictures, then waits for the base's `release` and exits: `crash`
 /// with an access violation's status, any other HOW with 0. Unreleased, it waits up to 60 s.
 fn picture(how: &str) -> i32 {
-    let images = PathBuf::from(std::env::var_os("CLAUDE_CODE_TMPDIR").expect("the launch sets it"))
-        .join("images");
-    fs::create_dir(&images).expect("an images folder");
-    fs::write(images.join("picture.jpg"), PICTURE_JPEG).expect("the picture");
+    keep_picture();
     let deadline = Instant::now() + Duration::from_secs(60);
     while !base_dir().join("release").exists() && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(10));
     }
     if how == "crash" { -1_073_741_819 } else { 0 }
+}
+
+fn keep_picture() {
+    let images = PathBuf::from(std::env::var_os("CLAUDE_CODE_TMPDIR").expect("the launch sets it"))
+        .join("images");
+    fs::create_dir(&images).expect("an images folder");
+    fs::write(images.join("picture.jpg"), PICTURE_JPEG).expect("the picture");
 }
 
 /// A question: `echo` copies stdin to stdout and logs each read's length to `echo.log`,
@@ -282,6 +286,11 @@ fn replay() {
                     check_picture_seed(&value);
                     fs::write(base.join(format!("picture-shape.{ordinal}")), b"1")
                         .expect("shape passed");
+                    continue;
+                }
+                "!keep-picture" => {
+                    check_picture_seed(&value);
+                    keep_picture();
                     continue;
                 }
                 "!exit" => return,

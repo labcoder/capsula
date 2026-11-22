@@ -1093,9 +1093,9 @@ async fn a_failed_termination_keeps_everything() {
 /// the next sweep (`a_restarted_lane_sweeps_leftover_launches`).
 #[tokio::test]
 async fn a_picture_in_the_childs_temp_goes_with_its_launch() {
-    for how in ["exit", "crash", "stop"] {
+    for how in ["shutdown", "exit", "crash", "stop"] {
         let base = Base::new("launch-temp-picture");
-        let lane = found(&base, &format!("picture:{how}")).await;
+        let mut lane = found(&base, &format!("picture:{how}")).await;
         let (start, mut launch) = admit(question(Duration::from_secs(20))).expect("a launch id");
         let control = start.control();
         queue(&lane, start);
@@ -1106,11 +1106,16 @@ async fn a_picture_in_the_childs_temp_goes_with_its_launch() {
                 .any(|(path, _)| path.ends_with(r"tmp\images\picture.jpg"))
         };
         until("the picture is in the launch's temp", kept).await;
-        if how == "stop" {
-            assert_eq!(launch.lease().revoke(), Revoked::Idle);
-        } else {
-            fs::write(base.0.join("release"), b"").expect("release the child");
-            until("the exit ends it", || control.is_ended()).await;
+        match how {
+            "stop" => assert_eq!(launch.lease().revoke(), Revoked::Idle),
+            "shutdown" => {
+                assert!(lane.close(tokio::time::Instant::now() + WAIT).await);
+                assert!(!kept(), "lane shutdown removed the picture before join");
+            }
+            _ => {
+                fs::write(base.0.join("release"), b"").expect("release the child");
+                until("the exit ends it", || control.is_ended()).await;
+            }
         }
         assert_eq!(end(launch).await, Teardown::Done, "{how}");
         assert!(launch_dirs(&base).is_empty(), "{how}");
@@ -1148,17 +1153,32 @@ async fn a_child_that_exits_or_lingers_is_ended_with_its_job() {
 #[tokio::test]
 async fn a_restarted_lane_sweeps_leftover_launches() {
     let base = Base::new("launch-sweep");
-    let file = leftover(&base, "0123456789abcdef0123456789abcdef");
+    let picture = |hex| {
+        let images = engine_dir(&base).join(hex).join("tmp").join("images");
+        owned_dirs(&base, &images);
+        let file = images.join("picture.jpg");
+        fs::write(
+            &file,
+            crate::engines::claude_code::lane::tests::PICTURE_JPEG,
+        )
+        .expect("an abandoned picture file");
+        file
+    };
+    let file = picture("0123456789abcdef0123456789abcdef");
     let mut lane = found(&base, "out").await;
+    assert!(!file.exists(), "restart swept the abandoned picture");
     assert!(launch_dirs(&base).is_empty(), "swept");
-    let file_again = leftover(&base, "0123456789abcdef0123456789abcdee");
+    let file_again = picture("0123456789abcdef0123456789abcdee");
     let held = locked(&file_again);
     assert!(matches!(version(&mut lane).await, Ok(Outcome::Version(_))));
     assert!(file_again.exists(), "a locked leftover stays");
     drop(held);
     assert!(matches!(version(&mut lane).await, Ok(Outcome::Version(_))));
     assert!(launch_dirs(&base).is_empty());
-    assert!(!file.exists());
+    assert!(
+        !file_again.exists(),
+        "the next sweep retried the locked picture"
+    );
 }
 
 /// Claude Code's session record and MCP log go at the next sweep, and nothing beside them: not
