@@ -325,10 +325,10 @@ impl Pages<'_> {
                      END END END
                  END,
                  CASE WHEN e.kind IN ('draft', 'action') THEN substr(CAST(e.body AS BLOB), 1, 33) END,
-                 CASE WHEN e.kind = 'user' THEN (SELECT r.screen FROM runs r WHERE r.id = e.run) END,
-                 CASE WHEN e.kind = 'user' THEN (SELECT r.state = 'active' FROM runs r WHERE r.id = e.run) END
+                 r.screen, r.state = 'active', r.state = 'failed'
                  FROM events e
              JOIN threads t ON t.id = e.thread AND t.state = 'live'
+             LEFT JOIN runs r ON e.kind = 'user' AND r.id = e.run AND r.thread = e.thread
              WHERE e.thread = ?1 AND (?2 IS NULL OR e.id < ?2)
              AND e.kind NOT IN ('scene_begin', 'scene_cleared', 'scene_cut', 'revealed',
                                 'output_item', 'tool_result')
@@ -359,12 +359,17 @@ impl Pages<'_> {
                     let kind = match kind.as_str() {
                         "user" => {
                             let active: Option<bool> = row.get(7)?;
-                            row.get::<_, Option<String>>(6)?
+                            let failed = row.get::<_, Option<bool>>(8)? == Some(true);
+                            let screen = row
+                                .get::<_, Option<String>>(6)?
                                 .as_deref()
-                                .and_then(|screen| super::held::shown(screen, active))
-                                .map_or(PageEventKind::User, |screen| PageEventKind::HeldTurn {
-                                    screen,
-                                })
+                                .and_then(|screen| super::held::shown(screen, active));
+                            match (failed, screen) {
+                                (false, None) => PageEventKind::User,
+                                (false, Some(screen)) => PageEventKind::HeldTurn { screen },
+                                (true, None) => PageEventKind::FailedUser,
+                                (true, Some(screen)) => PageEventKind::FailedHeldTurn { screen },
+                            }
                         }
                         "assistant_text" => PageEventKind::AssistantText,
                         "scene_step" => row.get::<_, Option<i64>>(4)?.map_or(

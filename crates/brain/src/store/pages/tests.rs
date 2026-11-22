@@ -124,6 +124,90 @@ fn events(store: &Store, thread: ThreadId, before: Option<EventId>) -> DataToShe
 }
 
 #[test]
+fn saved_failure_marks_only_its_user_event_and_preserves_partial_history() {
+    use crate::store::{Failure, Interruption};
+    use kumochi_protocol::message::HeldScreen;
+
+    let scratch = Scratch::new("pages-saved-failure");
+    let mut store = Store::open(&scratch.db()).expect("store");
+    store.recover().expect("main thread");
+    let thread = store.main_thread().expect("main thread");
+    let completed = RunId(1);
+    let typed = RunId(2);
+    let held = RunId(3);
+    let stopped = RunId(4);
+    let crashed = RunId(5);
+    for (run, screen, text, end) in [
+        (completed, None, "complete", Some(RunEnd::Done)),
+        (typed, None, "typed", Some(RunEnd::Failed(Failure::Engine))),
+        (
+            held,
+            Some(HeldScreen::Screen),
+            "held",
+            Some(RunEnd::Failed(Failure::Engine)),
+        ),
+        (
+            stopped,
+            None,
+            "stopped",
+            Some(RunEnd::Interrupted(Interruption::Stop)),
+        ),
+        (crashed, None, "waiting", None),
+    ] {
+        store
+            .begin_held_turn(thread, None, run, text, screen)
+            .expect("saved user turn");
+        if run == held {
+            store.sent_screen(run).expect("saved screen metadata");
+        }
+        if let Some(end) = end {
+            let partial = [NewEvent {
+                kind: EventKind::AssistantText,
+                text: Some("partial answer"),
+                body: None,
+            }];
+            let reply = if run == typed { &partial[..] } else { &[] };
+            store.end_run(thread, run, reply, end).expect("saved end");
+        }
+    }
+    let DataToShell::Page { events: rows, .. } = events(&store, thread, None) else {
+        panic!("history page");
+    };
+    assert_eq!(rows[0].kind, PageEventKind::User);
+    drop(store);
+
+    let mut store = Store::open(&scratch.db()).expect("reopen");
+    assert_eq!(store.recover().expect("recovery").crashed_runs, 1);
+    let DataToShell::Page {
+        events: rows,
+        before: None,
+        ..
+    } = events(&store, thread, None)
+    else {
+        panic!("one complete history page");
+    };
+    assert_eq!(
+        rows.iter()
+            .map(|event| (event.run, event.kind, event.text.as_str()))
+            .collect::<Vec<_>>(),
+        [
+            (Some(crashed), PageEventKind::FailedUser, "waiting"),
+            (Some(stopped), PageEventKind::User, "stopped"),
+            (
+                Some(held),
+                PageEventKind::FailedHeldTurn {
+                    screen: HeldScreen::Screen,
+                },
+                "held",
+            ),
+            (Some(typed), PageEventKind::AssistantText, "partial answer"),
+            (Some(typed), PageEventKind::FailedUser, "typed"),
+            (Some(completed), PageEventKind::User, "complete"),
+        ]
+    );
+}
+
+#[test]
 fn keyset_pages_keep_original_threads_once_while_new_threads_arrive() {
     let scratch = Scratch::new("pages-keyset");
     let mut store = Store::open(&scratch.db()).expect("store");
