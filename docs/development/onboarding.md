@@ -17,8 +17,10 @@ brain decides whether onboarding is owed and remembers which steps were complete
   step is recorded with `CompleteOnboardingStep` in its own slot (`Slot::OnboardingStep`), which
   never counts as the finish, so a record queued just before it can't refuse it.
 - `shell-core/onboarding.rs` is the plain state: the step, the field whose save it waits for (the
-  account step has none), and whether a finish is queued. It holds no text, so it has nothing to
-  log.
+  account step has none), whether a finish is queued, and whether the last one couldn't be sent
+  (`finish_unsent`, cleared by a queued finish or the next online Continue). It also decides how
+  the window goes (`leave`, below) and that only leaving the account step hands sign-ins over. It
+  holds no text, so it has nothing to log.
 - `shell/sign_in_mark.rs` is a sign-in one surface asked for, until it ends: `Settled`,
   `Open { generation, shown }` or `CancelOwed`. `Presence` keeps one per connection for the
   window (`onboarding_chatgpt`, `onboarding_claude`) and one for Settings; `presence/sign_ins.rs`
@@ -76,6 +78,12 @@ flowchart TD
 - **Closing halfway** (Finish later, Esc, the native close) saves a valid name still being edited,
   as closing Settings does, drops one that can't be sent, and sends no finish. Onboarding is then
   put off for the run (`ThisRun::PutOff`), as it is when the window fails to open.
+- **The way out is one ordered plan.** `Onboarding::leave` returns the steps the shell runs in
+  order. `Exit::Dismiss`: save and drop an edited name, cancel this window's sign-ins, put off,
+  close. `Exit::Close(landing)`: drop the step's draft, hand the sign-ins over, close, then land.
+  So a name is saved before the sign-ins are cancelled, and the hand-over comes before anything
+  opens. Closing removes the native window first and only then lets go of it and unpauses holds,
+  as hiding the typing box does: a close that fails keeps both, and a later one can try again.
 - **Nothing shows over it.** While the window shows, the peek stays closed (`panels::Owner::Onboarding`),
   a double-tap opens nothing before the shortcut step, and the taskbar button and a dock press
   bring the window to the front.
