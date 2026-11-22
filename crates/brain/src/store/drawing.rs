@@ -123,9 +123,10 @@ impl Store {
                 revision,
                 layout_version,
                 step,
+                protected,
             } => write_step(
                 &tx,
-                (*thread, *run),
+                (*thread, *run, *protected),
                 (target, clear),
                 (*revision, *layout_version),
                 step,
@@ -157,7 +158,7 @@ impl Store {
 
 fn write_step(
     conn: &Connection,
-    (thread, run): (ThreadId, RunId),
+    (thread, run, protected): (ThreadId, RunId, bool),
     (target, clear): (&Target, &[SceneId]),
     (revision, layout_version): (u32, u32),
     step: &Step,
@@ -213,6 +214,10 @@ fn write_step(
         None,
         Some(&body),
         now,
+    )?;
+    conn.execute(
+        "UPDATE runs SET protected = max(coalesce(protected, 0), ?2) WHERE id = ?1",
+        params![run, protected],
     )?;
     for &victim in clear {
         super::scenes::clear(conn, victim, now)?;
@@ -409,6 +414,7 @@ fn recover(conn: &Connection) -> Result<DrawingRecovery, StoreError> {
                 thread: ThreadId(row_id(thread)),
                 header: reading.header,
                 log: reading.log,
+                public: public(conn, begin, thread)?,
             }),
             Some(_) => {
                 skipped(begin);
@@ -418,6 +424,19 @@ fn recover(conn: &Connection) -> Result<DrawingRecovery, StoreError> {
         }
     }
     Ok(recovery)
+}
+
+/// Whether every run that wrote the scene begun at `begin` is marked public; an older or unmarked
+/// run isn't.
+fn public(conn: &Connection, begin: i64, thread: i64) -> Result<bool, StoreError> {
+    Ok(conn.query_row(
+        "SELECT NOT EXISTS (SELECT 1 FROM events e LEFT JOIN runs r ON r.id = e.run
+             WHERE (e.id = ?1 OR (e.thread = ?2 AND e.id > ?1 AND e.kind = 'scene_step'
+                 AND CASE WHEN json_valid(e.body) THEN json_extract(e.body, '$.scene') END = ?1))
+             AND r.protected IS NOT 0)",
+        params![begin, thread],
+        |row| row.get(0),
+    )?)
 }
 
 /// A candidate's header; `None`, logged, when it's too big, doesn't decode or names another

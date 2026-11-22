@@ -278,9 +278,8 @@ don't. A round that completes on `tool_use` with calls made ready is a tool roun
 stop reason and calls fails locally (`Protocol`) and keeps nothing. A tool round's calls go out as
 `KeyCall` events, each an `encode::ToolUse`: the type, id and name of a `tool_use` block of the
 reply, and its input as the JSON text the reader read, nothing else. They must be the calls made
-ready, in order. The store takes this route's items only as `ToolUse` (`append_key_round`;
-`append_round` refuses the route) and writes, reads and re-encodes the input byte for byte, so no
-generic JSON parse can change it. Projected and stored call inputs have the same depth limit:
+ready, in order. The store takes this route's items only as `ToolUse` (`append_round` refuses the
+route). Ordinary calls retain their input byte for byte. Projected and stored call inputs have the same depth limit:
 at most 96 nested objects and arrays, including the input object, so the enclosing Messages
 request fits the JSON parser's recursion budget. The reply, with the request it answered, stays
 in `Live` for the run's next round.
@@ -296,6 +295,37 @@ Once a key run has a send grant, withdrawal of a carried history source or scree
 and closes its fence. Rebuild, Stop, link loss, credential mutation and terminal completion retire
 the owner, including any reply it held between rounds. A late task cannot put one back.
 
-Later turns replay only complete typed groups under the same connection tag. If the tag changed
-on replacement or restart, or a group is malformed, the transcript text remains usable without
-any of those native items. Production still resolves the key route to Unserved.
+A Key run whose granted write carries protected material, a picture or a protected drawing
+digest, is marked for the rest of the run, even after the picture is withdrawn. A later round
+resends its first request, so only the digest that request carried counts. The call ledger and native round both store a fixed result instead of
+the original result. A stored Draw call has an empty record array; other calls keep an empty
+input object because their free text can also be derived from the picture. The stored call's
+envelope records the model, outside the provider JSON. The coordinator keeps the original
+results in memory for the exact same run's continuation. Any recall result is rendered from
+its references in the continuation's read transaction, as it is for an ordinary result.
+
+Later turns replay only complete typed groups under the same connection tag. The exact
+original slug must also have a current picture fact to receive the scrubbed form of a
+pictured call and result; other slugs, or a missing fact, get an empty input and a fixed
+unavailable result with the same pairing. A changed tag or malformed group replays as
+transcript text without native items. This does not change conversation text: screen-step
+narration saved as assistant text can follow the thread through later context, recall and
+summaries. The Key picture switch stays off.
+
+The same mark stamps every scene the run draws, on the screen or an overlay, with that
+recipient: the route, verified account generation and model the protected material was sent
+to. The drawing digest lists a stamped scene only for that recipient, and only while that
+model's catalog says it takes images. Other recipients get the public line, which lists only
+scenes no protected run drew. A later step from a protected run stamps a public scene; an
+unprotected step never clears a stamp; a scene stamped for two recipients or a screen scene
+without one is in no outbound digest. A step's recipient is read once, when it is admitted,
+and both its stored marker and its live stamp use that value, so a run that ends while the
+step is being written can't leave the scene public. After a restart a scene is public only when every run
+that drew it is marked public ([store](store.md), `runs.protected`); any other stays visible
+and reaches no model. So a protected scene leaves context after a restart, even for the model
+it was drawn for. Scenes from before that marker lose their model context once, at the upgrade.
+Send admission rechecks
+the recipient's image fact and that it still has a visible scene. A Key continuation also
+checks the recipient of any digest in its held first request, because the continuation does
+not rebuild that request's prefix.
+This is a check at admission; metadata-only withdrawal during an admitted write is separate.

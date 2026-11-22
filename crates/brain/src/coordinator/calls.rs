@@ -122,7 +122,7 @@ impl Coordinator {
             return self.call_refused(&done.key, ToolError::TooLarge, effects);
         }
         if let Some(call) = run.ledger.read_finished(&done.key, output) {
-            effects.push(Effect::Store(StoreOp::CommitCall(call)));
+            effects.push(Effect::Store(StoreOp::CommitCall(run.stored_call(call))));
         }
         Ok(())
     }
@@ -435,6 +435,7 @@ impl Coordinator {
             }
             Step::Screen { key, draw } => self.drawing_call(thread, &key, draw, effects),
             Step::Commit(call) => {
+                let call = run.stored_call(call);
                 // Advanced at dispatch: a candidate whose reserve never commits was never seen.
                 if let LocalWrite::CreateTask { thread, .. } = &call.write {
                     self.last_thread = *thread;
@@ -459,7 +460,7 @@ impl Coordinator {
         match current.ledger.drawn(key, end) {
             dispatch::Drawn::Refused(answers) => deliver(current, answers),
             dispatch::Drawn::Commit(hash) => {
-                effects.push(Effect::Store(StoreOp::CommitCall(dispatch::CommitCall {
+                let call = current.stored_call(dispatch::CommitCall {
                     key: key.clone(),
                     thread: current.thread,
                     tool: "draw",
@@ -467,7 +468,8 @@ impl Coordinator {
                     write: LocalWrite::None,
                     output,
                     then: None,
-                })));
+                });
+                effects.push(Effect::Store(StoreOp::CommitCall(call)));
             }
             dispatch::Drawn::Stale => {}
         }
@@ -536,6 +538,15 @@ impl Coordinator {
     ) -> Result<(), Stale> {
         self.current_call(key)?.ledger.failed(key);
         self.fail(key.run, Failure::Store, effects)
+    }
+}
+
+impl Run {
+    fn stored_call(&self, mut call: dispatch::CommitCall) -> dispatch::CommitCall {
+        if self.pictured_key_model().is_some() {
+            call.output = ToolOutput::Text(dispatch::PICTURE_RESULT.to_owned());
+        }
+        call
     }
 }
 

@@ -35,6 +35,8 @@ pub(crate) const MAX_ARGS: usize = 16 * 1024;
 /// The most bytes a call's stored output may hold [guess].
 pub(crate) const MAX_OUTPUT: usize = 64 * 1024;
 
+pub(crate) const PICTURE_RESULT: &str = "Screen-derived tool result omitted.";
+
 /// Who made a call, frozen when it arrived.
 #[derive(Clone, PartialEq, Eq)]
 pub(crate) enum Caller {

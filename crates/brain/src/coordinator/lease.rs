@@ -271,6 +271,10 @@ impl Coordinator {
     /// The transport is about to send `key`'s body. It's granted only for the current run's
     /// admitted build that no delete has touched since; otherwise the body is dropped unsent,
     /// and a touched build is built again. Every ask gets an answer.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one admission orders deletes, digests, pictures and the grant"
+    )]
     pub(super) fn send_ready(
         &mut self,
         key: BuildKey,
@@ -333,6 +337,32 @@ impl Coordinator {
             return;
         }
         let sources = build.sources().to_vec();
+        let digest = build
+            .screen_digests
+            .iter()
+            .find(|recipient| {
+                run.route == Some(recipient.route)
+                    && run
+                        .snapshot
+                        .as_ref()
+                        .and_then(|snapshot| snapshot.choice.as_ref())
+                        .is_some_and(|choice| choice.model == recipient.model)
+            })
+            .cloned();
+        if let Some(recipient) = digest.as_ref().or(run.key_digest_recipient.as_ref())
+            && (!self.pictured(recipient.route, Some(&recipient.model))
+                || !self.drawing.visible_to(run.thread, recipient))
+        {
+            let carried = run.key_digest_recipient.is_some();
+            effects.push(Effect::Rebuild(SendKey::Build(key)));
+            if carried {
+                self.fail(key.run, Failure::Engine, effects)
+                    .expect("the run is current");
+            } else {
+                self.rebuild(key, &BTreeSet::new(), &pending, effects);
+            }
+            return;
+        }
         // The request handed to the engine is judged, never the run's account of its screen.
         let pictured = build.pictured();
         // A `ChatGPT` run that may have written its picture keeps every later send, such as an
@@ -353,12 +383,38 @@ impl Coordinator {
             self.rebuild_without_picture(key, &pending, effects);
             return;
         }
-        if let Some(run) = self.current.as_mut()
+        // A later Key round resends its first request, so only that round's digest went out.
+        let sent = if key.round > 1
             && run
                 .route
                 .is_some_and(|route| route.kind == ConnectionKind::AnthropicKey)
         {
-            run.key_granted = true;
+            run.key_digest_recipient.is_some()
+        } else {
+            digest.is_some()
+        };
+        let protected = pictured || sent;
+        if let Some(run) = self.current.as_mut()
+            && let Some(route) = run.route
+        {
+            if route.kind == ConnectionKind::AnthropicKey {
+                run.key_granted = true;
+                if key.round == 1 {
+                    run.key_digest_recipient = digest;
+                }
+            }
+            if protected {
+                run.picture_recipient = Some(crate::context::PictureRecipient {
+                    route,
+                    model: run
+                        .snapshot
+                        .as_ref()
+                        .and_then(|snapshot| snapshot.choice.as_ref())
+                        .expect("a protected request has a resolved model")
+                        .model
+                        .clone(),
+                });
+            }
         }
         let screen = self
             .current

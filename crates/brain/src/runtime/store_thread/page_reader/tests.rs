@@ -444,6 +444,8 @@ fn build(thread: u64, attempt: u64, choice: Option<ModelChoice>) -> StoreOp {
         first: true,
         arrived: crate::coordinator::Arrived::default(),
         drawings: crate::drawing::Digest::default(),
+        picture_models: Vec::new(),
+        key_results: Vec::new(),
     })
 }
 

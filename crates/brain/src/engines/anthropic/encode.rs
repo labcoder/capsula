@@ -19,7 +19,7 @@ use crate::connections::model::MAX_REQUEST_BYTES;
 use crate::context::{BOUND, ConnectionTag, InputItem, Jpeg, ModelRequest, Role};
 use crate::coordinator::PictureRoutes;
 use crate::engines::responses::effort;
-use crate::engines::{CallId, Opaque};
+use crate::engines::{CallId, DRAW, Opaque};
 use crate::screen::JPEG_CAP;
 
 /// Every request's output cap, including thinking; the transport's envelope requires it.
@@ -498,6 +498,12 @@ pub struct ToolUse {
     input: String,
 }
 
+#[derive(Clone, Copy)]
+pub(crate) enum KeyHistory {
+    Scrubbed,
+    Neutral,
+}
+
 impl fmt::Debug for ToolUse {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ToolUse")
@@ -543,6 +549,19 @@ impl ToolUse {
 
     pub(crate) fn id(&self) -> &str {
         &self.id
+    }
+
+    pub(crate) fn scrubbed(mut self, history: KeyHistory) -> Self {
+        let input = if matches!(history, KeyHistory::Scrubbed) && self.name == DRAW {
+            r#"{"records":[]}"#
+        } else {
+            "{}"
+        };
+        input.clone_into(&mut self.input);
+        if crate::dispatch::named(&self.name).is_none() {
+            "redacted_tool".clone_into(&mut self.name);
+        }
+        self
     }
 
     /// The block as stored and sent: an id and a name need no escaping, and the input goes as read.

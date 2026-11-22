@@ -184,7 +184,8 @@ semantic admission still refuses them.
   differs (`SizeNotPicture`). `SceneState::begin` refuses a screen header without a usable
   stamp and any other header with one. `Begin::continues` compares the stamp, so a
   continuation is stamped before it is compared. The drawings digest the model reads leaves
-  `display` out. A header's JSON has no `display` key when it has no stamp, so every other
+  `display` out and lists screen scenes only for their picture's model and sign-in, while
+  that model is known to take pictures. A header's JSON has no `display` key when it has no stamp, so every other
   surface's stored header keeps its form; the binary frames always carry the field.
 - **What it admits** (`screen::admit`, at admission): `highlight` and `callout` with a box or
   `ref` target. Everything else, `line` and `arrow` included, a point target, a callout `at`,

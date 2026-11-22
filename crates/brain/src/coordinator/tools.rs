@@ -5,7 +5,7 @@
 
 use std::fmt;
 
-use kumochi_protocol::message::{ConnectionKind, RunId, ThreadId};
+use kumochi_protocol::message::{ConnectionKind, ModelSlug, RunId, ThreadId};
 
 use super::{Coordinator, Effect, ReplyText, Stale, StoreOp};
 use crate::context::{BOUND, Route};
@@ -18,6 +18,15 @@ use crate::store::Failure;
 pub const MAX_ROUNDS: u32 = 8;
 /// The most tool calls one run may make, across its rounds [guess, from §13b].
 pub const MAX_CALLS: u32 = 16;
+
+impl super::Run {
+    pub(super) fn pictured_key_model(&self) -> Option<&ModelSlug> {
+        self.picture_recipient
+            .as_ref()
+            .filter(|recipient| recipient.route.kind == ConnectionKind::AnthropicKey)
+            .map(|recipient| &recipient.model)
+    }
+}
 /// One round's write, in one transaction: the text streamed since the last write, the round's
 /// native items in output order, then each call's answer in call order. `RoundStored`
 /// answers it.
@@ -32,6 +41,7 @@ pub struct RoundItems {
     pub(crate) items: Vec<Opaque>,
     /// The Anthropic key's calls, in output order: the only items its rounds store.
     pub(crate) key_calls: Vec<ToolUse>,
+    pub(crate) pictured_key_model: Option<ModelSlug>,
     pub(crate) calls: Vec<(CallId, ToolOutput)>,
 }
 
@@ -56,6 +66,7 @@ pub(super) struct Loop {
     /// This round's native items, with their output index.
     items: Vec<(u32, Opaque)>,
     key_calls: Vec<(u32, ToolUse)>,
+    pub(super) key_results: Vec<(CallId, ToolOutput)>,
     item_bytes: usize,
     /// The round being stored, and whether it's the run's last.
     writing: Option<(u32, bool)>,
@@ -69,6 +80,7 @@ impl fmt::Debug for Loop {
             .field("dispatched", &self.dispatched)
             .field("items", &self.items.len())
             .field("key_calls", &self.key_calls.len())
+            .field("key_results", &self.key_results.len())
             .field("item_bytes", &self.item_bytes)
             .field("writing", &self.writing)
             .finish()
@@ -318,10 +330,17 @@ impl Coordinator {
         let mut key_calls = std::mem::take(&mut current.tools.key_calls);
         key_calls.sort_by_key(|(index, _)| *index);
         current.tools.item_bytes = 0;
-        let calls = std::mem::take(&mut current.tools.open)
+        let mut calls: Vec<_> = std::mem::take(&mut current.tools.open)
             .into_iter()
             .filter_map(|open| Some((open.call, open.output?)))
             .collect();
+        let pictured_key_model = current.pictured_key_model().cloned();
+        if pictured_key_model.is_some() {
+            current.tools.key_results.clone_from(&calls);
+            for (_, output) in &mut calls {
+                *output = ToolOutput::Text(crate::dispatch::PICTURE_RESULT.to_owned());
+            }
+        }
         current.tools.dispatched = false;
         current.tools.writing = Some((round, !calling));
         effects.push(Effect::Store(StoreOp::RoundItems(RoundItems {
@@ -341,6 +360,7 @@ impl Coordinator {
                 })
                 .collect(),
             key_calls: key_calls.into_iter().map(|(_, call)| call).collect(),
+            pictured_key_model,
             calls,
         })));
         Ok(())

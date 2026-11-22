@@ -108,7 +108,15 @@ pub(crate) fn compaction(
             std::iter::from_fn(|| notes.next_if(|note| note.id < uncovered.first))
                 .map(|note| note_item(&note))
                 .collect();
-        rendered.extend(render(snapshot, run, &items, None, &mut reached)?);
+        rendered.extend(render(
+            snapshot,
+            run,
+            &items,
+            None,
+            None,
+            &[],
+            &mut reached,
+        )?);
         rendered.extend(
             std::iter::from_fn(|| notes.next_if(|note| note.id <= uncovered.last))
                 .map(|note| note_item(&note)),

@@ -18,7 +18,7 @@ fn a_screen_name_does_not_change_an_overlay_draw_live_or_cleared() {
     for cleared in [false, true] {
         for screen_name in ["unrelated", "guessed"] {
             let mut drawing = Drawing::default();
-            drawing.canvas(RunId(1), Ok(Geometry::FIXTURE));
+            drawing.canvas(RunId(1), Ok(Geometry::FIXTURE), None);
             let mut store = Store::default();
             let screen = envelope(&named(screen_name, Surface::Screen), &[mark("mark")]);
             let screen = store.run(&mut drawing, call(1, "screen", screen));
@@ -83,7 +83,7 @@ fn pending_names_join_only_the_same_surfaces_first_write() {
         (Surface::Screen, Surface::Overlay),
     ] {
         let mut drawing = Drawing::default();
-        drawing.canvas(RunId(1), Ok(Geometry::FIXTURE));
+        drawing.canvas(RunId(1), Ok(Geometry::FIXTURE), None);
         let mut store = Store::default();
         for (call, surface) in [("first", winner), ("same", winner), ("other", other)] {
             let out = store.run(&mut drawing, streamed(call, 0, &named("shared", surface)));

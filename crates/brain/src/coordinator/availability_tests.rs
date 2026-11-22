@@ -479,6 +479,7 @@ fn a_draw_the_request_didnt_offer_commits_nothing() {
             text: None,
             items: Vec::new(),
             key_calls: Vec::new(),
+            pictured_key_model: None,
             calls: vec![(
                 super::call(),
                 crate::dispatch::ToolOutput::Error(crate::dispatch::ToolError::NotHere)

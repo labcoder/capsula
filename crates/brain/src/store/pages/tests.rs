@@ -1103,6 +1103,7 @@ fn typed_scene(store: &mut Store, thread: ThreadId, run: RunId) -> SceneId {
             revision: 1,
             layout_version: 2,
             step,
+            protected: false,
         })
         .expect("typed write")
     else {

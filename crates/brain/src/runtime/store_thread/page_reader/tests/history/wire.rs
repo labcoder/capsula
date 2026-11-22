@@ -249,6 +249,8 @@ fn next_request(store: &Store, run: RunId, kind: ConnectionKind) -> Built {
             first: true,
             arrived: Arrived::of(kind, connection),
             drawings: crate::drawing::Digest::default(),
+            picture_models: Vec::new(),
+            key_results: Vec::new(),
         },
         || {},
     )

@@ -204,7 +204,9 @@ so the delete fences it passed retire (`coordinator/ask.rs`).
 `Drawing::part` looks the part up in a live scene only, never a cleared, deleted or held-gone
 one. It needs the exact `Handle` of a live `Solid` that has a label, and returns the scene's
 thread, its `alt`, and the part's current label and info: the put at the handle's revision,
-then each later *kept* `set` in order (`scene/src/state/part.rs`). A part that doesn't
+then each later *kept* `set` in order (`scene/src/state/part.rs`). Only a public scene's part
+resolves: the ask becomes stored turn text that every later model reads, so a scene stamped
+for one recipient, or restored without a public marker, doesn't. A part that doesn't
 resolve, or a thread with a delete pending or fenced, answers `TurnRefused { turn, thread:
 None }`. That takes no run id, and the debug log names only whether the ask was admitted.
 

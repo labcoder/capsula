@@ -18,7 +18,7 @@ use std::sync::Arc;
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 use kumochi_protocol::message::{
-    AssistantName, ConnectionKind, EventId, ModelChoice, RunId, ThreadId, UserName,
+    AssistantName, ConnectionKind, EventId, ModelChoice, ModelSlug, RunId, ThreadId, UserName,
 };
 use zeroize::Zeroizing;
 
@@ -64,6 +64,12 @@ pub(crate) struct ConnectionTag(pub(crate) u64);
 pub(crate) struct Route {
     pub(crate) kind: ConnectionKind,
     pub(crate) tag: ConnectionTag,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct PictureRecipient {
+    pub(crate) route: Route,
+    pub(crate) model: ModelSlug,
 }
 
 #[cfg(test)]
@@ -149,6 +155,7 @@ pub(crate) enum Body {
     Native {
         kind: Option<ConnectionKind>,
         connection: ConnectionTag,
+        screen_model: Option<ModelSlug>,
         item: Opaque,
     },
     /// The result Kumochi answered a native call with, after its round's items.
@@ -177,11 +184,13 @@ impl fmt::Debug for Body {
             Self::Native {
                 kind,
                 connection,
+                screen_model,
                 item,
             } => f
                 .debug_struct("Native")
                 .field("kind", kind)
                 .field("connection", connection)
+                .field("screen_model", screen_model)
                 .field("item", item)
                 .finish(),
             Self::Result { call, output } => f
@@ -433,7 +442,11 @@ impl ModelRequest {
     /// request: any other route refuses here. The body's ceiling is checked when it's serialised.
     #[cfg(any(test, debug_assertions))]
     pub(crate) fn attach(&mut self, image: Jpeg) -> Result<(), ImageRefused> {
-        self.insert_image(image, takes_images(self.choice.as_ref()))
+        let pictured = self
+            .choice
+            .as_ref()
+            .is_some_and(|choice| choice.connection == ConnectionKind::ChatGpt);
+        self.insert_image(image, pictured)
     }
 
     /// Adds `image` after the newest user message when `pictured`, the coordinator's answer that
@@ -549,14 +562,6 @@ impl ModelRequest {
 /// Why a hold's screen part closed without an image: the shell's class, so the line the model
 /// gets and the one the user sees can't drift.
 pub(crate) use kumochi_protocol::message::ScreenClass;
-
-/// Whether a request on `choice` lists the drawings on screen, and a live check's request takes
-/// an image: only the Responses route's.
-// shortcut: a Claude run that carries a picture still gets the drawings line without screen
-// scenes; carry the run's picture answer into the build before a Claude route is switched on.
-fn takes_images(choice: Option<&ModelChoice>) -> bool {
-    choice.is_some_and(|choice| choice.connection == ConnectionKind::ChatGpt)
-}
 
 /// Where a screen hold's picture was taken: the display's place and size on the desktop in
 /// physical pixels, its DPI, and the picture's size. Numbers about the monitor and nothing on

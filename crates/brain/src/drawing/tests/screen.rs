@@ -32,7 +32,7 @@ fn screen_call(run: u64, name: &str, begin: &str, steps: &[String]) -> Input {
 /// A drawing told run 1 may draw on `canvas`.
 fn told(canvas: Result<Geometry, NoCanvas>) -> Drawing {
     let mut drawing = Drawing::default();
-    drawing.canvas(RunId(1), canvas);
+    drawing.canvas(RunId(1), canvas, None);
     drawing
 }
 
@@ -680,7 +680,7 @@ fn a_skip_closes_the_screen_for_a_later_run_continuing_the_scene_before_its_firs
             loss: Loss::Drop,
         },
     );
-    drawing.canvas(RunId(2), Ok(Geometry::FIXTURE));
+    drawing.canvas(RunId(2), Ok(Geometry::FIXTURE), None);
     let scene = screen_scene(&drawing);
     let begun = store.run(
         &mut drawing,
@@ -794,7 +794,7 @@ fn a_skip_changes_nothing_for_a_card_and_never_replaces_an_earlier_reason() {
         screen_call(1, "b", &screen_begin("marks", ""), &[marked("s1", "x")]),
     );
     let scene = screen_scene(&drawing);
-    drawing.canvas(RunId(1), Err(NoCanvas::NoPicture));
+    drawing.canvas(RunId(1), Err(NoCanvas::NoPicture), None);
     store.run(&mut drawing, Input::SceneSkipped { scene });
     let refused = store.run(
         &mut drawing,
@@ -816,13 +816,13 @@ fn a_skip_s_changed_screen_outlasts_the_picture_announced_again_but_not_sharing_
     );
     let scene = screen_scene(&drawing);
     store.run(&mut drawing, Input::SceneSkipped { scene });
-    drawing.canvas(RunId(1), Ok(Geometry::FIXTURE));
+    drawing.canvas(RunId(1), Ok(Geometry::FIXTURE), None);
     let again = store.run(
         &mut drawing,
         screen_call(1, "c", &screen_begin("again", ""), &[marked("s2", "y")]),
     );
     assert_eq!(texts(&[&again]), [format!("drawn: []; stopped: {CHANGED}")]);
-    drawing.canvas(RunId(1), Err(NoCanvas::Off));
+    drawing.canvas(RunId(1), Err(NoCanvas::Off), None);
     let off = store.run(
         &mut drawing,
         screen_call(1, "d", &screen_begin("again", ""), &[marked("s3", "z")]),
@@ -916,6 +916,14 @@ pub(crate) fn overlay_then_screen() -> (crate::drawing::Digest, crate::drawing::
         ),
     );
     let overlay = drawing.digest(THREAD);
+    drawing.canvas(
+        RunId(1),
+        Ok(Geometry::FIXTURE),
+        Some(&crate::context::PictureRecipient {
+            route: crate::context::Route::chatgpt(7),
+            model: kumochi_protocol::message::ModelSlug::new("gpt-6-luna").unwrap(),
+        }),
+    );
     store.run(
         &mut drawing,
         screen_call(
@@ -975,4 +983,73 @@ fn the_line_without_screen_scenes_has_a_cap_of_its_own() {
     assert_eq!(off_screen[0]["objects"].as_array().map(Vec::len), Some(512));
     assert_eq!(off_screen[0]["objects"][0], json!(["o088", "text"]));
     assert_eq!(off_screen[0]["more"], json!(88));
+}
+
+fn recipient(slug: &str) -> crate::context::PictureRecipient {
+    crate::context::PictureRecipient {
+        route: crate::context::Route::chatgpt(7),
+        model: kumochi_protocol::message::ModelSlug::new(slug).unwrap(),
+    }
+}
+
+/// An overlay is its authoring runs' recipient's, as a screen scene is: one drawn only by runs
+/// that carried nothing protected goes to every model, a protected step makes it that
+/// recipient's, a later unprotected step can't undo that, and a second recipient's step makes it
+/// no model's. A protected run's step marks its store write, so a restored overlay one drew is
+/// no model's.
+#[test]
+fn an_overlay_belongs_to_what_its_authors_were_sent() {
+    let (seen, other) = (recipient("seen"), recipient("other"));
+    let mut drawing = Drawing::default();
+    let mut store = Store::default();
+    let mut draw = |drawing: &mut Drawing,
+                    run: u64,
+                    author: Option<&crate::context::PictureRecipient>,
+                    scene: &str,
+                    object: &str| {
+        drawing.author(RunId(run), author);
+        store.run(
+            drawing,
+            call(
+                run,
+                &format!("c{run}"),
+                envelope(&begin(scene, "kept_alt"), &[text(object, object)]),
+            ),
+        );
+    };
+    draw(&mut drawing, 1, None, "public_scene", "public_object");
+    draw(&mut drawing, 2, Some(&seen), "seen_scene", "seen_object");
+    let digest = drawing.digest(THREAD);
+    assert!(digest.off_screen().contains("public_object"));
+    assert!(!digest.off_screen().contains("seen_scene"));
+    assert!(!digest.off_screen().contains("seen_object"));
+    let line = digest.line_for(&seen).expect("the recipient's line");
+    assert!(line.contains("public_object") && line.contains("seen_object"));
+    assert_eq!(digest.line_for(&other), None);
+
+    draw(&mut drawing, 3, Some(&seen), "public_scene", "seen_later");
+    draw(&mut drawing, 4, None, "seen_scene", "public_later");
+    let digest = drawing.digest(THREAD);
+    assert_eq!(digest.off_screen(), "[]");
+    let line = digest.line_for(&seen).expect("the recipient's line");
+    for object in ["public_object", "seen_later", "seen_object", "public_later"] {
+        assert!(line.contains(object), "{object}");
+    }
+
+    draw(&mut drawing, 5, Some(&other), "seen_scene", "other_object");
+    let digest = drawing.digest(THREAD);
+    let line = digest
+        .line_for(&seen)
+        .expect("public_scene is still the recipient's");
+    assert!(line.contains("seen_later"));
+    assert!(!line.contains("seen_object") && !line.contains("other_object"));
+    assert_eq!(digest.line_for(&other), None);
+    assert_eq!(digest.off_screen(), "[]");
+
+    let (recovered, skipped) = Drawing::recover(store.visible());
+    assert_eq!(skipped, Vec::<SceneId>::new());
+    assert_eq!(recovered.snapshot().scenes.len(), 2, "both stay visible");
+    let digest = recovered.digest(THREAD);
+    assert_eq!(digest.off_screen(), "[]");
+    assert_eq!(digest.recipients().count(), 0);
 }
