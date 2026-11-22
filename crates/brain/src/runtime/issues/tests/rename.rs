@@ -89,6 +89,7 @@ async fn a_case_only_repository_change_cannot_send_an_unknown_or_dismissed_issue
                 generation,
                 result: Ok(Repositories {
                     names: Bounded::new(vec![current.clone()]).unwrap(),
+                    ids: vec![NonZeroU64::new(7).unwrap()],
                 }),
             },
         );

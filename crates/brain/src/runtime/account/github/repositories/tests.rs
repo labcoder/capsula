@@ -87,11 +87,11 @@ fn installations(total: u64, ids: &[u64]) -> Value {
 }
 
 fn repositories(total: u64, names: &[&str]) -> Value {
-    json!({"total_count":total,"repositories":names.iter().map(|name| json!({"full_name":name})).collect::<Vec<_>>()})
+    json!({"total_count":total,"repositories":names.iter().zip(1_u64..).map(|(name, id)| json!({"full_name":name,"id":id})).collect::<Vec<_>>()})
 }
 
 fn numbered(total: u64, range: std::ops::Range<usize>) -> Value {
-    json!({"total_count":total,"repositories":range.map(|n| json!({"full_name":format!("owner/r{n:03}")})).collect::<Vec<_>>()})
+    json!({"total_count":total,"repositories":range.map(|n| json!({"full_name":format!("owner/r{n:03}"),"id":n + 1})).collect::<Vec<_>>()})
 }
 
 #[tokio::test]

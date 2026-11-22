@@ -95,7 +95,7 @@ fn identity_and_repositories() -> Vec<(RequestKind, Value)> {
         ),
         (
             RequestKind::Repositories,
-            json!({"total_count":1,"repositories":[{"full_name":"offline-owner/first"}]}),
+            json!({"total_count":1,"repositories":[{"full_name":"offline-owner/first","id":1}]}),
         ),
     ]
 }
@@ -464,7 +464,7 @@ fn default_replies(id: u64) -> Vec<(RequestKind, Value)> {
         (
             RequestKind::Repositories,
             json!({"total_count":2,"repositories":[
-                {"full_name":"offline-owner/old"}, {"full_name":"offline-owner/new"}
+                {"full_name":"offline-owner/old","id":1}, {"full_name":"offline-owner/new","id":2}
             ]}),
         ),
     ]

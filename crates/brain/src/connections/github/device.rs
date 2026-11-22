@@ -17,6 +17,7 @@ use kumochi_protocol::{
 use kumochi_scene::text::Bounded;
 use std::{
     fmt,
+    num::NonZeroU64,
     sync::{
         Arc,
         atomic::{AtomicU64, Ordering},
@@ -73,12 +74,31 @@ impl fmt::Debug for DefaultRepo {
 pub struct Repositories {
     /// Names in GitHub's spelling.
     pub names: Bounded<RepoName, MAX_GITHUB_REPOS>,
+    /// GitHub's numeric id for each name, in the same order.
+    pub ids: Vec<NonZeroU64>,
+}
+
+impl Repositories {
+    /// GitHub's id for `name`, if the listing has both.
+    pub fn id(&self, name: &RepoName) -> Option<NonZeroU64> {
+        id_of(&self.names, &self.ids, name)
+    }
+}
+
+/// The id listed beside `name` in a names-and-ids pair of lists.
+pub(crate) fn id_of(names: &[RepoName], ids: &[NonZeroU64], name: &RepoName) -> Option<NonZeroU64> {
+    names
+        .iter()
+        .position(|listed| listed == name)
+        .and_then(|at| ids.get(at))
+        .copied()
 }
 
 impl fmt::Debug for Repositories {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("GitHubRepositories")
             .field("count", &self.names.len())
+            .field("ids", &self.ids.len())
             .finish()
     }
 }
@@ -292,6 +312,7 @@ pub struct Machine {
     fence: Arc<AtomicU64>,
     deadline: Option<Instant>,
     repos: Bounded<RepoName, MAX_GITHUB_REPOS>,
+    repo_ids: Vec<NonZeroU64>,
     truncated: bool,
     default: Option<DefaultRepo>,
     pending_default: Option<RepoName>,
@@ -316,6 +337,7 @@ impl Machine {
             fence: Arc::new(AtomicU64::new(0)),
             deadline: None,
             repos: Bounded::default(),
+            repo_ids: Vec::new(),
             truncated: false,
             default,
             pending_default: None,
@@ -404,6 +426,12 @@ impl Machine {
         self.listed.then_some(self.repos.as_ref())
     }
 
+    /// GitHub's id for each of [`Self::repositories`], in the same order.
+    pub(crate) fn repository_ids(&self) -> Option<&[NonZeroU64]> {
+        self.repositories()?;
+        Some(&self.repo_ids)
+    }
+
     pub(crate) fn rotating(&self) -> bool {
         matches!(
             self.state,
@@ -465,6 +493,7 @@ impl Machine {
         self.fence.store(self.stamp.generation, Ordering::Release);
         self.deadline = None;
         self.repos = Bounded::new(Vec::new()).expect("empty repository list is bounded");
+        self.repo_ids.clear();
         self.truncated = false;
         self.verified = false;
         self.listed = false;
@@ -906,10 +935,12 @@ impl Machine {
                     && matches!(self.state, State::Connected(_)) =>
             {
                 self.repos = Bounded::default();
+                self.repo_ids.clear();
                 self.listed = false;
                 match result {
                     Ok(repositories) if self.verified => {
                         self.repos = repositories.names;
+                        self.repo_ids = repositories.ids;
                         self.listed = true;
                     }
                     Ok(_) => {}
@@ -925,6 +956,7 @@ impl Machine {
             }
             Input::Op(GitHubOp::RefreshRepos) if matches!(self.state, State::Connected(_)) => {
                 self.repos = Bounded::default();
+                self.repo_ids.clear();
                 self.listed = false;
                 if self.verified {
                     effects.push(Effect::RefreshRepos {

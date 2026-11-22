@@ -353,6 +353,7 @@ async fn sign_out_and_cancel_fence_every_live_attempt_and_all_late_completions()
                     generation: stamp.generation,
                     result: Ok(Repositories {
                         names: Bounded::new(vec![RepoName::new("owner/repo").unwrap()]).unwrap(),
+                        ids: Vec::new(),
                     }),
                 },
             ] {
@@ -422,6 +423,7 @@ async fn only_exact_fetched_repository_spelling_can_be_selected_or_restored() {
             generation: m.stamp().generation,
             result: Ok(Repositories {
                 names: Bounded::new(vec![repo.clone()]).unwrap(),
+                ids: Vec::new(),
             }),
         },
         Instant::now(),
@@ -680,6 +682,7 @@ async fn startup_non_401_failure_keeps_the_saved_account_with_an_empty_refreshab
                 generation: m.stamp().generation,
                 result: Ok(Repositories {
                     names: Bounded::new(vec![RepoName::new("owner/repo").unwrap()]).unwrap(),
+                    ids: Vec::new(),
                 }),
             },
             Instant::now(),
@@ -714,6 +717,7 @@ async fn startup_non_401_failure_keeps_the_saved_account_with_an_empty_refreshab
                 generation: m.stamp().generation,
                 result: Ok(Repositories {
                     names: Bounded::new(vec![repo.clone()]).unwrap(),
+                    ids: Vec::new(),
                 }),
             },
             Instant::now(),
@@ -812,6 +816,7 @@ async fn stale_repositories_cannot_replace_a_new_connections_list() {
             generation: old,
             result: Ok(Repositories {
                 names: Bounded::new(vec![RepoName::new("old/repo").unwrap()]).unwrap(),
+                ids: Vec::new(),
             }),
         },
     );

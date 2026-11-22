@@ -1,10 +1,13 @@
+use std::num::NonZeroU64;
+
 use kumochi_protocol::message::{
     ApprovalRev, Decision, DraftId, FailReason, GitHubLogin, IssueRefused, RepoName, RunId,
     StateVersion, ThreadId,
 };
 
 use super::actions_tests::{
-    A, body, mark, opened, posting, repo, seed, snapshot, title, uncertain, unknown, user,
+    A, ID, OTHER, bind, body, mark, opened, posting, repo, seed, snapshot, title, uncertain,
+    unknown, user,
 };
 use super::{RunEnd, Store, StoreError};
 use crate::connections::github::api::GitHubUser;
@@ -46,10 +49,11 @@ fn drafted(store: &mut Store, key: &str, raw_body: &str) -> Action {
         )
         .unwrap();
     store.end_run(thread, run, &[], RunEnd::Done).unwrap();
-    store
+    let action = store
         .action(DraftId(u64::try_from(id).unwrap()))
         .unwrap()
-        .unwrap()
+        .unwrap();
+    bind(store, &action)
 }
 
 fn changed(answer: Result<Answer, StoreError>) -> Action {
@@ -73,6 +77,7 @@ fn file(store: &mut Store, action: &Action, account: u64) -> Result<Answer, Stor
             capacity: true,
             account: Some(&account),
             repos: &repos,
+            repo_ids: &[ID, OTHER],
         },
     )
 }
@@ -196,6 +201,7 @@ fn case_only_repository_spelling_cannot_bypass_unknown_or_dismissed_uncertainty(
                 Some(&account),
             )
             .unwrap();
+        let a = bind(&mut store, &a);
         let preflight = changed(store.consent(
             a.draft,
             &a.hash(),
@@ -205,6 +211,7 @@ fn case_only_repository_spelling_cannot_bypass_unknown_or_dismissed_uncertainty(
                 capacity: true,
                 account: Some(&account),
                 repos: std::slice::from_ref(&lower),
+                repo_ids: &[ID],
             },
         ));
         let posting = changed(store.preflighted(a.draft, preflight.version, Ok(mark(A))));
@@ -228,6 +235,7 @@ fn case_only_repository_spelling_cannot_bypass_unknown_or_dismissed_uncertainty(
         let b = store
             .create_draft(thread, &a.title, &a.body, Some(&current), Some(&account))
             .unwrap();
+        let b = bind(&mut store, &b);
         assert_eq!(b.approval, Some(ApprovalRev(3)));
         assert_eq!(a.repo.as_ref().unwrap().as_str(), "owner/repo");
         assert_eq!(b.repo.as_ref().unwrap().as_str(), "Owner/Repo");
@@ -237,6 +245,7 @@ fn case_only_repository_spelling_cannot_bypass_unknown_or_dismissed_uncertainty(
             capacity: true,
             account: Some(&account),
             repos: std::slice::from_ref(&current),
+            repo_ids: &[ID],
         };
         let expected = Action {
             version: StateVersion(2),
@@ -293,6 +302,7 @@ fn repository_consent_membership_stays_literal_despite_case_insensitive_duplicat
             Some(&account),
         )
         .unwrap();
+    let action = bind(&mut store, &action);
     let lower = RepoName::new("owner/repo").unwrap();
     assert_eq!(
         store
@@ -305,6 +315,7 @@ fn repository_consent_membership_stays_literal_despite_case_insensitive_duplicat
                     capacity: true,
                     account: Some(&account),
                     repos: std::slice::from_ref(&lower),
+                    repo_ids: &[ID],
                 },
             )
             .unwrap(),
@@ -382,12 +393,23 @@ fn content_and_numeric_account_differences_are_not_general_semantic_deduplicatio
                 &body("first\n\tcafé!\n"),
                 Some(&repo()),
             )),
-            "repo" => changed(store.edit_draft(
-                b.draft,
-                &title("Same café"),
-                &body("first\n\tcafé\n"),
-                Some(&RepoName::new("octo/other").unwrap()),
-            )),
+            "repo" => {
+                let edited = changed(store.edit_draft(
+                    b.draft,
+                    &title("Same café"),
+                    &body("first\n\tcafé\n"),
+                    Some(&RepoName::new("octo/other").unwrap()),
+                ));
+                assert_eq!(edited.repo_id, None);
+                store
+                    .conn
+                    .execute(
+                        "UPDATE actions SET repo_id = 8 WHERE id = ?1",
+                        [i64::try_from(edited.draft.0).unwrap()],
+                    )
+                    .unwrap();
+                store.action(edited.draft).unwrap().unwrap()
+            }
             "account" | "login only" => {
                 let account = GitHubUser {
                     id: if case == "account" { 8 } else { 7 },
@@ -524,4 +546,95 @@ fn hiding_keeps_the_guard_but_completed_history_deletion_forgets_its_evidence() 
     assert_eq!(admitted.version, StateVersion(3));
     assert_eq!(admitted.approval, None);
     assert_eq!(admitted.consumed, Some(ApprovalRev(4)));
+}
+
+/// OSC-648: GitHub's repository id decides, so a rename still blocks the duplicate and a new
+/// repository under the old name doesn't. An earlier attempt with no id blocks by name.
+#[test]
+fn a_repository_id_tells_a_rename_from_a_new_repository_under_the_old_name() {
+    let old = RepoName::new("owner/repo").unwrap();
+    let renamed = RepoName::new("owner/renamed").unwrap();
+    let (seven, nine) = (NonZeroU64::new(7).unwrap(), NonZeroU64::new(9).unwrap());
+    for (case, legacy, second, blocked) in [
+        ("renamed", false, (&renamed, seven), true),
+        ("recreated", false, (&old, nine), false),
+        ("from before the id", true, (&old, nine), true),
+    ] {
+        let scratch = Scratch::new("duplicate-repository-id");
+        let mut store = opened(&scratch);
+        let thread = store.main_thread().unwrap();
+        let account = user(7);
+        let file = |store: &mut Store, action: &Action, repo: &RepoName, id: Option<NonZeroU64>| {
+            let live = crate::issues::Snapshot {
+                capacity: true,
+                account: Some(account.clone()),
+                repos: vec![repo.clone()],
+                repo_ids: id.into_iter().collect(),
+            };
+            let reviewed = changed(store.issue_write(
+                &crate::issues::Write::Rearm {
+                    draft: action.draft,
+                    at: action.version,
+                    hash: action.hash(),
+                    live: live.clone(),
+                },
+                None,
+            ));
+            let answer = store.consent(
+                reviewed.draft,
+                &reviewed.hash(),
+                reviewed.approval.unwrap(),
+                Decision::File,
+                &live.live(),
+            );
+            (reviewed, answer)
+        };
+        let a = store
+            .create_draft(
+                thread,
+                &title("Same café"),
+                &body("first\n"),
+                Some(&old),
+                Some(&account),
+            )
+            .unwrap();
+        let (_, answer) = file(&mut store, &a, &old, Some(seven));
+        let preflight = changed(answer);
+        assert_eq!(preflight.repo_id, Some(seven), "{case}");
+        let posting = changed(store.preflighted(a.draft, preflight.version, Ok(mark(A))));
+        let a = changed(store.posted(a.draft, posting.version, &uncertain()));
+        if legacy {
+            store
+                .conn
+                .execute("UPDATE actions SET repo_id = NULL", [])
+                .unwrap();
+        }
+        let (repo, id) = second;
+        let b = store
+            .create_draft(thread, &a.title, &a.body, Some(repo), Some(&account))
+            .unwrap();
+        let (b, answer) = file(&mut store, &b, repo, Some(id));
+        assert_eq!(b.repo_id, Some(id), "{case}");
+        let expected = if blocked {
+            Answer::Refused(
+                IssueRefused::UnresolvedDraft { draft: a.draft },
+                Action {
+                    version: StateVersion(3),
+                    approval: Some(ApprovalRev(6)),
+                    consumed: Some(ApprovalRev(5)),
+                    ..b.clone()
+                },
+            )
+        } else {
+            Answer::Changed(Action {
+                version: StateVersion(3),
+                stage: Stage::Preflight { unresolved: None },
+                approval: None,
+                consumed: Some(ApprovalRev(5)),
+                ..b.clone()
+            })
+        };
+        let answer = answer.unwrap();
+        assert_eq!(answer, expected, "{case}");
+    }
 }

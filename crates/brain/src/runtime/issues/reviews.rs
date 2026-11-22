@@ -112,6 +112,7 @@ impl Brain {
                 draft,
                 at: version,
                 hash,
+                live: self.account.github.issue_snapshot(),
             },
             scope: Some(scope),
         })]

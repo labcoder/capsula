@@ -115,7 +115,7 @@ fn authority(date: Option<u64>) -> Vec<Step> {
             Expected::Repositories,
             None,
             json!({"total_count":2,"repositories":[
-                {"full_name":"owner/repo"},{"full_name":"owner/other"}
+                {"full_name":"owner/repo","id":7},{"full_name":"owner/other","id":8}
             ]}),
         ),
     ]
@@ -151,6 +151,7 @@ fn action() -> Action {
         approval: None,
         consumed: Some(ApprovalRev(1)),
         uncertain: 0,
+        repo_id: NonZeroU64::new(7),
     }
 }
 
@@ -172,6 +173,38 @@ fn unknown() -> Action {
 
 fn row(number: u64, created_at: &str) -> Value {
     json!({"number":number,"title":"  Local café  ","body":"first\n\tcafé\n","created_at":created_at})
+}
+
+#[tokio::test(start_paused = true)]
+async fn scripted_authority_responses_are_independent_of_request_order() {
+    let (http, control, script) = bounded(authority(Some(100)));
+    let token = token();
+    let installations = api::installations(&http, &token, Page::new(1).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(installations.installations, [9]);
+    assert_eq!(installations.total_count, 1);
+    assert_eq!(control.server_date_s(), None);
+    let user = api::user(&http, &token).await.unwrap();
+    assert_eq!(user.id, 7);
+    assert_eq!(user.login.as_str(), "verified-owner");
+    assert_eq!(control.server_date_s(), Some(100));
+    let repositories = api::repositories(&http, &token, 9, Page::new(1).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(repositories.total_count, 2);
+    assert_eq!(
+        repositories
+            .repositories
+            .iter()
+            .map(|(name, id)| (name.as_str(), id.get()))
+            .collect::<Vec<_>>(),
+        [("owner/repo", 7), ("owner/other", 8)]
+    );
+    assert_eq!(control.server_date_s(), Some(100));
+    assert_eq!(script.calls.load(Ordering::SeqCst), 3);
+    assert!(script.steps.lock().unwrap().is_empty());
+    assert!(!control.may_have_sent());
 }
 
 #[tokio::test(start_paused = true)]
@@ -298,6 +331,8 @@ async fn identity_and_complete_exact_membership_are_required_without_retargeting
         ("unlisted", FailReason::NotFound, 3),
         ("case differs", FailReason::NotFound, 3),
         ("incomplete", FailReason::PreflightFailed, 3),
+        ("recreated since review", FailReason::NotFound, 3),
+        ("no id bound", FailReason::NotFound, 3),
     ] {
         let mut action = action();
         let mut steps = authority(Some(100));
@@ -307,16 +342,18 @@ async fn identity_and_complete_exact_membership_are_required_without_retargeting
             "numeric mismatch" => steps[0].body = json!({"id":8,"login":"verified-owner"}),
             "unlisted" => {
                 steps[2].body =
-                    json!({"total_count":1,"repositories":[{"full_name":"owner/other"}]});
+                    json!({"total_count":1,"repositories":[{"full_name":"owner/other","id":8}]});
             }
             "case differs" => {
                 steps[2].body =
-                    json!({"total_count":1,"repositories":[{"full_name":"Owner/repo"}]});
+                    json!({"total_count":1,"repositories":[{"full_name":"Owner/repo","id":7}]});
             }
             "incomplete" => {
                 steps[2].body =
-                    json!({"total_count":2,"repositories":[{"full_name":"owner/repo"}]});
+                    json!({"total_count":2,"repositories":[{"full_name":"owner/repo","id":7}]});
             }
+            "recreated since review" => action.repo_id = NonZeroU64::new(9),
+            "no id bound" => action.repo_id = None,
             _ => unreachable!(),
         }
         steps.truncate(calls);
@@ -342,6 +379,23 @@ async fn identity_and_complete_exact_membership_are_required_without_retargeting
             }
         );
     }
+}
+
+/// OSC-648: the id GitHub lists for the name now is the one bound at review, so preflight goes
+/// on; another id, or none bound, is refused above.
+#[tokio::test(start_paused = true)]
+async fn a_repository_unchanged_since_review_proceeds() {
+    let mut steps = authority(Some(100));
+    steps.push(reply(
+        Expected::Issues { since: 99, page: 1 },
+        Some(120),
+        json!([]),
+    ));
+    let (http, control, script) = bounded(steps);
+    let prepared = preflight(http, token(), &action(), &control).await.unwrap();
+    assert_eq!(prepared.mark.at_s.get(), 120);
+    assert_eq!(script.calls.load(Ordering::SeqCst), 4);
+    assert!(!control.may_have_sent());
 }
 
 #[tokio::test(start_paused = true)]
@@ -569,4 +623,23 @@ async fn prepared_and_failure_debug_never_expose_user_or_remote_content() {
         format!("{INCONCLUSIVE:?}"),
         "Failure { reason: PreflightFailed, unauthorized: false }"
     );
+}
+
+/// OSC-648: a lookup for an attempt with no id bound (pending across V11) can't name the
+/// repository, so it reads no issues and reports it couldn't check.
+#[tokio::test(start_paused = true)]
+async fn a_lookup_with_no_id_bound_reads_no_issues() {
+    let (http, _, script) = bounded(authority(Some(100)));
+    let action = Action {
+        repo_id: None,
+        ..unknown()
+    };
+    assert_eq!(
+        check(&http, &token(), &action).await.unwrap_err(),
+        Failure {
+            reason: FailReason::NotFound,
+            unauthorized: false
+        }
+    );
+    assert_eq!(script.calls.load(Ordering::SeqCst), 3);
 }

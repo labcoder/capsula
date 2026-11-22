@@ -101,6 +101,7 @@ async fn final_permit_rechecks_same_generation_repository_authority_after_postin
                 } else {
                     Ok(Repositories {
                         names: Bounded::default(),
+                        ids: Vec::new(),
                     })
                 },
             },
@@ -540,6 +541,7 @@ async fn a_real_post_401_revokes_only_the_generation_that_sent_it() {
                     generation,
                     result: Ok(Repositories {
                         names: Bounded::new(vec![RepoName::new("owner/repo").unwrap()]).unwrap(),
+                        ids: vec![NonZeroU64::new(7).unwrap()],
                     }),
                 },
             );

@@ -14,7 +14,7 @@ use rusqlite::{
 use tokio::time::Instant;
 
 use super::actions_tests::{
-    A, draft, opened, posting, repo, seed, snapshot, thread, unknown, user,
+    A, ID, draft, opened, posting, repo, reviewed, seed, snapshot, thread, unknown, user,
 };
 use super::{Store, StoreError};
 use crate::issues::{Action, Answer, Snapshot, Stage, Write, WriteScope};
@@ -25,6 +25,16 @@ pub(super) fn rearm(action: &Action) -> Write {
         draft: action.draft,
         at: action.version,
         hash: action.hash(),
+        live: unlisted(),
+    }
+}
+
+fn unlisted() -> Snapshot {
+    Snapshot {
+        capacity: false,
+        account: None,
+        repos: Vec::new(),
+        repo_ids: Vec::new(),
     }
 }
 
@@ -37,6 +47,7 @@ fn consent(action: &Action, cancelled: bool) -> Write {
         capacity: true,
         account: Some(user(7)),
         repos: vec![repo()],
+        repo_ids: vec![ID],
     };
     if cancelled {
         Write::CancelledConsent {
@@ -78,7 +89,7 @@ fn rearm_mints_without_changing_draft_or_failed_content_and_survives_restart() {
         let scratch = Scratch::new("issue-rearm-restart");
         let mut store = opened(&scratch);
         let owner = thread(&mut store);
-        let created = draft(&mut store, owner);
+        let created = reviewed(&mut store, owner);
         let action = if failed {
             let action = changed(store.issue_write(&consent(&created, true), None));
             assert_eq!(
@@ -139,6 +150,7 @@ fn stale_rearm_versions_hashes_and_gone_rows_do_not_mint_or_change_any_row() {
                         draft: action.draft,
                         at,
                         hash: action.hash(),
+                        live: unlisted(),
                     },
                     None
                 )
@@ -154,6 +166,7 @@ fn stale_rearm_versions_hashes_and_gone_rows_do_not_mint_or_change_any_row() {
                     draft: action.draft,
                     at: StateVersion(1),
                     hash: ContentHash([0; 32]),
+                    live: unlisted(),
                 },
                 None
             )
@@ -169,6 +182,7 @@ fn stale_rearm_versions_hashes_and_gone_rows_do_not_mint_or_change_any_row() {
                         draft,
                         at: StateVersion(1),
                         hash: action.hash(),
+                        live: unlisted(),
                     },
                     None
                 )
@@ -336,7 +350,7 @@ fn writer_consent_and_cancellation_check_version_before_consuming_a_current_appr
         let scratch = Scratch::new("issue-consent-version");
         let mut store = opened(&scratch);
         let owner = thread(&mut store);
-        let created = draft(&mut store, owner);
+        let created = reviewed(&mut store, owner);
         let fresh = changed(store.issue_write(&rearm(&created), None));
         let before = (snapshot(&store.conn), events(&store));
         let mut stale = consent(&fresh, cancelled);
@@ -380,10 +394,10 @@ fn version_checked_writes_preserve_the_identical_unresolved_guard() {
         let scratch = Scratch::new("issue-rearm-unresolved");
         let mut store = opened(&scratch);
         let owner = thread(&mut store);
-        let blocker = draft(&mut store, owner);
+        let blocker = reviewed(&mut store, owner);
         seed(&store, blocker.draft, &unknown(r#""Pending""#), 1);
         let blocker = store.action(blocker.draft).unwrap().unwrap();
-        let other = draft(&mut store, owner);
+        let other = reviewed(&mut store, owner);
         let fresh = changed(store.issue_write(&rearm(&other), None));
         let refused = store
             .issue_write(&consent(&fresh, cancelled), None)
@@ -413,6 +427,7 @@ fn rearm_and_versioned_writes_have_content_free_debug() {
         draft: DraftId(23),
         at: StateVersion(17),
         hash: ContentHash([83; 32]),
+        live: unlisted(),
     };
     assert_eq!(format!("{write:?}"), "IssueRearm");
     let scratch = Scratch::new("issue-rearm-debug");
@@ -423,5 +438,148 @@ fn rearm_and_versioned_writes_have_content_free_debug() {
     assert_eq!(
         format!("{:?}", consent(&action, true)),
         "IssueCancelledConsent"
+    );
+}
+
+/// OSC-648: a draft's first preview that finds its name listed binds that id and a later preview
+/// keeps it; consent refuses an offer that bound none or a name now listed under another id, and
+/// choosing another repository drops the id.
+#[test]
+fn a_preview_binds_the_listed_id_once_and_consent_only_verifies_it() {
+    use kumochi_protocol::message::RepoName;
+    use std::num::NonZeroU64;
+
+    let scratch = Scratch::new("issue-rearm-repo-id");
+    let mut store = opened(&scratch);
+    let owner = thread(&mut store);
+    let listing = |id| Snapshot {
+        capacity: true,
+        account: Some(user(7)),
+        repos: vec![repo()],
+        repo_ids: vec![NonZeroU64::new(id).unwrap()],
+    };
+    let review = |action: &Action, id| Write::Rearm {
+        draft: action.draft,
+        at: action.version,
+        hash: action.hash(),
+        live: listing(id),
+    };
+    let file = |action: &Action, id| Write::Consent {
+        draft: action.draft,
+        at: action.version,
+        hash: action.hash(),
+        approval: action.approval.unwrap(),
+        decision: Decision::File,
+        live: listing(id),
+    };
+    let unbound = draft(&mut store, owner);
+    let Answer::Changed(unbound) = store.issue_write(&rearm(&unbound), None).unwrap() else {
+        panic!("an unlisted preview commits");
+    };
+    assert_eq!(unbound.repo_id, None);
+    assert!(matches!(
+        store.issue_write(&file(&unbound, 7), None).unwrap(),
+        Answer::Refused(IssueRefused::RepoNotListed, refused) if refused.repo_id.is_none()
+    ));
+    let action = draft(&mut store, owner);
+    let Answer::Changed(first) = store.issue_write(&review(&action, 7), None).unwrap() else {
+        panic!("the first preview commits");
+    };
+    assert_eq!(first.repo_id, NonZeroU64::new(7));
+    let Answer::Changed(again) = store.issue_write(&review(&first, 9), None).unwrap() else {
+        panic!("a second preview commits");
+    };
+    assert_eq!(again.repo_id, NonZeroU64::new(7));
+    assert!(matches!(
+        store.issue_write(&file(&again, 9), None).unwrap(),
+        Answer::Refused(IssueRefused::RepoNotListed, refused)
+            if refused.repo_id == NonZeroU64::new(7)
+    ));
+    let other = RepoName::new("octo/other").unwrap();
+    let Answer::Changed(edited) = store
+        .edit_draft(again.draft, &again.title, &again.body, Some(&other))
+        .unwrap()
+    else {
+        panic!("another repository is an edit");
+    };
+    assert_eq!(edited.repo_id, None);
+}
+
+/// OSC-648: a draft saved before V11 has no id bound, so File is refused, uses up its approval and
+/// never reaches Preflight, until a fresh review binds the listed id; then it files as any other.
+#[test]
+fn a_draft_from_before_the_id_files_only_after_a_fresh_review() {
+    let scratch = Scratch::new("issue-v10-draft");
+    std::fs::create_dir_all(scratch.dir()).expect("folder");
+    let mut conn = Connection::open(scratch.db()).expect("file");
+    super::schema::migrate_to(&mut conn, 10).expect("V10");
+    conn.execute_batch(
+        "INSERT INTO threads (id, title, created_ms, updated_ms) VALUES (5, 'kept', 1, 1);
+         INSERT INTO actions (thread, version, stage, repo, account_id, account_login, title,
+         body, approval, uncertain, created_ms)
+         VALUES (5, 1, '{\"kind\":\"draft\"}', 'octo/repo', '7', 'octo', 'T', 'B', 1, 0, 0);
+         UPDATE approval_mark SET last = 1 WHERE id = 1;",
+    )
+    .expect("a draft saved before V11");
+    drop(conn);
+    let mut store = opened(&scratch);
+    let saved = store.action(DraftId(1)).expect("reads").expect("kept");
+    assert_eq!(
+        (saved.repo_id, saved.approval),
+        (None, Some(ApprovalRev(1)))
+    );
+    let listing = Snapshot {
+        capacity: true,
+        account: Some(user(7)),
+        repos: vec![repo()],
+        repo_ids: vec![ID],
+    };
+    let file = |action: &Action| Write::Consent {
+        draft: action.draft,
+        at: action.version,
+        hash: action.hash(),
+        approval: action.approval.unwrap(),
+        decision: Decision::File,
+        live: listing.clone(),
+    };
+    let idless = Write::Consent {
+        draft: saved.draft,
+        at: saved.version,
+        hash: saved.hash(),
+        approval: ApprovalRev(1),
+        decision: Decision::File,
+        live: Snapshot {
+            repo_ids: Vec::new(),
+            ..listing.clone()
+        },
+    };
+    let Answer::Refused(IssueRefused::RepoNotListed, refused) =
+        store.issue_write(&idless, None).unwrap()
+    else {
+        panic!("no id bound and none listed still isn't the reviewed repository");
+    };
+    assert_eq!(refused.consumed, Some(ApprovalRev(1)));
+    let Answer::Refused(IssueRefused::RepoNotListed, refused) =
+        store.issue_write(&file(&refused), None).unwrap()
+    else {
+        panic!("an unreviewed draft from before V11 can't file");
+    };
+    assert_eq!(
+        (&refused.stage, refused.consumed, refused.repo_id),
+        (&Stage::Draft, Some(ApprovalRev(2)), None)
+    );
+    let reviewed = changed(store.issue_write(
+        &Write::Rearm {
+            draft: refused.draft,
+            at: refused.version,
+            hash: refused.hash(),
+            live: listing.clone(),
+        },
+        None,
+    ));
+    assert_eq!(reviewed.repo_id, Some(ID));
+    assert_eq!(
+        changed(store.issue_write(&file(&reviewed), None)).stage,
+        Stage::Preflight { unresolved: None }
     );
 }

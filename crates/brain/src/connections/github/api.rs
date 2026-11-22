@@ -187,8 +187,8 @@ pub struct InstallationPage {
 
 /// One bounded repository page; the account layer owns aggregation.
 pub struct RepositoryPage {
-    /// Checked names, at most 100.
-    pub repositories: Vec<RepoName>,
+    /// Checked names with GitHub's numeric ids, at most 100.
+    pub repositories: Vec<(RepoName, NonZeroU64)>,
     /// The provider's advertised total.
     pub total_count: u64,
 }
@@ -363,6 +363,7 @@ struct InstallationsWire {
 #[derive(Deserialize)]
 struct Repository {
     full_name: RepoName,
+    id: NonZeroU64,
 }
 #[derive(Deserialize)]
 struct RepositoriesWire {
@@ -579,7 +580,11 @@ pub async fn repositories(
         return Err(ApiError::Response);
     }
     Ok(RepositoryPage {
-        repositories: raw.repositories.into_iter().map(|v| v.full_name).collect(),
+        repositories: raw
+            .repositories
+            .into_iter()
+            .map(|v| (v.full_name, v.id))
+            .collect(),
         total_count: raw.total_count,
     })
 }

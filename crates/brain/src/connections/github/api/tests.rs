@@ -3,6 +3,7 @@
 use std::{
     collections::VecDeque,
     future::Future,
+    num::NonZeroU64,
     sync::{
         Arc, Mutex,
         atomic::{AtomicUsize, Ordering},
@@ -114,7 +115,9 @@ fn valid(call: Call) -> Value {
         }
         Call::User => json!({"id":1,"login":"owner"}),
         Call::Installations => json!({"total_count":1,"installations":[{"id":42}]}),
-        Call::Repositories => json!({"total_count":1,"repositories":[{"full_name":"owner/repo"}]}),
+        Call::Repositories => {
+            json!({"total_count":1,"repositories":[{"full_name":"owner/repo","id":7}]})
+        }
     }
 }
 async fn invoke(http: &impl Http, call: Call) -> Result<(), ApiError> {
@@ -213,7 +216,10 @@ async fn page_calls_keep_the_requested_page_and_do_not_aggregate() {
         .unwrap();
     assert_eq!(
         reply.repositories,
-        vec![RepoName::new("owner/repo").unwrap()]
+        vec![(
+            RepoName::new("owner/repo").unwrap(),
+            NonZeroU64::new(7).unwrap()
+        )]
     );
     assert_eq!(reply.total_count, 1);
     let requests = http.requests.lock().unwrap();
@@ -318,7 +324,13 @@ async fn every_parser_enforces_its_entry_byte_cap_with_scripted_http() {
                     .await
                     .unwrap();
                 assert_eq!(reply.total_count, 1);
-                assert_eq!(reply.repositories, [RepoName::new("owner/repo").unwrap()]);
+                assert_eq!(
+                    reply.repositories,
+                    [(
+                        RepoName::new("owner/repo").unwrap(),
+                        NonZeroU64::new(7).unwrap()
+                    )]
+                );
             }
         }
         body.push(b' ');
@@ -1025,7 +1037,7 @@ async fn list_pages_accept_empty_and_exactly_one_hundred_rows_but_not_one_over()
             assert_eq!(page.installations, (1..=count).collect::<Vec<_>>());
         }
         let names: Vec<_> = (1..=count)
-            .map(|id| json!({"full_name":format!("owner/r{id}")}))
+            .map(|id| json!({"full_name":format!("owner/r{id}"),"id":id}))
             .collect();
         let http = Script::json(&json!({"total_count":count,"repositories":names}));
         let result = repositories(&http, &token(), 1, Page::new(1).unwrap()).await;
@@ -1037,7 +1049,10 @@ async fn list_pages_accept_empty_and_exactly_one_hundred_rows_but_not_one_over()
             assert_eq!(
                 page.repositories,
                 (1..=count)
-                    .map(|id| RepoName::new(&format!("owner/r{id}")).unwrap())
+                    .map(|id| (
+                        RepoName::new(&format!("owner/r{id}")).unwrap(),
+                        NonZeroU64::new(id).unwrap()
+                    ))
                     .collect::<Vec<_>>()
             );
         }
@@ -1107,12 +1122,15 @@ async fn installation_rows_require_positive_typed_ids_and_reject_duplicate_field
 async fn repository_rows_require_checked_names_and_reject_duplicate_fields() {
     let exact = format!("{}/{}", "a".repeat(39), "b".repeat(100));
     let http = Script::json(
-        &json!({"total_count":1,"repositories":[{"full_name":exact,"unknown":SENTINEL}]}),
+        &json!({"total_count":1,"repositories":[{"full_name":exact,"id":7,"unknown":SENTINEL}]}),
     );
     let page = repositories(&http, &token(), 1, Page::new(1).unwrap())
         .await
         .unwrap();
-    assert_eq!(page.repositories, vec![RepoName::new(&exact).unwrap()]);
+    assert_eq!(
+        page.repositories,
+        vec![(RepoName::new(&exact).unwrap(), NonZeroU64::new(7).unwrap())]
+    );
     for bad in [
         String::new(),
         "owner".to_owned(),
@@ -1125,7 +1143,8 @@ async fn repository_rows_require_checked_names_and_reject_duplicate_fields() {
         format!("{}/repo", "a".repeat(40)),
         format!("owner/{}", "b".repeat(101)),
     ] {
-        let http = Script::json(&json!({"total_count":1,"repositories":[{"full_name":bad}]}));
+        let http =
+            Script::json(&json!({"total_count":1,"repositories":[{"full_name":bad,"id":7}]}));
         assert_eq!(
             repositories(&http, &token(), 1, Page::new(1).unwrap())
                 .await
@@ -1141,6 +1160,13 @@ async fn repository_rows_require_checked_names_and_reject_duplicate_fields() {
         json!({"full_name":null}),
         json!({"full_name":true}),
         json!({"full_name":1}),
+        json!({"full_name":"owner/repo"}),
+        json!({"full_name":"owner/repo","id":null}),
+        json!({"full_name":"owner/repo","id":0}),
+        json!({"full_name":"owner/repo","id":-7}),
+        json!({"full_name":"owner/repo","id":"7"}),
+        json!({"full_name":"owner/repo","id":7.5}),
+        json!({"full_name":"owner/repo","id":[7]}),
     ] {
         let http = Script::json(&json!({"total_count":1,"repositories":[row]}));
         assert_eq!(
@@ -1151,7 +1177,7 @@ async fn repository_rows_require_checked_names_and_reject_duplicate_fields() {
         );
     }
     let http = Script::bytes(
-        br#"{"total_count":1,"repositories":[{"full_name":"owner/one","full_name":"owner/two"}]}"#
+        br#"{"total_count":1,"repositories":[{"full_name":"owner/one","id":7,"full_name":"owner/two"}]}"#
             .to_vec(),
     );
     assert_eq!(
@@ -1375,14 +1401,16 @@ async fn outermost_success_carriers_redact_credentials_user_codes_logins_and_rep
         .unwrap();
     assert_eq!(reply.login.as_str(), SENTINEL);
     assert_redacted(&format!("{:?}", Ok::<_, ApiError>(reply)));
-    let value =
-        json!({"total_count":1,"repositories":[{"full_name":format!("{SENTINEL}/{SENTINEL}")}]});
+    let value = json!({"total_count":1,"repositories":[{"full_name":format!("{SENTINEL}/{SENTINEL}"),"id":7}]});
     let reply = repositories(&Script::json(&value), &token(), 1, Page::new(1).unwrap())
         .await
         .unwrap();
     assert_eq!(
         reply.repositories,
-        vec![RepoName::new(&format!("{SENTINEL}/{SENTINEL}")).unwrap()]
+        vec![(
+            RepoName::new(&format!("{SENTINEL}/{SENTINEL}")).unwrap(),
+            NonZeroU64::new(7).unwrap()
+        )]
     );
     assert_redacted(&format!("{:?}", Ok::<_, ApiError>(reply)));
     let reply = installations(

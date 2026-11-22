@@ -12,7 +12,7 @@ use kumochi_scene::text::Bounded;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 
-use crate::connections::github::{api::GitHubUser, issues::CreateOutcome};
+use crate::connections::github::{api::GitHubUser, device::id_of, issues::CreateOutcome};
 
 mod io;
 pub use io::{Snapshot, Write, WriteScope};
@@ -33,6 +33,9 @@ pub struct Action {
     pub stage: Stage,
     /// The bound repository, if one is chosen.
     pub repo: Option<RepoName>,
+    /// GitHub's id for `repo`, bound by this draft's first preview that found the name listed;
+    /// none before that, and on rows from before the id was stored.
+    pub repo_id: Option<NonZeroU64>,
     /// The bound account, if any.
     pub account: Option<GitHubUser>,
     /// The exact title.
@@ -121,6 +124,8 @@ pub struct Live<'a> {
     pub account: Option<&'a GitHubUser>,
     /// The repositories the connection lists.
     pub repos: &'a [RepoName],
+    /// GitHub's id for each of `repos`, in the same order.
+    pub repo_ids: &'a [NonZeroU64],
 }
 
 /// A lookup's verdict on an action's uncertain attempts.
@@ -246,10 +251,13 @@ impl Action {
         if bound.id != connected.id {
             return Err(IssueRefused::OtherAccount);
         }
-        if !self
-            .repo
-            .as_ref()
-            .is_some_and(|repo| live.repos.contains(repo))
+        let Some(repo) = self.repo.as_ref().filter(|repo| live.repos.contains(repo)) else {
+            return Err(IssueRefused::RepoNotListed);
+        };
+        // Consent only verifies the id its preview bound. None bound (no review since V11, or a
+        // preview without a listing) never files; another id is another repository.
+        if matches!(next, Stage::Preflight { .. })
+            && (self.repo_id.is_none() || id_of(live.repos, live.repo_ids, repo) != self.repo_id)
         {
             return Err(IssueRefused::RepoNotListed);
         }
@@ -399,6 +407,9 @@ impl Action {
             return Err(IssueRefused::NotAllowedNow);
         }
         if (&self.title, &self.body, self.repo.as_ref()) != (title, body, repo) {
+            // Coming back to a repository binds what's listed then, but only with a fresh approval
+            // (an old click can't reuse it), and today's shell can't change the repository.
+            self.repo_id = self.repo_id.filter(|_| self.repo.as_ref() == repo);
             (self.title, self.body, self.repo) = (title.clone(), body.clone(), repo.cloned());
             self.stage = Stage::Draft;
         }
@@ -459,6 +470,7 @@ impl fmt::Debug for Action {
             .field("version", &self.version)
             .field("stage", &self.stage)
             .field("repo", &self.repo)
+            .field("repo_id", &self.repo_id)
             .field("account", &self.account)
             .field("title", &self.title)
             .field("body", &self.body)
