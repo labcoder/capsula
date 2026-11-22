@@ -670,9 +670,11 @@ fn queued_authenticated_natural_completion_admits_a_fresh_typed_turn(cx: &mut Te
                 playback = pipe.playback.try_recv().ok();
             }
             if let Some(playback) = &mut playback {
-                if playback.stopped()
-                    || (playback.ready() && playback.presented_prefix() == playback.handed())
-                {
+                let proving_start =
+                    turn == 1 && playback.handed() == 48 && playback.presented_prefix() < 48;
+                if proving_start && !playback.stopped() {
+                    playback.render(&mut []);
+                } else if playback.ready() || playback.stopped() {
                     let mut samples = [0.0; 48];
                     playback.render(&mut samples);
                     if !rendered && samples.contains(&(15_430.0_f32 / 32_768.0)) {
@@ -685,8 +687,6 @@ fn queued_authenticated_natural_completion_admits_a_fresh_typed_turn(cx: &mut Te
                         }
                         rendered = true;
                     }
-                } else {
-                    playback.render(&mut []);
                 }
             }
             std::thread::sleep(Duration::from_millis(2));
