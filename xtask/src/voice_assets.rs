@@ -1,9 +1,9 @@
 //! `cargo xtask voice-assets link <models> <natives>`: checks the voice files already on a dev
-//! machine against the manifest and hardlinks them where a dev build looks, so nothing downloads
-//! twice. It never copies and never downloads.
+//! machine against the manifest and copies them where a dev build looks, so nothing downloads
+//! twice. It never downloads.
 
-use std::fs;
 use std::path::{Path, PathBuf};
+use std::{fs, io};
 
 use anyhow::{Context as _, Result, bail, ensure};
 use kumochi_protocol::constants::DATA_DIR;
@@ -111,7 +111,7 @@ struct Placement<'a> {
     sha256: &'a str,
 }
 
-/// Verifies every source, then every existing destination, before linking anything, so a bad
+/// Verifies every source, then every existing destination, before copying anything, so a bad
 /// source or a conflicting destination changes nothing. Returns the destinations.
 fn link(
     models: &Path,
@@ -146,9 +146,9 @@ fn link(
     Ok(plan.into_iter().map(|placement| placement.dest).collect())
 }
 
-/// Keeps every destination that already verifies and hardlinks the absent ones. Any other
-/// existing destination is a conflict: it's reported and left as it is, and nothing is linked.
-/// If a link fails partway, the links this run made are removed again.
+/// Keeps every destination that already verifies and copies the absent ones. Any other existing
+/// destination is a conflict: it's reported and left as it is, and nothing is copied. If a copy
+/// fails partway, the files this run made are removed again.
 fn install(plan: &[Placement<'_>]) -> Result<()> {
     let mut missing = Vec::new();
     let mut conflicts = Vec::new();
@@ -161,13 +161,13 @@ fn install(plan: &[Placement<'_>]) -> Result<()> {
     }
     ensure!(
         conflicts.is_empty(),
-        "nothing was linked, because existing files don't match the manifest; move them aside \
+        "nothing was copied, because existing files don't match the manifest; move them aside \
          and run this again:\n{}",
         conflicts.join("\n")
     );
     let mut made: Vec<&Path> = Vec::with_capacity(missing.len());
     for placement in missing {
-        if let Err(error) = hard_link(&placement.source, &placement.dest) {
+        if let Err(error) = copy_new(placement, &mut made) {
             let stranded: Vec<String> = made
                 .into_iter()
                 .filter(|dest| fs::remove_file(dest).is_err())
@@ -177,26 +177,34 @@ fn install(plan: &[Placement<'_>]) -> Result<()> {
                 return Err(error);
             }
             return Err(error.context(format!(
-                "these links from this run couldn't be removed: {}",
+                "these files from this run couldn't be removed: {}",
                 stranded.join(", ")
             )));
         }
-        made.push(&placement.dest);
     }
     Ok(())
 }
 
-/// Hardlinks a new destination. It never replaces one: `fs::hard_link` fails if `dest` exists.
-fn hard_link(source: &Path, dest: &Path) -> Result<()> {
+/// Copies a source to a new destination, which takes its folder's permissions. A hardlink would
+/// share the source's, which the brain refuses where other accounts may write. It never replaces
+/// a destination, and one it creates joins `made` at once, so a failed copy is removed too.
+fn copy_new<'a>(placement: &'a Placement<'_>, made: &mut Vec<&'a Path>) -> Result<()> {
+    let dest = placement.dest.as_path();
     let parent = dest.parent().context("a destination has a folder")?;
     fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
-    fs::hard_link(source, dest).with_context(|| {
+    let mut file =
+        fs::File::create_new(dest).with_context(|| format!("creating {}", dest.display()))?;
+    made.push(dest);
+    let mut source = fs::File::open(&placement.source)
+        .with_context(|| format!("opening {}", placement.source.display()))?;
+    io::copy(&mut source, &mut file).with_context(|| {
         format!(
-            "hardlinking {} to {}: both must be on one NTFS volume, and nothing is copied",
-            source.display(),
+            "copying {} to {}",
+            placement.source.display(),
             dest.display()
         )
-    })
+    })?;
+    verify(dest, placement.bytes, placement.sha256)
 }
 
 fn verify(path: &Path, bytes: u64, sha256: &str) -> Result<()> {
@@ -296,20 +304,20 @@ mod tests {
     }
 
     #[test]
-    fn install_hardlinks_and_keeps_a_verified_destination() {
+    fn install_copies_and_keeps_a_verified_destination() {
         let dir = scratch("install");
         let source = dir.join("source");
         fs::write(&source, b"voice").expect("write");
         let sha = voice_sha();
         let dest = dir.join("models").join("part").join("f");
-        install(&[placement(&source, &dest, &sha)]).expect("links into a new folder");
+        install(&[placement(&source, &dest, &sha)]).expect("copies into a new folder");
         assert_eq!(fs::read(&dest).expect("read"), b"voice");
 
         fs::write(&source, b"VOICE").expect("rewrite the source in place");
         assert_eq!(
             fs::read(&dest).expect("read"),
-            b"VOICE",
-            "the destination is the same file as the source, not a copy"
+            b"voice",
+            "the destination is a copy with its folder's permissions, not the source's file"
         );
         fs::write(&source, b"voice").expect("restore");
 
@@ -333,17 +341,17 @@ mod tests {
             placement(&source, &conflicting, &sha),
         ])
         .expect_err("a mismatched destination fails");
-        assert!(error.to_string().contains("nothing was linked"), "{error}");
+        assert!(error.to_string().contains("nothing was copied"), "{error}");
         assert_eq!(
             fs::read(&conflicting).expect("read"),
             b"wrong",
             "the conflicting bytes survive"
         );
-        assert!(!fresh.exists(), "nothing was linked before the conflict");
+        assert!(!fresh.exists(), "nothing was copied before the conflict");
     }
 
     #[test]
-    fn a_failed_link_removes_the_links_this_run_made() {
+    fn a_failed_copy_removes_the_files_this_run_made() {
         let dir = scratch("rollback");
         let source = dir.join("source");
         fs::write(&source, b"voice").expect("write");
@@ -355,9 +363,9 @@ mod tests {
             placement(&source, &first, &sha),
             placement(&dir.join("absent"), &second, &sha),
         ])
-        .expect_err("the second link has no source");
-        assert!(!first.exists(), "the first link was removed again");
-        assert!(!second.exists());
+        .expect_err("the second copy has no source");
+        assert!(!first.exists(), "the first copy was removed again");
+        assert!(!second.exists(), "the second copy's new file was removed");
         assert_eq!(fs::read(&source).expect("read"), b"voice");
     }
 
