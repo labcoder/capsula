@@ -525,8 +525,9 @@ destination that already matches the manifest is kept, so delete models an older
 task hardlinked before running it again. Any other existing file there is a
 conflict: the task checks every destination before it copies anything, and if one conflicts it
 copies nothing, changes nothing and names the file, to be moved aside by hand. A failed copy
-leaves nothing at its final name, files already placed stay, and the next run removes a stopped
-run's temporary files. Run it again after `cargo clean`.
+leaves nothing at its final name, and files already placed stay. A leftover
+`*.voice-assets-*.tmp` in the models folder, from a run that was stopped, is safe to delete by
+hand. Run it again after `cargo clean`.
 
 ### Vendored worker-startup tests
 
