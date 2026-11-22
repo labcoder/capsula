@@ -391,7 +391,7 @@ async fn first_speech_setup_loads_and_holds_without_restarting_the_brain() {
 }
 
 #[tokio::test]
-async fn queued_hold_refuses_pending_and_saved_show_screen_on() {
+async fn queued_hold_refuses_pending_show_screen_and_ends_on_its_change() {
     use kumochi_protocol::constants::CONFIG_FILE;
     use kumochi_protocol::message::{AudioSession, OutputGeneration, SettingsOp};
 
@@ -434,6 +434,10 @@ async fn queued_hold_refuses_pending_and_saved_show_screen_on() {
         }
         let next = GestureId(G.0 + 1);
         recognize_for(&mut shell, next).await;
+        status_for(&mut shell, next, HoldStatus::Admitted).await;
+        shell
+            .send(&ControlToBrain::Settings(SettingsOp::SetShowScreen(false)))
+            .await;
         status_for(
             &mut shell,
             next,
@@ -850,8 +854,19 @@ async fn recognize_screen_recipient(
     shell: &mut Shell<tokio::io::DuplexStream>,
     task: Option<ThreadId>,
     choice: &ModelChoice,
+    audio: kumochi_protocol::message::AudioSession,
 ) {
     opened(shell).await;
+    if audio == kumochi_protocol::message::AudioSession::QueuedRequired {
+        let output = kumochi_protocol::message::OutputGeneration(7);
+        shell
+            .send(&ControlToBrain::QueuedAudioOutput(24_000, output))
+            .await;
+        assert_eq!(
+            shell.control().await,
+            Some(ControlToShell::QueuedAudioRegistered(output))
+        );
+    }
     if let Some(thread) = task {
         commit_hold_model(shell, thread, choice).await;
     }
@@ -868,7 +883,14 @@ async fn recognize_screen_recipient(
 
 /// A spoken screen hold through the running brain whose picture is sealed, its words coming
 /// before the picture or after it: the run carries both, and `HoldScreen` waits for the grant.
-async fn a_screen_hold_reaches_its_run_with_its_picture(first: First) {
+#[expect(
+    clippy::too_many_lines,
+    reason = "one spoken screen hold through the running brain, on either audio session"
+)]
+async fn a_screen_hold_reaches_its_run_with_its_picture(
+    first: First,
+    audio: kumochi_protocol::message::AudioSession,
+) {
     use crate::runtime::hold::tests::screen_hold::{release as released, seeing};
     type Request = <crate::screen::Holds as crate::supervise::Kind>::Request;
     type Reply = <crate::screen::Holds as crate::supervise::Kind>::Reply;
@@ -902,7 +924,7 @@ async fn a_screen_hold_reaches_its_run_with_its_picture(first: First) {
     let ((control, data), mut shell) = duplex();
     let mut tap = Tap::from_env();
     let client = async {
-        recognize_screen_recipient(&mut shell, task, &choice).await;
+        recognize_screen_recipient(&mut shell, task, &choice, audio).await;
         status(&mut shell, HoldStatus::Admitted).await;
         shell.send(&released(G, 100, 200, 2)).await;
         let (id, display) = rig.next().await;
@@ -940,7 +962,10 @@ async fn a_screen_hold_reaches_its_run_with_its_picture(first: First) {
         drop(shell);
     };
     let (_, ()) = tokio::time::timeout(super::PATIENCE, async {
-        tokio::join!(brain.serve(control, data, &mut tap), client)
+        tokio::join!(
+            brain.serve_with_audio(control, data, &mut tap, audio),
+            client
+        )
     })
     .await
     .unwrap();
@@ -970,13 +995,27 @@ async fn a_screen_hold_reaches_its_run_with_its_picture(first: First) {
 
 #[tokio::test]
 async fn a_screen_holds_words_then_its_picture_reach_the_run_together() {
-    Box::pin(a_screen_hold_reaches_its_run_with_its_picture(First::Words)).await;
+    Box::pin(a_screen_hold_reaches_its_run_with_its_picture(
+        First::Words,
+        kumochi_protocol::message::AudioSession::Legacy,
+    ))
+    .await;
 }
 
 #[tokio::test]
 async fn a_screen_holds_picture_then_its_words_reach_the_run_together() {
     Box::pin(a_screen_hold_reaches_its_run_with_its_picture(
         First::Picture,
+        kumochi_protocol::message::AudioSession::Legacy,
+    ))
+    .await;
+}
+
+#[tokio::test]
+async fn a_queued_pair_with_show_screen_on_sends_the_holds_picture_with_its_run() {
+    Box::pin(a_screen_hold_reaches_its_run_with_its_picture(
+        First::Picture,
+        kumochi_protocol::message::AudioSession::QueuedRequired,
     ))
     .await;
 }

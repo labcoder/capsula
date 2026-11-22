@@ -50,8 +50,8 @@ A refused enqueue reserves no turn and does not discard older recovery. One acce
 name one run, or be refused by its own turn number. Typed admission checks the outbox and output
 under their short state locks, so contention alone doesn't drop Enter. The native eligibility probe
 never waits for those locks: it refuses the press if it can't check eligibility. The owner checks saved
-consent again before offering the Hold. The Plain path admits an ordinary voice Hold only with
-Show Screen confirmed off on that registered pair, and with Talk-back unchanged since the pair
+consent again before offering the Hold. The Plain path admits a Hold only once that registered pair knows
+Show Screen, either way, and with Talk-back unchanged since the pair
 opened: its first change in either direction ends the pair's Hold admission. A pending
 change to either preference closes Hold admission; this includes settings and installer writes that can
 change an inherited value. The brain cancels an in-flight Hold when it takes such a change
@@ -64,8 +64,12 @@ and rejects late PCM for that gesture. If decode has already been admitted, canc
 that wins before the Brain handles its result discards the words instead.
 The mic Stop receipt clears microphone debt, not the reservation. Only the
 matching Hold run after release consumes that reservation, or a matching terminal Hold status
-clears it. A silent Hold starts no speaker and asks for no picture. AskAbout, screen capture and
-conducted Speech are still unsupported on Plain queued pairs.
+clears it. A silent Hold starts no speaker. With Show Screen on, a queued Hold is a screen hold
+exactly as [Screen release](#screen-release) and [Notice revision](#notice-revision) describe:
+the outbox admits `ScreenHoldRecognized` under the voice recognition's rule, and `ScreenRelease`
+only while that gesture is listening, ahead of its `KeyUp`. The picture is taken by the brain's
+worker, so no frame crosses the pipe, and a cancel or consent change before submit discards it.
+AskAbout and conducted Speech are still unsupported on Plain queued pairs.
 
 The offline narrated fixture selects a separate internal adapter on the same authenticated
 pair. Each attendance owns a fresh bridge; neither a reconnect nor a new run inherits the
