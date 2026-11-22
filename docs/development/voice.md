@@ -521,14 +521,17 @@ Supply your own model directory and the directory containing the native runtime 
 in [voice-natives.md](voice-natives.md).
 The task checks every source's size and SHA-256 before it copies anything, then copies the
 models into the dev models folder (`Kumochi Dev`) and the DLLs beside
-`target\debug\kumochid.exe` and `target\release\kumochid.exe`, and checks each copy again. It
-copies rather than hardlinks because a hardlink shares the source file's permissions, and the
-brain refuses a model file other accounts may change; a copy takes the destination folder's. It
-never downloads. A destination that already matches the manifest is kept, so delete models an
-older version of the task hardlinked before running it again. Any other existing file there is a
+`target\debug\kumochid.exe` and `target\release\kumochid.exe`, checking each copy's size
+and SHA-256 as it writes it. Each file is written under a temporary name beside its destination,
+then linked to its final name, which never replaces an existing file. It doesn't hardlink the
+source, because a hardlink shares the source file's permissions and the brain refuses a model
+file other accounts may change; a copy takes the destination folder's. It never downloads. A
+destination that already matches the manifest is kept, so delete models an older version of the
+task hardlinked before running it again. Any other existing file there is a
 conflict: the task checks every destination before it copies anything, and if one conflicts it
-copies nothing, changes nothing and names the file, to be moved aside by hand. If a copy fails
-partway, the files that run made are removed. Run it again after `cargo clean`.
+copies nothing, changes nothing and names the file, to be moved aside by hand. A failed copy
+leaves nothing at its final name, files already placed stay, and the next run removes a stopped
+run's temporary files. Run it again after `cargo clean`.
 
 ### Vendored worker-startup tests
 
