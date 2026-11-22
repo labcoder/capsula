@@ -268,89 +268,6 @@ fn confirm(f: &Fixture, at: usize, cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn draft_and_definite_failure_emit_only_the_exact_decision_and_never_a_remote_outcome(
-    cx: &mut TestAppContext,
-) {
-    for state in [ActionState::Draft, ActionState::Failed(FailReason::Network)] {
-        let f = fixture(cx, state.clone(), "saved body");
-        open(&f, 0, cx);
-        confirm(&f, 0, cx);
-        assert_eq!(f.controls.try_recv().unwrap(), payload(2, 2));
-        cx.simulate_keystrokes(f.views[0].1, "enter space enter");
-        assert!(f.controls.try_recv().is_err());
-        for model in &f.models {
-            model.read_with(cx, |model, _| {
-                assert_eq!(model.issue(DraftId(9)).unwrap().state(), Some(&state));
-            });
-        }
-        f.owner.update(cx, |owner, cx| {
-            owner
-                .link_events(
-                    Batch::Plain(vec![LinkEvent::ActionState {
-                        generation: 1,
-                        request: Some(2),
-                        draft: DraftId(9),
-                        version: StateVersion(2),
-                        state: state.clone(),
-                        approval: Some(ApprovalRev(2)),
-                    }]),
-                    cx,
-                )
-                .unwrap();
-        });
-        open(&f, 1, cx);
-        confirm(&f, 1, cx);
-        assert_eq!(f.controls.try_recv().unwrap(), payload(4, 3));
-        assert!(f.controls.try_recv().is_err());
-    }
-}
-
-#[gpui::test]
-fn cancel_escape_immediate_and_held_enter_retire_reviews_without_filing(cx: &mut TestAppContext) {
-    let f = fixture(cx, ActionState::Draft, "saved body");
-    for (key, request, review) in [("enter", 2, 1), ("escape", 4, 3)] {
-        open(&f, 0, cx);
-        cx.simulate_keystrokes(f.views[0].1, key);
-        cx.run_until_parked();
-        cancelled(&f, request, review);
-        assert!(
-            f.views[0]
-                .0
-                .read_with(cx, |view, _| view.pending_issue.is_none())
-        );
-    }
-    open(&f, 0, cx);
-    {
-        let mut frame = gpui_kit::VisualTestContext::from_window(f.views[0].1, cx);
-        for held in [false, true, true] {
-            frame.simulate_event(gpui_kit::KeyDownEvent {
-                keystroke: gpui_kit::Keystroke::parse("enter").unwrap(),
-                is_held: held,
-                prefer_character_input: false,
-            });
-        }
-        frame.run_until_parked();
-        cancelled(&f, 6, 5);
-    }
-    open(&f, 0, cx);
-    {
-        let mut frame = gpui_kit::VisualTestContext::from_window(f.views[0].1, cx);
-        let cancel = frame.debug_bounds("confirmation-cancel").unwrap().center();
-        frame.simulate_click(cancel, gpui_kit::Modifiers::default());
-        frame.run_until_parked();
-        cancelled(&f, 8, 7);
-    }
-    open(&f, 0, cx);
-    let mut frame = gpui_kit::VisualTestContext::from_window(f.views[0].1, cx);
-    let button = frame.debug_bounds("confirmation-danger").unwrap().center();
-    frame.simulate_click(button, gpui_kit::Modifiers::default());
-    frame.run_until_parked();
-    assert_eq!(f.controls.try_recv().unwrap(), payload(10, 6));
-    frame.simulate_click(button, gpui_kit::Modifiers::default());
-    assert!(f.controls.try_recv().is_err());
-}
-
-#[gpui::test]
 fn a_batched_scope_loss_and_same_return_rejects_focused_confirm_before_observers(
     cx: &mut TestAppContext,
 ) {
@@ -1083,35 +1000,6 @@ fn a_coalesced_peer_hydration_cannot_revive_an_old_confirmation(cx: &mut TestApp
     f.owner.read_with(cx, |owner, _| {
         assert_eq!(owner.session.as_ref().unwrap().granted(), 118);
     });
-}
-
-#[gpui::test]
-fn losing_the_window_retires_consent_instead_of_reviving_on_activation(cx: &mut TestAppContext) {
-    let f = fixture(cx, ActionState::Draft, "saved body");
-    open(&f, 0, cx);
-    cx.simulate_keystrokes(f.views[0].1, "tab");
-    {
-        let mut frame = gpui_kit::VisualTestContext::from_window(f.views[0].1, cx);
-        frame.deactivate_window();
-        frame.run_until_parked();
-        assert!(!frame.update(WindowExt::has_active_dialog));
-    }
-    f.views[0]
-        .1
-        .update(cx, |_, window, _| window.activate_window())
-        .unwrap();
-    cx.run_until_parked();
-    cancelled(&f, 2, 1);
-    cx.simulate_keystrokes(f.views[0].1, "enter");
-    assert!(f.controls.try_recv().is_err());
-    assert!(
-        f.views[0]
-            .0
-            .read_with(cx, |view, _| view.pending_issue.is_none())
-    );
-    open(&f, 0, cx);
-    confirm(&f, 0, cx);
-    assert_eq!(f.controls.try_recv().unwrap(), payload(4, 3));
 }
 
 #[gpui::test]

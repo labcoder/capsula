@@ -22,6 +22,12 @@ pub mod messages {
     pub mod consent {
         pub mod machine;
     }
+    #[cfg(test)]
+    mod tests {
+        mod issues {
+            mod consent;
+        }
+    }
 }
 pub mod perch;
 pub mod pulling;
