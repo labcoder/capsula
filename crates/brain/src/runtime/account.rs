@@ -5,6 +5,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc as std_mpsc;
 use std::thread;
 use std::time::Duration;
@@ -148,6 +149,19 @@ impl Catalog {
     }
 }
 
+#[derive(Debug)]
+struct Listening {
+    cancelled: Arc<AtomicBool>,
+    task: JoinHandle<()>,
+}
+
+impl Drop for Listening {
+    fn drop(&mut self) {
+        self.cancelled.store(true, Ordering::Release);
+        self.task.abort();
+    }
+}
+
 /// The account machine, the credential thread and the tasks it started.
 #[derive(Debug)]
 pub(crate) struct Accounts {
@@ -159,8 +173,8 @@ pub(crate) struct Accounts {
     released: Option<oneshot::Receiver<()>>,
     events_tx: mpsc::UnboundedSender<Input>,
     events: mpsc::UnboundedReceiver<Input>,
-    /// The live attempt's listener; aborting it closes the loopback.
-    listener: Option<JoinHandle<()>>,
+    /// The live attempt; dropping it fences the opener and aborts the listener.
+    listener: Option<Listening>,
     pub(super) net: Net,
     /// Callers waiting for the bearer, by ticket.
     tickets: HashMap<u64, oneshot::Sender<Access>>,
@@ -523,24 +537,20 @@ impl Accounts {
                     saved,
                     intent,
                 } => {
-                    if let Some(listener) = self.listener.take() {
-                        listener.abort();
-                    }
-                    self.listener = Some(tokio::spawn(listen(
+                    drop(self.listener.take());
+                    let cancelled = Arc::new(AtomicBool::new(false));
+                    let task = tokio::spawn(listen(
                         attempt,
                         host,
                         saved,
                         intent,
-                        self.oauth.sign_in,
+                        (self.oauth.sign_in, Arc::clone(&cancelled)),
                         Arc::clone(&self.net.launcher),
                         self.events_tx.clone(),
-                    )));
+                    ));
+                    self.listener = Some(Listening { cancelled, task });
                 }
-                Effect::Close => {
-                    if let Some(listener) = self.listener.take() {
-                        listener.abort();
-                    }
-                }
+                Effect::Close => drop(self.listener.take()),
                 // Never aborted: a sent token request may already have issued tokens.
                 Effect::Exchange {
                     attempt,
@@ -609,11 +619,9 @@ impl Accounts {
     /// dispatched are dropped: a pending flag they would have cleared stays set, and the next
     /// start counts it as uncertainty.
     pub(crate) async fn close(&mut self, deadline: Instant, refresh_by: Instant) {
+        drop(self.listener.take());
         self.github
             .stop(self.jobs.as_ref(), &self.reads_tx, &self.net.http);
-        if let Some(listener) = self.listener.take() {
-            listener.abort();
-        }
         self.catalog.cancel();
         self.connections.close();
         let settled = tokio::time::timeout_at(refresh_by, async {
@@ -836,7 +844,7 @@ async fn listen(
     host: Secret<Zeroizing<String>>,
     saved: Option<Secret<Account>>,
     intent: Intent,
-    limit: Duration,
+    (limit, cancelled): (Duration, Arc<AtomicBool>),
     launcher: Arc<dyn Launcher + Send + Sync>,
     events: mpsc::UnboundedSender<Input>,
 ) {
@@ -850,7 +858,7 @@ async fn listen(
         .await
         .map_err(Listened::Bind)?;
         sign_in
-            .open_browser(launcher)
+            .open_browser(launcher, &cancelled)
             .await
             .map_err(Listened::Launch)?;
         sign_in

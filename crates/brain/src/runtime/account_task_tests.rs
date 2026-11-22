@@ -1,9 +1,10 @@
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicUsize;
 
 use super::*;
 use crate::connections::clock::FixedClock;
 use crate::connections::http_client::{Http, Request, Response};
+use crate::connections::oauth::{LaunchError, LaunchTarget};
 
 struct Counted(Arc<AtomicBool>);
 
@@ -12,6 +13,61 @@ impl Http for Counted {
         self.0.store(true, Ordering::SeqCst);
         std::future::ready(Err(HttpError::Transport))
     }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn account_close_fences_launch_before_tokio_polls_the_aborted_listener() {
+    struct Opener(Arc<AtomicUsize>);
+    impl Launcher for Opener {
+        fn launch(&self, _: &LaunchTarget) -> Result<(), LaunchError> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    let scratch = crate::test_support::Scratch::new("account-close-browser-fence");
+    let mut accounts = crate::test_support::accounts(&scratch);
+    let opened = Arc::new(AtomicUsize::new(0));
+    accounts.net.launcher = Arc::new(Opener(Arc::clone(&opened)));
+    let wait = Duration::from_secs(10);
+    let (holding, held) = oneshot::channel();
+    let (release, released) = std_mpsc::channel();
+    let holder = std::thread::spawn(move || {
+        let _spawn = crate::platform::spawn_lock();
+        holding.send(()).unwrap();
+        released.recv_timeout(wait).unwrap();
+    });
+    tokio::time::timeout(wait, held).await.unwrap().unwrap();
+
+    accounts.handle(Input::Op(AccountOp::SignIn));
+    let listener = accounts.listener.as_ref().expect("sign-in listener");
+    let pending = listener.task.abort_handle();
+    let cancelled = Arc::clone(&listener.cancelled);
+    tokio::time::timeout(wait, async {
+        while Arc::strong_count(&cancelled) < 4 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the blocking worker owns a launch permission");
+
+    accounts.handle(Input::Op(AccountOp::CancelSignIn));
+    release.send(()).unwrap();
+    holder.join().unwrap();
+    let started = std::time::Instant::now();
+    while Arc::strong_count(&cancelled) > 2 {
+        assert!(
+            started.elapsed() < wait,
+            "the blocking worker did not finish"
+        );
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    assert!(
+        !pending.is_finished(),
+        "the listener has not been polled since Close"
+    );
+    assert_eq!(opened.load(Ordering::SeqCst), 0);
+    accounts.close(Instant::now(), Instant::now()).await;
 }
 
 #[tokio::test(start_paused = true)]

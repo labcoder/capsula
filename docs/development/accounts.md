@@ -199,7 +199,9 @@ id from the vault.
 `SystemBrowser` and `webbrowser`; tests record the URL without opening a browser.
 The async attempt keeps the listener and times the launch on Tokio's blocking pool. The worker
 gets only launch material, not the socket, and checks cancellation and expiry under the
-process-spawn guard so a queued launch can't open a stale page.
+process-spawn guard so a queued launch can't open a stale page. Cancel, replacement and
+shutdown invalidate that permission before aborting the listener task; cancellation does
+not depend on Tokio polling the listener again.
 `webbrowser` owns discovery of the OS browser
 executable and its existing arguments. Neither `id_token_hint` nor `login_hint` is sent,
 even when a saved record has ID, access and refresh tokens. Returning sign-in uses the

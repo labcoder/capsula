@@ -12,6 +12,7 @@ mod tests;
 use std::fmt;
 use std::net::Ipv4Addr;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use kumochi_protocol::{Secret, constants};
@@ -224,17 +225,22 @@ impl SignIn {
     pub async fn open_browser(
         &self,
         launcher: Arc<dyn Launcher + Send + Sync>,
+        cancelled: &Arc<AtomicBool>,
     ) -> Result<(), LaunchError> {
         let deadline = self.deadline;
-        if Instant::now() >= deadline {
+        if cancelled.load(Ordering::Acquire) || Instant::now() >= deadline {
             return Err(LaunchError::Expired);
         }
         let alive = Arc::new(());
         let pending = Arc::downgrade(&alive);
         let target = LaunchTarget(self.target.0.clone());
+        let cancelled = Arc::clone(cancelled);
         let launch = tokio::task::spawn_blocking(move || {
             let remaining = || {
                 pending.upgrade()?;
+                if cancelled.load(Ordering::Acquire) {
+                    return None;
+                }
                 deadline
                     .checked_duration_since(Instant::now())
                     .filter(|left| !left.is_zero())
