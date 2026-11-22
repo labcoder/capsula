@@ -357,6 +357,29 @@ fn late_status_and_release_cannot_cancel_a_newer_held_input(cx: &mut TestAppCont
     });
 }
 
+/// The link remembers only the last gesture it revoked. A hold whose input was cleared, not
+/// revoked, still sends its own cancel after another gesture's input was revoked, and the
+/// revoked gesture's cancel goes once.
+#[gpui::test]
+fn another_gesture_s_revoke_never_skips_a_hold_s_own_cancel(cx: &mut TestAppContext) {
+    let (owner, _data, controls) = ready(cx);
+    hold(&owner, 1, cx);
+    while controls.try_recv().is_ok() {}
+    owner.update(cx, |owner, cx| {
+        owner.link.clear_input(GestureId(1));
+        owner.link.track_input(GestureId(9));
+        assert_eq!(owner.link.cancel_input_gesture(), Some(GestureId(9)));
+        owner.cancel_voice(cx);
+    });
+    let cancels = std::iter::from_fn(|| controls.try_recv().ok())
+        .filter(|message| matches!(message, ControlToBrain::GestureCancel { .. }))
+        .collect::<Vec<_>>();
+    let cancel = |id| ControlToBrain::GestureCancel {
+        gesture: GestureId(id),
+    };
+    assert_eq!(cancels, [cancel(9), cancel(1)]);
+}
+
 #[gpui::test]
 fn one_typed_send_cancels_and_drains_a_hold_before_submitting(cx: &mut TestAppContext) {
     let (owner, data, _controls) = ready(cx);
