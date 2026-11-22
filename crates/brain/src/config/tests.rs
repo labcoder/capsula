@@ -765,6 +765,45 @@ fn an_unparseable_file_is_never_written_and_refuses_changes() {
 }
 
 #[test]
+fn tuning_is_read_at_load_and_left_as_written_by_settings_saves() {
+    let scratch = Scratch::new("config-tuning");
+    let dir = dir(&scratch);
+    let path = dir.join(CONFIG_FILE);
+    std::fs::write(&path, "[tuning.github]\nfiling_s = 30\nlisting_s = 25\n").expect("seeded");
+    let mut config = Config::load(Some(dir.clone()), ThreadId(1));
+    let tuning = config.github_tuning();
+    assert_eq!(tuning.filing_deadline, std::time::Duration::from_secs(30));
+    assert_eq!(tuning.listing_budget, std::time::Duration::from_secs(25));
+    apply(&mut config, SettingsOp::SetAssistantName(name("Nimbus")));
+    assert_eq!(config.github_tuning(), tuning);
+    let table = saved(&path);
+    assert_eq!(table["tuning"]["github"]["filing_s"].as_integer(), Some(30));
+    assert_eq!(
+        table["tuning"]["github"]["listing_s"].as_integer(),
+        Some(25)
+    );
+    assert_eq!(Config::load(Some(dir), ThreadId(1)).github_tuning(), tuning);
+}
+
+#[test]
+fn a_duplicate_tuning_key_makes_the_file_unreadable_with_default_tuning() {
+    let scratch = Scratch::new("config-tuning-duplicate");
+    let dir = dir(&scratch);
+    let path = dir.join(CONFIG_FILE);
+    let broken = "[tuning.github]\nfiling_s = 30\nfiling_s = 40\n";
+    std::fs::write(&path, broken).expect("seeded");
+    let config = Config::load(Some(dir), ThreadId(1));
+    assert_eq!(config.github_tuning(), super::GitHubTuning::default());
+    assert!(!config.view().screen_holds);
+    assert!(!config.view().show_screen);
+    assert!(matches!(
+        config.stage(SettingsOp::FinishOnboarding),
+        Err(ConfigError::Unreadable)
+    ));
+    assert_eq!(std::fs::read_to_string(&path).expect("readable"), broken);
+}
+
+#[test]
 fn an_unreadable_file_refuses_changes_like_a_broken_one() {
     let scratch = Scratch::new("config-unreadable");
     let dir = dir(&scratch);

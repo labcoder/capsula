@@ -113,7 +113,7 @@ async fn sixteen_reservations_are_never_refunded_and_the_seventeenth_never_dispa
             Step::Reply(None)
         };
         let script = Script::new(vec![step; 16]);
-        let control = Control::new();
+        let control = Control::new(GitHubTuning::default());
         let http = BoundedHttp::new(SharedHttp::new(script.clone()), Arc::clone(&control));
         for _ in 0..16 {
             if failed {
@@ -131,9 +131,58 @@ async fn sixteen_reservations_are_never_refunded_and_the_seventeenth_never_dispa
 }
 
 #[tokio::test(start_paused = true)]
+async fn a_lower_filing_cap_refuses_cleanly_and_never_refunds_or_resends_a_create() {
+    let tuning = GitHubTuning {
+        filing_requests: 12,
+        ..GitHubTuning::default()
+    };
+    let access = |http: BoundedHttp| {
+        http.with_post_access(
+            Instant::now() + Duration::from_secs(90),
+            200,
+            Arc::new(FixedClock(100)),
+        )
+    };
+
+    let control = Control::new(tuning);
+    let script = Script::new(vec![Step::Reply(None); 12]);
+    let http = access(BoundedHttp::new(
+        SharedHttp::new(script.clone()),
+        Arc::clone(&control),
+    ));
+    for _ in 0..12 {
+        assert_eq!(http.execute(get()).await.unwrap().status, 200);
+    }
+    assert_eq!(http.execute(post()).await.unwrap_err(), HttpError::Request);
+    assert_eq!(control.requests.load(Ordering::Acquire), 12);
+    assert_eq!(script.calls.load(Ordering::SeqCst), 12);
+    assert_eq!(script.creates.load(Ordering::SeqCst), 0);
+    assert!(!control.may_have_sent());
+
+    let control = Control::new(tuning);
+    let mut steps = vec![Step::Reply(None); 10];
+    steps.push(Step::Fail(HttpError::Connect));
+    let script = Script::new(steps);
+    let http = access(BoundedHttp::new(
+        SharedHttp::new(script.clone()),
+        Arc::clone(&control),
+    ));
+    for _ in 0..10 {
+        assert_eq!(http.execute(get()).await.unwrap().status, 200);
+    }
+    assert_eq!(http.execute(post()).await.unwrap_err(), HttpError::Connect);
+    assert!(control.may_have_sent());
+    assert_eq!(http.execute(post()).await.unwrap_err(), HttpError::Request);
+    assert_eq!(http.execute(get()).await.unwrap_err(), HttpError::Request);
+    assert_eq!(control.requests.load(Ordering::Acquire), 12);
+    assert_eq!(script.calls.load(Ordering::SeqCst), 11);
+    assert_eq!(script.creates.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test(start_paused = true)]
 async fn the_sixty_second_deadline_is_not_renewed_between_gets() {
     let started = Instant::now();
-    let control = Control::new();
+    let control = Control::new(GitHubTuning::default());
     let script = Script::new(vec![Step::Reply(None), Step::Pending]);
     let http = BoundedHttp::new(SharedHttp::new(script.clone()), Arc::clone(&control));
     assert_eq!(control.deadline(), started + Duration::from_secs(60));
@@ -151,7 +200,7 @@ async fn the_sixty_second_deadline_is_not_renewed_between_gets() {
 
 #[tokio::test(start_paused = true)]
 async fn cancellation_before_handoff_keeps_every_request_unsent() {
-    let control = Control::new();
+    let control = Control::new(GitHubTuning::default());
     let script = Script::new(Vec::new());
     let http = BoundedHttp::new(SharedHttp::new(script.clone()), Arc::clone(&control))
         .with_post_access(
@@ -181,7 +230,7 @@ impl Clock for CancellingClock {
 
 #[tokio::test(start_paused = true)]
 async fn cancellation_in_the_final_access_check_wins_the_atomic_handoff() {
-    let control = Control::new();
+    let control = Control::new(GitHubTuning::default());
     let script = Script::new(Vec::new());
     let http = BoundedHttp::new(SharedHttp::new(script.clone()), Arc::clone(&control))
         .with_post_access(
@@ -205,7 +254,7 @@ async fn absent_or_expired_access_never_hands_a_create_to_the_transport() {
         ("wall", 1, true),
         ("operation", 0, true),
     ] {
-        let control = Control::new();
+        let control = Control::new(GitHubTuning::default());
         let script = Script::new(Vec::new());
         let http = BoundedHttp::new(SharedHttp::new(script.clone()), Arc::clone(&control));
         let until = Instant::now() + Duration::from_secs(if case == "monotonic" { 0 } else { 90 });
@@ -245,7 +294,7 @@ impl Clock for MovingClock {
 #[tokio::test(start_paused = true)]
 async fn access_expiry_after_an_earlier_get_is_rechecked_before_handoff() {
     for monotonic in [false, true] {
-        let control = Control::new();
+        let control = Control::new(GitHubTuning::default());
         let script = Script::new(vec![Step::Reply(None)]);
         let wall = Arc::new(AtomicU64::new(100));
         let http = BoundedHttp::new(SharedHttp::new(script.clone()), Arc::clone(&control))
@@ -272,7 +321,7 @@ async fn access_expiry_after_an_earlier_get_is_rechecked_before_handoff() {
 #[tokio::test(start_paused = true)]
 async fn timeout_after_post_handoff_retains_uncertainty_at_the_original_deadline() {
     let started = Instant::now();
-    let control = Control::new();
+    let control = Control::new(GitHubTuning::default());
     let script = Script::new(vec![Step::Pending]);
     let http = BoundedHttp::new(SharedHttp::new(script.clone()), Arc::clone(&control))
         .with_post_access(
@@ -299,7 +348,7 @@ async fn cancellation_wakes_pending_gets_and_posts_with_their_actual_send_certai
         (true, HttpError::Timeout, 1),
     ] {
         let started = Instant::now();
-        let control = Control::new();
+        let control = Control::new(GitHubTuning::default());
         let script = Script::new(vec![Step::Pending]);
         let http = BoundedHttp::new(SharedHttp::new(script.clone()), Arc::clone(&control))
             .with_post_access(
@@ -329,7 +378,7 @@ async fn cancellation_wakes_pending_gets_and_posts_with_their_actual_send_certai
 
 #[tokio::test(start_paused = true)]
 async fn another_access_window_cannot_dispatch_a_second_post() {
-    let control = Control::new();
+    let control = Control::new(GitHubTuning::default());
     let script = Script::new(vec![Step::Reply(None)]);
     let first = BoundedHttp::new(SharedHttp::new(script.clone()), Arc::clone(&control))
         .with_post_access(
@@ -358,7 +407,7 @@ async fn another_access_window_cannot_dispatch_a_second_post() {
 
 #[tokio::test(start_paused = true)]
 async fn only_the_first_positive_completed_get_date_is_retained() {
-    let control = Control::new();
+    let control = Control::new(GitHubTuning::default());
     let script = Script::new(vec![
         Step::Reply(Some(9)),
         Step::Reply(None),
@@ -384,7 +433,7 @@ async fn only_the_first_positive_completed_get_date_is_retained() {
 
 #[tokio::test(start_paused = true)]
 async fn only_the_four_typed_github_gets_and_create_can_reach_the_transport() {
-    let control = Control::new();
+    let control = Control::new(GitHubTuning::default());
     let script = Script::new(vec![Step::Reply(None); 4]);
     let http = BoundedHttp::new(SharedHttp::new(script.clone()), Arc::clone(&control));
     for endpoint in [
@@ -442,7 +491,7 @@ async fn only_the_four_typed_github_gets_and_create_can_reach_the_transport() {
 
 #[tokio::test(start_paused = true)]
 async fn outer_debug_never_exposes_request_response_or_access_content() {
-    let control = Control::new();
+    let control = Control::new(GitHubTuning::default());
     let script = Script::new(vec![Step::Reply(Some(42))]);
     let http = BoundedHttp::new(SharedHttp::new(script), Arc::clone(&control)).with_post_access(
         Instant::now() + Duration::from_secs(90),

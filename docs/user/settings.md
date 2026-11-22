@@ -77,4 +77,5 @@ close Settings to reach Retry. Retry and Quit are also in the dock's native menu
 If the dock says **Check settings**, open Settings for the full explanation. A successful retry
 of the field that failed clears that notice. If the settings file can't be read, repair or
 delete `config.toml` in `%APPDATA%\Kumochi` and restart the app. Debug builds use
-`%APPDATA%\Kumochi Dev`, separate from an installed copy.
+`%APPDATA%\Kumochi Dev`, separate from an installed copy. Some built-in limits can be
+changed in the same file; see [tuning](tuning.md).

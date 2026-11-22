@@ -421,7 +421,7 @@ impl Brain {
             })]);
         }
         let check = matches!(write, Write::Read(_));
-        let control = Control::new();
+        let control = Control::new(self.account.github.tuning);
         let stamp = self.account.github.watch_issue(&control);
         let mut job = Job {
             id: self.filing.serial(),

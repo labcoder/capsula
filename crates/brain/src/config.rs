@@ -18,6 +18,9 @@ use kumochi_protocol::voice::VoicePart;
 use toml::{Table, Value};
 
 use crate::connections::github::device::DefaultRepo;
+use tuning::GitHubTuning;
+
+pub(crate) mod tuning;
 
 const ASSISTANT_NAME: &str = "assistant_name";
 const USER_NAME: &str = "user_name";
@@ -77,6 +80,8 @@ pub(crate) struct Config {
     /// `Err` when the file can't be written over: no home, or unreadable.
     table: Result<Table, Refusal>,
     view: SettingsView,
+    /// `[tuning.github]`, read once: a change applies at the next start.
+    github_tuning: GitHubTuning,
     /// What an absent `onboarded` key reads as, fixed at start: true when the profile was
     /// already in use, or the file can't be written, so neither ever asks for onboarding.
     in_use: bool,
@@ -140,6 +145,7 @@ impl Config {
         let view = view_of(&table, main_thread, false);
         Self {
             path: Some(path),
+            github_tuning: GitHubTuning::from_table(&table),
             table: Ok(table),
             view,
             in_use: false,
@@ -155,6 +161,7 @@ impl Config {
             path,
             table: Err(refusal),
             view,
+            github_tuning: GitHubTuning::default(),
             in_use: true,
         }
     }
@@ -202,6 +209,10 @@ impl Config {
             }
             Some(_) => false,
         }
+    }
+
+    pub(crate) fn github_tuning(&self) -> GitHubTuning {
+        self.github_tuning
     }
 
     pub(crate) fn default_choice(&self) -> StoredChoice {

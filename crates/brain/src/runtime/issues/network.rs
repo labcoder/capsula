@@ -77,7 +77,7 @@ async fn authority<'a>(
     if user.id != bound.id {
         return Err(NO_ACCOUNT);
     }
-    let repos = repositories::fetch(http, token).await?;
+    let repos = repositories::fetch(http, token, http.tuning()).await?;
     if !repos.names.contains(repo) {
         return Err(NO_REPO);
     }

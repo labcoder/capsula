@@ -7,10 +7,10 @@ use std::sync::{
 use tokio::sync::Notify;
 use tokio::time::{Instant, timeout_at};
 
+use crate::config::tuning::GitHubTuning;
 use crate::connections::clock::Clock;
 use crate::connections::github::GitHubEndpoint;
 use crate::connections::http_client::{Endpoint, Http, HttpError, Request, Response, SharedHttp};
-use crate::runtime::account::github::repositories::{FILING_DEADLINE, MAX_FILING_REQUESTS};
 
 #[cfg(test)]
 #[path = "transport_tests.rs"]
@@ -20,6 +20,7 @@ const STOPPED: u8 = 1;
 const HANDED: u8 = 2;
 
 pub(in crate::runtime) struct Control {
+    tuning: GitHubTuning,
     deadline: Instant,
     scope: crate::issues::WriteScope,
     state: AtomicU8,
@@ -29,9 +30,10 @@ pub(in crate::runtime) struct Control {
 }
 
 impl Control {
-    pub(in crate::runtime) fn new() -> Arc<Self> {
-        let deadline = Instant::now() + FILING_DEADLINE;
+    pub(in crate::runtime) fn new(tuning: GitHubTuning) -> Arc<Self> {
+        let deadline = Instant::now() + tuning.filing_deadline;
         Arc::new(Self {
+            tuning,
             deadline,
             scope: crate::issues::WriteScope::new(deadline),
             state: AtomicU8::new(0),
@@ -103,6 +105,10 @@ impl BoundedHttp {
         }
     }
 
+    pub(in crate::runtime) fn tuning(&self) -> GitHubTuning {
+        self.control.tuning
+    }
+
     pub(in crate::runtime) fn with_post_access(
         mut self,
         until: Instant,
@@ -156,7 +162,7 @@ impl Http for BoundedHttp {
         self.control
             .requests
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
-                (count < MAX_FILING_REQUESTS).then_some(count + 1)
+                (count < self.control.tuning.filing_requests).then_some(count + 1)
             })
             .map_err(|_| HttpError::Request)?;
         if post {

@@ -1,4 +1,5 @@
 use super::{Accounts, Brain, Event, Full, HttpFactory, Link, Work, settings};
+use crate::config::tuning::GitHubTuning;
 use crate::connections::github::{
     DeviceCodeValue, GitHubToken, RefreshToken,
     api::{self, ApiError, GitHubUser},
@@ -192,6 +193,8 @@ pub(crate) struct GitHub {
     outstanding: usize,
     suspended: Vec<(Stamp, Effect)>,
     issue: Option<Weak<crate::runtime::issues::transport::Control>>,
+    /// Filing and listing budgets from `[tuning.github]`, set once at start.
+    pub(in crate::runtime) tuning: GitHubTuning,
 }
 
 impl std::fmt::Debug for GitHub {
@@ -223,6 +226,7 @@ impl GitHub {
             rotation_stopped: false,
             outstanding: 0,
             suspended: Vec::new(),
+            tuning: GitHubTuning::default(),
             issue: None,
         }
     }
@@ -336,6 +340,7 @@ impl GitHub {
                     client,
                     self.client_id
                         .expect("configured operations have a client identifier"),
+                    self.tuning,
                 )));
                 self.verification = Some(verification);
                 return Vec::new();
@@ -960,6 +965,7 @@ async fn execute(
     operation: Operation,
     http: SharedHttp,
     client_id: &'static str,
+    tuning: GitHubTuning,
 ) -> Option<VerificationOutcome> {
     if fence.load(Ordering::Acquire) != stamp.generation {
         return None;
@@ -985,7 +991,7 @@ async fn execute(
             VerificationOutcome::Refreshed(api::refresh_user_token(&http, client_id, &token).await)
         }
         Operation::Repositories(token) => {
-            VerificationOutcome::Repositories(repositories::fetch(&http, &token).await)
+            VerificationOutcome::Repositories(repositories::fetch(&http, &token, tuning).await)
         }
         Operation::User(_) => unreachable!("user verification returned above"),
     })
