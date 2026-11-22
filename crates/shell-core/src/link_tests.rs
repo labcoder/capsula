@@ -947,17 +947,23 @@ fn bare_link() -> Link {
 }
 
 #[test]
-fn real_handshake_writer_preserves_legacy_order_and_echoes_queued_welcome() {
+fn real_handshake_writer_preserves_hellos_and_sends_one_text_profile() {
     use std::io::Read as _;
     use std::sync::atomic::{AtomicBool, Ordering};
 
     use kumochi_protocol::Secret;
-    use kumochi_protocol::message::{AudioSession, CAPABILITY_LEN, Hello};
+    use kumochi_protocol::message::{AudioSession, CAPABILITY_LEN, Hello, TextMetricsV1};
 
     for (mode, control_tag, data_tag) in [
         (AudioSession::Legacy, 0, 0),
         (AudioSession::QueuedRequired, 37, 9),
     ] {
+        let profile = (mode == AudioSession::QueuedRequired).then_some(TextMetricsV1 {
+            advances: [630; 95],
+            line_height: 1400,
+            range_maxima: [1100, 1550, 2250],
+        });
+        let family: Arc<str> = Arc::from("pair-local font family");
         let (peer_control, control) = pair(&format!("hello-control-{control_tag}"));
         let (peer_data, data) = pair(&format!("hello-data-{data_tag}"));
         for pipe in [&peer_control, &control, &peer_data, &data] {
@@ -966,6 +972,7 @@ fn real_handshake_writer_preserves_legacy_order_and_echoes_queued_welcome() {
         let allowed = Arc::new(AtomicBool::new(false));
         let connect = {
             let allowed = Arc::clone(&allowed);
+            let family = Arc::clone(&family);
             thread::spawn(move || {
                 let hello = Hello {
                     build_id: "b".into(),
@@ -973,10 +980,20 @@ fn real_handshake_writer_preserves_legacy_order_and_echoes_queued_welcome() {
                 };
                 let attempt =
                     (mode == AudioSession::QueuedRequired).then(|| Instant::now() + PATIENCE);
-                super::handshake_pair(control, hello, mode, attempt, || {
-                    assert!(allowed.load(Ordering::Acquire), "data opens after Welcome");
-                    Ok(data)
-                })
+                super::handshake_pair(
+                    control,
+                    hello,
+                    mode,
+                    attempt,
+                    super::DrawingText {
+                        profile,
+                        font_family: Some(family),
+                    },
+                    || {
+                        assert!(allowed.load(Ordering::Acquire), "data opens after Welcome");
+                        Ok(data)
+                    },
+                )
             })
         };
         let greeting = |tag, echo| {
@@ -1007,11 +1024,22 @@ fn real_handshake_writer_preserves_legacy_order_and_echoes_queued_welcome() {
         (&peer_data).read_exact(&mut got).unwrap();
         assert_eq!(got, data_bytes);
         assert_eq!(
-            connect.join().unwrap().unwrap().issue_origin,
+            frame::read(&mut &peer_data, Pipe::Data).unwrap(),
+            Some(DataToBrain::TextMetrics(profile))
+        );
+        let connected = connect.join().unwrap().unwrap();
+        assert_eq!(
+            connected.issue_origin,
             IssueSession {
                 incarnation: Incarnation(5),
                 epoch: 128
             }
+        );
+        assert_eq!(connected.drawing_font_family, Some(family));
+        drop(connected);
+        assert_eq!(
+            frame::read::<DataToBrain>(&mut &peer_data, Pipe::Data).unwrap(),
+            None
         );
     }
 }
@@ -1664,6 +1692,7 @@ fn the_brain_s_first_frames_with_the_account_view_keep_the_connection() {
         control: Arc::new(shell_control),
         data: Arc::new(shell_data),
         issue_origin: issue_session,
+        drawing_font_family: None,
     };
     let link =
         thread::spawn(move || start.link.attend(connection, &start.events) == Attendance::Lost);
@@ -1757,6 +1786,7 @@ fn an_ended_connection_s_sends_and_credit_never_reach_the_next() {
                     incarnation: Incarnation(1),
                     epoch,
                 },
+                drawing_font_family: None,
             };
             start.link.attend(connection, &start.events) == Attendance::Lost
         })
@@ -2074,6 +2104,7 @@ fn a_delete_answered_before_a_new_brain_never_fences_the_new_brain_s_runs() {
                     incarnation,
                     epoch: 1,
                 },
+                drawing_font_family: None,
             };
             start.link.attend(connection, &start.events) == Attendance::Lost
         })
@@ -4639,6 +4670,7 @@ fn queued_fixture_connector(
             queued_fixture_hello(),
             super::AudioSession::QueuedRequired,
             attempt,
+            super::DrawingText::default(),
             open_data,
         )?;
         if let Some(end) = wait_through {
@@ -4693,6 +4725,11 @@ fn read_queued_fixture_hello(control: &PipeClient, data: &PipeClient) {
         ),
         "the data hello names this exact pair"
     );
+    assert_eq!(
+        frame::read(&mut &*data, Pipe::Data).expect("text metrics"),
+        Some(DataToBrain::TextMetrics(None)),
+        "fixture shells explicitly select the built-in metrics after Hello"
+    );
 }
 
 fn lost_quiet_mic() -> (
@@ -4739,6 +4776,7 @@ fn replacement_pair(label: &str) -> (PipeClient, PipeClient, Connection) {
                 incarnation: Incarnation(1),
                 epoch: 2,
             },
+            drawing_font_family: None,
         },
     )
 }
@@ -4766,6 +4804,7 @@ fn assert_refused_queued_replacement(handle: &LinkHandle) {
                     incarnation: Incarnation(1),
                     epoch: 93
                 },
+                drawing_font_family: None,
             },
             &sender
         ),

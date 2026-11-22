@@ -395,7 +395,7 @@ fn retained_layouts_cover_hard_soft_and_long_lines(cx: &mut gpui_kit::TestAppCon
             let shaped = entry
                 .shape(
                     &mut fonts,
-                    &family,
+                    (&family, None),
                     &text_system,
                     gpui_kit::px(10.0),
                     wrap.map(gpui_kit::px),
@@ -458,17 +458,38 @@ fn retained_layout_keys_and_recreated_hosts_preserve_warm_storage(
             false,
         );
         entry
-            .shape(&mut fonts, &family, &text_system, px(10.0), None, 1.0)
+            .shape(
+                &mut fonts,
+                (&family, None),
+                &text_system,
+                px(10.0),
+                None,
+                1.0,
+            )
             .expect("cold shape");
         let mut bold = super::LabelEntry::new(Handle::new(1, 0).expect("handle"), 1, "bold", true);
-        bold.shape(&mut fonts, &family, &text_system, px(10.0), None, 1.0)
-            .expect("bold shape");
+        bold.shape(
+            &mut fonts,
+            (&family, None),
+            &text_system,
+            px(10.0),
+            None,
+            1.0,
+        )
+        .expect("bold shape");
         assert!(fonts.0[1].id.is_some());
         let recreated = WindowTextSystem::new(Arc::clone(cx.text_system()));
         for text_system in [&text_system, &recreated] {
             let ((), counts) = crate::allocation::activity(|| {
                 let shaped = entry
-                    .shape(&mut fonts, &family, text_system, px(10.0), None, 1.0)
+                    .shape(
+                        &mut fonts,
+                        (&family, None),
+                        text_system,
+                        px(10.0),
+                        None,
+                        1.0,
+                    )
                     .expect("warm shape");
                 assert_eq!(
                     (shaped.font_gen, shaped.size, shaped.wrap, shaped.scale),
@@ -493,7 +514,7 @@ fn retained_layout_keys_and_recreated_hosts_preserve_warm_storage(
                 let shaped = entry
                     .shape(
                         &mut fonts,
-                        &family,
+                        (&family, None),
                         &text_system,
                         px(size),
                         wrap.map(px),

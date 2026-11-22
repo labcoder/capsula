@@ -1,4 +1,4 @@
-//! The brain's own layout of every visible scene, laid out with the wide measure, so a step's
+//! The brain's own layout of every visible scene, measured for the current pair, so a step's
 //! paint work is counted before its write. A step is prepared off the coordinator thread while
 //! its admission seals the reducer, as a write does.
 
@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use kumochi_protocol::message::SceneId;
-use kumochi_scene::display::{PaintWork, WideMeasure};
+use kumochi_scene::display::{PaintWork, ProfileMeasure, TextMetricsV1};
 use kumochi_scene::layout::{
     DEFAULT_CANVAS, LayoutState, PrepareError, PrepareInput, SurfaceGeometry, prepare,
 };
@@ -136,6 +136,7 @@ impl Drawing {
                 input.with_paint_cap(Some(PaintWork::LIMITS)),
             )))),
             cancel: Arc::clone(&cancel),
+            metrics: self.paint_metrics,
         };
         #[cfg(test)]
         let job = if self.defer_preparation {
@@ -210,6 +211,18 @@ impl Drawing {
         }
         step.laid = match outcome {
             Prepared::Layout { layout, bytes } => Some((Arc::unwrap_or_clone(layout.0), bytes)),
+            Prepared::Geometry => {
+                self.fail(
+                    at,
+                    CallError::Step(StepError {
+                        step: Some(step.step.id.clone()),
+                        path: FieldPath::default(),
+                        code: ErrorCode::OutOfRange,
+                    }),
+                    out,
+                );
+                return Ok(());
+            }
             Prepared::Refused(error) if self.calls[at].picture.is_some() => {
                 self.fail(at, CallError::Step(error), out);
                 return Ok(());
@@ -294,6 +307,7 @@ pub struct PrepareJob {
     /// Taken by the first copy that runs.
     pub(super) input: Shared<Mutex<Option<PrepareInput>>>,
     pub(super) cancel: Arc<AtomicBool>,
+    metrics: Option<TextMetricsV1>,
 }
 
 impl PrepareJob {
@@ -305,7 +319,7 @@ impl PrepareJob {
         }
     }
 
-    /// Lays the step out with the wide measure, for the drawing system's answer.
+    /// Lays the step out with the pair's measure, for the drawing system's answer.
     pub fn run(self) -> Input {
         Input::Prepared {
             serial: self.serial,
@@ -315,13 +329,23 @@ impl PrepareJob {
 
     fn outcome(&self) -> Prepared {
         let input = self.input.0.lock().ok().and_then(|mut input| input.take());
-        match input.map(|input| prepare(input, &mut WideMeasure, &self.cancel)) {
+        let mut measure = ProfileMeasure::new(self.metrics);
+        let result = input.map(|input| prepare(input, &mut measure, &self.cancel));
+        if measure.geometry_exceeded() {
+            return Prepared::Geometry;
+        }
+        match result {
             Some(Ok(step)) => Prepared::Layout {
                 bytes: step.after.resident_bytes(),
                 layout: Shared(Arc::new(step.after)),
             },
             Some(Err(PrepareError::OverPaintWork)) => Prepared::TooMuch,
             Some(Err(PrepareError::Cancelled)) => Prepared::Cancelled,
+            Some(Err(PrepareError::Layout(error)))
+                if self.metrics.is_some() && error.code == ErrorCode::OutOfRange =>
+            {
+                Prepared::Geometry
+            }
             Some(Err(PrepareError::Layout(error))) => Prepared::Refused(error),
             // Another copy ran it, or it failed for something other than paint work.
             None | Some(Err(_)) => Prepared::Failed,
@@ -355,6 +379,8 @@ pub enum Prepared {
     },
     /// The scene alone paints more than the shell can.
     TooMuch,
+    /// A negotiated measurement or its derived layout exceeded a geometry bound.
+    Geometry,
     /// The reducer cancelled it.
     Cancelled,
     /// The step's own geometry can't be laid out: refused in a screen scene, whose model can

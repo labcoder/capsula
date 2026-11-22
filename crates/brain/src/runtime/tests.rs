@@ -645,6 +645,29 @@ fn duplex() -> ((DuplexStream, DuplexStream), Shell<DuplexStream>) {
     ((control, data), Shell::new(control_client, data_client))
 }
 
+#[tokio::test]
+async fn startup_text_metrics_are_rejected_on_the_live_data_link() {
+    let queue = RefCell::new(DataQueue::new(window()));
+    let ready = Notify::new();
+    let (turns, _turns) = mpsc::channel(1);
+    let (pages, _pages) = mpsc::channel(1);
+    let frame = frame::encode(&DataToBrain::TextMetrics(None), Pipe::Data).unwrap();
+    assert_eq!(
+        super::read_data(
+            &mut frame.as_slice(),
+            &turns,
+            &pages,
+            &queue,
+            &ready,
+            1,
+            None,
+            None,
+        )
+        .await,
+        Ended::Broken("startup frame on live data pipe")
+    );
+}
+
 /// The real named pipes.
 #[cfg(windows)]
 async fn pipes(name: &str) -> ((PipeServer, PipeServer), Shell<PipeClient>) {

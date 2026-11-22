@@ -98,7 +98,9 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    gpui_kit::application()
+    let platform = gpui_kit::platform::current_platform(false);
+    let drawing_text = platform.text_system();
+    gpui_kit::Application::with_platform(platform)
         .with_assets(crate::assets::Assets)
         .run(move |cx| {
             gpui_kit::init(cx);
@@ -110,7 +112,7 @@ fn main() -> ExitCode {
                     .map_err(|error| tracing::error!(%error, "can't open the dock"))
                     .and_then(|()| {
                         start
-                            .spawn()
+                            .spawn(crate::presenter::text_profiles(cx, drawing_text))
                             .map_err(|error| tracing::error!(%error, "can't start the link"))
                     });
             if started.is_err() {

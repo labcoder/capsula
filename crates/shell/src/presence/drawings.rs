@@ -2,13 +2,12 @@
 
 use std::time::Instant;
 
-use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::{Context, Window};
 use kumochi_protocol::message::{AudioSession, ControlToBrain};
 
 use super::line::on_next_frame;
 use super::{EscapePanel, OpenError, Presence};
-use crate::presenter::{Broken, Completion, Effect, Measure};
+use crate::presenter::{Broken, Completion, Effect, Measure, PairFont};
 
 impl Presence {
     pub(super) fn scene_effects(
@@ -155,10 +154,12 @@ impl Presence {
         cx: &mut Context<'_, Self>,
     ) {
         let text = std::sync::Arc::clone(cx.text_system());
-        let family = cx.theme().font_family.clone();
+        let (family, backend) = PairFont::selection(cx);
+        let family = family.clone();
+        let backend = backend.map(std::sync::Arc::clone);
         let task = cx
             .background_executor()
-            .spawn(async move { run(&mut Measure::new(text, family)) });
+            .spawn(async move { run(&mut Measure::with_backend(text, family, backend)) });
         cx.spawn(async move |this, cx| {
             let done = task.await;
             let result = this.update(cx, |this, cx| {
