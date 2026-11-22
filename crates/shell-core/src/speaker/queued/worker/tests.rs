@@ -838,7 +838,7 @@ fn a_hold_before_staging_keeps_a_successor_droppable_while_its_predecessor_plays
         std::array::from_fn(|i| if i < 472 { 0.5f32.to_bits() } else { 0 })
     );
     let now = Duration::from_millis(25);
-    worker.observations(now, false);
+    worker.observations(now);
     assert_eq!(worker.engine.tick(now), Ok(None));
     assert_eq!(worker.engine.progress.consumed, 960);
     assert_eq!(worker.engine.progress.heard, 480);
