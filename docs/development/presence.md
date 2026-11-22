@@ -144,10 +144,12 @@ Quit path. Pre-dock binaries fall back to closing their single visible status wi
 paths verify the spawned shell's PID; neither targets another app.
 `--panel` opens the current shell's panel programmatically before settling, so the sample
 includes the panel's steady-state resources rather than only the dock before any panel opens.
-The current shell also counts its dock frames: the benchmark passes `--input-diagnostics` and
-`--settle-after-ms=30000`, the shell writes `dock settled` when the sample starts and
-`dock paints settled=N` at Quit, and the benchmark fails unless `N` is 0. A baseline may predate
-the count, so it isn't checked.
+Current and baseline measurements both omit input diagnostics and use the same thirty-second
+settle. For a separate dock-paint check on the current shell, add `--paint-check` (also works
+with `--prebuilt`, not `--baseline`). That run passes `--input-diagnostics` and
+`--settle-after-ms=30000`, checks that the shell started the interval, and fails unless
+`dock paints settled=N` at Quit reports zero. Don't compare its instrumented CPU or memory
+rows against an ordinary baseline.
 
 Geometry tests cover all anchors, negative work-area origins, edge containment, the
 hidden-panel boundary and the overlay. Transparency, cross-process click-through, native

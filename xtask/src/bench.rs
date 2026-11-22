@@ -116,17 +116,18 @@ enum Images {
     Prepared(Prebuilt),
 }
 
-fn options(mut args: impl Iterator<Item = String>) -> Result<(u64, Images, Workload)> {
+fn options(mut args: impl Iterator<Item = String>) -> Result<(u64, Images, Workload, bool)> {
     let mut workload = match args.next().as_deref() {
         Some("idle") => Workload::Idle,
         Some("stretch") => bail!("motion trials return with the pull (C2a)"),
         _ => bail!(
-            "use bench idle [--duration 1..60] [--baseline <checkout> | --prebuilt <shell-sha> <brain-sha>] [--panel | --onboarding]"
+            "use bench idle [--duration 1..60] [--baseline <checkout> | --prebuilt <shell-sha> <brain-sha>] [--panel | --onboarding] [--paint-check]"
         ),
     };
     let mut duration = None;
     let mut baseline = None;
     let mut prepared = None;
+    let mut paint_check = false;
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--duration" if duration.is_none() => {
@@ -148,6 +149,7 @@ fn options(mut args: impl Iterator<Item = String>) -> Result<(u64, Images, Workl
             "--prebuilt" if prepared.is_none() => prepared = Some(Prebuilt::parse(&mut args)?),
             "--panel" if workload == Workload::Idle => workload = Workload::Panel,
             "--onboarding" if workload == Workload::Idle => workload = Workload::Onboarding,
+            "--paint-check" if !paint_check => paint_check = true,
             _ => bail!("unknown or duplicate benchmark option"),
         }
     }
@@ -159,16 +161,20 @@ fn options(mut args: impl Iterator<Item = String>) -> Result<(u64, Images, Workl
         prepared.is_none() || baseline.is_none(),
         "--prebuilt cannot be combined with --baseline"
     );
+    ensure!(
+        !paint_check || baseline.is_none(),
+        "--paint-check cannot be combined with --baseline"
+    );
     let images = match prepared {
         Some(pins) => Images::Prepared(pins),
         None => Images::Build(baseline),
     };
-    Ok((duration.unwrap_or(60), images, workload))
+    Ok((duration.unwrap_or(60), images, workload, paint_check))
 }
 
 /// Measures prepared Gate images, or builds the images before sampling.
 pub(crate) fn run(args: impl Iterator<Item = String>) -> Result<()> {
-    let (seconds, images, workload) = options(args)?;
+    let (seconds, images, workload, paint_check) = options(args)?;
     let (baseline, prepared) = match images {
         Images::Prepared(pins) => {
             let release = pins.release()?;
@@ -177,6 +183,9 @@ pub(crate) fn run(args: impl Iterator<Item = String>) -> Result<()> {
         Images::Build(baseline) => (baseline, None),
     };
     let stamp = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+    let paints = paint_check.then(|| {
+        std::env::temp_dir().join(format!("idle-bench-{}-{stamp}.txt", std::process::id()))
+    });
     let root = std::env::current_exe()?
         .parent()
         .and_then(Path::parent)
@@ -198,7 +207,14 @@ pub(crate) fn run(args: impl Iterator<Item = String>) -> Result<()> {
                 pins.shell_sha256,
                 pins.brain_sha256
             );
-            let measured = idle(&release.join(SHELL_EXE), &folders, seconds, None, workload);
+            let measured = idle(
+                &release.join(SHELL_EXE),
+                &folders,
+                seconds,
+                None,
+                workload,
+                paints.as_deref(),
+            );
             return session::combine([measured, pins.verify(&release)]);
         }
         let (release, build) = hermetic::build(
@@ -213,6 +229,7 @@ pub(crate) fn run(args: impl Iterator<Item = String>) -> Result<()> {
             seconds,
             baseline.as_deref(),
             workload,
+            paints.as_deref(),
         )
     })();
     run.finish(measured)
@@ -224,32 +241,21 @@ fn idle(
     seconds: u64,
     baseline: Option<&Path>,
     workload: Workload,
+    paints: Option<&Path>,
 ) -> Result<()> {
-    // A baseline shell may predate the settled-interval count, so only the current one is checked.
-    let paints = if baseline.is_some() {
-        None
-    } else {
-        let nonce = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
-        let path =
-            std::env::temp_dir().join(format!("idle-bench-{}-{nonce}.txt", std::process::id()));
+    if let Some(path) = paints {
         println!("dock paint diagnostics: {}", path.display());
-        Some(path)
-    };
-    let mut extra: Vec<OsString> = Vec::new();
-    if workload == Workload::Panel {
-        extra.push("--smoke".into());
-    }
-    if let Some(path) = &paints {
-        let mut diagnostics = OsString::from("--input-diagnostics=");
-        diagnostics.push(path);
-        extra.push(diagnostics);
-        extra.push(format!("--settle-after-ms={}", SETTLE.as_millis()).into());
     }
     println!("workload: {workload:?}; baseline: {}", baseline.is_some());
     let cycle_rate = calibrate_rate()?;
     crate::live::refuse_running(&platform::processes()?, std::process::id())?;
-    let mut child = platform::launch(shell, folders, (seconds + 40) * 1000, extra)
-        .context("launching release shell at normal priority")?;
+    let mut child = platform::launch(
+        shell,
+        folders,
+        (seconds + 40) * 1000,
+        idle_args(workload, paints),
+    )
+    .context("launching release shell at normal priority")?;
     let deadline = Instant::now() + Duration::from_secs(seconds + 60);
     let mut tracked = Vec::new();
     let measurement = measure(child.id(), seconds, &mut tracked, None, cycle_rate);
@@ -266,8 +272,8 @@ fn idle(
         .collect::<Vec<_>>();
     ensure!(errors.is_empty(), "{}", errors.join("; "));
     if let Some(path) = paints {
-        let diagnostics = fs::read_to_string(&path)?;
-        fs::remove_file(&path)?;
+        let diagnostics = fs::read_to_string(path)?;
+        fs::remove_file(path)?;
         let settled = settled_paints(&diagnostics)?;
         for line in diagnostics.lines().filter(|line| line.contains(" kumo ")) {
             println!("{line}");
@@ -279,6 +285,20 @@ fn idle(
         ensure!(settled == 0, "the dock painted {settled} frames at rest");
     }
     Ok(())
+}
+
+fn idle_args(workload: Workload, paints: Option<&Path>) -> Vec<OsString> {
+    let mut extra = Vec::new();
+    if workload == Workload::Panel {
+        extra.push("--smoke".into());
+    }
+    if let Some(path) = paints {
+        let mut diagnostics = OsString::from("--input-diagnostics=");
+        diagnostics.push(path);
+        extra.push(diagnostics);
+        extra.push(format!("--settle-after-ms={}", SETTLE.as_millis()).into());
+    }
+    extra
 }
 
 /// The shell's settled interval starts with the sample, after the same settle `measure` waits.
@@ -309,7 +329,7 @@ fn measure(
     metrics: Option<&Path>,
     cycle_rate: f64,
 ) -> Result<()> {
-    sleep(Duration::from_secs(30));
+    sleep(SETTLE);
     track(shell_pid, tracked)?;
     let dwm = if let Some(path) = metrics {
         Some(
@@ -559,19 +579,20 @@ fn cycle_percent(cycles: u64, rate: f64, wall: Duration) -> f64 {
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
+    use std::ffi::OsString;
+    use std::path::{Path, PathBuf};
     use std::time::Duration;
 
     use kumochi_protocol::constants::{BRAIN_EXE, SHELL_EXE};
 
-    use super::{Images, Workload, cycle_percent, options, percent, settled_paints};
+    use super::{Images, Workload, cycle_percent, idle_args, options, percent, settled_paints};
     use crate::hermetic::{Folders, Prebuilt};
 
     #[test]
     fn baseline_and_duration_options_combine_in_either_order() {
         assert_eq!(
             options(["idle".to_owned()].into_iter()).unwrap(),
-            (60, Images::Build(None), Workload::Idle),
+            (60, Images::Build(None), Workload::Idle, false),
             "default duration and binary location remain unchanged"
         );
         for args in [
@@ -583,7 +604,8 @@ mod tests {
                 (
                     1,
                     Images::Build(Some(PathBuf::from("release"))),
-                    Workload::Idle
+                    Workload::Idle,
+                    false
                 ),
                 "combined options"
             );
@@ -602,7 +624,7 @@ mod tests {
         }
         assert_eq!(
             options(["idle", "--panel"].into_iter().map(str::to_owned)).unwrap(),
-            (60, Images::Build(None), Workload::Panel)
+            (60, Images::Build(None), Workload::Panel, false)
         );
         assert_eq!(
             options(
@@ -614,7 +636,8 @@ mod tests {
             (
                 60,
                 Images::Build(Some(PathBuf::from("a"))),
-                Workload::Onboarding
+                Workload::Onboarding,
+                false
             )
         );
         assert!(
@@ -625,6 +648,37 @@ mod tests {
             )
             .is_err(),
             "one workload at a time"
+        );
+    }
+
+    #[test]
+    fn current_and_baseline_idle_launch_without_paint_diagnostics() {
+        let args = |cli: &[&str]| {
+            let (_, _, workload, paint_check) =
+                options(cli.iter().map(|arg| (*arg).to_owned())).unwrap();
+            idle_args(
+                workload,
+                paint_check.then_some(Path::new("dock paints.txt")),
+            )
+        };
+        let current = args(&["idle"]);
+        let baseline = args(&["idle", "--baseline", "old"]);
+        assert_eq!(current, baseline);
+        assert!(current.is_empty());
+        assert_eq!(
+            args(&["idle", "--paint-check"]),
+            [
+                OsString::from("--input-diagnostics=dock paints.txt"),
+                OsString::from("--settle-after-ms=30000"),
+            ]
+        );
+        assert!(
+            options(
+                ["idle", "--baseline", "old", "--paint-check"]
+                    .into_iter()
+                    .map(str::to_owned)
+            )
+            .is_err()
         );
     }
 
