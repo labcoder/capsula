@@ -554,7 +554,7 @@ impl Worker {
 
 /// A speaker with no device behind it, for the link's tests: it keeps the queue and answers
 /// stops, but no frame ever plays.
-#[cfg(test)]
+#[cfg(all(test, windows))]
 pub(crate) fn deviceless(outlet: Outlet, rate: u32) -> Speaker {
     launch(outlet, TEARDOWN, move |worker, ready| {
         idle(worker, &ready, rate);

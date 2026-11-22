@@ -3,7 +3,9 @@
 use std::sync::Arc;
 
 use async_channel::{Receiver, bounded};
-use kumochi_protocol::message::{ControlToBrain, GestureId, ThreadId};
+#[cfg(windows)]
+use kumochi_protocol::message::GestureId;
+use kumochi_protocol::message::{ControlToBrain, ThreadId};
 
 use super::{LinkHandle, Shared, queue_on};
 
@@ -20,6 +22,7 @@ fn handle() -> LinkHandle {
 }
 
 #[test]
+#[cfg(windows)]
 fn quit_admission_is_single_use_for_a_connected_transport() {
     let link = handle();
     let name = format!(
@@ -101,6 +104,7 @@ fn sent(queue: &Receiver<ControlToBrain>) -> Vec<(u64, bool)> {
 }
 
 #[test]
+#[cfg(windows)]
 fn an_aborted_outbox_refuses_quit_even_after_capacity_returns() {
     let install = |link: &LinkHandle, label, generation| {
         let (peer, pipe) = super::fixture::pair(label);

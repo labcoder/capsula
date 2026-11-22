@@ -665,3 +665,11 @@ fn canceling_one_backend_does_not_cancel_a_fallback_open() {
 }
 
 pub(crate) use super::playback_fixture::FakePlayback;
+#[cfg(target_os = "linux")]
+#[test]
+fn native_output_returns_unsupported_on_a_test_host() {
+    assert_eq!(
+        super::Output::open_default().unwrap_err(),
+        OutputError::Unsupported
+    );
+}

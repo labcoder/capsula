@@ -5,10 +5,20 @@ pub mod clipboard;
 pub mod credential;
 pub mod host;
 pub mod input;
+#[cfg_attr(
+    not(windows),
+    expect(
+        dead_code,
+        reason = "native capture is not built here; tests exercise its PCM and worker policy"
+    )
+)]
 pub mod microphone;
 pub mod screen_watch;
-#[cfg(any(windows, target_os = "macos"))]
+#[cfg(any(windows, target_os = "macos", target_os = "linux"))]
 pub mod speaker_cpal;
+
+#[cfg(not(windows))]
+mod unsupported;
 
 #[cfg(windows)]
 #[expect(
@@ -17,6 +27,10 @@ pub mod speaker_cpal;
 )]
 mod windows;
 
+#[cfg(not(windows))]
+pub use unsupported::session_id;
+#[cfg(not(windows))]
+pub(crate) use unsupported::{PipeClient, launch_detached};
 #[cfg(windows)]
 #[cfg(any(test, feature = "test-support"))]
 pub(crate) use windows::pipe::test_pair;
@@ -26,3 +40,14 @@ pub use windows::speaker::open as open_speaker;
 pub(crate) use windows::{PipeClient, launch_detached};
 #[cfg(windows)]
 pub use windows::{data_dir, session_id};
+
+pub(crate) fn logging_data_dir() -> Result<std::path::PathBuf, crate::logging::LoggingError> {
+    #[cfg(windows)]
+    {
+        data_dir().ok_or(crate::logging::LoggingError::NoLocalAppData)
+    }
+    #[cfg(not(windows))]
+    {
+        Err(crate::logging::LoggingError::Unsupported)
+    }
+}

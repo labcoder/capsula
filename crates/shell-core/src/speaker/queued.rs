@@ -9,13 +9,15 @@ use kumochi_protocol::message::{
 };
 use zeroize::Zeroize as _;
 
-#[cfg(any(windows, target_os = "macos"))]
 mod backend;
 mod receipts;
 mod timeline;
-#[cfg(any(windows, target_os = "macos"))]
 mod worker;
 
+#[cfg(not(windows))]
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) use backend::FixturePlayback;
+#[cfg(windows)]
 #[cfg(any(test, feature = "test-support"))]
 pub use backend::{FixturePlayback, await_fake_disposal, serialize_playback};
 

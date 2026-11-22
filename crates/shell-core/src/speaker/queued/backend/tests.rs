@@ -9,7 +9,10 @@ use super::super::worker::{
     Command,
     tests::{RUN, open_actor},
 };
-use super::{fixture::wait_for_playback_disposal, *};
+use super::{
+    fixture::{serialize_playback, wait_for_playback_disposal},
+    *,
+};
 
 const WAIT: Duration = Duration::from_secs(5);
 

@@ -1,3 +1,4 @@
+use super::pcm::{Format, Packetizer, Sample};
 use super::*;
 use async_channel::Sender;
 use kumochi_protocol::message::MAX_HOLD_CHUNKS;
@@ -34,6 +35,7 @@ fn dropping_an_owner_drains_its_committed_unforwarded_queue() {
 }
 
 #[test]
+#[cfg(windows)]
 fn a_device_gone_at_teardown_discards_and_any_other_teardown_error_stays_unconfirmed() {
     use crate::platform::windows::microphone::teardown_error;
     use windows::Win32::Foundation::E_FAIL;
@@ -51,6 +53,7 @@ fn a_device_gone_at_teardown_discards_and_any_other_teardown_error_stays_unconfi
 }
 
 #[test]
+#[cfg(windows)]
 fn native_batch_commit_rejects_revocation_after_authorization() {
     use crate::platform::windows::microphone::copy_batch;
     use std::sync::atomic::AtomicU64;
