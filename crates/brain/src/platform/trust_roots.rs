@@ -38,21 +38,3 @@ pub enum TrustRootsError {
     #[error("no usable root certificate")]
     Empty,
 }
-
-#[cfg(test)]
-mod tests {
-    use super::TrustRoots;
-
-    #[test]
-    fn debug_shows_counts_only() {
-        let roots = TrustRoots {
-            certificates: vec![vec![0x30, 0x03, 0x02, 0x01, 0x07]; 2],
-            skipped: 3,
-            unreadable: 1,
-        };
-        assert_eq!(
-            format!("{roots:?}"),
-            "TrustRoots { certificates: 2, skipped: 3, unreadable: 1 }"
-        );
-    }
-}

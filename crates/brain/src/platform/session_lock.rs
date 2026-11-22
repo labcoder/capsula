@@ -83,12 +83,12 @@ mod tests {
         let scratch = Scratch::new("session-lock-error");
         let directory = scratch.db().with_file_name("directory");
         fs::create_dir_all(&directory).expect("scratch directory");
-        assert!(
-            matches!(
-                SessionLock::try_acquire(&directory),
-                Err(SessionLockError::Io(_))
-            ),
-            "an invalid lock file is an I/O error, not contention"
-        );
+        let Err(SessionLockError::Io(error)) = SessionLock::try_acquire(&directory) else {
+            panic!("an invalid lock file is an I/O error, not contention");
+        };
+        #[cfg(windows)]
+        assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+        #[cfg(not(windows))]
+        assert_eq!(error.kind(), std::io::ErrorKind::IsADirectory);
     }
 }

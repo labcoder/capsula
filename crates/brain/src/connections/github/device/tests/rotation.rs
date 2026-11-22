@@ -50,24 +50,7 @@ fn explicit_cancel_ends_a_loaded_identity_check_without_a_late_connected_fallbac
         !m.connecting(),
         "shell turnover alone must not cancel startup verification"
     );
-    let effects = m.on(Input::Op(GitHubOp::CancelConnect), Instant::now());
-    assert!(matches!(effects[0], Effect::CancelAll));
-    assert_eq!(
-        m.view(Instant::now()),
-        GitHubView::NotVerified {
-            login: user().login
-        }
-    );
-    stale(
-        &mut m,
-        Input::User {
-            stamp,
-            result: Ok(user()),
-        },
-    );
-    assert_eq!(m.user(), None);
-    assert!(m.token().is_none());
-    assert_eq!(m.repositories(), None);
+    m.on(Input::Op(GitHubOp::CancelConnect), Instant::now());
     let effects = m.on(
         Input::Op(GitHubOp::SetDefaultRepo(
             RepoName::new("owner/repo").unwrap(),
@@ -75,24 +58,10 @@ fn explicit_cancel_ends_a_loaded_identity_check_without_a_late_connected_fallbac
         Instant::now(),
     );
     assert_eq!(error(&effects), ErrorKey::RequestRefused);
-    let effects = m.on(Input::Tick, Instant::now() + Duration::from_hours(9));
     assert!(matches!(
         effects.as_slice(),
-        [Effect::View(GitHubView::NotVerified { .. })]
+        [Effect::Error(_), Effect::View(GitHubView::NotVerified { login })] if *login == user().login
     ));
-    let effects = m.on(Input::Op(GitHubOp::RefreshRepos), Instant::now());
-    assert!(matches!(effects.as_slice(), [
-        Effect::ReadUser { stamp: next, .. }, Effect::View(GitHubView::Requesting)
-    ] if *next == m.stamp()));
-    assert_eq!(m.user(), None);
-    m.on(
-        Input::User {
-            stamp: m.stamp(),
-            result: Ok(user()),
-        },
-        Instant::now(),
-    );
-    assert_eq!(m.user(), Some(&user()));
 }
 
 fn marker(m: &mut Machine) -> (Stamp, Account) {

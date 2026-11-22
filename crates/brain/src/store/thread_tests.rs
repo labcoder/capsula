@@ -332,7 +332,11 @@ fn a_main_thread_insert_that_fails_leaves_none_and_the_next_start_creates_one() 
              BEGIN SELECT RAISE(ABORT, 'injected'); END;",
         )
         .expect("injected failure");
-    assert!(store.recover().is_err());
+    assert!(matches!(
+        store.recover(),
+        Err(StoreError::Sql(rusqlite::Error::SqliteFailure(error, _)))
+            if error.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_TRIGGER
+    ));
     assert!(matches!(store.main_thread(), Err(StoreError::NoThread)));
     store
         .conn
@@ -361,13 +365,24 @@ fn the_schema_allows_one_main_thread_and_a_model_only_with_its_effort() {
         "INSERT INTO threads (title, kind, created_ms, updated_ms) VALUES ('', 'main', 1, 1)",
         [],
     );
-    assert!(second_main.is_err());
+    assert!(matches!(
+        second_main,
+        Err(rusqlite::Error::SqliteFailure(error, _))
+            if error.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_UNIQUE
+    ));
     for half in ["model = 'gpt-6'", "effort = 'high'"] {
         let set = store.conn.execute(
             &format!("UPDATE threads SET {half} WHERE id = ?1"),
             [sql(thread)],
         );
-        assert!(set.is_err(), "{half} alone was stored");
+        assert!(
+            matches!(
+                set,
+                Err(rusqlite::Error::SqliteFailure(error, _))
+                    if error.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_CHECK
+            ),
+            "{half} must fail its constraint"
+        );
     }
     let both = store.conn.execute(
         "UPDATE threads SET model = 'gpt-6', effort = 'high' WHERE id = ?1",

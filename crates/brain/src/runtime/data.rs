@@ -402,25 +402,49 @@ mod tests {
 
     #[test]
     fn review_frames_include_entry_cost_and_never_exceed_the_data_cap() {
-        let cap = crate::runtime::DATA_CAP;
+        let cap = 512 * 1024;
+        let now = Instant::now();
         let mut queue = DataQueue::new(cap);
+        let first = vec![1; cap / 2];
+        queue.push_review(first.clone()).expect("first review fits");
+        let charge = queue.bytes() - first.len();
+        assert!(charge > 0);
+
+        let mut single = DataQueue::new(cap);
         assert!(matches!(
-            queue.push_review(vec![0; cap - ENTRY + 1]),
+            single.push_review(vec![0; cap - charge + 1]),
             Err(crate::runtime::Full)
         ));
-        assert_eq!(queue.bytes(), 0);
-        queue.push_review(vec![0; cap - ENTRY]).unwrap();
+        assert_eq!(single.bytes(), 0);
+        let exact = vec![0; cap - charge];
+        single
+            .push_review(exact.clone())
+            .expect("exact budget fits");
+        assert_eq!(single.pop(now), Some(exact));
+        single.wrote();
+        assert_eq!(single.bytes(), 0);
+
+        let remaining = cap - queue.bytes() - charge;
+        assert!(matches!(
+            queue.push_review(vec![2; remaining + 1]),
+            Err(crate::runtime::Full)
+        ));
+        let second = vec![3; remaining];
+        queue
+            .push_review(second.clone())
+            .expect("exact budget fits");
         assert_eq!(queue.bytes(), cap);
         assert!(matches!(
             queue.push_review(Vec::new()),
             Err(crate::runtime::Full)
         ));
-        assert_eq!(queue.bytes(), cap);
-        assert_eq!(queue.pop(Instant::now()).unwrap().len(), cap - ENTRY);
+        assert_eq!(queue.pop(now), Some(first));
         queue.wrote();
-        assert_eq!(queue.bytes(), 0);
-        queue.push_review(vec![0]).unwrap();
-        assert_eq!(queue.bytes(), ENTRY + 1);
+        assert_eq!(queue.pop(now), Some(second));
+        queue.wrote();
+        assert_eq!(queue.pop(now), None, "refused reviews were not queued");
+        queue.push_review(vec![4]).expect("room after draining");
+        assert_eq!(queue.pop(now), Some(vec![4]));
     }
 
     #[test]
@@ -488,29 +512,6 @@ mod tests {
     }
 
     #[test]
-    fn page_admission_is_released_only_when_its_reply_finishes_writing() {
-        let mut queue = DataQueue::new(100);
-        for request in
-            0..u32::try_from(kumochi_protocol::message::MAX_PENDING_PAGES).expect("small")
-        {
-            assert!(queue.admit_page(0, request).is_some());
-        }
-        assert!(queue.admit_page(0, 9).is_none());
-        queue.push(Owner::Page(1), vec![1]);
-        queue.push(A, vec![2]);
-        queue.revoke(RunId(1));
-        assert_eq!(queue.pop(Instant::now()), Some(vec![1]));
-        assert!(
-            queue.admit_page(0, 9).is_none(),
-            "a write still in progress isn't answered"
-        );
-        queue.wrote();
-        assert!(queue.admit_page(0, 9).is_some());
-        assert!(queue.admit_page(0, 9).is_none());
-        assert_eq!(queue.pop(Instant::now()), None);
-    }
-
-    #[test]
     fn page_identity_collision_exhaustion_and_terminal_ownership_fail_closed() {
         let mut queue = DataQueue::new(100);
         let admitted = Instant::now();
@@ -524,17 +525,32 @@ mod tests {
         stale = key.clone();
         stale.token += 1;
         assert!(!queue.accepts_page(&stale));
+        let cap = u32::try_from(kumochi_protocol::message::MAX_PENDING_PAGES).expect("small");
+        for i in 0..cap - 1 {
+            queue.admit_page(8, 100 + i).expect("another slot");
+        }
+        assert_eq!(queue.admit_page(8, 9), None, "pool is full");
         queue.push_page(&key, vec![1]);
         queue.push_page(&key, vec![2]);
-        assert_eq!(queue.frames_for_tests(), 1);
+        queue.push(A, vec![3]);
+        queue.revoke(RunId(1));
         assert_eq!(queue.pop(Instant::now()), Some(vec![1]));
         assert_eq!(key.control.check(), Ok(()));
         assert_eq!(queue.admit_page(8, 7), None);
+        assert_eq!(queue.admit_page(8, 9), None, "write is still in progress");
         queue.wrote();
         assert_eq!(key.control.check(), Err(crate::recall::Error::Ended));
-        assert_eq!(queue.pages.len(), 0);
+        assert_eq!(queue.pop(Instant::now()), None, "no duplicate or run frame");
         queue.wrote();
-        assert_eq!(queue.pages.len(), 0);
+
+        let replacement = queue
+            .admit_page(8, 9)
+            .expect("the written reply freed a slot");
+        assert_eq!(queue.admit_page(8, 9), None);
+        assert_eq!(queue.admit_page(8, 10), None, "no second slot was freed");
+        assert!(queue.accepts_page(&replacement));
+
+        let mut queue = DataQueue::new(100);
         queue.token = u64::MAX;
         assert_eq!(queue.admit_page(8, 9), None);
         assert_eq!(queue.admit_page(8, 10), None);

@@ -2,7 +2,7 @@ use std::{error::Error as _, sync::Arc};
 
 use kumochi_protocol::message::{MAX_SCENE_LOG_ENTRIES, RunId, SceneHeader, SceneId, ThreadId};
 use kumochi_scene::{
-    Admission, GlobalBudget, Handle, Op, SceneEvent, SceneState, Step, StopCut, WireId,
+    Admission, ErrorCode, GlobalBudget, Handle, Op, SceneEvent, SceneState, Step, StopCut, WireId,
     record::{Point, Surface},
     text::Bounded,
 };
@@ -21,98 +21,6 @@ fn begin(store: &mut Store) -> (ThreadId, RunId) {
         .begin_turn(ids.0, Some("title"), ids.1, "turn")
         .expect("turn");
     ids
-}
-
-#[test]
-#[ignore = "manual quiet-Rez release measurement, not a CI latency assertion"]
-fn measure_dense_scene_append_and_cut_at_lifetime_cap() {
-    use std::time::Instant;
-    let mut put = vec![serde_json::json!({"chart":{"id":"c","kind":"line","box":[0,0,100,100]}})];
-    let mut patches = Vec::new();
-    for series in 0..8 {
-        let data = vec![51.248_178_375_505_404; 200];
-        put.push(serde_json::json!({"series":{"id":format!("s{series}"),"in":"c","data":data}}));
-        patches.push(serde_json::json!({"target":format!("s{series}"),"data":data}));
-    }
-    let first_bytes =
-        serde_json::to_vec(&serde_json::json!({"step":{"id":"dense","put":put}})).expect("JSON");
-    assert_eq!(first_bytes.len(), 30_814);
-    let kumochi_scene::Record::Step(first_step) =
-        kumochi_scene::parse_record(&first_bytes).expect("legal record")
-    else {
-        panic!("step")
-    };
-    let first_step = Arc::new(first_step);
-    let updates: Vec<_> = (2..=64)
-        .map(|revision| {
-            let bytes = serde_json::to_vec(
-                &serde_json::json!({"step":{"id":format!("update{revision}"),"set":patches}}),
-            )
-            .expect("JSON");
-            let kumochi_scene::Record::Step(step) =
-                kumochi_scene::parse_record(&bytes).expect("legal update")
-            else {
-                panic!("step")
-            };
-            Arc::new(step)
-        })
-        .collect();
-    let mut samples = Vec::new();
-    for sample in 0..16 {
-        let scratch = Scratch::new("dense-append-cap");
-        let mut store = Store::open(&scratch.db()).expect("store");
-        let ids = begin(&mut store);
-        let start = Instant::now();
-        let Reply::Step(scene) = write(
-            &mut store,
-            ids,
-            Target::New(header("dense")),
-            1,
-            Arc::clone(&first_step),
-        )
-        .expect("first step") else {
-            panic!("step reply")
-        };
-        let first_ns = start.elapsed().as_nanos();
-        for (revision, step) in (2..64).zip(&updates) {
-            write(
-                &mut store,
-                ids,
-                Target::Existing(scene),
-                revision,
-                Arc::clone(step),
-            )
-            .expect("prefix step");
-        }
-        let start = Instant::now();
-        write(
-            &mut store,
-            ids,
-            Target::Existing(scene),
-            64,
-            Arc::clone(updates.last().expect("last step")),
-        )
-        .expect("cap step");
-        let cap_ns = start.elapsed().as_nanos();
-        let start = Instant::now();
-        cut(&mut store, scene, 64, 64).expect("cap cut");
-        let cut_ns = start.elapsed().as_nanos();
-        let stored = store.drawing_scenes().expect("full log");
-        let stored = &stored.scenes[0];
-        assert_eq!(stored.log.len(), 65);
-        let replayed = SceneState::replay(stored.header.begin.clone(), &stored.log)
-            .expect("valid canonical scene");
-        assert_eq!(replayed.revision(), 64);
-        if sample >= 8 {
-            samples.push((sample - 8, first_ns, cap_ns, cut_ns));
-        }
-    }
-    println!(
-        "dense_scene_append_and_cut points=1600 lifetime_steps=64 cut_revision=64 warmups=8 samples=8 includes_transaction=true"
-    );
-    for (sample, first_ns, cap_ns, cut_ns) in samples {
-        println!("sample,{sample},{first_ns},{cap_ns},{cut_ns}");
-    }
 }
 
 fn header(name: &str) -> SceneHeader {
@@ -663,7 +571,7 @@ fn original_steps_and_cuts_replay_with_gaps_and_reserved_ids() {
         })
         .expect("second cut");
     drop(store);
-    let store = Store::open(&scratch.db()).expect("reopen");
+    let mut store = Store::open(&scratch.db()).expect("reopen");
     let recovered = store.drawing_scenes().expect("scenes").scenes;
     assert_eq!(recovered.len(), 1);
     let expected = vec![
@@ -696,16 +604,40 @@ fn original_steps_and_cuts_replay_with_gaps_and_reserved_ids() {
     );
     let mut reused = step("dropped").as_ref().clone();
     reused.say = None;
-    assert!(
-        replayed.admit(&reused, &GlobalBudget::default()).is_err(),
-        "a cut cannot free a reserved step id"
-    );
+    let conflict = replayed
+        .admit(&reused, &GlobalBudget::default())
+        .expect_err("a cut cannot free a reserved step id");
+    assert_eq!(conflict.code, ErrorCode::DuplicateStepConflict);
+    assert_eq!(conflict.path.as_str(), "id");
     let Admission::New(_) = replayed
         .admit(&step("d"), &GlobalBudget::default())
         .expect("new id")
     else {
         panic!("new id must be new")
     };
+    for revision in 4..=64 {
+        assert_eq!(
+            write(
+                &mut store,
+                ids,
+                Target::Existing(scene),
+                revision,
+                step(&format!("step{revision}")),
+            )
+            .expect("lifetime step"),
+            Reply::Step(scene)
+        );
+    }
+    cut(&mut store, scene, 64, 64).expect("a cut at the lifetime step limit");
+    drop(store);
+
+    let store = Store::open(&scratch.db()).expect("reopen at the limit");
+    let recovered = store.drawing_scenes().expect("capped log").scenes;
+    assert_eq!(recovered.len(), 1);
+    assert_eq!(recovered[0].log.len(), 67);
+    let replayed = SceneState::replay(recovered[0].header.begin.clone(), &recovered[0].log)
+        .expect("semantic replay at the limit");
+    assert_eq!(replayed.revision(), 64);
 }
 
 /// Scenes in two threads, oldest first: one in the second thread, two in the first, then one

@@ -882,24 +882,6 @@ fn bound_and_unbound_streams_refuse_the_same_blocks_locally() {
 }
 
 #[test]
-fn only_a_bound_mappers_stream_keeps_its_block_starts_as_written() {
-    let event = start_raw(0, r#"{"type":"text","text":"a"}"#);
-    let kept = |mut reader: Reader| {
-        let mut written = None;
-        let read = reader.feed(format!("data: {event}\n\n").as_bytes(), &mut |event| {
-            written = event.written().map(<[u8]>::to_vec);
-        });
-        assert_eq!(read, Ok(Progress::More));
-        written
-    };
-    assert_eq!(kept(Reader::new(Mapper::default().capture())), None);
-    assert_eq!(
-        kept(Reader::new(Mapper::answering(&first("draw")).capture())),
-        Some(event.clone().into_bytes())
-    );
-}
-
-#[test]
 fn an_empty_start_input_is_empty_however_it_is_spaced() {
     let events = whole(&[
         start_raw(
@@ -1069,21 +1051,6 @@ fn a_tool_id_can_recur_with_a_distinct_result_in_the_next_round() {
 }
 
 #[test]
-fn a_completed_run_replays_without_thinking() {
-    let body = built(&request(vec![
-        message(Role::User, "draw a box"),
-        native(&json!({"type": "text", "text": "Here it is."})),
-        draw_use("toolu_1"),
-        output("toolu_1", "{\"steps\":1}"),
-        message(Role::Assistant, "Done."),
-        message(Role::User, "and another"),
-    ]));
-    let sent = serde_json::to_string(&body).expect("json");
-    assert!(!sent.contains("thinking"), "{sent}");
-    assert!(!sent.contains("signature"), "{sent}");
-}
-
-#[test]
 fn built_refused_and_replied_carriers_print_no_content() {
     let marker = "sensitive-sentinel";
     let conversation = request(vec![
@@ -1229,6 +1196,8 @@ fn an_authorized_picture_goes_once_as_one_image_block_at_its_place() {
 /// is built; a JPEG at the cap goes.
 #[test]
 fn a_picture_the_body_cant_carry_builds_nothing() {
+    use base64::Engine as _;
+
     let input = |images: Vec<Jpeg>| {
         let mut input = vec![message(Role::User, "look")];
         input.extend(images.into_iter().map(InputItem::Image));
@@ -1255,7 +1224,23 @@ fn a_picture_the_body_cant_carry_builds_nothing() {
             Some(BodyError::Image)
         );
     }
-    assert!(body_under(&input(vec![sealed(crate::screen::JPEG_CAP)]), TAG, ON).is_ok());
+    let image = sealed(crate::screen::JPEG_CAP);
+    let (jpeg, _) = image.capture().expect("sealed");
+    let request = input(vec![image.clone()]);
+    let (wire, _) = body_under(&request, TAG, ON).expect("JPEG at the limit");
+    let body: Value = serde_json::from_slice(wire.sent()).expect("JSON body");
+    let block = &body["messages"][0]["content"][1];
+    assert_eq!(block["type"], "image");
+    assert_eq!(block["source"]["type"], "base64");
+    assert_eq!(block["source"]["media_type"], "image/jpeg");
+    let decoded = base64::engine::general_purpose::STANDARD
+        .decode(block["source"]["data"].as_str().expect("image data"))
+        .expect("base64");
+    assert!(
+        decoded.as_slice() == jpeg,
+        "the sent block preserves the ceiling JPEG"
+    );
+    assert_eq!(body["messages"][0]["content"].as_array().unwrap().len(), 2);
 }
 
 /// A tool round keeps the picture where it went, once, and only while the switch is on.

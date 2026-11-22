@@ -1117,18 +1117,26 @@ mod tests {
 
     #[test]
     fn the_default_local_app_data_chain_passes_the_existing_boundary() {
-        let known = super::local_app_data().expect("local application data");
-        super::models::validate_model_path(&known).expect("ordinary local profile drive");
-        let held = super::hold_chain(&known).expect("ordinary default profile chain");
-        assert!(!held.is_empty());
-        let configured = std::env::var_os("LOCALAPPDATA").expect("default local application data");
-        super::models::validate_model_path(std::path::Path::new(&configured))
-            .expect("ordinary configured profile drive");
+        let (_scratch, root) = scratch("local-app-data-chain");
+        let roaming_profile = root.join("Profile");
+        let local = roaming_profile.join("AppData").join("Local");
+        fs::create_dir_all(&local).expect("ordinary profile chain");
+        super::models::validate_model_path(&local).expect("ordinary local profile drive");
+
+        let moved = root.join("Moved");
+        let held = super::hold_chain(&local).expect("ordinary local application data");
         assert!(
-            !super::hold_chain(std::path::Path::new(&configured))
-                .expect("ordinary configured profile chain")
-                .is_empty()
+            fs::rename(&roaming_profile, &moved).is_err(),
+            "a held ancestor cannot move"
         );
+        assert!(
+            local.is_dir(),
+            "a refused move preserves the original chain"
+        );
+        assert!(!moved.exists());
+        drop(held);
+        fs::rename(&roaming_profile, &moved).expect("releasing the chain allows the move");
+        assert!(moved.join("AppData").join("Local").is_dir());
     }
 
     #[test]

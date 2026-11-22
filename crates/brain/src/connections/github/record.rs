@@ -187,6 +187,11 @@ mod tests {
 
     #[test]
     fn required_pair_fields_reject_missing_null_duplicate_and_mistyped_values() {
+        let legacy = br#"{"token":"ghu_fake_sentinel","login":"octocat","id":7}"#;
+        assert!(matches!(
+            decode(&bytes(legacy)),
+            Err(VaultError::Unreadable)
+        ));
         for field in [
             "token",
             "refresh",
@@ -292,14 +297,5 @@ mod tests {
         let mut account = decode(&bytes(VALID)).unwrap();
         account.user.id = 0;
         assert!(matches!(encode(&account), Err(VaultError::Unreadable)));
-    }
-
-    #[test]
-    fn a_legacy_non_expiring_record_is_not_a_usable_account() {
-        let legacy = br#"{"token":"ghu_fake_sentinel","login":"octocat","id":7}"#;
-        assert!(matches!(
-            decode(&bytes(legacy)),
-            Err(VaultError::Unreadable)
-        ));
     }
 }

@@ -1,3 +1,5 @@
+use serde_json::json;
+
 use super::*;
 use crate::dispatch::Then;
 
@@ -14,7 +16,14 @@ fn a_draft_is_a_local_write_in_the_callers_thread_without_account_or_consent() {
     let mut ledger = Ledger::default();
     let call = commit(draft(&mut ledger, model("draft"), ARGS));
     assert_eq!(call.thread, T);
-    assert_eq!(call.key.run, R);
+    assert_eq!(
+        call.key,
+        LedgerKey {
+            run: R,
+            route: Route::Model,
+            call: "draft".into(),
+        }
+    );
     assert_eq!(call.tool, "draft_issue");
     assert_eq!(call.then, Some(Then::IssueDrafted));
     assert_eq!(
@@ -138,25 +147,40 @@ fn drafting_has_to_be_offered_to_the_run_on_either_route() {
 #[test]
 fn a_draft_replay_joins_then_returns_the_original_result_without_another_write() {
     let mut ledger = Ledger::default();
-    let first = commit(draft(&mut ledger, model("draft"), ARGS));
-    assert_step(&draft(&mut ledger, model("draft"), ARGS), &Step::Join);
+    let first = commit(draft(
+        &mut ledger,
+        model("draft"),
+        r#"{"title":"T","body":"B"}"#,
+    ));
+    let reordered = r#" { "body": "B", "title": "T" } "#;
+    let equivalent = r#" { "repo": null, "body": "B", "title": "T" } "#;
+    let changed = [
+        r#"{"title":"other","body":"B"}"#,
+        r#"{"title":"T","body":"other"}"#,
+    ];
+    assert_step(&draft(&mut ledger, model("draft"), reordered), &Step::Join);
+    for args in changed {
+        assert_step(
+            &draft(&mut ledger, model("draft"), args),
+            &error(ToolError::Reused),
+        );
+    }
+    assert_step(&draft(&mut ledger, model("draft"), equivalent), &Step::Join);
+    let expected = text("Saved a local issue draft for user review. Nothing was filed on GitHub.");
     assert_eq!(
         ledger.committed(&first.key),
         Some(vec![
-            (model("draft"), first.output.clone()),
-            (model("draft"), first.output.clone()),
+            (model("draft"), expected.clone()),
+            (model("draft"), expected.clone()),
+            (model("draft"), expected.clone()),
         ])
     );
     assert_step(
-        &draft(&mut ledger, model("draft"), ARGS),
-        &Step::Answer(first.output),
+        &draft(&mut ledger, model("draft"), equivalent),
+        &Step::Answer(expected),
     );
     assert_step(
-        &draft(
-            &mut ledger,
-            model("draft"),
-            r#"{"title":"other","body":"B"}"#,
-        ),
+        &draft(&mut ledger, model("draft"), changed[0]),
         &error(ToolError::Reused),
     );
 }

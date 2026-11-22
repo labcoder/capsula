@@ -192,7 +192,7 @@ use crate::connections::github::{
     device::{Effect as GitHubEffect, Input as GitHubInput},
 };
 use crate::platform::credential::{CredentialStoreError, SecretBytes};
-use kumochi_protocol::message::{Cleanup, GitHubLogin, GitHubOp, GitHubView, RepoName, UserCode};
+use kumochi_protocol::message::{Cleanup, GitHubLogin, GitHubOp, GitHubView, UserCode};
 use std::sync::{
     Mutex,
     atomic::{AtomicUsize, Ordering},
@@ -1593,15 +1593,59 @@ async fn verification_keeps_the_load_origin_when_the_owner_session_changes_befor
     accounts.close(Instant::now(), Instant::now()).await;
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_stale_wake_cannot_poll_a_new_attempt_and_unexecuted_effects_keep_their_stamp() {
+    use crate::connections::github::GitHubEndpoint;
+
+    struct DeviceHttp(mpsc::UnboundedSender<()>);
+
+    impl Http for DeviceHttp {
+        fn execute(
+            &self,
+            request: Request,
+        ) -> impl std::future::Future<Output = Result<Response, HttpError>> {
+            let body: &[u8] = match request.endpoint {
+                Endpoint::GitHub(GitHubEndpoint::DeviceCode { .. }) => {
+                    br#"{"device_code":"device-fixture","user_code":"ABCD-EFGH","verification_uri":"https://github.com/login/device","expires_in":900,"interval":1}"#
+                }
+                Endpoint::GitHub(GitHubEndpoint::AccessToken { .. }) => {
+                    self.0.send(()).expect("poll observer");
+                    br#"{"error":"authorization_pending"}"#
+                }
+                _ => panic!("unexpected device-flow endpoint"),
+            };
+            std::future::ready(Ok(user_response(200, body, ResponseMeta::default())))
+        }
+    }
+
+    async fn response(accounts: &mut Accounts) -> VerificationEvent {
+        let event = verification_event(accounts).await;
+        if event.stage != VerificationStage::Construction {
+            return event;
+        }
+        accounts.handle(Event::Verification(event));
+        verification_event(accounts).await
+    }
+
+    async fn challenge(accounts: &mut Accounts) {
+        accounts.github.op(
+            GitHubOp::Connect,
+            accounts.jobs.as_ref(),
+            &accounts.reads_tx,
+            &accounts.net.http,
+        );
+        let code = response(accounts).await;
+        assert!(matches!(code.outcome, VerificationOutcome::Code(Ok(_))));
+        accounts.handle(Event::Verification(code));
+    }
+
     let scratch = Scratch::new("github-owner-wakes");
-    let mut accounts = owner_accounts(
-        &scratch,
-        ObservedStore::default(),
-        crate::test_support::net(),
-    );
-    accounts.github.enable();
+    let (polls, mut seen) = mpsc::unbounded_channel();
+    let http = SharedHttp::new(DeviceHttp(polls));
+    let mut net = crate::test_support::net();
+    net.http = Arc::new(move || Ok(http.clone()));
+    let mut accounts = owner_accounts(&scratch, ObservedStore::default(), net);
+    accounts.github = super::github::GitHub::with_client(Some("fixture-client"));
     accounts.github_session(Some(1));
     drive(
         &mut accounts,
@@ -1610,77 +1654,48 @@ async fn a_stale_wake_cannot_poll_a_new_attempt_and_unexecuted_effects_keep_thei
             result: Ok(None),
         },
     );
-    drive(&mut accounts, GitHubInput::Op(GitHubOp::Connect));
-    let old = accounts.github.machine().stamp();
-    drive(
-        &mut accounts,
-        GitHubInput::Code {
-            stamp: old,
-            result: Ok(device_challenge()),
-        },
-    );
-    accounts.github_session(None);
+    challenge(&mut accounts).await;
+    let old = verification_event(&mut accounts).await;
+    assert_eq!(old.stage, VerificationStage::Wake);
+    assert_eq!(old.session, Some(1));
+
     accounts.github_session(Some(2));
-    drive(&mut accounts, GitHubInput::Op(GitHubOp::Connect));
-    let current = accounts.github.machine().stamp();
-    assert_ne!(current, old);
-    drive(
-        &mut accounts,
-        GitHubInput::Code {
-            stamp: current,
-            result: Ok(device_challenge()),
-        },
-    );
-    tokio::time::pause();
-    tokio::time::advance(Duration::from_secs(1)).await;
-    tokio::time::resume();
-    let http = &accounts.net.http;
+    challenge(&mut accounts).await;
+    let current = verification_event(&mut accounts).await;
+    assert_eq!(current.stage, VerificationStage::Wake);
+    assert_eq!(current.session, Some(2));
+
+    assert_eq!(accounts.handle(Event::Verification(old)), []);
+    assert!(!accounts.github.verifying(), "stale wake starts no request");
+    assert_eq!(seen.try_recv(), Err(mpsc::error::TryRecvError::Empty));
+    accounts.handle(Event::Verification(current.clone()));
+    assert_eq!(accounts.handle(Event::Verification(current.clone())), []);
+    let poll = response(&mut accounts).await;
+    assert!(matches!(
+        poll.outcome,
+        VerificationOutcome::Poll(Ok(crate::connections::github::api::TokenReply::Error {
+            code: crate::connections::github::api::TokenError::AuthorizationPending,
+            ..
+        }))
+    ));
+    assert_eq!(poll.session, Some(2));
+    assert_eq!(seen.try_recv(), Ok(()));
+    assert_eq!(seen.try_recv(), Err(mpsc::error::TryRecvError::Empty));
+    accounts.handle(Event::Verification(poll));
+    let scheduled = verification_event(&mut accounts).await;
+    assert_eq!(scheduled.stage, VerificationStage::Wake);
+    assert_eq!(scheduled.session, Some(2));
+    assert_eq!(accounts.handle(Event::Verification(current)), []);
     assert!(
-        accounts
-            .github
-            .wake(old, accounts.jobs.as_ref(), &accounts.reads_tx, http)
-            .is_err()
+        !accounts.github.verifying(),
+        "a spent wake starts no request"
     );
-    assert!(
-        accounts
-            .github
-            .suspended()
-            .iter()
-            .all(|(_, effect)| !matches!(effect, GitHubEffect::Poll { .. }))
-    );
-    accounts
-        .github
-        .wake(current, accounts.jobs.as_ref(), &accounts.reads_tx, http)
-        .unwrap();
-    assert_eq!(
-        accounts
-            .github
-            .suspended()
-            .iter()
-            .filter(|(_, effect)| matches!(effect, GitHubEffect::Poll { .. }))
-            .count(),
-        1
-    );
-    assert!(
-        accounts
-            .github
-            .wake(current, accounts.jobs.as_ref(), &accounts.reads_tx, http)
-            .is_err()
-    );
-    assert!(
-        accounts
-            .github
-            .checked(
-                GitHubInput::Op(GitHubOp::SetDefaultRepo(
-                    RepoName::new("owner/repo").unwrap()
-                )),
-                accounts.jobs.as_ref(),
-                &accounts.reads_tx,
-                http
-            )
-            .is_err()
-    );
-    assert!(accounts.github.machine().user().is_none());
+    assert_eq!(seen.try_recv(), Err(mpsc::error::TryRecvError::Empty));
+    assert!(matches!(
+        accounts.github_opened().as_slice(),
+        [ControlToShell::GitHub(GitHubView::AwaitingUser { user_code, .. })]
+            if user_code.as_str() == "ABCD-EFGH"
+    ));
     accounts.close(Instant::now(), Instant::now()).await;
 }
 

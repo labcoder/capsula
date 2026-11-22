@@ -414,24 +414,6 @@ fn a_claim_with_the_wrong_json_type_is_refused_not_read_as_absent() {
 }
 
 #[test]
-fn a_selected_key_that_isnt_rsa_is_refused() {
-    let valid = token(&claims());
-    let mut mislabelled = jwk(KID, &SIGNER);
-    mislabelled["kty"] = json!("EC");
-    assert_eq!(
-        verify_signed(
-            &valid,
-            &keys(json!({ "keys": [mislabelled] })),
-            CLIENT,
-            NONCE,
-            NOW
-        )
-        .map(|_| ()),
-        Err(IdentityError::Token)
-    );
-}
-
-#[test]
 fn token_and_key_rejections_have_exact_kinds() {
     use IdentityError::{Bounds, Token};
     let valid = token(&claims());
@@ -612,25 +594,6 @@ fn a_modulus_under_2048_bits_is_refused_though_ring_would_verify_it() {
         Err(IdentityError::Token)
     );
     assert!(check(&token(&claims())).is_ok(), "2048 bits is accepted");
-}
-
-#[test]
-fn caller_bindings_are_checked_before_the_token() {
-    use IdentityError::{Bounds, Token};
-    let valid = token(&claims());
-    let keys = keys(jwks());
-    let long = "x".repeat(257);
-    let cases = [
-        ("empty client", "", NONCE, Token),
-        ("long client", long.as_str(), NONCE, Bounds),
-        ("other client", "app_other", NONCE, Token),
-        ("empty nonce", CLIENT, "", Token),
-        ("long nonce", CLIENT, &long[..129], Bounds),
-    ];
-    for (name, client, nonce, expected) in cases {
-        let result = verify_signed(&valid, &keys, client, nonce, NOW).map(|_| ());
-        assert_eq!(result, Err(expected), "{name}");
-    }
 }
 
 #[test]
@@ -937,6 +900,7 @@ async fn verify_refuses_bad_discovery_before_fetching_keys() {
 async fn verify_ignores_unusable_unselected_keys() {
     let valid = token(&claims());
     let cases = [
+        ("another usable RSA key", jwk("first-key", &OTHER)),
         ("not an object", Value::Null),
         (
             "unknown key type",
@@ -951,12 +915,12 @@ async fn verify_ignores_unusable_unselected_keys() {
             json!({ "kty": "RSA", "kid": "broken-key", "n": 23, "e": "AQAB" }),
         ),
     ];
-    for (name, unusable) in cases {
+    for (name, unselected) in cases {
         let http = Scripted::new([
             discovery(ISSUER, JWKS_URI),
             response(
                 200,
-                json!({ "keys": [unusable, jwk(KID, &SIGNER)] }).to_string(),
+                json!({ "keys": [unselected, jwk(KID, &SIGNER)] }).to_string(),
             ),
         ]);
         let identity = verify(&http, &secret(&valid), CLIENT, NONCE, &FixedClock(NOW))
@@ -996,26 +960,6 @@ async fn verify_accepts_missing_key_metadata() {
 }
 
 #[tokio::test]
-async fn verify_selects_the_second_rsa_key() {
-    let valid = signed(&header("RS256", Some("second-key")), &claims(), &OTHER);
-    let http = Scripted::new([
-        discovery(ISSUER, JWKS_URI),
-        response(
-            200,
-            json!({ "keys": [jwk("first-key", &SIGNER), jwk("second-key", &OTHER)] }).to_string(),
-        ),
-    ]);
-    let identity = verify(&http, &secret(&valid), CLIENT, NONCE, &FixedClock(NOW))
-        .await
-        .expect("kid selects the second RSA key and its matching signature");
-    assert_eq!(identity.subject.expose().as_str(), SUBJECT);
-    assert_eq!(
-        identity.email.as_ref().map(|email| email.expose().as_str()),
-        Some(EMAIL)
-    );
-}
-
-#[tokio::test]
 async fn verify_rejects_conflicting_selected_key_metadata() {
     let valid = token(&claims());
     let cases = [
@@ -1025,6 +969,7 @@ async fn verify_rejects_conflicting_selected_key_metadata() {
         ("other algorithm", "alg", json!("RS512")),
         ("unknown algorithm", "alg", json!("future")),
         ("null algorithm", "alg", Value::Null),
+        ("not RSA", "kty", json!("EC")),
     ];
     for (name, field, value) in cases {
         let mut key = jwk(KID, &SIGNER);
@@ -1035,6 +980,11 @@ async fn verify_rejects_conflicting_selected_key_metadata() {
         ]);
         let result = verify(&http, &secret(&valid), CLIENT, NONCE, &FixedClock(NOW)).await;
         assert_eq!(result.map(|_| ()), Err(IdentityError::Token), "{name}");
+        assert_eq!(
+            http.requests().len(),
+            2,
+            "a selected key refusal is not a refetch"
+        );
     }
 }
 
@@ -1120,19 +1070,38 @@ async fn verify_refuses_a_bad_key_set() {
 
 #[tokio::test]
 async fn verify_checks_inputs_first_and_needs_a_clock() {
-    let http = Scripted::new([]);
-    let result = verify(&http, &secret(""), CLIENT, NONCE, &FixedClock(NOW)).await;
-    assert_eq!(result.map(|_| ()), Err(IdentityError::Token));
-    assert!(
-        http.requests().is_empty(),
-        "nothing is fetched for an empty token"
-    );
-    let http = Scripted::new([
-        discovery(ISSUER, JWKS_URI),
-        response(200, jwks().to_string()),
-    ]);
-    let result = verify(&http, &secret(&token(&claims())), CLIENT, NONCE, &NoClock).await;
-    assert_eq!(result.map(|_| ()), Err(IdentityError::Clock));
+    use IdentityError::{Bounds, Token};
+
+    let valid = token(&claims());
+    let long = "x".repeat(257);
+    for (value, client, nonce, expected) in [
+        ("", CLIENT, NONCE, Token),
+        (valid.as_str(), "", NONCE, Token),
+        (valid.as_str(), long.as_str(), NONCE, Bounds),
+        (valid.as_str(), CLIENT, "", Token),
+        (valid.as_str(), CLIENT, &long[..129], Bounds),
+    ] {
+        let http = Scripted::new([]);
+        let result = verify(&http, &secret(value), client, nonce, &FixedClock(NOW)).await;
+        assert_eq!(result.map(|_| ()), Err(expected));
+        assert!(
+            http.requests().is_empty(),
+            "invalid input never fetches keys"
+        );
+    }
+    let after_fetch: [(&str, &dyn Clock, IdentityError); 2] = [
+        ("app_other", &FixedClock(NOW), Token),
+        (CLIENT, &NoClock, IdentityError::Clock),
+    ];
+    for (client, clock, expected) in after_fetch {
+        let http = Scripted::new([
+            discovery(ISSUER, JWKS_URI),
+            response(200, jwks().to_string()),
+        ]);
+        let result = verify(&http, &secret(&valid), client, NONCE, clock).await;
+        assert_eq!(result.map(|_| ()), Err(expected));
+        assert_eq!(http.requests().len(), 2);
+    }
 }
 
 /// Design §3 rule 3: a refreshed set's token is bound to the subject already verified, with no

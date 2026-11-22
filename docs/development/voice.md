@@ -139,8 +139,7 @@ interrupts prefix hashing. Connecting is bounded to 30 seconds; there is no tota
 deadline. Progress carries a phase: `Verifying` while bytes already on disk are hashed, and
 `Downloading` from the first request. A phase change is sent at once; byte counts within a phase
 are coalesced to at most four updates a second, so a part that's already whole never shows
-`Downloading`. Tests use only injected
-loopback TLS fixtures; the ignored `measure_download_head` requires explicit permission.
+`Downloading`. Tests use only injected loopback TLS fixtures.
 
 ## Spoken replies
 
