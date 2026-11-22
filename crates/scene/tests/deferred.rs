@@ -10,14 +10,19 @@ use kumochi_scene::{
     Admission, ErrorCode, Frame, GlobalBudget, Record, SceneState, SceneView, Step, StepError,
     StopCut, StopOutcome,
     deferred::{self, Deferred, Pending},
-    layout::{LayoutState, PreparedStep},
+    layout::{LayoutState, PrepareInput, PreparedStep, SurfaceGeometry, prepare, recover},
     parse_record,
     text::Bounded,
+    theme::Theme,
 };
-use scene_support::{id, new_scene, prepared};
+use scene_support::{Measure, id, new_scene, prepared};
 use serde_json::{Value, json};
 use std::{
-    sync::mpsc::{self, Receiver, Sender},
+    sync::{
+        Arc,
+        atomic::AtomicBool,
+        mpsc::{self, Receiver, Sender},
+    },
     thread,
     time::{Duration, Instant},
 };
@@ -108,6 +113,7 @@ fn discarded_values_are_destroyed_and_metered_on_the_dropper() {
     activation_retires_settled_recolored_and_superseded_tracks();
     a_discarded_stage_frees_nothing_on_the_ui_thread();
     a_stale_activation_attributes_its_whole_step_owner();
+    retained_bytes_match_step_charges_and_recovery();
 }
 
 fn drain() {
@@ -647,63 +653,79 @@ fn stop_retires_dropped_removals_and_cell_changes() {
     drain();
 }
 
-#[test]
-#[ignore = "run with --exact --ignored alone, normal priority under the Rez quiet lock"]
-fn measure_stop_with_drops_before_start() {
-    assert!(!deferred::running());
-    measure_stop_with_drops();
-}
-
-#[test]
-#[ignore = "normal-priority release measurement under the Rez quiet lock"]
-fn measure_stop_with_drops_started() {
-    deferred::start().expect("dropper starts before intake");
-    measure_stop_with_drops();
-}
-
-#[expect(clippy::print_stdout, reason = "manual Rez measurement output")]
-fn measure_stop_with_drops() {
-    let mut times = Vec::with_capacity(32);
-    let mut released_bytes = Vec::with_capacity(32);
-    for sample in 0..37 {
-        if deferred::running() {
-            drain();
-        }
-        let (mut scene, mut budget, cut) = dropped_rows();
-        let start = Instant::now();
-        let (outcome, _, [allocated, released]) =
-            allocation::usage(|| scene.stop(&cut, &mut budget));
-        let elapsed = start.elapsed().as_nanos();
-        assert_eq!(
-            outcome.expect("valid cut"),
-            StopOutcome::Kept,
-            "the first step survives the cut"
+fn retained_bytes_match_step_charges_and_recovery() {
+    let mut scene = new_scene("resident");
+    let mut budget = GlobalBudget::default();
+    let theme = Arc::new(Theme::default());
+    let cancel = AtomicBool::new(false);
+    let (mut layout, _, [empty, released]) = allocation::usage(|| LayoutState::new(&scene));
+    assert!(
+        layout.resident_bytes() >= empty.saturating_sub(released),
+        "the empty layout's charge covers the net requested bytes"
+    );
+    for step in [
+        json!({"id":"shared","put":[
+            {"chart":{"id":"c","kind":"bar","box":[0,0,400,300],"categories":["Q","R"],
+                "x":{"min":-0.5,"max":1.5},"y":{"min":-10,"max":10}}},
+            {"series":{"id":"s","in":"c","data":[2,-2]}},
+            {"series":{"id":"t","in":"c","data":[3,-3]}},
+            {"path":{"id":"p","d":"M0 0 Q4 8 8 0","fill":"green"}}
+        ]}),
+        json!({"id":"nothing","put":[]}),
+        json!({"id":"more","put":[{"text":{"id":"x","at":[10,10],"text":"X"}}]}),
+    ] {
+        let Admission::New(candidate) = scene.admit(&typed_step(&step), &budget).expect("admitted")
+        else {
+            panic!("new step");
+        };
+        let ticket = scene
+            .commit(candidate, &mut budget)
+            .expect("committed")
+            .preparation;
+        let input = PrepareInput::new(
+            ticket,
+            layout.clone(),
+            SurfaceGeometry::default(),
+            Arc::clone(&theme),
+        )
+        .expect("consecutive preparation");
+        let (result, _, [allocated, released]) =
+            allocation::usage(|| prepare(input, &mut Measure, &cancel));
+        let result = result.expect("prepared");
+        result.validate(&scene, &layout).expect("current result");
+        let bytes = allocated.saturating_sub(released);
+        assert!(
+            bytes <= result.resident_bytes,
+            "revision {}: {bytes} net requested bytes, {} charged",
+            scene.revision(),
+            result.resident_bytes
         );
-        assert_eq!(
-            (scene.object_count(), scene.committed(), scene.revision()),
-            (264, 1, 2),
-            "the cut drops the second step without rewinding the lifetime revision"
-        );
-        if sample >= 5 {
-            times.push(elapsed);
-            released_bytes.push(released);
-            println!(
-                "stop_dropped_undo sample={} elapsed_ns={elapsed} allocated_bytes={allocated} caller_freed_bytes={released}",
-                sample - 5
+        if scene.revision() == 2 {
+            assert_eq!(
+                result.retained_bytes(),
+                layout.resident_bytes(),
+                "an empty step keeps exactly the prior rest charge"
+            );
+            assert!(
+                result.resident_bytes < result.retained_bytes(),
+                "the empty step does not charge the already retained chart and path again"
             );
         }
+        layout = result.after;
     }
-    if deferred::running() {
-        drain();
-    }
-    times.sort_unstable();
-    released_bytes.sort_unstable();
-    println!(
-        "stop_dropped_undo dropper={} samples=32 warmups=5 p50_ns={} max_ns={} caller_freed_p50_bytes={} caller_freed_max_bytes={}",
-        deferred::running(),
-        times[15],
-        times[31],
-        released_bytes[15],
-        released_bytes[31]
+    let (_, recovered) = recover(
+        scene.header().clone(),
+        scene.recovery_log(),
+        SurfaceGeometry::default(),
+        &theme,
+        &mut Measure,
+        &cancel,
+        None,
+    )
+    .expect("recovery");
+    assert_eq!(
+        recovered.resident_bytes(),
+        layout.resident_bytes(),
+        "recovery charges the same rest as live preparation"
     );
 }

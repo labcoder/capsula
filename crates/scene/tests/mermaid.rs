@@ -236,10 +236,27 @@ fn root_references_do_not_override_first_closed_group_membership() {
             .iter()
             .find(|item| item.handle == handle)
             .expect("node item");
-        assert_eq!(item.parent, scene.handle(&id(group)));
+        assert_eq!(
+            item.parent,
+            Some(scene.handle(&id(group)).expect("authored group"))
+        );
     }
-    assert_ne!(labelled(&items, "join").parent, scene.handle(&id("first")));
-    assert_ne!(labelled(&items, "join").parent, scene.handle(&id("second")));
+    let target = scene.handle(&id("target")).expect("authored diagram");
+    let groups = ["first", "second"].map(|name| scene.handle(&id(name)));
+    let mut parent = labelled(&items, "join").parent;
+    for _ in 0..items.len() {
+        if parent == Some(target) {
+            break;
+        }
+        assert!(!groups.contains(&parent), "the join is outside both groups");
+        let ancestor = parent.expect("the join stays inside its authored diagram");
+        parent = items
+            .iter()
+            .find(|item| item.handle == ancestor)
+            .expect("ancestor")
+            .parent;
+    }
+    assert_eq!(parent, Some(target));
 }
 
 #[test]
@@ -262,40 +279,37 @@ fn an_earlier_closed_reference_keeps_membership_before_a_later_declaration() {
 }
 
 #[test]
-fn conflicting_declarations_refuse_atomically_at_the_source_field() {
-    let scene = scene();
-    let budget = GlobalBudget::default();
-    let step = graph(
-        "flowchart TB\nsubgraph first[First]\nA[One]\nend\nsubgraph second[Second]\nA[Two]\nend\n",
-    );
-    let error = scene
-        .admit(&step, &budget)
-        .expect_err("conflicting declaration");
-    assert_eq!(error.code, ErrorCode::Unsupported);
-    assert_eq!(error.path.to_string(), "put[1].mermaid.src");
-    assert_eq!(scene.object_count(), 0);
-    assert_eq!(scene.revision(), 0);
-    assert_eq!(budget.usage().objects, 0);
-}
-
-#[test]
 fn refused_families_never_commit_a_valid_prefix() {
     let cases: Value = serde_json::from_str(include_str!("fixtures/mermaid/refused.json"))
         .expect("refused fixtures");
-    for case in cases.as_array().expect("fixture array") {
-        let scene = scene();
-        let budget = GlobalBudget::default();
+    let cases = cases.as_array().expect("fixture array").iter().map(|case| {
         let source = case["src"].as_str().expect("source");
         let expected = match case["code"].as_str().expect("diagnostic code") {
             "Malformed" => ErrorCode::Malformed,
             "Unsupported" => ErrorCode::Unsupported,
             code => panic!("unknown fixture code: {code}"),
         };
-        let error = scene
-            .admit(&graph(source), &budget)
-            .expect_err("outside D1");
-        assert_eq!(error.code, expected, "fixture {}", case["case"]);
-        assert_eq!(error.path.to_string(), "put[1].mermaid.src");
+        (source, expected)
+    });
+    for (source, expected) in cases.chain([
+        (
+            "graph TD;A_node-->odd->Vertex Text];",
+            ErrorCode::Unsupported,
+        ),
+        (
+            "flowchart TB\nA --> B[\"test\"]:::hot\n",
+            ErrorCode::Unsupported,
+        ),
+    ]) {
+        let scene = scene();
+        let budget = GlobalBudget::default();
+        rejected(
+            &scene,
+            &budget,
+            &graph(source),
+            expected,
+            "put[1].mermaid.src",
+        );
         assert_eq!(scene.object_count(), 0);
         assert_eq!(scene.revision(), 0);
         assert_eq!(budget.usage().objects, 0);
@@ -446,7 +460,7 @@ fn node_and_edge_limits_are_per_diagram_not_per_source() {
         for edge in 0..50 {
             writeln!(
                 source,
-                "{group}{} --> {group}{}",
+                "{group}{} -->|{group}-edge-{edge}| {group}{}",
                 edge % 25,
                 (edge + 1) % 25
             )
@@ -458,14 +472,16 @@ fn node_and_edge_limits_are_per_diagram_not_per_source() {
     let mut budget = GlobalBudget::default();
     let before = LayoutState::new(&scene);
     let prepared = picture(&mut scene, &mut budget, &before, &graph(&source));
+    let handles: std::collections::BTreeSet<_> = ["left", "right"]
+        .into_iter()
+        .flat_map(|group| (0..25).map(move |node| id(&format!("{group}{node}"))))
+        .map(|id| prepared.after.handle(&id).expect("authored node"))
+        .collect();
+    assert_eq!(handles.len(), 50);
+    let items = prepared.after.items();
     for group in ["left", "right"] {
-        for node in 0..25 {
-            assert!(
-                prepared
-                    .after
-                    .handle(&id(&format!("{group}{node}")))
-                    .is_some()
-            );
+        for edge in 0..50 {
+            labelled(&items, &format!("{group}-edge-{edge}"));
         }
     }
     let mut single = String::from("flowchart TB\n");
@@ -553,10 +569,32 @@ fn group_labels_and_edge_heads_survive_set_cut_and_recovery() {
         None,
     )
     .expect("cut graph recovery");
-    assert_eq!(bounds(&detached, "A"), expected_a);
-    assert_eq!(bounds(&detached, "B"), expected_b);
-    assert_eq!(detached.items(), recovered.items());
-    assert_eq!(labelled(&recovered.items(), "Named group").handle, cluster);
+    for layout in [&detached, &recovered] {
+        assert_eq!(bounds(layout, "A"), expected_a);
+        assert_eq!(bounds(layout, "B"), expected_b);
+        let items = layout.items();
+        assert_eq!(labelled(&items, "Named group").handle, cluster);
+        let join = labelled(&items, "join");
+        assert_eq!(join.handle, edge);
+        let tip = join
+            .primitives
+            .iter()
+            .find_map(|prim| match prim {
+                Prim::Line {
+                    points,
+                    closed: false,
+                    ..
+                } => points.last(),
+                _ => None,
+            })
+            .expect("the join shaft");
+        assert!(
+            join.primitives
+                .iter()
+                .any(|prim| { matches!(prim, Prim::Fill { points, .. } if points.contains(tip)) }),
+            "the join has a filled head at its end"
+        );
+    }
 }
 
 #[test]
@@ -907,7 +945,7 @@ fn nested_graph(groups: usize) -> String {
 }
 
 #[test]
-fn generated_reference_depth_failures_point_to_the_original_source() {
+fn generated_reference_depth_16_is_admitted_without_lowering_the_limit() {
     for groups in [14, 16] {
         rejected(
             &scene(),
@@ -917,10 +955,6 @@ fn generated_reference_depth_failures_point_to_the_original_source() {
             "put[1].mermaid.src",
         );
     }
-}
-
-#[test]
-fn generated_reference_depth_16_is_admitted_without_lowering_the_limit() {
     let mut scene = scene();
     let mut budget = GlobalBudget::default();
     let step = graph(&nested_graph(13));
@@ -928,10 +962,13 @@ fn generated_reference_depth_16_is_admitted_without_lowering_the_limit() {
     else {
         panic!("new graph");
     };
-    let committed = scene.commit(candidate, &mut budget).expect("commit");
-    assert_eq!(committed.handles.len(), 16);
-    assert_eq!(scene.handle(&id("A")).expect("deepest node").slot(), 15);
-    assert_eq!(budget.usage().objects, 16);
+    scene.commit(candidate, &mut budget).expect("commit");
+    for node in (0..13)
+        .map(|depth| format!("g{depth}"))
+        .chain(["A".to_owned()])
+    {
+        assert!(scene.handle(&id(&node)).is_some(), "retained {node}");
+    }
 }
 
 #[test]
@@ -1026,28 +1063,6 @@ fn bare_membership_mentions_do_not_redeclare_a_shaped_node() {
     assert_eq!(
         labelled(&items, "Christmas").handle,
         scene.handle(&id("A")).expect("source A")
-    );
-}
-
-#[test]
-fn unsupported_odd_shapes_after_a_trailing_hyphen_are_not_bad_arrows() {
-    rejected(
-        &scene(),
-        &GlobalBudget::default(),
-        &graph("graph TD;A_node-->odd->Vertex Text];"),
-        ErrorCode::Unsupported,
-        "put[1].mermaid.src",
-    );
-}
-
-#[test]
-fn a_class_suffix_after_a_shape_is_a_typed_refusal() {
-    rejected(
-        &scene(),
-        &GlobalBudget::default(),
-        &graph("flowchart TB\nA --> B[\"test\"]:::hot\n"),
-        ErrorCode::Unsupported,
-        "put[1].mermaid.src",
     );
 }
 

@@ -750,8 +750,10 @@ mod tests {
             }
         );
         // Radius 8 at scale 64 needs 26 pieces per corner: 4 · 27 + 1 points.
-        let node = at_64(&[rect(100.0, 8.0, None, Some((paint(), 2.0)))]);
+        let bordered = [rect(100.0, 8.0, None, Some((paint(), 2.0)))];
+        let node = at_64(&bordered);
         assert_eq!((node.outline_points, node.fill_vertices), (109, 0));
+        assert_eq!(PaintWork::of(&bordered, 2.0).outline_points, 25);
         // Charged at its declared radius 8, not the 5 the painter clamps a 10-unit side to.
         assert_eq!(
             at_64(&[rect(10.0, 8.0, Some(paint()), None)]).fill_vertices,
@@ -805,13 +807,6 @@ mod tests {
             align: Align::Left,
         };
         assert_eq!(at_64(&[text]), PaintWork::default());
-    }
-
-    #[test]
-    fn a_rect_is_charged_at_the_scale_it_is_given() {
-        // Radius 8 at scale 2 needs 5 pieces per corner: 4 · 6 + 1 points, against 109 at 64.
-        let bordered = [rect(100.0, 8.0, None, Some((paint(), 2.0)))];
-        assert_eq!(PaintWork::of(&bordered, 2.0).outline_points, 25);
     }
 
     #[test]

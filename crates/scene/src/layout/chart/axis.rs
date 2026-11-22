@@ -550,19 +550,26 @@ mod tests {
         ] {
             let range = domain(min, max, &Axis::default(), None, None);
             assert!(
-                range.min <= min && range.max >= max && range.min < range.max,
-                "range covers data"
+                range.min.is_finite()
+                    && range.max.is_finite()
+                    && range.min <= min
+                    && range.max >= max
+                    && range.min < range.max,
+                "finite domain covering {min}..{max}"
             );
-            assert!((4..=6).contains(&range.ticks().len()), "nice tick count");
-            let step = tick_step(range, TickBounds::Inside);
-            let magnitude = 10.0_f64.powf(step.log10().floor());
-            let factor = step / magnitude;
+            let ticks = range.ticks();
+            assert!(ticks.len() >= 3, "readable scale for {min}..{max}");
             assert!(
-                [1.0_f64, 2.0, 5.0, 10.0]
-                    .iter()
-                    .any(|n| (factor - n).abs() < 1e-8),
-                "tick step uses 1/2/5"
+                ticks.windows(2).all(|pair| pair[0] < pair[1]),
+                "ticks increase for {min}..{max}"
             );
+            let mut labels = Vec::new();
+            for tick in ticks {
+                assert!((range.min..=range.max).contains(&tick), "tick on the axis");
+                let label = compact(tick, None).expect("label");
+                assert!(!labels.contains(&label), "distinct labels");
+                labels.push(label);
+            }
         }
         assert_eq!(
             compact(1234.0, Some(&"ms".to_owned().try_into().expect("text")))

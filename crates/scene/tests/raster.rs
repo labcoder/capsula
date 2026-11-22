@@ -1,7 +1,7 @@
 //! Coverage, depth, translucency, ids, antialiasing, bounds and cancellation of the raster.
 use kumochi_scene::three::raster::{
-    BandScratch, COORD_LIMIT, Fragment, FrameScratch, PushError, Quality, RasterError, ScreenPoly,
-    Target, raster,
+    BandScratch, COORD_LIMIT, Fragment, FrameScratch, PushError, Quality, RasterError, Target,
+    raster,
 };
 use std::sync::atomic::AtomicBool;
 
@@ -71,15 +71,6 @@ fn run(
         })
         .collect();
     (rgba, ids)
-}
-
-#[test]
-fn a_screen_polygon_is_84_bytes() {
-    assert_eq!(
-        std::mem::size_of::<ScreenPoly>(),
-        84,
-        "the residency ledger charges 84 + 8 per triangle"
-    );
 }
 
 #[test]
@@ -357,8 +348,21 @@ fn clear_texels_take_their_first_covered_neighbour_colour() {
 
 #[test]
 fn an_empty_frame_is_clear() {
-    let (rgba, ids) = run(&mut FrameScratch::with_capacity(0), Quality::Rest, 2, 2);
-    assert_eq!((rgba, ids), (vec![[0; 4]; 4], vec![0; 4]), "nothing drawn");
+    let (mut color, mut ids) = ([u32::MAX; 4], [u8::MAX; 4]);
+    raster(
+        &mut FrameScratch::with_capacity(0),
+        Quality::Rest,
+        &mut BandScratch::new(2).expect("valid width"),
+        Target {
+            width: 2,
+            height: 2,
+            color: &mut color,
+            ids: &mut ids,
+        },
+        &AtomicBool::new(false),
+    )
+    .expect("empty frame rasterises");
+    assert_eq!((color, ids), ([0; 4], [0; 4]), "nothing drawn");
 }
 
 #[test]

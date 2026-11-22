@@ -207,7 +207,10 @@ fn a_screen_header_carries_the_brains_stamp_and_only_a_screen_header_may() {
     );
     assert_eq!(stamped.display, Some(DISPLAY));
     let json = serde_json::to_string(&stamped).expect("stamped JSON");
-    assert!(json.contains(r#""display":{"#), "{json}");
+    assert_eq!(
+        serde_json::from_str::<Value>(&json).expect("stamped JSON")["display"],
+        json!({"origin":[0,0],"size":[2560,1440],"dpi":96})
+    );
     assert_eq!(
         serde_json::from_str::<Begin>(&json).ok(),
         Some(stamped.clone())
@@ -651,12 +654,23 @@ fn no_outline_ever_covers_its_target_whatever_its_shape_or_pad() {
                 underline["pad"] = json!(pad);
             }
             let result = prepared(&[json!([{ "highlight": underline }])]).expect("prepared");
-            for (bar, ..) in rects(&item(&result, "h")) {
-                assert!(
-                    bar.origin.y > target[1] + target[3],
-                    "an underline below its words"
-                );
-            }
+            let bar = item(&result, "h");
+            let bottom = target[1] + target[3];
+            assert!(!bar.primitives.is_empty(), "the underline is shown");
+            assert!(
+                bar.primitives.iter().all(|primitive| match primitive {
+                    Prim::Rect { rect, .. } =>
+                        rect.origin.y > bottom && rect.size.y > 0.0 && rect.size.x > 0.0,
+                    Prim::Fill { points, .. } =>
+                        points.len() >= 3 && points.iter().all(|point| point.y > bottom),
+                    Prim::Line { points, width, .. } =>
+                        points.len() >= 2
+                            && *width > 0.0
+                            && points.iter().all(|point| point.y - width * 0.5 > bottom),
+                    Prim::Text { origin, .. } => origin.y > bottom,
+                }),
+                "the underline must stay wholly below its words"
+            );
         }
     }
 }
@@ -744,35 +758,41 @@ fn an_earlier_label_with_no_side_left_sits_out_until_one_frees() {
         item(&fenced, "c").primitives.is_empty(),
         "the label sits out"
     );
-    let freed = prepared(&[callout, fence, json!({"remove":["t"]})]).expect("prepared");
+    let freed =
+        prepared(&[callout.clone(), fence.clone(), json!({"remove":["t"]})]).expect("prepared");
     let label = item(&freed, "c");
-    assert_eq!(label.primitives.len(), 2, "the label is back");
+    let unfenced = prepared(std::slice::from_ref(&callout)).expect("prepared without fences");
     assert!(
-        near(label.bounds, [620.0, 278.0, 40.0, 15.0]),
-        "{:?}",
-        label.bounds
+        label
+            .primitives
+            .iter()
+            .any(|prim| matches!(prim, Prim::Text { text, .. } if text.as_str() == "Save")),
+        "the earlier label is visible once space frees"
     );
-}
-
-#[test]
-fn a_label_that_sits_out_leaves_its_place_to_a_later_label() {
-    let callout = json!([{"callout":{"id":"c","target":{"box":[600,300,80,40]},"text":"Save"}}]);
-    let fence = json!([
-        {"highlight":{"id":"t","target":{"box":[550,270,180,10]}}},
-        {"highlight":{"id":"b","target":{"box":[550,355,180,10]}}},
-        {"highlight":{"id":"l","target":{"box":[560,315,10,10]}}},
-        {"highlight":{"id":"r","target":{"box":[700,315,10,10]}}}
-    ]);
+    assert_eq!(
+        label.bounds,
+        item(&unfenced, "c").bounds,
+        "the earlier label returns to its open placement"
+    );
     // c sat out at its old centre (640, 285.5), which d's named side covers.
     let later = json!({"remove":["t"],"put":[
         {"callout":{"id":"d","target":{"box":[610,255,60,10]},"text":"Open","side":"bottom"}}
     ]});
+    let alone =
+        prepared(&[fence.clone(), later.clone()]).expect("prepared without the earlier label");
     let result = prepared(&[callout, fence, later]).expect("prepared");
     let label = item(&result, "d");
     assert!(
-        near(label.bounds, [620.0, 272.0, 40.0, 15.0]),
-        "{:?}",
-        label.bounds
+        label
+            .primitives
+            .iter()
+            .any(|prim| matches!(prim, Prim::Text { text, .. } if text.as_str() == "Open")),
+        "the later label is visible"
+    );
+    assert_eq!(
+        label.bounds,
+        item(&alone, "d").bounds,
+        "the hidden label doesn't reserve space"
     );
 }
 
@@ -954,7 +974,11 @@ fn a_screen_view_sits_on_its_own_display_keeps_off_the_stage_and_paints_nothing_
             .collect::<Vec<_>>()
     };
     let resting = painted(&SceneView::new(&marked.after, 1));
-    assert!(!resting.is_empty());
+    assert_eq!(
+        resting.len(),
+        1,
+        "the single authored highlight is visible at rest"
+    );
     let twice = Affine([2.0, 0.0, 0.0, 2.0, 0.0, 0.0]);
     let on_screen: Vec<Affine> = resting.iter().map(|at| twice.compose(*at)).collect();
     let mut view = SceneView::new(&marked.after, 1);

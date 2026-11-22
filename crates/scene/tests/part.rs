@@ -55,23 +55,6 @@ fn pair(label: &str, info: Option<&str>) -> (String, Option<String>) {
 }
 
 #[test]
-fn a_labelled_solid_gives_its_label_and_info() {
-    let (mut state, mut global) = (
-        SceneState::begin(header()).expect("scene"),
-        GlobalBudget::default(),
-    );
-    let put = first(
-        &mut state,
-        &mut global,
-        r#","label":"Wheel","info":"Front left""#,
-    );
-    assert_eq!(
-        text(state.part(handle(&put, "a"))),
-        Some(pair("Wheel", Some("Front left")))
-    );
-}
-
-#[test]
 fn later_kept_sets_apply_in_order_and_a_partial_set_keeps_the_other_field() {
     let (mut state, mut global) = (
         SceneState::begin(header()).expect("scene"),
@@ -83,6 +66,7 @@ fn later_kept_sets_apply_in_order_and_a_partial_set_keeps_the_other_field() {
         r#","label":"Wheel","info":"Front left""#,
     );
     let a = handle(&put, "a");
+    assert_eq!(text(state.part(a)), Some(pair("Wheel", Some("Front left"))));
     commit(
         &mut state,
         &mut global,

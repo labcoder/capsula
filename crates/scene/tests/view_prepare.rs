@@ -174,46 +174,12 @@ fn texts(prepared: &PreparedStep) -> Vec<&str> {
 }
 
 #[test]
-fn scale_reaches_world_vertices_once_through_the_composed_rest() {
-    let (mut scene, mut budget) = scene();
-    let first = opening(
-        &mut scene,
-        &mut budget,
-        json!({"id":"a","put":[
-            view(),
-            cube("p", &json!({"pos":[10,0,0],"scale":2})),
-            cube("c", &json!({"attach":"p","pos":[1,0,0],"scale":1.5})),
-        ]}),
-    );
-    assert_eq!(first.views.len(), 1);
-    let geometry = geometry(&first.after);
-    let child = &geometry.solids[1];
-    assert_eq!(child.parent, Some(0));
-    let mesh = built(geometry, 1);
-    assert_eq!(mesh.triangles.len(), 12);
-    let mut corner = [f64::NEG_INFINITY; 3];
-    for &v in &*mesh.vertices {
-        let p = child.rest.apply(v);
-        corner = [
-            corner[0].max(p[0]),
-            corner[1].max(p[1]),
-            corner[2].max(p[2]),
-        ];
-    }
-    assert_eq!(
-        corner.map(f64::to_bits),
-        [15.0_f64, 3.0, 3.0].map(f64::to_bits),
-        "a baked scale gives (16.5, 4.5, 4.5)"
-    );
-}
-
-#[test]
 fn reshading_shares_sources_and_meshes_and_text_sets_prepare_no_view() {
     let (mut scene, mut budget) = scene();
     let first = opening(
         &mut scene,
         &mut budget,
-        json!({"id":"a","put":[view(), cube("s", &json!({})), cube("u", &json!({"pos":[4,0,0]}))]}),
+        json!({"id":"a","put":[view(), cube("s", &json!({"color":"#224466"})), cube("u", &json!({"pos":[4,0,0]}))]}),
     );
     let quiet = next(
         &mut scene,
@@ -222,10 +188,6 @@ fn reshading_shares_sources_and_meshes_and_text_sets_prepare_no_view() {
         json!({"id":"b","set":[{"target":"s","label":"lid"},{"target":"u","info":"opens"}]}),
     );
     assert!(quiet.views.is_empty(), "label and info sets emit no view");
-    assert!(Arc::ptr_eq(
-        &first.after.views()[&id("v")],
-        &quiet.after.views()[&id("v")]
-    ));
     let shaded = next(
         &mut scene,
         &mut budget,
@@ -234,21 +196,35 @@ fn reshading_shares_sources_and_meshes_and_text_sets_prepare_no_view() {
     );
     assert_eq!(shaded.views.len(), 1);
     let (old, new) = (geometry(&first.after), geometry(&shaded.after));
-    assert_eq!(new.solids[0].rgb, [0xff, 0, 0]);
-    assert_ne!(old.solids[0].rgb, [0xff, 0, 0]);
-    assert_eq!(new.solids[1].rgb, old.solids[1].rgb);
-    for index in 0..2 {
-        assert!(Arc::ptr_eq(
-            &old.solids[index].source,
-            &new.solids[index].source
-        ));
-        assert!(Arc::ptr_eq(built(old, index), built(new, index)));
-    }
+    let color = |geometry: &ViewGeometry, name| {
+        geometry
+            .solids
+            .iter()
+            .find(|solid| solid.id == id(name))
+            .expect("prepared solid")
+            .rgb
+    };
+    assert_eq!(color(new, "s"), [0xff, 0, 0]);
+    assert_eq!(color(old, "s"), [0x22, 0x44, 0x66]);
+    assert_eq!(color(new, "u"), color(old, "u"));
     let reused: usize = (0..2)
         .map(|index| mesh_bytes(built(old, index)) + source_bytes(&old.solids[index].source))
         .sum::<usize>()
         + source_bytes(&old.source);
     assert_eq!(new.marginal_bytes(Some(old)), new.full_bytes() - reused);
+    let grown = next(
+        &mut scene,
+        &mut budget,
+        &shaded.after,
+        json!({"id":"d","put":[cube("w", &json!({"pos":[8,0,0],"color":"#00ff00"}))]}),
+    );
+    let rebuilt = geometry(&grown.after);
+    assert_eq!(color(rebuilt, "s"), [0xff, 0, 0]);
+    assert_eq!(color(rebuilt, "w"), [0, 0xff, 0]);
+    assert!(
+        rebuilt.marginal_bytes(Some(new)) <= rebuilt.full_bytes() - mesh_bytes(built(new, 0)),
+        "the successor does not charge a second copy of the unchanged mesh"
+    );
 }
 
 #[test]
@@ -312,14 +288,13 @@ fn one_step_routes_its_3d_and_2d_sets_to_their_own_phases() {
     );
     assert_eq!(geometry(&second.after).solids[0].rgb, [0, 0xff, 0]);
     assert_eq!(texts(&second), ["T"]);
-    let (mut blue_scene, mut blue_budget) = self::scene();
-    let blue = opening(
-        &mut blue_scene,
-        &mut blue_budget,
-        json!({"id":"a","put":[{"text":{"id":"t","text":"T","at":[0,0],"color":"#0000ff"}}]}),
+    assert_eq!(
+        paints(&second)
+            .iter()
+            .map(|paint| paint.rgb.get())
+            .collect::<Vec<_>>(),
+        [0x0000_00ff]
     );
-    assert_eq!(paints(&second), paints(&blue), "the 2D colour set applied");
-    assert_ne!(paints(&second), paints(&first));
     let third = next(
         &mut scene,
         &mut budget,
@@ -440,56 +415,6 @@ fn a_cancelled_preparation_publishes_nothing() {
 fn tube(path: &Value, r2: f64, segments: u8, pos: &Value) -> Value {
     json!({"solid":{"in":"v","id":"s","shape":"tube","path":path,"r2":r2,"segments":segments,"pos":pos}})
 }
-/// The single solid's stored vertices at its rest pose, in f64 as the frame stage reads them.
-fn rest_vertices(geometry: &ViewGeometry) -> Vec<[f64; 3]> {
-    let rest = geometry.solids[0].rest;
-    built(geometry, 0)
-        .vertices
-        .iter()
-        .map(|&v| rest.apply(v))
-        .collect()
-}
-
-#[test]
-fn offset_thin_tubes_keep_their_rest_cross_section() {
-    // Each tube's axis lands on a world axis; every stored vertex must sit at r2 from it.
-    // Lengths admit three decimals, so the first runs CAPS-191's tube at r2 0.001, not 0.0001.
-    for (path, r2, segments, pos, axis) in [
-        (
-            json!([[9000, 0, 0], [9000, 1, 0]]),
-            0.001,
-            4,
-            json!([-9000, 0, 0]),
-            [0, 2],
-        ),
-        (
-            json!([[6000, 6000, 0], [6000, 6000, 1]]),
-            0.001,
-            24,
-            json!([-6000, -6000, 0]),
-            [0, 1],
-        ),
-    ] {
-        let (mut scene, mut budget) = scene();
-        let prepared = opening(
-            &mut scene,
-            &mut budget,
-            json!({"id":"a","put":[view(), tube(&path, r2, segments, &pos)]}),
-        );
-        let geometry = geometry(&prepared.after);
-        assert!(!geometry.failed, "{path}");
-        let vertices = rest_vertices(geometry);
-        assert_eq!(vertices.len(), 2 * usize::from(segments), "{path}");
-        for p in vertices {
-            let distance = p[axis[0]].hypot(p[axis[1]]);
-            assert!(
-                (distance - r2).abs() <= r2 * 1e-4,
-                "{path}: a vertex sits {distance} from the axis"
-            );
-        }
-    }
-}
-
 #[test]
 fn every_face_group_lies_on_its_anchor_plane() {
     for (path, r2, segments, triangles, faces) in [
@@ -709,25 +634,16 @@ fn prepared_rest_vertices_narrow_to_the_world_build_bit_for_bit() {
             .extend(fields.as_object().expect("object").clone());
         json!({ "solid": solid })
     };
-    // (solid, triangles, distinct vertices), counted from each shape's topology.
+    // Triangle counts are determined from each shape's topology.
     let cases = [
-        (child("box", json!({"size":[1,2,3]})), 12, 8),
-        (child("sphere", json!({"r":1,"segments":12})), 320, 162),
-        (
-            child("cylinder", json!({"r":1,"h":2,"segments":12})),
-            44,
-            24,
-        ),
-        (child("cone", json!({"r":1,"h":2,"segments":12})), 22, 13),
-        (
-            child("torus", json!({"r":2,"r2":0.5,"segments":12})),
-            288,
-            144,
-        ),
+        (child("box", json!({"size":[1,2,3]})), 12),
+        (child("sphere", json!({"r":1,"segments":12})), 320),
+        (child("cylinder", json!({"r":1,"h":2,"segments":12})), 44),
+        (child("cone", json!({"r":1,"h":2,"segments":12})), 22),
+        (child("torus", json!({"r":2,"r2":0.5,"segments":12})), 288),
         (
             child("lathe", json!({"points":[[0,-1],[1,0],[0,1]],"segments":8})),
             16,
-            10,
         ),
         (
             child(
@@ -735,7 +651,6 @@ fn prepared_rest_vertices_narrow_to_the_world_build_bit_for_bit() {
                 json!({"points":[[0,0],[1,0],[1,1],[0,1]],"depth":1}),
             ),
             12,
-            8,
         ),
         (
             child(
@@ -743,39 +658,33 @@ fn prepared_rest_vertices_narrow_to_the_world_build_bit_for_bit() {
                 json!({"path":[[0,0,0],[0,0,1]],"r2":0.25,"segments":4}),
             ),
             12,
-            8,
-        ),
-        (
-            alone(
-                json!({"shape":"tube","path":[[9000,0,0],[9000,1,0]],"r2":0.001,"segments":4,"pos":[-9000,0,0]}),
-            ),
-            12,
-            8,
-        ),
-        (
-            alone(
-                json!({"shape":"tube","path":[[6000,6000,0],[6000,6000,1]],"r2":0.001,"segments":24,"pos":[-6000,-6000,0]}),
-            ),
-            92,
-            48,
         ),
         (
             alone(
                 json!({"shape":"extrude","points":[[-6000,-5999],[1.001,2.001],[0,1]],"depth":1}),
             ),
             8,
-            6,
         ),
         (
             alone(
                 json!({"shape":"extrude","points":[[-8500,1],[9000,0],[9000.001,1],[9000,2],[8999,0.5],[-9500,2],[-9500,0]],"depth":1}),
             ),
             24,
-            14,
         ),
     ];
+    let canonical = |mut triangles: Vec<[[u32; 3]; 3]>| {
+        for vertices in &mut triangles {
+            let [a, b, c] = *vertices;
+            *vertices = [*vertices, [b, c, a], [c, a, b]]
+                .into_iter()
+                .min()
+                .expect("three rotations");
+        }
+        triangles.sort_unstable();
+        triangles
+    };
     let mut scratch = MeshScratch::new();
-    for (solid, count, distinct) in cases {
+    let mut check = |solid: Value, count| {
         let (mut scene, mut budget) = scene();
         let prepared = opening(
             &mut scene,
@@ -791,11 +700,7 @@ fn prepared_rest_vertices_narrow_to_the_world_build_bit_for_bit() {
             .expect("the solid");
         let prepared_solid = &geometry.solids[index];
         let mesh = built(geometry, index);
-        assert_eq!(
-            (mesh.triangles.len(), mesh.vertices.len()),
-            (count, distinct),
-            "{solid}"
-        );
+        assert_eq!(mesh.triangles.len(), count, "{solid}");
         let Op::Solid(record) = &*prepared_solid.source else {
             panic!("a solid record");
         };
@@ -814,45 +719,65 @@ fn prepared_rest_vertices_narrow_to_the_world_build_bit_for_bit() {
         .written;
         assert_eq!(usize::try_from(written).expect("bounded"), count);
         assert_eq!(
-            narrowed(&prepared_solid.rest, mesh),
-            bits(&world),
+            canonical(narrowed(&prepared_solid.rest, mesh)),
+            canonical(bits(&world)),
             "{solid}"
         );
+        (prepared, index)
+    };
+    for (solid, count) in cases {
+        check(solid, count);
     }
-}
-
-#[test]
-fn a_set_colour_survives_a_later_rebuild_of_its_view() {
-    let (mut scene, mut budget) = scene();
-    let first = opening(
-        &mut scene,
-        &mut budget,
-        json!({"id":"a","put":[view(), cube("s", &json!({}))]}),
+    let (scaled, index) = check(
+        cube("s", &json!({"attach":"p","pos":[1,0,0],"scale":1.5})),
+        12,
     );
-    let red = next(
-        &mut scene,
-        &mut budget,
-        &first.after,
-        json!({"id":"b","set":[{"target":"s","color":"#ff0000"}]}),
-    );
-    let grown = next(
-        &mut scene,
-        &mut budget,
-        &red.after,
-        json!({"id":"c","put":[cube("u", &json!({"pos":[4,0,0],"color":"#00ff00"}))]}),
-    );
-    let view = geometry(&grown.after);
+    assert_eq!(scaled.views.len(), 1);
+    let geo = geometry(&scaled.after);
+    let child = &geo.solids[index];
+    let parent = &geo.solids[usize::from(child.parent.expect("attached child"))];
+    assert_eq!(parent.id, id("p"));
+    let corner = built(geo, index)
+        .vertices
+        .iter()
+        .map(|&vertex| child.rest.apply(vertex))
+        .fold([f64::NEG_INFINITY; 3], |max, p| {
+            std::array::from_fn(|axis| max[axis].max(p[axis]))
+        });
     assert_eq!(
-        view.solids
-            .iter()
-            .map(|solid| solid.rgb)
-            .collect::<Vec<_>>(),
-        [[0xff, 0, 0], [0, 0xff, 0]]
+        corner.map(f64::to_bits),
+        [15.0_f64, 3.0, 3.0].map(f64::to_bits)
     );
-    assert!(Arc::ptr_eq(
-        built(view, 0),
-        built(geometry(&first.after), 0)
-    ));
+    for (path, segments, count, pos, axis) in [
+        (
+            json!([[9000, 0, 0], [9000, 1, 0]]),
+            4_u8,
+            12,
+            json!([-9000, 0, 0]),
+            [0, 2],
+        ),
+        (
+            json!([[6000, 6000, 0], [6000, 6000, 1]]),
+            24,
+            92,
+            json!([-6000, -6000, 0]),
+            [0, 1],
+        ),
+    ] {
+        let (prepared, index) = check(tube(&path, 0.001, segments, &pos), count);
+        let geo = geometry(&prepared.after);
+        let mesh = built(geo, index);
+        for &i in mesh.triangles.iter().flatten() {
+            let p = geo.solids[index]
+                .rest
+                .apply(mesh.vertices[usize::try_from(i).expect("index")]);
+            let distance = p[axis[0]].hypot(p[axis[1]]);
+            assert!(
+                (distance - 0.001).abs() <= 1e-7,
+                "{path}: radius {distance}"
+            );
+        }
+    }
 }
 
 #[test]

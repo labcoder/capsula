@@ -639,6 +639,15 @@ mod tests {
                 "a one-ulp clipped endpoint mismatch must not be hidden by texel snapping"
             );
         }
+
+        let [start, mut end, ..] = polygon(&[[0.1, 0.2, 0.3], [22.345, 12.23, 1.2]]);
+        end.index = start.index;
+        for (normal, offset) in [([0.0, 0.0, 1.0], -0.5), ([1.0, 0.0, 4097.0], -2500.0)] {
+            assert_eq!(
+                intersection(start, end, normal, offset).p.map(f64::to_bits),
+                intersection(end, start, normal, offset).p.map(f64::to_bits)
+            );
+        }
     }
 
     fn polygon(points: &[Point]) -> [Vertex; 8] {
@@ -650,26 +659,6 @@ mod tests {
             };
         }
         out
-    }
-
-    #[test]
-    fn canonical_intersection_is_bit_identical_in_both_directions() {
-        for (a, b) in [(0, 7), (7, 0), (0, 0)] {
-            let start = Vertex {
-                p: [0.1, 0.2, 0.3],
-                index: a,
-            };
-            let end = Vertex {
-                p: [22.345, 12.23, 1.2],
-                index: b,
-            };
-            for (normal, offset) in [([0.0, 0.0, 1.0], -0.5), ([1.0, 0.0, 4097.0], -2500.0)] {
-                assert_eq!(
-                    intersection(start, end, normal, offset).p.map(f64::to_bits),
-                    intersection(end, start, normal, offset).p.map(f64::to_bits)
-                );
-            }
-        }
     }
 
     #[test]

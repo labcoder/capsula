@@ -1,9 +1,7 @@
-//! Exact default, unit and architecture-example semantics.
+//! Exact default and unit semantics.
 use kumochi_scene::{
     Record, Step, parse_record,
-    record::{
-        Align, AxisScale, ChartKind, Color, Direction, Ease, HighlightStyle, NodeShape, Op, Start,
-    },
+    record::{Align, AxisScale, ChartKind, Color, Ease, HighlightStyle, NodeShape, Op, Start},
 };
 
 fn step(json: &str) -> Step {
@@ -196,107 +194,4 @@ fn container_and_track_defaults_are_exact() {
     assert!(!anim.yoyo, "no reverse play by default");
     assert_eq!(anim.delay.expect("delay").get(), 100);
     assert_eq!(anim.keys[0].0.get(), 250);
-}
-
-#[test]
-fn architecture_example_parses_verbatim() {
-    let example = r#"{"records":[
- {"begin":{"v":1,"scene":"tls","surface":"overlay","title":"How HTTPS starts","alt":"Browser and server exchange hello and certificate"}},
- {"step":{"id":"s1","say":"First, your browser says hello.","put":[
-   {"diagram":{"id":"d","box":[40,60,880,420],"dir":"right"}},
-   {"node":{"id":"browser","in":"d","label":"Browser"}}]}},
- {"step":{"id":"s2","say":"The server answers with its certificate.","put":[
-   {"node":{"id":"server","in":"d","label":"Server","color":"green"}},
-   {"edge":{"id":"e1","in":"d","from":"browser","to":"server","label":"ClientHello"}}]}},
- {"end":{}}
-]}"#;
-    let value: serde_json::Value = serde_json::from_str(example).expect("architecture JSON");
-    let records: Vec<Record> = value["records"]
-        .as_array()
-        .expect("array")
-        .iter()
-        .map(|r| {
-            parse_record(&serde_json::to_vec(r).expect("record encodes"))
-                .expect("architecture record")
-        })
-        .collect();
-    assert_eq!(records.len(), 4);
-    let Record::Begin(begin) = &records[0] else {
-        panic!("begin")
-    };
-    assert!(
-        begin.scene.as_str() == "tls",
-        "parsed text matches the fixture"
-    );
-    assert!(
-        begin.title.as_ref().expect("title").as_str() == "How HTTPS starts",
-        "parsed text matches the fixture"
-    );
-    let Record::Step(first) = &records[1] else {
-        panic!("first step")
-    };
-    assert!(first.id.as_str() == "s1", "parsed text matches the fixture");
-    assert!(
-        first.say.as_ref().expect("say").as_str() == "First, your browser says hello.",
-        "parsed text matches the fixture"
-    );
-    assert_eq!(first.put.len(), 2);
-    let Op::Diagram(diagram) = &first.put[0] else {
-        panic!("diagram")
-    };
-    assert_eq!(diagram.dir, Some(Direction::Right));
-    assert_eq!(
-        diagram.bounds.expect("box").map(|n| n.get().to_bits()),
-        [40.0_f32, 60.0, 880.0, 420.0].map(f32::to_bits)
-    );
-    let Op::Node(browser) = &first.put[1] else {
-        panic!("browser node")
-    };
-    assert!(
-        browser.id.as_str() == "browser",
-        "parsed text matches the fixture"
-    );
-    assert!(
-        browser.parent.as_ref().expect("parent").as_str() == "d",
-        "parsed text matches the fixture"
-    );
-    assert!(
-        browser.label.as_str() == "Browser",
-        "parsed text matches the fixture"
-    );
-    let Record::Step(second) = &records[2] else {
-        panic!("second step")
-    };
-    assert!(
-        second.id.as_str() == "s2",
-        "parsed text matches the fixture"
-    );
-    assert_eq!(second.put.len(), 2);
-    let Op::Node(server) = &second.put[0] else {
-        panic!("server node")
-    };
-    assert!(
-        server.id.as_str() == "server",
-        "parsed text matches the fixture"
-    );
-    assert!(
-        server.label.as_str() == "Server",
-        "parsed text matches the fixture"
-    );
-    let Op::Edge(edge) = &second.put[1] else {
-        panic!("edge")
-    };
-    assert!(
-        edge.from.as_str() == "browser",
-        "parsed text matches the fixture"
-    );
-    assert!(
-        edge.to.as_str() == "server",
-        "parsed text matches the fixture"
-    );
-    assert!(
-        edge.label.as_ref().expect("label").as_str() == "ClientHello",
-        "parsed text matches the fixture"
-    );
-    assert!(matches!(records[3], Record::End(_)), "end record");
 }

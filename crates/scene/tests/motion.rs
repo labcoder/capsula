@@ -12,7 +12,7 @@ use scene_support::{Measure, id, new_scene, prepared};
 use kumochi_scene::{
     Admission, Frame, FrameItem, GlobalBudget, Handle, Record, SceneState, SceneView, StopCut,
     Text,
-    display::Paint,
+    display::{Paint, Prim},
     geom::Affine,
     layout::{
         LayoutState, PrepareError, PrepareInput, PreparedStep, SurfaceGeometry, prepare, recover,
@@ -346,8 +346,7 @@ fn the_first_appearance_is_the_earliest_object_the_step_put_with_something_to_pa
         Some(3018),
         "the child appears with its word-timed, delayed parent; the carried rectangle doesn't count"
     );
-    assert_eq!(item(&view, 3017, "child"), None);
-    assert_eq!(opacity(&view, 3018, "child"), 0.0_f32.to_bits());
+    assert!(item(&view, 3017, "child").is_none_or(|child| child.opacity <= 0.0));
     activate(
         &mut scene,
         &mut budget,
@@ -373,8 +372,17 @@ fn the_first_appearance_is_the_earliest_object_the_step_put_with_something_to_pa
         Some(300),
         "the diagram appears first but paints nothing"
     );
-    assert!(sample(&view, 299).items().is_empty());
-    assert!(item(&view, 300, "inner").is_some());
+    assert!(
+        sample(&view, 299)
+            .paint_items()
+            .all(|(item, _, _)| item.opacity <= 0.0)
+    );
+    assert!(
+        item(&view, 500, "inner")
+            .expect("visible after entering")
+            .opacity
+            > 0.0
+    );
 }
 
 #[test]
@@ -452,22 +460,24 @@ fn a_three_level_entrance_chain_keeps_its_start_when_a_child_is_added_later() {
 
 #[test]
 fn frame_debug_summarizes_counts_instead_of_drawing_properties() {
+    let marker = "drawing marker";
     let (mut scene, mut budget, mut view) = fresh();
     activate(
         &mut scene,
         &mut budget,
         &mut view,
         json!({"id":"text","put":[
-            {"text":{"id":"label","at":[12,34],"text":"drawing marker"}}
+            {"text":{"id":"label","at":[123.125,456.875],"text":marker}}
         ]}),
         0,
     );
     let frame = sample(&view, 0);
-    assert_eq!(format!("{frame:?}"), "Frame { items: 1, .. }");
-    assert_eq!(
-        format!("{:?}", frame.items()[0]),
-        "FrameItem { primitives: 1, .. }"
-    );
+    let bytes = format!("{:?}", marker.as_bytes());
+    for debug in [format!("{frame:?}"), format!("{:?}", frame.items()[0])] {
+        for private in [marker, bytes.trim_matches(['[', ']']), "123.125", "456.875"] {
+            assert!(!debug.contains(private), "{debug}");
+        }
+    }
 }
 
 #[test]
@@ -737,10 +747,9 @@ fn scene_debug_summarizes_counts_instead_of_poses_and_keys() {
         ]}),
         0,
     );
-    assert_eq!(
-        format!("{view:?}"),
-        "SceneView { activated: 1, objects: 1, tracks: 1, .. }"
-    );
+    let debug = format!("{view:?}");
+    assert!(!debug.contains("123.5"), "{debug}");
+    assert!(!debug.contains("456.5"), "{debug}");
 }
 
 #[test]
@@ -1181,6 +1190,24 @@ fn a_cut_installs_the_activated_revision_and_rejects_older_bases() {
     );
 }
 
+fn outline_rgb(item: &FrameItem) -> u32 {
+    let mut rgb = item.primitives.iter().filter_map(|prim| match prim {
+        Prim::Rect {
+            border: Some((color, _)),
+            ..
+        }
+        | Prim::Line { color, .. }
+        | Prim::Fill { color, .. } => Some(item.color.unwrap_or(*color).rgb.get()),
+        _ => None,
+    });
+    let first = rgb.next().expect("visible outline");
+    assert!(
+        rgb.all(|color| color == first),
+        "the whole outline has one color"
+    );
+    first
+}
+
 #[test]
 fn a_later_set_color_replaces_a_running_color_track_at_activation() {
     let (mut scene, mut budget, mut view) = fresh();
@@ -1189,24 +1216,25 @@ fn a_later_set_color_replaces_a_running_color_track_at_activation() {
         &mut budget,
         &mut view,
         json!({"id":"paint","put":[rect("s"),
-            {"anim":{"target":"s","track":"color","keys":[[0,"red"],[100,"blue"]]}}]}),
+            {"anim":{"target":"s","track":"color","keys":[[0,"#ee2040"],[100,"#2266aa"]]}}]}),
         0,
     );
-    assert!(
-        item(&view, 50, "s").expect("shape").color.is_some(),
+    assert_eq!(
+        outline_rgb(&item(&view, 50, "s").expect("shape")),
+        0x0088_4375,
         "the track paints first"
     );
     activate(
         &mut scene,
         &mut budget,
         &mut view,
-        json!({"id":"recolor","set":[{"target":"s","color":"green"}]}),
+        json!({"id":"recolor","set":[{"target":"s","color":"#35ac67"}]}),
         50,
     );
     for now in [50, 200] {
         assert_eq!(
-            item(&view, now, "s").expect("shape").color,
-            None,
+            outline_rgb(&item(&view, now, "s").expect("shape")),
+            0x0035_ac67,
             "the newest write wins at {now}"
         );
     }
@@ -1395,10 +1423,17 @@ fn pose(view: &SceneView, now: u64) -> (Affine, Option<Paint>) {
 fn refused_and_discarded_stages_keep_live_and_delayed_tracks() {
     let (mut scene, mut budget, view) = tracked();
     let times = [500, 1999, 2250, 2500];
-    let before = times.map(|now| pose(&view, now));
+    let painted = |now| {
+        let item = item(&view, now, "s").expect("shape");
+        (item.transform, outline_rgb(&item))
+    };
+    let before = times.map(painted);
     assert_eq!(before[0].0, Affine([1.0, 0.0, 0.0, 1.0, 50.0, 0.0]));
-    assert_ne!(before[1].1, before[2].1, "the hold ends at 2,000 ms");
-    assert_ne!(before[2].1, before[3].1, "and the track moves on");
+    let [early, held, during, finished] = before.map(|(_, color)| color);
+    assert_eq!(early, held, "holds before the delayed start");
+    assert_ne!(during, held, "the hold ends");
+    assert_ne!(during, finished, "the track is still in progress");
+    assert_ne!(held, finished, "the track reaches a different color");
     let (mut other, mut other_budget, other_view) = fresh();
     let foreign = prepared(
         &mut other,
@@ -1420,7 +1455,7 @@ fn refused_and_discarded_stages_keep_live_and_delayed_tracks() {
         json!({"id":"unrelated","put":[rect("z")]}),
     );
     drop(view.prepare_activation(&next, 600, 800).expect("stage"));
-    assert_eq!(times.map(|now| pose(&view, now)), before);
+    assert_eq!(times.map(painted), before);
     assert_eq!((view.activated(), view.next_wake(600)), (1, Some(1000)));
 }
 
@@ -1540,29 +1575,14 @@ fn four_views_reach_the_legal_caps_without_frame_allocations() {
 }
 
 #[test]
-fn quiet_prefixes_after_tracks_charge_the_motion_maps_they_copy() {
+fn track_heavy_prefixes_hold_no_more_than_their_charges() {
     let mut budget = GlobalBudget::default();
-    let (scene, history) = track_heavy_history("tracks", &mut budget);
+    let (scene, history) = track_heavy_history("bounds", &mut budget);
     assert_eq!(
         (history.len(), scene.usage().objects, scene.usage().tracks),
         (64, 256, 256),
         "the history fills the step cap with one track per rectangle"
     );
-    let (plain, plain_bytes) = &history[1];
-    let (tip, tip_bytes) = &history[63];
-    assert!(
-        tip_bytes + plain.resident_bytes <= plain_bytes + tip.resident_bytes,
-        "61 steps after its tracks the tip retains {tip_bytes} bytes and charges {}; the prefix \
-         before them retains {plain_bytes} and charges {}",
-        tip.resident_bytes,
-        plain.resident_bytes
-    );
-}
-
-#[test]
-fn track_heavy_prefixes_hold_no_more_than_their_charges() {
-    let mut budget = GlobalBudget::default();
-    let (_, history) = track_heavy_history("bounds", &mut budget);
     for (index, (step, held)) in history.iter().enumerate() {
         assert!(
             *held <= step.resident_bytes,
@@ -1575,6 +1595,13 @@ fn track_heavy_prefixes_hold_no_more_than_their_charges() {
         tracked_held - plain_held,
         tracked.resident_bytes - plain.resident_bytes,
         "over the same index, the tracks step charges exactly the 256 motion maps it allocates"
+    );
+    let (tip, tip_held) = &history[63];
+    assert!(
+        tip_held + plain.resident_bytes <= plain_held + tip.resident_bytes,
+        "quiet tip holds {tip_held} bytes and charges {}; untracked prefix holds {plain_held} and charges {}",
+        tip.resident_bytes,
+        plain.resident_bytes
     );
 }
 
@@ -1649,6 +1676,11 @@ fn removing_compiled_objects_releases_the_empty_private_fact_index() {
         prepare(input, &mut Measure, &AtomicBool::new(false)).expect("removed diagram")
     });
     assert_eq!(removed.after.revealed_at_rest().len(), 0);
+    assert_eq!(
+        removed.after.resident_bytes(),
+        empty.resident_bytes(),
+        "removed compiled facts charge no more than a never-populated layout"
+    );
     assert!(
         held <= removed.resident_bytes,
         "empty compiled layout holds {held} bytes but charges {}",

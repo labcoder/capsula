@@ -177,6 +177,11 @@ fn a_dependant_follows_its_anchor_when_the_anchor_moves_later() {
         json!({"id":"move","set":[{"target":"c2","behind":"c1"}]}),
     ]);
     assert_eq!(painted(&view, ALL), ["sky", "sun", "c2", "c1"]);
+    let (_, _, view) = drawn(vec![
+        cloud(),
+        json!({"id":"back","set":[{"target":"c2","behind":"sky"}]}),
+    ]);
+    assert_eq!(painted(&view, ALL), ["c2", "sky", "c1"]);
 }
 
 #[test]
@@ -195,15 +200,6 @@ fn the_same_links_paint_the_same_whatever_order_they_were_set_in() {
         json!({"id":"two","set":[sun]}),
     ]);
     assert_eq!(painted(&view, ALL), expected, "across steps");
-}
-
-#[test]
-fn an_existing_object_moves_behind_an_earlier_one() {
-    let (_, _, view) = drawn(vec![
-        cloud(),
-        json!({"id":"back","set":[{"target":"c2","behind":"sky"}]}),
-    ]);
-    assert_eq!(painted(&view, ALL), ["c2", "sky", "c1"]);
 }
 
 #[test]
@@ -242,57 +238,50 @@ fn a_removed_anchor_keeps_its_own_link_for_its_dependants() {
 }
 
 #[test]
-fn removing_an_anchor_keeps_its_dependants_where_they_were() {
-    let tree = json!({"id":"sun","put":[circle("sun")],"set":[
-        {"target":"sun","behind":"c2"},{"target":"c1","behind":"c2"},{"target":"sky","behind":"sun"}]});
-    let (scene, _, view) = drawn(vec![
-        cloud(),
-        tree.clone(),
-        json!({"id":"drop","remove":["sun"]}),
-    ]);
-    assert_eq!(
-        painted(&view, ALL),
-        ["c1", "sky", "c2"],
-        "sky stays above c1"
-    );
-    assert_eq!(painted(&recovered(&scene), ALL), ["c1", "sky", "c2"]);
-    let (scene, _, view) = drawn(vec![
-        cloud(),
-        tree,
-        json!({"id":"root","remove":["c2"]}),
-        json!({"id":"drop","remove":["sun"]}),
-    ]);
-    assert_eq!(painted(&view, ALL), ["c1", "sky"], "at the root too");
-    assert_eq!(painted(&recovered(&scene), ALL), ["c1", "sky"]);
-}
-
-#[test]
 fn nested_removed_anchors_keep_the_order_of_what_survives() {
-    let names = ["a1", "a2", "b", "z"];
+    let check = |steps, expected: &[&str], names: &[&str]| {
+        let (scene, _, view) = drawn(steps);
+        assert_eq!(painted(&view, names), expected, "live");
+        assert_eq!(painted(&recovered(&scene), names), expected, "recovered");
+    };
+    let names = &["a1", "a2", "b", "z"];
     let put = json!({"id":"put","put":[circle("a1"),circle("a2"),circle("b"),circle("z")],"set":[
         {"target":"a1","behind":"b"},{"target":"a2","behind":"b"},{"target":"z","behind":"a1"}]});
-    let (scene, _, view) = drawn(vec![put.clone(), json!({"id":"one","remove":["a1"]})]);
-    assert_eq!(painted(&view, &names), ["z", "a2", "b"]);
-    assert_eq!(painted(&recovered(&scene), &names), ["z", "a2", "b"]);
-    let (scene, _, view) = drawn(vec![
-        put,
-        json!({"id":"one","remove":["a1"]}),
-        json!({"id":"two","remove":["b"]}),
-    ]);
-    assert_eq!(painted(&view, &names), ["z", "a2"]);
-    assert_eq!(painted(&recovered(&scene), &names), ["z", "a2"]);
-}
+    let drop_inner = json!({"id":"one","remove":["a1"]});
+    check(
+        vec![put.clone(), drop_inner.clone()],
+        &["z", "a2", "b"],
+        names,
+    );
+    check(
+        vec![put.clone(), drop_inner, json!({"id":"two","remove":["b"]})],
+        &["z", "a2"],
+        names,
+    );
+    check(
+        vec![put, json!({"id":"both","remove":["a1","b"]})],
+        &["z", "a2"],
+        names,
+    );
 
-#[test]
-fn removing_two_anchors_in_one_step_keeps_the_order_of_what_survives() {
-    let names = ["a1", "a2", "b", "z"];
-    let (scene, _, view) = drawn(vec![
-        json!({"id":"put","put":[circle("a1"),circle("a2"),circle("b"),circle("z")],"set":[
-            {"target":"a1","behind":"b"},{"target":"a2","behind":"b"},{"target":"z","behind":"a1"}]}),
-        json!({"id":"both","remove":["a1","b"]}),
-    ]);
-    assert_eq!(painted(&view, &names), ["z", "a2"]);
-    assert_eq!(painted(&recovered(&scene), &names), ["z", "a2"]);
+    let tree = json!({"id":"sun","put":[circle("sun")],"set":[
+        {"target":"sun","behind":"c2"},{"target":"c1","behind":"c2"},{"target":"sky","behind":"sun"}]});
+    let drop_sun = json!({"id":"drop","remove":["sun"]});
+    check(
+        vec![cloud(), tree.clone(), drop_sun.clone()],
+        &["c1", "sky", "c2"],
+        ALL,
+    );
+    check(
+        vec![
+            cloud(),
+            tree,
+            json!({"id":"root","remove":["c2"]}),
+            drop_sun,
+        ],
+        &["c1", "sky"],
+        ALL,
+    );
 }
 
 #[test]
@@ -446,9 +435,9 @@ fn a_chain_ends_at_a_removed_anchor() {
         cloud(),
         json!({"id":"one","set":[{"target":"c1","behind":"c2"}]}),
         json!({"id":"drop","remove":["c2"]}),
-        json!({"id":"two","set":[{"target":"sky","behind":"c1"}]}),
+        json!({"id":"two","put":[circle("star")],"set":[{"target":"star","behind":"c1"}]}),
     ]);
-    assert_eq!(painted(&view, ALL), ["sky", "c1"]);
+    assert_eq!(painted(&view, ALL), ["sky", "star", "c1"]);
 }
 
 /// `count` circles named `{prefix}0` upwards, each behind the one before it.
@@ -520,25 +509,17 @@ fn a_removed_stack_with_nothing_live_behind_it_no_longer_counts() {
     let (mut put, set) = chain("o", 17);
     put.push(circle("x"));
     let removed: Vec<String> = (1..17).map(|index| format!("o{index}")).collect();
-    admitted(
-        &[
-            json!({"id":"chain","put":put,"set":set}),
-            json!({"id":"drop","remove":removed}),
-        ],
-        &json!({"id":"move","set":[{"target":"o0","behind":"x"}]}),
-    );
-}
-
-#[test]
-fn a_stack_removed_in_a_step_still_counts_in_that_step() {
-    let (mut put, set) = chain("o", 17);
-    put.push(circle("x"));
-    let removed: Vec<String> = (1..17).map(|index| format!("o{index}")).collect();
+    let chain = json!({"id":"chain","put":put,"set":set});
+    let link = json!([{"target":"o0","behind":"x"}]);
     refused(
-        &[json!({"id":"chain","put":put,"set":set})],
-        &json!({"id":"move","remove":removed,"set":[{"target":"o0","behind":"x"}]}),
+        std::slice::from_ref(&chain),
+        &json!({"id":"move","remove":removed,"set":link}),
         ErrorCode::TooDeep,
         "set[0].behind",
+    );
+    admitted(
+        &[chain, json!({"id":"drop","remove":removed})],
+        &json!({"id":"move","set":link}),
     );
 }
 

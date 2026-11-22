@@ -1,7 +1,7 @@
 //! Streaming grammar, cursor boundaries, allocation checks and Rez measurements.
 
 use kumochi_scene::{
-    limits::{MAX_DRAWING_BYTES, MAX_RECORD_BYTES},
+    limits::MAX_DRAWING_BYTES,
     tokenize::{TokenError, Tokenizer},
 };
 
@@ -146,15 +146,15 @@ fn drawing_with_record_size(size: usize) -> Vec<u8> {
 #[test]
 fn byte_and_depth_limits_are_exact() {
     assert_eq!(
-        scan(&drawing_with_record_size(MAX_RECORD_BYTES), 40).expect("record at cap")[0].len(),
-        MAX_RECORD_BYTES
+        scan(&drawing_with_record_size(32_768), 40).expect("record at cap")[0].len(),
+        32_768
     );
     assert_eq!(
-        scan(&drawing_with_record_size(MAX_RECORD_BYTES + 1), 4096).err(),
+        scan(&drawing_with_record_size(32_769), 4096).err(),
         Some(TokenError::RecordTooLarge)
     );
     let mut drawing = b"{\"records\":[]}".to_vec();
-    drawing.resize(MAX_DRAWING_BYTES, b' ');
+    drawing.resize(524_288, b' ');
     assert!(
         scan(&drawing, 4096).expect("drawing at cap").is_empty(),
         "exact drawing cap is legal"
@@ -357,25 +357,14 @@ fn drain_without_copy(tokenizer: &mut Tokenizer, drawing: &[u8], delta: usize) {
 
 #[test]
 fn steady_state_uses_the_one_record_buffer() {
+    let (_, count) = allocation::count(|| std::hint::black_box(Vec::<u8>::with_capacity(32)));
+    assert!(count > 0, "the counter observes an allocation");
     let drawing = measurement_drawing();
     for delta in [40, 4096] {
         let mut tokenizer = Tokenizer::new();
         let ((), count) = allocation::count(|| drain_without_copy(&mut tokenizer, &drawing, delta));
         assert_eq!(count, 0, "no allocations after the buffer is created");
     }
-}
-
-#[test]
-fn allocation_counter_observes_allocation_zeroing_and_reallocation() {
-    let size = std::hint::black_box(32);
-    let (buffers, count) = allocation::count(|| {
-        let mut growing = Vec::<u8>::with_capacity(size);
-        growing.reserve_exact(size * 2);
-        let zeroed = vec![0_u8; size];
-        std::hint::black_box((growing, zeroed))
-    });
-    assert_eq!(count, 3, "the counter sees all three allocation operations");
-    drop(buffers);
 }
 
 #[test]

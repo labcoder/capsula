@@ -266,72 +266,6 @@ fn degenerate_triangle_is_counted_and_degenerate_anchor_faces_are_culled() {
 }
 
 #[test]
-fn rounded_source_plane_is_shared_by_both_six_vertex_fans() {
-    let hexagon = [
-        (1.0, 0.1),
-        (0.37, 0.91),
-        (-0.62, 0.79),
-        (-0.94, -0.16),
-        (-0.23, -0.87),
-        (0.71, -0.65),
-    ]
-    .map(|(x, y)| {
-        Vec3::new(
-            (100.0 + x) as f32,
-            (200.0 + y) as f32,
-            (300.0 - (x + 2.0 * y) / 3.0) as f32,
-        )
-    });
-    let positions = hexagon.map(|v| [v.x, v.y, v.z].map(f64::from));
-    let normal = vector(
-        delta(positions[1], positions[0]),
-        delta(positions[2], positions[0]),
-    );
-    assert!(
-        (3..6).any(|i| scalar(normal, delta(positions[i], positions[0])).abs() > 1e-6),
-        "f32 rounding must take vertices off the anchor plane"
-    );
-    let fans = [
-        [[0, 1, 2], [0, 2, 3], [0, 3, 4], [0, 4, 5]],
-        [[3, 4, 5], [3, 5, 0], [3, 0, 1], [3, 1, 2]],
-    ];
-    for depth in [f32::from_bits(0x3f00_0007), f32::from_bits(0x3f00_0008)] {
-        let cam = Camera::new(
-            0.0,
-            0.0,
-            1.0 / f64::from(depth),
-            90.0,
-            [100.0, 200.0, 300.0],
-        )
-        .expect("valid camera");
-        for (front, back) in [(0, 1), (1, 0)] {
-            let first = [Face {
-                anchors: [0, 1, 2],
-                triangles: &fans[front],
-            }];
-            let second = [Face {
-                anchors: [0, 1, 2],
-                triangles: &fans[back],
-            }];
-            let mut reference = build(&[solid(&hexagon, &first)], &cam, [128, 128], 4);
-            let mut overlap = build(
-                &[solid(&hexagon, &first), solid(&hexagon, &second)],
-                &cam,
-                [128, 128],
-                8,
-            );
-            for quality in [Quality::Motion, Quality::Rest] {
-                assert_eq!(
-                    image(&mut overlap, [128, 128], quality),
-                    image(&mut reference, [128, 128], quality),
-                    "depth {depth:?}, fan {front}, {quality:?}"
-                );
-            }
-        }
-    }
-}
-
-#[test]
 fn camera_bounds_and_nonfinite_inputs_refuse_without_changing_state() {
     for pitch in [-85.0, 85.0] {
         assert_eq!(
@@ -527,10 +461,13 @@ fn admitted_counts_capacity_sizes_invalid_indices_and_empty_frames() {
     let s = solid(&extremal, &faces);
     let mut out = FrameScratch::with_capacity(24000);
     let cancel = AtomicBool::new(false);
-    let (result, allocations) =
-        allocation::count(|| frame(&[s], &extremal_camera, &light(), [2, 2], &mut out, &cancel));
-    assert_eq!((result, allocations), (Ok(()), 0));
-    assert_eq!(out.len(), 24000);
+    for pass in ["initial", "reused"] {
+        let (result, allocations) = allocation::count(|| {
+            frame(&[s], &extremal_camera, &light(), [2, 2], &mut out, &cancel)
+        });
+        assert_eq!((result, allocations), (Ok(()), 0), "{pass}");
+        assert_eq!(out.len(), 24000, "{pass}");
+    }
     let mut short = FrameScratch::with_capacity(23999);
     assert_eq!(
         frame(
@@ -759,17 +696,20 @@ fn precision_floor_clips_at_the_world_float_boundary_and_bad_depth_clears_output
         2,
     );
     let boundary = f32::from_bits(0x4680_01e0);
-    for (z, expected) in [(boundary.next_down(), 2), (boundary.next_up(), 0)] {
+    for (z, visible) in [(boundary.next_down(), true), (boundary.next_up(), false)] {
         let mut s = solid(&SQUARE, &faces);
         s.pose = Transform::local([16384.0, 16384.0, z], [0.0; 3], 1.0);
-        let out = build(&[s], &cam, [8, 8], 2);
-        assert_eq!(out.len(), expected);
+        let mut out = build(&[s], &cam, [8, 8], 2);
+        let (_, ids) = image(&mut out, [8, 8], Quality::Rest);
+        assert_eq!(ids.iter().any(|&id| id != 0), visible);
     }
-    let mut out = FrameScratch::with_capacity(2);
     let tiny = Camera::new(0.0, 0.0, 1e-300, 90.0, [0.0; 3]).expect("valid fixture");
+    let square = solid(&SQUARE, &faces);
+    let mut out = build(&[square], &camera(), [8, 8], 2);
+    assert!(image(&mut out, [8, 8], Quality::Rest).1.contains(&1));
     assert_eq!(
         frame(
-            &[solid(&SQUARE, &faces)],
+            &[square],
             &tiny,
             &light(),
             [8, 8],
@@ -778,7 +718,10 @@ fn precision_floor_clips_at_the_world_float_boundary_and_bad_depth_clears_output
         ),
         Err(FrameError::Numeric)
     );
-    assert_eq!(out.len(), 0);
+    assert_eq!(
+        image(&mut out, [8, 8], Quality::Rest),
+        (vec![0; 64], vec![0; 64])
+    );
     for size in [[1, 4096], [4096, 1]] {
         assert_eq!(
             frame(
@@ -838,53 +781,85 @@ fn one_solid_pose_does_not_move_its_neighbour_and_authored_opacity_reaches_ids()
 
 #[test]
 fn coplanar_faces_share_the_source_plane_across_different_triangulations_at_bin_boundary() {
-    let first = [Face {
-        anchors: [0, 1, 2],
-        triangles: &SPLIT,
-    }];
-    let second = [Face {
-        anchors: [0, 1, 2],
-        triangles: &OTHER,
-    }];
     let tilted = SQUARE.map(|v| Vec3::new(v.x, v.y, 0.125 * v.x + 0.25 * v.y));
+    let hexagon = [
+        (1.0, 0.1),
+        (0.37, 0.91),
+        (-0.62, 0.79),
+        (-0.94, -0.16),
+        (-0.23, -0.87),
+        (0.71, -0.65),
+    ]
+    .map(|(x, y)| {
+        Vec3::new(
+            (100.0 + x) as f32,
+            (200.0 + y) as f32,
+            (300.0 - (x + 2.0 * y) / 3.0) as f32,
+        )
+    });
+    let positions = hexagon.map(|v| [v.x, v.y, v.z].map(f64::from));
+    let normal = vector(
+        delta(positions[1], positions[0]),
+        delta(positions[2], positions[0]),
+    );
+    assert!(
+        (3..6).any(|i| scalar(normal, delta(positions[i], positions[0])).abs() > 1e-6),
+        "f32 rounding must take vertices off the anchor plane"
+    );
+    let fans = [
+        [[0, 1, 2], [0, 2, 3], [0, 3, 4], [0, 4, 5]],
+        [[3, 4, 5], [3, 5, 0], [3, 0, 1], [3, 1, 2]],
+    ];
+    let quad_fans: [&[[u32; 3]]; 2] = [&SPLIT, &OTHER];
     for depth in [f32::from_bits(0x3f00_0007), f32::from_bits(0x3f00_0008)] {
-        for (yaw, pitch, vertices) in [
-            (0.0, 0.0, &SQUARE),
-            (0.0, 20.0, &tilted),
-            (31.0, 20.0, &tilted),
+        for (yaw, pitch, target, vertices, triangles, size) in [
+            (0.0, 0.0, [0.0; 3], SQUARE.as_slice(), quad_fans, [32, 32]),
+            (0.0, 20.0, [0.0; 3], &tilted, quad_fans, [32, 32]),
+            (31.0, 20.0, [0.0; 3], &tilted, quad_fans, [32, 32]),
+            (
+                0.0,
+                0.0,
+                [100.0, 200.0, 300.0],
+                &hexagon,
+                [&fans[0], &fans[1]],
+                [128, 128],
+            ),
         ] {
-            let cam = Camera::new(yaw, pitch, 1.0 / f64::from(depth), 90.0, [0.0; 3])
+            let cam = Camera::new(yaw, pitch, 1.0 / f64::from(depth), 90.0, target)
                 .expect("valid fixture");
-            for (a, b) in [(&first, &second), (&second, &first)] {
-                let mut reference = build(&[solid(vertices, a)], &cam, [32, 32], 2);
-                let mut overlap =
-                    build(&[solid(vertices, a), solid(vertices, b)], &cam, [32, 32], 4);
-                for q in [Quality::Motion, Quality::Rest] {
-                    assert_eq!(
-                        image(&mut overlap, [32, 32], q),
-                        image(&mut reference, [32, 32], q)
-                    );
-                }
-            }
+            assert_fan_images_match(vertices, triangles, &cam, size);
         }
     }
 }
 
-#[test]
-fn reused_frame_has_zero_allocations() {
-    let faces = [Face {
-        anchors: [0, 1, 2],
-        triangles: &SPLIT,
-    }];
-    let s = solid(&SQUARE, &faces);
-    let mut out = build(&[s], &camera(), [8, 8], 2);
-    let cam = camera();
-    let lamp = light();
-    let stop = AtomicBool::new(false);
-    let (result, allocations) =
-        allocation::count(|| frame(&[s], &cam, &lamp, [8, 8], &mut out, &stop));
-    assert_eq!((result, allocations), (Ok(()), 0));
-    assert_eq!(out.len(), 2);
+fn assert_fan_images_match(
+    vertices: &[Vec3],
+    fans: [&[[u32; 3]]; 2],
+    cam: &Camera,
+    size: [u32; 2],
+) {
+    let [first, second] = fans.map(|triangles| {
+        solid(
+            vertices,
+            &[Face {
+                anchors: [0, 1, 2],
+                triangles,
+            }],
+        )
+    });
+    for (a, b) in [(first, second), (second, first)] {
+        let mut reference = build(&[a], cam, size, a.triangles.len());
+        let mut overlap = build(&[a, b], cam, size, a.triangles.len() + b.triangles.len());
+        for quality in [Quality::Motion, Quality::Rest] {
+            let expected = image(&mut reference, size, quality);
+            assert!(expected.1.contains(&1), "the reference face is visible");
+            assert_eq!(
+                image(&mut overlap, size, quality),
+                expected,
+                "{size:?}, {quality:?}, {cam:?}"
+            );
+        }
+    }
 }
 
 const BOX_TRIANGLES: [[[u32; 3]; 2]; 6] = [
