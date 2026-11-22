@@ -1309,6 +1309,7 @@ async fn the_tuned_drain_deadline_closes_only_the_unfinished_framing() {
     reply(&mut server, &response);
     assert!(poll(&mut call).is_pending());
     tokio::time::advance(Duration::from_millis(249)).await;
+    reply(&mut server, b"1\r\nx\r\n");
     assert!(poll(&mut call).is_pending());
     tokio::time::advance(Duration::from_millis(1)).await;
     assert!(matches!(poll(&mut call), Poll::Ready((Ok(()), _))));
