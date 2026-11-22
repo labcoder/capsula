@@ -39,6 +39,13 @@ pub enum PageOf {
         /// The previous page's oldest id.
         before: Option<EventId>,
     },
+    /// A live thread's nearest newer events, with an exclusive lower bound.
+    EventsAfter {
+        /// The thread to read.
+        thread: ThreadId,
+        /// The newest event already held by the reader.
+        after: EventId,
+    },
 }
 
 impl fmt::Debug for PageOf {
@@ -52,6 +59,11 @@ impl fmt::Debug for PageOf {
                 .debug_struct("Events")
                 .field("thread", thread)
                 .field("before", before)
+                .finish(),
+            Self::EventsAfter { thread, after } => f
+                .debug_struct("EventsAfter")
+                .field("thread", thread)
+                .field("after", after)
                 .finish(),
         }
     }
@@ -126,6 +138,8 @@ pub enum PageEventKind {
 pub struct PageEvent {
     /// Its store id.
     pub id: EventId,
+    /// Unix milliseconds when the event was stored, for display rather than ordering.
+    pub created_ms: i64,
     /// The run it belongs to, when present.
     pub run: Option<RunId>,
     /// What it records.
@@ -189,6 +203,7 @@ mod tests {
             events: vec![
                 PageEvent {
                     id: EventId(u64::MAX),
+                    created_ms: i64::MAX,
                     run: Some(RunId(u64::MAX)),
                     kind: PageEventKind::NoVisual {
                         scene: SceneId(u64::MAX)
@@ -198,12 +213,12 @@ mod tests {
                 };
                 crate::message::MAX_PAGE_ROWS
             ],
-            before: Some(EventId(u64::MAX)),
+            next: Some(EventId(u64::MAX)),
         };
         let encoded = frame::encode(&page, Pipe::Data).expect("bounded Page frame");
         assert_eq!(
             encoded.len(),
-            frame::HEADER_LEN + 1 + 5 + 10 + 1 + 50 * 34 + 11
+            frame::HEADER_LEN + 1 + 5 + 10 + 1 + 50 * 44 + 11
         );
         assert!(
             encoded.len() <= crate::message::MAX_PAGE_BYTES,
@@ -236,6 +251,7 @@ mod tests {
                 assert_eq!(postcard::to_allocvec(&kind).expect("kind"), bytes);
                 PageEvent {
                     id: EventId(id),
+                    created_ms: 0,
                     run: Some(RunId(id)),
                     kind,
                     text: "user text".to_owned(),
@@ -247,7 +263,7 @@ mod tests {
             request: 1,
             thread: ThreadId(1),
             events,
-            before: None,
+            next: None,
         };
         let encoded = frame::encode(&page, Pipe::Data).expect("page");
         assert_eq!(
@@ -284,6 +300,7 @@ mod tests {
         };
         let event = PageEvent {
             id: EventId(3),
+            created_ms: 0,
             run: Some(RunId(4)),
             kind: PageEventKind::User,
             text: text.to_owned(),
@@ -312,7 +329,7 @@ mod tests {
                 request: 3,
                 thread: ThreadId(1),
                 events: vec![event.clone()],
-                before: None
+                next: None
             }
         );
         for content in [words, title, text, slug] {

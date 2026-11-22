@@ -44,9 +44,10 @@ fn page(request: u32) -> DataToShell {
     DataToShell::Page {
         request,
         thread: ThreadId(1),
-        before: None,
+        next: None,
         events: vec![PageEvent {
             id: EventId(7),
+            created_ms: 0,
             run: None,
             kind: PageEventKind::Issue { draft: DraftId(9) },
             text: "old title".into(),
