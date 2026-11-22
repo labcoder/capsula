@@ -13,6 +13,7 @@ use super::{
 use crate::coordinator::{DRAIN_STALL, QUIET_TIMEOUT, Synthesized};
 use crate::engines::{Finish, TurnEvent};
 use crate::store::{Interruption, RunEnd};
+use crate::voice::pump::OutputMode;
 use crate::voice::reply::ReportMode;
 
 const RATE: u32 = 24_000;
@@ -24,11 +25,17 @@ const SEG: SegmentId = SegmentId(0);
 fn queued_registration_reports_only_an_installed_tuple() {
     let mut core = fresh();
     let output = OutputGeneration(7);
-    assert_eq!(core.register_queued_output(32_000, output), Ok(vec![]));
+    assert_eq!(
+        core.register_queued_output(32_000, output, OutputMode::Legacy),
+        Ok(vec![])
+    );
     assert_eq!(core.output, Some((32_000, output, ReportMode::Queued)));
     core.handle(Input::AudioOutputUnavailable { generation: output })
         .unwrap();
-    assert_eq!(core.register_queued_output(RATE, output), Err(Stale));
+    assert_eq!(
+        core.register_queued_output(RATE, output, OutputMode::Legacy),
+        Err(Stale)
+    );
     assert_eq!(core.output, None);
 }
 

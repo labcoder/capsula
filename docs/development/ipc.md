@@ -27,7 +27,8 @@ doesn't turn an audio-required pair into a text-only pair. Its data reader can w
 announcement or PCM frame until the control reader names that run. Control stays available while
 the data head waits, and the session owner wakes that head on binding, returned capacity, revocation
 or close. In Plain mode, Speech-start announcements and scene speech promises end
-the pair without credit.
+the pair without credit, so the brain sends a speech-start step's `say` there as a Plain segment
+with no promise.
 Talk-back-off typed turns bind the same run identity but start no speaker worker. They owe
 no audio receipts. Unexpected speech ends a silent pair without credit, before waiting for a
 run to be named or draining a stopped or ended run.
