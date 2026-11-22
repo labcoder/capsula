@@ -3046,6 +3046,97 @@ fn authenticated_queued_text_replies_with_talk_back_off() {
     assert_eq!(probe.quiet_receipt(), None);
 }
 
+#[cfg(debug_assertions)]
+#[test]
+fn burst_playback_reports_the_entire_due_source_to_brain() {
+    use kumochi_protocol::message::{Cursor, SegmentId};
+
+    const TOTAL: u64 = 3_840;
+    let _device = serialize_playback();
+    let (id, hello, probe, brain) =
+        kumochi_brain::ipc::offline_plain_peer("0 text An offline voice reply.".into(), 16);
+    probe.release_ack();
+    probe.release_run();
+    probe.allow_data_credit();
+    let pipe = authenticated_primed(id, hello);
+    let events = patient(pipe.events);
+    let session = connected(next(&events));
+    let limit = Instant::now() + PATIENCE;
+    while !pipe.handle.admits_text(Some(&session)) {
+        assert!(
+            Instant::now() < limit && session.open(),
+            "queued audio registered"
+        );
+        thread::yield_now();
+    }
+    assert!(pipe.handle.send_data(&session, queued_text(1, "speak")));
+    let mut playback = pipe.playback.recv_timeout(PATIENCE).unwrap();
+    let run = RunId(1);
+    let limit = Instant::now() + PATIENCE;
+    let (mut done, mut ended) = (false, false);
+    while !(done && ended && probe.quiet() == run) {
+        assert!(
+            Instant::now() < limit && session.open(),
+            "the spoken run finishes naturally"
+        );
+        for event in events.try_iter() {
+            match event {
+                LinkEvent::RunState {
+                    run: id,
+                    phase: Phase::Done,
+                    ..
+                } => {
+                    assert_eq!(id, run);
+                    done = true;
+                }
+                LinkEvent::Data { message, bytes, .. } => {
+                    if let DataToShell::RunEnd { run: id } = message {
+                        assert_eq!(id, run);
+                        ended = true;
+                    }
+                    session.grant(bytes);
+                }
+                LinkEvent::TurnRefused { .. } | LinkEvent::Error { .. } => {
+                    panic!("the spoken turn must finish normally")
+                }
+                _ => {}
+            }
+        }
+        for _ in 0..16 {
+            playback.render(&mut [0.0; 48]);
+        }
+        thread::yield_now();
+    }
+    assert_eq!(playback.handed(), TOTAL);
+    assert_eq!(playback.presented_prefix(), TOTAL);
+    let sample = u32::try_from(TOTAL).unwrap();
+    let cursor = Cursor {
+        segment: SegmentId(0),
+        sample,
+    };
+    let receipts = probe.retired(run);
+    let [final_receipt] = receipts
+        .iter()
+        .filter(|receipt| receipt.final_segment)
+        .collect::<Vec<_>>()[..]
+    else {
+        panic!("Brain accepts one final retirement, got {receipts:?}");
+    };
+    assert_eq!(
+        (
+            final_receipt.segment,
+            final_receipt.retired,
+            final_receipt.heard
+        ),
+        (cursor.segment, sample, sample)
+    );
+    assert_eq!(probe.quiet_receipt(), Some((run, Some(cursor))));
+    assert_eq!(probe.stop(), RunId(0));
+    pipe.handle.end(&session);
+    assert!(pipe.link.join().unwrap());
+    assert!(brain.join().unwrap());
+}
+
 #[derive(Clone, Copy)]
 enum SilentSpeechAt {
     Live,

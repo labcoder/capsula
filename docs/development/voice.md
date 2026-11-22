@@ -225,6 +225,11 @@ stateDiagram-v2
 - **Queued output (dormant).** Instead of legacy progress and played reports, ordered retirement
   refunds the synthesis window even for unheard samples. Only the separate heard prefix updates
   history; duplicate retirement and a producer-side drop cannot refund the same samples twice.
+  The device callback reserves presentation evidence before copying stamped speech. If the receipt
+  ring or the worker's presentation timeline backs up, output is silent until there is room, and
+  the next callback resumes at the same device frame. Stop still fences copying and starts the
+  fade immediately. The worker drains receipts through their publication fence before sending the
+  terminal cursor, counting only presentation that was due at the original Stop cutoff.
 - **Speech-start admission (dormant).** The producer holds the next queued Speech-start segment
   until a keyed Allow or Discard joins it at the normal synthesis window. An early decision sticks
   to its announced segment; a duplicate cannot dispatch it again. Discard still owes the ordered
