@@ -7,9 +7,9 @@ pub(super) mod microphone;
 pub(super) mod pipe;
 mod process;
 
-pub(crate) use credential::WindowsKeyStageWriter;
 #[cfg(test)]
 pub(crate) use credential::assert_offline_native_header;
+pub(crate) use credential::{WindowsKeyStageWriter, read_instance};
 pub use folders::data_dir;
 pub(crate) use pipe::PipeClient;
 pub use pipe::session_id;
