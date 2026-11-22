@@ -434,7 +434,7 @@ impl Coordinator {
             let run = current.id;
             effects.push(Effect::ArmDeadline {
                 run,
-                after: super::WALL_CLOCK,
+                after: self.tuning.wall_clock,
             });
             self.build(run, 1, effects);
         }
@@ -442,7 +442,7 @@ impl Coordinator {
     }
 
     /// A typed turn on Claude Code that arrived while it was being found and has no sign-in for it
-    /// waits up to [`super::FINDING_WAIT`] for the next report, with no build or snapshot, so its
+    /// waits up to `[tuning.runs] finding_wait_s` for the next report, with no build or snapshot, so its
     /// release is a first build that reads the choice again.
     pub(super) fn waits_for_claude_code(
         &mut self,
@@ -462,7 +462,7 @@ impl Coordinator {
         current.snapshot = None;
         effects.push(Effect::ArmDeadline {
             run,
-            after: super::FINDING_WAIT,
+            after: self.tuning.finding_wait,
         });
         true
     }

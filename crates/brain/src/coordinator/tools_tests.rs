@@ -434,6 +434,65 @@ fn the_ninth_round_is_refused_before_its_build() {
 }
 
 #[test]
+fn a_tuned_wall_clock_arms_each_run_deadline() {
+    let mut core = super::fresh();
+    core.tuning.wall_clock = std::time::Duration::from_secs(30);
+    let effects = core
+        .handle(Input::Turn {
+            turn: 1,
+            thread: None,
+            text: "hi".into(),
+        })
+        .expect("a turn is never stale");
+    assert_eq!(
+        effects.last(),
+        Some(&Effect::ArmDeadline {
+            run: R,
+            after: std::time::Duration::from_secs(30)
+        })
+    );
+}
+
+#[test]
+fn tuned_run_budgets_refuse_the_round_and_call_past_their_own_limits() {
+    let tuning = crate::config::tuning::RunTuning {
+        rounds: 2,
+        calls: 2,
+        ..crate::config::tuning::RunTuning::default()
+    };
+    let mut core = started();
+    core.tuning = tuning;
+    play(&mut core, called(1));
+    assert_eq!(
+        core.handle(completed(&core)),
+        Ok(vec![round_items(1, None, Vec::new(), vec![id(1)])])
+    );
+    assert!(starts_round(&next(&mut core, 1), 2));
+    play(&mut core, called(2));
+    assert_eq!(
+        core.handle(completed(&core)),
+        Ok(ends_failed(Failure::Budget)),
+        "no third build"
+    );
+
+    let mut core = started();
+    core.tuning = tuning;
+    for n in 1..=2 {
+        play(&mut core, called(n));
+    }
+    assert_eq!(
+        core.handle(engine(
+            super::engine_key(&core, R),
+            TurnEvent::ToolCallStarted {
+                call: id(3),
+                name: ToolName::Unknown,
+            }
+        )),
+        Ok(ends_failed(Failure::Budget))
+    );
+}
+
+#[test]
 fn the_seventeenth_call_fails_the_run_in_one_round_or_across_rounds() {
     let mut core = started();
     for n in 1..=MAX_CALLS {

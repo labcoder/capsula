@@ -13,6 +13,7 @@ use super::messages::{self, MessagesBody};
 use super::models::{self, CatalogModel, CheckError};
 use super::sse_map::{Capture, StopReason};
 use super::tls::{AnthropicTls, RouteConnector};
+use crate::config::tuning::ModelTuning;
 use crate::connections::model::Events;
 use crate::connections::model::budget::Budget;
 use crate::connections::model::conn::ModelClient;
@@ -29,10 +30,12 @@ pub(crate) struct Transport {
     catalog: Arc<Budget>,
     messages: Arc<Budget>,
     refused: Option<Refused>,
+    /// `[tuning.model]` for each Messages post.
+    model: ModelTuning,
 }
 
 impl Transport {
-    pub(crate) fn native() -> Option<Self> {
+    pub(crate) fn native(model: ModelTuning) -> Option<Self> {
         if !SERVE_ANTHROPIC_KEY {
             return None;
         }
@@ -41,6 +44,7 @@ impl Transport {
             catalog: Arc::new(Budget::from_var(LIVE_KEY_CATALOG_BUDGET_ENV)),
             messages: Arc::new(Budget::from_var(LIVE_KEY_MESSAGES_BUDGET_ENV)),
             refused: None,
+            model,
         })
     }
 
@@ -51,6 +55,7 @@ impl Transport {
             catalog: Arc::new(Budget::limited(Some(catalog))),
             messages: Arc::new(Budget::limited(Some(messages))),
             refused: None,
+            model: ModelTuning::default(),
         }
     }
 
@@ -95,7 +100,8 @@ impl Transport {
         let client = ModelClient::new(Fenced(
             Fenced(self.connector.clone(), offer.fence.clone()),
             authority.fence.clone(),
-        ));
+        ))
+        .with_tuning(self.model);
         let result = authority
             .fence
             .while_open(offer.fence.while_open(messages::stream(

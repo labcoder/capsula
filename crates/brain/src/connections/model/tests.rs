@@ -1322,6 +1322,54 @@ async fn an_idle_stream_ends_after_its_idle_limit() {
     ));
 }
 
+#[tokio::test(start_paused = true)]
+async fn tuned_waits_end_an_idle_stream_and_retire_a_pooled_connection_sooner() {
+    let tuning = crate::config::tuning::ModelTuning {
+        idle: Duration::from_secs(15),
+        pool_idle: Duration::from_secs(10),
+        ..crate::config::tuning::ModelTuning::default()
+    };
+    let mut harness = Harness::new(1 << 20);
+    harness.client.tuning = tuning;
+    let payload = body("hello");
+    let mut call = harness.call(&payload, 1);
+    assert!(poll(&mut call).is_pending());
+    harness.grant(1);
+    assert!(poll(&mut call).is_pending());
+    let mut server = harness.accept();
+    received(&mut server);
+    reply(
+        &mut server,
+        b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n",
+    );
+    assert!(poll(&mut call).is_pending());
+    tokio::time::advance(Duration::from_millis(14_999)).await;
+    assert!(poll(&mut call).is_pending());
+    tokio::time::advance(Duration::from_millis(1)).await;
+    assert!(matches!(
+        poll(&mut call),
+        Poll::Ready((Err(Failure::Transport), _))
+    ));
+
+    for (idle, reused) in [
+        (Duration::from_millis(9_999), true),
+        (Duration::from_secs(10), false),
+    ] {
+        let mut harness = Harness::budgeted(1 << 20, Some(2));
+        harness.client.tuning = tuning;
+        let body = body("hello");
+        let first = complete(&harness, &body, 1, None);
+        tokio::time::advance(idle).await;
+        if reused {
+            complete(&harness, &body, 2, Some(first));
+            assert_eq!(harness.accepts(), 0);
+        } else {
+            complete(&harness, &body, 2, None);
+            drop(first);
+        }
+    }
+}
+
 /// The result of one request answered with `response` once it's sent.
 #[expect(
     clippy::panic_in_result_fn,

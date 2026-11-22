@@ -39,3 +39,42 @@ listing_s = 60
 # 4–12: requests one listing of your repositories may make.
 listing_requests_count = 12
 ```
+
+## Model replies
+
+These are how long Kumochi waits on ChatGPT or an Anthropic API key at each step of a reply.
+A shorter wait gives up sooner on a slow connection; a longer one keeps a stuck reply on screen
+longer. Checking an API key keeps its built-in waits.
+
+```toml
+[tuning.model]
+# 3–10 seconds: connecting and sending one request.
+send_s = 10
+# 15–240 seconds: the longest pause between parts of a reply. At most content_idle_s.
+idle_s = 60
+# 3–40 seconds: reading the explanation when a service refuses a request.
+error_body_s = 10
+# 10–50 seconds: how long an unused connection is kept for the next request.
+pool_idle_s = 50
+# 15–240 seconds: Anthropic: how long a reply may wait for Kumochi to catch up.
+backpressure_s = 60
+# 150–2400 seconds: Anthropic: the longest a reply may go without new text.
+content_idle_s = 600
+```
+
+## Runs
+
+These limit one answer: how many rounds of tool use and calls it may make, and how long it may
+take. The counts can only be made lower.
+
+```toml
+[tuning.runs]
+# 2–8: model rounds one answer may use tools in.
+rounds_count = 8
+# 2–16: tool calls one answer may make.
+calls_count = 16
+# 30–240 seconds: the time available to process an answer, separate from discovery.
+wall_clock_s = 120
+# 8–60 seconds: how long a message to Claude Code waits while Kumochi is still looking for it.
+finding_wait_s = 30
+```

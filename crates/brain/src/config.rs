@@ -18,7 +18,7 @@ use kumochi_protocol::voice::VoicePart;
 use toml::{Table, Value};
 
 use crate::connections::github::device::DefaultRepo;
-use tuning::GitHubTuning;
+use tuning::{GitHubTuning, ModelTuning, RunTuning};
 
 pub(crate) mod tuning;
 
@@ -80,8 +80,10 @@ pub(crate) struct Config {
     /// `Err` when the file can't be written over: no home, or unreadable.
     table: Result<Table, Refusal>,
     view: SettingsView,
-    /// `[tuning.github]`, read once: a change applies at the next start.
+    /// `[tuning]`, read once: a change applies at the next start.
     github_tuning: GitHubTuning,
+    model_tuning: ModelTuning,
+    run_tuning: RunTuning,
     /// What an absent `onboarded` key reads as, fixed at start: true when the profile was
     /// already in use, or the file can't be written, so neither ever asks for onboarding.
     in_use: bool,
@@ -146,6 +148,8 @@ impl Config {
         Self {
             path: Some(path),
             github_tuning: GitHubTuning::from_table(&table),
+            model_tuning: ModelTuning::from_table(&table),
+            run_tuning: RunTuning::from_table(&table),
             table: Ok(table),
             view,
             in_use: false,
@@ -162,6 +166,8 @@ impl Config {
             table: Err(refusal),
             view,
             github_tuning: GitHubTuning::default(),
+            model_tuning: ModelTuning::default(),
+            run_tuning: RunTuning::default(),
             in_use: true,
         }
     }
@@ -213,6 +219,14 @@ impl Config {
 
     pub(crate) fn github_tuning(&self) -> GitHubTuning {
         self.github_tuning
+    }
+
+    pub(crate) fn model_tuning(&self) -> ModelTuning {
+        self.model_tuning
+    }
+
+    pub(crate) fn run_tuning(&self) -> RunTuning {
+        self.run_tuning
     }
 
     pub(crate) fn default_choice(&self) -> StoredChoice {

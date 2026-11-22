@@ -19,6 +19,7 @@ use tokio_rustls::client::TlsStream;
 use super::error::Failure;
 use super::sse::MAX_STREAM_BYTES;
 use super::wire::{self, Body, Head, MAX_INTERIM_HEADS, Step};
+use crate::config::tuning::ModelTuning;
 use crate::connections::http_client::{self, HttpError};
 
 const HOST: &str = "api.openai.com";
@@ -26,7 +27,7 @@ const HOST: &str = "api.openai.com";
 pub(super) const MAX_WIRE_BYTES: usize = MAX_STREAM_BYTES + 1024 * 1024;
 const READ_BYTES: usize = 16 * 1024;
 /// An idle connection older than this is closed rather than reused [guess].
-pub(super) const POOL_IDLE: Duration = Duration::from_secs(50);
+pub(crate) const POOL_IDLE: Duration = Duration::from_secs(50);
 
 /// Opens a connection to the model host.
 pub trait Connect: Send + Sync {
@@ -73,6 +74,8 @@ impl Connect for Tls {
 pub struct ModelClient<C: Connect> {
     pub(in crate::connections) connect: C,
     idle: Mutex<Option<(C::Io, Instant)>>,
+    /// `[tuning.model]`, or the built-in waits.
+    pub(crate) tuning: ModelTuning,
 }
 
 impl<C: Connect> ModelClient<C> {
@@ -81,13 +84,20 @@ impl<C: Connect> ModelClient<C> {
         Self {
             connect,
             idle: Mutex::new(None),
+            tuning: ModelTuning::default(),
         }
+    }
+
+    /// The same client with `[tuning.model]`'s waits.
+    pub(crate) fn with_tuning(mut self, tuning: ModelTuning) -> Self {
+        self.tuning = tuning;
+        self
     }
 
     /// The idle connection, when it's fresh and nothing has arrived on it, such as a close.
     pub(super) fn checkout(&self) -> Option<C::Io> {
         let (mut io, since) = self.lock().take()?;
-        (since.elapsed() < POOL_IDLE && quiet(&mut io)).then_some(io)
+        (since.elapsed() < self.tuning.pool_idle && quiet(&mut io)).then_some(io)
     }
 
     /// Keeps `io`, which finished a response with nothing left over, for the next request.
