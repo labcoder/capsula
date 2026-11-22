@@ -20,7 +20,7 @@ use tokio::task::{AbortHandle, JoinHandle};
 use tokio::time::Instant;
 use zeroize::Zeroizing;
 
-use crate::config::tuning::OAuthTuning;
+use crate::config::tuning::{OAuthTuning, TokenTuning};
 use crate::connections::account::{
     AccountState, Denied, Effect, Input, Job, Listened, Received, Worker,
 };
@@ -198,8 +198,15 @@ impl Accounts {
         worker: Worker<S>,
         net: Net,
         oauth: OAuthTuning,
+        tokens: TokenTuning,
     ) -> std::io::Result<Self> {
-        Self::spawn_with_github(worker, net, github::GitHub::new(), oauth)
+        Self::spawn_with_github(
+            worker,
+            net,
+            github::GitHub::new(tokens.github_refresh_lead),
+            oauth,
+            tokens.chatgpt_refresh_lead,
+        )
     }
 
     #[cfg(any(test, all(windows, debug_assertions, feature = "test-support")))]
@@ -212,6 +219,7 @@ impl Accounts {
             net,
             github::GitHub::with_client(None),
             OAuthTuning::default(),
+            TokenTuning::default().chatgpt_refresh_lead,
         )
     }
 
@@ -220,8 +228,9 @@ impl Accounts {
         net: Net,
         github: github::GitHub,
         oauth: OAuthTuning,
+        chatgpt_refresh_lead: Duration,
     ) -> std::io::Result<Self> {
-        let (state, started) = AccountState::start();
+        let (state, started) = AccountState::start_with_refresh_lead(chatgpt_refresh_lead);
         let (events_tx, events) = mpsc::unbounded_channel();
         let (loaded_tx, loaded) = std_mpsc::channel();
         let (reads_tx, reads) = mpsc::unbounded_channel();

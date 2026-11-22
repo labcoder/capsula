@@ -1,5 +1,5 @@
-//! Refresh (design §3 rule 3): the 60 s rule, one flight through save and identity check, what
-//! each refusal does, and what a sign-out landing mid-flight leaves. Results are fed in as data.
+//! Refresh (design §3 rule 3): the renewal threshold, one flight through save and identity check,
+//! what each refusal does, and what a sign-out landing mid-flight leaves.
 
 use super::*;
 use crate::connections::http_client::{HttpError, Response};
@@ -156,6 +156,25 @@ fn a_bearer_is_refreshed_once_it_has_sixty_seconds_left() {
     );
     assert_eq!(h.answers.len(), 1, "the caller waits for the flight");
     assert_eq!(h.marker(), marker(&["request_pending"]));
+}
+
+#[test]
+fn a_shorter_lead_keeps_the_bearer_until_the_exact_renewal_threshold() {
+    let mut h = Harness::seeded_with_state(
+        "refresh-short-lead",
+        account_at(NOW + 31, None),
+        AccountState::start_with_refresh_lead(Duration::from_secs(30)),
+    );
+    h.access(1, NOW);
+    assert_eq!(h.answers, [(1, bearer("old-access"))]);
+    assert!(h.refreshes.is_empty());
+    h.access(2, NOW + 1);
+    assert_eq!(h.answers, [(1, bearer("old-access"))]);
+    h.refreshed(rotated(None));
+    assert_eq!(
+        h.answers,
+        [(1, bearer("old-access")), (2, bearer("access-new"))]
+    );
 }
 
 #[test]

@@ -1,4 +1,4 @@
-//! Refresh (design §3 rule 3). A caller asks for the bearer; a set within a minute of expiry is
+//! Refresh (design §3 rule 3). A caller asks for the bearer; a set within the configured lead is
 //! refreshed first, on the token lane. The refresh token is marked as sent before it goes out,
 //! and one whose answer was never saved is never sent again. The rotated set is saved before
 //! anything else goes out, then its identity token is checked against the saved subject. Callers
@@ -18,9 +18,6 @@ use crate::connections::oauth::exchange::{ExchangeError, OAuthCode, TokenSet};
 use crate::connections::oauth::id_token::{IdentityError, permits_plan};
 use crate::connections::records::{Account, Origin, Record as _, Revocable, Tokens, entry_fits};
 use crate::connections::vault::SaveResult;
-
-/// Local policy: refresh when the access token has this long left (design §6).
-const EARLY_SECONDS: u64 = 60;
 
 /// Which save of a refresh flight a [`Job::Rotate`](super::Job::Rotate) is.
 #[derive(Debug, Clone, Copy)]
@@ -96,7 +93,10 @@ impl AccountState {
             })
         };
         let refused = self.refused == Some(self.generation);
-        if (refused || within(EARLY_SECONDS)) && !self.renewed && !self.tickets.is_empty() {
+        if (refused || within(self.refresh_lead.as_secs()))
+            && !self.renewed
+            && !self.tickets.is_empty()
+        {
             return self.waiting.push_back(Waiting::Refresh(self.generation));
         }
         if within(0) {

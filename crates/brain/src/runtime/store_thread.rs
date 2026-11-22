@@ -38,6 +38,7 @@ const SWAP_WAIT: Duration = Duration::from_secs(2);
 /// When an owed purge is tried.
 #[derive(Debug)]
 pub(crate) struct Schedule {
+    pub(crate) context: crate::config::tuning::ContextTuning,
     /// How long after the last op [guess].
     pub(crate) quiet: Duration,
     /// The wait after an attempt that didn't finish, doubling up to `last_retry`, so a store
@@ -87,6 +88,7 @@ impl std::fmt::Debug for Gate {
 impl Default for Schedule {
     fn default() -> Self {
         Self {
+            context: crate::config::tuning::ContextTuning::default(),
             quiet: Duration::from_millis(200),
             first_retry: Duration::from_secs(60),
             last_retry: Duration::from_mins(30),
@@ -412,6 +414,7 @@ impl StoreThread {
             reads,
             &exit,
             acks.clone(),
+            schedule.context,
             #[cfg(test)]
             page_reader::Hooks {
                 observed: schedule.observed.clone(),

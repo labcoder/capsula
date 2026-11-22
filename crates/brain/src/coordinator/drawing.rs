@@ -22,6 +22,11 @@ pub(super) struct StepReply {
 }
 
 impl Coordinator {
+    pub(crate) fn configure_drawing(&mut self, tuning: crate::config::tuning::DrawingTuning) {
+        self.drawing.tuning = tuning;
+        self.retry_after = tuning.first_retry;
+    }
+
     pub(super) fn drawing_call(
         &mut self,
         thread: ThreadId,
@@ -162,13 +167,16 @@ impl Coordinator {
         &mut self,
         recovery: Result<crate::store::DrawingRecovery, crate::store::StoreError>,
     ) -> Vec<Effect> {
+        let tuning = self.drawing.tuning;
         let Ok(recovery) = recovery else {
             tracing::warn!("stored drawing recovery was unavailable");
             self.drawing = Drawing::unavailable();
+            self.drawing.tuning = tuning;
             return Vec::new();
         };
         let (drawing, mut skipped) = Drawing::recover(recovery.scenes);
         self.drawing = drawing;
+        self.drawing.tuning = tuning;
         skipped.extend(recovery.skipped);
         skipped.sort_unstable();
         skipped.dedup();

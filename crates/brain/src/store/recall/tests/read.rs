@@ -1,6 +1,45 @@
 use super::*;
 
 #[test]
+fn tuned_history_read_limit_does_not_shrink_a_saved_range_on_replay() {
+    let (_scratch, store) = world("recall-tuned-read");
+    task(&store, 2, "B");
+    for id in 10..=30 {
+        say(&store, id, 2, "user", "fact");
+    }
+    let query = Query::Read {
+        task: 2,
+        from: 10,
+        to: 30,
+    };
+    let prior = select(&store, Origin::Kumo, &query).unwrap();
+    let baseline = render(&store, Origin::Kumo, &prior).0;
+    let read =
+        Snapshot::begin(&store.conn)
+            .unwrap()
+            .with_tuning(crate::config::tuning::ContextTuning {
+                read_events: 10,
+                ..Default::default()
+            });
+    assert_eq!(
+        read.select_recall(Origin::Kumo, &query).unwrap(),
+        Selection::Read {
+            task: 2,
+            first_shown: Some(10),
+            last_shown: Some(19),
+            cut: None,
+            next: Some(20),
+        }
+    );
+    let mut sources = BTreeSet::new();
+    let replayed = read
+        .render_recall(Origin::Kumo, &prior, &mut sources)
+        .unwrap();
+    assert_eq!(serde_json::from_str::<Value>(&replayed).unwrap(), baseline);
+    assert_eq!(sources, BTreeSet::from([ThreadId(2)]));
+}
+
+#[test]
 fn sparse_ranges_persist_only_actual_shown_endpoints_and_leave_empty_ranges_empty() {
     let (_scratch, store) = world("recall-sparse-endpoints");
     task(&store, 2, "B");

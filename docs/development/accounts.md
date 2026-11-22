@@ -522,11 +522,12 @@ entry is stamped no earlier than the brain's start time plus its monotonic run t
 set back while it's listed only delays its age-out.
 
 **Refresh** (`account::refresh`, design §3 rule 3). The bearer is handed out only through
-`Accounts::access`, which answers on a oneshot. Each call checks the wall clock: a set with 60 s or
-less left [local policy], or with no wall time, is refreshed first; there's no timer. The refresh
-is one flight on the token lane, from the request until the rotated set is committed and its
-identity token verified. Callers that arrive meanwhile join it, and all of them get the same
-answer. The request and the identity check run as tokio tasks the brain never aborts, so a caller
+`Accounts::access`, which answers on a oneshot. Each call checks the wall clock: a set with no more
+time left than `[tuning.tokens] chatgpt_refresh_lead_s` (default 60 s, range 30–60 s), or with no
+wall time, is refreshed first; there's no timer. The refresh is one flight on the token lane,
+from the request until the rotated set is committed and its identity token verified. Callers
+that arrive meanwhile join it and get the same answer. The request and the identity check run
+as tokio tasks the brain never aborts, so a caller
 that drops its receiver ends only its own wait. Each is supervised: one that ends without
 reporting, as a panic does in a debug build (a release build aborts on panic), reports a
 content-free failure instead. A refresh's outcome is then unknown, so the session ends and its

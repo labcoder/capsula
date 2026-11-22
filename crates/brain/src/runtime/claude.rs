@@ -3,7 +3,7 @@
 //! both at the moment it's sent.
 
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use kumochi_protocol::constants::CLAUDE_QUESTIONS_ENV;
 use kumochi_protocol::message::{
@@ -57,6 +57,7 @@ pub(crate) const SIGN_IN: SignInStore = SignInStore::FileWithDacl;
     reason = "independent flags: the switch, a queued find, a deletion to finish and a full queue"
 )]
 pub(crate) struct Claude {
+    pub(super) launch_lifetime: Duration,
     lane: Option<Lane>,
     sign_in: SignInStore,
     /// False under `[claude_code] enabled = false`, where only a marked deletion runs.
@@ -175,6 +176,7 @@ impl Default for Claude {
 impl Claude {
     pub(super) fn new(lane: Option<Lane>, sign_in: SignInStore, view: ClaudeCodeView) -> Self {
         Self {
+            launch_lifetime: MAX_LAUNCH,
             lane,
             sign_in,
             finds: true,
@@ -860,7 +862,7 @@ impl Claude {
                 Offer::Nothing => Arc::default(),
                 Offer::Mcp(_, _, schemas) => Arc::clone(schemas),
             },
-            lifetime: MAX_LAUNCH,
+            lifetime: self.launch_lifetime.min(MAX_LAUNCH),
             calls: Some(self.calls.0.clone()),
         })?;
         if let Some(held) = self.launches.last_mut() {

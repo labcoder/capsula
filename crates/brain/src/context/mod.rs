@@ -34,15 +34,15 @@ const JPEG_DATA_URL: &str = "data:image/jpeg;base64,";
 /// An image's Responses input item with an empty URL. The keys' order doesn't change its length.
 const EMPTY_IMAGE_ITEM: &str = r#"{"type":"message","role":"user","content":[{"type":"input_image","image_url":"","detail":"high"}]}"#;
 /// The newest runs kept raw, the current one included, when they fit [guess].
+#[cfg(test)]
 pub(crate) const RAW_RUNS: usize = 8;
 /// The most one reference re-reads [guess].
+#[cfg(test)]
 pub(crate) const REREAD_CAP: usize = 32 * 1024;
 /// What a reference to a deleted task renders as.
 pub(crate) const REMOVED: &str = "[removed with a deleted task]";
 /// What a reference the run's origin may not reach renders as.
 pub(crate) const UNAVAILABLE: &str = "[not available here]";
-/// The most deletion notes a request carries, newest kept [guess].
-pub(crate) const MAX_NOTES: usize = 32;
 
 /// Where a run was started, which decides what it may reach. It comes from the run's thread,
 /// never from anything a model produced.

@@ -436,11 +436,11 @@ fn a_retry_deadline_leaves_with_the_debt_and_a_new_failure_waits_the_first_delay
         scenes: vec![SceneId(id)],
     };
     core.handle(clear(1)).expect("a clear is never stale");
-    for millis in [500, 1000, 2000] {
+    for millis in [500, 1000, 2000, 4000, 8000, 16_000, 30_000] {
         assert_eq!(core.handle(failed(1)), Ok(vec![arm(millis)]));
         assert_eq!(core.handle(Input::Retry), Ok(vec![clear_scenes(&[1])]));
     }
-    assert_eq!(core.handle(failed(1)), Ok(vec![arm(4000)]));
+    assert_eq!(core.handle(failed(1)), Ok(vec![arm(30_000)]));
     assert_eq!(
         core.handle(clear(2)),
         Ok(vec![
@@ -449,7 +449,7 @@ fn a_retry_deadline_leaves_with_the_debt_and_a_new_failure_waits_the_first_delay
             clear_scenes(&[1]),
             Effect::CancelRetry
         ]),
-        "the 4 s deadline goes once the owed write rides another op"
+        "the deadline goes once the owed write rides another op"
     );
     assert_eq!(core.handle(committed(1)), Ok(Vec::new()));
     assert_eq!(core.handle(committed(2)), Ok(Vec::new()));
@@ -462,6 +462,30 @@ fn a_retry_deadline_leaves_with_the_debt_and_a_new_failure_waits_the_first_delay
         Ok(vec![arm(500)]),
         "a new failure waits the first delay at once"
     );
+}
+
+#[test]
+fn tuned_scene_clear_retries_start_and_cap_at_the_configured_delays() {
+    let mut core = Coordinator::ready_for_tests(ThreadId(1), ThreadId(3), RunId(9), visible(&[1]));
+    core.configure_drawing(crate::config::tuning::DrawingTuning {
+        first_retry: Duration::from_millis(750),
+        last_retry: Duration::from_millis(1200),
+        ..Default::default()
+    });
+    core.handle(Input::Clear {
+        scenes: vec![SceneId(1)],
+    })
+    .unwrap();
+    for millis in [750, 1200, 1200] {
+        assert_eq!(
+            core.handle(Input::ScenesCleared {
+                scenes: vec![SceneId(1)],
+                ok: false
+            }),
+            Ok(vec![arm(millis)])
+        );
+        assert_eq!(core.handle(Input::Retry), Ok(vec![clear_scenes(&[1])]));
+    }
 }
 
 #[test]

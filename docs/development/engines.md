@@ -89,7 +89,8 @@ re-read every time a request is built, in the same read transaction as the conve
 - A task that is gone or being deleted renders as `[removed with a deleted task]`. A live task
   with nothing in the range renders as empty text, not as removed. A store failure is an error,
   never a removal.
-- Each re-read is capped at 32 KiB [guess]. Events are shown as `user: …` and `assistant: …` lines.
+- Each older reference re-read is capped by `reread_bytes` (default 32 KiB). Events are shown as
+  `user: …` and `assistant: …` lines.
   The lines that fit whole are kept. An event that alone is over the cap keeps its longest prefix
   ending on a character boundary. The result says which events it shows, whether it was
   truncated, and the first event it left out (`continue_from`). A search snippet is a
@@ -226,16 +227,17 @@ sequenceDiagram
   deleted.
 - **Held deletes.** A delete whose thread an unsettled lease carries waits in `deleting` with no
   writer op. It goes out once, in the order accepted, when no lease carries it.
-- **Deadline.** A lease that hasn't settled 15 s [guess] after its grant fails closed: its held
-  deletes are refused with `NotHidden`, and so is any later delete of its sources; its run fails
+- **Deadline.** A lease that hasn't settled within `send_lease_s` (default 15 s) after its grant
+  fails closed: its held deletes are refused with `NotHidden`, and so is any later delete of its sources; its run fails
   as `failed(engine)`; and nothing is granted again until the brain restarts. A late settlement
   settles only the picture its lease carried, and every fence stays. A delete is never released
   because time ran out.
 - **Held sends.** A sender whose body can go out again until a process tree is confirmed ended
   (a Claude Code question, see [claude-code.md](claude-code.md#launches)) asks with
-  `SendGate::ask_held(hold)`. Its lease's deadline is `hold`, capped at `MAX_HOLD` (165 s), in
-  place of the 15 s, for builds and jobs alike. Past it, the lease fails closed the same way: its
-  run fails, its held deletes are refused, and its sources stay fenced until the brain restarts.
+  `SendGate::ask_held(hold)`. Its lease uses the remaining launch time plus the fixed 15 s
+  teardown allowance, capped at `MAX_HOLD` (165 s), instead of `send_lease_s`. Past it, the lease
+  fails closed the same way: its run fails, its held deletes are refused, and its sources stay
+  fenced until the brain restarts.
   It doesn't stop other grants, though. A held sender is a separate process on its own pipes, not
   the shared transport, so a teardown that never confirmed is that lane's fault alone, and the
   lane already refuses every later launch (see [claude-code.md](claude-code.md#launches)). ChatGPT
@@ -326,15 +328,16 @@ uses the thread's newest summary in place of every event through `last_event`. T
 - **After a run.** When a title job ends on its own (and at once for Kumo's runs, which have no
   title job), a compaction job for the same thread takes the slot, under every fence above. Its
   read sums the byte length of the text and bodies of every ended run no summary covers, ÷ 4 as
-  estimated tokens [guess: the catalog has no context sizes yet]. Under `COMPACT_AT` = 24k [guess]
-  it stops with no request. Debug builds take `KUMOCHI_COMPACT_AT` to lower it for the live check.
-  Measuring the whole uncovered backlog, not the newest eight runs, means runs that leave the raw
-  window are summarized even while the newest stay small.
-- **What it summarizes.** The uncovered runs older than the newest eight [guess] are eligible; with
-  none, there's no request. The request carries `prompts/summary.md` with the run's names, the
-  previous summary, and the longest prefix of whole eligible runs that fits `SUMMARY_INPUT` = 96 KiB
-  [guess], rendered by the builder's own reference rendering in the job's read transaction, so a
-  deleted task's range renders as the removed marker. The cut is always at a run boundary, so a
+  estimated tokens [guess: the catalog has no context sizes yet]. Under
+  `compact_at_token_count` (default 24k) it stops with no request. Debug builds take
+  `KUMOCHI_COMPACT_AT` to lower it for the live check. Measuring the whole uncovered backlog,
+  not just the current raw window, means runs that leave the raw window are summarized even
+  while the newest stay small.
+- **What it summarizes.** The uncovered runs older than the configured raw window (default eight)
+  are eligible; with none, there's no request. The request carries `prompts/summary.md` with the run's names, the
+  previous summary, and the longest prefix of whole eligible runs that fits `summary_input_bytes`
+  (default 96 KiB), rendered by the builder in the job's read transaction, so a deleted task's
+  range renders as the removed marker. The cut is always at a run boundary, so a
   call never leaves its result. If the oldest eligible run alone doesn't fit, the job stops with no
   request and coverage doesn't move (`shortcut:` one such run stalls compaction behind it until a
   continuation scheme exists). The new summary replaces the previous one, so it covers from the

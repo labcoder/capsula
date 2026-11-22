@@ -442,19 +442,28 @@ needs `filing_requests_count >= listing_requests_count + 4` and `listing_s <= fi
 
 `[tuning.model]` rides on `ModelClient` (`with_tuning`), so the ChatGPT engine and each Anthropic
 Messages post use it; image and marks checks and API-key checks keep the built-in waits.
-`send_s` can only shorten the existing upload timeout so it stays below the coordinator's fixed
-send-grant deadline. A group with `content_idle_s` below `idle_s` takes its defaults.
-`[tuning.runs]` sits on the
-`Coordinator`: the round and call counts only lower the compile-time ceilings `MAX_ROUNDS` and
+`send_s` can only shorten the existing upload timeout so it stays below the coordinator's
+shortest send-grant deadline. A group with `content_idle_s` below `idle_s` takes its defaults.
+`[tuning.runs]` supplies the coordinator and Claude Code lane: the round and call counts only
+lower the compile-time ceilings `MAX_ROUNDS` and
 `MAX_CALLS` (the engine's attempt budget is sized from `MAX_ROUNDS`), and `wall_clock_s` and
-`finding_wait_s` replace `WALL_CLOCK` and `FINDING_WAIT`, which stay the defaults.
+`finding_wait_s` replace `WALL_CLOCK` and `FINDING_WAIT`, which stay the defaults. The direct
+send lease always outlasts the upload timeout. A held send still uses the remaining Claude Code
+launch time plus its fixed teardown allowance, under the fixed outer cap.
 
 `[tuning.oauth]` is copied into the ChatGPT account lane at startup. The local sign-in window
 and refresh request cannot outlast their built-in limits. Refresh and revocation both bound
 HTTP setup and network work under one absolute deadline. The nondecreasing backoffs must sum to less
 than that budget, or all OAuth keys use their defaults. Token validation, shutdown settlement
-and the number of retry attempts are unchanged. The user
-reference, with the examples the docs-match test checks, is [tuning](../user/tuning.md).
+and the number of retry attempts are unchanged.
+
+`[tuning.tokens]` goes to the account lanes at startup. The lead can only shorten, and GitHub
+still computes the smaller of its lead and half the token's remaining lifetime.
+`[tuning.drawing]` supplies the draw controller and the readiness and scene-clear timers.
+The first retry cannot be longer than the cap, and draw counts only lower the existing ceilings.
+`[tuning.context]` supplies the page reader and compaction threshold. The limits apply to
+context assembly and new reads; recall replay still checks saved selections against the fixed
+record and request limits. See [tuning](../user/tuning.md) for the examples the docs test checks.
 
 ## Claude Code
 

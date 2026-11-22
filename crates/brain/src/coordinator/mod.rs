@@ -306,7 +306,7 @@ pub enum Input {
     },
     /// The timer for owed clears and selections fired.
     Retry,
-    /// [`crate::drawing::READY_WAIT`] passed while a draw call waited for the shell.
+    /// The drawing readiness wait expired while a call waited for the shell.
     ReadyWait,
     /// The user confirmed deleting `thread`.
     Delete {
@@ -525,7 +525,7 @@ pub enum Effect {
     },
     /// Forget the armed `ArmRetry`: nothing owed is left unwritten.
     CancelRetry,
-    /// Report `ReadyWait` after [`crate::drawing::READY_WAIT`], replacing any earlier one.
+    /// Arm the drawing readiness timer, replacing any earlier one.
     ArmReadyWait,
     /// Forget the armed `ArmReadyWait`: no draw call waits for the shell.
     CancelReadyWait,
@@ -867,8 +867,10 @@ impl Coordinator {
         last_run: RunId,
         scenes: Vec<SceneState>,
     ) -> Self {
+        let drawing = crate::drawing::Drawing::default();
         Self {
-            drawing: crate::drawing::Drawing::default(),
+            retry_after: drawing.tuning.first_retry,
+            drawing,
             drawing_held: Vec::new(),
             drawing_reply: None,
             screen_marks: crate::drawing::SCREEN_MARKS,
@@ -882,7 +884,6 @@ impl Coordinator {
             clearing: Vec::new(),
             keeping: Vec::new(),
             session_start: RunId(last_run.0 + 1),
-            retry_after: scenes::FIRST_RETRY,
             retry_armed: None,
             ready_armed: false,
             deleting: Vec::new(),

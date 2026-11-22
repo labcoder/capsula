@@ -330,9 +330,10 @@ one at a time. A run whose choice names Claude Code starts one through `Claude::
 
 - **Admission.** `Claude::launch` admits only while the view is `Ready`, `SIGN_IN` is
   `FileWithDacl`, the lane finds and isn't cleaning, no version is quarantined, and the lifetime
-  is at most `MAX_LAUNCH` (150 s). The id, the deadline, the binding and the gate are fixed
-  there, and `Launch` reads them (`id()`, `deadline()`, `binding()`, `gate()`), so the core
-  knows them before the lane's turn. An id that can't be drawn is `Identity`, and a full lane
+  is at most `MAX_LAUNCH` (150 s). Normal questions and their warm attempts use the configured
+  `claude_launch_s`, which can only shorten that lifetime. Admission fixes the id, deadline,
+  binding and gate, and `Launch` reads them (`id()`, `deadline()`, `binding()`, `gate()`), so the
+  core knows them before the lane's turn. An id that can't be drawn is `Identity`, and a full lane
   queue (`LANE_QUEUE`, 4) is `Busy`; nothing is queued then, and the core only ever `try_send`s.
 - **The lease.** The run holds a `RunLease`; revoking or dropping it ends the launch. One atomic
   word decides stdin: the pump admits each chunk by compare-exchange `Open → Writing` before its

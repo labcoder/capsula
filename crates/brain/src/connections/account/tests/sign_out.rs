@@ -234,6 +234,7 @@ fn boot(seeded: &Seeded) -> Harness {
         seeded.service.clone(),
         seeded.store.clone(),
         Wall::new(),
+        AccountState::start(),
     )
 }
 

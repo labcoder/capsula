@@ -1991,6 +1991,25 @@ async fn a_grant_after_the_question_deadline_seeds_nothing() {
 /// An ask nobody answers ends at the question's deadline: nothing is seeded and the attempt
 /// reports `Deadline` once.
 #[tokio::test]
+async fn tuned_claude_launch_shortens_its_held_lease_without_cutting_teardown() {
+    let mut rig = Rig::new("question-tuned-launch", &synthetic_signed_in()).await;
+    rig.claude.launch_lifetime = Duration::from_secs(60);
+    let admitted_after = Instant::now();
+    let question = rig.claude.take(&rig.snapshot()).expect("taken");
+    let mut played = play(&question);
+    let Some(Input::SendReady {
+        hold: Some(hold), ..
+    }) = rig.drive(played.inputs.recv()).await
+    else {
+        panic!("a held ask");
+    };
+    assert!(hold <= Duration::from_secs(75));
+    assert!(hold >= Duration::from_secs(75).saturating_sub(admitted_after.elapsed()));
+    drop(played);
+    rig.close().await;
+}
+
+#[tokio::test]
 async fn an_unanswered_ask_ends_at_the_question_deadline() {
     let mut rig = Rig::new("question-unanswered", &synthetic_signed_in()).await;
     deadline_in(&mut rig, Duration::from_millis(300));

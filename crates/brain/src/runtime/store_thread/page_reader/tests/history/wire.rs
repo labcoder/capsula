@@ -252,6 +252,7 @@ fn next_request(store: &Store, run: RunId, kind: ConnectionKind) -> Built {
             picture_models: Vec::new(),
             key_results: Vec::new(),
         },
+        Default::default(),
         || {},
     )
     .result
@@ -308,6 +309,7 @@ fn compact_quoted_reply(store: &mut Store, quote: &str) {
             }),
             compact_at: 0,
         },
+        Default::default(),
         || {},
     )
     .result

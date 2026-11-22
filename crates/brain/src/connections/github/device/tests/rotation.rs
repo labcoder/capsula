@@ -131,16 +131,20 @@ async fn saving_rotation() -> (Machine, Stamp) {
 
 #[tokio::test(start_paused = true)]
 async fn short_lifetimes_schedule_a_positive_delay_before_expiry_without_immediate_rotation() {
-    for (lifetime, delay_ms) in [
-        (1, 500),
-        (2, 1000),
-        (59, 29_500),
-        (60, 30_000),
-        (61, 30_500),
-        (120, 60_000),
-        (121, 61_000),
+    for (lead_s, lifetime, delay_ms) in [
+        (60, 1, 500),
+        (60, 2, 1000),
+        (60, 59, 29_500),
+        (60, 60, 30_000),
+        (60, 61, 30_500),
+        (60, 120, 60_000),
+        (60, 121, 61_000),
+        (30, 59, 29_500),
+        (30, 60, 30_000),
+        (30, 61, 31_000),
     ] {
-        let mut m = new_machine(None);
+        let mut m = Machine::with_refresh_lead(None, Duration::from_secs(lead_s));
+        m.clock = Arc::new(FixedClock(1_000));
         let mut saved = account();
         saved.credentials.expires_at_s = 1000 + lifetime;
         let now = Instant::now();

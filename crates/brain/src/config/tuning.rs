@@ -11,6 +11,7 @@ use toml::{Table, Value};
 
 use crate::connections::{anthropic::messages, model, oauth};
 use crate::coordinator;
+use crate::engines::claude_code::supervisor::MAX_LAUNCH;
 
 const TUNING: &str = "tuning";
 
@@ -33,11 +34,14 @@ const fn limit(key: &'static str, default: u64, min: u64, max: u64) -> Limit {
 
 /// Every group by its name under `[tuning]`, for the docs check.
 #[cfg(test)]
-pub(crate) const GROUPS: [(&str, &[Limit]); 4] = [
+pub(crate) const GROUPS: [(&str, &[Limit]); 7] = [
     ("github", &GITHUB),
     ("model", &MODEL),
     ("runs", &RUNS),
     ("oauth", &OAUTH),
+    ("tokens", &TOKENS),
+    ("drawing", &DRAWING),
+    ("context", &CONTEXT),
 ];
 
 /// `[tuning.github]`. These bound requests to the user's account, so every build keeps them in
@@ -73,11 +77,23 @@ pub(crate) const MODEL: [Limit; 7] = [
 
 /// `[tuning.runs]`. The counts bound model calls, so they only tighten from the built-in ceilings
 /// `MAX_ROUNDS` and `MAX_CALLS`, which also size the engine's attempt budget at compile time.
-pub(crate) const RUNS: [Limit; 4] = [
+pub(crate) const RUNS: [Limit; 6] = [
     limit("rounds_count", 8, 2, 8),
     limit("calls_count", 16, 2, 16),
     limit("wall_clock_s", coordinator::WALL_CLOCK.as_secs(), 30, 240),
     limit("finding_wait_s", coordinator::FINDING_WAIT.as_secs(), 8, 60),
+    limit(
+        "send_lease_s",
+        coordinator::SEND_DEADLINE.as_secs(),
+        model::SEND_DEADLINE.as_secs() + 1,
+        coordinator::SEND_DEADLINE.as_secs(),
+    ),
+    limit(
+        "claude_launch_s",
+        MAX_LAUNCH.as_secs(),
+        60,
+        MAX_LAUNCH.as_secs(),
+    ),
 ];
 
 const OAUTH: [Limit; 5] = [
@@ -96,6 +112,28 @@ const OAUTH: [Limit; 5] = [
     limit("revoke_s", oauth::revoke::BUDGET.as_secs(), 3, 40),
     limit("first_backoff_ms", 500, 125, 2000),
     limit("second_backoff_ms", 1000, 250, 4000),
+];
+
+const TOKENS: [Limit; 2] = [
+    limit("github_refresh_lead_s", 60, 30, 60),
+    limit("chatgpt_refresh_lead_s", 60, 30, 60),
+];
+
+const DRAWING: [Limit; 5] = [
+    limit("calls_count", 16, 1, 16),
+    limit("rejected_count", 8, 1, 8),
+    limit("ready_wait_ms", 1000, 250, 1000),
+    limit("first_retry_ms", 500, 250, 2000),
+    limit("last_retry_ms", 30_000, 1000, 60_000),
+];
+
+const CONTEXT: [Limit; 6] = [
+    limit("compact_at_token_count", 24_000, 24_000, 48_000),
+    limit("summary_input_bytes", 98_304, 49_152, 98_304),
+    limit("raw_runs_count", 8, 2, 8),
+    limit("notes_count", 32, 16, 32),
+    limit("reread_bytes", 32_768, 16_384, 32_768),
+    limit("read_events_count", 20, 10, 20),
 ];
 
 /// Requests a filing makes besides its listing: the user, two match pages and the create.
@@ -212,6 +250,8 @@ pub(crate) struct RunTuning {
     pub(crate) wall_clock: Duration,
     /// Waiting for Claude Code to be found before a typed turn on it gives up.
     pub(crate) finding_wait: Duration,
+    pub(crate) send_lease: Duration,
+    pub(crate) claude_launch: Duration,
 }
 
 impl Default for RunTuning {
@@ -226,13 +266,24 @@ impl RunTuning {
         Self::from_values(read(table, "runs", &RUNS, |_| true))
     }
 
-    fn from_values([rounds, calls, wall_clock_s, finding_wait_s]: [u64; 4]) -> Self {
+    fn from_values(
+        [
+            rounds,
+            calls,
+            wall_clock_s,
+            finding_wait_s,
+            send_lease_s,
+            claude_launch_s,
+        ]: [u64; 6],
+    ) -> Self {
         let count = |value: u64| u32::try_from(value).expect("a run count is at most 16");
         Self {
             rounds: count(rounds),
             calls: count(calls),
             wall_clock: Duration::from_secs(wall_clock_s),
             finding_wait: Duration::from_secs(finding_wait_s),
+            send_lease: Duration::from_secs(send_lease_s),
+            claude_launch: Duration::from_secs(claude_launch_s),
         }
     }
 }
@@ -273,8 +324,102 @@ impl OAuthTuning {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct TokenTuning {
+    pub(crate) github_refresh_lead: Duration,
+    pub(crate) chatgpt_refresh_lead: Duration,
+}
+
+impl Default for TokenTuning {
+    fn default() -> Self {
+        Self::from_values(defaults(&TOKENS))
+    }
+}
+
+impl TokenTuning {
+    pub(crate) fn from_table(table: &Table) -> Self {
+        Self::from_values(read(table, "tokens", &TOKENS, |_| true))
+    }
+
+    fn from_values([github, chatgpt]: [u64; 2]) -> Self {
+        Self {
+            github_refresh_lead: Duration::from_secs(github),
+            chatgpt_refresh_lead: Duration::from_secs(chatgpt),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct DrawingTuning {
+    pub(crate) calls: usize,
+    pub(crate) rejected: u8,
+    pub(crate) ready_wait: Duration,
+    pub(crate) first_retry: Duration,
+    pub(crate) last_retry: Duration,
+}
+
+impl Default for DrawingTuning {
+    fn default() -> Self {
+        Self::from_values(defaults(&DRAWING))
+    }
+}
+
+impl DrawingTuning {
+    pub(crate) fn from_table(table: &Table) -> Self {
+        Self::from_values(read(
+            table,
+            "drawing",
+            &DRAWING,
+            |[_, _, _, first, last]| first <= last,
+        ))
+    }
+
+    fn from_values([calls, rejected, ready, first, last]: [u64; 5]) -> Self {
+        Self {
+            calls: count(calls),
+            rejected: u8::try_from(rejected).expect("rejected count is bounded to eight"),
+            ready_wait: Duration::from_millis(ready),
+            first_retry: Duration::from_millis(first),
+            last_retry: Duration::from_millis(last),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ContextTuning {
+    pub(crate) compact_at: u64,
+    pub(crate) summary_input: usize,
+    pub(crate) raw_runs: usize,
+    pub(crate) notes: usize,
+    pub(crate) reread: usize,
+    pub(crate) read_events: usize,
+}
+
+impl Default for ContextTuning {
+    fn default() -> Self {
+        Self::from_values(defaults(&CONTEXT))
+    }
+}
+
+impl ContextTuning {
+    pub(crate) fn from_table(table: &Table) -> Self {
+        Self::from_values(read(table, "context", &CONTEXT, |_| true))
+    }
+
+    fn from_values([compact_at, summary, raw_runs, notes, reread, read_events]: [u64; 6]) -> Self {
+        Self {
+            compact_at,
+            summary_input: count(summary),
+            raw_runs: count(raw_runs),
+            notes: count(notes),
+            reread: count(reread),
+            read_events: count(read_events),
+        }
+    }
+}
+
 fn count(value: u64) -> usize {
-    usize::try_from(value).expect("a tuning count is at most 16")
+    usize::try_from(value).expect("bounded tuning values fit usize")
 }
 
 fn defaults<const N: usize>(limits: &[Limit; N]) -> [u64; N] {

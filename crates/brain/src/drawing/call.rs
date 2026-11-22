@@ -21,9 +21,7 @@ use super::{Drawing, Job, LAYOUT_VERSION, Output, Pend, StepWait, Wait};
 use crate::coordinator::{Effect, Stale};
 use crate::engines::CallId;
 
-/// Rejected records one run may make [guess, architecture v1 §4.5].
-const MAX_REJECTED: u8 = 8;
-/// Draw calls one run may make (guess).
+/// Hard call ceiling used to size the queue even when the configured limit is lower.
 pub(super) const MAX_CALLS_PER_RUN: usize = 16;
 /// Records one call may make: a `begin`, the run's whole step budget and an `end`. The next
 /// one ends the call as exhausted, after the records before it.
@@ -239,7 +237,7 @@ pub(super) struct Call {
     pub(super) awaits: Option<u32>,
     /// The newest step of its scene the shell prepared or showed while it was open.
     pub(super) answered: Option<u32>,
-    /// The shell answered for its scene since the last [`super::READY_WAIT`] tick.
+    /// The shell answered for its scene since the last ready-wait tick.
     pub(super) heard: bool,
     /// Text after its records array was ignored, told with its result.
     pub(super) after_records: bool,
@@ -444,13 +442,14 @@ impl Drawing {
                 Ok(Some(at))
             };
         }
+        let limit = self.tuning.calls;
         let ledger = self.ledger(run);
-        if ledger.calls > MAX_CALLS_PER_RUN {
+        if ledger.calls > limit {
             return Err(Stale);
         }
         ledger.calls += 1;
         let (repair, exhausted) = (ledger.failed, ledger.exhausted);
-        if ledger.calls > MAX_CALLS_PER_RUN {
+        if ledger.calls > limit {
             // Told once; the run's later calls are stale.
             out.calls.push(CallEnd {
                 run,
@@ -883,8 +882,8 @@ impl Drawing {
         }
     }
 
-    /// Ends a call early. A model error spends the run's budgets: eight rejected records, and
-    /// one repair round after a failed call.
+    /// Ends a call early. A model error spends the run's rejection budget or its one repair
+    /// round after a failed call.
     pub(super) fn fail(&mut self, at: usize, error: CallError, out: &mut Output) {
         let (run, repair) = (self.calls[at].run, self.calls[at].repair);
         // Spent budgets end every later model error as exhausted, whichever call it is in.
@@ -900,7 +899,7 @@ impl Drawing {
                 ledger.exhausted |= repair;
                 ledger.failed = true;
             }
-            ledger.exhausted |= ledger.rejected >= MAX_REJECTED;
+            ledger.exhausted |= ledger.rejected >= self.tuning.rejected;
         }
         self.end(at, Some(error), out);
     }
@@ -1116,7 +1115,7 @@ impl Drawing {
     pub(super) fn remaining(&self, run: RunId) -> Remaining {
         let ledger = self.runs.iter().find(|ledger| ledger.run == run);
         if run <= self.closed
-            || ledger.is_some_and(|ledger| ledger.exhausted || ledger.calls >= MAX_CALLS_PER_RUN)
+            || ledger.is_some_and(|ledger| ledger.exhausted || ledger.calls >= self.tuning.calls)
         {
             Remaining::Nothing
         } else if ledger.is_some_and(|ledger| ledger.steps >= MAX_DRAW_STEPS_PER_RUN) {

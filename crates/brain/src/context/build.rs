@@ -8,9 +8,9 @@ use serde_json::{Value, json};
 
 use super::bound::{fixed_bytes, item_bytes};
 use super::{
-    Body, BuildError, Built, ConnectionTag, HistoryRef, InputItem, Item, MAX_NOTES, ModelRequest,
-    Origin, PictureRecipient, RAW_RUNS, REMOVED, REREAD_CAP, Role, RunSnapshot, Supplied,
-    UNAVAILABLE, note_item, summary_item, tools,
+    Body, BuildError, Built, ConnectionTag, HistoryRef, InputItem, Item, ModelRequest, Origin,
+    PictureRecipient, REMOVED, Role, RunSnapshot, Supplied, UNAVAILABLE, note_item, summary_item,
+    tools,
 };
 use crate::dispatch::ToolOutput;
 use crate::engines::anthropic::encode::{KeyHistory, ToolUse};
@@ -108,9 +108,10 @@ fn assemble(
     }
     // A deletion note follows the last run that began before it, never splitting one, and is
     // dropped with that run; notes older than every run stay only while no run left the window.
-    let mut notes = snapshot.notes(turn.thread, after, MAX_NOTES)?;
-    let whole = older.len() < RAW_RUNS;
-    let mut segments = older.iter().rev().take(RAW_RUNS - 1);
+    let tuning = snapshot.tuning();
+    let mut notes = snapshot.notes(turn.thread, after, tuning.notes)?;
+    let whole = older.len() < tuning.raw_runs;
+    let mut segments = older.iter().rev().take(tuning.raw_runs - 1);
     let mut kept = Vec::new();
     loop {
         let segment = segments.next();
@@ -553,7 +554,7 @@ fn quote(
         reference.thread,
         reference.first,
         reference.last,
-        REREAD_CAP,
+        snapshot.tuning().reread,
     )?;
     Ok(json!({
         "task": task,

@@ -8,7 +8,7 @@ use kumochi_protocol::constants::{COMPACT_AT_ENV, DISPLAY_NAME};
 use kumochi_protocol::message::{Effort, MAX_TITLE_CHARS, ModelChoice, ThreadTitle};
 
 use crate::context::build::fill;
-use crate::context::compact::{COMPACT_AT, MAX_SUMMARY};
+use crate::context::compact::MAX_SUMMARY;
 use crate::context::{InputItem, ModelRequest, Role, RunSnapshot};
 
 const TITLE_PROMPT: &str = include_str!("../prompts/title.md");
@@ -20,13 +20,13 @@ pub(crate) const MAX_OUTPUT: usize = 4 * 1024;
 /// cut shorter, to [`MAX_SUMMARY`] [guess].
 pub(crate) const MAX_SUMMARY_OUTPUT: usize = 2 * MAX_SUMMARY;
 
-/// The compaction threshold: [`COMPACT_AT`], or in a dev build the count [`COMPACT_AT_ENV`] names.
-pub(crate) fn compact_at() -> u64 {
+/// The compaction threshold, with the existing Dev fixture override.
+pub(crate) fn compact_at(configured: u64) -> u64 {
     std::env::var(COMPACT_AT_ENV)
         .ok()
         .filter(|_| cfg!(debug_assertions))
         .and_then(|value| value.trim().parse().ok())
-        .unwrap_or(COMPACT_AT)
+        .unwrap_or(configured)
 }
 
 /// The title request for a task whose first ask is `ask`: the title prompt with the run's names,

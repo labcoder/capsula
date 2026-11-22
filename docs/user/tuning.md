@@ -80,6 +80,10 @@ calls_count = 16
 wall_clock_s = 120
 # 8–60 seconds: how long a message to Claude Code waits while Kumochi is still looking for it.
 finding_wait_s = 30
+# 11–15 seconds: how long a direct model send has to settle after being granted.
+send_lease_s = 15
+# 60–150 seconds: the maximum lifetime of a Claude Code launch, including warm-up.
+claude_launch_s = 150
 ```
 
 ## ChatGPT sign-in and tokens
@@ -102,4 +106,57 @@ first_backoff_ms = 500
 # Both waits together must be shorter than revoke_s.
 # 250–4000 milliseconds: the wait before a second retry, at least as long as the first.
 second_backoff_ms = 1000
+```
+
+## Token refresh leads
+
+A shorter lead lets a session use its existing token closer to expiry. It doesn't extend the
+token's validity or change what happens after a failed refresh.
+
+```toml
+[tuning.tokens]
+# 30–60 seconds: how early to refresh GitHub, still limited to half the remaining lifetime.
+github_refresh_lead_s = 60
+# 30–60 seconds: when ChatGPT starts waiting for refresh rather than using the old token.
+chatgpt_refresh_lead_s = 60
+```
+
+## Drawing
+
+These control draw calls and how long Kumochi waits for the shell or retries a failed clear.
+They don't change the drawing format, layout, or screen permissions.
+
+```toml
+[tuning.drawing]
+# 1–16: draw calls a run may open.
+calls_count = 16
+# 1–8: rejected records before drawing ends for that run.
+rejected_count = 8
+# 250–1000 milliseconds: how long a waiting draw call gives the shell to become ready.
+ready_wait_ms = 1000
+# 250–2000 milliseconds: the first wait before retrying a failed clear. At most last_retry_ms.
+first_retry_ms = 500
+# 1000–60000 milliseconds: the cap for waits between clear retries.
+last_retry_ms = 30000
+```
+
+## Context and recall
+
+These change how much history goes into requests. They don't delete stored history or let a
+model read anything it couldn't read before. A saved recall result keeps its original selection.
+
+```toml
+[tuning.context]
+# 24000–48000 estimated tokens: uncovered history required to start background compaction.
+compact_at_token_count = 24000
+# 49152–98304 bytes: summary request budget, including instructions and the previous summary.
+summary_input_bytes = 98304
+# 2–8: the newest runs kept raw when they fit.
+raw_runs_count = 8
+# 16–32: the newest deletion notes considered by the context builder.
+notes_count = 32
+# 16384–32768 bytes: how much text one older history reference may reread.
+reread_bytes = 32768
+# 10–20: text events a new history.read result may show, still subject to its byte limit.
+read_events_count = 20
 ```

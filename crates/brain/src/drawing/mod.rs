@@ -30,6 +30,7 @@ use kumochi_scene::layout::LayoutState;
 use kumochi_scene::theme::Theme;
 use kumochi_scene::{Admitted, Begin, GlobalBudget, Record, SceneState, Step, StopCut};
 
+use crate::config::tuning::DrawingTuning;
 use crate::coordinator::{BuildKey, Effect, Stale, StoreOp};
 use crate::engines::CallId;
 
@@ -37,7 +38,6 @@ pub use call::{CallEnd, CallError, Remaining};
 pub(crate) use digest::Digest;
 pub use io::{Reply, StoredScene, Target, Write};
 pub use prepare::{PrepareJob, Prepared, Shared};
-pub use ready::READY_WAIT;
 pub(crate) use screen::{SCREEN_MARKS, ScreenMarks, stored_item};
 pub(crate) use snapshot::CHUNK_TARGET;
 pub use snapshot::Snapshot;
@@ -137,7 +137,7 @@ pub enum Input {
         /// Its zero-based lifetime index.
         index: u32,
     },
-    /// [`READY_WAIT`] passed while a finished call waited for the shell.
+    /// A ready-wait interval passed while a finished call waited for the shell.
     ReadyWait,
     /// The shell couldn't prepare a step and stopped its scene at `cut`.
     StepFailed {
@@ -211,6 +211,7 @@ pub struct Output {
 /// The drawing system's state.
 #[derive(Default)]
 pub struct Drawing {
+    pub(crate) tuning: DrawingTuning,
     unavailable: bool,
     global: GlobalBudget,
     /// Visible scenes, oldest first.

@@ -243,9 +243,9 @@ RefreshRepos, plus Sign out. Only a successful explicit recheck restores use;
 late success or failure from the canceled check cannot do so. A genuine
 non-401 startup failure uses the same saved-but-unverified presentation.
 
-An access token schedules rotation one minute before expiry, or halfway through
-the remaining lifetime when less than two minutes remain. Every positive remaining
-lifetime has a positive delay. An access token already unusable when restored-account
+An access token schedules rotation before expiry by `[tuning.tokens] github_refresh_lead_s`
+(default 60 s, range 30–60 s), capped at half the remaining lifetime. Every positive
+remaining lifetime has a positive delay. An access token already unusable when restored-account
 verification or a successful fresh-pair save completes ends in NeedsSignIn. A fresh
 pair that expires during its identity check still gets its one credential save first.
 An expired stored pair found at startup still gets one automatic recovery; an

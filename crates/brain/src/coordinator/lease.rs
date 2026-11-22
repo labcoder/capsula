@@ -428,7 +428,7 @@ impl Coordinator {
     }
 
     /// Records a lease for `key` carrying `sources` and `screen`, grants it and arms its deadline:
-    /// `hold`, capped at [`MAX_HOLD`], or [`SEND_DEADLINE`].
+    /// `hold`, capped at [`MAX_HOLD`], or the configured send lease.
     pub(super) fn grant(
         &mut self,
         key: SendKey,
@@ -453,7 +453,7 @@ impl Coordinator {
         effects.push(Effect::Grant(id));
         effects.push(Effect::ArmSendDeadline {
             lease: id,
-            after: hold.map_or(SEND_DEADLINE, |hold| hold.min(MAX_HOLD)),
+            after: hold.map_or(self.tuning.send_lease, |hold| hold.min(MAX_HOLD)),
         });
     }
 

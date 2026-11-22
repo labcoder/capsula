@@ -10,8 +10,8 @@ use kumochi_protocol::message::{EventId, ThreadId, ThreadKind};
 use super::bound::{escaped, fixed_bytes, item_bytes};
 use super::build::{fill, render};
 use super::{
-    Body, BuildError, Built, InputItem, Item, MAX_NOTES, ModelRequest, Origin, RAW_RUNS, Role,
-    RunSnapshot, Summary, note_item, summary_item,
+    Body, BuildError, Built, InputItem, Item, ModelRequest, Origin, Role, RunSnapshot, Summary,
+    note_item, summary_item,
 };
 use crate::store::Generation;
 use crate::store::context::{Snapshot, Speaker};
@@ -20,6 +20,7 @@ const SUMMARY_PROMPT: &str = include_str!("../../prompts/summary.md");
 /// The uncovered backlog, in estimated tokens, at which a task compacts after a run [guess].
 pub(crate) const COMPACT_AT: u64 = 24_000;
 /// The most a summary request may carry, prompt and previous summary included [guess].
+#[cfg(test)]
 pub(crate) const SUMMARY_INPUT: usize = 96 * 1024;
 /// The longest summary stored, in bytes [guess].
 pub(crate) const MAX_SUMMARY: usize = 8 * 1024;
@@ -36,8 +37,8 @@ pub(crate) struct Compaction {
 }
 
 /// The summary request for `thread`, once its uncovered backlog reaches `compact_at` estimated
-/// tokens. It summarizes the longest prefix of whole runs older than the newest [`RAW_RUNS`]
-/// that fits [`SUMMARY_INPUT`], with the previous summary, and covers from the previous
+/// tokens. It summarizes the longest prefix of whole runs older than the configured raw-run
+/// window that fits the summary-input limit, with the previous summary, and covers from the previous
 /// summary's start through the last run it carries. `None` when the thread is being deleted or
 /// gone, the backlog is under the threshold, no run is old enough, or the oldest one alone
 /// doesn't fit.
@@ -57,17 +58,18 @@ pub(crate) fn compaction(
     let after = previous.as_ref().map(|summary| summary.last);
     let uncovered = snapshot.uncovered(thread, after)?;
     let backlog = uncovered.iter().map(|run| run.bytes).sum::<u64>() / BYTES_PER_TOKEN;
-    let eligible = &uncovered[..uncovered.len().saturating_sub(RAW_RUNS)];
+    let tuning = snapshot.tuning();
+    let eligible = &uncovered[..uncovered.len().saturating_sub(tuning.raw_runs)];
     let Some(newest) = eligible.last() else {
         return Ok(None);
     };
     if backlog < compact_at {
         return Ok(None);
     }
-    let (said, unread) = snapshot.span(thread, after, newest.last, SUMMARY_INPUT)?;
+    let (said, unread) = snapshot.span(thread, after, newest.last, tuning.summary_input)?;
     let mut said = said.into_iter().peekable();
     let mut notes = snapshot
-        .notes(thread, after, MAX_NOTES)?
+        .notes(thread, after, tuning.notes)?
         .into_iter()
         .peekable();
 
@@ -122,7 +124,7 @@ pub(crate) fn compaction(
                 .map(|note| note_item(&note)),
         );
         let bytes = rendered.iter().map(item_bytes).sum::<usize>();
-        if total + bytes > SUMMARY_INPUT {
+        if total + bytes > tuning.summary_input {
             break;
         }
         total += bytes;

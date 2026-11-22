@@ -2,17 +2,10 @@
 //! not yet durable. Every way a scene leaves the set writes a `scene_cleared`, so the store's
 //! recovery at start reads the set this holds.
 
-use std::time::Duration;
-
 use kumochi_protocol::message::{MAX_VISIBLE_SCENES, RunId, SceneId, Step};
 
 use super::{Coordinator, Effect, Stale, StoreOp};
 use crate::store::SceneState;
-
-/// The first wait before owed writes that failed are tried again [guess].
-pub(super) const FIRST_RETRY: Duration = Duration::from_millis(500);
-/// The longest, so a store that keeps failing is tried rarely instead of constantly [guess].
-const LAST_RETRY: Duration = Duration::from_secs(30);
 
 impl Coordinator {
     /// The visible set, oldest first.
@@ -65,7 +58,7 @@ impl Coordinator {
     /// longer.
     pub(super) fn retry_now(&mut self, effects: &mut Vec<Effect>) {
         self.retry_armed = None;
-        self.retry_after = (self.retry_after * 2).min(LAST_RETRY);
+        self.retry_after = (self.retry_after * 2).min(self.drawing.tuning.last_retry);
         self.retry(effects);
         self.drawing_retry(effects);
     }
@@ -75,7 +68,7 @@ impl Coordinator {
     /// debt. A deadline longer than the current wait, armed before a commit reset it, is replaced.
     pub(super) fn arm_retry(&mut self, effects: &mut Vec<Effect>) {
         if self.clearing.is_empty() && self.keeping.is_empty() && !self.drawing.cut_pending() {
-            self.retry_after = FIRST_RETRY;
+            self.retry_after = self.drawing.tuning.first_retry;
         }
         let unwritten = self.clearing.iter().any(|(_, writing)| !writing)
             || self.keeping.iter().any(|(_, _, writing)| !writing)
@@ -164,7 +157,7 @@ impl Coordinator {
     /// A clear's write committed: those scenes' clears are durable.
     pub(super) fn cleared(&mut self, scenes: &[SceneId]) {
         self.clearing.retain(|(scene, _)| !scenes.contains(scene));
-        self.retry_after = FIRST_RETRY;
+        self.retry_after = self.drawing.tuning.first_retry;
     }
 
     /// A clear's write failed: those scenes wait for a retry.
@@ -234,7 +227,7 @@ impl Coordinator {
     /// A kept selection's write committed.
     pub(super) fn kept(&mut self, scene: SceneId) {
         self.keeping.retain(|(kept, _, _)| *kept != scene);
-        self.retry_after = FIRST_RETRY;
+        self.retry_after = self.drawing.tuning.first_retry;
     }
 
     /// A kept selection's write failed: it waits for a retry.
