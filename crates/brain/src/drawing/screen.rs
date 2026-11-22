@@ -37,21 +37,26 @@ impl Drawing {
         let ledger = self.ledger(run);
         if canvas.is_err() || ledger.canvas != Some(Err(NoCanvas::Changed)) {
             ledger.canvas = Some(canvas);
-            if canvas.is_ok() && ledger.picture_recipient.is_none() {
-                ledger.picture_recipient = recipient.cloned();
+            if canvas.is_ok()
+                && ledger.author == super::Author::Public
+                && let Some(recipient) = recipient
+            {
+                ledger.author = super::Author::Private(recipient.clone());
             }
         }
     }
 
     /// `run`'s requests carried protected material for `recipient`, so every scene it draws, on
-    /// any surface, is that recipient's. The first recipient stays for the rest of the run.
+    /// any surface, is that recipient's. The first recipient (or a subsequent revocation to
+    /// `Unknown`) stays for the rest of the run.
     pub(crate) fn author(&mut self, run: RunId, recipient: Option<&PictureRecipient>) {
         if run > self.closed
             && let Some(recipient) = recipient
         {
-            self.ledger(run)
-                .picture_recipient
-                .get_or_insert_with(|| recipient.clone());
+            let ledger = self.ledger(run);
+            if ledger.author == super::Author::Public {
+                ledger.author = super::Author::Private(recipient.clone());
+            }
         }
     }
 
@@ -77,9 +82,69 @@ impl Drawing {
         Ok(begin)
     }
 
-    /// Sharing the screen was turned off: every screen scene leaves, every call drawing one ends
-    /// as `ScreenOff`, and a later screen `begin` is refused the same way. A step of theirs still
-    /// being laid out or written settles without reaching the shell.
+    /// Downgrades every private scene, in-flight private step write, and active protected run
+    /// ledger to `Author::Unknown`, keeping overlays visible locally and preserving `protected`
+    /// storage markers while preventing any of them from reaching a model again.
+    pub(crate) fn revoke_private(&mut self) {
+        for held in &mut self.scenes {
+            if !held.gone && matches!(held.author, super::Author::Private(_)) {
+                held.author = super::Author::Unknown;
+            }
+        }
+        if let Some(Pending {
+            wait: Wait::Step(write) | Wait::Prepare { step: write, .. },
+            ..
+        }) = &mut self.pending
+            && matches!(write.author, super::Author::Private(_))
+        {
+            write.author = super::Author::Unknown;
+        }
+        for ledger in &mut self.runs {
+            if matches!(ledger.author, super::Author::Private(_)) {
+                ledger.author = super::Author::Unknown;
+            }
+        }
+    }
+
+    /// Resets a provisional authorship stamp for a round-1 run whose send was proven unsent
+    /// before any draw call or write occurred, so a clean screen-free retry draws as public.
+    pub(crate) fn reset_unsent_author(&mut self, run: RunId) {
+        if run <= self.closed
+            || self.calls.iter().any(|call| call.run == run)
+            || self
+                .scenes
+                .iter()
+                .any(|held| held.committers.contains(&Some(run)))
+            || matches!(
+                &self.pending,
+                Some(Pending {
+                    wait: Wait::Lookup { run: owner, .. },
+                    ..
+                }) if *owner == run
+            )
+            || matches!(
+                &self.pending,
+                Some(Pending {
+                    wait: Wait::Step(write) | Wait::Prepare { step: write, .. },
+                    ..
+                }) if write.run == run
+            )
+        {
+            return;
+        }
+        if let Some(ledger) = self
+            .runs
+            .iter_mut()
+            .find(|ledger| ledger.run == run && ledger.untouched())
+        {
+            ledger.author = super::Author::Public;
+        }
+    }
+
+    /// Sharing the screen was turned off: every screen scene leaves, every remaining private
+    /// overlay drops out of outbound digests while staying visible locally, every call drawing a
+    /// screen scene ends as `ScreenOff`, and a later screen `begin` is refused the same way. A
+    /// step of theirs still being laid out or written settles without reaching the shell.
     pub(super) fn screen_off(&mut self, out: &mut Output) {
         for ledger in &mut self.runs {
             if ledger.canvas.is_some() {
@@ -113,6 +178,7 @@ impl Drawing {
             .map(|held| held.scene)
             .collect();
         self.clear_scenes(&screens, out);
+        self.revoke_private();
     }
 
     /// The shell skipped screen scene `scene` because the screen may have changed since its

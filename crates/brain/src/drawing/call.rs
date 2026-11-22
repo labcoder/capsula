@@ -283,7 +283,7 @@ pub(super) struct RunLedger {
     pub(super) loss: Option<ThreadId>,
     /// What its screen scenes may be drawn on; `None` while `draw` can't mark the screen.
     pub(super) canvas: Option<Result<crate::context::Geometry, crate::context::NoCanvas>>,
-    pub(super) picture_recipient: Option<crate::context::PictureRecipient>,
+    pub(super) author: super::Author,
 }
 
 impl RunLedger {
@@ -291,6 +291,10 @@ impl RunLedger {
     // the count past the run's end if a late refusal shows up in practice.
     pub(super) fn drew_nothing(&self) -> bool {
         self.calls > 0 && self.steps == self.refused
+    }
+
+    pub(super) const fn untouched(&self) -> bool {
+        self.calls == 0 && self.steps == 0
     }
 
     pub(super) fn refuse_step(&mut self) {
@@ -765,11 +769,11 @@ impl Drawing {
         } else {
             Arc::clone(&step)
         };
-        let recipient = self
+        let author = self
             .runs
             .iter()
             .find(|ledger| ledger.run == run)
-            .and_then(|ledger| ledger.picture_recipient.clone());
+            .map_or(super::Author::Public, |ledger| ledger.author.clone());
         let write = Write::Step {
             thread,
             run,
@@ -778,7 +782,7 @@ impl Drawing {
             revision,
             layout_version,
             step: stored,
-            protected: recipient.is_some(),
+            protected: author.is_protected(),
         };
         let wait = StepWait {
             run,
@@ -791,7 +795,7 @@ impl Drawing {
             loss_dropped: false,
             interrupted: None,
             laid: None,
-            recipient,
+            author,
         };
         self.prepare_step(wait, write, out);
         Ok(())
@@ -1148,7 +1152,7 @@ impl Drawing {
                     exhausted: false,
                     loss: None,
                     canvas: None,
-                    picture_recipient: None,
+                    author: super::Author::Public,
                 });
                 self.runs.len() - 1
             });

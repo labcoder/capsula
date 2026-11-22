@@ -205,13 +205,24 @@ sequenceDiagram
   coordinator closes it as soon as the run may no longer send that picture: its route's fact no
   longer lists the model as taking images (`ChatGPT`'s is its catalog's `input_modalities`, and a
   loss holds for the rest of the run), the picture is withdrawn, or the run's sign-in changes.
-  The Responses transport admits each writer poll against it (see Write admission). The key route
-  checks at its first write attempt, after any early response. Claude Code reserves each pipe
+  A send that carries a protected drawing digest without a picture, on `ChatGPT` or the key
+  route, carries one too: it also closes when showing the screen is turned off (which removes
+  screen scenes and drops private overlays out of outbound digests while leaving them visible
+  locally), when a carried drawing changes or queues a failed cut, when the run ends, or, on a
+  true key continuation (not a standalone inline rewrite), when any round-1 carried private scene
+  changes, leaves, or loses authority in between. Claude Code's digest-only sends aren't gated
+  yet; its pictures stay off.
+  Both HTTP routes (`ChatGPT` Responses and Anthropic Messages) upload through `ModelConn::upload`
+  and check the grant before every write and flush poll (see Write admission): closing the grant
+  before the first admission prevents any request bytes from being written, while bytes already
+  admitted into TLS or kernel buffers cannot be recalled. Claude Code reserves each pipe
   write against the same grant. If no write was attempted, any terminal outcome goes behind the
   confirmed unsent receipt on that same channel. A closed grant makes the still-current build
-  rebuild without the picture, so the old terminal outcome is stale. Unconfirmed teardown leaves
-  settlement to the held lease's deadline. Once a write was attempted, the pump reports terminal
-  outcomes as usual, including `Truncated` for unexpected stream EOF.
+  rebuild without the picture (or keeps a still-valid picture when only a drawing digest changed),
+  so the old terminal outcome is stale; a revoked key continuation fails closed instead of
+  rebuilding. Unconfirmed teardown leaves settlement to the held lease's deadline. Once a write
+  was attempted, the pump reports terminal outcomes as usual, including `Truncated` for
+  unexpected stream EOF.
   On Claude Code the grant also belongs to the account generation
   the question it was issued for was asked under, not the one its picture was captured under:
   a new generation closes it, before that generation is published, even while that launch,
