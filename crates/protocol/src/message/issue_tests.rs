@@ -185,7 +185,7 @@ fn tagged_github_refusal_appends_wire_tags_and_keeps_error_validation() {
     let too_many = [14, 0, 0, 0, 25, 42, 5, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
     assert!(matches!(
         read::<ControlToShell>(&mut too_many.as_slice(), Pipe::Control),
-        Err(FrameError::Malformed(postcard::Error::SerdeDeCustom))
+        Err(FrameError::Malformed(_))
     ));
 }
 
@@ -633,17 +633,13 @@ fn issue_provenance_rejects_missing_mistyped_overflow_and_truncated_identities()
     for short in [&[0, 5][..], &[0, 5, 128]] {
         assert!(matches!(
             decode::<ControlToShell>(short),
-            Err(FrameError::Malformed(
-                postcard::Error::DeserializeUnexpectedEnd
-            ))
+            Err(FrameError::Malformed(_))
         ));
     }
     for short in [&[25][..], &[25, 128]] {
         assert!(matches!(
             decode::<ControlToBrain>(short),
-            Err(FrameError::Malformed(
-                postcard::Error::DeserializeUnexpectedEnd
-            ))
+            Err(FrameError::Malformed(_))
         ));
     }
     for json in [

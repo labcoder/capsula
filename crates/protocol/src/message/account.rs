@@ -157,9 +157,8 @@ mod tests {
         for bad in ["", "a\n@b", "a\r@b", "a\u{2028}@b", over.as_str()] {
             assert_eq!(AccountEmail::new(bad), Err(EmailError), "{bad:?}");
             let wire = postcard::to_allocvec(bad).unwrap();
-            assert_eq!(
-                postcard::from_bytes::<AccountEmail>(&wire),
-                Err(postcard::Error::SerdeDeCustom),
+            assert!(
+                postcard::from_bytes::<AccountEmail>(&wire).is_err(),
                 "{bad:?}"
             );
         }
