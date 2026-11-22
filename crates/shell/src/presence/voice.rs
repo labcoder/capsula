@@ -297,7 +297,7 @@ impl Presence {
                 .is_some_and(|s| s.generation() == stamp.session && s.open())
     }
 
-    fn voice_notice(&mut self, text: Text, cx: &mut Context<'_, Self>) {
+    pub(super) fn voice_notice(&mut self, text: Text, cx: &mut Context<'_, Self>) {
         tracing::debug!(stage = ?FailureStage::Notice, reason = ?text, "held speech input notice");
         self.voice.status = Some(text);
         // A microphone that may still be open matters more than the lost brain's notice.
@@ -1091,6 +1091,7 @@ impl Presence {
         } else {
             Text::HoldFailed
         };
+        let prepared = request.is_ok();
         let sent = match request {
             Err(reason) => {
                 tracing::warn!(stage = ?FailureStage::Admission, ?reason, "held speech input failed");
@@ -1147,10 +1148,11 @@ impl Presence {
             self.refusal = None;
             self.voice_notice(Text::HoldPreparing, cx);
         } else {
-            self.unused_voice(&token, Some(&session));
+            if prepared {
+                self.runs.discard_unpublished_hold(gesture);
+            }
+            self.unused_voice(&token, (!prepared).then_some(&session));
             self.link.clear_input(gesture);
-            self.runs.cancel_hold();
-            self.drain_voice_cancel();
             self.voice_notice(notice, cx);
         }
     }
