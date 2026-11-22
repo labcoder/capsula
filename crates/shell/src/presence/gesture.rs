@@ -1,10 +1,8 @@
 //! Carries keyboard gestures from the native Raw Input callback into the presence owner.
 //!
-//! The callback closes collection authority before deferred UI work. Effects then reach the
-//! owner through `update_window`, which only tries to borrow the app. If GPUI is already
-//! borrowed, because a nested message loop dispatched this callback, effects wait in order
-//! with their original times and are retried until they apply or the owner is gone, instead of
-//! panicking or being lost. Intents run when the dock's update has ended, inside the same call:
+//! The callback closes collection authority before applying or queuing UI work. Cancellations
+//! always wait in the ordered queue, where the task sends the wire cancel before applying the
+//! corresponding effects. Other effects also queue when the app is busy. Intents run when the dock's update has ended, inside the same call:
 //! GPUI takes a window out of its table while updating it, and a recognized hold's capture
 //! lease must reach every presence window, the dock included.
 
@@ -13,33 +11,63 @@ use std::rc::Rc;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
-use gpui_kit::{AnyWindowHandle, App, AppContext as _, AsyncApp, WeakEntity};
+use gpui_kit::{
+    AnyWindowHandle, App, AppContext as _, AsyncApp, BackgroundExecutor, Context, WeakEntity,
+};
 
 use super::{
     Presence,
     voice::{Gates, HoldBack, Stamp},
 };
 use crate::input::{
-    Edge, Event, Gesture, Key, TalkHeld,
+    Edge, Effect, Event, Gesture, Key, TalkHeld,
     hold::{Delivery, Fence, InputReason, InputStage, Intent},
 };
 use crate::link::{InputCancel, LinkHandle};
 use crate::platform::{Deliver, EventTime, cursor_position, performance_counter};
+use crate::strings::Text;
 use kumochi_protocol::geometry::PhysicalPoint;
 use kumochi_protocol::message::{GestureId, ThreadId};
 
 struct Pending {
+    cancel: Option<InputCancel>,
+    gesture: Option<PendingGesture>,
+}
+
+struct PendingGesture {
     delivery: Delivery,
     stamp: Stamp,
     qpc: u64,
     /// Where the pointer was when this delivery recognized a hold or saw its keys come up.
     pointer: Option<PhysicalPoint>,
     input: ReleaseInput,
-    cancelled: Option<GestureId>,
-    superseded: Option<InputCancel>,
+    cancelled: Option<(GestureId, u64)>,
     /// An Esc press: every retirement waits until this delivery is decided.
     escape: Option<Rc<HoldBack>>,
     collection: u64,
+}
+
+impl PendingGesture {
+    fn typing_effects(
+        &self,
+        owner: &mut Presence,
+        cx: &mut Context<'_, Presence>,
+    ) -> [Option<Effect>; 3] {
+        let effects = self.delivery.effects;
+        if !effects.contains(&Some(Effect::OpenInput)) {
+            return effects;
+        }
+        if !self.input.uninterrupted()
+            || !owner.native.escape_trusted()
+            || owner.link.microphone_gate().latest() != self.collection
+        {
+            return effects.map(|effect| effect.filter(|effect| *effect != Effect::OpenInput));
+        }
+        if let Some((gesture, _)) = self.cancelled {
+            owner.cancel_voice_gesture(gesture, cx);
+        }
+        effects
+    }
 }
 
 #[derive(Clone)]
@@ -85,6 +113,7 @@ enum Applied {
 
 #[derive(Clone, Copy)]
 enum CancelDispatch {
+    Inline,
     Clear,
     Refused,
 }
@@ -109,28 +138,44 @@ pub(super) fn deliver(
     cx: &mut App,
 ) -> Deliver {
     let (deferred, pending) = async_channel::unbounded::<Pending>();
-    // Queued plus in flight, so a newer effect never overtakes one still being retried.
     let backlog = Rc::new(Cell::new(0_usize));
-    let waiting = (owner.clone(), Rc::clone(&backlog), link.clone());
+    let waiting = (owner.clone(), link.clone(), Rc::clone(&backlog));
     cx.spawn(async move |cx| {
-        let (owner, backlog, link) = waiting;
-        while let Ok(mut pending) = pending.recv().await {
-            let sent = pending.superseded.take().is_none_or(|cancel| link.dispatch_input_cancel(&cancel));
-            let cancel = if sent { CancelDispatch::Clear } else { CancelDispatch::Refused };
-            loop {
-                match apply(cx, dock, &owner, &pending, cancel) {
-                    Applied::Yes => break,
-                    Applied::Gone => {
-                        tracing::debug!(stage = ?InputStage::Delivery, reason = ?InputReason::OwnerGone, "held speech input boundary");
-                        return;
+        let (owner, link, backlog) = waiting;
+        while let Ok(Pending { cancel, gesture }) = pending.recv().await {
+            let cancel = if let Some(cancel) = cancel {
+                let link = link.clone();
+                let sent = cx.background_executor().spawn(async move { link.dispatch_input_cancel(&cancel) }).await;
+                #[cfg(test)]
+                if let Some((arrived, resume)) = WIRE_CANCEL_BARRIER.take() {
+                    arrived.try_send(()).expect("the test waits for the wire cancel");
+                    let _resume = resume.recv().await;
+                }
+                if sent {
+                    CancelDispatch::Clear
+                } else {
+                    CancelDispatch::Refused
+                }
+            } else {
+                CancelDispatch::Clear
+            };
+            if let Some(gesture) = gesture {
+                loop {
+                    match apply(cx, dock, &owner, &gesture, cancel) {
+                        Applied::Yes => break,
+                        Applied::Gone => {
+                            tracing::debug!(stage = ?InputStage::Delivery, reason = ?InputReason::OwnerGone, "held speech input boundary");
+                            break;
+                        }
+                        Applied::Busy => cx.background_executor().timer(RETRY).await,
                     }
-                    Applied::Busy => cx.background_executor().timer(RETRY).await,
                 }
             }
-            backlog.set(backlog.get().saturating_sub(1));
+            backlog.set(backlog.get() - 1);
         }
     })
     .detach();
+    let executor = cx.background_executor().clone();
     let async_cx = cx.to_async();
     let fence = std::cell::RefCell::new(Fence::new(link.microphone_gate()));
     let escaped = Cell::new(None);
@@ -144,10 +189,24 @@ pub(super) fn deliver(
         } else if matches!(event, Event::Key { .. }) && !at.repeated_modifier {
             input.set((serial.saturating_add(1), reset));
         }
-        let Ok(qpc) = u64::try_from(performance_counter()) else {
+        let qpc = performance_counter();
+        #[cfg(test)]
+        let qpc = if FAIL_CLOCK.take() { -1 } else { qpc };
+        let Ok(qpc) = u64::try_from(qpc) else {
             tracing::warn!(stage = ?InputStage::Delivery, reason = ?InputReason::ClockUnavailable, "held speech input failed");
             input.set((serial.saturating_add(1), reset.saturating_add(1)));
-            link.cancel_input();
+            if let Some(cancel) = link.revoke_input_for_dispatch() {
+                enqueue(
+                    &deferred,
+                    &backlog,
+                    &executor,
+                    &link,
+                    Pending {
+                        cancel: Some(cancel),
+                        gesture: None,
+                    },
+                );
+            }
             let mut state = gesture.get();
             let _cancelled =
                 fence
@@ -163,13 +222,15 @@ pub(super) fn deliver(
             escaped.set(None);
             escape_down.set(false);
         }
+        let mut wire_cancel = None;
         if let Event::Key {
             key: Key::Escape(_),
             edge,
         } = event
         {
             if edge == Edge::Down && !escape_down.replace(true) {
-                escaped.set(link.cancel_input_gesture());
+                wire_cancel = link.revoke_input_for_dispatch();
+                escaped.set(wire_cancel.as_ref().map(InputCancel::target));
             } else if edge == Edge::Up {
                 escape_down.set(false);
                 escaped.set(None);
@@ -177,7 +238,10 @@ pub(super) fn deliver(
         }
         let escape = event == Event::Escape;
         let mut cancelled = if escape {
-            escaped.take().or_else(|| link.cancel_input_gesture())
+            escaped.take().or_else(|| {
+                wire_cancel = link.revoke_input_for_dispatch();
+                wire_cancel.as_ref().map(InputCancel::target)
+            })
         } else {
             None
         };
@@ -197,7 +261,7 @@ pub(super) fn deliver(
             },
         );
         gesture.set(state);
-        let mut superseded = None;
+        let mut cancellation = cancelled.is_some();
         for intent in delivery.intents.iter().flatten() {
             if let Intent::End { gesture, .. } = intent
                 && recovered_hold.get() == Some(*gesture)
@@ -222,7 +286,11 @@ pub(super) fn deliver(
                     generation,
                 } => {
                     if generation.is_ok() {
-                        superseded = link.revoke_input_for_dispatch();
+                        debug_assert!(
+                            wire_cancel.is_none(),
+                            "recognition cannot carry an earlier cancel"
+                        );
+                        wire_cancel = link.revoke_input_for_dispatch();
                         link.track_input_on(*gesture, session);
                     }
                     gates.recognized(*gesture, generation.is_ok());
@@ -230,7 +298,8 @@ pub(super) fn deliver(
                 Intent::End {
                     cancelled: true, ..
                 } => {
-                    link.cancel_input();
+                    cancellation |= !escape;
+                    wire_cancel = wire_cancel.or_else(|| link.revoke_input_for_dispatch());
                 }
                 _ => {}
             }
@@ -243,12 +312,26 @@ pub(super) fn deliver(
             .iter()
             .any(|e| matches!(e, Some(crate::input::Effect::OpenInput)))
         {
-            cancelled = link.cancel_input_gesture();
+            wire_cancel = wire_cancel.or_else(|| link.revoke_input_for_dispatch());
+            cancellation = true;
+            cancelled = wire_cancel.as_ref().map(InputCancel::target);
         }
         if delivery.effects.iter().all(Option::is_none)
             && delivery.intents.iter().all(Option::is_none)
             && !escape
         {
+            if let Some(cancel) = wire_cancel {
+                enqueue(
+                    &deferred,
+                    &backlog,
+                    &executor,
+                    &link,
+                    Pending {
+                        cancel: Some(cancel),
+                        gesture: None,
+                    },
+                );
+            }
             return state.deadline();
         }
         // Sampled once, here in the callback, so a screen hold's line starts where the pointer
@@ -273,8 +356,7 @@ pub(super) fn deliver(
             .then(cursor_position)
             .and_then(Result::ok)
             .map(PhysicalPoint);
-        let ordered_cancel = superseded.is_some();
-        let pending = Pending {
+        let pending = PendingGesture {
             delivery,
             qpc,
             pointer,
@@ -284,7 +366,6 @@ pub(super) fn deliver(
                 at,
             },
             cancelled,
-            superseded,
             escape: escape.then(|| gates.hold_back()),
             collection: link.microphone_gate().latest(),
             stamp: Stamp {
@@ -293,7 +374,8 @@ pub(super) fn deliver(
                 choice: link.choice_revision(),
             },
         };
-        if !ordered_cancel
+        if !cancellation
+            && wire_cancel.is_none()
             && !at.defer_terminal
             && backlog.get() == 0
             && matches!(
@@ -302,24 +384,23 @@ pub(super) fn deliver(
                     dock,
                     &owner,
                     &pending,
-                    CancelDispatch::Clear
+                    CancelDispatch::Inline
                 ),
                 Applied::Yes
             )
         {
             return gesture.get().deadline();
         }
-        backlog.set(backlog.get() + 1);
-        tracing::debug!(stage = ?InputStage::Delivery, reason = ?InputReason::Deferred, "held speech input boundary");
-        if deferred.try_send(pending).is_err() {
-            if ordered_cancel {
-                let _revoked = link.revoke_input_for_dispatch();
-            } else {
-                link.cancel_input();
-            }
-            backlog.set(backlog.get() - 1);
-            tracing::debug!(stage = ?InputStage::Delivery, reason = ?InputReason::QueueClosed, "held speech input boundary");
-        }
+        enqueue(
+            &deferred,
+            &backlog,
+            &executor,
+            &link,
+            Pending {
+                cancel: wire_cancel,
+                gesture: Some(pending),
+            },
+        );
         gesture.get().deadline()
     });
     let scheduled = Rc::new(Cell::new((0, None)));
@@ -329,6 +410,37 @@ pub(super) fn deliver(
         schedule(&reduce, &scheduled, deadline, &timers);
         deadline
     })
+}
+
+fn enqueue(
+    deferred: &async_channel::Sender<Pending>,
+    backlog: &Cell<usize>,
+    executor: &BackgroundExecutor,
+    link: &LinkHandle,
+    pending: Pending,
+) {
+    #[cfg(test)]
+    if CLOSE_DELIVERY.take() {
+        deferred.close();
+    }
+    if let Err(refused) = deferred.try_send(pending) {
+        let Pending { cancel, .. } = refused.into_inner();
+        let current = link.revoke_input_for_dispatch();
+        if cancel.is_some() || current.is_some() {
+            let link = link.clone();
+            executor
+                .spawn(async move {
+                    for cancel in cancel.into_iter().chain(current) {
+                        let _sent = link.dispatch_input_cancel(&cancel);
+                    }
+                })
+                .detach();
+        }
+        tracing::debug!(stage = ?InputStage::Delivery, reason = ?InputReason::QueueClosed, "held speech input boundary");
+    } else {
+        backlog.set(backlog.get() + 1);
+        tracing::debug!(stage = ?InputStage::Delivery, reason = ?InputReason::Deferred, "held speech input boundary");
+    }
 }
 
 type Reduce = dyn Fn(Event, EventTime) -> Option<Instant>;
@@ -370,11 +482,12 @@ fn schedule(
     .detach();
 }
 
-fn stale_hold_escape(owner: &Presence, gesture: Option<GestureId>, session: u64) -> bool {
-    gesture.is_some()
-        && owner.session.as_ref().is_none_or(|current| {
-            current.generation() != session || !current.alive().load(Ordering::Acquire)
+fn stale_hold_escape(owner: &Presence, cancelled: Option<(GestureId, u64)>) -> bool {
+    cancelled.is_some_and(|(_, generation)| {
+        owner.session.as_ref().is_none_or(|current| {
+            current.generation() != generation || !current.alive().load(Ordering::Acquire)
         })
+    })
 }
 
 /// Applies effects through a fallible borrow of the app.
@@ -382,7 +495,7 @@ fn apply(
     cx: &mut AsyncApp,
     dock: AnyWindowHandle,
     owner: &WeakEntity<Presence>,
-    pending: &Pending,
+    pending: &PendingGesture,
     cancel: CancelDispatch,
 ) -> Applied {
     let result = cx.update_window(dock, |_, window, app| {
@@ -398,30 +511,26 @@ fn apply(
         }) && pending.input.continuous();
         let applied = owner.update(app, |this, cx| {
             if pending.escape.is_some()
-                && (!uninterrupted
-                    || stale_hold_escape(this, pending.cancelled, pending.stamp.session))
+                && matches!(cancel, CancelDispatch::Inline)
+                && this.voice.pending.is_some()
             {
-                return false;
+                return None;
             }
-            let mut effects = pending.delivery.effects;
-            if effects.contains(&Some(crate::input::Effect::OpenInput)) {
-                if uninterrupted
-                    && this.native.escape_trusted()
-                    && this.link.microphone_gate().latest() == pending.collection
-                {
-                    if let Some(gesture) = pending.cancelled {
-                        this.cancel_voice_gesture(gesture, cx);
-                    }
-                } else {
-                    effects = effects.map(|effect| {
-                        effect.filter(|effect| *effect != crate::input::Effect::OpenInput)
-                    });
-                }
+            if pending.escape.is_some()
+                && (!uninterrupted || stale_hold_escape(this, pending.cancelled))
+            {
+                return Some(false);
             }
+            let effects = pending.typing_effects(this, cx);
             this.apply_effects(effects, window, cx);
-            true
+            Some(true)
         });
-        if applied.as_ref().is_ok_and(|apply| *apply)
+        let applied = match applied {
+            Ok(Some(applied)) => applied,
+            Ok(None) => return Applied::Busy,
+            Err(_) => return Applied::Gone,
+        };
+        if applied
             && (pending.escape.is_some() || pending.delivery.intents.iter().any(Option::is_some))
         {
             let (owner, intents) = (owner.clone(), pending.delivery.intents.clone());
@@ -436,17 +545,13 @@ fn apply(
                 }
                 let _gone = owner.update(app, |this, cx| {
                     let uninterrupted = uninterrupted && input.uninterrupted();
-                    if escape
-                        && (!uninterrupted || stale_hold_escape(this, cancelled, stamp.session))
-                    {
+                    if escape && (!uninterrupted || stale_hold_escape(this, cancelled)) {
                         return;
                     }
                     let release = (continuous && input.continuous()).then_some(&input);
+                    let trusted = uninterrupted && this.native.escape_trusted();
                     for mut intent in intents.into_iter().flatten() {
-                        if matches!(cancel, CancelDispatch::Refused)
-                            || !uninterrupted
-                            || !this.native.escape_trusted()
-                        {
+                        if matches!(cancel, CancelDispatch::Refused) || !trusted {
                             if let Intent::End { cancelled, .. } = &mut intent {
                                 *cancelled = true;
                             } else {
@@ -456,14 +561,25 @@ fn apply(
                                 } = intent
                                     && this.voice.gates.skip_recognition(token)
                                 {
+                                    let refused = trusted
+                                        && matches!(cancel, CancelDispatch::Refused)
+                                        && this.link.input_is(gesture);
                                     this.link.clear_input(gesture);
+                                    if refused {
+                                        this.voice.lost = None;
+                                        this.voice_notice(Text::HoldFailed, cx);
+                                    }
                                 }
                                 continue;
                             }
                         }
                         this.voice_delivery(intent, stamp, qpc, pointer, release, cx);
                     }
-                    if escape && this.native_escape(cancelled, cx).is_err() {
+                    if escape
+                        && this
+                            .native_escape(cancelled.map(|(gesture, _)| gesture), cx)
+                            .is_err()
+                    {
                         tracing::error!("can't apply native Escape");
                     }
                 });
@@ -473,19 +589,42 @@ fn apply(
             // Deferred to the end of this update, where the dock is back in GPUI's window table.
             app.defer(intents);
         }
-        applied.is_ok()
+        Applied::Yes
     });
     match result {
-        Ok(true) => Applied::Yes,
-        Ok(false) => Applied::Gone,
+        Ok(applied) => applied,
         Err(_) if owner.upgrade().is_none() => Applied::Gone,
         Err(_) => Applied::Busy,
     }
 }
 
 #[cfg(test)]
+type WireCancelBarrier = (async_channel::Sender<()>, async_channel::Receiver<()>);
+
+#[cfg(test)]
 thread_local! {
+    pub(super) static FAIL_CLOCK: Cell<bool> = const { Cell::new(false) };
+    pub(super) static CLOSE_DELIVERY: Cell<bool> = const { Cell::new(false) };
+    static WIRE_CANCEL_BARRIER: Cell<Option<WireCancelBarrier>> = const { Cell::new(None) };
     static BEFORE_DEFERRED_RELEASE: Cell<Option<Box<dyn FnOnce()>>> = const { Cell::new(None) };
+}
+
+#[cfg(test)]
+pub(super) fn wire_cancel_before_effects(
+    cx: &mut gpui_kit::TestAppContext,
+    send: impl FnOnce(&mut gpui_kit::TestAppContext),
+) {
+    let (arrived, wire) = async_channel::bounded(1);
+    let (release, resume) = async_channel::bounded(1);
+    assert!(
+        WIRE_CANCEL_BARRIER
+            .replace(Some((arrived, resume)))
+            .is_none()
+    );
+    send(cx);
+    cx.run_until_parked();
+    assert_eq!(wire.try_recv(), Ok(()));
+    drop(release);
 }
 
 #[cfg(test)]
@@ -513,7 +652,7 @@ pub(super) fn deliver_intent(
     pointer: Option<PhysicalPoint>,
     held: TalkHeld,
 ) -> bool {
-    let pending = Pending {
+    let pending = PendingGesture {
         delivery: Delivery {
             effects: [None, None, None],
             intents: [Some(intent), None, None],
@@ -523,7 +662,6 @@ pub(super) fn deliver_intent(
         pointer,
         input: ReleaseInput::fixture(held),
         cancelled: None,
-        superseded: None,
         escape: None,
         collection: 0,
     };

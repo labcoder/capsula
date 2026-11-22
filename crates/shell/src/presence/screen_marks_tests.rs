@@ -1397,7 +1397,14 @@ fn esc_in_another_app_takes_a_pending_hold_s_marks_and_cancels_it(cx: &mut TestA
             Key::Escape(crate::input::PhysicalKey::new(1).unwrap()),
             Edge::Down,
         );
-        deliver(Event::Key { key, edge }, after(at, 2000));
+        let raw = || deliver(Event::Key { key, edge }, after(at, 2000));
+        if woke_first {
+            super::super::gesture::wire_cancel_before_effects(cx, |_| {
+                raw();
+            });
+        } else {
+            raw();
+        }
         let heard = watching
             .bit
             .borrow()
@@ -1560,7 +1567,14 @@ fn a_press_that_cancelled_its_pending_hold_leaves_an_ordinary_drawing_up(cx: &mu
                 Key::Escape(crate::input::PhysicalKey::new(1).unwrap()),
                 Edge::Down,
             );
-            deliver(Event::Key { key, edge }, after(at, 2000));
+            let raw = || deliver(Event::Key { key, edge }, after(at, 2000));
+            if woke_first == Some(true) {
+                super::super::gesture::wire_cancel_before_effects(cx, |_| {
+                    raw();
+                });
+            } else {
+                raw();
+            }
             if woke_first.is_some() {
                 let bit = watching.bit.borrow();
                 bit.as_ref().expect("started sources").set();
@@ -1638,10 +1652,9 @@ fn the_hotkey_s_press_after_an_esc_down_that_ended_a_waiting_hold_does_nothing_m
     });
 }
 
-/// The app is borrowed while the press arrives, so its delivery waits in the callback's
-/// backlog: hold 1's input is revoked and its cancel is written, and nothing is applied yet.
+/// Let the peer receive the cancel but hold off the owner effect so a reply can overtake it.
 fn press_deferred(deliver: &Deliver, at: Instant, cx: &mut TestAppContext) {
-    cx.update(|_| {
+    super::super::gesture::wire_cancel_before_effects(cx, |_| {
         let (key, edge) = (
             Key::Escape(crate::input::PhysicalKey::new(1).unwrap()),
             Edge::Down,
