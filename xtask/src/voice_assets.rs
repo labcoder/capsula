@@ -1,6 +1,6 @@
 //! `cargo xtask voice-assets link <models> <natives>`: checks the voice files already on a dev
-//! machine against the manifest and hardlinks them where a dev build looks, so nothing downloads
-//! twice. It never copies and never downloads.
+//! machine against the manifest and copies them where a dev build looks, so nothing downloads
+//! twice. It never downloads.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -9,7 +9,7 @@ use anyhow::{Context as _, Result, bail, ensure};
 use kumochi_protocol::constants::DATA_DIR;
 use kumochi_protocol::voice::{MODEL_FILES, MODELS_DIR, ModelFile, NATIVE_FILES, VoicePart};
 
-use crate::platform::gate_capture::file_sha256;
+use crate::platform::gate_capture::{file_sha256, sha256_through};
 
 const USAGE: &str = "usage: cargo xtask voice-assets link <models-dir> <natives-dir>";
 
@@ -111,7 +111,7 @@ struct Placement<'a> {
     sha256: &'a str,
 }
 
-/// Verifies every source, then every existing destination, before linking anything, so a bad
+/// Verifies every source, then every existing destination, before copying anything, so a bad
 /// source or a conflicting destination changes nothing. Returns the destinations.
 fn link(
     models: &Path,
@@ -146,9 +146,9 @@ fn link(
     Ok(plan.into_iter().map(|placement| placement.dest).collect())
 }
 
-/// Keeps every destination that already verifies and hardlinks the absent ones. Any other
-/// existing destination is a conflict: it's reported and left as it is, and nothing is linked.
-/// If a link fails partway, the links this run made are removed again.
+/// Keeps every destination that already verifies and copies the absent ones. Any other existing
+/// destination is a conflict: it's reported and left as it is, and nothing is copied. A failed copy
+/// leaves nothing at its final name; files this run already placed stay, since each verified.
 fn install(plan: &[Placement<'_>]) -> Result<()> {
     let mut missing = Vec::new();
     let mut conflicts = Vec::new();
@@ -161,42 +161,57 @@ fn install(plan: &[Placement<'_>]) -> Result<()> {
     }
     ensure!(
         conflicts.is_empty(),
-        "nothing was linked, because existing files don't match the manifest; move them aside \
+        "nothing was copied, because existing files don't match the manifest; move them aside \
          and run this again:\n{}",
         conflicts.join("\n")
     );
-    let mut made: Vec<&Path> = Vec::with_capacity(missing.len());
-    for placement in missing {
-        if let Err(error) = hard_link(&placement.source, &placement.dest) {
-            let stranded: Vec<String> = made
-                .into_iter()
-                .filter(|dest| fs::remove_file(dest).is_err())
-                .map(|dest| dest.display().to_string())
-                .collect();
-            if stranded.is_empty() {
-                return Err(error);
-            }
-            return Err(error.context(format!(
-                "these links from this run couldn't be removed: {}",
-                stranded.join(", ")
-            )));
-        }
-        made.push(&placement.dest);
-    }
-    Ok(())
+    missing.into_iter().try_for_each(publish)
 }
 
-/// Hardlinks a new destination. It never replaces one: `fs::hard_link` fails if `dest` exists.
-fn hard_link(source: &Path, dest: &Path) -> Result<()> {
+// shortcut: no junction, symlink or file-identity checks on the destination folders, which are the
+// developer's own %LOCALAPPDATA% and target folders; add them if this ever writes elsewhere.
+/// Copies the source to a temporary file beside the destination, verifying the bytes as they are
+/// written, then links the final name to it. A hardlink to the source would share its ACL, which
+/// the brain refuses where other accounts may write.
+fn publish(placement: &Placement<'_>) -> Result<()> {
+    let dest = placement.dest.as_path();
     let parent = dest.parent().context("a destination has a folder")?;
+    let name = dest
+        .file_name()
+        .context("a destination has a file name")?
+        .to_string_lossy();
     fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
-    fs::hard_link(source, dest).with_context(|| {
-        format!(
-            "hardlinking {} to {}: both must be on one NTFS volume, and nothing is copied",
-            source.display(),
-            dest.display()
-        )
-    })
+    let temp = parent.join(format!("{name}.voice-assets-{}.tmp", std::process::id()));
+    let file =
+        fs::File::create_new(&temp).with_context(|| format!("creating {}", temp.display()))?;
+    let published = copy_verified(placement, file).and_then(|()| {
+        // Our own copy has the destination folder's ACL, so the brain accepts the link.
+        fs::hard_link(&temp, dest).with_context(|| format!("placing {}", dest.display()))
+    });
+    let removed = fs::remove_file(&temp).with_context(|| format!("removing {}", temp.display()));
+    published.and(removed)
+}
+
+/// Copies the source into `file` and checks the written size and hash against the manifest.
+fn copy_verified(placement: &Placement<'_>, mut file: fs::File) -> Result<()> {
+    let source = fs::File::open(&placement.source)
+        .with_context(|| format!("opening {}", placement.source.display()))?;
+    let sha256 = sha256_through(source, &mut file)
+        .with_context(|| format!("copying {}", placement.source.display()))?;
+    let bytes = file.metadata()?.len();
+    ensure!(
+        bytes == placement.bytes,
+        "{} copied {bytes} bytes; the manifest pins {}",
+        placement.source.display(),
+        placement.bytes
+    );
+    ensure!(
+        sha256 == placement.sha256,
+        "{} copied with SHA-256 {sha256}; the manifest pins {}",
+        placement.source.display(),
+        placement.sha256
+    );
+    Ok(())
 }
 
 fn verify(path: &Path, bytes: u64, sha256: &str) -> Result<()> {
@@ -229,7 +244,7 @@ mod tests {
 
     use kumochi_protocol::voice::MODEL_FILES;
 
-    use super::{Placement, S5_LAYOUT, install, link, s5_path, verify};
+    use super::{Placement, S5_LAYOUT, install, link, publish, s5_path, verify};
     use crate::scratch::Scratch;
 
     fn scratch(name: &str) -> Scratch {
@@ -296,20 +311,20 @@ mod tests {
     }
 
     #[test]
-    fn install_hardlinks_and_keeps_a_verified_destination() {
+    fn install_copies_and_keeps_a_verified_destination() {
         let dir = scratch("install");
         let source = dir.join("source");
         fs::write(&source, b"voice").expect("write");
         let sha = voice_sha();
         let dest = dir.join("models").join("part").join("f");
-        install(&[placement(&source, &dest, &sha)]).expect("links into a new folder");
+        install(&[placement(&source, &dest, &sha)]).expect("copies into a new folder");
         assert_eq!(fs::read(&dest).expect("read"), b"voice");
 
         fs::write(&source, b"VOICE").expect("rewrite the source in place");
         assert_eq!(
             fs::read(&dest).expect("read"),
-            b"VOICE",
-            "the destination is the same file as the source, not a copy"
+            b"voice",
+            "the destination is a copy with its folder's permissions, not the source's file"
         );
         fs::write(&source, b"voice").expect("restore");
 
@@ -333,17 +348,31 @@ mod tests {
             placement(&source, &conflicting, &sha),
         ])
         .expect_err("a mismatched destination fails");
-        assert!(error.to_string().contains("nothing was linked"), "{error}");
+        assert!(error.to_string().contains("nothing was copied"), "{error}");
         assert_eq!(
             fs::read(&conflicting).expect("read"),
             b"wrong",
             "the conflicting bytes survive"
         );
-        assert!(!fresh.exists(), "nothing was linked before the conflict");
+        assert!(!fresh.exists(), "nothing was copied before the conflict");
+    }
+
+    fn temporaries(dir: &Path) -> Vec<String> {
+        fs::read_dir(dir)
+            .expect("list")
+            .map(|entry| {
+                entry
+                    .expect("entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .filter(|name| name.contains(".voice-assets-"))
+            .collect()
     }
 
     #[test]
-    fn a_failed_link_removes_the_links_this_run_made() {
+    fn a_failed_copy_keeps_the_placed_files_and_leaves_no_temporary() {
         let dir = scratch("rollback");
         let source = dir.join("source");
         fs::write(&source, b"voice").expect("write");
@@ -355,10 +384,49 @@ mod tests {
             placement(&source, &first, &sha),
             placement(&dir.join("absent"), &second, &sha),
         ])
-        .expect_err("the second link has no source");
-        assert!(!first.exists(), "the first link was removed again");
-        assert!(!second.exists());
+        .expect_err("the second copy has no source");
+        assert_eq!(
+            fs::read(&first).expect("read"),
+            b"voice",
+            "a placed file stays"
+        );
+        assert!(!second.exists(), "nothing at the failed copy's final name");
+        assert_eq!(temporaries(&dir.join("models")), Vec::<String>::new());
         assert_eq!(fs::read(&source).expect("read"), b"voice");
+    }
+
+    #[test]
+    fn a_wrong_hash_copy_places_nothing() {
+        let dir = scratch("wrong-hash");
+        let source = dir.join("source");
+        fs::write(&source, b"voice").expect("write");
+        let models = dir.join("models");
+        let dest = models.join("f");
+
+        let error = install(&[placement(&source, &dest, &"0".repeat(64))])
+            .expect_err("the copy's hash doesn't match");
+        assert!(
+            error.to_string().contains("copied with SHA-256"),
+            "{error:#}"
+        );
+        assert!(!dest.exists(), "no final file");
+        assert_eq!(temporaries(&models), Vec::<String>::new());
+    }
+
+    #[test]
+    fn an_existing_final_file_is_never_replaced() {
+        let dir = scratch("existing");
+        let source = dir.join("source");
+        fs::write(&source, b"voice").expect("write");
+        let sha = voice_sha();
+        let models = dir.join("models");
+        fs::create_dir_all(&models).expect("models folder");
+        let dest = models.join("f");
+        fs::write(&dest, b"other").expect("a file arrives at the final name");
+
+        publish(&placement(&source, &dest, &sha)).expect_err("the final name exists");
+        assert_eq!(fs::read(&dest).expect("read"), b"other", "left as it was");
+        assert_eq!(temporaries(&models), Vec::<String>::new());
     }
 
     #[test]

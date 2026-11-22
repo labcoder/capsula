@@ -108,7 +108,7 @@ impl Prebuilt {
         ] {
             let bytes = fs::read(dir.join(name))
                 .with_context(|| format!("prebuilt {name} is unavailable; no build fallback"))?;
-            let actual = platform::gate_capture::sha256_reader(bytes.as_slice())
+            let actual = platform::gate_capture::sha256_through(bytes.as_slice(), std::io::sink())
                 .with_context(|| format!("hashing prebuilt {name}"))?;
             ensure!(
                 actual == *expected,

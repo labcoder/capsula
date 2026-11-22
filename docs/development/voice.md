@@ -511,7 +511,7 @@ The native runtime and its license audit are in [voice-natives.md](voice-natives
 
 ## Local model and native files
 
-A developer who already has the files links them instead of downloading them again:
+A developer who already has the files copies them instead of downloading them again:
 
 ```text
 cargo xtask voice-assets link <user-models-dir> <user-native-library-dir>
@@ -519,14 +519,20 @@ cargo xtask voice-assets link <user-models-dir> <user-native-library-dir>
 
 Supply your own model directory and the directory containing the native runtime DLLs described
 in [voice-natives.md](voice-natives.md).
-The task checks every source's size and SHA-256 before it links anything, then hardlinks the
+The task checks every source's size and SHA-256 before it copies anything, then copies the
 models into the dev models folder (`Kumochi Dev`) and the DLLs beside
-`target\debug\kumochid.exe` and `target\release\kumochid.exe`. Hardlinks take no space, and
-they need the sources and the destination on one NTFS volume. The task never copies and never
-downloads. A destination that already matches the manifest is kept. Any other existing file there
-is a conflict: the task checks every destination before it links anything, and if one conflicts it
-links nothing, changes nothing and names the file, to be moved aside by hand. If a link fails
-partway, the links that run made are removed. Run it again after `cargo clean`.
+`target\debug\kumochid.exe` and `target\release\kumochid.exe`, checking each copy's size
+and SHA-256 as it writes it. Each file is written under a temporary name beside its destination,
+then linked to its final name, which never replaces an existing file. It doesn't hardlink the
+source, because a hardlink shares the source file's permissions and the brain refuses a model
+file other accounts may change; a copy takes the destination folder's. It never downloads. A
+destination that already matches the manifest is kept, so delete models an older version of the
+task hardlinked before running it again. Any other existing file there is a
+conflict: the task checks every destination before it copies anything, and if one conflicts it
+copies nothing, changes nothing and names the file, to be moved aside by hand. A failed copy
+leaves nothing at its final name, and files already placed stay. A leftover
+`*.voice-assets-*.tmp` in the models folder, from a run that was stopped, is safe to delete by
+hand. Run it again after `cargo clean`.
 
 ### Vendored worker-startup tests
 

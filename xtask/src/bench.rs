@@ -655,7 +655,8 @@ mod tests {
         let mut hashes = [shell.as_bytes(), brain.as_bytes()]
             .into_iter()
             .map(|bytes| {
-                crate::platform::gate_capture::sha256_reader(bytes).expect("hash fixture")
+                crate::platform::gate_capture::sha256_through(bytes, std::io::sink())
+                    .expect("hash fixture")
             });
         let prebuilt = Prebuilt::parse(&mut hashes).expect("two SHA-256 pins");
         std::fs::write(dir.join(SHELL_EXE), shell.as_bytes()).expect("write shell fixture");
