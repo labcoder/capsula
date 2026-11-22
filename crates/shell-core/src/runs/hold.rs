@@ -371,6 +371,13 @@ impl Runs {
         })
     }
 
+    /// Removes an offer the caller staged but couldn't queue, without making a wire cancel.
+    pub fn discard_unpublished_hold(&mut self, gesture: GestureId) {
+        let _discarded = self
+            .hold
+            .take_if(|hold| hold.gesture == gesture && hold.run.is_none());
+    }
+
     pub fn cancel_hold(&mut self) {
         if let Some(hold) = self.hold.take() {
             self.hold_cancel = Some(hold.gesture);

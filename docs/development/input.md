@@ -89,13 +89,15 @@ sequenceDiagram
   revision and original QPC; double-tap effects retain their ordinary typing path. Key-down's
   gate also freezes the screen offer published for that connection, choice and target
   ([notice revision](ipc.md#notice-revision)).
-  Both reach the owner through `AsyncApp::update_window`, which
-  only tries to borrow GPUI. If GPUI is already borrowed, because a nested message loop
-  dispatched the callback, the effects wait in an ordered queue with their original times, and
-  a foreground task retries them every millisecond until they apply or the owner is gone.
-  Replacing a tracked hold revokes its local input first. Its wire cancel takes the ordered
-  queue even when GPUI is free, and must reach the same link generation before the replacement
-  offer can be sent. A refused cancel can't admit that offer. Queued effects retain their order.
+  Cancellations use the ordered gesture queue even when GPUI is free. The dispatch task
+  sends each wire cancel off the UI thread and only on its original link generation. A refused
+  cancel can't admit a replacement hold: a reconnect in that window shows the existing
+  Hold Failed notice. An offer that never enters the control queue is discarded locally.
+  The task then applies owner effects through `AsyncApp::update_window`, retrying every
+  millisecond if GPUI is already borrowed. Ordinary Esc with no Hold still takes its
+  local decision inline when the app is available and no earlier delivery is pending. If delivery
+  is closed, the callback still revokes local input and hands any remaining cancels to the
+  background executor without applying owner effects.
 - **Deadlines.** The gesture returns at most one deadline: the 300 ms hold or the double-tap
   window. The proxy arms it with `SetTimer` after delivery, for the time left from then, rounded
   up to whole milliseconds, so slow delivery never lengthens the hold, and disarms it
