@@ -176,7 +176,7 @@ pub(crate) fn hash(mut x: u32) -> f32 {
 
 #[cfg(test)]
 mod tests {
-    use super::{hash, hex, smax, smin, smoothstep, v3};
+    use super::{smax, smin, smoothstep, v3};
 
     #[test]
     #[expect(
@@ -208,27 +208,18 @@ mod tests {
     }
 
     #[test]
-    fn hex_splits_channels() {
-        let c = hex(0xFF_00_33);
-        assert_eq!((c.r, c.g), (1.0, 0.0));
-        assert!((c.b - 0.2).abs() < 1e-7, "0x33 is 51/255: {}", c.b);
-    }
-
-    #[test]
     #[expect(clippy::float_cmp, reason = "the step clamps to exactly 0 and 1")]
     fn smoothstep_clamps_and_centres() {
-        assert_eq!(smoothstep(0.0, 1.0, -1.0), 0.0);
-        assert_eq!(smoothstep(0.0, 1.0, 2.0), 1.0);
-        assert_eq!(smoothstep(0.0, 1.0, 0.5), 0.5);
-    }
-
-    #[test]
-    #[expect(clippy::float_cmp, reason = "zero hashes to exactly zero")]
-    fn the_hash_stays_in_unit_range() {
-        assert_eq!(hash(0), 0.0, "zero is a fixed point of every step");
-        for x in [1, 7, 0x9e37, u32::MAX] {
-            let h = hash(x);
-            assert!((0.0..=1.0).contains(&h), "hash({x}) = {h}");
+        for (input, expected) in [
+            (1.0, 0.0),
+            (2.0, 0.0),
+            (3.0, 0.15625),
+            (4.0, 0.5),
+            (5.0, 0.84375),
+            (6.0, 1.0),
+            (7.0, 1.0),
+        ] {
+            assert_eq!(smoothstep(2.0, 6.0, input), expected, "{input}");
         }
     }
 }

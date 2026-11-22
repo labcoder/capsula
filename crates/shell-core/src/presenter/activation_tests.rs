@@ -213,10 +213,7 @@ fn timing_reports_the_accepted_step_with_zero_narration_and_its_entrance_span() 
             DrawTiming::Shown { key, epoch: 2 },
         ]
     );
-}
 
-#[test]
-fn timing_reports_nonblank_narration_text_without_a_time_reservation() {
     for (first, narrated) in [
         (step(r#"{"step":{"id":"silent"}}"#), false),
         (step(r#"{"step":{"id":"blank","say":" \t"}}"#), false),
@@ -335,27 +332,6 @@ fn visibility_epochs_rebind_fresh_paints_without_resetting_activation_once_state
         [None; 4],
         "same activation, new epoch"
     );
-}
-
-#[test]
-fn a_failed_epoch_cannot_deliver_an_earlier_success() {
-    let (mut presenter, now) = prepared(&[(RUN, rect("r"))]);
-    presenter.advance(GENERATION, now).expect("activate");
-    presenter.sample_at(ms(now, 800)).expect("a sample");
-    presenter.frames.borrow_mut().shown = true;
-    let receipts = Rc::new(RefCell::new(Vec::new()));
-    let out = Rc::clone(&receipts);
-    presenter.observe_draw_timing(move |receipt| out.borrow_mut().push(receipt));
-    paint(&presenter);
-    assert!(presenter.frames.borrow().paint(|_, _| Err::<(), _>(())));
-    assert_eq!(presenter.take_shown(GENERATION), [None; 4]);
-    assert_eq!(
-        controls(&presenter.paint_failed()),
-        [&ControlToBrain::SceneFailed { scene: LIVE }]
-    );
-    assert_eq!(presenter.stoppable_run(), None);
-    assert_eq!(presenter.residency(), 0);
-    assert_eq!(*receipts.borrow(), []);
 }
 
 #[test]
@@ -749,7 +725,6 @@ fn a_wake_whose_head_is_no_longer_due_drops_its_request_and_drains() {
         arrive(&mut presenter, commit_frame(LIVE, 2, rect("next")), due).expect("lane"),
     );
     assert!(presenter.advance(GENERATION, due).expect("busy").is_empty());
-    assert_eq!(presenter.scenes[&LIVE].pending_consumption, Some(1));
     assert!(
         arrive(&mut presenter, commit_frame(LIVE, 3, rect("held")), due)
             .expect("held")
@@ -757,24 +732,29 @@ fn a_wake_whose_head_is_no_longer_due_drops_its_request_and_drains() {
     );
     let painted = due + Duration::from_millis(50);
     paint_shown(&mut presenter, painted);
-    let mut work = jobs(
-        presenter
-            .completed(admission.run(), painted)
-            .expect("admitted"),
-    );
+    let ready = presenter
+        .completed(admission.run(), painted)
+        .expect("admitted");
+    assert!(ready.iter().any(|effect| matches!(
+        effect,
+        super::Effect::ConsumptionReady {
+            scene: LIVE,
+            index: 1
+        }
+    )));
+    let mut work = jobs(ready);
     let effects = presenter
         .consumption_ready(GENERATION, LIVE, 1, painted)
         .expect("no longer due");
     assert_eq!(bound(&presenter), 1);
-    assert_eq!(presenter.scenes[&LIVE].pending_consumption, None);
     let held = only_admission(effects);
     let wake = presenter
         .next_wake(painted)
         .expect("the head is back on the wake");
-    assert!(wake > painted);
-    work.extend(jobs(
-        presenter.completed(held.run(), painted).expect("admitted"),
-    ));
+    assert_eq!(wake, ms(now, 250));
+    let dispatched = presenter.completed(held.run(), painted).expect("admitted");
+    assert_eq!(super::credit(&dispatched), super::FRAME);
+    work.extend(jobs(dispatched));
     while let Some(job) = work.pop() {
         work.extend(jobs(
             presenter

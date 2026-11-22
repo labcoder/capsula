@@ -122,27 +122,6 @@ fn begin_is_owed_only_until_onboarded_and_an_onboarded_view_closes_at_any_step()
 }
 
 #[test]
-fn a_changed_name_saves_once_and_goes_on_only_at_its_answer() {
-    let (mut settings, mut onboarding) = first_run(None);
-    settings.change(Field::Assistant, "Mochi");
-    assert_eq!(
-        press(&mut settings, &mut onboarding),
-        (
-            vec![SettingsOp::SetAssistantName(
-                AssistantName::new("Mochi").expect("valid")
-            )],
-            Next::Stay
-        )
-    );
-    assert_eq!(onboarding.step(), Step::Welcome);
-    assert_eq!(
-        answer(&mut settings, &mut onboarding, view("Mochi", None, false)),
-        Next::Moved
-    );
-    assert_eq!(onboarding.step(), Step::YourName);
-}
-
-#[test]
 fn a_refusal_stays_with_the_saved_name_and_continue_then_goes_on_without_sending() {
     let (mut settings, mut onboarding) = first_run(None);
     settings.change(Field::Assistant, "Mochi");
@@ -215,20 +194,6 @@ fn a_blank_name_with_nothing_saved_goes_on_without_sending() {
     settings.change(Field::User, "  ");
     assert_eq!(press(&mut settings, &mut onboarding), (vec![], Next::Moved));
     assert_eq!(onboarding.step(), Step::Accounts);
-}
-
-/// The account and shortcut steps have no field: Continue or Not now goes on to the shortcut, and
-/// Finish there asks for the finish into the peek, with nothing saved.
-#[test]
-fn the_steps_without_a_name_go_on_and_finish_with_nothing_saved() {
-    let (mut settings, mut onboarding) = on_shortcut();
-    assert_eq!(
-        press(&mut settings, &mut onboarding),
-        (vec![], Next::Finish(Landing::Peek))
-    );
-    assert_eq!(onboarding.step(), Step::Shortcut);
-    settings.disconnected();
-    assert_eq!(press(&mut settings, &mut onboarding), (vec![], Next::Stay));
 }
 
 /// A double-tap is used up at every step; at the shortcut it asks for the finish into typing,
@@ -309,6 +274,7 @@ fn continue_twice_during_one_save_sends_once_and_goes_on_once() {
         )
     );
     assert_eq!(press(&mut settings, &mut onboarding), (vec![], Next::Stay));
+    assert_eq!(onboarding.step(), Step::Welcome);
     assert_eq!(
         answer(&mut settings, &mut onboarding, view("Mochi", None, false)),
         Next::Moved
@@ -348,6 +314,10 @@ fn without_a_view_continue_does_nothing() {
         assert_eq!(press(&mut settings, &mut onboarding), (vec![], Next::Stay));
         assert_eq!(onboarding.step(), Step::Welcome);
     }
+    let (mut settings, mut onboarding) = on_shortcut();
+    settings.disconnected();
+    assert_eq!(press(&mut settings, &mut onboarding), (vec![], Next::Stay));
+    assert_eq!(onboarding.step(), Step::Shortcut);
 }
 
 #[test]
@@ -367,9 +337,10 @@ fn a_disconnect_forgets_the_wait_and_the_step_stays_after_reconnect() {
 fn an_asked_finish_lands_on_the_peek_and_a_refused_one_can_be_asked_again() {
     let (mut settings, mut onboarding) = on_shortcut();
     assert_eq!(
-        press(&mut settings, &mut onboarding).1,
-        Next::Finish(Landing::Peek)
+        press(&mut settings, &mut onboarding),
+        (vec![], Next::Finish(Landing::Peek))
     );
+    assert_eq!(onboarding.step(), Step::Shortcut);
     assert!(settings.finish_onboarding(|op| op == SettingsOp::FinishOnboarding));
     onboarding.finish_queued(Landing::Peek);
     assert!(onboarding.finishing());
