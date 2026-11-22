@@ -128,6 +128,11 @@ pub(super) struct Build {
     /// The admitted request carries the hold's image.
     pictured: bool,
     pub(super) screen_digests: Vec<PictureRecipient>,
+    /// The thread's drawings when the build began, which a protected digest must still match
+    /// until its send writes.
+    pub(super) drawings: crate::drawing::Digest,
+    /// Exact live private scene revisions captured for each eligible recipient at build start.
+    private_scenes: Vec<(PictureRecipient, Vec<crate::drawing::PrivateScene>)>,
     /// The dispatcher's tools the admitted request offered.
     offered: Vec<ToolName>,
     /// The admitted request's sources, checked again before each send.
@@ -153,6 +158,8 @@ impl Build {
             offers_draw: false,
             pictured: false,
             screen_digests: Vec::new(),
+            drawings: crate::drawing::Digest::default(),
+            private_scenes: Vec::new(),
             offered: Vec::new(),
             sources: Vec::new(),
             inline,
@@ -187,6 +194,16 @@ impl Build {
 
     pub(super) fn sources(&self) -> &[ThreadId] {
         &self.sources
+    }
+
+    pub(super) fn private_scenes_for(
+        &self,
+        recipient: &PictureRecipient,
+    ) -> Option<&[crate::drawing::PrivateScene]> {
+        self.private_scenes
+            .iter()
+            .find(|(owner, _)| owner == recipient)
+            .map(|(_, scenes)| scenes.as_slice())
     }
 
     /// The `sources` a delete reached. Every pending delete is exposed, since exposure starts
@@ -257,6 +274,17 @@ impl Coordinator {
             .filter(|recipient| self.pictured(recipient.route, Some(&recipient.model)))
             .cloned()
             .collect();
+        build.private_scenes = build
+            .screen_digests
+            .iter()
+            .map(|recipient| {
+                (
+                    recipient.clone(),
+                    self.drawing.private_scenes(thread, recipient),
+                )
+            })
+            .collect();
+        build.drawings = drawings.clone();
         self.current(run)
             .expect("the current run did not change")
             .build = Some(build);

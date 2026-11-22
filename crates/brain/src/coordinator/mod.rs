@@ -666,7 +666,9 @@ struct Run {
     /// The recipient of the protected material, a picture or a protected digest, an admitted
     /// request of this run carried: everything the run authors is that recipient's.
     picture_recipient: Option<crate::context::PictureRecipient>,
-    key_digest_recipient: Option<crate::context::PictureRecipient>,
+    /// The protected digest a Key run's first request carried, which later true continuations
+    /// resend verbatim in their held prefix.
+    key_digest: Option<lease::KeyDigest>,
     /// A typed turn that arrived while Claude Code was being found, until it binds or is released.
     finding: Option<availability::Finding>,
     /// The round that compacted inline since the run's last admitted build.
@@ -1107,12 +1109,30 @@ impl Coordinator {
                 }
             }
             Input::Clear { scenes } => {
+                if let Some(carried) = self
+                    .current
+                    .as_mut()
+                    .and_then(|run| run.key_digest.as_mut())
+                    && carried
+                        .scenes
+                        .iter()
+                        .any(|held| scenes.contains(&held.scene))
+                {
+                    carried.revoked = true;
+                }
                 self.drawing_clear(scenes.clone(), &mut effects);
                 self.clear(&scenes, &mut effects);
             }
             Input::ScenesCleared { scenes, ok: true } => self.cleared(&scenes),
             Input::ScenesCleared { scenes, ok: false } => self.clear_failed(&scenes),
             Input::ClearVisible => {
+                if let Some(carried) = self
+                    .current
+                    .as_mut()
+                    .and_then(|run| run.key_digest.as_mut())
+                {
+                    carried.revoked = true;
+                }
                 self.drawing_input(crate::drawing::Input::ClearVisible, &mut effects)?;
                 self.clear_visible(&mut effects);
             }
@@ -1159,6 +1179,14 @@ impl Coordinator {
                 &mut effects,
             ),
             Input::ShowScreenOff => {
+                if let Some(carried) = self
+                    .current
+                    .as_mut()
+                    .and_then(|run| run.key_digest.as_mut())
+                {
+                    carried.revoked = true;
+                }
+                self.drawing.revoke_private();
                 self.screen_holds_off(
                     |screen| matches!(screen, crate::context::Screen::Picture(..)),
                     &mut effects,
@@ -1377,7 +1405,7 @@ impl Coordinator {
             sent: Vec::new(),
             key_granted: false,
             picture_recipient: None,
-            key_digest_recipient: None,
+            key_digest: None,
             finding,
             compacted: None,
             draw: None,
@@ -1514,6 +1542,7 @@ impl Coordinator {
         effects: &mut Vec<Effect>,
     ) {
         run.control.0.cancel();
+        self.close_digest_grants(run.id);
         // No send carrying the hold's picture was granted, or none wrote any of it, so its turn
         // mustn't say it was sent.
         if run.untold.is_some()
@@ -1591,6 +1620,7 @@ impl Coordinator {
         });
         let id = run.id;
         self.ending.push(run);
+        self.revoke_pictures();
         self.settle(id, effects);
     }
 

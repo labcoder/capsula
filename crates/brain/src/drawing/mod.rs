@@ -34,7 +34,7 @@ use crate::coordinator::{BuildKey, Effect, Stale, StoreOp};
 use crate::engines::CallId;
 
 pub use call::{CallEnd, CallError, Remaining};
-pub(crate) use digest::Digest;
+pub(crate) use digest::{Digest, PrivateScene};
 pub use io::{Reply, StoredScene, Target, Write};
 pub use prepare::{PrepareJob, Prepared, Shared};
 pub use ready::READY_WAIT;

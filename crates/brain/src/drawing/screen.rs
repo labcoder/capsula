@@ -77,9 +77,20 @@ impl Drawing {
         Ok(begin)
     }
 
-    /// Sharing the screen was turned off: every screen scene leaves, every call drawing one ends
-    /// as `ScreenOff`, and a later screen `begin` is refused the same way. A step of theirs still
-    /// being laid out or written settles without reaching the shell.
+    /// Downgrades every private scene so it stays visible locally without reaching any model
+    /// again.
+    pub(crate) fn revoke_private(&mut self) {
+        for held in &mut self.scenes {
+            if !held.gone && matches!(held.author, super::Author::Private(_)) {
+                held.author = super::Author::Unknown;
+            }
+        }
+    }
+
+    /// Sharing the screen was turned off: every screen scene leaves, every remaining private
+    /// overlay drops out of outbound digests while staying visible locally, every call drawing a
+    /// screen scene ends as `ScreenOff`, and a later screen `begin` is refused the same way. A
+    /// step of theirs still being laid out or written settles without reaching the shell.
     pub(super) fn screen_off(&mut self, out: &mut Output) {
         for ledger in &mut self.runs {
             if ledger.canvas.is_some() {
@@ -113,6 +124,7 @@ impl Drawing {
             .map(|held| held.scene)
             .collect();
         self.clear_scenes(&screens, out);
+        self.revoke_private();
     }
 
     /// The shell skipped screen scene `scene` because the screen may have changed since its
