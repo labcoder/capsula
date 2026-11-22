@@ -73,7 +73,7 @@ impl Http for Arc<FilingServer> {
                 (
                     100,
                     json!({"total_count":2,"repositories":[
-                        {"full_name":"owner/other"},{"full_name":"owner/repo"}
+                        {"full_name":"owner/other","id":8},{"full_name":"owner/repo","id":7}
                     ]}),
                 )
             }
@@ -195,6 +195,7 @@ async fn filing_owner(scratch: &Scratch, server: &Arc<FilingServer>) -> (Brain, 
                     RepoName::new("owner/repo").unwrap(),
                 ])
                 .unwrap(),
+                ids: Vec::new(),
             }),
         },
     );

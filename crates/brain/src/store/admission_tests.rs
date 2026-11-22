@@ -67,6 +67,7 @@ fn decide(store: &mut Store, action: &Action, decision: Decision) -> Result<Answ
         account: Some(&account),
         capacity: true,
         repos: &repos,
+        repo_ids: &[],
     };
     let approval = action.approval.expect("offered");
     store.consent(action.draft, &action.hash(), approval, decision, &live)
@@ -92,6 +93,7 @@ fn unavailable_capacity_consumes_consent_without_an_unowned_preflight_or_replay(
             capacity: false,
             account: Some(&account),
             repos: &repos,
+            repo_ids: &[],
         };
         let Answer::Refused(why, refused) = store
             .consent(
@@ -448,6 +450,7 @@ fn consent_checks_in_order_and_uses_up_the_current_revision() {
             account,
             repos,
             capacity: true,
+            repo_ids: &[],
         };
         let answer = store.consent(first.draft, &hash, ApprovalRev(n), Decision::File, &live);
         current = Action {
@@ -465,6 +468,7 @@ fn consent_checks_in_order_and_uses_up_the_current_revision() {
         capacity: true,
         account: Some(&owner),
         repos: &listed,
+        repo_ids: &[],
     };
     let consent = |store: &mut Store, rev: u64| {
         store.consent(
@@ -835,6 +839,7 @@ fn lookups_land_only_in_their_episode() {
         capacity: true,
         account: Some(&account),
         repos: &[],
+        repo_ids: &[],
     };
     let approval = refused.approval.expect("offered");
     let anyway = store.consent(
@@ -903,6 +908,10 @@ fn lookups_land_only_in_their_episode() {
 }
 
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one pass over every live stage, read top to bottom"
+)]
 fn bind_reaches_every_live_draft_and_files_nothing() {
     let scratch = Scratch::new("admission-bind");
     let mut store = opened(&scratch);
@@ -923,6 +932,7 @@ fn bind_reaches_every_live_draft_and_files_nothing() {
         account: Some(&seven),
         capacity: true,
         repos: &listed,
+        repo_ids: &[],
     };
     let consent = |store: &mut Store, action: &Action| {
         let approval = action.approval.expect("offered");

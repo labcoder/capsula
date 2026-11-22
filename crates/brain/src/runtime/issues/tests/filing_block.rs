@@ -41,6 +41,7 @@ fn unknown_draft(scratch: &Scratch, owner: &Action) -> Action {
         capacity: true,
         account: owner.account.as_ref(),
         repos: &repos,
+        repo_ids: &[],
     };
     let IssueAnswer::Changed(preflight) = store
         .consent(

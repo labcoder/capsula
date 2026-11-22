@@ -466,6 +466,11 @@ impl GitHub {
             } else {
                 Vec::new()
             },
+            repo_ids: if usable {
+                self.machine.repository_ids().unwrap_or_default().to_vec()
+            } else {
+                Vec::new()
+            },
         }
     }
 

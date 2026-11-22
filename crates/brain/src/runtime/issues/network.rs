@@ -81,6 +81,14 @@ async fn authority<'a>(
     if !repos.names.contains(repo) {
         return Err(NO_REPO);
     }
+    // A repository under the reviewed name with another id isn't the one reviewed.
+    // shortcut: an attempt pending across the V10 upgrade has no id and is checked by name only.
+    if action
+        .repo_id
+        .is_some_and(|reviewed| repos.id(repo) != Some(reviewed))
+    {
+        return Err(NO_REPO);
+    }
     Ok((repo, user, repos))
 }
 

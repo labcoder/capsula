@@ -263,7 +263,8 @@ all installations, with at most two 100-row pages per resource and 200 unique
 repositories overall. Totals and page lengths must be consistent; duplicate
 installation IDs, incomplete pages, errors and bound exhaustion grant no partial
 authority. Names coalesce case-insensitively across installations while retaining
-GitHub's spelling. A failed refresh clears repository authority.
+GitHub's spelling, each with GitHub's positive numeric repository id; a row without one fails
+the listing. A failed refresh clears repository authority.
 
 The default is non-secret `[github] default_account`/`default_repo` metadata in
 config.toml. Its numeric account ID is stored as decimal text, so the whole u64

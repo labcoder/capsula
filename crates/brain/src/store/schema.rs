@@ -5,7 +5,7 @@ use rusqlite::Connection;
 use super::StoreError;
 
 /// Each entry moves the schema up one version; append, never edit.
-pub(super) const MIGRATIONS: &[&str] = &[V1, V2, V3, V4, V5, V6, V7, V8, V9, V10];
+pub(super) const MIGRATIONS: &[&str] = &[V1, V2, V3, V4, V5, V6, V7, V8, V9, V10, V11];
 
 /// Threads, their append-only events with full-text search, and runs. Foreign keys have no
 /// cascade, so deletion names every table and fails loudly if one is missed.
@@ -187,6 +187,12 @@ UPDATE threads SET connection = 'chatgpt' WHERE model IS NOT NULL;
 /// public, NULL for a run that wrote none and every older run.
 const V10: &str = "
 ALTER TABLE runs ADD COLUMN protected INTEGER CHECK (protected IN (0, 1));
+";
+
+/// An issue attempt keeps GitHub's numeric id for its repository, so a rename or a new
+/// repository under the same name is told apart. Older rows have none.
+const V11: &str = "
+ALTER TABLE actions ADD COLUMN repo_id INTEGER CHECK (repo_id IS NULL OR repo_id >= 1);
 ";
 
 /// Applies every migration past the file's version, each in its own transaction.

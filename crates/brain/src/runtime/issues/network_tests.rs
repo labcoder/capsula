@@ -115,7 +115,7 @@ fn authority(date: Option<u64>) -> Vec<Step> {
             Expected::Repositories,
             None,
             json!({"total_count":2,"repositories":[
-                {"full_name":"owner/repo"},{"full_name":"owner/other"}
+                {"full_name":"owner/repo","id":7},{"full_name":"owner/other","id":8}
             ]}),
         ),
     ]
@@ -151,6 +151,7 @@ fn action() -> Action {
         approval: None,
         consumed: Some(ApprovalRev(1)),
         uncertain: 0,
+        repo_id: None,
     }
 }
 
@@ -196,9 +197,9 @@ async fn scripted_authority_responses_are_independent_of_request_order() {
         repositories
             .repositories
             .iter()
-            .map(RepoName::as_str)
+            .map(|(name, id)| (name.as_str(), id.get()))
             .collect::<Vec<_>>(),
-        ["owner/repo", "owner/other"]
+        [("owner/repo", 7), ("owner/other", 8)]
     );
     assert_eq!(control.server_date_s(), Some(100));
     assert_eq!(script.calls.load(Ordering::SeqCst), 3);
@@ -330,6 +331,7 @@ async fn identity_and_complete_exact_membership_are_required_without_retargeting
         ("unlisted", FailReason::NotFound, 3),
         ("case differs", FailReason::NotFound, 3),
         ("incomplete", FailReason::PreflightFailed, 3),
+        ("recreated since review", FailReason::NotFound, 3),
     ] {
         let mut action = action();
         let mut steps = authority(Some(100));
@@ -339,16 +341,17 @@ async fn identity_and_complete_exact_membership_are_required_without_retargeting
             "numeric mismatch" => steps[0].body = json!({"id":8,"login":"verified-owner"}),
             "unlisted" => {
                 steps[2].body =
-                    json!({"total_count":1,"repositories":[{"full_name":"owner/other"}]});
+                    json!({"total_count":1,"repositories":[{"full_name":"owner/other","id":8}]});
             }
             "case differs" => {
                 steps[2].body =
-                    json!({"total_count":1,"repositories":[{"full_name":"Owner/repo"}]});
+                    json!({"total_count":1,"repositories":[{"full_name":"Owner/repo","id":7}]});
             }
             "incomplete" => {
                 steps[2].body =
-                    json!({"total_count":2,"repositories":[{"full_name":"owner/repo"}]});
+                    json!({"total_count":2,"repositories":[{"full_name":"owner/repo","id":7}]});
             }
+            "recreated since review" => action.repo_id = NonZeroU64::new(9),
             _ => unreachable!(),
         }
         steps.truncate(calls);
@@ -373,6 +376,29 @@ async fn identity_and_complete_exact_membership_are_required_without_retargeting
                 Some("owner/repo")
             }
         );
+    }
+}
+
+/// OSC-648: the id GitHub lists for the name now must be the one bound at review; an attempt
+/// from before the id was stored is checked by name, as before.
+#[tokio::test(start_paused = true)]
+async fn a_repository_unchanged_since_review_or_from_before_the_id_proceeds() {
+    for repo_id in [NonZeroU64::new(7), None] {
+        let mut steps = authority(Some(100));
+        steps.push(reply(
+            Expected::Issues { since: 99, page: 1 },
+            Some(120),
+            json!([]),
+        ));
+        let (http, control, script) = bounded(steps);
+        let action = Action {
+            repo_id,
+            ..action()
+        };
+        let prepared = preflight(http, token(), &action, &control).await.unwrap();
+        assert_eq!(prepared.mark.at_s.get(), 120, "{repo_id:?}");
+        assert_eq!(script.calls.load(Ordering::SeqCst), 4, "{repo_id:?}");
+        assert!(!control.may_have_sent(), "{repo_id:?}");
     }
 }
 
