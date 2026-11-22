@@ -34,7 +34,7 @@ pub(super) enum Finding {
     /// Before its first build: `Finding` reports keep it, and Ready records the newest sign-in.
     Due,
     /// Its first build found no sign-in for its Claude Code choice; the next report releases it.
-    Waiting,
+    Waiting { until: tokio::time::Instant },
 }
 
 /// A usable connection and its catalog.
@@ -427,15 +427,18 @@ impl Coordinator {
                 }
             }
         }
-        if current.finding == Some(Finding::Waiting)
+        if let Some(Finding::Waiting { until }) = current.finding
             && !matches!(self.claude_code, Availability::Finding)
         {
+            let now = tokio::time::Instant::now();
+            if now >= until {
+                return true;
+            }
             current.finding = None;
             let run = current.id;
-            effects.push(Effect::ArmDeadline {
-                run,
-                after: self.tuning.wall_clock,
-            });
+            let at = now + self.tuning.wall_clock;
+            current.control.0.end = at.into_std();
+            effects.push(Effect::ArmDeadlineAt { run, at });
             self.build(run, 1, effects);
         }
         true
@@ -451,19 +454,19 @@ impl Coordinator {
         effects: &mut Vec<Effect>,
     ) -> bool {
         let claude = choice.is_some_and(|choice| choice.connection == ConnectionKind::ClaudeCode);
+        let wait = self.tuning.finding_wait;
         let Ok(current) = self.current(run) else {
             return false;
         };
         if !claude || current.finding != Some(Finding::Due) {
             return false;
         }
-        current.finding = Some(Finding::Waiting);
+        current.finding = Some(Finding::Waiting {
+            until: tokio::time::Instant::now() + wait,
+        });
         current.build = None;
         current.snapshot = None;
-        effects.push(Effect::ArmDeadline {
-            run,
-            after: self.tuning.finding_wait,
-        });
+        effects.push(Effect::ArmDeadline { run, after: wait });
         true
     }
 

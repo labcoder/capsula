@@ -30,7 +30,7 @@ use crate::connections::oauth::exchange::{ExchangeError, exchange};
 use crate::connections::oauth::id_token::{IdentityError, verify, verify_refreshed};
 use crate::connections::oauth::refresh::refresh;
 use crate::connections::oauth::revoke::revoke;
-use crate::connections::oauth::{Authorization, Intent, LaunchError, Launcher, SignIn};
+use crate::connections::oauth::{Authorization, Intent, Launcher, SignIn};
 use crate::connections::records::{Account, Revocable};
 use crate::context::ConnectionTag;
 use crate::coordinator::{Availability, Ready};
@@ -44,6 +44,9 @@ use crate::coordinator::{Input as CoreInput, RefusedKey};
 pub(super) mod github;
 #[cfg(test)]
 pub(super) mod github_tests;
+#[cfg(test)]
+#[path = "account_task_tests.rs"]
+mod task_tests;
 
 #[derive(Debug)]
 pub(super) enum Work {
@@ -552,7 +555,8 @@ impl Accounts {
                 ))),
                 Effect::Revoke(entries) => drop(tokio::spawn(revoke_task(
                     entries,
-                    self.oauth,
+                    Instant::now() + self.oauth.revoke,
+                    self.oauth.backoff,
                     Arc::clone(&self.net.http),
                     self.events_tx.clone(),
                 ))),
@@ -565,7 +569,7 @@ impl Accounts {
                     generation,
                     client,
                     refresh_token,
-                    self.oauth.refresh,
+                    Instant::now() + self.oauth.refresh,
                     self.net.clone(),
                     self.events_tx.clone(),
                 ))),
@@ -845,14 +849,10 @@ async fn listen(
         )
         .await
         .map_err(Listened::Bind)?;
-        // Opening the browser is OS work that can block, so it runs off the core loop.
-        let (sign_in, opened) = tokio::task::spawn_blocking(move || {
-            let opened = sign_in.open_browser(launcher.as_ref());
-            (sign_in, opened)
-        })
-        .await
-        .map_err(|_| Listened::Launch(LaunchError::Launch))?;
-        opened.map_err(Listened::Launch)?;
+        sign_in
+            .open_browser(launcher)
+            .await
+            .map_err(Listened::Launch)?;
         sign_in
             .receive()
             .await
@@ -865,16 +865,31 @@ async fn listen(
     events.send(Input::Listened { attempt, result }).ok();
 }
 
+async fn account_http(http: HttpFactory, deadline: Instant) -> Result<SharedHttp, ExchangeError> {
+    if Instant::now() >= deadline {
+        return Err(ExchangeError::PreDispatchTimeout);
+    }
+    let built = tokio::time::timeout_at(deadline, tokio::task::spawn_blocking(move || http()))
+        .await
+        .map_err(|_| ExchangeError::PreDispatchTimeout)?;
+    if Instant::now() >= deadline {
+        return Err(ExchangeError::PreDispatchTimeout);
+    }
+    built
+        .map_err(|_| HttpError::Configuration)?
+        .map_err(ExchangeError::Http)
+}
+
 async fn revoke_task(
     entries: Vec<Secret<Revocable>>,
-    tuning: OAuthTuning,
+    deadline: Instant,
+    backoff: [Duration; 2],
     http: HttpFactory,
     events: mpsc::UnboundedSender<Input>,
 ) {
-    let deadline = Instant::now() + tuning.revoke;
-    let confirmed = match tokio::task::spawn_blocking(move || http()).await {
-        Ok(Ok(http)) => revoke(&http, entries, deadline, tuning.backoff).await,
-        _ => Vec::new(),
+    let confirmed = match account_http(http, deadline).await {
+        Ok(http) => revoke(&http, entries, deadline, backoff).await,
+        Err(_) => Vec::new(),
     };
     events.send(Input::Revoked(confirmed)).ok();
 }
@@ -928,18 +943,15 @@ async fn refresh_task(
     generation: u64,
     client: Secret<Zeroizing<String>>,
     refresh_token: Secret<Zeroizing<String>>,
-    limit: Duration,
+    deadline: Instant,
     net: Net,
     events: mpsc::UnboundedSender<Input>,
 ) {
     let build = Arc::clone(&net.http);
     // Its own task, so one that panics still ends the flight; the payload isn't logged.
     let result = tokio::spawn(async move {
-        let http = tokio::task::spawn_blocking(move || build())
-            .await
-            .map_err(|_| ExchangeError::Http(HttpError::Configuration))?
-            .map_err(ExchangeError::Http)?;
-        refresh(&http, client.expose(), refresh_token.expose(), limit).await
+        let http = account_http(build, deadline).await?;
+        refresh(&http, client.expose(), refresh_token.expose(), deadline).await
     })
     .await
     .unwrap_or_else(|_| {

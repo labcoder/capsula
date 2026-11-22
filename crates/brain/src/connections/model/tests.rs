@@ -1046,29 +1046,35 @@ async fn a_round_dropped_while_its_flush_waits_settles_as_written() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn an_early_head_near_the_deadline_with_a_stalled_body_still_settles_at_it() {
-    let harness = Harness::new(4096);
-    let body = body(&"p".repeat(64 * 1024));
-    let mut call = harness.call(&body, 1);
-    assert!(poll(&mut call).is_pending());
-    harness.grant(1);
-    assert!(poll(&mut call).is_pending());
-    let mut server = harness.accept();
-    received(&mut server);
-    tokio::time::advance(Duration::from_secs(9)).await;
-    reply(
-        &mut server,
-        b"HTTP/1.1 429 Slow\r\nContent-Length: 50\r\n\r\n{\"error\":",
-    );
-    assert!(poll(&mut call).is_pending());
-    assert_eq!(harness.settled(), []);
-    tokio::time::advance(Duration::from_secs(1)).await;
-    assert!(matches!(
-        poll(&mut call),
-        Poll::Ready((Err(Failure::Transport), _))
-    ));
-    assert_eq!(harness.seen(), (vec![], vec![0]));
-    assert_eq!(harness.settled().len(), 1);
+async fn a_trickled_early_refusal_settles_at_the_earlier_budget() {
+    for (head_at_s, body_ms) in [(9, 1000), (1, 3000)] {
+        let mut harness = Harness::new(4096);
+        harness.client.tuning.error_body = Duration::from_secs(3);
+        let payload = body(&"p".repeat(64 * 1024));
+        let mut call = harness.call(&payload, 1);
+        assert!(poll(&mut call).is_pending());
+        harness.grant(1);
+        assert!(poll(&mut call).is_pending());
+        let mut server = harness.accept();
+        received(&mut server);
+        tokio::time::advance(Duration::from_secs(head_at_s)).await;
+        reply(
+            &mut server,
+            b"HTTP/1.1 429 Slow\r\nContent-Length: 50\r\n\r\n{\"error\":",
+        );
+        assert!(poll(&mut call).is_pending());
+        tokio::time::advance(Duration::from_millis(body_ms - 1)).await;
+        reply(&mut server, b" {");
+        assert!(poll(&mut call).is_pending());
+        assert_eq!(harness.settled(), []);
+        tokio::time::advance(Duration::from_millis(1)).await;
+        assert!(matches!(
+            poll(&mut call),
+            Poll::Ready((Err(Failure::Transport), _))
+        ));
+        assert_eq!(harness.seen(), (vec![], vec![0]));
+        assert_eq!(harness.settled(), settled_once(false));
+    }
 }
 
 #[tokio::test]

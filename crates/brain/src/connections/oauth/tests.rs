@@ -1,8 +1,8 @@
-use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::future::{Future, poll_fn};
 use std::net::SocketAddr;
 use std::pin::Pin;
+use std::sync::{Arc, Mutex};
 use std::task::Poll;
 use std::time::Duration;
 
@@ -20,7 +20,7 @@ use crate::connections::records::{Account, Tokens};
 use crate::test_support::{Captured, SENTINEL};
 
 #[derive(Default)]
-struct RecordingLauncher(RefCell<Option<String>>);
+struct RecordingLauncher(Mutex<Option<String>>);
 
 impl Launcher for RecordingLauncher {
     fn launch(&self, target: &LaunchTarget) -> Result<(), LaunchError> {
@@ -36,7 +36,7 @@ impl Launcher for RecordingLauncher {
             .expect("numeric address");
         let _connected =
             std::net::TcpStream::connect(address).expect("listener bound before launch");
-        self.0.replace(Some(target.url().to_owned()));
+        *self.0.lock().unwrap() = Some(target.url().to_owned());
         Ok(())
     }
 }
@@ -500,13 +500,79 @@ async fn idle_preconnect_then_valid_callback_completes_inside_attempt_deadline()
 async fn expired_attempt_neither_launches_nor_receives() {
     let (attempt, _address, _seen) = attempt().await;
     tokio::time::advance(Duration::from_secs(300)).await;
-    let launcher = RecordingLauncher::default();
-    assert_eq!(attempt.open_browser(&launcher), Err(LaunchError::Expired));
+    let launcher = Arc::new(RecordingLauncher::default());
+    assert_eq!(
+        attempt
+            .open_browser(Arc::<RecordingLauncher>::clone(&launcher))
+            .await,
+        Err(LaunchError::Expired)
+    );
     assert!(
-        launcher.0.borrow().is_none(),
+        launcher.0.lock().unwrap().is_none(),
         "expired attempt never launched"
     );
     assert_eq!(attempt.receive().await.unwrap_err(), SignInError::Expired);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_launch_held_at_spawn_never_opens_after_expiry_or_cancellation() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use tokio::sync::oneshot;
+
+    struct Probe {
+        opened: Arc<AtomicBool>,
+        done: Option<oneshot::Sender<()>>,
+    }
+    impl Launcher for Probe {
+        fn launch(&self, _: &LaunchTarget) -> Result<(), LaunchError> {
+            self.opened.store(true, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+    impl Drop for Probe {
+        fn drop(&mut self) {
+            if let Some(done) = self.done.take() {
+                done.send(()).ok();
+            }
+        }
+    }
+
+    for expire in [true, false] {
+        let (locking, locked) = oneshot::channel();
+        let (release, holding) = std::sync::mpsc::channel();
+        let holder = std::thread::spawn(move || {
+            let _spawn = crate::platform::spawn_lock();
+            locking.send(()).unwrap();
+            holding.recv_timeout(Duration::from_secs(10)).unwrap();
+        });
+        locked.await.unwrap();
+        let (attempt, address, _seen) = attempt().await;
+        let (done, exited) = oneshot::channel();
+        let opened = Arc::new(AtomicBool::new(false));
+        let mut launch = Box::pin(attempt.open_browser(Arc::new(Probe {
+            opened: Arc::clone(&opened),
+            done: Some(done),
+        })));
+        pending(launch.as_mut()).await;
+        if expire {
+            tokio::time::advance(super::ATTEMPT_LIMIT).await;
+            assert_eq!(launch.as_mut().await, Err(LaunchError::Expired));
+        }
+        drop(launch);
+        drop(attempt);
+        assert_eq!(
+            TcpStream::connect(address).await.unwrap_err().kind(),
+            std::io::ErrorKind::ConnectionRefused,
+            "the held worker cannot own the listener"
+        );
+        release.send(()).unwrap();
+        holder.join().unwrap();
+        exited.await.unwrap();
+        assert!(
+            !opened.load(Ordering::SeqCst),
+            "no stale launch reached the opener"
+        );
+    }
 }
 
 #[tokio::test(start_paused = true)]
@@ -560,9 +626,12 @@ async fn returning_sign_in_never_hands_saved_tokens_or_hints_to_the_launcher() {
     )
     .await
     .expect("bind");
-    let launcher = RecordingLauncher::default();
-    attempt.open_browser(&launcher).expect("injected launch");
-    let url = launcher.0.into_inner().expect("launch recorded");
+    let launcher = Arc::new(RecordingLauncher::default());
+    attempt
+        .open_browser(Arc::<RecordingLauncher>::clone(&launcher))
+        .await
+        .expect("injected launch");
+    let url = launcher.0.lock().unwrap().take().expect("launch recorded");
     for value in [
         "synthetic-access-token-B1",
         "synthetic-refresh-token-B1",

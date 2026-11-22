@@ -197,7 +197,9 @@ id from the vault.
 
 `open_browser` hands a `LaunchTarget` to an injectable `Launcher`. Production uses
 `SystemBrowser` and `webbrowser`; tests record the URL without opening a browser.
-The runtime opens it on tokio's blocking pool, because an OS launch can block the core loop.
+The async attempt keeps the listener and times the launch on Tokio's blocking pool. The worker
+gets only launch material, not the socket, and checks cancellation and expiry under the
+process-spawn guard so a queued launch can't open a stale page.
 `webbrowser` owns discovery of the OS browser
 executable and its existing arguments. Neither `id_token_hint` nor `login_hint` is sent,
 even when a saved record has ID, access and refresh tokens. Returning sign-in uses the
@@ -334,7 +336,9 @@ replies, oversized data and other statuses leave issuance uncertain for the late
 No provider message or body enters an error.
 
 `oauth::refresh::refresh` posts `grant_type=refresh_token`, the saved `client_id`, the refresh
-token and `resource`, with a 30 s deadline [local policy], and parses the answer as an exchange's.
+token and `resource`, then parses the answer as an exchange's. The tunable 30 s default covers
+HTTP client setup and the request under one deadline. A timeout during setup or before dispatch
+is definitely unsent; a timeout after dispatch is not.
 Unlike an exchange, it may leave out `id_token` or `refresh_token`; an exchange without `id_token`
 is unusable. Empty or oversized inputs are refused before anything is sent.
 
@@ -647,7 +651,7 @@ or Retry enters at the first step of the persisted phase:
    isn't rewritten, but the account token is still revoked. So is a list the account token can
    never fit (`Bounds`): `outcome_unknown` is persisted first, the list stays as it was, and the
    token is revoked from memory; if that marker write is refused, the step is `Refused`. A refused read decides nothing: the step is `Refused` and Retry reruns it.
-3. **Revoke.** One run over the list, inside the usual 10 s budget.
+3. **Revoke.** One run over the list, inside the tunable setup and network budget (10 s by default).
 4. **Checkpoint.** The confirmed entries leave the list (a refused rewrite leaves them listed, which
    counts as unconfirmed), then one marker write enters `Deleting` and decides the notice: clear
    only when the saved list is empty and `request_pending` and `outcome_unknown` are clear. With

@@ -535,6 +535,13 @@ pub enum Effect {
         /// How long from now.
         after: Duration,
     },
+    /// Resume a run with the same absolute deadline as its store-read control.
+    ArmDeadlineAt {
+        /// The run.
+        run: RunId,
+        /// The end of its resumed run budget.
+        at: tokio::time::Instant,
+    },
     /// The shell broke the protocol: end its connection.
     Broken(&'static str),
     /// Hand TTS `run`'s segment, to be resampled to `rate`; the pump forwards its events as
@@ -1094,7 +1101,7 @@ impl Coordinator {
                 if current.finishing && !current.tools.calling() {
                     return Err(Stale);
                 }
-                if current.finding == Some(availability::Finding::Waiting) {
+                if matches!(current.finding, Some(availability::Finding::Waiting { .. })) {
                     let reason = model_unavailable();
                     self.fail_with(run, Failure::Engine, reason, &mut effects)?;
                 } else if current
