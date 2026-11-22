@@ -392,8 +392,8 @@ mod tests {
             .into_iter()
             .flatten()
         {
-            assert!(!text.contains(SENTINEL), "a planted value leaked: {text}");
-            assert!(!text.contains("4919"), "a version leaked: {text}");
+            assert!(!text.contains(SENTINEL), "a planted value leaked");
+            assert!(!text.contains("4919"), "a version leaked");
         }
         (out, error, quit_sent)
     }
@@ -445,8 +445,8 @@ mod tests {
             .into_iter()
             .flatten()
         {
-            assert!(!text.contains(SENTINEL), "a planted value leaked: {text}");
-            assert!(!text.contains("4919"), "a version leaked: {text}");
+            assert!(!text.contains(SENTINEL), "a planted value leaked");
+            assert!(!text.contains("4919"), "a version leaked");
         }
         (out, error, quit_sent)
     }
@@ -619,19 +619,48 @@ mod tests {
 
     #[test]
     fn the_deadline_ends_the_sign_in_by_quitting_without_a_cancel() {
-        let mut brain = fixture(vec![
-            Step::View(signed_out()),
-            Step::View(ClaudeCodeView::SigningIn),
-            Step::Late,
-        ]);
-        let (out, error, quit_sent) = run(&mut brain, Ask::SignIn);
-        assert_eq!(out, format!("claude code: signed out\n{WAITING}"));
-        assert_eq!(
-            error.as_deref(),
-            Some("the sign-in didn't settle in 330s; Quitting ends it")
+        let diagnostics = |detail: &str| {
+            let mut brain = fixture(vec![
+                Step::View(signed_out()),
+                Step::View(ClaudeCodeView::SigningIn),
+                Step::Late,
+            ]);
+            *brain
+                .frames
+                .iter_mut()
+                .find(|frame| frame.is_err())
+                .expect("deadline error") =
+                Err(anyhow!("nothing expected arrived; last: {detail}"));
+            brain.frames.push_front(Ok(Frame::Data(
+                DataToShell::AssistantText {
+                    run: RunId(3),
+                    delta: detail.into(),
+                },
+                0,
+            )));
+            let mut out = Vec::new();
+            let (result, quit_sent) = session(Ok(&mut brain), &mut out, |wire, out| {
+                drive(wire, out, Ask::SignIn)
+            });
+            let error = result.expect_err("sign-in times out");
+            assert_eq!(brain.sent, [CONNECT, QUIT]);
+            assert!(quit_sent);
+            (out, format!("{error:#}"), format!("{error:?}"))
+        };
+        let original = format!("{TOKEN} {PATH}");
+        let [shown, other] = [
+            original.as_str(),
+            r"abcalternate-key-1290 D:\Profiles\another\Settings\Tool",
+        ]
+        .map(diagnostics);
+        assert!(shown == other, "key or path affected sign-in diagnostics");
+        assert!(
+            shown.0 == format!("claude code: signed out\n{WAITING}").as_bytes()
+                && shown.1 == "the sign-in didn't settle in 330s; Quitting ends it"
+                && !shown.2.contains(SENTINEL)
+                && !shown.2.contains("4919"),
+            "sign-in deadline diagnostics are not sanitized"
         );
-        assert_eq!(brain.sent, [CONNECT, QUIT]);
-        assert!(quit_sent);
     }
 
     #[test]

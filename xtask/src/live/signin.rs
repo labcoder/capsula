@@ -390,7 +390,7 @@ mod tests {
             .into_iter()
             .flatten()
         {
-            assert!(!text.contains(SENTINEL), "a planted value leaked: {text}");
+            assert!(!text.contains(SENTINEL), "a planted value leaked");
         }
         (out, error, quit_sent)
     }
@@ -479,7 +479,7 @@ mod tests {
             .into_iter()
             .flatten()
         {
-            assert!(!text.contains(SENTINEL), "a planted value leaked: {text}");
+            assert!(!text.contains(SENTINEL), "a planted value leaked");
         }
         (out, error, quit_sent)
     }
@@ -655,23 +655,49 @@ mod tests {
 
     #[test]
     fn the_deadline_cancels_the_sign_in() {
-        let mut brain = fixture(vec![
-            Step::View(signed_out()),
-            Step::View(AccountView::SigningIn),
-            Step::Late,
-            Step::View(signed_out()),
-        ]);
-        let (out, error, quit_sent) = run(&mut brain);
-        assert_eq!(
-            out,
-            format!("account: signed out\n{WAITING}account: signed out\n")
+        let diagnostics = |detail: &str| {
+            let mut brain = fixture(vec![
+                Step::View(signed_out()),
+                Step::View(AccountView::SigningIn),
+                Step::Late,
+                Step::View(signed_out()),
+            ]);
+            *brain
+                .frames
+                .iter_mut()
+                .find(|frame| frame.is_err())
+                .expect("deadline error") =
+                Err(anyhow!("nothing expected arrived; last: {detail}"));
+            brain.frames.push_front(Ok(Frame::Data(
+                DataToShell::AssistantText {
+                    run: RunId(3),
+                    delta: detail.into(),
+                },
+                0,
+            )));
+            let mut out = Vec::new();
+            let (result, quit_sent) = session(Ok(&mut brain), &mut out, drive);
+            let error = result.expect_err("sign-in times out");
+            assert_eq!(ops(&brain), [SIGN_IN, CANCEL, QUIT]);
+            assert!(quit_sent);
+            (out, format!("{error:#}"), format!("{error:?}"))
+        };
+        let original = format!("{TOKEN} {EMAIL}");
+        let [shown, other] = [
+            original.as_str(),
+            "abcalternate-key-1290 abcother@fakemail.testsite",
+        ]
+        .map(diagnostics);
+        assert!(
+            shown == other,
+            "account material affected sign-in diagnostics"
         );
-        assert_eq!(
-            error.as_deref(),
-            Some("sign-in didn't settle in 330s; it was cancelled")
+        assert!(
+            shown.0 == format!("account: signed out\n{WAITING}account: signed out\n").as_bytes()
+                && shown.1 == "sign-in didn't settle in 330s; it was cancelled"
+                && !shown.2.contains(SENTINEL),
+            "sign-in deadline diagnostics are not sanitized"
         );
-        assert_eq!(ops(&brain), [SIGN_IN, CANCEL, QUIT]);
-        assert!(quit_sent);
     }
 
     #[test]
