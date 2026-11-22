@@ -173,7 +173,9 @@ impl Snapshot<'_> {
                 if !self.live_task(*task, origin)? {
                     return Err(Error::NoTask);
                 }
-                let limit = self.tuning().read_events.min(READ_EVENTS);
+                let tuning = self.tuning();
+                let limit = tuning.read_events.min(READ_EVENTS);
+                let bytes_limit = tuning.reread.min(TEXT_BYTES);
                 let rows = self.recall_events(*task, *from, *to, origin, limit)?;
                 let mut shown = Vec::new();
                 let mut cut = None;
@@ -185,14 +187,14 @@ impl Snapshot<'_> {
                     }
                     shown.push(event(row, &row.text));
                     let following = rows.get(at + 1).map(|row| row.id);
-                    if range(*task, &shown, None, following).to_string().len() > TEXT_BYTES {
+                    if range(*task, &shown, None, following).to_string().len() > bytes_limit {
                         shown.pop();
                         if at == 0 {
                             let bytes = prefix(&row.text, |text| {
                                 range(*task, &[event(row, text)], Some(text.len()), following)
                                     .to_string()
                                     .len()
-                                    <= TEXT_BYTES
+                                    <= bytes_limit
                             });
                             cut = Some(bytes);
                             shown.push(event(row, &row.text[..bytes]));

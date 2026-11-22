@@ -42,10 +42,10 @@ The stored `recall` output contains selectors, not task titles, snippets or sour
   match existed. Replay runs a snippet query for those exact events, never a new search.
   Each snippet is capped at 4,096 encoded JSON-string bytes, not merely FTS's token count.
 - A range keeps its actual shown endpoints, a final cut-prefix byte length and the next
-  entirely unshown event's actual ID. A new result shows at most `read_events_count` events
-  (default twenty); replay keeps the selected range under the fixed twenty-event limit.
-  Its JSON text payload
-  is capped at 32 KiB, including escaping and range metadata but excluding refreshed titles.
+  entirely unshown event's actual ID. A new result is capped by `read_events_count` (default
+  twenty) and `reread_bytes` (default 32 KiB), counting escaped JSON and range metadata before
+  the title and outer wrapper. Replay keeps the saved range and cut under the fixed twenty-event
+  and 32 KiB caps.
   A first oversized event is cut on a UTF-8 boundary. Its tail cannot be paged with this API;
   the output says so, and continuation advances beyond it. Replay cannot grow the prefix or
   rediscover continuation after append or rename.

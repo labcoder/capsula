@@ -19,7 +19,7 @@ use crate::store::context::{Snapshot, Speaker};
 const SUMMARY_PROMPT: &str = include_str!("../../prompts/summary.md");
 /// The uncovered backlog, in estimated tokens, at which a task compacts after a run [guess].
 pub(crate) const COMPACT_AT: u64 = 24_000;
-/// The most a summary request may carry, prompt and previous summary included [guess].
+/// The default background compaction input budget, in estimated bytes.
 #[cfg(test)]
 pub(crate) const SUMMARY_INPUT: usize = 96 * 1024;
 /// The longest summary stored, in bytes [guess].
@@ -36,12 +36,13 @@ pub(crate) struct Compaction {
     pub(crate) built: Built,
 }
 
-/// The summary request for `thread`, once its uncovered backlog reaches `compact_at` estimated
-/// tokens. It summarizes the longest prefix of whole runs older than the configured raw-run
-/// window that fits the summary-input limit, with the previous summary, and covers from the previous
-/// summary's start through the last run it carries. `None` when the thread is being deleted or
-/// gone, the backlog is under the threshold, no run is old enough, or the oldest one alone
-/// doesn't fit.
+/// The background summary request for `thread`, once its uncovered backlog reaches `compact_at`
+/// estimated tokens. It takes the longest prefix of eligible whole runs that fits the input
+/// estimate: JSON-escaped strings plus fixed body and item allowances, not provider wire bytes.
+/// The estimate includes instructions, the previous summary and the closing message. Coverage
+/// starts at the previous summary or the first included run and ends at the last included run.
+/// `None` when the thread is being deleted or gone, the backlog is under the threshold, or no
+/// eligible run fits.
 ///
 /// # Errors
 /// [`BuildError`] when the read fails or the run's origin doesn't own the thread.
@@ -132,7 +133,7 @@ pub(crate) fn compaction(
         kept.extend(rendered);
         through = Some(uncovered.last);
     }
-    // shortcut: one run over SUMMARY_INPUT stalls compaction behind it until a continuation
+    // shortcut: one run over the input budget stalls background compaction until a continuation
     // scheme exists; upgrade when a real thread hits it.
     let Some(through) = through else {
         return Ok(None);
@@ -185,8 +186,8 @@ pub(crate) fn fit_summary(output: &str, allowance: usize) -> Option<String> {
 /// Inline compaction's request (B5), when a run's current turn fits without the thread's summary
 /// but not with it: the summary rewritten to fit the `room` the bound leaves. It covers what the
 /// summary covered. The allowance returned with it is what the new text may add to its item,
-/// counted escaped, for [`fit_summary`]. `None` when the thread is being deleted or gone, has no
-/// summary, or leaves no room.
+/// counted escaped, for [`fit_summary`]. The background input budget doesn't apply. `None` when
+/// the thread is being deleted or gone, has no summary, or leaves no room.
 ///
 /// # Errors
 /// [`BuildError`] when the read fails or the run's origin doesn't own the thread.

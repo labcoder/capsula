@@ -461,9 +461,11 @@ and the number of retry attempts are unchanged.
 still computes the smaller of its lead and half the token's remaining lifetime.
 `[tuning.drawing]` supplies the draw controller and the readiness and scene-clear timers.
 The first retry cannot be longer than the cap, and draw counts only lower the existing ceilings.
-`[tuning.context]` supplies the page reader and compaction threshold. The limits apply to
-context assembly and new reads; recall replay still checks saved selections against the fixed
-record and request limits. See [tuning](../user/tuning.md) for the examples the docs test checks.
+`[tuning.context]` supplies the page reader and compaction threshold. `reread_bytes` caps new
+history reads and older reference excerpts; recall replay still checks saved selections against
+the fixed record and request limits. `summary_input_bytes` limits the background compaction
+input estimate (JSON-escaped strings plus fixed overhead), not inline rewriting or exact
+provider request bytes. See [tuning](../user/tuning.md) for the examples the docs test checks.
 
 ## Claude Code
 

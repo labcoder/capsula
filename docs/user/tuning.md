@@ -144,18 +144,20 @@ last_retry_ms = 30000
 
 These change how much history goes into requests. They don't delete stored history or let a
 model read anything it couldn't read before. A saved recall result keeps its original selection.
+The background compaction budget estimates JSON-escaped text and request overhead. It doesn't
+apply to a summary rewritten during an answer.
 
 ```toml
 [tuning.context]
 # 24000–48000 estimated tokens: uncovered history required to start background compaction.
 compact_at_token_count = 24000
-# 49152–98304 bytes: summary request budget, including instructions and the previous summary.
+# 49152–98304 estimated bytes: background compaction input, including instructions and the previous summary.
 summary_input_bytes = 98304
 # 2–8: the newest runs kept raw when they fit.
 raw_runs_count = 8
 # 16–32: the newest deletion notes considered by the context builder.
 notes_count = 32
-# 16384–32768 bytes: how much text one older history reference may reread.
+# 16384–32768 bytes: caps new history.read payloads and text reread from older references.
 reread_bytes = 32768
 # 10–20: text events a new history.read result may show, still subject to its byte limit.
 read_events_count = 20
