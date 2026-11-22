@@ -1241,7 +1241,7 @@ fn issue_actions_print_no_content() {
 /// OSC-648: an attempt pending across V11 keeps its row with no repository id, and opening the
 /// upgraded file again changes nothing.
 #[test]
-fn version_nine_attempts_gain_an_empty_repository_id_once() {
+fn version_ten_attempts_gain_an_empty_repository_id_once() {
     let scratch = Scratch::new("actions-v10");
     std::fs::create_dir_all(scratch.dir()).expect("folder");
     let mut conn = Connection::open(scratch.db()).expect("file");
@@ -1269,7 +1269,7 @@ fn version_nine_attempts_gain_an_empty_repository_id_once() {
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .expect("schema");
-        assert_eq!((version, columns), (10, 1), "{open}");
+        assert_eq!((version, columns), (11, 1), "{open}");
         let action = store.action(DraftId(1)).expect("reads").expect("kept");
         assert_eq!(
             (action.repo.as_ref().map(RepoName::as_str), action.repo_id),
