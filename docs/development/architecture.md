@@ -82,6 +82,12 @@ GPUI; the shell is the crate that does. `cargo xtask check-core` holds that in C
 direct dependencies are a list in `xtask/src/check_core.rs`, so a new one is a reviewed line,
 and the whole tree is searched for a framework's name.
 
+Linux is a build and test host for `shell-core`, not a supported runtime. Its native
+IPC, process launch, credential storage, file logging, and audio entry points return
+`Unsupported`. The shared tests use scripted audio and need ALSA development headers
+to compile CPAL, not an audio device. Real Windows pipe and device tests and tests that
+need the brain stay on Windows while the brain cannot build on Linux.
+
 The shell's tests build the core as a dependency, without `cfg(test)`. So a test double in
 the core is gated on `any(test, feature = "test-support")`, and only a dev-dependency may
 turn that feature on. `check-core` fails on any other spelling of a test gate that could

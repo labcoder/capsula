@@ -6,6 +6,19 @@ use kumochi_protocol::constants::{self, CREDENTIAL_SERVICE};
 use kumochi_protocol::message::{KeyRejection, KeyStageId, KeyStagePlan, validate_anthropic_key};
 use zeroize::Zeroizing;
 
+#[cfg(not(windows))]
+use crate::credential::CredentialError;
+#[cfg(not(windows))]
+use kumochi_protocol::message::Capability;
+
+#[cfg(windows)]
+pub(crate) use super::windows::read_instance;
+
+#[cfg(not(windows))]
+pub(crate) fn read_instance(_: u32) -> Result<Capability, CredentialError> {
+    Err(CredentialError::Unsupported)
+}
+
 pub(crate) struct PastedAnthropicKey(Zeroizing<String>);
 
 impl PastedAnthropicKey {
@@ -45,7 +58,17 @@ pub(crate) enum StageError {
     #[error("staging identity mismatch")]
     IdentityMismatch,
     #[error("the credential store is unavailable")]
+    #[cfg_attr(
+        all(not(windows), not(test)),
+        expect(
+            dead_code,
+            reason = "native store failures are Windows-only; fixtures can exercise them here"
+        )
+    )]
     Store,
+    #[cfg(not(windows))]
+    #[error("native credential storage is unsupported on this platform")]
+    Unsupported,
 }
 
 #[cfg(windows)]
@@ -67,7 +90,7 @@ pub(crate) fn write_key_stage(
     permit: StagePermit,
     key: PastedAnthropicKey,
 ) -> Result<KeyStageId, StageError> {
-    write_stage(permit, key, |_, _| Err(StageError::Store))
+    write_stage(permit, key, |_, _| Err(StageError::Unsupported))
 }
 
 #[expect(

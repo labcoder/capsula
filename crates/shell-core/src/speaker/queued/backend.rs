@@ -7,11 +7,22 @@ use std::time::Instant;
 
 use crate::platform::speaker_cpal::{BackendStream, Control, OutputError, Transport};
 
+#[cfg(not(windows))]
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) use fixture::FixturePlayback;
 #[cfg(any(test, feature = "test-support"))]
 pub(super) use fixture::spawn_fake;
+#[cfg(windows)]
 #[cfg(any(test, feature = "test-support"))]
 pub use fixture::{FixturePlayback, await_fake_disposal, serialize_playback};
 #[cfg(any(test, feature = "test-support"))]
+#[cfg_attr(
+    not(windows),
+    expect(
+        unreachable_pub,
+        reason = "Windows shell fixtures export these test helpers"
+    )
+)]
 mod fixture;
 
 #[derive(Clone, Copy, PartialEq, Eq)]

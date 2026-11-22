@@ -761,7 +761,11 @@ impl Worker {
                     }
                 }
                 Err(OutputError::Full) => break,
-                Err(OutputError::Unavailable | OutputError::PacketTooLarge) => {
+                Err(
+                    OutputError::Unavailable
+                    | OutputError::Unsupported
+                    | OutputError::PacketTooLarge,
+                ) => {
                     self.recover(now);
                     break;
                 }

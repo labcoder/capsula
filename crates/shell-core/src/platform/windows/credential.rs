@@ -6,10 +6,21 @@ use windows::Win32::Security::Credentials::{
 use windows::core::PWSTR;
 use zeroize::Zeroizing;
 
+use crate::credential::CredentialError;
 use crate::platform::credential::{
     KeyStageWriter, PastedAnthropicKey, StageError, StagePermit, write_stage,
 };
-use kumochi_protocol::message::KeyStageId;
+use keyring::Entry;
+use kumochi_protocol::Secret;
+use kumochi_protocol::constants::{INSTANCE_SERVICE, instance_entry};
+use kumochi_protocol::message::{CAPABILITY_LEN, Capability, KeyStageId};
+
+pub(crate) fn read_instance(session: u32) -> Result<Capability, CredentialError> {
+    let account = instance_entry(session);
+    let bytes = Entry::new(INSTANCE_SERVICE, &account)?.get_secret()?;
+    let bytes: [u8; CAPABILITY_LEN] = bytes.try_into().map_err(|_| CredentialError::WrongLength)?;
+    Ok(Secret::new(bytes))
+}
 
 #[derive(Debug)]
 pub(crate) struct WindowsKeyStageWriter;
