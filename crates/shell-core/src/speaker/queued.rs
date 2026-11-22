@@ -75,6 +75,9 @@ impl Drop for Packet {
     }
 }
 
+/// How long a presented frame keeps speech evidence.
+const SPEECH_GRACE: Duration = Duration::from_millis(500);
+
 /// Expiring evidence that a run's audio is presenting: it holds Esc, never admits a microphone.
 #[derive(Clone)]
 pub(crate) struct Speech {
@@ -92,12 +95,20 @@ impl Speech {
         }
     }
 
-    /// Extends the evidence to `until`, waking the shell when it starts again.
-    fn hold(&self, until: Instant) {
+    /// Holds to a grace past the frame presented at `presented`, on a clock now at `now`.
+    fn hold(&self, presented: Duration, now: Duration) {
+        let Some(left) = presented
+            .saturating_add(SPEECH_GRACE)
+            .checked_sub(now)
+            .filter(|left| !left.is_zero())
+        else {
+            return;
+        };
+        let until = Instant::now() + left;
         let nanos = u64::try_from(until.saturating_duration_since(self.base).as_nanos())
             .unwrap_or(u64::MAX)
             .max(1);
-        let before = self.at(self.until.swap(nanos, Ordering::AcqRel));
+        let before = self.at(self.until.fetch_max(nanos, Ordering::AcqRel));
         if before.is_none_or(|at| at <= Instant::now()) {
             let _woken = self.changed.try_send(());
         }

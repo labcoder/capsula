@@ -444,6 +444,12 @@ impl Runs {
             .filter(|run| *run > self.fence && self.owned_disposition(*run) == RunDisposition::Live)
     }
 
+    /// Whether `run` is the live run and its terminal `RunState` came before its `RunEnd`.
+    pub fn state_ended(&self, run: RunId) -> bool {
+        self.live
+            .is_some_and(|live| live.run == run && live.state_ended)
+    }
+
     pub fn owned_disposition(&self, run: RunId) -> RunDisposition {
         if self.pending_stops.contains_key(&run) {
             RunDisposition::Stopped

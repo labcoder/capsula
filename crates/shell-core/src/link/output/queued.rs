@@ -241,7 +241,7 @@ impl OutputOwner {
     /// # Errors
     /// `Busy` on contention.
     pub fn speech(&self, session: u64) -> Result<Option<(RunId, Instant)>, Denied> {
-        // Not `try_lock`: this frequent read must not use up a test's scripted contention.
+        // The plain lock: refusals a test scripts for the owner's calls aren't spent on this read.
         let mut state = match self.state.try_lock() {
             Ok(state) => state,
             Err(std::sync::TryLockError::Poisoned(state)) => state.into_inner(),

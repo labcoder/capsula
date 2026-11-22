@@ -271,20 +271,26 @@ open status panel alone never does.
 
 Speech holds it too, from positive evidence only. The queued speaker's worker extends a
 `Speech` lease each time the native route reports presented PCM for the run, to 500 ms past
-that frame. It clears the lease when it recovers or retires the route, and when it stops.
+that frame's presentation time. Evidence already past that is ignored, and an older frame never
+shortens the lease. It clears the lease when it recovers or retires the route, and when it stops.
 Admission, an owed quiet receipt, a virtual route or a heard prefix never arm it, and
 `LOCAL_QUIET` and `RECEIPT_QUEUED` still gate the microphone and typed turns alone. Onset
 and clearing wake the output owner's change channel. Presence reads the lease there through
 `OutputOwner::speech`, which never waits. When it is busy, Presence keeps only a lease that
-hasn't run out and reads again. It also reads again when the lease runs out, and a session
+hasn't run out and reads again after 10 ms, doubling up to 80 ms. It also reads again when the lease runs out, and a session
 that ended has no lease. `Activity::speaking` is true while the lease holds and no focused
-Kumochi panel (the typing box, Tasks or Settings) takes Esc itself. Those panels keep their own
+Kumochi panel (the typing box, Tasks or Settings, by window activation rather than visibility)
+takes Esc itself. Those panels keep their own
 Esc, which stops speech first. Focus changes resync the hotkey.
 
 An Esc press carries the lease's session and run, captured when the press arrives, through
-deferred delivery. If that run is still the moving one, the press stops it as usual. Otherwise
-the press offers `Stop` only to that run's speaker on that session, locally. It never stops a
-newer run and never sends the brain a `Stop` for an ended run.
+deferred delivery. A press from another session does nothing. If that run is still the moving
+one and its `Done` hasn't come, the press fences that run alone (`fence_spoken`), so turns sent
+after the press stay. Otherwise the press offers `Stop` only to that run's speaker on that
+session, locally: `Done` comes on control before `RunEnd` on data, so an ended run's audio can
+still play. A local stop never ends the pair. Audio already gone is left alone, and a busy owner
+that refuses every try gets the stop given up. It never stops a newer run and never sends the
+brain a `Stop` for an ended run.
 Held voice additionally owns global Esc through preparation and pre-answer work. A raw Escape
 revokes collection before deferred UI; its hotkey delivery consumes one marker so that the
 same press cannot also dismiss typing. Cleanup debt alone does not capture Esc from newer

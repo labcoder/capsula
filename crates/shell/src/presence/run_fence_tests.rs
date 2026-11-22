@@ -756,6 +756,7 @@ fn queued_speech_holds_esc_only_while_presented_and_never_from_a_focused_box(
     cx: &mut TestAppContext,
 ) {
     use crate::link::{Batch, LinkEvent, fixture};
+    use kumochi_protocol::message::DataToShell;
     use std::time::{Duration, Instant};
 
     let _device = fixture::serialize_playback();
@@ -778,15 +779,30 @@ fn queued_speech_holds_esc_only_while_presented_and_never_from_a_focused_box(
             .unwrap();
     });
     let settings = std::cell::Cell::new(false);
+    // Some while run ends are held back, so a run's Done is in before its RunEnd.
+    let run_ends = std::cell::RefCell::new(None::<Vec<LinkEvent>>);
     let apply = |cx: &mut TestAppContext| {
         for event in events.try_iter() {
             settings.set(settings.get() || matches!(&event, LinkEvent::Settings { .. }));
+            if let Some(held) = run_ends.borrow_mut().as_mut()
+                && matches!(
+                    &event,
+                    LinkEvent::Data {
+                        message: DataToShell::RunEnd { .. },
+                        ..
+                    }
+                )
+            {
+                held.push(event);
+                continue;
+            }
             owner.update(cx, |owner, cx| {
                 owner.link_events(Batch::Plain(vec![event]), cx).unwrap();
             });
         }
-        // The owner's wakes come from foreign threads, which the test scheduler refuses.
-        owner.update(cx, Presence::refresh_speech);
+        // The owner's wakes come from foreign threads, which the test scheduler refuses, so this
+        // steps the dispatcher they would poke.
+        owner.update(cx, Presence::dispatch);
         cx.run_until_parked();
     };
     let wait =
@@ -811,6 +827,7 @@ fn queued_speech_holds_esc_only_while_presented_and_never_from_a_focused_box(
     for (turn, focused) in [(1, false), (2, true), (3, false), (4, false)] {
         owner.update(cx, |owner, cx| {
             let text = owner.text.as_mut().unwrap();
+            text.focused = false;
             if focused {
                 text.typing.open();
             } else {
@@ -818,8 +835,39 @@ fn queued_speech_holds_esc_only_while_presented_and_never_from_a_focused_box(
             }
             owner.focus_changed(cx);
         });
+        if turn == 1 {
+            *run_ends.borrow_mut() = Some(Vec::new());
+        }
         fixture::prime_next_playback(&pipe.handle);
         submit_draft(&owner, "speak", cx);
+        if turn == 2 {
+            let stopped = probe.stop();
+            owner.update(cx, |owner, cx| {
+                let (_, run) = first.expect("the first run's lease");
+                assert!(
+                    owner.runs.state_ended(run) && owner.runs.stoppable() == Some(run),
+                    "the first run told Done and its RunEnd is held"
+                );
+                owner.native_escape(None, first, cx).expect("Esc");
+            });
+            assert_eq!(
+                probe.stop(),
+                stopped,
+                "a press on a run that told Done sends the Brain no Stop"
+            );
+            for event in run_ends.take().expect("held run ends") {
+                owner.update(cx, |owner, cx| {
+                    owner.link_events(Batch::Plain(vec![event]), cx).unwrap();
+                });
+            }
+            owner.read_with(cx, |owner, _| {
+                assert_eq!(owner.runs.stoppable(), None);
+                assert!(
+                    owner.runs.working(),
+                    "the turn sent after that speech still waits for its answer"
+                );
+            });
+        }
         let mut playback = None;
         wait("the run's device opens", cx, &mut |_| {
             playback = playback.take().or_else(|| pipe.playback.try_recv().ok());
@@ -859,6 +907,19 @@ fn queued_speech_holds_esc_only_while_presented_and_never_from_a_focused_box(
                 first = owner.read_with(cx, |owner, _| {
                     owner.speech.get().map(|(session, run, _)| (session, run))
                 });
+                let stopped = probe.stop();
+                owner.update(cx, |owner, cx| {
+                    let (session, run) = first.expect("a lease");
+                    owner
+                        .native_escape(None, Some((session + 1, run)), cx)
+                        .expect("Esc");
+                    assert_eq!(
+                        owner.runs.stoppable(),
+                        Some(run),
+                        "a press that saw another session's speech stops nothing here"
+                    );
+                });
+                assert_eq!(probe.stop(), stopped, "and tells the Brain nothing");
                 wait("the reply finishes", cx, &mut |_| {
                     device.render(&mut block);
                     pipe.handle.admits_text(Some(&session))
@@ -868,8 +929,19 @@ fn queued_speech_holds_esc_only_while_presented_and_never_from_a_focused_box(
                 apply(cx);
                 assert!(matches!(lease(), Ok(None)));
                 assert!(!held(cx), "Esc goes back once the evidence runs out");
+                wait("the first run's RunEnd is held", cx, &mut |_| {
+                    run_ends
+                        .borrow()
+                        .as_ref()
+                        .is_some_and(|held| !held.is_empty())
+                });
             }
             2 => {
+                assert!(held(cx), "an open box without focus leaves Esc to speech");
+                owner.update(cx, |owner, cx| {
+                    owner.text.as_mut().unwrap().focused = true;
+                    owner.focus_changed(cx);
+                });
                 assert!(!held(cx), "the focused box keeps Esc while it speaks");
                 owner.update(cx, |owner, cx| owner.escape(cx).expect("Esc"));
                 wait("the box's Esc stops the speaker", cx, &mut |_| {
@@ -909,6 +981,19 @@ fn queued_speech_holds_esc_only_while_presented_and_never_from_a_focused_box(
                     device.render(&mut block);
                     pipe.handle.admits_text(Some(&session))
                 });
+                pipe.handle.output().refuse(1000);
+                owner.update(cx, |owner, cx| {
+                    owner.native_escape(None, first, cx).expect("Esc");
+                });
+                wait("the local stop is given up", cx, &mut |cx| {
+                    cx.executor().advance_clock(Duration::from_millis(5));
+                    owner.read_with(cx, |owner, _| owner.pending_stops.is_empty())
+                });
+                pipe.handle.output().refuse(0);
+                assert!(
+                    session.open(),
+                    "a local stop that can't get through never ends the pair"
+                );
             }
             _ => {
                 assert!(held(cx));
