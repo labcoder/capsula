@@ -17,7 +17,7 @@ use super::receipts::Receipts;
 use super::timeline::{Anchor, Engine, Observation, Opened, Phase, Tail};
 use super::{Admission, Credit, Fault, Packet};
 use crate::platform::speaker_cpal::{
-    Control, OutputError, OutputEvent, PacketKind, Source, TailAck, Transport,
+    Control, OutputError, OutputEvent, PRESENTATION_SLOTS, PacketKind, Source, TailAck, Transport,
 };
 
 mod drawing;
@@ -618,7 +618,10 @@ impl Worker {
             self.recover(now);
             return;
         }
-        for _ in 0..SERVICE {
+        for _ in 0..PRESENTATION_SLOTS {
+            if !self.engine.presentation_room(now) {
+                break;
+            }
             let Some(report) = route.transport.presentation() else {
                 break;
             };

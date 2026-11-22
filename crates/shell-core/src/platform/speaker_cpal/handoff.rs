@@ -38,6 +38,10 @@ pub(super) fn pair<T: Send>() -> (Producer<T>, Consumer<T>) {
 }
 
 impl<T> Producer<T> {
+    pub(super) fn has_room(&self) -> bool {
+        !self.slots[self.next].published.load(Ordering::Acquire)
+    }
+
     pub(super) fn push(&mut self, value: T) -> Result<(), T> {
         self.publish(value, || {})
     }
@@ -56,10 +60,10 @@ impl<T> Producer<T> {
     }
 
     fn publish(&mut self, value: T, before_publish: impl FnOnce()) -> Result<(), T> {
-        let slot = &self.slots[self.next];
-        if slot.published.load(Ordering::Acquire) {
+        if !self.has_room() {
             return Err(value);
         }
+        let slot = &self.slots[self.next];
         // SAFETY: this producer exclusively owns the unpublished slot. In normal use the
         // previous consumer took the value before releasing the slot.
         unsafe { *slot.value.get() = Some(value) };

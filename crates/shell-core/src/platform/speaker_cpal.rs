@@ -38,6 +38,7 @@ const PACKET_SAMPLES: usize = 480;
 const MAX_FRAMES: usize = 4_096;
 const MAX_CHANNELS: u16 = 32;
 const BLOCKS: usize = 8;
+pub(crate) const PRESENTATION_SLOTS: usize = BLOCKS;
 struct Block {
     samples: Vec<f32>,
 }
@@ -513,11 +514,6 @@ impl Playback {
             if len == 0 {
                 break None;
             }
-            if let Err(reason) = admit(&self.control) {
-                break Some(reason);
-            }
-            let (head, rest) = out.split_at_mut(len);
-            head.copy_from_slice(&block.pcm.samples[self.offset..self.offset + len]);
             let copied = block.stamp.map(|stamp| {
                 stamp.copied(
                     self.offset / self.channels,
@@ -527,6 +523,19 @@ impl Playback {
                     at,
                 )
             });
+            if let Some((_, span)) = copied {
+                if report.is_some_and(|previous| !span.is_some_and(|next| next.follows(previous))) {
+                    Self::publish(&mut self.observed, &self.control, report.take());
+                }
+                if report.is_none() && !self.observed.has_room() {
+                    break self.control.interruption();
+                }
+            }
+            if let Err(reason) = admit(&self.control) {
+                break Some(reason);
+            }
+            let (head, rest) = out.split_at_mut(len);
+            head.copy_from_slice(&block.pcm.samples[self.offset..self.offset + len]);
             self.offset += len;
             if self.offset == block.pcm.samples.len() {
                 self.recycle = Some(block.index);
@@ -541,16 +550,11 @@ impl Playback {
             if let Some((handed, span)) = copied {
                 self.control.handed_through(handed);
                 if let Some(span) = span {
-                    if let Some(previous) = &mut report
-                        && previous.source.run == span.source.run
-                        && previous.source.generation == span.source.generation
-                        && previous.source.segment == span.source.segment
-                        && previous.through == span.first
-                    {
+                    if let Some(previous) = &mut report {
                         previous.through = span.through;
                         previous.at = previous.at.and(span.at);
                     } else {
-                        self.publish(report.replace(span));
+                        report = Some(span);
                     }
                 }
             }
@@ -558,7 +562,7 @@ impl Playback {
             worked = true;
             after_copy();
         };
-        self.publish(report);
+        Self::publish(&mut self.observed, &self.control, report);
         if interruption == Some(CopyDenied::Stop) && !self.shared.cancelled.load(Ordering::Acquire)
         {
             let at = (total - out.len()) / self.channels;
@@ -574,11 +578,11 @@ impl Playback {
         }
     }
 
-    fn publish(&mut self, report: Option<Presented>) {
+    fn publish(observed: &mut Producer<Presented>, control: &Control, report: Option<Presented>) {
         if let Some(report) = report
-            && self.observed.push(report).is_err()
+            && observed.push(report).is_err()
         {
-            self.control.overflow();
+            control.overflow();
         }
     }
 
