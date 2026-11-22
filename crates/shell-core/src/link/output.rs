@@ -4,7 +4,7 @@
 //! drops of a speaker happen after it.
 
 use std::fmt;
-use std::sync::atomic::{AtomicBool, Ordering, fence};
+use std::sync::atomic::{Ordering, fence};
 use std::sync::mpsc::SyncSender;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError, TryLockError};
 use std::time::Instant;
@@ -13,7 +13,9 @@ use async_channel::{Receiver, Sender};
 use kumochi_protocol::message::{GestureId, OutputGeneration, RunId};
 
 use crate::platform::microphone::{Generation, MicOwner, Reserved, Running};
-use crate::speaker::{Command, FAULT, RELEASED, Speaker, Tail, UNKNOWN};
+#[cfg(any(test, feature = "test-support"))]
+use crate::speaker::UNKNOWN;
+use crate::speaker::{Command, FAULT, RELEASED, Tail};
 
 use super::{HANDSHAKE_TIMEOUT, RETRY_DELAY};
 
@@ -24,8 +26,6 @@ pub(super) use queued::{NarratedReservation, Queued, RefusedTail};
 #[path = "output_tests.rs"]
 mod tests;
 
-/// Output generations tracked until their tails settle; `LIVE` keeps one speaker thread at a
-/// time, so this is a ceiling, not the safety argument.
 const LEDGER: usize = 4;
 
 /// Aborts one session's pipes.
@@ -44,10 +44,6 @@ pub struct OutputOwner {
     mic_retired: Condvar,
     changed: Sender<()>,
     changes: Receiver<()>,
-    /// Runs as `opened` is entered, before its decision: a test's point between the link's own
-    /// check and the owner's.
-    #[cfg(any(test, feature = "test-support"))]
-    before_opened: Mutex<Option<Box<dyn FnOnce() + Send>>>,
     /// A test's contention: this many more non-waiting calls find the owner busy.
     #[cfg(any(test, feature = "test-support"))]
     refusals: std::sync::atomic::AtomicU32,
@@ -61,8 +57,6 @@ impl Default for OutputOwner {
             mic_retired: Condvar::new(),
             changed: sender,
             changes,
-            #[cfg(any(test, feature = "test-support"))]
-            before_opened: Mutex::default(),
             #[cfg(any(test, feature = "test-support"))]
             refusals: std::sync::atomic::AtomicU32::default(),
         }
@@ -101,7 +95,7 @@ enum Output {
         epoch: u64,
         why: Why,
     },
-    Opening(OutputGeneration),
+    #[cfg(any(test, feature = "test-support"))]
     Live(OutputGeneration),
     Lost(OutputGeneration),
     Queued(OutputGeneration),
@@ -110,12 +104,8 @@ enum Output {
 /// Why a session has no output.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Why {
-    /// No opener: every normal launch.
+    /// The Legacy session has no playback engine.
     NoOpener,
-    /// Talk-back is off.
-    Off,
-    /// The open was refused, or no generation or ledger slot was left.
-    Refused,
     /// Its output was withdrawn or failed, and its tail settled clean.
     Retired,
 }
@@ -227,8 +217,7 @@ enum Verdict {
     Terminal,
 }
 
-/// A generation's verdict from its own tail. Only the ledger holding it means no worker, engine
-/// or thread can write it again.
+/// A scripted generation's verdict from its own tail. The last reference cannot write again.
 fn verdict(tail: &Arc<Tail>) -> Verdict {
     let gone = Arc::strong_count(tail) == 1;
     fence(Ordering::Acquire);
@@ -255,6 +244,7 @@ fn verdict(tail: &Arc<Tail>) -> Verdict {
 
 impl State {
     fn settle(&mut self) {
+        let live = self.live();
         let Self {
             ledger,
             output,
@@ -262,14 +252,10 @@ impl State {
             ..
         } = self;
         for slot in ledger.iter_mut() {
-            // An opening generation settles only once its open's outcome is applied.
-            let Some(entry) = slot
-                .as_mut()
-                .filter(|entry| !entry.terminal && *output != Output::Opening(entry.generation))
-            else {
+            let Some(entry) = slot.as_mut().filter(|entry| !entry.terminal) else {
                 continue;
             };
-            let live = *output == Output::Live(entry.generation);
+            let live = live == Some(entry.generation);
             match verdict(&entry.tail) {
                 Verdict::Pending => {}
                 Verdict::Clean => {
@@ -312,9 +298,9 @@ impl State {
         }
         self.commands = None;
         self.output = match self.output {
-            Output::Opening(generation) | Output::Live(generation) | Output::Lost(generation) => {
-                Output::Lost(generation)
-            }
+            #[cfg(any(test, feature = "test-support"))]
+            Output::Live(generation) => Output::Lost(generation),
+            lost @ Output::Lost(_) => lost,
             _ => Output::Closed,
         };
         self.abort.clone()
@@ -329,8 +315,9 @@ impl State {
 
     fn live(&self) -> Option<OutputGeneration> {
         match self.output {
+            #[cfg(any(test, feature = "test-support"))]
             Output::Live(generation) => Some(generation),
-            _ => None,
+            Output::Closed | Output::Quiet { .. } | Output::Lost(_) | Output::Queued(_) => None,
         }
     }
 
@@ -367,6 +354,7 @@ impl State {
                 Ok(())
             }
             (OutputKey::NoOutput(key), Output::Quiet { epoch, .. }) if key == epoch => Ok(()),
+            #[cfg(any(test, feature = "test-support"))]
             (OutputKey::Generation(key), Output::Live(generation)) if key == generation => {
                 let now = self
                     .tail(generation)
@@ -432,54 +420,14 @@ impl OutputOwner {
         self.changes.clone()
     }
 
-    /// For a speaker's worker, which wakes the owner without locking it.
-    pub(super) fn waker(&self) -> Sender<()> {
-        self.changed.clone()
-    }
-
-    /// The link thread starts `session`, before it says Connected. With an opener (`abort`
-    /// ends the session's pipes) and talk-back on, it reserves a ledger slot and a generation
-    /// before the opener runs and returns them; without a slot or a generation it refuses.
-    pub(super) fn begin(
-        &self,
-        session: u64,
-        abort: Option<Abort>,
-    ) -> Option<(OutputGeneration, Arc<Tail>)> {
+    /// Starts a silent Legacy session before the link reports Connected.
+    pub fn begin_quiet(&self, session: u64) {
         let mut state = self.lock();
         state.session = Some(session);
-        let opener = abort.is_some();
-        state.abort = abort;
-        let free = state.ledger.iter().position(Option::is_none);
-        let next = state.generations.checked_add(1);
-        let begun = match (opener, state.off, free, next) {
-            (false, ..) => {
-                state.quiet(Why::NoOpener);
-                None
-            }
-            (true, true, ..) => {
-                state.quiet(Why::Off);
-                None
-            }
-            (true, false, Some(free), Some(next)) => {
-                let generation = OutputGeneration(next);
-                let tail = Arc::<Tail>::default();
-                state.generations = next;
-                state.ledger[free] = Some(Entry {
-                    generation,
-                    tail: Arc::clone(&tail),
-                    terminal: false,
-                });
-                state.output = Output::Opening(generation);
-                Some((generation, tail))
-            }
-            _ => {
-                state.quiet(Why::Refused);
-                None
-            }
-        };
+        state.abort = None;
+        state.quiet(Why::NoOpener);
         drop(state);
         self.wake();
-        begun
     }
 
     pub(super) fn begin_queued(
@@ -535,91 +483,8 @@ impl OutputOwner {
         Some(registration_by)
     }
 
-    /// The link thread's open of `generation` returned, before its reader starts. Under the owner's
-    /// lock it reads whether Quit began and whether its session is still `alive`. These reads
-    /// decide whether the opening wins against Quit or session loss. A refused speaker announces
-    /// nothing and is let go after the lock. A kept speaker is fenced first: withdrawn when talk-back went off,
-    /// else paused under a held inhibit, and only then accepted, so its announcement can't
-    /// precede its fence. An `Err` speaker couldn't be fenced: the link drops it and ends the
-    /// session. A stream that retired before this keeps its entry until now, so the session never
-    /// goes live without it.
-    ///
-    /// # Errors
-    /// The speaker, when it couldn't be fenced.
-    pub(super) fn opened(
-        &self,
-        generation: OutputGeneration,
-        speaker: Option<Speaker>,
-        quitting: impl FnOnce() -> bool,
-        alive: &AtomicBool,
-    ) -> Result<Option<Speaker>, Speaker> {
-        #[cfg(any(test, feature = "test-support"))]
-        if let Some(hook) = self
-            .before_opened
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .take()
-        {
-            hook();
-        }
-        let mut state = self.lock();
-        let opening = state.output == Output::Opening(generation);
-        let current = !quitting() && alive.load(Ordering::Acquire);
-        let mut refused = None;
-        let opened = match speaker {
-            None => {
-                if opening {
-                    state.quiet(Why::Refused);
-                }
-                Ok(None)
-            }
-            Some(speaker) if !current => {
-                if opening {
-                    state.quiet(Why::Refused);
-                }
-                refused = Some(speaker);
-                Ok(None)
-            }
-            Some(speaker) => {
-                let fence = if state.off {
-                    Some(Command::Withdraw)
-                } else {
-                    state
-                        .inhibit
-                        .as_ref()
-                        .map(|inhibit| Command::Pause(inhibit.serial))
-                };
-                if opening && fence.is_none_or(|fence| speaker.command(fence)) {
-                    state.commands = speaker.commands();
-                    state.output = Output::Live(generation);
-                    speaker.accept();
-                    Ok(Some(speaker))
-                } else {
-                    if opening {
-                        state.output = Output::Lost(generation);
-                    }
-                    Err(speaker)
-                }
-            }
-        };
-        drop(state);
-        drop(refused);
-        self.wake();
-        opened
-    }
-
-    /// The session was lost, as the caller already published: waits for any opening decision.
     pub(super) fn cancelled(&self) {
         drop(self.state.lock().unwrap_or_else(PoisonError::into_inner));
-    }
-
-    /// Runs `hook` as the next `opened` is entered.
-    #[cfg(any(test, feature = "test-support"))]
-    pub fn before_opened(&self, hook: Box<dyn FnOnce() + Send>) {
-        *self
-            .before_opened
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner) = Some(hook);
     }
 
     #[cfg(any(test, feature = "test-support"))]
@@ -738,9 +603,9 @@ impl OutputOwner {
     pub fn claim(&self, token: &InhibitToken, session: u64) -> Result<Claim, Denied> {
         let state = self.try_lock()?;
         let key = match state.output {
+            #[cfg(any(test, feature = "test-support"))]
             Output::Live(generation) => OutputKey::Generation(generation),
             Output::Quiet { epoch, .. } => OutputKey::NoOutput(epoch),
-            Output::Opening(_) => return Err(Denied::Opening),
             Output::Closed | Output::Lost(_) => return Err(Denied::Stale),
             Output::Queued(_) => {
                 OutputKey::QueuedHold(state.queued_hold().ok_or(Denied::Unqualified)?)
@@ -900,20 +765,13 @@ impl OutputOwner {
         stopped
     }
 
-    /// Opens `session`'s output with no speaker, as a reconnect's link thread does.
-    #[cfg(any(test, feature = "test-support"))]
-    pub fn begin_quiet(&self, session: u64) {
-        let _opened = self.begin(session, None);
-    }
-
     /// Makes the next `calls` non-waiting calls find the owner busy.
     #[cfg(any(test, feature = "test-support"))]
     pub fn refuse(&self, calls: u32) {
         self.refusals.store(calls, Ordering::Release);
     }
 
-    /// Talk-back off: a live speaker is withdrawn, an opening one when it opens, and later
-    /// sessions get none.
+    /// Talk-back off ends the queued pair. Legacy is already silent.
     pub fn withdraw(&self) {
         let mut state = self.lock();
         if std::mem::replace(&mut state.off, true) {
@@ -926,9 +784,8 @@ impl OutputOwner {
             self.end(session);
             return;
         }
-        let abort = state.command(Command::Withdraw);
         drop(state);
-        self.after(abort);
+        self.wake();
     }
 
     /// The current output, settled. Never waits.
@@ -938,6 +795,7 @@ impl OutputOwner {
     pub fn view(&self) -> Result<OutputView, Denied> {
         let state = self.try_lock()?;
         let (key, why) = match state.output {
+            #[cfg(any(test, feature = "test-support"))]
             Output::Live(generation) => (Some(OutputKey::Generation(generation)), None),
             Output::Quiet { epoch, why } => (Some(OutputKey::NoOutput(epoch)), Some(why)),
             _ => (None, None),
