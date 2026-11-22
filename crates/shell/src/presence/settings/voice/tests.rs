@@ -1,6 +1,7 @@
 use gpui_kit::TestAppContext;
 use kumochi_protocol::message::{ErrorKey, PartState, SttUnload};
 
+use super::super::SettingsTab;
 use crate::settings::Update;
 use crate::strings::Text;
 
@@ -35,7 +36,7 @@ fn open(
         .center();
     frame.simulate_click(point, gpui_kit::Modifiers::default());
     frame.run_until_parked();
-    frame.update(|_, cx| assert_eq!(view.read(cx).tab, 2));
+    frame.update(|_, cx| assert_eq!(view.read(cx).tab, SettingsTab::Voice));
     (window, view)
 }
 
@@ -152,16 +153,16 @@ fn keyboard_voice_choice_sends_the_exact_policy_and_waits_for_its_ordered_answer
     frame.run_until_parked();
     frame.update(|window, cx| {
         view.update(cx, |view, cx| view.focus(window, cx));
-        assert_eq!(view.read(cx).tab, 0);
+        assert_eq!(view.read(cx).tab, SettingsTab::General);
         window.draw(cx).clear(cx);
     });
     for (keys, expected) in [
-        ("ctrl-tab", 1),
-        ("ctrl-tab", 2),
-        ("ctrl-tab", 3),
-        ("ctrl-tab", 0),
-        ("ctrl-shift-tab", 3),
-        ("ctrl-shift-tab", 2),
+        ("ctrl-tab", SettingsTab::Accounts),
+        ("ctrl-tab", SettingsTab::Voice),
+        ("ctrl-tab", SettingsTab::Privacy),
+        ("ctrl-tab", SettingsTab::General),
+        ("ctrl-shift-tab", SettingsTab::Privacy),
+        ("ctrl-shift-tab", SettingsTab::Voice),
     ] {
         press(&mut frame, keys);
         frame.run_until_parked();
@@ -268,7 +269,7 @@ fn keyboard_tab_changes_retain_the_edit_and_escape_still_uses_the_settings_path(
     frame.run_until_parked();
     frame.update(|window, cx| {
         let view = view.read(cx);
-        assert_eq!(view.tab, 1);
+        assert_eq!(view.tab, SettingsTab::Accounts);
         assert_eq!(view.editing(), None);
         assert_eq!(view.model.read(cx).value(Field::Assistant), "RetainedDraft");
         assert!(view.focus.is_focused(window));
@@ -277,7 +278,7 @@ fn keyboard_tab_changes_retain_the_edit_and_escape_still_uses_the_settings_path(
     press(&mut frame, "ctrl-shift-tab");
     frame.run_until_parked();
     frame.update(|window, cx| {
-        assert_eq!(view.read(cx).tab, 0);
+        assert_eq!(view.read(cx).tab, SettingsTab::General);
         assert_eq!(
             view.read(cx).inputs[0].read(cx).value().as_ref(),
             "RetainedDraft"
@@ -615,7 +616,7 @@ fn model_buttons_use_pointer_and_space_but_cancel_acceptance_does_not_mean_cance
         press(&mut frame, "ctrl-tab escape");
         frame.run_until_parked();
         frame.update(|window, cx| {
-            assert_eq!(view.read(cx).tab, 3);
+            assert_eq!(view.read(cx).tab, SettingsTab::Privacy);
             assert!(view.read(cx).focus.is_focused(window));
         });
         assert!(matches!(received.try_recv(), Ok(PresenceEvent::Escape)));
@@ -638,7 +639,7 @@ fn model_buttons_use_pointer_and_space_but_cancel_acceptance_does_not_mean_cance
         press(&mut frame, "ctrl-tab escape");
         frame.run_until_parked();
         frame.update(|window, cx| {
-            assert_eq!(view.read(cx).tab, 3);
+            assert_eq!(view.read(cx).tab, SettingsTab::Privacy);
             assert!(view.read(cx).focus.is_focused(window));
         });
         assert!(matches!(received.try_recv(), Ok(PresenceEvent::Escape)));
@@ -886,7 +887,7 @@ fn the_privacy_tab_holds_the_screen_toggle_which_sends_once_and_waits_for_the_sa
     frame.simulate_click(tab, gpui_kit::Modifiers::default());
     frame.run_until_parked();
     frame.update(|window, cx| {
-        assert_eq!(view.read(cx).tab, 3);
+        assert_eq!(view.read(cx).tab, SettingsTab::Privacy);
         window.draw(cx).clear(cx);
     });
     let toggle = frame
@@ -996,7 +997,7 @@ fn privacy_under_claude_code(
         gpui_kit::open_window(options, cx, |window, cx| {
             cx.new(|cx| {
                 let mut view = super::super::SettingsView::new(model, weak, events, window, cx);
-                view.tab = 3;
+                view.tab = SettingsTab::Privacy;
                 view
             })
         })

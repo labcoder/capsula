@@ -1,6 +1,6 @@
 use gpui_kit::{AppContext as _, TestAppContext, WindowOptions};
 
-use super::{SettingsPanel, SettingsView};
+use super::{SettingsPanel, SettingsTab, SettingsView};
 use crate::presence::test_fixture;
 
 use crate::link::{Batch, LinkEvent, LinkState, Session};
@@ -12,6 +12,29 @@ use kumochi_protocol::message::{
     ControlToBrain, GitHubOp, GitHubView, Incarnation, KeyView, PlanState, UserCode,
 };
 use kumochi_scene::text::Bounded;
+
+fn detached_settings(
+    owner: &mut Presence,
+    cx: &mut gpui_kit::Context<'_, Presence>,
+) -> (AnyWindowHandle, Entity<SettingsView>) {
+    let model = owner.settings.clone();
+    let weak = cx.weak_entity();
+    let events = owner.events.clone();
+    let (window, view) = gpui_kit::open_window(WindowOptions::default(), cx, |window, cx| {
+        cx.new(|cx| SettingsView::new(model, weak, events, window, cx))
+    })
+    .expect("headless settings window");
+    owner.settings_panel = Some(SettingsPanel {
+        window,
+        view: view.clone(),
+        visible: false,
+        focused: false,
+        bounds: [0; 4],
+        previous: None,
+        activation: None,
+    });
+    (window, view)
+}
 
 fn github_panel(
     cx: &mut TestAppContext,
@@ -25,7 +48,7 @@ fn github_panel(
     let settings_view = view.clone();
     let controls = view.update(cx, |view, cx| {
         view.owner = owner.downgrade();
-        view.tab = 1;
+        view.tab = SettingsTab::Accounts;
         owner.update(cx, |owner, _| {
             view.events = owner.events.clone();
             owner.settings = view.model.clone();
@@ -464,28 +487,20 @@ fn recovery_settings_clicks_open_the_exact_tab_through_the_hidden_panel_path(
     use kumochi_protocol::message::{Action, ErrorKey, UserError};
 
     for (key, source, expected) in [
-        (ErrorKey::AnthropicKeyRejected, Source::Account, 1),
-        (ErrorKey::SettingsRefused, Source::Settings(None), 0),
+        (
+            ErrorKey::AnthropicKeyRejected,
+            Source::Account,
+            SettingsTab::Accounts,
+        ),
+        (
+            ErrorKey::SettingsRefused,
+            Source::Settings(None),
+            SettingsTab::General,
+        ),
     ] {
         let owner = test_fixture::presence(cx);
         let (window, view) = owner.update(cx, |owner, cx| {
-            let model = owner.settings.clone();
-            let weak = cx.weak_entity();
-            let events = owner.events.clone();
-            let (window, view) =
-                gpui_kit::open_window(WindowOptions::default(), cx, |window, cx| {
-                    cx.new(|cx| SettingsView::new(model, weak, events, window, cx))
-                })
-                .expect("headless settings window");
-            owner.settings_panel = Some(SettingsPanel {
-                window,
-                view: view.clone(),
-                visible: false,
-                focused: false,
-                bounds: [0; 4],
-                previous: None,
-                activation: None,
-            });
+            let (_, view) = detached_settings(owner, cx);
             owner.chat_notice.present(
                 UserError::new(key, Vec::new(), vec![Action::OpenSettings])
                     .expect("bounded settings recovery"),
@@ -605,34 +620,20 @@ fn recovery_openers_select_the_exact_tab_without_toggling_a_visible_window_close
 ) {
     let owner = test_fixture::presence(cx);
     owner.update(cx, |owner, cx| {
-        let model = owner.settings.clone();
-        let weak = cx.weak_entity();
-        let events = owner.events.clone();
-        let (window, view) = gpui_kit::open_window(WindowOptions::default(), cx, |window, cx| {
-            cx.new(|cx| SettingsView::new(model, weak, events, window, cx))
-        })
-        .expect("headless settings window");
-        owner.settings_panel = Some(SettingsPanel {
-            window,
-            view: view.clone(),
-            visible: true,
-            focused: false,
-            bounds: [0; 4],
-            previous: None,
-            activation: None,
-        });
+        let (_, view) = detached_settings(owner, cx);
+        owner.settings_panel.as_mut().unwrap().visible = true;
         owner.open_accounts(cx).expect("accounts tab");
         assert!(owner.settings_open());
-        assert_eq!(view.read(cx).tab, 1);
+        assert_eq!(view.read(cx).tab, SettingsTab::Accounts);
         owner.open_accounts(cx).expect("accounts stays open");
         assert!(owner.settings_open());
-        assert_eq!(view.read(cx).tab, 1);
+        assert_eq!(view.read(cx).tab, SettingsTab::Accounts);
         owner.open_general(cx).expect("general tab");
         assert!(owner.settings_open());
-        assert_eq!(view.read(cx).tab, 0);
+        assert_eq!(view.read(cx).tab, SettingsTab::General);
         owner.open_general(cx).expect("general stays open");
         assert!(owner.settings_open());
-        assert_eq!(view.read(cx).tab, 0);
+        assert_eq!(view.read(cx).tab, SettingsTab::General);
     });
 }
 
@@ -722,8 +723,112 @@ fn open_settings_in_the_chat_recovery_swaps_the_chat_for_settings(cx: &mut TestA
     owner.read_with(cx, |owner, cx| {
         assert!(owner.settings_open(), "Settings is shown");
         assert!(!owner.text_open(), "the chat is hidden");
-        assert_eq!(view.read(cx).tab, 1);
+        assert_eq!(view.read(cx).tab, SettingsTab::Accounts);
     });
+}
+
+#[gpui::test]
+fn opening_settings_from_chat_keeps_the_name_save_until_its_answer(cx: &mut TestAppContext) {
+    use crate::settings::{Error, Field};
+    use kumochi_protocol::message::{Action, AssistantName, ErrorKey, SettingsOp, UserError};
+
+    let _area = crate::platform::work_area_fixture::set([0, 0, 2560, 1400]);
+    let settings = |view, answer| LinkEvent::Settings {
+        generation: 7,
+        view,
+        answer,
+    };
+    let open_settings = |key| UserError::new(key, vec![], vec![Action::OpenSettings]).unwrap();
+    for refused in [false, true] {
+        let owner = test_fixture::presence(cx);
+        let mut saved = super::super::general::tests::saved();
+        let (window, view, controls) = owner.update(cx, |owner, cx| {
+            owner.session = Some(Session::detached(7, Incarnation(1)));
+            owner
+                .link_events(Batch::Plain(vec![settings(saved.clone(), false)]), cx)
+                .unwrap();
+            let (window, view) = detached_settings(owner, cx);
+            owner.open_general(cx).unwrap();
+            (window, view, owner.link.record_controls())
+        });
+        let mut frame = VisualTestContext::from_window(window, cx);
+        frame.update(|window, _| window.activate_window());
+        frame.run_until_parked();
+        frame.update(|window, cx| {
+            view.read(cx).inputs[0].clone().update(cx, |input, cx| {
+                input.set_value("", window, cx);
+                input.focus(window, cx);
+            });
+            window.draw(cx).clear(cx);
+        });
+        frame.run_until_parked();
+        frame.simulate_input("Cirrus");
+        let name = AssistantName::new("Cirrus").unwrap();
+        let chat = owner.update(cx, |owner, cx| {
+            assert_eq!(view.read(cx).editing(), Some(Field::Assistant));
+            assert!(controls.is_empty(), "the name is still an active draft");
+            owner.open_text(cx).unwrap();
+            assert!(owner.text_open());
+            assert!(!owner.settings_open());
+            owner
+                .link_events(
+                    Batch::Plain(vec![LinkEvent::Error {
+                        generation: 7,
+                        error: open_settings(ErrorKey::AnthropicKeyRejected),
+                    }]),
+                    cx,
+                )
+                .unwrap();
+            owner.text.as_ref().unwrap().window
+        });
+        assert_eq!(
+            controls.try_recv(),
+            Ok(ControlToBrain::Settings(SettingsOp::SetAssistantName(
+                name.clone()
+            )))
+        );
+        click_github(chat, "chat-recovery-action-0", cx);
+        let mut accounts = VisualTestContext::from_window(window, cx);
+        accounts.update(|window, cx| window.draw(cx).clear(cx));
+        assert!(
+            accounts.debug_bounds("account-provider").is_some(),
+            "the painted recovery must open Accounts"
+        );
+        let error = UserError::from(ErrorKey::SettingsRefused);
+        owner.update(cx, |owner, cx| {
+            assert!(owner.settings_open());
+            assert!(!owner.text_open());
+            let state = owner.settings.read(cx);
+            assert!(state.field(Field::Assistant).saving);
+            assert_eq!(state.value(Field::Assistant), "Cirrus");
+            let mut reply = Vec::new();
+            if refused {
+                reply.push(LinkEvent::Error {
+                    generation: 7,
+                    error: error.clone(),
+                });
+            } else {
+                saved.assistant_name = name;
+            }
+            reply.push(settings(saved, true));
+            owner.link_events(Batch::Plain(reply), cx).unwrap();
+            owner.open_general(cx).unwrap();
+        });
+        cx.run_until_parked();
+        view.read_with(cx, |view, cx| {
+            let expected = if refused { "Kumo" } else { "Cirrus" };
+            let state = view.model.read(cx);
+            assert_eq!(view.tab, SettingsTab::General);
+            assert_eq!(view.inputs[0].read(cx).value().as_ref(), expected);
+            assert_eq!(state.value(Field::Assistant), expected);
+            assert!(!state.field(Field::Assistant).saving);
+            assert_eq!(
+                state.field(Field::Assistant).error,
+                refused.then_some(Error::Brain(error))
+            );
+        });
+        assert!(controls.is_empty(), "navigation cannot send the name twice");
+    }
 }
 
 fn drain(controls: &async_channel::Receiver<ControlToBrain>) -> Vec<ControlToBrain> {
@@ -1010,10 +1115,14 @@ fn sign_out_confirmation_ownership_ends_on_refusal_tab_change_and_dismissal(
     let mut frame = VisualTestContext::from_window(window, cx);
     frame.update(|window, cx| {
         assert!(window.has_active_dialog(cx));
-        view.update(cx, |view, cx| view.select_tab(0, window, cx));
+        view.update(cx, |view, cx| {
+            view.select_tab(SettingsTab::General, window, cx);
+        });
         assert!(!window.has_active_dialog(cx));
         assert!(view.read(cx).confirmation.is_none());
-        view.update(cx, |view, cx| view.select_tab(1, window, cx));
+        view.update(cx, |view, cx| {
+            view.select_tab(SettingsTab::Accounts, window, cx);
+        });
     });
     click_github(window, "account-sign-out", cx);
     owner.update(cx, |owner, cx| {

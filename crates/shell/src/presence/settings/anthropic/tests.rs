@@ -7,6 +7,7 @@ use kumochi_protocol::message::{
     KeyStagePlan,
 };
 
+use super::super::SettingsTab;
 use super::*;
 use crate::link::{Batch, LinkEvent, LinkState, Session};
 use crate::presence::test_fixture;
@@ -27,7 +28,7 @@ impl Render for Row {
 fn accounts(cx: &mut TestAppContext) -> (AnyWindowHandle, Entity<SettingsView>) {
     let (window, view) = super::super::general::tests::open(cx);
     view.update(cx, |view, cx| {
-        view.tab = 1;
+        view.tab = SettingsTab::Accounts;
         view.model.update(cx, |state, cx| {
             state.key_paste.receive(KeyView::Missing, None);
             cx.notify();
