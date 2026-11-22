@@ -5,13 +5,14 @@ use std::{
         atomic::{AtomicUsize, Ordering},
     },
     task::Poll,
+    time::Duration,
 };
 
 use kumochi_protocol::message::RepoName;
 use serde_json::{Value, json};
 use zeroize::Zeroizing;
 
-use super::{ApiError, Duration, GitHubToken, Http, HttpError, Secret, fetch};
+use super::{ApiError, GitHubToken, GitHubTuning, Http, HttpError, Secret, fetch};
 use crate::connections::http_client::{Request, Response, ResponseMeta};
 use crate::test_support::SENTINEL;
 
@@ -101,7 +102,9 @@ async fn multiple_intersections_are_complete_case_insensitive_and_keep_github_sp
         repositories(2, &["Owner/Bravo", "owner/alpha"]),
         repositories(2, &["OWNER/BRAVO", "owner/charlie"]),
     ]);
-    let result = fetch(&http, &token()).await.unwrap();
+    let result = fetch(&http, &token(), GitHubTuning::default())
+        .await
+        .unwrap();
     assert_eq!(
         result
             .names
@@ -128,7 +131,14 @@ async fn no_installations_or_no_repository_rows_is_a_complete_empty_snapshot() {
         (vec![installations(1, &[1]), repositories(0, &[])], 2),
     ] {
         let http = Script::new(values);
-        assert_eq!(fetch(&http, &token()).await.unwrap().names.len(), 0);
+        assert_eq!(
+            fetch(&http, &token(), GitHubTuning::default())
+                .await
+                .unwrap()
+                .names
+                .len(),
+            0
+        );
         assert_eq!(http.urls.lock().unwrap().len(), requests);
     }
 }
@@ -140,7 +150,9 @@ async fn two_hundred_repositories_are_complete_but_one_more_never_grants_partial
         numbered(200, 0..100),
         numbered(200, 100..200),
     ]);
-    let result = fetch(&http, &token()).await.unwrap();
+    let result = fetch(&http, &token(), GitHubTuning::default())
+        .await
+        .unwrap();
     assert_eq!(
         result
             .names
@@ -162,7 +174,9 @@ async fn two_hundred_repositories_are_complete_but_one_more_never_grants_partial
             values.push(numbered(101, 100..101));
         }
         let http = Script::new(values);
-        let result = fetch(&http, &token()).await.unwrap();
+        let result = fetch(&http, &token(), GitHubTuning::default())
+            .await
+            .unwrap();
         assert_eq!(
             result
                 .names
@@ -186,7 +200,9 @@ async fn two_hundred_repositories_are_complete_but_one_more_never_grants_partial
     ] {
         let http = Script::new(values);
         assert_eq!(
-            fetch(&http, &token()).await.unwrap_err(),
+            fetch(&http, &token(), GitHubTuning::default())
+                .await
+                .unwrap_err(),
             ApiError::Response
         );
         assert_eq!(http.replies.lock().unwrap().len(), 0);
@@ -200,7 +216,7 @@ async fn twelve_total_page_requests_succeed_and_a_thirteenth_is_never_dispatched
         let mut values = vec![installations(count, &ids)];
         values.extend((0..count).map(|_| repositories(0, &[])));
         let http = Script::new(values);
-        let result = fetch(&http, &token()).await;
+        let result = fetch(&http, &token(), GitHubTuning::default()).await;
         if succeeds {
             assert_eq!(result.unwrap().names.len(), 0);
             assert_eq!(http.replies.lock().unwrap().len(), 0);
@@ -210,6 +226,43 @@ async fn twelve_total_page_requests_succeed_and_a_thirteenth_is_never_dispatched
         }
         assert_eq!(http.urls.lock().unwrap().len(), 12);
     }
+}
+
+#[tokio::test(start_paused = true)]
+async fn tuned_listing_budgets_stop_at_their_own_request_count_and_deadline() {
+    let tuning = GitHubTuning {
+        listing_requests: 4,
+        listing_budget: Duration::from_secs(20),
+        ..GitHubTuning::default()
+    };
+    for (count, succeeds) in [(3, true), (4, false)] {
+        let ids: Vec<_> = (1..=count).collect();
+        let mut values = vec![installations(count, &ids)];
+        values.extend((0..count).map(|_| repositories(0, &[])));
+        let http = Script::new(values);
+        let result = fetch(&http, &token(), tuning).await;
+        if succeeds {
+            assert_eq!(result.unwrap().names.len(), 0);
+        } else {
+            assert_eq!(result.unwrap_err(), ApiError::Response);
+            assert_eq!(http.replies.lock().unwrap().len(), 1);
+        }
+        assert_eq!(http.urls.lock().unwrap().len(), 4);
+    }
+    let http = Script::new(vec![installations(1, &[1]), repositories(0, &[])]);
+    for (step, delay) in http.replies.lock().unwrap().iter_mut().zip([10, 12]) {
+        step.delay = Duration::from_secs(delay);
+    }
+    let started = tokio::time::Instant::now();
+    assert_eq!(
+        fetch(&http, &token(), tuning).await.unwrap_err(),
+        ApiError::Http(HttpError::Timeout)
+    );
+    assert_eq!(
+        tokio::time::Instant::now(),
+        started + Duration::from_secs(20)
+    );
+    assert_eq!(http.urls.lock().unwrap().len(), 2);
 }
 
 #[tokio::test]
@@ -224,7 +277,9 @@ async fn installation_pages_refuse_missing_extra_overflowing_and_duplicate_rows(
     ] {
         let http = Script::new(vec![value]);
         assert_eq!(
-            fetch(&http, &token()).await.unwrap_err(),
+            fetch(&http, &token(), GitHubTuning::default())
+                .await
+                .unwrap_err(),
             ApiError::Response
         );
         assert_eq!(http.urls.lock().unwrap().len(), 1);
@@ -237,7 +292,9 @@ async fn installation_pages_refuse_missing_extra_overflowing_and_duplicate_rows(
     ] {
         let http = Script::new(vec![installations(101, &ids), second]);
         assert_eq!(
-            fetch(&http, &token()).await.unwrap_err(),
+            fetch(&http, &token(), GitHubTuning::default())
+                .await
+                .unwrap_err(),
             ApiError::Response
         );
         assert_eq!(http.urls.lock().unwrap().len(), 2);
@@ -259,7 +316,9 @@ async fn repository_pages_refuse_truncation_changed_totals_and_duplicate_names()
     ] {
         let http = Script::new(vec![installations(1, &[1]), value]);
         assert_eq!(
-            fetch(&http, &token()).await.unwrap_err(),
+            fetch(&http, &token(), GitHubTuning::default())
+                .await
+                .unwrap_err(),
             ApiError::Response
         );
         assert_eq!(http.urls.lock().unwrap().len(), 2);
@@ -272,7 +331,9 @@ async fn repository_pages_refuse_truncation_changed_totals_and_duplicate_names()
     ] {
         let http = Script::new(vec![installations(1, &[1]), numbered(101, 0..100), second]);
         assert_eq!(
-            fetch(&http, &token()).await.unwrap_err(),
+            fetch(&http, &token(), GitHubTuning::default())
+                .await
+                .unwrap_err(),
             ApiError::Response
         );
         assert_eq!(http.urls.lock().unwrap().len(), 3);
@@ -316,7 +377,9 @@ async fn errors_and_malformed_later_replies_never_return_an_earlier_partial_snap
             reply,
             delay: Duration::ZERO,
         });
-        let error = fetch(&http, &token()).await.unwrap_err();
+        let error = fetch(&http, &token(), GitHubTuning::default())
+            .await
+            .unwrap_err();
         assert_eq!(error, expected);
         assert!(!format!("{error:?} {error}").contains(SENTINEL));
         assert_eq!(http.urls.lock().unwrap().len(), 3);
@@ -340,7 +403,7 @@ async fn one_shared_deadline_stops_later_installations_and_drops_the_inflight_re
         step.delay = Duration::from_secs(10);
     }
     let token = token();
-    let future = fetch(&http, &token);
+    let future = fetch(&http, &token, GitHubTuning::default());
     tokio::pin!(future);
     pending_once(future.as_mut()).await;
     for _ in 0..5 {
@@ -371,7 +434,7 @@ async fn dropping_a_partial_traversal_cancels_the_request_without_detached_work(
     http.replies.lock().unwrap().back_mut().unwrap().delay = Duration::from_secs(10);
     let token = token();
     {
-        let future = fetch(&http, &token);
+        let future = fetch(&http, &token, GitHubTuning::default());
         tokio::pin!(future);
         pending_once(future.as_mut()).await;
         assert_eq!(http.urls.lock().unwrap().len(), 3);

@@ -1,4 +1,5 @@
 use super::*;
+use crate::config::tuning::GitHubTuning;
 use kumochi_protocol::message::{
     ApprovalRev, GitHubLogin, IssueBody, IssueTitle, RepoName, StateVersion,
 };
@@ -199,7 +200,7 @@ async fn an_older_lookup_cannot_complete_a_new_job_in_the_same_uncertain_episode
         draft: action.draft,
         stamp: brain.account.github.machine().stamp(),
         check: true,
-        control: Control::new(),
+        control: Control::new(GitHubTuning::default()),
         admission: None,
         action: Some(action.clone()),
         token: None,

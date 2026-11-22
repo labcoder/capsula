@@ -408,6 +408,32 @@ no shell is connected, and Quit and close write what's left before they end.
   here, and with no absolute `%APPDATA%`, so a file Kumochi can't save never asks for onboarding.
 - **No absolute `%APPDATA%`:** the defaults, and changes are refused.
 
+## Tuning
+
+`[tuning.<group>]` tables override built-in limits (`config/tuning.rs`). Each group is a
+typed struct built from a table of limits: key, default and range, with the unit in the key
+(`_s`, `_count`). `Config::load` reads them once, so a change needs a restart, and nothing
+writes them; the settings writer keeps them like any key it doesn't own. A file that doesn't
+parse gives every group its defaults, as for every other key.
+
+- **Wrong type** (not a non-negative integer): that key's default.
+- **Out of range:** the nearer edge, in every build. Wider Dev-only ranges are for harmless
+  values only and arrive with the first such key; budgets that bound requests, spending or
+  privacy never widen.
+- **Inconsistent group:** every key in the group takes its default, so a group is never half
+  applied.
+- **Logs** name only keys this build owns. Unknown keys are counted, never named, because a key
+  can hold anything.
+
+`[tuning.github]` holds the filing and listing budgets. A filing (`issues::transport::Control`)
+gets one deadline, `filing_s`, at creation, shared by every request, retry and cleanup in it,
+and counts up to `filing_requests_count` requests, refusing the next without dispatching it.
+A reservation is never refunded and a create that may have been sent is never resent. A filing
+makes its listing's requests plus four (the user, two match pages and the create), so the group
+needs `filing_requests_count >= listing_requests_count + 4` and `listing_s <= filing_s`.
+`repositories::fetch` takes the listing pair; review rearms use `filing_s` too. The user
+reference, with the example the docs-match test checks, is [tuning](../user/tuning.md).
+
 ## Claude Code
 
 `[claude_code] enabled = false` in `config.toml` turns Claude Code's discovery off: the brain
