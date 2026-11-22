@@ -2254,27 +2254,49 @@ fn pie_series_continue_the_slice_palette() {
     ]));
     let items = result.after.items();
     let theme = Theme::default();
-    for (name, slots) in [("a", [0, 1]), ("b", [2, 3])] {
+    for (name, slots, diagonals) in [
+        ("a", [0, 1], [[1.0, -1.0], [1.0, 1.0]]),
+        ("b", [2, 3], [[-1.0, 1.0], [-1.0, -1.0]]),
+    ] {
         let handle = result.after.handle(&id(name)).expect("series handle");
         let item = items
             .iter()
             .find(|item| item.handle == handle)
             .expect("prepared series");
-        let mut colors: Vec<_> = item
+        let fills: Vec<_> = item
             .primitives
             .iter()
             .filter_map(|primitive| match primitive {
-                Prim::Fill { color, .. } if color.opacity > 0.0 => Some(color.rgb.get()),
+                Prim::Fill { points, color } if color.opacity > 0.0 => {
+                    Some((points.as_ref(), color.rgb.get()))
+                }
                 _ => None,
             })
             .collect();
-        colors.sort_unstable();
-        let mut expected = slots.map(|slot| theme.series(slot).get());
-        expected.sort_unstable();
-        assert_eq!(
-            colors, expected,
-            "series {name} continues the palette across its slices"
-        );
+        let center = item.bounds.center();
+        let inset = item.bounds.size.x.min(item.bounds.size.y) * 0.125;
+        for (slot, [dx, dy]) in slots.into_iter().zip(diagonals) {
+            let probe = center + Vec2::new(dx, dy) * inset;
+            let colors: std::collections::BTreeSet<_> = fills
+                .iter()
+                .filter_map(|&(points, color)| {
+                    let crossings = points
+                        .iter()
+                        .zip(points.iter().cycle().skip(1))
+                        .filter(|&(a, b)| {
+                            (a.y > probe.y) != (b.y > probe.y)
+                                && probe.x < a.x + (probe.y - a.y) * (b.x - a.x) / (b.y - a.y)
+                        })
+                        .count();
+                    (!crossings.is_multiple_of(2)).then_some(color)
+                })
+                .collect();
+            assert_eq!(
+                colors,
+                std::collections::BTreeSet::from([theme.series(slot).get()]),
+                "series {name} has its palette slot {slot} at {probe:?}"
+            );
+        }
     }
 }
 

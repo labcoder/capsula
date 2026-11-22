@@ -477,8 +477,8 @@ mod tests {
 
     use super::{
         Ask, Check, Entry, LIVE_KEY_CATALOG_BUDGET_ENV, LIVE_KEY_MESSAGES_BUDGET_ENV,
-        ProductIdentity, brain_command, build, claude_question, drained, end, end_with, entry,
-        read_kept, run_bounded, wait_bounded, warn_cleanup, with_cleanup,
+        ProductIdentity, bounded, brain_command, build, claude_question, drained, end, end_with,
+        entry, read_kept, run_bounded, wait_bounded, warn_cleanup, with_cleanup,
     };
     use crate::platform;
 
@@ -592,14 +592,38 @@ mod tests {
     fn a_run_past_its_limit_is_ended_and_a_failed_one_returns_its_status() {
         let start = Instant::now();
         let error = build(held(), SHORT).expect_err("a hung build fails");
-        assert!(error.to_string().contains("brain build"), "{error}");
+        let detail = error.to_string();
+        assert!(
+            detail.starts_with("the brain build didn't finish in "),
+            "{detail}"
+        );
+        assert!(!detail.contains("cleanup also failed"), "{detail}");
         assert!(
             (SHORT..Duration::from_secs(15)).contains(&start.elapsed()),
             "the build returned outside the timeout window"
         );
 
-        let error = run_bounded(held(), SHORT, "the fixture").expect_err("times out");
-        assert!(error.to_string().contains("the fixture"), "{error}");
+        let mut child = held().spawn().expect("held child starts");
+        let stdin = child
+            .stdin
+            .take()
+            .expect("held child has an open input pipe");
+        let observed = platform::Process::open(child.id()).expect("observe the held process");
+        let error = bounded(child, SHORT, "the fixture").expect_err("times out");
+        assert!(
+            error
+                .to_string()
+                .starts_with("the fixture didn't finish in "),
+            "{error}"
+        );
+        assert!(
+            observed
+                .exit_code()
+                .expect("read the process exit")
+                .is_some(),
+            "timed-out child survives while its input is still open"
+        );
+        drop(stdin);
         let status = run_bounded(exits(3), SHORT * 50, "the fixture").expect("finishes");
         assert_eq!(status.code(), Some(3));
     }

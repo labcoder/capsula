@@ -309,6 +309,25 @@ mod tests {
         }
     }
 
+    fn assert_unreadable(error: &str, path: &str, fields: [[&str; 2]; 3]) {
+        for when in ["before", "after"] {
+            assert!(
+                error.split("unreadable").skip(1).any(|record| {
+                    let words: Vec<_> = record
+                        .split(|ch: char| !ch.is_ascii_alphanumeric() && ch != '\\')
+                        .filter(|word| !word.is_empty())
+                        .collect();
+                    words.first() == Some(&when)
+                        && words.contains(&path)
+                        && fields
+                            .iter()
+                            .all(|field| words.windows(2).any(|pair| pair == field))
+                }),
+                "missing unreadable {when} at {path} with {fields:?}: {error}"
+            );
+        }
+    }
+
     #[test]
     fn an_equal_recursive_read_is_proven_unchanged() {
         assert!(
@@ -341,7 +360,11 @@ mod tests {
             .ensure_unchanged(&registry(denied()))
             .unwrap_err()
             .to_string();
-        assert_diagnostic(&error, &[r"HKCU\Preload", "before", "after", "5"]);
+        assert_unreadable(
+            &error,
+            r"HKCU\Preload",
+            [["open", "5"], ["read", "0"], ["truncated", "false"]],
+        );
     }
 
     #[test]
@@ -360,9 +383,10 @@ mod tests {
             .ensure_unchanged(&registry(deep()))
             .unwrap_err()
             .to_string();
-        assert_diagnostic(
+        assert_unreadable(
             &error,
-            &[r"HKCU\Preload\deep", "before", "after", "truncated"],
+            r"HKCU\Preload\deep",
+            [["open", "0"], ["read", "0"], ["truncated", "true"]],
         );
     }
 
