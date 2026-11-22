@@ -1235,8 +1235,8 @@ exactly one application handoff allocation per `paint_path`, of exactly 32 bytes
 vertex; and GPUI-internal allocations, which are reported rather than asserted. Draw,
 flow, transforms and text-scale tests keep off-grid values without rounding, quantizing
 or precomputing frames. GPUI consumes the handoff Vec, so the callback as a whole is not
-allocation-free. The cache reuses the locked lyon_tessellation 1.0.23 tessellator;
-GPUI's PathBuilder creates a new tessellator and buffers on every call.
+allocation-free. Rect fallbacks reuse the locked lyon_tessellation 1.0.23 sweep and output buffers;
+GPUI's PathBuilder would create both on every call.
 
 The 64 MiB allowance remains application-owned bytes only. GPUI-owned allocations are
 reported even when the application retains them: one shaped result per label within
@@ -1961,13 +1961,16 @@ geometry is assembled completely before that item's paths or quads are submitted
 refusal clears the pending handoffs without painting any of that item. A later label failure
 keeps the earlier-painted behavior, but drains and frees all remaining handoffs.
 
-One presence-owned stroke scratch survives overlay-host recreation and is shared serially
-across scenes. Its vertex and run capacities and the stage holder are a fixed residency seed,
-charged once alongside returned owners, not once per scene. Strokes count and replay the same
+One presence-owned paint scratch survives overlay-host recreation and is shared serially
+across scenes. Its stroke vertex and run capacities, fixed Rect fill allowance and stage holder
+are charged once alongside returned owners, not once per scene. Strokes count and replay the same
 dash/reveal walk into one exactly sized path handoff. Static fills still use staged triangles.
-Changing rect backgrounds, rings and reveal sectors retain the narrow transient lyon-fill
-allocation exception; their events are generated without contour lists, and neither the
-tessellator nor its output buffers survive that build. Text is copied once into sorted,
+Changing rect backgrounds, rings and reveal sectors stream their contours into the same
+tessellator, and clear its vertex and index buffers without freeing them between builds.
+The sweep can grow on first use or a larger contour; its retained storage is charged once
+against a fixed 512 KiB allowance. The allocation check exercises cap-sized rounded fills
+and rings and verifies that dropping the scratch releases what it retained. Warmed
+placement-2 backgrounds and borders make only their exact-size GPUI handoffs. Text is copied once into sorted,
 generation-bound label entries at staging. Short shared strings stay inline; longer strings
 share an owned Arc except for the pinned string type's static whitespace optimization.
 Staging records whether the supplied Arc is retained, so static whitespace is not charged
@@ -1997,10 +2000,9 @@ than boxing canvas callbacks. These storage changes do not change Stop, frame ge
 input or the terminal paint-failure policy.
 
 Test-only bounded traces record allocation and free identities across render, layout,
-prepaint, paint and the deferred owner callback as App work. Narrow GPUI and changing-fill
+prepaint, paint and the deferred owner callback as App work. Narrow GPUI and fill-scratch
 scopes restore that phase; application arguments stay in App. Geometry assertions match
-each actual handoff to its allocation lifetime and check fill lifetimes within each build,
-without subtracting aggregate allocation counts.
+each actual handoff to its allocation lifetime and track scratch growth across builds.
 
 In this source, the live-owner terminal callback (`paint_observed`, checkpoints `160..161`)
 records retirement (`Case::A`..`Case::E`), control refusal (`Case::B`, `Case::D`), host
