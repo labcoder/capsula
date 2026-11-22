@@ -36,6 +36,7 @@ fn quit_admission_is_single_use_for_a_connected_transport() {
         data,
         pipe: Arc::new(pipe),
         submits: std::sync::atomic::AtomicU32::new(0),
+        queued_input: super::QueuedInput::default(),
         closing: Arc::default(),
     });
     link.delete(ThreadId(8));
@@ -113,6 +114,7 @@ fn an_aborted_outbox_refuses_quit_even_after_capacity_returns() {
             data,
             pipe: Arc::clone(&pipe),
             submits: std::sync::atomic::AtomicU32::new(0),
+            queued_input: super::QueuedInput::default(),
             closing: Arc::default(),
         });
         (peer, pipe, control, queued)
