@@ -184,21 +184,39 @@ fn a_brain_lost_before_the_receipt_restores_the_words_once_and_keeps_the_notice(
 }
 
 #[gpui::test]
-fn a_revoked_holds_words_never_come_back_after_a_loss(cx: &mut TestAppContext) {
+fn only_a_revoked_holds_words_stay_back_after_a_loss(cx: &mut TestAppContext) {
     use kumochi_protocol::message::{ControlToBrain, SettingsOp};
 
-    let (owner, _data, _controls) = ready(cx);
-    hold(&owner, 1, cx);
-    deliver(&owner, words(1, 1, SENTINEL, 40), cx);
-    owner.update(cx, |owner, _| {
-        let session = owner.session.clone().expect("connected");
-        let off = ControlToBrain::Settings(SettingsOp::SetHoldToTalk(false));
-        assert!(owner.link.send_control(&session, off));
-    });
-    deliver(&owner, LinkEvent::State(LinkState::Reconnecting), cx);
-    assert_eq!(draft(&owner, cx), "");
-    assert_eq!(lost(&owner, cx), None);
-    owner.read_with(cx, |owner, _| assert!(owner.voice.recovery.is_none()));
+    // (how the hold's input ends before the brain is lost, whether the words come back)
+    for (case, restored) in [("change", false), ("escape", false), ("answered", true)] {
+        let (owner, _data, _controls) = ready(cx);
+        hold(&owner, 1, cx);
+        deliver(&owner, words(1, 1, SENTINEL, 40), cx);
+        if case == "answered" {
+            thinking(&owner, cx);
+            deliver(&owner, run_state(Phase::Answering), cx);
+        }
+        owner.update(cx, |owner, _| {
+            if case == "escape" {
+                assert!(owner.link.cancel_input());
+            } else {
+                let session = owner.session.clone().expect("connected");
+                let off = ControlToBrain::Settings(SettingsOp::SetHoldToTalk(false));
+                assert!(owner.link.send_control(&session, off));
+            }
+        });
+        deliver(&owner, LinkEvent::State(LinkState::Reconnecting), cx);
+        assert_eq!(
+            draft(&owner, cx),
+            if restored { SENTINEL } else { "" },
+            "{case}"
+        );
+        assert_eq!(
+            lost(&owner, cx),
+            restored.then_some(Text::HoldLostRestored),
+            "{case}"
+        );
+    }
 }
 
 #[gpui::test]
@@ -294,7 +312,6 @@ fn a_failed_or_stopped_held_run_drops_its_words(cx: &mut TestAppContext) {
             gesture: GestureId(2),
             run: None,
             target: owner.voice.target.get(),
-            choice: owner.link.choice_revision(),
             picture: false,
             words: Some(SENTINEL.into()),
         });
