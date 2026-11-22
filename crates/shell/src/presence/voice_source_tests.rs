@@ -2264,3 +2264,56 @@ fn the_native_callback_reads_the_pointer_at_recognition_and_when_the_keys_come_u
         }
     }
 }
+
+#[gpui::test]
+fn superseding_native_hold_returns_before_outbox_release_and_sends_cancel_first(
+    cx: &mut TestAppContext,
+) {
+    use crate::link::fixture;
+
+    let (owner, _data, _controls) = ready(cx);
+    let pipe = fixture::attended("superseding-hold");
+    let events = fixture::patient(pipe.events.clone());
+    let session = fixture::connected(fixture::next(&events));
+    owner.update(cx, |this, _| {
+        this.link = pipe.handle.clone();
+        this.session = Some(session.clone());
+    });
+    let old = GestureId(1);
+    let replacement = GestureId(2);
+    let send = native(&owner, cx);
+    let at = Instant::now();
+    chord(&send, Edge::Down, at);
+    assert!(matches!(
+        pipe.next_control(),
+        ControlToBrain::KeyDown { gesture, .. } if gesture == old
+    ));
+    chord(&send, Edge::Up, at + Duration::from_millis(100));
+
+    pipe.handle.track_input(old);
+    let at = at + Duration::from_secs(1);
+    chord(&send, Edge::Down, at);
+    assert!(matches!(
+        pipe.next_control(),
+        ControlToBrain::KeyDown { gesture, .. } if gesture == replacement
+    ));
+
+    fixture::with_outbox_held(&pipe.handle, &session, || {
+        send(Event::Deadline, after(at, 301));
+        assert!(!pipe.handle.input_is(old), "local revocation is immediate");
+        assert!(
+            pipe.handle.input_is(replacement),
+            "replacement is already tracked"
+        );
+    });
+
+    cx.run_until_parked();
+    assert_eq!(
+        pipe.next_control(),
+        ControlToBrain::GestureCancel { gesture: old }
+    );
+    assert!(matches!(
+        pipe.next_control(),
+        ControlToBrain::VoiceHoldRecognized { gesture, .. } if gesture == replacement
+    ));
+}

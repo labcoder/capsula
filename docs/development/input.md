@@ -93,7 +93,9 @@ sequenceDiagram
   only tries to borrow GPUI. If GPUI is already borrowed, because a nested message loop
   dispatched the callback, the effects wait in an ordered queue with their original times, and
   a foreground task retries them every millisecond until they apply or the owner is gone.
-  Queued effects retain their order.
+  Replacing a tracked hold revokes its local input first. Its wire cancel takes the ordered
+  queue even when GPUI is free, and must reach the same link generation before the replacement
+  offer can be sent. A refused cancel can't admit that offer. Queued effects retain their order.
 - **Deadlines.** The gesture returns at most one deadline: the 300 ms hold or the double-tap
   window. The proxy arms it with `SetTimer` after delivery, for the time left from then, rounded
   up to whole milliseconds, so slow delivery never lengthens the hold, and disarms it
