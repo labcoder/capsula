@@ -5076,6 +5076,155 @@ fn queued_speech_start_or_scene_promise_closes_without_data_credit() {
 }
 
 #[cfg(debug_assertions)]
+#[test]
+fn a_narrated_pair_whose_run_end_never_comes_is_torn_down() {
+    let link = narrated_attended("narrated-missing-run-end");
+    let events = patient(link.events.clone());
+    let _named = queued_named_run(&link, &events);
+    let interrupted = run_state(
+        7,
+        ThreadId(1),
+        Phase::Interrupted,
+        Some(RunOrigin::Typed { turn: 1 }),
+    );
+    frame::write(&mut &link.control, &interrupted, Pipe::Control).expect("terminal control");
+    let by = Instant::now() + super::HANDSHAKE_TIMEOUT + PATIENCE;
+    while frame::write(&mut &link.control, &ControlToShell::Ping, Pipe::Control).is_ok() {
+        match frame::read::<ControlToBrain>(&mut &link.control, Pipe::Control) {
+            Ok(Some(ControlToBrain::Pong)) => {}
+            Ok(None) | Err(_) => break,
+            Ok(Some(other)) => panic!("only pongs, got {other:?}"),
+        }
+        assert!(Instant::now() < by, "the pair outlived its missing RunEnd");
+        thread::sleep(Duration::from_millis(250));
+    }
+    assert!(link.link.join().expect("the attended link didn't panic"));
+}
+
+#[cfg(debug_assertions)]
+#[test]
+fn a_decoded_run_end_outlasts_the_bound_while_the_bridge_is_busy() {
+    let link = narrated_attended("narrated-run-end-busy-bridge");
+    let events = patient(link.events.clone());
+    let (session, _) = queued_named_run(&link, &events);
+    let bridge = Arc::clone(session.io.narrated.as_ref().expect("a narrated pair"));
+    let interrupted = run_state(
+        7,
+        ThreadId(1),
+        Phase::Interrupted,
+        Some(RunOrigin::Typed { turn: 1 }),
+    );
+    frame::write(&mut &link.control, &interrupted, Pipe::Control).expect("terminal control");
+    let (held, holding) = std::sync::mpsc::channel();
+    let (release, released) = std::sync::mpsc::channel::<()>();
+    let holder = thread::spawn(move || {
+        let _state = bridge.hold_state();
+        held.send(()).expect("the test waits");
+        released.recv().ok();
+    });
+    holding.recv().expect("the bridge is held");
+    let end = DataToShell::RunEnd { run: RunId(7) };
+    frame::write(&mut &*link.data, &end, Pipe::Data).expect("the exact end");
+    let by = Instant::now() + super::HANDSHAKE_TIMEOUT + Duration::from_secs(1);
+    while Instant::now() < by {
+        frame::write(&mut &link.control, &ControlToShell::Ping, Pipe::Control)
+            .expect("the pair stays open");
+        while frame::read::<ControlToBrain>(&mut &link.control, Pipe::Control)
+            .expect("control")
+            .expect("the pair stays open")
+            != ControlToBrain::Pong
+        {}
+        thread::sleep(Duration::from_millis(250));
+    }
+    release.send(()).expect("the holder waits");
+    holder.join().expect("the holder finished");
+    assert!(session.open());
+}
+
+#[test]
+fn a_queued_keyup_publishes_its_release_only_when_it_is_sent() {
+    use kumochi_protocol::message::{GestureId, HoldStatus};
+    use std::sync::atomic::Ordering;
+
+    for refused in [true, false] {
+        let link = attended_queued(if refused {
+            "queued-keyup-refused"
+        } else {
+            "queued-keyup-published"
+        });
+        let events = patient(link.events.clone());
+        let session = connected(next(&events));
+        let output = queued_registration(&link.control, &link.handle.shared);
+        acknowledge_queued(&link.control, output);
+        assert!(matches!(next(&events), LinkEvent::Settings { .. }));
+        let view = kumochi_protocol::message::SettingsView {
+            talk_back: true,
+            show_screen: false,
+            ..settings_view()
+        };
+        frame::write(
+            &mut &link.control,
+            &ControlToShell::Settings {
+                view,
+                answer: false,
+            },
+            Pipe::Control,
+        )
+        .expect("settings");
+        assert!(matches!(next(&events), LinkEvent::Settings { .. }));
+        let gesture = GestureId(43);
+        let recognized = ControlToBrain::VoiceHoldRecognized {
+            gesture,
+            thread: None,
+            selection: 1,
+        };
+        link.handle.track_input(gesture);
+        assert!(link.handle.send_control(&session, recognized.clone()));
+        assert_eq!(
+            frame::read(&mut &link.control, Pipe::Control).expect("control"),
+            Some(recognized)
+        );
+        frame::write(
+            &mut &link.control,
+            &ControlToShell::VoiceHoldStatus {
+                gesture,
+                status: HoldStatus::Admitted,
+            },
+            Pipe::Control,
+        )
+        .expect("admitted");
+        assert!(
+            matches!(next(&events), LinkEvent::VoiceHold { gesture: key, status: HoldStatus::Admitted, .. } if key == gesture)
+        );
+        let released = ControlToBrain::KeyUp {
+            gesture,
+            t_qpc: 5,
+            chunks: 0,
+        };
+        let published = &link.handle.shared.output.hold_released;
+        if refused {
+            fill_queued_control_mailbox(&link, &session);
+            assert!(!link.handle.send_control(&session, released.clone()));
+            assert!(
+                !published.load(Ordering::Acquire),
+                "a refused KeyUp withdraws its release"
+            );
+            continue;
+        }
+        assert!(link.handle.send_control(&session, released.clone()));
+        assert!(
+            published.load(Ordering::Acquire),
+            "a sent KeyUp's release is visible to the data reader"
+        );
+        assert_eq!(
+            frame::read(&mut &link.control, Pipe::Control).expect("control"),
+            Some(released)
+        );
+        assert!(session.open());
+    }
+}
+
+#[cfg(debug_assertions)]
 fn narrated_attended(label: &str) -> Attended {
     attended_queued_shared(
         label,

@@ -776,7 +776,15 @@ impl Shared {
             }
             _ => None,
         };
+        // Published before KeyUp can reach the Brain, whose early promise reads it.
+        let released = matches!(replacement, Some(QueuedHold::Released(_)));
+        if released {
+            self.output.hold_released.store(true, Ordering::Release);
+        }
         if !self.queue_voice_control(out, message) {
+            if released {
+                self.output.hold_released.store(false, Ordering::Release);
+            }
             return false;
         }
         if let Some(replacement) = replacement {
@@ -2118,6 +2126,9 @@ fn watch(
                 }
             }
             Ok(Some(ControlToShell::Ping)) => {
+                if queued.is_some() && shared.output.run_end_overdue(generation, Instant::now()) {
+                    return;
+                }
                 if out.try_send(ControlToBrain::Pong).is_err() {
                     tracing::warn!("the control queue is full; the brain isn't reading");
                 }
@@ -2204,6 +2215,11 @@ fn watch(
                     && matches!(phase, Phase::Done | Phase::Interrupted | Phase::Failed)
                 {
                     shared.output.queued_terminal(generation, run);
+                }
+                if queued.is_some()
+                    && matches!(phase, Phase::Done | Phase::Interrupted | Phase::Failed)
+                {
+                    shared.output.queued_run_ended(generation, run);
                 }
                 if events
                     .send_blocking(LinkEvent::RunState {
@@ -2350,10 +2366,15 @@ fn watch(
                 {
                     shared.microphone.cancel(gesture);
                     shared.clear_input(gesture);
-                    if queued.is_some() {
-                        shared.with_queued_input(generation, |input| {
-                            let _cleared = input.hold.take_if(|hold| hold.gesture() == gesture);
-                        });
+                    if queued.is_some()
+                        && shared.with_queued_input(generation, |input| {
+                            input
+                                .hold
+                                .take_if(|hold| hold.gesture() == gesture)
+                                .is_some()
+                        }) == Some(true)
+                    {
+                        shared.output.hold_released.store(false, Ordering::Release);
                     }
                 }
                 if queued.is_some() && status == HoldStatus::Admitted {

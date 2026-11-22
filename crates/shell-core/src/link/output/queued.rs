@@ -10,7 +10,9 @@ use kumochi_protocol::message::{ControlToBrain, Narration, RunOrigin, SegmentId,
 use super::{
     Arc, Denied, Ordering, Output, OutputGeneration, OutputOwner, RunId, State, SyncSender,
 };
-use crate::link::{Attendance, Shared, narrated::Narrated, queued::MetadataFrame};
+use crate::link::{
+    Attendance, HANDSHAKE_TIMEOUT, Shared, narrated::Narrated, queued::MetadataFrame,
+};
 use crate::speaker::DRAIN;
 use crate::speaker::conductor::Assignment;
 use crate::speaker::queued::{Command, Input, Packet, RATE, spawn, spawn_plain};
@@ -55,7 +57,7 @@ pub(in crate::link) struct Queued {
     wake: Arc<OnceLock<Thread>>,
     stopped: RunId,
     narrated: Option<Arc<Narrated>>,
-    predecessor: Option<(RunId, Delivery)>,
+    predecessor: Option<(RunId, Delivery, Option<Instant>)>,
     early_end: Option<RunId>,
     pending: Option<u32>,
     active: Option<Active>,
@@ -79,6 +81,7 @@ struct Active {
     proof: Arc<AtomicU8>,
     delivery: Option<Delivery>,
     locally_stopped: bool,
+    run_end_by: Option<Instant>,
 }
 
 impl Queued {
@@ -147,6 +150,9 @@ impl Queued {
             return true;
         }
         self.stopped = run;
+        active
+            .run_end_by
+            .get_or_insert(Instant::now() + HANDSHAKE_TIMEOUT);
         let accepted = active.input.as_ref().is_none_or(Input::stop);
         if accepted
             && matches!(origin, StopOrigin::Local)
@@ -175,18 +181,27 @@ impl Queued {
             && self.show_screen.is_some()
             && !self.closing.load(Ordering::Acquire)
             && (self.talk_back == Some(false)
-                || self.narrated.is_none()
-                    && self.pending.is_none()
+                || self.pending.is_none()
                     && self.predecessor.is_none()
-                    && !self.owes_proof(RECEIPT_QUEUED))
+                    && !self.owes_proof(RECEIPT_QUEUED)
+                    && self.narration_ended(Narrated::idle))
     }
 
-    fn delivery(&mut self, run: RunId) -> Result<DeliveryTarget<'_>, ()> {
-        if let Some((_, delivery)) = self.predecessor.as_mut().filter(|(id, _)| *id == run) {
+    /// A narrated run is over once its exact `RunEnd` cleared its delivery and its promise handed off.
+    fn narration_ended(&self, idle: fn(&Narrated) -> bool) -> bool {
+        self.active
+            .as_ref()
+            .is_none_or(|run| run.delivery.is_none())
+            && self.narrated.as_deref().is_none_or(idle)
+    }
+
+    fn delivery(&mut self, run: RunId, hold: &AtomicBool) -> Result<DeliveryTarget<'_>, ()> {
+        if let Some((_, delivery, _)) = self.predecessor.as_mut().filter(|(id, ..)| *id == run) {
             return Ok(DeliveryTarget::Draining(delivery));
         }
         let current = self.active.as_ref().map_or(RunId(0), |active| active.id);
-        if run > current && self.pending.is_some() && self.early_end != Some(run) {
+        let named = self.pending.is_some() || hold.load(Ordering::Acquire);
+        if run > current && named && self.early_end != Some(run) {
             return Ok(DeliveryTarget::Waiting);
         }
         let active = self
@@ -463,18 +478,20 @@ impl OutputOwner {
                 RunOrigin::Typed { turn } => owner.pending == Some(turn),
                 RunOrigin::Hold { .. } => {
                     owner.pending.is_none()
-                        && (owner.talk_back == Some(false) || owner.narrated.is_none())
+                        && (owner.talk_back == Some(false)
+                            || owner.narration_ended(Narrated::wait_idle))
                 }
             };
             if !offered {
                 return false;
             }
             owner.pending = None;
+            self.hold_released.store(false, Ordering::Release);
             owner.retire();
             if let Some(old) = owner.active.take().filter(|old| old.locally_stopped)
                 && let Some(delivery) = old.delivery
             {
-                owner.predecessor = Some((old.id, delivery));
+                owner.predecessor = Some((old.id, delivery, old.run_end_by));
             }
             let ended = owner.early_end == Some(run);
             if ended {
@@ -490,6 +507,7 @@ impl OutputOwner {
                 delivery: (!silent && owner.narrated.is_some() && !ended)
                     .then_some(Delivery::Unpromised),
                 locally_stopped: false,
+                run_end_by: None,
             });
             if silent {
                 owner.wake();
@@ -589,7 +607,9 @@ impl OutputOwner {
             .speech_queue(assignment.session)
             .filter(|(output, _)| *output == assignment.output)
             .ok_or(())?;
-        let (delivery, input, outcome) = match owner.delivery(assignment.run)? {
+        let (delivery, input, outcome) = match owner
+            .delivery(assignment.run, &self.hold_released)?
+        {
             DeliveryTarget::Waiting => return Ok(NarratedReservation::Waiting),
             DeliveryTarget::Live(delivery, input) => {
                 (delivery, input, NarratedReservation::Reserved)
@@ -675,8 +695,8 @@ impl OutputOwner {
             let delivery = owner
                 .predecessor
                 .as_ref()
-                .filter(|(id, _)| *id == run)
-                .map(|(_, delivery)| delivery)
+                .filter(|(id, ..)| *id == run)
+                .map(|(_, delivery, _)| delivery)
                 .or_else(|| {
                     owner
                         .active
@@ -731,12 +751,38 @@ impl OutputOwner {
         }
     }
 
+    /// Terminal control starts the wait for the run's exact `RunEnd`.
+    pub(in crate::link) fn queued_run_ended(&self, session: u64, run: RunId) {
+        if let Some((_, owner)) = self.lock().queue(session)
+            && let Some(active) = owner.active.as_mut().filter(|active| active.id == run)
+        {
+            active
+                .run_end_by
+                .get_or_insert(Instant::now() + HANDSHAKE_TIMEOUT);
+        }
+    }
+
+    /// A fenced narrated run whose `RunEnd` never came; the caller tears the pair down.
+    pub(in crate::link) fn run_end_overdue(&self, session: u64, now: Instant) -> bool {
+        let overdue = |by: Option<Instant>| by.is_some_and(|by| now >= by);
+        self.lock().queue(session).is_some_and(|(_, owner)| {
+            owner
+                .predecessor
+                .as_ref()
+                .is_some_and(|(.., by)| overdue(*by))
+                || owner
+                    .active
+                    .as_ref()
+                    .is_some_and(|active| active.delivery.is_some() && overdue(active.run_end_by))
+        })
+    }
+
     pub(in crate::link) fn end_queued_run(&self, session: u64, run: RunId) -> bool {
         let mut state = self.lock();
         let Some((_, owner)) = state.queue(session) else {
             return false;
         };
-        if owner.predecessor.take_if(|(id, _)| *id == run).is_some() {
+        if owner.predecessor.take_if(|(id, ..)| *id == run).is_some() {
             return true;
         }
         let current = owner.active.as_ref().map_or(RunId(0), |active| active.id);
