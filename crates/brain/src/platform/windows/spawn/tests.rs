@@ -13,6 +13,8 @@ use super::*;
 const PROBE: &str = "platform::windows::spawn::tests::child_probe";
 /// Marks where the probe's own arguments start among the test harness's filters.
 const MARK: &str = "spawn-probe";
+const ECHO_START: &[u8] = b"<echo>";
+const ECHO_END: &[u8] = b"</echo>";
 
 fn exe() -> PathBuf {
     std::env::current_exe().expect("test executable")
@@ -71,7 +73,11 @@ fn report(spawned: &mut Spawned) -> Vec<String> {
         .read_to_string(&mut text)
         .expect("stdout");
     text.lines()
-        .filter(|line| line.starts_with("ARG ") || line.starts_with("ENV "))
+        .filter(|line| {
+            ["ARG ", "ENV ", "ARGV0 "]
+                .iter()
+                .any(|prefix| line.starts_with(prefix))
+        })
         .map(str::to_owned)
         .collect()
 }
@@ -104,6 +110,7 @@ fn child_probe() {
     for (name, value) in std::env::vars_os() {
         writeln!(lines, "ENV {name:?}={value:?}").expect("a String takes writes");
     }
+    writeln!(lines, "ARGV0 {:?}", args[0]).expect("a String takes writes");
     match mode.as_str() {
         "report" => {
             let mut out = io::stdout();
@@ -114,7 +121,9 @@ fn child_probe() {
             let mut input = Vec::new();
             io::stdin().read_to_end(&mut input).expect("stdin");
             let mut out = io::stdout();
+            out.write_all(ECHO_START).expect("echo start");
             out.write_all(&input).expect("stdout");
+            out.write_all(ECHO_END).expect("echo end");
             out.flush().expect("flush");
         }
         "console" => {
@@ -152,13 +161,39 @@ fn arguments_round_trip_through_the_command_line() {
     .into_iter()
     .map(OsString::from)
     .collect();
-    let mut child = start("report", &args, &base_env(), Stdio::Piped, &job).expect("spawn");
-    let args_seen: Vec<String> = report(&mut child)
-        .into_iter()
+    let original = exe();
+    let folder = original.parent().expect("executable folder");
+    let scratch = crate::scratch::Scratch::under(folder, "spawn argv0");
+    let exe = scratch.join(original.file_name().expect("executable name"));
+    std::fs::hard_link(&original, &exe).expect("same-volume executable alias with spaces");
+    let mut child = spawn(&Launch {
+        exe: &exe,
+        args: &probe_args("report", &args),
+        cwd: folder,
+        env: &base_env(),
+        stdio: Stdio::Piped,
+        jobs: &[&job],
+    })
+    .expect("spawn");
+    let seen = report(&mut child);
+    let args_seen: Vec<String> = seen
+        .iter()
         .filter(|line| line.starts_with("ARG "))
+        .cloned()
         .collect();
     let expected: Vec<String> = args.iter().map(|arg| format!("ARG {arg:?}")).collect();
     assert_eq!(args_seen, expected);
+    let argv0 = seen
+        .into_iter()
+        .filter(|line| line.starts_with("ARGV0 "))
+        .collect::<Vec<_>>();
+    assert_eq!(argv0, [format!("ARGV0 {:?}", exe.as_os_str())]);
+    assert!(
+        child
+            .process
+            .exits_within(Duration::from_secs(10))
+            .expect("wait for the alias to be unused")
+    );
 }
 
 #[test]
@@ -224,17 +259,21 @@ fn pipes_carry_stdin_to_the_child_and_its_stdout_back() {
     let mut child = start("echo", &[], &base_env(), Stdio::Piped, &job).expect("spawn");
     let ended = read_to_end(child.stdout.take().expect("stdout"));
     let mut stdin = child.stdin.take().expect("stdin");
-    stdin.write_all(b"ping\n").expect("write");
+    let payload = b"ping\r\n\x80\0pong\n";
+    stdin.write_all(payload).expect("write");
     drop(stdin);
     let out = ended
         .recv_timeout(Duration::from_secs(10))
         .expect("stdout ends");
-    let text = String::from_utf8_lossy(&out);
-    assert_eq!(
-        text.lines().filter(|line| *line == "ping").count(),
-        1,
-        "{text:?}"
-    );
+    let positions = |marker: &[u8]| {
+        out.windows(marker.len())
+            .enumerate()
+            .filter_map(|(at, bytes)| (bytes == marker).then_some(at))
+            .collect::<Vec<_>>()
+    };
+    let [start]: [usize; 1] = positions(ECHO_START).try_into().expect("one echo start");
+    let [end]: [usize; 1] = positions(ECHO_END).try_into().expect("one echo end");
+    assert_eq!(&out[start + ECHO_START.len()..end], payload);
 }
 
 /// Runs the ignored test `name` alone in a child of this test binary, so a handle it makes
@@ -402,31 +441,6 @@ fn units(text: &str) -> Vec<u16> {
     text.encode_utf16().collect()
 }
 
-#[test]
-fn quoting_follows_the_command_line_rules() {
-    let quoted = |arg: &str| {
-        let mut line = Vec::new();
-        push_quoted(&mut line, OsStr::new(arg));
-        String::from_utf16(&line).expect("utf-16")
-    };
-    assert_eq!(quoted("plain"), "plain");
-    assert_eq!(quoted(""), r#""""#);
-    assert_eq!(quoted("a b"), r#""a b""#);
-    assert_eq!(quoted("a\tb"), "\"a\tb\"");
-    assert_eq!(quoted(r#"say "hi""#), r#""say \"hi\"""#);
-    assert_eq!(quoted(r"no\space"), r"no\space");
-    assert_eq!(quoted(r"trail\ x\"), r#""trail\ x\\""#);
-    assert_eq!(quoted(r#"a\"b"#), r#""a\\\"b""#);
-}
-
-#[test]
-fn the_executable_is_quoted_and_a_quote_in_it_is_refused() {
-    let line = command_line(Path::new(r"C:\a b\c.exe"), &[OsString::from("x")]).expect("line");
-    assert_eq!(line, [units(r#""C:\a b\c.exe" x"#), vec![0]].concat());
-    let refused = command_line(Path::new(r#"C:\a"b.exe"#), &[]).expect_err("quote");
-    assert_eq!(refused.kind(), io::ErrorKind::InvalidInput);
-}
-
 fn env(pairs: &[(&str, &str)]) -> Vec<(OsString, OsString)> {
     pairs
         .iter()
@@ -436,6 +450,7 @@ fn env(pairs: &[(&str, &str)]) -> Vec<(OsString, OsString)> {
 
 #[test]
 fn the_environment_block_sorts_by_ordinal_uppercase() {
+    assert_eq!(environment_block(&[]).expect("empty block"), [0, 0]);
     let block = environment_block(&env(&[("_x", "3"), ("b", "2"), ("A", "1")])).expect("block");
     // Uppercase puts `b` (as `B`, 0x42) before `_` (0x5F); a plain sort would put it after.
     assert_eq!(
@@ -450,11 +465,6 @@ fn the_environment_block_sorts_by_ordinal_uppercase() {
         ]
         .concat()
     );
-}
-
-#[test]
-fn an_empty_environment_is_two_nuls() {
-    assert_eq!(environment_block(&[]).expect("block"), vec![0, 0]);
 }
 
 #[test]
@@ -481,7 +491,8 @@ fn a_nul_or_relative_path_is_refused_before_any_child_starts() {
     let sentinel: OsString = "later-sentinel".into();
     let nul_exe = PathBuf::from(format!("{}\0tail", exe.display()));
     let nul_cwd = PathBuf::from(format!("{}\0tail", folder.display()));
-    let cases: [(&Path, Vec<OsString>, &Path); 7] = [
+    let cases: [(&Path, Vec<OsString>, &Path); 8] = [
+        (Path::new(r#"C:\a"b.exe"#), vec![], &folder),
         (&exe, vec!["first\0tail".into(), sentinel.clone()], &folder),
         (&exe, vec!["\0first".into(), sentinel.clone()], &folder),
         (&nul_exe, vec![sentinel], &folder),
@@ -512,18 +523,34 @@ fn a_nul_or_relative_path_is_refused_before_any_child_starts() {
 #[test]
 fn launch_and_spawned_debug_show_counts_not_values() {
     let job = Job::new().expect("job");
+    let exe = exe();
+    let arg = "private-argv-sentinel";
+    let name = "private-env-name-sentinel";
+    let value = "private-env-value-sentinel";
+    let args = probe_args("echo", &[arg.into()]);
+    let mut pairs = base_env();
+    pairs.extend(env(&[(name, value)]));
     let launch = Launch {
-        exe: Path::new(r"C:\k.exe"),
-        args: &["secret-arg".into()],
-        cwd: Path::new(r"C:\"),
-        env: &env(&[("NAME", "secret-value")]),
-        stdio: Stdio::Null,
+        exe: &exe,
+        args: &args,
+        cwd: exe.parent().expect("folder"),
+        env: &pairs,
+        stdio: Stdio::Piped,
         jobs: &[&job],
     };
-    let text = format!("{launch:?}");
-    assert_eq!(
-        text,
-        r#"Launch { exe: "C:\\k.exe", args: 1, env: 1, stdio: Null, jobs: 1, .. }"#
+    let mut child = spawn(&launch).expect("spawn");
+    for debug in [format!("{launch:?}"), format!("{child:?}")] {
+        for sentinel in [arg, name, value] {
+            assert!(!debug.contains(sentinel));
+            assert!(!debug.contains(&format!("{:?}", sentinel.as_bytes())));
+        }
+    }
+    drop(child.stdin.take());
+    assert!(
+        child
+            .process
+            .exits_within(Duration::from_secs(10))
+            .expect("wait for fixture")
     );
 }
 

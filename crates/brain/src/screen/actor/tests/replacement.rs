@@ -105,7 +105,7 @@ struct Replacement {
 }
 
 impl Replacement {
-    fn held(owner: Owner, elapsed: Duration) -> Self {
+    fn held(owner: Owner, elapsed: Duration, next_display: PhysicalRect) -> Self {
         let (inbox, events) = mpsc::sync_channel(QUEUE);
         let (send, replies) = mpsc::channel();
         let (audit, scrubbed) = mpsc::channel();
@@ -180,7 +180,7 @@ impl Replacement {
             assert!(bytes.is_empty());
         }
         *rig.clock.lock().unwrap() += elapsed;
-        rig.context(next, NEW);
+        rig.context(next, next_display);
         rig.release_receive.send(()).unwrap();
         entering.recv_timeout(PATIENCE).unwrap();
         rig.handoff = rig.allocations.recv_timeout(PATIENCE).unwrap();
@@ -279,7 +279,7 @@ impl Drop for Replacement {
 
 #[test]
 fn expired_same_owner_replacement_disposes_before_second_capture() {
-    let rig = Replacement::held(key(2).owner, Duration::from_secs(31));
+    let rig = Replacement::held(key(2).owner, Duration::from_secs(31), NEW);
     rig.disposed_before_handoff();
     rig.release_capture.send(()).unwrap();
     rig.acquired(rig.next, NEW);
@@ -287,35 +287,33 @@ fn expired_same_owner_replacement_disposes_before_second_capture() {
 
 #[test]
 fn replacement_by_a_later_gesture_disposes_before_handoff_and_old_release() {
-    let owner = Owner {
-        gesture: 8,
-        ..key(2).owner
-    };
-    let rig = Replacement::held(owner, Duration::ZERO);
-    rig.disposed_before_handoff();
-    rig.retire_old_and_complete();
-}
-
-#[test]
-fn replacement_by_a_later_epoch_disposes_before_handoff_and_old_release() {
-    let owner = Owner {
-        epoch: 2,
-        gesture: 1,
-    };
-    let rig = Replacement::held(owner, Duration::ZERO);
-    rig.disposed_before_handoff();
-    rig.retire_old_and_complete();
+    for owner in [
+        Owner {
+            gesture: 8,
+            ..key(2).owner
+        },
+        Owner {
+            epoch: 2,
+            gesture: 1,
+        },
+    ] {
+        let rig = Replacement::held(owner, Duration::ZERO, NEW);
+        rig.disposed_before_handoff();
+        rig.retire_old_and_complete();
+    }
 }
 
 #[test]
 fn unexpired_same_owner_replacement_reuses_the_allocation() {
-    let rig = Replacement::held(key(2).owner, Duration::ZERO);
-    assert_eq!(rig.handoff, rig.old_allocation);
-    assert_eq!(rig.scrubbed.try_recv(), Err(mpsc::TryRecvError::Empty));
-    rig.release_capture.send(()).unwrap();
-    rig.acquired(rig.next, NEW);
-    assert_eq!(
-        rig.allocations.recv_timeout(PATIENCE).unwrap(),
-        rig.old_allocation
-    );
+    for display in [OLD, NEW] {
+        let rig = Replacement::held(key(2).owner, Duration::ZERO, display);
+        assert_eq!(rig.handoff, rig.old_allocation);
+        assert_eq!(rig.scrubbed.try_recv(), Err(mpsc::TryRecvError::Empty));
+        rig.release_capture.send(()).unwrap();
+        rig.acquired(rig.next, display);
+        assert_eq!(
+            rig.allocations.recv_timeout(PATIENCE).unwrap(),
+            rig.old_allocation
+        );
+    }
 }

@@ -42,34 +42,6 @@ fn sorted(mut pixels: Vec<[u32; 2]>) -> Vec<[u32; 2]> {
     pixels
 }
 
-/// Every pixel whose centre lies within `radius` of the segment from `a` to `b`, in image pixels.
-fn within(size: [u32; 2], a: [f64; 2], b: [f64; 2], radius: f64) -> Vec<[u32; 2]> {
-    let [dx, dy] = [b[0] - a[0], b[1] - a[1]];
-    block(0..=size[0] - 1, 0..=size[1] - 1)
-        .into_iter()
-        .filter(|&[x, y]| {
-            let p = [f64::from(x) + 0.5, f64::from(y) + 0.5];
-            let t =
-                (((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / (dx * dx + dy * dy)).clamp(0.0, 1.0);
-            (p[0] - a[0] - t * dx).powi(2) + (p[1] - a[1] - t * dy).powi(2) <= radius * radius
-        })
-        .collect()
-}
-
-#[test]
-fn a_shallow_segment_colours_every_pixel_within_its_width() {
-    let (mut rgb, region) = blank([40, 24]);
-    paint(&mut rgb, [40, 24], region, &points(&[[4, 10], [32, 15]]));
-    let (a, b) = ([4.5, 10.5], [32.5, 15.5]);
-    let pink = within([40, 24], a, b, 1.5);
-    let white: Vec<_> = within([40, 24], a, b, 2.5)
-        .into_iter()
-        .filter(|pixel| !pink.contains(pixel))
-        .collect();
-    assert_eq!(coloured(&rgb, 40, PINK), pink);
-    assert_eq!(coloured(&rgb, 40, WHITE), white);
-}
-
 #[test]
 fn a_two_point_path_colours_exactly_its_line_and_edge() {
     let (mut rgb, region) = blank([32, 24]);
@@ -112,29 +84,27 @@ fn an_empty_or_one_point_path_paints_nothing() {
 
 #[test]
 fn a_segment_that_leaves_the_image_is_painted_up_to_its_edge() {
-    let (mut rgb, region) = blank([10, 10]);
-    let bounds = paint(&mut rgb, [10, 10], region, &points(&[[5, 5], [20, 5]]));
-    assert_eq!(
-        bounds,
-        Some(InkBounds {
-            left: 3,
-            top: 3,
-            right: 10,
-            bottom: 8
-        })
-    );
-    assert_eq!(coloured(&rgb, 10, PINK), block(4..=9, 4..=6));
-    let mut white = block(4..=9, 3..=3);
-    white.extend(block(4..=9, 7..=7));
-    white.extend([[3, 4], [3, 5], [3, 6]]);
-    assert_eq!(coloured(&rgb, 10, WHITE), sorted(white));
-}
-
-#[test]
-fn a_segment_from_off_the_image_starts_at_its_edge() {
-    let (mut rgb, region) = blank([10, 10]);
-    paint(&mut rgb, [10, 10], region, &points(&[[-5, 5], [4, 5]]));
-    assert_eq!(coloured(&rgb, 10, PINK), block(0..=5, 4..=6));
+    for (path, left, right, pink, cap) in [
+        ([[5, 5], [20, 5]], 3, 10, 4..=9, 3),
+        ([[-5, 5], [4, 5]], 0, 7, 0..=5, 6),
+    ] {
+        let (mut rgb, region) = blank([10, 10]);
+        let bounds = paint(&mut rgb, [10, 10], region, &points(&path));
+        assert_eq!(
+            bounds,
+            Some(InkBounds {
+                left,
+                top: 3,
+                right,
+                bottom: 8
+            })
+        );
+        assert_eq!(coloured(&rgb, 10, PINK), block(pink.clone(), 4..=6));
+        let mut white = block(pink.clone(), 3..=3);
+        white.extend(block(pink, 7..=7));
+        white.extend([[cap, 4], [cap, 5], [cap, 6]]);
+        assert_eq!(coloured(&rgb, 10, WHITE), sorted(white));
+    }
 }
 
 #[test]

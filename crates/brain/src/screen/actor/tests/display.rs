@@ -13,49 +13,87 @@ fn display(id: u64, point: PhysicalPoint, ink: Vec<PhysicalPoint>) -> Request {
 }
 
 #[test]
-fn a_display_frame_commits_with_its_monitors_bounds() {
-    let rig = Rig::start(None, None, None);
-    rig.send(
-        1,
-        &display(1, PhysicalPoint([1, 1]), vec![PhysicalPoint([2, 2]); 2]),
-    );
-    let (request, reply) = rig.reply();
-    let Reply::Acquired(actual, meta) = reply else {
-        panic!("not acquired: {reply:?}")
-    };
-    assert_eq!(
-        (request, actual, meta.capture, meta.display, meta.dpi),
-        (1, key(1), CaptureId(1), DISPLAY, 120)
-    );
-    assert_eq!(rig.reply(), (1, Reply::Complete(key(1))));
-    rig.finish();
-}
-
-#[test]
 fn a_sealed_display_paints_the_path_its_request_carried() {
-    let rig = Rig::start(None, None, None);
-    // The fake's 4×3 frame is its monitor at one image pixel per physical pixel, from x = -4.
+    use crate::screen::ink::InkBounds;
+
     let corner = PhysicalPoint([-4, 0]);
-    rig.send(1, &display(1, PhysicalPoint([1, 1]), vec![corner, corner]));
-    assert!(matches!(rig.reply(), (1, Reply::Acquired(..))));
-    assert_eq!(rig.reply(), (1, Reply::Complete(key(1))));
-    rig.send(2, &Request::Seal(key(1)));
-    let (id, reply) = rig.reply();
-    let Reply::Sealed(sealed, context) = reply else {
-        panic!("not sealed: {reply:?}")
-    };
-    assert_eq!((id, sealed), (2, key(1)));
-    assert_eq!(
-        context.ink(),
-        Some(crate::screen::ink::InkBounds {
-            left: 0,
-            top: 0,
-            right: 3,
-            bottom: 3
-        })
-    );
-    rig.scrubbed();
-    rig.finish();
+    for (ink, expected, contrasting_pixel) in [
+        (Vec::new(), None, None),
+        (
+            vec![corner, corner],
+            Some(InkBounds {
+                left: 0,
+                top: 0,
+                right: 3,
+                bottom: 3,
+            }),
+            None,
+        ),
+        (
+            vec![PhysicalPoint([6, 10]), PhysicalPoint([16, 10])],
+            Some(InkBounds {
+                left: 8,
+                top: 8,
+                right: 23,
+                bottom: 13,
+            }),
+            Some((15, 10)),
+        ),
+    ] {
+        let rig = Rig::start(None, None, None);
+        rig.send(1, &display(1, PhysicalPoint([1, 1]), ink));
+        let (id, reply) = rig.reply();
+        let Reply::Acquired(acquired, meta) = reply else {
+            panic!("not acquired: {reply:?}")
+        };
+        assert_eq!(
+            (id, acquired, meta.capture, meta.display, meta.dpi),
+            (1, key(1), CaptureId(1), DISPLAY, 120)
+        );
+        assert_eq!(rig.reply(), (1, Reply::Complete(key(1))));
+        rig.send(2, &Request::Seal(key(1)));
+        let (id, reply) = rig.reply();
+        let Reply::Sealed(sealed, context) = reply else {
+            panic!("not sealed: {reply:?}")
+        };
+        assert_eq!((id, sealed), (2, key(1)));
+        assert_eq!(context.ink(), expected);
+        let geometry = context.geometry();
+        assert_eq!(
+            (
+                geometry.display.origin,
+                geometry.display.size,
+                geometry.display.dpi,
+                geometry.picture
+            ),
+            ([-4, 0], [40, 30], 120, [40, 30])
+        );
+        let image = image::load_from_memory_with_format(context.jpeg(), image::ImageFormat::Jpeg)
+            .expect("a JPEG")
+            .to_rgb8();
+        assert_eq!(image.dimensions(), (40, 30));
+        let background = |x, y| {
+            assert!(
+                image
+                    .get_pixel(x, y)
+                    .0
+                    .iter()
+                    .all(|channel| channel.abs_diff(91) < 16),
+                "plain background at {x},{y}"
+            );
+        };
+        background(30, 25);
+        if let Some((x, y)) = contrasting_pixel {
+            let [red, green, _] = image.get_pixel(x, y).0;
+            assert!(red > 200 && green < 100, "pink on the line: {red} {green}");
+        } else {
+            background(15, 10);
+        }
+        rig.scrubbed_bytes(40 * 30 * 4);
+        rig.send(3, &Request::Seal(key(1)));
+        assert_eq!(rig.reply(), (3, Reply::Refused(Refusal::Stale)));
+        rig.finish();
+    }
 }
 
 #[test]
@@ -64,19 +102,6 @@ fn a_display_that_changed_refuses_and_scrubs_its_frame() {
     rig.send(1, &display(1, PhysicalPoint([-1, 1]), Vec::new()));
     assert_eq!(rig.reply(), (1, Reply::Refused(Refusal::DisplayChanged)));
     rig.scrubbed();
-    rig.finish();
-}
-
-#[test]
-fn a_display_ticket_is_spent_once_and_an_older_one_is_stale() {
-    let rig = Rig::start(None, None, None);
-    rig.send(1, &display(2, PhysicalPoint([1, 1]), Vec::new()));
-    assert!(matches!(rig.reply(), (1, Reply::Acquired(..))));
-    assert_eq!(rig.reply(), (1, Reply::Complete(key(2))));
-    rig.send(2, &display(2, PhysicalPoint([1, 1]), Vec::new()));
-    assert_eq!(rig.reply(), (2, Reply::Refused(Refusal::Reused)));
-    rig.send(3, &display(1, PhysicalPoint([1, 1]), Vec::new()));
-    assert_eq!(rig.reply(), (3, Reply::Refused(Refusal::Stale)));
     rig.finish();
 }
 
@@ -92,5 +117,9 @@ fn a_path_over_the_limit_is_refused_and_still_spends_its_ticket() {
     rig.send(3, &display(3, PhysicalPoint([1, 1]), full));
     assert!(matches!(rig.reply(), (3, Reply::Acquired(..))));
     assert_eq!(rig.reply(), (3, Reply::Complete(key(3))));
+    rig.send(4, &display(3, PhysicalPoint([1, 1]), Vec::new()));
+    assert_eq!(rig.reply(), (4, Reply::Refused(Refusal::Reused)));
+    rig.send(5, &display(2, PhysicalPoint([1, 1]), Vec::new()));
+    assert_eq!(rig.reply(), (5, Reply::Refused(Refusal::Stale)));
     rig.finish();
 }

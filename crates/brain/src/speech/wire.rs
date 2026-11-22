@@ -148,17 +148,24 @@ mod tests {
 
     #[test]
     fn debug_shows_no_audio_text_or_paths() {
+        let natives = "native-path-private-marker";
+        let models = "model-path-private-marker";
+        let pcm = "pcm-private-marker";
+        let transcript = "transcript-private-marker";
         let request = SpeechRequest::Load {
-            natives: "C:\\private\\natives".into(),
-            models: "C:\\private\\models".into(),
+            natives: format!(r"C:\{natives}").into(),
+            models: format!(r"C:\{models}").into(),
         };
-        assert_eq!(format!("{request:?}"), "SpeechRequest(***)");
         let decode = SpeechRequest::Decode {
             rate: 16_000,
-            pcm: vec![7; 4],
+            pcm: pcm.bytes().map(i16::from).collect(),
         };
-        assert_eq!(format!("{decode:?}"), "SpeechRequest(***)");
-        let text = SpeechReply::Text("a private sentence".into());
-        assert_eq!(format!("{text:?}"), "Text(18 bytes)");
+        let text = SpeechReply::Text(transcript.into());
+        let debug = format!("{request:?} {decode:?} {text:?}");
+        for marker in [natives, models, pcm, transcript] {
+            let bytes = format!("{:?}", marker.as_bytes());
+            assert!(!debug.contains(marker));
+            assert!(!debug.contains(&bytes[1..bytes.len() - 1]));
+        }
     }
 }

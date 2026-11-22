@@ -474,20 +474,17 @@ fn the_recognizer_gets_parakeet_on_eight_cpu_threads() {
 }
 
 #[test]
-fn a_null_recognizer_is_create_and_nothing_is_destroyed() {
-    let sherpa = sherpa(None);
-    fake(&sherpa, |fake| fake.null_recognizer = true);
-    let models = model_fixture();
-    assert_eq!(
-        sherpa.recognizer(models.dir()).err(),
-        Some(NativeError::Create)
-    );
-    assert_eq!(calls(&sherpa), ["create recognizer"]);
-}
-
-#[test]
 fn null_native_returns_fail_and_destroy_every_object_once() {
     type Case = (fn(&mut Fake), NativeError, &'static [&'static str]);
+    let null = sherpa(Some(b"unused"));
+    let models = model_fixture();
+    fake(&null, |fake| fake.null_recognizer = true);
+    assert_eq!(
+        null.recognizer(models.dir()).err(),
+        Some(NativeError::Create)
+    );
+    assert_eq!(calls(&null), ["create recognizer"]);
+
     let cases: [Case; 3] = [
         (
             |fake| fake.null_stream = true,
@@ -570,42 +567,6 @@ fn bad_input_is_refused_before_any_stream() {
     let max = usize::try_from(i32::MAX).expect("64-bit");
     assert_eq!(sample_count(max), Ok(i32::MAX));
     assert_eq!(sample_count(max + 1), Err(NativeError::Input));
-}
-
-fn scratch_file(scratch: &Scratch, bytes: &[u8]) -> PathBuf {
-    std::fs::create_dir_all(scratch.dir()).expect("scratch folder");
-    let path = scratch.dir().join("pinned.dll");
-    std::fs::write(&path, bytes).expect("scratch file");
-    path
-}
-
-#[test]
-fn a_native_is_checked_against_its_size_and_hash() {
-    let scratch = Scratch::new("sherpa-pin");
-    // SHA-256 of "abc".
-    let abc = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
-    let missing = scratch.dir().join("absent.dll");
-    assert_eq!(verify(&missing, 3, abc).err(), Some(NativeError::Missing));
-    let path = scratch_file(&scratch, b"abc");
-    assert!(verify(&path, 3, abc).is_ok(), "the pinned bytes pass");
-    assert_eq!(verify(&path, 4, abc).err(), Some(NativeError::Pin));
-    let path = scratch_file(&scratch, b"abd");
-    assert_eq!(verify(&path, 3, abc).err(), Some(NativeError::Pin));
-}
-
-#[test]
-fn the_verified_handle_refuses_writers() {
-    let scratch = Scratch::new("sherpa-hold");
-    let abc = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
-    let path = scratch_file(&scratch, b"abc");
-    let held = verify(&path, 3, abc).expect("pinned");
-    let write = std::fs::OpenOptions::new().write(true).open(&path);
-    assert_eq!(
-        write.map(drop).map_err(|error| error.raw_os_error()),
-        Err(Some(32)),
-        "ERROR_SHARING_VIOLATION while the handle is held"
-    );
-    drop(held);
 }
 
 // Staging and the held load path. The pins here are copies of a harmless system DLL under names
@@ -890,8 +851,8 @@ fn staging_copies_checked_pins_into_owner_only_folders_and_keeps_them() {
     let staged = stage(&source, &root, std::slice::from_ref(&pin)).expect("staged");
     let file = staged_dir(&root).join(pin.name);
     assert_eq!(
-        std::fs::read(&file).ok(),
-        std::fs::read(source.join(pin.name)).ok()
+        std::fs::read(&file).expect("staged DLL readable"),
+        std::fs::read(source.join(pin.name)).expect("source DLL readable")
     );
     assert!(owner_only(&root.join("natives")) && owner_only(&staged_dir(&root)));
     drop(staged);
@@ -909,16 +870,46 @@ fn staging_copies_checked_pins_into_owner_only_folders_and_keeps_them() {
 fn a_source_that_misses_its_pin_leaves_nothing_staged() {
     let root = stage_root("stage-bad");
     let source = root.join("source");
-    let pin = fake_pin(&source, "kumochi-test-bad.dll");
-    let wrong = NativeFile {
+    std::fs::create_dir(&source).expect("source directory");
+    let pin = NativeFile {
+        name: "kumochi-test-bad.dll",
+        bytes: 3,
+        sha256: "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+    };
+    let absent = NativeFile {
+        name: "kumochi-test-absent.dll",
+        ..pin
+    };
+    let wrong_size = NativeFile { bytes: 4, ..pin };
+    let wrong_digest = NativeFile {
         sha256: "0000000000000000000000000000000000000000000000000000000000000000",
         ..pin
     };
+    for (candidate, bytes, why) in [
+        (&absent, None, NativeError::Missing),
+        (&wrong_size, Some(b"abc"), NativeError::Pin),
+        (&wrong_digest, Some(b"abc"), NativeError::Pin),
+        (&pin, Some(b"abd"), NativeError::Pin),
+    ] {
+        if let Some(bytes) = bytes {
+            std::fs::write(source.join(candidate.name), bytes).expect("write the pin fixture");
+        }
+        assert_eq!(
+            stage(&source, &root, std::slice::from_ref(candidate)).err(),
+            Some(why)
+        );
+        assert_eq!(std::fs::read_dir(staged_dir(&root)).unwrap().count(), 0);
+    }
+    std::fs::write(source.join(pin.name), b"abc").expect("known SHA-256 vector");
+    let staged =
+        stage(&source, &root, std::slice::from_ref(&pin)).expect("the pinned vector stages");
     assert_eq!(
-        stage(&source, &root, std::slice::from_ref(&wrong)).err(),
-        Some(NativeError::Pin)
+        std::fs::read(staged_dir(&root).join(pin.name))
+            .unwrap()
+            .as_slice(),
+        b"abc"
     );
-    assert!(!staged_dir(&root).join(wrong.name).exists());
+    drop(staged);
 }
 
 #[test]
@@ -934,6 +925,8 @@ fn nothing_rebinds_the_staged_pins_between_verification_and_load() {
     let dir = staged_dir(&root);
     let file = dir.join(pin.name);
     let away = root.join("away");
+    let writer = File::options().write(true).open(&file).map(drop);
+    assert!(sharing_violation(writer), "the staged DLL refuses a writer");
     assert!(sharing_violation(std::fs::rename(&file, &away)), "the DLL");
     assert!(sharing_violation(std::fs::remove_file(&file)), "the DLL");
     // A folder rename may fail on the open files below it first, so any refusal will do.
@@ -1023,17 +1016,20 @@ fn a_staging_folder_labelled_medium_without_no_write_up_is_refused() {
     let root = stage_root("stage-medium-label");
     let natives = root.join("natives");
     std::fs::create_dir_all(&natives).expect("natives folder");
-    set_label(&natives, "S:(ML;;NR;;;ME)");
     let source = root.join("source");
     let pin = fake_pin(&source, "kumochi-test-medium.dll");
-    assert_eq!(
-        stage(&source, &root, std::slice::from_ref(&pin)).err(),
-        Some(NativeError::Unsafe)
-    );
-    assert!(
-        !staged_dir(&root).exists(),
-        "refused before anything below it"
-    );
+    for label in ["S:(ML;;NR;;;ME)", "S:(ML;;NW;;;LW)"] {
+        set_label(&natives, label);
+        assert_eq!(
+            stage(&source, &root, std::slice::from_ref(&pin)).err(),
+            Some(NativeError::Unsafe),
+            "{label}"
+        );
+        assert!(
+            !staged_dir(&root).exists(),
+            "refused before anything below {label}"
+        );
+    }
     set_label(&natives, "S:(ML;;NW;;;ME)");
     drop(stage(&source, &root, std::slice::from_ref(&pin)).expect("staged under medium NW"));
 }
@@ -1051,20 +1047,6 @@ fn a_root_others_can_change_is_refused() {
         Some(NativeError::Unsafe)
     );
     assert!(!root.join("natives").exists());
-}
-
-#[test]
-fn a_staging_folder_labelled_low_is_refused() {
-    let root = stage_root("stage-low-label");
-    let natives = root.join("natives");
-    std::fs::create_dir_all(&natives).expect("natives folder");
-    icacls(&natives, &["/setintegritylevel", "low"]);
-    let source = root.join("source");
-    let pin = fake_pin(&source, "kumochi-test-label.dll");
-    assert_eq!(
-        stage(&source, &root, std::slice::from_ref(&pin)).err(),
-        Some(NativeError::Unsafe)
-    );
 }
 
 /// Set for the child process the low-integrity test starts: the staging root.

@@ -263,25 +263,3 @@ fn empty_read_trees_require_the_cut_and_never_complete_masks() {
         );
     }
 }
-
-#[test]
-fn astral_names_count_scalars_and_password_debug_hides_length() {
-    let mut source = FakeSource::flat(1);
-    source.nodes[0].name = "😀".repeat(129);
-    let tree = run(&mut source, &LIMITS);
-    assert_eq!(tree.elements[0].name, "😀".repeat(128));
-    assert_eq!(tree.elements[0].name.len(), 512);
-    assert!(tree.elements[0].name_cut);
-    assert_eq!(
-        format!(
-            "{:?}",
-            NodeProps {
-                name: "password_sentinel".repeat(9),
-                password: true,
-                control_type: 0,
-                rect: RECT
-            }
-        ),
-        "NodeProps { name_chars: 0, password: true, .. }"
-    );
-}

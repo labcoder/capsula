@@ -118,14 +118,6 @@ async fn dispatch_is_visible_before_the_writer_can_receive_the_body() {
     assert_eq!(ended, Some(LossReason::Ended));
 }
 
-#[tokio::test]
-async fn a_closed_disposition_channel_with_no_dispatch_fact_stays_unknown() {
-    let (track, receipt) = watch::channel(Dispatch::Pending);
-    drop(track);
-    assert_eq!(*receipt.borrow(), Dispatch::Pending);
-    assert!(receipt.has_changed().is_err());
-}
-
 #[derive(Clone, Copy)]
 enum Writer {
     Full,
@@ -162,12 +154,9 @@ async fn writer_refusal_stays_dispatched(condition: Writer) {
 
 #[tokio::test]
 async fn a_full_writer_queue_conservatively_keeps_the_dispatched_generation() {
-    writer_refusal_stays_dispatched(Writer::Full).await;
-}
-
-#[tokio::test]
-async fn a_closed_writer_conservatively_keeps_the_dispatched_generation() {
-    writer_refusal_stays_dispatched(Writer::Closed).await;
+    for condition in [Writer::Full, Writer::Closed] {
+        writer_refusal_stays_dispatched(condition).await;
+    }
 }
 
 #[tokio::test]

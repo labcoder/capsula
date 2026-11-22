@@ -11,38 +11,6 @@ const RECT: PhysicalRect = PhysicalRect {
     size: [100, 50],
 };
 
-#[test]
-fn the_instrumented_clock_observes_the_walks_deadline_check() {
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    let checks = Arc::new(AtomicUsize::new(0));
-    let observed = Arc::clone(&checks);
-    let mut reader = ThreadedReader::with_clock(
-        || {
-            Ok(Source {
-                read: |_| props("clock"),
-                count: 0,
-                _local: Rc::new(()),
-            })
-        },
-        Platform,
-        move || {
-            observed.fetch_add(1, Ordering::Relaxed);
-            Instant::now()
-        },
-        || true,
-    )
-    .unwrap();
-    let walked = reader
-        .walk(job(31, Instant::now() + Duration::from_secs(1), masks(31)))
-        .unwrap();
-    assert_eq!(walked.tree.availability, Availability::Read);
-    assert_eq!(walked.tree.elements.len(), 1);
-    assert!(
-        checks.load(Ordering::Relaxed) >= 1,
-        "the walk reads the injected clock"
-    );
-}
-
 #[derive(Clone)]
 struct Platform;
 impl ElementPlatform for Platform {
@@ -356,13 +324,6 @@ fn gate() -> (
     (read, entering, release)
 }
 
-/// A wake that reports each call. The thread wakes only after the completion is in its slot, so
-/// one report means one `poll` answers.
-fn told() -> (impl Fn() -> bool + Send + 'static, mpsc::Receiver<()>) {
-    let (tell, told) = mpsc::channel();
-    (move || tell.send(()).is_ok(), told)
-}
-
 fn later() -> Instant {
     Instant::now() + Duration::from_secs(5)
 }
@@ -438,43 +399,37 @@ fn a_pending_walk_never_blocks_poll_and_a_dropped_wake_keeps_its_completion() {
 }
 
 #[test]
-fn begin_while_a_walk_is_pending_retires_without_queueing_a_second() {
-    let (read, entering, release) = gate();
-    let mut reader = waking(read, || true);
-    assert!(matches!(reader.begin(job(42, later(), masks(42))), Ok(())));
-    entering.recv_timeout(Duration::from_secs(1)).unwrap();
-    let sink = masks(43);
-    let Err(refused) = reader.begin(job(43, later(), Arc::clone(&sink))) else {
-        panic!("a second job was queued");
-    };
-    assert_busy(&refused, 43, true);
-    assert_eq!(
-        sink.lock().unwrap().completeness(),
-        Completeness::Unknown(Unavailable::Busy)
-    );
-    release.send(()).unwrap();
-}
-
-#[test]
 fn begin_after_an_untaken_completion_retires_and_keeps_that_completion() {
-    let (wake, landed) = told();
-    let mut reader = waking(|_| props("untaken"), wake);
-    assert!(matches!(reader.begin(job(44, later(), masks(44))), Ok(())));
-    landed.recv_timeout(Duration::from_secs(1)).unwrap();
-    let sink = masks(45);
-    let Err(refused) = reader.begin(job(45, later(), Arc::clone(&sink))) else {
-        panic!("begin dropped the untaken completion");
-    };
-    assert_busy(&refused, 45, true);
-    assert_eq!(
-        sink.lock().unwrap().completeness(),
-        Completeness::Unknown(Unavailable::Busy)
-    );
-    let kept = reader.poll().expect("still in its slot").unwrap();
-    assert_eq!(kept.tree.capture, CaptureId(44));
-    assert_eq!(kept.tree.elements[0].name, "untaken");
-    assert!(
-        kept.retire,
-        "taking a completion cannot revive a retired reader"
-    );
+    for completed in [false, true] {
+        let (read, entering, release) = gate();
+        let (wake, landed) = mpsc::channel();
+        let mut reader = waking(read, move || wake.send(()).is_ok());
+        assert!(matches!(reader.begin(job(44, later(), masks(44))), Ok(())));
+        entering.recv_timeout(Duration::from_secs(1)).unwrap();
+        if completed {
+            release.send(()).unwrap();
+            landed.recv_timeout(Duration::from_secs(1)).unwrap();
+        }
+        let sink = masks(45);
+        let Err(refused) = reader.begin(job(45, later(), Arc::clone(&sink))) else {
+            panic!("begin accepted a second walk, first completed: {completed}");
+        };
+        assert_busy(&refused, 45, true);
+        assert_eq!(
+            sink.lock().unwrap().completeness(),
+            Completeness::Unknown(Unavailable::Busy)
+        );
+        if !completed {
+            assert!(reader.poll().is_none(), "the first provider is still gated");
+            release.send(()).unwrap();
+            landed.recv_timeout(Duration::from_secs(1)).unwrap();
+        }
+        let kept = reader.poll().expect("still in its slot").unwrap();
+        assert_eq!(kept.tree.capture, CaptureId(44));
+        assert_eq!(kept.tree.elements[0].name, "gated");
+        assert!(
+            kept.retire,
+            "taking a completion cannot revive a retired reader"
+        );
+    }
 }

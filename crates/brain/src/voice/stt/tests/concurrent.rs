@@ -17,6 +17,20 @@ fn gate(harness: &Harness, samples: usize) -> mpsc::Sender<()> {
 #[test]
 fn production_admission_refuses_live_replies_and_preserves_the_physical_slot_limit() {
     use kumochi_protocol::message::HoldFailure;
+    let serial = Harness::loaded();
+    let running_gate = gate(&serial, 1);
+    let waiting_gate = gate(&serial, 2);
+    let running = serial.decode(1).expect("running");
+    assert_eq!(serial.event(), Event::Decoding(1));
+    let waiting = serial.decode(2).expect("waiting");
+    assert_eq!(serial.decode(3).err(), Some(SttBusy));
+    serial.no_event();
+    running_gate.send(()).expect("running finishes");
+    assert_eq!(answer(running), text(1));
+    assert_eq!(serial.event(), Event::Decoding(2));
+    waiting_gate.send(()).expect("waiting finishes");
+    assert_eq!(answer(waiting), text(2));
+
     let harness = Harness::loaded();
     let first_gate = gate(&harness, 1);
     let second_gate = gate(&harness, 2);
@@ -91,15 +105,26 @@ fn stale_decodes_allow_overlap_late_receiver_drop_and_reuse_without_exceeding_tw
 
 #[test]
 fn an_unload_waits_for_both_calls_in_either_order_and_settles_the_waiter_immediately() {
-    for first_ends_first in [true, false] {
+    for first_ends_first in [None, Some(true), Some(false)] {
         let harness = Harness::loaded();
         let first_gate = gate(&harness, 1);
-        let second_gate = gate(&harness, 2);
         let first = harness.decode(1).expect("first");
         assert_eq!(harness.event(), Event::Decoding(1));
-        drop(first);
-        let second = harness.decode(2).expect("second");
-        assert_eq!(harness.event(), Event::Decoding(2));
+        let (running, len, early, late) = if let Some(first_ends_first) = first_ends_first {
+            drop(first);
+            let second_gate = gate(&harness, 2);
+            let second = harness.decode(2).expect("second");
+            assert_eq!(harness.event(), Event::Decoding(2));
+            let (early, late) = if first_ends_first {
+                (first_gate, second_gate)
+            } else {
+                (second_gate, first_gate)
+            };
+            (second, 2, Some(early), late)
+        } else {
+            (first, 1, None, first_gate)
+        };
+
         let waiter = harness.decode(3).expect("waiter");
         harness.handle.unload(1);
         assert_eq!(answer(waiter), SttResult::Stale);
@@ -107,52 +132,68 @@ fn an_unload_waits_for_both_calls_in_either_order_and_settles_the_waiter_immedia
             answer(harness.decode(4).expect("refused")),
             SttResult::NotLoaded
         );
-        let (early, late) = if first_ends_first {
-            (first_gate, second_gate)
-        } else {
-            (second_gate, first_gate)
-        };
-        early.send(()).expect("early release");
+        if let Some(early) = early {
+            early.send(()).expect("early release");
+        }
         harness.no_event();
         harness.no_report();
         late.send(()).expect("late release");
-        assert_eq!(answer(second), text(2));
+        assert_eq!(answer(running), text(len));
         assert_eq!(harness.event(), Event::TornDown);
         assert_eq!(harness.reports(1), [report(1, LoadEvent::Unloaded)]);
+        assert_eq!(
+            answer(harness.decode(5).expect("refused")),
+            SttResult::NotLoaded
+        );
     }
 }
 
 #[test]
 fn the_newest_ask_carries_the_waiter_only_after_both_old_calls_have_drained() {
-    let harness = Harness::loaded();
-    let first_gate = gate(&harness, 1);
-    let second_gate = gate(&harness, 2);
-    let third_gate = gate(&harness, 3);
-    let first = harness.decode(1).expect("first");
-    assert_eq!(harness.event(), Event::Decoding(1));
-    drop(first);
-    let second = harness.decode(2).expect("second");
-    assert_eq!(harness.event(), Event::Decoding(2));
-    let waiter = harness.decode(3).expect("waiter");
-    harness.handle.load("superseded".into(), 2);
-    harness.handle.load("newest".into(), 3);
-    second_gate.send(()).expect("second release");
-    assert_eq!(answer(second), text(2));
-    harness.no_event();
-    harness.no_report();
-    first_gate.send(()).expect("first release");
-    assert_eq!(harness.event(), Event::TornDown);
-    assert_eq!(harness.event(), Event::Loaded("newest".into()));
-    assert_eq!(harness.event(), Event::Decoding(3));
-    third_gate.send(()).expect("third release");
-    assert_eq!(answer(waiter), text(3));
-    assert_eq!(
-        harness.reports(2),
-        [report(1, LoadEvent::Unloaded), report(3, LoadEvent::Loaded)]
-    );
-    harness.handle.unload(1);
-    assert_eq!(harness.reports(1), [report(1, LoadEvent::Unloaded)]);
-    assert_eq!(harness.handle.control.lock().current, Some(3));
+    for cancel_middle in [false, true] {
+        let harness = Harness::loaded();
+        let first_gate = gate(&harness, 1);
+        let second_gate = gate(&harness, 2);
+        let third_gate = gate(&harness, 3);
+        let first = harness.decode(1).expect("first");
+        assert_eq!(harness.event(), Event::Decoding(1));
+        drop(first);
+        let second = harness.decode(2).expect("second");
+        assert_eq!(harness.event(), Event::Decoding(2));
+        let waiter = harness.decode(3).expect("waiter");
+        harness.handle.load("superseded".into(), 2);
+        let waiter = if cancel_middle {
+            harness.handle.unload(2);
+            assert_eq!(harness.reports(1), [report(2, LoadEvent::Unloaded)]);
+            assert_eq!(answer(waiter), SttResult::Stale);
+            None
+        } else {
+            Some(waiter)
+        };
+        harness.handle.load("newest".into(), 3);
+        second_gate.send(()).expect("second release");
+        assert_eq!(answer(second), text(2));
+        harness.no_event();
+        harness.no_report();
+        first_gate.send(()).expect("first release");
+        assert_eq!(harness.event(), Event::TornDown);
+        assert_eq!(harness.event(), Event::Loaded("newest".into()));
+        assert_eq!(
+            harness.reports(2),
+            [report(1, LoadEvent::Unloaded), report(3, LoadEvent::Loaded)]
+        );
+        let next = waiter.unwrap_or_else(|| harness.decode(3).expect("new owner takes fresh work"));
+        assert_eq!(harness.event(), Event::Decoding(3));
+        third_gate.send(()).expect("third release");
+        assert_eq!(answer(next), text(3));
+        harness.handle.unload(1);
+        assert_eq!(harness.reports(1), [report(1, LoadEvent::Unloaded)]);
+        let next = harness.decode(4).expect("new owner survived stale unload");
+        assert_eq!(harness.event(), Event::Decoding(4));
+        harness.release();
+        assert_eq!(answer(next), text(4));
+        harness.no_event();
+    }
 }
 
 #[test]
@@ -191,87 +232,101 @@ fn dropping_the_owner_is_nonblocking_but_release_waits_for_both_calls() {
 #[test]
 fn idle_only_starts_after_all_running_and_queued_work_finishes() {
     use kumochi_protocol::message::SttUnload;
-    let harness = Harness::loaded();
-    let first_gate = gate(&harness, 1);
-    let second_gate = gate(&harness, 2);
-    let third_gate = gate(&harness, 3);
-    let first = harness.decode(1).expect("first");
-    assert_eq!(harness.event(), Event::Decoding(1));
-    drop(first);
-    let second = harness.decode(2).expect("second");
-    assert_eq!(harness.event(), Event::Decoding(2));
-    let third = harness.decode(3).expect("waiter");
-    harness.handle.set_unload(SttUnload::After15Min);
-    let old = std::time::Instant::now()
-        .checked_sub(Duration::from_hours(1))
-        .expect("fixture clock supports one hour of history");
-    harness
-        .handle
-        .control
-        .update(|state| state.idle_since = old);
-    second_gate.send(()).expect("second release");
-    assert_eq!(answer(second), text(2));
-    assert_eq!(harness.event(), Event::Decoding(3));
-    assert_eq!(harness.handle.control.lock().idle_since, old);
-    third_gate.send(()).expect("third release");
-    assert_eq!(answer(third), text(3));
-    assert_eq!(harness.handle.control.lock().idle_since, old);
-    first_gate.send(()).expect("first release");
-    harness.wait_for(|state| state.idle_since > old, "no quiescent idle reset");
-    harness.no_event();
-    let expired = std::time::Instant::now()
-        .checked_sub(Duration::from_mins(15))
-        .expect("fixture clock supports fifteen minutes of history");
-    harness
-        .handle
-        .control
-        .update(|state| state.idle_since = expired);
-    harness.handle.set_unload(SttUnload::After15Min);
-    assert_eq!(harness.event(), Event::TornDown);
-    assert_eq!(harness.reports(1), [report(1, LoadEvent::Unloaded)]);
+
+    for overlap in [false, true] {
+        let harness = Harness::loaded();
+        let first_gate = gate(&harness, 1);
+        let third_gate = gate(&harness, 3);
+        let first = harness.decode(1).expect("first");
+        assert_eq!(harness.event(), Event::Decoding(1));
+        let (active, len, active_gate, stale_gate) = if overlap {
+            drop(first);
+            let second_gate = gate(&harness, 2);
+            let second = harness.decode(2).expect("second");
+            assert_eq!(harness.event(), Event::Decoding(2));
+            (second, 2, second_gate, Some(first_gate))
+        } else {
+            (first, 1, first_gate, None)
+        };
+        let third = harness.decode(3).expect("waiter");
+        harness.handle.set_unload(SttUnload::After15Min);
+        let old = Instant::now()
+            .checked_sub(Duration::from_hours(1))
+            .expect("fixture clock supports one hour of history");
+        harness
+            .handle
+            .control
+            .update(|state| state.idle_since = old);
+        harness.no_event();
+        harness.no_report();
+        active_gate.send(()).expect("active release");
+        assert_eq!(answer(active), text(len));
+        assert_eq!(harness.event(), Event::Decoding(3));
+        harness.no_event();
+        harness.no_report();
+        let before_last_release = harness.handle.control.lock().idle_since;
+        third_gate.send(()).expect("third release");
+        assert_eq!(answer(third), text(3));
+        if let Some(stale_gate) = stale_gate {
+            harness.no_event();
+            harness.no_report();
+            stale_gate.send(()).expect("stale release");
+        }
+        harness.wait_for(
+            |state| state.idle_since > before_last_release,
+            "no quiescent idle reset",
+        );
+        assert!(harness.handle.current_use(1));
+        harness.no_event();
+        let expired = Instant::now()
+            .checked_sub(Duration::from_mins(15))
+            .expect("fixture clock supports fifteen minutes of history");
+        harness
+            .handle
+            .control
+            .update(|state| state.idle_since = expired);
+        assert_eq!(harness.event(), Event::TornDown);
+        assert_eq!(harness.reports(1), [report(1, LoadEvent::Unloaded)]);
+    }
 }
 
 #[test]
 fn an_available_loss_beats_sibling_success_and_later_valid_results_cannot_revive_the_owner() {
-    let harness = Harness::loaded();
-    let first_gate = gate(&harness, 1);
-    let second_gate = gate(&harness, 2);
-    let first = harness.decode(1).expect("first");
-    assert_eq!(harness.event(), Event::Decoding(1));
-    drop(first);
-    let second = harness.decode(2).expect("second");
-    assert_eq!(harness.event(), Event::Decoding(2));
-    let waiter = harness.decode(3).expect("waiter");
-    harness
-        .handle
-        .control
-        .update(|state| state.decode_cut = Some(DecodeCut::Delivery));
-    harness.lose.store(true, Ordering::SeqCst);
-    first_gate.send(()).expect("first release");
-    harness.wait_for(
-        |state| state.finished[0].is_some(),
-        "first completion absent",
-    );
-    harness.lose.store(false, Ordering::SeqCst);
-    second_gate.send(()).expect("second release");
-    harness.wait_for(
-        |state| state.finished.iter().all(Option::is_some),
-        "second completion absent",
-    );
-    harness
-        .handle
-        .control
-        .update(|state| state.decode_cut = None);
-    assert_eq!(answer(second), SttResult::Failed(SpeechError::WorkerLost));
-    assert_eq!(answer(waiter), SttResult::NotLoaded);
-    assert_eq!(harness.event(), Event::Lost);
-    assert_eq!(
-        answer(harness.decode(4).expect("refused")),
-        SttResult::NotLoaded
-    );
-    harness.no_report();
-    harness.release();
-    assert_eq!(harness.reports(1), [report(1, LoadEvent::Lost)]);
+    for loss_slot in 0..2 {
+        let harness = Harness::loaded();
+        let first_gate = gate(&harness, 1);
+        let second_gate = gate(&harness, 2);
+        let first = harness.decode(1).expect("first");
+        assert_eq!(harness.event(), Event::Decoding(1));
+        drop(first);
+        let second = harness.decode(2).expect("second");
+        assert_eq!(harness.event(), Event::Decoding(2));
+        let waiter = harness.decode(3).expect("waiter");
+        harness
+            .handle
+            .control
+            .update(|state| state.decode_cut = Some(DecodeCut::Delivery));
+        for (slot, finish) in [first_gate, second_gate].into_iter().enumerate() {
+            harness.lose.store(slot == loss_slot, Ordering::SeqCst);
+            finish.send(()).expect("release one completion");
+            harness.wait_for(|state| state.finished[slot].is_some(), "completion absent");
+        }
+        harness
+            .handle
+            .control
+            .update(|state| state.decode_cut = None);
+        assert_eq!(answer(second), SttResult::Failed(SpeechError::WorkerLost));
+        assert_eq!(answer(waiter), SttResult::NotLoaded);
+        assert_eq!(harness.event(), Event::Lost);
+        assert_eq!(
+            answer(harness.decode(4).expect("refused")),
+            SttResult::NotLoaded
+        );
+        harness.no_report();
+        harness.release();
+        assert_eq!(harness.reports(1), [report(1, LoadEvent::Lost)]);
+        available_loss_fences_admission_during_join(loss_slot);
+    }
 }
 
 #[test]
@@ -357,111 +412,73 @@ fn a_current_generation_loss_fails_live_replies_but_still_drains_both_calls() {
     assert_eq!(harness.reports(1), [report(1, LoadEvent::Lost)]);
 }
 
-struct LossAt(usize);
+fn available_loss_fences_admission_during_join(loss_slot: usize) {
+    use super::super::{Control, settle_decodes};
+    use kumochi_protocol::message::HoldFailure;
 
-impl Decoder for LossAt {
-    fn decode(&self, _: u32, samples: &[i16]) -> Result<String, SpeechError> {
-        if samples.len() == self.0 {
-            Err(SpeechError::WorkerLost)
-        } else {
-            Ok("fresh result".to_owned())
-        }
-    }
-}
-
-#[test]
-fn either_available_slot_loss_is_observed_before_any_sibling_success() {
-    use super::super::{Control, settle_decodes, spawn_decode};
-    for loss in [1, 2] {
-        let control = Control {
+    let (reports, _observed) = Reports::new();
+    let (first_send, first) = oneshot::channel();
+    let (second_send, second) = oneshot::channel();
+    let handle = SttHandle {
+        control: Arc::new(Control {
             state: Mutex::new(State {
                 want: Some(("models".into(), 1)),
                 current: Some(1),
                 ready: true,
                 waiting: None,
-                replies: [None, None],
-                finished: [None, None],
+                replies: [Some(first_send), Some(second_send)],
+                finished: std::array::from_fn(|slot| {
+                    Some(if slot == loss_slot {
+                        SttResult::Failed(SpeechError::WorkerLost)
+                    } else {
+                        text(slot + 1)
+                    })
+                }),
                 decode_cut: None,
                 hold_after_ready: false,
                 unload_after: None,
-                idle_since: std::time::Instant::now(),
+                idle_since: Instant::now(),
                 shutdown: false,
             }),
             wake: std::sync::Condvar::new(),
-        };
-        let (_notices, mut losses) = broadcast::channel(4);
-        let decoder = LossAt(loss);
-        std::thread::scope(|scope| {
-            let (first_send, first) = oneshot::channel();
-            let (second_send, second) = oneshot::channel();
-            control.update(|state| state.replies = [Some(first_send), Some(second_send)]);
-            let (let_join, joined) = mpsc::channel();
-            let first_control = &control;
-            let first_decoder = &decoder;
-            let first_task = scope.spawn(move || {
-                let result = match first_decoder.decode(16_000, &[0]) {
-                    Ok(text) => SttResult::Text(text),
-                    Err(error) => SttResult::Failed(error),
-                };
-                first_control.update(|state| state.finished[0] = Some(result));
-                joined
-                    .recv_timeout(WAIT)
-                    .expect("settlement reached its first join");
-            });
-            let second_task = spawn_decode(scope, &control, &decoder, 1, 16_000, vec![0; 2], None)
-                .expect("second thread");
-            let mut running = [Some(first_task), Some(second_task)];
-            let mut state = control.lock();
-            let until = std::time::Instant::now() + WAIT;
-            while state.finished.iter().any(Option::is_none) {
-                let left = until
-                    .checked_duration_since(std::time::Instant::now())
-                    .expect("both completions publish");
-                state = control
-                    .wake
-                    .wait_timeout(state, left)
-                    .expect("completion wake")
-                    .0;
-            }
-            let control = &control;
-            let during_join = scope.spawn(move || {
-                let until = Instant::now() + WAIT;
-                loop {
-                    let state = control.lock();
-                    if state.finished[0].is_none() {
-                        let ready = state.ready;
-                        let_join.send(()).unwrap();
-                        return ready;
-                    }
-                    drop(state);
-                    assert!(
-                        Instant::now() < until,
-                        "settlement never reached its first join"
-                    );
-                    std::thread::yield_now();
-                }
-            });
-            let mut failed = false;
-            drop(settle_decodes(
-                control,
-                state,
-                &mut running,
-                1,
-                Generation(0),
-                &mut losses,
-                &mut failed,
-            ));
-            assert!(
-                !during_join.join().unwrap(),
-                "known worker loss must fence admission before join"
-            );
-            assert!(failed);
-            assert!(running.iter().all(Option::is_none));
-            assert!(!control.lock().ready);
-            assert_eq!(answer(first), SttResult::Failed(SpeechError::WorkerLost));
-            assert_eq!(answer(second), SttResult::Failed(SpeechError::WorkerLost));
+        }),
+        reports,
+    };
+    let (_notices, mut losses) = broadcast::channel(4);
+    std::thread::scope(|scope| {
+        let (let_join, joined) = mpsc::channel();
+        let first_task = scope.spawn(move || {
+            joined
+                .recv_timeout(WAIT)
+                .expect("settlement reached its first join");
         });
-    }
+        let second_task = scope.spawn(|| {});
+        let mut running = [Some(first_task), Some(second_task)];
+        let handle = &handle;
+        let during_join = scope.spawn(move || {
+            let until = Instant::now() + WAIT;
+            while handle.control.lock().finished[0].is_some() {
+                assert!(Instant::now() < until, "settlement did not reach the join");
+                std::thread::yield_now();
+            }
+            let admission = handle.admit_use();
+            let_join.send(()).expect("release join");
+            admission
+        });
+        let mut failed = false;
+        drop(settle_decodes(
+            &handle.control,
+            handle.control.lock(),
+            &mut running,
+            1,
+            Generation(0),
+            &mut losses,
+            &mut failed,
+        ));
+        assert_eq!(during_join.join().unwrap(), Err(HoldFailure::NotLoaded));
+        assert_eq!(answer(first), SttResult::Failed(SpeechError::WorkerLost));
+        assert_eq!(answer(second), SttResult::Failed(SpeechError::WorkerLost));
+    });
 }
 
 #[test]

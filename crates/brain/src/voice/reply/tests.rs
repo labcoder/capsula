@@ -55,13 +55,17 @@ fn early_speech_decision_waits_for_the_producer_window() {
 #[test]
 fn two_speech_steps_decide_in_order_and_discard_owes_one_final() {
     let mut reply = Reply::new(RunId(7), RATE, OutputGeneration(1), ReportMode::Queued);
-    assert!(
+    assert_eq!(
         run(&mut reply, |r, out| {
             r.say(step(8, 0), "A.", out);
             r.say(step(8, 1), "B.", out);
+        }),
+        [0, 1].map(|index| Speech::Queued {
+            segment: seg(index),
+            step: Some(step(8, index)),
+            start: SegmentStart::Speech,
+            output_generation: OutputGeneration(1),
         })
-        .iter()
-        .all(|effect| matches!(effect, Speech::Queued { .. }))
     );
     let later = run(&mut reply, |r, out| {
         assert_eq!(
@@ -142,23 +146,35 @@ fn speech_fences_around_allow_reject_late_source() {
 
 #[test]
 fn a_cut_releases_a_latched_allow_without_overtaking_the_earlier_final() {
-    let mut reply = Reply::new(RunId(7), RATE, OutputGeneration(1), ReportMode::Queued);
-    run(&mut reply, |r, out| r.text("Plain. ", out));
-    run(&mut reply, |r, out| r.say(step(8, 0), "Speech.", out));
-    assert!(
-        run(&mut reply, |r, out| {
-            r.decide(dispatch(1), SpeechDecision::Allow, out).unwrap();
-        })
-        .is_empty()
-    );
-    assert_eq!(
-        run(&mut reply, |r, out| r.step_failed(SceneId(8), out)),
-        [Speech::DecisionTaken(dispatch(1))]
-    );
-    assert_eq!(
-        run(&mut reply, |r, out| r.done(seg(0), out)),
-        [pcm(0, 0, 0, Some(0)), pcm(1, 0, 0, Some(0))]
-    );
+    for mode in [ReportMode::Queued, ReportMode::Legacy] {
+        let mut reply = Reply::new(RunId(7), RATE, OutputGeneration(1), mode);
+        run(&mut reply, |r, out| r.text("Plain. ", out));
+        run(&mut reply, |r, out| r.say(step(8, 0), "Speech.", out));
+        let expected = if matches!(mode, ReportMode::Queued) {
+            assert!(
+                run(&mut reply, |r, out| {
+                    r.decide(dispatch(1), SpeechDecision::Allow, out).unwrap();
+                })
+                .is_empty()
+            );
+            vec![Speech::DecisionTaken(dispatch(1))]
+        } else {
+            Vec::new()
+        };
+        assert_eq!(
+            run(&mut reply, |r, out| r.step_failed(SceneId(8), out)),
+            expected
+        );
+        assert_eq!(
+            run(&mut reply, |r, out| r.pcm(seg(0), vec![5; 10], out)),
+            [pcm(0, 0, 10, None)]
+        );
+        assert_eq!(
+            run(&mut reply, |r, out| r.done(seg(0), out)),
+            [pcm(0, 1, 0, Some(10)), pcm(1, 0, 0, Some(0))]
+        );
+        assert_eq!(run(&mut reply, |r, out| r.done(seg(0), out)), []);
+    }
 }
 
 fn step(scene: u64, index: u32) -> StepRef {
@@ -323,20 +339,40 @@ fn producer_drop_does_not_refund_queued_retirement_twice() {
         r.say(step(7, 0), "line", out);
         r.decide(dispatch(0), SpeechDecision::Allow, out).unwrap();
         r.pcm(seg(0), vec![5; 480], out);
-        let partial = SpeechRetirement {
-            final_segment: false,
-            ..retirement(0, 240, 240)
-        };
-        r.retired(partial, out).unwrap();
-        assert_eq!(r.unplayed, 240);
-        r.step_failed(SceneId(7), out);
-        assert_eq!(r.unplayed, 0);
-        let final_receipt = retirement(0, 480, 240);
-        r.retired(final_receipt, out).unwrap();
-        r.retired(final_receipt, out).unwrap();
+        r.text("Next. ", out);
     });
-    assert_eq!(reply.unplayed, 0);
-    assert_eq!(reply.heard().map(|heard| heard.sample), Some(240));
+    let partial = SpeechRetirement {
+        final_segment: false,
+        ..retirement(0, 240, 240)
+    };
+    assert_eq!(
+        run(&mut reply, |r, out| r.retired(partial, out).unwrap()),
+        [Speech::Credit(240)]
+    );
+    assert_eq!(
+        run(&mut reply, |r, out| r.step_failed(SceneId(7), out)),
+        [
+            Speech::Cancel,
+            pcm(0, 1, 0, Some(480)),
+            speak(1, "Next."),
+            Speech::Credit(240)
+        ]
+    );
+    let final_receipt = retirement(0, 480, 240);
+    for _ in 0..2 {
+        assert_eq!(
+            run(&mut reply, |r, out| r.retired(final_receipt, out).unwrap()),
+            []
+        );
+    }
+    assert_eq!(
+        reply.heard(),
+        Some(Heard {
+            segment: seg(0),
+            sample: 240,
+            text: 0
+        })
+    );
 }
 
 #[test]
@@ -359,27 +395,33 @@ fn credit_stops_at_the_window_and_progress_gives_it_back_in_part() {
         r.progress(seg(0), 500, out).expect("stale");
     });
     assert_eq!(out, []);
-}
 
-#[test]
-fn a_30_second_segment_streams_through_the_20_second_window_on_progress_alone() {
-    let mut reply = reply();
-    run(&mut reply, |r, out| r.text("Long. ", out));
-    let mut sent = 0u32;
-    let mut played = 0u32;
-    while sent < 720_000 {
-        run(&mut reply, |r, out| r.pcm(seg(0), vec![5; 2_400], out));
-        sent += 2_400;
-        if u64::from(sent - played) >= WINDOW {
+    let mut played = 24_000;
+    assert_eq!(
+        run(&mut reply, |r, out| r
+            .progress(seg(0), played, out)
+            .expect("plays")),
+        [Speech::Credit(23_000)]
+    );
+    for seq in 200..300 {
+        assert_eq!(
+            run(&mut reply, |r, out| r.pcm(seg(0), vec![5; 2_400], out)),
+            [pcm(0, seq, 2_400, None)]
+        );
+        if (seq + 1) * 2_400 - played == 480_000 {
             played += 24_000;
-            let out = run(&mut reply, |r, out| {
-                r.progress(seg(0), played, out).expect("plays");
-            });
-            assert_eq!(out, [Speech::Credit(24_000)]);
+            assert_eq!(
+                run(&mut reply, |r, out| r
+                    .progress(seg(0), played, out)
+                    .expect("plays")),
+                [Speech::Credit(24_000)]
+            );
         }
     }
-    let out = run(&mut reply, |r, out| r.done(seg(0), out));
-    assert_eq!(out, [pcm(0, 300, 0, Some(720_000))]);
+    assert_eq!(
+        run(&mut reply, |r, out| r.done(seg(0), out)),
+        [pcm(0, 300, 0, Some(720_000))]
+    );
 }
 
 #[test]
@@ -413,49 +455,43 @@ fn the_final_chunk_is_empty_and_carries_the_samples_sent() {
 }
 
 #[test]
-fn the_run_is_final_only_once_the_last_segment_played() {
-    let mut reply = reply();
-    run(&mut reply, |r, out| r.text("One. Two. Three", out));
-    run(&mut reply, super::Reply::close);
-    assert!(!reply.is_final());
-    for n in 0..3 {
-        run(&mut reply, |r, out| r.pcm(seg(n), vec![5; 10], out));
-        run(&mut reply, |r, out| r.done(seg(n), out));
-    }
-    run(&mut reply, |r, out| {
-        r.played(seg(0), 10, out).expect("plays");
-    });
-    run(&mut reply, |r, out| {
-        r.played(seg(1), 10, out).expect("plays");
-    });
-    assert!(
-        !reply.is_final(),
-        "the shell's queue can run dry before the last segment plays"
-    );
-    run(&mut reply, |r, out| {
-        r.played(seg(2), 10, out).expect("plays");
-    });
-    assert!(reply.is_final());
-}
-
-#[test]
 fn a_late_final_chunk_holds_finality_until_it_plays() {
-    let mut reply = reply();
-    run(&mut reply, |r, out| r.text("One. Two.", out));
-    run(&mut reply, super::Reply::close);
-    speak_and_play(&mut reply, 0, 10);
-    run(&mut reply, |r, out| r.pcm(seg(1), vec![5; 10], out));
-    assert_eq!(
-        reply.played(seg(1), 10, &mut Vec::new()),
-        Err(Refused::OutOfOrder)
-    );
-    assert!(!reply.is_final());
-    run(&mut reply, |r, out| r.done(seg(1), out));
-    assert!(!reply.is_final());
-    run(&mut reply, |r, out| {
-        r.played(seg(1), 10, out).expect("plays");
-    });
-    assert!(reply.is_final());
+    for late in [false, true] {
+        let mut reply = reply();
+        run(&mut reply, |r, out| r.text("One. Two. Three", out));
+        run(&mut reply, Reply::close);
+        assert!(!reply.is_final());
+        for n in 0..2 {
+            run(&mut reply, |r, out| r.pcm(seg(n), vec![5; 10], out));
+            run(&mut reply, |r, out| r.done(seg(n), out));
+        }
+        run(&mut reply, |r, out| r.pcm(seg(2), vec![5; 10], out));
+        if !late {
+            run(&mut reply, |r, out| r.done(seg(2), out));
+        }
+        for n in 0..2 {
+            run(&mut reply, |r, out| {
+                r.played(seg(n), 10, out).expect("plays")
+            });
+        }
+        assert!(
+            !reply.is_final(),
+            "the queue can drain before the last segment plays"
+        );
+        if late {
+            assert_eq!(
+                reply.played(seg(2), 10, &mut Vec::new()),
+                Err(Refused::OutOfOrder)
+            );
+            assert!(!reply.is_final());
+            run(&mut reply, |r, out| r.done(seg(2), out));
+            assert!(!reply.is_final());
+        }
+        run(&mut reply, |r, out| {
+            r.played(seg(2), 10, out).expect("plays")
+        });
+        assert!(reply.is_final());
+    }
 }
 
 #[test]
@@ -608,24 +644,22 @@ fn a_failed_scene_drops_its_say_and_the_text_after_it_still_plays() {
         r.played(seg(2), 0, out).expect("plays");
     });
     assert!(reply.is_final(), "a dropped segment needs no SegmentPlayed");
-}
 
-#[test]
-fn a_failed_scene_s_queued_says_end_and_the_next_text_speaks() {
-    let mut reply = reply();
-    run(&mut reply, |r, out| r.say(step(1, 0), "One.", out));
-    run(&mut reply, |r, out| r.say(step(1, 1), "Two.", out));
-    run(&mut reply, |r, out| r.say(step(1, 2), "Three.", out));
+    let mut reply = self::reply();
+    for (index, text) in ["One.", "Two.", "Three."].into_iter().enumerate() {
+        run(&mut reply, |r, out| {
+            r.say(step(4, u32::try_from(index).unwrap()), text, out)
+        });
+    }
     run(&mut reply, |r, out| r.text("After. ", out));
-    let out = run(&mut reply, |r, out| r.step_failed(SceneId(1), out));
     assert_eq!(
-        out,
+        run(&mut reply, |r, out| r.step_failed(SceneId(4), out)),
         [
             Speech::Cancel,
             pcm(0, 0, 0, Some(0)),
             pcm(1, 0, 0, Some(0)),
             pcm(2, 0, 0, Some(0)),
-            speak(3, "After."),
+            speak(3, "After.")
         ]
     );
 }
@@ -635,7 +669,19 @@ fn says_are_bounded_and_blank_ones_stay_silent() {
     let mut reply = reply();
     let at_limit = "a".repeat(1_024);
     let out = run(&mut reply, |r, out| r.say(step(1, 0), &at_limit, out));
-    assert_eq!(out.len(), 3, "queued, spoken and credited");
+    assert_eq!(
+        out,
+        [
+            Speech::Queued {
+                segment: seg(0),
+                step: Some(step(1, 0)),
+                start: SegmentStart::Speech,
+                output_generation: OutputGeneration(1),
+            },
+            speak(0, &at_limit),
+            Speech::Credit(480_000),
+        ]
+    );
     assert_eq!(
         run(&mut reply, |r, out| r.say(
             step(1, 1),
@@ -691,6 +737,8 @@ fn a_revoke_is_final_only_once_the_shell_is_quiet() {
     run(&mut reply, |r, out| {
         r.progress(seg(0), 60, out).expect("plays");
     });
+    run(&mut reply, |r, out| r.say(step(4, 0), "Drop.", out));
+    run(&mut reply, |r, out| r.say(step(4, 1), "Next.", out));
     run(&mut reply, super::Reply::close);
     let out = run(&mut reply, |r, out| r.revoke(Revoker::Brain, out));
     assert_eq!(out, [Speech::Revoke { tell_shell: true }]);
@@ -701,6 +749,7 @@ fn a_revoke_is_final_only_once_the_shell_is_quiet() {
         run(&mut reply, |r, out| r.say(step(1, 0), "More.", out)),
         []
     );
+    assert_eq!(run(&mut reply, |r, out| r.step_failed(SceneId(4), out)), []);
     assert!(!reply.is_final());
     assert_eq!(
         reply.stopped(Some(Cursor {
@@ -711,6 +760,7 @@ fn a_revoke_is_final_only_once_the_shell_is_quiet() {
     );
     assert!(!reply.is_final(), "a refused answer isn't quiet");
     assert_eq!(reply.stopped(None), Ok(()));
+    assert_eq!(run(&mut reply, |r, out| r.step_failed(SceneId(4), out)), []);
     assert!(reply.is_final());
     assert_eq!(
         reply.heard(),
@@ -722,31 +772,6 @@ fn a_revoke_is_final_only_once_the_shell_is_quiet() {
         "no cursor keeps the point already heard"
     );
     assert_eq!(reply.stopped(None), Err(Refused::OutOfOrder));
-}
-
-#[test]
-fn the_quiet_cursor_moves_the_heard_point() {
-    let mut reply = reply();
-    run(&mut reply, |r, out| r.text("A. B. ", out));
-    run(&mut reply, |r, out| r.pcm(seg(0), vec![5; 100], out));
-    run(&mut reply, |r, out| r.done(seg(0), out));
-    run(&mut reply, |r, out| r.pcm(seg(1), vec![5; 100], out));
-    run(&mut reply, |r, out| r.revoke(Revoker::Shell, out));
-    assert_eq!(
-        reply.stopped(Some(Cursor {
-            segment: seg(1),
-            sample: 30,
-        })),
-        Ok(())
-    );
-    assert_eq!(
-        reply.heard(),
-        Some(Heard {
-            segment: seg(1),
-            sample: 30,
-            text: 2,
-        })
-    );
 }
 
 #[test]
@@ -773,8 +798,16 @@ fn a_device_change_stops_the_run_s_speech_and_its_text_stays() {
 #[test]
 fn the_stall_timer_counts_only_its_latest_arm_and_only_while_draining() {
     let mut reply = reply();
-    run(&mut reply, |r, out| r.text("A. B", out));
     let mut out = Vec::new();
+    reply.text("A. ", &mut out);
+    reply.say(step(4, 0), "Drop.", &mut out);
+    reply.step_failed(SceneId(4), &mut out);
+    reply.pcm(seg(0), vec![5; 10], &mut out);
+    assert!(
+        !out.iter()
+            .any(|effect| matches!(effect, Speech::Arm { .. }))
+    );
+    out.clear();
     reply.close(&mut out);
     let Some(Speech::Arm { epoch: first }) = out
         .iter()
@@ -799,22 +832,15 @@ fn the_stall_timer_counts_only_its_latest_arm_and_only_while_draining() {
     let mut out = Vec::new();
     reply.progress(seg(0), 0, &mut out).expect("no progress");
     assert_eq!(out, [], "a report that doesn't advance doesn't re-arm");
+    for scene in [9, 4] {
+        reply.step_failed(SceneId(scene), &mut out);
+        assert_eq!(out, []);
+        assert!(reply.stalled(second));
+    }
     reply.revoke(Revoker::Brain, &mut Vec::new());
     assert!(
         !reply.stalled(second),
         "a revoked run waits on quiet, not the stall timer"
-    );
-}
-
-#[test]
-fn before_the_producer_closes_nothing_arms_the_timer() {
-    let mut reply = reply();
-    let mut out = Vec::new();
-    reply.text("A. ", &mut out);
-    reply.pcm(seg(0), vec![5; 10], &mut out);
-    assert!(
-        !out.iter()
-            .any(|speech| matches!(speech, Speech::Arm { .. }))
     );
 }
 
@@ -843,40 +869,6 @@ fn heard_text_ends_at_the_last_played_text_segment() {
             text: 4,
         })
     );
-}
-
-#[test]
-fn a_failed_future_say_ends_only_after_the_segment_before_it() {
-    let mut reply = reply();
-    run(&mut reply, |r, out| r.text("Intro. ", out));
-    run(&mut reply, |r, out| r.say(step(4, 0), "Diagram.", out));
-    assert_eq!(run(&mut reply, |r, out| r.step_failed(SceneId(4), out)), []);
-    assert_eq!(
-        run(&mut reply, |r, out| r.pcm(seg(0), vec![5; 10], out)),
-        [pcm(0, 0, 10, None)]
-    );
-    assert_eq!(
-        run(&mut reply, |r, out| r.done(seg(0), out)),
-        [pcm(0, 1, 0, Some(10)), pcm(1, 0, 0, Some(0))]
-    );
-    assert_eq!(run(&mut reply, |r, out| r.done(seg(0), out)), []);
-}
-
-#[test]
-fn a_scene_failure_after_a_revoke_sends_nothing() {
-    for quiet in [false, true] {
-        let mut reply = reply();
-        run(&mut reply, |r, out| r.say(step(4, 0), "One.", out));
-        run(&mut reply, |r, out| r.say(step(4, 1), "Two.", out));
-        run(&mut reply, Reply::close);
-        run(&mut reply, |r, out| r.revoke(Revoker::Brain, out));
-        if quiet {
-            reply.stopped(None).expect("quiet");
-        }
-        let mut out = Vec::new();
-        reply.step_failed(SceneId(4), &mut out);
-        assert_eq!(out, [], "quiet: {quiet}");
-    }
 }
 
 #[test]
@@ -978,9 +970,9 @@ fn a_queued_stop_hears_finished_text_even_before_the_data_final() {
 fn a_quiet_cursor_can_t_skip_unfinished_speech_or_go_back() {
     let mut reply = reply();
     run(&mut reply, |r, out| r.text("A. B. C. ", out));
-    run(&mut reply, |r, out| r.pcm(seg(0), vec![5; 10], out));
+    run(&mut reply, |r, out| r.pcm(seg(0), vec![5; 100], out));
     run(&mut reply, |r, out| r.done(seg(0), out));
-    run(&mut reply, |r, out| r.pcm(seg(1), vec![5; 10], out));
+    run(&mut reply, |r, out| r.pcm(seg(1), vec![5; 100], out));
     run(&mut reply, |r, out| r.revoke(Revoker::Shell, out));
     assert_eq!(
         reply.stopped(Some(Cursor {
@@ -994,10 +986,18 @@ fn a_quiet_cursor_can_t_skip_unfinished_speech_or_go_back() {
     reply
         .stopped(Some(Cursor {
             segment: seg(1),
-            sample: 5,
+            sample: 30,
         }))
         .expect("reachable");
     assert!(reply.is_final());
+    assert_eq!(
+        reply.heard(),
+        Some(Heard {
+            segment: seg(1),
+            sample: 30,
+            text: 2
+        })
+    );
 
     let mut back = self::reply();
     run(&mut back, |r, out| r.text("A. ", out));
@@ -1062,25 +1062,6 @@ fn after_quiet_late_reports_don_t_move_the_heard_point() {
     assert_eq!(reply.heard(), heard);
     assert_eq!(reply.played(seg(0), 10, &mut Vec::new()), Ok(()));
     assert_eq!(reply.heard(), heard);
-}
-
-#[test]
-fn a_step_failure_that_changes_nothing_doesn_t_re_arm_the_timer() {
-    let mut reply = reply();
-    run(&mut reply, |r, out| r.say(step(4, 0), "One.", out));
-    run(&mut reply, |r, out| r.text("Two. ", out));
-    run(&mut reply, |r, out| r.step_failed(SceneId(4), out));
-    let mut out = Vec::new();
-    reply.close(&mut out);
-    let Some(Speech::Arm { epoch }) = out.last().cloned() else {
-        panic!("closing arms the timer: {out:?}");
-    };
-    for scene in [9, 4] {
-        let mut out = Vec::new();
-        reply.step_failed(SceneId(scene), &mut out);
-        assert_eq!(out, [], "scene {scene}");
-        assert!(reply.stalled(epoch), "scene {scene}");
-    }
 }
 
 #[test]

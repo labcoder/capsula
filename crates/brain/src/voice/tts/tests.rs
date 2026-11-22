@@ -405,43 +405,16 @@ fn a_non_finite_sample_fails_and_ends_the_segment() {
 }
 
 #[test]
-fn thirty_seconds_is_the_limit() {
-    let harness = Harness::loaded();
-    let script = harness.script();
-    let mut events = harness.speak("hello", 8);
-    script.send(Ok(vec![0.0; 720_000]));
-    drop(script.frames);
-    assert_eq!(harness.next(&mut events), Some(pcm(vec![0; 720_000])));
-    assert_eq!(
-        harness.next(&mut events),
-        Some(TtsEvent::Done {
-            segment: 7,
-            total: 720_000
-        })
-    );
-
-    let script = harness.script();
-    let mut events = harness.speak("hello", 8);
-    script.send(Ok(vec![0.0; 720_001]));
-    assert_eq!(harness.next(&mut events), Some(failed(TtsError::TooLong)));
-    assert_eq!(harness.next(&mut events), None);
-}
-
-#[test]
-fn a_synthesis_error_is_reported_once() {
-    let harness = Harness::loaded();
-    let script = harness.script();
-    let mut events = harness.speak("hello", 8);
-    script.send(Err(TtsError::Synthesis));
-    assert_eq!(harness.next(&mut events), Some(failed(TtsError::Synthesis)));
-    assert_eq!(harness.next(&mut events), None);
-}
-
-#[test]
 fn a_stream_start_failure_leaves_the_owner_able_to_speak_and_unload() {
     let harness = Harness::loaded();
     harness.streams.send(Err(TtsError::Synthesis)).unwrap();
     let mut events = harness.speak("hello", 8);
+    assert_eq!(harness.next(&mut events), Some(failed(TtsError::Synthesis)));
+    assert_eq!(harness.next(&mut events), None);
+
+    let script = harness.script();
+    let mut events = harness.speak("hello", 8);
+    script.send(Err(TtsError::Synthesis));
     assert_eq!(harness.next(&mut events), Some(failed(TtsError::Synthesis)));
     assert_eq!(harness.next(&mut events), None);
 
@@ -479,22 +452,23 @@ fn nothing_speaks_before_a_successful_load() {
     let mut events = harness.speak("hello", 4);
     assert_eq!(harness.next(&mut events), Some(failed(TtsError::NotLoaded)));
 
-    let failing = Harness::new(Err(TtsError::Load));
-    failing.handle.load("models".into(), 1);
-    assert_eq!(failing.reports(1), [report(1, LoadEvent::Failed)]);
-    let mut events = failing.speak("hello", 4);
-    assert_eq!(failing.next(&mut events), Some(failed(TtsError::NotLoaded)));
-    assert_eq!(failing.loads.load(Ordering::SeqCst), 1, "no retry loop");
-}
-
-#[test]
-fn model_paths_spoken_reply_owner_reports_the_path_reason_without_retrying() {
-    let failing = Harness::new(Err(TtsError::ModelPath));
-    failing.handle.load("models".into(), 1);
-    assert_eq!(failing.reports(1), [report(1, LoadEvent::ModelPath)]);
-    let mut events = failing.speak("hello", 4);
-    assert_eq!(failing.next(&mut events), Some(failed(TtsError::NotLoaded)));
-    assert_eq!(failing.loads.load(Ordering::SeqCst), 1);
+    for (error, event) in [
+        (TtsError::Load, LoadEvent::Failed),
+        (TtsError::ModelPath, LoadEvent::ModelPath),
+    ] {
+        let failing = Harness::new(Err(error));
+        failing.handle.load("models".into(), 1);
+        assert_eq!(failing.reports(1), [report(1, event)]);
+        let mut events = failing.speak("hello", 4);
+        assert_eq!(failing.next(&mut events), Some(failed(TtsError::NotLoaded)));
+        assert_eq!(failing.next(&mut events), None);
+        failing.no_report();
+        assert_eq!(
+            failing.loads.load(Ordering::SeqCst),
+            1,
+            "no retry enters the native loader"
+        );
+    }
 }
 
 #[test]
@@ -567,50 +541,6 @@ fn unload_and_dropping_the_handle_drop_the_model() {
 }
 
 #[test]
-fn a_load_that_finishes_after_its_unload_is_discarded_and_the_newer_ask_loads() {
-    let (started, loading) = std_mpsc::channel();
-    let (release, released) = std_mpsc::channel();
-    let harness = Harness::gated(
-        Ok(()),
-        Some(Gate {
-            started,
-            release: released,
-        }),
-    );
-    harness.handle.load("models".into(), 1);
-    loading
-        .recv_timeout(WAIT)
-        .expect("the owner is inside the load");
-    harness.handle.unload(1);
-    harness.handle.load("models".into(), 2);
-    harness.no_report();
-    release.send(()).expect("the first load is waiting");
-    assert_eq!(harness.reports(1), [report(1, LoadEvent::Discarded)]);
-    loading
-        .recv_timeout(WAIT)
-        .expect("the newer ask loads after the late one is freed");
-    assert_eq!(
-        harness.live.load(Ordering::SeqCst),
-        0,
-        "the late model is freed"
-    );
-    release.send(()).expect("the second load is waiting");
-    assert_eq!(harness.reports(1), [report(2, LoadEvent::Loaded)]);
-    harness.wait_live(1);
-    harness.no_report();
-    let script = harness.script();
-    let mut events = harness.speak("hello", 4);
-    drop(script.frames);
-    assert_eq!(
-        harness.next(&mut events),
-        Some(TtsEvent::Done {
-            segment: 7,
-            total: 0
-        })
-    );
-}
-
-#[test]
 fn a_discarded_model_is_gone_before_its_ask_is_quiet() {
     let (started, loading) = std_mpsc::channel();
     let (release, released) = std_mpsc::channel();
@@ -628,6 +558,7 @@ fn a_discarded_model_is_gone_before_its_ask_is_quiet() {
     harness.handle.unload(1);
     harness.handle.load("models".into(), 2);
     harness.drops.hold.store(true, Ordering::SeqCst);
+    harness.no_report();
     release.send(()).expect("the first load is waiting");
     harness
         .dropping
@@ -643,6 +574,27 @@ fn a_discarded_model_is_gone_before_its_ask_is_quiet() {
         .expect("the newer ask loads after the late model is gone");
     release.send(()).expect("the second load is waiting");
     assert_eq!(harness.reports(1), [report(2, LoadEvent::Loaded)]);
+    harness.wait_live(1);
+    for samples in [0, 4] {
+        let script = harness.script();
+        let mut events = harness.speak("hello", 4);
+        if samples > 0 {
+            script.send(Ok(vec![0.0; samples]));
+        }
+        drop(script.frames);
+        if samples > 0 {
+            assert_eq!(harness.next(&mut events), Some(pcm(vec![0; samples])));
+        }
+        assert_eq!(
+            harness.next(&mut events),
+            Some(TtsEvent::Done {
+                segment: 7,
+                total: u32::try_from(samples).unwrap()
+            })
+        );
+        assert_eq!(harness.next(&mut events), None);
+    }
+    harness.no_report();
 }
 
 #[test]
@@ -751,6 +703,26 @@ fn audio_is_resampled_to_the_speak_rate_and_counted_there() {
         assert_eq!(last, end, "{input}");
         assert_eq!(harness.next(&mut events), None);
     }
+
+    let script = harness.script();
+    let mut events = harness.speak("hello", 8);
+    script.send(Ok(vec![0.0; 720_000]));
+    drop(script.frames);
+    assert_eq!(harness.next(&mut events), Some(pcm(vec![0; 720_000])));
+    assert_eq!(
+        harness.next(&mut events),
+        Some(TtsEvent::Done {
+            segment: 7,
+            total: 720_000
+        })
+    );
+    assert_eq!(harness.next(&mut events), None);
+
+    let script = harness.script();
+    let mut events = harness.speak("hello", 8);
+    script.send(Ok(vec![0.0; 720_001]));
+    assert_eq!(harness.next(&mut events), Some(failed(TtsError::TooLong)));
+    assert_eq!(harness.next(&mut events), None);
 }
 
 #[test]

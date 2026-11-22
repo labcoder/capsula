@@ -251,18 +251,35 @@ fn depth_16_is_read_and_17_is_skipped_without_losing_siblings() {
 
 #[test]
 fn names_are_cut_at_128_characters_not_bytes() {
-    for (name, expected, cut) in [
-        ("x".repeat(128), "x".repeat(128), false),
-        ("x".repeat(129), "x".repeat(128), true),
-        ("é".repeat(129), "é".repeat(128), true),
+    for (name, expected, bytes, cut) in [
+        ("x".repeat(128), "x".repeat(128), 128, false),
+        ("x".repeat(129), "x".repeat(128), 128, true),
+        ("é".repeat(129), "é".repeat(128), 256, true),
+        ("😀".repeat(129), "😀".repeat(128), 512, true),
     ] {
         let mut source = FakeSource::flat(1);
         source.nodes[0].name = name;
         let tree = run(&mut source, &LIMITS);
         assert_eq!(tree.elements[0].name, expected);
+        assert_eq!(tree.elements[0].name.len(), bytes);
         assert_eq!(tree.elements[0].name_cut, cut);
         assert_eq!(tree.cut, None);
     }
+    let password_debug = |name: &str| {
+        format!(
+            "{:?}",
+            NodeProps {
+                name: name.into(),
+                password: true,
+                control_type: 0,
+                rect: RECT,
+            }
+        )
+    };
+    let sentinel = "password_sentinel";
+    let debug = password_debug(sentinel);
+    assert_absent(debug.as_bytes(), sentinel);
+    assert_eq!(debug, password_debug(&sentinel.repeat(9)));
 }
 
 #[test]
@@ -282,9 +299,13 @@ fn window_names_are_zeroed_when_the_walk_and_its_tree_drop() {
 fn json_at_60000_fits_and_another_element_is_cut() {
     // Root: 170 + 112; indices 1..9: 167; 10..99: 168; 100..354: 169.
     assert_eq!(282 + 9 * 167 + 90 * 168 + 255 * 169, 60_000);
-    for (count, cut) in [(355, None), (356, Some(Cut::Bytes))] {
+    for (count, root_name_bytes, expected_bytes, cut) in [
+        (355, 112, 60_000, None),
+        (356, 112, 60_000, Some(Cut::Bytes)),
+        (512, 0, 59_888, Some(Cut::Bytes)),
+    ] {
         let mut source = FakeSource::flat(count);
-        source.nodes[0].name = "a".repeat(112);
+        source.nodes[0].name = "a".repeat(root_name_bytes);
         let tree = run(&mut source, &LIMITS);
         assert_eq!(tree.elements.len(), 355);
         assert_eq!(tree.cut, cut);
@@ -293,24 +314,9 @@ fn json_at_60000_fits_and_another_element_is_cut() {
                 .iter()
                 .map(|e| serde_json::to_vec(e).unwrap().len())
                 .sum::<usize>(),
-            60_000
+            expected_bytes
         );
     }
-}
-
-#[test]
-fn production_byte_cap_binds_before_the_element_cap() {
-    // Without the root's 112 name bytes, 355 elements occupy 59,888 bytes; the next adds 169.
-    let tree = run(&mut FakeSource::flat(512), &LIMITS);
-    assert_eq!(tree.elements.len(), 355);
-    assert_eq!(tree.cut, Some(Cut::Bytes));
-    assert_eq!(
-        tree.elements
-            .iter()
-            .map(|e| serde_json::to_vec(e).unwrap().len())
-            .sum::<usize>(),
-        59_888
-    );
 }
 
 #[test]
@@ -411,12 +417,21 @@ fn budget_and_provider_failure_keep_exactly_the_read_prefix() {
         &mut FakePlatform(false),
     )
     .unwrap();
-    assert_eq!(tree.elements.len(), 3);
+    let ids = |tree: &ElementTree| {
+        tree.elements
+            .iter()
+            .map(|node| (node.id.capture, node.id.index))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        ids(&tree),
+        [(CaptureId(1), 0), (CaptureId(1), 1), (CaptureId(1), 2)]
+    );
     assert_eq!(source.reads.get(), 3);
     assert_eq!(tree.cut, Some(Cut::Budget));
     source.fail_at = Some(2);
     let tree = run(&mut source, &LIMITS);
-    assert_eq!(tree.elements.len(), 2);
+    assert_eq!(ids(&tree), [(CaptureId(1), 0), (CaptureId(1), 1)]);
     assert_eq!(tree.cut, Some(Cut::Provider));
 }
 
@@ -547,30 +562,37 @@ fn password_and_descendant_sentinels_never_escape_and_masks_survive_cuts() {
 
 #[test]
 fn root_owner_exclusion_applies_to_foreground_and_window_targets() {
-    for (target, why) in [
-        (ElementTarget::Foreground, Unavailable::Excluded),
-        (TARGET, Unavailable::Excluded),
-        (
-            ElementTarget::Window {
-                window: WindowRef(7),
-                pid: 9,
-            },
-            Unavailable::NoWindow,
-        ),
+    let wrong_owner = ElementTarget::Window {
+        window: WindowRef(7),
+        pid: 9,
+    };
+    for (target, excluded, why) in [
+        (ElementTarget::Foreground, true, Unavailable::Excluded),
+        (TARGET, true, Unavailable::Excluded),
+        (wrong_owner, true, Unavailable::NoWindow),
+        (wrong_owner, false, Unavailable::NoWindow),
     ] {
         let now = Instant::now();
         let mut job = job(1, now + Duration::from_secs(1));
         job.target = target;
         let mut source = FakeSource::flat(1);
+        source.nodes[0].name = "must not read".into();
         assert_eq!(
-            walk(&mut source, &job, &LIMITS, &|| now, &mut FakePlatform(true)).unwrap(),
+            walk(
+                &mut source,
+                &job,
+                &LIMITS,
+                &|| now,
+                &mut FakePlatform(excluded)
+            )
+            .unwrap(),
             unavailable(CaptureId(1), why)
         );
         assert_eq!(source.reads.get(), 0);
-        assert_eq!(
-            job.masks.lock().unwrap().completeness(),
-            Completeness::Unknown(why)
-        );
+        let masks = job.masks.lock().unwrap();
+        assert_eq!(masks.completeness(), Completeness::Unknown(why));
+        assert_eq!(masks.generation(), 1);
+        assert_eq!(masks.rects(), &[]);
     }
 }
 
@@ -608,45 +630,19 @@ fn walked(source: &mut FakeSource, limits: &ElementLimits) -> (ElementTree, Comp
 }
 
 #[test]
-fn a_rendered_page_with_too_few_named_elements_leaves_masks_partial() {
-    use crate::screen::ocr::NAMED_MIN;
-    for (mut source, expected) in [
-        (page_tree(&[(25, NAMED_MIN - 1)]), Completeness::Partial),
-        (page_tree(&[(25, NAMED_MIN)]), Completeness::Complete),
-        (
-            FakeSource {
-                pages: Vec::new(),
-                ..page_tree(&[(25, 0)])
-            },
-            Completeness::Complete,
-        ),
-    ] {
-        let now = Instant::now();
-        let job = job(1, now + Duration::from_secs(1));
-        let tree = walk(
-            &mut source,
-            &job,
-            &LIMITS,
-            &|| now,
-            &mut FakePlatform(false),
-        )
-        .unwrap();
-        assert_eq!(tree.cut, None);
-        assert_eq!(tree.elements.len(), 57);
-        assert_eq!(job.masks.lock().unwrap().completeness(), expected);
-    }
-}
-
-#[test]
 fn a_sparse_page_beside_a_rich_one_leaves_masks_partial() {
-    use crate::screen::ocr::NAMED_MIN;
-    for (pages, expected) in [
-        ([(25, 25), (25, NAMED_MIN - 1)], Completeness::Partial),
-        ([(25, 25), (25, NAMED_MIN)], Completeness::Complete),
+    let mut non_page = page_tree(&[(25, 0)]);
+    non_page.pages.clear();
+    for (mut source, count, expected) in [
+        (page_tree(&[(25, 19)]), 57, Completeness::Partial),
+        (page_tree(&[(25, 20)]), 57, Completeness::Complete),
+        (non_page, 57, Completeness::Complete),
+        (page_tree(&[(25, 25), (25, 19)]), 83, Completeness::Partial),
+        (page_tree(&[(25, 25), (25, 20)]), 83, Completeness::Complete),
     ] {
-        let (tree, completeness) = walked(&mut page_tree(&pages), &LIMITS);
+        let (tree, completeness) = walked(&mut source, &LIMITS);
         assert_eq!(tree.cut, None);
-        assert_eq!(tree.elements.len(), 83);
+        assert_eq!(tree.elements.len(), count);
         assert_eq!(completeness, expected);
     }
 }
@@ -818,32 +814,4 @@ fn busy_completion_cannot_be_upgraded_by_a_late_walk() {
         assert_eq!(known.generation(), 2);
         assert_eq!(known.rects(), [RECT]);
     }
-}
-
-#[test]
-fn a_reused_window_handle_with_a_different_root_pid_is_no_window() {
-    let mut source = FakeSource::flat(1);
-    source.nodes[0].name = "must not read".into();
-    let mut job = job(13, Instant::now() + Duration::from_secs(1));
-    job.target = ElementTarget::Window {
-        window: WindowRef(7),
-        pid: 9,
-    };
-    let tree = walk(
-        &mut source,
-        &job,
-        &LIMITS,
-        &Instant::now,
-        &mut FakePlatform(false),
-    )
-    .unwrap();
-    assert_eq!(tree, unavailable(CaptureId(13), Unavailable::NoWindow));
-    assert_eq!(source.reads.get(), 0);
-    let masks = job.masks.lock().unwrap();
-    assert_eq!(
-        masks.completeness(),
-        Completeness::Unknown(Unavailable::NoWindow)
-    );
-    assert_eq!(masks.generation(), 1);
-    assert_eq!(masks.rects(), &[]);
 }

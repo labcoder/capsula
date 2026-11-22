@@ -164,8 +164,9 @@ fn masks_clip_to_the_display_and_black_every_pixel_including_the_right_edge() {
     masks.push(rect([0, 0], [u32::MAX, u32::MAX]));
     masks.push(rect([i32::MIN, i32::MIN], [1, 1]));
     masks.push(rect([-2, -1], [0, 2]));
+    masks.push(rect([i32::MAX - 1, 0], [u32::MAX, u32::MAX]));
     let clean = sanitize(&mut raw, &masks).unwrap();
-    assert_eq!(clean.generation(), 4);
+    assert_eq!(clean.generation(), 5);
     let (_, pixels) = clean.image();
     for y in 0..5 {
         for x in 0..6 {
@@ -186,31 +187,20 @@ fn masks_clip_to_the_display_and_black_every_pixel_including_the_right_edge() {
             27, 13,
         ]
     );
-}
 
-#[test]
-fn empty_masks_preserve_pixels_and_a_new_mask_requires_a_new_generation() {
-    let mut raw = frame(rect([0, 0], [2, 1]), |_, _| [13, 27, 41, 7]);
+    let mut raw = frame(rect([-2002, 98], [6, 5]), |_, _| [255; 4]);
     let mut masks = MaskSet::new(CaptureId(1));
-    {
-        let clean = sanitize(&mut raw, &masks).unwrap();
-        assert_eq!(clean.generation(), 0);
-        assert_eq!(clean.image().1, [13, 27, 41, 7, 13, 27, 41, 7]);
-        assert_eq!(decode(&overview(&clean).unwrap()).dimensions(), (2, 1));
-    }
-    masks.push(rect([1, 0], [1, 1]));
-    {
-        let clean = sanitize(&mut raw, &masks).unwrap();
-        assert_eq!(clean.generation(), 1);
-        assert_eq!(clean.image().1, [13, 27, 41, 7, 0, 0, 0, 255]);
-    }
-    masks.push(rect([0, 0], [1, 1]));
+    masks.push(rect([-2000, 100], [2, 1]));
+    masks.push(rect([i32::MAX - 1, 0], [u32::MAX, u32::MAX]));
     let clean = sanitize(&mut raw, &masks).unwrap();
-    assert_eq!(clean.generation(), 2);
-    assert_eq!(clean.image().1, [0, 0, 0, 255, 0, 0, 0, 255]);
-    masks = MaskSet::new(CaptureId(1));
-    assert_eq!(masks.generation(), 0);
-    assert_eq!(masks.rects(), []);
+    for (at, pixel) in clean.image().1.chunks_exact(4).enumerate() {
+        let expected = if (14..16).contains(&at) {
+            [0, 0, 0, 255]
+        } else {
+            [255; 4]
+        };
+        assert_eq!(pixel, expected, "pixel {at}");
+    }
 }
 
 #[test]
@@ -272,16 +262,21 @@ fn area_average_rounds_half_up_not_nearest_neighbour() {
 
 #[test]
 fn fractional_footprints_are_area_weighted_and_bgra_becomes_rgb() {
-    let mut raw = frame(rect([-3, 4], [3, 1]), |x, _| match x {
-        0 => [0, 30, 60, 7],
-        1 => [90, 120, 150, 7],
-        _ => [180, 210, 240, 7],
+    let strip = rect([-3, 4], [3, 1]);
+    let mut raw = frame(strip, |x, _| {
+        [[0, 30, 60, 7], [90, 120, 150, 7], [180, 210, 240, 7]][usize::try_from(x).unwrap()]
     });
     let clean = sanitize(&mut raw, &MaskSet::new(CaptureId(1))).unwrap();
-    // Each footprint spans 1.5 source pixels: weights 1 + 0.5, then 0.5 + 1.
+    assert_eq!(resample(&clean, strip, [2, 1]), [90, 60, 30, 210, 180, 150]);
+    let display = rect([-3, 4], [3, 3]);
+    let mut raw = frame(display, |x, y| {
+        let value = u8::try_from((y * 3 + x) * 18).unwrap();
+        [value, value + 30, value + 60, 7]
+    });
+    let clean = sanitize(&mut raw, &MaskSet::new(CaptureId(1))).unwrap();
     assert_eq!(
-        resample(&clean, rect([-3, 4], [3, 1]), [2, 1]),
-        [90, 60, 30, 210, 180, 150]
+        resample(&clean, display, [2, 2]),
+        [84, 54, 24, 108, 78, 48, 156, 126, 96, 180, 150, 120]
     );
 }
 
@@ -348,8 +343,36 @@ fn encoded_images_carry_their_capture_and_superseding_generation() {
     assert_eq!(decode(&first).get_pixel(32, 32).0, [255; 3]);
     assert_eq!(decode(&second).get_pixel(32, 32).0, [0; 3]);
     assert_eq!(decode(&second).get_pixel(0, 0).0, [255; 3]);
+    let second = decode(&second);
     for [x, y] in [[8, 32], [56, 32], [32, 8], [32, 56]] {
-        assert_eq!(decode(&second).get_pixel(x, y).0, [255; 3]);
+        assert_eq!(second.get_pixel(x, y).0, [255; 3]);
+    }
+    masks.push(rect([0, 0], [16, 16]));
+    let third = overview(&sanitize(&mut raw, &masks).unwrap()).unwrap();
+    assert_eq!((third.capture, third.generation), (CaptureId(1), 2));
+    let third = decode(&third);
+    assert_eq!(third.dimensions(), (64, 64));
+    assert_eq!(third.get_pixel(0, 0).0, [0; 3]);
+    assert_eq!(third.get_pixel(32, 32).0, [0; 3]);
+    assert_eq!(third.get_pixel(63, 63).0, [255; 3]);
+    let mut raw = frame(rect([0, 0], [2, 1]), |_, _| [13, 27, 41, 7]);
+    let mut masks = MaskSet::new(CaptureId(1));
+    assert_eq!(masks.generation(), 0);
+    assert_eq!(masks.rects(), []);
+    for (mask_x, generation, bgra) in [
+        (None, 0, [13, 27, 41, 7, 13, 27, 41, 7]),
+        (Some(1), 1, [13, 27, 41, 7, 0, 0, 0, 255]),
+        (Some(0), 2, [0, 0, 0, 255, 0, 0, 0, 255]),
+    ] {
+        if let Some(x) = mask_x {
+            masks.push(rect([x, 0], [1, 1]));
+        }
+        let clean = sanitize(&mut raw, &masks).unwrap();
+        assert_eq!(clean.generation(), generation);
+        assert_eq!(clean.image().1, bgra);
+        if generation == 0 {
+            assert_eq!(decode(&overview(&clean).unwrap()).dimensions(), (2, 1));
+        }
     }
 }
 
@@ -404,27 +427,6 @@ fn the_first_finish_wins_so_a_late_complete_cannot_hide_unknown_masks() {
 }
 
 #[test]
-fn negative_desktop_masks_clip_in_i64_and_preserve_every_outside_edge() {
-    let mut raw = frame(rect([-2560, 0], [2560, 1440]), |_, _| [255; 4]);
-    let mut masks = MaskSet::new(CaptureId(1));
-    masks.push(rect([-2000, 100], [40, 20]));
-    masks.push(rect([i32::MAX - 1, 0], [u32::MAX, u32::MAX]));
-    let clean = sanitize(&mut raw, &masks).unwrap();
-    let (_, pixels) = clean.image();
-    for y in 0..1440 {
-        for x in 0..2560 {
-            let expected = if (560..600).contains(&x) && (100..120).contains(&y) {
-                [0, 0, 0, 255]
-            } else {
-                [255; 4]
-            };
-            let offset = (y * 2560 + x) * 4;
-            assert_eq!(&pixels[offset..offset + 4], &expected, "{x},{y}");
-        }
-    }
-}
-
-#[test]
 fn crop_caps_each_axis_independently() {
     let mut raw = frame(rect([0, 0], [2560, 1440]), |_, _| [255; 4]);
     let clean = sanitize(&mut raw, &MaskSet::new(CaptureId(1))).unwrap();
@@ -442,21 +444,6 @@ fn crop_caps_each_axis_independently() {
             (expected.size[0], expected.size[1])
         );
     }
-}
-
-#[test]
-fn fractional_area_weights_apply_on_both_axes() {
-    let mut raw = frame(rect([0, 0], [3, 3]), |x, y| {
-        let value = u8::try_from((y * 3 + x) * 18).unwrap();
-        [value, value, value, 255]
-    });
-    let clean = sanitize(&mut raw, &MaskSet::new(CaptureId(1))).unwrap();
-    // Source rows: 0,18,36 / 54,72,90 / 108,126,144. Each 1.5×1.5 footprint
-    // has weights 1,0.5,0.5,0.25: sums 54,108,216,270 divided by 2.25.
-    assert_eq!(
-        resample(&clean, rect([0, 0], [3, 3]), [2, 2]),
-        [24, 24, 24, 48, 48, 48, 96, 96, 96, 120, 120, 120,]
-    );
 }
 
 #[test]

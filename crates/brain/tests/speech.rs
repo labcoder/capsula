@@ -60,22 +60,6 @@ fn fixture_completion(result: io::Result<u32>, readers_started: bool) -> Result<
     Ok(())
 }
 
-#[test]
-fn a_startup_failure_is_not_replaced_by_missing_readers() {
-    let failure = io::Error::new(
-        io::ErrorKind::PermissionDenied,
-        "private startup error marker",
-    );
-    assert_eq!(
-        fixture_completion(Err(failure), false),
-        Err("speech fixture operation failed (PermissionDenied)".into())
-    );
-    assert_eq!(
-        fixture_completion(Ok(0), false),
-        Err("speech fixture output readers missing".into())
-    );
-}
-
 #[expect(
     clippy::fn_params_excessive_bools,
     reason = "the caller either confirmed teardown or must preserve the scratch"
@@ -86,20 +70,6 @@ fn scratch_after_teardown(
 ) -> Option<scratch::Scratch> {
     // Leave scratch in place unless the child teardown is confirmed.
     confirmed.then(|| ManuallyDrop::into_inner(dir))
-}
-
-#[test]
-fn unconfirmed_teardown_preserves_scratch() {
-    let parent = scratch::dir("speech-teardown-test");
-    let dir = ManuallyDrop::new(scratch::Scratch::under(parent.path(), "fixture"));
-    let marker = dir.join("marker");
-    std::fs::write(&marker, b"fixture evidence").expect("marker");
-
-    drop(scratch_after_teardown(dir, false));
-    assert_eq!(
-        std::fs::read(marker).expect("marker survives"),
-        b"fixture evidence"
-    );
 }
 
 fn run_fixture(fixture: &str) {

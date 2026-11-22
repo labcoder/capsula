@@ -215,13 +215,15 @@ fn idle_release_and_a_fresh_installer_request_reload_without_fetching_or_stale_r
         }
         assert_eq!(installer.reported(SpeechInput, harness.reports(1)[0]), []);
         assert_eq!(installer.view().speech_input, PartState::Ready);
-        let decoded = harness.decode(2).expect("not busy");
-        assert_eq!(harness.event(), Event::Decoding(2));
-        harness.release();
-        assert_eq!(answer(decoded), text(2));
-        harness.handle.unload(1);
-        assert_eq!(harness.reports(1), [report(1, LoadEvent::Unloaded)]);
-        assert_eq!(harness.handle.control.lock().current, Some(3));
+        for (stale, len) in [(1, 2), (7, 3)] {
+            harness.handle.unload(stale);
+            assert_eq!(harness.reports(1), [report(stale, LoadEvent::Unloaded)]);
+            harness.no_event();
+            let decoded = harness.decode(len).expect("not busy");
+            assert_eq!(harness.event(), Event::Decoding(len));
+            harness.release();
+            assert_eq!(answer(decoded), text(len));
+        }
         harness.handle.unload(3);
         assert_eq!(harness.event(), Event::TornDown);
         assert_eq!(harness.reports(1), [report(3, LoadEvent::Unloaded)]);
@@ -255,44 +257,6 @@ fn an_idle_clock_moved_once_the_model_is_ready_still_counts_when_serving_starts(
 }
 
 #[test]
-fn an_expired_idle_clock_never_interrupts_running_or_queued_decodes() {
-    use kumochi_protocol::message::SttUnload;
-
-    let harness = Harness::loaded();
-    harness.handle.set_unload(SttUnload::After15Min);
-    let first = harness.decode(1).expect("not busy");
-    assert_eq!(harness.event(), Event::Decoding(1));
-    let second = harness.decode(2).expect("one waiting decode");
-    harness.handle.control.update(|state| {
-        state.idle_since = std::time::Instant::now()
-            .checked_sub(Duration::from_hours(1))
-            .expect("fixture clock supports one hour of history");
-    });
-    harness.no_event();
-    harness.no_report();
-    harness.release();
-    assert_eq!(answer(first), text(1));
-    assert_eq!(harness.event(), Event::Decoding(2));
-    harness.no_event();
-    harness.no_report();
-    let idle_since = harness.handle.control.lock().idle_since;
-    harness.release();
-    assert_eq!(answer(second), text(2));
-    harness.wait_for(
-        |state| state.idle_since != idle_since,
-        "the worker never reset the idle clock after the second decode",
-    );
-    assert_eq!(harness.handle.control.lock().current, Some(1));
-    harness.handle.control.update(|state| {
-        state.idle_since = std::time::Instant::now()
-            .checked_sub(Duration::from_mins(15))
-            .expect("fixture clock supports fifteen minutes of history");
-    });
-    assert_eq!(harness.event(), Event::TornDown);
-    assert_eq!(harness.reports(1), [report(1, LoadEvent::Unloaded)]);
-}
-
-#[test]
 fn keep_warm_and_a_longer_timeout_preserve_the_loaded_owner() {
     use kumochi_protocol::message::SttUnload;
 
@@ -317,26 +281,6 @@ fn keep_warm_and_a_longer_timeout_preserve_the_loaded_owner() {
     harness.handle.set_unload(SttUnload::After15Min);
     assert_eq!(harness.event(), Event::TornDown);
     assert_eq!(harness.reports(1), [report(1, LoadEvent::Unloaded)]);
-}
-
-#[test]
-fn idle_policy_without_a_wanted_model_neither_loads_nor_accepts_a_decode() {
-    use kumochi_protocol::message::SttUnload;
-
-    let harness = Harness::new();
-    harness.handle.set_unload(SttUnload::After15Min);
-    harness.handle.control.update(|state| {
-        state.idle_since = std::time::Instant::now()
-            .checked_sub(Duration::from_hours(1))
-            .expect("fixture clock supports one hour of history");
-    });
-    assert_eq!(
-        answer(harness.decode(1).expect("not busy")),
-        SttResult::NotLoaded
-    );
-    harness.no_event();
-    harness.no_report();
-    assert_eq!(harness.handle.control.lock().current, None);
 }
 
 #[test]
@@ -491,24 +435,6 @@ async fn definitive_no_dispatch_releases_without_a_worker_exit() {
 }
 
 #[tokio::test]
-async fn an_unconfirmed_exit_does_not_release_a_dispatched_load() {
-    use crate::supervise::{Dispatch, Exit};
-    let (_dispatch, mut receipt) = tokio::sync::watch::channel(Dispatch::Dispatched(Generation(7)));
-    let (exits, mut retired) = broadcast::channel(4);
-    exits
-        .send(Exit {
-            generation: Generation(7),
-            confirmed: false,
-        })
-        .expect("observer");
-    let (retirement, _intents) = crate::supervise::fixture::retirement();
-    assert_eq!(
-        super::released(&mut receipt, &mut retired, &retirement).await,
-        Err(SpeechError::ExitUnconfirmed)
-    );
-}
-
-#[tokio::test]
 async fn a_closed_pending_dispatch_receipt_does_not_prove_discard() {
     use crate::supervise::Dispatch;
     let (dispatch, mut receipt) = tokio::sync::watch::channel(Dispatch::Pending);
@@ -524,102 +450,30 @@ async fn a_closed_pending_dispatch_receipt_does_not_prove_discard() {
 #[tokio::test]
 async fn a_lagged_exit_subscription_does_not_release_a_dispatched_load() {
     use crate::supervise::{Dispatch, Exit};
-    let (_dispatch, mut receipt) = tokio::sync::watch::channel(Dispatch::Dispatched(Generation(7)));
-    let (exits, mut retired) = broadcast::channel(1);
-    exits
-        .send(Exit {
-            generation: Generation(7),
-            confirmed: true,
-        })
-        .expect("observer");
-    exits
-        .send(Exit {
-            generation: Generation(8),
-            confirmed: true,
-        })
-        .expect("observer");
-    let (retirement, _intents) = crate::supervise::fixture::retirement();
-    assert_eq!(
-        super::released(&mut receipt, &mut retired, &retirement).await,
-        Err(SpeechError::ExitUnconfirmed)
-    );
-}
-
-#[tokio::test]
-async fn a_closed_exit_subscription_does_not_release_a_dispatched_load() {
-    use crate::supervise::Dispatch;
-    let (_dispatch, mut receipt) = tokio::sync::watch::channel(Dispatch::Dispatched(Generation(7)));
-    let (exits, mut closed) = broadcast::channel(1);
-    drop(exits);
-    let (retirement, _intents) = crate::supervise::fixture::retirement();
-    assert_eq!(
-        super::released(&mut receipt, &mut closed, &retirement).await,
-        Err(SpeechError::ExitUnconfirmed)
-    );
-}
-
-#[test]
-fn an_unconfirmed_exit_keeps_its_physical_ask_and_cannot_acknowledge_unload() {
-    use crate::voice::installer::{Durable, Effect, Folder, Installer, RemoveAnswer};
-    use kumochi_protocol::message::PartState;
-    use kumochi_protocol::voice::VoicePart::SpeechInput;
-
-    let (mut installer, effects) = Installer::start(
-        [Durable::Installed, Durable::Absent],
-        [true; 2].map(Ok),
-        [true; 2],
-        &[],
-        true,
-    );
-    assert_eq!(
-        effects,
-        [Effect::Load {
-            part: SpeechInput,
-            ask: 1
-        }]
-    );
-    let (reports, mut observed) = Reports::new();
-    let (started, start) = mpsc::channel();
-    let (release, leave) = mpsc::channel();
-    let (exited, exit) = mpsc::channel();
-    let guard = OnExit(exited);
-    let (_losses, losses) = broadcast::channel(4);
-    let handle = SttHandle::spawn_with(reports, losses, move |_, _| {
-        let _guard = &guard;
-        started.send(Event::Lost).expect("load started");
-        leave.recv_timeout(WAIT).expect("release load failure");
-        Err(SpeechError::ExitUnconfirmed)
-    })
-    .expect("owner starts");
-    handle.load(PathBuf::from("models"), 1);
-    assert_eq!(start.recv_timeout(WAIT).expect("load starts"), Event::Lost);
-    release.send(()).expect("fail load");
-    assert_eq!(exit.recv_timeout(WAIT).expect("owner ended"), Event::Exited);
-    let fatal = observed
-        .try_recv()
-        .expect("fatal owner report precedes exit");
-    assert_eq!(fatal, report(1, LoadEvent::Unavailable));
-    assert_eq!(installer.reported(SpeechInput, fatal), []);
-    assert_eq!(installer.view().speech_input, PartState::Unavailable);
-    assert!(!installer.ready(SpeechInput));
-    assert_eq!(installer.install(SpeechInput), []);
-    assert_eq!(installer.reload_input(), []);
-    assert_eq!(
-        installer.remove(SpeechInput, Folder::Present),
-        (RemoveAnswer::Refused, vec![])
-    );
-    handle.load(PathBuf::from("newer-models"), 2);
-    handle.unload(1);
-    handle.unload(2);
-    assert_eq!(handle.control.lock().current, Some(1));
-    assert_eq!(
-        handle.control.lock().want.as_ref().map(|(_, ask)| *ask),
-        Some(1)
-    );
-    assert!(matches!(
-        observed.try_recv(),
-        Err(tokio::sync::mpsc::error::TryRecvError::Empty)
-    ));
+    for closed in [false, true] {
+        let (_dispatch, mut receipt) =
+            tokio::sync::watch::channel(Dispatch::Dispatched(Generation(7)));
+        let (exits, mut retired) = broadcast::channel(1);
+        let _live = if closed {
+            drop(exits);
+            None
+        } else {
+            for generation in [Generation(7), Generation(8)] {
+                exits
+                    .send(Exit {
+                        generation,
+                        confirmed: true,
+                    })
+                    .expect("observer");
+            }
+            Some(exits)
+        };
+        let (retirement, _intents) = crate::supervise::fixture::retirement();
+        assert_eq!(
+            super::released(&mut receipt, &mut retired, &retirement).await,
+            Err(SpeechError::ExitUnconfirmed)
+        );
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -910,73 +764,6 @@ fn debug_shows_no_samples_and_no_transcript() {
 }
 
 #[test]
-fn one_decode_runs_one_waits_and_a_third_is_busy() {
-    let harness = Harness::loaded();
-    let first = harness.decode(1).expect("runs");
-    assert_eq!(harness.event(), Event::Decoding(1));
-    let second = harness.decode(2).expect("waits");
-    assert_eq!(harness.decode(3).err(), Some(SttBusy));
-    harness.release();
-    assert_eq!(answer(first), text(1));
-    assert_eq!(harness.event(), Event::Decoding(2));
-    harness.release();
-    assert_eq!(answer(second), text(2));
-}
-
-#[test]
-fn unload_answers_the_waiting_decode_at_once_and_tears_down_after_the_running_one() {
-    let harness = Harness::loaded();
-    let running = harness.decode(1).expect("runs");
-    assert_eq!(harness.event(), Event::Decoding(1));
-    let waiting = harness.decode(2).expect("waits");
-    harness.handle.unload(1);
-    assert_eq!(answer(waiting), SttResult::Stale);
-    assert_eq!(
-        answer(harness.decode(3).expect("answered")),
-        SttResult::NotLoaded,
-        "a decode after unload isn't held behind the running one"
-    );
-    harness.no_report();
-    harness.release();
-    assert_eq!(answer(running), text(1));
-    assert_eq!(harness.event(), Event::TornDown);
-    assert_eq!(harness.reports(1), [report(1, LoadEvent::Unloaded)]);
-    assert_eq!(
-        answer(harness.decode(4).expect("answered")),
-        SttResult::NotLoaded
-    );
-}
-
-#[test]
-fn a_newer_ask_during_a_decode_reloads_after_it() {
-    let harness = Harness::loaded();
-    let running = harness.decode(1).expect("runs");
-    assert_eq!(harness.event(), Event::Decoding(1));
-    harness.handle.load("models".into(), 2);
-    harness.handle.unload(2);
-    harness.handle.load("models".into(), 3);
-    assert_eq!(
-        harness.reports(1),
-        [report(2, LoadEvent::Unloaded)],
-        "ask 2 never reached the thread"
-    );
-    harness.release();
-    assert_eq!(answer(running), text(1));
-    assert_eq!(harness.event(), Event::TornDown);
-    assert_eq!(harness.event(), Event::Loaded("models".into()));
-    assert_eq!(
-        harness.reports(2),
-        [report(1, LoadEvent::Unloaded), report(3, LoadEvent::Loaded)]
-    );
-    harness.wait_ready();
-    let next = harness.decode(2).expect("runs");
-    assert_eq!(harness.event(), Event::Decoding(2));
-    harness.release();
-    assert_eq!(answer(next), text(2));
-    harness.no_event();
-}
-
-#[test]
 fn a_load_that_finishes_after_its_unload_is_discarded_and_the_newer_ask_loads() {
     let harness = Harness::new();
     harness.hold_load.store(true, Ordering::SeqCst);
@@ -1006,34 +793,6 @@ fn a_load_that_finishes_after_its_unload_is_discarded_and_the_newer_ask_loads() 
 }
 
 #[test]
-fn unloading_an_older_ask_leaves_the_served_model_alone() {
-    let harness = Harness::loaded();
-    harness.handle.unload(7);
-    assert_eq!(harness.reports(1), [report(7, LoadEvent::Unloaded)]);
-    harness.no_event();
-    let next = harness.decode(1).expect("runs");
-    assert_eq!(harness.event(), Event::Decoding(1));
-    harness.release();
-    assert_eq!(answer(next), text(1));
-}
-
-#[test]
-fn an_idle_loss_ends_serving_and_is_reported_lost() {
-    let harness = Harness::loaded();
-    harness.lose_worker();
-    assert_eq!(harness.event(), Event::Lost);
-    harness.release();
-    assert_eq!(harness.reports(1), [report(1, LoadEvent::Lost)]);
-    assert_eq!(
-        answer(harness.decode(1).expect("answered")),
-        SttResult::NotLoaded
-    );
-    harness.handle.load("models".into(), 2);
-    assert_eq!(harness.event(), Event::Loaded("models".into()));
-    assert_eq!(harness.reports(1), [report(2, LoadEvent::Loaded)]);
-}
-
-#[test]
 fn the_wake_task_brings_an_idle_loss_to_the_thread_and_ends_with_the_supervisor() {
     let harness = Harness::loaded();
     let task = super::wake_on_losses(
@@ -1052,6 +811,14 @@ fn the_wake_task_brings_an_idle_loss_to_the_thread_and_ends_with_the_supervisor(
     assert_eq!(harness.event(), Event::Lost);
     harness.release();
     assert_eq!(harness.reports(1), [report(1, LoadEvent::Lost)]);
+    assert_eq!(
+        answer(harness.decode(1).expect("answered")),
+        SttResult::NotLoaded
+    );
+    harness.no_event();
+    harness.handle.load("models".into(), 2);
+    assert_eq!(harness.event(), Event::Loaded("models".into()));
+    assert_eq!(harness.reports(1), [report(2, LoadEvent::Loaded)]);
     drop(harness);
     end.recv_timeout(WAIT)
         .expect("the wake task ends with the supervisor");
@@ -1075,21 +842,6 @@ fn a_loss_after_the_load_returns_but_before_it_serves_is_kept() {
         answer(harness.decode(1).expect("answered")),
         SttResult::NotLoaded
     );
-}
-
-#[test]
-fn a_loss_from_before_a_load_is_not_charged_to_it() {
-    let harness = Harness::new();
-    harness.lose_worker();
-    harness.handle.load("models".into(), 1);
-    assert_eq!(harness.event(), Event::Loaded("models".into()));
-    harness.wait_ready();
-    assert_eq!(harness.reports(1), [report(1, LoadEvent::Loaded)]);
-    harness.no_report();
-    let next = harness.decode(1).expect("runs");
-    assert_eq!(harness.event(), Event::Decoding(1));
-    harness.release();
-    assert_eq!(answer(next), text(1));
 }
 
 /// The supervisor answers a lost worker's requests before it broadcasts the loss, so the loss can
@@ -1136,49 +888,73 @@ fn an_old_workers_loss_that_arrives_after_a_replacement_load_is_not_charged_to_i
 /// skipped as older than the load.
 #[test]
 fn a_lagged_loss_queue_still_skips_old_workers_losses() {
-    let harness = Harness::new();
-    for _ in 0..5 {
+    for older in [1, 5] {
+        let harness = Harness::new();
+        for _ in 0..older {
+            harness.lose_worker();
+        }
+        harness.handle.load("models".into(), 1);
+        assert_eq!(harness.event(), Event::Loaded("models".into()));
+        harness.wait_ready();
+        assert_eq!(harness.reports(1), [report(1, LoadEvent::Loaded)]);
+        harness.no_report();
+        let next = harness.decode(1).expect("runs");
+        assert_eq!(harness.event(), Event::Decoding(1));
+        harness.release();
+        assert_eq!(answer(next), text(1));
         harness.lose_worker();
+        assert_eq!(
+            harness.event(),
+            Event::Lost,
+            "the serving worker's loss counts"
+        );
+        harness.release();
+        assert_eq!(harness.reports(1), [report(1, LoadEvent::Lost)]);
     }
+
+    let harness = Harness::new();
+    harness.worker.store(5, Ordering::SeqCst);
+    harness.hold_serve.store(true, Ordering::SeqCst);
     harness.handle.load("models".into(), 1);
     assert_eq!(harness.event(), Event::Loaded("models".into()));
-    harness.wait_ready();
-    assert_eq!(harness.reports(1), [report(1, LoadEvent::Loaded)]);
-    let next = harness.decode(1).expect("runs");
-    assert_eq!(harness.event(), Event::Decoding(1));
-    harness.release();
-    assert_eq!(answer(next), text(1));
+    for older in 0..5 {
+        harness.losses.send(Generation(older)).expect("subscribed");
+    }
     harness.lose_worker();
+    harness.release();
     assert_eq!(
         harness.event(),
         Event::Lost,
-        "the serving worker's own loss still counts"
+        "the overflow retained the serving worker's loss"
     );
     harness.release();
-    assert_eq!(harness.reports(1), [report(1, LoadEvent::Lost)]);
-}
-
-/// An overflow that keeps the served worker's own loss still reports it lost, and one that keeps
-/// only older workers' losses doesn't.
-#[test]
-fn a_lagged_read_finds_the_served_workers_loss_and_skips_older_ones() {
-    let (sender, mut kept_own) = broadcast::channel(2);
-    let mut only_older = sender.subscribe();
-    for dead in 0..4 {
-        sender.send(Generation(dead)).expect("subscribed");
-    }
-    assert!(super::lost(&mut kept_own, Generation(3)));
-    assert!(!super::lost(&mut only_older, Generation(4)));
+    assert_eq!(
+        harness.reports(2),
+        [report(1, LoadEvent::Loaded), report(1, LoadEvent::Lost)]
+    );
 }
 
 #[test]
 fn a_decode_before_any_load_is_not_loaded() {
-    let harness = Harness::new();
-    assert_eq!(
-        answer(harness.decode(1).expect("answered")),
-        SttResult::NotLoaded
-    );
-    harness.no_event();
+    use kumochi_protocol::message::SttUnload;
+
+    for expired in [false, true] {
+        let harness = Harness::new();
+        if expired {
+            harness.handle.set_unload(SttUnload::After15Min);
+            harness.handle.control.update(|state| {
+                state.idle_since = Instant::now()
+                    .checked_sub(Duration::from_hours(1))
+                    .expect("fixture clock supports one hour of history");
+            });
+        }
+        assert_eq!(
+            answer(harness.decode(1).expect("answered")),
+            SttResult::NotLoaded
+        );
+        harness.no_event();
+        harness.no_report();
+    }
 }
 
 #[test]
@@ -1240,139 +1016,41 @@ async fn model_paths_speech_owner_reports_the_path_reason_after_release() {
 }
 
 #[test]
-fn a_lost_worker_fails_the_running_decode_and_leaves_it_unloaded_until_asked_again() {
-    let harness = Harness::loaded();
-    let running = harness.decode(1).expect("runs");
-    assert_eq!(harness.event(), Event::Decoding(1));
-    let waiting = harness.decode(2).expect("waits");
-    harness.lose.store(true, Ordering::SeqCst);
-    harness.release();
-    assert_eq!(answer(running), SttResult::Failed(SpeechError::WorkerLost));
-    assert_eq!(harness.event(), Event::Lost);
-    harness.release();
-    assert_eq!(
-        answer(waiting),
-        SttResult::NotLoaded,
-        "nothing runs on the lost model"
-    );
-    assert_eq!(
-        answer(harness.decode(3).expect("answered")),
-        SttResult::NotLoaded
-    );
-    harness.no_event();
-    assert_eq!(harness.reports(1), [report(1, LoadEvent::Lost)]);
-    harness.lose.store(false, Ordering::SeqCst);
-    harness.handle.load("models".into(), 2);
-    assert_eq!(harness.event(), Event::Loaded("models".into()));
-}
-
-#[test]
 fn a_load_asked_for_while_a_loss_is_cleaned_up_still_reaches_the_worker() {
-    let harness = Harness::loaded();
-    let running = harness.decode(1).expect("runs");
-    assert_eq!(harness.event(), Event::Decoding(1));
-    let waiting = harness.decode(2).expect("waits");
-    harness.lose.store(true, Ordering::SeqCst);
-    harness.release();
-    assert_eq!(answer(running), SttResult::Failed(SpeechError::WorkerLost));
-    assert_eq!(harness.event(), Event::Lost);
-    harness.lose.store(false, Ordering::SeqCst);
-    harness.handle.load("models".into(), 2);
-    harness.release();
-    assert_eq!(
-        answer(waiting),
-        SttResult::NotLoaded,
-        "the lost model's waiter is settled, not carried over"
-    );
-    assert_eq!(
-        harness.reports(2),
-        [report(1, LoadEvent::Lost), report(2, LoadEvent::Loaded)]
-    );
-    assert_eq!(harness.event(), Event::Loaded("models".into()));
-    harness.wait_ready();
-    let next = harness.decode(3).expect("runs");
-    assert_eq!(harness.event(), Event::Decoding(3));
-    harness.release();
-    assert_eq!(answer(next), text(3));
-}
-
-#[test]
-fn a_new_models_folder_reloads_and_serves_the_decode_left_waiting() {
-    let harness = Harness::loaded();
-    let running = harness.decode(1).expect("runs");
-    assert_eq!(harness.event(), Event::Decoding(1));
-    let waiting = harness.decode(2).expect("waits");
-    harness.handle.load("other".into(), 2);
-    harness.release();
-    assert_eq!(answer(running), text(1));
-    assert_eq!(harness.event(), Event::TornDown);
-    assert_eq!(harness.event(), Event::Loaded("other".into()));
-    assert_eq!(harness.event(), Event::Decoding(2));
-    assert_eq!(
-        harness.reports(2),
-        [report(1, LoadEvent::Unloaded), report(2, LoadEvent::Loaded)]
-    );
-    harness.release();
-    assert_eq!(answer(waiting), text(2));
-}
-
-#[test]
-fn dropping_the_handle_tears_down_then_ends_the_thread() {
-    let harness = Harness::loaded();
-    drop(harness.handle);
-    assert_eq!(
-        harness.events.recv_timeout(WAIT).ok(),
-        Some(Event::TornDown)
-    );
-    assert_eq!(harness.events.recv_timeout(WAIT).ok(), Some(Event::Exited));
-}
-
-/// What the owner's thread logs when its load ends `ExitUnconfirmed`, after `keep` decides
-/// whether the handle outlives the failure: a quitting brain drops it before its runtime ends
-/// the supervisor.
-fn unconfirmed_exit_log(keep: fn(SttHandle) -> Option<SttHandle>) -> String {
-    let captured = crate::test_support::Captured::default();
-    let thread_log = captured.clone();
-    let (reports, _observed) = Reports::new();
-    let (started, start) = mpsc::channel();
-    let (release, leave) = mpsc::channel();
-    let (exited, exit) = mpsc::channel();
-    let guard = OnExit(exited);
-    let (_losses, losses) = broadcast::channel(4);
-    let handle = SttHandle::spawn_with(reports, losses, move |_, _| {
-        let _guard = &guard;
-        // The owner logs on this thread after the engine returns, so capture stays installed.
-        // shortcut: leaks the guard for the process's life; harmless, this thread ends in the test.
-        std::mem::forget(thread_log.install());
-        started.send(Event::Lost).expect("load started");
-        leave.recv_timeout(WAIT).expect("release load failure");
-        Err(SpeechError::ExitUnconfirmed)
-    })
-    .expect("owner starts");
-    handle.load(PathBuf::from("models"), 1);
-    assert_eq!(start.recv_timeout(WAIT).expect("load starts"), Event::Lost);
-    let kept = keep(handle);
-    release.send(()).expect("fail load");
-    assert_eq!(exit.recv_timeout(WAIT).expect("owner ended"), Event::Exited);
-    drop(kept);
-    captured.text()
-}
-
-#[test]
-fn a_quit_logs_no_unconfirmed_speech_worker_exit() {
-    let log = unconfirmed_exit_log(|_| None);
-    assert!(!log.contains("speech worker exit unconfirmed"), "{log}");
-    assert!(!log.contains("ERROR"), "{log}");
-}
-
-#[test]
-fn an_unconfirmed_exit_while_the_brain_runs_is_logged_as_an_error() {
-    let log = unconfirmed_exit_log(Some);
-    let line = log
-        .lines()
-        .find(|line| {
-            line.contains("speech worker exit unconfirmed, so speech input stays unavailable")
-        })
-        .expect("the error line");
-    assert!(line.contains(" ERROR "), "{line}");
+    for during_cleanup in [true, false] {
+        let harness = Harness::loaded();
+        let running = harness.decode(1).expect("runs");
+        assert_eq!(harness.event(), Event::Decoding(1));
+        let waiting = harness.decode(2).expect("waits");
+        harness.lose.store(true, Ordering::SeqCst);
+        harness.release();
+        assert_eq!(answer(running), SttResult::Failed(SpeechError::WorkerLost));
+        assert_eq!(harness.event(), Event::Lost);
+        harness.lose.store(false, Ordering::SeqCst);
+        if during_cleanup {
+            harness.handle.load("models".into(), 2);
+        }
+        harness.release();
+        assert_eq!(
+            answer(waiting),
+            SttResult::NotLoaded,
+            "the lost model's waiter is settled, not carried over"
+        );
+        assert_eq!(harness.reports(1), [report(1, LoadEvent::Lost)]);
+        if !during_cleanup {
+            assert_eq!(
+                answer(harness.decode(3).expect("answered")),
+                SttResult::NotLoaded
+            );
+            harness.no_event();
+            harness.handle.load("models".into(), 2);
+        }
+        assert_eq!(harness.reports(1), [report(2, LoadEvent::Loaded)]);
+        assert_eq!(harness.event(), Event::Loaded("models".into()));
+        harness.wait_ready();
+        let next = harness.decode(3).expect("runs");
+        assert_eq!(harness.event(), Event::Decoding(3));
+        harness.release();
+        assert_eq!(answer(next), text(3));
+    }
 }

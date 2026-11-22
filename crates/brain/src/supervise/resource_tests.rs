@@ -4,6 +4,7 @@ use super::*;
 enum Delivery {
     CancelBefore,
     ExpireBefore,
+    PollExpiryBeforeSend,
     CancelAfterSend,
     AtDeadline,
     AfterDeadline,
@@ -16,6 +17,7 @@ async fn selected_resource_destinations_keep_their_original_deadline_and_guard_t
         for schedule in [
             Delivery::CancelBefore,
             Delivery::ExpireBefore,
+            Delivery::PollExpiryBeforeSend,
             Delivery::CancelAfterSend,
             Delivery::AtDeadline,
             Delivery::AfterDeadline,
@@ -35,7 +37,13 @@ async fn selected_resource_destinations_keep_their_original_deadline_and_guard_t
             if matches!(schedule, Delivery::ExpireBefore) {
                 tokio::time::advance(Duration::from_secs(1)).await;
             }
-            if matches!(schedule, Delivery::CancelBefore) {
+            if matches!(schedule, Delivery::PollExpiryBeforeSend) {
+                tokio::time::advance(Duration::from_secs(1)).await;
+                assert!(matches!(request.await, Err(WorkerLost::Lost)));
+                assert!(selected.is_closed(), "timeout destroyed the receiver");
+                assert_eq!(*intents.borrow(), None);
+                assert_eq!(selected.deliver("terminal".into(), Generation(0)), Ok(true));
+            } else if matches!(schedule, Delivery::CancelBefore) {
                 drop(request);
                 assert_eq!(selected.deliver("terminal".into(), Generation(0)), Ok(true));
             } else {
@@ -70,32 +78,6 @@ async fn selected_resource_destinations_keep_their_original_deadline_and_guard_t
                 "{schedule:?}, {expected:?}"
             );
         }
-    }
-}
-
-#[tokio::test(start_paused = true)]
-async fn timeout_before_selected_delivery_destroys_the_receiver_in_both_resource_modes() {
-    for expected in [None, Some(Generation(0))] {
-        let (handle, mut commands, intents) = handle();
-        let until = Instant::now() + Duration::from_secs(1);
-        let mut request = Box::pin(handle.request_resource(vec![7], until, expected, None));
-        assert!(
-            request
-                .as_mut()
-                .poll(&mut Context::from_waker(Waker::noop()))
-                .is_pending()
-        );
-        let mut selected = commands.try_recv().expect("admitted destination").answer;
-        selected.dispatched(Generation(0));
-        tokio::time::advance(Duration::from_secs(1)).await;
-        assert!(matches!(request.await, Err(WorkerLost::Lost)));
-        assert!(
-            selected.is_closed(),
-            "timeout destroyed the receiver before delivery"
-        );
-        assert_eq!(*intents.borrow(), None);
-        assert_eq!(selected.deliver("terminal".into(), Generation(0)), Ok(true));
-        assert_eq!(*intents.borrow(), Some(Generation(0)));
     }
 }
 

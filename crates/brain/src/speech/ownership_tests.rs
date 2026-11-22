@@ -276,13 +276,7 @@ async fn invalid_load_terminals_cause_real_retirement_and_one_delete_only_after_
             rig.confirm.send(confirmed).expect("physical result");
             if confirmed {
                 let lost = report(&mut observed).await;
-                assert_eq!(
-                    lost,
-                    LoadReport {
-                        ask: 1,
-                        event: LoadEvent::Lost
-                    }
-                );
+                assert_eq!((lost.ask, lost.event), (1, LoadEvent::Lost));
                 assert_eq!(
                     installer.reported(SpeechInput, lost),
                     [Effect::Delete {
@@ -294,17 +288,28 @@ async fn invalid_load_terminals_cause_real_retirement_and_one_delete_only_after_
             } else {
                 let unavailable = report(&mut observed).await;
                 assert_eq!(
-                    unavailable,
-                    LoadReport {
-                        ask: 1,
-                        event: LoadEvent::Unavailable
-                    }
+                    (unavailable.ask, unavailable.event),
+                    (1, LoadEvent::Unavailable)
                 );
                 assert_eq!(installer.reported(SpeechInput, unavailable), []);
                 assert_eq!(
                     installer.view().speech_input,
                     kumochi_protocol::message::PartState::Unavailable
                 );
+                assert!(!installer.ready(SpeechInput));
+                assert_eq!(
+                    installer.remove(SpeechInput, Folder::Present),
+                    (RemoveAnswer::Refused, vec![])
+                );
+                assert_eq!(installer.reload_input(), []);
+                owner.unload(1);
+                owner.load(PathBuf::from("newer-models"), 2);
+                owner.unload(2);
+                assert_eq!(
+                    owner.admit_use(),
+                    Err(kumochi_protocol::message::HoldFailure::NotLoaded)
+                );
+                rig.no_more_requests();
                 held(&mut observed).await;
                 assert_eq!(installer.install(SpeechInput), []);
                 assert_eq!(rig.spawns.load(Ordering::Relaxed), 0);

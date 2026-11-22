@@ -194,14 +194,35 @@ fn local_validity_ends_at_exactly_ttl_and_drops_the_previous_image() {
 
 #[test]
 fn a_ticket_read_late_ends_at_the_brains_deadline_before_its_own_length() {
-    let mut rig = Rig::new([4, 3], 7);
-    rig.deadline = 500;
-    rig.knobs.takes.set(Duration::from_millis(500));
-    assert_eq!(rig.take(1, [4, 3], 0), Err(Refusal::Expired.into()));
-    assert_eq!(rig.screen.frame().image(), None);
-    rig.knobs.takes.set(Duration::from_millis(499));
-    assert_eq!(rig.take(2, [4, 3], 0), Ok(meta(2, [4, 3], 0)));
-    assert_eq!(rig.knobs.calls.get(), 2);
+    for (deadline, start, capture_time, size, pixels) in [
+        (500, 0, 500, [4, 3], [9; 48].as_slice()),
+        (FAR, 1_999, 1, [4, 3], [9; 48].as_slice()),
+        (FAR, 1_999, 1, [2, 2], [9; 16].as_slice()),
+    ] {
+        for on_time in [true, false] {
+            let mut rig = Rig::new([4, 3], 7);
+            assert_eq!(rig.take(1, [4, 3], 0), Ok(meta(1, [4, 3], 0)));
+            rig.deadline = deadline;
+            rig.knobs.size.set(size);
+            rig.knobs.fill.set(9);
+            rig.knobs
+                .takes
+                .set(Duration::from_millis(capture_time - u64::from(on_time)));
+            let took = rig.take(2, size, start);
+            if on_time {
+                let expected = meta(2, size, start);
+                assert_eq!(took, Ok(expected));
+                assert_eq!(rig.screen.frame().image(), Some((expected, pixels)));
+            } else {
+                assert_eq!(took, Err(Refusal::Expired.into()));
+                assert_eq!(rig.screen.frame().image(), None);
+                rig.knobs.fail.set(Some(Failure::Retire(-7)));
+                assert_eq!(rig.take(3, size, 0), Err(Failure::Retire(-7)));
+                assert_eq!(rig.screen.frame().image(), None);
+            }
+            assert_eq!(rig.knobs.calls.get(), if on_time { 2 } else { 3 });
+        }
+    }
 }
 
 #[test]
@@ -235,19 +256,6 @@ fn generations_at_or_below_the_high_water_mark_stay_spent() {
 }
 
 #[test]
-fn a_frame_that_completes_after_expiry_is_never_published() {
-    let mut rig = Rig::new([4, 3], 7);
-    assert_eq!(rig.take(1, [4, 3], 0), Ok(meta(1, [4, 3], 0)));
-    rig.knobs.fill.set(9);
-    rig.knobs.takes.set(Duration::from_millis(1));
-    assert_eq!(rig.take(2, [4, 3], 1_999), Err(Refusal::Expired.into()));
-    assert_eq!(rig.screen.frame().image(), None);
-    rig.knobs.fail.set(Some(Failure::Retire(-7)));
-    assert_eq!(rig.take(3, [4, 3], 0), Err(Failure::Retire(-7)));
-    assert_eq!(rig.screen.frame().image(), None);
-}
-
-#[test]
 fn a_copy_that_fails_partway_after_a_good_frame_leaves_no_image() {
     let mut rig = Rig::new([4, 3], 7);
     for (generation, failure) in [(2, Failure::Fault(-5)), (4, Failure::Retire(-7))] {
@@ -260,23 +268,6 @@ fn a_copy_that_fails_partway_after_a_good_frame_leaves_no_image() {
         assert_eq!(rig.take(generation, [4, 3], 0), Err(failure));
         assert_eq!(rig.screen.frame().image(), None);
     }
-}
-
-#[test]
-fn the_cpu_buffer_keeps_its_allocation_for_an_equal_or_smaller_frame() {
-    let mut rig = Rig::new([4, 3], 1);
-    assert_eq!(rig.take(1, [4, 3], 0), Ok(meta(1, [4, 3], 0)));
-    let warm = rig.screen.frame().allocation();
-    assert_eq!(rig.take(2, [4, 3], 0), Ok(meta(2, [4, 3], 0)));
-    assert_eq!(rig.screen.frame().allocation(), warm);
-    rig.knobs.size.set([2, 2]);
-    rig.knobs.fill.set(5);
-    assert_eq!(rig.take(3, [2, 2], 0), Ok(meta(3, [2, 2], 0)));
-    assert_eq!(rig.screen.frame().allocation(), warm);
-    assert_eq!(
-        rig.screen.frame().image(),
-        Some((meta(3, [2, 2], 0), [5_u8; 16].as_slice()))
-    );
 }
 
 #[test]

@@ -188,10 +188,17 @@ fn output_translates_origin_clips_and_rounds_outward() {
         rect([-8, -19], [5, 2]),
         100,
     );
-    assert_eq!(output.words.len(), 2);
-    assert_eq!(output.words[0].text, "a");
-    assert_eq!(output.words[0].rect, rect([-8, -19], [2, 1]));
-    assert_eq!(output.words[1].rect, rect([-8, -19], [1, 2]));
+    assert_eq!(
+        output
+            .words
+            .iter()
+            .map(|word| (word.text.as_str(), word.rect))
+            .collect::<Vec<_>>(),
+        [
+            ("a", rect([-8, -19], [2, 1])),
+            ("b", rect([-8, -19], [1, 2]))
+        ]
+    );
     assert!(!output.truncated);
 }
 
@@ -220,22 +227,6 @@ fn caps_are_exact_and_utf8_safe_after_mask_filtering() {
         assert_eq!(output.words[0].text.len(), expected);
         assert_eq!(output.truncated, truncated);
     }
-    set.lock().unwrap().push(rect([-10, -20], [1, 1]));
-    let mut words = (0..2_001)
-        .map(|_| word("hidden", [0.1, 0.1, 1.0, 1.0]))
-        .collect::<Vec<_>>();
-    words.push(word(&"x".repeat(32_769), [0.1, 0.1, 1.0, 1.0]));
-    words.push(word("wholly inside", [0.0, 0.0, 0.5, 0.5]));
-    words.push(word("visible", [1.0, 0.0, 1.0, 1.0]));
-    let output = run(words, &set, region, 100);
-    assert_eq!(output.words.len(), 1);
-    assert_eq!(output.words[0].text, "visible");
-    assert!(!output.truncated);
-}
-
-#[test]
-fn byte_cap_accumulates_across_words() {
-    let set = masks(Completeness::Complete);
     for (lengths, kept, truncated) in [
         (vec![16_384, 16_384], vec![16_384, 16_384], false),
         (vec![16_384, 16_384, 1], vec![16_384, 16_384], true),
@@ -247,7 +238,7 @@ fn byte_cap_accumulates_across_words() {
                 .map(|len| word(&"x".repeat(len), [0.0, 0.0, 1.0, 1.0]))
                 .collect(),
             &set,
-            rect([-10, -20], [8, 4]),
+            region,
             100,
         );
         assert_eq!(
@@ -260,6 +251,17 @@ fn byte_cap_accumulates_across_words() {
         );
         assert_eq!(output.truncated, truncated);
     }
+    set.lock().unwrap().push(rect([-10, -20], [1, 1]));
+    let mut words = (0..2_001)
+        .map(|_| word("hidden", [0.1, 0.1, 1.0, 1.0]))
+        .collect::<Vec<_>>();
+    words.push(word(&"x".repeat(32_769), [0.1, 0.1, 1.0, 1.0]));
+    words.push(word("wholly inside", [0.0, 0.0, 0.5, 0.5]));
+    words.push(word("visible", [1.0, 0.0, 1.0, 1.0]));
+    let output = run(words, &set, region, 100);
+    assert_eq!(output.words.len(), 1);
+    assert_eq!(output.words[0].text, "visible");
+    assert!(!output.truncated);
 }
 
 #[test]

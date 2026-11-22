@@ -27,7 +27,7 @@ const RECT: PhysicalRect = PhysicalRect {
 /// The fake's monitor, apart from its window.
 const DISPLAY: PhysicalRect = PhysicalRect {
     origin: [-4, 0],
-    size: [4, 3],
+    size: [40, 30],
 };
 
 fn key(id: u64) -> Key {
@@ -193,7 +193,12 @@ impl Capturer for Fake {
         frame: &mut RawFrame,
     ) -> Result<(Acquired, PhysicalRect), Failure> {
         frame.audit(self.audit.clone());
-        frame.begin(4, 3)?.fill(91);
+        let [width, height] = if point.0[0] < 0 {
+            RECT.size
+        } else {
+            DISPLAY.size
+        };
+        frame.begin(width, height)?.fill(91);
         if point.0[0] < 0 {
             return Err(Refusal::DisplayChanged.into());
         }
@@ -388,6 +393,9 @@ impl Rig {
         assert_eq!(self.reply(), (id, Reply::Complete(key(id))));
     }
     fn scrubbed(&self) {
+        self.scrubbed_bytes(48);
+    }
+    fn scrubbed_bytes(&self, expected: usize) {
         loop {
             let bytes = self
                 .scrubbed
@@ -396,7 +404,7 @@ impl Rig {
             if bytes.is_empty() {
                 continue;
             }
-            assert_eq!(bytes, vec![0; 48]);
+            assert_eq!(bytes, vec![0; expected]);
             return;
         }
     }
@@ -585,63 +593,34 @@ fn a_late_walk_is_taken_and_discarded_before_release_ack_and_the_reader_can_be_r
 #[test]
 fn retirement_without_a_capture_fences_old_owners_and_a_failed_attempt_stays_spent() {
     let rig = Rig::start(None, None, None);
-    rig.send(1, &Request::Retire(key(1).owner));
-    assert_eq!(rig.reply(), (1, Reply::Released(key(1).owner, None)));
-    rig.send(2, &context(2));
-    assert_eq!(rig.reply(), (2, Reply::Refused(Refusal::Stale)));
-    let newer = Owner {
-        gesture: 8,
-        ..key(1).owner
-    };
-    rig.send(3, &context_for(2, newer));
-    assert_eq!(
-        rig.reply(),
-        (3, Reply::Refused(Refusal::Reused)),
-        "the refused ticket is spent"
-    );
-    rig.send(4, &context_for(4, newer));
-    let fresh = Key {
-        owner: newer,
-        capture: CaptureId(4),
-    };
-    let (_, reply) = rig.reply();
-    assert!(matches!(reply, Reply::Acquired(actual, _) if actual == fresh));
-    assert_eq!(rig.reply(), (4, Reply::Complete(fresh)));
-    rig.finish();
-}
-
-#[test]
-fn the_fence_orders_holds_by_epoch_before_gesture() {
-    let rig = Rig::start(None, None, None);
     let fence = Owner {
         epoch: 2,
         gesture: 1,
     };
     rig.send(1, &Request::Retire(fence));
     assert_eq!(rig.reply(), (1, Reply::Released(fence, None)));
-    let earlier_epoch = Owner {
-        epoch: 1,
-        gesture: 9,
+    rig.send(2, &context_for(2, key(1).owner));
+    assert_eq!(rig.reply(), (2, Reply::Refused(Refusal::Stale)));
+    rig.send(3, &context_for(3, fence));
+    assert_eq!(rig.reply(), (3, Reply::Refused(Refusal::Stale)));
+    let newer = Owner {
+        gesture: 2,
+        ..fence
     };
-    for (id, owner) in [(2, earlier_epoch), (3, fence)] {
-        rig.send(id, &context_for(id, owner));
-        assert_eq!(
-            rig.reply(),
-            (id, Reply::Refused(Refusal::Stale)),
-            "{owner:?}"
-        );
-    }
-    let next = Key {
-        owner: Owner {
-            epoch: 2,
-            gesture: 2,
-        },
-        capture: CaptureId(4),
+    rig.send(4, &context_for(3, newer));
+    assert_eq!(
+        rig.reply(),
+        (4, Reply::Refused(Refusal::Reused)),
+        "the refused ticket is spent"
+    );
+    rig.send(5, &context_for(5, newer));
+    let fresh = Key {
+        owner: newer,
+        capture: CaptureId(5),
     };
-    rig.send(4, &context_for(4, next.owner));
     let (_, reply) = rig.reply();
-    assert!(matches!(reply, Reply::Acquired(actual, _) if actual == next));
-    assert_eq!(rig.reply(), (4, Reply::Complete(next)));
+    assert!(matches!(reply, Reply::Acquired(actual, _) if actual == fresh));
+    assert_eq!(rig.reply(), (5, Reply::Complete(fresh)));
     rig.finish();
 }
 
@@ -972,64 +951,52 @@ fn a_window_fault_answers_its_hold_alone_and_the_same_capturer_serves_the_next()
 }
 
 #[test]
-fn a_walked_hold_seals_one_masked_jpeg_and_releases_its_frame() {
-    let rig = Rig::start(None, None, None);
-    rig.send(1, &context(1));
-    rig.acquired(1);
-    rig.send(
-        2,
-        &Request::Elements {
-            key: key(1),
-            target: ElementTarget::Foreground,
-        },
-    );
-    let (id, reply) = rig.reply();
-    assert!(
-        id == 2 && matches!(reply, Reply::Elements(walked, _) if walked == key(1)),
-        "{reply:?}"
-    );
-    rig.send(3, &Request::Seal(key(1)));
-    let (id, reply) = rig.reply();
-    let Reply::Sealed(sealed, context) = reply else {
-        panic!("not sealed: {reply:?}")
-    };
-    assert_eq!((id, sealed), (3, key(1)));
-    let image = image::load_from_memory_with_format(context.jpeg(), image::ImageFormat::Jpeg)
-        .expect("a JPEG");
-    assert_eq!((image.width(), image.height()), (4, 3));
-    assert_eq!(context.transform().display, RECT);
-    rig.scrubbed();
-    rig.send(4, &Request::Seal(key(1)));
-    assert_eq!(rig.reply(), (4, Reply::Refused(Refusal::Stale)));
-    rig.finish();
-}
-
-#[test]
 fn a_hold_seals_its_frame_as_captured_with_no_walk_and_only_once() {
-    let rig = Rig::start(None, None, None);
-    rig.send(1, &context(1));
-    rig.acquired(1);
-    rig.send(2, &Request::Seal(key(1)));
-    let (id, reply) = rig.reply();
-    let Reply::Sealed(sealed, context) = reply else {
-        panic!("not sealed: {reply:?}")
-    };
-    assert_eq!((id, sealed), (2, key(1)));
-    let image = image::load_from_memory_with_format(context.jpeg(), image::ImageFormat::Jpeg)
-        .expect("a JPEG");
-    assert_eq!((image.width(), image.height()), (4, 3));
-    rig.scrubbed();
-    rig.send(
-        3,
-        &Request::Elements {
+    for walk in [false, true] {
+        let rig = Rig::start(None, None, None);
+        let elements = Request::Elements {
             key: key(1),
             target: ElementTarget::Foreground,
-        },
-    );
-    assert_eq!(rig.reply(), (3, Reply::Refused(Refusal::Stale)));
-    rig.send(4, &Request::Seal(key(1)));
-    assert_eq!(rig.reply(), (4, Reply::Refused(Refusal::Stale)));
-    rig.finish();
+        };
+        rig.send(1, &context(1));
+        rig.acquired(1);
+        if walk {
+            rig.send(2, &elements);
+            let (id, reply) = rig.reply();
+            let Reply::Elements(walked, tree) = reply else {
+                panic!("not an element tree: {reply:?}");
+            };
+            assert_eq!(
+                (id, walked, tree.capture, tree.availability),
+                (2, key(1), CaptureId(1), crate::screen::Availability::Read)
+            );
+        }
+        rig.send(3, &Request::Seal(key(1)));
+        let (id, reply) = rig.reply();
+        let Reply::Sealed(sealed, context) = reply else {
+            panic!("not sealed: {reply:?}")
+        };
+        assert_eq!((id, sealed), (3, key(1)));
+        let image = image::load_from_memory_with_format(context.jpeg(), image::ImageFormat::Jpeg)
+            .expect("a JPEG");
+        assert_eq!((image.width(), image.height()), (4, 3));
+        let geometry = context.geometry();
+        assert_eq!(
+            (
+                geometry.display.origin,
+                geometry.display.size,
+                geometry.display.dpi,
+                geometry.picture
+            ),
+            ([0, 0], [4, 3], 96, [4, 3])
+        );
+        rig.scrubbed();
+        rig.send(4, &elements);
+        assert_eq!(rig.reply(), (4, Reply::Refused(Refusal::Stale)));
+        rig.send(5, &Request::Seal(key(1)));
+        assert_eq!(rig.reply(), (5, Reply::Refused(Refusal::Stale)));
+        rig.finish();
+    }
 }
 #[test]
 fn a_window_changed_since_its_capture_refuses_the_seal_and_releases_the_frame() {

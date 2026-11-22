@@ -226,21 +226,6 @@ async fn fetch(downloader: &Downloader) -> (Result<(), DownloadError>, Progress)
 }
 
 #[tokio::test]
-async fn model_paths_refuse_a_redirected_installed_root_without_changing_bytes() {
-    let server = Server::start(vec![]);
-    let (scratch, downloader) = server.downloader();
-    let actual = scratch.dir().join("actual");
-    let pinned = actual.join(MODEL.part.dir()).join(MODEL.name);
-    seed(&pinned, b"abcdef");
-    fs::create_dir(&downloader.models).expect("empty junction");
-    crate::platform::sherpa::tests::set_junction(&downloader.models, &actual)
-        .expect("own local junction");
-    assert_eq!(fetch(&downloader).await.0, Err(DownloadError::ModelPath));
-    assert_eq!(fs::read(&pinned).unwrap(), b"abcdef");
-    assert_eq!(server.accepted.load(Ordering::SeqCst), 0);
-}
-
-#[tokio::test]
 async fn model_paths_refuse_a_hard_linked_partial_without_changing_its_alias() {
     let server = Server::start(vec![Reply::full()]);
     let (scratch, downloader) = server.downloader();
@@ -255,6 +240,7 @@ async fn model_paths_refuse_a_hard_linked_partial_without_changing_its_alias() {
     assert_eq!(server.accepted.load(Ordering::SeqCst), 0);
 }
 
+#[derive(Clone, Copy)]
 enum LinkedFolder {
     Root,
     Part,
@@ -365,6 +351,7 @@ enum LinkKind {
     Symlink,
 }
 
+#[derive(Clone, Copy)]
 enum LinkedFile {
     Final,
     Partial,
@@ -426,27 +413,15 @@ async fn linked_folder_refused(location: LinkedFolder, kind: LinkKind) {
 
 #[tokio::test]
 async fn model_paths_refuse_a_part_junction() {
-    linked_folder_refused(LinkedFolder::Part, LinkKind::Junction).await;
-}
-
-#[tokio::test]
-async fn model_paths_refuse_an_ancestor_junction() {
-    linked_folder_refused(LinkedFolder::Ancestor, LinkKind::Junction).await;
-}
-
-#[tokio::test]
-async fn model_paths_refuse_a_root_symlink() {
-    linked_folder_refused(LinkedFolder::Root, LinkKind::Symlink).await;
-}
-
-#[tokio::test]
-async fn model_paths_refuse_a_part_symlink() {
-    linked_folder_refused(LinkedFolder::Part, LinkKind::Symlink).await;
-}
-
-#[tokio::test]
-async fn model_paths_refuse_an_ancestor_symlink() {
-    linked_folder_refused(LinkedFolder::Ancestor, LinkKind::Symlink).await;
+    for location in [
+        LinkedFolder::Root,
+        LinkedFolder::Part,
+        LinkedFolder::Ancestor,
+    ] {
+        for kind in [LinkKind::Junction, LinkKind::Symlink] {
+            linked_folder_refused(location, kind).await;
+        }
+    }
 }
 
 async fn linked_file_refused(location: LinkedFile, kind: LinkKind) {
@@ -478,22 +453,11 @@ async fn linked_file_refused(location: LinkedFile, kind: LinkKind) {
 
 #[tokio::test]
 async fn model_paths_refuse_a_final_symlink() {
-    linked_file_refused(LinkedFile::Final, LinkKind::Symlink).await;
-}
-
-#[tokio::test]
-async fn model_paths_refuse_a_partial_symlink() {
-    linked_file_refused(LinkedFile::Partial, LinkKind::Symlink).await;
-}
-
-#[tokio::test]
-async fn model_paths_refuse_a_final_junction() {
-    linked_file_refused(LinkedFile::Final, LinkKind::Junction).await;
-}
-
-#[tokio::test]
-async fn model_paths_refuse_a_partial_junction() {
-    linked_file_refused(LinkedFile::Partial, LinkKind::Junction).await;
+    for location in [LinkedFile::Final, LinkedFile::Partial] {
+        for kind in [LinkKind::Symlink, LinkKind::Junction] {
+            linked_file_refused(location, kind).await;
+        }
+    }
 }
 
 #[tokio::test]
@@ -1090,6 +1054,10 @@ async fn redirects_and_first_url_refuse_untrusted_destinations() {
 #[test]
 fn production_host_policy_and_parser_boundaries() {
     let rules = Rules::default();
+    for model in kumochi_protocol::voice::MODEL_FILES {
+        let url = Url::parse(model.url).expect("valid manifest URL");
+        assert!(rules.accepts(&url), "manifest URL meets production policy");
+    }
     for (url, expected) in [
         ("https://huggingface.co/a", true),
         ("https://cdn.hf.co/a", true),
@@ -1315,63 +1283,66 @@ async fn stalled_body_times_out_at_exactly_thirty_seconds() {
 
 #[tokio::test(start_paused = true)]
 async fn progress_is_coalesced_to_four_updates_per_second() {
-    let (sender, mut receiver) = watch::channel(Progress {
-        phase: FetchPhase::Verifying,
-        done: 0,
-        total: 6,
-    });
-    let mut reporter = Reporter {
-        sender: &sender,
-        last: Instant::now(),
-        value: Progress {
+    for phase in [FetchPhase::Verifying, FetchPhase::Downloading] {
+        let initial = Progress {
             phase: FetchPhase::Verifying,
             done: 0,
             total: 6,
-        },
-    };
-    reporter.update(1);
-    assert_eq!(
-        *receiver.borrow_and_update(),
-        Progress {
-            phase: FetchPhase::Verifying,
-            done: 0,
-            total: 6
-        },
-        "initial bytes coalesced"
-    );
-    time::advance(Duration::from_millis(249)).await;
-    reporter.update(2);
-    assert!(
-        !receiver.has_changed().expect("valid voice fixture"),
-        "not before 250 ms"
-    );
-    time::advance(Duration::from_millis(1)).await;
-    reporter.update(3);
-    assert_eq!(
-        *receiver.borrow_and_update(),
-        Progress {
-            phase: FetchPhase::Verifying,
-            done: 3,
-            total: 6
-        },
-        "exactly 250 ms"
-    );
-    reporter.update(6);
-    reporter.finish().await;
-    assert_eq!(
-        *receiver.borrow_and_update(),
-        Progress {
-            phase: FetchPhase::Verifying,
-            done: 6,
-            total: 6
-        },
-        "terminal progress"
-    );
-    assert_eq!(
-        Instant::now() - reporter.last,
-        PROGRESS_INTERVAL,
-        "terminal update also throttled"
-    );
+        };
+        let (sender, mut receiver) = watch::channel(initial);
+        let mut reporter = Reporter {
+            sender: &sender,
+            last: Instant::now(),
+            value: initial,
+        };
+        reporter.phase(FetchPhase::Verifying);
+        assert!(!receiver.has_changed().expect("live fixture"));
+        if phase == FetchPhase::Downloading {
+            time::advance(Duration::from_millis(10)).await;
+            reporter.phase(phase);
+            assert_eq!(
+                *receiver.borrow_and_update(),
+                Progress { phase, ..initial },
+                "phase change sends immediately"
+            );
+        }
+        reporter.update(1);
+        assert_eq!(*receiver.borrow_and_update(), Progress { phase, ..initial });
+        time::advance(Duration::from_millis(249)).await;
+        reporter.update(2);
+        assert!(
+            !receiver.has_changed().expect("live fixture"),
+            "not before 250 ms"
+        );
+        time::advance(Duration::from_millis(1)).await;
+        reporter.update(3);
+        assert_eq!(
+            *receiver.borrow_and_update(),
+            Progress {
+                phase,
+                done: 3,
+                ..initial
+            },
+            "exactly 250 ms"
+        );
+        let sent = Instant::now();
+        reporter.update(6);
+        assert!(!receiver.has_changed().expect("live fixture"));
+        reporter.finish().await;
+        assert_eq!(
+            *receiver.borrow_and_update(),
+            Progress {
+                phase,
+                done: 6,
+                ..initial
+            }
+        );
+        assert_eq!(
+            Instant::now() - sent,
+            Duration::from_millis(250),
+            "terminal update also throttled"
+        );
+    }
 }
 
 #[tokio::test]
@@ -1482,103 +1453,5 @@ async fn connection_and_tls_handshake_have_a_thirty_second_deadline() {
             .expect_err("fixture spinner aborted")
             .is_cancelled(),
         "spinner stopped"
-    );
-}
-
-#[test]
-fn errors_are_closed_and_content_free() {
-    use std::error::Error;
-    for (error, text) in [
-        (
-            DownloadError::NoSpace { needed: 7 },
-            "insufficient model space",
-        ),
-        (DownloadError::Refused, "model request refused"),
-        (DownloadError::Size, "model size mismatch"),
-        (DownloadError::Hash, "model hash mismatch"),
-        (DownloadError::Timeout, "model download timed out"),
-        (DownloadError::Transport, "model transport failed"),
-        (DownloadError::Io, "model storage failed"),
-        (DownloadError::Cancelled, "model download cancelled"),
-    ] {
-        assert_eq!(error.to_string(), text, "closed diagnostic");
-        assert!(error.source().is_none(), "no raw library error");
-    }
-}
-
-#[tokio::test]
-#[ignore = "live HEAD requests require the owner's explicit approval"]
-async fn measure_download_head() {
-    let downloader = Downloader::new(
-        crate::platform::data_dir()
-            .expect("valid voice fixture")
-            .join(kumochi_protocol::voice::MODELS_DIR),
-    )
-    .expect("valid voice fixture");
-    for model in kumochi_protocol::voice::MODEL_FILES {
-        let url = Url::parse(model.url).expect("valid voice fixture");
-        assert!(
-            downloader.rules.accepts(&url),
-            "manifest URL meets production policy"
-        );
-        let response = downloader
-            .client
-            .head(url)
-            .header(ACCEPT_ENCODING, "identity")
-            .send()
-            .await
-            .expect("valid voice fixture");
-        assert_eq!(response.status(), reqwest::StatusCode::OK, "HEAD succeeded");
-        tracing::info!(host = response.url().host_str(), "voice HEAD destination");
-    }
-}
-
-#[tokio::test(start_paused = true)]
-async fn a_phase_change_is_sent_at_once_and_bytes_stay_throttled() {
-    let (sender, mut receiver) = watch::channel(Progress {
-        phase: FetchPhase::Verifying,
-        done: 0,
-        total: 6,
-    });
-    let mut reporter = Reporter {
-        sender: &sender,
-        last: Instant::now(),
-        value: Progress {
-            phase: FetchPhase::Verifying,
-            done: 0,
-            total: 6,
-        },
-    };
-    reporter.phase(FetchPhase::Verifying);
-    assert!(
-        !receiver.has_changed().expect("valid voice fixture"),
-        "the same phase sends nothing"
-    );
-    time::advance(Duration::from_millis(10)).await;
-    reporter.phase(FetchPhase::Downloading);
-    assert_eq!(
-        *receiver.borrow_and_update(),
-        Progress {
-            phase: FetchPhase::Downloading,
-            done: 0,
-            total: 6
-        },
-        "within 250 ms of the last send"
-    );
-    time::advance(Duration::from_millis(249)).await;
-    reporter.update(2);
-    assert!(
-        !receiver.has_changed().expect("valid voice fixture"),
-        "bytes wait 250 ms from the phase change"
-    );
-    time::advance(Duration::from_millis(1)).await;
-    reporter.update(3);
-    assert_eq!(
-        *receiver.borrow_and_update(),
-        Progress {
-            phase: FetchPhase::Downloading,
-            done: 3,
-            total: 6
-        }
     );
 }

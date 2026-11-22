@@ -89,24 +89,24 @@ fn failed_load_releases_before_receipt(failure: Failure, expected: &[&str]) {
 
 #[test]
 fn failed_warmup_destroys_the_recognizer_and_resources_before_failed_and_next_read() {
-    failed_load_releases_before_receipt(
-        Failure::Warmup,
-        &[
-            "recognizer released",
-            "resources retiring",
-            "resources released",
-            "reply",
-            "read",
-        ],
-    );
-}
-
-#[test]
-fn failed_recognizer_creation_releases_resources_before_failed_and_next_read() {
-    failed_load_releases_before_receipt(
-        Failure::Recognizer,
-        &["resources retiring", "resources released", "reply", "read"],
-    );
+    for (failure, expected) in [
+        (
+            Failure::Warmup,
+            &[
+                "recognizer released",
+                "resources retiring",
+                "resources released",
+                "reply",
+                "read",
+            ][..],
+        ),
+        (
+            Failure::Recognizer,
+            &["resources retiring", "resources released", "reply", "read"][..],
+        ),
+    ] {
+        failed_load_releases_before_receipt(failure, expected);
+    }
 }
 
 const WAIT: Duration = Duration::from_secs(5);
@@ -312,6 +312,8 @@ fn native_requests(ending: usize) -> Vec<u8> {
 #[expect(clippy::disallowed_methods, reason = "spawns while holding spawn_lock")]
 fn a_decode_child_fail_stops_without_another_input_request() {
     const KEY: &str = "KUMOCHI_TEST_DECODE_FAILSTOP";
+    const STARTED: &str = "speech decode fixture started";
+    const WINDOWS_FAST_FAIL: i32 = -1_073_740_791;
     if let Ok(mode) = std::env::var(KEY) {
         crate::platform::quiet_failures();
         std::thread::scope(|scope| {
@@ -336,6 +338,8 @@ fn a_decode_child_fail_stops_without_another_input_request() {
             if completion_failure {
                 drop(slots.freed);
             }
+            writeln!(io::stdout(), "{STARTED}").expect("write fixture marker");
+            io::stdout().flush().expect("flush fixture marker");
             release.send(()).expect("release child");
             loop {
                 std::thread::park();
@@ -352,7 +356,7 @@ fn a_decode_child_fail_stops_without_another_input_request() {
                 "--nocapture",
             ])
             .env(KEY, mode)
-            .stdout(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::null());
         let mut child = {
             let _spawning = crate::platform::spawn_lock();
@@ -361,7 +365,15 @@ fn a_decode_child_fail_stops_without_another_input_request() {
         let until = std::time::Instant::now() + WAIT;
         loop {
             if let Some(status) = child.try_wait().expect("child status") {
-                assert!(!status.success(), "failed child continued serving");
+                assert_eq!(status.code(), Some(WINDOWS_FAST_FAIL), "{mode}");
+                let mut output = String::new();
+                child
+                    .stdout
+                    .take()
+                    .expect("fixture stdout")
+                    .read_to_string(&mut output)
+                    .expect("read fixture marker");
+                assert!(output.contains(STARTED), "{mode}: fixture did not start");
                 break;
             }
             if std::time::Instant::now() >= until {
@@ -424,10 +436,7 @@ fn an_unrepresentable_model_path_is_refused_without_native_storage() {
             SpeechReply::Failed(NativeError::Input)
         );
     }
-}
 
-#[test]
-fn representable_model_paths_keep_the_root_refusal() {
     for models in ["", ".", "models", "modèles", "C:\\models\\音声"] {
         assert_eq!(
             load_refusal(Path::new(models)),

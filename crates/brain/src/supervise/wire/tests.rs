@@ -100,7 +100,10 @@ fn the_sized_writer_refuses_a_message_over_the_cap_and_writes_nothing() {
     let over = "x".repeat(Sealed::MAX_REPLY);
     assert!(matches!(
         write_sized(&mut bytes, 1, &over, Sealed::MAX_REPLY),
-        Err(FrameError::TooLarge { .. })
+        Err(FrameError::TooLarge {
+            len: 4_194_308,
+            max: 4_194_304,
+        })
     ));
     assert!(bytes.is_empty());
 }
@@ -154,20 +157,6 @@ fn a_reply_at_the_cap_fills_one_buffer_and_one_byte_over_is_lost() {
 }
 
 #[test]
-fn a_single_chunk_reply_needs_no_buffer() {
-    let mut zeroed = Zeroed::new(Sealed::MAX_REPLY);
-    assert_eq!(
-        zeroed.push(last(0, vec![1, 2, 3]), <[u8]>::to_vec),
-        Ok(Some(vec![1, 2, 3]))
-    );
-    assert!(zeroed.bytes.is_none());
-    assert_eq!(
-        zeroed.push(last(0, vec![4]), <[u8]>::to_vec),
-        Ok(Some(vec![4]))
-    );
-}
-
-#[test]
 fn zeroed_reassembly_refuses_a_gap_a_repeat_and_an_empty_chunk() {
     let mut zeroed = Zeroed::new(8);
     assert_eq!(zeroed.push(chunk(0, vec![1]), <[u8]>::to_vec), Ok(None));
@@ -202,8 +191,12 @@ fn every_zeroed_frame_is_zeroed_when_dropped_pushed_or_not() {
     SCRUBBED.take();
     let mut zeroed = Zeroed::new(8);
     assert_eq!(
-        zeroed.push(last(0, vec![7; 3]), <[u8]>::to_vec),
-        Ok(Some(vec![7; 3]))
+        zeroed.push(last(0, vec![1, 2, 3]), <[u8]>::to_vec),
+        Ok(Some(vec![1, 2, 3]))
+    );
+    assert_eq!(
+        zeroed.push(last(0, vec![4]), <[u8]>::to_vec),
+        Ok(Some(vec![4]))
     );
     let (mut requests, _replies) = pending([1, 2]);
     let stray = Frame {
@@ -218,7 +211,10 @@ fn every_zeroed_frame_is_zeroed_when_dropped_pushed_or_not() {
     let (frames, reads) = tokio::sync::mpsc::channel(1);
     frames.try_send(Some(last(0, vec![7; 6]))).expect("room");
     drop((frames, reads));
-    assert_eq!(SCRUBBED.take(), [(true, 3), (true, 5), (true, 6)]);
+    assert_eq!(
+        SCRUBBED.take(),
+        [(true, 3), (true, 1), (true, 5), (true, 6)]
+    );
 }
 
 #[test]
