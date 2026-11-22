@@ -520,6 +520,7 @@ async fn pending_attempt_expires_after_five_minutes() {
 
 #[tokio::test(start_paused = true)]
 async fn a_tuned_sign_in_attempt_expires_at_its_own_deadline() {
+    let started = tokio::time::Instant::now();
     let limit = Duration::from_secs(75);
     let attempt = SignIn::bind("urn:uuid:synthetic-host", None, Intent::SignIn, limit)
         .await
@@ -530,6 +531,7 @@ async fn a_tuned_sign_in_attempt_expires_at_its_own_deadline() {
     pending(receive.as_mut()).await;
     tokio::time::advance(Duration::from_secs(1)).await;
     assert_eq!(receive.await.unwrap_err(), SignInError::Expired);
+    assert_eq!(started.elapsed(), Duration::from_secs(75));
 }
 
 #[tokio::test]
