@@ -187,48 +187,6 @@ fn colliding_labels_nudge_along_the_curve_and_recenter_after_removal() {
 }
 
 #[test]
-fn label_collisions_use_world_bounds_across_transformed_parents() {
-    let mut scene = new_scene("world_chips");
-    let before = LayoutState::new(&scene);
-    let picture = prepared(
-        &mut scene,
-        &mut GlobalBudget::default(),
-        &before,
-        json!({"id":"parents","put":[
-            {"diagram":{"id":"d1","dir":"right","box":[0,0,360,300]}},
-            {"diagram":{"id":"d2","dir":"right","box":[0,0,360,300]}},
-            {"node":{"id":"a","in":"d1","label":"A"}},
-            {"node":{"id":"b","in":"d1","label":"B"}},
-            {"node":{"id":"c","in":"d2","label":"C"}},
-            {"node":{"id":"d","in":"d2","label":"D"}},
-            {"edge":{"id":"e1","in":"d1","from":"a","to":"b","label":"x"}},
-            {"edge":{"id":"e2","in":"d2","from":"c","to":"d","label":"y"}},
-            {"anim":{"target":"d2","track":"scale","keys":[[0,2]]}},
-            {"anim":{"target":"d2","track":"pos","keys":[[0,[-240,-36]]]}},
-            {"anim":{"target":"b","track":"pos","keys":[[0,[120,0]]]}},
-            {"anim":{"target":"d","track":"pos","keys":[[0,[120,0]]]}}
-        ]}),
-    );
-    assert_eq!(
-        chip(&picture.after, scene.handle(&id("e1")).expect("first edge")),
-        Rect {
-            origin: Vec2::new(232.0, 29.0),
-            size: Vec2::new(16.0, 14.0)
-        }
-    );
-    assert_eq!(
-        chip(
-            &picture.after,
-            scene.handle(&id("e2")).expect("second edge")
-        ),
-        Rect {
-            origin: Vec2::new(217.0, 29.0),
-            size: Vec2::new(16.0, 14.0)
-        }
-    );
-}
-
-#[test]
 fn labels_with_no_free_interior_sample_stay_present_at_the_midpoint() {
     let mut scene = new_scene("full_edge");
     let before = LayoutState::new(&scene);

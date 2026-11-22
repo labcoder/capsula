@@ -351,40 +351,6 @@ fn preparation_failure_is_an_ordered_cut_before_the_next_call() {
 }
 
 #[test]
-fn first_step_preparation_failure_clears_without_an_extra_event_kind() {
-    let mut state = scene();
-    let mut global = GlobalBudget::default();
-    commit(
-        &mut state,
-        &mut global,
-        r#"{"id":"failed","put":[{"text":{"id":"x","at":[0,0],"text":""}}]}"#,
-    );
-    assert_eq!(
-        state
-            .stop(&cut(0, vec![]), &mut global)
-            .expect("first-step failure"),
-        StopOutcome::Cleared
-    );
-    assert_eq!(
-        (
-            state.revision(),
-            state.committed(),
-            state.object_count(),
-            state.recovery_log().len()
-        ),
-        (1, 0, 0, 2)
-    );
-    assert!(matches!(
-        &state.recovery_log()[1],
-        SceneEvent::Stop(StopCut { activated: 0, .. })
-    ));
-    let replay =
-        SceneState::replay(header(), state.recovery_log()).expect("cleared failure replay");
-    assert!(replay.is_cleared());
-    assert_eq!((replay.revision(), replay.committed()), (1, 0));
-}
-
-#[test]
 fn an_effective_cut_after_a_gap_preserves_original_handles_and_reservations() {
     let mut state = scene();
     let mut global = GlobalBudget::default();

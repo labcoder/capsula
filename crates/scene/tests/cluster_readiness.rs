@@ -167,33 +167,3 @@ fn anchors_one_level_past_the_depth_limit_reject_at_admission() {
     let result = scene.admit(&step, &GlobalBudget::default());
     assert_eq!(result.expect_err("depth 17").code, ErrorCode::TooDeep);
 }
-
-#[test]
-#[ignore = "standalone release executable on quiet Rez under measuring.lock"]
-fn prepare_depth_limit_anchors() {
-    use std::{hint::black_box, time::Instant};
-
-    for (name, order) in [
-        ("far_first", SourceOrder::FarFirst),
-        ("near_first", SourceOrder::NearFirst),
-    ] {
-        let fixture = far_anchors(13, order);
-        let mut samples = Vec::with_capacity(64);
-        for iteration in 0..69 {
-            let (_scene, budget, input) = input(&fixture);
-            assert_eq!(budget.usage().objects, 577);
-            let cancel = AtomicBool::new(false);
-            let start = Instant::now();
-            let result = prepare(black_box(input), &mut Measure, &cancel);
-            let elapsed = start.elapsed().as_secs_f64() * 1e6;
-            assert_eq!(result.expect("picture").after.items().len(), 577);
-            if iteration >= 5 {
-                samples.push(elapsed);
-            }
-        }
-        println!("workload={name} samples=64");
-        for (index, elapsed) in samples.into_iter().enumerate() {
-            println!("sample {index} {elapsed:.3}");
-        }
-    }
-}

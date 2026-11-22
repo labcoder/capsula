@@ -688,20 +688,34 @@ mod tests {
             ChartKind::Scatter,
             ChartKind::Pie,
         ] {
-            for data in ["[]", "[1]", "[0,1e300,2]"] {
-                let out = draw(&series(data), &basis(kind), &mut build).expect("draw");
-                assert!(out.bounds.within_canvas(), "finite output bounds");
-                if data != "[]" {
-                    assert!(!out.output.is_empty(), "nonempty series draws");
-                }
-            }
-            if kind != ChartKind::Pie {
-                let out =
-                    draw(&series("[-12,0,1e300]"), &basis(kind), &mut build).expect("signed draw");
-                assert!(
-                    out.bounds.within_canvas() && !out.output.is_empty(),
-                    "signed and huge values draw"
+            let basis = basis(kind);
+            let mut check = |data, has_huge_value| {
+                let out = draw(&series(data), &basis, &mut build).expect("draw");
+                assert_eq!(
+                    out.output.is_empty(),
+                    data == "[]",
+                    "{kind:?} {data}: only empty data has no drawing"
                 );
+                assert!(out.bounds.within_canvas(), "{kind:?} {data} bounds");
+                if has_huge_value && kind != ChartKind::Pie {
+                    assert!(
+                        out.output.iter().any(|p| match p {
+                            Prim::Rect { rect, .. } if kind == ChartKind::Bar =>
+                                rect.size.y > 0.0 && rect.origin.y.abs() < 1e-5,
+                            Prim::Rect { rect, .. } => rect.center().y.abs() < 1e-5,
+                            Prim::Line { points, .. } | Prim::Fill { points, .. } =>
+                                points.iter().any(|point| point.y.abs() < 1e-5),
+                            Prim::Text { .. } => false,
+                        }),
+                        "{kind:?} {data}: the huge value projects to the top of the plot"
+                    );
+                }
+            };
+            check("[]", false);
+            check("[1]", false);
+            check("[0,1e300,2]", true);
+            if kind != ChartKind::Pie {
+                check("[-12,0,1e300]", true);
             }
         }
     }
@@ -738,7 +752,7 @@ mod tests {
     }
     #[test]
     fn stacks_include_every_series_and_pairs_use_numeric_x() {
-        let a = series("[[10,1e300],[20,-3]]");
+        let a = series("[[10,1e300],[20,-1e300]]");
         let b = a.clone();
         let chart: Chart = serde_json::from_str(r#"{"id":"c","box":[0,0,400,300],"stacked":true}"#)
             .expect("chart");
@@ -753,11 +767,21 @@ mod tests {
         };
         let (plot, _) = header(&chart, &[&a, &b], &mut build).expect("header");
         assert!(
-            plot.y.max >= 2e300 && plot.y.min <= -6.0,
-            "both signed stacks set the range"
+            plot.y.min <= -2e300 && plot.y.max >= 2e300,
+            "the domain includes both signed stack totals"
         );
-        assert_eq!(plot.x.min.to_bits(), 5.0_f64.to_bits());
-        assert_eq!(plot.x.max.to_bits(), 25.0_f64.to_bits());
+        for (x, single, combined) in [(10.0, 1e300, 2e300), (20.0, -1e300, -2e300)] {
+            assert!(
+                (plot.at(x, single).y - plot.at(x, combined).y).abs() >= 1.0,
+                "both series remain visually distinct from just one at x={x}"
+            );
+        }
+        let left = plot.at(10.0, 0.0).x;
+        let right = plot.at(20.0, 0.0).x;
+        assert!(
+            plot.frame.origin.x < left && right - left >= 1.0 && right < plot.frame.max().x,
+            "numeric x values remain distinct and inside the plot"
+        );
     }
     #[test]
     fn area_keeps_only_the_top_stroke_and_single_points_are_native_dots() {
@@ -821,34 +845,55 @@ mod tests {
             screen: None,
         };
         let mut basis = basis(ChartKind::Pie);
-        let out = draw(&series("[1]"), &basis, &mut build).expect("half pie");
-        let labels: Vec<_> = out
-            .output
-            .iter()
-            .filter_map(|p| {
-                if let Prim::Text { text, .. } = p {
-                    Some(text.as_str())
-                } else {
-                    None
-                }
-            })
-            .collect();
-        assert_eq!(labels, ["50%"]);
-        let Prim::Fill { points, .. } = &out.output[0] else {
-            panic!("slice");
-        };
-        assert_eq!(points.len(), crate::path::PIE_ARC_SEGMENTS + 2);
-        assert!(
-            (points[1].y - 4.0).abs() < 1e-5 && (points[points.len() - 1].y - 96.0).abs() < 1e-5,
-            "half-circle endpoints"
-        );
-        basis.pie = None;
-        let out = draw(&series("[1]"), &basis, &mut build).expect("new positive pie");
-        assert!(
+        let slice_bounds = |out: &Drawing, label| {
+            assert_eq!(
+                out.output
+                    .iter()
+                    .filter_map(|p| match p {
+                        Prim::Text { text, .. } => Some(text.as_str()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>(),
+                [label],
+                "one positive slice has one percentage label"
+            );
             out.output
                 .iter()
-                .any(|p| matches!(p, Prim::Text { text, .. } if text.as_str() == "100%")),
-            "empty allocation falls back to a full circle"
+                .filter_map(|p| match p {
+                    Prim::Fill { points, .. } => Some(points.iter().copied()),
+                    _ => None,
+                })
+                .flatten()
+                .map(|origin| Rect {
+                    origin,
+                    size: Vec2::default(),
+                })
+                .reduce(Rect::union)
+                .expect("visible slice")
+        };
+        let center = basis.plot.frame.center();
+        let half = slice_bounds(
+            &draw(&series("[1]"), &basis, &mut build).expect("half pie"),
+            "50%",
+        );
+        assert!(
+            (half.origin.x - center.x).abs() < 1e-4
+                && half.size.x > 0.0
+                && (half.center().y - center.y).abs() <= 0.05 * half.size.y
+                && (half.size.y - 2.0 * half.size.x).abs() <= 0.1 * half.size.y,
+            "the retained half spans the right side of the pie"
+        );
+        basis.pie = None;
+        let full = slice_bounds(
+            &draw(&series("[1]"), &basis, &mut build).expect("new positive pie"),
+            "100%",
+        );
+        assert!(
+            full.size.x > 0.0
+                && (full.size.y - full.size.x).abs() <= 0.1 * full.size.x
+                && (full.center().x - center.x).abs() <= 0.05 * full.size.x
+                && (full.center().y - center.y).abs() <= 0.05 * full.size.y,
+            "the fallback covers a full disc around the center"
         );
     }
     #[test]

@@ -578,13 +578,15 @@ fn times_and_source_validate_on_both_routes() {
             postcard::from_bytes::<Source>(&bytes).ok().as_ref() == Some(&value),
             "source parity"
         );
-        for op in [
-            json!({"path":{"id":"p","d":source}}),
-            json!({"mermaid":{"in":"d","src":source}}),
+        for (op, kind, field) in [
+            (json!({"path":{"id":"p","d":source}}), "path", "d"),
+            (json!({"mermaid":{"in":"d","src":source}}), "mermaid", "src"),
         ] {
-            assert!(
-                parse(&json!({"step":{"id":"s","put":[op]}})).is_ok(),
-                "source is not capped as display text"
+            let record = parse(&json!({"step":{"id":"s","put":[op]}})).expect("at source cap");
+            let encoded = serde_json::to_value(record).expect("serializable record");
+            assert_eq!(
+                encoded["step"]["put"][0][kind][field].as_str(),
+                Some(source.as_str())
             );
         }
         let excessive = format!("{source}x");

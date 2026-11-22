@@ -1,6 +1,10 @@
 //! Scene-format behavior and privacy regressions.
-use kumochi_scene::record::{Anchor, Cell, Color, KeyValue, Point, Start};
-use kumochi_scene::{ErrorCode, Finite, StepError, Text, WireId, parse_draw_record, parse_record};
+use kumochi_scene::record::{
+    Anchor, Cell, Color, KeyValue, Others, Point, Start, Surface, Version,
+};
+use kumochi_scene::{
+    Begin, ErrorCode, Finite, Record, StepError, Text, WireId, parse_draw_record, parse_record,
+};
 use serde::{Serialize, de::DeserializeOwned};
 
 fn round_trip<T: Serialize + DeserializeOwned + PartialEq>(value: &T) {
@@ -58,72 +62,68 @@ fn strict_records() {
     assert_eq!(missing.code, ErrorCode::MissingField);
     assert_eq!(missing.path.as_str(), "alt");
     let inline = br#"{"begin":{"v":1,"scene":"s","surface":"inline","alt":""}}"#;
-    assert!(parse_record(inline).is_ok());
+    let expected = Begin {
+        v: Version::V1,
+        scene: WireId::try_from("s".to_owned()).expect("valid id"),
+        surface: Surface::Inline,
+        size: None,
+        title: None,
+        alt: Text::try_from(String::new()).expect("empty alt is valid"),
+        others: Others::Clear,
+        display: None,
+    };
+    assert_eq!(
+        parse_record(inline).expect("generic inline begin"),
+        Record::Begin(expected.clone())
+    );
     let unsupported = parse_draw_record(inline).expect_err("draw tool rejects inline begin");
     assert_eq!(unsupported.step, None);
     assert_eq!(unsupported.code, ErrorCode::Unsupported);
     assert_eq!(unsupported.path.as_str(), "surface");
     assert_eq!(unsupported.tool_text(), "surface: scene.Unsupported");
-    assert!(
-        parse_draw_record(br#"{"begin":{"v":1,"scene":"s","surface":"overlay","alt":""}}"#).is_ok()
+    assert_eq!(
+        parse_draw_record(br#"{"begin":{"v":1,"scene":"s","surface":"overlay","alt":""}}"#)
+            .expect("draw tool overlay begin"),
+        Record::Begin(Begin {
+            surface: Surface::Overlay,
+            ..expected
+        })
     );
 }
 #[test]
-fn the_draw_tool_supplies_the_only_version_when_a_begin_omits_it() {
-    let unversioned = br#"{"begin":{"scene":"s","surface":"overlay","alt":"a"}}"#;
-    let missing = parse_record(unversioned).expect_err("the generic contract keeps v required");
-    assert_eq!(
-        (missing.path.as_str(), missing.code),
-        ("v", ErrorCode::MissingField)
-    );
-    assert_eq!(
-        parse_draw_record(unversioned).expect("the draw tool supplies v"),
-        parse_record(br#"{"begin":{"v":1,"scene":"s","surface":"overlay","alt":"a"}}"#)
-            .expect("an explicit version")
-    );
-    for (json, path, code) in [
+fn the_draw_tool_defaults_only_omitted_begin_surface_and_version() {
+    let explicit = parse_record(br#"{"begin":{"v":1,"scene":"s","surface":"overlay","alt":"a"}}"#)
+        .expect("explicit header");
+    for (json, missing) in [
+        (r#"{"begin":{"scene":"s","alt":"a"}}"#, None),
+        (r#"{"begin":{"v":1,"scene":"s","alt":"a"}}"#, None),
         (
-            r#"{"begin":{"v":2,"scene":"s","surface":"overlay","alt":"a"}}"#,
-            "v",
-            ErrorCode::WrongVersion,
+            r#"{"begin":{"scene":"s","surface":"overlay","alt":"a"}}"#,
+            Some("v"),
         ),
+    ] {
+        assert_eq!(
+            parse_draw_record(json.as_bytes()).expect("draw defaults"),
+            explicit
+        );
+        let error = parse_record(json.as_bytes()).expect_err("generic parsing stays strict");
+        assert_eq!(error.code, ErrorCode::MissingField, "{json}");
+        if let Some(path) = missing {
+            assert_eq!(error.path.as_str(), path, "{json}");
+        }
+    }
+    for (json, path, code) in [
+        (r#"{"begin":{"scene":"s"}}"#, "alt", ErrorCode::MissingField),
         (
             r#"{"begin":{"scene":"s","surface":"overlay"}}"#,
             "alt",
             ErrorCode::MissingField,
         ),
         (
-            r#"{"begin":{"scene":"s","surface":"inline","alt":"a"}}"#,
-            "surface",
-            ErrorCode::Unsupported,
+            r#"{"begin":{"v":2,"scene":"s","surface":"overlay","alt":"a"}}"#,
+            "v",
+            ErrorCode::WrongVersion,
         ),
-    ] {
-        let error = parse_draw_record(json.as_bytes()).expect_err("still refused");
-        assert_eq!((error.path.as_str(), error.code), (path, code), "{json}");
-    }
-}
-
-#[test]
-fn the_draw_tool_defaults_only_omitted_begin_surface_and_version() {
-    let explicit = parse_record(br#"{"begin":{"v":1,"scene":"s","surface":"overlay","alt":"a"}}"#)
-        .expect("explicit header");
-    for json in [
-        r#"{"begin":{"scene":"s","alt":"a"}}"#,
-        r#"{"begin":{"v":1,"scene":"s","alt":"a"}}"#,
-    ] {
-        assert_eq!(
-            parse_draw_record(json.as_bytes()).expect("draw defaults"),
-            explicit
-        );
-        assert_eq!(
-            parse_record(json.as_bytes())
-                .expect_err("generic parsing stays strict")
-                .code,
-            ErrorCode::MissingField
-        );
-    }
-    for (json, path, code) in [
-        (r#"{"begin":{"scene":"s"}}"#, "alt", ErrorCode::MissingField),
         (
             r#"{"begin":{"v":2,"scene":"s","alt":"a"}}"#,
             "v",
@@ -193,8 +193,9 @@ fn draw_defaults_reject_duplicate_outer_begins_instead_of_picking_the_last() {
 
 #[test]
 fn text_and_list_boundaries_are_not_truncated() {
-    let accepted = Text::try_from("é".repeat(400));
-    assert!(accepted.is_ok(), "400 Unicode scalars are legal");
+    let exact = "é".repeat(400);
+    let accepted = Text::try_from(exact.clone()).expect("400 Unicode scalars are legal");
+    assert_eq!(accepted.as_str(), exact);
     assert_eq!(
         Text::try_from("é".repeat(401)).err(),
         Some(ErrorCode::TooLong)

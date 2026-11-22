@@ -272,6 +272,74 @@ mod tests {
         );
         drop(source);
     }
+
+    #[test]
+    fn a_ticket_charges_its_view_updates_once() {
+        use crate::{
+            Admission, GlobalBudget, SceneState,
+            display::WideMeasure,
+            layout::{LayoutState, PrepareInput, SurfaceGeometry, prepare},
+            theme::Theme,
+        };
+        use std::sync::atomic::AtomicBool;
+
+        let Record::Begin(header) =
+            parse_record(br#"{"begin":{"v":1,"scene":"s","surface":"overlay","alt":""}}"#)
+                .expect("header")
+        else {
+            panic!("begin");
+        };
+        let Record::Step(step) = parse_record(
+            br#"{"step":{"id":"a","put":[{"view3d":{"id":"v"}},{"solid":{"in":"v","id":"s","shape":"box","size":[2,2,2]}}]}}"#,
+        )
+        .expect("step") else {
+            panic!("step");
+        };
+        let make_ticket = |header| {
+            let mut scene = SceneState::begin(header).expect("scene");
+            let mut budget = GlobalBudget::default();
+            let before = LayoutState::new(&scene);
+            let Admission::New(candidate) = scene.admit(&step, &budget).expect("admit") else {
+                panic!("new step");
+            };
+            let ticket = scene
+                .commit(candidate, &mut budget)
+                .expect("commit")
+                .preparation;
+            (scene, before, ticket)
+        };
+        let (_scene, _before, ticket) = make_ticket(header.clone());
+        assert_eq!(ticket.views.len(), 1);
+        let attributed = ticket.attributed_bytes();
+        let ((), _, [_, released]) = allocation::usage(|| drop(ticket));
+        let (_shared, _, [allocated, temporary]) =
+            allocation::usage(|| (Arc::new(()), Arc::new(step.clone())));
+        assert_eq!(
+            attributed,
+            released + allocated - temporary,
+            "charge the ticket's own allocations plus the owner and source it shares with the scene"
+        );
+
+        let (_scene, before, ticket) = make_ticket(header);
+        let input = PrepareInput::new(
+            ticket,
+            before,
+            SurfaceGeometry::default(),
+            Arc::new(Theme::default()),
+        )
+        .expect("input");
+        let mut prepared =
+            prepare(input, &mut WideMeasure, &AtomicBool::new(false)).expect("prepared");
+        assert_eq!(prepared.views.len(), 1);
+        assert!(
+            prepared.ticket.views.is_empty(),
+            "preparation consumes the inputs"
+        );
+        let ((), _, [_, leftover]) =
+            allocation::usage(|| drop(std::mem::take(&mut prepared.ticket.views)));
+        assert_eq!(leftover, 0, "consumed inputs leave no heap buffer");
+    }
+
     use crate::{
         Finite, Record, WireId, parse_record,
         record::{Change, Point},

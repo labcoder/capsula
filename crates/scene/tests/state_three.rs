@@ -760,15 +760,33 @@ fn stop_keeps_a_3d_object_only_with_its_view_and_attachment_chain() {
 
 #[test]
 fn reach_bounds_every_generated_vertex_from_the_local_origin() {
-    for json in [
-        r#"{"in":"v","id":"s","shape":"box","size":[2,4,6]}"#,
-        r#"{"in":"v","id":"s","shape":"sphere","r":3}"#,
-        r#"{"in":"v","id":"s","shape":"cylinder","r":2,"h":5}"#,
-        r#"{"in":"v","id":"s","shape":"cone","r":2,"r2":1,"h":3}"#,
-        r#"{"in":"v","id":"s","shape":"torus","r":3,"r2":1}"#,
-        r#"{"in":"v","id":"s","shape":"extrude","points":[[10,10],[12,10],[12,13],[10,13]],"depth":2}"#,
-        r#"{"in":"v","id":"s","shape":"lathe","points":[[1,5],[2,7],[1,9]]}"#,
-        r#"{"in":"v","id":"s","shape":"tube","path":[[5,5,5],[8,5,5],[8,9,5]],"r2":0.5}"#,
+    for (json, envelope) in [
+        (
+            r#"{"in":"v","id":"s","shape":"box","size":[2,4,6]}"#,
+            14.0_f64.sqrt(),
+        ),
+        (r#"{"in":"v","id":"s","shape":"sphere","r":3}"#, 3.0),
+        (
+            r#"{"in":"v","id":"s","shape":"cylinder","r":2,"h":5}"#,
+            10.25_f64.sqrt(),
+        ),
+        (
+            r#"{"in":"v","id":"s","shape":"cone","r":2,"r2":1,"h":3}"#,
+            2.5,
+        ),
+        (r#"{"in":"v","id":"s","shape":"torus","r":3,"r2":1}"#, 4.0),
+        (
+            r#"{"in":"v","id":"s","shape":"extrude","points":[[10,10],[12,10],[12,13],[10,13]],"depth":2}"#,
+            314.0_f64.sqrt(),
+        ),
+        (
+            r#"{"in":"v","id":"s","shape":"lathe","points":[[1,5],[2,7],[1,9]]}"#,
+            82.0_f64.sqrt(),
+        ),
+        (
+            r#"{"in":"v","id":"s","shape":"tube","path":[[5,5,5],[8,5,5],[8,9,5]],"r2":0.5}"#,
+            170.0_f64.sqrt() + 0.5,
+        ),
     ] {
         let parsed = step(&format!(r#"{{"id":"x","put":[{{"solid":{json}}}]}}"#));
         let Op::Solid(solid) = &parsed.put[0] else {
@@ -797,6 +815,7 @@ fn reach_bounds_every_generated_vertex_from_the_local_origin() {
             })
             .fold(0.0, f64::max);
         let bound = reach(solid).expect("valid");
+        assert!(bound <= envelope + 1e-12, "{json}: {bound} > {envelope}");
         let rounding = 1.0 + f64::from(f32::EPSILON);
         assert!(farthest <= bound * rounding, "{json}: {farthest} > {bound}");
         assert!(farthest > 0.0);
@@ -806,11 +825,14 @@ fn reach_bounds_every_generated_vertex_from_the_local_origin() {
 #[test]
 fn info_is_bounded_and_redacted_like_other_text() {
     let marker = "SENTINEL";
-    let long = "é".repeat(400);
+    let info = format!("{marker}{}", "é".repeat(392));
     let parsed = step(&format!(
-        r#"{{"id":"x","set":[{{"target":"s","info":"{marker}{}"}}]}}"#,
-        &long[..long.len() - 2 * marker.len()]
+        r#"{{"id":"x","set":[{{"target":"s","info":"{info}"}}]}}"#
     ));
+    assert_eq!(
+        parsed.set[0].info.as_ref().expect("bounded info").as_str(),
+        info
+    );
     let decimal = format!("{:?}", marker.as_bytes());
     for debug in [format!("{parsed:?}"), format!("{:?}", parsed.set[0])] {
         assert!(!debug.contains(marker), "{debug}");
@@ -822,6 +844,7 @@ fn info_is_bounded_and_redacted_like_other_text() {
     );
     let error = parse_record(over.as_bytes()).expect_err("401 characters");
     assert_eq!(error.code, ErrorCode::TooLong);
+    assert_eq!(error.path.as_str(), "set[0].info");
 }
 
 #[test]

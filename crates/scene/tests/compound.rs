@@ -97,20 +97,28 @@ fn edges_belong_to_the_exact_least_common_diagram_of_their_nodes() {
         ("a", "c", "deep"),
         ("a", "a", "deep"),
     ] {
-        let scene = scene();
-        let budget = GlobalBudget::default();
+        let mut scene = scene();
+        let before = LayoutState::new(&scene);
         let mut put = groups();
         put.push(json!({"edge":{"id":"edge","in":parent,"from":from,"to":to}}));
-        let bytes =
-            serde_json::to_vec(&json!({"step":{"id":"edges","put":put}})).expect("step JSON");
-        let Record::Step(step) = parse_record(&bytes).expect("typed step") else {
-            panic!("step fixture");
-        };
-        scene
-            .admit(&step, &budget)
-            .expect("least-common-group edge");
-        assert_eq!(scene.object_count(), 0, "admission does not publish");
-        assert_eq!(budget.usage().objects, 0);
+        let prepared = picture(
+            &mut scene,
+            &mut GlobalBudget::default(),
+            &before,
+            json!({"id":"edges","put":put}),
+        );
+        let handle = prepared.after.handle(&id("edge")).expect("prepared edge");
+        let items = prepared.after.items();
+        let edge = items
+            .iter()
+            .find(|item| item.handle == handle)
+            .expect("edge item");
+        assert!(
+            edge.primitives
+                .iter()
+                .any(|prim| matches!(prim, Prim::Line { points, .. } if points.len() >= 2)),
+            "the accepted least-common-group edge {from} → {to} is drawn"
+        );
     }
 }
 
@@ -474,6 +482,30 @@ fn compound_cap_fixtures_share_the_global_object_budget() {
             json!({"id":"overflow","put":[{"line":{"id":"extra","from":[0,0],"to":[1,1]}}]}),
             ErrorCode::OverBudget(Budget::LiveObjects),
         );
+        if matches!(fixture, fixtures::Fixture::CrossGroup) {
+            let chain = growing_chain(fixture);
+            let sources: Vec<_> = std::iter::once(&chain)
+                .chain(retained.iter().skip(1).map(|(scene, _)| scene))
+                .map(|scene| (scene.header(), scene.recovery_log()))
+                .collect();
+            let (results, recovered_budget) = recover_all(
+                &sources,
+                SurfaceGeometry::default(),
+                &Arc::new(Theme::default()),
+                &mut Measure,
+                &AtomicBool::new(false),
+                None,
+            );
+            let recovered: Vec<_> = results
+                .into_iter()
+                .map(|result| {
+                    let (scene, layout) = result.expect("recovered capped view");
+                    (scene.revision(), layout.items().len())
+                })
+                .collect();
+            assert_eq!(recovered, [(64, 600), (1, 600), (1, 150), (1, 150)]);
+            assert_eq!(recovered_budget.usage().objects, 1500);
+        }
     }
 }
 

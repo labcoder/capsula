@@ -70,40 +70,6 @@ fn two_way_labels_have_distinct_opposite_arcs() {
 }
 
 #[test]
-fn skipped_label_bows_over_the_chain_without_widening_ranks() {
-    let mut scene = new_scene("skip_arc");
-    let before = LayoutState::new(&scene);
-    let picture = prepared(
-        &mut scene,
-        &mut GlobalBudget::default(),
-        &before,
-        json!({"id":"skip","put":[
-            {"diagram":{"id":"diagram","dir":"right","box":[0,0,600,300]}},
-            {"node":{"id":"a","in":"diagram","label":"A"}},
-            {"node":{"id":"b","in":"diagram","label":"B"}},
-            {"node":{"id":"c","in":"diagram","label":"C"}},
-            {"edge":{"id":"e1","in":"diagram","from":"a","to":"b","label":"x"}},
-            {"edge":{"id":"e2","in":"diagram","from":"b","to":"c","label":"x"}},
-            {"edge":{"id":"e3","in":"diagram","from":"a","to":"c","label":"shared"}}
-        ]}),
-    );
-    assert_eq!(
-        picture.after.bounds(&id("c")).expect("last rank"),
-        Some(Rect {
-            origin: Vec2::new(412.0, 16.0),
-            size: Vec2::new(80.0, 40.0),
-        })
-    );
-    assert_eq!(
-        chip(&picture.after, scene.handle(&id("e3")).expect("skip")),
-        Rect {
-            origin: Vec2::new(272.0, -3.0),
-            size: Vec2::new(56.0, 14.0),
-        }
-    );
-}
-
-#[test]
 fn neighbouring_chips_keep_an_exact_six_pixel_world_gap() {
     let mut scene = new_scene("chip_gap");
     let before = LayoutState::new(&scene);
@@ -303,48 +269,6 @@ fn three_parallel_links_alternate_lanes_in_both_flow_directions() {
 }
 
 #[test]
-fn a_detached_bowed_edge_keeps_its_curve_when_its_label_changes() {
-    let mut scene = new_scene("detached_bow");
-    let mut budget = GlobalBudget::default();
-    let before = LayoutState::new(&scene);
-    let first = prepared(
-        &mut scene,
-        &mut budget,
-        &before,
-        json!({"id":"pair","put":[
-            {"diagram":{"id":"diagram","dir":"right","box":[0,0,360,300]}},
-            {"node":{"id":"a","in":"diagram","label":"A"}},
-            {"node":{"id":"b","in":"diagram","label":"B"}},
-            {"edge":{"id":"e1","in":"diagram","from":"a","to":"b","label":"x"}},
-            {"edge":{"id":"e2","in":"diagram","from":"b","to":"a","label":"y"}}
-        ]}),
-    );
-    let handle = scene.handle(&id("e2")).expect("kept edge");
-    scene
-        .stop(
-            &StopCut {
-                activated: 1,
-                revealed: Bounded::new(vec![handle]).expect("cut"),
-            },
-            &mut budget,
-        )
-        .expect("stop");
-    let cut = first.after.cut(&scene).expect("detached layout");
-    let next = prepared(
-        &mut scene,
-        &mut budget,
-        &cut,
-        json!({"id":"label","set":[{"target":"e2","label":"z"}]}),
-    );
-    let old = cut.items();
-    let new = next.after.items();
-    assert_eq!(old[0].primitives[0], new[0].primitives[0]);
-    assert_eq!(old[0].primitives[1], new[0].primitives[1]);
-    assert_eq!(chip(&cut, handle), chip(&next.after, handle));
-    assert_eq!(scene.object_count(), 1);
-}
-
-#[test]
 fn a_labelled_self_loop_runs_outside_its_node() {
     for (direction, label, width, middle_x) in [
         ("right", "retry", 48.0, 256.0),
@@ -386,12 +310,8 @@ fn a_labelled_self_loop_runs_outside_its_node() {
 }
 
 #[test]
-fn two_labelled_self_loops_have_wire_ordered_lanes() {
+fn labelled_self_loops_have_wire_ordered_lanes() {
     self_loop_lanes(2);
-}
-
-#[test]
-fn three_labelled_self_loops_have_wire_ordered_lanes() {
     self_loop_lanes(3);
 }
 

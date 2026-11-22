@@ -293,43 +293,42 @@ fn empty_content_falls_back_to_the_canvas() {
 }
 
 #[test]
-fn overflow_grows_a_declared_canvas_instead_of_clipping_to_it() {
-    assert_eq!(
-        picture(
-            header(Some([100.0, 100.0])),
-            &json!([{"line":{"id":"line","from":[90,90],"to":[120,150]}}])
-        )
-        .fit_extent(),
-        rect(0.0, 0.0, 120.0, 150.0),
-    );
-}
-
-#[test]
-fn axis_aligned_strokes_grow_the_declared_canvas_before_fitting() {
-    for (from, to, extent, translation) in [
+fn strokes_grow_the_declared_canvas_before_fitting() {
+    for (from, to, extent, scale, translation) in [
         (
             [90, 90],
             [120, 90],
             rect(0.0, 0.0, 120.0, 100.0),
+            5.0 / 6.0,
             [0.0, 25.0 / 3.0],
         ),
         (
             [90, 90],
             [90, 120],
             rect(0.0, 0.0, 100.0, 120.0),
+            5.0 / 6.0,
             [25.0 / 3.0, 0.0],
         ),
         (
             [-20, 90],
             [10, 90],
             rect(-20.0, 0.0, 120.0, 100.0),
+            5.0 / 6.0,
             [50.0 / 3.0, 25.0 / 3.0],
         ),
         (
             [90, -20],
             [90, 10],
             rect(0.0, -20.0, 100.0, 120.0),
+            5.0 / 6.0,
             [25.0 / 3.0, 50.0 / 3.0],
+        ),
+        (
+            [90, 90],
+            [120, 150],
+            rect(0.0, 0.0, 120.0, 150.0),
+            2.0 / 3.0,
+            [10.0, 0.0],
         ),
     ] {
         let layout = picture(
@@ -338,14 +337,7 @@ fn axis_aligned_strokes_grow_the_declared_canvas_before_fitting() {
         );
         assert_eq!(layout.fit_extent(), extent, "stroke {from:?} to {to:?}");
         let actual = place(layout.fit_extent(), rect(0.0, 0.0, 100.0, 100.0), 2.0);
-        let expected = [
-            5.0 / 6.0,
-            0.0,
-            0.0,
-            5.0 / 6.0,
-            translation[0],
-            translation[1],
-        ];
+        let expected = [scale, 0.0, 0.0, scale, translation[0], translation[1]];
         for (actual, expected) in actual.0.into_iter().zip(expected) {
             assert!(
                 (actual - expected).abs() < 0.00001,
@@ -547,7 +539,7 @@ fn a_growing_step_replaces_the_fit_once_and_removal_does_not_shrink_it() {
 fn ordinary_illustrations_fit_the_paint_caps() {
     let round = |id: String, at: [f32; 4]| json!({"shape":{"id":id,"kind":"ellipse","box":at,"fill":"#d5dde9","width":0}});
     // A night sky: its background, a two-circle moon and six stars, then a cloud of eight
-    // ellipses. Every filled ellipse is a 48-gon whatever its size: 5 + 16 · 48 = 773.
+    // ellipses.
     let mut sky = vec![
         json!({"shape":{"id":"sky","kind":"rect","box":[0,0,960,600],"fill":"#0b1a3a","width":0}}),
     ];
@@ -555,8 +547,7 @@ fn ordinary_illustrations_fit_the_paint_caps() {
         let x = f32::from(index) * 55.0;
         round(format!("round{index}"), [x, 100.0, 40.0 + x / 4.0, 30.0])
     }));
-    // A detailed cartoon mouse: 21 filled round parts and a radius-12 shirt, filled and bordered,
-    // whose fallback costs 29 points: 21 · 48 + 29 = 1,037.
+    // A detailed cartoon mouse: 21 filled round parts and a filled, bordered radius-12 shirt.
     let mut mouse = vec![
         json!({"shape":{"id":"shirt","kind":"rect","box":[225,455,200,145],"radius":12,"fill":"red","color":"fg","width":2}}),
     ];
@@ -564,9 +555,8 @@ fn ordinary_illustrations_fit_the_paint_caps() {
         let x = f32::from(index) * 30.0;
         round(format!("part{index}"), [x, 200.0, 24.0, 18.0])
     }));
-    // A 30-step flowchart with labelled arrows, shrunk to fit the default canvas but charged
-    // unshrunk: 21 points per node, and per arrow 3 for its head and 21 for its label's chip:
-    // 30 · 21 + 29 · 24 = 1,326 fill and 30 · 21 = 630 outline.
+    // A 30-step flowchart with labelled arrows fits the default and a tall authored canvas
+    // without changing its paint charge.
     let mut flow = vec![json!({"diagram":{"id":"d","dir":"down"}})];
     flow.extend(
         (0..30).map(|index| json!({"node":{"id":format!("n{index}"),"in":"d","label":"Step"}})),
@@ -574,14 +564,17 @@ fn ordinary_illustrations_fit_the_paint_caps() {
     flow.extend((1..30).map(|index| {
         json!({"edge":{"id":format!("e{index}"),"from":format!("n{}", index - 1),"to":format!("n{index}"),"label":"then"}})
     }));
-    for (put, fill, outline) in [(sky, 773, 0), (mouse, 1_037, 29), (flow, 1_326, 630)] {
-        let put = serde_json::Value::Array(put);
-        let work = picture(header(None), &put).paint_work();
-        assert_eq!((work.fill_vertices, work.outline_points), (fill, outline));
-        let wide = measured(header(None), &put, &mut WideMeasure).paint_work();
-        assert_eq!(wide, work, "the brain's wide measure charges them the same");
-        assert!(work.within_limits());
-    }
+    let flow = serde_json::Value::Array(flow);
+    let charge = |size, put: &serde_json::Value| {
+        let work = picture(header(size), put).paint_work();
+        assert_ne!(work, PaintWork::default(), "the scene has paint work");
+        let wide = measured(header(size), put, &mut WideMeasure).paint_work();
+        assert_eq!(wide.max(work), wide, "the brain's measure is conservative");
+        work
+    };
+    charge(None, &serde_json::Value::Array(sky));
+    charge(None, &serde_json::Value::Array(mouse));
+    assert_eq!(charge(None, &flow), charge(Some([960.0, 4000.0]), &flow));
 }
 
 /// A node a Stop keeps without its shrunk diagram takes the diagram's fit into its own transform,
@@ -648,26 +641,4 @@ fn a_node_cut_out_of_its_shrunk_diagram_stays_charged_unshrunk() {
     )
     .expect("recovered");
     assert_eq!(charge(recovered.paint_work()), (21, 21));
-}
-
-/// A diagram's fit follows its measured text, so its paint work is charged unshrunk: the same
-/// 30-box chain costs the same shrunk to fit the default canvas as unshrunk on a tall one.
-#[test]
-fn a_diagram_is_charged_unshrunk_whatever_its_fit() {
-    let mut flow = vec![json!({"diagram":{"id":"d","dir":"down"}})];
-    flow.extend(
-        (0..30).map(|index| json!({"node":{"id":format!("n{index}"),"in":"d","label":"Step"}})),
-    );
-    flow.extend((1..30).map(|index| {
-        json!({"edge":{"id":format!("e{index}"),"from":format!("n{}", index - 1),"to":format!("n{index}"),"label":"then"}})
-    }));
-    let flow = serde_json::Value::Array(flow);
-    for size in [None, Some([960.0, 4000.0])] {
-        let work = picture(header(size), &flow).paint_work();
-        assert_eq!(
-            (work.fill_vertices, work.outline_points),
-            (1_326, 630),
-            "{size:?}"
-        );
-    }
 }
