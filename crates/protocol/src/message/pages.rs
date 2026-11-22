@@ -212,6 +212,7 @@ mod tests {
         let words = "private search words";
         let title = "private thread title";
         let text = "private event text";
+        let issue_title = "zqx-private-title";
         let slug = "zqxprivatemodel";
         let choice = ModelChoice {
             model: ModelSlug::new(slug).expect("valid"),
@@ -240,16 +241,18 @@ mod tests {
             text: text.to_owned(),
             cut: false,
         };
-        assert_eq!(
-            format!("{row:?}"),
-            "ThreadRow { id: ThreadId(1), updated_ms: 2, kind: Thread, choice: Some(ModelChoice { model: ModelSlug(len=15), effort: Medium, connection: ChatGpt }), .. }"
-        );
-        assert_eq!(
-            format!("{set_model:?}"),
-            "SetModel { thread: ThreadId(1), choice: ModelChoice { model: ModelSlug(len=15), effort: Medium, connection: ChatGpt } }"
-        );
+        let issue = PageEvent {
+            id: EventId(1),
+            run: None,
+            kind: PageEventKind::Issue {
+                draft: crate::message::DraftId(2),
+            },
+            text: issue_title.to_owned(),
+            cut: false,
+        };
+        let issue_debug = format!("{issue:?}");
         let output = format!(
-            "{page:?} {row:?} {event:?} {set_model:?} {:?} {:?} {:?}",
+            "{page:?} {row:?} {event:?} {issue_debug} {set_model:?} {:?} {:?} {:?}",
             DataToBrain::PageRequest {
                 request: 1,
                 page: page.clone()
@@ -262,12 +265,13 @@ mod tests {
             DataToShell::Page {
                 request: 3,
                 thread: ThreadId(1),
-                events: vec![event.clone()],
+                events: vec![event.clone(), issue],
                 before: None
             }
         );
-        for content in [words, title, text, slug] {
+        for content in [words, title, text, issue_title, slug] {
             assert!(!output.contains(content));
+            assert!(!output.contains(&format!("{:?}", content.as_bytes())));
         }
     }
 }

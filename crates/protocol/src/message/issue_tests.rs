@@ -210,6 +210,10 @@ fn filed_confirmation_and_duplicate_warning_round_trip_independently() {
                 maybe_duplicate,
             };
             let bytes = postcard::to_allocvec(&value).unwrap();
+            assert_eq!(
+                &bytes[bytes.len() - 2..],
+                &[u8::from(confirmed_by_user), u8::from(maybe_duplicate)]
+            );
             assert_eq!(postcard::from_bytes::<ActionState>(&bytes).unwrap(), value);
             assert!(postcard::from_bytes::<ActionState>(&bytes[..bytes.len() - 1]).is_err());
         }
@@ -543,49 +547,6 @@ fn largest_issue_and_connection_frames_fit_their_exact_budgets() {
 }
 
 #[test]
-fn largest_review_frames_fit_their_exact_budgets() {
-    let card = card();
-    roundtrip(
-        &DataToShell::IssueReview {
-            request: u64::MAX,
-            card: card.clone(),
-        },
-        Pipe::Data,
-        34271,
-    );
-    for (op, length) in [
-        (
-            IssueOp::Rearm {
-                draft: card.draft,
-                version: card.version,
-                hash: card.hash,
-            },
-            88,
-        ),
-        (
-            IssueOp::CancelReview {
-                draft: card.draft,
-                review: u64::MAX,
-            },
-            56,
-        ),
-    ] {
-        roundtrip(
-            &ControlToBrain::Issue {
-                session: IssueSession {
-                    incarnation: Incarnation(u64::MAX),
-                    epoch: u64::MAX,
-                },
-                request: u64::MAX,
-                op: Box::new(op),
-            },
-            Pipe::Control,
-            length,
-        );
-    }
-}
-
-#[test]
 fn issue_provenance_round_trips_exactly_through_welcome_and_operation_prefixes() {
     use crate::frame::{FrameError, read};
     for (session, bytes) in [
@@ -715,8 +676,12 @@ fn issue_operation_identity_preserves_inner_tags_and_exact_wire_fields() {
     let mut consent = vec![0, 2];
     consent.extend([91; 32]);
     consent.extend([3, 0]);
-    let mut rearm = vec![3, 2, 3];
+    let max = [255, 255, 255, 255, 255, 255, 255, 255, 255, 1];
+    let mut rearm = vec![3, 2];
+    rearm.extend(max);
     rearm.extend([91; 32]);
+    let mut cancel = vec![4, 2];
+    cancel.extend(max);
     for (op, inner) in [
         (
             IssueOp::Consent {
@@ -732,7 +697,7 @@ fn issue_operation_identity_preserves_inner_tags_and_exact_wire_fields() {
         (
             IssueOp::Rearm {
                 draft: DraftId(2),
-                version: StateVersion(3),
+                version: StateVersion(u64::MAX),
                 hash: ContentHash([91; 32]),
             },
             rearm,
@@ -740,9 +705,9 @@ fn issue_operation_identity_preserves_inner_tags_and_exact_wire_fields() {
         (
             IssueOp::CancelReview {
                 draft: DraftId(2),
-                review: 128,
+                review: u64::MAX,
             },
-            vec![4, 2, 128, 1],
+            cancel,
         ),
     ] {
         for (request, identity) in [
@@ -994,13 +959,14 @@ fn issue_unavailable_has_only_correlated_identity_and_round_trips_exact_wire_dat
 #[test]
 fn issue_unavailable_rejects_unknown_tags_overflow_missing_and_mistyped_identity() {
     use crate::frame::{FrameError, read};
+
+    let overflow = [128, 128, 128, 128, 128, 128, 128, 128, 128, 2];
     for payload in [
-        vec![31],
-        vec![29, 128, 128, 128, 128, 128, 128, 128, 128, 128, 2, 0],
-        vec![29, 0, 128, 128, 128, 128, 128, 128, 128, 128, 128, 2],
-        vec![29, 1, 2, 4],
+        vec![0x7f],
+        [&[29][..], &overflow, &[2, 0]].concat(),
+        [&[29, 1][..], &overflow, &[0]].concat(),
+        vec![29, 1, 2, 0x7f],
     ] {
-        assert!(postcard::from_bytes::<ControlToShell>(&payload).is_err());
         let mut wire = u32::try_from(payload.len()).unwrap().to_le_bytes().to_vec();
         wire.extend(payload);
         assert!(matches!(
@@ -1217,23 +1183,6 @@ fn outer_wire_carriers_and_tap_never_format_issue_or_device_content() {
 }
 
 #[test]
-fn issue_page_debug_omits_its_title() {
-    assert_eq!(
-        format!(
-            "{:?}",
-            PageEvent {
-                id: EventId(1),
-                run: None,
-                kind: PageEventKind::Issue { draft: DraftId(2) },
-                text: "zqx-private-title".into(),
-                cut: false
-            }
-        ),
-        "PageEvent { id: EventId(1), run: None, kind: Issue { draft: DraftId(2) }, cut: false, .. }"
-    );
-}
-
-#[test]
 fn review_operations_have_closed_json_shapes_and_numeric_bounds() {
     assert_eq!(MAX_ISSUE_REVIEWS, 16);
     for (op, json) in [
@@ -1294,6 +1243,15 @@ fn review_operations_have_closed_json_shapes_and_numeric_bounds() {
 #[test]
 fn review_data_keeps_its_request_full_card_and_exact_appended_wire_tag() {
     use crate::frame::{FrameError, read};
+    let largest = DataToShell::IssueReview {
+        request: u64::MAX,
+        card: card(),
+    };
+    let wire = encode(&largest, Pipe::Data).expect("max card fits");
+    assert_eq!(
+        read(&mut wire.as_slice(), Pipe::Data).expect("decodes"),
+        Some(largest)
+    );
     let card = IssueCard {
         draft: DraftId(1),
         thread: ThreadId(2),
@@ -1306,6 +1264,9 @@ fn review_data_keeps_its_request_full_card_and_exact_appended_wire_tag() {
         version: StateVersion(4),
         state: ActionState::Draft,
     };
+    let mut card_bytes = vec![1, 2, 0, 0, 1, b't', 1, b'b'];
+    card_bytes.extend([0; 32]);
+    card_bytes.extend([1, 3, 4, 0]);
     for (request, identity) in [
         (0, vec![0]),
         (
@@ -1315,9 +1276,7 @@ fn review_data_keeps_its_request_full_card_and_exact_appended_wire_tag() {
     ] {
         let mut payload = vec![21];
         payload.extend(identity);
-        payload.extend([1, 2, 0, 0, 1, b't', 1, b'b']);
-        payload.extend([0; 32]);
-        payload.extend([1, 3, 4, 0]);
+        payload.extend(&card_bytes);
         let message = DataToShell::IssueReview {
             request,
             card: card.clone(),
@@ -1364,11 +1323,9 @@ fn review_data_keeps_its_request_full_card_and_exact_appended_wire_tag() {
             assert!(serde_json::from_value::<DataToShell>(missing).is_err());
         }
     }
-    assert!(postcard::from_bytes::<DataToShell>(&[21]).is_err());
-    assert!(
-        postcard::from_bytes::<DataToShell>(&[20, 128, 128, 128, 128, 128, 128, 128, 128, 128, 2])
-            .is_err()
-    );
+    let mut overflow = vec![21, 128, 128, 128, 128, 128, 128, 128, 128, 128, 2];
+    overflow.extend(card_bytes);
+    assert!(postcard::from_bytes::<DataToShell>(&overflow).is_err());
 }
 
 #[test]

@@ -177,12 +177,11 @@ it, recorded in credentials.db's `control` row; after that each open deletes onl
 legacy staging name as defense against earlier writers. Anyone signed in on an earlier build sees Signed out and
 connects again, and the revocations it still owed are dropped unsent.
 
-Instance capabilities use keyring instead: `instance_entry(session)` is the account
-`capability-<u32>`, and `parse_instance_entry` accepts only canonical decimal accounts.
+Instance capabilities use keyring instead: `instance_entry(session)` formats the account
+`capability-<u32>` with the session ID in decimal.
 On Windows, keyring stores `{account}.{service}`, represented by `instance_target`:
-`capability-7.Kumochi instance`, or `capability-7.Kumochi Dev instance`. An enumerated
-target is not an account and must not be fed directly to the account parser. Existing
-instance callers retain keyring's default mapping. Anthropic paste staging uses
+`capability-7.Kumochi instance`, or `capability-7.Kumochi Dev instance`. Instance callers
+retain keyring's default mapping. Anthropic paste staging uses
 only authority generation names through the raw Windows writer described above;
 `anthropic_staging_target` remains only in legacy cleanup inventories.
 

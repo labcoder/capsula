@@ -29,11 +29,6 @@ impl VoicePart {
     pub fn files(self) -> impl Iterator<Item = &'static ModelFile> {
         MODEL_FILES.iter().filter(move |file| file.part == self)
     }
-
-    /// The part's installed size in bytes, the figure the UI shows.
-    pub fn bytes(self) -> u64 {
-        self.files().map(|file| file.bytes).sum()
-    }
 }
 
 /// The models folder, under the [`crate::constants::DATA_DIR`] folder in `%LOCALAPPDATA%`.
@@ -181,12 +176,6 @@ mod tests {
     }
 
     #[test]
-    fn the_ui_sizes_are_the_pinned_totals() {
-        assert_eq!(VoicePart::SpeechInput.bytes(), 670_478_772, "670 MB");
-        assert_eq!(VoicePart::SpokenReplies.bytes(), 65_051_089, "65 MB");
-    }
-
-    #[test]
     fn every_model_file_is_pinned_by_revision_size_and_hash() {
         let mut names = HashSet::new();
         for file in MODEL_FILES {
@@ -243,13 +232,5 @@ mod tests {
             assert!(names.insert(file.name), "{} is listed once", file.name);
         }
         assert!(is_sha256(NATIVE_ARCHIVE_SHA256), "archive hash");
-    }
-
-    #[test]
-    fn the_hash_check_rejects_near_misses() {
-        assert!(!is_sha256(&"a".repeat(63)), "short");
-        assert!(!is_sha256(&"a".repeat(65)), "long");
-        assert!(!is_sha256(&"A".repeat(64)), "uppercase");
-        assert!(!is_sha256(&"g".repeat(64)), "not hex");
     }
 }

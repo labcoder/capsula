@@ -413,6 +413,8 @@ mod tests {
         }
         let view = SettingsView {
             onboarding_from: OnboardingStep::Shortcut,
+            talk_back: true,
+            stt_unload: SttUnload::After1Hour,
             ..view()
         };
         let bytes = postcard::to_allocvec(&view).expect("encodes");
@@ -420,28 +422,6 @@ mod tests {
             postcard::from_bytes::<SettingsView>(&bytes).expect("decodes"),
             view
         );
-    }
-
-    #[test]
-    fn the_voice_settings_round_trip_in_the_view() {
-        for talk_back in [false, true] {
-            for stt_unload in [
-                SttUnload::Kept,
-                SttUnload::After15Min,
-                SttUnload::After1Hour,
-            ] {
-                let view = SettingsView {
-                    talk_back,
-                    stt_unload,
-                    ..view()
-                };
-                let bytes = postcard::to_allocvec(&view).expect("encodes");
-                assert_eq!(
-                    postcard::from_bytes::<SettingsView>(&bytes).expect("decodes"),
-                    view
-                );
-            }
-        }
     }
 
     #[test]
@@ -472,33 +452,25 @@ mod tests {
                     );
                 }
                 let view = SettingsView {
-                    assistant_name: AssistantName::new("Sentinelname").expect("valid"),
-                    user_name: Some(UserName::new("Sentineluser").expect("valid")),
-                    onboarded: true,
-                    onboarding_from: crate::message::OnboardingStep::Welcome,
-                    main_thread: ThreadId(1),
-                    max_frame_rate: MaxFrameRate::AUTOMATIC,
-                    default_model: None,
                     dock_position: position,
                     show_in_taskbar: shown,
-                    talk_back: false,
-                    stt_unload: SttUnload::Kept,
-                    hold_to_talk: crate::message::DEFAULT_HOLD_TO_TALK,
-                    screen_holds: crate::message::DEFAULT_SCREEN_HOLDS,
-                    show_screen: crate::message::DEFAULT_SHOW_SCREEN,
+                    ..view()
                 };
                 let bytes = postcard::to_allocvec(&view).expect("encodes");
                 assert_eq!(
                     postcard::from_bytes::<SettingsView>(&bytes).expect("decodes"),
                     view
                 );
-                let outer = super::super::ControlToShell::Settings { view, answer: true };
-                let debug = format!("{outer:?}");
-                for marker in ["Sentinelname", "Sentineluser"] {
-                    assert!(!debug.contains(marker));
-                    assert!(!debug.contains(&format!("{:?}", marker.as_bytes())));
-                }
             }
+        }
+        let outer = super::super::ControlToShell::Settings {
+            view: view(),
+            answer: true,
+        };
+        let debug = format!("{outer:?}");
+        for marker in ["Sentinelname", "Sentineluser"] {
+            assert!(!debug.contains(marker));
+            assert!(!debug.contains(&format!("{:?}", marker.as_bytes())));
         }
     }
 
@@ -508,9 +480,9 @@ mod tests {
             let bytes = postcard::to_allocvec(&fps).expect("encodes");
             postcard::from_bytes::<MaxFrameRate>(&bytes).map(MaxFrameRate::fps)
         };
-        assert_eq!(decode(None).ok(), Some(None));
+        assert_eq!(decode(None), Ok(None));
         for fps in [30, 60, 72, 120, 144] {
-            assert_eq!(decode(Some(fps)).ok(), Some(Some(fps)));
+            assert_eq!(decode(Some(fps)), Ok(Some(fps)));
         }
         for fps in [0, 29, 31, 59, 61, 71, 73, 143, 145, u16::MAX] {
             assert!(decode(Some(fps)).is_err(), "{fps}");
@@ -543,22 +515,10 @@ mod tests {
             assert_eq!(ok(bad), Err(NameError::NotOneLine), "{bad:?}");
         }
         assert_eq!(UserName::new("").map(|_| ()), Err(NameError::Empty));
-    }
-
-    #[test]
-    fn an_invalid_name_fails_to_decode() {
         let bytes = postcard::to_allocvec(&"a".repeat(25)).expect("encodes");
         assert!(postcard::from_bytes::<AssistantName>(&bytes).is_err());
-        let bytes = postcard::to_allocvec(&"Kumo").expect("encodes");
+        let bytes = postcard::to_allocvec(&"  Kumo \t").expect("encodes");
         let name: AssistantName = postcard::from_bytes(&bytes).expect("decodes");
         assert_eq!(name.as_str(), "Kumo");
-    }
-
-    #[test]
-    fn debug_prints_only_the_length() {
-        let name = AssistantName::new("Sentinelname").expect("valid");
-        assert_eq!(format!("{name:?}"), "AssistantName(len=12)");
-        let user = Some(UserName::new("Oscarsentinel").expect("valid"));
-        assert!(!format!("{user:?}").contains("Oscarsentinel"));
     }
 }

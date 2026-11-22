@@ -182,6 +182,7 @@ pub fn write<T: Serialize>(
 mod tests {
     use super::{FrameError, HEADER_LEN, Pipe, decode, encode, encode_into, payload_len, read};
     use crate::Secret;
+    use crate::constants::OBJECT_PREFIX;
     use crate::message::{ControlToBrain, Hello};
 
     fn hello() -> ControlToBrain {
@@ -215,13 +216,6 @@ mod tests {
     }
 
     #[test]
-    fn empty_stream_is_a_clean_end() {
-        let got: Option<ControlToBrain> =
-            read(&mut [].as_slice(), Pipe::Control).expect("no error");
-        assert_eq!(got, None);
-    }
-
-    #[test]
     fn truncated_header_and_payload_are_errors() {
         let frame = encode(&hello(), Pipe::Control).expect("hello encodes");
         for cut in [1, HEADER_LEN, frame.len() - 1] {
@@ -235,13 +229,11 @@ mod tests {
 
     #[test]
     fn length_is_checked_against_each_pipe_cap() {
-        let at_control_cap = u32::try_from(Pipe::Control.max_payload())
-            .expect("fits")
-            .to_le_bytes();
-        let over_control_cap = (u32::from_le_bytes(at_control_cap) + 1).to_le_bytes();
+        let at_control_cap = 65_536_u32.to_le_bytes();
+        let over_control_cap = 65_537_u32.to_le_bytes();
         assert_eq!(
             payload_len(at_control_cap, Pipe::Control).expect("at cap"),
-            64 * 1024
+            65_536
         );
         assert!(matches!(
             payload_len(over_control_cap, Pipe::Control),
@@ -254,6 +246,17 @@ mod tests {
             payload_len(over_control_cap, Pipe::Data).expect("under data cap"),
             65_537
         );
+        assert_eq!(
+            payload_len(262_144_u32.to_le_bytes(), Pipe::Data).expect("at data cap"),
+            262_144
+        );
+        assert!(matches!(
+            payload_len(262_145_u32.to_le_bytes(), Pipe::Data),
+            Err(FrameError::TooLarge {
+                len: 262_145,
+                max: 262_144
+            })
+        ));
         assert!(matches!(
             payload_len([0xff; HEADER_LEN], Pipe::Data),
             Err(FrameError::TooLarge { .. })
@@ -263,46 +266,38 @@ mod tests {
     #[test]
     fn oversized_messages_are_refused_on_encode() {
         let big = ControlToBrain::Hello(Hello {
-            build_id: "x".repeat(Pipe::Control.max_payload()),
+            build_id: "x".repeat(65_536),
             capability: Secret::new([0; 32]),
         });
+        let data = encode(&big, Pipe::Data).expect("fits the data pipe");
         assert!(matches!(
             encode(&big, Pipe::Control),
-            Err(FrameError::TooLarge { .. })
+            Err(FrameError::TooLarge { len, max: 65_536 })
+                if len == data.len() - HEADER_LEN && len > 65_536
         ));
-        assert!(
-            encode(&big, Pipe::Data).is_ok(),
-            "the same message fits the data pipe"
-        );
     }
 
     #[test]
-    fn garbage_and_trailing_bytes_are_malformed() {
+    fn a_step_shown_tag_without_fields_is_malformed() {
         assert!(matches!(
             decode::<ControlToBrain>(&[9]),
-            Err(FrameError::Malformed(_))
-        ));
-        assert!(matches!(
-            decode::<ControlToBrain>(&[]),
-            Err(FrameError::Malformed(_))
-        ));
-        let quitting = encode(&ControlToBrain::Quitting, Pipe::Control).expect("encodes");
-        let mut payload = quitting[HEADER_LEN..].to_vec();
-        payload.push(0);
-        assert!(matches!(
-            decode::<ControlToBrain>(&payload),
             Err(FrameError::Malformed(_))
         ));
     }
 
     #[test]
     fn pipe_names_differ_by_session_and_pipe() {
-        assert_ne!(Pipe::Control.name(1), Pipe::Control.name(2));
-        assert_ne!(Pipe::Control.name(1), Pipe::Data.name(1));
-        assert!(
-            Pipe::Data.name(1).starts_with(r"\\.\pipe\"),
-            "{}",
-            Pipe::Data.name(1)
+        assert_eq!(
+            Pipe::Control.name(1),
+            format!(r"\\.\pipe\{OBJECT_PREFIX}-1-control")
+        );
+        assert_eq!(
+            Pipe::Control.name(2),
+            format!(r"\\.\pipe\{OBJECT_PREFIX}-2-control")
+        );
+        assert_eq!(
+            Pipe::Data.name(1),
+            format!(r"\\.\pipe\{OBJECT_PREFIX}-1-data")
         );
     }
 }

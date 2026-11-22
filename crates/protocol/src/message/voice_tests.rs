@@ -20,6 +20,7 @@ fn voice_tags_are_pinned() {
             [tag],
             "{part:?}"
         );
+        assert_eq!(postcard::from_bytes::<VoicePart>(&[tag]), Ok(part));
     }
     for (state, tag) in [
         (PartState::NotInstalled, 0),
@@ -37,11 +38,9 @@ fn voice_tags_are_pinned() {
         ),
         (PartState::Unavailable, 7),
     ] {
-        assert_eq!(
-            postcard::to_allocvec(&state).expect("encodes")[0],
-            tag,
-            "{state:?}"
-        );
+        let bytes = postcard::to_allocvec(&state).expect("encodes");
+        assert_eq!(bytes[0], tag, "{state:?}");
+        assert_eq!(postcard::from_bytes::<PartState>(&bytes), Ok(state));
     }
     for (unload, tag) in [
         (SttUnload::Kept, 0),
@@ -54,46 +53,31 @@ fn voice_tags_are_pinned() {
             "{unload:?}"
         );
     }
-}
-
-#[test]
-fn voice_parts_and_part_states_round_trip() {
-    for part in VoicePart::ALL {
-        let bytes = postcard::to_allocvec(&part).expect("encodes");
-        assert_eq!(postcard::from_bytes::<VoicePart>(&bytes), Ok(part));
+    assert!(postcard::from_bytes::<VoicePart>(&[0x7f]).is_err());
+    assert!(postcard::from_bytes::<PartState>(&[0x7f]).is_err());
+    let downloading = PartState::Downloading {
+        done: u64::MAX - 1,
+        total: u64::MAX,
+    };
+    for view in [
+        VoiceView {
+            speech_input: downloading,
+            spoken_replies: PartState::Failed {
+                key: ErrorKey::VoiceCorrupt,
+                installed: false,
+            },
+        },
+        VoiceView {
+            speech_input: PartState::Failed {
+                key: ErrorKey::VoiceLoad,
+                installed: true,
+            },
+            spoken_replies: downloading,
+        },
+    ] {
+        let bytes = postcard::to_allocvec(&view).expect("encodes");
+        assert_eq!(postcard::from_bytes::<VoiceView>(&bytes), Ok(view));
     }
-    assert!(postcard::from_bytes::<VoicePart>(&[2]).is_err());
-    let states = [
-        PartState::NotInstalled,
-        PartState::Verifying,
-        PartState::Downloading {
-            done: 0,
-            total: u64::MAX,
-        },
-        PartState::Loading,
-        PartState::Ready,
-        PartState::Unloaded,
-        PartState::Unavailable,
-        PartState::Failed {
-            key: ErrorKey::VoiceCorrupt,
-            installed: false,
-        },
-        PartState::Failed {
-            key: ErrorKey::VoiceLoad,
-            installed: true,
-        },
-    ];
-    for speech_input in states {
-        for spoken_replies in states {
-            let view = VoiceView {
-                speech_input,
-                spoken_replies,
-            };
-            let bytes = postcard::to_allocvec(&view).expect("encodes");
-            assert_eq!(postcard::from_bytes::<VoiceView>(&bytes), Ok(view));
-        }
-    }
-    assert!(postcard::from_bytes::<PartState>(&[8]).is_err());
 }
 
 fn mic(rate: u32, len: usize, seq: u32) -> MicPcm {

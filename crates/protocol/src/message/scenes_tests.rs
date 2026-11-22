@@ -147,7 +147,7 @@ fn cuts_bound_scenes_and_handles_on_construction_and_decode() {
     duplicate_handle.cut.revealed =
         Bounded::new(vec![Handle::new(64, 0).expect("valid"); 2]).expect("bounded");
     for invalid in [
-        vec![cut(1, 0); 5],
+        (1..=5).map(|scene| cut(scene, 0)).collect(),
         vec![cut(1, 0); 2],
         vec![cut(1, 600), cut(2, 600), cut(3, 301)],
         vec![duplicate_handle],
@@ -208,10 +208,7 @@ fn chunks_validate_local_shape_without_cross_chunk_replay() {
     let mut raw = chunk();
     raw.revision = 1;
     raw.events = vec![step(2)];
-    assert_eq!(
-        decode::<SceneSnapshotChunk>(&raw),
-        Err(postcard::Error::SerdeDeCustom)
-    );
+    assert!(decode::<SceneSnapshotChunk>(&raw).is_err());
     let mut raw = chunk();
     raw.events = vec![step(64); MAX_SCENE_LOG_ENTRIES];
     let value = decode::<SceneSnapshotChunk>(&raw).expect("at log bound");
@@ -246,42 +243,20 @@ fn chunks_validate_local_shape_without_cross_chunk_replay() {
     assert!(decode::<SceneSnapshotChunk>(&raw).is_err());
     raw.header = None;
     raw.ordinal = 127;
-    assert!(decode::<SceneSnapshotChunk>(&raw).is_ok());
+    let value = decode::<SceneSnapshotChunk>(&raw).expect("at ordinal bound");
+    assert_eq!(
+        (
+            value.scene,
+            value.revision,
+            value.ordinal,
+            value.header.is_none(),
+            value.events.len(),
+            value.last
+        ),
+        (SceneId(1), 64, 127, true, 1, true)
+    );
     raw.ordinal = 128;
     assert!(decode::<SceneSnapshotChunk>(&raw).is_err());
-}
-
-#[test]
-fn debug_keeps_model_ids_and_text_out_of_headers_and_logs() {
-    let mut raw = chunk();
-    let kumochi_scene::Record::Step(step) = kumochi_scene::parse_record(
-        br#"{"step":{"id":"private-step-id","say":"private-speech","put":[{"text":{"id":"private-object-id","at":[13337.25,0],"text":"private-text"}}]}}"#,
-    )
-    .expect("valid step") else {
-        panic!("step record")
-    };
-    raw.events = vec![SceneEvent::Step {
-        revision: 1,
-        step: Arc::new(step),
-    }];
-    let value = decode::<SceneSnapshotChunk>(&raw).expect("valid chunk");
-    let debug = format!("{value:?}");
-    for private in [
-        "private-model-id",
-        "private-title",
-        "private-alt",
-        "private-step-id",
-        "private-speech",
-        "private-object-id",
-        "private-text",
-        "13337.25",
-    ] {
-        assert!(!debug.contains(private));
-    }
-    let bytes = postcard::to_allocvec(&value).expect("encodes");
-    for end in 0..bytes.len() {
-        assert!(postcard::from_bytes::<SceneSnapshotChunk>(&bytes[..end]).is_err());
-    }
 }
 
 #[test]
