@@ -159,7 +159,9 @@ fn a_fragmented_welcome_uses_one_absolute_deadline() {
         let writes = scope.spawn(move || {
             let deadline = Instant::now() + budget;
             ready.send(deadline).expect("publish the fixture deadline");
-            let fragment_time = deadline - Duration::from_millis(400);
+            let fragment_time = deadline
+                .checked_sub(Duration::from_millis(400))
+                .expect("fragment time is within the fixture budget");
             thread::sleep(fragment_time.saturating_duration_since(Instant::now()));
             server
                 .write_all(&wire[HEADER_LEN..=HEADER_LEN])

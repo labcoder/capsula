@@ -420,11 +420,14 @@ mod tests {
         }
     }
 
-    struct TerminalFixture(Fixture);
+    struct TerminalFixture {
+        fixture: Fixture,
+        read_after_terminal: bool,
+    }
 
     impl Wire for &mut TerminalFixture {
         fn send(&mut self, message: &ControlToBrain) -> Result<()> {
-            (&mut self.0).send(message)
+            (&mut self.fixture).send(message)
         }
 
         fn until<T>(
@@ -432,8 +435,8 @@ mod tests {
             limit: Duration,
             pick: impl FnMut(&Frame) -> Option<T>,
         ) -> Result<T> {
-            assert!(!self.0.frames.is_empty(), "read after terminal discovery");
-            (&mut self.0).until(limit, pick)
+            self.read_after_terminal |= self.fixture.frames.is_empty();
+            (&mut self.fixture).until(limit, pick)
         }
     }
 
@@ -540,15 +543,19 @@ mod tests {
         ];
         for (found, words) in cases {
             // Today's main ships `Undecided`: discovery ends at the first case.
-            let mut brain = TerminalFixture(fixture(vec![
-                Step::View(ClaudeCodeView::NotFound),
-                Step::View(found),
-            ]));
+            let mut brain = TerminalFixture {
+                fixture: fixture(vec![
+                    Step::View(ClaudeCodeView::NotFound),
+                    Step::View(found),
+                ]),
+                read_after_terminal: false,
+            };
             let (out, error, quit_sent) = run_observed(&mut brain, Ask::SignIn);
+            assert!(!brain.read_after_terminal, "read after terminal discovery");
             assert!(out.contains(words), "{out}");
             let error = error.expect("unavailable state is refused");
             assert!(error.contains(words), "{error}");
-            assert_eq!(brain.0.sent, [QUIT]);
+            assert_eq!(brain.fixture.sent, [QUIT]);
             assert!(quit_sent);
         }
     }
