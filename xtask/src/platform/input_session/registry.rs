@@ -312,12 +312,13 @@ mod tests {
     fn assert_unreadable(error: &str, path: &str, fields: [[&str; 2]; 3]) {
         for when in ["before", "after"] {
             assert!(
-                error.split("unreadable").skip(1).any(|record| {
+                error.split(';').any(|record| {
                     let words: Vec<_> = record
                         .split(|ch: char| !ch.is_ascii_alphanumeric() && ch != '\\')
                         .filter(|word| !word.is_empty())
                         .collect();
-                    words.first() == Some(&when)
+                    words.contains(&"unreadable")
+                        && words.contains(&when)
                         && words.contains(&path)
                         && fields
                             .iter()

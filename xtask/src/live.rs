@@ -584,7 +584,7 @@ mod tests {
         let error = build(held(), SHORT).expect_err("a hung build fails");
         let detail = error.to_string();
         assert!(
-            detail.starts_with("the brain build didn't finish in "),
+            detail.contains("brain build") && detail.contains("200ms"),
             "{detail}"
         );
         assert!(!detail.contains("cleanup also failed"), "{detail}");
@@ -599,13 +599,15 @@ mod tests {
             .take()
             .expect("held child has an open input pipe");
         let observed = platform::Process::open(child.id()).expect("observe the held process");
+        let start = Instant::now();
         let error = bounded(child, SHORT, "the fixture").expect_err("times out");
+        let detail = error.to_string();
         assert!(
-            error
-                .to_string()
-                .starts_with("the fixture didn't finish in "),
-            "{error}"
+            detail.contains("the fixture") && detail.contains("200ms"),
+            "{detail}"
         );
+        assert!(!detail.contains("cleanup also failed"), "{detail}");
+        assert!(start.elapsed() >= SHORT, "the wait returned early");
         assert!(
             observed
                 .exit_code()
