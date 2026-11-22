@@ -2745,7 +2745,10 @@ fn queued_hold_waits_for_its_saved_preferences_and_rejects_another_run_origin() 
     };
     assert_ne!(output, OutputGeneration(0));
     acknowledge_queued(&link.control, output);
-    assert!(!link.handle.admits_voice(generation), "Show Screen is on");
+    assert!(
+        link.handle.admits_voice(generation),
+        "a known Show Screen admits"
+    );
 
     for op in [
         SettingsOp::SetTaskbar(false),
@@ -2805,6 +2808,99 @@ fn queued_hold_waits_for_its_saved_preferences_and_rejects_another_run_origin() 
         link.handle.voice_stop_pending(),
         "closing the pair didn't settle the real microphone debt"
     );
+}
+
+#[test]
+fn a_queued_screen_release_goes_only_while_its_hold_listens_unrevoked() {
+    use kumochi_protocol::geometry::{PhysicalPoint, PointerPath, ReleasePointer};
+    use kumochi_protocol::message::{
+        GestureId, HoldStatus, LeaseGeneration, NoticeRevision, SettingsOp, SettingsView,
+    };
+
+    // (the shell turns Show Screen off itself, the brain's answer changes it)
+    for (sent, answered) in [(false, false), (true, false), (false, true)] {
+        let link = attended_queued("queued-screen-release");
+        let events = patient(link.events);
+        let session = connected(next(&events));
+        let generation = session.generation();
+        let gesture = GestureId(41);
+        let send = |msg| frame::write(&mut &link.control, &msg, Pipe::Control).unwrap();
+        let receive = || frame::read(&mut &link.control, Pipe::Control).unwrap();
+        let settings = |show_screen| {
+            send(ControlToShell::Settings {
+                view: SettingsView {
+                    show_screen,
+                    ..settings_view()
+                },
+                answer: false,
+            });
+            assert!(
+                matches!(next(&events), LinkEvent::Settings { generation: actual, .. } if actual == generation)
+            );
+        };
+        settings(true);
+        let Some(ControlToBrain::QueuedAudioOutput(_, output)) = receive() else {
+            panic!("the pair offers its logical output");
+        };
+        acknowledge_queued(&link.control, output);
+        let recognized = ControlToBrain::ScreenHoldRecognized {
+            gesture,
+            thread: None,
+            selection: 1,
+            t_qpc: 1,
+            notice: Some(NoticeRevision::FIRST),
+        };
+        let released = ControlToBrain::ScreenRelease {
+            gesture,
+            lease: LeaseGeneration(1),
+            t_qpc: 2,
+            excluded_qpc: 2,
+            pointer: ReleasePointer(PhysicalPoint([5, 5])),
+            path: PointerPath(Vec::new()),
+            notice: Some(NoticeRevision::FIRST),
+        };
+        link.handle.track_input(gesture);
+        assert!(link.handle.send_control(&session, recognized.clone()));
+        assert_eq!(receive(), Some(recognized));
+        assert!(
+            !link.handle.send_control(&session, released.clone()),
+            "the hold isn't listening yet"
+        );
+        send(ControlToShell::VoiceHoldStatus {
+            gesture,
+            status: HoldStatus::Admitted,
+        });
+        assert!(
+            matches!(next(&events), LinkEvent::VoiceHold { gesture: key, status: HoldStatus::Admitted, .. } if key == gesture)
+        );
+        if sent {
+            let off = ControlToBrain::Settings(SettingsOp::SetShowScreen(false));
+            assert!(link.handle.send_control(&session, off.clone()));
+            assert_eq!(receive(), Some(ControlToBrain::GestureCancel { gesture }));
+            assert_eq!(receive(), Some(off));
+        }
+        if answered {
+            settings(false);
+        }
+        let revoked = sent || answered;
+        assert_eq!(
+            link.handle.send_control(&session, released.clone()),
+            !revoked,
+            "sent {sent}, answered {answered}"
+        );
+        if !revoked {
+            assert_eq!(receive(), Some(released));
+        }
+        send(run_state(
+            1,
+            ThreadId(1),
+            Phase::Thinking,
+            Some(RunOrigin::Hold {
+                gesture: GestureId(42),
+            }),
+        ));
+        queued_pair_closed(link.link, &link.control, &link.data);
+    }
 }
 
 #[test]

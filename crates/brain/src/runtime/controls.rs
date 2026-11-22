@@ -48,17 +48,17 @@ impl Registration {
             {
                 Err(Ended::Broken("queued audio output withdrawn"))
             }
-            ControlToBrain::KeyDown { .. } | ControlToBrain::VoiceHoldRecognized { .. }
+            ControlToBrain::KeyDown { .. }
+            | ControlToBrain::VoiceHoldRecognized { .. }
+            | ControlToBrain::ScreenHoldRecognized { .. }
                 if self == Self::Awaiting =>
             {
                 Err(Ended::Broken("hold before queued audio registration"))
             }
-            ControlToBrain::HoldRecognized { .. } | ControlToBrain::ScreenHoldRecognized { .. } => {
-                Err(Ended::Broken(match self {
-                    Self::Awaiting => "hold before queued audio registration",
-                    Self::Applied(_) => "hold on a Plain queued connection",
-                }))
-            }
+            ControlToBrain::HoldRecognized { .. } => Err(Ended::Broken(match self {
+                Self::Awaiting => "hold before queued audio registration",
+                Self::Applied(_) => "hold on a Plain queued connection",
+            })),
             _ => Ok(None),
         }
     }

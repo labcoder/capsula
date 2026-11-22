@@ -740,7 +740,8 @@ impl Shared {
                     && self.output.queued_hold_ready(generation)
                     && out.try_send(message).is_ok();
             }
-            ControlToBrain::VoiceHoldRecognized { gesture, .. } => {
+            ControlToBrain::VoiceHoldRecognized { gesture, .. }
+            | ControlToBrain::ScreenHoldRecognized { gesture, .. } => {
                 if hold.is_some()
                     || input.consent_answers != 0
                     || !self.input_is(*gesture)
@@ -750,11 +751,13 @@ impl Shared {
                 }
                 Some(QueuedHold::Recognized(*gesture))
             }
-            ControlToBrain::KeyUp { gesture, .. } => {
+            ControlToBrain::KeyUp { gesture, .. }
+            | ControlToBrain::ScreenRelease { gesture, .. } => {
                 if *hold != Some(QueuedHold::Listening(*gesture)) || !self.input_is(*gesture) {
                     return false;
                 }
-                Some(QueuedHold::Released(*gesture))
+                matches!(message, ControlToBrain::KeyUp { .. })
+                    .then_some(QueuedHold::Released(*gesture))
             }
             ControlToBrain::GestureCancel { gesture } if matches!(hold, Some(QueuedHold::Recognized(id) | QueuedHold::Listening(id)) if id == gesture) => {
                 Some(QueuedHold::Cancelled(*gesture))
@@ -1010,7 +1013,6 @@ impl LinkHandle {
             && matches!(
                 &message,
                 ControlToBrain::HoldRecognized { .. }
-                    | ControlToBrain::ScreenHoldRecognized { .. }
                     | ControlToBrain::Warm { .. }
                     | ControlToBrain::Settings(SettingsOp::SetTalkBack(_))
             )
@@ -2039,7 +2041,10 @@ fn watch(
             }
             Ok(Some(ControlToShell::Settings { view, answer })) => {
                 if queued.is_some() {
-                    if view.show_screen {
+                    if shared
+                        .output
+                        .show_screen_changes(generation, view.show_screen)
+                    {
                         let _revoked = shared.revoke_input();
                     }
                     if let Err(reason) = shared

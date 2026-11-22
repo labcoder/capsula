@@ -992,9 +992,8 @@ impl Presence {
         let settings = self.settings.read(cx);
         let consent_pending = queued
             && (!self.link.admits_voice(stamp.session)
-                || settings.view().is_none_or(|view| view.show_screen)
-                || settings.show_screen_pending()
-                || self.voice.gates.offer_of(gesture).is_some());
+                || settings.view().is_none()
+                || settings.show_screen_pending());
         if let Some(notice) = settings.hold_to_talk_notice().or_else(|| {
             (consent_pending || self.link.voice_stop_pending()).then_some(Text::TurnBusy)
         }) {
@@ -1067,9 +1066,7 @@ impl Presence {
         // Nothing of the screen is taken now, after every refusal above. The runs model reads
         // the notice the dock's icon shows, and its answer says which hold this is.
         // Only the offer its first input was seen under, and only while it is still published.
-        let (offer, request) = if queued {
-            (None, self.runs.begin_hold(gesture, None))
-        } else {
+        let (offer, request) = {
             let offer = self
                 .voice
                 .gates
