@@ -356,7 +356,7 @@ fn json(
                 name,
                 arguments,
             } => {
-                let input = serde_json::from_str::<Value>(arguments)
+                let input = literal(arguments.as_bytes())
                     .ok()
                     .filter(Value::is_object)
                     .ok_or(BodyError::Arguments)?;

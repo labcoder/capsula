@@ -252,6 +252,31 @@ fn only_a_request_for_the_key_with_instructions_builds() {
     assert_eq!(error(&bare), Some(BodyError::NoInstructions));
 }
 
+/// A stored call's arguments go out as stored: a member with `serde_json`'s raw-value name stays an
+/// ordinary member, and a repeated name builds nothing rather than one copy winning.
+#[test]
+fn stored_arguments_are_sent_as_stored_or_build_nothing() {
+    let marked = r#"{"$serde_json::private::RawValue":"{\"query\":\"other\"}"}"#;
+    let (_, conversation) = body(
+        &request(vec![
+            call("call_1", "search_history", marked),
+            output("call_1", "ok"),
+        ]),
+        TAG,
+    )
+    .expect("a body");
+    let wire = conversation.wire().expect("json").0;
+    let wire = String::from_utf8_lossy(&wire);
+    assert!(wire.contains(&format!(r#""input":{marked}"#)), "{wire}");
+    refused(
+        vec![
+            call("call_1", "search_history", r#"{"query":"a","query":"b"}"#),
+            output("call_1", "ok"),
+        ],
+        BodyError::Arguments,
+    );
+}
+
 #[test]
 fn arguments_names_and_native_items_outside_the_closed_set_build_nothing() {
     for arguments in ["", "{", "{} x", "[1]", "\"text\"", "null", "7"] {
