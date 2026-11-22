@@ -422,7 +422,7 @@ impl Worker {
                 revoked,
             }
         });
-        let view = if self.engine.queue.stopped || self.stop_cutoff.is_some() {
+        let view = if self.engine.queue.stopped {
             View::Fenced
         } else {
             next.view

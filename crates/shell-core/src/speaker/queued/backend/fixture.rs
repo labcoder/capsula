@@ -68,6 +68,22 @@ impl FixturePlayback {
     }
 }
 
+#[cfg(all(test, windows))]
+mod tests {
+    use super::{Control, FixturePlayback};
+
+    impl FixturePlayback {
+        pub(crate) fn render_during_copy(
+            &mut self,
+            samples: &mut [f32],
+            action: impl FnOnce(&Control),
+        ) {
+            self.callback
+                .fill_during_copy(samples, self.origin.elapsed(), action);
+        }
+    }
+}
+
 pub(in crate::speaker::queued) fn spawn_fake(
     owner: Thread,
     origin: Instant,

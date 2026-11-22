@@ -3390,6 +3390,97 @@ fn queued_replacement_with_unproved_quiet_needs_retry_without_clearing_debt() {
 }
 
 #[test]
+fn queued_stop_with_a_late_fade_allows_a_fresh_hold_and_typed_turn() {
+    use crate::speaker::DRAIN;
+    use kumochi_protocol::message::{GestureId, HoldStatus};
+
+    let _device = serialize_playback();
+    let (device, playback) = std::sync::mpsc::sync_channel(1);
+    let link = attended_queued_shared(
+        "queued-stop-deadline-old",
+        Arc::new(Shared {
+            fake_playback: Some(device),
+            ..Shared::default()
+        }),
+    );
+    let events = patient(link.events.clone());
+    let (session, output) = queued_named_run(&link, &events);
+    let mut playback = stage_queued_pcm(&link.data, &playback, output);
+    let deadline = Instant::now() + PATIENCE;
+    while !playback.ready() {
+        assert!(Instant::now() < deadline, "the old route stages source");
+        thread::sleep(Duration::from_millis(2));
+    }
+    let run = RunId(7);
+    let mut tail = [99.0; 180];
+    playback.render_during_copy(&mut tail, |control| {
+        frame::write(
+            &mut &link.control,
+            &ControlToShell::SpeechRevoked { run },
+            Pipe::Control,
+        )
+        .unwrap();
+        let limit = Instant::now() + PATIENCE;
+        while !control.stopped() {
+            assert!(
+                Instant::now() < limit,
+                "revoke immediately fences new copies"
+            );
+            thread::sleep(Duration::from_millis(2));
+        }
+        thread::sleep(DRAIN + Duration::from_millis(20));
+        assert_eq!(control.fenced_handoff(), None);
+    });
+    assert!(
+        tail[..60]
+            .iter()
+            .all(|frame| frame.to_bits() == (9_000.0_f32 / 32_768.0).to_bits())
+    );
+    assert_eq!(tail[179].to_bits(), 0);
+    assert_eq!(
+        frame::read(&mut &link.control, Pipe::Control).unwrap(),
+        Some(ControlToBrain::SpeechStopped { run, cursor: None })
+    );
+    drop(link.control);
+    assert!(link.link.join().unwrap());
+    assert_queued_retry_after_local_quiet(&link.handle, &session, "queued-stop-deadline-new");
+
+    let hold = attended_shared(
+        "late-fade-hold",
+        Arc::clone(&link.handle.shared),
+        Incarnation(1),
+    );
+    let events = patient(hold.events);
+    let session = connected(next(&events));
+    let gesture = GestureId(2);
+    let offer = ControlToBrain::VoiceHoldRecognized {
+        gesture,
+        thread: None,
+        selection: 0,
+    };
+    assert!(hold.handle.send_control(&session, offer.clone()));
+    assert_eq!(
+        frame::read(&mut &hold.control, Pipe::Control).unwrap(),
+        Some(offer)
+    );
+    frame::write(
+        &mut &hold.control,
+        &ControlToShell::VoiceHoldStatus {
+            gesture,
+            status: HoldStatus::Admitted,
+        },
+        Pipe::Control,
+    )
+    .unwrap();
+    assert!(matches!(
+        next(&events),
+        LinkEvent::VoiceHold { gesture: id, status: HoldStatus::Admitted, .. } if id == gesture
+    ));
+    hold.handle.end(&session);
+    queued_pair_closed(hold.link, &hold.control, &hold.data);
+}
+
+#[test]
 fn queued_no_source_disconnect_allows_retry_before_or_after_wire_quiet() {
     for revoke_first in [false, true] {
         let link = attended_queued("queued-no-source-old");
