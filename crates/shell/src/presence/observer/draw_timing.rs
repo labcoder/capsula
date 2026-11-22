@@ -3,12 +3,12 @@
 use std::{cell::Cell, fmt, rc::Rc};
 
 use gpui_kit::App;
-#[cfg(debug_assertions)]
+#[cfg(any(debug_assertions, all(windows, feature = "gate-draw-replay")))]
 use kumochi_protocol::constants::ProductIdentity;
 use kumochi_protocol::message::{MAX_VISIBLE_SCENES, SceneId};
 use kumochi_shell_core::presenter::{DrawKey, DrawTiming, Presenter};
 
-#[cfg(debug_assertions)]
+#[cfg(any(debug_assertions, all(windows, feature = "gate-draw-replay")))]
 use super::super::Launch;
 use super::{Observer, Record, Shared};
 use crate::platform;
@@ -16,14 +16,24 @@ use crate::platform;
 type Observation = (SceneId, u64, u32);
 type Observations = [Option<Observation>; MAX_VISIBLE_SCENES];
 
-#[cfg(debug_assertions)]
+#[cfg(any(debug_assertions, all(windows, feature = "gate-draw-replay")))]
 #[derive(Debug)]
 pub(super) struct DrawFixture(bool);
 
-#[cfg(debug_assertions)]
+#[cfg(any(debug_assertions, all(windows, feature = "gate-draw-replay")))]
 impl DrawFixture {
     pub(super) fn new(identity: ProductIdentity, launch: &Launch, mode: Option<&str>) -> Self {
         Self(identity == ProductIdentity::GATE && launch.draw_timing && mode == Some("draw"))
+    }
+
+    pub(super) fn require(&self) -> std::io::Result<()> {
+        if self.0 {
+            Ok(())
+        } else {
+            Err(std::io::Error::other(
+                "release drawing replay requires Gate identity and draw mode",
+            ))
+        }
     }
 
     pub(super) fn take(&mut self) -> Option<&'static str> {
@@ -245,7 +255,7 @@ mod tests {
         );
     }
 
-    #[cfg(debug_assertions)]
+    #[cfg(any(debug_assertions, all(windows, feature = "gate-draw-replay")))]
     #[test]
     fn only_the_debug_gate_draw_observer_arms_one_fixed_fixture_draft() {
         use ProductIdentity as Identity;

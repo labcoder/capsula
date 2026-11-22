@@ -88,13 +88,17 @@ impl Prebuilt {
             .parent()
             .context("missing owned launch directory")?
             .join("bin");
-        fs::create_dir(&bin)?;
+        self.stage_into(release, &bin)?;
+        Ok(bin)
+    }
+
+    pub(crate) fn stage_into(&self, release: &Path, bin: &Path) -> Result<()> {
+        fs::create_dir(bin)?;
         for name in [SHELL_EXE, BRAIN_EXE] {
             fs::copy(release.join(name), bin.join(name))
                 .with_context(|| format!("staging prebuilt {name}"))?;
         }
-        self.verify(&bin)?;
-        Ok(bin)
+        self.verify(bin)
     }
 
     pub(crate) fn verify(&self, dir: &Path) -> Result<()> {

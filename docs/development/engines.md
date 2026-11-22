@@ -595,3 +595,8 @@ line's content is ever logged, and every type here prints only kinds, lengths an
 connection to show; it's never a reason to refuse the route. The recordings in
 `fixtures/claude-code/` are checked by a normal test: no decoded string may hold a drive, UNC or
 `/`-rooted path, `Users\`, or a UUID other than the all-zero placeholder.
+
+The [offline drawing timing gate](input.md#offline-drawing-timing) reuses the Responses
+parser with a fixed in-memory HTTP/SSE transport. In an opted-in release build, the
+Gate identity, draw mode, one-run budget, fixed replay model and fresh receipt are
+required. The fixture can't fall back to the account engine.

@@ -232,7 +232,7 @@ struct Out<'a, const REPLAY: bool> {
     stamp: Option<Stamp>,
 }
 
-#[cfg(all(windows, debug_assertions))]
+#[cfg(all(windows, any(debug_assertions, feature = "gate-draw-replay")))]
 pub(super) async fn replay_round(
     connect: impl Connect,
     request: &RunRequest,
@@ -260,6 +260,7 @@ pub(super) async fn replay_round(
     let out = Out::<true> {
         round: &mut round,
         events,
+        #[cfg(all(windows, debug_assertions))]
         stamp: None,
     };
     let result = crate::connections::model::stream(
@@ -293,7 +294,7 @@ impl<const REPLAY: bool> Events for Out<'_, REPLAY> {
 
     async fn taken(&mut self) -> ControlFlow<()> {
         for event in self.round.take() {
-            #[cfg(all(windows, debug_assertions))]
+            #[cfg(all(windows, any(debug_assertions, feature = "gate-draw-replay")))]
             let event = if REPLAY {
                 match event {
                     TurnEvent::ToolArgsDelta { call, delta } => {
