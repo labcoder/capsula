@@ -389,7 +389,9 @@ whether its build matches. A shell that meets a brain from another build waits f
 exit and starts the one beside itself.
 
 After authenticating both legs as one process, the brain reads that pair's single
-`TextMetrics` frame within the existing handshake deadline. It rejects a declared payload
+`TextMetrics` frame. Both Hello modes use one absolute deadline for connecting the data leg,
+reading its Hello and accepting its metrics. A completed frame at or after the deadline
+doesn't start the session. The brain rejects a declared payload
 over 304 bytes before allocating or reading the body. The optional profile has 99 postcard
 `u16` values in 1/1024 em: advances for U+0020–U+007E in order, line height, then the CJK,
 remaining BMP and wide-exception maxima. An explicit `None` or a decoded profile with any

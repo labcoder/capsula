@@ -7,9 +7,16 @@ use std::{collections::VecDeque, fmt};
 
 use kumochi_protocol::frame::Pipe;
 use kumochi_protocol::message::{DataToShell, SceneId, SceneSnapshotChunk, Step};
+use tokio::time::Instant;
 
 use crate::drawing::{CHUNK_TARGET, ReaccountJob, Reaccounted};
 use crate::store::SceneState;
+
+pub(super) struct Barrier {
+    pub(super) deadline: Instant,
+    /// Required state was observed settled before the deadline.
+    pub(super) settled: bool,
+}
 
 /// One worker at a time across connection attempts, including a cancelled worker winding down.
 #[derive(Debug)]
@@ -21,11 +28,18 @@ pub(super) struct Reaccount {
 
 impl Reaccount {
     pub(super) fn start(source: ReaccountJob) -> Self {
+        Self::spawn(source, ReaccountJob::run)
+    }
+
+    pub(super) fn spawn(
+        source: ReaccountJob,
+        run: impl FnOnce(&ReaccountJob, &AtomicBool) -> Option<Reaccounted> + Send + 'static,
+    ) -> Self {
         let source = Arc::new(source);
         let cancel = Arc::new(AtomicBool::new(false));
         let job = Arc::clone(&source);
         let signal = Arc::clone(&cancel);
-        let task = tokio::task::spawn_blocking(move || job.run(&signal));
+        let task = tokio::task::spawn_blocking(move || run(&job, &signal));
         Self {
             source,
             cancel,
@@ -39,15 +53,21 @@ impl Reaccount {
     }
 }
 
-pub(super) async fn reaccounted(
-    pending: &mut Option<Reaccount>,
-) -> (Arc<ReaccountJob>, Option<Reaccounted>) {
+pub(super) struct ReaccountReceipt {
+    pub(super) source: Arc<ReaccountJob>,
+    pub(super) result: Option<Reaccounted>,
+}
+
+pub(super) async fn reaccounted(pending: &mut Option<Reaccount>) -> Option<ReaccountReceipt> {
     let Some(replay) = pending.as_mut() else {
         return std::future::pending().await;
     };
     let result = (&mut replay.task).await.ok().flatten();
     let finished = pending.take().expect("a replay just finished");
-    (finished.source, result)
+    (!finished.cancel.load(Ordering::Relaxed)).then_some(ReaccountReceipt {
+        source: finished.source,
+        result,
+    })
 }
 
 /// A step's encoding beyond its label: the label's length prefix, at most 2 bytes for a label

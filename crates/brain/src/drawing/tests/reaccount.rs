@@ -27,6 +27,21 @@ fn shown(run: u64, index: u32) -> Input {
     }
 }
 
+fn wide_text(step: &str, x: u16, glyphs: usize) -> String {
+    format!(
+        r#"{{"id":"{step}","put":[{{"text":{{"id":"long","text":"{}","at":[{x},100],"align":"left"}}}}]}}"#,
+        "W".repeat(glyphs)
+    )
+}
+
+fn geometry_error(step: &str) -> CallError {
+    CallError::Step(StepError {
+        step: Some(wire(step)),
+        path: kumochi_scene::FieldPath::default(),
+        code: ErrorCode::OutOfRange,
+    })
+}
+
 #[test]
 fn negotiated_wrap_increases_a_dashed_leader_past_the_paint_cap_before_write() {
     for (profile, x, expected) in [
@@ -65,33 +80,77 @@ fn negotiated_wrap_increases_a_dashed_leader_past_the_paint_cap_before_write() {
 
 #[test]
 fn a_valid_extreme_advance_cannot_write_a_dimension_overflow_uncounted() {
+    let profile = Some(metrics(8192));
+    for timed_out in [false, true] {
+        let mut drawing = Drawing::default();
+        if !timed_out {
+            assert!(drawing.reaccount(1, profile).is_none());
+        }
+        let mut store = Store::default();
+        store.run(
+            &mut drawing,
+            call(1, "base", args("one", &[text("base", "a")])),
+        );
+        store.run(&mut drawing, shown(1, 0));
+        if timed_out {
+            drawing.use_uncounted_measure(profile);
+            assert!(drawing.scenes[0].paint.is_none());
+        }
+        let first = drawing.snapshot().chunks;
+        let log = store.log(SceneId(1)).clone();
+        // 380 glyphs exceed the measured width cap; 100 fit individually but reach x=21,000.
+        for (run, x, glyphs) in [(2, 0, 380), (3, 9000, 100)] {
+            let refused = store.run(
+                &mut drawing,
+                call(
+                    run,
+                    "extreme",
+                    args("one", &[wide_text("overflow", x, glyphs)]),
+                ),
+            );
+            assert_eq!(refused.calls[0].error, Some(geometry_error("overflow")));
+            assert_eq!(*store.log(SceneId(1)), log);
+            assert_eq!(drawing.snapshot().chunks, first);
+        }
+        let accepted = store.run(
+            &mut drawing,
+            call(4, "valid", args("one", &[text("valid", "ordinary")])),
+        );
+        assert_eq!(accepted.calls[0].error, None);
+        assert_eq!(accepted.calls[0].drawn, [wire("valid")]);
+        assert_eq!(store.log(SceneId(1)).len(), 2);
+        assert_eq!(drawing.scenes[0].paint.is_none(), timed_out);
+    }
+}
+
+#[test]
+fn a_job_that_cannot_start_does_not_write_a_negotiated_continuation() {
     let mut drawing = Drawing::default();
-    assert!(drawing.reaccount(1, Some(metrics(8192))).is_none());
     let mut store = Store::default();
     store.run(
         &mut drawing,
         call(1, "base", args("one", &[text("base", "a")])),
     );
     store.run(&mut drawing, shown(1, 0));
-    let first = drawing.snapshot().chunks;
-    // 380 glyphs exceed the measured width cap; 100 fit individually but reach x=21,000.
-    for (run, x, glyphs) in [(2, 0, 380), (3, 9000, 100)] {
-        let too_wide = format!(
-            r#"{{"id":"overflow","put":[{{"text":{{"id":"long","text":"{}","at":[{x},100],"align":"left"}}}}]}}"#,
-            "W".repeat(glyphs)
-        );
-        let refused = store.run(&mut drawing, call(run, "extreme", args("one", &[too_wide])));
-        assert_eq!(
-            refused.calls[0].error,
-            Some(CallError::Step(StepError {
-                step: Some(wire("overflow")),
-                path: kumochi_scene::FieldPath::default(),
-                code: ErrorCode::OutOfRange,
-            }))
-        );
-        assert_eq!(store.log(SceneId(1)).len(), 1);
-        assert_eq!(drawing.snapshot().chunks, first);
-    }
+    drawing.use_uncounted_measure(Some(metrics(2048)));
+    drawing.defer_preparation = true;
+    let log = store.log(SceneId(1)).clone();
+
+    let pending = drawing
+        .handle(call(2, "later", args("one", &[text("later", "new")])))
+        .expect("a fresh call");
+    assert!(sent(&pending).is_none());
+    let failure = pending
+        .effects
+        .iter()
+        .find_map(|effect| match effect {
+            Effect::PrepareDrawing(job) => Some(job.unprepared()),
+            _ => None,
+        })
+        .expect("dispatching a preparation job");
+    let refused = store.run(&mut drawing, failure);
+    assert_eq!(refused.calls[0].error, Some(CallError::Failed));
+    assert_eq!(*store.log(SceneId(1)), log);
 }
 
 #[test]
@@ -236,15 +295,54 @@ fn failed_reaccounting_keeps_the_scene_but_not_its_old_paint_charge() {
     assert_eq!(drawing.snapshot().chunks, original.chunks);
     assert_eq!(store.visible()[0].scene, SceneId(1));
 
+    let log = store.log(SceneId(1)).clone();
+    let out = store.run(
+        &mut drawing,
+        call(2, "later", args("one", &[text("later", "new")])),
+    );
+    assert_eq!(
+        out.calls[0].error,
+        Some(CallError::TooMuchToPaint { cleared: false })
+    );
+    assert_eq!(*store.log(SceneId(1)), log);
+    assert_eq!(drawing.snapshot().chunks, original.chunks);
+
     let fresh =
         r#"{"id":"fresh","put":[{"line":{"id":"long","from":[0,0],"to":[3000,0],"dash":true}}]}"#;
     let out = store.run(
         &mut drawing,
-        call(2, "fresh", args("two", &[fresh.to_owned()])),
+        call(3, "fresh", args("two", &[fresh.to_owned()])),
     );
     assert_eq!(
         out.calls[0].error, None,
         "the old charge can't refuse this scene"
     );
     assert_eq!(store.visible().len(), 2);
+}
+
+#[test]
+fn a_retained_prefix_with_invalid_geometry_refuses_an_ordinary_continuation() {
+    let mut drawing = Drawing::default();
+    let mut store = Store::default();
+    store.run(
+        &mut drawing,
+        call(1, "base", args("one", &[wide_text("base", 0, 380)])),
+    );
+    store.run(&mut drawing, shown(1, 0));
+    let log = store.log(SceneId(1)).clone();
+    let original = drawing.snapshot();
+    let replay = drawing
+        .reaccount(2, Some(metrics(8192)))
+        .expect("changed profile");
+    let result = replay.run(&AtomicBool::new(false));
+    assert!(result.is_none());
+    assert!(drawing.install_reaccounted(2, &replay, result));
+
+    let refused = store.run(
+        &mut drawing,
+        call(2, "later", args("one", &[text("later", "new")])),
+    );
+    assert_eq!(refused.calls[0].error, Some(geometry_error("later")));
+    assert_eq!(*store.log(SceneId(1)), log);
+    assert_eq!(drawing.snapshot().chunks, original.chunks);
 }
