@@ -1095,6 +1095,9 @@ sequenceDiagram
   the live one. `StoreFailed` and Thinking never send it.
 - **The shell** keeps one slot (`presence/voice.rs`): the session, gesture, target, whether
   the hold asked for a picture, and the words. See [Presence](presence.md#held-words-after-a-lost-brain).
+- A hold whose input was revoked after recognition (a choice change, or a Show Screen change on a
+  queued pair) never gives its words back: the copy remembers the link's choice revision, and a
+  loss after any change drops it without a notice. Legacy and queued holds share this.
 - Nothing is resubmitted. The words wait in the composer. The copy's lifetime is bounded by
   events, not time, and a failed or interrupted held run drops it.
 

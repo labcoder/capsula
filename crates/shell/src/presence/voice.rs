@@ -136,6 +136,8 @@ pub(super) struct Recovery {
     /// The held run, once Thinking names it, so its failure drops the words after the hold ends.
     run: Option<RunId>,
     target: (Option<ThreadId>, u64),
+    /// The link's choice revision at recognition: a revoke since then keeps the words back.
+    choice: u64,
     picture: bool,
     words: Option<Content>,
 }
@@ -1119,6 +1121,7 @@ impl Presence {
                 gesture,
                 run: None,
                 target: stamp.target,
+                choice: stamp.choice,
                 picture: screen,
                 words: None,
             });
@@ -1234,7 +1237,12 @@ impl Presence {
     /// The brain was lost with a hold's turn unstored: its words go back into an empty composer
     /// on the hold's own target, without showing it, and the notice says what happened.
     pub(super) fn recover_hold(&mut self, cx: &mut Context<'_, Self>) {
-        let Some(slot) = self.voice.recovery.take() else {
+        let Some(slot) = self
+            .voice
+            .recovery
+            .take()
+            .filter(|slot| slot.choice == self.link.choice_revision())
+        else {
             return;
         };
         let restored = if slot.target.0.is_some()
