@@ -30,5 +30,14 @@ pub mod messages {
     }
 }
 pub mod perch;
+pub mod pull_dock {
+    pub mod machine;
+}
+pub mod pull_picture {
+    pub mod machine;
+}
 pub mod pulling;
+pub mod stage {
+    pub mod machine;
+}
 pub mod thread_selection;
