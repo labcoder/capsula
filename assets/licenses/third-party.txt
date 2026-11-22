@@ -10100,7 +10100,7 @@ DEALINGS IN THE SOFTWARE.
 
 ## MIT
 
-form_urlencoded 1.2.2
+form_urlencoded 1.2.3
 
 Copyright (c) 2013-2016 The rust-url developers
 
@@ -10133,7 +10133,7 @@ DEALINGS IN THE SOFTWARE.
 data-url 0.3.2
 idna 1.1.0
 percent-encoding 2.3.2
-url 2.5.8
+url 2.5.9
 
 Copyright (c) 2013-2025 The rust-url developers
 
@@ -25774,7 +25774,7 @@ except according to those terms.
 
 ## published source notices
 
-url 2.5.8
+url 2.5.9
 
 Copyright 2013-2015 The rust-url developers.
 
@@ -25786,9 +25786,9 @@ except according to those terms.
 
 ## published source notices
 
-form_urlencoded 1.2.2
+form_urlencoded 1.2.3
 percent-encoding 2.3.2
-url 2.5.8
+url 2.5.9
 
 Copyright 2013-2016 The rust-url developers.
 
@@ -26404,7 +26404,7 @@ THE SOFTWARE.
 ## published source notices
 
 idna 1.1.0
-url 2.5.8
+url 2.5.9
 
 Copyright 2016 The rust-url developers.
 
