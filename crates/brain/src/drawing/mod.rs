@@ -230,7 +230,7 @@ pub struct Drawing {
     /// never holds more than four uncleared scenes.
     clearing: bool,
     theme: Arc<Theme>,
-    /// The measure behind the retained paint charges, also used for preparation once matched.
+    /// The negotiated measure for all step preparations, including uncounted scenes.
     paint_metrics: Option<TextMetricsV1>,
     /// Unit tests lay steps out inline, answering at once, unless they defer to an effect.
     #[cfg(test)]
@@ -252,8 +252,7 @@ struct Held {
     gone: bool,
     /// Its first step replaced earlier drawings and nothing of it was shown yet.
     replaced: bool,
-    /// Its wide layout and charge; `None` once a preparation failed for any reason but paint
-    /// work, leaving the shell's guard as the scene's only check.
+    /// Its retained layout and paint charge, if tracked by the brain.
     paint: Option<Paint>,
 }
 
