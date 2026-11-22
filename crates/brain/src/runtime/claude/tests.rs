@@ -1074,7 +1074,13 @@ pub(super) fn row() -> Vec<ModelInfo> {
     .map(|(slug, name)| ModelInfo {
         slug: ModelSlug::new(slug).expect("valid"),
         display_name: ModelName::new(name).expect("valid"),
-        supported_efforts: None,
+        supported_efforts: EffortSet::new([
+            Effort::Low,
+            Effort::Medium,
+            Effort::High,
+            Effort::XHigh,
+            Effort::Max,
+        ]),
     })
     .collect()
 }
