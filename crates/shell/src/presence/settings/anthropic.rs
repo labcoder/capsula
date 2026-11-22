@@ -94,7 +94,13 @@ impl SettingsView {
                 let text = strings.get(Text::AnthropicReplaceNote);
                 div().debug_selector(|| text.clone()).text_sm().child(text)
             }))
-            .children(notice(state).map(|text| div().text_sm().child(strings.get(text))))
+            .children(notice(state).map(|message| {
+                let text = strings.get(message);
+                let line = div().text_sm();
+                #[cfg(test)]
+                let line = line.self_start().debug_selector(|| text.clone());
+                line.child(text)
+            }))
             .child(
                 div()
                     .flex()
