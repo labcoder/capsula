@@ -601,8 +601,12 @@ mod tests {
             },
             start,
         );
-        lease.ready(7, start + QUIET);
         assert_eq!(lease.gate(), Gate::Aborted);
+        let retry = start + Duration::from_millis(1_000);
+        lease.ready(7, retry);
+        lease.observe(CALM, retry + Duration::from_millis(1_000));
+        assert_eq!(lease.gate(), Gate::Aborted);
+        assert!(!lease.injectable());
     }
 
     #[test]

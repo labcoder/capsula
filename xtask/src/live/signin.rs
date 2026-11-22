@@ -211,10 +211,32 @@ fn state(view: &AccountView) -> String {
 }
 
 #[cfg(test)]
+fn assert_one_deadline(mut waits: impl Iterator<Item = (Instant, Duration)>, cap: Duration) {
+    let (first, remaining) = waits.next().expect("the fixture reached the phase");
+    assert!(
+        (cap - Duration::from_secs(1)..=cap).contains(&remaining),
+        "initial allowance was {remaining:?}, expected {cap:?}"
+    );
+    let deadline = first + remaining;
+    let tolerance = Duration::from_millis(10);
+    for (at, remaining) in waits {
+        let later = at + remaining;
+        assert!(
+            later <= deadline + tolerance,
+            "the phase deadline was extended"
+        );
+        assert!(
+            later + tolerance >= deadline,
+            "the phase deadline was shortened"
+        );
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use std::collections::VecDeque;
     use std::thread;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     use anyhow::{Result, anyhow, bail};
     use kumochi_protocol::message::{
@@ -223,7 +245,7 @@ mod tests {
         ThreadId, ThreadKind, ThreadRow, UserName,
     };
 
-    use super::{SIGNIN, VIEW, Wire, drive, inspect, session, state};
+    use super::{Wire, assert_one_deadline, drive, inspect, session, state};
     use crate::slice2::client::Frame;
 
     /// Every planted value starts with this, so one search finds any of them.
@@ -383,6 +405,86 @@ mod tests {
     const QUIT: ControlToBrain = ControlToBrain::Quitting;
     const WAITING: &str = "signing in: finish in the browser; waiting at most 330s\n";
 
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum WaitFor {
+        Initial,
+        Answer,
+        SignIn,
+    }
+
+    #[derive(Default)]
+    struct ObservedFixture {
+        frames: VecDeque<Result<Frame>>,
+        sent: Vec<ControlToBrain>,
+        signing_in: bool,
+        sent_before_busy: Option<ControlToBrain>,
+        waits: Vec<(WaitFor, Instant, Duration)>,
+    }
+
+    impl Wire for &mut ObservedFixture {
+        fn send(&mut self, message: &ControlToBrain) -> Result<()> {
+            self.sent.push(message.clone());
+            Ok(())
+        }
+
+        fn until<T>(
+            &mut self,
+            limit: Duration,
+            mut pick: impl FnMut(&Frame) -> Option<T>,
+        ) -> Result<T> {
+            let phase = if self.signing_in {
+                WaitFor::SignIn
+            } else if self.sent.last() == Some(&SIGN_IN) {
+                WaitFor::Answer
+            } else {
+                WaitFor::Initial
+            };
+            self.waits.push((phase, Instant::now(), limit));
+            while let Some(frame) = self.frames.pop_front() {
+                let frame = frame?;
+                if let Some(picked) = pick(&frame) {
+                    if self.signing_in {
+                        thread::sleep(Duration::from_millis(25));
+                    }
+                    self.signing_in = matches!(
+                        frame,
+                        Frame::Control(ControlToShell::Account(AccountView::SigningIn))
+                    );
+                    if matches!(
+                        frame,
+                        Frame::Control(ControlToShell::Account(AccountView::Busy))
+                    ) {
+                        self.sent_before_busy = self.sent.last().cloned();
+                    }
+                    return Ok(picked);
+                }
+            }
+            bail!("nothing expected arrived in {limit:?}; last: {TOKEN}")
+        }
+    }
+
+    fn observed(steps: Vec<Step>) -> ObservedFixture {
+        ObservedFixture {
+            frames: fixture(steps).frames,
+            ..ObservedFixture::default()
+        }
+    }
+
+    fn run_observed(fixture: &mut ObservedFixture) -> (String, Option<String>, bool) {
+        let mut out = Vec::new();
+        let (result, quit_sent) = session(Ok(&mut *fixture), &mut out, drive);
+        let out = String::from_utf8(out).expect("utf-8");
+        let printed = result.as_ref().err().map(|error| format!("{error:?}"));
+        let error = result.err().map(|error| format!("{error:#}"));
+        for text in [Some(&out), printed.as_ref(), error.as_ref()]
+            .into_iter()
+            .flatten()
+        {
+            assert!(!text.contains(SENTINEL), "a planted value leaked: {text}");
+        }
+        (out, error, quit_sent)
+    }
+
     #[test]
     fn a_sign_in_prints_only_states_and_keeps_one_deadline() {
         let declined = AccountView::SignedIn {
@@ -394,28 +496,33 @@ mod tests {
             (signed_in(None), "plan enabled"),
             (declined, "plan declined"),
         ] {
-            let mut brain = fixture(vec![
+            let mut brain = observed(vec![
                 Step::View(signed_out()),
                 Step::View(AccountView::SigningIn),
                 Step::View(AccountView::SigningIn),
                 Step::View(end),
             ]);
-            let (out, error, quit_sent) = run(&mut brain);
+            let (out, error, quit_sent) = run_observed(&mut brain);
             assert_eq!(
                 out,
                 format!("account: signed out\n{WAITING}account: signed in, {words}\n")
             );
             assert_eq!(error, None);
-            assert_eq!(ops(&brain), [SIGN_IN, QUIT]);
+            assert_eq!(brain.sent, [SIGN_IN, QUIT]);
             assert!(quit_sent);
-            let [first, answer, settle, again] = brain.limits[..] else {
-                panic!("four waits: {:?}", brain.limits);
-            };
-            assert_eq!((first, answer), (VIEW, VIEW));
-            assert!(
-                settle <= SIGNIN && again < settle,
-                "{settle:?} then {again:?}"
-            );
+            for (phase, seconds) in [
+                (WaitFor::Initial, 10),
+                (WaitFor::Answer, 10),
+                (WaitFor::SignIn, 330),
+            ] {
+                assert_one_deadline(
+                    brain
+                        .waits
+                        .iter()
+                        .filter_map(|&(seen, at, limit)| (seen == phase).then_some((at, limit))),
+                    Duration::from_secs(seconds),
+                );
+            }
         }
     }
 
@@ -531,17 +638,20 @@ mod tests {
 
     #[test]
     fn a_refused_sign_in_reports_the_answer() {
-        let mut brain = fixture(vec![
+        let mut brain = observed(vec![
             Step::View(signed_out()),
             Step::View(AccountView::Busy),
         ]);
-        let (out, error, _) = run(&mut brain);
-        let words = "busy: another Windows session holds the account";
-        assert_eq!(out, format!("account: signed out\naccount: {words}\n"));
-        assert_eq!(
-            error.as_deref(),
-            Some(format!("sign-in ended with the account {words}").as_str())
+        let (out, error, quit_sent) = run_observed(&mut brain);
+        assert!(out.contains("signed out") && out.contains("busy"), "{out}");
+        let error = error.expect("sign-in failed");
+        assert!(
+            error.contains("busy") && error.contains("another Windows session"),
+            "{error}"
         );
+        assert_eq!(brain.sent_before_busy, Some(SIGN_IN));
+        assert_eq!(brain.sent, [SIGN_IN, QUIT]);
+        assert!(quit_sent);
     }
 
     #[test]

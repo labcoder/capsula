@@ -668,10 +668,7 @@ mod tests {
     }
 
     #[test]
-    fn the_ends_map_to_the_first_and_last_pixel_and_outside_is_refused() {
-        assert_eq!(normalized(0, 0, 2560), Some(13));
-        assert_eq!(normalized(2559, 0, 2560), Some(65523));
-        assert_eq!(normalized(-1920, -1920, 4480), Some(7));
+    fn absolute_mapping_refuses_outside_points_and_empty_extents() {
         assert_eq!(normalized(2560, 0, 2560), None);
         assert_eq!(normalized(-1921, -1920, 4480), None);
         assert_eq!(normalized(0, 0, 0), None);

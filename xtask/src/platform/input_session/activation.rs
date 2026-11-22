@@ -360,6 +360,23 @@ mod tests {
         activation
     }
 
+    fn assert_terminal_refusal(stage: usize, look: Look, case: &str) {
+        let mut activation = upto(stage);
+        assert!(step(&mut activation, stage, look).is_err(), "{case}");
+        assert_no_continuation(activation, case);
+    }
+
+    fn assert_no_continuation(mut refused: Activation, case: &str) {
+        for any in 0..4 {
+            let mut retry = refused;
+            assert!(
+                step(&mut retry, any, CALM).is_err(),
+                "{case}: calm step {any} after the refusal"
+            );
+        }
+        assert!(refused.prepare(AWAY, AT).is_err(), "{case}: prepare again");
+    }
+
     fn assert_refused(stage: usize, look: Look, case: &str) {
         let mut activation = upto(stage);
         assert!(step(&mut activation, stage, look).is_err(), "{case}");
@@ -495,14 +512,14 @@ mod tests {
                     Owner { pid: 77, ..EDIT },
                 ),
             ] {
-                assert_refused(stage, Look { at_point, ..CALM }, case);
+                assert_terminal_refusal(stage, Look { at_point, ..CALM }, case);
             }
             for capture in [EDIT, FOREIGN] {
                 let look = Look {
                     capture: Some(capture),
                     ..CALM
                 };
-                assert_refused(stage, look, "a mouse capture");
+                assert_terminal_refusal(stage, look, "a mouse capture");
             }
         }
     }
@@ -615,6 +632,14 @@ mod tests {
                 },
             ),
             (
+                "held_input",
+                Look {
+                    foreign: Some("held_input"),
+                    at_point: ROOT,
+                    ..CALM
+                },
+            ),
+            (
                 "desktop",
                 Look {
                     desktop: false,
@@ -651,23 +676,30 @@ mod tests {
             ),
         ] {
             let mut activation = upto(0);
-            let error = activation.may_move(look).unwrap_err();
-            assert_eq!(
-                error.to_string(),
-                format!("fixture activation move refused: {reason}")
-            );
-            assert_eq!(activation.stage, Stage::Aborted);
-            assert_eq!(
-                activation.may_move(CALM).unwrap_err().to_string(),
-                "fixture activation move refused: activation_state"
-            );
+            let report = activation.may_move(look).unwrap_err().to_string();
+            let reasons = report
+                .split(|ch: char| !ch.is_ascii_alphanumeric() && ch != '_')
+                .filter(|word| {
+                    matches!(
+                        *word,
+                        "held_input"
+                            | "desktop"
+                            | "deadline"
+                            | "stale_look"
+                            | "edit_not_at_point"
+                            | "mouse_capture"
+                            | "activation_state"
+                    )
+                });
+            assert!(reasons.eq([reason]), "{look:?}: {report}");
+            assert_no_continuation(activation, reason);
         }
     }
 
     #[test]
     fn the_click_needs_the_pointer_exactly_on_its_point() {
         for cursor in [POINT { x: 301, y: 260 }, POINT { x: 300, y: 259 }] {
-            assert_refused(1, Look { cursor, ..CALM }, "pointer off the point");
+            assert_terminal_refusal(1, Look { cursor, ..CALM }, "pointer off the point");
         }
         let elsewhere = Look {
             cursor: POINT { x: 5, y: 5 },
@@ -717,7 +749,7 @@ mod tests {
                     ..CALM
                 },
             ] {
-                assert_refused(stage, look, &format!("{look:?}"));
+                assert_terminal_refusal(stage, look, &format!("{look:?}"));
             }
         }
     }

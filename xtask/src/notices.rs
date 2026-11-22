@@ -213,21 +213,39 @@ mod tests {
         let policy = Policy::read(root).unwrap();
         let dir = crate::scratch::dir("embedded-icons");
         fs::create_dir_all(dir.join("assets/icons")).unwrap();
+        let lock: toml::Table = fs::read_to_string(root.join("Cargo.lock"))
+            .unwrap()
+            .parse()
+            .unwrap();
+        let source = lock["package"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|package| package["name"].as_str() == Some("gpui-kit-assets"))
+            .unwrap()["source"]
+            .as_str()
+            .unwrap();
         let package = serde_json::json!({
             "name":"gpui-kit-assets",
-            "source":"git+https://github.com/longbridge/gpui-kit#99576db58ec8103417c41a092e891b4022d24e7e",
+            "source": source,
             "manifest_path": dir.join("Cargo.toml")
         });
         let output = assets(root, &policy, &[package]).unwrap();
+        let apache = fs::read_to_string(root.join("assets/licenses/Apache-2.0.txt"))
+            .unwrap()
+            .replace("\r\n", "\n");
         for (name, credit) in [
             ("phonon", "Phonon 31M English by Gradium, Apache-2.0."),
             ("juniper", "Juniper voice by Gradium, Apache-2.0."),
         ] {
             let (_, rest) = output.split_once(&format!("\n## {name}\n")).unwrap();
-            let (block, _) = rest.split_once("\n## ").unwrap();
+            let block = rest.split_once("\n## ").map_or(rest, |(block, _)| block);
             assert!(block.contains(credit));
+            assert!(block.lines().any(|line| line == "License: Apache-2.0"));
             assert!(block.contains("Version 2.0, January 2004"));
+            assert!(block.contains(apache.trim_end()));
             assert!(!block.contains("Zed Industries"));
+            assert!(!block.to_ascii_lowercase().contains("gpui"));
         }
     }
 
