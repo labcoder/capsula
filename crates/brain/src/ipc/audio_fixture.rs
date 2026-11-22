@@ -107,6 +107,20 @@ pub fn offline_narrated_peer(
     offline_draw_peer(tone_chunks, audio_fixture::AudioProbe::narrated())
 }
 
+/// Starts the narrated replay on a Legacy pump, so the registered pair stays Plain.
+/// # Panics
+/// Panics if the private test namespace or the fixture Brain cannot start.
+pub fn offline_plain_narrated_peer(
+    tone_chunks: usize,
+) -> (
+    u32,
+    Hello,
+    std::sync::Arc<audio_fixture::AudioProbe>,
+    JoinHandle<bool>,
+) {
+    offline_draw_peer(tone_chunks, audio_fixture::AudioProbe::plain_narrated())
+}
+
 /// Starts one same-run narrated replacement with controlled initial data credit.
 /// # Panics
 /// Panics if the private test namespace or the fixture Brain cannot start.
