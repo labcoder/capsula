@@ -867,17 +867,23 @@ impl Brain {
                 .send(Event::Connection(ConnectionEvent::Refused { tag }))
                 .ok();
         }));
+        #[cfg(test)]
+        let pictures = self.coordinator.pictures();
+        let new_live = || {
+            let live = Live::new(allowance);
+            #[cfg(test)]
+            let live = live.with_test_pictures(pictures);
+            Arc::new(live)
+        };
         let live = if let SendKey::Build(key) = request.key {
             if let Some((_, old)) = self.key_round.take_if(|(build, _)| build.run != key.run) {
                 old.retire();
             }
-            let (owned, live) = self
-                .key_round
-                .get_or_insert_with(|| (key, Arc::new(Live::new(allowance))));
+            let (owned, live) = self.key_round.get_or_insert_with(|| (key, new_live()));
             *owned = key;
             Arc::clone(live)
         } else {
-            Arc::new(Live::new(allowance))
+            new_live()
         };
         Some(Box::new(question::Question {
             transport,
