@@ -12,7 +12,10 @@ use super::super::{
     paint_paths,
     paint_phase::{self, Phase},
 };
-use super::{Scratch, paths};
+use super::{
+    FillScratch, RECT_EVENT_LIMIT, RECT_INDEX_LIMIT, RECT_VERTEX_LIMIT, Scratch, events, paths,
+    tessellated,
+};
 
 fn ink() -> Paint {
     Paint::from(Rgb::try_from(0x33_66_99).expect("RGB"))
@@ -316,6 +319,84 @@ fn largest_charged_rects_and_mirrored_strokes_preserve_parity_and_refusal() {
     ] {
         parity(&mut scratch, &line(12, true, true), transform, 0.7, 0.37);
     }
+}
+
+#[test]
+fn a_thin_rounded_border_with_crossing_chords_matches_the_transient_fill() {
+    let rect = Rect {
+        origin: Vec2::new(17_000.0, 17_000.0),
+        size: Vec2::new(200.0, 200.0),
+    };
+    let mut scratch = Scratch::new();
+    let transform = Affine::pose(4.0, 0.3, Vec2::default());
+    let warm = Prim::Rect {
+        rect,
+        radius: 6.0,
+        fill: None,
+        border: Some((ink(), 1.0)),
+    };
+    drop(
+        paths(&mut scratch, &warm, transform, 1.0, 0.0, MAX_COMPOSED_SCALE)
+            .expect("warm rounded border"),
+    );
+    let thin = Prim::Rect {
+        rect,
+        radius: 6.0,
+        fill: None,
+        border: Some((ink(), 0.001)),
+    };
+    parity(&mut scratch, &thin, transform, 1.0, 0.0);
+}
+
+#[test]
+fn a_sweep_with_small_input_and_large_output_releases_its_scratch() {
+    use gpui_kit::{FillOptions, FillRule};
+
+    let contour = |x, y, far_x, far_y| {
+        events(
+            [
+                Vec2::new(x, y),
+                Vec2::new(far_x, y),
+                Vec2::new(far_x, far_y),
+                Vec2::new(x, far_y),
+            ]
+            .into_iter(),
+        )
+    };
+    let stripes: Vec<_> = (1..=40_u16)
+        .flat_map(|at| {
+            let near = f32::from(at) * 2.0;
+            contour(0.0, near, 82.0, near + 1.0).chain(contour(near, 0.0, near + 1.0, 82.0))
+        })
+        .collect();
+    assert_eq!(stripes.len(), 400);
+    assert!(stripes.len() <= RECT_EVENT_LIMIT);
+    let rule = FillRule::EvenOdd;
+    let mut transient = FillScratch::new();
+    transient
+        .build(
+            stripes.iter().copied(),
+            FillOptions::default().with_fill_rule(rule),
+        )
+        .expect("intersection-aware sweep");
+    assert!(transient.buffers.vertices.len() > RECT_VERTEX_LIMIT);
+    assert!(transient.buffers.indices.len() > RECT_INDEX_LIMIT);
+    let (scratch, _, [allocated, released]) = crate::allocation::usage(|| {
+        let mut scratch = FillScratch::new();
+        let path = tessellated(
+            &mut scratch,
+            stripes.iter().copied(),
+            rule,
+            Affine::default(),
+        )
+        .expect("a discarded sweep still paints")
+        .expect("a nonempty path");
+        assert_eq!(path.vertices.len(), transient.buffers.indices.len());
+        scratch
+    });
+    assert_eq!(allocated, released);
+    assert_eq!(scratch.buffers.vertices.capacity(), 0);
+    assert_eq!(scratch.buffers.indices.capacity(), 0);
 }
 
 #[test]

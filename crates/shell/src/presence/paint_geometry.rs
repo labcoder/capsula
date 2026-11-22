@@ -28,8 +28,11 @@ const RECT_EVENT_LIMIT: usize = {
     if fill > border { fill } else { border }
 };
 
-/// One retained sweep and its output for the bounded Rect path (scene.md, Paint backend).
-pub(super) const FILL_SCRATCH_BYTES: usize = RECT_EVENT_LIMIT.next_power_of_two() * 1024;
+const RECT_VERTEX_LIMIT: usize = 4_096;
+const RECT_INDEX_LIMIT: usize = 12_288;
+
+/// The accounting allowance checked on measured fixtures, not a Lyon capacity bound.
+pub(super) const FILL_SCRATCH_BYTES: usize = 2 * 1024 * 1024;
 
 pub(super) struct FillScratch {
     tessellator: FillTessellator,
@@ -269,7 +272,7 @@ fn filled(
 
 fn tessellated(
     scratch: &mut FillScratch,
-    events: impl Iterator<Item = PathEvent> + Clone,
+    events: impl Iterator<Item = PathEvent>,
     rule: FillRule,
     transform: Affine,
 ) -> Result<Option<Path<Pixels>>, BuildError> {
@@ -279,26 +282,26 @@ fn tessellated(
         .size_hint()
         .1
         .is_some_and(|count| count <= RECT_EVENT_LIMIT);
-    let mut transient;
-    let buffers = if bounded
-        && scratch
-            .build(events.clone(), options.with_intersections(false))
-            .is_ok()
-    {
-        &scratch.buffers
-    } else {
+    if let Err(error) = scratch.build(events, options) {
         *scratch = FillScratch::new();
-        transient = FillScratch::new();
-        transient.build(events, options)?;
-        &transient.buffers
+        return Err(error);
+    }
+    let keep = bounded
+        && scratch.buffers.vertices.len() <= RECT_VERTEX_LIMIT
+        && scratch.buffers.indices.len() <= RECT_INDEX_LIMIT;
+    let path = {
+        let _app = paint_phase::enter(Phase::App);
+        let triangles = scratch.buffers.indices.iter().map(|index| {
+            let at = scratch.buffers.vertices[usize::from(*index)];
+            Vec2::new(at.x, at.y)
+        });
+        super::paint_paths::placed(triangles, transform)
     };
+    if !keep {
+        *scratch = FillScratch::new();
+    }
     drop(fill);
-    let _app = paint_phase::enter(Phase::App);
-    let triangles = buffers.indices.iter().map(|index| {
-        let at = buffers.vertices[usize::from(*index)];
-        Vec2::new(at.x, at.y)
-    });
-    Ok(super::paint_paths::placed(triangles, transform))
+    Ok(path)
 }
 
 #[cfg(test)]
