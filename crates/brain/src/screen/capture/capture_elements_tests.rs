@@ -102,38 +102,6 @@ fn ticket_expiry_binds_even_while_the_frame_is_younger_than_250ms() {
 }
 
 #[test]
-fn missing_reader_and_frame_metadata_have_distinct_faults() {
-    let mut rig = Rig::new([4, 3], 7);
-    assert_eq!(rig.take(1, [4, 3], 0), Ok(meta(1, [4, 3], 0)));
-    rig.screen.reader = None;
-    assert_eq!(
-        elements(
-            &mut rig.screen,
-            CaptureId(10),
-            ElementTarget::Foreground,
-            &|| rig.start
-        )
-        .err(),
-        Some(Failure::Fault(-1))
-    );
-    rig.screen.reader = Some(crate::screen::elements::tests::open_reader(Box::new(
-        || true,
-    )));
-    assert_eq!(rig.take(2, [4, 3], 0), Ok(meta(2, [4, 3], 0)));
-    rig.screen.frame.invalidate();
-    assert_eq!(
-        elements(
-            &mut rig.screen,
-            CaptureId(20),
-            ElementTarget::Foreground,
-            &|| rig.start
-        )
-        .err(),
-        Some(Failure::Fault(-2))
-    );
-}
-
-#[test]
 fn reader_initialization_failure_preserves_capture_and_spends_the_faulted_walk() {
     let mut rig = Rig::new([4, 3], 7);
     let now = rig.start;

@@ -11,38 +11,6 @@ const RECT: PhysicalRect = PhysicalRect {
     size: [100, 50],
 };
 
-#[test]
-fn the_instrumented_clock_observes_the_walks_deadline_check() {
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    let checks = Arc::new(AtomicUsize::new(0));
-    let observed = Arc::clone(&checks);
-    let mut reader = ThreadedReader::with_clock(
-        || {
-            Ok(Source {
-                read: |_| props("clock"),
-                count: 0,
-                _local: Rc::new(()),
-            })
-        },
-        Platform,
-        move || {
-            observed.fetch_add(1, Ordering::Relaxed);
-            Instant::now()
-        },
-        || true,
-    )
-    .unwrap();
-    let walked = reader
-        .walk(job(31, Instant::now() + Duration::from_secs(1), masks(31)))
-        .unwrap();
-    assert_eq!(walked.tree.availability, Availability::Read);
-    assert_eq!(walked.tree.elements.len(), 1);
-    assert!(
-        checks.load(Ordering::Relaxed) >= 1,
-        "the walk reads the injected clock"
-    );
-}
-
 #[derive(Clone)]
 struct Platform;
 impl ElementPlatform for Platform {

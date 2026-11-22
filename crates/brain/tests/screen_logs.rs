@@ -93,6 +93,12 @@ fn panic_hook_and_environment_fault_are_exercised_in_child_processes() {
             stderr.join().expect("stderr"),
         );
         assert_eq!(status.code(), Some(0), "{test}: {stdout}{stderr}");
+        let results: Vec<_> = stdout
+            .lines()
+            .filter_map(|line| line.strip_prefix("test result: ok. "))
+            .map(|summary| summary.split(';').next().unwrap())
+            .collect();
+        assert_eq!(results, ["1 passed"], "{test}: wrong fixture count");
     }
     let logs = std::fs::read_dir(dir.join(kumochi_protocol::constants::DATA_DIR).join("logs"))
         .expect("logs")

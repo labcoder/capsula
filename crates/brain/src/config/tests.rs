@@ -227,40 +227,6 @@ fn refused_github_defaults_preserve_the_file_view_and_default_in_later_saves() {
 }
 
 #[test]
-fn github_default_staging_honors_an_unavailable_or_unreadable_config() {
-    let default = DefaultRepo {
-        account: 1,
-        repo: RepoName::new("owner/repo").expect("valid repo"),
-    };
-    let config = Config::load(None, ThreadId(1));
-    assert_eq!(github_default(&config), None);
-    assert!(matches!(
-        config.stage_github_default(&default),
-        Err(ConfigError::NoHome)
-    ));
-    let scratch = Scratch::new("config-github-unreadable");
-    let dir = dir(&scratch);
-    let path = dir.join(CONFIG_FILE);
-    let broken = "[github\n";
-    std::fs::write(&path, broken).expect("seeded");
-    let config = Config::load(Some(dir.clone()), ThreadId(1));
-    assert_eq!(github_default(&config), None);
-    assert!(matches!(
-        config.stage_github_default(&default),
-        Err(ConfigError::Unreadable)
-    ));
-    assert_eq!(std::fs::read_to_string(&path).expect("readable"), broken);
-    std::fs::remove_file(&path).expect("removed broken fixture");
-    std::fs::create_dir(&path).expect("a folder where the file goes");
-    let config = Config::load(Some(dir), ThreadId(1));
-    assert_eq!(github_default(&config), None);
-    assert!(matches!(
-        config.stage_github_default(&default),
-        Err(ConfigError::Unreadable)
-    ));
-}
-
-#[test]
 fn hold_to_talk_toggle_has_its_own_wire_operation_and_persists() {
     let scratch = Scratch::new("config-hold-to-talk");
     let dir = dir(&scratch);
@@ -746,25 +712,6 @@ fn unknown_keys_survive_a_write_and_clearing_the_user_name_removes_it() {
 }
 
 #[test]
-fn an_unparseable_file_is_never_written_and_refuses_changes() {
-    let scratch = Scratch::new("config-broken");
-    let dir = dir(&scratch);
-    let path = dir.join(CONFIG_FILE);
-    let broken = "assistant_name = \"Zqx\nnot toml [";
-    std::fs::write(&path, broken).expect("seeded");
-    let config = Config::load(Some(dir), ThreadId(1));
-    assert_eq!(
-        config.view().assistant_name.as_str(),
-        DEFAULT_ASSISTANT_NAME
-    );
-    assert!(matches!(
-        config.stage(SettingsOp::FinishOnboarding),
-        Err(ConfigError::Unreadable)
-    ));
-    assert_eq!(std::fs::read_to_string(&path).expect("readable"), broken);
-}
-
-#[test]
 fn tuning_is_read_at_load_and_left_as_written_by_settings_saves() {
     let scratch = Scratch::new("config-tuning");
     let dir = dir(&scratch);
@@ -810,31 +757,6 @@ fn a_duplicate_tuning_key_makes_the_file_unreadable_with_default_tuning() {
         Err(ConfigError::Unreadable)
     ));
     assert_eq!(std::fs::read_to_string(&path).expect("readable"), broken);
-}
-
-#[test]
-fn an_unreadable_file_refuses_changes_like_a_broken_one() {
-    let scratch = Scratch::new("config-unreadable");
-    let dir = dir(&scratch);
-    std::fs::create_dir(dir.join(CONFIG_FILE)).expect("a folder where the file goes");
-    let config = Config::load(Some(dir), ThreadId(1));
-    assert!(matches!(
-        config.stage(SettingsOp::FinishOnboarding),
-        Err(ConfigError::Unreadable)
-    ));
-}
-
-#[test]
-fn no_home_refuses_changes() {
-    let config = Config::load(None, ThreadId(1));
-    assert_eq!(
-        config.view().assistant_name.as_str(),
-        DEFAULT_ASSISTANT_NAME
-    );
-    assert!(matches!(
-        config.stage(SettingsOp::FinishOnboarding),
-        Err(ConfigError::NoHome)
-    ));
 }
 
 #[test]
@@ -898,20 +820,45 @@ fn a_failed_write_changes_neither_the_file_nor_the_settings() {
     let scratch = Scratch::new("config-failed");
     let dir = dir(&scratch);
     let path = dir.join(CONFIG_FILE);
+    let temp = dir.join(format!("{CONFIG_FILE}.tmp"));
     let mut config = Config::load(Some(dir.clone()), ThreadId(1));
     apply(&mut config, SettingsOp::SetAssistantName(name("Nimbus")));
+    apply(
+        &mut config,
+        SettingsOp::SetDockPosition(DockPosition::MiddleLeft),
+    );
+    apply(&mut config, SettingsOp::SetTaskbar(false));
     let before = std::fs::read_to_string(&path).expect("readable");
-    // A folder where the temp file goes makes the write fail before the replace.
-    std::fs::create_dir(dir.join(format!("{CONFIG_FILE}.tmp"))).expect("blocker");
-    let pending = config
-        .stage(SettingsOp::SetAssistantName(name("Cirrus")))
-        .expect("staged");
-    assert!(matches!(pending.write(), Err(ConfigError::Write(_))));
-    drop(pending);
-    assert_eq!(config.view().assistant_name.as_str(), "Nimbus");
-    assert_eq!(std::fs::read_to_string(&path).expect("readable"), before);
-    let staged = config.stage(SettingsOp::FinishOnboarding).expect("staged");
-    assert_eq!(staged.view.assistant_name.as_str(), "Nimbus");
+    let view = config.view().clone();
+    std::fs::create_dir(&temp).expect("blocker");
+    for op in [
+        SettingsOp::SetAssistantName(name("Cirrus")),
+        SettingsOp::SetDockPosition(DockPosition::BottomRight),
+        SettingsOp::SetTaskbar(true),
+    ] {
+        let pending = config.stage(op).expect("staged");
+        assert_eq!(config.view(), &view);
+        assert!(matches!(pending.write(), Err(ConfigError::Write(_))));
+        drop(pending);
+        assert_eq!(config.view(), &view);
+        assert_eq!(std::fs::read_to_string(&path).expect("readable"), before);
+    }
+    std::fs::remove_dir(&temp).expect("unblocked");
+    apply(&mut config, SettingsOp::FinishOnboarding);
+    let reloaded = Config::load(Some(dir.clone()), ThreadId(1));
+    assert_eq!(reloaded.view().assistant_name.as_str(), "Nimbus");
+    assert_eq!(reloaded.view().dock_position, DockPosition::MiddleLeft);
+    assert!(!reloaded.view().show_in_taskbar);
+    assert!(reloaded.view().onboarded);
+
+    apply(
+        &mut config,
+        SettingsOp::SetDockPosition(DockPosition::BottomCenter),
+    );
+    apply(&mut config, SettingsOp::SetTaskbar(true));
+    let reloaded = Config::load(Some(dir), ThreadId(1));
+    assert_eq!(reloaded.view().dock_position, DockPosition::BottomCenter);
+    assert!(reloaded.view().show_in_taskbar);
 }
 
 #[cfg(windows)]
@@ -1072,48 +1019,6 @@ fn invalid_dock_and_taskbar_values_survive_unrelated_saves_until_explicitly_set(
             assert_eq!(saved["show_in_taskbar"].as_bool(), Some(false));
         }
     }
-}
-
-#[test]
-fn refused_dock_and_taskbar_writes_do_not_leak_into_a_later_save() {
-    let scratch = Scratch::new("config-refused-dock");
-    let dir = dir(&scratch);
-    let path = dir.join(CONFIG_FILE);
-    let temp = dir.join(format!("{CONFIG_FILE}.tmp"));
-    let mut config = Config::load(Some(dir.clone()), ThreadId(1));
-    apply(
-        &mut config,
-        SettingsOp::SetDockPosition(DockPosition::MiddleLeft),
-    );
-    apply(&mut config, SettingsOp::SetTaskbar(false));
-    let before = std::fs::read_to_string(&path).expect("readable");
-    let view = config.view().clone();
-    std::fs::create_dir(&temp).expect("blocker");
-    for op in [
-        SettingsOp::SetDockPosition(DockPosition::BottomRight),
-        SettingsOp::SetTaskbar(true),
-    ] {
-        let pending = config.stage(op).expect("staged");
-        assert_eq!(config.view(), &view);
-        assert!(matches!(pending.write(), Err(ConfigError::Write(_))));
-        drop(pending);
-        assert_eq!(config.view(), &view);
-        assert_eq!(std::fs::read_to_string(&path).expect("readable"), before);
-    }
-    std::fs::remove_dir(&temp).expect("unblocked");
-    apply(&mut config, SettingsOp::FinishOnboarding);
-    let reloaded = Config::load(Some(dir.clone()), ThreadId(1));
-    assert_eq!(reloaded.view().dock_position, DockPosition::MiddleLeft);
-    assert!(!reloaded.view().show_in_taskbar);
-    assert!(reloaded.view().onboarded);
-    apply(
-        &mut config,
-        SettingsOp::SetDockPosition(DockPosition::BottomCenter),
-    );
-    apply(&mut config, SettingsOp::SetTaskbar(true));
-    let reloaded = Config::load(Some(dir), ThreadId(1));
-    assert_eq!(reloaded.view().dock_position, DockPosition::BottomCenter);
-    assert!(reloaded.view().show_in_taskbar);
 }
 
 fn choice(slug: &str, effort: Effort) -> ModelChoice {
@@ -1385,8 +1290,11 @@ fn a_config_that_cant_be_written_serves_onboarded_and_still_refuses_every_write(
     let scratch = Scratch::new("config-onboarded-refusing");
     let dir = dir(&scratch);
     let path = dir.join(CONFIG_FILE);
-    let broken = "onboarded = false\nnot toml [";
+    let broken = "onboarded = false\nassistant_name = \"Zqx\nnot toml [";
     std::fs::write(&path, broken).expect("seeded");
+    let blocked = dir.join("blocked");
+    let blocked_file = blocked.join(CONFIG_FILE);
+    std::fs::create_dir_all(&blocked_file).expect("a folder where the file goes");
     let default = DefaultRepo {
         account: 1,
         repo: RepoName::new("owner/repo").expect("valid repo"),
@@ -1396,8 +1304,17 @@ fn a_config_that_cant_be_written_serves_onboarded_and_still_refuses_every_write(
             Config::load(Some(dir), ThreadId(1)),
             ConfigError::Unreadable,
         ),
+        (
+            Config::load(Some(blocked), ThreadId(1)),
+            ConfigError::Unreadable,
+        ),
         (Config::load(None, ThreadId(1)), ConfigError::NoHome),
     ] {
+        assert_eq!(
+            config.view().assistant_name.as_str(),
+            DEFAULT_ASSISTANT_NAME
+        );
+        assert_eq!(github_default(&config), None);
         assert!(config.view().onboarded, "{refusal}");
         config.count_in_use(
             &AccountView::SignedOut {
@@ -1439,4 +1356,5 @@ fn a_config_that_cant_be_written_serves_onboarded_and_still_refuses_every_write(
         assert_eq!(config.view(), &view);
     }
     assert_eq!(std::fs::read_to_string(&path).expect("readable"), broken);
+    assert!(blocked_file.is_dir());
 }

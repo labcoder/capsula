@@ -100,7 +100,10 @@ fn the_sized_writer_refuses_a_message_over_the_cap_and_writes_nothing() {
     let over = "x".repeat(Sealed::MAX_REPLY);
     assert!(matches!(
         write_sized(&mut bytes, 1, &over, Sealed::MAX_REPLY),
-        Err(FrameError::TooLarge { .. })
+        Err(FrameError::TooLarge {
+            len: 4_194_308,
+            max: 4_194_304,
+        })
     ));
     assert!(bytes.is_empty());
 }

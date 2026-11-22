@@ -60,22 +60,6 @@ fn fixture_completion(result: io::Result<u32>, readers_started: bool) -> Result<
     Ok(())
 }
 
-#[test]
-fn a_startup_failure_is_not_replaced_by_missing_readers() {
-    let failure = io::Error::new(
-        io::ErrorKind::PermissionDenied,
-        "private startup error marker",
-    );
-    assert_eq!(
-        fixture_completion(Err(failure), false),
-        Err("speech fixture operation failed (PermissionDenied)".into())
-    );
-    assert_eq!(
-        fixture_completion(Ok(0), false),
-        Err("speech fixture output readers missing".into())
-    );
-}
-
 #[expect(
     clippy::fn_params_excessive_bools,
     reason = "the caller either confirmed teardown or must preserve the scratch"

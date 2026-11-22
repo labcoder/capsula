@@ -20,7 +20,7 @@ use super::{Store, StoreError};
 use crate::issues::{Action, Answer, Snapshot, Stage, Write, WriteScope};
 use crate::test_support::Scratch;
 
-fn rearm(action: &Action) -> Write {
+pub(super) fn rearm(action: &Action) -> Write {
     Write::Rearm {
         draft: action.draft,
         at: action.version,
@@ -76,7 +76,7 @@ fn changed(answer: Result<Answer, StoreError>) -> Action {
     }
 }
 
-fn events(store: &Store) -> Vec<String> {
+pub(super) fn events(store: &Store) -> Vec<String> {
     store.conn.prepare(
         "SELECT json_array(id, thread, run, kind, text, body, created_ms) FROM events ORDER BY id",
     ).unwrap().query_map([], |row| row.get(0)).unwrap()
@@ -341,52 +341,6 @@ fn rearm_scopes_roll_back_before_commit_but_keep_a_late_committed_answer() {
             assert_eq!((snapshot(&store.conn), events(&store)), before);
             assert_eq!(snapshot(&Connection::open(scratch.db()).unwrap()), before.0);
         }
-    }
-}
-
-#[test]
-fn rearm_counters_reach_the_limit_once_and_never_wrap_or_burn_a_rolled_back_mint() {
-    for allocator in [false, true] {
-        let scratch = Scratch::new("issue-rearm-exhaustion");
-        let mut store = opened(&scratch);
-        let owner = thread(&mut store);
-        let action = draft(&mut store, owner);
-        store
-            .conn
-            .execute_batch(if allocator {
-                "UPDATE approval_mark SET last = 9223372036854775806;"
-            } else {
-                "UPDATE actions SET version = 9223372036854775806;"
-            })
-            .unwrap();
-        let current = store.action(action.draft).unwrap().unwrap();
-        let fresh = changed(store.issue_write(&rearm(&current), None));
-        assert_eq!(
-            fresh,
-            Action {
-                version: StateVersion(if allocator {
-                    2
-                } else {
-                    9_223_372_036_854_775_807
-                }),
-                approval: Some(ApprovalRev(if allocator {
-                    9_223_372_036_854_775_807
-                } else {
-                    2
-                })),
-                ..action
-            }
-        );
-        let before = (snapshot(&store.conn), events(&store));
-        assert!(matches!(
-            store.issue_write(&rearm(&fresh), None),
-            Err(StoreError::Issue)
-        ));
-        assert_eq!((snapshot(&store.conn), events(&store)), before);
-        assert_eq!(
-            snapshot(&store.conn).1,
-            if allocator { i64::MAX } else { 2 }
-        );
     }
 }
 

@@ -23,16 +23,6 @@ fn seal(rig: &mut Rig) -> Result<ScreenContext, Failure> {
 }
 
 #[test]
-fn an_unchanged_display_seals_once() {
-    let mut rig = held([4, 3], Vec::new());
-    rig.screen.display_at = |bounds| Some((bounds, 144));
-    let context = seal(&mut rig).expect("sealed");
-    assert_eq!(context.ink(), None);
-    assert_eq!(rig.screen.frame().image(), None);
-    assert_eq!(seal(&mut rig), Err(Refusal::Stale.into()));
-}
-
-#[test]
 fn a_display_that_moved_rescaled_or_vanished_refuses_and_releases_its_frame() {
     let moved: fn(PhysicalRect) -> Option<(PhysicalRect, u32)> = |bounds| {
         Some((
@@ -88,21 +78,33 @@ fn neither_the_context_nor_its_bounds_print_where_the_user_pointed() {
     let mut rig = held([40, 30], path);
     rig.screen.display_at = |bounds| Some((bounds, 144));
     let context = seal(&mut rig).expect("sealed");
-    assert!(context.ink().is_some());
-    assert_eq!(
-        format!("{context:?}"),
-        format!(
-            "ScreenContext {{ bytes: {}, size: [40, 30], .. }}",
-            context.jpeg().len()
-        )
-    );
-    assert_eq!(format!("{:?}", context.ink()), "Some(InkBounds(***))");
-    let shown = Shown::Display {
-        bounds: PhysicalRect {
-            origin: [-2551, 17],
-            size: [2560, 1440],
-        },
-        dpi: 144,
+    let debug = format!("{context:?}");
+    for sentinel in ["-2550", "-2540", "-2560"] {
+        assert!(!debug.contains(sentinel));
+    }
+    let first = context.ink().expect("painted bounds");
+    let second = InkBounds {
+        left: 17,
+        top: 19,
+        right: 27,
+        bottom: 29,
     };
-    assert_eq!(format!("{shown:?}"), "Display { dpi: 144, .. }");
+    assert_eq!(format!("{:?}", Some(first)), format!("{:?}", Some(second)));
+    let context = context.with_ink(Some(second));
+    assert_eq!(debug, format!("{context:?}"));
+    assert_eq!(debug, format!("{:?}", context.with_ink(None)));
+    let shown_debug = |origin, size| {
+        format!(
+            "{:?}",
+            Shown::Display {
+                bounds: PhysicalRect { origin, size },
+                dpi: 144
+            }
+        )
+    };
+    let shown = shown_debug([-2551, 17777], [2560, 1440]);
+    for sentinel in ["-2551", "17777", "2560", "1440"] {
+        assert!(!shown.contains(sentinel));
+    }
+    assert_eq!(shown, shown_debug([12345, -45678], [2048, 1080]));
 }

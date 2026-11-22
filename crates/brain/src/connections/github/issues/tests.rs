@@ -875,6 +875,18 @@ async fn outermost_carriers_errors_and_logs_redact_text_and_embedded_byte_lists(
         &json!({"number":1,"html_url":format!("https://github.com/{SENTINEL}/repo/issues/1")}),
     );
     let outcome = create_issue(&http, &token(), query.repo, content).await;
+    let url = IssueUrl::for_issue(query.repo, 1).unwrap();
+    assert_eq!(
+        url.as_str(),
+        format!("https://github.com/{SENTINEL}/repo/issues/1")
+    );
+    assert_eq!(
+        outcome,
+        CreateOutcome::Created {
+            number: 1,
+            url: url.clone()
+        }
+    );
     assert_redacted(&format!("{:?}", Ok::<_, ApiError>(outcome)));
     let mut value = row(1);
     value["title"] = json!(SENTINEL);
@@ -882,7 +894,15 @@ async fn outermost_carriers_errors_and_logs_redact_text_and_embedded_byte_lists(
     let found = list_matches(&Script::json(200, &json!([value])), &token(), &query)
         .await
         .unwrap();
-    assert_eq!(found.issues.len(), 1);
+    assert_eq!(
+        found.issues.as_slice(),
+        [Match {
+            number: 1,
+            url,
+            created_s: 1_709_251_199
+        }]
+    );
+    assert!(found.complete);
     assert_redacted(&format!("{:?}", Ok::<_, ApiError>(found)));
     for bytes in [
         SENTINEL.as_bytes().to_vec(),

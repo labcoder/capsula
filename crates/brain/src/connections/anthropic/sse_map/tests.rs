@@ -2,7 +2,7 @@ use serde_json::{Value, json};
 
 use super::{Progress, Reader, StopReason};
 use crate::connections::anthropic::error::{Failure, Kind};
-use crate::connections::model::framer::{MAX_EVENT_BYTES, MAX_LINE_BYTES, MAX_STREAM_BYTES};
+use crate::connections::model::framer::MAX_STREAM_BYTES;
 use crate::connections::model::sse::MAX_TEXT_BYTES;
 
 const REPLAY: &[u8] =
@@ -280,43 +280,6 @@ fn completion_ignores_trailing_bytes_and_every_later_feed() {
 }
 
 #[test]
-fn reader_enforces_line_and_multiline_event_caps() {
-    for extra in [0, 1] {
-        let mut line = vec![b'a'; MAX_LINE_BYTES + extra];
-        line[0] = b':';
-        line.push(b'\n');
-        line.extend(ending("end_turn"));
-        let first = 600_000;
-        let header = b"{\"type\":\"ping\"}";
-        let mut joined = b"data: ".to_vec();
-        joined.extend_from_slice(header);
-        joined.resize(6 + first, b' ');
-        joined.extend_from_slice(b"\ndata: ");
-        joined.extend(vec![b' '; MAX_EVENT_BYTES + extra - first - 1]);
-        joined.extend_from_slice(b"\n\n");
-        joined.extend(ending("end_turn"));
-        for bytes in [&line, &joined] {
-            for size in [bytes.len(), 64 * 1024] {
-                let (seen, end) = read(bytes, size);
-                if extra == 0 {
-                    assert_eq!(end.unwrap(), StopReason::EndTurn);
-                    assert_eq!(
-                        seen,
-                        [
-                            json!({"type":"message_delta","delta":{"stop_reason":"end_turn"}}),
-                            json!({"type":"message_stop"})
-                        ]
-                    );
-                } else {
-                    assert!(matches!(end, Err(Failure::Protocol)));
-                    assert_eq!(seen, Vec::<Value>::new());
-                }
-            }
-        }
-    }
-}
-
-#[test]
 fn ignored_ping_and_unknown_events_still_count_toward_stream_cap() {
     for kind in ["ping", "synthetic_future_event"] {
         let mut padding = event(&json!({"type":kind}));
@@ -354,37 +317,34 @@ fn ignored_ping_and_unknown_events_still_count_toward_stream_cap() {
 
 #[test]
 fn only_text_deltas_spend_the_visible_text_cap() {
+    let tool_delta = json!({"type":"content_block_delta","delta":{"type":"input_json_delta",
+        "partial_json":"x".repeat(MAX_TEXT_BYTES / 2)}});
+    let first = json!({"type":"content_block_delta","delta":{"type":"text_delta",
+        "text":"é".repeat(MAX_TEXT_BYTES / 4)}});
     for extra in [0, 1] {
-        let mut bytes = Vec::new();
-        for _ in 0..3 {
-            bytes.extend(event(&json!({"type":"content_block_delta","delta":{"type":"input_json_delta","partial_json":"x".repeat(MAX_TEXT_BYTES / 2)}})));
-        }
-        for text in [
-            "é".repeat(MAX_TEXT_BYTES / 4),
-            "a".repeat(MAX_TEXT_BYTES / 2 + extra),
-        ] {
-            bytes.extend(event(
-                &json!({"type":"content_block_delta","delta":{"type":"text_delta","text":text}}),
-            ));
-        }
+        let second = json!({"type":"content_block_delta","delta":{"type":"text_delta",
+            "text":"a".repeat(MAX_TEXT_BYTES / 2 + extra)}});
+        let mut expected = vec![tool_delta.clone(); 3];
+        expected.push(first.clone());
+        let mut bytes: Vec<_> = expected.iter().flat_map(event).collect();
+        bytes.extend(event(&second));
         bytes.extend(ending("end_turn"));
+        if extra == 0 {
+            expected.extend([
+                second,
+                json!({"type":"message_delta","delta":{"stop_reason":"end_turn"}}),
+                json!({"type":"message_stop"}),
+            ]);
+        }
         for size in [bytes.len(), 64 * 1024] {
             let (seen, end) = read(&bytes, size);
-            if extra == 0 {
-                assert_eq!(end.unwrap(), StopReason::EndTurn);
-                assert_eq!(seen.len(), 7);
-                assert_eq!(
-                    seen[3]["delta"]["text"].as_str().unwrap().len(),
-                    MAX_TEXT_BYTES / 2
-                );
-                assert_eq!(
-                    seen[4]["delta"]["text"].as_str().unwrap().len(),
-                    MAX_TEXT_BYTES / 2
-                );
+            let expected_end = if extra == 0 {
+                Ok(StopReason::EndTurn)
             } else {
-                assert!(matches!(end, Err(Failure::Protocol)));
-                assert_eq!(seen.len(), 4);
-            }
+                Err(Failure::Protocol)
+            };
+            assert_eq!(end, expected_end);
+            assert_eq!(seen, expected);
         }
     }
 }

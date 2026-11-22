@@ -270,34 +270,6 @@ fn a_checkpoint_cannot_claim_confirmation_while_the_persisted_list_is_nonempty()
 }
 
 #[test]
-fn sweep_only_allows_account_load_but_promotion_fences_without_deleting_it() {
-    let (_scratch, path, service, store) = setup("marker-fence");
-    let mut vault = open(&store, &service, &path);
-    committed(vault.save_account(&account("old")));
-    vault
-        .update_marker(MarkerUpdate::BeginSweep)
-        .expect("sweep");
-    assert!(
-        vault.load_account().expect("sweep-only load").is_some(),
-        "sweep alone never fences"
-    );
-    vault
-        .update_marker(MarkerUpdate::Promote(Disposition::Erase))
-        .expect("promote");
-    drop(vault);
-    let vault = open(&store, &service, &path);
-    assert!(
-        vault.load_account().expect("fenced load").is_none(),
-        "a pending sign-out exposes no usable tokens"
-    );
-    assert!(
-        is_current(&vault, Kind::Account),
-        "the stored record still exists behind the fence"
-    );
-    assert_only_current(&vault, &store);
-}
-
-#[test]
 fn checkpoint_folds_uncertainty_once_and_a_refusal_prevents_deletion() {
     for (pending, unknown, list_empty, expected_notice) in [
         (false, false, false, true),

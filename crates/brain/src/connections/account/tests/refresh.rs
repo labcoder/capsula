@@ -236,29 +236,43 @@ fn the_rotated_set_is_saved_before_its_identity_is_checked() {
 
 #[test]
 fn callers_join_one_flight_through_its_identity_check() {
-    let mut h = Harness::seeded("refresh-one-flight", account_at(NOW, None));
-    h.access(1, NOW);
-    h.access(2, NOW);
-    assert_eq!(h.refreshes.len(), 1);
-    h.refreshed(rotated(Some("id-new")));
-    h.access(3, NOW);
-    assert_eq!(h.validations.len(), 1);
-    h.validated(Err(IdentityError::Http(HttpError::Timeout)));
-    let offline = failed(ErrorKey::AccountOffline, &[Action::Retry]);
-    assert_eq!(
-        h.answers,
-        [(1, offline.clone()), (2, offline.clone()), (3, offline)]
-    );
-    assert!(h.tokens().pending_identity_validation, "still blocked");
-    h.access(4, NOW);
-    h.access(5, NOW);
-    assert_eq!(h.validations.len(), 2, "a retried check is one more flight");
-    assert_eq!(h.refreshes.len(), 1, "with no second refresh");
-    h.validated(identity("subject-1"));
-    assert_eq!(
-        h.answers[3..],
-        [(4, bearer("access-new")), (5, bearer("access-new"))]
-    );
+    for (name, failure, key) in [
+        (
+            "refresh-one-flight",
+            IdentityError::Http(HttpError::Timeout),
+            ErrorKey::AccountOffline,
+        ),
+        (
+            "refresh-unknown-key",
+            IdentityError::UnknownKey,
+            ErrorKey::SignInFailed,
+        ),
+    ] {
+        let mut h = Harness::seeded(name, account_at(NOW, None));
+        h.access(1, NOW);
+        h.access(2, NOW);
+        assert_eq!(h.refreshes.len(), 1);
+        h.refreshed(rotated(Some("id-new")));
+        h.access(3, NOW);
+        assert_eq!(h.validations.len(), 1);
+        h.validated(Err(failure));
+        let retry = failed(key, &[Action::Retry]);
+        assert_eq!(
+            h.answers,
+            [(1, retry.clone()), (2, retry.clone()), (3, retry)]
+        );
+        assert!(h.tokens().pending_identity_validation, "still blocked");
+        assert_eq!(h.refresh_token().as_deref(), Some("refresh-new"));
+        h.access(4, NOW);
+        h.access(5, NOW);
+        assert_eq!(h.validations.len(), 2, "a retried check is one more flight");
+        assert_eq!(h.refreshes.len(), 1, "with no second refresh");
+        h.validated(identity("subject-1"));
+        assert_eq!(
+            h.answers[3..],
+            [(4, bearer("access-new")), (5, bearer("access-new"))]
+        );
+    }
 }
 
 #[test]
@@ -519,24 +533,6 @@ fn a_rotated_set_that_fails_its_check_ends_the_session_and_stays_in_chatgpt() {
     }
 }
 
-/// A key the check's key set lacks, even fetched again, leaves the set pending like a discovery
-/// failure: the session goes on, and the next use checks again.
-#[test]
-fn a_check_whose_key_is_missing_stays_pending() {
-    let mut h = Harness::seeded("refresh-unknown-key", account_at(NOW, None));
-    h.access(1, NOW);
-    h.refreshed(rotated(Some("id-new")));
-    h.validated(Err(IdentityError::UnknownKey));
-    assert_eq!(
-        h.answers,
-        [(1, failed(ErrorKey::SignInFailed, &[Action::Retry]))]
-    );
-    assert!(h.tokens().pending_identity_validation, "still pending");
-    assert_eq!(h.refresh_token(), Some("refresh-new".to_owned()));
-    h.access(2, NOW);
-    assert_eq!(h.validations.len(), 2, "checked again");
-}
-
 /// L2: a rotated set that can't be saved as the account, its access token past its bound say,
 /// still lists its successor when the entry fits, so the rotated token is revoked. The token it
 /// replaced was consumed, so the session ends, and it stays in `chatgpt` marked as sent.
@@ -624,24 +620,6 @@ fn a_held_list_save_is_saved_again_at_the_next_use() {
     );
 }
 
-/// A refresh out at sign-out that didn't rotate left the old token in place: nothing's unknown.
-#[test]
-fn a_refresh_out_at_sign_out_that_kept_its_token_leaves_nothing_unknown() {
-    let mut h = Harness::seeded("refresh-kept-at-sign-out", account_at(NOW, None));
-    h.access(1, NOW);
-    h.op(AccountOp::SignOut);
-    h.refreshed(Ok(TokenSet {
-        refresh_token: None,
-        ..rotated(None).expect("a set")
-    }));
-    assert_eq!(
-        run(&h.revoking[0]),
-        [("refresh-old".to_owned(), Origin::Account)]
-    );
-    h.sign_out_confirmed();
-    assert_eq!(h.view(), &signed_out());
-}
-
 #[test]
 fn a_set_left_pending_by_a_restart_is_checked_before_it_is_used() {
     let mut h = Harness::seeded("refresh-pending", account_at(NOW + 3600, Some("id-old")));
@@ -698,24 +676,33 @@ fn a_refresh_held_at_its_gate_while_a_sign_out_lands_is_never_sent() {
 
 #[test]
 fn a_refresh_out_at_sign_out_leaves_its_successor_to_be_revoked() {
-    let mut h = Harness::seeded("refresh-successor", account_at(NOW, None));
-    h.access(1, NOW);
-    h.op(AccountOp::SignOut);
-    assert_eq!(h.answers, [(1, Err(Denied::Unusable))]);
-    assert!(h.revoking.is_empty(), "Prepare waits for the refresh");
-    h.refreshed(rotated(Some("id-new")));
-    assert_eq!(
-        run(&h.revoking[0]),
-        [("refresh-new".to_owned(), Origin::Account)],
-        "the successor, not the token it rotated"
-    );
-    assert!(
-        h.validations.is_empty(),
-        "a replaced account's set is never checked"
-    );
-    h.sign_out_confirmed();
-    assert_eq!(h.view(), &signed_out());
-    assert_eq!(h.account(), Some(registration()));
+    for (name, rotates, expected) in [
+        ("refresh-successor", true, "refresh-new"),
+        ("refresh-kept-at-sign-out", false, "refresh-old"),
+    ] {
+        let mut h = Harness::seeded(name, account_at(NOW, None));
+        h.access(1, NOW);
+        h.op(AccountOp::SignOut);
+        assert_eq!(h.answers, [(1, Err(Denied::Unusable))]);
+        assert!(h.revoking.is_empty(), "Prepare waits for the refresh");
+        let mut set = rotated(Some("id-new")).expect("a set");
+        if !rotates {
+            set.refresh_token = None;
+            set.id_token = None;
+        }
+        h.refreshed(Ok(set));
+        assert_eq!(
+            run(&h.revoking[0]),
+            [(expected.to_owned(), Origin::Account)]
+        );
+        assert!(
+            h.validations.is_empty(),
+            "a replaced account's set is never checked"
+        );
+        h.sign_out_confirmed();
+        assert_eq!(h.view(), &signed_out());
+        assert_eq!(h.account(), Some(registration()));
+    }
 }
 
 #[test]

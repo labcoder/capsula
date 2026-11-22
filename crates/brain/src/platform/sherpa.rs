@@ -559,17 +559,6 @@ fn copy_pin(source: &Path, path: &Path, pin: &NativeFile) -> Result<(), NativeEr
     copied
 }
 
-/// Opens `path` against writers and checks its size and SHA-256 through that handle.
-#[cfg(test)]
-fn verify(path: &Path, bytes: u64, sha256: &str) -> Result<File, NativeError> {
-    let mut file = open_locked(path).map_err(|error| match error.kind() {
-        io::ErrorKind::NotFound => NativeError::Missing,
-        _ => NativeError::Load,
-    })?;
-    check_pin(&mut file, bytes, sha256, None)?;
-    Ok(file)
-}
-
 /// Reads `file` to its end, also into `copy` when given, and checks its size and SHA-256.
 fn check_pin(
     file: &mut File,
