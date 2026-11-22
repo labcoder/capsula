@@ -495,7 +495,7 @@ mod tests {
         assert_eq!(mark.style, HighlightStyle::Box);
         assert_eq!(
             bounds.map(|value| value.get().to_bits()),
-            [20.0, 30.0, 40.0, 50.0].map(f64::to_bits)
+            [20.0, 30.0, 40.0, 50.0].map(f32::to_bits)
         );
 
         let inline = br#"{"begin":{"v":1,"scene":"s","surface":"inline","alt":"a"}}"#;
