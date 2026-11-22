@@ -370,6 +370,14 @@ impl Engine {
         Observation::Accepted
     }
 
+    pub(super) fn presentation_room(&mut self, now: Duration) -> bool {
+        if self.recovering {
+            return false;
+        }
+        self.present_due(now);
+        self.anchors.len() < ANCHORS
+    }
+
     /// Delivery time cannot confirm a pending prediction on a route already lost.
     pub(super) fn lost(&mut self, generation: u64, handed: u64, now: Duration) -> bool {
         if self.physical != Some(generation) {

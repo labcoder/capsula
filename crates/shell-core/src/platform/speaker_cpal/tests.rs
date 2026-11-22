@@ -1,6 +1,6 @@
 use super::{
     AtomicU8, BLOCKS, ErrorKind, MAX_FRAMES, MAX_RATE, OutputError, OutputEvent, PACKET_SAMPLES,
-    PacketKind, ReadyBlock, SOURCE_RATE,
+    PRESENTATION_SLOTS, PacketKind, ReadyBlock, SOURCE_RATE,
 };
 
 fn pair(rate: u32, channels: usize) -> (super::Submit, super::Playback) {
@@ -585,6 +585,180 @@ fn dropping_the_backend_before_the_transport_silences_a_surviving_callback() {
     playback.fill_at(&mut out, Some(Duration::from_millis(1)));
     assert_eq!(out.map(f32::to_bits), [0; 2]);
     assert_eq!(transport.control().handed(), 101);
+}
+
+#[test]
+fn saturated_presentation_keeps_exact_pcm_across_a_recycled_segment() {
+    use super::Source;
+    use kumochi_protocol::message::{RunId, SegmentId};
+    use std::time::Duration;
+
+    let (mut submit, mut playback) = pair(SOURCE_RATE, 1);
+    let full = u64::try_from(PRESENTATION_SLOTS).unwrap();
+    let first = Source {
+        run: RunId(5),
+        generation: 3,
+        segment: SegmentId(0),
+        at: 0,
+    };
+    let second = Source {
+        segment: SegmentId(1),
+        at: full + 1,
+        ..first
+    };
+    submit
+        .packet_for(
+            &[16_384; PRESENTATION_SLOTS + 1],
+            PacketKind::End,
+            Some(first),
+        )
+        .unwrap();
+    submit
+        .packet_for(&[8192; 2], PacketKind::End, Some(second))
+        .unwrap();
+    for _ in 0..PRESENTATION_SLOTS {
+        let mut out = [0.0];
+        playback.fill_at(&mut out, Some(Duration::ZERO));
+        assert_eq!(out.map(f32::to_bits), [0.5f32.to_bits()]);
+    }
+    let recycled = playback.current.as_ref().unwrap().index;
+    let mut blocked = [99.0; 3];
+    playback.fill_at(&mut blocked, Some(Duration::from_millis(1)));
+    assert_eq!(blocked.map(f32::to_bits), [0; 3]);
+    assert_eq!(submit.control.handed(), full);
+    assert!(!submit.control.overflowed());
+    for _ in 2..BLOCKS {
+        submit.packet(&[0], PacketKind::End).unwrap();
+    }
+
+    let first_receipt = submit.observed.pop().unwrap();
+    assert_eq!((first_receipt.first, first_receipt.through), (0, 1));
+    let mut boundary = [99.0; 3];
+    playback.fill_at(&mut boundary, Some(Duration::from_millis(2)));
+    assert_eq!(boundary.map(f32::to_bits), [0.5f32.to_bits(), 0, 0]);
+    assert_eq!(submit.control.handed(), second.at);
+    let third = Source {
+        segment: SegmentId(2),
+        at: second.at + 2,
+        ..first
+    };
+    submit
+        .packet_for(&[-16_384], PacketKind::End, Some(third))
+        .unwrap();
+    assert_eq!(
+        submit.blocks[recycled].samples[0].to_bits(),
+        (-0.5f32).to_bits()
+    );
+    for through in 2..=second.at {
+        let receipt = submit.observed.pop().unwrap();
+        assert_eq!(receipt.source, first);
+        assert_eq!((receipt.first, receipt.through), (through - 1, through));
+    }
+    let mut resumed = [99.0; BLOCKS + 2];
+    playback.fill_at(&mut resumed, Some(Duration::from_millis(3)));
+    let mut expected = [0.0; BLOCKS + 2];
+    expected[..2].fill(0.25);
+    expected[BLOCKS] = -0.5;
+    assert_eq!(resumed.map(f32::to_bits), expected.map(f32::to_bits));
+    let tail: Vec<_> = std::iter::from_fn(|| submit.observed.pop())
+        .map(|receipt| (receipt.source, receipt.first, receipt.through))
+        .collect();
+    assert_eq!(
+        tail,
+        [
+            (second, second.at, third.at),
+            (third, third.at, third.at + 1)
+        ]
+    );
+    assert!(!submit.control.overflowed());
+}
+
+#[test]
+fn a_full_presentation_ring_does_not_delay_stop_fade_or_publish_extra_source() {
+    use super::{Source, TailAck};
+    use kumochi_protocol::message::{RunId, SegmentId};
+    use std::time::Duration;
+
+    let (mut submit, mut playback) = pair(SOURCE_RATE, 1);
+    let source = Source {
+        run: RunId(5),
+        generation: 3,
+        segment: SegmentId(0),
+        at: 0,
+    };
+    submit
+        .packet_for(
+            &[16_384; PRESENTATION_SLOTS + 1],
+            PacketKind::End,
+            Some(source),
+        )
+        .unwrap();
+    for _ in 0..PRESENTATION_SLOTS {
+        playback.fill_at(&mut [0.0], Some(Duration::ZERO));
+    }
+    let full = u64::try_from(PRESENTATION_SLOTS).unwrap();
+    assert_eq!(submit.control.handed(), full);
+    submit.control.stop();
+    let start = Duration::from_millis(20);
+    let mut fade = [99.0; 120];
+    playback.fill_at(&mut fade, Some(start));
+    assert!(fade[..119].iter().all(|frame| *frame > 0.0 && *frame < 0.5));
+    assert_eq!(fade[119].to_bits(), 0);
+    assert_eq!(
+        submit.control.tail(),
+        TailAck::At(start + Duration::from_nanos(118 * 1_000_000_000 / u64::from(SOURCE_RATE)))
+    );
+    assert_eq!(submit.control.fenced_handoff(), Some(full));
+    for through in 1..=full {
+        let receipt = submit.observed.pop().unwrap();
+        assert_eq!(
+            (receipt.source, receipt.first, receipt.through),
+            (source, through - 1, through)
+        );
+    }
+    assert_eq!(submit.observed.pop(), None);
+    assert!(!submit.control.overflowed());
+    let mut after = [99.0; 4];
+    playback.fill_at(&mut after, Some(start));
+    assert_eq!(after.map(f32::to_bits), [0; 4]);
+    assert_eq!(submit.control.fenced_handoff(), Some(full));
+}
+
+#[test]
+fn receipt_pressure_at_an_unequal_rate_keeps_the_fractional_resume_position() {
+    use super::Source;
+    use kumochi_protocol::message::{RunId, SegmentId};
+    use std::time::Duration;
+
+    let (mut submit, mut playback) = pair(48_000, 1);
+    let full = u64::try_from(PRESENTATION_SLOTS).unwrap();
+    let source = Source {
+        run: RunId(5),
+        generation: 3,
+        segment: SegmentId(0),
+        at: 0,
+    };
+    submit
+        .packet_for(&[16_384; 120], PacketKind::End, Some(source))
+        .unwrap();
+    let time = Some(Duration::ZERO);
+    for _ in 0..PRESENTATION_SLOTS {
+        playback.fill_at(&mut [0.0; 2], time);
+    }
+    let mut blocked = [99.0];
+    playback.fill_at(&mut blocked, time);
+    assert_eq!(blocked.map(f32::to_bits), [0]);
+    assert_eq!(submit.control.handed(), full);
+    for through in 1..=full {
+        assert_eq!(submit.observed.pop().unwrap().through, through);
+    }
+    playback.fill_at(&mut [0.0], time);
+    assert_eq!(submit.control.handed(), full + 1);
+    assert_eq!(submit.observed.pop(), None);
+    playback.fill_at(&mut [0.0], time);
+    let resumed = submit.observed.pop().unwrap();
+    assert_eq!((resumed.first, resumed.through), (full, full + 1));
+    assert_eq!(submit.observed.pop(), None);
 }
 
 #[test]

@@ -88,6 +88,134 @@ fn packet(origin: u64, seq: u32, samples: usize, last: Option<u32>) -> Packet {
     }
 }
 
+fn stage_receipts(
+    worker: &mut Worker,
+    input: &Input,
+    port: &Port,
+    requests: &Receiver<Request>,
+    replies: &SyncSender<Reply>,
+    occupied: &'static AtomicBool,
+) -> (FakePlayback, Arc<Control>) {
+    input.command(Command::Expect).unwrap();
+    input.submit(packet(7, 0, 480, Some(480))).unwrap();
+    worker
+        .step(port, &mut [0; 480], &mut |_| {}, INSTANT)
+        .unwrap();
+    let Request::Open(generation, control) = requests.try_recv().unwrap() else {
+        panic!("expected a pending open");
+    };
+    let (transport, playback) = FakePlayback::open(Arc::clone(&control), occupied);
+    assert!(
+        replies
+            .send(Reply::Opened(generation, Some(transport)))
+            .is_ok()
+    );
+    worker
+        .step(port, &mut [0; 480], &mut |_| {}, INSTANT)
+        .unwrap();
+    (playback, control)
+}
+
+#[test]
+fn a_full_presentation_timeline_drains_at_its_deadline_without_new_callbacks() {
+    static OCCUPIED: AtomicBool = AtomicBool::new(false);
+    let (mut worker, input, port, requests, replies) = fake();
+    let (mut playback, control) =
+        stage_receipts(&mut worker, &input, &port, &requests, &replies, &OCCUPIED);
+    for time in 20..=36 {
+        playback.fill(&mut [0.0], Duration::from_millis(time));
+        worker
+            .step(&port, &mut [0; 480], &mut |_| {}, INSTANT)
+            .unwrap();
+    }
+    assert_eq!(worker.engine.progress.heard, 0);
+    assert!(
+        !control.stopped(),
+        "a full timeline doesn't invalidate the physical route"
+    );
+    assert_eq!(worker.deadline(INSTANT), Some(Duration::from_millis(20)));
+    worker
+        .step(&port, &mut [0; 480], &mut |_| {}, Duration::from_millis(20))
+        .unwrap();
+    assert_eq!(worker.engine.progress.heard, 1);
+    assert_eq!(
+        worker.deadline(Duration::from_millis(20)),
+        Some(Duration::from_millis(21))
+    );
+    worker
+        .step(&port, &mut [0; 480], &mut |_| {}, Duration::from_millis(36))
+        .unwrap();
+    assert_eq!(worker.engine.progress.heard, 17);
+    assert_eq!(worker.engine.progress.first_gap, None);
+    assert!(!control.stopped());
+}
+
+#[test]
+fn a_stop_deadline_does_not_discard_the_in_flight_fade() {
+    use kumochi_protocol::message::Cursor;
+
+    static OCCUPIED: AtomicBool = AtomicBool::new(false);
+    let (mut worker, input, port, requests, replies) = fake();
+    let (mut playback, control) =
+        stage_receipts(&mut worker, &input, &port, &requests, &replies, &OCCUPIED);
+    playback.fill(&mut [0.0], INSTANT);
+    let cutoff = Duration::from_millis(2);
+    let deadline = cutoff + DRAIN;
+    let mut samples = [0.0; 180];
+    playback.fill_during_copy(&mut samples, Duration::from_millis(1), |control| {
+        assert!(input.stop());
+        worker
+            .step(&port, &mut [0; 480], &mut |_| {}, cutoff)
+            .unwrap();
+        assert_eq!(worker.deadline(cutoff), Some(deadline));
+        worker
+            .step(&port, &mut [0; 480], &mut |_| {}, deadline)
+            .unwrap();
+        assert_eq!(control.fenced_handoff(), None);
+        assert_eq!(control.tail(), TailAck::Pending);
+        assert!(
+            requests.try_recv().is_err(),
+            "the exact callback still owns its copy"
+        );
+        assert!(!worker.engine.final_at(deadline));
+    });
+    assert!(
+        samples[..60]
+            .iter()
+            .all(|sample| sample.to_bits() == 0.5f32.to_bits())
+    );
+    assert!(
+        samples[60..179]
+            .iter()
+            .all(|sample| *sample > 0.0 && *sample < 0.5)
+    );
+    assert_eq!(samples[179].to_bits(), 0);
+    assert_eq!(control.fenced_handoff(), Some(61));
+    assert!(matches!(control.tail(), TailAck::At(_)));
+    worker
+        .step(&port, &mut [0; 480], &mut |_| {}, deadline)
+        .unwrap();
+    assert!(matches!(requests.try_recv(), Ok(Request::Retire(1))));
+    let mut reports = Vec::new();
+    assert!(
+        Receipts::default().publish(&worker.engine, deadline, &mut |report| {
+            reports.push(report);
+            true
+        })
+    );
+    assert_eq!(
+        reports.last(),
+        Some(&ControlToBrain::SpeechStopped {
+            run: RUN,
+            cursor: Some(Cursor {
+                segment: SegmentId(0),
+                sample: 1
+            })
+        }),
+        "main's cutoff keeps the confirmed prefix and real late quiet still settles debt"
+    );
+}
+
 #[test]
 fn stop_is_processed_while_the_open_and_ingress_mailboxes_are_busy() {
     let (worker, mut input, port, requests, reply) = fake();
@@ -284,7 +412,17 @@ fn overflow_during_playback_retires_actual_handoff_without_promoting_pending_est
 
     for _ in 0..9 {
         playback.fill(&mut [0.0; 2], PREDICTED);
+        assert!(
+            worker
+                .physical
+                .as_mut()
+                .unwrap()
+                .transport
+                .presentation()
+                .is_some()
+        );
     }
+    playback.force_observation_overflow();
     assert!(control.overflowed());
     worker.step(&port, &mut pcm, &mut grant, LOSS).unwrap();
     assert_eq!(worker.engine.progress.consumed, 42);

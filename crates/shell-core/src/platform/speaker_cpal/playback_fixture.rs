@@ -10,6 +10,34 @@ impl FakePlayback {
     }
 
     #[cfg(test)]
+    pub(crate) fn force_observation_overflow(&self) {
+        self.0.control.overflow();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fill_during_copy(
+        &mut self,
+        out: &mut [f32],
+        at: std::time::Duration,
+        action: impl FnOnce(&Control),
+    ) {
+        let mut action = Some(action);
+        self.0.control.note_callback();
+        self.0.render(
+            out,
+            Some(at),
+            |control| {
+                control.begin_copy()?;
+                if let Some(action) = action.take() {
+                    action(control);
+                }
+                Ok(())
+            },
+            || {},
+        );
+    }
+
+    #[cfg(test)]
     pub(crate) fn open(control: Arc<Control>, occupied: &'static AtomicBool) -> (Transport, Self) {
         Self::try_open(control, occupied).expect("only one stream may claim the fixture pool")
     }
