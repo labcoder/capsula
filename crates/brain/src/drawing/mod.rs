@@ -34,7 +34,7 @@ use crate::coordinator::{BuildKey, Effect, Stale, StoreOp};
 use crate::engines::CallId;
 
 pub use call::{CallEnd, CallError, Remaining};
-pub(crate) use digest::Digest;
+pub(crate) use digest::{Digest, PrivateScene};
 pub use io::{Reply, StoredScene, Target, Write};
 pub use prepare::{PrepareJob, Prepared, Shared};
 pub use ready::READY_WAIT;
@@ -266,14 +266,21 @@ enum Author {
 }
 
 impl Author {
-    /// The author after a step from a run whose requests carried material for `recipient`.
-    fn and(self, recipient: Option<crate::context::PictureRecipient>) -> Self {
-        match (self, recipient) {
-            (author, None) => author,
-            (Self::Public, Some(recipient)) => Self::Private(recipient),
-            (Self::Private(held), Some(recipient)) if held == recipient => Self::Private(held),
+    /// Folds another step's authorship into `self`.
+    fn and(self, step: Self) -> Self {
+        match (self, step) {
+            (author, Self::Public) => author,
+            (Self::Public, Self::Private(recipient)) => Self::Private(recipient),
+            (Self::Private(held), Self::Private(recipient)) if held == recipient => {
+                Self::Private(held)
+            }
             _ => Self::Unknown,
         }
+    }
+
+    /// Whether this authorship came from protected material (`runs.protected = true`).
+    const fn is_protected(&self) -> bool {
+        !matches!(self, Self::Public)
     }
 }
 
@@ -372,9 +379,10 @@ struct StepWait {
     /// The step's wide layout and its resident bytes, which the scene keeps once the write
     /// commits; `None` writes it uncounted.
     laid: Option<(LayoutState, usize)>,
-    /// Its run's recipient when the step was admitted, read once so the stored marker and the
-    /// live stamp agree even when the run closes before the write is acknowledged.
-    recipient: Option<crate::context::PictureRecipient>,
+    /// Its run's authorship when the step was admitted, read once so the stored marker and the
+    /// live stamp agree even when the run closes before the write is acknowledged; `revoke_private`
+    /// may downgrade `Private` to `Unknown` while in flight.
+    author: Author,
 }
 
 /// The scene a pending step goes into.
