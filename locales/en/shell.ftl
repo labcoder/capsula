@@ -203,6 +203,7 @@ github-canceling = Canceling GitHub sign-in…
 github-refreshing = Refreshing repositories…
 settings-voice = Voice
 speak-answers-aloud = Speak answers aloud
+talk-back-busy = Finish or stop the current work, then try again.
 settings-privacy = Privacy
 voice-speech-input = Speech input
 voice-idle-policy = Unload speech input when idle
