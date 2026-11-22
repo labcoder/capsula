@@ -173,6 +173,7 @@ texts! {
     GitHubCanceling => "github-canceling",
     GitHubRefreshing => "github-refreshing",
     Voice => "settings-voice",
+    SpeakAnswersAloud => "speak-answers-aloud",
     Privacy => "settings-privacy",
     SpeechInput => "voice-speech-input",
     VoiceIdlePolicy => "voice-idle-policy",

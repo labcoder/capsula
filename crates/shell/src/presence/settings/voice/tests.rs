@@ -41,6 +41,79 @@ fn open(
 }
 
 #[gpui::test]
+fn speak_answers_aloud_saves_and_restores_the_authoritative_choice(cx: &mut TestAppContext) {
+    use crate::link::{Batch, LinkEvent, Session};
+    use kumochi_protocol::message::{ControlToBrain, Incarnation, SettingsOp};
+
+    let (window, view) = open(cx);
+    let owner = crate::presence::test_fixture::presence(cx);
+    let controls = view.update(cx, |view, cx| {
+        view.owner = owner.downgrade();
+        owner.update(cx, |owner, _| {
+            owner.settings = view.model.clone();
+            owner.session = Some(Session::detached(7, Incarnation(1)));
+            owner.link.record_controls()
+        })
+    });
+    let mut frame = gpui_kit::VisualTestContext::from_window(window, cx);
+    let settings = |frame: &mut gpui_kit::VisualTestContext, on, update, refusal| {
+        frame.update(|_, cx| {
+            let mut saved = view.read(cx).model.read(cx).view().unwrap().clone();
+            saved.talk_back = on;
+            let mut events = Vec::new();
+            if let Some(error) = refusal {
+                events.push(LinkEvent::Error {
+                    generation: 7,
+                    error,
+                });
+            }
+            events.push(LinkEvent::Settings {
+                generation: 7,
+                view: saved,
+                answer: update == Update::Answer,
+            });
+            owner.update(cx, |owner, cx| {
+                owner.link_events(Batch::Plain(events), cx).unwrap();
+            });
+        });
+    };
+    let click = |frame: &mut gpui_kit::VisualTestContext| {
+        frame.update(|window, cx| window.draw(cx).clear(cx));
+        let center = frame
+            .debug_bounds("speak-answers-aloud")
+            .expect("Speak answers aloud checkbox")
+            .center();
+        frame.simulate_click(center, gpui_kit::Modifiers::default());
+        frame.run_until_parked();
+    };
+
+    settings(&mut frame, true, Update::Unsolicited, None);
+    click(&mut frame);
+    let off = ControlToBrain::Settings(SettingsOp::SetTalkBack(false));
+    assert_eq!(controls.try_recv(), Ok(off.clone()));
+    click(&mut frame);
+    assert_eq!(controls.try_recv(), Err(async_channel::TryRecvError::Empty));
+    settings(
+        &mut frame,
+        true,
+        Update::Answer,
+        Some(ErrorKey::SettingsRefused.into()),
+    );
+    frame.update(|window, cx| window.draw(cx).clear(cx));
+    assert!(frame.debug_bounds("talk-back-error").is_some());
+    click(&mut frame);
+    assert_eq!(controls.try_recv(), Ok(off));
+    press(&mut frame, "ctrl-tab ctrl-shift-tab");
+    settings(&mut frame, false, Update::Answer, None);
+    click(&mut frame);
+    assert_eq!(
+        controls.try_recv(),
+        Ok(ControlToBrain::Settings(SettingsOp::SetTalkBack(true)))
+    );
+    assert!(controls.is_empty());
+}
+
+#[gpui::test]
 fn hold_to_talk_is_keyboard_operable_and_waits_for_the_saved_answer(cx: &mut TestAppContext) {
     use crate::link::{Batch, LinkEvent, Session};
     use kumochi_protocol::message::{ControlToBrain, Incarnation, SettingsOp};

@@ -202,6 +202,7 @@ github-code-expired = This code is no longer available. Cancel and connect again
 github-canceling = Canceling GitHub sign-in…
 github-refreshing = Refreshing repositories…
 settings-voice = Voice
+speak-answers-aloud = Speak answers aloud
 settings-privacy = Privacy
 voice-speech-input = Speech input
 voice-idle-policy = Unload speech input when idle
