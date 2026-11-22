@@ -55,7 +55,7 @@ fn color() -> Paint {
     clippy::too_many_lines,
     reason = "manual probe counts and coordinates are bounded by 32768"
 )]
-fn case(kind: Kind, candidate: usize) -> Case {
+fn case_primitives(kind: Kind, candidate: usize) -> Vec<(Prim, Affine)> {
     let mut primitives = Vec::new();
     if matches!(kind, Kind::Overlap) {
         primitives.push((
@@ -158,6 +158,14 @@ fn case(kind: Kind, candidate: usize) -> Case {
             primitives.push((prim.clone(), Affine::pose(64.0, 0.01, Vec2::new(0.0, 0.0))));
         }
     }
+    primitives
+}
+
+fn case(kind: Kind, candidate: usize) -> Case {
+    stage_case(kind, candidate, case_primitives(kind, candidate))
+}
+
+fn stage_case(kind: Kind, candidate: usize, primitives: Vec<(Prim, Affine)>) -> Case {
     let work = primitives
         .iter()
         .fold(PaintWork::default(), |sum, (prim, _)| {
@@ -456,10 +464,9 @@ fn smoke_primary_paint_work() {
     reason = "bounded diagnostic coordinates"
 )]
 fn small_primitives(candidate: usize, rect_placement: f32) -> Case {
-    let mut mixed = case(Kind::Dash, candidate);
-    mixed.kind = Kind::Mixed;
+    let mut primitives = case_primitives(Kind::Dash, candidate);
     for index in 0..candidate / 3 {
-        mixed.primitives.push((
+        primitives.push((
             Prim::Fill {
                 points: Arc::from([
                     Vec2::new(0.0, 0.0),
@@ -476,7 +483,7 @@ fn small_primitives(candidate: usize, rect_placement: f32) -> Case {
         ));
     }
     for index in 0..candidate / 5 {
-        mixed.primitives.push((
+        primitives.push((
             Prim::Rect {
                 rect: Rect {
                     origin: Vec2::new(0.0, 0.0),
@@ -496,13 +503,7 @@ fn small_primitives(candidate: usize, rect_placement: f32) -> Case {
             ),
         ));
     }
-    mixed.work = mixed
-        .primitives
-        .iter()
-        .fold(PaintWork::default(), |sum, (prim, _)| {
-            sum + PaintWork::of(std::slice::from_ref(prim), MAX_COMPOSED_SCALE)
-        });
-    mixed
+    stage_case(Kind::Mixed, candidate, primitives)
 }
 
 #[test]
@@ -510,6 +511,19 @@ fn the_small_primitive_control_spends_the_three_budgets_independently() {
     for placement in [1.0_f32, 2.0] {
         let mixed = small_primitives(512, placement);
         assert_eq!(mixed.primitives.len(), 1 + 170 + 102);
+        let (index, (_, pose)) = mixed
+            .primitives
+            .iter()
+            .enumerate()
+            .find(|(_, (prim, _))| matches!(prim, Prim::Fill { .. }))
+            .expect("a diagnostic triangle");
+        let handle = kumochi_scene::Handle::new(1, 0).expect("a diagnostic handle");
+        let path = mixed
+            .cache
+            .fill(handle, index, *pose)
+            .expect("a staged diagnostic fill")
+            .expect("a nonempty diagnostic fill");
+        assert_eq!(path.vertices.len(), 3);
         for (_, pose) in mixed
             .primitives
             .iter()

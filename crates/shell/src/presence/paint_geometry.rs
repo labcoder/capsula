@@ -4,7 +4,7 @@ use gpui_kit::{FillOptions, FillRule, Path, Pixels};
 use kumochi_scene::{
     display::{Contour, Paint, Prim, fallback_corner_segments},
     geom::{Affine, Rect, Vec2},
-    limits::MAX_GLOBAL_FILL_VERTICES,
+    limits::{MAX_GLOBAL_FILL_VERTICES, MAX_GLOBAL_OUTLINE_POINTS},
 };
 use lyon::{
     path::PathEvent,
@@ -20,8 +20,16 @@ use super::{
 /// A primitive's fill and stroke paths, each with its paint.
 pub(super) type PrimPaths = [Option<(Path<Pixels>, Paint)>; 2];
 
-/// Fixed residency allowance for the reusable Lyon sweep and output below the paint caps.
-pub(super) const FILL_SCRATCH_BYTES: usize = MAX_GLOBAL_FILL_VERTICES * 256;
+const RECT_FILL_POINTS: usize = (MAX_GLOBAL_FILL_VERTICES - 1) / 4 * 4;
+const RECT_BORDER_POINTS: usize = (MAX_GLOBAL_OUTLINE_POINTS - 1) / 4 * 4 * 2 + 2;
+const RECT_EVENT_LIMIT: usize = {
+    let fill = RECT_FILL_POINTS + 1;
+    let border = RECT_BORDER_POINTS + 1;
+    if fill > border { fill } else { border }
+};
+
+/// One retained sweep and its output for the bounded Rect path (scene.md, Paint backend).
+pub(super) const FILL_SCRATCH_BYTES: usize = RECT_EVENT_LIMIT.next_power_of_two() * 1024;
 
 pub(super) struct FillScratch {
     tessellator: FillTessellator,
@@ -34,6 +42,23 @@ impl FillScratch {
             tessellator: FillTessellator::new(),
             buffers: VertexBuffers::with_capacity(0, 0),
         }
+    }
+
+    fn build(
+        &mut self,
+        events: impl Iterator<Item = PathEvent>,
+        options: FillOptions,
+    ) -> Result<(), BuildError> {
+        self.buffers.clear();
+        self.tessellator
+            .tessellate(
+                events,
+                &options,
+                &mut BuffersBuilder::new(&mut self.buffers, |vertex: FillVertex<'_>| {
+                    vertex.position()
+                }),
+            )
+            .map_err(|_| BuildError::Fill)
     }
 }
 
@@ -212,7 +237,7 @@ fn sector(
     Ok(None)
 }
 
-fn events(points: impl Iterator<Item = Vec2> + Clone) -> impl Iterator<Item = PathEvent> {
+fn events(points: impl Iterator<Item = Vec2> + Clone) -> impl Iterator<Item = PathEvent> + Clone {
     let points = points.map(|at| lyon::math::point(at.x, at.y));
     let first = points.clone().next();
     let last = points.clone().last();
@@ -244,21 +269,29 @@ fn filled(
 
 fn tessellated(
     scratch: &mut FillScratch,
-    events: impl Iterator<Item = PathEvent>,
+    events: impl Iterator<Item = PathEvent> + Clone,
     rule: FillRule,
     transform: Affine,
 ) -> Result<Option<Path<Pixels>>, BuildError> {
     let fill = paint_phase::enter(Phase::LyonFill);
-    let buffers = &mut scratch.buffers;
-    buffers.clear();
-    scratch
-        .tessellator
-        .tessellate(
-            events,
-            &FillOptions::default().with_fill_rule(rule),
-            &mut BuffersBuilder::new(buffers, |vertex: FillVertex<'_>| vertex.position()),
-        )
-        .map_err(|_| BuildError::Fill)?;
+    let options = FillOptions::default().with_fill_rule(rule);
+    let bounded = events
+        .size_hint()
+        .1
+        .is_some_and(|count| count <= RECT_EVENT_LIMIT);
+    let mut transient;
+    let buffers = if bounded
+        && scratch
+            .build(events.clone(), options.with_intersections(false))
+            .is_ok()
+    {
+        &scratch.buffers
+    } else {
+        *scratch = FillScratch::new();
+        transient = FillScratch::new();
+        transient.build(events, options)?;
+        &transient.buffers
+    };
     drop(fill);
     let _app = paint_phase::enter(Phase::App);
     let triangles = buffers.indices.iter().map(|index| {

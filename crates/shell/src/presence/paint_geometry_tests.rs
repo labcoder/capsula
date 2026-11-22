@@ -440,58 +440,55 @@ fn one_straight_stroke_requests_only_one_exact_handoff() {
 }
 
 #[test]
-fn rect_scratch_stays_with_the_painter_and_is_charged_once() {
-    use super::{FILL_SCRATCH_BYTES, Rounded, events, tessellated};
-    use gpui_kit::FillRule;
+fn the_rect_work_ceiling_keeps_no_more_than_the_fixed_scratch_charge() {
+    use kumochi_scene::display::PaintWork;
 
-    let mut scratch = Scratch::new();
     let rect = Rect {
         origin: Vec2::default(),
-        size: Vec2::new(20_000.0, 18_000.0),
+        size: Vec2::new(8_000.0, 7_000.0),
     };
-    let global = kumochi_scene::limits::MAX_GLOBAL_FILL_VERTICES;
-    let fill_segments = u32::try_from((global - 1) / 4 - 1).unwrap();
-    let outline = kumochi_scene::limits::MAX_GLOBAL_OUTLINE_POINTS;
-    let ring_segments = u32::try_from((outline - 1) / 4 - 1).unwrap();
-    let far = Rounded::new(rect, 8_000.0, fill_segments);
-    let outer = Rounded::new(rect, 8_000.0, ring_segments);
-    let inner = Rounded::new(
-        Rect {
-            origin: Vec2::new(4.0, 4.0),
-            size: rect.size - Vec2::new(8.0, 8.0),
+    let primitives = [
+        Prim::Rect {
+            rect,
+            radius: 3_282.0,
+            fill: Some(ink()),
+            border: None,
         },
-        7_996.0,
-        ring_segments,
-    );
-    let transform = Affine::pose(2.0, 0.25, Vec2::default());
-    let ((), _, [allocated, released]) = crate::allocation::usage(|| {
-        drop(
-            tessellated(
-                &mut scratch.fill,
-                events(far.iter()),
-                FillRule::NonZero,
+        Prim::Rect {
+            rect,
+            radius: 453.0,
+            fill: None,
+            border: Some((ink(), 4.0)),
+        },
+    ];
+    let work = PaintWork::of(&primitives, MAX_COMPOSED_SCALE);
+    assert!(work.within_limits());
+    assert_eq!((work.fill_vertices, work.outline_points), (2_045, 765));
+    let transform = Affine::pose(MAX_COMPOSED_SCALE, 0.25, Vec2::default());
+    let paint = |scratch: &mut Scratch| {
+        for (index, draw) in [(0, 1.0), (1, 1.0), (1, 0.999)] {
+            let paths = paths(
+                scratch,
+                &primitives[index],
                 transform,
+                draw,
+                0.0,
+                MAX_COMPOSED_SCALE,
             )
-            .expect("a cap-sized fill")
-            .expect("has path vertices"),
-        );
-        drop(
-            tessellated(
-                &mut scratch.fill,
-                events(outer.iter()).chain(events(inner.iter())),
-                FillRule::EvenOdd,
-                transform,
-            )
-            .expect("a cap-sized ring")
-            .expect("has path vertices"),
-        );
+            .expect("the admitted Rect fallback");
+            let path = &paths[index].as_ref().expect("the Rect path").0;
+            assert!(path.vertices.len() >= 3);
+            assert!(paths[1 - index].is_none());
+        }
+    };
+    let (scratch, _, [allocated, released]) = crate::allocation::usage(|| {
+        let mut scratch = Scratch::new();
+        paint(&mut scratch);
+        scratch
     });
     let held = allocated - released;
-    assert!(
-        held > 0 && held <= FILL_SCRATCH_BYTES,
-        "scratch held {held} bytes"
-    );
-    let ((), _, [allocated, freed]) = crate::allocation::usage(|| drop(scratch.fill));
+    assert!(held <= scratch.bytes(), "scratch held {held} bytes");
+    let ((), _, [allocated, freed]) = crate::allocation::usage(|| drop(scratch));
     assert_eq!(
         (allocated, freed),
         (0, held),
@@ -500,46 +497,41 @@ fn rect_scratch_stays_with_the_painter_and_is_charged_once() {
 }
 
 #[test]
-fn warmed_rect_fallback_allocates_only_the_path_handoffs_at_placement_two() {
-    let prim = Prim::Rect {
+fn a_contour_over_the_rect_limit_leaves_no_extra_retained_scratch() {
+    use kumochi_scene::display::PaintWork;
+
+    let prim = |radius| Prim::Rect {
         rect: Rect {
             origin: Vec2::default(),
-            size: Vec2::new(40.0, 24.0),
+            size: Vec2::new(8_000.0, 7_000.0),
         },
-        radius: 6.0,
+        radius,
         fill: Some(ink()),
-        border: Some((ink(), 4.0)),
+        border: None,
     };
-    let mut scratch = Scratch::new();
-    let transform = Affine::pose(2.0, 0.3, Vec2::default());
-    let draws = [0.25, 0.5, 0.999, 1.0];
-    for draw in draws {
-        assert!(
-            paths(&mut scratch, &prim, transform, draw, 0.0, 2.0)
-                .expect("warm the same fallback")
-                .iter()
-                .all(Option::is_some)
-        );
-    }
-    let ((), events) = crate::allocation::requests(8_192, || {
-        let _app = paint_phase::enter(Phase::App);
-        for draw in draws {
-            drop(
-                paths(&mut scratch, &prim, transform, draw, 0.0, 2.0)
-                    .expect("fill and border stay paintable"),
-            );
-        }
+    let over = prim(3_295.0);
+    let work = PaintWork::of(std::slice::from_ref(&over), MAX_COMPOSED_SCALE);
+    assert_eq!(work.fill_vertices, 2_049);
+    assert!(!work.within_limits());
+    let transform = Affine::pose(MAX_COMPOSED_SCALE, 0.25, Vec2::default());
+    let paint = |scratch: &mut Scratch, prim: &Prim| {
+        let [Some((path, _)), None] = paths(scratch, prim, transform, 1.0, 0.0, MAX_COMPOSED_SCALE)
+            .expect("the existing single-path bound admits it")
+        else {
+            panic!("one prepared path");
+        };
+        assert!(path.vertices.len() >= 3);
+    };
+    let (fresh, _, [allocated, released]) = crate::allocation::usage(Scratch::new);
+    let baseline = allocated - released;
+    drop(fresh);
+    let (scratch, _, [allocated, released]) = crate::allocation::usage(|| {
+        let mut scratch = Scratch::new();
+        paint(&mut scratch, &prim(3_282.0));
+        paint(&mut scratch, &over);
+        scratch
     });
-    let scratch_allocations = events
-        .iter()
-        .filter(|event| event.action == 0 && event.tag == 2)
-        .count();
-    assert_eq!(
-        scratch_allocations, 0,
-        "warm fallback tessellation allocates nothing"
-    );
-    assert_eq!(
-        paint_phase::tests::assert_paths(&events, 1),
-        2 * draws.len()
-    );
+    assert_eq!(allocated - released, baseline);
+    let ((), _, [allocated, freed]) = crate::allocation::usage(|| drop(scratch));
+    assert_eq!((allocated, freed), (0, baseline));
 }
