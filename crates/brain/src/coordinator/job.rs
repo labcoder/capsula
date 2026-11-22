@@ -233,8 +233,9 @@ impl Coordinator {
             thread,
             serial: self.attempts,
         };
-        let control =
-            crate::recall::control::Control::new(std::time::Instant::now() + super::WALL_CLOCK);
+        let control = crate::recall::control::Control::new(
+            std::time::Instant::now() + self.tuning.wall_clock,
+        );
         self.job = Some(Job {
             control: crate::recall::control::CancelOnDrop(control.clone()),
             key,

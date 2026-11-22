@@ -14,9 +14,10 @@ use crate::engines::anthropic::encode::ToolUse;
 use crate::engines::{CallId, Opaque, ToolName};
 use crate::store::Failure;
 
-/// The most model rounds one run may have [guess, from §13b].
+/// The most model rounds one run may have [guess, from §13b]; `[tuning.runs]` may only lower it.
 pub const MAX_ROUNDS: u32 = 8;
-/// The most tool calls one run may make, across its rounds [guess, from §13b].
+/// The most tool calls one run may make, across its rounds [guess, from §13b]; `[tuning.runs]` may
+/// only lower it.
 pub const MAX_CALLS: u32 = 16;
 /// One round's write, in one transaction: the text streamed since the last write, the round's
 /// native items in output order, then each call's answer in call order. `RoundStored`
@@ -76,9 +77,9 @@ impl fmt::Debug for Loop {
 }
 
 impl Loop {
-    /// Charges one call; false when the run has made all it may.
-    pub(super) fn charge(&mut self) -> bool {
-        if self.calls >= MAX_CALLS {
+    /// Charges one call; false when the run has made all `limit` allows.
+    pub(super) fn charge(&mut self, limit: u32) -> bool {
+        if self.calls >= limit {
             return false;
         }
         self.calls += 1;
@@ -224,10 +225,11 @@ impl Coordinator {
     /// with their results unless it was the run's last allowed round, a round with only native
     /// items is stored before the run ends, and a round with neither ends it.
     pub(super) fn round_end(&mut self, run: RunId, effects: &mut Vec<Effect>) -> Result<(), Stale> {
+        let rounds = self.tuning.rounds;
         let current = self.current(run)?;
         let round = current.build.as_ref().map_or(1, |build| build.key().round);
         let calling = current.tools.calling();
-        if calling && round >= MAX_ROUNDS {
+        if calling && round >= rounds {
             return self.fail(run, Failure::Budget, effects);
         }
         if !calling && current.tools.items.is_empty() {

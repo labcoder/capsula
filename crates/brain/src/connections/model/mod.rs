@@ -241,7 +241,8 @@ async fn send<C: Connect, L: Lease>(
 ) -> Result<(), Failure> {
     let request = wire::request(bearer.expose(), body.0.expose())?;
     let lease = ask.await.ok_or(Failure::Rebuild)?;
-    let deadline = Instant::now() + SEND_DEADLINE;
+    let tuning = client.tuning;
+    let deadline = Instant::now() + tuning.send;
     let mut attempt = Attempt {
         conn: None,
         lease: Some(lease),
@@ -271,7 +272,9 @@ async fn send<C: Connect, L: Lease>(
             .await?
         {
             Upload::Flushed => Ok(()),
-            Upload::Refused(head) => Err(Failure::Provider(refusal(conn, head).await?)),
+            Upload::Refused(head) => {
+                Err(Failure::Provider(refusal(conn, head, tuning.idle).await?))
+            }
         }
     });
     upload.await.map_err(|_| Failure::Transport)??;
@@ -282,9 +285,9 @@ async fn send<C: Connect, L: Lease>(
         .conn
         .as_mut()
         .expect("an upload that flushed holds its connection");
-    let head = conn.head(IDLE).await?;
+    let head = conn.head(tuning.idle).await?;
     if !(200..300).contains(&head.status) {
-        let refused = timeout(ERROR_BODY_DEADLINE, refusal(conn, head)).await;
+        let refused = timeout(tuning.error_body, refusal(conn, head, tuning.idle)).await;
         return Err(Failure::Provider(refused.map_err(|_| Failure::Transport)??));
     }
     let mut events = Reader::default();
@@ -292,7 +295,7 @@ async fn send<C: Connect, L: Lease>(
     let mut progress = match head.media {
         Media::EventStream => Progress::More,
         Media::Absent => {
-            let fed = events.feed(&sniff(conn, &mut body).await?, &mut |event| {
+            let fed = events.feed(&sniff(conn, &mut body, tuning.idle).await?, &mut |event| {
                 out.event(event);
             })?;
             if out.taken().await.is_break() {
@@ -304,7 +307,7 @@ async fn send<C: Connect, L: Lease>(
     };
     while progress == Progress::More {
         let length = conn
-            .next(&mut body, IDLE)
+            .next(&mut body, tuning.idle)
             .await?
             .ok_or(Failure::Truncated)?;
         let fed = events.feed(&conn.buf[..length], &mut |event| out.event(event));
@@ -338,7 +341,11 @@ async fn send<C: Connect, L: Lease>(
 
 /// The first data of a body whose head names no type, once its first 128 bytes show an event
 /// stream: blank space, then `data:`, `event:` or a `:` comment.
-async fn sniff<Io>(conn: &mut ModelConn<Io>, body: &mut Body) -> Result<Vec<u8>, Failure>
+async fn sniff<Io>(
+    conn: &mut ModelConn<Io>,
+    body: &mut Body,
+    idle: Duration,
+) -> Result<Vec<u8>, Failure>
 where
     Io: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
@@ -353,14 +360,18 @@ where
         if window.len() == SNIFF_BYTES || !FIELDS.iter().any(|field| field.starts_with(start)) {
             return Err(Failure::Protocol);
         }
-        let length = conn.next(body, IDLE).await?.ok_or(Failure::Protocol)?;
+        let length = conn.next(body, idle).await?.ok_or(Failure::Protocol)?;
         prefix.extend_from_slice(&conn.buf[..length]);
         conn.buf.drain(..length);
     }
 }
 
 /// A refusal's bounded body, read to the end of its framing.
-async fn refusal<Io>(conn: &mut ModelConn<Io>, head: Head) -> Result<ProviderError, Failure>
+async fn refusal<Io>(
+    conn: &mut ModelConn<Io>,
+    head: Head,
+    idle: Duration,
+) -> Result<ProviderError, Failure>
 where
     Io: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
@@ -369,7 +380,7 @@ where
     }
     let mut body = Body::new(head.framing);
     let mut bytes = Zeroizing::new(Vec::new());
-    while let Some(length) = conn.next(&mut body, IDLE).await? {
+    while let Some(length) = conn.next(&mut body, idle).await? {
         if length > MAX_BODY_BYTES - bytes.len() {
             return Err(Failure::Protocol);
         }

@@ -82,11 +82,12 @@ impl Coordinator {
         }
         let drawing_pending = matches!(&event, TurnEvent::Finished(Finish::Completed))
             && self.drawing.pending_for(run);
+        let limit = self.tuning.calls;
         let current = self.current(run)?;
         match event {
             TurnEvent::TextDelta(delta) => self.text(key, &delta, effects)?,
             // Charged before anything of the call is kept (D13-M2).
-            TurnEvent::ToolCallStarted { .. } if !current.tools.charge() => {
+            TurnEvent::ToolCallStarted { .. } if !current.tools.charge(limit) => {
                 self.fail(run, Failure::Budget, effects)?;
             }
             // A draw the request didn't offer has no effect (D13-H2).

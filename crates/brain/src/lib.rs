@@ -258,7 +258,7 @@ async fn run_admitted(
         scenes,
         match replay {
             Some(replay) => replay,
-            None => engine()?,
+            None => engine(config.model_tuning())?,
         },
         config,
         account,
@@ -502,7 +502,7 @@ async fn direct_dev_draw_refuses_before_store_or_vault_startup() {
 /// The engine runs use: in a dev build that names a script in
 /// [`kumochi_protocol::constants::FIXTURE_ENV`], that script answers every run; otherwise the
 /// account's Responses engine answers, once the account is ready.
-fn engine() -> Result<Selected, BrainError> {
+fn engine(tuning: config::tuning::ModelTuning) -> Result<Selected, BrainError> {
     #[cfg(debug_assertions)]
     if let Some(path) = std::env::var_os(kumochi_protocol::constants::FIXTURE_ENV) {
         let script = std::fs::read_to_string(path).map_err(BrainError::Fixture)?;
@@ -512,7 +512,7 @@ fn engine() -> Result<Selected, BrainError> {
         return Ok(Selected::Fixture(Box::new(fixture)));
     }
     let (access, asks) = AccessHandle::new();
-    let client = ModelClient::new(Tls::build().map_err(BrainError::Model)?);
+    let client = ModelClient::new(Tls::build().map_err(BrainError::Model)?).with_tuning(tuning);
     let engine = Responses::new(client, Budget::from_env(), access);
     Ok(Selected::Account {
         engine: Box::new(engine),

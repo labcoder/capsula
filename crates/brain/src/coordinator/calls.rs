@@ -293,10 +293,11 @@ impl Coordinator {
             launch,
             key,
         };
+        let limit = self.tuning.calls;
         let run = self
             .current(build.run)
             .expect("an authorized launch's run is current");
-        if !run.ledger.has(&caller.key()) && !run.tools.charge() {
+        if !run.ledger.has(&caller.key()) && !run.tools.charge(limit) {
             self.fail(build.run, Failure::Budget, effects)
                 .expect("the run is current");
             return Dispatch::Answered(ToolOutput::Error(ToolError::Ended));
