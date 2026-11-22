@@ -92,6 +92,27 @@ pub(super) fn draft(store: &mut Store, thread: ThreadId) -> Action {
         .expect("draft")
 }
 
+/// GitHub's ids for `repo()` and the other repository the listings name.
+pub(super) const ID: NonZeroU64 = NonZeroU64::new(7).expect("nonzero");
+pub(super) const OTHER: NonZeroU64 = NonZeroU64::new(8).expect("nonzero");
+
+/// The action with `repo()` bound to `ID`, as its review over a listing leaves it, without that
+/// review's new revision.
+pub(super) fn bind(store: &mut Store, action: &Action) -> Action {
+    let id = i64::try_from(action.draft.0).expect("a stored draft");
+    store
+        .conn
+        .execute("UPDATE actions SET repo_id = 7 WHERE id = ?1", [id])
+        .expect("bind");
+    store.action(action.draft).expect("read").expect("live")
+}
+
+/// A new draft, reviewed: see [`bind`].
+pub(super) fn reviewed(store: &mut Store, thread: ThreadId) -> Action {
+    let action = draft(store, thread);
+    bind(store, &action)
+}
+
 pub(super) fn posting(mark: &str) -> String {
     format!(r#"{{"kind":"posting","mark":{mark},"unresolved":null}}"#)
 }

@@ -151,7 +151,7 @@ fn action() -> Action {
         approval: None,
         consumed: Some(ApprovalRev(1)),
         uncertain: 0,
-        repo_id: None,
+        repo_id: NonZeroU64::new(7),
     }
 }
 
@@ -332,6 +332,7 @@ async fn identity_and_complete_exact_membership_are_required_without_retargeting
         ("case differs", FailReason::NotFound, 3),
         ("incomplete", FailReason::PreflightFailed, 3),
         ("recreated since review", FailReason::NotFound, 3),
+        ("no id bound", FailReason::NotFound, 3),
     ] {
         let mut action = action();
         let mut steps = authority(Some(100));
@@ -352,6 +353,7 @@ async fn identity_and_complete_exact_membership_are_required_without_retargeting
                     json!({"total_count":2,"repositories":[{"full_name":"owner/repo","id":7}]});
             }
             "recreated since review" => action.repo_id = NonZeroU64::new(9),
+            "no id bound" => action.repo_id = None,
             _ => unreachable!(),
         }
         steps.truncate(calls);
@@ -379,27 +381,21 @@ async fn identity_and_complete_exact_membership_are_required_without_retargeting
     }
 }
 
-/// OSC-648: the id GitHub lists for the name now must be the one bound at review; an attempt
-/// from before the id was stored is checked by name, as before.
+/// OSC-648: the id GitHub lists for the name now is the one bound at review, so preflight goes
+/// on; another id, or none bound, is refused above.
 #[tokio::test(start_paused = true)]
-async fn a_repository_unchanged_since_review_or_from_before_the_id_proceeds() {
-    for repo_id in [NonZeroU64::new(7), None] {
-        let mut steps = authority(Some(100));
-        steps.push(reply(
-            Expected::Issues { since: 99, page: 1 },
-            Some(120),
-            json!([]),
-        ));
-        let (http, control, script) = bounded(steps);
-        let action = Action {
-            repo_id,
-            ..action()
-        };
-        let prepared = preflight(http, token(), &action, &control).await.unwrap();
-        assert_eq!(prepared.mark.at_s.get(), 120, "{repo_id:?}");
-        assert_eq!(script.calls.load(Ordering::SeqCst), 4, "{repo_id:?}");
-        assert!(!control.may_have_sent(), "{repo_id:?}");
-    }
+async fn a_repository_unchanged_since_review_proceeds() {
+    let mut steps = authority(Some(100));
+    steps.push(reply(
+        Expected::Issues { since: 99, page: 1 },
+        Some(120),
+        json!([]),
+    ));
+    let (http, control, script) = bounded(steps);
+    let prepared = preflight(http, token(), &action(), &control).await.unwrap();
+    assert_eq!(prepared.mark.at_s.get(), 120);
+    assert_eq!(script.calls.load(Ordering::SeqCst), 4);
+    assert!(!control.may_have_sent());
 }
 
 #[tokio::test(start_paused = true)]
@@ -627,4 +623,23 @@ async fn prepared_and_failure_debug_never_expose_user_or_remote_content() {
         format!("{INCONCLUSIVE:?}"),
         "Failure { reason: PreflightFailed, unauthorized: false }"
     );
+}
+
+/// OSC-648: a lookup for an attempt with no id bound (pending across V10) can't name the
+/// repository, so it reads no issues and reports it couldn't check.
+#[tokio::test(start_paused = true)]
+async fn a_lookup_with_no_id_bound_reads_no_issues() {
+    let (http, _, script) = bounded(authority(Some(100)));
+    let action = Action {
+        repo_id: None,
+        ..unknown()
+    };
+    assert_eq!(
+        check(&http, &token(), &action).await.unwrap_err(),
+        Failure {
+            reason: FailReason::NotFound,
+            unauthorized: false
+        }
+    );
+    assert_eq!(script.calls.load(Ordering::SeqCst), 3);
 }

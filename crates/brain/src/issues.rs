@@ -254,10 +254,10 @@ impl Action {
         let Some(repo) = self.repo.as_ref().filter(|repo| live.repos.contains(repo)) else {
             return Err(IssueRefused::RepoNotListed);
         };
-        // Consent only verifies the id its preview bound: the name listed under another id, or an
-        // id where the preview bound none, isn't the repository the user reviewed.
+        // Consent only verifies the id its preview bound. None bound (no review since V10, or a
+        // preview without a listing) never files; another id is another repository.
         if matches!(next, Stage::Preflight { .. })
-            && id_of(live.repos, live.repo_ids, repo) != self.repo_id
+            && (self.repo_id.is_none() || id_of(live.repos, live.repo_ids, repo) != self.repo_id)
         {
             return Err(IssueRefused::RepoNotListed);
         }
@@ -407,6 +407,8 @@ impl Action {
             return Err(IssueRefused::NotAllowedNow);
         }
         if (&self.title, &self.body, self.repo.as_ref()) != (title, body, repo) {
+            // Coming back to a repository binds what's listed then, but only with a fresh approval
+            // (an old click can't reuse it), and today's shell can't change the repository.
             self.repo_id = self.repo_id.filter(|_| self.repo.as_ref() == repo);
             (self.title, self.body, self.repo) = (title.clone(), body.clone(), repo.cloned());
             self.stage = Stage::Draft;

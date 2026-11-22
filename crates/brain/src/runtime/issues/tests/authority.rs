@@ -541,7 +541,7 @@ async fn a_real_post_401_revokes_only_the_generation_that_sent_it() {
                     generation,
                     result: Ok(Repositories {
                         names: Bounded::new(vec![RepoName::new("owner/repo").unwrap()]).unwrap(),
-                        ids: Vec::new(),
+                        ids: vec![NonZeroU64::new(7).unwrap()],
                     }),
                 },
             );

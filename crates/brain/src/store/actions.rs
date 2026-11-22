@@ -430,20 +430,15 @@ fn consent_row(
         }
         let account = action.account.as_ref()?;
         let repo = action.repo.as_ref()?;
-        let repo_id = action
-            .repo_id
-            .map(|repo| i64::try_from(repo.get()))
-            .transpose()
-            .ok()?;
-        // Two ids decide, so a rename still matches and a new repository under the old name doesn't.
-        // shortcut: rows from before V10 have no id and match by name; they exist only for
-        // attempts pending across that upgrade.
+        let repo_id = i64::try_from(action.repo_id?.get()).ok()?;
+        // Ids decide, so a rename still matches and a new repository under the old name doesn't.
+        // An earlier attempt with no id (pending across V10) can't be told apart; its name blocks.
         let other: Option<i64> = tx
             .query_row(
                 "SELECT a.id FROM actions a
                      WHERE a.id <> ?1
                      AND a.account_id = ?2 AND a.title = ?4 AND a.body = ?5
-                     AND CASE WHEN a.repo_id IS NULL OR ?6 IS NULL THEN a.repo = ?3 COLLATE NOCASE
+                     AND CASE WHEN a.repo_id IS NULL THEN a.repo = ?3 COLLATE NOCASE
                               ELSE a.repo_id = ?6 END
                      AND (json_extract(a.stage, '$.kind') IN ('preflight', 'posting', 'unknown')
                           OR (json_extract(a.stage, '$.kind') = 'discarded' AND a.uncertain > 0))

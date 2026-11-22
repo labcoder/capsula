@@ -12,7 +12,7 @@ use rusqlite::{
 use tokio::time::Instant;
 
 use super::actions_tests::{
-    A, body, draft, issue, mark, opened, repo, snapshot, thread, title, user,
+    A, ID, body, draft, issue, mark, opened, repo, reviewed, snapshot, thread, title, user,
 };
 use super::{Store, StoreError};
 use crate::connections::github::issues::CreateOutcome;
@@ -30,7 +30,7 @@ fn consent(action: &Action) -> Write {
             capacity: true,
             account: Some(user(7)),
             repos: vec![repo()],
-            repo_ids: Vec::new(),
+            repo_ids: vec![ID],
         },
     }
 }
@@ -156,7 +156,7 @@ fn cancellation_from_the_wal_commit_hook_cannot_erase_a_committed_answer() {
     let scratch = Scratch::new("issue-scope-committed");
     let mut store = opened(&scratch);
     let owner = thread(&mut store);
-    let action = draft(&mut store, owner);
+    let action = reviewed(&mut store, owner);
     store
         .conn
         .busy_timeout(Duration::from_millis(1234))
@@ -212,7 +212,7 @@ fn unscoped_result_and_compensation_writes_settle_posting_after_logical_cancella
         let scratch = Scratch::new("issue-scope-settlement");
         let mut store = opened(&scratch);
         let owner = thread(&mut store);
-        let action = draft(&mut store, owner);
+        let action = reviewed(&mut store, owner);
         store
             .conn
             .busy_timeout(Duration::from_millis(1234))
