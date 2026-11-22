@@ -101,10 +101,11 @@ impl Presence {
         };
         // Done comes on control before RunEnd on data, so an ended run can still speak.
         if self.runs.state_ended(run) || self.moving_run(std::time::Instant::now()) != Some(run) {
+            // The lease observer follows the quiet, so no refresh here can fail the pair.
             self.stop_speech_locally(current, run, cx);
-        } else {
-            self.fence_spoken(run, &current, cx);
+            return Ok(());
         }
+        self.fence_spoken(run, &current, cx);
         self.runs_changed(cx)
     }
 
