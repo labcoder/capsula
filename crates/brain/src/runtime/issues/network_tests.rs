@@ -625,7 +625,7 @@ async fn prepared_and_failure_debug_never_expose_user_or_remote_content() {
     );
 }
 
-/// OSC-648: a lookup for an attempt with no id bound (pending across V10) can't name the
+/// OSC-648: a lookup for an attempt with no id bound (pending across V11) can't name the
 /// repository, so it reads no issues and reports it couldn't check.
 #[tokio::test(start_paused = true)]
 async fn a_lookup_with_no_id_bound_reads_no_issues() {

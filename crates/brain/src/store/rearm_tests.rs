@@ -551,14 +551,14 @@ fn a_preview_binds_the_listed_id_once_and_consent_only_verifies_it() {
     assert_eq!(edited.repo_id, None);
 }
 
-/// OSC-648: a draft saved before V10 has no id bound, so File is refused, uses up its approval and
+/// OSC-648: a draft saved before V11 has no id bound, so File is refused, uses up its approval and
 /// never reaches Preflight, until a fresh review binds the listed id; then it files as any other.
 #[test]
 fn a_draft_from_before_the_id_files_only_after_a_fresh_review() {
-    let scratch = Scratch::new("issue-v9-draft");
+    let scratch = Scratch::new("issue-v10-draft");
     std::fs::create_dir_all(scratch.dir()).expect("folder");
     let mut conn = Connection::open(scratch.db()).expect("file");
-    super::schema::migrate_to(&mut conn, 9).expect("V9");
+    super::schema::migrate_to(&mut conn, 10).expect("V10");
     conn.execute_batch(
         "INSERT INTO threads (id, title, created_ms, updated_ms) VALUES (5, 'kept', 1, 1);
          INSERT INTO actions (thread, version, stage, repo, account_id, account_login, title,
@@ -566,7 +566,7 @@ fn a_draft_from_before_the_id_files_only_after_a_fresh_review() {
          VALUES (5, 1, '{\"kind\":\"draft\"}', 'octo/repo', '7', 'octo', 'T', 'B', 1, 0, 0);
          UPDATE approval_mark SET last = 1 WHERE id = 1;",
     )
-    .expect("a draft saved before V10");
+    .expect("a draft saved before V11");
     drop(conn);
     let mut store = opened(&scratch);
     let saved = store.action(DraftId(1)).expect("reads").expect("kept");
@@ -608,7 +608,7 @@ fn a_draft_from_before_the_id_files_only_after_a_fresh_review() {
     let Answer::Refused(IssueRefused::RepoNotListed, refused) =
         store.issue_write(&file(&refused), None).unwrap()
     else {
-        panic!("an unreviewed draft from before V10 can't file");
+        panic!("an unreviewed draft from before V11 can't file");
     };
     assert_eq!(
         (&refused.stage, refused.consumed, refused.repo_id),

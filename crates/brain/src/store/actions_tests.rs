@@ -291,7 +291,7 @@ fn version_six_upgrades_with_its_rows_and_an_unused_mark() {
         .conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .expect("version");
-    assert_eq!(version, 10);
+    assert_eq!(version, 11);
     let marks: Vec<(i64, i64)> = store
         .conn
         .prepare("SELECT id, last FROM approval_mark")
@@ -1238,14 +1238,14 @@ fn issue_actions_print_no_content() {
     assert_eq!(shown, "Unknown(Unplaced(7))");
 }
 
-/// OSC-648: an attempt pending across V10 keeps its row with no repository id, and opening the
+/// OSC-648: an attempt pending across V11 keeps its row with no repository id, and opening the
 /// upgraded file again changes nothing.
 #[test]
 fn version_nine_attempts_gain_an_empty_repository_id_once() {
-    let scratch = Scratch::new("actions-v9");
+    let scratch = Scratch::new("actions-v10");
     std::fs::create_dir_all(scratch.dir()).expect("folder");
     let mut conn = Connection::open(scratch.db()).expect("file");
-    schema::migrate_to(&mut conn, 9).expect("V9");
+    schema::migrate_to(&mut conn, 10).expect("V10");
     conn.execute(
         "INSERT INTO threads (id, title, created_ms, updated_ms) VALUES (5, 'kept', 1, 1)",
         [],

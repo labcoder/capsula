@@ -254,7 +254,7 @@ impl Action {
         let Some(repo) = self.repo.as_ref().filter(|repo| live.repos.contains(repo)) else {
             return Err(IssueRefused::RepoNotListed);
         };
-        // Consent only verifies the id its preview bound. None bound (no review since V10, or a
+        // Consent only verifies the id its preview bound. None bound (no review since V11, or a
         // preview without a listing) never files; another id is another repository.
         if matches!(next, Stage::Preflight { .. })
             && (self.repo_id.is_none() || id_of(live.repos, live.repo_ids, repo) != self.repo_id)

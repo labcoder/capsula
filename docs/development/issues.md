@@ -50,7 +50,7 @@ Draft and Failed cards with a usable bound connection offer Review to file. The 
 `Rearm { draft, version, hash }`, not File. Ordered SQL checks the live editable row and
 atomically advances its version and durable approval without changing content, stage,
 consumed revision or uncertainty. The first rearm that finds the bound name listed also stores
-GitHub's id for it (`repo_id`, V10); later rearms of the same draft keep it, and choosing another
+GitHub's id for it (`repo_id`, V11); later rearms of the same draft keep it, and choosing another
 repository clears it. Only the matching live committed reply returns
 `IssueReview { request, card }` on the data pipe. Its authoritative full card opens the shared
 Cancel-first, keyboard-scrollable literal preview, including the bound account and repository.
@@ -291,7 +291,7 @@ The checks run in order:
    also needs the id listed for that name now to equal the id the draft's preview bound;
    consent never stores one. Otherwise `RepoNotListed`, so a repository recreated under the name
    gets nothing, and only a new draft, with a new preview, can bind it. A draft with no id bound,
-   such as one not reviewed since V10, is refused the same way, and its next review binds one.
+   such as one not reviewed since V11, is refused the same way, and its next review binds one.
    After a genuine rename the card no longer offers Review to file, because the bound name isn't
    listed; the user files a new draft under the new name (an accepted limit).
 7. File has no different retained draft with the same numeric account, repository, exact
@@ -301,7 +301,7 @@ The checks run in order:
 
 The duplicate check compares repository ids, so a renamed or transferred repository is still the
 same one and a new repository under an old name isn't. The draft being filed always has an id;
-an earlier attempt without one (pending across V10) can't be told apart, so it blocks by name
+an earlier attempt without one (pending across V11) can't be told apart, so it blocks by name
 under SQLite `NOCASE`. Cards,
 content hashes and current-membership checks keep the literal spelling, and the id isn't part of
 the content hash. Existing bindings are never silently retargeted.
@@ -331,7 +331,7 @@ Posting, a fresh account-owner permit, the single POST and its durable result. T
 60-second absolute deadline and 16-request cap cover all phases without renewal or refunds.
 Preflight and each recovery lookup refuse with `NotFound`, before anything is sent, when the
 name now lists a different repository id from the one stored at review, or when the row has
-no id (an attempt pending across V10): nothing is sent and the lookup reports it couldn't
+no id (an attempt pending across V11): nothing is sent and the lookup reports it couldn't
 check. The final permit checks the current numeric identity, expiry, complete
 repository authority and exact destination again. Only a real matching-generation 401 invalidates the account.
 

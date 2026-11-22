@@ -432,7 +432,7 @@ fn consent_row(
         let repo = action.repo.as_ref()?;
         let repo_id = i64::try_from(action.repo_id?.get()).ok()?;
         // Ids decide, so a rename still matches and a new repository under the old name doesn't.
-        // An earlier attempt with no id (pending across V10) can't be told apart; its name blocks.
+        // An earlier attempt with no id (pending across V11) can't be told apart; its name blocks.
         let other: Option<i64> = tx
             .query_row(
                 "SELECT a.id FROM actions a
