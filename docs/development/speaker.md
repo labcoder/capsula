@@ -259,6 +259,10 @@ All go out on the connection's control queue, in order. The announcement comes f
   last 8 [guess] answers. A repeat past them is answered again, maybe with no cursor, and the
   brain ignores it for a run already final. Stops come out of order, so an older run's first
   stop is still answered, and a floor of run ids can't stand in for that memory.
+  With healthy receipts, the conservative Stop heard cursor can trail actual playback by zero to
+  about one callback (for example, 10–20 ms), bounded for a gap-free run by the
+  480,000-sample source window; nothing currently reads the persisted cursor to resume playback,
+  mark the transcript, or build model context.
 - `AudioOutputUnavailable { generation }` goes out on the first freeze.
 - **Bound.** At most 512 reports wait unread: every segment's receipt and as many again. Past
   that the brain isn't reading, and the worker ends, whatever faulted first, rather than grow
