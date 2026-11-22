@@ -113,6 +113,8 @@ pub(super) struct Lease {
     screen: Option<Carried>,
     /// The revocable grant for the picture this send carries on a Claude route.
     picture: Option<PictureGrant>,
+    /// The recipient of the protected digest this send carries, which its grant also gates.
+    digest: Option<crate::context::PictureRecipient>,
 }
 
 /// A granted send carrying a hold's picture, which its turn already records as sent.
@@ -154,7 +156,8 @@ impl Coordinator {
     }
 
     /// Fences new write admissions for each picture grant whose run may no longer send it: its
-    /// picture was withdrawn or lost, or its recipient no longer takes it. Each grant's first
+    /// picture was withdrawn or lost, its recipient no longer takes it, or the drawings its digest
+    /// lists no longer read as its build read them. Each grant's first
     /// close keeps that cause on its run for the send's terminal (`Self::round_reason`).
     pub(super) fn revoke_pictures(&mut self) {
         let mut first = Vec::new();
@@ -171,7 +174,16 @@ impl Coordinator {
                 Some(run) if matches!(run.screen, Some(crate::context::Screen::Withdrawn)) => {
                     Some(kumochi_protocol::message::ErrorKey::ScreenUnavailable.into())
                 }
-                Some(run) if run.screen_lost.is_none() && self.run_pictured(run) => continue,
+                Some(run)
+                    if run.screen_lost.is_none()
+                        && self.run_pictured(run)
+                        && lease
+                            .digest
+                            .as_ref()
+                            .is_none_or(|recipient| self.digest_current(run, key, recipient)) =>
+                {
+                    continue;
+                }
                 Some(run) => Some(run.picture_stopped()),
                 None => None,
             };
@@ -190,6 +202,43 @@ impl Coordinator {
                 run.grant_closed = Some((key, cause));
             }
         }
+    }
+
+    /// Closes every open picture grant for `run`, stopping any unstarted write at once.
+    pub(super) fn close_grants(&self, run: RunId) {
+        for lease in &self.leases {
+            if let (Some(grant), SendKey::Build(key)) = (&lease.picture, lease.id.key)
+                && key.run == run
+            {
+                grant.close();
+            }
+        }
+    }
+
+    /// Whether `recipient`'s digest in `run`'s build `key` still reads as the thread's
+    /// drawings read now, and for a Key continuation has not been cleared or turned off since
+    /// round 1.
+    fn digest_current(
+        &self,
+        run: &super::Run,
+        key: BuildKey,
+        recipient: &crate::context::PictureRecipient,
+    ) -> bool {
+        if key.round > 1
+            && run
+                .route
+                .is_some_and(|route| route.kind == ConnectionKind::AnthropicKey)
+            && matches!(&run.key_digest, Some((carried, scenes)) if carried == recipient && scenes.is_empty())
+        {
+            return false;
+        }
+        run.build
+            .as_ref()
+            .filter(|build| build.key() == key)
+            .is_some_and(|build| {
+                let built = build.drawings.line_for(recipient);
+                built.is_some() && built == self.drawing.digest(run.thread).line_for(recipient)
+            })
     }
 
     /// Why a round ended, read the same way for every build kind: a send its own lease stopped
@@ -349,11 +398,13 @@ impl Coordinator {
                         .is_some_and(|choice| choice.model == recipient.model)
             })
             .cloned();
-        if let Some(recipient) = digest.as_ref().or(run.key_digest_recipient.as_ref())
+        let prior = run.key_digest.as_ref().map(|(recipient, _)| recipient);
+        if let Some(recipient) = digest.as_ref().or(prior)
             && (!self.pictured(recipient.route, Some(&recipient.model))
-                || !self.drawing.visible_to(run.thread, recipient))
+                || !self.drawing.visible_to(run.thread, recipient)
+                || !self.digest_current(run, key, recipient))
         {
-            let carried = run.key_digest_recipient.is_some();
+            let carried = run.key_digest.is_some();
             effects.push(Effect::Rebuild(SendKey::Build(key)));
             if carried {
                 self.fail(key.run, Failure::Engine, effects)
@@ -365,13 +416,6 @@ impl Coordinator {
         }
         // The request handed to the engine is judged, never the run's account of its screen.
         let pictured = build.pictured();
-        // A `ChatGPT` run that may have written its picture keeps every later send, such as an
-        // inline rewrite, under a grant too, though that send carries no picture of its own.
-        let revocable = pictured
-            || (run.exposed()
-                && run
-                    .route
-                    .is_some_and(|route| route.kind == ConnectionKind::ChatGpt));
         if let Some(reason) = self.written_picture_lost() {
             effects.push(Effect::Rebuild(SendKey::Build(key)));
             self.fail_with(key.run, Failure::Engine, reason, effects)
@@ -384,23 +428,47 @@ impl Coordinator {
             return;
         }
         // A later Key round resends its first request, so only that round's digest went out.
-        let sent = if key.round > 1
+        let carried = if key.round > 1
             && run
                 .route
                 .is_some_and(|route| route.kind == ConnectionKind::AnthropicKey)
         {
-            run.key_digest_recipient.is_some()
+            run.key_digest
+                .as_ref()
+                .map(|(recipient, _)| recipient.clone())
         } else {
-            digest.is_some()
+            digest.clone()
         };
-        let protected = pictured || sent;
+        let protected = pictured || carried.is_some();
+        // shortcut: Claude Code's text writes take no grant, so its digest-only sends stay
+        // ungated; gate them before Claude Code pictures turn on.
+        let gated = carried.filter(|_| {
+            run.route
+                .is_some_and(|route| route.kind != ConnectionKind::ClaudeCode)
+        });
+        // A `ChatGPT` run that may have written its picture keeps every later send, such as an
+        // inline rewrite, under a grant too, though that send carries no picture of its own.
+        let revocable = pictured
+            || gated.is_some()
+            || (run.exposed()
+                && run
+                    .route
+                    .is_some_and(|route| route.kind == ConnectionKind::ChatGpt));
+        let digest_scenes = (key.round == 1)
+            .then(|| {
+                digest
+                    .as_ref()
+                    .map(|recipient| self.drawing.private_scenes(run.thread, recipient))
+            })
+            .flatten()
+            .unwrap_or_default();
         if let Some(run) = self.current.as_mut()
             && let Some(route) = run.route
         {
             if route.kind == ConnectionKind::AnthropicKey {
                 run.key_granted = true;
                 if key.round == 1 {
-                    run.key_digest_recipient = digest;
+                    run.key_digest = digest.map(|recipient| (recipient, digest_scenes));
                 }
             }
             if protected {
@@ -424,6 +492,7 @@ impl Coordinator {
         self.grant(SendKey::Build(key), sources, hold, screen, effects);
         if revocable && let Some(lease) = self.leases.last_mut() {
             lease.picture = Some(PictureGrant::new());
+            lease.digest = gated;
         }
     }
 
@@ -449,6 +518,7 @@ impl Coordinator {
             held_send: hold.is_some(),
             screen,
             picture: None,
+            digest: None,
         });
         effects.push(Effect::Grant(id));
         effects.push(Effect::ArmSendDeadline {
@@ -483,13 +553,37 @@ impl Coordinator {
                 .picture
                 .as_ref()
                 .is_some_and(|grant| !grant.is_open());
+        if unsent
+            && let SendKey::Build(key) = lease.key
+            && key.round == 1
+            && let Some(run) = self.current.as_mut().filter(|run| {
+                run.id == key.run && run.build.as_ref().is_some_and(|build| build.key() == key)
+            })
+        {
+            run.key_granted = false;
+            run.key_digest = None;
+            run.picture_recipient = None;
+        }
         if revoked
             && let SendKey::Build(key) = lease.key
             && self.current.as_ref().is_some_and(|run| {
                 run.id == key.run && run.build.as_ref().is_some_and(|build| build.key() == key)
             })
         {
+            let carried = self
+                .current
+                .as_ref()
+                .is_some_and(|run| run.key_digest.is_some());
             if let Some(reason) = self.written_picture_lost() {
+                self.fail_with(key.run, Failure::Engine, reason, effects)
+                    .expect("the run is current");
+            } else if carried {
+                let current = self.current.as_ref().expect("the run is current");
+                let reason = current
+                    .grant_closed
+                    .as_ref()
+                    .filter(|(closed, _)| *closed == key)
+                    .map_or_else(|| current.picture_stopped(), |(_, reason)| reason.clone());
                 self.fail_with(key.run, Failure::Engine, reason, effects)
                     .expect("the run is current");
             } else {

@@ -205,6 +205,10 @@ sequenceDiagram
   coordinator closes it as soon as the run may no longer send that picture: its route's fact no
   longer lists the model as taking images (`ChatGPT`'s is its catalog's `input_modalities`, and a
   loss holds for the rest of the run), the picture is withdrawn, or the run's sign-in changes.
+  A send that carries a protected drawing digest without a picture, on `ChatGPT` or the key
+  route, carries one too: it also closes once the drawings that digest lists no longer read as
+  its build read them, such as when showing the screen is turned off. Claude Code's
+  digest-only sends aren't gated yet; its pictures stay off.
   The Responses transport admits each writer poll against it (see Write admission). The key route
   checks at its first write attempt, after any early response. Claude Code reserves each pipe
   write against the same grant. If no write was attempted, any terminal outcome goes behind the

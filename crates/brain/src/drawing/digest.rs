@@ -4,7 +4,7 @@
 
 use std::fmt;
 
-use kumochi_protocol::message::ThreadId;
+use kumochi_protocol::message::{SceneId, ThreadId};
 use serde_json::json;
 
 use super::{Author, Drawing, Held};
@@ -118,6 +118,22 @@ impl Drawing {
                 && !held.gone
                 && matches!(&held.author, Author::Private(held) if held == recipient)
         })
+    }
+
+    pub(crate) fn private_scenes(
+        &self,
+        thread: ThreadId,
+        recipient: &PictureRecipient,
+    ) -> Vec<SceneId> {
+        self.scenes
+            .iter()
+            .filter(|held| {
+                held.thread == thread
+                    && !held.gone
+                    && matches!(&held.author, Author::Private(held) if held == recipient)
+            })
+            .map(|held| held.scene)
+            .collect()
     }
 
     /// One line of [`Self::digest`]: the scenes on a surface it keeps.

@@ -128,6 +128,9 @@ pub(super) struct Build {
     /// The admitted request carries the hold's image.
     pictured: bool,
     pub(super) screen_digests: Vec<PictureRecipient>,
+    /// The thread's drawings when the build began, which a protected digest must still match
+    /// until its send writes.
+    pub(super) drawings: crate::drawing::Digest,
     /// The dispatcher's tools the admitted request offered.
     offered: Vec<ToolName>,
     /// The admitted request's sources, checked again before each send.
@@ -153,6 +156,7 @@ impl Build {
             offers_draw: false,
             pictured: false,
             screen_digests: Vec::new(),
+            drawings: crate::drawing::Digest::default(),
             offered: Vec::new(),
             sources: Vec::new(),
             inline,
@@ -257,6 +261,7 @@ impl Coordinator {
             .filter(|recipient| self.pictured(recipient.route, Some(&recipient.model)))
             .cloned()
             .collect();
+        build.drawings = drawings.clone();
         self.current(run)
             .expect("the current run did not change")
             .build = Some(build);

@@ -328,4 +328,7 @@ Send admission rechecks
 the recipient's image fact and that it still has a visible scene. A Key continuation also
 checks the recipient of any digest in its held first request, because the continuation does
 not rebuild that request's prefix.
-This is a check at admission; metadata-only withdrawal during an admitted write is separate.
+The granted write carries a revocable grant too, which closes, before any byte is written, if
+the image fact, the key's sign-in or the Key picture switch goes, or if the drawings the
+digest lists change (showing the screen turned off, for one) ([engines](engines.md), Picture
+grant).

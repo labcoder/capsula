@@ -2454,13 +2454,266 @@ fn begin_typed_key_turn(
         .expect("the typed turn's build")
 }
 
+/// A typed Key turn sent the pictured turn's digest writes under a revocable grant. Losing the
+/// model's image fact, the key's sign-in, Key pictures, key validity, showing the screen or the
+/// listed drawing between grant and first write stops that write; a rebuildable round 1 then
+/// rebuilds cleanly without the revoked digest, and unchanged it writes.
+#[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "seven revocation triggers with round-1 rebuild check"
+)]
+fn a_digest_only_key_send_writes_only_while_its_digest_may_go() {
+    use crate::connections::model::Lease as _;
+    use crate::coordinator::{Availability, PictureRoutes, RefusedKey};
+    use kumochi_protocol::message::{ConnectionKind::AnthropicKey, ErrorKey, RunId};
+
+    type Change = fn(&mut Coordinator);
+    let changes: [(&str, bool, Option<Change>); 7] = [
+        ("unchanged", false, None),
+        (
+            "image-fact",
+            true,
+            Some(|core| {
+                let none = super::super::routes::pictured(5, &[]);
+                core.handle(Input::Engines(AnthropicKey, none)).unwrap();
+            }),
+        ),
+        (
+            "sign-out",
+            false,
+            Some(|core| {
+                let out = Availability::Unavailable(ErrorKey::AccountRefused.into());
+                core.handle(Input::Engines(AnthropicKey, out)).unwrap();
+            }),
+        ),
+        (
+            "pictures-off",
+            true,
+            Some(|core| core.set_pictures(PictureRoutes::new(false, false))),
+        ),
+        (
+            "screen-off",
+            true,
+            Some(|core| {
+                core.handle(Input::ShowScreenOff).unwrap();
+            }),
+        ),
+        (
+            "clear-visible",
+            true,
+            Some(|core| {
+                core.handle(Input::ClearVisible).unwrap();
+            }),
+        ),
+        (
+            "key-refused",
+            false,
+            Some(|core| {
+                core.handle(Input::KeyRefused(RefusedKey(
+                    crate::context::ConnectionTag(5),
+                )))
+                .unwrap();
+            }),
+        ),
+    ];
+    for (name, rebuilds, change) in changes {
+        let scratch = Scratch::new(&format!("provider-draw-key-digest-grant-{name}"));
+        let mut store = store(&scratch);
+        let (mut core, snapshot) = pictured_key();
+        end_pictured_key_run(&mut core, &mut store, &snapshot);
+        let next = RunId(R.0 + 1);
+        let key = begin_typed_key_turn(&mut core, &mut store, next);
+        let request = built_key(
+            &store,
+            &snapshot,
+            next,
+            Some(&key_recipient(&snapshot)),
+            &[],
+            core.drawing.digest(T),
+        );
+        let wire = key_wire(&request, snapshot.connection).to_string();
+        assert!(wire.contains("key_scene_private"), "{name}");
+        let lease = grant_key_build(&mut core, key, &snapshot, request);
+        let grant = core
+            .picture_grant(lease)
+            .expect("a digest-only send's grant");
+        let (inputs, _settled) = tokio::sync::mpsc::unbounded_channel();
+        let send = crate::engines::SendLease::new(lease, inputs).with_picture(Some(grant));
+        let settled = match change {
+            None => {
+                assert!(send.admit().is_some(), "{name}");
+                Input::SendSettled { lease }
+            }
+            Some(change) => {
+                change(&mut core);
+                assert!(send.admit().is_none(), "{name}");
+                Input::SendUnsent { lease }
+            }
+        };
+        let effects = core.handle(settled).unwrap();
+        if rebuilds {
+            let again = effects
+                .iter()
+                .find_map(|effect| match effect {
+                    Effect::Store(StoreOp::BuildContext(build)) => Some(build.key),
+                    _ => None,
+                })
+                .expect("round 1 rebuilds cleanly after an unsent digest revocation");
+            assert_ne!(again, key, "{name}");
+            let rebuilt = built_key(&store, &snapshot, next, None, &[], core.drawing.digest(T));
+            let wire = key_wire(&rebuilt, snapshot.connection).to_string();
+            assert!(!wire.contains("key_scene_private"), "{name}");
+            let plain = grant_key_build(&mut core, again, &snapshot, rebuilt);
+            assert!(core.picture_grant(plain).is_none(), "{name}");
+            core.handle(Input::SendSettled { lease: plain }).unwrap();
+        }
+    }
+}
+
+/// A Key continuation resends its first request, so clearing a screen scene that first request
+/// digested stops round 2 even when round 1 drew a still-visible private overlay: at admission
+/// when cleared before round 2's grant, and at write admission when cleared after it.
+#[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "drives round 1 into round 2 before and after grant"
+)]
+fn a_key_continuation_stops_when_its_first_round_screen_digest_is_cleared() {
+    use crate::connections::model::Lease as _;
+    use crate::coordinator::SendKey;
+    use kumochi_protocol::message::{ConnectionKind::AnthropicKey, RunId};
+
+    for after_grant in [false, true] {
+        let scratch = Scratch::new(&format!("provider-draw-key-cont-revoke-{after_grant}"));
+        let mut store = store(&scratch);
+        let (mut core, snapshot) = pictured_key();
+        end_pictured_key_run(&mut core, &mut store, &snapshot);
+        let next = RunId(R.0 + 1);
+        let key = begin_typed_key_turn(&mut core, &mut store, next);
+        let first = built_key(
+            &store,
+            &snapshot,
+            next,
+            Some(&key_recipient(&snapshot)),
+            &[],
+            core.drawing.digest(T),
+        );
+        admit_key_build(&mut core, key, &snapshot, first);
+        let call = key_call(
+            &mut core,
+            &mut store,
+            (next, "digest-draw"),
+            COPIED_KEY_OVERLAY,
+        );
+        assert_eq!(store.commit_call(&call).unwrap(), Committed::Done);
+        let effects = core
+            .handle(Input::CallCommitted {
+                key: call.key.clone(),
+                outcome: Committed::Done,
+                then: None,
+            })
+            .unwrap();
+        let [Effect::Store(StoreOp::RoundItems(round))] = effects.as_slice() else {
+            panic!("a completed round: {effects:?}");
+        };
+        store
+            .append_key_round_events(
+                (T, next),
+                snapshot.connection,
+                &[],
+                &round.key_calls,
+                &round.calls,
+                round.pictured_key_model.as_ref(),
+            )
+            .unwrap();
+        if !after_grant {
+            core.handle(Input::ShowScreenOff).unwrap();
+            assert!(
+                core.drawing.visible_to(T, &key_recipient(&snapshot)),
+                "round 1's overlay stays visible"
+            );
+        }
+        let effects = core
+            .handle(Input::RoundStored {
+                run: next,
+                round: 1,
+            })
+            .unwrap();
+        let [Effect::Store(StoreOp::BuildContext(build))] = effects.as_slice() else {
+            panic!("round 2 build: {effects:?}");
+        };
+        let second = built_key(
+            &store,
+            &snapshot,
+            next,
+            Some(&key_recipient(&snapshot)),
+            &build.key_results,
+            core.drawing.digest(T),
+        );
+        let model = super::super::routes::choice(AnthropicKey, "m");
+        let Input::ContextBuilt(mut context) = super::super::routes::built_for(build.key, &model)
+        else {
+            unreachable!()
+        };
+        context.snapshot = None;
+        context.result.as_mut().unwrap().request = second;
+        core.handle(Input::ContextBuilt(context)).unwrap();
+        let ready = core
+            .handle(Input::SendReady {
+                key: SendKey::Build(build.key),
+                hold: None,
+            })
+            .unwrap();
+        if !after_grant {
+            assert!(ready.contains(&Effect::Rebuild(SendKey::Build(build.key))));
+            assert!(
+                core.current.is_none(),
+                "round 2 fails instead of rebuilding"
+            );
+            continue;
+        }
+        let lease = ready
+            .into_iter()
+            .find_map(|effect| match effect {
+                Effect::Grant(lease) => Some(lease),
+                _ => None,
+            })
+            .expect("round 2 granted");
+        let grant = core.picture_grant(lease).expect("round 2 carries a grant");
+        let (inputs, _settled) = tokio::sync::mpsc::unbounded_channel();
+        let send = crate::engines::SendLease::new(lease, inputs).with_picture(Some(grant));
+        core.handle(Input::ShowScreenOff).unwrap();
+        assert!(send.admit().is_none(), "screen-off closes round 2's grant");
+        let effects = core.handle(Input::SendUnsent { lease }).unwrap();
+        assert!(
+            !effects
+                .iter()
+                .any(|effect| matches!(effect, Effect::Store(StoreOp::BuildContext(_)))),
+            "round 2 never attempts a doomed rebuild"
+        );
+        assert!(core.current.is_none(), "round 2 fails cleanly");
+    }
+}
+
 /// Admits build `key` on the pictured Key choice, sending `request` with the draw tool.
 fn admit_key_build(
     core: &mut Coordinator,
     key: BuildKey,
     snapshot: &RunSnapshot,
-    mut request: crate::context::ModelRequest,
+    request: crate::context::ModelRequest,
 ) {
+    let lease = grant_key_build(core, key, snapshot, request);
+    core.handle(Input::SendSettled { lease }).unwrap();
+}
+
+/// Grants build `key` as [`admit_key_build`] does and returns its lease, unsettled.
+fn grant_key_build(
+    core: &mut Coordinator,
+    key: BuildKey,
+    snapshot: &RunSnapshot,
+    mut request: crate::context::ModelRequest,
+) -> crate::coordinator::LeaseId {
     use crate::coordinator::SendKey;
     use kumochi_protocol::message::ConnectionKind;
 
@@ -2472,19 +2725,17 @@ fn admit_key_build(
     request.tools = crate::context::tools(snapshot.origin);
     built.result.as_mut().unwrap().request = request;
     core.handle(Input::ContextBuilt(built)).unwrap();
-    let lease = core
-        .handle(Input::SendReady {
-            key: SendKey::Build(key),
-            hold: None,
-        })
-        .unwrap()
-        .into_iter()
-        .find_map(|effect| match effect {
-            Effect::Grant(lease) => Some(lease),
-            _ => None,
-        })
-        .expect("the Key round entered write admission");
-    core.handle(Input::SendSettled { lease }).unwrap();
+    core.handle(Input::SendReady {
+        key: SendKey::Build(key),
+        hold: None,
+    })
+    .unwrap()
+    .into_iter()
+    .find_map(|effect| match effect {
+        Effect::Grant(lease) => Some(lease),
+        _ => None,
+    })
+    .expect("the Key round entered write admission")
 }
 
 const FIRST_KEY_OVERLAY: &str = r#"{"records":[{"begin":{"v":1,"scene":"first_scene","surface":"overlay","alt":"first_alt","others":"keep"}},{"step":{"id":"d1","put":[{"shape":{"id":"first_object","kind":"rect","box":[0,0,10,10]}}]}},{"end":{}}]}"#;
