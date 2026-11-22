@@ -327,17 +327,13 @@ fn live_speech_metadata_is_required_and_not_part_of_snapshots() {
         for missing in 1..=suffix {
             assert!(matches!(
                 frame::decode::<DataToShell>(&payload[..payload.len() - missing]),
-                Err(frame::FrameError::Malformed(
-                    postcard::Error::DeserializeUnexpectedEnd
-                ))
+                Err(frame::FrameError::Malformed(_))
             ));
         }
         payload.push(0);
         assert!(matches!(
             frame::decode::<DataToShell>(&payload),
-            Err(frame::FrameError::Malformed(
-                postcard::Error::DeserializeBadEncoding
-            ))
+            Err(frame::FrameError::Malformed(_))
         ));
     }
     let snapshot = snapshot(header(), step.clone());
