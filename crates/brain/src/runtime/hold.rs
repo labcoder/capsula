@@ -964,7 +964,10 @@ impl Brain {
 
     /// The user turned showing the screen off: a pending screen hold goes on as voice with no
     /// line, and every run's screen picture is withdrawn.
-    pub(super) fn show_screen_off(&mut self) {
+    pub(super) fn show_screen_off(
+        &mut self,
+        link: Option<&mut Link<'_, '_>>,
+    ) -> Result<(), super::Ended> {
         if self
             .holds
             .pending
@@ -973,7 +976,10 @@ impl Brain {
         {
             self.holds.close_screen_as(None);
         }
-        self.offline(Input::ShowScreenOff);
+        if let Some(effects) = self.handle(Input::ShowScreenOff) {
+            self.apply(effects, link)?;
+        }
+        Ok(())
     }
 
     /// Claude Code's generation moved: every picture held for it that wasn't granted is lost, so

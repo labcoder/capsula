@@ -260,7 +260,8 @@ impl Brain {
         }
         if let ControlToBrain::Settings(op) = message {
             // Still written; the shell that sent it is gone, so nothing answers it.
-            self.queue_settings(op);
+            let applied = self.queue_settings(op, None);
+            debug_assert!(applied.is_ok(), "applying without a shell can't fail");
             return;
         }
         if let Ok(Some(input)) = control_input(message) {
@@ -304,7 +305,7 @@ impl Brain {
             }
             // Off closes the offer as it's taken; only a finished save opens it again.
             let off = op == SettingsOp::SetShowScreen(false);
-            self.queue_settings(op);
+            self.queue_settings(op, Some(link))?;
             hold.map_err(|Full| Ended::Lost)?;
             self.pump_settings(Some(link)).map_err(|Full| Ended::Lost)?;
             if off {

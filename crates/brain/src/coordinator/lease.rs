@@ -153,6 +153,16 @@ impl Coordinator {
             .clone()
     }
 
+    pub(crate) fn code_picture_grants(&self, run: RunId) -> impl Iterator<Item = &PictureGrant> {
+        let on_code = self.route_kind(run) == Some(ConnectionKind::ClaudeCode);
+        self.leases
+            .iter()
+            .filter_map(move |lease| match lease.id.key {
+                SendKey::Build(key) if on_code && key.run == run => lease.picture.as_ref(),
+                _ => None,
+            })
+    }
+
     /// Fences new write admissions for each picture grant whose run may no longer send it: its
     /// picture was withdrawn or lost, or its recipient no longer takes it. Each grant's first
     /// close keeps that cause on its run for the send's terminal (`Self::round_reason`).
