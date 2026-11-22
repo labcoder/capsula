@@ -150,6 +150,7 @@ async fn mcp_draft_defaults_need_the_same_verified_account_and_complete_list() {
                         result: Ok(Repositories {
                             names: Bounded::new(vec![RepoName::new("owner/other").unwrap()])
                                 .unwrap(),
+                            ids: vec![NonZeroU64::new(8).unwrap()],
                         }),
                     },
                     tokio::time::Instant::now(),

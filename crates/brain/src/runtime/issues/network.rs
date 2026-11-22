@@ -81,6 +81,10 @@ async fn authority<'a>(
     if !repos.names.contains(repo) {
         return Err(NO_REPO);
     }
+    // Only the id bound at review names the repository: none bound, or another listed, refuses.
+    if action.repo_id.is_none() || repos.id(repo) != action.repo_id {
+        return Err(NO_REPO);
+    }
     Ok((repo, user, repos))
 }
 

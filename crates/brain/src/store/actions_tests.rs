@@ -92,6 +92,27 @@ pub(super) fn draft(store: &mut Store, thread: ThreadId) -> Action {
         .expect("draft")
 }
 
+/// GitHub's ids for `repo()` and the other repository the listings name.
+pub(super) const ID: NonZeroU64 = NonZeroU64::new(7).expect("nonzero");
+pub(super) const OTHER: NonZeroU64 = NonZeroU64::new(8).expect("nonzero");
+
+/// The action with `repo()` bound to `ID`, as its review over a listing leaves it, without that
+/// review's new revision.
+pub(super) fn bind(store: &mut Store, action: &Action) -> Action {
+    let id = i64::try_from(action.draft.0).expect("a stored draft");
+    store
+        .conn
+        .execute("UPDATE actions SET repo_id = 7 WHERE id = ?1", [id])
+        .expect("bind");
+    store.action(action.draft).expect("read").expect("live")
+}
+
+/// A new draft, reviewed: see [`bind`].
+pub(super) fn reviewed(store: &mut Store, thread: ThreadId) -> Action {
+    let action = draft(store, thread);
+    bind(store, &action)
+}
+
 pub(super) fn posting(mark: &str) -> String {
     format!(r#"{{"kind":"posting","mark":{mark},"unresolved":null}}"#)
 }
@@ -168,6 +189,7 @@ fn issue_events_share_action_and_approval_commits_but_not_noops_or_replays() {
         account: None,
         capacity: true,
         repos: &[],
+        repo_ids: &[],
     };
     assert!(matches!(
         store.consent(
@@ -269,7 +291,7 @@ fn version_six_upgrades_with_its_rows_and_an_unused_mark() {
         .conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .expect("version");
-    assert_eq!(version, 10);
+    assert_eq!(version, 11);
     let marks: Vec<(i64, i64)> = store
         .conn
         .prepare("SELECT id, last FROM approval_mark")
@@ -310,6 +332,7 @@ fn a_draft_is_created_read_edited_and_discarded() {
         approval: Some(ApprovalRev(1)),
         consumed: None,
         uncertain: 0,
+        repo_id: None,
     };
     assert_eq!(draft(&mut store, thread), expected);
     assert_eq!(
@@ -521,6 +544,7 @@ fn hidden_threads_take_no_action_input_and_nothing_comes_back() {
         account: Some(&seven),
         capacity: true,
         repos: &listed,
+        repo_ids: &[],
     };
     store.begin_delete(hidden).expect("hidden");
     store
@@ -609,6 +633,7 @@ fn revisions_and_draft_ids_are_never_reused_after_deletion_and_purge() {
         account: Some(&seven),
         capacity: true,
         repos: &listed,
+        repo_ids: &[],
     };
     let gone = store.consent(second, &fresh.hash(), ApprovalRev(3), Decision::File, &live);
     assert!(matches!(gone, Ok(Answer::Gone)), "{gone:?}");
@@ -723,6 +748,7 @@ fn a_failure_after_the_mint_rolls_the_mint_back() {
         account: None,
         capacity: true,
         repos: &[],
+        repo_ids: &[],
     };
     let refuse = |store: &mut Store| {
         store.consent(
@@ -1049,6 +1075,7 @@ fn counters_fail_closed_at_their_limits() {
         account: None,
         capacity: true,
         repos: &[],
+        repo_ids: &[],
     };
     let refused = store.consent(
         editable,
@@ -1159,6 +1186,7 @@ fn issue_actions_print_no_content() {
         account: Some(&account),
         capacity: true,
         repos: &repos,
+        repo_ids: &[],
     };
     let mut answers = Vec::new();
     let mut step = |answer: Result<Answer, StoreError>| {
@@ -1208,4 +1236,53 @@ fn issue_actions_print_no_content() {
         );
     }
     assert_eq!(shown, "Unknown(Unplaced(7))");
+}
+
+/// OSC-648: an attempt pending across V11 keeps its row with no repository id, and opening the
+/// upgraded file again changes nothing.
+#[test]
+fn version_ten_attempts_gain_an_empty_repository_id_once() {
+    let scratch = Scratch::new("actions-v10");
+    std::fs::create_dir_all(scratch.dir()).expect("folder");
+    let mut conn = Connection::open(scratch.db()).expect("file");
+    schema::migrate_to(&mut conn, 10).expect("V10");
+    conn.execute(
+        "INSERT INTO threads (id, title, created_ms, updated_ms) VALUES (5, 'kept', 1, 1)",
+        [],
+    )
+    .expect("an older thread");
+    conn.execute(
+        "INSERT INTO actions (thread, version, stage, repo, account_id, account_login, title,
+         body, uncertain, created_ms) VALUES (5, 1, ?1, 'octo/repo', '7', 'octo', 'T', 'B', 1, 0)",
+        [unknown(r#""Pending""#)],
+    )
+    .expect("an attempt pending across the upgrade");
+    drop(conn);
+    for open in ["upgrade", "reopen"] {
+        let store = opened(&scratch);
+        let (version, columns): (i64, i64) = store
+            .conn
+            .query_row(
+                "SELECT (SELECT user_version FROM pragma_user_version),
+                 (SELECT count(*) FROM pragma_table_info('actions') WHERE name = 'repo_id')",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("schema");
+        assert_eq!((version, columns), (11, 1), "{open}");
+        let action = store.action(DraftId(1)).expect("reads").expect("kept");
+        assert_eq!(
+            (action.repo.as_ref().map(RepoName::as_str), action.repo_id),
+            (Some("octo/repo"), None),
+            "{open}"
+        );
+        assert!(
+            constraint(
+                &store
+                    .conn
+                    .execute("UPDATE actions SET repo_id = 0 WHERE id = 1", [])
+            ),
+            "{open}"
+        );
+    }
 }
