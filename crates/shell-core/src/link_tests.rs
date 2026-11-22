@@ -5838,3 +5838,79 @@ fn queued_pair_closed(link: thread::JoinHandle<bool>, control: &PipeClient, data
         "the original data pipe was closed"
     );
 }
+
+#[cfg(debug_assertions)]
+#[test]
+fn a_lost_route_that_never_calls_back_goes_quiet_and_admits_the_next_turn() {
+    use kumochi_protocol::message::ScreenChoice;
+
+    let _device = serialize_playback();
+    let (id, hello, probe, brain) =
+        kumochi_brain::ipc::offline_plain_peer("0 text A reply cut off by an unplug.".into(), 64);
+    probe.release_ack();
+    probe.release_run();
+    probe.allow_data_credit();
+    let pipe = authenticated_primed(id, hello);
+    let events = patient(pipe.events);
+    let session = connected(next(&events));
+    let admitted = || {
+        let until = Instant::now() + PATIENCE;
+        while !pipe.handle.admits_text(Some(&session)) {
+            assert!(
+                Instant::now() < until && session.open(),
+                "the pair admits a turn"
+            );
+            thread::sleep(Duration::from_millis(2));
+        }
+    };
+    let typed = |turn| {
+        pipe.handle.send_data(
+            &session,
+            DataToBrain::TextSubmit {
+                turn,
+                thread: None,
+                screen: ScreenChoice::None,
+                text: "unplug".into(),
+            },
+        )
+    };
+    admitted();
+    assert!(typed(1));
+    let mut playback = pipe
+        .playback
+        .recv_timeout(PATIENCE)
+        .expect("the reply opens the fake route");
+    let mut samples = [0.0; 48];
+    let until = Instant::now() + PATIENCE;
+    while samples.iter().all(|sample| *sample == 0.0) {
+        assert!(Instant::now() < until, "the reply starts playing");
+        playback.render(&mut samples);
+        thread::sleep(Duration::from_millis(2));
+    }
+    // Unplugged: the device reports loss and never calls back again.
+    playback.lose();
+    let until = Instant::now() + PATIENCE;
+    while probe.quiet() == RunId(0) {
+        assert!(
+            Instant::now() < until && session.open(),
+            "the destroyed route still reports quiet"
+        );
+        thread::sleep(Duration::from_millis(2));
+    }
+    admitted();
+    assert!(typed(2), "the next typed turn is accepted");
+    let until = Instant::now() + PATIENCE;
+    while !matches!(
+        events.recv_timeout(PATIENCE),
+        Ok(LinkEvent::RunState {
+            origin: Some(RunOrigin::Typed { turn: 2 }),
+            ..
+        })
+    ) {
+        assert!(Instant::now() < until, "the second turn runs");
+    }
+    drop(playback);
+    pipe.handle.end(&session);
+    assert!(pipe.link.join().unwrap());
+    assert!(brain.join().unwrap());
+}

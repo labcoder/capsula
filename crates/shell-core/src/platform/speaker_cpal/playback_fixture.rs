@@ -9,6 +9,10 @@ impl FakePlayback {
         super::OutputEvent::latch(&self.0.shared.pending, super::ErrorKind::Xrun);
     }
 
+    pub(crate) fn lose(&self) {
+        super::OutputEvent::latch(&self.0.shared.pending, super::ErrorKind::StreamInvalidated);
+    }
+
     #[cfg(test)]
     pub(crate) fn force_observation_overflow(&self) {
         self.0.control.overflow();
