@@ -587,6 +587,8 @@ impl Worker {
                     generation, pending,
                     "the backend answers its only pending job"
                 );
+                // A destroyed stream plays nothing more, so a still-unknown tail is quiet now.
+                self.engine.acknowledge(generation, Some(now));
             }
             Err(TryRecvError::Empty) => {}
             Err(TryRecvError::Disconnected) => {
