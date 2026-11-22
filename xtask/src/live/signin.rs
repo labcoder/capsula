@@ -213,8 +213,11 @@ fn state(view: &AccountView) -> String {
 #[cfg(test)]
 fn assert_one_deadline(mut waits: impl Iterator<Item = (Instant, Duration)>, cap: Duration) {
     let (first, remaining) = waits.next().expect("the fixture reached the phase");
+    let earliest = cap
+        .checked_sub(Duration::from_secs(1))
+        .expect("phase allowance is at least one second");
     assert!(
-        (cap - Duration::from_secs(1)..=cap).contains(&remaining),
+        (earliest..=cap).contains(&remaining),
         "initial allowance was {remaining:?}, expected {cap:?}"
     );
     let deadline = first + remaining;
