@@ -5,6 +5,8 @@ pub mod anthropic;
 pub(crate) mod authority;
 pub mod catalog;
 pub mod clock;
+#[cfg(debug_assertions)]
+pub mod draw_check;
 pub mod error;
 pub mod github;
 pub mod http_client;

@@ -335,6 +335,10 @@ pub const IMAGE_DIAGNOSTIC_ARG: &str = "--image-diagnostic";
 /// built without it exits 10.
 pub const MARKS_CHECK_ARG: &str = "--marks-check";
 
+/// Dev builds only: the drawing live check, which `cargo xtask live draw` runs. A brain built
+/// without it exits 10.
+pub const DRAW_CHECK_ARG: &str = "--draw-check";
+
 /// The capture's one output file, in its `target\live\<time>` run folder.
 pub const CATALOG_PROVENANCE_FILE: &str = "catalog-provenance.json";
 

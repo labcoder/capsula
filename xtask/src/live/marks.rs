@@ -1,13 +1,14 @@
-//! `cargo xtask live marks`: runs the copied dev brain once in its screen marks check mode,
-//! bounded and in a kill-on-close job, and prints the brain's lines and one line from its exit
-//! code. `KUMOCHI_LIVE_BUDGET` reaches the brain through the environment; 0 is the dry run.
+//! `cargo xtask live marks` and `cargo xtask live draw`: runs the copied dev brain once in the
+//! check's mode, bounded and in a kill-on-close job, and prints the brain's lines and one line from
+//! its exit code. `KUMOCHI_LIVE_BUDGET` reaches the brain through the environment; 0 is the dry
+//! run.
 
 use std::path::Path;
 use std::process::{ExitStatus, Stdio};
 use std::time::Duration;
 
 use anyhow::{Context as _, Result, ensure};
-use kumochi_protocol::constants::{BRAIN_EXE, MARKS_CHECK_ARG};
+use kumochi_protocol::constants::BRAIN_EXE;
 
 use super::{brain_command, drained, refuse_running};
 use crate::platform;
@@ -17,29 +18,34 @@ const LIMIT: Duration = Duration::from_mins(30);
 /// The brain's lines kept; anything else it printed is dropped.
 const KEPT: [&str; 4] = ["marks-check ", "request=", "mark=", "summary "];
 
-pub(super) fn run(folder: &Path) -> Result<()> {
+/// Runs the brain in `folder`'s `bin` with `flag`, reported as `name`. Any exit but 0 fails.
+pub(super) fn run(folder: &Path, flag: &str, name: &str) -> Result<()> {
     platform::Job::kill_on_close()
         .and_then(platform::Job::hold_self)
         .context("putting the run in a job")?;
     refuse_running(&platform::processes()?, std::process::id())?;
     let child = brain_command(&folder.join("bin").join(BRAIN_EXE))
-        .arg(MARKS_CHECK_ARG)
+        .arg(flag)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()
-        .context("starting the marks check (requests: 0)")?;
-    let (status, text, read) = drained(child, LIMIT, "the marks check")?;
+        .with_context(|| format!("starting the {name} (requests: 0)"))?;
+    let (status, text, read) = drained(child, LIMIT, &format!("the {name}"))?;
     let lines = kept(&text);
     for line in &lines {
         println!("{line}");
     }
     println!(
         "{}",
-        summary(status.as_ref().ok().and_then(ExitStatus::code), &lines)
+        summary(
+            name,
+            status.as_ref().ok().and_then(ExitStatus::code),
+            &lines
+        )
     );
     read.context("reading the check's lines")?;
-    ensure!(status?.success(), "the marks check stopped");
+    ensure!(status?.success(), "the {name} stopped");
     Ok(())
 }
 
@@ -49,21 +55,25 @@ fn kept(text: &str) -> Vec<&str> {
         .collect()
 }
 
-/// The run's line. Requests that went out are the request lines with a status; a run that stopped
-/// may have sent one more whose line never printed.
-fn summary(code: Option<i32>, lines: &[&str]) -> String {
+/// The run's line. Requests that went out are the request lines with a status, less those the
+/// budget left unsent; a run that stopped may have sent one more whose line never printed.
+fn summary(name: &str, code: Option<i32>, lines: &[&str]) -> String {
     let sent = lines
         .iter()
-        .filter(|line| line.starts_with("request=") && line.contains(" status="))
+        .filter(|line| {
+            line.starts_with("request=")
+                && line.contains(" status=")
+                && !line.contains(" result=spent")
+        })
         .count();
     match code {
-        Some(0) => format!("marks check: done (requests: {sent})"),
-        Some(code @ 10..=19) => format!("marks check: nothing sent, exit {code} (requests: 0)"),
+        Some(0) => format!("{name}: done (requests: {sent})"),
+        Some(code @ 10..=19) => format!("{name}: nothing sent, exit {code} (requests: 0)"),
         Some(code) => format!(
-            "marks check: stopped, exit {code} (requests: at most {})",
+            "{name}: stopped, exit {code} (requests: at most {})",
             sent + 1
         ),
-        None => format!("marks check: no exit code (requests: at most {})", sent + 1),
+        None => format!("{name}: no exit code (requests: at most {})", sent + 1),
     }
 }
 
@@ -106,8 +116,23 @@ mod tests {
             ),
             (None, "marks check: no exit code (requests: at most 3)"),
         ] {
-            assert_eq!(summary(code, &lines), line);
+            assert_eq!(summary("marks check", code, &lines), line);
         }
-        assert_eq!(summary(Some(0), &[]), "marks check: done (requests: 0)");
+        assert_eq!(
+            summary("draw check", Some(0), &[]),
+            "draw check: done (requests: 0)"
+        );
+    }
+
+    #[test]
+    fn a_request_the_budget_left_unsent_is_not_counted() {
+        let lines = [
+            "request=1 prompt=water-cycle body_bytes=9 status=2xx code=- param=- result=completed",
+            "request=2 prompt=y-squared body_bytes=9 status=- code=- param=- result=spent",
+        ];
+        assert_eq!(
+            summary("draw check", Some(0), &lines),
+            "draw check: done (requests: 1)"
+        );
     }
 }
