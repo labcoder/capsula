@@ -1041,6 +1041,7 @@ impl Brain {
     /// A connection's first frames: the settings and the account, then anything owed from while
     /// no shell was connected.
     fn open(&mut self, link: &mut Link<'_, '_>) -> Result<(), Ended> {
+        link.queued_silent = link.registration.is_some() && !self.config.view().talk_back;
         self.settings_now(link).map_err(|Full| Ended::Lost)?;
         self.pump_settings(Some(link)).map_err(|Full| Ended::Lost)?;
         self.account_input(AccountInput::Connected, Some(link))
@@ -1567,7 +1568,7 @@ async fn read_data(
                 return Ended::Broken("Hello sent twice");
             }
             Ok(Some(DataToBrain::MicPcm(mut chunk))) => {
-                if let Some(pcm) = pcm.filter(|_| registration.is_none()) {
+                if let Some(pcm) = pcm.filter(|_| Registration::admits(registration)) {
                     pcm.push(chunk);
                 } else {
                     zeroize::Zeroize::zeroize(&mut chunk.samples);
@@ -1768,6 +1769,7 @@ struct Link<'a, 't> {
     ready: &'a Notify,
     tap: &'t mut Tap,
     registration: Option<&'a Cell<Registration>>,
+    queued_silent: bool,
     /// The snapshots still to send, once `Scenes` has gone.
     recovery: Option<Recovery>,
     /// Page replies waiting for room in the data queue.
@@ -1787,6 +1789,7 @@ impl<'a, 't> Link<'a, 't> {
             ready,
             tap,
             registration: None,
+            queued_silent: false,
             recovery: None,
             held_pages: VecDeque::new(),
         }

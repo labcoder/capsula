@@ -175,6 +175,35 @@ impl Config {
         &self.view
     }
 
+    pub(crate) fn implicit_talk_back(&self) -> bool {
+        self.table.as_ref().is_ok_and(|table| {
+            table.get(VOICE).is_none_or(|voice| {
+                voice
+                    .as_table()
+                    .is_some_and(|voice| !voice.contains_key(TALK_BACK))
+            })
+        })
+    }
+
+    pub(crate) fn queued_hold_preferences_off(&self) -> bool {
+        if self.view.talk_back || self.view.show_screen {
+            return false;
+        }
+        let Ok(table) = &self.table else {
+            return false;
+        };
+        match table.get(VOICE) {
+            None => true,
+            Some(Value::Table(voice)) => {
+                let known = |key| voice.get(key).is_none_or(Value::is_bool);
+                known(TALK_BACK)
+                    && known(SHOW_SCREEN)
+                    && (voice.contains_key(SHOW_SCREEN) || known(SCREEN_HOLDS))
+            }
+            Some(_) => false,
+        }
+    }
+
     pub(crate) fn default_choice(&self) -> StoredChoice {
         self.table
             .as_ref()

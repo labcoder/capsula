@@ -170,7 +170,7 @@ fn data_writer_scrubs_serialized_pcm_after_success() {
     let packet = private_pcm();
     let mut encoded = zeroize::Zeroizing::new(Vec::new());
     let mut bytes = Vec::new();
-    super::super::write_data_frame(&mut bytes, &packet, &mut encoded).expect("written");
+    super::super::write_data_frame(&mut bytes, &packet, &mut encoded, || true).expect("written");
     let Some(DataToBrain::MicPcm(packet)) =
         frame::read(&mut bytes.as_slice(), Pipe::Data).expect("valid frame")
     else {
@@ -194,7 +194,7 @@ fn data_writer_scrubs_serialized_pcm_after_write_failure() {
         let mut encoded = zeroize::Zeroizing::new(Vec::new());
         let mut bytes = [0; 3];
         let mut writer = std::io::Cursor::new(&mut bytes[..available]);
-        let result = super::super::write_data_frame(&mut writer, &packet, &mut encoded);
+        let result = super::super::write_data_frame(&mut writer, &packet, &mut encoded, || true);
         assert!(matches!(result, Err(frame::FrameError::Io(error))
             if error.kind() == std::io::ErrorKind::WriteZero));
         assert_eq!(
@@ -215,7 +215,7 @@ fn data_writer_scrubs_serialized_text_after_encode_failure() {
     };
     let mut encoded = zeroize::Zeroizing::new(Vec::new());
     let mut bytes = Vec::new();
-    let result = super::super::write_data_frame(&mut bytes, &packet, &mut encoded);
+    let result = super::super::write_data_frame(&mut bytes, &packet, &mut encoded, || true);
     assert!(matches!(
         result,
         Err(frame::FrameError::TooLarge { max: 262_144, .. })
@@ -443,7 +443,7 @@ fn quitting_discards_previous_pcm_before_the_writer_takes_it() {
     link.track_input(GestureId(1));
     assert!(link.begin_quit());
     let session = Session::detached(1, Incarnation(1));
-    super::super::write_data(&data, &queue, &session.io, &link.shared);
+    super::super::write_data(&data, &queue, &session.io, &link.shared, || session.open());
     drop(data);
     assert_eq!(
         frame::read::<DataToBrain>(&mut &peer, Pipe::Data).unwrap(),

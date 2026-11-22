@@ -1177,6 +1177,107 @@ pub(super) fn source(
     (open, finish, started, samples)
 }
 
+#[cfg(windows)]
+#[gpui::test]
+fn queued_presence_claims_silent_output_and_cancels_the_fake_microphone(cx: &mut TestAppContext) {
+    use crate::link::fixture;
+    use kumochi_protocol::message::PartState;
+
+    let _device = fixture::serialize_playback();
+    let (id, hello, probe, brain) = kumochi_brain::ipc::offline_hold_peer();
+    let pipe = fixture::authenticated_primed(id, hello);
+    let events = fixture::patient(pipe.events);
+    let owner = crate::presence::test_fixture::presence(cx);
+    owner.update(cx, |owner, _| owner.link = pipe.handle.clone());
+    let apply = |event, cx: &mut TestAppContext| {
+        owner.update(cx, |owner, cx| {
+            owner.link_events(Batch::Plain(vec![event]), cx).unwrap();
+        });
+    };
+    let session = fixture::connected(fixture::next(&events));
+    apply(LinkEvent::Connected(session.clone()), cx);
+    loop {
+        let event = fixture::next(&events);
+        let voice_ready = matches!(
+            &event,
+            LinkEvent::Voice {
+                speech_input: PartState::Ready,
+                ..
+            }
+        );
+        apply(event, cx);
+        if voice_ready {
+            break;
+        }
+    }
+    probe.release_ack();
+    probe.release_run();
+    probe.allow_data_credit();
+    until(cx, |_| pipe.handle.admits_voice(session.generation()));
+
+    let (open, finish, started, samples) = source(&owner, cx, None);
+    let (token, stamp) = hold(&owner, 1, cx);
+    loop {
+        let event = fixture::next(&events);
+        let admitted = matches!(
+            &event,
+            LinkEvent::VoiceHold {
+                gesture: GestureId(1),
+                status: HoldStatus::Admitted,
+                ..
+            }
+        );
+        assert!(!matches!(
+            &event,
+            LinkEvent::CaptureDone { .. } | LinkEvent::RunState { .. }
+        ));
+        apply(event, cx);
+        if admitted {
+            break;
+        }
+    }
+    started.recv_timeout(Duration::from_secs(3)).unwrap();
+    open.send(()).unwrap();
+    until(cx, |cx| {
+        owner.read_with(cx, |owner, _| {
+            owner.voice.status == Some(Text::HoldListening)
+        })
+    });
+    samples.recv_timeout(Duration::from_secs(3)).unwrap();
+    owner.update(cx, |owner, cx| {
+        owner.voice_intent(
+            Intent::End {
+                gesture: GestureId(1),
+                cancelled: true,
+            },
+            stamp,
+            19,
+            None,
+            TalkHeld::default(),
+            cx,
+        );
+    });
+    finish.send(()).unwrap();
+    until(cx, |cx| {
+        while let Ok(event) = events.try_recv() {
+            assert!(!matches!(
+                &event,
+                LinkEvent::CaptureDone { .. } | LinkEvent::RunState { .. }
+            ));
+            apply(event, cx);
+        }
+        token.retired()
+            && !pipe.handle.voice_stop_pending()
+            && pipe.handle.admits_text(Some(&session))
+    });
+    assert_eq!(probe.decoded(), 0);
+    pipe.handle.end(&session);
+    assert!(pipe.link.join().unwrap());
+    assert!(brain.join().unwrap());
+    drop(owner);
+    cx.run_until_parked();
+}
+
 #[gpui::test]
 #[expect(
     clippy::too_many_lines,

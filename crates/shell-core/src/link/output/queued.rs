@@ -5,7 +5,7 @@ use std::thread::{self, Thread};
 use std::time::Instant;
 
 use async_channel::Sender;
-use kumochi_protocol::message::{ControlToBrain, SegmentId, SettingsView};
+use kumochi_protocol::message::{ControlToBrain, RunOrigin, SegmentId, SettingsView};
 
 use super::{Arc, Ordering, Output, OutputGeneration, OutputOwner, RunId, State, SyncSender};
 use crate::link::{Shared, narrated::Narrated, queued::MetadataFrame};
@@ -42,6 +42,7 @@ pub(in crate::link) struct Queued {
     deadline: Instant,
     ack: Option<SyncSender<()>>,
     talk_back: Option<bool>,
+    show_screen: Option<bool>,
     wake: Arc<OnceLock<Thread>>,
     stopped: RunId,
     narrated: Option<Arc<Narrated>>,
@@ -84,6 +85,7 @@ impl Queued {
             deadline,
             ack: Some(ack),
             talk_back: None,
+            show_screen: None,
             wake,
             stopped: RunId(0),
             narrated,
@@ -157,6 +159,13 @@ impl Queued {
         self.talk_back.is_some() && self.ack.is_none()
     }
 
+    fn silent_hold(&self) -> bool {
+        self.ready()
+            && self.talk_back == Some(false)
+            && self.show_screen == Some(false)
+            && !self.closing.load(Ordering::Acquire)
+    }
+
     fn delivery(&mut self, run: RunId) -> Result<DeliveryTarget<'_>, ()> {
         if let Some((_, delivery)) = self.predecessor.as_mut().filter(|(id, _)| *id == run) {
             return Ok(DeliveryTarget::Draining(delivery));
@@ -180,6 +189,17 @@ impl Queued {
 }
 
 impl State {
+    pub(super) fn silent_queued(&self) -> Option<OutputGeneration> {
+        if let Output::Queued(output) = self.output
+            && self.session.is_some()
+            && !self.off
+            && self.queued.as_ref().is_some_and(Queued::silent_hold)
+        {
+            return Some(output);
+        }
+        None
+    }
+
     fn queue(&mut self, session: u64) -> Option<(OutputGeneration, &mut Queued)> {
         let Output::Queued(output) = self.output else {
             return None;
@@ -243,10 +263,8 @@ impl OutputOwner {
         turn: Option<u32>,
         send: impl FnOnce() -> bool,
     ) -> bool {
-        self.try_lock()
-            .ok()
-            .as_mut()
-            .and_then(|state| state.queue(session))
+        self.lock()
+            .queue(session)
             .filter(|(_, owner)| {
                 owner.ready()
                     && !owner.owes_proof(RECEIPT_QUEUED)
@@ -268,6 +286,22 @@ impl OutputOwner {
         }
     }
 
+    pub(in crate::link) fn try_queued_hold_ready(&self, session: u64) -> bool {
+        self.try_lock()
+            .is_ok_and(|state| state.session == Some(session) && state.silent_queued().is_some())
+    }
+
+    pub(in crate::link) fn queued_hold_ready(&self, session: u64) -> bool {
+        let state = self.lock();
+        state.session == Some(session) && state.silent_queued().is_some()
+    }
+
+    pub(in crate::link) fn can_reserve_hold(&self, session: u64) -> bool {
+        self.lock()
+            .queue(session)
+            .is_some_and(|(_, owner)| owner.silent_hold() && owner.pending.is_none())
+    }
+
     pub(in crate::link) fn register_queued(
         &self,
         session: u64,
@@ -278,8 +312,16 @@ impl OutputOwner {
         let Some((output, owner)) = state.queue(session) else {
             return false;
         };
-        if let Some(registered) = owner.talk_back {
-            return registered == settings.talk_back;
+        if owner
+            .talk_back
+            .is_some_and(|registered| registered != settings.talk_back)
+        {
+            owner.show_screen = None;
+            return false;
+        }
+        owner.show_screen = Some(settings.show_screen);
+        if owner.talk_back.is_some() {
+            return true;
         }
         if out
             .try_send(ControlToBrain::QueuedAudioOutput(RATE, output))
@@ -321,7 +363,7 @@ impl OutputOwner {
         &self,
         session: u64,
         run: RunId,
-        turn: kumochi_protocol::message::RunOrigin,
+        turn: RunOrigin,
         out: &Sender<ControlToBrain>,
         mut credit: impl FnMut(u32) + Send + 'static,
         shared: Weak<Shared>,
@@ -334,8 +376,11 @@ impl OutputOwner {
             }) else {
                 return false;
             };
-            if !matches!(turn, kumochi_protocol::message::RunOrigin::Typed { turn } if owner.pending == Some(turn))
-            {
+            let offered = match turn {
+                RunOrigin::Typed { turn } => owner.pending == Some(turn),
+                RunOrigin::Hold { .. } => owner.talk_back == Some(false) && owner.pending.is_none(),
+            };
+            if !offered {
                 return false;
             }
             owner.pending = None;
