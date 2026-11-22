@@ -769,6 +769,10 @@ impl Drawing {
             revision,
             layout_version,
             step: stored,
+            protected: self
+                .runs
+                .iter()
+                .any(|ledger| ledger.run == run && ledger.picture_recipient.is_some()),
         };
         let wait = StepWait {
             run,

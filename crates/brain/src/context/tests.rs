@@ -76,6 +76,7 @@ impl World {
                 revision: 1,
                 layout_version: 2,
                 step: std::sync::Arc::new(step),
+                protected: false,
             })
             .expect("drawing")
         else {

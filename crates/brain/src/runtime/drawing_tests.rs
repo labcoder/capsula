@@ -47,6 +47,7 @@ fn typed_brain_with_steps(
             revision: 1,
             layout_version: 2,
             step: stored_step("a", "a"),
+            protected: false,
         })
         .expect("first step")
     else {
@@ -61,6 +62,7 @@ fn typed_brain_with_steps(
             revision: 2,
             layout_version: 2,
             step: stored_step("b", "b"),
+            protected: false,
         })
         .expect("second step");
     for (revision, step) in (3..).zip(extra) {
@@ -73,6 +75,7 @@ fn typed_brain_with_steps(
                 revision,
                 layout_version: 2,
                 step: Arc::clone(step),
+                protected: false,
             })
             .expect("extra recovery step");
     }
@@ -144,6 +147,7 @@ fn four_typed_scenes(
                 revision: 1,
                 layout_version: 2,
                 step,
+                protected: false,
             })
             .expect("durable step")
         else {
@@ -508,6 +512,7 @@ async fn a_refused_snapshot_scene_is_durably_cleared_before_the_other_scene_is_d
             revision: 1,
             layout_version: 2,
             step,
+            protected: false,
         })
         .expect("step")
     else {
@@ -712,6 +717,7 @@ async fn a_typed_restart_describes_and_queues_the_original_log_with_scene_owners
             revision: 1,
             layout_version: 2,
             step: Arc::clone(&step),
+            protected: false,
         })
         .expect("durable step")
     else {

@@ -1457,6 +1457,7 @@ impl Store {
                 clear,
                 revision,
                 step,
+                protected,
                 ..
             } => {
                 let scene = match target {
@@ -1468,11 +1469,19 @@ impl Store {
                             thread: *thread,
                             header: json(header),
                             log: Vec::new(),
+                            public: true,
                         });
                         scene
                     }
                     Target::Existing(scene) => *scene,
                 };
+                if *protected {
+                    self.scenes
+                        .iter_mut()
+                        .find(|stored| stored.scene == scene)
+                        .expect("a begun scene")
+                        .public = false;
+                }
                 let step: Step = json(&**step);
                 self.log(scene).push(SceneEvent::Step {
                     revision: *revision,
@@ -3007,6 +3016,7 @@ fn wide(scene: u64) -> StoredScene {
             layout_version: 2,
         },
         log,
+        public: true,
     }
 }
 
@@ -3329,6 +3339,7 @@ fn debug_and_display_never_carry_drawing_content() {
             revision: 1,
             layout_version: 2,
             step: Arc::new(step),
+            protected: false,
         },
     ];
     let end = CallEnd {
@@ -3350,6 +3361,7 @@ fn debug_and_display_never_carry_drawing_content() {
         thread: THREAD,
         header,
         log: Vec::new(),
+        public: true,
     };
     let mut deferred = Drawing {
         defer_preparation: true,

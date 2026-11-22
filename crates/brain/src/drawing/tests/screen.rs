@@ -995,7 +995,8 @@ fn recipient(slug: &str) -> crate::context::PictureRecipient {
 /// An overlay is its authoring runs' recipient's, as a screen scene is: one drawn only by runs
 /// that carried nothing protected goes to every model, a protected step makes it that
 /// recipient's, a later unprotected step can't undo that, and a second recipient's step makes it
-/// no model's. Authors aren't stored, so a restored overlay is public.
+/// no model's. A protected run's step marks its store write, so a restored overlay one drew is
+/// no model's.
 #[test]
 fn an_overlay_belongs_to_what_its_authors_were_sent() {
     let (seen, other) = (recipient("seen"), recipient("other"));
@@ -1049,8 +1050,6 @@ fn an_overlay_belongs_to_what_its_authors_were_sent() {
     assert_eq!(skipped, Vec::<SceneId>::new());
     assert_eq!(recovered.snapshot().scenes.len(), 2, "both stay visible");
     let digest = recovered.digest(THREAD);
-    assert!(
-        digest.off_screen().contains("public_scene") && digest.off_screen().contains("seen_scene")
-    );
+    assert_eq!(digest.off_screen(), "[]");
     assert_eq!(digest.recipients().count(), 0);
 }

@@ -260,7 +260,8 @@ enum Author {
     Public,
     /// The runs that carried any carried it for this recipient alone.
     Private(crate::context::PictureRecipient),
-    /// A screen scene with no recipient, or drawn for two recipients: no model gets it.
+    /// Restored with a run that wasn't marked public, a screen scene with no recipient, or drawn
+    /// for two recipients: no model gets it.
     Unknown,
 }
 
@@ -454,8 +455,11 @@ impl Drawing {
                 committers: vec![None; usize::try_from(state.revision()).unwrap_or_default()],
                 refused_through: 0,
                 state,
-                // shortcut: authors aren't stored, so a restored overlay is public; store them before Key pictures turn on.
-                author: Author::Public,
+                author: if stored.public {
+                    Author::Public
+                } else {
+                    Author::Unknown
+                },
                 gone: false,
                 replaced: false,
                 paint: layout.map(Paint::at_rest),

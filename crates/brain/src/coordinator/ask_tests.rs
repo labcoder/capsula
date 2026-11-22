@@ -38,6 +38,7 @@ fn drawn(scratch: &Scratch) -> (Coordinator, SceneId) {
             revision: 1,
             layout_version: 2,
             step: Arc::new(step),
+            protected: false,
         })
         .expect("first step")
     else {

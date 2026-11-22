@@ -85,6 +85,7 @@ fn seed(scratch: &Scratch, [label, info, alt]: [&str; 3], choice: &ModelChoice) 
             revision: 1,
             layout_version: 2,
             step: Arc::new(step),
+            protected: false,
         })
         .expect("step")
     else {

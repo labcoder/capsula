@@ -2733,3 +2733,88 @@ fn key_rounds_reusing_a_draw_id_draw_twice_and_a_same_round_retry_draws_once() {
         .expect("result row count");
     assert_eq!(rows, 2);
 }
+
+/// After a restart, an overlay a protected run drew reaches no model, the one it was drawn for
+/// included, on the recipient line and on the text-only fallback alike, while an overlay only
+/// public runs drew still reaches every model.
+#[test]
+fn a_restart_keeps_a_protected_overlay_out_of_every_request() {
+    use crate::drawing::{Drawing, Target, Write};
+    use crate::store::RunEnd;
+    use kumochi_protocol::message::{ConnectionKind, RunId};
+
+    let scratch = Scratch::new("provider-draw-restored-authors");
+    let mut store = store(&scratch);
+    let drawn = RunId(R.0 + 1);
+    store.begin_turn(T, None, drawn, "protected turn").unwrap();
+    for (run, scene, object, protected) in [
+        (R, "restored_public", "public_object", false),
+        (drawn, "restored_private", "private_object", true),
+    ] {
+        store
+            .drawing_write(&Write::Step {
+                thread: T,
+                run,
+                target: Target::New(
+                    serde_json::from_value(json!({
+                        "begin": {"v":1,"scene":scene,"surface":"overlay","alt":format!("{scene}_alt"),"others":"keep"},
+                        "layout_version": 2
+                    }))
+                    .unwrap(),
+                ),
+                clear: Vec::new(),
+                revision: 1,
+                layout_version: 2,
+                step: std::sync::Arc::new(
+                    serde_json::from_value(json!({
+                        "id":"s1","put":[{"shape":{"id":object,"kind":"rect","box":[0,0,10,10]}}]
+                    }))
+                    .unwrap(),
+                ),
+                protected,
+            })
+            .unwrap();
+        store.end_run(T, run, &[], RunEnd::Done).unwrap();
+    }
+    drop(store);
+
+    let mut store = Store::open(&scratch.db()).unwrap();
+    store.recover().unwrap();
+    let (drawing, skipped) = Drawing::recover(store.drawing_scenes().unwrap().scenes);
+    assert_eq!(skipped, Vec::new());
+    let run = RunId(R.0 + 2);
+    store.begin_turn(T, None, run, "after restart").unwrap();
+    let (_, snapshot) = pictured_key();
+    for (connection, slug, capable) in [
+        (ConnectionKind::AnthropicKey, "m", true),
+        (ConnectionKind::AnthropicKey, "other-vision", true),
+        (ConnectionKind::AnthropicKey, "text-only", false),
+        (ConnectionKind::ChatGpt, "m", true),
+    ] {
+        let mut receiving = snapshot.clone();
+        receiving.choice = Some(super::super::routes::choice(connection, slug));
+        let pictured = capable.then(|| key_recipient(&receiving));
+        let request = built_key(
+            &store,
+            &receiving,
+            run,
+            pictured.as_ref(),
+            &[],
+            drawing.digest(T),
+        );
+        let wire = if connection == ConnectionKind::ChatGpt {
+            crate::engines::responses::body(&request)
+                .unwrap()
+                .to_string()
+        } else {
+            key_wire(&request, receiving.connection).to_string()
+        };
+        for public in ["restored_public", "restored_public_alt", "public_object"] {
+            assert!(wire.contains(public), "{connection:?} {slug} {public}");
+        }
+        for private in ["restored_private", "private_object"] {
+            assert!(!wire.contains(private), "{connection:?} {slug} {private}");
+        }
+        assert!(wire.contains("after restart"));
+    }
+}
