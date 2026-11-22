@@ -5,6 +5,7 @@ use kumochi_protocol::message::{
     DataToShell, MAX_VISIBLE_SCENES, RunId, SceneFailure, SceneHeader, SceneId, ThreadId,
 };
 use kumochi_scene::layout::LayoutState;
+use kumochi_scene::record::Surface;
 use kumochi_scene::text::Bounded;
 use kumochi_scene::{ReplacementDisposition, Step, StopCut};
 
@@ -115,6 +116,11 @@ impl Drawing {
             ..
         } = write;
         let begun = matches!(scene, Pend::New { .. });
+        let recipient = self
+            .runs
+            .iter()
+            .find(|ledger| ledger.run == run)
+            .and_then(|ledger| ledger.picture_recipient.clone());
         let (scene, index) = match scene {
             Pend::Held { scene, admitted } => {
                 let Some(at) = self.live(scene) else {
@@ -129,6 +135,9 @@ impl Drawing {
                     return;
                 }
                 let held = &mut self.scenes[at];
+                if held.picture_recipient != recipient {
+                    held.picture_recipient = None;
+                }
                 let committed = held
                     .state
                     .commit(admitted, &mut self.global)
@@ -193,11 +202,14 @@ impl Drawing {
                     .push(Effect::Data(DataToShell::SceneBegin { scene: id, header }));
                 let paint =
                     laid.map(|laid| Paint::begun(LayoutState::new(&state), committed.index, laid));
+                let picture_recipient =
+                    recipient.filter(|_| state.header().surface == Surface::Screen);
                 self.scenes.push(Held {
                     scene: id,
                     thread,
                     layout_version: LAYOUT_VERSION,
                     state,
+                    picture_recipient,
                     committers: vec![Some(run)],
                     refused_through: 0,
                     gone: false,

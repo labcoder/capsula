@@ -543,7 +543,7 @@ impl Coordinator {
 
 impl Run {
     fn stored_call(&self, mut call: dispatch::CommitCall) -> dispatch::CommitCall {
-        if self.pictured_key_model.is_some() {
+        if self.pictured_key_model().is_some() {
             call.output = ToolOutput::Text(dispatch::PICTURE_RESULT.to_owned());
         }
         call

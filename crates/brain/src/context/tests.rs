@@ -2433,10 +2433,11 @@ fn a_route_without_screen_pictures_is_sent_no_screen_scene() {
     let main = world.main;
     let (_, current) = world.run(Some(main), "ask", None);
     let (_, drawings) = crate::drawing::tests::screen::overlay_then_screen();
-    for connection in [
-        ConnectionKind::ChatGpt,
-        ConnectionKind::ClaudeCode,
-        ConnectionKind::AnthropicKey,
+    for (connection, picture_fact) in [
+        (ConnectionKind::ChatGpt, true),
+        (ConnectionKind::ChatGpt, false),
+        (ConnectionKind::ClaudeCode, true),
+        (ConnectionKind::AnthropicKey, true),
     ] {
         let mut run = snapshot(Origin::Kumo, None);
         run.choice.as_mut().expect("a choice").connection = connection;
@@ -2444,9 +2445,28 @@ fn a_route_without_screen_pictures_is_sent_no_screen_scene() {
             drawings: drawings.clone(),
             ..Supplied::default()
         };
-        let built = world
-            .build(&run, (main, current), supplied, BOUND)
-            .expect("built");
+        let picture = picture_fact.then(|| PictureRecipient {
+            route: Route {
+                kind: connection,
+                tag: run.connection,
+            },
+            model: run.choice.as_ref().expect("a choice").model.clone(),
+        });
+        let reader = Connection::open(world.scratch.db()).expect("reader");
+        let built = build(
+            Snapshot::begin(&reader).expect("snapshot"),
+            &run,
+            Turn {
+                thread: main,
+                run: current,
+                local_time: TIME,
+                picture: picture.as_ref(),
+                key_results: &[],
+            },
+            supplied,
+            BOUND,
+        )
+        .expect("built");
         let sent = match connection {
             ConnectionKind::ClaudeCode => {
                 crate::engines::claude_code::seed::encode(&built.request, &[])
@@ -2461,7 +2481,7 @@ fn a_route_without_screen_pictures_is_sent_no_screen_scene() {
             ConnectionKind::ChatGpt => drawing_line(&built).as_bytes().to_vec(),
         };
         let sent = String::from_utf8(sent).expect("UTF-8");
-        let screens = connection == ConnectionKind::ChatGpt;
+        let screens = picture_fact && connection == ConnectionKind::ChatGpt;
         let line = if screens {
             format!("[{OVERLAY},{SCREEN_SCENE}]")
         } else {

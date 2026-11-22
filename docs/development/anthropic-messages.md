@@ -308,5 +308,15 @@ original slug must also have a current picture fact to receive the scrubbed form
 pictured call and result; other slugs, or a missing fact, get an empty input and a fixed
 unavailable result with the same pairing. A changed tag or malformed group replays as
 transcript text without native items. This does not change conversation text: screen-step
-narration is saved as assistant text and can follow the thread through later context, recall
-and summaries. The Key picture switch stays off.
+narration saved as assistant text can follow the thread through later context, recall and
+summaries. The Key picture switch stays off.
+
+The drawing digest lists a visible screen scene only for the same route, verified account
+generation and model that received its picture, and only while that model's catalog says
+it takes images. Other recipients get the overlay-only line. A scene edited by more than
+one recipient has no outbound screen digest. Screen scenes aren't revived from the store
+after restart, so the digest does not store or recover a recipient. Send admission rechecks
+the recipient's image fact and that it still has a visible scene. A Key continuation also
+checks the recipient of any digest in its held first request, because the continuation does
+not rebuild that request's prefix.
+This is a check at admission; metadata-only withdrawal during an admitted write is separate.

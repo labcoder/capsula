@@ -1854,7 +1854,7 @@ fn round_calls(effects: &[Effect]) -> Vec<(CallId, ToolOutput)> {
     rounds[0].clone()
 }
 
-const KEY_MARKS: &str = r#"{"records":[{"begin":{"scene":"key_scene_private","surface":"screen","alt":"key_alt_private"}},{"step":{"id":"key_step_private","put":[{"highlight":{"id":"key_object_private","target":{"box":[186,598,450,78]},"style":"box"}}]}},{"end":{}}]}"#;
+const KEY_MARKS: &str = r#"{"records":[{"begin":{"scene":"key_scene_private","surface":"screen","title":"key_title_private","alt":"key_alt_private"}},{"step":{"id":"key_step_private","put":[{"highlight":{"id":"key_object_private","target":{"box":[186,598,450,78]},"style":"box"}}]}},{"end":{}}]}"#;
 
 fn pictured_key() -> (Coordinator, RunSnapshot) {
     use super::super::routes::{built_for, choice, held, jpeg, key, pictured};
@@ -1927,6 +1927,7 @@ fn built_key(
     run: kumochi_protocol::message::RunId,
     picture: Option<&crate::context::PictureRecipient>,
     key_results: &[(CallId, ToolOutput)],
+    drawings: crate::drawing::Digest,
 ) -> crate::context::ModelRequest {
     use crate::context::Supplied;
     use crate::context::build::{Turn, build};
@@ -1940,7 +1941,10 @@ fn built_key(
             picture,
             key_results,
         },
-        Supplied::default(),
+        Supplied {
+            drawings,
+            ..Supplied::default()
+        },
         crate::context::BOUND,
     )
     .unwrap()
@@ -2067,6 +2071,7 @@ fn pictured_key_storage_and_wire_are_scrubbed_but_the_live_round_gets_its_result
             R,
             Some(&key_recipient(&snapshot)),
             &build.key_results,
+            crate::drawing::Digest::default(),
         ),
         snapshot.connection,
     );
@@ -2095,7 +2100,14 @@ fn assert_pictured_key_switches(store: &mut Store, snapshot: &RunSnapshot) {
         next.choice.as_mut().unwrap().model = ModelSlug::new(slug).unwrap();
         let recipient = capable.then(|| key_recipient(&next));
         let body = key_wire(
-            &built_key(store, &next, run, recipient.as_ref(), &[]),
+            &built_key(
+                store,
+                &next,
+                run,
+                recipient.as_ref(),
+                &[],
+                crate::drawing::Digest::default(),
+            ),
             next.connection,
         );
         assert_eq!(body["model"], slug);
@@ -2166,6 +2178,66 @@ fn interrupting_a_pictured_key_draw_leaves_only_a_scrubbed_early_result() {
             0
         )
     );
+}
+
+#[test]
+fn pictured_key_scene_metadata_reaches_only_its_picture_recipient() {
+    use crate::store::RunEnd;
+    use kumochi_protocol::message::{ConnectionKind, RunId};
+
+    let scratch = Scratch::new("provider-draw-key-picture-digest");
+    let mut store = store(&scratch);
+    let (mut core, snapshot) = pictured_key();
+    let commit = pictured_key_call(&mut core, &mut store);
+    assert_eq!(store.commit_call(&commit).unwrap(), Committed::Done);
+    store.end_run(T, R, &[], RunEnd::Done).unwrap();
+    let drawings = core.drawing.digest(T);
+    assert_eq!(drawings.recipients().count(), 1);
+    let run = RunId(R.0 + 1);
+    store.begin_turn(T, None, run, "read the drawing").unwrap();
+    for (connection, tag, slug, capability, keeps) in [
+        (ConnectionKind::AnthropicKey, 5, "m", true, true),
+        (ConnectionKind::AnthropicKey, 5, "m", false, false),
+        (ConnectionKind::AnthropicKey, 5, "other", true, false),
+        (ConnectionKind::AnthropicKey, 6, "m", true, false),
+        (ConnectionKind::ChatGpt, 5, "m", true, false),
+    ] {
+        let mut receiving = snapshot.clone();
+        receiving.connection = ConnectionTag(tag);
+        receiving.choice = Some(super::super::routes::choice(connection, slug));
+        let pictured = capability.then(|| key_recipient(&receiving));
+        let request = built_key(
+            &store,
+            &receiving,
+            run,
+            pictured.as_ref(),
+            &[],
+            drawings.clone(),
+        );
+        let wire = if connection == ConnectionKind::ChatGpt {
+            crate::engines::responses::body(&request)
+                .unwrap()
+                .to_string()
+        } else {
+            key_wire(&request, receiving.connection).to_string()
+        };
+        for mark in [
+            "key_scene_private",
+            "key_title_private",
+            "key_alt_private",
+            "key_object_private",
+            "1280.0,720.0",
+        ] {
+            assert_eq!(
+                wire.contains(mark),
+                keeps,
+                "{connection:?} {tag} {slug} {mark}"
+            );
+        }
+        assert!(wire.contains("read the drawing"));
+        assert!(!wire.contains("186,598,450,78"));
+        assert!(!wire.contains("input_image"));
+    }
 }
 
 #[test]

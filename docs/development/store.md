@@ -86,13 +86,14 @@ first, gives its complete begin header and its surviving objects as `[id, kind]`
 order, never step content, positions or labels. The pairs of every scene share one 8 KiB cap,
 a comma each. Scenes take room newest first, each from its newest object back to the first
 pair that doesn't fit, so an older scene may still list small pairs after a newer one ran out.
-A scene that lists fewer than it holds adds `"more"`, the count left out. The reducer
-renders the line twice, each under its own cap: with every scene, and without screen scenes.
-This keeps screen-scene metadata with the account that received the picture. The build chooses by
-connection: ChatGPT gets the full line even if the selected model can't take images, and every
-other connection gets the line without screen scenes. This does not filter user or model prose,
-summaries, or same-account native ChatGPT replay, whose stored arguments can retain object ids and
-whose size-error result can contain picture dimensions. The line goes after Local time in the
+A scene that lists fewer than it holds adds `"more"`, the count left out. The reducer renders
+an overlay-only line and a line per visible screen-scene recipient, each with its own cap.
+Once the build knows the turn's model, it chooses a screen line only for the exact route,
+sign-in generation and model slug that received the picture, and only with a positive image fact.
+An unknown or mixed scene recipient gets no screen metadata. This does not filter user or
+assistant prose, including screen-step narration re-read by recall or compaction, or same-account
+native ChatGPT replay, whose stored arguments can retain object ids and whose size-error result
+can contain picture dimensions. The line goes after Local time in the
 current user item, and the empty `[]` line overrides stale references after
 Esc. The complete rendered item, including outer JSON escaping, counts against the ordinary
 request bound; the line's `Debug` shows only its length, and it is never logged.

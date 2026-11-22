@@ -18,6 +18,15 @@ use crate::store::Failure;
 pub const MAX_ROUNDS: u32 = 8;
 /// The most tool calls one run may make, across its rounds [guess, from §13b].
 pub const MAX_CALLS: u32 = 16;
+
+impl super::Run {
+    pub(super) fn pictured_key_model(&self) -> Option<&ModelSlug> {
+        self.picture_recipient
+            .as_ref()
+            .filter(|recipient| recipient.route.kind == ConnectionKind::AnthropicKey)
+            .map(|recipient| &recipient.model)
+    }
+}
 /// One round's write, in one transaction: the text streamed since the last write, the round's
 /// native items in output order, then each call's answer in call order. `RoundStored`
 /// answers it.
@@ -325,7 +334,7 @@ impl Coordinator {
             .into_iter()
             .filter_map(|open| Some((open.call, open.output?)))
             .collect();
-        let pictured_key_model = current.pictured_key_model.clone();
+        let pictured_key_model = current.pictured_key_model().cloned();
         if pictured_key_model.is_some() {
             current.tools.key_results.clone_from(&calls);
             for (_, output) in &mut calls {

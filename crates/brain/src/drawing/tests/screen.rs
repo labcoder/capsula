@@ -32,7 +32,7 @@ fn screen_call(run: u64, name: &str, begin: &str, steps: &[String]) -> Input {
 /// A drawing told run 1 may draw on `canvas`.
 fn told(canvas: Result<Geometry, NoCanvas>) -> Drawing {
     let mut drawing = Drawing::default();
-    drawing.canvas(RunId(1), canvas);
+    drawing.canvas(RunId(1), canvas, None);
     drawing
 }
 
@@ -680,7 +680,7 @@ fn a_skip_closes_the_screen_for_a_later_run_continuing_the_scene_before_its_firs
             loss: Loss::Drop,
         },
     );
-    drawing.canvas(RunId(2), Ok(Geometry::FIXTURE));
+    drawing.canvas(RunId(2), Ok(Geometry::FIXTURE), None);
     let scene = screen_scene(&drawing);
     let begun = store.run(
         &mut drawing,
@@ -794,7 +794,7 @@ fn a_skip_changes_nothing_for_a_card_and_never_replaces_an_earlier_reason() {
         screen_call(1, "b", &screen_begin("marks", ""), &[marked("s1", "x")]),
     );
     let scene = screen_scene(&drawing);
-    drawing.canvas(RunId(1), Err(NoCanvas::NoPicture));
+    drawing.canvas(RunId(1), Err(NoCanvas::NoPicture), None);
     store.run(&mut drawing, Input::SceneSkipped { scene });
     let refused = store.run(
         &mut drawing,
@@ -816,13 +816,13 @@ fn a_skip_s_changed_screen_outlasts_the_picture_announced_again_but_not_sharing_
     );
     let scene = screen_scene(&drawing);
     store.run(&mut drawing, Input::SceneSkipped { scene });
-    drawing.canvas(RunId(1), Ok(Geometry::FIXTURE));
+    drawing.canvas(RunId(1), Ok(Geometry::FIXTURE), None);
     let again = store.run(
         &mut drawing,
         screen_call(1, "c", &screen_begin("again", ""), &[marked("s2", "y")]),
     );
     assert_eq!(texts(&[&again]), [format!("drawn: []; stopped: {CHANGED}")]);
-    drawing.canvas(RunId(1), Err(NoCanvas::Off));
+    drawing.canvas(RunId(1), Err(NoCanvas::Off), None);
     let off = store.run(
         &mut drawing,
         screen_call(1, "d", &screen_begin("again", ""), &[marked("s3", "z")]),
@@ -916,6 +916,14 @@ pub(crate) fn overlay_then_screen() -> (crate::drawing::Digest, crate::drawing::
         ),
     );
     let overlay = drawing.digest(THREAD);
+    drawing.canvas(
+        RunId(1),
+        Ok(Geometry::FIXTURE),
+        Some(&crate::context::PictureRecipient {
+            route: crate::context::Route::chatgpt(7),
+            model: kumochi_protocol::message::ModelSlug::new("gpt-6-luna").unwrap(),
+        }),
+    );
     store.run(
         &mut drawing,
         screen_call(

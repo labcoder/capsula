@@ -96,7 +96,11 @@ impl Coordinator {
             },
         };
         if let Some(canvas) = self.canvas() {
-            self.drawing.canvas(key.run, canvas);
+            let recipient = self
+                .current
+                .as_ref()
+                .and_then(|run| run.picture_recipient.as_ref());
+            self.drawing.canvas(key.run, canvas, recipient);
         }
         if self.drawing_input(input, effects).is_err() {
             self.drawn(key, ToolOutput::Error(ToolError::Ended), effects);

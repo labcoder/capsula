@@ -95,7 +95,7 @@ fn assemble(
         turn.key_results,
         &mut sources,
     )?;
-    append_drawings(&mut current, &supplied.drawings, run);
+    append_drawings(&mut current, &supplied.drawings, turn.picture);
     let unsummarized =
         fixed_bytes(&instructions, &tools) + current.iter().map(item_bytes).sum::<usize>();
     let mut total = unsummarized + summary.iter().map(item_bytes).sum::<usize>();
@@ -161,7 +161,11 @@ fn assemble(
     })
 }
 
-fn append_drawings(input: &mut [InputItem], drawings: &crate::drawing::Digest, run: &RunSnapshot) {
+fn append_drawings(
+    input: &mut [InputItem],
+    drawings: &crate::drawing::Digest,
+    picture: Option<&PictureRecipient>,
+) {
     if let Some(text) = input.iter_mut().find_map(|item| match item {
         InputItem::Message {
             role: Role::User,
@@ -170,11 +174,11 @@ fn append_drawings(input: &mut [InputItem], drawings: &crate::drawing::Digest, r
         _ => None,
     }) {
         text.push_str("\nDrawings on screen: ");
-        text.push_str(if super::takes_images(run.choice.as_ref()) {
-            drawings.as_str()
-        } else {
-            drawings.off_screen()
-        });
+        text.push_str(
+            picture
+                .and_then(|recipient| drawings.line_for(recipient))
+                .unwrap_or_else(|| drawings.off_screen()),
+        );
     }
 }
 

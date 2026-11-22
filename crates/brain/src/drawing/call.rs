@@ -283,6 +283,7 @@ pub(super) struct RunLedger {
     pub(super) loss: Option<ThreadId>,
     /// What its screen scenes may be drawn on; `None` while `draw` can't mark the screen.
     pub(super) canvas: Option<Result<crate::context::Geometry, crate::context::NoCanvas>>,
+    pub(super) picture_recipient: Option<crate::context::PictureRecipient>,
 }
 
 impl RunLedger {
@@ -1136,6 +1137,7 @@ impl Drawing {
                     exhausted: false,
                     loss: None,
                     canvas: None,
+                    picture_recipient: None,
                 });
                 self.runs.len() - 1
             });
