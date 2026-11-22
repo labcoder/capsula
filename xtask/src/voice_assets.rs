@@ -168,14 +168,11 @@ fn install(plan: &[Placement<'_>]) -> Result<()> {
     missing.into_iter().try_for_each(publish)
 }
 
-/// What every temporary copy's name holds after its final name.
-const TEMP_TAG: &str = ".voice-assets-";
-
 // shortcut: no junction, symlink or file-identity checks on the destination folders, which are the
 // developer's own %LOCALAPPDATA% and target folders; add them if this ever writes elsewhere.
 /// Copies the source to a temporary file beside the destination, verifying the bytes as they are
 /// written, then links the final name to it. A hardlink to the source would share its ACL, which
-/// the brain refuses where other accounts may write. Removes a stopped run's temporary files first.
+/// the brain refuses where other accounts may write.
 fn publish(placement: &Placement<'_>) -> Result<()> {
     let dest = placement.dest.as_path();
     let parent = dest.parent().context("a destination has a folder")?;
@@ -184,20 +181,7 @@ fn publish(placement: &Placement<'_>) -> Result<()> {
         .context("a destination has a file name")?
         .to_string_lossy();
     fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
-    let stale = format!("{name}{TEMP_TAG}");
-    for entry in fs::read_dir(parent).with_context(|| format!("listing {}", parent.display()))? {
-        let path = entry?.path();
-        let file = path
-            .file_name()
-            .map(|file| file.to_string_lossy().into_owned());
-        let ours = file
-            .as_deref()
-            .and_then(|file| file.strip_prefix(&stale)?.strip_suffix(".tmp"));
-        if ours.is_some_and(|pid| pid.parse::<u32>().is_ok()) {
-            fs::remove_file(&path).with_context(|| format!("removing {}", path.display()))?;
-        }
-    }
-    let temp = parent.join(format!("{stale}{}.tmp", std::process::id()));
+    let temp = parent.join(format!("{name}.voice-assets-{}.tmp", std::process::id()));
     let file =
         fs::File::create_new(&temp).with_context(|| format!("creating {}", temp.display()))?;
     let published = copy_verified(placement, file).and_then(|()| {
@@ -412,16 +396,11 @@ mod tests {
     }
 
     #[test]
-    fn a_wrong_hash_copy_places_nothing_and_clears_stale_temporaries() {
+    fn a_wrong_hash_copy_places_nothing() {
         let dir = scratch("wrong-hash");
         let source = dir.join("source");
         fs::write(&source, b"voice").expect("write");
         let models = dir.join("models");
-        fs::create_dir_all(&models).expect("models folder");
-        let stale = models.join("f.voice-assets-1.tmp");
-        fs::write(&stale, b"half").expect("a stopped run's temporary");
-        let other = models.join("g.voice-assets-1.tmp");
-        fs::write(&other, b"kept").expect("another file's temporary");
         let dest = models.join("f");
 
         let error = install(&[placement(&source, &dest, &"0".repeat(64))])
@@ -431,8 +410,7 @@ mod tests {
             "{error:#}"
         );
         assert!(!dest.exists(), "no final file");
-        assert!(!stale.exists(), "the stopped run's temporary was removed");
-        assert_eq!(temporaries(&models), ["g.voice-assets-1.tmp"]);
+        assert_eq!(temporaries(&models), Vec::<String>::new());
     }
 
     #[test]
