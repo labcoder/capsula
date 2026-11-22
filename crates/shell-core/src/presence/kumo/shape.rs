@@ -338,6 +338,13 @@ mod tests {
     }
 
     #[test]
+    fn a_zero_size_has_a_finite_scale() {
+        assert!((Framing::CARD.units_per_pixel(0) - 2.2).abs() < 1e-6);
+        let p = Framing::CARD.to_cloud(0, 0.0, 0.0);
+        assert!(p.x.is_finite() && p.y.is_finite(), "{p:?}");
+    }
+
+    #[test]
     fn empty_and_single_pixel_bakes() {
         let shape = Silhouette::emoji();
         assert!(GBuffer::bake(&shape, 0, Framing::CARD).texels.is_empty());
