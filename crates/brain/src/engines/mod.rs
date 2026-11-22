@@ -350,7 +350,7 @@ pub enum TurnEvent {
         delta: String,
     },
     /// Argument bytes emitted only by the fixed draw timing replay.
-    #[cfg(all(windows, debug_assertions))]
+    #[cfg(all(windows, any(debug_assertions, feature = "gate-draw-replay")))]
     ReplayDrawDelta {
         /// The replay's call.
         call: CallId,
@@ -398,7 +398,7 @@ impl fmt::Debug for TurnEvent {
                 .field("call", call)
                 .field("delta_bytes", &delta.len())
                 .finish(),
-            #[cfg(all(windows, debug_assertions))]
+            #[cfg(all(windows, any(debug_assertions, feature = "gate-draw-replay")))]
             Self::ReplayDrawDelta { delta, .. } => f
                 .debug_struct("ReplayDrawDelta")
                 .field("delta_bytes", &delta.len())

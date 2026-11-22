@@ -6,7 +6,7 @@
 mod engine;
 #[cfg(test)]
 mod engine_tests;
-#[cfg(all(windows, debug_assertions))]
+#[cfg(all(windows, any(debug_assertions, feature = "gate-draw-replay")))]
 pub(crate) mod replay;
 #[cfg(test)]
 mod tests;

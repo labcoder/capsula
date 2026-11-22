@@ -60,7 +60,7 @@ use tokio::task::JoinSet;
 
 use crate::connections::model::budget::Budget;
 use crate::connections::model::conn::{ModelClient, Tls};
-#[cfg(all(windows, debug_assertions))]
+#[cfg(all(windows, any(debug_assertions, feature = "gate-draw-replay")))]
 use crate::connections::model::text_observation::Observation;
 #[cfg(debug_assertions)]
 use crate::engines::fixture::Fixture;
@@ -123,17 +123,19 @@ pub enum BrainError {
 pub fn shut_down(runtime: tokio::runtime::Runtime) {
     end_runtime(
         runtime,
-        #[cfg(all(windows, debug_assertions))]
+        #[cfg(all(windows, any(debug_assertions, feature = "gate-draw-replay")))]
         Observation::current().map(AsRef::as_ref),
     );
 }
 
 fn end_runtime(
     runtime: tokio::runtime::Runtime,
-    #[cfg(all(windows, debug_assertions))] observation: Option<&Observation>,
+    #[cfg(all(windows, any(debug_assertions, feature = "gate-draw-replay")))] observation: Option<
+        &Observation,
+    >,
 ) {
     runtime.shutdown_timeout(Duration::ZERO);
-    #[cfg(all(windows, debug_assertions))]
+    #[cfg(all(windows, any(debug_assertions, feature = "gate-draw-replay")))]
     if let Some(observation) = observation {
         observation.finish();
     }
@@ -144,13 +146,86 @@ fn end_runtime(
 /// # Errors
 /// Fails when the pipes can't be created (another brain holds them), the capability can't be
 /// made or stored, the helpers can't start, or a pipe fails outright.
-pub async fn run() -> Result<(), BrainError> {
+pub fn run() -> impl Future<Output = Result<(), BrainError>> {
+    use kumochi_protocol::constants::{LIVE_CHATGPT_TEXT_ENV, ProductIdentity};
+
+    let mode = std::env::var(LIVE_CHATGPT_TEXT_ENV).ok();
+    run_admitted(
+        draw_admission(mode.as_deref(), ProductIdentity::ACTIVE),
+        #[cfg(test)]
+        || {},
+    )
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum StartMode {
+    Normal,
+    Draw,
+}
+
+fn draw_admission(
+    mode: Option<&str>,
+    identity: kumochi_protocol::constants::ProductIdentity,
+) -> Result<StartMode, BrainError> {
+    use kumochi_protocol::constants::ProductIdentity;
+
+    let draw = mode == Some("draw");
+    let refusal = if draw
+        && !cfg!(all(
+            windows,
+            any(debug_assertions, feature = "gate-draw-replay")
+        )) {
+        Some("drawing replay is not compiled in")
+    } else if (draw
+        || cfg!(all(
+            windows,
+            feature = "gate-draw-replay",
+            not(debug_assertions)
+        )))
+        && identity != ProductIdentity::GATE
+    {
+        Some("drawing replay requires Gate identity")
+    } else if !draw
+        && cfg!(all(
+            windows,
+            feature = "gate-draw-replay",
+            not(debug_assertions)
+        ))
+    {
+        Some("release drawing replay requires draw mode")
+    } else {
+        None
+    };
+    if let Some(refusal) = refusal {
+        return Err(BrainError::Fixture(io::Error::other(refusal)));
+    }
+    Ok(if draw {
+        StartMode::Draw
+    } else {
+        StartMode::Normal
+    })
+}
+
+async fn run_admitted(
+    admission: Result<StartMode, BrainError>,
+    #[cfg(test)] starting: impl FnOnce(),
+) -> Result<(), BrainError> {
+    let mode = admission?;
+    #[cfg(test)]
+    starting();
     let session = platform::session_id()?;
     // The pipes come first: a second brain fails here, before it touches anything else.
     let mut pipes = Pipes::create(session)?;
     let exe = std::env::current_exe()?;
-    #[cfg(all(windows, debug_assertions))]
+    #[cfg(all(windows, any(debug_assertions, feature = "gate-draw-replay")))]
     Observation::prepare(&exe);
+    #[cfg(all(windows, any(debug_assertions, feature = "gate-draw-replay")))]
+    let replay = (mode == StartMode::Draw).then(draw_engine).transpose()?;
+    #[cfg(not(all(windows, any(debug_assertions, feature = "gate-draw-replay"))))]
+    let replay = {
+        let _ = mode;
+        None
+    };
     // Before any shell is served, so no run starts ahead of the recovery scan. Blocking is fine:
     // nothing else runs on the runtime yet.
     let mut store = store::Store::open(&store::default_path()?)?;
@@ -169,6 +244,8 @@ pub async fn run() -> Result<(), BrainError> {
     let high_water = store.high_water()?;
     let scenes = store.scenes()?;
     let mut config = config::Config::load(platform::config_dir(), main_thread);
+    #[cfg(all(windows, feature = "gate-draw-replay", not(debug_assertions)))]
+    require_draw_model(&config)?;
     let claude_on = config.claude_code_enabled();
     tracing::info!(enabled = claude_on, "Claude Code setting");
     // Before the capability is stored, so its write never overlaps the vault's first reads.
@@ -179,7 +256,10 @@ pub async fn run() -> Result<(), BrainError> {
         main_thread,
         high_water,
         scenes,
-        engine()?,
+        match replay {
+            Some(replay) => replay,
+            None => engine()?,
+        },
         config,
         account,
     )
@@ -339,21 +419,90 @@ fn claude_lane(
         .ok()
 }
 
+#[cfg(all(
+    windows,
+    any(
+        all(test, debug_assertions),
+        all(feature = "gate-draw-replay", not(debug_assertions))
+    )
+))]
+fn require_draw_model(config: &config::Config) -> Result<(), BrainError> {
+    if !config
+        .default_choice()
+        .display()
+        .ok()
+        .flatten()
+        .is_some_and(|choice| {
+            choice.connection == kumochi_protocol::message::ConnectionKind::ChatGpt
+                && choice.model.as_str() == engines::responses::replay::MODEL
+                && choice.effort == kumochi_protocol::message::Effort::Low
+        })
+    {
+        return Err(BrainError::Fixture(io::Error::other(
+            "release drawing replay needs its fixed model",
+        )));
+    }
+    Ok(())
+}
+
+#[cfg(all(test, windows, debug_assertions))]
+#[test]
+fn draw_opt_in_refuses_a_different_model() {
+    use kumochi_protocol::{constants::CONFIG_FILE, message::ThreadId};
+
+    let scratch = crate::test_support::Scratch::new("draw-fixed-model");
+    std::fs::create_dir(scratch.dir()).unwrap();
+    for (model, effort, connection, accepted) in [
+        ("draw-replay", "Low", "ChatGpt", true),
+        ("other-model", "Low", "ChatGpt", false),
+        ("draw-replay", "High", "ChatGpt", false),
+        ("draw-replay", "Low", "AnthropicKey", false),
+    ] {
+        std::fs::write(
+            scratch.dir().join(CONFIG_FILE),
+            format!(r#"default_model = {{ model = "{model}", effort = "{effort}", connection = "{connection}" }}"#),
+        ).unwrap();
+        let config = config::Config::load(Some(scratch.dir().to_owned()), ThreadId(1));
+        assert_eq!(require_draw_model(&config).is_ok(), accepted);
+    }
+}
+
+#[cfg(all(windows, any(debug_assertions, feature = "gate-draw-replay")))]
+fn draw_engine() -> Result<Selected, BrainError> {
+    let observation = Observation::drawing().ok_or_else(|| {
+        BrainError::Fixture(io::Error::other(
+            "drawing replay needs a fresh gate receipt",
+        ))
+    })?;
+    let replay =
+        engines::responses::replay::Replay::new(observation).map_err(BrainError::Fixture)?;
+    Ok(Selected::DrawReplay(Box::new(replay)))
+}
+
+#[cfg(all(test, windows, debug_assertions))]
+#[tokio::test]
+async fn direct_dev_draw_refuses_before_store_or_vault_startup() {
+    use kumochi_protocol::constants::ProductIdentity;
+
+    let refused = draw_admission(Some("draw"), ProductIdentity::DEV);
+    let Err(BrainError::Fixture(error)) = Box::pin(run_admitted(refused, || {
+        panic!("refused draw entered store/vault startup");
+    }))
+    .await
+    else {
+        panic!("direct Dev draw did not refuse at startup");
+    };
+    assert_eq!(error.to_string(), "drawing replay requires Gate identity");
+    assert!(matches!(
+        draw_admission(Some("1"), ProductIdentity::DEV),
+        Ok(StartMode::Normal)
+    ));
+}
+
 /// The engine runs use: in a dev build that names a script in
 /// [`kumochi_protocol::constants::FIXTURE_ENV`], that script answers every run; otherwise the
 /// account's Responses engine answers, once the account is ready.
 fn engine() -> Result<Selected, BrainError> {
-    #[cfg(all(windows, debug_assertions))]
-    if std::env::var(kumochi_protocol::constants::LIVE_CHATGPT_TEXT_ENV).as_deref() == Ok("draw") {
-        let observation = Observation::drawing().ok_or_else(|| {
-            BrainError::Fixture(io::Error::other(
-                "drawing replay needs a fresh gate receipt",
-            ))
-        })?;
-        let replay =
-            engines::responses::replay::Replay::new(observation).map_err(BrainError::Fixture)?;
-        return Ok(Selected::DrawReplay(Box::new(replay)));
-    }
     #[cfg(debug_assertions)]
     if let Some(path) = std::env::var_os(kumochi_protocol::constants::FIXTURE_ENV) {
         let script = std::fs::read_to_string(path).map_err(BrainError::Fixture)?;

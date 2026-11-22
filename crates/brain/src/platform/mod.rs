@@ -91,7 +91,7 @@ pub(crate) use windows::call_throwing_export;
 pub(crate) use windows::fake_claude::FAKE_CLAUDE;
 #[cfg(windows)]
 pub(crate) use windows::ocr::open as open_ocr;
-#[cfg(all(windows, debug_assertions))]
+#[cfg(all(windows, any(debug_assertions, feature = "gate-draw-replay")))]
 pub(crate) use windows::qpc_now;
 #[cfg(all(windows, debug_assertions))]
 pub use windows::raise_access_violation;

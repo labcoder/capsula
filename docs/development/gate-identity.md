@@ -75,6 +75,20 @@ fail without a fallback build or launch. The receipt records `build_seconds=0.0`
 This mode can't also build a `--baseline` checkout. Copying the images doesn't make the
 cold-start result a cold executable-cache measurement.
 
+### Prebuilt offline drawing
+
+Build the replay fixture outside the assigned quiet hold. Enable Gate identity only on
+the command line; the two replay features have no default and don't enable Gate identity.
+
+```bash
+cargo build --release --locked --offline -p xtask -p kumochi-shell -p kumochi-brain   --features kumochi-protocol/gate-identity,kumochi-shell/gate-draw-replay,kumochi-brain/gate-draw-replay
+"$target/release/xtask.exe" draw-timing "$transcript" --prebuilt "$shell_sha" "$brain_sha"
+```
+
+Record and verify the three same-build image hashes as above, including the driver.
+The result still ends at [accepted overlay paint](input.md#offline-drawing-timing);
+the replay uses no provider and this command doesn't match presents.
+
 Gate commands that build their own images strip `CARGO_MANIFEST_*`
 and `CARGO_PKG_*` so the parent's `cargo run` environment doesn't invalidate ring's cache.
 Real input changes still rebuild: in particular, the build ID follows HEAD's reflog.
