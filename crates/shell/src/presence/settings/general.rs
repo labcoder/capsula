@@ -408,6 +408,7 @@ pub(super) mod tests {
     };
     use kumochi_protocol::message::{AssistantName, MaxFrameRate, SettingsView, ThreadId};
 
+    use super::super::SettingsTab;
     use super::{choice_index, dock_choice_index, labels, rate_at};
     use crate::settings::{Settings, Update};
     use crate::strings::Strings;
@@ -562,7 +563,7 @@ pub(super) mod tests {
         });
     }
 
-    fn saved() -> SettingsView {
+    pub(in crate::presence::settings) fn saved() -> SettingsView {
         SettingsView {
             assistant_name: AssistantName::new("Kumo").expect("valid"),
             user_name: None,
@@ -642,7 +643,7 @@ pub(super) mod tests {
         let (window, view) = open(cx);
         for key in [ErrorKey::AccountRefused, ErrorKey::SignInNeeded] {
             view.update(cx, |view, cx| {
-                view.tab = 1;
+                view.tab = SettingsTab::Accounts;
                 view.model.update(cx, |model, cx| {
                     assert!(model.accounts.receive(
                         Some(1),
@@ -692,7 +693,7 @@ pub(super) mod tests {
             (ErrorKey::PlanUnavailable, false, false),
         ] {
             view.update(cx, |view, cx| {
-                view.tab = 1;
+                view.tab = SettingsTab::Accounts;
                 view.model.update(cx, |model, cx| {
                     model.accounts.receive(
                         Some(1),

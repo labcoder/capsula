@@ -31,6 +31,35 @@ gpui_kit::actions!(settings, [NextTab, PreviousTab]);
 
 const SHOW_ANTHROPIC_KEY_ROW: bool = true;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SettingsTab {
+    General,
+    Accounts,
+    Voice,
+    Privacy,
+}
+
+impl SettingsTab {
+    const ALL: [Self; 4] = [Self::General, Self::Accounts, Self::Voice, Self::Privacy];
+
+    const fn index(self) -> usize {
+        match self {
+            Self::General => 0,
+            Self::Accounts => 1,
+            Self::Voice => 2,
+            Self::Privacy => 3,
+        }
+    }
+
+    const fn next(self) -> Self {
+        Self::ALL[(self.index() + 1) % Self::ALL.len()]
+    }
+
+    const fn previous(self) -> Self {
+        Self::ALL[(self.index() + Self::ALL.len() - 1) % Self::ALL.len()]
+    }
+}
+
 pub(super) struct SettingsView {
     pub(super) model: Entity<Settings>,
     pub(super) owner: WeakEntity<Presence>,
@@ -46,7 +75,7 @@ pub(super) struct SettingsView {
     github_interactive: Option<u64>,
     focus: FocusHandle,
     editing: Option<Field>,
-    tab: usize,
+    tab: SettingsTab,
     dock_notice: Option<Text>,
     taskbar_notice: Option<Text>,
     hold_notice: Option<Text>,
@@ -144,7 +173,7 @@ impl SettingsView {
             github_interactive: None,
             focus: cx.focus_handle().tab_stop(true),
             editing: None,
-            tab: 0,
+            tab: SettingsTab::General,
             dock_notice: None,
             taskbar_notice: None,
             hold_notice: None,
@@ -184,12 +213,7 @@ impl SettingsView {
         cx.notify();
     }
 
-    pub(super) fn select_tab(
-        &mut self,
-        tab: usize,
-        window: &mut Window,
-        cx: &mut Context<'_, Self>,
-    ) {
+    fn select_tab(&mut self, tab: SettingsTab, window: &mut Window, cx: &mut Context<'_, Self>) {
         self.tab = tab;
         self.finish_edit(window, cx);
     }
@@ -201,7 +225,7 @@ impl SettingsView {
 
     #[cfg(debug_assertions)]
     pub(super) fn fixture_accounts(&mut self) {
-        self.tab = 1;
+        self.tab = SettingsTab::Accounts;
         self.fixture = true;
     }
 
@@ -301,29 +325,33 @@ impl SettingsView {
     fn tabs(&self, cx: &Context<'_, Self>) -> TabBar {
         let strings = cx.global::<Strings>();
         TabBar::new("settings-tabs")
-            .selected_index(self.tab)
-            .child(Tab::new().label(strings.get(Text::General)))
-            .child(Tab::new().label(strings.get(Text::Accounts)))
-            .child({
-                let tab = Tab::new().label(strings.get(Text::Voice));
+            .selected_index(self.tab.index())
+            .children(SettingsTab::ALL.map(|tab| {
+                let item = Tab::new().label(strings.get(match tab {
+                    SettingsTab::General => Text::General,
+                    SettingsTab::Accounts => Text::Accounts,
+                    SettingsTab::Voice => Text::Voice,
+                    SettingsTab::Privacy => Text::Privacy,
+                }));
                 #[cfg(test)]
-                let tab = tab.debug_selector(|| "settings-voice-tab".into());
-                tab
-            })
-            .child({
-                let tab = Tab::new().label(strings.get(Text::Privacy));
-                #[cfg(test)]
-                let tab = tab.debug_selector(|| "settings-privacy-tab".into());
-                tab
-            })
-            .on_click(cx.listener(|view, tab, window, cx| {
+                let item = match tab {
+                    SettingsTab::Voice => item.debug_selector(|| "settings-voice-tab".into()),
+                    SettingsTab::Privacy => item.debug_selector(|| "settings-privacy-tab".into()),
+                    _ => item,
+                };
+                item
+            }))
+            .on_click(cx.listener(|view, index, window, cx| {
+                let Some(&tab) = SettingsTab::ALL.get(*index) else {
+                    return;
+                };
                 view.dock_notice = None;
                 view.taskbar_notice = None;
                 view.hold_notice = None;
                 view.confirmation = None;
                 crate::confirmation::retire_in(window, cx);
                 window.close_all_dialogs(cx);
-                view.tab = *tab;
+                view.tab = tab;
                 cx.notify();
             }))
     }
@@ -352,10 +380,10 @@ impl Render for SettingsView {
             .track_focus(&self.focus)
             .on_action(move |_: &Escape, _, _| send(&events, PresenceEvent::Escape))
             .on_action(cx.listener(|view, _: &NextTab, window, cx| {
-                view.select_tab((view.tab + 1) % 4, window, cx);
+                view.select_tab(view.tab.next(), window, cx);
             }))
             .on_action(cx.listener(|view, _: &PreviousTab, window, cx| {
-                view.select_tab((view.tab + 3) % 4, window, cx);
+                view.select_tab(view.tab.previous(), window, cx);
             }))
             .child(
                 div()
@@ -394,16 +422,21 @@ impl Render for SettingsView {
                             .flex()
                             .flex_col()
                             .gap_4()
-                            .children((self.tab == 0).then(|| self.general(window, cx)))
-                            .children((self.tab == 1).then(|| self.accounts(cx)))
-                            .children((self.tab == 1).then(|| self.claude(cx)))
                             .children(
-                                (self.tab == 1 && SHOW_ANTHROPIC_KEY_ROW)
+                                (self.tab == SettingsTab::General)
+                                    .then(|| self.general(window, cx)),
+                            )
+                            .children(
+                                (self.tab == SettingsTab::Accounts).then(|| self.accounts(cx)),
+                            )
+                            .children((self.tab == SettingsTab::Accounts).then(|| self.claude(cx)))
+                            .children(
+                                (self.tab == SettingsTab::Accounts && SHOW_ANTHROPIC_KEY_ROW)
                                     .then(|| self.anthropic(cx)),
                             )
-                            .children((self.tab == 1).then(|| self.github(cx)))
-                            .children((self.tab == 2).then(|| self.voice(cx)))
-                            .children((self.tab == 3).then(|| self.privacy(cx))),
+                            .children((self.tab == SettingsTab::Accounts).then(|| self.github(cx)))
+                            .children((self.tab == SettingsTab::Voice).then(|| self.voice(cx)))
+                            .children((self.tab == SettingsTab::Privacy).then(|| self.privacy(cx))),
                     ),
             )
             .children(self.stop.then(|| {
