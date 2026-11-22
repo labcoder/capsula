@@ -63,18 +63,18 @@ impl Engine for Silence {
 /// A brain playing `script` with spoken replies on, speaking through `Silence`.
 fn spoken(scratch: &Scratch, script: &str) -> Brain {
     let mut brain = test_support::brain(scratch, script);
-    enable_spoken(&mut brain);
+    enable_spoken(&mut brain, OutputMode::Legacy);
     brain
 }
 
-fn enable_spoken(brain: &mut Brain) {
+fn enable_spoken(brain: &mut Brain, output: OutputMode) {
     let (reports, _) = crate::voice::Reports::new();
     let tts = TtsHandle::spawn_with(tokio::runtime::Handle::current(), reports, |_: &Path| {
         Ok(Silence)
     })
     .expect("the owner thread starts");
     tts.load("models".into(), 1);
-    brain.pump = Some(Pump::new(tts, OutputMode::Legacy));
+    brain.pump = Some(Pump::new(tts, output));
     brain.offline(Input::SpokenReplies { loaded: true });
     brain.offline(Input::AudioOutput {
         rate: 24_000,
@@ -108,7 +108,8 @@ async fn closed_speech_waits_across_live_data_credits_then_dispatches_once() {
         r#""kind":"rect","box":[0,0,10,10]}}]}},{"end":{}}]}"#,
     );
     brain.engine = Box::new(DrawThenFinish(Fixture::parse(script).unwrap()));
-    enable_spoken(&mut brain);
+    // This shell conducts: it decides each speech-start segment.
+    enable_spoken(&mut brain, OutputMode::Conducted);
     let inputs = brain.inputs_tx.clone();
     let ((control, data), mut shell) = duplex();
     let mut tap = Tap::from_env();

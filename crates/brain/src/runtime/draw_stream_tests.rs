@@ -1163,6 +1163,69 @@ async fn unspoken_invalidated_attempt_leaves_no_reply_in_rebuild_history_or_sear
 }
 
 #[tokio::test]
+async fn a_plain_queued_pair_hears_a_speech_step_as_a_plain_segment() {
+    let scratch = Scratch::new("plain-queued-say");
+    let mut brain = brain(&scratch);
+    brain.offline(Input::SpokenReplies { loaded: true });
+    let (out, _controls) = mpsc::channel(64);
+    let queue = RefCell::new(DataQueue::new(window()));
+    let ready = Notify::new();
+    let mut tap = Tap::from_env();
+    let registration = std::cell::Cell::new(super::Registration::Awaiting);
+    let mut link = Link::new(&out, &queue, &ready, &mut tap);
+    link.registration = Some(&registration);
+    link.recovery = brain.describe(&mut link).expect("initial membership");
+    let output = OutputGeneration(17);
+    let register = kumochi_protocol::message::ControlToBrain::QueuedAudioOutput(24_000, output);
+    assert!(matches!(
+        brain.control_frame(register, 0, &mut link, &mut None),
+        Ok(None)
+    ));
+    let key = start(&mut brain, &mut link).await;
+    submit_narrating_step(&mut brain, &mut link, key, "Narrate this.");
+    let scene = step_landed(&mut brain, &mut link).await;
+
+    let frames = all_frames(&queue);
+    let commits: Vec<_> = frames
+        .iter()
+        .filter_map(|frame| match frame {
+            DataToShell::SceneStepCommit { run, speech, .. } => Some((*run, *speech)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        commits,
+        [(key.run, None)],
+        "no speech promise on a Plain pair"
+    );
+    let announced: Vec<_> = frames
+        .iter()
+        .filter_map(|frame| match frame {
+            DataToShell::SegmentQueued {
+                run,
+                segment,
+                step,
+                start,
+                output_generation,
+            } => Some((*run, *segment, *step, *start, *output_generation)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        announced,
+        [(
+            key.run,
+            SegmentId(0),
+            Some(StepRef { scene, index: 0 }),
+            SegmentStart::Plain,
+            output
+        )],
+        "the step's line is an ordinary Plain segment"
+    );
+    brain.close().await;
+}
+
+#[tokio::test]
 #[expect(
     clippy::too_many_lines,
     reason = "the same real replacement runs at each data-writer boundary"

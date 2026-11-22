@@ -328,8 +328,8 @@ sequenceDiagram
   saved reply; replaying a drawing doesn't emit it again. An assigned segment that later fails
   isn't written as a new Chat line.
 - **Drawing timing.** The presenter doesn't estimate narration time for any step, assigned or
-  not. No normal launch opens a speaker here. Keep step narration off when enabling ordinary
-  spoken replies until the conductor supplies real playback timing.
+  not. A Plain queued pair has no conductor, so a speech-start step's `say` is announced there
+  as an ordinary `Plain` segment with no speech promise, and the step keeps its authored timing.
 - **The pump** is owned by the core loop and read only while the data queue has room. With no
   pump, a Speak fails as if TTS weren't loaded, and the run's remaining segments end empty.
 - **First PCM, conducted output only.** The pump times one dispatched Speak, including plain

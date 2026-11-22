@@ -339,6 +339,7 @@ impl Coordinator {
     }
 
     fn forward_drawing_effect(&mut self, mut effect: Effect, effects: &mut Vec<Effect>) {
+        let plain_say = self.plain_say;
         if let Effect::Data(DataToShell::SceneStepCommit {
             run,
             scene,
@@ -354,8 +355,8 @@ impl Coordinator {
             && let Some(reply) = &mut current.reply
         {
             let start = match step.start {
-                Start::Speech => SegmentStart::Speech,
-                Start::Now | Start::After { .. } => SegmentStart::Plain,
+                Start::Speech if !plain_say => SegmentStart::Speech,
+                Start::Speech | Start::Now | Start::After { .. } => SegmentStart::Plain,
             };
             let step = StepRef {
                 scene: *scene,
