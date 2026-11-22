@@ -10,8 +10,8 @@ use kumochi_protocol::message::{
 use rusqlite::{Connection, OptionalExtension as _, Row, Transaction, params};
 
 use super::{Store, StoreError, now_ms, sql_id};
-use crate::connections::github::{api::GitHubUser, issues::CreateOutcome};
-use crate::issues::{Action, Answer, Live, Lookup, Mark, Stage, Write, WriteScope};
+use crate::connections::github::{api::GitHubUser, device::id_of, issues::CreateOutcome};
+use crate::issues::{Action, Answer, Live, Lookup, Mark, Snapshot, Stage, Write, WriteScope};
 
 impl Store {
     /// Executes one operation on the existing ordered store writer.
@@ -66,7 +66,12 @@ impl Store {
         }
         match write {
             Write::Read(draft) => Ok(self.action(*draft)?.map_or(Answer::Gone, Answer::Unchanged)),
-            Write::Rearm { draft, at, hash } => {
+            Write::Rearm {
+                draft,
+                at,
+                hash,
+                live,
+            } => {
                 let Ok(id) = i64::try_from(draft.0) else {
                     return Ok(Answer::Gone);
                 };
@@ -83,6 +88,7 @@ impl Store {
                     if !matches!(action.stage, Stage::Draft | Stage::Failed { .. }) {
                         return Ok(Answer::Refused(IssueRefused::NotAllowedNow, action));
                     }
+                    bind_repo_id(tx, id, &action, live)?;
                     commit_stage(tx, id, &action.stage, action.uncertain)?;
                     Ok(Answer::Changed(load(tx, id)?.ok_or(StoreError::Issue)?))
                 })
@@ -417,7 +423,7 @@ fn consent_row(
         if at.is_some_and(|at| action.version != at) {
             return Some(Err(IssueRefused::StaleApproval));
         }
-        let (before, before_id) = (action.stage.clone(), action.repo_id);
+        let before = action.stage.clone();
         let consent = action.consent(hash, approval, decision, live);
         if decision != Decision::File || consent.is_err() || action.stage == before {
             return Some(consent);
@@ -456,7 +462,7 @@ fn consent_row(
             .ok()?;
         if let Some(other) = other {
             let draft = u64::try_from(other).ok().filter(|id| *id != 0)?;
-            (action.stage, action.repo_id) = (before, before_id);
+            action.stage = before;
             return Some(Err(IssueRefused::UnresolvedDraft {
                 draft: DraftId(draft),
             }));
@@ -513,6 +519,28 @@ fn change_row(
 
 /// Moves a row to `stage`, raising its version, with a fresh approval where the stage offers a
 /// decision and none elsewhere.
+/// Stores the id `live` lists for the action's repository unless one is bound: the first preview
+/// that finds the name listed binds it, and a retry of this draft keeps it, so only a new draft
+/// can bind a repository recreated under the name since.
+fn bind_repo_id(
+    tx: &Connection,
+    id: i64,
+    action: &Action,
+    live: &Snapshot,
+) -> Result<(), StoreError> {
+    let listed = action
+        .repo
+        .as_ref()
+        .and_then(|repo| id_of(&live.repos, &live.repo_ids, repo))
+        .map(|listed| sql_id(listed.get(), StoreError::Issue))
+        .transpose()?;
+    tx.execute(
+        "UPDATE actions SET repo_id = COALESCE(repo_id, ?2) WHERE id = ?1",
+        params![id, listed],
+    )?;
+    Ok(())
+}
+
 fn commit_stage(tx: &Connection, id: i64, stage: &Stage, uncertain: u32) -> Result<(), StoreError> {
     let approval = matches!(
         stage,
