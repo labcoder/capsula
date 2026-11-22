@@ -94,6 +94,7 @@ enum Slot {
     Taskbar(TaskbarChoice),
     SttUnload(SttUnload),
     HoldToTalk(bool),
+    TalkBack(bool),
     ShowScreen(bool),
     SpeechInput(SpeechInputAction),
     /// The default model; the choice itself is `Settings::model_queued`.
@@ -113,6 +114,7 @@ impl Slot {
             | (Self::Taskbar(_), Self::Taskbar(_))
             | (Self::SttUnload(_), Self::SttUnload(_))
             | (Self::HoldToTalk(_), Self::HoldToTalk(_))
+            | (Self::TalkBack(_), Self::TalkBack(_))
             | (Self::ShowScreen(_), Self::ShowScreen(_))
             | (Self::SpeechInput(_), Self::SpeechInput(_))
             | (Self::Model, Self::Model)
@@ -130,6 +132,7 @@ impl Slot {
             | Self::Taskbar(_)
             | Self::SttUnload(_)
             | Self::HoldToTalk(_)
+            | Self::TalkBack(_)
             | Self::ShowScreen(_)
             | Self::SpeechInput(_)
             | Self::Model
@@ -180,6 +183,7 @@ pub struct Settings {
     speech_send_failed: bool,
     stt_error: Option<UserError>,
     stt_send_failed: bool,
+    talk_back_send_failed: bool,
     /// Each catalog on offer, in arrival order.
     models: Vec<(ConnectionKind, Vec<ModelInfo>)>,
     /// The newest default model sent and not yet answered.
@@ -422,6 +426,7 @@ impl Settings {
                 | Slot::Taskbar(_)
                 | Slot::SttUnload(_)
                 | Slot::HoldToTalk(_)
+                | Slot::TalkBack(_)
                 | Slot::ShowScreen(_)
                 | Slot::SpeechInput(_)
                 | Slot::Model
@@ -624,6 +629,7 @@ impl Settings {
         self.speech_error = None;
         self.speech_send_failed = false;
         self.stt_send_failed = false;
+        self.talk_back_send_failed = false;
         self.pending.clear();
         self.models.clear();
         self.model_queued = None;

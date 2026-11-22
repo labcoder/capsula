@@ -96,6 +96,51 @@ impl Settings {
         true
     }
 
+    pub fn talk_back_choice(&self) -> Option<bool> {
+        let saved = self.view.as_ref()?.talk_back;
+        self.pending
+            .iter()
+            .find_map(|pending| match (pending.slot, pending.failed) {
+                (Slot::TalkBack(on), false) => Some(on),
+                _ => None,
+            })
+            .or(Some(saved))
+    }
+
+    pub fn talk_back_pending(&self) -> bool {
+        self.pending
+            .iter()
+            .any(|pending| matches!(pending.slot, Slot::TalkBack(_)))
+    }
+
+    pub fn talk_back_error(&self) -> Option<&UserError> {
+        self.notice_slot
+            .filter(|slot| matches!(slot, Slot::TalkBack(_)))
+            .and(self.notice.as_ref())
+    }
+
+    pub fn talk_back_send_failed(&self) -> bool {
+        self.talk_back_send_failed
+    }
+
+    #[expect(
+        clippy::fn_params_excessive_bools,
+        reason = "the checkbox and wire setter carry this boolean unchanged"
+    )]
+    pub fn send_talk_back(&mut self, on: bool, send: impl FnOnce(SettingsOp) -> bool) {
+        if self.talk_back_pending() || self.talk_back_choice().is_none_or(|old| old == on) {
+            return;
+        }
+        self.talk_back_send_failed = !send(SettingsOp::SetTalkBack(on));
+        if !self.talk_back_send_failed {
+            self.pending.push_back(Pending {
+                slot: Slot::TalkBack(on),
+                failed: false,
+                reset_draft: false,
+            });
+        }
+    }
+
     /// Whether a hold also sends the model the screen: the choice in flight, else the saved one.
     pub fn show_screen_choice(&self) -> Option<bool> {
         let saved = self.view.as_ref()?.show_screen;

@@ -115,6 +115,55 @@ impl SettingsView {
                     .text_color(cx.theme().muted_foreground)
                     .child(strings.get(Text::VoiceIdleHelp)),
             )
+            .child(self.talk_back(cx))
+    }
+
+    fn talk_back(&self, cx: &Context<'_, Self>) -> impl IntoElement {
+        let state = self.model.read(cx);
+        let strings = cx.global::<Strings>();
+        let error = if state.talk_back_send_failed() {
+            Some(strings.get(Text::SettingsUnavailable))
+        } else {
+            state.talk_back_error().map(|error| strings.error(error))
+        };
+        div()
+            .flex()
+            .flex_col()
+            .gap_3()
+            .child(
+                Checkbox::new("speak-answers-aloud")
+                    .label(strings.get(Text::SpeakAnswersAloud))
+                    .checked(state.talk_back_choice() == Some(true))
+                    .disabled(state.view().is_none() || state.talk_back_pending())
+                    .on_change(cx.listener(|view, on, _, cx| {
+                        if view
+                            .owner
+                            .update(cx, |owner, cx| owner.save_talk_back(*on, cx))
+                            .is_err()
+                        {
+                            view.model.update(cx, |state, cx| {
+                                state.send_talk_back(*on, |_| false);
+                                cx.notify();
+                            });
+                        }
+                    }))
+                    .map(|checkbox| {
+                        #[cfg(test)]
+                        let checkbox = checkbox.debug_selector(|| "speak-answers-aloud".into());
+                        checkbox
+                    }),
+            )
+            .children(
+                state
+                    .talk_back_pending()
+                    .then(|| div().text_xs().child(strings.get(Text::SettingsSaving))),
+            )
+            .children(error.map(|error| {
+                let error = div().text_sm().text_color(cx.theme().danger).child(error);
+                #[cfg(test)]
+                let error = error.debug_selector(|| "talk-back-error".into());
+                error
+            }))
     }
 
     fn hold_to_talk(&self, cx: &Context<'_, Self>) -> impl IntoElement {
