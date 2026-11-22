@@ -172,7 +172,8 @@ fn newer_keyed_answers_never_borrow_older_cancelled_or_deleted_prefixes() {
                 stop: Some(stop(21)),
                 credit: BYTES,
                 visible: false,
-                restore: None
+                restore: None,
+                hold: None,
             },
         );
         assert!(runs.submitted.is_empty());
@@ -425,6 +426,7 @@ fn three_queued_turns_a_switch_and_esc_never_move_focus_on_late_states() {
                 credit: 0,
                 visible: false,
                 restore: None,
+                hold: None,
             }
         );
         assert_eq!(runs.target(), Target::New);
@@ -807,6 +809,7 @@ fn a_failure_applied_after_esc_is_not_shown() {
                 credit: 0,
                 visible: false,
                 restore: None,
+                hold: None,
             },
             None
         ),
@@ -948,6 +951,7 @@ fn data_before_its_run_state_is_held_until_the_state_names_it() {
             credit: BYTES,
             visible: true,
             restore: None,
+            hold: None,
         }
     );
     assert_eq!(shown_text(&runs), Some((RunId(3), "early")));
@@ -980,6 +984,7 @@ fn esc_cancels_a_turn_whose_run_isnt_named_yet() {
             credit: BYTES,
             visible: false,
             restore: None,
+            hold: None,
         }
     );
     assert!(runs.shown().is_none(), "nothing of a shows");
@@ -1004,6 +1009,7 @@ fn esc_cancels_a_turn_whose_run_isnt_named_yet() {
             credit: 0,
             visible: true,
             restore: None,
+            hold: None,
         }
     );
     data(&mut runs, text(2, "b runs"));
@@ -1042,6 +1048,7 @@ fn esc_stops_the_known_run_and_cancels_the_turn_queued_behind_it() {
             credit: BYTES,
             visible: false,
             restore: None,
+            hold: None,
         },
         "exactly one Stop names a's run"
     );
@@ -1281,6 +1288,7 @@ fn a_reconnect_forgets_turns_esc_cancelled_and_their_held_data() {
             credit: 0,
             visible: true,
             restore: None,
+            hold: None,
         },
         "b isn't cancelled, and a's held frame is gone"
     );
@@ -1339,6 +1347,7 @@ fn esc_stops_then_clears_then_dismisses_with_a_cancelled_turn_pending() {
             credit: 0,
             visible: false,
             restore: None,
+            hold: None,
         },
         "a's run is stopped once it's named"
     );

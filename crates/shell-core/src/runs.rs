@@ -12,7 +12,7 @@ use std::fmt;
 
 mod hold;
 use hold::Hold;
-pub use hold::{HoldRelease, ScreenHold, ScreenLine, ScreenNotice};
+pub use hold::{HoldRelease, HoldState, ScreenHold, ScreenLine, ScreenNotice};
 
 use kumochi_protocol::frame::Pipe;
 use kumochi_protocol::message::{
@@ -111,6 +111,8 @@ pub struct Applied {
     /// The text of a turn that failed before answering, given back once for an empty
     /// composer.
     pub restore: Option<Content>,
+    /// What the state did to the hold it names, when it names one.
+    pub hold: Option<HoldState>,
 }
 
 impl fmt::Debug for Applied {
@@ -121,6 +123,7 @@ impl fmt::Debug for Applied {
             .field("input_ended", &self.input_ended)
             .field("visible", &self.visible)
             .field("restore_len", &self.restore.as_ref().map(|text| text.len()))
+            .field("hold", &self.hold)
             .finish()
     }
 }

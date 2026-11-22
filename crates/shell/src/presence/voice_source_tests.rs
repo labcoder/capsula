@@ -2696,3 +2696,38 @@ fn a_hold_gives_global_esc_back_once_its_run_answers(cx: &mut TestAppContext) {
         "the hold's own answer gives Esc back"
     );
 }
+
+/// A hold whose run the runs refuse at its first state ends with it: the hold and its notice go,
+/// its cancel is told once and global Esc is given back.
+#[gpui::test]
+fn a_hold_whose_first_run_state_is_refused_ends_with_it(cx: &mut TestAppContext) {
+    let (owner, _data, controls) = ready(cx);
+    owner.update(cx, |owner, _| {
+        owner.runs.apply_scenes(&[]).unwrap();
+    });
+    hold(&owner, 1, cx);
+    owner.update(cx, |owner, _| {
+        owner.link.clear_input(GestureId(1));
+        owner.voice.pending.as_mut().expect("the hold").source = Source::Sent;
+    });
+    run_state(&owner, 5, Phase::Thinking, None, cx);
+    while controls.try_recv().is_ok() {}
+    let origin = Some(RunOrigin::Hold {
+        gesture: GestureId(1),
+    });
+    run_state(&owner, 4, Phase::Thinking, origin, cx);
+    owner.read_with(cx, |owner, _| {
+        assert!(owner.voice.pending.is_none());
+        assert_eq!(owner.voice.status, Some(Text::HoldFailed));
+    });
+    assert!(!esc_held(&owner, cx), "the ended hold gives Esc back");
+    let cancels = std::iter::from_fn(|| controls.try_recv().ok())
+        .filter(|message| matches!(message, ControlToBrain::GestureCancel { .. }))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        cancels,
+        [ControlToBrain::GestureCancel {
+            gesture: GestureId(1)
+        }]
+    );
+}
