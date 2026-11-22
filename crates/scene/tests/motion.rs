@@ -778,19 +778,28 @@ fn a_reconstructed_view_requires_an_outside_paint_frame_clear() {
 
 #[test]
 fn scene_debug_summarizes_counts_instead_of_poses_and_keys() {
-    let (mut scene, mut budget, mut view) = fresh();
-    activate(
-        &mut scene,
-        &mut budget,
-        &mut view,
-        json!({"id":"shape","put":[rect("s"),
-            {"anim":{"target":"s","track":"x","keys":[[0,123.5],[100,456.5]]}}
-        ]}),
-        0,
+    let inspect = |first, last| {
+        let (mut scene, mut budget, mut view) = fresh();
+        activate(
+            &mut scene,
+            &mut budget,
+            &mut view,
+            json!({"id":"shape","put":[rect("s"),
+                {"anim":{"target":"s","track":"x","keys":[[0,first],[100,last]]}}
+            ]}),
+            0,
+        );
+        let pose = transform(&view, 50, "s");
+        (pose, format!("{view:?}"))
+    };
+    let (pose, debug) = inspect(123.5, 456.5);
+    let (other_pose, other) = inspect(678.25, 901.75);
+    assert!(pose != other_pose, "fixture poses must differ");
+    assert!(debug == other, "poses or keys affected SceneView Debug");
+    assert!(
+        !debug.contains("123.5") && !debug.contains("456.5"),
+        "SceneView Debug contains an authored key value"
     );
-    let debug = format!("{view:?}");
-    assert!(!debug.contains("123.5"), "{debug}");
-    assert!(!debug.contains("456.5"), "{debug}");
 }
 
 #[test]
