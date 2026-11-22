@@ -20,6 +20,15 @@ pub(crate) struct Presented {
     pub(crate) at: Option<Duration>,
 }
 
+impl Presented {
+    pub(super) fn follows(self, previous: Self) -> bool {
+        previous.source.run == self.source.run
+            && previous.source.generation == self.source.generation
+            && previous.source.segment == self.source.segment
+            && previous.through == self.first
+    }
+}
+
 pub(super) struct Conversion {
     origin: u64,
     frames: u64,

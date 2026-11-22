@@ -1,6 +1,6 @@
 use super::*;
 use crate::platform::speaker_cpal::tests::FakePlayback;
-use kumochi_protocol::message::SpeechPcm;
+use kumochi_protocol::message::{Cursor, SpeechPcm, SpeechRetirement};
 
 pub(in crate::speaker::queued) const RUN: RunId = RunId(17);
 const OUTPUT: OutputGeneration = OutputGeneration(2);
@@ -24,6 +24,7 @@ fn fake() -> (Worker, Input, Port, Receiver<Request>, SyncSender<Reply>) {
             replies,
             route_closed: false,
             retired_route: None,
+            stop_cutoff: None,
             virtual_route: false,
             drawing: None,
         },
@@ -85,6 +86,142 @@ fn packet(origin: u64, seq: u32, samples: usize, last: Option<u32>) -> Packet {
             last,
             samples: vec![16_384; samples],
         },
+    }
+}
+
+fn stage_receipts(
+    worker: &mut Worker,
+    input: &Input,
+    port: &Port,
+    requests: &Receiver<Request>,
+    replies: &SyncSender<Reply>,
+    occupied: &'static AtomicBool,
+) -> (FakePlayback, Arc<Control>) {
+    input.command(Command::Expect).unwrap();
+    input.submit(packet(7, 0, 480, Some(480))).unwrap();
+    worker
+        .step(port, &mut [0; 480], &mut |_| {}, INSTANT)
+        .unwrap();
+    let Request::Open(generation, control) = requests.try_recv().unwrap() else {
+        panic!("expected a pending open");
+    };
+    let (transport, playback) = FakePlayback::open(Arc::clone(&control), occupied);
+    assert!(
+        replies
+            .send(Reply::Opened(generation, Some(transport)))
+            .is_ok()
+    );
+    worker
+        .step(port, &mut [0; 480], &mut |_| {}, INSTANT)
+        .unwrap();
+    (playback, control)
+}
+
+#[test]
+fn a_full_presentation_timeline_drains_at_its_deadline_without_new_callbacks() {
+    static OCCUPIED: AtomicBool = AtomicBool::new(false);
+    let (mut worker, input, port, requests, replies) = fake();
+    let (mut playback, control) =
+        stage_receipts(&mut worker, &input, &port, &requests, &replies, &OCCUPIED);
+    for time in 20..=36 {
+        playback.fill(&mut [0.0], Duration::from_millis(time));
+        worker
+            .step(&port, &mut [0; 480], &mut |_| {}, INSTANT)
+            .unwrap();
+    }
+    assert_eq!(worker.engine.progress.heard, 0);
+    assert!(
+        !control.stopped(),
+        "a full timeline doesn't invalidate the physical route"
+    );
+    assert_eq!(worker.deadline(INSTANT), Some(Duration::from_millis(20)));
+    worker
+        .step(&port, &mut [0; 480], &mut |_| {}, Duration::from_millis(20))
+        .unwrap();
+    assert_eq!(worker.engine.progress.heard, 1);
+    assert_eq!(
+        worker.deadline(Duration::from_millis(20)),
+        Some(Duration::from_millis(21))
+    );
+    worker
+        .step(&port, &mut [0; 480], &mut |_| {}, Duration::from_millis(36))
+        .unwrap();
+    assert_eq!(worker.engine.progress.heard, 17);
+    assert_eq!(worker.engine.progress.first_gap, None);
+    assert!(!control.stopped());
+}
+
+#[test]
+fn stop_waits_for_the_last_publication_and_uses_the_original_cutoff() {
+    const CUTOFF: Duration = Duration::from_millis(10);
+    static OCCUPIED: [AtomicBool; 2] = [const { AtomicBool::new(false) }; 2];
+    for ((last_at, due), occupied) in [(9, 8), (11, 7)].into_iter().zip(&OCCUPIED) {
+        let (mut worker, input, port, requests, replies) = fake();
+        let (mut playback, control) =
+            stage_receipts(&mut worker, &input, &port, &requests, &replies, occupied);
+        for time in 0..7 {
+            playback.fill(&mut [0.0], Duration::from_millis(time));
+        }
+        let mut receipts = Receipts::default();
+        let mut reports = Vec::new();
+        let mut last = [0.0];
+        playback.fill_before_publish(&mut last, Duration::from_millis(last_at), || {
+            assert!(input.stop());
+            worker
+                .step(&port, &mut [0; 480], &mut |_| {}, CUTOFF)
+                .unwrap();
+            assert_eq!(control.fenced_handoff(), Some(8));
+            assert_eq!(control.tail(), TailAck::Pending);
+            assert!(receipts.publish(&worker.engine, CUTOFF, &mut |report| {
+                reports.push(report);
+                true
+            }));
+            assert!(
+                reports.is_empty(),
+                "the terminal report cannot overtake publication"
+            );
+        });
+        assert_eq!(last.map(f32::to_bits), [0.5f32.to_bits()]);
+        let fade_at = Duration::from_millis(12);
+        let mut fade = [99.0; 120];
+        playback.fill(&mut fade, fade_at);
+        assert!(
+            fade[..119]
+                .iter()
+                .all(|sample| *sample > 0.0 && *sample < 0.5)
+        );
+        assert_eq!(fade[119].to_bits(), 0);
+        let TailAck::At(quiet) = control.tail() else {
+            panic!("fade should publish quiet even with the receipt ring full");
+        };
+        worker
+            .step(&port, &mut [0; 480], &mut |_| {}, quiet)
+            .unwrap();
+        assert!(receipts.publish(&worker.engine, quiet, &mut |report| {
+            reports.push(report);
+            true
+        }));
+        let cursor = Cursor {
+            segment: SegmentId(0),
+            sample: due,
+        };
+        assert_eq!(
+            reports,
+            [
+                ControlToBrain::SpeechRetired(SpeechRetirement {
+                    run: RUN,
+                    output: OUTPUT,
+                    segment: cursor.segment,
+                    retired: due,
+                    heard: due,
+                    final_segment: false,
+                }),
+                ControlToBrain::SpeechStopped {
+                    run: RUN,
+                    cursor: Some(cursor)
+                },
+            ]
+        );
     }
 }
 
@@ -284,7 +421,17 @@ fn overflow_during_playback_retires_actual_handoff_without_promoting_pending_est
 
     for _ in 0..9 {
         playback.fill(&mut [0.0; 2], PREDICTED);
+        assert!(
+            worker
+                .physical
+                .as_mut()
+                .unwrap()
+                .transport
+                .presentation()
+                .is_some()
+        );
     }
+    playback.force_observation_overflow();
     assert!(control.overflowed());
     worker.step(&port, &mut pcm, &mut grant, LOSS).unwrap();
     assert_eq!(worker.engine.progress.consumed, 42);
@@ -691,7 +838,7 @@ fn a_hold_before_staging_keeps_a_successor_droppable_while_its_predecessor_plays
         std::array::from_fn(|i| if i < 472 { 0.5f32.to_bits() } else { 0 })
     );
     let now = Duration::from_millis(25);
-    worker.observations(now);
+    worker.observations(now, false);
     assert_eq!(worker.engine.tick(now), Ok(None));
     assert_eq!(worker.engine.progress.consumed, 960);
     assert_eq!(worker.engine.progress.heard, 480);
