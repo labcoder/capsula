@@ -2877,7 +2877,9 @@ fn a_queued_screen_release_goes_only_while_its_hold_listens_unrevoked() {
             assert_eq!(receive(), Some(off));
         }
         if answered {
+            let choice = link.handle.choice_revision();
             settings(false);
+            assert_eq!(link.handle.choice_revision(), choice + 1);
         }
         let revoked = sent || answered;
         assert_eq!(
