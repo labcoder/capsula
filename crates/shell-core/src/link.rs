@@ -601,6 +601,8 @@ struct Shared {
     microphone: CollectionGate,
     microphone_stop: Mutex<Option<microphone::Stop>>,
     input: AtomicU64,
+    // Only the native input owner publishes this, before tracking a gesture.
+    input_generation: AtomicU64,
     choice: AtomicU64,
     quit_sent: AtomicBool,
     /// The control pipe while connected, so Quit can bound its writes.
@@ -802,6 +804,13 @@ impl Shared {
     }
 }
 
+/// A locally revoked gesture whose wire cancellation belongs to one link generation.
+#[derive(Debug)]
+pub struct InputCancel {
+    generation: u64,
+    gesture: GestureId,
+}
+
 /// The UI's handle on the link.
 #[derive(Clone, Debug)]
 pub struct LinkHandle {
@@ -880,7 +889,16 @@ impl LinkHandle {
     pub fn link_generation(&self) -> u64 {
         self.shared.generations.load(Ordering::Acquire)
     }
+    #[cfg(any(test, feature = "test-support"))]
     pub fn track_input(&self, gesture: GestureId) {
+        self.track_input_on(gesture, self.link_generation());
+    }
+
+    /// Tracks a gesture with the link generation sampled during recognition.
+    pub fn track_input_on(&self, gesture: GestureId, generation: u64) {
+        self.shared
+            .input_generation
+            .store(generation, Ordering::Relaxed);
         let _tracked =
             self.shared
                 .input
@@ -898,21 +916,51 @@ impl LinkHandle {
         self.cancel_input_gesture().is_some()
     }
     pub fn cancel_input_gesture(&self) -> Option<GestureId> {
-        let shared = &self.shared;
-        let gesture = shared.revoke_input()?;
+        let gesture = self.shared.revoke_input()?;
+        self.send_input_cancel(gesture, None);
+        Some(gesture)
+    }
+
+    /// Revokes local input and microphone authority without touching the control outbox.
+    pub fn revoke_input_for_dispatch(&self) -> Option<InputCancel> {
+        let generation = self.shared.input_generation.load(Ordering::Relaxed);
+        let gesture = self.shared.revoke_input()?;
+        Some(InputCancel {
+            generation,
+            gesture,
+        })
+    }
+
+    /// Sends the revoked gesture's cancel on its original outbox, before any replacement offer.
+    pub fn dispatch_input_cancel(&self, cancel: &InputCancel) -> bool {
+        self.send_input_cancel(cancel.gesture, Some(cancel.generation))
+    }
+
+    fn send_input_cancel(&self, gesture: GestureId, generation: Option<u64>) -> bool {
         let cancel = ControlToBrain::GestureCancel { gesture };
         #[cfg(any(test, feature = "test-support"))]
         if let Some(recording) = &self.control_recording {
-            let _queued = recording.try_send(cancel);
-            return Some(gesture);
+            return generation.is_none_or(|generation| generation == self.link_generation())
+                && recording.try_send(cancel).is_ok();
         }
-        let outbox = shared.outbox.lock().unwrap_or_else(PoisonError::into_inner);
-        if let Some(outbox) = outbox.as_ref()
-            && outbox.control.try_send(cancel).is_err()
-        {
+        let outbox = self
+            .shared
+            .outbox
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let Some(outbox) = outbox.as_ref().filter(|outbox| {
+            generation.is_none_or(|generation| {
+                generation == outbox.generation && !outbox.pipe.is_aborted()
+            })
+        }) else {
+            return false;
+        };
+        if outbox.control.try_send(cancel).is_ok() {
+            true
+        } else {
             outbox.pipe.abort();
+            false
         }
-        Some(gesture)
     }
 
     /// Marks Quit, so the link starts no brain from here on and no speaker opening now is

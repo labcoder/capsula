@@ -23,7 +23,7 @@ use crate::input::{
     Edge, Event, Gesture, Key, TalkHeld,
     hold::{Delivery, Fence, InputReason, InputStage, Intent},
 };
-use crate::link::LinkHandle;
+use crate::link::{InputCancel, LinkHandle};
 use crate::platform::{Deliver, EventTime, cursor_position, performance_counter};
 use kumochi_protocol::geometry::PhysicalPoint;
 use kumochi_protocol::message::{GestureId, ThreadId};
@@ -36,6 +36,7 @@ struct Pending {
     pointer: Option<PhysicalPoint>,
     input: ReleaseInput,
     cancelled: Option<GestureId>,
+    superseded: Option<InputCancel>,
     /// An Esc press: every retirement waits until this delivery is decided.
     escape: Option<Rc<HoldBack>>,
     collection: u64,
@@ -82,6 +83,12 @@ enum Applied {
     Gone,
 }
 
+#[derive(Clone, Copy)]
+enum CancelDispatch {
+    Clear,
+    Refused,
+}
+
 /// Builds the native callback. `dock` is always open, so it anchors the app borrow.
 #[expect(
     clippy::too_many_lines,
@@ -104,12 +111,14 @@ pub(super) fn deliver(
     let (deferred, pending) = async_channel::unbounded::<Pending>();
     // Queued plus in flight, so a newer effect never overtakes one still being retried.
     let backlog = Rc::new(Cell::new(0_usize));
-    let waiting = (owner.clone(), Rc::clone(&backlog));
+    let waiting = (owner.clone(), Rc::clone(&backlog), link.clone());
     cx.spawn(async move |cx| {
-        let (owner, backlog) = waiting;
-        while let Ok(pending) = pending.recv().await {
+        let (owner, backlog, link) = waiting;
+        while let Ok(mut pending) = pending.recv().await {
+            let sent = pending.superseded.take().is_none_or(|cancel| link.dispatch_input_cancel(&cancel));
+            let cancel = if sent { CancelDispatch::Clear } else { CancelDispatch::Refused };
             loop {
-                match apply(cx, dock, &owner, &pending) {
+                match apply(cx, dock, &owner, &pending, cancel) {
                     Applied::Yes => break,
                     Applied::Gone => {
                         tracing::debug!(stage = ?InputStage::Delivery, reason = ?InputReason::OwnerGone, "held speech input boundary");
@@ -174,8 +183,8 @@ pub(super) fn deliver(
         };
         let mut state = gesture.get();
         let mut recovered = false;
-        let voice_paused =
-            Cell::new(paused.get() || !link.can_start_voice_gesture(link.link_generation()));
+        let session = link.link_generation();
+        let voice_paused = Cell::new(paused.get() || !link.can_start_voice_gesture(session));
         let delivery = fence.borrow_mut().reduce_with_keyboard_read(
             &mut state,
             event,
@@ -188,6 +197,7 @@ pub(super) fn deliver(
             },
         );
         gesture.set(state);
+        let mut superseded = None;
         for intent in delivery.intents.iter().flatten() {
             if let Intent::End { gesture, .. } = intent
                 && recovered_hold.get() == Some(*gesture)
@@ -212,8 +222,8 @@ pub(super) fn deliver(
                     generation,
                 } => {
                     if generation.is_ok() {
-                        link.cancel_input();
-                        link.track_input(*gesture);
+                        superseded = link.revoke_input_for_dispatch();
+                        link.track_input_on(*gesture, session);
                     }
                     gates.recognized(*gesture, generation.is_ok());
                 }
@@ -263,6 +273,7 @@ pub(super) fn deliver(
             .then(cursor_position)
             .and_then(Result::ok)
             .map(PhysicalPoint);
+        let ordered_cancel = superseded.is_some();
         let pending = Pending {
             delivery,
             qpc,
@@ -273,18 +284,26 @@ pub(super) fn deliver(
                 at,
             },
             cancelled,
+            superseded,
             escape: escape.then(|| gates.hold_back()),
             collection: link.microphone_gate().latest(),
             stamp: Stamp {
                 target: target.get(),
-                session: link.link_generation(),
+                session,
                 choice: link.choice_revision(),
             },
         };
-        if !at.defer_terminal
+        if !ordered_cancel
+            && !at.defer_terminal
             && backlog.get() == 0
             && matches!(
-                apply(&mut async_cx.clone(), dock, &owner, &pending),
+                apply(
+                    &mut async_cx.clone(),
+                    dock,
+                    &owner,
+                    &pending,
+                    CancelDispatch::Clear
+                ),
                 Applied::Yes
             )
         {
@@ -293,7 +312,11 @@ pub(super) fn deliver(
         backlog.set(backlog.get() + 1);
         tracing::debug!(stage = ?InputStage::Delivery, reason = ?InputReason::Deferred, "held speech input boundary");
         if deferred.try_send(pending).is_err() {
-            link.cancel_input();
+            if ordered_cancel {
+                let _revoked = link.revoke_input_for_dispatch();
+            } else {
+                link.cancel_input();
+            }
             backlog.set(backlog.get() - 1);
             tracing::debug!(stage = ?InputStage::Delivery, reason = ?InputReason::QueueClosed, "held speech input boundary");
         }
@@ -360,6 +383,7 @@ fn apply(
     dock: AnyWindowHandle,
     owner: &WeakEntity<Presence>,
     pending: &Pending,
+    cancel: CancelDispatch,
 ) -> Applied {
     let result = cx.update_window(dock, |_, window, app| {
         let uninterrupted = pending.input.uninterrupted();
@@ -419,7 +443,10 @@ fn apply(
                     }
                     let release = (continuous && input.continuous()).then_some(&input);
                     for mut intent in intents.into_iter().flatten() {
-                        if !uninterrupted || !this.native.escape_trusted() {
+                        if matches!(cancel, CancelDispatch::Refused)
+                            || !uninterrupted
+                            || !this.native.escape_trusted()
+                        {
                             if let Intent::End { cancelled, .. } = &mut intent {
                                 *cancelled = true;
                             } else {
@@ -496,8 +523,12 @@ pub(super) fn deliver_intent(
         pointer,
         input: ReleaseInput::fixture(held),
         cancelled: None,
+        superseded: None,
         escape: None,
         collection: 0,
     };
-    matches!(apply(cx, dock, owner, &pending), Applied::Yes)
+    matches!(
+        apply(cx, dock, owner, &pending, CancelDispatch::Clear),
+        Applied::Yes
+    )
 }

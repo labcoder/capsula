@@ -149,6 +149,39 @@ fn microphone_stop_replays_until_acceptance_without_reviving_or_duplicating_inpu
     }
 }
 
+#[test]
+fn an_input_cancel_does_not_follow_a_replacement_connection() {
+    let old = attended("cancel-generation-old");
+    let source = connected(old.events.recv_blocking().unwrap());
+    let handle = old.handle.clone();
+    let gesture = GestureId(7);
+    let token = handle.microphone_gate().arm(gesture).unwrap();
+    handle.track_input(gesture);
+    let shared = Arc::clone(&handle.shared);
+    drop(old.control);
+    assert!(old.link.join().unwrap());
+
+    let current = attended_shared("cancel-generation-new", shared, Incarnation(2));
+    let replacement = connected(current.events.recv_blocking().unwrap());
+    assert_ne!(source.generation(), replacement.generation());
+    let cancel = handle
+        .revoke_input_for_dispatch()
+        .expect("locally revoke the old hold");
+    assert_eq!(
+        token.mode(&replacement.alive(), Instant::now()),
+        Err(MicError::Cancelled)
+    );
+    assert!(!handle.dispatch_input_cancel(&cancel));
+    frame::write(&mut &current.control, &ControlToShell::Ping, Pipe::Control).unwrap();
+    assert_eq!(
+        current.next_control(),
+        ControlToBrain::Pong,
+        "no cancel crossed to the new outbox"
+    );
+    drop(current.control);
+    assert!(current.link.join().unwrap());
+}
+
 fn stop_ack(link: &Attended, gesture: GestureId) {
     frame::write(
         &mut &link.control,
