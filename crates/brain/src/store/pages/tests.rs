@@ -894,9 +894,11 @@ fn history_event(store: &Store, id: u64, kind: PageEventKind, text: &str) -> Pag
         id: EventId(id),
         created_ms: store
             .conn
-            .query_row("SELECT created_ms FROM events WHERE id = ?1", [id], |row| {
-                row.get(0)
-            })
+            .query_row(
+                "SELECT created_ms FROM events WHERE id = ?1",
+                [i64::try_from(id).expect("fixture id")],
+                |row| row.get(0),
+            )
             .expect("fixture timestamp"),
         run: Some(RunId(1)),
         kind,
