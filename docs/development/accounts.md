@@ -2,7 +2,7 @@
 
 ## Anthropic API key
 
-The Settings → Accounts key row is wired but hidden until key chat is activated.
+Settings → Accounts shows the Anthropic API key row for pasting, checking, and removing a key.
 At the explicit Paste click, the UI thread samples the clipboard sequence number
 as metadata. A row-only Windows adapter reads the payload off the UI thread:
 it takes only Unicode text when present, never queries, reads or names any
