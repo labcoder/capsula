@@ -25,6 +25,16 @@ fn rearm(action: &Action) -> Write {
         draft: action.draft,
         at: action.version,
         hash: action.hash(),
+        live: unlisted(),
+    }
+}
+
+fn unlisted() -> Snapshot {
+    Snapshot {
+        capacity: false,
+        account: None,
+        repos: Vec::new(),
+        repo_ids: Vec::new(),
     }
 }
 
@@ -140,6 +150,7 @@ fn stale_rearm_versions_hashes_and_gone_rows_do_not_mint_or_change_any_row() {
                         draft: action.draft,
                         at,
                         hash: action.hash(),
+                        live: unlisted(),
                     },
                     None
                 )
@@ -155,6 +166,7 @@ fn stale_rearm_versions_hashes_and_gone_rows_do_not_mint_or_change_any_row() {
                     draft: action.draft,
                     at: StateVersion(1),
                     hash: ContentHash([0; 32]),
+                    live: unlisted(),
                 },
                 None
             )
@@ -170,6 +182,7 @@ fn stale_rearm_versions_hashes_and_gone_rows_do_not_mint_or_change_any_row() {
                         draft,
                         at: StateVersion(1),
                         hash: action.hash(),
+                        live: unlisted(),
                     },
                     None
                 )
@@ -460,6 +473,7 @@ fn rearm_and_versioned_writes_have_content_free_debug() {
         draft: DraftId(23),
         at: StateVersion(17),
         hash: ContentHash([83; 32]),
+        live: unlisted(),
     };
     assert_eq!(format!("{write:?}"), "IssueRearm");
     let scratch = Scratch::new("issue-rearm-debug");
@@ -471,4 +485,68 @@ fn rearm_and_versioned_writes_have_content_free_debug() {
         format!("{:?}", consent(&action, true)),
         "IssueCancelledConsent"
     );
+}
+
+/// OSC-648: a draft's first preview that finds its name listed binds that id and a later preview
+/// keeps it; consent refuses an offer that bound none or a name now listed under another id, and
+/// choosing another repository drops the id.
+#[test]
+fn a_preview_binds_the_listed_id_once_and_consent_only_verifies_it() {
+    use kumochi_protocol::message::RepoName;
+    use std::num::NonZeroU64;
+
+    let scratch = Scratch::new("issue-rearm-repo-id");
+    let mut store = opened(&scratch);
+    let owner = thread(&mut store);
+    let listing = |id| Snapshot {
+        capacity: true,
+        account: Some(user(7)),
+        repos: vec![repo()],
+        repo_ids: vec![NonZeroU64::new(id).unwrap()],
+    };
+    let review = |action: &Action, id| Write::Rearm {
+        draft: action.draft,
+        at: action.version,
+        hash: action.hash(),
+        live: listing(id),
+    };
+    let file = |action: &Action, id| Write::Consent {
+        draft: action.draft,
+        at: action.version,
+        hash: action.hash(),
+        approval: action.approval.unwrap(),
+        decision: Decision::File,
+        live: listing(id),
+    };
+    let unbound = draft(&mut store, owner);
+    let Answer::Changed(unbound) = store.issue_write(&rearm(&unbound), None).unwrap() else {
+        panic!("an unlisted preview commits");
+    };
+    assert_eq!(unbound.repo_id, None);
+    assert!(matches!(
+        store.issue_write(&file(&unbound, 7), None).unwrap(),
+        Answer::Refused(IssueRefused::RepoNotListed, refused) if refused.repo_id.is_none()
+    ));
+    let action = draft(&mut store, owner);
+    let Answer::Changed(first) = store.issue_write(&review(&action, 7), None).unwrap() else {
+        panic!("the first preview commits");
+    };
+    assert_eq!(first.repo_id, NonZeroU64::new(7));
+    let Answer::Changed(again) = store.issue_write(&review(&first, 9), None).unwrap() else {
+        panic!("a second preview commits");
+    };
+    assert_eq!(again.repo_id, NonZeroU64::new(7));
+    assert!(matches!(
+        store.issue_write(&file(&again, 9), None).unwrap(),
+        Answer::Refused(IssueRefused::RepoNotListed, refused)
+            if refused.repo_id == NonZeroU64::new(7)
+    ));
+    let other = RepoName::new("octo/other").unwrap();
+    let Answer::Changed(edited) = store
+        .edit_draft(again.draft, &again.title, &again.body, Some(&other))
+        .unwrap()
+    else {
+        panic!("another repository is an edit");
+    };
+    assert_eq!(edited.repo_id, None);
 }

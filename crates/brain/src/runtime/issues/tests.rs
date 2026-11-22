@@ -38,6 +38,8 @@ mod reconnect;
 mod rename;
 #[path = "tests/replay.rs"]
 mod replay;
+#[path = "tests/repo_id.rs"]
+mod repo_id;
 #[path = "tests/reviews.rs"]
 mod reviews;
 #[path = "tests/storage.rs"]
@@ -51,6 +53,7 @@ struct FilingServer {
     receipt: AtomicUsize,
     posted: Notify,
     lose_response: bool,
+    replaced: bool,
 }
 
 impl Http for Arc<FilingServer> {
@@ -73,7 +76,8 @@ impl Http for Arc<FilingServer> {
                 (
                     100,
                     json!({"total_count":2,"repositories":[
-                        {"full_name":"owner/other","id":8},{"full_name":"owner/repo","id":7}
+                        {"full_name":"owner/other","id":8},
+                        {"full_name":"owner/repo","id":if self.replaced { 9 } else { 7 }}
                     ]}),
                 )
             }

@@ -49,7 +49,9 @@ request.
 Draft and Failed cards with a usable bound connection offer Review to file. The opener sends
 `Rearm { draft, version, hash }`, not File. Ordered SQL checks the live editable row and
 atomically advances its version and durable approval without changing content, stage,
-consumed revision or uncertainty. Only the matching live committed reply returns
+consumed revision or uncertainty. The first rearm that finds the bound name listed also stores
+GitHub's id for it (`repo_id`, V10); later rearms of the same draft keep it, and choosing another
+repository clears it. Only the matching live committed reply returns
 `IssueReview { request, card }` on the data pipe. Its authoritative full card opens the shared
 Cancel-first, keyboard-scrollable literal preview, including the bound account and repository.
 An ordinary saved card or state notification can never open it.
@@ -286,7 +288,9 @@ The checks run in order:
 4. The action has an account, and `Live` has a user with a nonzero id. Otherwise `NotConnected`.
 5. Their numeric ids are equal; logins don't count. Otherwise `OtherAccount`.
 6. The bound repository is listed. Otherwise `RepoNotListed`. A decision that starts a send
-   stores the id GitHub lists for that name (`repo_id`, V10) on the action.
+   also needs the id listed for that name now to equal the id the draft's preview bound;
+   consent never stores one. Otherwise `RepoNotListed`, so a repository recreated under the name
+   gets nothing, and only a new draft, with a new preview, can bind it.
 7. File has no different retained draft with the same numeric account, repository, exact
    title and normalized body in Preflight, Posting or Unknown, or dismissed with retained
    uncertainty. Otherwise `UnresolvedDraft` names that earlier draft. This check runs in the

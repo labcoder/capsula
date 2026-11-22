@@ -33,8 +33,8 @@ pub struct Action {
     pub stage: Stage,
     /// The bound repository, if one is chosen.
     pub repo: Option<RepoName>,
-    /// GitHub's id for `repo` when the attempt was last consented to; none on rows from before
-    /// the id was stored.
+    /// GitHub's id for `repo`, bound by this draft's first preview that found the name listed;
+    /// none before that, and on rows from before the id was stored.
     pub repo_id: Option<NonZeroU64>,
     /// The bound account, if any.
     pub account: Option<GitHubUser>,
@@ -254,8 +254,12 @@ impl Action {
         let Some(repo) = self.repo.as_ref().filter(|repo| live.repos.contains(repo)) else {
             return Err(IssueRefused::RepoNotListed);
         };
-        if matches!(next, Stage::Preflight { .. }) {
-            self.repo_id = id_of(live.repos, live.repo_ids, repo);
+        // Consent only verifies the id its preview bound: the name listed under another id, or an
+        // id where the preview bound none, isn't the repository the user reviewed.
+        if matches!(next, Stage::Preflight { .. })
+            && id_of(live.repos, live.repo_ids, repo) != self.repo_id
+        {
+            return Err(IssueRefused::RepoNotListed);
         }
         self.stage = next;
         Ok(())
@@ -403,6 +407,7 @@ impl Action {
             return Err(IssueRefused::NotAllowedNow);
         }
         if (&self.title, &self.body, self.repo.as_ref()) != (title, body, repo) {
+            self.repo_id = self.repo_id.filter(|_| self.repo.as_ref() == repo);
             (self.title, self.body, self.repo) = (title.clone(), body.clone(), repo.cloned());
             self.stage = Stage::Draft;
         }

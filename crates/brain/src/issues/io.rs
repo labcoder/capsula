@@ -85,6 +85,8 @@ pub enum Write {
         at: StateVersion,
         /// The exact displayed content binding.
         hash: ContentHash,
+        /// The repository listing the preview is built on; it binds the name's id once.
+        live: Snapshot,
     },
     /// Consume one consent revision, including a refused admission.
     Consent {

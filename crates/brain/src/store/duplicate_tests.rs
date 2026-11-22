@@ -548,22 +548,31 @@ fn a_repository_id_tells_a_rename_from_a_new_repository_under_the_old_name() {
         let mut store = opened(&scratch);
         let thread = store.main_thread().unwrap();
         let account = user(7);
-        let consent =
-            |store: &mut Store, action: &Action, repo: &RepoName, id: Option<NonZeroU64>| {
-                let ids: Vec<_> = id.into_iter().collect();
-                store.consent(
-                    action.draft,
-                    &action.hash(),
-                    action.approval.unwrap(),
-                    Decision::File,
-                    &Live {
-                        capacity: true,
-                        account: Some(&account),
-                        repos: std::slice::from_ref(repo),
-                        repo_ids: &ids,
-                    },
-                )
+        let file = |store: &mut Store, action: &Action, repo: &RepoName, id: Option<NonZeroU64>| {
+            let live = crate::issues::Snapshot {
+                capacity: true,
+                account: Some(account.clone()),
+                repos: vec![repo.clone()],
+                repo_ids: id.into_iter().collect(),
             };
+            let reviewed = changed(store.issue_write(
+                &crate::issues::Write::Rearm {
+                    draft: action.draft,
+                    at: action.version,
+                    hash: action.hash(),
+                    live: live.clone(),
+                },
+                None,
+            ));
+            let answer = store.consent(
+                reviewed.draft,
+                &reviewed.hash(),
+                reviewed.approval.unwrap(),
+                Decision::File,
+                &live.live(),
+            );
+            (reviewed, answer)
+        };
         let a = store
             .create_draft(
                 thread,
@@ -573,7 +582,8 @@ fn a_repository_id_tells_a_rename_from_a_new_repository_under_the_old_name() {
                 Some(&account),
             )
             .unwrap();
-        let preflight = changed(consent(&mut store, &a, &old, first_id));
+        let (_, answer) = file(&mut store, &a, &old, first_id);
+        let preflight = changed(answer);
         assert_eq!(preflight.repo_id, first_id, "{case}");
         let posting = changed(store.preflighted(a.draft, preflight.version, Ok(mark(A))));
         let a = changed(store.posted(a.draft, posting.version, &uncertain()));
@@ -581,27 +591,28 @@ fn a_repository_id_tells_a_rename_from_a_new_repository_under_the_old_name() {
         let b = store
             .create_draft(thread, &a.title, &a.body, Some(repo), Some(&account))
             .unwrap();
-        let answer = consent(&mut store, &b, repo, Some(id)).unwrap();
+        let (b, answer) = file(&mut store, &b, repo, Some(id));
+        assert_eq!(b.repo_id, Some(id), "{case}");
         let expected = if blocked {
             Answer::Refused(
                 IssueRefused::UnresolvedDraft { draft: a.draft },
                 Action {
-                    version: StateVersion(2),
-                    approval: Some(ApprovalRev(4)),
-                    consumed: Some(ApprovalRev(3)),
+                    version: StateVersion(3),
+                    approval: Some(ApprovalRev(6)),
+                    consumed: Some(ApprovalRev(5)),
                     ..b.clone()
                 },
             )
         } else {
             Answer::Changed(Action {
-                version: StateVersion(2),
+                version: StateVersion(3),
                 stage: Stage::Preflight { unresolved: None },
                 approval: None,
-                consumed: Some(ApprovalRev(3)),
-                repo_id: Some(id),
+                consumed: Some(ApprovalRev(5)),
                 ..b.clone()
             })
         };
+        let answer = answer.unwrap();
         assert_eq!(answer, expected, "{case}");
     }
 }
