@@ -807,6 +807,8 @@ records only their operation and length.
   audio or was cut still ends. The announcement is run-owned, like PCM; a scene clear can
   remove its scene-owned commit from the shared FIFO without removing the announcement. The
   stored start class is therefore independent of whether the shell receives that commit.
+- **Legacy wire compatibility.** The brain still accepts the legacy output controls below;
+  the stock shell never sends them.
 - **Withdrawal.** `AudioOutputUnavailable` (a fault, or talk-back turned off) withdraws the
   output of its `generation` without ending the connection; a withdrawal of any other
   generation changes nothing. Until an `AudioOutput` of a strictly newer generation, no run gets a reply: the brain ignores one at or below the
@@ -814,9 +816,9 @@ records only their operation and length.
 - **Progress.** `SpeechProgress` goes out at most every 250 ms. `SpeechStopped` confirms that
   output for the run is quiet; `cursor` is `None` when nothing of it played.
 - **Out of bounds.** A `MicPcm` or an `AudioOutput` rate out of bounds ends the connection as
-  broken. A connection without a speaker, which is every normal launch today, sends no
-  `AudioOutput`, so no speech frames come; any that do are credited and dropped. A speaker
-  takes them off the data pipe itself and answers `SpeechRevoked` ([speaker.md](speaker.md)).
+  broken. A stock Legacy connection announces no audio output; unexpected speech PCM is
+  wiped, credited and dropped. On a registered queued pair the worker handles PCM and revoke
+  ([speaker.md](speaker.md)).
 
 ## GitHub and issue wire contract
 
