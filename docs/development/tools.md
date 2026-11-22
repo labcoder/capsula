@@ -319,12 +319,10 @@ preflight and prompt offer the overlay and the screen.
   take an earlier side and leave a later label no room where the brain found one. The shell's
   own `NoRoom` then stops the step, and the model isn't told. Accepted for the first version.
 
-Before a separately authorized live schema check, `cargo xtask live account` can
-inspect Kumochi Dev's own non-secret account view with a zero-request inference
-budget. It prints only state words, never signs in, and refuses while another
-product process is running; starting a signed-in dev brain may still run its
-normal start-up ChatGPT token refresh and catalog read. `cargo test` uses offline
-fixtures instead.
+Before a separately authorized live schema check, `cargo xtask live account` prints
+Kumochi Dev's non-secret account state without requesting inference. It refuses while
+another product process is running. See the [account check's startup effects](live-checks.md#account)
+for network activity and cleanup the dev brain may perform. `cargo test` uses offline fixtures instead.
 
 ## `create_task`
 
