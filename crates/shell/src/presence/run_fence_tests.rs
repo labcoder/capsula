@@ -746,6 +746,187 @@ fn assert_heard_prefix(
     cursor
 }
 
+#[cfg(all(windows, debug_assertions))]
+#[gpui::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "four spoken turns share one real authenticated pair"
+)]
+fn queued_speech_holds_esc_only_while_presented_and_never_from_a_focused_box(
+    cx: &mut TestAppContext,
+) {
+    use crate::link::{Batch, LinkEvent, fixture};
+    use std::time::{Duration, Instant};
+
+    let _device = fixture::serialize_playback();
+    let (id, hello, probe, brain) =
+        kumochi_brain::ipc::offline_plain_peer("0 text Distinct sound. End.".into(), 8);
+    probe.release_ack();
+    probe.release_run();
+    probe.allow_data_credit();
+    let pipe = fixture::authenticated_primed(id, hello);
+    let events = fixture::patient(pipe.events);
+    let owner = super::test_fixture::presence(cx);
+    let session = fixture::connected(fixture::next(&events));
+    owner.update(cx, |owner, cx| {
+        owner.link = pipe.handle.clone();
+        owner
+            .link_events(
+                Batch::Plain(vec![LinkEvent::Connected(session.clone())]),
+                cx,
+            )
+            .unwrap();
+    });
+    let settings = std::cell::Cell::new(false);
+    let apply = |cx: &mut TestAppContext| {
+        for event in events.try_iter() {
+            settings.set(settings.get() || matches!(&event, LinkEvent::Settings { .. }));
+            owner.update(cx, |owner, cx| {
+                owner.link_events(Batch::Plain(vec![event]), cx).unwrap();
+            });
+        }
+        // The owner's wakes come from foreign threads, which the test scheduler refuses.
+        owner.update(cx, Presence::refresh_speech);
+        cx.run_until_parked();
+    };
+    let wait =
+        |what: &str, cx: &mut TestAppContext, done: &mut dyn FnMut(&mut TestAppContext) -> bool| {
+            let deadline = Instant::now() + Duration::from_secs(4);
+            while !done(cx) {
+                assert!(Instant::now() < deadline, "{what}");
+                apply(cx);
+                std::thread::sleep(Duration::from_millis(2));
+            }
+        };
+    let held =
+        |cx: &mut TestAppContext| owner.read_with(cx, |owner, _| owner.escape_hold.shows_stop());
+    let lease = || pipe.handle.output().speech(session.generation());
+    wait(
+        "Presence applies Settings and the pair is ready",
+        cx,
+        &mut |_| settings.get() && pipe.handle.admits_text(Some(&session)),
+    );
+    let mut block = [0.0; 48];
+    let mut first = None;
+    for (turn, focused) in [(1, false), (2, true), (3, false), (4, false)] {
+        owner.update(cx, |owner, cx| {
+            let text = owner.text.as_mut().unwrap();
+            if focused {
+                text.typing.open();
+            } else {
+                text.typing.close(super::text::Hide::Dismiss);
+            }
+            owner.focus_changed(cx);
+        });
+        fixture::prime_next_playback(&pipe.handle);
+        submit_draft(&owner, "speak", cx);
+        let mut playback = None;
+        wait("the run's device opens", cx, &mut |_| {
+            playback = playback.take().or_else(|| pipe.playback.try_recv().ok());
+            playback
+                .as_ref()
+                .is_some_and(fixture::FixturePlayback::ready)
+        });
+        let mut device = playback.unwrap();
+        if turn == 1 {
+            assert!(
+                !pipe.handle.admits_text(Some(&session)),
+                "the bound run already owes its quiet"
+            );
+            let before = std::iter::repeat_with(lease)
+                .find(Result::is_ok)
+                .expect("the owner frees up");
+            assert_eq!(before, Ok(None), "no PCM was presented yet");
+            assert!(!held(cx), "Esc isn't taken before the first PCM");
+        }
+        wait("presented PCM gives a speech lease", cx, &mut |_| {
+            if matches!(lease(), Ok(None)) {
+                device.render(&mut block);
+            }
+            matches!(lease(), Ok(Some(_)))
+        });
+        wait("the shell reads the lease", cx, &mut |cx| {
+            owner.read_with(cx, |owner, _| owner.live_speech(Instant::now()).is_some())
+        });
+        match turn {
+            1 => {
+                assert!(held(cx), "presented speech takes Esc");
+                first = owner.read_with(cx, |owner, _| owner.live_speech(Instant::now()));
+                wait("the reply finishes", cx, &mut |_| {
+                    device.render(&mut block);
+                    pipe.handle.admits_text(Some(&session))
+                });
+                std::thread::sleep(Duration::from_millis(300));
+                cx.executor().advance_clock(Duration::from_secs(1));
+                apply(cx);
+                assert!(matches!(lease(), Ok(None)));
+                assert!(!held(cx), "Esc goes back once the evidence runs out");
+            }
+            2 => {
+                assert!(!held(cx), "the focused box keeps Esc while it speaks");
+                owner.update(cx, |owner, cx| owner.escape(cx).expect("Esc"));
+                wait("the box's Esc stops the speaker", cx, &mut |_| {
+                    device.stopped()
+                });
+                wait("the stopped reply goes quiet", cx, &mut |_| {
+                    device.render(&mut block);
+                    pipe.handle.admits_text(Some(&session))
+                });
+                owner.read_with(cx, |owner, _| {
+                    assert!(
+                        owner.text_open(),
+                        "the press that stopped speech left the box"
+                    );
+                });
+                owner.update(cx, |owner, cx| owner.escape(cx).expect("Esc"));
+                owner.read_with(cx, |owner, _| {
+                    assert!(!owner.text_open(), "the next press reaches the box");
+                });
+            }
+            3 => {
+                let stopped = probe.stop();
+                owner.update(cx, |owner, cx| {
+                    let successor = owner.runs.stoppable();
+                    owner.native_escape(None, first, cx).expect("Esc");
+                    assert_eq!(
+                        owner.runs.stoppable(),
+                        successor,
+                        "a press that saw the first run's speech leaves its successor running"
+                    );
+                });
+                std::thread::sleep(Duration::from_millis(50));
+                apply(cx);
+                assert!(!device.stopped(), "the successor keeps speaking");
+                assert_eq!(probe.stop(), stopped, "and the Brain gets no Stop");
+                wait("the successor finishes", cx, &mut |_| {
+                    device.render(&mut block);
+                    pipe.handle.admits_text(Some(&session))
+                });
+            }
+            _ => {
+                assert!(held(cx));
+                // The device stops calling back, as an unplugged one can without an error.
+                wait("the stalled route is retired", cx, &mut |_| {
+                    device.stopped()
+                });
+                assert_eq!(
+                    std::iter::repeat_with(lease).find(Result::is_ok),
+                    Some(Ok(None)),
+                    "retiring the route ended the lease at once"
+                );
+                wait("a stalled route gives Esc back", cx, &mut |cx| !held(cx));
+            }
+        }
+        drop(device);
+        if turn < 4 {
+            fixture::await_fake_disposal();
+        }
+    }
+    pipe.handle.end(&session);
+    assert!(pipe.link.join().expect("Shell link joined"));
+    assert!(brain.join().expect("Brain joined"));
+}
+
 fn escape(owner: &Entity<Presence>, cx: &mut TestAppContext) {
     owner.update(cx, |owner, cx| {
         owner.activity =

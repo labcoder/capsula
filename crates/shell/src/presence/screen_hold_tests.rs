@@ -771,7 +771,9 @@ fn a_hold_that_ends_before_its_release_stops_the_line_and_takes_no_lease(cx: &mu
         |ready, cx| {
             ready
                 .owner
-                .update(cx, |owner, cx| owner.native_escape(Some(GestureId(1)), cx))
+                .update(cx, |owner, cx| {
+                    owner.native_escape(Some(GestureId(1)), None, cx)
+                })
                 .expect("escape");
         },
         // The brain fails the hold.

@@ -752,13 +752,22 @@ impl Presence {
             .detach();
         }
         if sent && let Some(run) = run {
-            self.pending_stops
-                .push_back((session.clone(), run, STOP_TRIES));
-            if self.stop_retry.is_none() {
-                self.drain_stops(cx);
-            }
+            self.stop_speaker(session.clone(), run, cx);
         }
         sent
+    }
+
+    /// Offers `run`'s speaker `Stop` on `session` behind any earlier one not taken yet.
+    pub(super) fn stop_speaker(
+        &mut self,
+        session: Session,
+        run: kumochi_protocol::message::RunId,
+        cx: &mut Context<'_, Self>,
+    ) {
+        self.pending_stops.push_back((session, run, STOP_TRIES));
+        if self.stop_retry.is_none() {
+            self.drain_stops(cx);
+        }
     }
 
     /// Offers the pending speaker stops to the owner in order. A busy owner is offered the front

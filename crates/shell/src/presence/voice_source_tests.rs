@@ -345,6 +345,7 @@ pub(super) fn native(owner: &Entity<Presence>, cx: &mut TestAppContext) -> Deliv
             Rc::clone(&owner.voice.target),
             Rc::clone(&owner.voice.paused),
             owner.voice.gates.clone(),
+            Rc::clone(&owner.speech),
             cx,
         )
     })

@@ -267,8 +267,24 @@ The local effect always happens first, and nothing waits on the brain:
 Esc is held system-wide with `RegisterHotKey` while held voice is active or a drawing is shown:
 the overlay is showing scene frames (`Presenter::drawn`), or run steps show in the open typing
 panel. Mirrored, preparing and recovering scenes that aren't painted yet don't hold it, and an
-open status panel alone never does. Spoken replies don't hold it yet; `Activity::speaking` is
-always false.
+open status panel alone never does.
+
+Speech holds it too, from positive evidence only. The queued speaker's worker extends a
+`Speech` lease each time the native route reports presented PCM for the run, to 500 ms past
+that frame. It clears the lease when it recovers or retires the route, and when it stops.
+Admission, an owed quiet receipt, a virtual route or a heard prefix never arm it, and
+`LOCAL_QUIET` and `RECEIPT_QUEUED` still gate the microphone and typed turns alone. Onset
+and clearing wake the output owner's change channel. Presence reads the lease there through
+`OutputOwner::speech`, which never waits. When it is busy, Presence keeps only a lease that
+hasn't run out and reads again. It also reads again when the lease runs out, and a session
+that ended has no lease. `Activity::speaking` is true while the lease holds and no focused
+Kumochi panel (the typing box, Tasks or Settings) takes Esc itself. Those panels keep their own
+Esc, which stops speech first. Focus changes resync the hotkey.
+
+An Esc press carries the lease's session and run, captured when the press arrives, through
+deferred delivery. If that run is still the moving one, the press stops it as usual. Otherwise
+the press offers `Stop` only to that run's speaker on that session, locally. It never stops a
+newer run and never sends the brain a `Stop` for an ended run.
 Held voice additionally owns global Esc through preparation and pre-answer work. A raw Escape
 revokes collection before deferred UI; its hotkey delivery consumes one marker so that the
 same press cannot also dismiss typing. Cleanup debt alone does not capture Esc from newer

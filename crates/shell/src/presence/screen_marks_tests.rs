@@ -1309,7 +1309,7 @@ fn the_hotkey_s_esc_takes_a_pending_hold_s_marks_and_cancels_it(cx: &mut TestApp
         // The hotkey's reducer revokes the hold's input before the press is applied.
         let cancelled = owner.link.cancel_input_gesture();
         assert_eq!(cancelled, Some(GestureId(1)));
-        owner.native_escape(cancelled, cx).expect("escape");
+        owner.native_escape(cancelled, None, cx).expect("escape");
     });
     cx.run_until_parked();
     let [stop, clear] = gone();
@@ -1755,8 +1755,9 @@ fn measure_captured_stop_and_raw_intake(cx: &mut TestAppContext) {
                 let cancel = |cx: &mut TestAppContext| {
                     watching.ready.owner.update(cx, |owner, cx| {
                         let start = Instant::now();
-                        let (result, counts, bytes) =
-                            allocation::usage(|| owner.native_escape(Some(GestureId(gesture)), cx));
+                        let (result, counts, bytes) = allocation::usage(|| {
+                            owner.native_escape(Some(GestureId(gesture)), None, cx)
+                        });
                         (result, start.elapsed().as_nanos(), counts, bytes)
                     })
                 };
@@ -2466,7 +2467,9 @@ fn a_cancel_marker_left_behind_takes_no_other_press_and_cancels_no_other_hold(
     let watching = watch(true, cx);
     drawn(&watching, cx);
     watching.ready.owner.update(cx, |owner, cx| {
-        owner.native_escape(Some(GestureId(1)), cx).expect("escape");
+        owner
+            .native_escape(Some(GestureId(1)), None, cx)
+            .expect("escape");
     });
     cx.run_until_parked();
     assert_eq!(told(&watching), [clear()]);
@@ -2477,7 +2480,7 @@ fn a_cancel_marker_left_behind_takes_no_other_press_and_cancels_no_other_hold(
     let _native = ended_by_esc_down(&watching, cx);
     told(&watching);
     watching.ready.owner.update(cx, |owner, cx| {
-        owner.native_escape(None, cx).expect("escape");
+        owner.native_escape(None, None, cx).expect("escape");
         assert_eq!(owner.voice.ended, None);
     });
     cx.run_until_parked();
@@ -2489,7 +2492,9 @@ fn a_cancel_marker_left_behind_takes_no_other_press_and_cancels_no_other_hold(
     let _native = ended_by_esc_down(&watching, cx);
     hold(&watching, 2, cx);
     watching.ready.owner.update(cx, |owner, cx| {
-        owner.native_escape(Some(GestureId(2)), cx).expect("escape");
+        owner
+            .native_escape(Some(GestureId(2)), None, cx)
+            .expect("escape");
         assert!(owner.voice.pending.is_none(), "hold 2 is cancelled");
     });
 
@@ -2502,7 +2507,9 @@ fn a_cancel_marker_left_behind_takes_no_other_press_and_cancels_no_other_hold(
     });
     hold(&watching, 2, cx);
     watching.ready.owner.update(cx, |owner, cx| {
-        owner.native_escape(Some(GestureId(1)), cx).expect("escape");
+        owner
+            .native_escape(Some(GestureId(1)), None, cx)
+            .expect("escape");
         let hold = owner.voice.pending.as_ref().expect("hold 2");
         assert_eq!(hold.token.gesture(), GestureId(2));
     });

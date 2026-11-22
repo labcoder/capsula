@@ -4,8 +4,7 @@
 //! third, otherwise dismiss the topmost local panel. Esc is held system-wide only while Kumochi
 //! speaks, shows a drawing or has Kumo pulled out, so an app in front keeps it otherwise.
 
-/// What the shell knows is moving or on screen. Speech arrives in slice 7, so `speaking` stays
-/// false until then.
+/// What the shell knows is moving or on screen.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[expect(
     clippy::struct_excessive_bools,
@@ -14,7 +13,7 @@
 pub struct Activity {
     /// A run streams, speaks or acts.
     pub working: bool,
-    /// Audio is playing.
+    /// The native route presents a run's audio, and no focused Kumochi panel takes Esc itself.
     pub speaking: bool,
     /// A drawing is on screen.
     pub drawing: bool,
