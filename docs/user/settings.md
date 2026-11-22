@@ -22,9 +22,10 @@ and the error stays beside the control until a successful retry. Offline control
 reconnecting reads the saved preference instead of assuming an interrupted save succeeded.
 **Hold to talk** is the checkbox above it.
 
-**Speak answers aloud** controls whether an installed voice reads replies. It saves when
-you toggle it, even if you leave Settings, and you can choose it before a voice is installed.
-It doesn't download a voice or start recording.
+**Speak answers aloud** saves your preference for spoken replies when playback is available.
+You can choose it before a voice is installed; it doesn't download a voice or start recording.
+If Settings asks you to finish or stop current work first, the saved choice hasn't changed.
+Try again once that work is done.
 
 **Privacy** has one checkbox, named for your assistant: **Kumo can see what you see**. While
 it's on, a hold to talk also sends the model you're using one screenshot of the screen your

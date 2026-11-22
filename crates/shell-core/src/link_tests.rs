@@ -2520,6 +2520,108 @@ fn queued_text(turn: u32, text: &str) -> DataToBrain {
     }
 }
 
+#[test]
+fn queued_talk_back_waits_for_both_ends_of_a_deleted_reply() {
+    use super::output::Denied;
+    use kumochi_protocol::message::{Deleted, SettingsOp};
+
+    for (data_first, outcome) in [(true, Deleted::Hidden), (false, Deleted::Removed)] {
+        let link = attended_queued("queued-talk-back-delete");
+        let events = patient(link.events);
+        let session = connected(next(&events));
+        let control = |message: ControlToShell| {
+            frame::write(&mut &link.control, &message, Pipe::Control).unwrap();
+        };
+        control(ControlToShell::Settings {
+            view: settings_view(),
+            answer: false,
+        });
+        let Some(ControlToBrain::QueuedAudioOutput(24_000, output)) =
+            frame::read(&mut &link.control, Pipe::Control).unwrap()
+        else {
+            panic!("silent pair registers");
+        };
+        acknowledge_queued(&link.control, output);
+        assert!(matches!(next(&events), LinkEvent::Settings { .. }));
+        let text = queued_text(1, "before deletion");
+        assert!(link.handle.send_data(&session, text.clone()));
+        assert_eq!(
+            frame::read(&mut &*link.data, Pipe::Data).unwrap(),
+            Some(text)
+        );
+        control(run_state(
+            7,
+            ThreadId(1),
+            Phase::Thinking,
+            Some(RunOrigin::Typed { turn: 1 }),
+        ));
+        assert!(matches!(
+            next(&events),
+            LinkEvent::RunState { run: RunId(7), .. }
+        ));
+
+        let data_end = || {
+            frame::write(
+                &mut &*link.data,
+                &DataToShell::RunEnd { run: RunId(7) },
+                Pipe::Data,
+            )
+            .unwrap();
+            assert!(matches!(
+                next(&events),
+                LinkEvent::Data {
+                    message: DataToShell::RunEnd { run: RunId(7) },
+                    ..
+                }
+            ));
+        };
+        let delete = |thread, outcome, last_run| {
+            control(ControlToShell::ThreadDeleted {
+                thread,
+                outcome,
+                last_run: Some(last_run),
+            });
+            assert!(matches!(
+                next(&events),
+                LinkEvent::ThreadDeleted { thread: t, outcome: o, last_run: Some(r) }
+                    if (t, o, r) == (thread, outcome, last_run)
+            ));
+        };
+        let offer = || link.handle.send_talk_back(&session, true);
+        if data_first {
+            data_end();
+            assert_eq!(offer(), Err(Denied::Busy));
+            for (thread, outcome, run) in [
+                (ThreadId(1), Deleted::NotHidden, RunId(7)),
+                (ThreadId(1), Deleted::Hidden, RunId(8)),
+                (ThreadId(2), Deleted::Removed, RunId(7)),
+            ] {
+                delete(thread, outcome, run);
+                assert_eq!(offer(), Err(Denied::Busy));
+            }
+        }
+        delete(ThreadId(1), outcome, RunId(7));
+        if !data_first {
+            assert_eq!(offer(), Err(Denied::Busy));
+            data_end();
+        }
+        let after_both = offer();
+        if after_both.is_ok() {
+            assert_eq!(
+                frame::read(&mut &link.control, Pipe::Control).unwrap(),
+                Some(ControlToBrain::Settings(SettingsOp::SetTalkBack(true)))
+            );
+        }
+        link.handle.end(&session);
+        assert!(link.link.join().unwrap());
+        assert_eq!(
+            after_both,
+            Ok(()),
+            "matching deletion and RunEnd settle the idle fence"
+        );
+    }
+}
+
 #[cfg(debug_assertions)]
 #[test]
 fn queued_admission_waits_for_the_outbox_but_the_first_voice_edge_refuses() {
@@ -3719,6 +3821,36 @@ fn queued_refused_progress_preserves_only_the_original_callback_quiet() {
         [0; 128],
         "no old suffix after quiet"
     );
+}
+
+#[test]
+fn talk_back_reconnects_do_not_spend_or_reset_the_loss_budget() {
+    use super::LinkState;
+    use kumochi_protocol::message::AudioSession;
+
+    let link = Link {
+        audio: AudioSession::QueuedRequired,
+        ..bare_link()
+    };
+    let (events, states) = async_channel::unbounded();
+    let (retry, retries) = async_channel::bounded::<()>(1);
+    drop(retry);
+    let genuine_loss = Some(Instant::now());
+    for _ in 0..2 {
+        assert_eq!(
+            link.after_loss(&events, &retries, Attendance::TalkBackChanged, genuine_loss),
+            Some((LinkState::Reconnecting, genuine_loss))
+        );
+    }
+    assert!(states.is_empty());
+    assert_eq!(
+        link.after_loss(&events, &retries, Attendance::Lost, genuine_loss),
+        None
+    );
+    assert!(matches!(
+        states.try_recv(),
+        Ok(LinkEvent::State(LinkState::Failed))
+    ));
 }
 
 #[test]

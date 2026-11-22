@@ -67,12 +67,19 @@ impl Presence {
         reason = "the checkbox and wire setter carry this boolean unchanged"
     )]
     pub(in crate::presence) fn save_talk_back(&mut self, on: bool, cx: &mut Context<'_, Self>) {
+        use crate::link::output::Denied;
+
         let (link, session) = (&self.link, &self.session);
         self.settings.update(cx, |state, cx| {
-            state.send_talk_back(on, |op| {
-                session
+            state.send_talk_back(on, || {
+                match session
                     .as_ref()
-                    .is_some_and(|session| link.send_control(session, ControlToBrain::Settings(op)))
+                    .map(|session| link.send_talk_back(session, on))
+                {
+                    Some(Ok(())) => Ok(()),
+                    Some(Err(Denied::Busy)) => Err(Text::TalkBackBusy),
+                    Some(Err(_)) | None => Err(Text::SettingsUnavailable),
+                }
             });
             cx.notify();
         });

@@ -40,6 +40,135 @@ fn open(
     (window, view)
 }
 
+#[cfg(all(windows, debug_assertions))]
+#[gpui::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one real toggle from held submit to completed reply"
+)]
+fn queued_talk_back_cannot_overtake_an_unwritten_typed_turn(cx: &mut TestAppContext) {
+    use crate::link::{Batch, LinkEvent, fixture};
+    use gpui_kit::VisualTestContext;
+    use kumochi_protocol::message::{DataToShell, Phase, RunOrigin};
+    use std::time::{Duration, Instant};
+
+    fn wait(label: &str, mut ready: impl FnMut() -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while !ready() {
+            assert!(Instant::now() < deadline, "{label}");
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    }
+
+    let _area = crate::platform::work_area_fixture::set([0, 0, 2560, 1400]);
+    let (id, hello, probe, brain) =
+        kumochi_brain::ipc::offline_text_peer("0 text Reply before switching.".into());
+    let pipe = fixture::authenticated_primed(id, hello);
+    let events = fixture::patient(pipe.events.clone());
+    let owner = crate::presence::test_fixture::presence(cx);
+    owner.update(cx, |owner, _| owner.link = pipe.handle.clone());
+    let apply = |event, cx: &mut TestAppContext| {
+        owner.update(cx, |owner, cx| {
+            owner.link_events(Batch::Plain(vec![event]), cx).unwrap();
+        });
+    };
+    let session = fixture::connected(fixture::next(&events));
+    apply(LinkEvent::Connected(session.clone()), cx);
+    loop {
+        let event = fixture::next(&events);
+        let settings = matches!(event, LinkEvent::Settings { .. });
+        apply(event, cx);
+        if settings {
+            break;
+        }
+    }
+    probe.release_ack();
+    probe.release_run();
+    probe.allow_data_credit();
+    wait("queued registration", || {
+        pipe.handle.admits_text(Some(&session))
+    });
+    owner.update(cx, |owner, cx| owner.open_text(cx).unwrap());
+    pipe.hold_text();
+    crate::presence::run_fence_tests::submit_draft(&owner, "Keep this turn", cx);
+    wait("the writer holds the reserved submit before write", || {
+        pipe.text_held()
+    });
+    owner.read_with(cx, |owner, cx| {
+        assert_eq!(
+            owner.text.as_ref().unwrap().input.read(cx).value().as_ref(),
+            ""
+        );
+    });
+    let (window, view) = open(cx);
+    view.update(cx, |view, cx| {
+        view.model = owner.read(cx).settings.clone();
+        view.owner = owner.downgrade();
+        cx.notify();
+    });
+    let mut frame = VisualTestContext::from_window(window, cx);
+    let click = |frame: &mut VisualTestContext| {
+        frame.update(|window, cx| window.draw(cx).clear(cx));
+        let point = frame.debug_bounds("speak-answers-aloud").unwrap().center();
+        frame.simulate_click(point, gpui_kit::Modifiers::default());
+        frame.run_until_parked();
+        frame.update(|window, cx| window.draw(cx).clear(cx));
+    };
+    click(&mut frame);
+    let refused = frame.debug_bounds("talk-back-error").is_some();
+    if !refused {
+        wait(
+            "unprotected toggle closes the old pair before the writer is released",
+            || !session.open(),
+        );
+    }
+    pipe.release_text();
+    let old_pair_survived = session.open();
+    if old_pair_survived {
+        let (mut named, mut done, mut ended) = (0, false, false);
+        let mut reply = String::new();
+        while !(done && ended) {
+            let event = fixture::next(&events);
+            match &event {
+                LinkEvent::RunState {
+                    phase: Phase::Thinking,
+                    origin: Some(RunOrigin::Typed { turn: 1 }),
+                    ..
+                } => named += 1,
+                LinkEvent::RunState {
+                    phase: Phase::Done, ..
+                } => done = true,
+                LinkEvent::Data {
+                    message: DataToShell::AssistantText { delta, .. },
+                    ..
+                } => reply.push_str(delta.as_str()),
+                LinkEvent::Data {
+                    message: DataToShell::RunEnd { .. },
+                    ..
+                } => ended = true,
+                _ => {}
+            }
+            apply(event, cx);
+        }
+        assert_eq!(named, 1);
+        assert_eq!(reply, "Reply before switching.");
+        assert!(session.open());
+        assert_eq!(
+            owner.read_with(cx, |owner, cx| owner.settings.read(cx).talk_back_choice()),
+            Some(false)
+        );
+        click(&mut frame);
+        wait("a new click at idle replaces the pair", || !session.open());
+    }
+    assert_eq!(pipe.link.join().unwrap(), !old_pair_survived);
+    assert!(brain.join().unwrap());
+    assert!(
+        old_pair_survived,
+        "a Talk-back click closed the pair before the reserved turn reached Brain"
+    );
+    assert!(refused, "the unchanged choice needs an inline explanation");
+}
+
 #[gpui::test]
 fn speak_answers_aloud_saves_and_restores_the_authoritative_choice(cx: &mut TestAppContext) {
     use crate::link::{Batch, LinkEvent, Session};
