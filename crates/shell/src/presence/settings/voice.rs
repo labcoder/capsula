@@ -121,11 +121,10 @@ impl SettingsView {
     fn talk_back(&self, cx: &Context<'_, Self>) -> impl IntoElement {
         let state = self.model.read(cx);
         let strings = cx.global::<Strings>();
-        let error = if state.talk_back_send_failed() {
-            Some(strings.get(Text::SettingsUnavailable))
-        } else {
-            state.talk_back_error().map(|error| strings.error(error))
-        };
+        let error = state
+            .talk_back_send_error()
+            .map(|text| strings.get(text))
+            .or_else(|| state.talk_back_error().map(|error| strings.error(error)));
         div()
             .flex()
             .flex_col()
@@ -142,7 +141,7 @@ impl SettingsView {
                             .is_err()
                         {
                             view.model.update(cx, |state, cx| {
-                                state.send_talk_back(*on, |_| false);
+                                state.send_talk_back(*on, || Err(Text::SettingsUnavailable));
                                 cx.notify();
                             });
                         }

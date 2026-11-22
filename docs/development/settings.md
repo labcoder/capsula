@@ -75,8 +75,13 @@ clears pending policy and voice status, and generation checks reject late snapsh
 **Speak answers aloud** uses the same FIFO with `SetTalkBack`. It saves on toggle, including
 when leaving Settings, and a refused write restores the saved value. Like the other voice
 preferences, it can be set before a model is installed and does not install one. Legacy
-receives the saved answer on the same connection. A queued connection ends when Talk-back
-changes; Settings is unavailable until the next connection supplies the persisted value.
+receives the saved answer on the same connection. On a queued pair the toggle is refused
+while a turn is reserved, a hold is unsettled, or a reply is still active. The user can try
+again when idle; there is no deferred save. A successful offer closes new turn and capture
+admission until the ordered answer. A changed answer for that save ends the pair and
+reconnects without counting as a connection loss; Settings reads the next pair's saved value.
+Hiding or removing the exact active reply's thread ends its control side, but the pair still
+waits for the reply's data end and any speaking quiet receipt before allowing a change.
 
 The control reader forwards `Voice.speech_input` to the settings model with its connection
 generation instead of dropping the whole Voice view. Status comes only from that snapshot,

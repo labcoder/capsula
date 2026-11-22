@@ -7,8 +7,10 @@ use std::time::Instant;
 use async_channel::Sender;
 use kumochi_protocol::message::{ControlToBrain, RunOrigin, SegmentId, SettingsView};
 
-use super::{Arc, Ordering, Output, OutputGeneration, OutputOwner, RunId, State, SyncSender};
-use crate::link::{Shared, narrated::Narrated, queued::MetadataFrame};
+use super::{
+    Arc, Denied, Ordering, Output, OutputGeneration, OutputOwner, RunId, State, SyncSender,
+};
+use crate::link::{Attendance, Shared, narrated::Narrated, queued::MetadataFrame};
 use crate::speaker::DRAIN;
 use crate::speaker::conductor::Assignment;
 use crate::speaker::queued::{Command, Input, Packet, RATE, spawn, spawn_plain};
@@ -22,6 +24,8 @@ const RECEIPT_QUEUED: u8 = 2;
 const RETIRING: u8 = 4;
 const REPORT_REFUSED: u8 = 8;
 const TAIL_UNAVAILABLE: u8 = 16;
+const DATA_ENDED: u8 = 32;
+const CONTROL_ENDED: u8 = 64;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(in crate::link) enum RefusedTail {
@@ -46,6 +50,7 @@ pub(in crate::link) struct Queued {
     deadline: Instant,
     ack: Option<SyncSender<()>>,
     talk_back: Option<bool>,
+    switching: Option<bool>,
     show_screen: Option<bool>,
     wake: Arc<OnceLock<Thread>>,
     stopped: RunId,
@@ -89,6 +94,7 @@ impl Queued {
             deadline,
             ack: Some(ack),
             talk_back: None,
+            switching: None,
             show_screen: None,
             wake,
             stopped: RunId(0),
@@ -160,7 +166,7 @@ impl Queued {
     }
 
     fn ready(&self) -> bool {
-        self.talk_back.is_some() && self.ack.is_none()
+        self.talk_back.is_some() && self.ack.is_none() && self.switching.is_none()
     }
 
     /// A speaking pair also needs the previous run's delivered quiet receipt and nothing reserved.
@@ -314,35 +320,82 @@ impl OutputOwner {
             .is_some_and(|(_, owner)| owner.hold_ready() && owner.pending.is_none())
     }
 
+    #[expect(
+        clippy::fn_params_excessive_bools,
+        reason = "the wire preference is a boolean"
+    )]
+    pub(in crate::link) fn switch_talk_back(
+        &self,
+        session: u64,
+        on: bool,
+        send: impl FnOnce() -> bool,
+    ) -> Result<(), Denied> {
+        let mut state = self.lock();
+        let inhibited = state.inhibit.is_some();
+        let Some((_, owner)) = state.queue(session) else {
+            return Err(Denied::Stale);
+        };
+        let ended = DATA_ENDED | CONTROL_ENDED;
+        if inhibited
+            || !owner.ready()
+            || owner.pending.is_some()
+            || owner.predecessor.is_some()
+            || owner.owes_proof(RECEIPT_QUEUED)
+            || owner
+                .active
+                .as_ref()
+                .is_some_and(|run| run.proof.load(Ordering::Acquire) & ended != ended)
+        {
+            return Err(Denied::Busy);
+        }
+        if owner.talk_back == Some(on) || !send() {
+            return Err(Denied::Lost);
+        }
+        owner.switching = Some(on);
+        Ok(())
+    }
+
+    #[expect(
+        clippy::fn_params_excessive_bools,
+        reason = "the wire bit attributes an answer"
+    )]
     pub(in crate::link) fn register_queued(
         &self,
         session: u64,
         settings: &SettingsView,
+        answer: bool,
         out: &Sender<ControlToBrain>,
-    ) -> bool {
+    ) -> Result<(), Attendance> {
         let mut state = self.lock();
         let Some((output, owner)) = state.queue(session) else {
-            return false;
+            return Err(Attendance::Lost);
         };
         if owner
             .talk_back
             .is_some_and(|registered| registered != settings.talk_back)
         {
             owner.show_screen = None;
-            return false;
+            return Err(if answer && owner.switching == Some(settings.talk_back) {
+                Attendance::TalkBackChanged
+            } else {
+                Attendance::Lost
+            });
+        }
+        if answer {
+            owner.switching = None;
         }
         owner.show_screen = Some(settings.show_screen);
         if owner.talk_back.is_some() {
-            return true;
+            return Ok(());
         }
         if out
             .try_send(ControlToBrain::QueuedAudioOutput(RATE, output))
             .is_err()
         {
-            return false;
+            return Err(Attendance::Lost);
         }
         owner.talk_back = Some(settings.talk_back);
-        true
+        Ok(())
     }
 
     pub(in crate::link) fn acknowledge_queued(
@@ -409,6 +462,7 @@ impl OutputOwner {
             if ended {
                 owner.stopped = run;
                 owner.early_end = None;
+                proof.fetch_or(DATA_ENDED, Ordering::Relaxed);
             }
             let silent = owner.talk_back == Some(false);
             owner.active = Some(Active {
@@ -648,6 +702,17 @@ impl OutputOwner {
             .is_some_and(|(_, owner)| owner.stop(run, StopOrigin::Brain))
     }
 
+    pub(in crate::link) fn queued_terminal(&self, session: u64, run: RunId) {
+        if let Some(active) = self
+            .lock()
+            .queue(session)
+            .and_then(|(_, owner)| owner.active.as_ref())
+            && active.id == run
+        {
+            active.proof.fetch_or(CONTROL_ENDED, Ordering::Release);
+        }
+    }
+
     pub(in crate::link) fn end_queued_run(&self, session: u64, run: RunId) -> bool {
         let mut state = self.lock();
         let Some((_, owner)) = state.queue(session) else {
@@ -658,6 +723,7 @@ impl OutputOwner {
         }
         let current = owner.active.as_ref().map_or(RunId(0), |active| active.id);
         if let Some(active) = owner.active.as_mut().filter(|active| active.id == run) {
+            active.proof.fetch_or(DATA_ENDED, Ordering::Release);
             active.delivery = None;
             owner.retire();
             owner.stopped = run;

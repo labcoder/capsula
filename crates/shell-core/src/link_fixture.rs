@@ -84,6 +84,31 @@ pub struct Authenticated {
     pub link: JoinHandle<bool>,
 }
 
+#[cfg(debug_assertions)]
+impl Authenticated {
+    pub fn hold_text(&self) {
+        self.handle
+            .shared
+            .hold_text_writer
+            .store(1, std::sync::atomic::Ordering::Release);
+    }
+
+    pub fn text_held(&self) -> bool {
+        self.handle
+            .shared
+            .hold_text_writer
+            .load(std::sync::atomic::Ordering::Acquire)
+            == 2
+    }
+
+    pub fn release_text(&self) {
+        self.handle
+            .shared
+            .hold_text_writer
+            .store(0, std::sync::atomic::Ordering::Release);
+    }
+}
+
 /// Opens the next run's fake device before its worker admits PCM.
 #[cfg(debug_assertions)]
 pub fn prime_next_playback(handle: &LinkHandle) {
