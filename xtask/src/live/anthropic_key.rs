@@ -1121,19 +1121,25 @@ mod tests {
         for record in &records {
             tap::write(&mut bytes, record).expect("written");
         }
-        let whole = bytes.len();
+        let cut = bytes.len() + 3;
         tap::write(&mut bytes, &bare(Direction::ToShell, "Error")).expect("written");
-        bytes.truncate(whole + 3);
-        fs::write(&path, &bytes).expect("tap");
-        assert_eq!(
-            read(&path).expect("read"),
-            [
-                Seen::Key(KeyView::Checking),
-                Seen::Staged,
-                run(Phase::Done),
-                Seen::Refused,
-                Seen::Unexpected("CaptureDone".to_owned()),
-            ]
-        );
+        let (prefix, suffix) = bytes.split_at(cut);
+        fs::write(&path, prefix).expect("tap");
+        let mut expected = vec![
+            Seen::Key(KeyView::Checking),
+            Seen::Staged,
+            run(Phase::Done),
+            Seen::Refused,
+            Seen::Unexpected("CaptureDone".to_owned()),
+        ];
+        assert_eq!(read(&path).expect("read"), expected);
+        fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .expect("open tap for append")
+            .write_all(suffix)
+            .expect("finish the record");
+        expected.push(Seen::Unexpected("Error".to_owned()));
+        assert_eq!(read(&path).expect("read after append"), expected);
     }
 }

@@ -265,7 +265,11 @@ pub(crate) fn run_bounded(mut command: Command, limit: Duration, what: &str) -> 
 fn bounded(mut child: Child, limit: Duration, what: &str) -> Result<ExitStatus> {
     let failure = match wait_bounded(&mut child, limit) {
         Ok(Some(status)) => return Ok(status),
-        Ok(None) => anyhow!("{what} didn't finish in {limit:?}"),
+        Ok(None) => io::Error::new(
+            io::ErrorKind::TimedOut,
+            format!("{what} didn't finish in {limit:?}"),
+        )
+        .into(),
         Err(error) => anyhow!("waiting for {what} failed: {error}"),
     };
     Err(joined(failure, end(&mut child)))
@@ -460,6 +464,7 @@ fn brain_command(exe: &std::path::Path) -> Command {
 #[cfg(test)]
 mod tests {
     use std::ffi::OsStr;
+    use std::io::Write as _;
     use std::io::{self, Read};
     use std::os::windows::process::CommandExt as _;
     use std::process::{Child, Command, Stdio};
@@ -557,21 +562,35 @@ mod tests {
         child.wait().expect("the test child is reaped");
     }
 
+    fn held_for_deadline() -> Command {
+        let mut command = Command::new("cmd");
+        command
+            .args(["/D", "/C"])
+            .raw_arg("set /p go=")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        command
+    }
+
     #[test]
     fn a_bounded_wait_returns_the_status_or_none_at_its_limit() {
         let mut quick = exits(3).spawn().expect("cmd starts");
         let status = wait_bounded(&mut quick, Duration::from_secs(30)).expect("waits");
         assert_eq!(status.and_then(|status| status.code()), Some(3));
 
-        let mut slow = held().spawn().expect("cmd starts");
+        let mut slow = held_for_deadline().spawn().expect("cmd starts");
         let start = Instant::now();
-        assert_eq!(wait_bounded(&mut slow, SHORT).expect("waits"), None);
-        assert!(
-            start.elapsed() >= SHORT,
-            "returned early: {:?}",
-            start.elapsed()
-        );
+        let waited = wait_bounded(&mut slow, SHORT).expect("waits");
+        let elapsed = start.elapsed();
+        let still_running = slow.try_wait().expect("reads").is_none();
         end(&mut slow).expect("taskkill ends a held cmd");
+        assert_eq!(waited, None);
+        assert!(
+            (SHORT..Duration::from_secs(5)).contains(&elapsed),
+            "returned outside the timeout window: {elapsed:?}"
+        );
+        assert!(still_running, "the wait must leave the held child alone");
         assert!(
             slow.try_wait().expect("reads").is_some(),
             "the child is reaped"
@@ -581,31 +600,33 @@ mod tests {
     #[test]
     fn a_run_past_its_limit_is_ended_and_a_failed_one_returns_its_status() {
         let start = Instant::now();
-        let error = build(held(), SHORT).expect_err("a hung build fails");
-        let detail = error.to_string();
-        assert!(
-            detail.starts_with("the brain build didn't finish in "),
-            "{detail}"
+        let error = build(held_for_deadline(), SHORT).expect_err("a hung build fails");
+        assert_eq!(
+            error.downcast_ref::<io::Error>().map(io::Error::kind),
+            Some(io::ErrorKind::TimedOut),
+            "{error:#}"
         );
-        assert!(!detail.contains("cleanup also failed"), "{detail}");
+        assert!(error.to_string().contains("brain build"), "{error:#}");
         assert!(
             (SHORT..Duration::from_secs(15)).contains(&start.elapsed()),
             "the build returned outside the timeout window"
         );
 
-        let mut child = held().spawn().expect("held child starts");
+        let mut child = held_for_deadline().spawn().expect("held child starts");
         let stdin = child
             .stdin
             .take()
             .expect("held child has an open input pipe");
         let observed = platform::Process::open(child.id()).expect("observe the held process");
+        let start = Instant::now();
         let error = bounded(child, SHORT, "the fixture").expect_err("times out");
-        assert!(
-            error
-                .to_string()
-                .starts_with("the fixture didn't finish in "),
-            "{error}"
+        assert_eq!(
+            error.downcast_ref::<io::Error>().map(io::Error::kind),
+            Some(io::ErrorKind::TimedOut),
+            "{error:#}"
         );
+        assert!(error.to_string().contains("the fixture"), "{error:#}");
+        assert!(start.elapsed() >= SHORT, "the wait returned early");
         assert!(
             observed
                 .exit_code()
@@ -637,24 +658,59 @@ mod tests {
 
     #[test]
     fn a_hung_kill_is_ended_and_the_survivor_named() {
-        let mut child = held().spawn().expect("cmd starts");
+        const HUNG_KILLER: &str = "KUMOCHI_TEST_HUNG_KILLER";
+        if std::env::var_os(HUNG_KILLER).is_some() {
+            io::copy(&mut io::stdin(), &mut io::sink()).expect("wait for fixture release");
+            return;
+        }
+
+        let (input, mut release) = io::pipe().expect("killer input pipe");
+        let (mut output, lifetime) = io::pipe().expect("killer lifetime pipe");
+        let mut killer = Command::new(std::env::current_exe().expect("test executable"));
+        killer
+            .args([
+                "--exact",
+                "live::tests::a_hung_kill_is_ended_and_the_survivor_named",
+            ])
+            .env(HUNG_KILLER, "1")
+            .stdin(Stdio::from(input))
+            .stdout(Stdio::from(lifetime))
+            .stderr(Stdio::null());
+        let mut child = held_for_deadline().spawn().expect("cmd starts");
         let pid = child.id();
-        let killer = held();
-        let error = end_with(&mut child, killer, SHORT).expect_err("the kill hangs");
-        let killer = error
-            .to_string()
-            .split_once("(process ")
-            .and_then(|(_, rest)| rest.split_once(')'))
-            .map(|(pid, _)| pid.to_owned())
-            .expect("the killer's pid is named");
-        assert_eq!(
-            format!("{error:#}"),
-            format!(
-                "taskkill (process {killer}) didn't finish in 200ms and was ended; process {pid} \
-                 may still be running; end it with `taskkill /T /F /PID {pid}`"
-            )
+        let start = Instant::now();
+        let result = end_with(&mut child, killer, SHORT);
+        let elapsed = start.elapsed();
+        let killer_ended = release.write_all(b"x").map_err(|error| error.kind());
+        drop(release);
+        let target_survived = child.try_wait().expect("observe the target").is_none();
+        if target_survived {
+            child.kill().expect("the test target can be killed");
+        }
+        child.wait().expect("the test target is reaped");
+        io::copy(&mut output, &mut io::sink()).expect("killer closes its output even on failure");
+        assert!(target_survived, "the fake killer did not end the target");
+        assert!(
+            (SHORT..Duration::from_secs(5)).contains(&elapsed),
+            "the fake killer was not ended within the timeout window: {elapsed:?}"
         );
-        reap(child);
+        assert_eq!(
+            killer_ended,
+            Err(io::ErrorKind::BrokenPipe),
+            "the fake killer was still alive before its input was released"
+        );
+        let diagnostic = format!("{:#}", result.expect_err("the kill hangs"));
+        let words: Vec<_> = diagnostic
+            .split(|ch: char| !ch.is_ascii_alphanumeric() && ch != '/')
+            .filter(|word| !word.is_empty())
+            .collect();
+        let pid = pid.to_string();
+        assert!(
+            words
+                .windows(5)
+                .any(|words| words == ["taskkill", "/T", "/F", "/PID", &pid]),
+            "{diagnostic}"
+        );
     }
 
     #[test]

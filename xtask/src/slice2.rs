@@ -294,13 +294,28 @@ mod tests {
         ];
         for args in [&inner[..], &[]] {
             let error = run(args.iter().map(|arg| (*arg).to_owned())).expect_err("refused");
+            let report = format!("{error:#}");
+            assert!(report.contains("gate identity"), "{report}");
+            let mut tokens = report.split_ascii_whitespace();
+            assert!(tokens.any(|token| token == "cargo"), "{report}");
+            for token in [
+                "run",
+                "--release",
+                "--package",
+                "xtask",
+                "--features",
+                "kumochi-protocol/gate-identity",
+                "--",
+                "<task>",
+            ] {
+                assert_eq!(tokens.next(), Some(token), "{report}");
+            }
             assert_eq!(
-                format!("{error:#}"),
-                "a gate tool runs only as the gate identity: cargo run --release --package xtask \
-                 --features kumochi-protocol/gate-identity -- <task>"
+                std::fs::read_dir(&folder).unwrap().count(),
+                0,
+                "refused before output"
             );
         }
-        assert!(!folder.join("report.md").exists());
     }
 
     #[test]
