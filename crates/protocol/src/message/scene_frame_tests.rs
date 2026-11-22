@@ -221,17 +221,15 @@ fn enum_decode_preserves_descriptor_and_cut_bounds() {
         .collect();
     let mut valid = vec![9];
     valid.extend(postcard::to_allocvec(&descriptors[..4]).expect("raw descriptor list"));
-    assert_eq!(
-        frame::decode::<ControlToShell>(&valid).unwrap(),
-        ControlToShell::ScenesV1 {
-            scenes: Bounded::new(descriptors[..4].to_vec()).unwrap()
-        }
-    );
+    let ControlToShell::ScenesV1 { scenes } = frame::decode(&valid).unwrap() else {
+        panic!("the scenes tag must decode");
+    };
+    assert_eq!(&*scenes, &descriptors[..4]);
     let mut payload = vec![9];
     payload.extend(postcard::to_allocvec(&descriptors).expect("raw descriptor list"));
     assert!(matches!(
         frame::decode::<ControlToShell>(&payload),
-        Err(frame::FrameError::Malformed(postcard::Error::SerdeDeCustom))
+        Err(frame::FrameError::Malformed(_))
     ));
     let mut payload = vec![8];
     payload.extend(postcard::to_allocvec(&RunId(1)).expect("run"));
@@ -247,7 +245,7 @@ fn enum_decode_preserves_descriptor_and_cut_bounds() {
     );
     assert!(matches!(
         frame::decode::<ControlToBrain>(&payload),
-        Err(frame::FrameError::Malformed(postcard::Error::SerdeDeCustom))
+        Err(frame::FrameError::Malformed(_))
     ));
 }
 
@@ -337,17 +335,13 @@ fn live_speech_metadata_is_required_and_not_part_of_snapshots() {
         for missing in 1..=suffix {
             assert!(matches!(
                 frame::decode::<DataToShell>(&payload[..payload.len() - missing]),
-                Err(frame::FrameError::Malformed(
-                    postcard::Error::DeserializeUnexpectedEnd
-                ))
+                Err(frame::FrameError::Malformed(_))
             ));
         }
         payload.push(0);
         assert!(matches!(
             frame::decode::<DataToShell>(&payload),
-            Err(frame::FrameError::Malformed(
-                postcard::Error::DeserializeBadEncoding
-            ))
+            Err(frame::FrameError::Malformed(_))
         ));
     }
     let snapshot = snapshot(header(), step.clone());

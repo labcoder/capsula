@@ -59,7 +59,7 @@ fn github_refusal_is_content_free_while_its_repository_request_remains_redacted(
         lines[0],
         format!("GitHub ({} bytes)", wire_len(&request, Pipe::Control))
     );
-    assert_fields(&lines[1], &["GitHubError", "GitHubUnavailable"]);
+    assert_fields(&lines[1], "GitHubError", &["GitHubUnavailable"]);
     for text in [
         format!("{request:?} {refusal:?} {records:?}"),
         lines.join("\n"),
@@ -118,17 +118,28 @@ fn contains(haystack: &[u8], needle: &[u8]) -> bool {
     haystack.windows(needle.len()).any(|w| w == needle)
 }
 
-fn assert_fields(line: &str, fields: &[&str]) {
-    let words: Vec<_> = line
-        .split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
-        .filter(|s| !s.is_empty())
-        .collect();
+fn assert_fields(line: &str, op: &str, fields: &[&str]) {
+    let mut words = line
+        .split(|c: char| !c.is_ascii_alphanumeric() && !matches!(c, '_' | '-'))
+        .filter(|s| !s.is_empty());
+    assert_eq!(words.next(), Some(op), "{line}");
+    let words: Vec<_> = words.collect();
     for field in fields {
-        let field: Vec<_> = field.split_whitespace().collect();
-        assert!(
-            words.windows(field.len()).any(|words| words == field),
-            "{field:?} missing from {line}"
+        let expected: Vec<_> = field.split_whitespace().collect();
+        let mut positions = words
+            .iter()
+            .enumerate()
+            .filter(|(_, word)| **word == expected[0])
+            .map(|(at, _)| at);
+        let at = positions
+            .next()
+            .unwrap_or_else(|| panic!("{field} missing from {line}"));
+        assert_eq!(
+            words.get(at..at + expected.len()),
+            Some(expected.as_slice()),
+            "{line}"
         );
+        assert_eq!(positions.next(), None, "{field} repeated in {line}");
     }
 }
 
@@ -222,7 +233,8 @@ fn content_free_ops_keep_their_fields_and_others_only_their_name_and_length() {
     }
     assert_fields(
         &lines[1],
-        &["Welcome", "incarnation Incarnation 7", "issue_epoch 11"],
+        "Welcome",
+        &["incarnation Incarnation 7", "issue_epoch 11"],
     );
     let out = lines.join("\n");
     for secret in [NAME, USER, "0.1.0+abc"] {
@@ -393,12 +405,12 @@ fn connection_ops_warm_and_the_connections_view_keep_their_fields() {
         "Control",
         &[Direction::ToBrain, Direction::ToBrain, Direction::ToShell],
     );
-    assert_fields(&lines[0], &["Connection", "CheckAnthropicKey"]);
-    assert_fields(&lines[1], &["Warm", "thread ThreadId 3"]);
+    assert_fields(&lines[0], "Connection", &["CheckAnthropicKey"]);
+    assert_fields(&lines[1], "Warm", &["thread ThreadId 3"]);
     assert_fields(
         &lines[2],
+        "Connections",
         &[
-            "Connections",
             "anthropic Unconfirmed",
             "anthropic_revision Some 1",
             "claude_code SignedOut",
@@ -413,17 +425,23 @@ fn connection_ops_warm_and_the_connections_view_keep_their_fields() {
 fn staging_frames_are_indistinguishable_at_different_encoded_widths() {
     use crate::message::{KeyStageId, KeyStagePlan};
     let plan = KeyStageId([19; 16]);
-    let messages = |len| {
+    let messages = |plan, len| {
         (
             ControlToBrain::Connection(ConnectionOp::BeginAnthropicKeyStage { request: 7, len }),
             ControlToShell::AnthropicKeyStage {
                 request: 7,
                 result: Ok(KeyStagePlan { id: plan, len }),
             },
+            ControlToBrain::Connection(ConnectionOp::AnthropicKeyStaged { plan }),
+            ControlToShell::AnthropicKeyStageDone {
+                plan,
+                result: Ok(()),
+            },
         )
     };
-    let short = messages(127);
-    let long = messages(128);
+    let short = messages(plan, 127);
+    let long = messages(plan, 128);
+    let different_id = messages(KeyStageId([37; 16]), 127);
     assert_ne!(
         wire_len(&short.0, Pipe::Control),
         wire_len(&long.0, Pipe::Control)
@@ -433,33 +451,27 @@ fn staging_frames_are_indistinguishable_at_different_encoded_widths() {
         wire_len(&long.1, Pipe::Control)
     );
     assert_eq!(format!("{short:?}"), format!("{long:?}"));
-    let capture = |(begin, reply): &(ControlToBrain, ControlToShell)| {
+    assert_eq!(format!("{short:?}"), format!("{different_id:?}"));
+    let capture = |(begin, reply, staged, done): &(_, _, _, _)| {
         recording(&[
             record(Direction::ToBrain, begin),
             record(Direction::ToShell, reply),
-            record(
-                Direction::ToBrain,
-                &ControlToBrain::Connection(ConnectionOp::AnthropicKeyStaged { plan }),
-            ),
-            record(
-                Direction::ToShell,
-                &ControlToShell::AnthropicKeyStageDone {
-                    plan,
-                    result: Ok(()),
-                },
-            ),
+            record(Direction::ToBrain, staged),
+            record(Direction::ToShell, done),
         ])
     };
     let file = capture(&short);
     assert_eq!(file, capture(&long));
+    assert_eq!(file, capture(&different_id));
     let mut reader = &file[MAGIC.len()..];
-    for op in [
-        "BeginAnthropicKeyStage",
-        "AnthropicKeyStage",
-        "AnthropicKeyStaged",
-        "AnthropicKeyStageDone",
+    for (direction, op) in [
+        (Direction::ToBrain, "BeginAnthropicKeyStage"),
+        (Direction::ToShell, "AnthropicKeyStage"),
+        (Direction::ToBrain, "AnthropicKeyStaged"),
+        (Direction::ToShell, "AnthropicKeyStageDone"),
     ] {
         let record = read(&mut reader).expect("read").expect("stage record");
+        assert_eq!((record.pipe, record.direction), (Pipe::Control, direction));
         assert_eq!(
             (record.op.as_str(), record.len, record.payload.as_ref()),
             (op, 0, None)

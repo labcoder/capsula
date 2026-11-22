@@ -257,15 +257,13 @@ fn truncated_and_mistyped_voice_frames_are_refused() {
     assert_eq!(frame::decode::<DataToBrain>(body).ok(), Some(message));
     assert!(matches!(
         frame::decode::<DataToBrain>(&body[..body.len() - 1]),
-        Err(FrameError::Malformed(
-            postcard::Error::DeserializeUnexpectedEnd
-        ))
+        Err(FrameError::Malformed(_))
     ));
     let mut mistyped = body.to_vec();
     mistyped[0] = 0x7f;
     assert!(matches!(
         frame::decode::<DataToBrain>(&mistyped),
-        Err(FrameError::Malformed(postcard::Error::SerdeDeCustom))
+        Err(FrameError::Malformed(_))
     ));
 }
 

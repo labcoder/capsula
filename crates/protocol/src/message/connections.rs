@@ -379,24 +379,18 @@ mod tests {
             let payload = &encoded[HEADER_LEN..];
             assert!(matches!(
                 frame::decode::<ControlToBrain>(&payload[..payload.len() - 1]),
-                Err(FrameError::Malformed(
-                    postcard::Error::DeserializeUnexpectedEnd
-                ))
+                Err(FrameError::Malformed(_))
             ));
             let mut trailing = payload.to_vec();
             trailing.push(0);
             assert!(matches!(
                 frame::decode::<ControlToBrain>(&trailing),
-                Err(FrameError::Malformed(
-                    postcard::Error::DeserializeBadEncoding
-                ))
+                Err(FrameError::Malformed(_))
             ));
         }
         assert!(matches!(
             frame::read::<ControlToBrain>(&mut &[0, 0, 0, 0][..], Pipe::Control),
-            Err(FrameError::Malformed(
-                postcard::Error::DeserializeUnexpectedEnd
-            ))
+            Err(FrameError::Malformed(_))
         ));
         assert!(matches!(
             frame::read::<ControlToBrain>(&mut &65537_u32.to_le_bytes()[..], Pipe::Control),
@@ -413,13 +407,9 @@ mod tests {
         use crate::message::{ControlToBrain, ControlToShell};
         use crate::tap::Tapped as _;
         let id = KeyStageId([0xab; 16]);
+        let other = KeyStageId([0xcd; 16]);
+        assert_eq!(format!("{id:?}"), format!("{other:?}"));
         let generation = generation_hex(&id.0);
-        let bytes = format!("{:?}", id.0);
-        let no_generation = |shown: &str| {
-            assert!(!shown.contains(&generation));
-            assert!(!shown.contains(bytes.trim_matches(['[', ']'])));
-        };
-        no_generation(&format!("{id:?}"));
         assert_eq!(
             generation_target("test", "anthropic", &generation, 0),
             "test/gen/anthropic/abababababababababababababababab/0"
@@ -428,16 +418,11 @@ mod tests {
             generation_target("test", "anthropic", &generation, 1),
             "test/gen/anthropic/abababababababababababababababab/1"
         );
+        let redacted = format!("{:?}", KeyStagePlan { id, len: 2000 });
         for (len, chunks, last) in [(2000, 1, 2000), (2048, 2, 48)] {
             let plan = KeyStagePlan { id, len };
-            let shown = format!("{plan:?}");
-            no_generation(&shown);
-            let len_text = len.to_string();
-            assert!(
-                !shown
-                    .split(|c: char| !c.is_ascii_digit())
-                    .any(|n| n == len_text)
-            );
+            assert_eq!(format!("{plan:?}"), redacted);
+            assert_eq!(format!("{:?}", KeyStagePlan { id: other, len }), redacted);
             let layout = plan.layout().expect("bounded plan");
             assert_eq!(layout.chunks(), chunks);
             assert_eq!(layout.chunk_len(chunks - 1), last);

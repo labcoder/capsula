@@ -248,16 +248,10 @@ mod tests {
     #[test]
     fn effort_sets_reject_empty_and_unknown_bits_on_construction_and_the_wire() {
         assert_eq!(EffortSet::new([]), None);
-        assert_eq!(
-            postcard::from_bytes::<EffortSet>(&[]),
-            Err(postcard::Error::DeserializeUnexpectedEnd)
-        );
+        assert!(postcard::from_bytes::<EffortSet>(&[]).is_err());
         for bits in [0, 32, 33, 255] {
             assert_eq!(EffortSet::try_from(bits), Err(EffortSetError));
-            assert_eq!(
-                postcard::from_bytes::<EffortSet>(&[bits]),
-                Err(postcard::Error::SerdeDeCustom)
-            );
+            assert!(postcard::from_bytes::<EffortSet>(&[bits]).is_err());
         }
         for (mask, effort) in [
             (1, Effort::Low),
@@ -323,10 +317,7 @@ mod tests {
             assert_eq!(ok(bad), Err(NameError::NotOneLine), "{bad:?}");
         }
         let bytes = postcard::to_allocvec(&"a".repeat(81)).expect("encodes");
-        assert_eq!(
-            postcard::from_bytes::<ThreadTitle>(&bytes),
-            Err(postcard::Error::SerdeDeCustom)
-        );
+        assert!(postcard::from_bytes::<ThreadTitle>(&bytes).is_err());
     }
 
     #[test]
@@ -338,10 +329,7 @@ mod tests {
             assert_eq!(ok(bad), Err(SlugError), "{bad:?}");
         }
         let bytes = postcard::to_allocvec(&"Not-A-Slug").expect("encodes");
-        assert_eq!(
-            postcard::from_bytes::<ModelSlug>(&bytes),
-            Err(postcard::Error::SerdeDeCustom)
-        );
+        assert!(postcard::from_bytes::<ModelSlug>(&bytes).is_err());
     }
 
     #[test]

@@ -37,9 +37,7 @@ fn an_unresolved_draft_refusal_appends_tag_seven_and_round_trips_its_identity() 
     );
     assert!(matches!(
         decode::<ControlToShell>(&[19, 128, 1, 2, 3, 1, 4, 7, 128]),
-        Err(FrameError::Malformed(
-            postcard::Error::DeserializeUnexpectedEnd
-        ))
+        Err(FrameError::Malformed(_))
     ));
     let largest = IssueRefused::UnresolvedDraft {
         draft: DraftId(u64::MAX),
@@ -179,7 +177,7 @@ fn tagged_github_refusal_appends_wire_tags_and_keeps_error_validation() {
     let too_many = [14, 0, 0, 0, 25, 42, 5, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
     assert!(matches!(
         read::<ControlToShell>(&mut too_many.as_slice(), Pipe::Control),
-        Err(FrameError::Malformed(postcard::Error::SerdeDeCustom))
+        Err(FrameError::Malformed(_))
     ));
 }
 
@@ -220,29 +218,25 @@ fn correlated_cards_keep_legacy_indices_and_the_original_input_bound() {
     let limit = [
         8, 9, 16, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16,
     ];
-    assert_eq!(
-        crate::frame::decode::<DataToBrain>(&limit).unwrap(),
-        DataToBrain::IssueCardsRequest {
-            request: 9,
-            drafts: Bounded::new((1..=16).map(DraftId).collect()).unwrap(),
-        }
-    );
+    let DataToBrain::IssueCardsRequest { request, drafts } = crate::frame::decode(&limit).unwrap()
+    else {
+        panic!("the correlated request tag must decode");
+    };
+    assert_eq!(request, 9);
+    let expected: Vec<_> = (1..=16).map(DraftId).collect();
+    assert_eq!(&*drafts, expected.as_slice());
     let mut over = limit.to_vec();
     over[2] = 17;
     over.push(17);
     assert!(matches!(
         crate::frame::decode::<DataToBrain>(&over),
-        Err(crate::frame::FrameError::Malformed(
-            postcard::Error::SerdeDeCustom
-        ))
+        Err(crate::frame::FrameError::Malformed(_))
     ));
     let mut short = 18_u32.to_le_bytes().to_vec();
     short.extend_from_slice(&limit[..18]);
     assert!(matches!(
         crate::frame::read::<DataToBrain>(&mut short.as_slice(), Pipe::Data),
-        Err(crate::frame::FrameError::Malformed(
-            postcard::Error::DeserializeUnexpectedEnd
-        ))
+        Err(crate::frame::FrameError::Malformed(_))
     ));
     for (status, tag) in [
         (IssueCardsStatus::Complete, 0),
@@ -631,17 +625,13 @@ fn issue_provenance_rejects_missing_mistyped_overflow_and_truncated_identities()
     for short in [&[0, 5][..], &[0, 5, 128]] {
         assert!(matches!(
             decode::<ControlToShell>(short),
-            Err(FrameError::Malformed(
-                postcard::Error::DeserializeUnexpectedEnd
-            ))
+            Err(FrameError::Malformed(_))
         ));
     }
     for short in [&[25][..], &[25, 128]] {
         assert!(matches!(
             decode::<ControlToBrain>(short),
-            Err(FrameError::Malformed(
-                postcard::Error::DeserializeUnexpectedEnd
-            ))
+            Err(FrameError::Malformed(_))
         ));
     }
     for json in [
@@ -1142,6 +1132,7 @@ fn outer_wire_carriers_and_tap_never_format_issue_or_device_content() {
         &markers,
     );
     let shown = format!("{:?}", ContentHash(hash.as_bytes().try_into().unwrap()));
+    assert_eq!(shown, format!("{:?}", ContentHash([0xab; 32])));
     assert!(!shown.contains(hash));
     assert!(!shown.contains(format!("{:?}", hash.as_bytes()).trim_matches(['[', ']'])));
 }

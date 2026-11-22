@@ -476,15 +476,19 @@ fn a_pointer_path_holds_at_most_2048_points() {
 fn where_the_user_pointed_is_absent_from_debug_and_from_the_tap() {
     const IN_PATH: i32 = 1_357_924_680;
     const AT_RELEASE: i32 = -1_246_813_579;
-    let message = ControlToBrain::ScreenRelease {
+    let release = |point, end| ControlToBrain::ScreenRelease {
         gesture: GestureId(1),
         lease: LeaseGeneration(2),
         t_qpc: 3,
         excluded_qpc: 4,
-        pointer: ReleasePointer(PhysicalPoint([AT_RELEASE, AT_RELEASE])),
-        path: PointerPath(vec![PhysicalPoint([IN_PATH, IN_PATH])]),
+        pointer: ReleasePointer(PhysicalPoint([end, end])),
+        path: PointerPath(vec![PhysicalPoint([point, point])]),
         notice: None,
     };
+    let message = release(IN_PATH, AT_RELEASE);
+    let shown = format!("{message:?}");
+    assert_eq!(shown, format!("{:?}", release(1_468_135_790, AT_RELEASE)));
+    assert_eq!(shown, format!("{:?}", release(IN_PATH, -1_357_924_681)));
     let payload = postcard::to_allocvec(&message).expect("encodes");
     let record =
         Record::of(Pipe::Control, Direction::ToBrain, &message, payload.len()).expect("records");
@@ -493,7 +497,7 @@ fn where_the_user_pointed_is_absent_from_debug_and_from_the_tap() {
     let mut forged = record.clone();
     forged.payload = Some(payload.clone());
     let texts = [
-        format!("{message:?}"),
+        shown,
         format!("{record:?}"),
         record.describe(),
         forged.describe(),

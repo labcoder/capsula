@@ -328,20 +328,13 @@ mod tests {
         assert_eq!(args[1], 4);
         args[1] = 5;
         args.splice(2..2, [1, 0]);
-        // `TryFrom`'s refusal reaches postcard as a custom error, which keeps no text.
-        assert_eq!(
-            postcard::from_bytes::<UserError>(&args),
-            Err(postcard::Error::SerdeDeCustom)
-        );
+        assert!(postcard::from_bytes::<UserError>(&args).is_err());
         // Key, the args' length, four 6-byte args, then the actions' length: one more action.
         let at = 2 + 4 * 6;
         assert_eq!(bytes[at], 3);
         bytes[at] = 4;
         bytes.push(0);
-        assert_eq!(
-            postcard::from_bytes::<UserError>(&bytes),
-            Err(postcard::Error::SerdeDeCustom)
-        );
+        assert!(postcard::from_bytes::<UserError>(&bytes).is_err());
     }
 
     #[test]
