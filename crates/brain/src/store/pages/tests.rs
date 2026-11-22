@@ -160,10 +160,7 @@ fn task_age_uses_a_strict_five_day_boundary_and_keeps_saved_outcomes() {
             TaskState::Sleeping
         );
     }
-    assert_eq!(
-        task_state(i64::MIN, i64::MAX, Some(Done)),
-        TaskState::Done
-    );
+    assert_eq!(task_state(i64::MIN, i64::MAX, Some(Done)), TaskState::Done);
     assert_eq!(
         task_state(i64::MAX, i64::MIN, Some(Failed)),
         TaskState::Sleeping

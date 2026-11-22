@@ -216,11 +216,7 @@ impl Pages<'_> {
                     Ok(TaskFact {
                         latest_run,
                         last_activity_ms,
-                        state: task_state(
-                            now,
-                            last_activity_ms,
-                            latest_run.map(|run| run.outcome),
-                        ),
+                        state: task_state(now, last_activity_ms, latest_run.map(|run| run.outcome)),
                     })
                 })
                 .map_err(|_| StoreError::Read)?;
