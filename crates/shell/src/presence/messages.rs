@@ -16,7 +16,7 @@ pub(super) mod consent;
 use super::Presence;
 use crate::runs::Shown;
 use crate::strings::{Strings, Text};
-use crate::threads::{HistoryEdge, Threads};
+use crate::threads::Threads;
 
 gpui_kit::actions!(thread_messages, [EarlierMessages, LaterMessages]);
 
@@ -104,14 +104,9 @@ impl Messages {
             let model = model.clone();
             let owner = owner.clone();
             move |event, _, cx| {
-                let edge = if !event.is_scrolled {
-                    HistoryEdge::Newer
-                } else if event.visible_range.start == 0 {
-                    HistoryEdge::Older
-                } else {
-                    HistoryEdge::Inside
-                };
-                scroll_history(&model, &owner, edge, cx);
+                if event.visible_range.start == 0 {
+                    older(&model, &owner, cx);
+                }
             }
         });
         let watch = cx.observe_in(&model, window, |view, model, window, cx| {
@@ -204,7 +199,7 @@ impl Messages {
         {
             let first = first_message(&self.rows, self.live_row);
             self.reveal_older = Some((state.history_revision(), before, first));
-            scroll_history(&self.model, &self.owner, HistoryEdge::Older, cx);
+            older(&self.model, &self.owner, cx);
         }
     }
 
@@ -216,7 +211,6 @@ impl Messages {
             .filter(|live| {
                 live.thread.is_some()
                     && live.thread == state.open
-                    && !state.has_newer_events()
                     && Some(live.run) != state.proven
                     && !live.text.is_empty()
             })
@@ -244,7 +238,6 @@ impl Messages {
             .collect();
         let count = ids.len();
         if self.shown_thread == state.open {
-            let top = self.list.logical_scroll_top();
             let prefix = self
                 .ids
                 .iter()
@@ -266,14 +259,6 @@ impl Messages {
             if self.live_row != live || self.proven != state.proven {
                 self.list.remeasure_items(0..count);
             }
-            if (prefix != count || prefix != self.ids.len())
-                && let Some(item_ix) = state.history_anchor(&self.ids, &ids, top.item_ix)
-            {
-                let offset = ListOffset { item_ix, ..top };
-                if self.list.logical_scroll_top() != offset {
-                    self.list.scroll_to(offset);
-                }
-            }
         } else {
             self.list.reset(count);
         }
@@ -288,7 +273,7 @@ impl Messages {
                     .is_some_and(|id| first.is_none_or(|first| id < first));
                 if !earlier && let Some(before) = state.before {
                     self.reveal_older = Some((revision, before, first));
-                    scroll_history(&self.model, &self.owner, HistoryEdge::Older, cx);
+                    older(&self.model, &self.owner, cx);
                 } else {
                     self.list.scroll_to(ListOffset {
                         item_ix: 0,
@@ -312,19 +297,16 @@ fn first_message(rows: &[Row], live: Option<RunId>) -> Option<u64> {
         .map(|row| row.id.1)
 }
 
-fn scroll_history(
-    model: &Entity<Threads>,
-    owner: &WeakEntity<Presence>,
-    edge: HistoryEdge,
-    cx: &mut App,
-) {
+pub(super) fn older(model: &Entity<Threads>, owner: &WeakEntity<Presence>, cx: &mut App) {
     let model = model.clone();
     let owner = owner.clone();
     cx.defer(move |cx| {
         let _gone = owner.update(cx, |owner, cx| {
-            if model.update(cx, |state, _| state.history_scrolled(edge)) {
-                owner.request_pages(cx);
-            }
+            model.update(cx, |state, cx| {
+                state.older_events();
+                cx.notify();
+            });
+            owner.request_pages(cx);
         });
     });
 }
@@ -390,20 +372,11 @@ impl Render for Messages {
                 let bottom = view.list.logical_scroll_top().item_ix == view.list.item_count();
                 let end_anchor = if bottom { height } else { px(0.0) };
                 view.list.scroll_by(-height * 0.9 - end_anchor);
-                scroll_history(&view.model, &view.owner, HistoryEdge::Inside, cx);
                 cx.notify();
             }))
             .on_action(cx.listener(|view, _: &LaterMessages, _, cx| {
                 view.list
                     .scroll_by(view.list.viewport_bounds().size.height * 0.9);
-                let edge = if view.list.logical_scroll_top().item_ix >= view.count
-                    || view.list.is_scrolled_to_end() == Some(true)
-                {
-                    HistoryEdge::Newer
-                } else {
-                    HistoryEdge::Inside
-                };
-                scroll_history(&view.model, &view.owner, edge, cx);
                 cx.notify();
             }))
             .child(messages)
@@ -443,8 +416,7 @@ fn stored_rows(state: &Threads, cx: &App) -> Rc<[Row]> {
         current_group = group;
     }
     if let Some(note) = state
-        .screen_note
-        .as_ref()
+        .visible_screen_note()
         .filter(|note| Some(note.thread) == state.open)
     {
         let after = note.after.map_or(0, |after| after.0);
@@ -928,7 +900,7 @@ mod tests {
             };
             let ids = |rows: &[Row]| rows.iter().map(|row| row.id).collect::<Vec<_>>();
             assert_eq!(ids(&stored_rows(&state, cx)), [("event", 5), ("event", 7)]);
-            state.screen_note = Some(note(Some(EventId(5)), Text::ScreenNoteCant));
+            state.set_screen_note_for_tests(note(Some(EventId(5)), Text::ScreenNoteCant));
             let rows = stored_rows(&state, cx);
             assert_eq!(ids(&rows), [("event", 5), ("note", 5), ("event", 7)]);
             assert_eq!(
@@ -937,7 +909,7 @@ mod tests {
             );
             assert_eq!(rows[1].label, None);
             // Said in an empty conversation, it stays above what came later.
-            state.screen_note = Some(note(None, Text::ScreenNoteCan));
+            state.set_screen_note_for_tests(note(None, Text::ScreenNoteCan));
             let rows = stored_rows(&state, cx);
             assert_eq!(ids(&rows), [("note", 0), ("event", 5), ("event", 7)]);
             assert_eq!(
@@ -974,7 +946,7 @@ mod tests {
                 next: Some(EventId(11)),
             });
             // A note that followed a message older than this page sits above all of it.
-            state.screen_note = Some(ScreenNote {
+            state.set_screen_note_for_tests(ScreenNote {
                 thread: ThreadId(1),
                 after: Some(EventId(4)),
                 text: Text::ScreenNoteCant,

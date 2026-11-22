@@ -29,6 +29,45 @@ pub enum HistoryEdge {
     Newer,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct HistoryAnchor {
+    pub event: EventId,
+    pub offset: f32,
+}
+
+#[derive(Default)]
+struct HistoryWindow {
+    after: Option<EventId>,
+    scrolled: bool,
+    refresh: Option<EventId>,
+    note: Option<PendingNote>,
+}
+
+struct PendingNote {
+    request: Option<u32>,
+    note: ScreenNote,
+}
+
+impl HistoryWindow {
+    fn next_read(&self) -> Option<Read> {
+        if self
+            .note
+            .as_ref()
+            .is_some_and(|note| note.request.is_none())
+        {
+            return Some(Read::NoteAnchor);
+        }
+        self.refresh.map(Read::WindowRefresh)
+    }
+
+    fn take_note(&mut self, request: u32) -> Option<ScreenNote> {
+        if self.note.as_ref()?.request != Some(request) {
+            return None;
+        }
+        self.note.take().map(|pending| pending.note)
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 enum View {
     #[default]
@@ -65,6 +104,8 @@ enum Read {
     First,
     More,
     Newer,
+    NoteAnchor,
+    WindowRefresh(EventId),
     Repair,
     /// The newest page, replacing every cached row, so older ones reload through pagination.
     Refresh,
@@ -113,9 +154,7 @@ pub struct Threads {
     /// Newest first; stored event ids remain distinct, even within one run.
     pub events: Vec<PageEvent>,
     pub before: Option<EventId>,
-    after: Option<EventId>,
-    scrolled_history: bool,
-    preserve_newer_anchor: bool,
+    window: Option<HistoryWindow>,
     pub listed: bool,
     pub loaded: bool,
     pub proven: Option<RunId>,
@@ -130,7 +169,7 @@ pub struct Threads {
     /// The last delete answered that nothing changed; cleared by the next confirm.
     pub delete_failed: bool,
     /// The open conversation's one line that isn't stored; see [`Self::screen_sees`].
-    pub screen_note: Option<ScreenNote>,
+    screen_note: Option<ScreenNote>,
     /// The note for what the default model last did with a hold's picture; none until it has
     /// said.
     pub sees: Option<Text>,
@@ -221,6 +260,14 @@ impl Threads {
             reads: Rc::clone(&browse.reads),
             ..Self::chat()
         };
+        (browse, chat)
+    }
+
+    /// For views that walk a bounded history in both directions.
+    pub fn bounded_pair() -> (Self, Self) {
+        let (mut browse, mut chat) = Self::pair();
+        browse.window = Some(HistoryWindow::default());
+        chat.window = Some(HistoryWindow::default());
         (browse, chat)
     }
 
@@ -342,15 +389,44 @@ impl Threads {
         if self.sees.replace(text).is_none_or(|was| was == text) {
             return false;
         }
-        self.screen_note = thread
+        let note = thread
             .filter(|thread| self.open == Some(*thread) && self.loaded)
             .map(|thread| ScreenNote {
                 thread,
-                after: self.events.first().map(|event| event.id),
+                after: self
+                    .events
+                    .first()
+                    .filter(|_| self.window.is_none())
+                    .map(|event| event.id),
                 text,
                 model: model.clone(),
             });
-        self.screen_note.is_some()
+        if let Some(window) = &mut self.window {
+            let changed = self.screen_note.take().is_some() || note.is_some();
+            window.note = note.map(|note| PendingNote {
+                request: None,
+                note,
+            });
+            changed
+        } else {
+            self.screen_note = note;
+            self.screen_note.is_some()
+        }
+    }
+
+    pub fn visible_screen_note(&self) -> Option<&ScreenNote> {
+        self.screen_note.as_ref().filter(|note| {
+            self.window.is_none()
+                || (self.open == Some(note.thread)
+                    && note
+                        .after
+                        .is_some_and(|id| self.events.iter().any(|event| event.id == id)))
+        })
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn set_screen_note_for_tests(&mut self, note: ScreenNote) {
+        self.screen_note = Some(note);
     }
 
     /// `apply`, for the shell's tests.
@@ -422,7 +498,13 @@ impl Threads {
     }
 
     pub fn reading(&self) -> bool {
-        self.event_pending.is_some() || self.event_needed.is_some()
+        self.event_pending.is_some()
+            || self.event_needed.is_some()
+            || self
+                .window
+                .as_ref()
+                .and_then(HistoryWindow::next_read)
+                .is_some()
     }
 
     pub fn history_revision(&self) -> u64 {
@@ -492,6 +574,9 @@ impl Threads {
         self.event_pending = None;
         self.list_needed = None;
         self.event_needed = None;
+        if let Some(window) = &mut self.window {
+            *window = HistoryWindow::default();
+        }
         self.deferred_search = None;
         self.reread.clear();
         self.unconfirmed.clear();
@@ -551,9 +636,9 @@ impl Threads {
         self.settled = None;
         self.events.clear();
         self.before = None;
-        self.after = None;
-        self.scrolled_history = false;
-        self.preserve_newer_anchor = false;
+        if let Some(window) = &mut self.window {
+            *window = HistoryWindow::default();
+        }
         self.loaded = false;
         self.event_revision = self.event_revision.wrapping_add(1);
         self.event_needed = thread.map(|_| Read::First);
@@ -600,14 +685,16 @@ impl Threads {
     }
 
     pub fn has_newer_events(&self) -> bool {
-        self.after.is_some()
+        self.window
+            .as_ref()
+            .is_some_and(|window| window.after.is_some())
     }
 
     pub fn history_scrolled(&mut self, edge: HistoryEdge) -> bool {
-        self.scrolled_history = edge != HistoryEdge::Newer || self.has_newer_events();
-        if !self.scrolled_history {
-            self.preserve_newer_anchor = false;
-        }
+        let Some(window) = &mut self.window else {
+            return false;
+        };
+        window.scrolled = edge != HistoryEdge::Newer || window.after.is_some();
         if self.reading() {
             return false;
         }
@@ -621,18 +708,12 @@ impl Threads {
         self.reading()
     }
 
-    pub fn history_anchor<T: PartialEq>(
-        &self,
-        previous: &[T],
-        current: &[T],
-        index: usize,
-    ) -> Option<usize> {
-        let key = if self.preserve_newer_anchor && index == previous.len() {
-            previous.last()
-        } else {
-            previous.get(index)
-        }?;
-        current.iter().position(|item| item == key)
+    /// The view supplies a real visible event and its offset, never an edge sentinel.
+    pub fn history_anchor(&self, anchor: HistoryAnchor) -> Option<HistoryAnchor> {
+        self.events
+            .iter()
+            .any(|event| event.id == anchor.event)
+            .then_some(anchor)
     }
 
     pub fn settled(&mut self, thread: ThreadId, run: RunId) {
@@ -722,7 +803,12 @@ impl Threads {
             let after = match read {
                 Read::More => self.next,
                 Read::Renamed(after) => after,
-                Read::First | Read::Repair | Read::Refresh | Read::Newer => None,
+                Read::First
+                | Read::Repair
+                | Read::Refresh
+                | Read::Newer
+                | Read::NoteAnchor
+                | Read::WindowRefresh(_) => None,
             };
             self.list_pending = Some(Pending {
                 request,
@@ -740,38 +826,7 @@ impl Threads {
                 },
             });
         }
-        if self.event_pending.is_none()
-            && let Some(thread) = self.open
-            && let Some(read) = self.event_needed
-            && let Some(request) = self.reads.borrow_mut().admit(self.view)
-        {
-            self.event_needed = None;
-            self.event_pending = Some(Pending {
-                request,
-                revision: self.event_revision,
-                read,
-                stale: false,
-                after: None,
-                proves: if read == Read::More {
-                    None
-                } else {
-                    self.settled
-                },
-            });
-            requests.push(DataToBrain::PageRequest {
-                request,
-                page: match read {
-                    Read::Newer => PageOf::EventsAfter {
-                        thread,
-                        after: self.after.expect("a newer read has a cursor"),
-                    },
-                    _ => PageOf::Events {
-                        thread,
-                        before: self.before.filter(|_| read == Read::More),
-                    },
-                },
-            });
-        }
+        requests.extend(self.request_event_page());
         loop {
             let ids = self.reads.borrow().cards.wanted(self.view);
             if ids.is_empty() {
@@ -784,6 +839,65 @@ impl Threads {
             requests.push(request);
         }
         requests
+    }
+
+    fn request_event_page(&mut self) -> Option<DataToBrain> {
+        if self.event_pending.is_some() {
+            return None;
+        }
+        let thread = self.open?;
+        let read = self
+            .event_needed
+            .or_else(|| self.window.as_ref().and_then(HistoryWindow::next_read))?;
+        let request = self.reads.borrow_mut().admit(self.view)?;
+        self.event_needed = None;
+        if let Some(window) = &mut self.window {
+            match read {
+                Read::NoteAnchor => {
+                    if let Some(note) = &mut window.note {
+                        note.request = Some(request);
+                    }
+                }
+                Read::WindowRefresh(_) => window.refresh = None,
+                _ => {}
+            }
+        }
+        self.event_pending = Some(Pending {
+            request,
+            revision: self.event_revision,
+            read,
+            stale: false,
+            after: None,
+            proves: if matches!(
+                read,
+                Read::First | Read::Repair | Read::Refresh | Read::Newer
+            ) {
+                self.settled
+            } else {
+                None
+            },
+        });
+        Some(DataToBrain::PageRequest {
+            request,
+            page: match read {
+                Read::Newer => PageOf::EventsAfter {
+                    thread,
+                    after: self
+                        .window
+                        .as_ref()
+                        .and_then(|window| window.after)
+                        .expect("a newer read has a cursor"),
+                },
+                Read::WindowRefresh(before) => PageOf::Events {
+                    thread,
+                    before: Some(before),
+                },
+                _ => PageOf::Events {
+                    thread,
+                    before: self.before.filter(|_| read == Read::More),
+                },
+            },
+        })
     }
 
     /// Applies a page frame and returns its credit: the whole frame, used or dropped, since the
@@ -851,6 +965,17 @@ impl Threads {
                 if pending.revision != self.event_revision || self.open != Some(thread) {
                     return;
                 }
+                if pending.read == Read::NoteAnchor {
+                    if let Some(mut note) = self
+                        .window
+                        .as_mut()
+                        .and_then(|window| window.take_note(request))
+                    {
+                        note.after = events.first().map(|event| event.id);
+                        self.screen_note = Some(note);
+                    }
+                    return;
+                }
                 self.apply_events(pending.read, events, next);
                 self.loaded = true;
                 self.failed = false;
@@ -888,13 +1013,24 @@ impl Threads {
     }
 
     fn apply_events(&mut self, read: Read, events: Vec<PageEvent>, next: Option<EventId>) {
-        self.preserve_newer_anchor = read == Read::Newer && !events.is_empty();
         let newest = self.events.first().map(|event| event.id);
-        let away = newest.is_some() && (self.scrolled_history || self.has_newer_events());
+        let away = newest.is_some()
+            && self
+                .window
+                .as_ref()
+                .is_some_and(|window| window.scrolled || window.after.is_some());
+        let refresh = if read == Read::Refresh {
+            next.zip(newest)
+                .map(|(cursor, newest)| cursor.min(EventId(newest.0.saturating_add(1))))
+        } else if matches!(read, Read::WindowRefresh(_)) {
+            next
+        } else {
+            None
+        };
         match read {
             Read::First => self.replace_events(events, next),
-            Read::Refresh if !away => self.replace_events(events, next),
-            Read::Repair
+            Read::Refresh if self.window.is_none() => self.replace_events(events, next),
+            Read::Repair | Read::Refresh
                 if !away
                     && (!self.loaded
                         || next.is_some()
@@ -908,7 +1044,9 @@ impl Threads {
                 for event in events {
                     if newest.is_none_or(|id| event.id > id) {
                         if away {
-                            self.after = newest;
+                            if let Some(window) = &mut self.window {
+                                window.after = newest;
+                            }
                         } else {
                             fresh.push(event);
                         }
@@ -921,6 +1059,13 @@ impl Threads {
                 self.events.splice(0..0, fresh);
                 self.trim_events(HistoryEdge::Newer);
             }
+            Read::WindowRefresh(_) => {
+                for event in events {
+                    if let Some(shown) = self.events.iter_mut().find(|shown| shown.id == event.id) {
+                        shown.kind = event.kind;
+                    }
+                }
+            }
             Read::More => {
                 for event in events {
                     if !self.events.iter().any(|old| old.id == event.id) {
@@ -932,21 +1077,34 @@ impl Threads {
             }
             Read::Newer => {
                 self.events.splice(0..0, events);
-                self.after = next;
+                if let Some(window) = &mut self.window {
+                    window.after = next;
+                }
                 self.trim_events(HistoryEdge::Newer);
             }
-            Read::Renamed(_) => unreachable!("a title read cannot return events"),
+            Read::NoteAnchor | Read::Renamed(_) => unreachable!("not an event window read"),
+        }
+        if matches!(read, Read::Refresh | Read::WindowRefresh(_))
+            && let Some(window) = &mut self.window
+        {
+            window.refresh = refresh
+                .filter(|before| self.events.last().is_some_and(|oldest| *before > oldest.id));
         }
     }
 
     fn replace_events(&mut self, events: Vec<PageEvent>, next: Option<EventId>) {
         self.events = events;
         self.before = next;
-        self.after = None;
+        if let Some(window) = &mut self.window {
+            window.after = None;
+        }
         self.trim_events(HistoryEdge::Newer);
     }
 
     fn trim_events(&mut self, toward: HistoryEdge) {
+        let Some(window) = &mut self.window else {
+            return;
+        };
         let older = toward == HistoryEdge::Older;
         let mut retained = 0;
         let mut bytes = 0;
@@ -962,7 +1120,7 @@ impl Threads {
         if retained < len {
             if older {
                 self.events.drain(..len - retained);
-                self.after = self.events.first().map(|event| event.id);
+                window.after = self.events.first().map(|event| event.id);
             } else {
                 self.events.truncate(retained);
                 self.before = self.events.last().map(|event| event.id);
@@ -1022,7 +1180,9 @@ impl Threads {
                     .retain(|old| !threads.iter().any(|row| row.id == old.id));
                 self.rows.splice(0..0, threads);
             }
-            Read::Newer => unreachable!("a newer history read cannot return tasks"),
+            Read::Newer | Read::NoteAnchor | Read::WindowRefresh(_) => {
+                unreachable!("a history read cannot return tasks")
+            }
             Read::Renamed(_) => {
                 for row in threads {
                     if let Some(old) = self.rows.iter_mut().find(|old| old.id == row.id) {
@@ -1050,6 +1210,12 @@ impl Threads {
         {
             self.event_pending = None;
             let current = pending.revision == self.event_revision;
+            if pending.read == Read::NoteAnchor {
+                if current && let Some(window) = &mut self.window {
+                    drop(window.take_note(request));
+                }
+                return;
+            }
             if current {
                 self.event_revision = self.event_revision.wrapping_add(1);
             }
