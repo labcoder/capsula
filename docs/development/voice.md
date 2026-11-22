@@ -938,6 +938,16 @@ delivery, not worker/native copies or physical retirement.
 
 ### Voice-only held turns
 
+On a registered Plain queued pair with Talk-back and Show Screen confirmed off,
+revocation closes the Shell's capture and enqueue for the gesture. A frame already
+captured may still cross the local pipe: the writer checks authority before writing,
+but that check and the write are separate. If cancellation reaches the Brain before
+decode admission, it discards accumulated or queued audio and rejects later frames
+for that gesture. Raw PCM is not logged or stored. If decode was already admitted
+but cancellation wins before the Brain handles its result, the Brain discards the
+words without delivering, submitting or storing them. Cancellation cannot recall PCM
+already transferred to STT or undo an earlier submission.
+
 Quit immediately cancels collection and fences the last tracked gesture for the
 background shutdown owner. No new microphone packets are admitted, and the
 data writer discards buffered PCM it takes after Quit. A transfer already in

@@ -4,7 +4,9 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use kumochi_protocol::message::{ControlToShell, ErrorKey, SttUnload, VoiceView};
+use kumochi_protocol::message::{
+    ControlToShell, ErrorKey, HoldFailure, HoldStatus, SttUnload, VoiceView,
+};
 use kumochi_protocol::voice::VoicePart;
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::sync::watch;
@@ -362,7 +364,11 @@ impl Brain {
         self.run(effects);
         self.voice_policy();
         if let Some(link) = link.as_deref_mut() {
-            self.hold_voice_changed(link)?;
+            if link.registration.is_some() && self.hold_consent_pending() {
+                self.hold_end(HoldStatus::Failed(HoldFailure::ChoiceChanged), link)?;
+            } else {
+                self.hold_voice_changed(link)?;
+            }
         }
         let Some(voice) = &self.voice else {
             return Ok(());
