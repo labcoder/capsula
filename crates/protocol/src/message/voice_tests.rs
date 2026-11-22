@@ -1,8 +1,8 @@
 //! Every voice bound at its limit and one past it, the largest frames, and redaction.
 
 use super::{
-    Cursor, MAX_HOLD_CHUNKS, MAX_TRANSCRIPT_BYTES, MicPcm, OutputGeneration, PartState, SegmentId,
-    SpeechPcm, Transcript, VoiceBound, VoiceView, check_rate,
+    Cursor, MicPcm, OutputGeneration, PartState, SegmentId, SpeechPcm, Transcript, VoiceBound,
+    VoiceView, check_rate,
 };
 use crate::frame::{self, FrameError, HEADER_LEN, Pipe};
 use crate::message::ErrorKey;
@@ -143,7 +143,7 @@ fn a_hold_sends_at_most_3000_chunks() {
     assert_eq!(
         MicPcm {
             last: true,
-            ..mic(48_000, 960, MAX_HOLD_CHUNKS - 1)
+            ..mic(48_000, 960, 2_999)
         }
         .check(),
         Ok(())
@@ -151,7 +151,7 @@ fn a_hold_sends_at_most_3000_chunks() {
     assert_eq!(
         MicPcm {
             last: true,
-            ..mic(48_000, 960, MAX_HOLD_CHUNKS)
+            ..mic(48_000, 960, 3_000)
         }
         .check(),
         Err(VoiceBound::Chunks)
@@ -190,39 +190,41 @@ fn a_speech_chunk_holds_up_to_100_ms_and_a_segment_up_to_30_s() {
 
 #[test]
 fn a_transcript_is_at_most_16_kib() {
-    let transcript = |len| Transcript {
+    let transcript = |text| Transcript {
         run: RunId(1),
-        text: "a".repeat(len),
+        text,
     };
-    assert_eq!(transcript(MAX_TRANSCRIPT_BYTES).check(), Ok(()));
-    assert_eq!(transcript(0).check(), Ok(()));
+    let limit = "é".repeat(8_192);
     assert_eq!(
-        transcript(MAX_TRANSCRIPT_BYTES + 1).check(),
+        transcript(format!("{limit}a")).check(),
         Err(VoiceBound::Text)
     );
-}
-
-fn payload<T: serde::Serialize>(message: &T, pipe: Pipe) -> usize {
-    frame::encode(message, pipe)
-        .expect("fits the pipe's cap")
-        .len()
-        - HEADER_LEN
+    assert_eq!(transcript(limit).check(), Ok(()));
+    assert_eq!(transcript(String::new()).check(), Ok(()));
 }
 
 #[test]
 fn the_largest_voice_frames_fit_their_pipes() {
+    fn round_trip<T>(message: T, pipe: Pipe)
+    where
+        T: serde::Serialize + serde::de::DeserializeOwned + PartialEq + std::fmt::Debug,
+    {
+        let bytes = frame::encode(&message, pipe).expect("fits the pipe's cap");
+        assert!(bytes.len() - HEADER_LEN <= pipe.max_payload());
+        assert_eq!(
+            frame::read(&mut bytes.as_slice(), pipe).unwrap(),
+            Some(message)
+        );
+    }
+
     let worst_mic = DataToBrain::MicPcm(MicPcm {
         gesture: GestureId(u32::MAX),
-        seq: MAX_HOLD_CHUNKS - 1,
+        seq: 2_999,
         rate: 192_000,
         last: false,
         samples: vec![i16::MIN; 3_840],
     });
-    // Tag, gesture, a 2-byte seq, a 3-byte rate, last, a 2-byte length, 3 bytes a sample.
-    assert_eq!(
-        payload(&worst_mic, Pipe::Data),
-        1 + 5 + 2 + 3 + 1 + 2 + 3_840 * 3
-    );
+    round_trip(worst_mic, Pipe::Data);
     let worst_speech = DataToShell::SpeechPcm(SpeechPcm {
         run: RunId(u64::MAX),
         segment: SegmentId(u32::MAX),
@@ -231,20 +233,12 @@ fn the_largest_voice_frames_fit_their_pipes() {
         samples: vec![i16::MIN; 19_200],
         last: Some(5_760_000),
     });
-    // Tag, run, segment, generation and seq at their widest, a 3-byte length, 3 bytes a
-    // sample, then Some and a 4-byte total.
-    assert_eq!(
-        payload(&worst_speech, Pipe::Data),
-        1 + 10 + 5 + 5 + 5 + 3 + 19_200 * 3 + 1 + 4
-    );
+    round_trip(worst_speech, Pipe::Data);
     let worst_transcript = DataToShell::Transcript(Transcript {
         run: RunId(u64::MAX),
-        text: "a".repeat(MAX_TRANSCRIPT_BYTES),
+        text: "é".repeat(8_192),
     });
-    assert_eq!(
-        payload(&worst_transcript, Pipe::Data),
-        1 + 10 + 3 + MAX_TRANSCRIPT_BYTES
-    );
+    round_trip(worst_transcript, Pipe::Data);
     let stopped = ControlToBrain::SpeechStopped {
         run: RunId(u64::MAX),
         cursor: Some(Cursor {
@@ -252,7 +246,7 @@ fn the_largest_voice_frames_fit_their_pipes() {
             sample: u32::MAX,
         }),
     };
-    assert_eq!(payload(&stopped, Pipe::Control), 1 + 10 + 1 + 5 + 5);
+    round_trip(stopped, Pipe::Control);
 }
 
 #[test]
@@ -277,44 +271,73 @@ fn truncated_and_mistyped_voice_frames_are_refused() {
 
 #[test]
 fn debug_and_the_tap_show_no_audio_or_text() {
-    let marker = "kumochi-voice-sentinel";
-    let sample: i16 = 12_345;
-    let messages: [(String, Record); 3] = [
-        {
-            let message = DataToBrain::MicPcm(MicPcm {
-                samples: vec![sample; 960],
-                ..mic(48_000, 960, 0)
-            });
-            let record = Record::of(Pipe::Data, Direction::ToBrain, &message, 10).expect("records");
-            (format!("{message:?}"), record)
-        },
-        {
-            let message = DataToShell::SpeechPcm(SpeechPcm {
-                samples: vec![sample; 3],
-                ..speech(3, Some(3))
-            });
-            let record = Record::of(Pipe::Data, Direction::ToShell, &message, 10).expect("records");
-            (format!("{message:?}"), record)
-        },
-        {
-            let message = DataToShell::Transcript(Transcript {
-                run: RunId(1),
-                text: marker.to_owned(),
-            });
-            let record = Record::of(Pipe::Data, Direction::ToShell, &message, 10).expect("records");
-            (format!("{message:?}"), record)
-        },
-    ];
-    let bytes = format!("{:?}", marker.as_bytes());
-    let bytes = &bytes[1..bytes.len() - 1];
-    for (debug, record) in messages {
+    use crate::tap::{self, Tapped};
+
+    const PCM: i16 = 12_345;
+    const TEXT: &str = "kumochi-voice-sentinel";
+
+    fn check(message: &(impl Tapped + std::fmt::Debug), direction: Direction, sentinel: &[u8]) {
+        let payload = frame::encode_payload(message).unwrap();
+        let contains = |data: &[u8], needle: &[u8]| data.windows(needle.len()).any(|w| w == needle);
         assert!(
-            !debug.contains("12345") && !debug.contains(marker),
-            "{debug}"
+            contains(&payload, sentinel),
+            "the wire carries the sentinel"
         );
-        assert!(!debug.contains(bytes), "{debug}");
-        // 12,345 as little-endian bytes, the way a byte list of the PCM would print.
-        assert!(!debug.contains("57, 48"), "{debug}");
-        assert_eq!(record.payload, None, "{debug}");
+        let mut record = Record::of(Pipe::Data, direction, message, payload.len()).unwrap();
+        assert_eq!(record.payload, None);
+        let metadata = format!("{} ({} bytes)", message.op(), payload.len());
+        assert_eq!(record.describe(), metadata);
+        let mut bytes = Vec::new();
+        tap::write(&mut bytes, &record).unwrap();
+        for forbidden in [
+            sentinel,
+            TEXT.as_bytes(),
+            &PCM.to_le_bytes(),
+            &PCM.to_be_bytes(),
+        ] {
+            assert!(!contains(&bytes, forbidden));
+        }
+        record.payload = Some(payload);
+        assert_eq!(record.describe(), metadata);
+        let mut forged = Vec::new();
+        tap::write_header(&mut forged).unwrap();
+        tap::write(&mut forged, &record).unwrap();
+        let mut output = Vec::new();
+        assert_eq!(tap::dump(&mut forged.as_slice(), &mut output).unwrap(), 1);
+        let dump = String::from_utf8(output).unwrap();
+        assert!(dump.contains(&metadata));
+        let pcm_wire = postcard::to_allocvec(&PCM).unwrap();
+        for output in [format!("{message:?}"), dump] {
+            assert!(!output.contains("12345") && !output.contains(TEXT));
+            for bytes in [TEXT.as_bytes(), &PCM.to_le_bytes(), &pcm_wire] {
+                assert!(!output.contains(format!("{bytes:?}").trim_matches(['[', ']'])));
+            }
+        }
     }
+
+    let pcm_wire = postcard::to_allocvec(&PCM).unwrap();
+    check(
+        &DataToBrain::MicPcm(MicPcm {
+            samples: vec![PCM; 960],
+            ..mic(48_000, 960, 0)
+        }),
+        Direction::ToBrain,
+        &pcm_wire,
+    );
+    check(
+        &DataToShell::SpeechPcm(SpeechPcm {
+            samples: vec![PCM; 3],
+            ..speech(3, Some(3))
+        }),
+        Direction::ToShell,
+        &pcm_wire,
+    );
+    check(
+        &DataToShell::Transcript(Transcript {
+            run: RunId(1),
+            text: TEXT.to_owned(),
+        }),
+        Direction::ToShell,
+        TEXT.as_bytes(),
+    );
 }

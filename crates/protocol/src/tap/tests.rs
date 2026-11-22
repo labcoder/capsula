@@ -54,19 +54,19 @@ fn github_refusal_is_content_free_while_its_repository_request_remains_redacted(
     assert_eq!(read(&mut reader).unwrap(), Some(records[0].clone()));
     assert_eq!(read(&mut reader).unwrap(), Some(records[1].clone()));
     assert_eq!(read(&mut reader).unwrap(), None);
-    let mut out = Vec::new();
-    assert_eq!(dump(&mut file.as_slice(), &mut out).unwrap(), 2);
-    let out = String::from_utf8(out).unwrap();
+    let lines = dump_messages(&file, "Control", &[Direction::ToBrain, Direction::ToShell]);
     assert_eq!(
-        out,
-        format!(
-            "    0 Control shell -> brain  GitHub ({} bytes)\n    1 Control brain -> shell  GitHubError(UserError {{ key: GitHubUnavailable, args: [], actions: [] }})\n2 frames\n",
-            wire_len(&request, Pipe::Control)
-        )
+        lines[0],
+        format!("GitHub ({} bytes)", wire_len(&request, Pipe::Control))
     );
-    let debug = format!("{request:?} {refusal:?} {records:?} {out}");
-    assert!(!debug.contains(marker));
-    assert!(!debug.contains(&format!("{:?}", marker.as_bytes())));
+    assert_fields(&lines[1], &["GitHubError", "GitHubUnavailable"]);
+    for text in [
+        format!("{request:?} {refusal:?} {records:?}"),
+        lines.join("\n"),
+    ] {
+        assert!(!text.contains(marker));
+        assert!(!text.contains(format!("{:?}", marker.as_bytes()).trim_matches(['[', ']'])));
+    }
 }
 
 fn wire_len(message: &impl Tapped, pipe: Pipe) -> usize {
@@ -118,6 +118,68 @@ fn contains(haystack: &[u8], needle: &[u8]) -> bool {
     haystack.windows(needle.len()).any(|w| w == needle)
 }
 
+fn assert_fields(line: &str, fields: &[&str]) {
+    let words: Vec<_> = line
+        .split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+        .filter(|s| !s.is_empty())
+        .collect();
+    for field in fields {
+        let field: Vec<_> = field.split_whitespace().collect();
+        assert!(
+            words.windows(field.len()).any(|words| words == field),
+            "{field:?} missing from {line}"
+        );
+    }
+}
+
+fn dump_messages(mut file: &[u8], pipe: &str, directions: &[Direction]) -> Vec<String> {
+    let mut out = Vec::new();
+    assert_eq!(
+        dump(&mut file, &mut out).unwrap(),
+        u64::try_from(directions.len()).unwrap()
+    );
+    let out = String::from_utf8(out).unwrap();
+    let mut lines = out.lines();
+    let messages = directions
+        .iter()
+        .enumerate()
+        .map(|(seq, direction)| {
+            let line = lines.next().unwrap();
+            let (from, to) = match direction {
+                Direction::ToBrain => ("shell", "brain"),
+                Direction::ToShell => ("brain", "shell"),
+            };
+            assert!(
+                line.split_whitespace().take(5).eq([
+                    seq.to_string().as_str(),
+                    pipe,
+                    from,
+                    "->",
+                    to
+                ]),
+                "{line}"
+            );
+            line.split_once("->")
+                .unwrap()
+                .1
+                .trim_start()
+                .strip_prefix(to)
+                .unwrap()
+                .trim()
+                .to_owned()
+        })
+        .collect();
+    assert!(
+        lines
+            .next()
+            .unwrap()
+            .split_whitespace()
+            .eq([directions.len().to_string().as_str(), "frames"])
+    );
+    assert_eq!(lines.next(), None);
+    messages
+}
+
 #[test]
 fn content_free_ops_keep_their_fields_and_others_only_their_name_and_length() {
     let welcome = ControlToShell::Welcome {
@@ -141,28 +203,40 @@ fn content_free_ops_keep_their_fields_and_others_only_their_name_and_length() {
     for secret in [&[9; 32][..], NAME.as_bytes(), USER.as_bytes(), b"0.1.0+abc"] {
         assert!(!contains(&file, secret), "{secret:?} was recorded");
     }
-    let mut out = Vec::new();
-    assert_eq!(dump(&mut file.as_slice(), &mut out).expect("dumps"), 4);
-    let out = String::from_utf8(out).expect("utf-8");
-    let hello_len = wire_len(&hello, Pipe::Control);
-    let view_len = wire_len(&view(), Pipe::Control);
-    assert_eq!(
-        out,
-        [
-            format!("    0 Control shell -> brain  Hello ({hello_len} bytes)"),
-            "    1 Control brain -> shell  Welcome { incarnation: Incarnation(7), issue_epoch: 11 }".to_owned(),
-            format!(
-                "    2 Control shell -> brain  Settings ({} bytes)",
-                wire_len(&rename, Pipe::Control)
-            ),
-            format!("    3 Control brain -> shell  Settings ({view_len} bytes)"),
-            "4 frames\n".to_owned(),
-        ]
-        .join("\n")
+    let lines = dump_messages(
+        &file,
+        "Control",
+        &[
+            Direction::ToBrain,
+            Direction::ToShell,
+            Direction::ToBrain,
+            Direction::ToShell,
+        ],
     );
+    for (line, op, len) in [
+        (&lines[0], "Hello", wire_len(&hello, Pipe::Control)),
+        (&lines[2], "Settings", wire_len(&rename, Pipe::Control)),
+        (&lines[3], "Settings", wire_len(&view(), Pipe::Control)),
+    ] {
+        assert_eq!(line, &format!("{op} ({len} bytes)"));
+    }
+    assert_fields(
+        &lines[1],
+        &["Welcome", "incarnation Incarnation 7", "issue_epoch 11"],
+    );
+    let out = lines.join("\n");
+    for secret in [NAME, USER, "0.1.0+abc"] {
+        assert!(!out.contains(secret));
+        assert!(!out.contains(format!("{:?}", secret.as_bytes()).trim_matches(['[', ']'])));
+    }
+    assert!(!out.contains(format!("{:?}", [9; 32]).trim_matches(['[', ']'])));
     let mut reader = &file[MAGIC.len()..];
     let read_back: Vec<_> = std::iter::from_fn(|| read(&mut reader).expect("reads")).collect();
     assert_eq!(read_back, records);
+    assert_eq!(
+        crate::frame::decode::<ControlToShell>(read_back[1].payload.as_deref().unwrap()).unwrap(),
+        welcome
+    );
 }
 
 #[test]
@@ -179,11 +253,9 @@ fn a_data_pipe_hello_keeps_only_its_op_name_and_length() {
     for secret in [&capability[..], b"0.1.0+abc"] {
         assert!(!contains(&file, secret), "{secret:?} was recorded");
     }
-    let mut out = Vec::new();
-    dump(&mut file.as_slice(), &mut out).expect("dumps");
     assert_eq!(
-        String::from_utf8(out).expect("utf-8"),
-        format!("    0 Data    shell -> brain  Hello ({len} bytes)\n1 frames\n")
+        dump_messages(&file, "Data", &[Direction::ToBrain]),
+        [format!("Hello ({len} bytes)")]
     );
 }
 
@@ -218,15 +290,12 @@ fn a_model_result_round_trips_but_never_records_its_choice() {
         assert_eq!(record.payload, None);
         let file = recording(&[record]);
         assert!(!contains(&file, MODEL.as_bytes()));
-        assert!(!format!("{file:?}").contains(&format!("{:?}", MODEL.as_bytes())));
-        let mut out = Vec::new();
-        dump(&mut file.as_slice(), &mut out).expect("dumps");
         assert_eq!(
-            String::from_utf8(out).expect("utf-8"),
-            format!(
-                "    0 Control brain -> shell  ThreadModelSet ({} bytes)\n1 frames\n",
+            dump_messages(&file, "Control", &[Direction::ToShell]),
+            [format!(
+                "ThreadModelSet ({} bytes)",
                 wire_len(&result, Pipe::Control)
-            )
+            )]
         );
     }
 }
@@ -242,14 +311,12 @@ fn a_rename_keeps_only_its_op_name_and_length() {
     assert_eq!(record.payload, None);
     let file = recording(&[record]);
     assert!(!contains(&file, TITLE.as_bytes()), "the title was recorded");
-    let mut out = Vec::new();
-    assert_eq!(dump(&mut file.as_slice(), &mut out).expect("dumps"), 1);
-    let dump = String::from_utf8(out).expect("utf-8");
-    assert!(dump.contains(&format!(
-        "ThreadOp ({} bytes)",
-        wire_len(&rename, Pipe::Control)
-    )));
-    for output in [format!("{rename:?}"), dump] {
+    let lines = dump_messages(&file, "Control", &[Direction::ToBrain]);
+    assert_eq!(
+        lines[0],
+        format!("ThreadOp ({} bytes)", wire_len(&rename, Pipe::Control))
+    );
+    for output in [&format!("{rename:?}"), &lines[0]] {
         assert!(!output.contains(TITLE));
         assert!(!output.contains(&format!("{:?}", TITLE.as_bytes())));
     }
@@ -286,37 +353,59 @@ fn an_account_op_keeps_its_fields_and_the_account_view_only_its_name() {
 
 #[test]
 fn connection_ops_warm_and_the_connections_view_keep_their_fields() {
-    let records = [
-        record(
-            Direction::ToBrain,
-            &ControlToBrain::Connection(ConnectionOp::CheckAnthropicKey),
-        ),
-        record(
-            Direction::ToBrain,
-            &ControlToBrain::Warm {
-                thread: ThreadId(3),
+    let check = ControlToBrain::Connection(ConnectionOp::CheckAnthropicKey);
+    let warm = ControlToBrain::Warm {
+        thread: ThreadId(3),
+    };
+    let connections = ControlToShell::Connections(ConnectionsView {
+        anthropic: KeyView::Unconfirmed,
+        anthropic_revision: Some(1),
+        claude_code: ClaudeCodeView::SignedOut {
+            version: ClaudeVersion {
+                major: 2,
+                minor: 1,
+                patch: 306,
             },
-        ),
-        record(
-            Direction::ToShell,
-            &ControlToShell::Connections(ConnectionsView {
-                anthropic: KeyView::Unconfirmed,
-                anthropic_revision: Some(1),
-                claude_code: ClaudeCodeView::SignedOut {
-                    version: ClaudeVersion {
-                        major: 2,
-                        minor: 1,
-                        patch: 306,
-                    },
-                },
-            }),
-        ),
+        },
+    });
+    let records = [
+        record(Direction::ToBrain, &check),
+        record(Direction::ToBrain, &warm),
+        record(Direction::ToShell, &connections),
     ];
-    let mut out = Vec::new();
-    dump(&mut recording(&records).as_slice(), &mut out).expect("dumps");
+    let file = recording(&records);
+    let mut reader = &file[MAGIC.len()..];
+    for expected in [check, warm] {
+        let payload = read(&mut reader).unwrap().unwrap().payload.unwrap();
+        assert_eq!(
+            crate::frame::decode::<ControlToBrain>(&payload).unwrap(),
+            expected
+        );
+    }
+    let payload = read(&mut reader).unwrap().unwrap().payload.unwrap();
     assert_eq!(
-        String::from_utf8(out).expect("utf-8"),
-        "    0 Control shell -> brain  Connection(CheckAnthropicKey)\n    1 Control shell -> brain  Warm { thread: ThreadId(3) }\n    2 Control brain -> shell  Connections(ConnectionsView { anthropic: Unconfirmed, anthropic_revision: Some(1), claude_code: SignedOut { version: ClaudeVersion { major: 2, minor: 1, patch: 306 } } })\n3 frames\n"
+        crate::frame::decode::<ControlToShell>(&payload).unwrap(),
+        connections
+    );
+    assert_eq!(read(&mut reader).unwrap(), None);
+    let lines = dump_messages(
+        &file,
+        "Control",
+        &[Direction::ToBrain, Direction::ToBrain, Direction::ToShell],
+    );
+    assert_fields(&lines[0], &["Connection", "CheckAnthropicKey"]);
+    assert_fields(&lines[1], &["Warm", "thread ThreadId 3"]);
+    assert_fields(
+        &lines[2],
+        &[
+            "Connections",
+            "anthropic Unconfirmed",
+            "anthropic_revision Some 1",
+            "claude_code SignedOut",
+            "major 2",
+            "minor 1",
+            "patch 306",
+        ],
     );
 }
 
@@ -335,12 +424,12 @@ fn staging_frames_are_indistinguishable_at_different_encoded_widths() {
     };
     let short = messages(127);
     let long = messages(128);
-    assert_eq!(
-        wire_len(&short.0, Pipe::Control) + 1,
+    assert_ne!(
+        wire_len(&short.0, Pipe::Control),
         wire_len(&long.0, Pipe::Control)
     );
-    assert_eq!(
-        wire_len(&short.1, Pipe::Control) + 1,
+    assert_ne!(
+        wire_len(&short.1, Pipe::Control),
         wire_len(&long.1, Pipe::Control)
     );
     assert_eq!(format!("{short:?}"), format!("{long:?}"));

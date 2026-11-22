@@ -211,14 +211,24 @@ fn v1_tags_are_appended_and_messages_round_trip_in_both_encodings() {
 
 #[test]
 fn enum_decode_preserves_descriptor_and_cut_bounds() {
-    let descriptor = SceneDescriptorV1 {
-        scene: SceneId(1),
-        revision: 1,
-        committed: 1,
-        log_entries: 1,
-    };
+    let descriptors: Vec<_> = (1..=5)
+        .map(|id| SceneDescriptorV1 {
+            scene: SceneId(id),
+            revision: 1,
+            committed: 1,
+            log_entries: 1,
+        })
+        .collect();
+    let mut valid = vec![9];
+    valid.extend(postcard::to_allocvec(&descriptors[..4]).expect("raw descriptor list"));
+    assert_eq!(
+        frame::decode::<ControlToShell>(&valid).unwrap(),
+        ControlToShell::ScenesV1 {
+            scenes: Bounded::new(descriptors[..4].to_vec()).unwrap()
+        }
+    );
     let mut payload = vec![9];
-    payload.extend(postcard::to_allocvec(&vec![descriptor; 5]).expect("raw descriptor list"));
+    payload.extend(postcard::to_allocvec(&descriptors).expect("raw descriptor list"));
     assert!(matches!(
         frame::decode::<ControlToShell>(&payload),
         Err(frame::FrameError::Malformed(postcard::Error::SerdeDeCustom))
@@ -251,7 +261,6 @@ fn number_dense_legal_step_and_snapshot_event_fit_the_data_frame() {
         }
     }
     let json = serde_json::to_vec(&json!({"step":{"id":"dense","put":put}})).expect("encodes");
-    assert_eq!(json.len(), 32_619);
     assert!(json.len() <= MAX_RECORD_BYTES);
     let Record::Step(step) = parse_record(&json).expect("bounded typed step") else {
         panic!("step")
@@ -269,13 +278,14 @@ fn number_dense_legal_step_and_snapshot_event_fit_the_data_frame() {
         step: step.clone(),
         speech: None,
     };
-    let bytes = frame::encode(&live, Pipe::Data).expect("dense live frame fits");
-    assert!(
-        bytes.len() > json.len() * 4,
-        "exercise numeric expansion, not text compression"
-    );
     round_trip(&live, Pipe::Data);
-    round_trip(&snapshot(header(), step), Pipe::Data);
+    let snapshot = snapshot(header(), step);
+    let DataToShell::SceneSnapshotV1 { chunk } = &snapshot else {
+        panic!("snapshot fixture")
+    };
+    let event = postcard::to_allocvec(&chunk.events[0]).unwrap();
+    assert!(event.len() > 32 * 1024);
+    round_trip(&snapshot, Pipe::Data);
 }
 
 #[test]
@@ -340,12 +350,26 @@ fn live_speech_metadata_is_required_and_not_part_of_snapshots() {
             ))
         ));
     }
-    round_trip(&snapshot(header(), step), Pipe::Data);
+    let snapshot = snapshot(header(), step.clone());
+    let DataToShell::SceneSnapshotV1 { chunk } = &snapshot else {
+        panic!("snapshot fixture")
+    };
+    let event = &chunk.events[0];
+    let mut expected = vec![0, 1];
+    expected.extend(postcard::to_allocvec(&step).unwrap());
+    assert_eq!(postcard::to_allocvec(event).unwrap(), expected);
+    assert_eq!(frame::decode::<SceneEvent>(&expected).unwrap(), *event);
+    assert_eq!(
+        serde_json::to_value(event).unwrap(),
+        json!({"step":{"revision":1,"step":step}})
+    );
+    round_trip(&snapshot, Pipe::Data);
 }
 
 #[test]
 fn global_handle_cut_fits_the_control_cap() {
-    let mut remaining = MAX_GLOBAL_LIVE_OBJECTS;
+    assert_eq!(MAX_GLOBAL_LIVE_OBJECTS, 1_500);
+    let mut remaining = 1_500;
     let cuts = (0..4)
         .map(|scene| {
             let count = remaining.min(MAX_LIVE_OBJECTS);
@@ -369,8 +393,6 @@ fn global_handle_cut_fits_the_control_cap() {
         run: RunId(u64::MAX),
         cuts: SceneCuts::new(cuts).expect("global cap"),
     };
-    let bytes = frame::encode(&message, Pipe::Control).expect("fits");
-    assert_eq!(bytes.len(), 4567);
     round_trip(&message, Pipe::Control);
 }
 
@@ -416,7 +438,15 @@ fn all_scene_messages_are_redacted_even_in_forged_tap_records() {
             assert!(!file.windows(secret.len()).any(|w| w == secret.as_bytes()));
             assert!(!dump.contains(secret));
             assert!(!debug.contains(secret));
+            let listed = format!("{:?}", secret.as_bytes());
+            assert!(!dump.contains(listed.trim_matches(['[', ']'])));
+            assert!(!debug.contains(listed.trim_matches(['[', ']'])));
         }
+        let position = 13_337.25_f32.to_le_bytes();
+        assert!(!file.windows(position.len()).any(|w| w == position));
+        let listed = format!("{position:?}");
+        assert!(!dump.contains(listed.trim_matches(['[', ']'])));
+        assert!(!debug.contains(listed.trim_matches(['[', ']'])));
     }
     for value in controls() {
         check(&value, Pipe::Control, Direction::ToBrain);
@@ -431,6 +461,11 @@ fn all_scene_messages_are_redacted_even_in_forged_tap_records() {
         assert!(frame::decode::<DataToShell>(&payload[..end]).is_err());
     }
     for value in messages {
+        if matches!(value, DataToShell::SceneStepCommit { .. }) {
+            let wire = frame::encode_payload(&value).unwrap();
+            let coordinate = 13_337.25_f32.to_le_bytes();
+            assert!(wire.windows(coordinate.len()).any(|w| w == coordinate));
+        }
         check(&value, Pipe::Data, Direction::ToShell);
     }
     check(

@@ -271,7 +271,7 @@ mod tests {
         );
         for content in [words, title, text, issue_title, slug] {
             assert!(!output.contains(content));
-            assert!(!output.contains(&format!("{:?}", content.as_bytes())));
+            assert!(!output.contains(format!("{:?}", content.as_bytes()).trim_matches(['[', ']'])));
         }
     }
 }

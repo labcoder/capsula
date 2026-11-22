@@ -150,15 +150,24 @@ pub const NATIVE_FILES: &[NativeFile] = &[
 /// The release archive [`NATIVE_FILES`] come from, which nothing downloads at run time.
 pub const NATIVE_ARCHIVE_URL: &str = "https://github.com/k2-fsa/sherpa-onnx/releases/download/v2.0.1/sherpa-onnx-v2.0.1-win-x64-shared-MD-Release-lib.tar.bz2";
 
-/// [`NATIVE_ARCHIVE_URL`]'s SHA-256, as GitHub's release page lists it.
-pub const NATIVE_ARCHIVE_SHA256: &str =
-    "c3c78220db8bebf97d5f932496165bb3897b163410427d7c021013439c80f183";
-
 #[cfg(test)]
 mod tests {
     use std::collections::HashSet;
 
-    use super::{MODEL_FILES, NATIVE_ARCHIVE_SHA256, NATIVE_FILES, VoicePart};
+    use serde::Deserialize;
+
+    use super::{MODEL_FILES, NATIVE_FILES, VoicePart};
+
+    #[derive(Deserialize)]
+    struct Asset {
+        name: String,
+        source: String,
+        files: Vec<String>,
+    }
+
+    fn inventory() -> Vec<Asset> {
+        serde_json::from_str(include_str!("../../../assets/licenses/inventory.json")).unwrap()
+    }
 
     fn is_sha256(hex: &str) -> bool {
         hex.len() == 64
@@ -167,70 +176,80 @@ mod tests {
                 .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
     }
 
-    fn is_plain_name(name: &str) -> bool {
-        !name.is_empty()
-            && !name.starts_with('.')
-            && name
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-' || b == b'_')
-    }
-
     #[test]
     fn every_model_file_is_pinned_by_revision_size_and_hash() {
-        let mut names = HashSet::new();
-        for file in MODEL_FILES {
-            assert!(is_sha256(file.sha256), "{} hash", file.name);
-            assert!(file.bytes > 0, "{} size", file.name);
-            assert!(
-                is_plain_name(file.name),
-                "{} is a plain file name",
-                file.name
-            );
-            assert!(
-                names.insert((file.part, file.name)),
-                "{} is listed once",
-                file.name
-            );
-            let rest = file
-                .url
+        let inventory = inventory();
+        let mut expected = HashSet::new();
+        for (asset, part) in [
+            ("parakeet", VoicePart::SpeechInput),
+            ("phonon", VoicePart::SpokenReplies),
+            ("juniper", VoicePart::SpokenReplies),
+        ] {
+            let pin = inventory.iter().find(|entry| entry.name == asset).unwrap();
+            assert!(!pin.files.is_empty());
+            let (_, revision) = pin
+                .source
                 .strip_prefix("https://huggingface.co/")
-                .expect("models come from Hugging Face over HTTPS");
-            let revision = rest
-                .split("/resolve/")
-                .nth(1)
-                .and_then(|tail| tail.split('/').next())
-                .expect("a resolve URL");
-            assert!(
-                revision.len() == 40 && revision.bytes().all(|b| b.is_ascii_hexdigit()),
-                "{} is pinned to a commit, not a branch",
-                file.name
-            );
+                .unwrap()
+                .split_once("/resolve/")
+                .unwrap();
+            assert!(revision.len() == 40 && revision.bytes().all(|b| b.is_ascii_hexdigit()));
+            for file in &pin.files {
+                let (name, digest) = file
+                    .strip_prefix("model:")
+                    .unwrap()
+                    .split_once(':')
+                    .unwrap();
+                assert!(is_sha256(digest));
+                assert!(
+                    !name.is_empty()
+                        && !name.starts_with('.')
+                        && name
+                            .bytes()
+                            .all(|b| b.is_ascii_alphanumeric() || b".-_".contains(&b))
+                );
+                let upstream = if name == "juniper.safetensors" {
+                    "voices/NIWIOv5vTi5eRMj8.safetensors"
+                } else {
+                    name
+                };
+                assert!(expected.insert((
+                    part,
+                    name,
+                    digest,
+                    format!("{}/{upstream}", pin.source)
+                )));
+            }
         }
-        for part in VoicePart::ALL {
-            assert!(part.files().count() > 0, "{part:?} has files");
+        let mut actual = HashSet::new();
+        for part in [VoicePart::SpeechInput, VoicePart::SpokenReplies] {
+            for file in part.files() {
+                assert!(file.bytes > 0, "{} size", file.name);
+                assert!(actual.insert((part, file.name, file.sha256, file.url.to_owned())));
+            }
         }
+        assert_eq!(actual.len(), MODEL_FILES.len());
+        assert_eq!(actual, expected);
     }
 
     #[test]
     fn every_native_file_is_pinned_by_size_and_hash() {
-        let mut names = HashSet::new();
-        for file in NATIVE_FILES {
-            assert!(is_sha256(file.sha256), "{} hash", file.name);
-            assert!(file.bytes > 0, "{} size", file.name);
+        let audited = ["sherpa-onnx-c-api.dll", "onnxruntime.dll"];
+        assert_eq!(NATIVE_FILES.len(), audited.len());
+        let inventory = inventory();
+        let pin = inventory
+            .iter()
+            .find(|entry| entry.name == "voice-native-runtime")
+            .unwrap();
+        assert_eq!(pin.files.len(), audited.len());
+        for name in audited {
+            let file = NATIVE_FILES.iter().find(|file| file.name == name).unwrap();
+            assert!(file.bytes > 0, "{name} size");
+            assert!(is_sha256(file.sha256), "{name} digest");
             assert!(
-                is_plain_name(file.name),
-                "{} is a plain file name",
-                file.name
+                pin.files
+                    .contains(&format!("native:{name}:{}", file.sha256))
             );
-            assert!(
-                std::path::Path::new(file.name)
-                    .extension()
-                    .is_some_and(|ext| ext == "dll"),
-                "{} is a DLL",
-                file.name
-            );
-            assert!(names.insert(file.name), "{} is listed once", file.name);
         }
-        assert!(is_sha256(NATIVE_ARCHIVE_SHA256), "archive hash");
     }
 }

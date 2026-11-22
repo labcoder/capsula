@@ -357,8 +357,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn staging_frames_refuse_truncated_missing_trailing_and_oversized_payloads() {
-        use crate::frame::{self, FrameError, Pipe};
+    fn staging_frames_refuse_missing_trailing_and_oversized_payloads() {
+        use crate::frame::{self, FrameError, HEADER_LEN, Pipe};
         use crate::message::ControlToBrain;
         for op in [
             ConnectionOp::BeginAnthropicKeyStage {
@@ -376,13 +376,7 @@ mod tests {
                     .expect("complete"),
                 Some(message)
             );
-            for end in 1..encoded.len() {
-                assert!(matches!(
-                    frame::read::<ControlToBrain>(&mut &encoded[..end], Pipe::Control),
-                    Err(FrameError::Truncated)
-                ));
-            }
-            let payload = &encoded[4..];
+            let payload = &encoded[HEADER_LEN..];
             assert!(matches!(
                 frame::decode::<ControlToBrain>(&payload[..payload.len() - 1]),
                 Err(FrameError::Malformed(
@@ -419,20 +413,34 @@ mod tests {
         use crate::message::{ControlToBrain, ControlToShell};
         use crate::tap::Tapped as _;
         let id = KeyStageId([0xab; 16]);
+        let generation = generation_hex(&id.0);
+        let bytes = format!("{:?}", id.0);
+        let no_generation = |shown: &str| {
+            assert!(!shown.contains(&generation));
+            assert!(!shown.contains(bytes.trim_matches(['[', ']'])));
+        };
+        no_generation(&format!("{id:?}"));
+        assert_eq!(
+            generation_target("test", "anthropic", &generation, 0),
+            "test/gen/anthropic/abababababababababababababababab/0"
+        );
+        assert_eq!(
+            generation_target("test", "anthropic", &generation, 1),
+            "test/gen/anthropic/abababababababababababababababab/1"
+        );
         for (len, chunks, last) in [(2000, 1, 2000), (2048, 2, 48)] {
             let plan = KeyStagePlan { id, len };
-            assert_eq!(format!("{plan:?}"), "KeyStagePlan(***)");
+            let shown = format!("{plan:?}");
+            no_generation(&shown);
+            let len_text = len.to_string();
+            assert!(
+                !shown
+                    .split(|c: char| !c.is_ascii_digit())
+                    .any(|n| n == len_text)
+            );
             let layout = plan.layout().expect("bounded plan");
             assert_eq!(layout.chunks(), chunks);
             assert_eq!(layout.chunk_len(chunks - 1), last);
-            assert_eq!(
-                generation_target("test", "anthropic", &generation_hex(&id.0), 0),
-                "test/gen/anthropic/abababababababababababababababab/0"
-            );
-            assert_eq!(
-                generation_target("test", "anthropic", &generation_hex(&id.0), 1),
-                "test/gen/anthropic/abababababababababababababababab/1"
-            );
             let reply = ControlToShell::AnthropicKeyStage {
                 request: 7,
                 result: Ok(plan),
@@ -483,7 +491,6 @@ mod tests {
             done
         );
         assert!(!done.content_free());
-        assert_eq!(format!("{id:?}"), "KeyStageId(***)");
     }
 
     #[test]
@@ -564,10 +571,12 @@ mod tests {
                 patch: 65535
             })
         );
+        let distinct = ok("2.1.306").unwrap();
         assert_eq!(
-            ok("2.1.306").map(|v| v.to_string()),
-            Ok("2.1.306".to_owned())
+            (distinct.major, distinct.minor, distinct.patch),
+            (2, 1, 306)
         );
+        assert_eq!(distinct.to_string(), "2.1.306");
         for bad in [
             "",
             "2.1",

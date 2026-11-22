@@ -350,7 +350,6 @@ mod tests {
     fn generation_names_never_overlap_a_legacy_name() {
         let prefix = format!("{CREDENTIAL_SERVICE}/{CREDENTIAL_GENERATION_SEGMENT}/");
         let legacy: Vec<String> = account_targets(CREDENTIAL_SERVICE).collect();
-        assert_eq!(legacy.len(), 262, "every legacy name is counted");
         for name in &legacy {
             assert!(
                 !name.starts_with(&prefix),

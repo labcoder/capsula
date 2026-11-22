@@ -19,6 +19,22 @@ const RECT: PhysicalRect = PhysicalRect {
 
 #[test]
 fn voice_only_hold_controls_append_tags_without_screen_authority() {
+    assert_eq!(
+        postcard::to_allocvec(&ControlToBrain::VoiceHoldRecognized {
+            gesture: GestureId(1),
+            thread: None,
+            selection: 2,
+        })
+        .unwrap(),
+        [27, 1, 0, 2]
+    );
+    assert_eq!(
+        postcard::to_allocvec(&ControlToBrain::VoiceHoldStopped {
+            gesture: GestureId(1)
+        })
+        .unwrap(),
+        [28, 1]
+    );
     let recognized = ControlToBrain::VoiceHoldRecognized {
         gesture: GESTURE,
         thread: Some(ThreadId(u64::MAX)),
@@ -30,7 +46,7 @@ fn voice_only_hold_controls_append_tags_without_screen_authority() {
         (stopped, 28, 6, "VoiceHoldStopped"),
     ] {
         assert_eq!(postcard::to_allocvec(&message).expect("encodes")[0], tag);
-        round_trip(&message, Pipe::Control, size);
+        assert_eq!(round_trip(&message, Pipe::Control), size);
         redacted(&message, Direction::ToBrain, op, size);
     }
     for status in [
@@ -58,7 +74,7 @@ fn voice_only_hold_controls_append_tags_without_screen_authority() {
             7
         };
         assert_eq!(postcard::to_allocvec(&message).expect("encodes")[0], 28);
-        round_trip(&message, Pipe::Control, size);
+        assert_eq!(round_trip(&message, Pipe::Control), size);
         redacted(&message, Direction::ToShell, "VoiceHoldStatus", size);
     }
 }
@@ -67,32 +83,32 @@ fn voice_only_hold_controls_append_tags_without_screen_authority() {
 fn voice_stop_acceptance_appends_a_redacted_control_tag() {
     let message = ControlToShell::VoiceHoldStopAccepted { gesture: GESTURE };
     assert_eq!(postcard::to_allocvec(&message).expect("encodes")[0], 30);
-    round_trip(&message, Pipe::Control, 6);
-    redacted(&message, Direction::ToShell, "VoiceHoldStopAccepted", 6);
+    assert_eq!(round_trip(&message, Pipe::Control), 6);
+    assert_eq!(
+        redacted(&message, Direction::ToShell, "VoiceHoldStopAccepted", 6),
+        b"\x00\x01\x15VoiceHoldStopAccepted\x06\x00\x00\x00\x00"
+    );
 }
 
 #[test]
 fn screen_hold_states_append_a_redacted_control_tag() {
     let model =
         super::ModelName::new(&"\u{1F600}".repeat(super::MAX_MODEL_NAME_CHARS)).expect("valid");
-    for (state, size) in [
-        (
-            super::ScreenHolds::On {
-                model,
-                connection: super::ConnectionKind::ClaudeCode,
-                slug: super::ModelSlug::new(&"a".repeat(super::MAX_SLUG_BYTES)).expect("valid"),
-                revision: super::NoticeRevision(std::num::NonZeroU64::MAX),
-            },
-            1 + 1 + 2 + 4 * super::MAX_MODEL_NAME_CHARS + 1 + 1 + super::MAX_SLUG_BYTES + 10,
-        ),
-        (super::ScreenHolds::Off(super::ScreenOff::ModelCantSee), 3),
-        (super::ScreenHolds::Off(super::ScreenOff::NotReady), 3),
-        (super::ScreenHolds::Off(super::ScreenOff::Unsupported), 3),
-        (super::ScreenHolds::Off(super::ScreenOff::TurnedOff), 3),
+    for state in [
+        super::ScreenHolds::On {
+            model,
+            connection: super::ConnectionKind::ClaudeCode,
+            slug: super::ModelSlug::new(&"a".repeat(super::MAX_SLUG_BYTES)).expect("valid"),
+            revision: super::NoticeRevision(std::num::NonZeroU64::MAX),
+        },
+        super::ScreenHolds::Off(super::ScreenOff::ModelCantSee),
+        super::ScreenHolds::Off(super::ScreenOff::NotReady),
+        super::ScreenHolds::Off(super::ScreenOff::Unsupported),
+        super::ScreenHolds::Off(super::ScreenOff::TurnedOff),
     ] {
         let message = ControlToShell::ScreenHolds(state);
         assert_eq!(postcard::to_allocvec(&message).expect("encodes")[0], 31);
-        round_trip(&message, Pipe::Control, size);
+        let size = round_trip(&message, Pipe::Control);
         redacted(&message, Direction::ToShell, "ScreenHolds", size);
     }
     assert_eq!(
@@ -147,7 +163,7 @@ fn a_held_screens_outcome_appends_a_redacted_control_tag() {
             outcome,
         };
         assert_eq!(postcard::to_allocvec(&message).expect("encodes")[0], 32);
-        round_trip(&message, Pipe::Control, size);
+        assert_eq!(round_trip(&message, Pipe::Control), size);
         redacted(&message, Direction::ToShell, "HoldScreen", size);
     }
 }
@@ -155,18 +171,20 @@ fn a_held_screens_outcome_appends_a_redacted_control_tag() {
 fn round_trip<M: Serialize + DeserializeOwned + PartialEq + std::fmt::Debug>(
     message: &M,
     pipe: Pipe,
-    size: usize,
-) {
+) -> usize {
     let frame = frame::encode(message, pipe).expect("encodes within cap");
-    assert_eq!(frame.len(), HEADER_LEN + size);
+    let size = frame.len() - HEADER_LEN;
     assert!(size <= pipe.max_payload());
     assert_eq!(
-        frame::decode::<M>(&frame[HEADER_LEN..]).expect("decodes"),
-        *message
+        frame::read::<M>(&mut frame.as_slice(), pipe)
+            .expect("decodes")
+            .as_ref(),
+        Some(message)
     );
+    size
 }
 
-fn redacted(message: &impl Tapped, direction: Direction, op: &str, size: usize) {
+fn redacted(message: &impl Tapped, direction: Direction, op: &str, size: usize) -> Vec<u8> {
     let record = Record::of(Pipe::Control, direction, message, size).expect("records");
     assert_eq!(
         record,
@@ -181,30 +199,21 @@ fn redacted(message: &impl Tapped, direction: Direction, op: &str, size: usize) 
     assert_eq!(record.describe(), format!("{op} ({size} bytes)"));
     let mut bytes = Vec::new();
     tap::write(&mut bytes, &record).expect("writes");
-    let mut expected = vec![
-        0,
-        u8::from(direction == Direction::ToShell),
-        u8::try_from(op.len()).expect("short op"),
-    ];
-    expected.extend(op.as_bytes());
-    expected.extend(u32::try_from(size).expect("small frame").to_le_bytes());
-    expected.push(0);
+    let mut remaining = bytes.as_slice();
     assert_eq!(
-        bytes, expected,
-        "only the op, length and framing are recorded"
-    );
-    assert_eq!(
-        tap::read(&mut bytes.as_slice()).expect("reads"),
+        tap::read(&mut remaining).expect("reads"),
         Some(record.clone())
     );
+    assert!(remaining.is_empty());
     let mut forged = record;
     forged.payload = Some(postcard::to_allocvec(message).expect("encodes"));
     assert_eq!(forged.describe(), format!("{op} ({size} bytes)"));
+    bytes
 }
 
 #[test]
 fn largest_hold_controls_round_trip_fit_the_cap_and_stay_redacted() {
-    for (message, op, size) in [
+    for (message, op) in [
         (
             ControlToBrain::HoldRecognized {
                 gesture: GESTURE,
@@ -216,7 +225,6 @@ fn largest_hold_controls_round_trip_fit_the_cap_and_stay_redacted() {
                 notice: Some(super::NoticeRevision(std::num::NonZeroU64::MAX)),
             },
             "HoldRecognized",
-            63,
         ),
         (
             ControlToBrain::KeyDown {
@@ -224,7 +232,6 @@ fn largest_hold_controls_round_trip_fit_the_cap_and_stay_redacted() {
                 t_qpc: u64::MAX,
             },
             "KeyDown",
-            16,
         ),
         (
             ControlToBrain::KeyUp {
@@ -233,12 +240,10 @@ fn largest_hold_controls_round_trip_fit_the_cap_and_stay_redacted() {
                 chunks: u32::MAX,
             },
             "KeyUp",
-            21,
         ),
         (
             ControlToBrain::GestureCancel { gesture: GESTURE },
             "GestureCancel",
-            6,
         ),
         (
             ControlToBrain::FocusHint {
@@ -246,7 +251,6 @@ fn largest_hold_controls_round_trip_fit_the_cap_and_stay_redacted() {
                 hint: FocusHint::Region(RECT),
             },
             "FocusHint",
-            27,
         ),
         (
             ControlToBrain::FocusHint {
@@ -254,15 +258,13 @@ fn largest_hold_controls_round_trip_fit_the_cap_and_stay_redacted() {
                 hint: FocusHint::Window(WindowRef(u64::MAX)),
             },
             "FocusHint",
-            17,
         ),
         (
             ControlToBrain::ExclusionLapsed { lease: LEASE },
             "ExclusionLapsed",
-            6,
         ),
     ] {
-        round_trip(&message, Pipe::Control, size);
+        let size = round_trip(&message, Pipe::Control);
         redacted(&message, Direction::ToBrain, op, size);
     }
     round_trip(
@@ -276,7 +278,6 @@ fn largest_hold_controls_round_trip_fit_the_cap_and_stay_redacted() {
             notice: None,
         },
         Pipe::Control,
-        9,
     );
 }
 
@@ -284,8 +285,8 @@ fn largest_hold_controls_round_trip_fit_the_cap_and_stay_redacted() {
 fn capture_results_round_trip_fit_the_cap_and_stay_redacted() {
     for capture_for in [CaptureFor::Gesture(GESTURE), CaptureFor::Turn(u32::MAX)] {
         let done = ControlToShell::CaptureDone { capture_for };
-        round_trip(&done, Pipe::Control, 7);
-        redacted(&done, Direction::ToShell, "CaptureDone", 7);
+        let size = round_trip(&done, Pipe::Control);
+        redacted(&done, Direction::ToShell, "CaptureDone", size);
         for reason in [
             CaptureFailure::ExclusionUnavailable,
             CaptureFailure::Cancelled,
@@ -295,8 +296,8 @@ fn capture_results_round_trip_fit_the_cap_and_stay_redacted() {
                 capture_for,
                 reason,
             };
-            round_trip(&failed, Pipe::Control, 8);
-            redacted(&failed, Direction::ToShell, "CaptureFailed", 8);
+            let size = round_trip(&failed, Pipe::Control);
+            redacted(&failed, Direction::ToShell, "CaptureFailed", size);
         }
     }
 }
@@ -316,7 +317,6 @@ fn run_origins_screen_choices_and_refusals_round_trip() {
                 origin: Some(origin),
             },
             Pipe::Control,
-            30,
         );
     }
     round_trip(
@@ -328,7 +328,6 @@ fn run_origins_screen_choices_and_refusals_round_trip() {
             origin: None,
         },
         Pipe::Control,
-        24,
     );
     round_trip(
         &ControlToShell::TurnRefused {
@@ -336,12 +335,8 @@ fn run_origins_screen_choices_and_refusals_round_trip() {
             thread: Some(ThreadId(u64::MAX)),
         },
         Pipe::Control,
-        17,
     );
-    for (screen, size) in [
-        (ScreenChoice::None, 19),
-        (ScreenChoice::Include { lease: LEASE }, 24),
-    ] {
+    for screen in [ScreenChoice::None, ScreenChoice::Include { lease: LEASE }] {
         round_trip(
             &DataToBrain::TextSubmit {
                 turn: u32::MAX,
@@ -350,7 +345,6 @@ fn run_origins_screen_choices_and_refusals_round_trip() {
                 text: Content::default(),
             },
             Pipe::Data,
-            size,
         );
     }
 }
@@ -361,7 +355,7 @@ fn a_skipped_scene_appends_a_redacted_tag_after_the_screen_release() {
         scene: super::SceneId(u64::MAX),
     };
     assert_eq!(postcard::to_allocvec(&skipped).expect("encodes")[0], 31);
-    round_trip(&skipped, Pipe::Control, 11);
+    assert_eq!(round_trip(&skipped, Pipe::Control), 11);
     redacted(&skipped, Direction::ToBrain, "SceneSkipped", 11);
     let skipped = ControlToBrain::SceneSkipped {
         scene: super::SceneId(2),
@@ -377,7 +371,7 @@ fn a_ready_step_appends_a_redacted_tag_after_the_skipped_scene() {
         index: u32::MAX,
     };
     assert_eq!(postcard::to_allocvec(&ready).expect("encodes")[0], 32);
-    round_trip(&ready, Pipe::Control, 26);
+    assert_eq!(round_trip(&ready, Pipe::Control), 26);
     redacted(&ready, Direction::ToBrain, "StepReady", 26);
     let ready = ControlToBrain::StepReady {
         run: RunId(1),
@@ -396,7 +390,7 @@ fn an_output_withdrawal_appends_a_redacted_tag_after_the_ready_step() {
         generation: super::OutputGeneration(u32::MAX),
     };
     assert_eq!(postcard::to_allocvec(&withdrawn).expect("encodes")[0], 33);
-    round_trip(&withdrawn, Pipe::Control, 6);
+    assert_eq!(round_trip(&withdrawn, Pipe::Control), 6);
     redacted(&withdrawn, Direction::ToBrain, "AudioOutputUnavailable", 6);
     let withdrawn = ControlToBrain::AudioOutputUnavailable {
         generation: super::OutputGeneration(2),
@@ -423,14 +417,20 @@ fn a_screen_holds_controls_append_redacted_tags_and_fit_the_control_cap() {
         path: PointerPath(vec![corner; 2_048]),
         notice: Some(super::NoticeRevision(std::num::NonZeroU64::MAX)),
     };
-    for (message, tag, size, op) in [
-        (recognized, 29, 48, "ScreenHoldRecognized"),
-        (release, 30, 20_534, "ScreenRelease"),
-    ] {
-        assert_eq!(postcard::to_allocvec(&message).expect("encodes")[0], tag);
-        round_trip(&message, Pipe::Control, size);
-        redacted(&message, Direction::ToBrain, op, size);
-    }
+    assert_eq!(postcard::to_allocvec(&recognized).expect("encodes")[0], 29);
+    let size = round_trip(&recognized, Pipe::Control);
+    redacted(
+        &recognized,
+        Direction::ToBrain,
+        "ScreenHoldRecognized",
+        size,
+    );
+    assert_eq!(postcard::to_allocvec(&release).expect("encodes")[0], 30);
+    assert_eq!(round_trip(&release, Pipe::Control), 20_534);
+    assert_eq!(
+        redacted(&release, Direction::ToBrain, "ScreenRelease", 20_534),
+        b"\x00\x00\x0dScreenRelease\x36\x50\x00\x00\x00"
+    );
     let recognized = ControlToBrain::ScreenHoldRecognized {
         gesture: GestureId(1),
         thread: None,
@@ -460,7 +460,7 @@ fn a_screen_holds_controls_append_redacted_tags_and_fit_the_control_cap() {
     ] {
         let message = release(path);
         assert_eq!(postcard::to_allocvec(&message).expect("encodes"), bytes);
-        round_trip(&message, Pipe::Control, bytes.len());
+        assert_eq!(round_trip(&message, Pipe::Control), bytes.len());
     }
 }
 
@@ -485,29 +485,29 @@ fn where_the_user_pointed_is_absent_from_debug_and_from_the_tap() {
         path: PointerPath(vec![PhysicalPoint([IN_PATH, IN_PATH])]),
         notice: None,
     };
-    assert_eq!(
-        format!("{message:?}"),
-        "ScreenRelease { gesture: GestureId(1), lease: LeaseGeneration(2), t_qpc: 3, \
-         excluded_qpc: 4, pointer: ReleasePointer { .. }, path: PointerPath(1), notice: None }"
-    );
     let payload = postcard::to_allocvec(&message).expect("encodes");
     let record =
         Record::of(Pipe::Control, Direction::ToBrain, &message, payload.len()).expect("records");
     let mut recording = Vec::new();
     tap::write(&mut recording, &record).expect("writes");
+    let mut forged = record.clone();
+    forged.payload = Some(payload.clone());
     let texts = [
         format!("{message:?}"),
         format!("{record:?}"),
         record.describe(),
+        forged.describe(),
     ];
     let within = |bytes: &[u8], part: &[u8]| bytes.windows(part.len()).any(|at| at == part);
     for sentinel in [IN_PATH, AT_RELEASE] {
         let wire = postcard::to_allocvec(&sentinel).expect("encodes");
         assert!(within(&payload, &wire), "the frame itself carries it");
         let listed = format!("{wire:?}");
+        let raw = format!("{:?}", sentinel.to_le_bytes());
         for text in &texts {
             assert!(!text.contains(&sentinel.unsigned_abs().to_string()));
             assert!(!text.contains(listed.trim_matches(['[', ']'])));
+            assert!(!text.contains(raw.trim_matches(['[', ']'])));
         }
         for bytes in [&wire[..], &sentinel.to_le_bytes(), &sentinel.to_be_bytes()] {
             assert!(!within(&recording, bytes));
@@ -528,7 +528,7 @@ fn held_words_and_their_receipt_append_redacted_data_tags() {
         (stored, 23, 6, "HoldStored"),
     ] {
         assert_eq!(postcard::to_allocvec(&message).expect("encodes")[0], tag);
-        round_trip(&message, Pipe::Data, size);
+        assert_eq!(round_trip(&message, Pipe::Data), size);
         let record = Record::of(Pipe::Data, Direction::ToShell, &message, size).expect("records");
         assert_eq!((record.op.as_str(), record.payload.as_ref()), (op, None));
         let mut bytes = Vec::new();
@@ -556,7 +556,7 @@ fn a_thread_events_change_appends_data_tag_24_and_an_unknown_tag_is_refused() {
         thread: ThreadId(u64::MAX),
     };
     assert_eq!(postcard::to_allocvec(&message).expect("encodes")[0], 24);
-    round_trip(&message, Pipe::Data, 11);
+    assert_eq!(round_trip(&message, Pipe::Data), 11);
     let record = Record::of(Pipe::Data, Direction::ToShell, &message, 11).expect("records");
     assert_eq!(
         (record.op.as_str(), record.payload.as_ref()),

@@ -439,18 +439,12 @@ mod tests {
         ];
         assert_eq!(DockPosition::ALL, positions);
         assert_eq!(DockPosition::default(), DockPosition::TopCenter);
-        for position in positions {
+        for (index, position) in (0_u8..).zip(positions) {
+            let op = SettingsOp::SetDockPosition(position);
+            let wire = [5, index];
+            assert_eq!(postcard::to_allocvec(&op).unwrap(), wire);
+            assert_eq!(postcard::from_bytes::<SettingsOp>(&wire), Ok(op));
             for shown in [true, false] {
-                for op in [
-                    SettingsOp::SetDockPosition(position),
-                    SettingsOp::SetTaskbar(shown),
-                ] {
-                    let bytes = postcard::to_allocvec(&op).expect("encodes");
-                    assert_eq!(
-                        postcard::from_bytes::<SettingsOp>(&bytes).expect("decodes"),
-                        op
-                    );
-                }
                 let view = SettingsView {
                     dock_position: position,
                     show_in_taskbar: shown,
@@ -463,6 +457,11 @@ mod tests {
                 );
             }
         }
+        for (shown, wire) in [(false, [6, 0]), (true, [6, 1])] {
+            let op = SettingsOp::SetTaskbar(shown);
+            assert_eq!(postcard::to_allocvec(&op).unwrap(), wire);
+            assert_eq!(postcard::from_bytes::<SettingsOp>(&wire), Ok(op));
+        }
         let outer = super::super::ControlToShell::Settings {
             view: view(),
             answer: true,
@@ -470,7 +469,7 @@ mod tests {
         let debug = format!("{outer:?}");
         for marker in ["Sentinelname", "Sentineluser"] {
             assert!(!debug.contains(marker));
-            assert!(!debug.contains(&format!("{:?}", marker.as_bytes())));
+            assert!(!debug.contains(format!("{:?}", marker.as_bytes()).trim_matches(['[', ']'])));
         }
     }
 

@@ -1157,9 +1157,9 @@ mod tests {
     use super::{
         CAPABILITY_LEN, ControlToBrain, ControlToShell, DATA_WINDOW, DataToBrain, DataToShell,
         Effort, Hello, Incarnation, MAX_MODEL_NAME_CHARS, MAX_MODELS, MAX_PAGE_BYTES,
-        MAX_PAGE_ROWS, MAX_SLUG_BYTES, MAX_STEP_LABEL, MAX_STEPS, MAX_TITLE_CHARS, ModelChoice,
-        ModelInfo, ModelName, ModelSlug, RunId, SceneId, Secret, Step, ThreadCursor, ThreadId,
-        ThreadKind, ThreadRow,
+        MAX_PAGE_ROWS, MAX_SLUG_BYTES, MAX_STEP_LABEL, MAX_STEPS, ModelChoice, ModelInfo,
+        ModelName, ModelSlug, RunId, SceneId, Secret, Step, ThreadCursor, ThreadId, ThreadKind,
+        ThreadRow,
     };
     use crate::frame::{self, HEADER_LEN, Pipe};
 
@@ -1172,7 +1172,7 @@ mod tests {
             capability: Secret::new([7; CAPABILITY_LEN]),
         };
         let mut hello_bytes = vec![0, 1, b'b'];
-        hello_bytes.extend([7; CAPABILITY_LEN]);
+        hello_bytes.extend([7; 32]);
         let encode = |bytes: postcard::Result<Vec<u8>>| bytes.expect("encodes");
         assert_eq!(
             encode(postcard::to_allocvec(&ControlToBrain::Hello(hello.clone()))),
@@ -1212,7 +1212,7 @@ mod tests {
             epoch: 128,
         };
         let mut control = vec![37, 1, b'b'];
-        control.extend([7; CAPABILITY_LEN]);
+        control.extend([7; 32]);
         let message = ControlToBrain::QueuedHello(hello.clone());
         assert_eq!(postcard::to_allocvec(&message).unwrap(), control);
         assert_eq!(frame::decode::<ControlToBrain>(&control).unwrap(), message);
@@ -1440,7 +1440,7 @@ mod tests {
     fn a_full_page_of_the_longest_titles_and_choices_fits_the_page_cap() {
         let row = ThreadRow {
             id: ThreadId(u64::MAX),
-            title: "🌥".repeat(MAX_TITLE_CHARS),
+            title: "🌥".repeat(80),
             updated_ms: i64::MIN,
             kind: ThreadKind::Thread,
             choice: Some(ModelChoice {
@@ -1451,19 +1451,21 @@ mod tests {
         };
         let list = DataToShell::ThreadList {
             request: u32::MAX,
-            threads: vec![row; MAX_PAGE_ROWS],
+            threads: vec![row; 50],
             next: Some(ThreadCursor {
                 updated_ms: i64::MIN,
                 id: ThreadId(u64::MAX),
                 rank_bits: u64::MAX,
             }),
         };
-        // Per row: id, a 2-byte length and 320 bytes of title, time, kind, Some, a 1-byte length
-        // and 64 bytes of slug, effort, connection.
-        let row_len = 10 + 2 + 320 + 10 + 1 + 1 + 1 + 64 + 1 + 1;
-        let payload = payload(&list, Pipe::Data);
-        assert_eq!(payload, 1 + 5 + 1 + MAX_PAGE_ROWS * row_len + 1 + 30);
-        assert!(payload + HEADER_LEN <= MAX_PAGE_BYTES, "{payload} bytes");
+        let bytes = frame::encode(&list, Pipe::Data).unwrap();
+        assert_eq!(MAX_PAGE_ROWS, 50);
+        assert_eq!(MAX_PAGE_BYTES, 32 * 1024);
+        assert!(bytes.len() <= MAX_PAGE_BYTES);
+        assert_eq!(
+            frame::read(&mut bytes.as_slice(), Pipe::Data).unwrap(),
+            Some(list)
+        );
     }
 
     #[test]
@@ -1479,14 +1481,15 @@ mod tests {
             ],
             last: true,
         };
-        let payload = payload(&chunk, Pipe::Data);
-        // Tag, id, revision, length, then a 2-byte length and 256 bytes per label, then last.
-        assert_eq!(
-            payload,
-            1 + 10 + 5 + 1 + MAX_STEPS * (2 + MAX_STEP_LABEL) + 1
-        );
+        assert_eq!((MAX_STEPS, MAX_STEP_LABEL), (64, 256));
+        let bytes = frame::encode(&chunk, Pipe::Data).unwrap();
+        assert_eq!(DATA_WINDOW, 512 * 1024);
         let window = usize::try_from(DATA_WINDOW).expect("the window fits in usize");
-        assert!(payload + HEADER_LEN <= window, "{payload} bytes");
+        assert!(bytes.len() <= window);
+        assert_eq!(
+            frame::read(&mut bytes.as_slice(), Pipe::Data).unwrap(),
+            Some(chunk)
+        );
     }
 
     #[test]

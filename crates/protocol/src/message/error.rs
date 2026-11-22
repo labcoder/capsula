@@ -346,10 +346,16 @@ mod tests {
 
     #[test]
     fn every_key_that_decodes_is_in_all() {
-        let decoded: Vec<ErrorKey> = (0..=u8::MAX)
-            .filter_map(|tag| postcard::from_bytes(&[tag]).ok())
+        use std::collections::HashSet;
+        use std::mem::discriminant;
+
+        let decoded: Vec<ErrorKey> = (0..=u32::from(u8::MAX))
+            .filter_map(|tag| postcard::from_bytes(&postcard::to_allocvec(&tag).unwrap()).ok())
             .collect();
-        assert!(decoded.iter().all(|key| ErrorKey::ALL.contains(key)));
-        assert_eq!(decoded.len(), ErrorKey::ALL.len());
+        let actual: HashSet<_> = decoded.iter().map(discriminant).collect();
+        let expected: HashSet<_> = ErrorKey::ALL.iter().map(discriminant).collect();
+        assert_eq!(actual.len(), decoded.len(), "duplicate decoded key");
+        assert_eq!(expected.len(), ErrorKey::ALL.len(), "duplicate catalog key");
+        assert_eq!(actual, expected);
     }
 }
