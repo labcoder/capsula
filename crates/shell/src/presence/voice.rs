@@ -77,6 +77,7 @@ enum FailureReason {
     StaleReceipt,
     PointerUnread,
     ScreenReleaseSend,
+    Paused,
 }
 
 #[cfg(test)]
@@ -993,6 +994,13 @@ impl Presence {
             }
             return;
         };
+        // Onboarding paused holds after this one's delivery was queued: it ends quietly.
+        if self.voice.paused.get() {
+            tracing::debug!(stage = ?FailureStage::Admission, reason = ?FailureReason::Paused, "held speech input refused");
+            self.unused_voice(&token, self.session.as_ref());
+            self.link.clear_input(gesture);
+            return;
+        }
         let queued =
             self.link.audio_session() == kumochi_protocol::message::AudioSession::QueuedRequired;
         let settings = self.settings.read(cx);

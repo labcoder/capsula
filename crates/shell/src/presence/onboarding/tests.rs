@@ -1648,3 +1648,38 @@ fn press(window: AnyWindowHandle, keys: &str, cx: &mut TestAppContext) {
     }
     frame.run_until_parked();
 }
+
+/// A hold recognised just before the window opened, but applied only after it paused holds,
+/// ends quietly: no hold, no microphone and no failure notice.
+#[gpui::test]
+fn a_hold_applied_after_onboarding_opens_ends_without_a_failure_notice(cx: &mut TestAppContext) {
+    let (owner, _data, _controls) = ready(cx);
+    let token = owner.update(cx, |owner, cx| {
+        crate::presence::voice_wiring_tests::gate(owner, 2, cx);
+        let token = owner
+            .link
+            .microphone_gate()
+            .arm(GestureId(2))
+            .expect("fresh hold");
+        owner.link.track_input(GestureId(2));
+        token
+    });
+    open_over(&owner, cx);
+    owner.update(cx, |owner, cx| {
+        let stamp = crate::presence::voice::Stamp {
+            target: owner.voice.target.get(),
+            session: owner.session.as_ref().map_or(1, Session::generation),
+            choice: owner.link.choice_revision(),
+        };
+        let recognized = crate::input::hold::Intent::Recognized {
+            gesture: GestureId(2),
+            generation: Ok(token.clone()),
+        };
+        let held = crate::input::TalkHeld::default();
+        owner.voice_intent(recognized, stamp, 0, None, held, cx);
+        assert!(owner.voice.pending.is_none());
+        assert_eq!(owner.voice.status, None);
+    });
+    cx.run_until_parked();
+    assert!(token.retired());
+}
