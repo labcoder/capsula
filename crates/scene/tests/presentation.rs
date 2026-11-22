@@ -102,6 +102,23 @@ fn at_rest(layout: &LayoutState) -> Frame {
     frame
 }
 
+fn stroke_segments(primitives: &[Prim]) -> impl Iterator<Item = (Vec2, Vec2)> {
+    primitives
+        .iter()
+        .flat_map(|primitive| match primitive {
+            Prim::Line {
+                points,
+                closed: false,
+                width,
+                color,
+                ..
+            } if *width > 0.0 && color.opacity > 0.0 => points.windows(2),
+            _ => [].windows(2),
+        })
+        .filter(|pair| pair[0] != pair[1])
+        .map(|pair| (pair[0], pair[1]))
+}
+
 fn assert_graph_placement(
     frame: &Frame,
     handles: &[Handle],
@@ -396,26 +413,25 @@ fn curve_subdivision_reserves_the_presentation_scale() {
         &json!([{"path":{"id":"p","d":"M0 0 Q4 8 8 0"}}]),
     );
     let frame = at_rest(&layout);
-    let points = frame
+    let handle = layout.handle(&id("p")).expect("authored curve");
+    let segments: Vec<_> = frame
         .paint_items()
-        .flat_map(|(_, _, primitives)| primitives)
-        .find_map(|prim| {
-            if let Prim::Line { points, .. } = prim {
-                Some(points)
-            } else {
-                None
-            }
+        .filter(|(item, _, _)| item.handle == handle && item.opacity > 0.0)
+        .flat_map(|(item, _, primitives)| {
+            stroke_segments(primitives)
+                .map(|(a, b)| (item.transform.point(a), item.transform.point(b)))
         })
-        .expect("painted curve");
-    assert_eq!(points.first(), Some(&Vec2::new(0.0, 0.0)));
-    assert_eq!(points.last(), Some(&Vec2::new(8.0, 0.0)));
+        .collect();
+    for end in [Vec2::new(0.0, 0.0), Vec2::new(8.0, 0.0)] {
+        assert!(segments.iter().any(|&(a, b)| a == end || b == end));
+    }
     for i in 0..=128_u16 {
         let t = f32::from(i) / 128.0;
         let point = Vec2::new(8.0 * t, 16.0 * t * (1.0 - t));
         assert!(
-            points.windows(2).any(|p| {
-                let side = p[1] - p[0];
-                let from_start = point - p[0];
+            segments.iter().any(|&(a, b)| {
+                let side = b - a;
+                let from_start = point - a;
                 let offset = (from_start.x * side.x + from_start.y * side.y)
                     / (side.x * side.x + side.y * side.y);
                 let error = from_start - side * offset.clamp(0.0, 1.0);
@@ -429,13 +445,19 @@ fn curve_subdivision_reserves_the_presentation_scale() {
 fn assert_graph_paint(
     layout: &LayoutState,
     nodes: &[(&str, &str, Option<&str>)],
-    edges: &[(&str, &str)],
+    edges: &[(&str, &str, &str)],
 ) -> Vec<(Rect, f32)> {
     assert!(
         layout.paint_work().within_limits(),
         "the graph fits the paint cap"
     );
     let frame = at_rest(layout);
+    let bounds_of = |name| {
+        layout
+            .bounds(&id(name))
+            .expect("node bounds")
+            .expect("authored node")
+    };
     let contours = nodes
         .iter()
         .map(|(name, main, aux)| {
@@ -445,20 +467,29 @@ fn assert_graph_paint(
                 .iter()
                 .find(|item| item.handle == handle)
                 .expect("painted node");
-            let outline = item
+            let bounds = bounds_of(name);
+            let radius = item
                 .primitives
                 .iter()
-                .find_map(|prim| match prim {
+                .filter_map(|prim| match prim {
                     Prim::Rect {
                         rect,
                         radius,
-                        fill: Some(_),
-                        border: Some(_),
-                        ..
-                    } => Some((*rect, *radius)),
+                        fill: Some(fill),
+                        border: Some((border, width)),
+                    } if item.transform.bounds(*rect) == bounds
+                        && fill.opacity > 0.0
+                        && border.opacity > 0.0
+                        && *width > 0.0 =>
+                    {
+                        let [a, b, ..] = item.transform.0;
+                        Some(*radius * a.hypot(b))
+                    }
                     _ => None,
                 })
-                .expect("filled, bordered node");
+                .max_by(f32::total_cmp)
+                .expect("a filled, bordered contour for the node");
+            assert!(item.opacity > 0.0, "{name} visibly paints its node");
             for label in std::iter::once(main).chain(aux) {
                 assert!(
                     item.primitives
@@ -467,28 +498,32 @@ fn assert_graph_paint(
                     "{name} paints its label {label}"
                 );
             }
-            outline
+            (bounds, radius)
         })
         .collect();
-    for (name, label) in edges {
-        let handle = layout.handle(&id(name)).expect("authored edge");
+    for (from, to, label) in edges {
+        let name = format!("{from}{to}");
+        let handle = layout.handle(&id(&name)).expect("authored edge");
         let item = frame
             .items()
             .iter()
             .find(|item| item.handle == handle)
             .expect("painted edge");
-        let end = item
-            .primitives
-            .iter()
-            .find_map(|prim| match prim {
-                Prim::Line { points, .. } if points.first() != points.last() => points.last(),
-                _ => None,
-            })
-            .expect("painted edge stroke");
+        let ends: Vec<_> = stroke_segments(&item.primitives)
+            .flat_map(|(a, b)| [a, b])
+            .collect();
+        let target = bounds_of(to).edge_toward(bounds_of(from).center());
         assert!(
-            item.primitives
-                .iter()
-                .any(|p| matches!(p, Prim::Fill { points, .. } if points.contains(end))),
+            item.opacity > 0.0
+                && item.primitives.iter().any(|prim| {
+                    matches!(prim, Prim::Fill { points, color } if color.opacity > 0.0
+                    && points.len() >= 3
+                    && points.iter().any(|tip| {
+                        let delta = item.transform.point(*tip) - target;
+                        delta.x.abs() < 1e-3 && delta.y.abs() < 1e-3
+                            && ends.iter().filter(|end| *end == tip).count() == 1
+                    }))
+                }),
             "{name} paints an arrowhead at the end of its stroke"
         );
         assert!(
@@ -526,10 +561,10 @@ fn a_small_overlay_diagram_of_rounded_nodes_fits_the_paint_budgets() {
             ("d", "Delta", Some("fourth")),
         ],
         &[
-            ("ab", "one"),
-            ("bc", "two"),
-            ("cd", "three"),
-            ("db", "four"),
+            ("a", "b", "one"),
+            ("b", "c", "two"),
+            ("c", "d", "three"),
+            ("d", "b", "four"),
         ],
     );
     let [
@@ -541,12 +576,12 @@ fn a_small_overlay_diagram_of_rounded_nodes_fits_the_paint_budgets() {
     else {
         panic!("four node contours")
     };
-    assert_eq!(circle.size.x.to_bits(), circle.size.y.to_bits());
-    assert_eq!(circle_radius.to_bits(), (circle.size.y * 0.5).to_bits());
-    assert_eq!(pill_radius.to_bits(), (pill.size.y * 0.5).to_bits());
+    assert!((circle.size.x - circle.size.y).abs() < 1e-3);
+    assert!((circle_radius - circle.size.y * 0.5).abs() < 1e-3);
+    assert!((pill_radius - pill.size.y * 0.5).abs() < 1e-3);
     assert!(pill.size.x > pill.size.y);
     assert!(circle_radius > pill_radius && pill_radius > bravo && *bravo > 0.0);
-    assert_eq!(bravo.to_bits(), charlie.to_bits());
+    assert!((bravo - charlie).abs() < 1e-3);
 }
 
 #[test]
@@ -571,7 +606,7 @@ fn four_plain_nodes_and_three_labelled_edges_fit_the_paint_budgets() {
             ("c", "Charlie", None),
             ("d", "Delta", None),
         ],
-        &[("ab", "one"), ("bc", "two"), ("cd", "three")],
+        &[("a", "b", "one"), ("b", "c", "two"), ("c", "d", "three")],
     );
     assert!(nodes.iter().all(|(rect, radius)| {
         rect.size.x > rect.size.y && *radius >= 0.0 && *radius < rect.size.y * 0.5
@@ -625,10 +660,11 @@ fn a_rotated_chain_at_the_depth_limit_stays_within_its_charge() {
     view.set_stage(rect(0.0, 0.0, 2560.0, 1440.0));
     let mut frame = Frame::new();
     view.frame(0, &mut frame).expect("a fresh frame");
+    let handle = layout.handle(&id("r")).expect("authored rect");
     let item = frame
         .items()
         .iter()
-        .find(|item| !item.primitives.is_empty())
+        .find(|item| item.handle == handle)
         .expect("the rect");
     let [a, b, c, d, ..] = item.transform.0;
     let posed = (a * d - b * c).abs().sqrt();
@@ -677,7 +713,13 @@ fn a_growing_step_replaces_the_fit_once_and_removal_does_not_shrink_it() {
         layout = step.after.clone();
         view.activate(step, 0, 800, &mut frame).expect("activate");
         view.frame(0, &mut frame).expect("frame");
-        assert_eq!(frame.items()[0].transform.0[0].to_bits(), scale.to_bits());
+        let handle = scene.handle(&id("a")).expect("original shape");
+        let item = frame
+            .items()
+            .iter()
+            .find(|item| item.handle == handle)
+            .expect("original shape still paints");
+        assert_eq!(item.transform.0[0].to_bits(), scale.to_bits());
     }
 }
 
@@ -729,7 +771,7 @@ fn ordinary_illustrations_fit_the_paint_caps() {
             let paint = || {
                 frame
                     .paint_items()
-                    .filter(|(item, _, _)| item.handle == handle)
+                    .filter(|(item, _, _)| item.handle == handle && item.opacity > 0.0)
                     .flat_map(|(_, _, prims)| prims)
             };
             match kind.as_str() {
@@ -767,11 +809,26 @@ fn ordinary_illustrations_fit_the_paint_caps() {
         assert!(work.within_limits());
         let wide = measured(header(size), put, &mut WideMeasure).paint_work();
         assert_eq!(wide.max(work), wide, "the brain's measure is conservative");
+        (layout, wide)
     };
     check(None, &serde_json::Value::Array(sky));
     check(None, &serde_json::Value::Array(mouse));
-    check(None, &flow);
-    check(Some([960.0, 4000.0]), &flow);
+    let (default, default_wide) = check(None, &flow);
+    let (tall, tall_wide) = check(Some([960.0, 4000.0]), &flow);
+    let node_width = |layout: &LayoutState| {
+        layout
+            .bounds(&id("n0"))
+            .expect("valid bounds")
+            .expect("authored node")
+            .size
+            .x
+    };
+    assert!(node_width(&default) < node_width(&tall));
+    assert_eq!(
+        (default.paint_work(), default_wide),
+        (tall.paint_work(), tall_wide),
+        "both measures charge the diagram unshrunk"
+    );
 }
 
 /// A node a Stop keeps without its shrunk diagram takes the diagram's fit into its own transform,

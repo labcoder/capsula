@@ -452,6 +452,42 @@ mod tests {
     use crate::display::TextMeasure;
     use crate::{display::Prim, theme::Theme};
     use std::{collections::BTreeMap, sync::atomic::AtomicBool};
+
+    fn label_ink(drawing: &Drawing) -> impl Iterator<Item = (&str, Rect)> {
+        drawing.output.iter().filter_map(|p| {
+            let Prim::Text {
+                origin,
+                text,
+                style,
+                color,
+                max_width,
+                align,
+            } = p
+            else {
+                return None;
+            };
+            if color.opacity <= 0.0 || text.as_str().is_empty() {
+                return None;
+            }
+            let [width, height] = Measure
+                .measure(text.as_str(), *style, *max_width)
+                .expect("label measurement");
+            let spare = max_width.unwrap_or(width) - width;
+            let offset = match align {
+                Align::Left => 0.0,
+                Align::Center => spare * 0.5,
+                Align::Right => spare,
+            };
+            Some((
+                text.as_str(),
+                Rect {
+                    origin: *origin + Vec2::new(offset, 0.0),
+                    size: Vec2::new(width, height),
+                },
+            ))
+        })
+    }
+
     #[test]
     fn seven_tick_windows_keep_the_upper_tick() {
         for log in [false, true] {
@@ -470,7 +506,7 @@ mod tests {
     #[test]
     fn explicit_log_window_without_a_decade_has_no_y_labels() {
         let chart: Chart = serde_json::from_str(
-            r#"{"id":"c","box":[0,0,400,300],"kind":"line","y":{"min":2,"max":8,"scale":"log"}}"#,
+            r#"{"id":"c","box":[0,0,400,300],"kind":"line","x":{"unit":"x"},"y":{"min":2,"max":8,"scale":"log"}}"#,
         )
         .expect("chart");
         let series: Series = serde_json::from_str(r#"{"id":"s","data":[2,8]}"#).expect("series");
@@ -493,18 +529,11 @@ mod tests {
         ] {
             assert!((plot.at(0.0, value).y - y).abs() < 1e-4);
         }
-        assert_eq!(
-            out.output
-                .iter()
-                .filter(|p| matches!(
-                    p,
-                    Prim::Text {
-                        align: Align::Right,
-                        ..
-                    }
-                ))
-                .count(),
-            0
+        let mut labels = label_ink(&out).peekable();
+        assert!(labels.peek().is_some(), "X ticks are still labeled");
+        assert!(
+            labels.all(|(text, ink)| text.ends_with('x') && ink.origin.y > frame.max().y),
+            "only X tick labels appear"
         );
     }
 
@@ -526,28 +555,15 @@ mod tests {
         };
         let (plot, out) = header(&chart, &[&series], &mut build).expect("header");
         for (label, right) in [("1.0e-6", false), ("1M", true)] {
-            let mut labels = out.output.iter().filter_map(|p| match p {
-                Prim::Text {
-                    origin,
-                    text,
-                    style,
-                    max_width,
-                    align: Align::Center,
-                    ..
-                } if text.as_str() == label => Some((
-                    origin.x,
-                    Measure
-                        .measure(text.as_str(), *style, *max_width)
-                        .expect("label measurement")[0],
-                )),
-                _ => None,
-            });
-            let (x, width) = labels.next().expect("edge decade label");
+            let mut labels =
+                label_ink(&out).filter_map(|(text, ink)| (text == label).then_some(ink));
+            let ink = labels.next().expect("edge decade label");
             assert_eq!(labels.next(), None, "each edge decade is only painted once");
+            assert!(ink.origin.y > plot.frame.max().y, "{label} below the plot");
             let (edge, expected) = if right {
-                (x + width, plot.frame.max().x)
+                (ink.max().x, plot.frame.max().x)
             } else {
-                (x, plot.frame.origin.x)
+                (ink.origin.x, plot.frame.origin.x)
             };
             assert!((edge - expected).abs() < 1e-4, "{label} at the plot edge");
         }
@@ -652,7 +668,7 @@ mod tests {
         assert_eq!(range.fraction(1.0).to_bits(), 0.0_f32.to_bits());
         assert_eq!(range.fraction(10.0).to_bits(), 1.0_f32.to_bits());
         let chart: Chart = serde_json::from_str(
-            r#"{"id":"c","box":[0,0,400,300],"kind":"line","y":{"min":1,"max":100,"scale":"log"}}"#,
+            r#"{"id":"c","box":[0,0,400,300],"kind":"line","x":{"unit":"x"},"y":{"min":1,"max":100,"scale":"log"}}"#,
         )
         .expect("chart");
         let series: Series =
@@ -667,39 +683,23 @@ mod tests {
             screen: None,
         };
         let (plot, out) = header(&chart, &[&series], &mut build).expect("header");
-        let labels: Vec<_> = out
-            .output
-            .iter()
-            .filter_map(|p| match p {
-                Prim::Text {
-                    origin,
-                    text,
-                    style,
-                    max_width,
-                    align: Align::Right,
-                    ..
-                } => {
-                    let height = Measure
-                        .measure(text.as_str(), *style, *max_width)
-                        .expect("label measurement")[1];
-                    Some((text.as_str(), origin.y + height * 0.5))
-                }
-                _ => None,
-            })
-            .collect();
         let frame = plot.frame;
+        let labels: Vec<_> = label_ink(&out)
+            .filter(|&(text, _)| !text.ends_with('x'))
+            .collect();
         assert_eq!(labels.len(), 3);
         for (label, expected) in [
             ("1", frame.max().y),
             ("10", frame.center().y),
             ("100", frame.origin.y),
         ] {
-            let &(_, centre) = labels
+            let &(_, ink) = labels
                 .iter()
                 .find(|&&(text, _)| text == label)
                 .expect("decade label");
+            assert!(ink.max().x < frame.origin.x, "decade label in the Y gutter");
             assert!(
-                (centre - expected).abs() < 1e-4,
+                (ink.center().y - expected).abs() < 1e-4,
                 "decade label centred on its tick"
             );
         }

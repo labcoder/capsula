@@ -334,6 +334,12 @@ fn the_first_appearance_is_the_earliest_object_the_step_put_with_something_to_pa
         "the child appears with its word-timed, delayed parent; the carried rectangle doesn't count"
     );
     assert!(item(&view, 3017, "child").is_none_or(|child| child.opacity <= 0.0));
+    let child = handle(&view, "child");
+    assert!(
+        sample(&view, 3019)
+            .paint_items()
+            .any(|(item, _, _)| item.handle == child && item.opacity > 0.0)
+    );
     activate(
         &mut scene,
         &mut budget,
@@ -350,7 +356,7 @@ fn the_first_appearance_is_the_earliest_object_the_step_put_with_something_to_pa
         &mut view,
         json!({"id":"group","put":[
             {"diagram":{"id":"e","delay":100}},
-            {"shape":{"id":"inner","in":"e","kind":"rect","box":[0,0,8,8],"delay":300}}
+            {"shape":{"id":"inner","in":"e","kind":"rect","box":[0,0,8,8],"delay":300,"enter":"none"}}
         ]}),
         0,
     );
@@ -364,11 +370,11 @@ fn the_first_appearance_is_the_earliest_object_the_step_put_with_something_to_pa
             .paint_items()
             .all(|(item, _, _)| item.opacity <= 0.0)
     );
+    let inner = handle(&view, "inner");
     assert!(
-        item(&view, 500, "inner")
-            .expect("visible after entering")
-            .opacity
-            > 0.0
+        sample(&view, 300)
+            .paint_items()
+            .any(|(item, _, _)| item.handle == inner && item.opacity > 0.0)
     );
 }
 
@@ -528,7 +534,10 @@ fn step_and_numeric_debug_do_not_expose_drawing_arguments() {
         }
     }
     let debug = format!("{step:?}");
-    assert!(!debug.contains("23456") && !debug.contains("56789"));
+    assert!(
+        !debug.contains("23456") && !debug.contains("56789"),
+        "the Step summary omits raw word and repeat metadata"
+    );
 }
 
 #[test]
@@ -1461,7 +1470,7 @@ fn an_installed_stage_carries_the_live_and_delayed_tracks_it_does_not_replace() 
         "the running x track keeps its own clock"
     );
     assert_eq!(
-        times.map(|now| pose(&view, now).1.expect("color override").rgb.get()),
+        times.map(|now| outline_rgb(&item(&view, now, "s").expect("shape"))),
         [0xff_00_00, 0x80_00_80, 0x00_00_ff],
         "the delayed color carries through its hold"
     );
@@ -1672,6 +1681,12 @@ fn removing_compiled_objects_releases_the_empty_private_fact_index() {
     );
 }
 
+fn rect_handle(layout: &LayoutState, index: usize) -> Handle {
+    layout
+        .handle(&id(&format!("r{index}")))
+        .expect("authored rectangle")
+}
+
 #[test]
 fn removed_recovered_and_cut_prefixes_hold_no_more_than_their_charges() {
     let within_charge = |case, held, charged| {
@@ -1725,23 +1740,12 @@ fn removed_recovered_and_cut_prefixes_hold_no_more_than_their_charges() {
         .expect("recovery");
         layout
     });
-    let survivors = (200..256)
-        .map(|n| {
-            shapes
-                .after
-                .handle(&id(&format!("r{n}")))
-                .expect("authored rectangle")
-        })
-        .collect();
-    let survivors = sorted(survivors);
+    let survivors = sorted((200..256).map(|n| rect_handle(&shapes.after, n)).collect());
     for layout in [&recovered, &removal.after] {
         assert_eq!(sorted(layout.revealed_at_rest()), survivors);
     }
     within_charge("recovered prefix", held, recovered.resident_bytes());
-    let survivors: Vec<_> = (0..256)
-        .step_by(2)
-        .map(|slot| Handle::new(1, slot).expect("authored even slot"))
-        .collect();
+    let mut survivors = Vec::with_capacity(128);
     let (kept, held) = holding(|| {
         let mut budget = GlobalBudget::default();
         let mut scene = new_scene("cut");
@@ -1758,6 +1762,7 @@ fn removed_recovered_and_cut_prefixes_hold_no_more_than_their_charges() {
             &shapes.after,
             json!({"id":"tracks","put":tracks()}),
         );
+        survivors.extend((0..256).step_by(2).map(|n| rect_handle(&tracked.after, n)));
         scene
             .stop(
                 &StopCut {
@@ -1769,8 +1774,13 @@ fn removed_recovered_and_cut_prefixes_hold_no_more_than_their_charges() {
             .expect("valid cut");
         tracked.after.cut(&scene).expect("kept prefix")
     });
+    survivors.sort_unstable();
     assert_eq!(sorted(kept.revealed_at_rest()), survivors);
     assert_eq!(sorted(SceneView::new(&kept, 2).stop(0)), survivors);
+    for index in 0..256 {
+        let name = format!("r{index}");
+        assert_eq!(kept.handle(&id(&name)).is_some(), index % 2 == 0, "{name}");
+    }
     within_charge("sole-owner cut prefix", held, kept.resident_bytes());
 }
 

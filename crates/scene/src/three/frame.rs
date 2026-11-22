@@ -453,11 +453,11 @@ mod tests {
         let extrusion = r#"{"solid":{"in":"v","id":"s","shape":"extrude","points":[[-6000,-5999],[1.001,2.001],[0,1]],"depth":1}}"#;
         let scaled = r#"{"solid":{"in":"v","id":"p","shape":"box","size":[2,2,2],"pos":[10,0,0],"scale":2}},
             {"solid":{"in":"v","id":"c","shape":"box","size":[2,2,2],"attach":"p","pos":[1,0,0],"scale":1.5}}"#;
-        for (name, put) in [
-            ("six", six),
-            ("tube", tube),
-            ("extrusion", extrusion),
-            ("scaled", scaled),
+        for (name, put, visible) in [
+            ("six", six, 12),
+            ("tube", tube, 6),
+            ("extrusion", extrusion, 3),
+            ("scaled", scaled, 12),
         ] {
             let geometry = prepared(put);
             assert!(!geometry.failed, "{name}");
@@ -520,7 +520,11 @@ mod tests {
                 &AtomicBool::new(false),
             )
             .unwrap();
-            assert!(!out.is_empty(), "{name} has visible fragments");
+            assert_eq!(
+                out.len(),
+                visible,
+                "{name} projects all surviving triangles"
+            );
         }
     }
 
@@ -545,28 +549,44 @@ mod tests {
         let light = Light::new([0.0, 0.0, -1.0], 0.0).unwrap();
         let mut out = FrameScratch::with_capacity(2049);
         let cancel = AtomicBool::new(true);
-        let mut skip = 0;
-        loop {
+        let mut first_partial = None;
+        let mut previous = 0;
+        let mut completed = false;
+        let preamble_allowance = 16 + vertices.len() + 3 * triangles.len();
+        for skip in 0..=preamble_allowance + triangles.len() {
             out.clear();
             SKIP_POLLS.with(|n| n.set(skip));
             let result = build(&solids, &camera, &light, [8, 8], &mut out, &cancel);
             SKIP_POLLS.with(|n| n.set(0));
+            let emitted = out.len();
+            assert!(
+                (previous..=previous + 1024).contains(&emitted),
+                "triangle work advanced from {previous} to {emitted} without polling"
+            );
+            previous = emitted;
+            if result.is_ok() {
+                assert_eq!(
+                    emitted,
+                    triangles.len(),
+                    "every fixture triangle is visible"
+                );
+                completed = true;
+                break;
+            }
             assert_eq!(
                 result,
                 Err(FrameError::Cancelled),
                 "cancellation must reach the triangle loop"
             );
-            if !out.is_empty() {
-                break;
+            if emitted != 0 {
+                first_partial.get_or_insert(skip);
             }
-            skip += 1;
         }
         assert!(
-            out.len() <= 1024,
-            "the first triangle quantum emitted {} fragments",
-            out.len()
+            completed,
+            "bypassing all frame polls must finish the fixture"
         );
-        SKIP_POLLS.with(|n| n.set(skip));
+        SKIP_POLLS.with(|n| n.set(first_partial.expect("cancellation after triangle work")));
         let result = frame(&solids, &camera, &light, [8, 8], &mut out, &cancel);
         SKIP_POLLS.with(|n| n.set(0));
         assert_eq!(result, Err(FrameError::Cancelled));

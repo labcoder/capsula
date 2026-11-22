@@ -95,6 +95,75 @@ fn cut(revision: u32, handles: Vec<Handle>) -> StopCut {
     }
 }
 
+fn assert_polygon_picture(picture: &LayoutState, revision: u32) {
+    let expected = Handle::new(revision, 0).expect("polygon handle");
+    assert_eq!(
+        picture.revision(),
+        revision,
+        "the ticket prepares the requested revision"
+    );
+    assert_eq!(
+        picture.handle(&id("p")),
+        Some(expected),
+        "the ticket publishes the polygon"
+    );
+    let bounds = picture
+        .bounds(&id("p"))
+        .expect("valid bounds")
+        .expect("polygon");
+    assert_eq!(
+        bounds.size,
+        Vec2::new(40.0, 30.0),
+        "the polygon keeps its authored dimensions"
+    );
+    let item = picture
+        .items()
+        .into_iter()
+        .find(|item| item.handle == expected)
+        .expect("painted polygon");
+    let fills: Vec<Vec<Vec2>> = item
+        .primitives
+        .iter()
+        .filter_map(|prim| match prim {
+            Prim::Fill { points, color } if color.opacity > 0.0 => {
+                Some(points.iter().map(|p| item.transform.point(*p)).collect())
+            }
+            _ => None,
+        })
+        .collect();
+    for vertex in [
+        Vec2::new(0.0, 0.0),
+        Vec2::new(40.0, 0.0),
+        Vec2::new(20.0, 30.0),
+    ] {
+        assert!(
+            fills.iter().any(|points| points.contains(&vertex)),
+            "the polygon paints its authored vertex {vertex:?}"
+        );
+    }
+    for point in [
+        Vec2::new(10.0, 5.0),
+        Vec2::new(20.0, 14.0),
+        Vec2::new(30.0, 5.0),
+    ] {
+        assert!(
+            fills.iter().any(|points| {
+                points
+                    .iter()
+                    .zip(points.iter().cycle().skip(1))
+                    .filter(|(a, b)| {
+                        (a.y > point.y) != (b.y > point.y)
+                            && point.x < a.x + (b.x - a.x) * (point.y - a.y) / (b.y - a.y)
+                    })
+                    .count()
+                    % 2
+                    != 0
+            }),
+            "the polygon paints its interior at {point:?}"
+        );
+    }
+}
+
 #[test]
 fn a_preview_is_the_ticket_its_commit_returns_and_refuses_a_stale_candidate() {
     let mut global = GlobalBudget::default();
@@ -121,29 +190,7 @@ fn a_preview_is_the_ticket_its_commit_returns_and_refuses_a_stale_candidate() {
     let first = old.commit(first, &mut global).expect("first commit");
     let before = prepare_ticket(first.preparation, layout);
     let prepares_polygon = |ticket, layout, revision| {
-        let picture = prepare_ticket(ticket, layout);
-        let expected = Handle::new(revision, 0).expect("polygon handle");
-        assert_eq!(picture.revision(), revision);
-        assert_eq!(picture.handle(&id("p")), Some(expected));
-        let bounds = picture
-            .bounds(&id("p"))
-            .expect("valid bounds")
-            .expect("polygon");
-        assert_eq!(bounds.size, Vec2::new(40.0, 30.0));
-        let item = picture
-            .items()
-            .into_iter()
-            .find(|item| item.handle == expected)
-            .expect("painted polygon");
-        for vertex in [
-            Vec2::new(0.0, 0.0),
-            Vec2::new(40.0, 0.0),
-            Vec2::new(20.0, 30.0),
-        ] {
-            assert!(item.primitives.iter().any(|prim| {
-                matches!(prim, Prim::Fill { points, .. } if points.iter().any(|p| item.transform.point(*p) == vertex))
-            }), "the polygon paints its authored vertex {vertex:?}");
-        }
+        assert_polygon_picture(&prepare_ticket(ticket, layout), revision);
     };
     let ops =
         json!([{"shape":{"id":"p","kind":"polygon","fill":"red","points":[[0,0],[40,0],[20,30]]}}]);
@@ -1435,6 +1482,14 @@ fn delay_generated_motion_foreign_admission_and_replay_batch_limits_are_checked(
         vec![json!({"edge":{"id":"e","in":"d","from":"a","to":"b","flow":100}})],
     );
     assert_eq!((budget.usage().tracks, budget.usage().keys), (0, 0));
+    assert!(matches!(
+        candidate(
+            &state,
+            &budget,
+            json!({"id":"exact","put":[{"anim":{"target":"a","track":"opacity","repeat":1,"keys":[[0,0],[30000,1]]}}]})
+        ),
+        Ok(Admission::New(_))
+    ));
     let error = rejected(
         &state,
         &budget,

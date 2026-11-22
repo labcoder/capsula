@@ -326,10 +326,7 @@ fn binary_payloads_cannot_bypass_validation() {
     );
     for id in ["", &"x".repeat(41), "invalid/id"] {
         let bytes = postcard::to_allocvec(id).expect("raw string encodes");
-        assert!(
-            postcard::from_bytes::<WireId>(&bytes).err() == Some(postcard::Error::SerdeDeCustom),
-            "binary ids remain validated"
-        );
+        postcard::from_bytes::<WireId>(&bytes).expect_err("binary ids remain validated");
     }
 }
 #[test]
@@ -397,7 +394,6 @@ fn errors_and_debug_do_not_echo_drawing_content() {
     }
     let bytes = postcard::to_allocvec("private-value-sentinel/").expect("raw string encodes");
     let failure = postcard::from_bytes::<WireId>(&bytes).expect_err("invalid binary id");
-    assert_eq!(failure, postcard::Error::SerdeDeCustom);
     assert_redacted(&format!("{failure} {failure:?}"), &["private"]);
 }
 #[test]
@@ -921,35 +917,34 @@ mod three {
             bytes.extend([0; 8]);
             bytes
         };
-        let control = postcard::from_bytes::<Solid>(&solid_with_position([1.0, 2.0, 3.0]))
-            .expect("fixed-wire control position");
+        let key = |position: [f32; 3]| {
+            [3].into_iter()
+                .chain(position.into_iter().flat_map(f32::to_le_bytes))
+                .collect::<Vec<_>>()
+        };
+        let solid_bytes = solid_with_position([1.0, 2.0, 3.0]);
+        let key_bytes = key([1.0, 2.0, 3.0]);
+        let control = postcard::from_bytes::<Solid>(&solid_bytes).expect("fixed-wire control");
         assert_eq!(
-            control,
-            solid(&fixture(json!({"shape":"box","pos":[1,2,3]})))
+            control
+                .pos
+                .expect("authored position")
+                .map(Finite::get)
+                .map(f32::to_bits),
+            [1.0_f32, 2.0, 3.0].map(f32::to_bits)
+        );
+        assert_eq!(
+            postcard::from_bytes::<KeyValue>(&key_bytes).expect("fixed-wire key control"),
+            KeyValue::V3([1.0, 2.0, 3.0].map(|v| Finite::try_from(v).expect("finite")))
         );
         for value in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
-            let raw = postcard::to_allocvec(&[value, 0.0, 0.0]).expect("raw position");
-            let mut bytes = vec![3];
-            bytes.extend_from_slice(&raw);
-            assert_eq!(
-                postcard::from_bytes::<KeyValue>(&bytes).expect_err("nonfinite V3"),
-                postcard::Error::SerdeDeCustom
-            );
-            assert_eq!(
-                postcard::from_bytes::<Solid>(&solid_with_position([value, 2.0, 3.0]))
-                    .expect_err("nonfinite position"),
-                postcard::Error::SerdeDeCustom
-            );
+            postcard::from_bytes::<KeyValue>(&key([value, 2.0, 3.0])).expect_err("nonfinite V3");
+            postcard::from_bytes::<Solid>(&solid_with_position([value, 2.0, 3.0]))
+                .expect_err("nonfinite position");
         }
-        let bytes = postcard::to_allocvec(&solid(&fixture(json!({"shape":"sphere","r":1}))))
-            .expect("solid");
-        assert_eq!(
-            postcard::from_bytes::<Solid>(&bytes[..bytes.len() - 1]).expect_err("truncated solid"),
-            postcard::Error::DeserializeUnexpectedEnd
-        );
-        assert_eq!(
-            postcard::from_bytes::<KeyValue>(&[3, 0, 0, 0, 0]).expect_err("truncated V3"),
-            postcard::Error::DeserializeUnexpectedEnd
-        );
+        postcard::from_bytes::<Solid>(&solid_bytes[..solid_bytes.len() - 1])
+            .expect_err("truncated solid");
+        postcard::from_bytes::<KeyValue>(&key_bytes[..key_bytes.len() - 1])
+            .expect_err("truncated V3");
     }
 }

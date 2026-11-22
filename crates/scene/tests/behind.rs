@@ -624,19 +624,25 @@ fn a_behind_id_is_never_given_to_a_generated_mermaid_object() {
         panic!("new graph");
     };
     let committed = control.commit(admitted, &mut budget).expect("committed");
-    let generated = committed
+    let generated: Vec<_> = committed
         .handles
         .iter()
-        .find(|(id, _)| !matches!(id.as_str(), "target" | "A"))
-        .expect("unnamed Mermaid root");
-    let mut referenced = graph;
-    referenced["set"] = json!([{"target":"c1","behind":generated.0.as_str()}]);
-    refused(
-        &[cloud()],
-        &referenced,
-        ErrorCode::UnknownRef,
-        "set[0].behind",
+        .filter(|(id, _)| !matches!(id.as_str(), "target" | "A"))
+        .collect();
+    assert!(
+        !generated.is_empty(),
+        "the fixture creates an unnamed Mermaid root"
     );
+    let mut referenced = graph;
+    for (generated, _) in generated {
+        referenced["set"] = json!([{"target":"c1","behind":generated.as_str()}]);
+        refused(
+            &[cloud()],
+            &referenced,
+            ErrorCode::UnknownRef,
+            "set[0].behind",
+        );
+    }
 }
 
 #[test]
@@ -651,6 +657,7 @@ fn a_stored_step_written_before_behind_existed_still_decodes() {
         (*revision, step.id.as_str(), &step.start),
         (3, "red", &Start::Speech)
     );
+    assert!(step.say.is_none() && step.put.is_empty() && step.remove.is_empty());
     let [change] = &step.set[..] else {
         panic!("one stored change");
     };
@@ -660,6 +667,14 @@ fn a_stored_step_written_before_behind_existed_still_decodes() {
         Some(Color::Hex(0x00FF_0000_u32.try_into().expect("red RGB")))
     );
     assert_eq!(change.behind, None);
+    assert!(
+        change.text.is_none()
+            && change.label.is_none()
+            && change.cells.is_none()
+            && change.data.is_none()
+            && change.emphasis.is_none()
+            && change.info.is_none()
+    );
     assert_eq!(
         serde_json::to_value(&event)
             .expect("JSON")

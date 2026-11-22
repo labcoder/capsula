@@ -647,8 +647,8 @@ mod tests {
                 rect,
                 fill: Some(paint),
                 ..
-            } if paint.opacity > 0.0 => Some(*rect),
-            Prim::Fill { points, color } if color.opacity > 0.0 => {
+            } if paint.opacity > 0.0 && rect.size.x > 0.0 && rect.size.y > 0.0 => Some(*rect),
+            Prim::Fill { points, color } if color.opacity > 0.0 && points.len() >= 3 => {
                 let &first = points.first()?;
                 let bounds = points
                     .iter()
@@ -660,6 +660,44 @@ mod tests {
             _ => None,
         }
     }
+
+    fn fill_at(primitives: &[Prim], at: Vec2) -> Option<Paint> {
+        primitives.iter().rev().find_map(|p| match p {
+            Prim::Rect {
+                rect,
+                radius,
+                fill: Some(paint),
+                ..
+            } if paint.opacity > 0.0 => {
+                let half = rect.size * 0.5;
+                let radius = radius.min(half.x).min(half.y);
+                let d = at - rect.center();
+                let x = d.x.abs();
+                let y = d.y.abs();
+                let dx = (x - (half.x - radius)).max(0.0);
+                let dy = (y - (half.y - radius)).max(0.0);
+                (x < half.x && y < half.y && dx * dx + dy * dy <= radius * radius).then_some(*paint)
+            }
+            Prim::Fill { points, color } if color.opacity > 0.0 => {
+                let winding = points.iter().zip(points.iter().cycle().skip(1)).fold(
+                    0,
+                    |winding, (&a, &b)| {
+                        let side = (b.x - a.x) * (at.y - a.y) - (b.y - a.y) * (at.x - a.x);
+                        if a.y <= at.y && b.y > at.y && side > 0.0 {
+                            winding + 1
+                        } else if b.y <= at.y && a.y > at.y && side < 0.0 {
+                            winding - 1
+                        } else {
+                            winding
+                        }
+                    },
+                );
+                (winding != 0).then_some(*color)
+            }
+            _ => None,
+        })
+    }
+
     fn basis(kind: ChartKind) -> Basis {
         Basis {
             plot: Arc::new(Plot {
@@ -707,7 +745,7 @@ mod tests {
             ChartKind::Pie,
         ] {
             let basis = basis(kind);
-            let mut check = |data, has_huge_value| {
+            let mut check = |data, huge_x: Option<f32>| {
                 let out = draw(&series(data), &basis, &mut build).expect("draw");
                 assert_eq!(
                     out.output.is_empty(),
@@ -715,25 +753,19 @@ mod tests {
                     "{kind:?} {data}: only empty data has no drawing"
                 );
                 assert!(out.bounds.within_canvas(), "{kind:?} {data} bounds");
-                if has_huge_value && kind != ChartKind::Pie {
+                if let Some(x) = huge_x.filter(|_| kind != ChartKind::Pie) {
+                    let at = Vec2::new(x - if kind == ChartKind::Bar { 5.0 } else { 0.25 }, 0.25);
                     assert!(
-                        out.output.iter().any(|p| match p {
-                            Prim::Rect { rect, .. } if kind == ChartKind::Bar =>
-                                rect.size.y > 0.0 && rect.origin.y.abs() < 1e-5,
-                            Prim::Rect { rect, .. } => rect.center().y.abs() < 1e-5,
-                            Prim::Line { points, .. } | Prim::Fill { points, .. } =>
-                                points.iter().any(|point| point.y.abs() < 1e-5),
-                            Prim::Text { .. } => false,
-                        }),
+                        fill_at(&out.output, at).is_some(),
                         "{kind:?} {data}: the huge value projects to the top of the plot"
                     );
                 }
             };
-            check("[]", false);
-            check("[1]", false);
-            check("[0,1e300,2]", true);
+            check("[]", None);
+            check("[1]", None);
+            check("[0,1e300,2]", Some(100.0));
             if kind != ChartKind::Pie {
-                check("[-12,0,1e300]", true);
+                check("[-12,0,1e300]", Some(200.0));
             }
         }
     }
@@ -754,12 +786,19 @@ mod tests {
         let rect = out
             .output
             .iter()
-            .find_map(filled_bounds)
+            .filter_map(filled_bounds)
+            .reduce(Rect::union)
             .expect("filled bar");
         assert!(
             (rect.origin.y - 70.0).abs() < 1e-5 && (rect.size.y - 10.0).abs() < 1e-5,
             "negative stack occupies -4 to -6"
         );
+        for y in [70.25, 75.25, 79.75] {
+            assert!(
+                fill_at(&out.output, Vec2::new(5.25, y)).is_some(),
+                "bar paints at y={y}"
+            );
+        }
     }
     #[test]
     fn category_at_limit_keeps_all_text_without_percent_suffix() {
@@ -825,15 +864,19 @@ mod tests {
         let dot = single
             .output
             .iter()
-            .find_map(filled_bounds)
+            .filter_map(filled_bounds)
+            .reduce(Rect::union)
             .expect("filled dot");
         assert!((dot.center().x).abs() < 1e-5 && (dot.center().y - 45.0).abs() < 1e-5);
         assert!(dot.size.x > 0.0 && dot.size.y > 0.0);
+        assert!(fill_at(&single.output, Vec2::new(0.25, 45.25)).is_some());
         assert!(
             single
                 .output
                 .iter()
-                .all(|p| !matches!(p, Prim::Line { .. }))
+                .all(|p| !matches!(p, Prim::Line { points, color, width, .. }
+                    if color.opacity > 0.0 && *width > 0.0
+                        && points.windows(2).any(|pair| pair[0] != pair[1])))
         );
         let out = draw(&series("[1,2]"), &basis(ChartKind::Area), &mut build).expect("area");
         let mut spans = Vec::new();
@@ -843,10 +886,14 @@ mod tests {
                 closed,
                 color,
                 width,
+                dashed,
                 ..
             } = primitive
+                && color.opacity > 0.0
+                && *width > 0.0
+                && points.windows(2).any(|pair| pair[0] != pair[1])
             {
-                assert!(!closed && color.opacity > 0.0 && *width > 0.0);
+                assert!(!closed && !dashed, "only the open data line is stroked");
                 assert!(
                     points.iter().all(|p| {
                         (0.0..=100.0).contains(&p.x) && (p.y - (45.0 - p.x * 0.05)).abs() < 1e-5
@@ -870,18 +917,29 @@ mod tests {
             (covered - 100.0).abs() < 1e-5,
             "the whole data line is stroked"
         );
-        assert!(
-            out.output.iter().any(|p| {
-                matches!(p, Prim::Fill { .. })
-                    && filled_bounds(p).is_some_and(|rect| {
-                        rect.origin.x.abs() < 1e-5
-                            && (rect.max().x - 100.0).abs() < 1e-5
-                            && (rect.origin.y - 40.0).abs() < 1e-5
-                            && (rect.max().y - 50.0).abs() < 1e-5
-                    })
-            }),
-            "the fill reaches the zero baseline"
-        );
+        for x in (0_u16..100).map(|x| f32::from(x) + 0.25) {
+            for (y, covered) in [(49.75, true), (50.25, false)] {
+                assert_eq!(
+                    fill_at(&out.output, Vec2::new(x, y)).is_some(),
+                    covered,
+                    "area fill ends at the baseline at x={x}, y={y}"
+                );
+            }
+        }
+        for x in (5_u16..95).map(|x| f32::from(x) + 0.25) {
+            let top = 45.0 - x * 0.05;
+            for (y, covered) in [
+                (top - 0.25, false),
+                (top + 0.25, true),
+                (top.midpoint(50.0), true),
+            ] {
+                assert_eq!(
+                    fill_at(&out.output, Vec2::new(x, y)).is_some(),
+                    covered,
+                    "area fill starts at the data line at x={x}, y={y}"
+                );
+            }
+        }
     }
     #[test]
     fn pie_uses_its_retained_span_and_empty_allocation_can_become_positive() {
@@ -900,7 +958,8 @@ mod tests {
                 out.output
                     .iter()
                     .filter_map(|p| match p {
-                        Prim::Text { text, .. } => Some(text.as_str()),
+                        Prim::Text { text, color, .. } if color.opacity > 0.0 =>
+                            Some(text.as_str()),
                         _ => None,
                     })
                     .collect::<Vec<_>>(),
@@ -909,23 +968,13 @@ mod tests {
             );
             out.output
                 .iter()
-                .filter_map(|p| match p {
-                    Prim::Fill { points, .. } => Some(points.iter().copied()),
-                    _ => None,
-                })
-                .flatten()
-                .map(|origin| Rect {
-                    origin,
-                    size: Vec2::default(),
-                })
+                .filter_map(filled_bounds)
                 .reduce(Rect::union)
                 .expect("visible slice")
         };
         let center = basis.plot.frame.center();
-        let half = slice_bounds(
-            &draw(&series("[1]"), &basis, &mut build).expect("half pie"),
-            "50%",
-        );
+        let half_pie = draw(&series("[1]"), &basis, &mut build).expect("half pie");
+        let half = slice_bounds(&half_pie, "50%");
         assert!(
             (half.origin.x - center.x).abs() < 1e-4
                 && half.size.x > 0.0
@@ -933,11 +982,16 @@ mod tests {
                 && (half.size.y - 2.0 * half.size.x).abs() <= 0.1 * half.size.y,
             "the retained half spans the right side of the pie"
         );
+        for y in [-15.25, 15.25] {
+            assert!(fill_at(&half_pie.output, center + Vec2::new(15.25, y)).is_some());
+            assert_eq!(
+                fill_at(&half_pie.output, center + Vec2::new(-15.25, y)),
+                None
+            );
+        }
         basis.pie = None;
-        let full = slice_bounds(
-            &draw(&series("[1]"), &basis, &mut build).expect("new positive pie"),
-            "100%",
-        );
+        let full_pie = draw(&series("[1]"), &basis, &mut build).expect("new positive pie");
+        let full = slice_bounds(&full_pie, "100%");
         assert!(
             full.size.x > 0.0
                 && (full.size.y - full.size.x).abs() <= 0.1 * full.size.x
@@ -945,6 +999,11 @@ mod tests {
                 && (full.center().y - center.y).abs() <= 0.05 * full.size.y,
             "the fallback covers a full disc around the center"
         );
+        for y in [-15.25, 15.25] {
+            for x in [-15.25, 15.25] {
+                assert!(fill_at(&full_pie.output, center + Vec2::new(x, y)).is_some());
+            }
+        }
     }
     #[test]
     fn cancellation_and_text_measurement_failure_propagate() {
@@ -1021,21 +1080,35 @@ mod tests {
                 .iter()
                 .find(|item| item.handle == handle)
                 .expect("series paint");
-            let mut bars: Vec<_> = item
-                .primitives
-                .iter()
-                .filter_map(|prim| match prim {
-                    Prim::Rect {
-                        fill: Some(paint),
-                        rect,
-                        ..
-                    } if paint.opacity > 0.0 => Some((item.transform.bounds(*rect), paint.rgb)),
-                    _ => None,
-                })
-                .collect();
-            bars.sort_by(|a, b| a.0.origin.x.total_cmp(&b.0.origin.x));
-            assert_eq!(bars.len(), 2, "one bar per category");
-            (bars, item.opacity.to_bits())
+            let bars = [false, true].map(|second_category| {
+                let rect = item
+                    .primitives
+                    .iter()
+                    .filter_map(filled_bounds)
+                    .filter(|r| (r.center().x >= 200.0) == second_category)
+                    .reduce(Rect::union)
+                    .expect("filled bar for category");
+                let center = rect.center();
+                let paint = fill_at(&item.primitives, center).expect("painted bar center");
+                for y in [rect.origin.y + 0.25, rect.max().y - 0.25] {
+                    assert_eq!(
+                        fill_at(&item.primitives, Vec2::new(center.x, y)),
+                        Some(paint),
+                        "the same fill covers the bar down to its baseline"
+                    );
+                }
+                let paint = item.color.map_or(paint, |over| over.faded(paint.opacity));
+                (
+                    (item.transform.bounds(rect), paint.rgb),
+                    (item.opacity * paint.opacity).to_bits(),
+                )
+            });
+            let [(left, alpha), (right, other_alpha)] = bars;
+            assert_eq!(
+                alpha, other_alpha,
+                "both categories share the sampled opacity"
+            );
+            ([left, right], alpha)
         };
         let first = picture(
             &mut scene,
@@ -1057,11 +1130,8 @@ mod tests {
             &theme,
         );
         let red = crate::record::Rgb::try_from(0x00ff_0000).expect("red");
-        let refit = initial
-            .iter()
-            .map(|&(rect, _)| (rect, red))
-            .collect::<Vec<_>>();
-        assert_eq!(painted(&second.after, &s), (refit.clone(), alpha));
+        let refit = initial.map(|(rect, _)| (rect, red));
+        assert_eq!(painted(&second.after, &s), (refit, alpha));
         let revealed = [&s, &t].map(|id| second.after.handle(id).expect("handle"));
         scene
             .stop(
@@ -1082,7 +1152,7 @@ mod tests {
         let other = painted(&detached, &t);
         assert_eq!(painted(&first.after, &t), other);
         assert_eq!(painted(&second.after, &t), other);
-        assert_eq!(painted(&detached, &s), (refit.clone(), 0.375_f32.to_bits()));
+        assert_eq!(painted(&detached, &s), (refit, 0.375_f32.to_bits()));
         let next = picture(
             &mut scene,
             &mut budget,

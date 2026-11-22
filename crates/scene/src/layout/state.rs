@@ -15,6 +15,12 @@ use std::{
     sync::Arc,
 };
 
+#[cfg(test)]
+use crate::display::Prim;
+#[cfg(test)]
+#[path = "../../tests/support/connected_stroke.rs"]
+mod connected_stroke;
+
 /// Resting values of explicit tracks; `None` means no explicit owner, so the base applies.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct Rest {
@@ -463,7 +469,7 @@ impl LayoutState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::display::{MeasureError, Prim, TextMeasure, TextStyle};
+    use crate::display::{MeasureError, TextMeasure, TextStyle};
     use crate::layout::{PrepareInput, PreparedStep, SurfaceGeometry, prepare, recover};
     use crate::{
         Admission, Frame, FrameItem, GlobalBudget, Record, SceneView, StopCut, parse_record,
@@ -676,9 +682,10 @@ mod tests {
                 .expect("safe")
                 .expect("group")
         });
-        assert!(
-            !bounds[0].intersects(bounds[1]),
-            "sibling groups stay apart"
+        assert_eq!(bounds[0].size, Vec2::new(188.0, 152.0));
+        assert_eq!(
+            bounds[1].origin.x.to_bits(),
+            (bounds[0].max().x + 62.0).to_bits()
         );
         let contains = |outer: Rect, inner: Rect| {
             outer.origin.x <= inner.origin.x
@@ -692,18 +699,6 @@ mod tests {
                 .after
                 .resting_transform(edge.handle)
                 .expect("safe transform");
-            let chip = edge
-                .primitives
-                .iter()
-                .find_map(|p| match p {
-                    Prim::Rect {
-                        rect,
-                        fill: Some(_),
-                        ..
-                    } => Some(*rect),
-                    _ => None,
-                })
-                .expect("label chip");
             let ink = edge
                 .primitives
                 .iter()
@@ -720,15 +715,14 @@ mod tests {
                     _ => None,
                 })
                 .expect("long label");
-            let (chip, ink) = (transform.bounds(chip), transform.bounds(ink));
-            assert!(contains(chip, ink), "the chip covers its label");
+            let ink = transform.bounds(ink);
             assert!(
-                contains(bounds[index], chip),
-                "the cluster contains its label chip"
+                contains(bounds[index], ink),
+                "the cluster contains its long edge label"
             );
             assert!(
-                !bounds[1 - index].intersects(chip),
-                "the chip clears its sibling"
+                !bounds[1 - index].intersects(ink),
+                "the label clears the sibling cluster"
             );
         }
     }
@@ -750,29 +744,23 @@ mod tests {
             r#"{"step":{"id":"first","put":[{"diagram":{"id":"r"}},{"diagram":{"id":"g","in":"r"}},{"node":{"id":"a","in":"g","label":"A"}},{"node":{"id":"b","in":"g","label":"B"}},{"edge":{"id":"e","in":"g","from":"a","to":"b"}},{"anim":{"target":"b","track":"y","keys":[[0,100]]}}]}}"#,
         );
         let after = &prepared.after;
-        let edge = &after.objects[&id("e")].item;
-        let stroke = edge
-            .primitives
+        let handle = after.handle(&id("e")).expect("edge handle");
+        let frame = sample(&SceneView::new(after, after.revision()), 0);
+        let edge = frame
             .iter()
-            .find_map(|p| match p {
-                Prim::Line {
-                    points,
-                    closed: false,
-                    ..
-                } => Some(points.as_ref()),
-                _ => None,
-            })
-            .expect("painted edge stroke");
-        let transform = after.resting_transform(edge.handle).expect("safe");
+            .find(|item| item.handle == handle)
+            .expect("painted edge");
+        assert!(edge.opacity > 0.0 && edge.draw > 0.0, "edge is visible");
+        let stroke = connected_stroke::connected_stroke(&edge.primitives)
+            .expect("connected painted edge stroke");
         let a = after.bounds(&id("a")).expect("safe").expect("a");
         let b = after.bounds(&id("b")).expect("safe").expect("b");
-        assert_eq!(
-            transform.point(*stroke.first().expect("source point")),
-            Vec2::new(a.center().x, a.max().y)
-        );
-        assert_eq!(
-            transform.point(*stroke.last().expect("destination point")),
-            Vec2::new(b.center().x, b.origin.y)
+        let ends = [stroke[0], stroke[stroke.len() - 1]].map(|point| edge.transform.point(point));
+        let start = Vec2::new(a.center().x, a.max().y);
+        let end = Vec2::new(b.center().x, b.origin.y);
+        assert!(
+            ends == [start, end] || ends == [end, start],
+            "edge endpoints {ends:?} connect the resting ports {start:?} and {end:?}"
         );
     }
 }

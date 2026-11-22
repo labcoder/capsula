@@ -440,16 +440,24 @@ fn tube(path: &Value, r2: f64, segments: u8, pos: &Value) -> Value {
 }
 #[test]
 fn every_face_group_lies_on_its_anchor_plane() {
-    for (path, r2, segments, triangles, straight) in [
+    let cross = |a: [f64; 3], b: [f64; 3]| {
+        [
+            a[1] * b[2] - a[2] * b[1],
+            a[2] * b[0] - a[0] * b[2],
+            a[0] * b[1] - a[1] * b[0],
+        ]
+    };
+    let dot = |a: [f64; 3], b: [f64; 3]| a.into_iter().zip(b).map(|(a, b)| a * b).sum::<f64>();
+    let offset = |base: [f64; 3], p: [f64; 3]| [p[0] - base[0], p[1] - base[1], p[2] - base[2]];
+    for (path, r2, segments, triangles) in [
         (
             json!([[0, 0, 0], [0, 1, 0], [1, 2, 0], [1, 3, 1]]),
             0.1,
             8,
             60,
-            false,
         ),
-        (json!([[0, 0, 0], [0, 0, 2], [2, 0, 2]]), 0.25, 4, 20, false),
-        (json!([[0, 0, 0], [0, 0, 1], [0, 0, 3]]), 0.25, 4, 20, true),
+        (json!([[0, 0, 0], [0, 0, 2], [2, 0, 2]]), 0.25, 4, 20),
+        (json!([[0, 0, 0], [0, 0, 1], [0, 0, 3]]), 0.25, 4, 20),
     ] {
         let (mut scene, mut budget) = scene();
         let prepared = opening(
@@ -461,55 +469,29 @@ fn every_face_group_lies_on_its_anchor_plane() {
         assert_eq!(mesh.triangles.len(), triangles, "{path}");
         let mut seen = vec![false; triangles];
         let at = |i: u32| mesh.vertices[usize::try_from(i).expect("index")];
-        let z_span = |triangle: [u32; 3]| {
-            triangle
-                .map(|i| at(i)[2])
-                .into_iter()
-                .fold((f64::INFINITY, f64::NEG_INFINITY), |(low, high), z| {
-                    (low.min(z), high.max(z))
-                })
-        };
         for face in &*mesh.faces {
             let [base, second, third] = face.anchors.map(at);
-            let offset = |p: [f64; 3]| [p[0] - base[0], p[1] - base[1], p[2] - base[2]];
-            let [e1, e2] = [second, third].map(offset);
-            let normal = [
-                e1[1] * e2[2] - e1[2] * e2[1],
-                e1[2] * e2[0] - e1[0] * e2[2],
-                e1[0] * e2[1] - e1[1] * e2[0],
-            ];
-            let length = normal.iter().map(|v| v * v).sum::<f64>().sqrt();
+            let normal = cross(offset(base, second), offset(base, third));
+            let length = dot(normal, normal).sqrt();
             let start = usize::try_from(face.start).expect("start");
             let end = start + usize::try_from(face.len).expect("len");
             let group = &mesh.triangles[start..end];
             for (index, triangle) in (start..end).zip(group) {
                 assert!(!seen[index], "{path}: overlapping face groups");
                 seen[index] = true;
-                for &i in triangle {
-                    let d = offset(at(i));
-                    let off = (d[0] * normal[0] + d[1] * normal[1] + d[2] * normal[2]) / length;
+                let [a, b, c] = triangle.map(at);
+                for p in [a, b, c] {
+                    let off = dot(offset(base, p), normal) / length;
                     assert!(
                         off.abs() <= 1e-5,
                         "{path}: a group vertex is {off} off its plane"
                     );
                 }
-                if straight {
-                    let (low, high) = z_span(*triangle);
-                    if high - low > 0.5 {
-                        let span = (low.to_bits(), high.to_bits());
-                        assert!(
-                            group
-                                .iter()
-                                .filter(|&&other| {
-                                    let (low, high) = z_span(other);
-                                    (low.to_bits(), high.to_bits()) == span
-                                })
-                                .count()
-                                >= 2,
-                            "both triangles across each straight side band share an anchor"
-                        );
-                    }
-                }
+                let winding = cross(offset(a, b), offset(a, c));
+                assert!(
+                    dot(normal, winding) > 0.0,
+                    "{path}: the shared plane must face the same way as its triangles"
+                );
             }
         }
         assert!(

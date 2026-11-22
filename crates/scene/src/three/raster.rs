@@ -655,12 +655,17 @@ fn us(v: u32) -> usize {
 #[cfg(test)]
 mod tests {
     use super::{
-        BandScratch, Fragment, FrameScratch, MOTION, POLL_SAMPLES, RasterError, Region, SUBTEXEL,
-        Work, fill,
+        BandScratch, Fragment, FrameScratch, MOTION, POLL_SAMPLES, REST, RasterError, Region,
+        SUBTEXEL, Work, fill,
     };
     use std::sync::atomic::AtomicBool;
 
-    fn fill_spans(rows: i32, cancel: &AtomicBool) -> (Result<(), RasterError>, usize) {
+    fn fill_spans(
+        rows: i32,
+        offsets: &[[i32; 2]],
+        initial_depth: u32,
+        cancel: &AtomicBool,
+    ) -> (Result<(), RasterError>, usize) {
         let (w, h) = (4096 * SUBTEXEL, rows * SUBTEXEL);
         let mut frame = FrameScratch::with_capacity(1);
         let fragment = Fragment {
@@ -673,28 +678,45 @@ mod tests {
         };
         assert_eq!(frame.push(&fragment), Ok(true), "the polygon is kept");
         let mut band = BandScratch::new(4096).expect("band");
+        band.depth.fill(initial_depth);
         let region = Region {
             width: 4096,
             y0: 0,
             rows: 32,
-            offsets: &MOTION,
+            offsets,
         };
         let mut work = Work {
             cancel,
             left: POLL_SAMPLES,
         };
         let result = fill(&frame.polys[0], &region, &mut band, &mut work);
-        (result, band.depth.iter().filter(|&&d| d != 0).count())
+        let painted = band
+            .depth
+            .iter()
+            .filter(|&&depth| depth != initial_depth)
+            .count();
+        (result, painted)
     }
 
     #[test]
     fn a_polygon_stops_once_its_sample_quantum_runs_out() {
-        let (result, painted) = fill_spans(32, &AtomicBool::new(true));
-        assert_eq!(result, Err(RasterError::Cancelled));
-        assert!(
-            painted <= 65_536 + 4096,
-            "painted {painted} samples after cancellation"
-        );
-        assert_eq!(fill_spans(15, &AtomicBool::new(false)), (Ok(()), 15 * 4096));
+        for offsets in [MOTION.as_slice(), REST.as_slice()] {
+            let (result, painted) = fill_spans(32, offsets, 0, &AtomicBool::new(true));
+            assert_eq!(result, Err(RasterError::Cancelled));
+            assert!(
+                painted <= 65_536 + 4096,
+                "{} samples per texel: painted {painted} samples after cancellation",
+                offsets.len()
+            );
+            assert_eq!(
+                fill_spans(15, offsets, 0, &AtomicBool::new(false)),
+                (Ok(()), 15 * 4096 * offsets.len())
+            );
+            assert_eq!(
+                fill_spans(32, offsets, u32::MAX, &AtomicBool::new(true)),
+                (Err(RasterError::Cancelled), 0),
+                "occluded samples still count as work"
+            );
+        }
     }
 }

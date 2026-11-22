@@ -247,16 +247,34 @@ mod tests {
         else {
             panic!("begin")
         };
-        let mut scene = crate::SceneState::begin(begin).expect("scene");
-        let mut budget = crate::GlobalBudget::default();
-        let crate::Admission::New(candidate) = scene.admit(&step, &budget).expect("admission")
-        else {
-            panic!("new step")
+        let make_ticket = |begin| {
+            let mut scene = crate::SceneState::begin(begin).expect("scene");
+            let mut budget = crate::GlobalBudget::default();
+            let crate::Admission::New(candidate) = scene.admit(&step, &budget).expect("admission")
+            else {
+                panic!("new step")
+            };
+            let ticket = scene
+                .commit(candidate, &mut budget)
+                .expect("commit")
+                .preparation;
+            (scene, ticket)
         };
-        let ticket = scene
-            .commit(candidate, &mut budget)
-            .expect("commit")
-            .preparation;
+
+        let (scene, ticket) = make_ticket(begin.clone());
+        let attributed = ticket.attributed_bytes();
+        let ((), _, [_, marginal]) = allocation::usage(|| drop(ticket));
+        let (shared, _, [allocated, released]) =
+            allocation::usage(|| (Arc::new(step.clone()), Arc::new(())));
+        assert_eq!(
+            attributed,
+            marginal + (allocated - released),
+            "the ticket charges its own allocations plus its source and owner, not the rest of the scene"
+        );
+        drop(shared);
+        drop(scene);
+
+        let (scene, ticket) = make_ticket(begin);
         let attributed = ticket.attributed_bytes();
         drop(scene);
         let ((), _, [_, released]) = allocation::usage(|| drop(ticket));

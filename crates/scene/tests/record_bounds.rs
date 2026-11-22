@@ -8,10 +8,7 @@ use serde_json::{Value, json};
 
 mod three {
     use super::*;
-    use kumochi_scene::{
-        record::{Fov, Length, Pitch, Segments, Size, Spin, Unit},
-        text::Bounded,
-    };
+    use kumochi_scene::record::{Fov, Length, Pitch, Segments, Size, Solid, Spin, Unit};
     use serde::de::DeserializeOwned;
 
     fn scalar<
@@ -305,12 +302,19 @@ mod three {
         }
     }
 
+    fn binary_solid(points: &[[f32; 2]], path: &[[f32; 3]], info: Option<&str>) -> Vec<u8> {
+        postcard::to_allocvec(&(
+            "v", "s", 0_u8, [0_u8; 5], points, path, [0_u8; 6], info, [0_u8; 2],
+        ))
+        .expect("raw solid fields")
+    }
+
     #[test]
     fn solid_text_decode_caps_apply_in_both_formats() {
         for count in [400, 401] {
             let info = "é".repeat(count);
             let input = json!({"step":{"id":"s","put":[{"solid":{"id":"s","in":"v","shape":"box","info":info}}]}});
-            let bytes = postcard::to_allocvec(&info).expect("raw text");
+            let bytes = binary_solid(&[], &[], Some(&info));
             if count == 400 {
                 let Record::Step(step) = parse(&input).expect("exact info cap") else {
                     panic!("step")
@@ -320,8 +324,10 @@ mod three {
                 };
                 assert_eq!(solid.info.as_ref().expect("info").as_str(), info);
                 assert_eq!(
-                    postcard::from_bytes::<kumochi_scene::Text>(&bytes)
+                    postcard::from_bytes::<Solid>(&bytes)
                         .expect("binary text cap")
+                        .info
+                        .expect("authored info")
                         .as_str(),
                     info
                 );
@@ -329,11 +335,7 @@ mod three {
                 let error = parse(&input).expect_err("excess info");
                 assert_eq!(error.code, ErrorCode::TooLong);
                 assert_eq!(error.path.as_str(), "put[0].solid.info");
-                assert_eq!(
-                    postcard::from_bytes::<kumochi_scene::Text>(&bytes)
-                        .expect_err("binary text cap"),
-                    postcard::Error::SerdeDeCustom
-                );
+                postcard::from_bytes::<Solid>(&bytes).expect_err("binary info exceeds cap");
             }
         }
     }
@@ -347,71 +349,49 @@ mod three {
                     .collect();
                 let path: Vec<_> = points.iter().map(|&[x, y]| [x, y, x + 2.0]).collect();
                 let mut solid = json!({"id":"s","in":"v","shape":"box"});
-                solid[field] = if field == "points" {
-                    json!(points)
+                let (outline, centerline) = if field == "points" {
+                    solid[field] = json!(points);
+                    (points.as_slice(), [].as_slice())
                 } else {
-                    json!(path)
+                    solid[field] = json!(path);
+                    ([].as_slice(), path.as_slice())
                 };
                 let input = json!({"step":{"id":"s","put":[{"solid":solid}]}});
+                let bytes = binary_solid(outline, centerline, None);
                 if count == 512 {
                     let record = parse(&input).expect("exact list cap");
-                    let bytes = postcard::to_allocvec(&record).expect("binary list");
-                    let binary = postcard::from_bytes::<Record>(&bytes).expect("exact binary list");
-                    assert_eq!(binary, record);
-                    for decoded in [record, binary] {
-                        let Record::Step(step) = decoded else {
-                            panic!("step")
-                        };
-                        let Op::Solid(solid) = &step.put[0] else {
-                            panic!("solid")
-                        };
-                        if field == "points" {
-                            assert_eq!(solid.points.len(), 512);
-                            assert!(
-                                solid
-                                    .points
-                                    .iter()
-                                    .map(|p| p.map(Finite::get))
-                                    .eq(points.iter().copied())
-                            );
-                        } else {
-                            assert_eq!(solid.path.len(), 512);
-                            assert!(
-                                solid
-                                    .path
-                                    .iter()
-                                    .map(|p| p.map(Finite::get))
-                                    .eq(path.iter().copied())
-                            );
-                        }
-                    }
+                    let encoded = postcard::to_allocvec(&record).expect("binary record");
+                    assert_eq!(
+                        postcard::from_bytes::<Record>(&encoded).expect("exact binary record"),
+                        record
+                    );
+                    let Record::Step(step) = record else {
+                        panic!("step")
+                    };
+                    let [Op::Solid(solid)] = &*step.put else {
+                        panic!("one authored solid")
+                    };
+                    let binary = postcard::from_bytes::<Solid>(&bytes).expect("exact binary list");
+                    assert_eq!(&binary, solid);
+                    assert!(
+                        solid
+                            .points
+                            .iter()
+                            .map(|p| p.map(Finite::get))
+                            .eq(outline.iter().copied())
+                    );
+                    assert!(
+                        solid
+                            .path
+                            .iter()
+                            .map(|p| p.map(Finite::get))
+                            .eq(centerline.iter().copied())
+                    );
                 } else {
                     let error = parse(&input).expect_err("excess list");
                     assert_eq!(error.code, ErrorCode::TooLong);
                     assert_eq!(error.path.as_str(), format!("put[0].solid.{field}[512]"));
-                }
-                if field == "points" {
-                    let bytes = postcard::to_allocvec(&points).expect("raw outline");
-                    let decoded = postcard::from_bytes::<Bounded<[Finite; 2], 512>>(&bytes);
-                    if count == 512 {
-                        assert_eq!(decoded.expect("binary cap").len(), 512);
-                    } else {
-                        assert_eq!(
-                            decoded.expect_err("binary over cap"),
-                            postcard::Error::SerdeDeCustom
-                        );
-                    }
-                } else {
-                    let bytes = postcard::to_allocvec(&path).expect("raw path");
-                    let decoded = postcard::from_bytes::<Bounded<[Finite; 3], 512>>(&bytes);
-                    if count == 512 {
-                        assert_eq!(decoded.expect("binary cap").len(), 512);
-                    } else {
-                        assert_eq!(
-                            decoded.expect_err("binary over cap"),
-                            postcard::Error::SerdeDeCustom
-                        );
-                    }
+                    postcard::from_bytes::<Solid>(&bytes).expect_err("binary list exceeds cap");
                 }
             }
         }

@@ -149,11 +149,15 @@ fn same_step_references_and_expanded_slots_are_deterministic() {
     );
     assert_eq!((committed.index, committed.revision), (0, 1));
     let expected = [("a", 1024), ("d", 1026), ("b", 1027), ("e", 1028)];
-    assert_eq!(committed.handles.len(), expected.len());
-    for (name, raw) in expected {
-        let found = committed.handles.iter().find(|(key, _)| *key == id(name));
-        assert_eq!(found.map(|(_, handle)| handle.get()), Some(raw), "{name}");
-    }
+    assert_eq!(
+        committed
+            .handles
+            .iter()
+            .map(|(name, handle)| (name.as_str(), handle.get()))
+            .collect::<Vec<_>>(),
+        expected,
+        "committed handles are in expanded put order"
+    );
     for _ in 0..2 {
         let replay = SceneState::replay(header(), state.recovery_log()).expect("valid recovery");
         for (name, raw) in expected {

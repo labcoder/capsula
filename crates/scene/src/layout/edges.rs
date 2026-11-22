@@ -420,13 +420,17 @@ mod tests {
         for count in [0, 1, 2, 3] {
             let mut old = vec![line.clone()];
             old.extend((0..count).map(|_| Prim::Fill {
-                points: Arc::from([Vec2::new(-100.0, -100.0); 3]),
+                points: Arc::from([
+                    Vec2::new(-100.0, -100.0),
+                    Vec2::new(-90.0, -100.0),
+                    Vec2::new(-100.0, -90.0),
+                ]),
                 color,
             }));
             old.push(chip.clone());
             let new = repaint_curve(&old, &points, heads(&points, Head::Both))
                 .expect("repaint wrong heads");
-            let mut tips = Vec::new();
+            let mut fills = Vec::new();
             let mut unchanged = Vec::new();
             for prim in new.iter() {
                 let Prim::Fill {
@@ -438,21 +442,41 @@ mod tests {
                     continue;
                 };
                 assert_eq!(*paint, color);
-                let tip = points.iter().find(|p| p.y.abs() < 1e-5).expect("arrow tip");
-                let at_start = tip.x.abs() < 1e-5;
-                assert!(at_start || (tip.x - 16.0).abs() < 1e-5);
-                assert!(points.iter().any(|p| p.y < 0.0));
-                assert!(points.iter().any(|p| p.y > 0.0));
-                assert!(
-                    points
-                        .iter()
-                        .filter(|p| p.y.abs() >= 1e-5)
-                        .all(|p| { if at_start { p.x > tip.x } else { p.x < tip.x } })
-                );
-                tips.push(at_start);
+                for p in points.iter() {
+                    assert!((0.0..=16.0).contains(&p.x));
+                }
+                fills.push(points.as_ref());
             }
-            tips.sort_unstable();
-            assert_eq!(tips, [false, true]);
+            for (tip, inward) in [(0.0, 1.0), (16.0, -1.0)] {
+                assert!(
+                    fills
+                        .iter()
+                        .copied()
+                        .flatten()
+                        .any(|p| { (p.x - tip).abs() < 1e-5 && p.y.abs() < 1e-5 })
+                );
+                for (distance, y, expected) in [
+                    (1.0, 0.25, true),
+                    (1.0, 1.0, false),
+                    (4.0, 1.0, true),
+                    (4.0, -1.0, true),
+                ] {
+                    let x = tip + inward * distance;
+                    let painted = fills.iter().any(|polygon| {
+                        polygon
+                            .iter()
+                            .zip(polygon.iter().cycle().skip(1))
+                            .filter(|(a, b)| {
+                                (a.y > y) != (b.y > y)
+                                    && x < a.x + (b.x - a.x) * (y - a.y) / (b.y - a.y)
+                            })
+                            .count()
+                            % 2
+                            == 1
+                    });
+                    assert_eq!(painted, expected, "arrowhead ink at ({x}, {y})");
+                }
+            }
             assert_eq!(unchanged.len(), 2);
             assert!(unchanged.contains(&&line) && unchanged.contains(&&chip));
             assert_eq!(

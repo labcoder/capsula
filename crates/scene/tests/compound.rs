@@ -434,25 +434,46 @@ fn assert_cross_group_routes(layout: &LayoutState, step: &Value) {
             .expect("painted edge");
         let from = a.edge_toward(b.center());
         let to = b.edge_toward(a.center());
-        let at = |point, expected: Vec2| {
-            let delta = item.transform.point(point) - expected;
+        let near = |point: Vec2, expected: Vec2| {
+            let delta = point - expected;
             delta.x.abs() < 0.01 && delta.y.abs() < 0.01
         };
-        assert!(
-            item.primitives.iter().any(|prim| {
-                let Prim::Line {
+        let mut segments: Vec<_> = item
+            .primitives
+            .iter()
+            .flat_map(|prim| match prim {
+                Prim::Line {
                     points,
                     closed: false,
+                    width,
+                    color,
                     ..
-                } = prim
-                else {
-                    return false;
-                };
-                points
-                    .first()
-                    .zip(points.last())
-                    .is_some_and(|(a, b)| at(*a, from) && at(*b, to))
-            }),
+                } if *width > 0.0 && color.opacity > 0.0 => points.windows(2),
+                _ => [].windows(2),
+            })
+            .map(|pair| [item.transform.point(pair[0]), item.transform.point(pair[1])])
+            .collect();
+        let mut reached = vec![from];
+        let connected = loop {
+            let Some(point) = reached.pop() else {
+                break false;
+            };
+            if near(point, to) {
+                break true;
+            }
+            segments.retain(|[a, b]| {
+                if near(*a, point) {
+                    reached.push(*b);
+                } else if near(*b, point) {
+                    reached.push(*a);
+                } else {
+                    return true;
+                }
+                false
+            });
+        };
+        assert!(
+            item.opacity > 0.0 && connected,
             "{name} connects the two node outlines"
         );
         checked += 1;

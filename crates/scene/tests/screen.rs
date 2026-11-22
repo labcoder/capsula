@@ -138,11 +138,17 @@ fn near(actual: Rect, expected: [f32; 4]) -> bool {
     ];
     got.iter().zip(expected).all(|(a, b)| (a - b).abs() < 1e-3)
 }
-fn outline(drawn: &[Drawn], rgb: u32) -> Drawn {
+fn outline(drawn: &[Drawn], rgb: u32, around: Rect) -> Drawn {
     drawn
         .iter()
         .copied()
-        .find(|(_, _, _, border)| border.is_some_and(|(paint, _)| paint.rgb.get() == rgb))
+        .filter(|(bounds, _, _, border)| {
+            inside(around, *bounds)
+                && border.is_some_and(|(paint, width)| {
+                    paint.rgb.get() == rgb && paint.opacity > 0.0 && width > 0.0
+                })
+        })
+        .max_by(|(a, ..), (b, ..)| (a.size.x * a.size.y).total_cmp(&(b.size.x * b.size.y)))
         .expect("colored outline")
 }
 
@@ -612,8 +618,12 @@ fn a_box_mark_is_a_two_tone_outline_outside_the_padded_box_in_logical_pixels() {
     .expect("prepared");
     let drawn = rects(&item(&result, "h"));
     let padded = rect([98.0, 98.0, 44.0, 24.0]);
-    let white = outline(&drawn, 0x00FF_FFFF);
-    let purple = outline(&drawn, MARK_RGB);
+    let white = outline(&drawn, 0x00FF_FFFF, padded);
+    let purple = outline(&drawn, MARK_RGB, padded);
+    assert!(drawn.iter().all(|layer| {
+        !layer.0.intersects(padded)
+            || (layer.2.is_none() && layer.3.is_none_or(|_| clears(padded, *layer)))
+    }));
     for layer in [white, purple] {
         assert!(
             layer.1 > 0.0 && layer.2.is_none() && clears(padded, layer),
@@ -656,7 +666,7 @@ fn screen_marks_leave_the_target_clear_or_dim_only_the_surroundings() {
     let target = rect([100.0, 100.0, 40.0, 20.0]);
     let padded = rect([98.0, 98.0, 44.0, 24.0]);
     for rgb in [0x00FF_FFFF, MARK_RGB] {
-        let outline = outline(&ring, rgb);
+        let outline = outline(&ring, rgb, padded);
         assert!(
             (outline.1 - outline.0.size.y * 0.5).abs() < 1e-3,
             "a ring has round ends"
@@ -668,22 +678,23 @@ fn screen_marks_leave_the_target_clear_or_dim_only_the_surroundings() {
     }
 
     let underline = mark("underline");
-    for (rgb, height) in [(0x00FF_FFFF, 2.0), (MARK_RGB, 1.0)] {
-        let (bar, radius, ..) = underline
-            .iter()
-            .find(|(_, _, fill, _)| fill.is_some_and(|paint| paint.rgb.get() == rgb))
-            .expect("the underline color is visible");
-        assert!(bar.origin.y >= padded.max().y && bar.size.x > 0.0);
-        assert!((bar.size.y - height).abs() < 1e-3);
+    for (rgb, inset, height) in [(0x00FF_FFFF, 0.0, 2.0), (MARK_RGB, 0.5, 1.0)] {
         assert!(
-            (radius - bar.size.y * 0.5).abs() < 1e-3,
-            "the underline has round ends"
+            underline.iter().any(|(bar, radius, fill, _)| {
+                fill.is_some_and(|paint| paint.rgb.get() == rgb && paint.opacity > 0.0)
+                    && near(
+                        *bar,
+                        [
+                            target.origin.x + inset,
+                            padded.max().y + inset,
+                            target.size.x - 2.0 * inset,
+                            height,
+                        ],
+                    )
+                    && (radius - bar.size.y * 0.5).abs() < 1e-3
+            }),
+            "each tone of the underline spans its target and has round ends"
         );
-        if rgb == 0x00FF_FFFF {
-            assert!((bar.origin.y - padded.max().y).abs() < 1e-3);
-            assert!((bar.origin.x - target.origin.x).abs() < 1e-3);
-            assert!((bar.max().x - target.max().x).abs() < 1e-3);
-        }
     }
 
     let marker = mark("marker");
@@ -694,9 +705,20 @@ fn screen_marks_leave_the_target_clear_or_dim_only_the_surroundings() {
         }),
         "the padded marker uses the allowed opacity"
     );
+    let mut marker_fills = Vec::new();
+    for (bounds, _, fill, _) in &marker {
+        if let Some(fill) = fill.filter(|paint| paint.opacity > 0.0) {
+            assert!(fill.opacity <= MAX_MARKER_OPACITY);
+            assert!(
+                marker_fills.iter().all(|prior| !bounds.intersects(*prior)),
+                "overlapping marker paint would increase the target's opacity"
+            );
+            marker_fills.push(*bounds);
+        }
+    }
 
     let spotlight = mark("spotlight");
-    let aperture = outline(&spotlight, 0x00FF_FFFF).0;
+    let aperture = outline(&spotlight, 0x00FF_FFFF, padded).0;
     assert!(inside(padded, aperture) && inside(aperture, canvas()));
     let mut dimmed = Vec::<Rect>::new();
     let area = |r: Rect| f64::from(r.size.x) * f64::from(r.size.y);
@@ -1032,6 +1054,29 @@ fn the_canvas_maps_onto_its_own_display_in_logical_pixels_and_nowhere_else() {
     );
 }
 
+fn mark_debug(authored: &Step, display: ScreenDisplay) -> Vec<String> {
+    let mut begin = header();
+    begin.display = Some(display);
+    let stored = screen::without_boxes(authored);
+    let mut outputs = vec![
+        format!("{authored:?}"),
+        format!("{stored:?}"),
+        format!("{display:?}"),
+        format!("{begin:?}"),
+        format!("{:?}", Record::Begin(begin)),
+    ];
+    for op in authored.put.iter().chain(stored.put.iter()) {
+        let target = match op {
+            Op::Highlight(mark) => &mark.target,
+            Op::Callout(label) => &label.target,
+            _ => panic!("fixture mark"),
+        };
+        outputs.push(format!("{op:?}"));
+        outputs.push(format!("{target:?}"));
+    }
+    outputs
+}
+
 #[test]
 fn no_box_or_display_number_reaches_a_debug_output_or_the_stored_step() {
     let marker = "zq-sentinel";
@@ -1042,26 +1087,28 @@ fn no_box_or_display_number_reaches_a_debug_output_or_the_stored_step() {
         size: [2751, 1429],
         dpi: 97,
     };
-    let mut begin = header();
-    begin.display = Some(display);
-    let authored = step(&json!([
-        {"highlight":{"id":"h","target":{"box":mark_box}}},
-        {"callout":{"id":"c","target":{"box":label_box},"text":marker}}
-    ]));
+    let marks = |mark_box, label_box, label| {
+        step(&json!([
+            {"highlight":{"id":"h","target":{"box":mark_box}}},
+            {"callout":{"id":"c","target":{"box":label_box},"text":label}}
+        ]))
+    };
+    let authored = marks(mark_box, label_box, marker);
     let stored = screen::without_boxes(&authored);
-    let mut outputs = vec![
-        format!("{authored:?}"),
-        format!("{stored:?}"),
-        format!("{display:?}"),
-        format!("{begin:?}"),
-        format!("{:?}", Record::Begin(begin)),
-    ];
-    outputs.extend(
-        authored
-            .put
-            .iter()
-            .chain(stored.put.iter())
-            .map(|op| format!("{op:?}")),
+    let other_marks = marks(
+        [581.75, 681.25, 71.875, 81.375],
+        [781.75, 581.25, 91.875, 11.375],
+        "yx-redacted",
+    );
+    let other_display = ScreenDisplay {
+        origin: [88_835, -88_836],
+        size: [3642, 2538],
+        dpi: 84,
+    };
+    let outputs = mark_debug(&authored, display);
+    assert!(
+        outputs == mark_debug(&other_marks, other_display),
+        "Debug must not depend on private mark or display data"
     );
     let coordinates: Vec<_> = mark_box
         .into_iter()
@@ -1084,13 +1131,10 @@ fn no_box_or_display_number_reaches_a_debug_output_or_the_stored_step() {
             .map(String::as_str)
             .chain([marker])
         {
-            assert!(
-                !output.contains(absent),
-                "Debug exposed a privacy sentinel: {absent}"
-            );
+            assert!(!output.contains(absent), "Debug exposed a privacy sentinel");
             assert!(
                 !output.contains(&format!("{:?}", absent.as_bytes())),
-                "Debug exposed a privacy sentinel as bytes: {absent}"
+                "Debug exposed a privacy sentinel as bytes"
             );
         }
     }

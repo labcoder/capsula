@@ -14,6 +14,10 @@ use std::sync::{Arc, atomic::AtomicBool};
 mod scene_support;
 use scene_support::{Measure, id, new_scene, prepared};
 
+#[path = "support/connected_stroke.rs"]
+mod connected_stroke;
+use connected_stroke::connected_stroke;
+
 fn bounds(layout: &LayoutState, name: &str) -> Rect {
     layout
         .bounds(&id(name))
@@ -202,20 +206,11 @@ fn assert_route(layout: &LayoutState, frame: &Frame, name: &str, from: Vec2, to:
         .iter()
         .find(|item| item.handle == handle)
         .expect("painted line");
+    assert!(item.opacity > 0.0 && item.draw > 0.0, "{name} is visible");
+    let points = connected_stroke(&item.primitives).expect("connected painted line");
+    let ends = [points[0], points[points.len() - 1]].map(|point| item.transform.point(point));
     assert!(
-        item.primitives.iter().any(|prim| {
-            let Prim::Line {
-                points,
-                closed: false,
-                ..
-            } = prim
-            else {
-                return false;
-            };
-            points.first().zip(points.last()).is_some_and(|(a, b)| {
-                item.transform.point(*a) == from && item.transform.point(*b) == to
-            })
-        }),
+        ends == [from, to] || ends == [to, from],
         "{name} connects the world endpoints {from:?} and {to:?}"
     );
 }

@@ -1,7 +1,7 @@
 //! Bounded Mermaid compilation through admission, preparation and original-log recovery.
 use kumochi_scene::{
-    Admission, Budget, ErrorCode, Frame, GlobalBudget, Handle, SceneState, SceneView, Step,
-    StopCut,
+    Admission, Budget, ErrorCode, Frame, FrameItem, GlobalBudget, Handle, SceneState, SceneView,
+    Step, StopCut,
     display::{Item, Prim},
     geom::{Affine, Rect, Vec2},
     layout::{LayoutState, PrepareInput, PreparedStep, SurfaceGeometry, prepare, recover},
@@ -23,6 +23,10 @@ use mermaid::{connected_full_graph, graph, scene, typed};
 #[expect(dead_code, reason = "typed Mermaid fixtures admit Steps directly")]
 mod scene_support;
 use scene_support::{Measure, id, new_scene};
+
+#[path = "support/connected_stroke.rs"]
+mod connected_stroke;
+use connected_stroke::connected_stroke;
 
 #[path = "support/allocation.rs"]
 #[expect(
@@ -121,17 +125,17 @@ fn at_rest(layout: &LayoutState) -> Frame {
     frame
 }
 
-fn stroke(primitives: &[Prim]) -> Option<(&[Vec2], f32, bool)> {
-    primitives.iter().find_map(|prim| match prim {
-        Prim::Line {
-            points,
-            width,
-            dashed,
-            closed: false,
-            ..
-        } => Some((&**points, *width, *dashed)),
-        _ => None,
-    })
+fn painted_item(frame: &Frame, handle: Handle) -> &FrameItem {
+    let item = frame
+        .items()
+        .iter()
+        .find(|item| item.handle == handle)
+        .expect("painted item");
+    assert!(
+        item.opacity > 0.0 && item.draw > 0.0,
+        "{handle:?} is visible"
+    );
+    item
 }
 
 fn near(p: Vec2, q: Vec2) -> bool {
@@ -143,11 +147,14 @@ fn edge_handle(layout: &LayoutState, frame: &Frame, from: &str, to: &str) -> Han
     let b = bounds(layout, to);
     let start = a.edge_toward(b.center());
     let end = b.edge_toward(a.center());
-    let mut matched = frame.paint_items().filter_map(|(item, _, primitives)| {
-        let (points, _, _) = stroke(primitives)?;
-        (near(item.transform.point(*points.first()?), start)
-            && near(item.transform.point(*points.last()?), end))
-        .then_some(item.handle)
+    let mut matched = frame.items().iter().filter_map(|item| {
+        if item.opacity <= 0.0 || item.draw <= 0.0 {
+            return None;
+        }
+        let points = connected_stroke(&item.primitives)?;
+        let [a, b] = [points[0], points[points.len() - 1]].map(|p| item.transform.point(p));
+        ((near(a, start) && near(b, end)) || (near(b, start) && near(a, end)))
+            .then_some(item.handle)
     });
     let handle = matched
         .next()
@@ -158,6 +165,99 @@ fn edge_handle(layout: &LayoutState, frame: &Frame, from: &str, to: &str) -> Han
         "fixture has one {from} -> {to} stroke"
     );
     handle
+}
+
+fn dot(a: Vec2, b: Vec2) -> f32 {
+    a.x * b.x + a.y * b.y
+}
+
+fn outline_distance(item: &FrameItem, point: Vec2) -> f32 {
+    let point = item
+        .transform
+        .inverse()
+        .expect("invertible outline")
+        .point(point);
+    let segment_distance = |(a, b): (Vec2, Vec2)| {
+        let delta = b - a;
+        let offset = point - a;
+        let length_squared = dot(delta, delta);
+        if length_squared == 0.0 {
+            return f32::INFINITY;
+        }
+        let residual = offset - delta * (dot(offset, delta) / length_squared).clamp(0.0, 1.0);
+        residual.x.hypot(residual.y)
+    };
+    item.primitives
+        .iter()
+        .map(|prim| match prim {
+            Prim::Rect {
+                rect,
+                radius,
+                border: Some((ink, width)),
+                ..
+            } if ink.opacity > 0.0 && *width > 0.0 => {
+                let half = rect.size * 0.5;
+                let radius = radius.clamp(0.0, half.x.min(half.y));
+                let delta = point - rect.center();
+                let x = delta.x.abs() - half.x + radius;
+                let y = delta.y.abs() - half.y + radius;
+                let signed = x.max(0.0).hypot(y.max(0.0)) + x.max(y).min(0.0) - radius;
+                signed.max(-signed - width).max(0.0)
+            }
+            Prim::Line {
+                points,
+                closed,
+                color,
+                width,
+                dashed: false,
+            } if color.opacity > 0.0 && *width > 0.0 && points.len() >= 2 => points
+                .windows(2)
+                .map(|pair| (pair[0], pair[1]))
+                .chain(closed.then(|| (points[points.len() - 1], points[0])))
+                .map(|segment| (segment_distance(segment) - width * 0.5).max(0.0))
+                .fold(f32::INFINITY, f32::min),
+            _ => f32::INFINITY,
+        })
+        .fold(f32::INFINITY, f32::min)
+}
+
+fn assert_outline(item: &FrameItem, rect: Rect) {
+    for fraction in [1.0 / 3.0, 0.5, 2.0 / 3.0] {
+        let x = rect.origin.x + rect.size.x * fraction;
+        let y = rect.origin.y + rect.size.y * fraction;
+        for point in [
+            Vec2::new(x, rect.origin.y),
+            Vec2::new(x, rect.max().y),
+            Vec2::new(rect.origin.x, y),
+            Vec2::new(rect.max().x, y),
+        ] {
+            assert!(
+                outline_distance(item, point) < 0.25,
+                "outline crosses {point:?}"
+            );
+        }
+    }
+}
+
+fn has_head(item: &FrameItem, tip: Vec2, inside: Vec2) -> bool {
+    let outward = tip - inside;
+    item.primitives.iter().any(|prim| {
+        let Prim::Fill { points, color } = prim else {
+            return false;
+        };
+        if color.opacity <= 0.0 {
+            return false;
+        }
+        let projection = |point| dot(point - tip, outward);
+        points.iter().any(|&point| near(point, tip))
+            && points.iter().any(|&p| projection(p) < 0.0)
+            && points.iter().all(|&p| projection(p) <= 0.01)
+            && points.windows(2).any(|pair| {
+                let a = pair[0] - tip;
+                let b = pair[1] - tip;
+                (a.x * b.y - a.y * b.x).abs() > 0.01
+            })
+    })
 }
 
 fn rejected(scene: &SceneState, budget: &GlobalBudget, step: &Step, code: ErrorCode, path: &str) {
@@ -438,27 +538,17 @@ fn explicit_blank_labels_stay_empty_on_normal_nodes() {
         let prepared = picture(&mut scene, &mut budget, &before, &graph(source));
         let node = scene.handle(&id("A")).expect("named node");
         let frame = at_rest(&prepared.after);
-        let mut paint = frame
-            .paint_items()
-            .filter(|(item, _, _)| item.handle == node)
-            .flat_map(|(_, _, prims)| prims)
-            .peekable();
+        let item = painted_item(&frame, node);
+        let rect = bounds(&prepared.after, "A");
+        assert_eq!(rect.size, Vec2::new(80.0, 40.0));
+        assert_outline(item, rect);
         assert!(
-            paint.peek().is_some(),
-            "node A paints even with a blank label"
+            !item
+                .primitives
+                .iter()
+                .any(|prim| matches!(prim, Prim::Text { text, .. } if !text.as_str().is_empty())),
+            "node A has no label text"
         );
-        let mut has_outline = false;
-        for prim in paint {
-            has_outline |= matches!(
-                prim,
-                Prim::Rect {
-                    border: Some(_),
-                    ..
-                }
-            );
-            assert!(!matches!(prim, Prim::Text { text, .. } if !text.as_str().is_empty()));
-        }
-        assert!(has_outline);
         assert_eq!(scene.object_count(), 3);
         assert_eq!(budget.usage().objects, 3);
     }
@@ -498,47 +588,51 @@ fn compiled_edges_keep_distinct_heads_strokes_and_labels() {
         &graph(include_str!("fixtures/mermaid/gates/labelled-edges.mmd")),
     );
     let items = prepared.after.items();
-    let mut normal_width = 0.0;
-    let mut thick_width = 0.0;
+    let mut normal_width = 0.0_f32;
+    let mut thick_width = f32::INFINITY;
     let frame = at_rest(&prepared.after);
     for (label, from, to, heads, dotted) in [
-        ("normal", "request", "process", [0, 1], false),
-        ("retry", "process", "retry", [0, 1], true),
-        ("batch", "retry", "result", [0, 1], false),
-        ("shared", "request", "result", [0, 0], false),
-        ("sync", "result", "store", [1, 1], false),
+        ("normal", "request", "process", [false, true], false),
+        ("retry", "process", "retry", [false, true], true),
+        ("batch", "retry", "result", [false, true], false),
+        ("shared", "request", "result", [false, false], false),
+        ("sync", "result", "store", [true, true], false),
     ] {
-        let item = labelled(&items, label);
-        assert_eq!(item.handle, edge_handle(&prepared.after, &frame, from, to));
-        let (points, width, dashed) = stroke(&item.primitives).expect("edge stroke");
-        let end = points.len() - 1;
-        let actual_heads =
-            [(points[0], points[1]), (points[end], points[end - 1])].map(|(tip, inside)| {
-                let outward = tip - inside;
-                let projection = |point: Vec2| {
-                    let delta = point - tip;
-                    delta.x * outward.x + delta.y * outward.y
-                };
-                item.primitives
-                    .iter()
-                    .filter(|prim| {
-                        matches!(prim, Prim::Fill { points, .. }
-                    if points.iter().any(|&p| near(p, tip))
-                        && points.iter().any(|&p| projection(p) < 0.0)
-                        && points.iter().all(|&p| projection(p) <= 0.01))
-                    })
-                    .count()
-            });
-        assert_eq!(actual_heads, heads, "edge {label} start/end heads");
-        assert_eq!(dashed, dotted, "edge {label}");
-        if label == "normal" {
-            normal_width = width;
+        let handle = edge_handle(&prepared.after, &frame, from, to);
+        assert_eq!(labelled(&items, label).handle, handle);
+        let item = painted_item(&frame, handle);
+        let mut points = connected_stroke(&item.primitives).expect("connected edge stroke");
+        let start = bounds(&prepared.after, from).edge_toward(bounds(&prepared.after, to).center());
+        if !near(item.transform.point(points[0]), start) {
+            points.reverse();
         }
-        if label == "batch" {
-            thick_width = width;
+        let end = points.len() - 1;
+        let actual_heads = [(points[0], points[1]), (points[end], points[end - 1])]
+            .map(|(tip, inside)| has_head(item, tip, inside));
+        assert_eq!(actual_heads, heads, "edge {label} start/end heads");
+        for prim in item.primitives.iter() {
+            if let Prim::Line {
+                points,
+                color,
+                width,
+                dashed,
+                closed: false,
+            } = prim
+                && color.opacity > 0.0
+                && *width > 0.0
+                && points.len() >= 2
+            {
+                assert_eq!(*dashed, dotted, "every segment of edge {label}");
+                if label == "normal" {
+                    normal_width = normal_width.max(*width);
+                }
+                if label == "batch" {
+                    thick_width = thick_width.min(*width);
+                }
+            }
         }
     }
-    assert!(normal_width > 0.0 && thick_width > normal_width);
+    assert!(normal_width > 0.0 && thick_width.is_finite() && thick_width > normal_width);
 }
 
 #[test]
@@ -665,25 +759,19 @@ fn group_labels_and_edge_heads_survive_set_cut_and_recovery() {
         assert_eq!(bounds(layout, "B"), expected_b);
         let items = layout.items();
         assert_eq!(labelled(&items, "Named group").handle, cluster);
-        let join = labelled(&items, "join");
-        assert_eq!(join.handle, edge);
-        let tip = join
-            .primitives
-            .iter()
-            .find_map(|prim| match prim {
-                Prim::Line {
-                    points,
-                    closed: false,
-                    ..
-                } => points.last(),
-                _ => None,
-            })
-            .expect("the join shaft");
+        assert_eq!(labelled(&items, "join").handle, edge);
+        let frame = at_rest(layout);
+        assert_eq!(edge_handle(layout, &frame, "A", "B"), edge);
+        let join = painted_item(&frame, edge);
+        let mut points = connected_stroke(&join.primitives).expect("connected join shaft");
+        let end = expected_b.edge_toward(expected_a.center());
+        if near(join.transform.point(points[0]), end) {
+            points.reverse();
+        }
+        let last = points.len() - 1;
         assert!(
-            join.primitives
-                .iter()
-                .any(|prim| { matches!(prim, Prim::Fill { points, .. } if points.contains(tip)) }),
-            "the join has a filled head at its end"
+            has_head(join, points[last], points[last - 1]),
+            "the join has a filled head at B"
         );
     }
 }
@@ -1177,22 +1265,16 @@ fn bare_membership_mentions_do_not_redeclare_a_shaped_node() {
         labelled(&items, "Christmas").handle,
         scene.handle(&id("A")).expect("source A")
     );
-    let corner_radius = |node: &Item| {
-        node.primitives
-            .iter()
-            .find_map(|prim| match prim {
-                Prim::Rect {
-                    radius,
-                    border: Some(_),
-                    ..
-                } => Some(*radius),
-                _ => None,
-            })
-            .expect("node outline")
-    };
+    let frame = at_rest(&prepared.after);
+    let round = painted_item(&frame, scene.handle(&id("A")).expect("rounded A"));
+    let plain = painted_item(&frame, scene.handle(&id("B")).expect("plain B"));
+    let a = bounds(&prepared.after, "A");
+    let b = bounds(&prepared.after, "B");
+    assert_outline(round, a);
+    assert_outline(plain, b);
     assert!(
-        corner_radius(labelled(&items, "Christmas"))
-            > corner_radius(labelled(&items, "Go shopping"))
+        outline_distance(round, a.origin) > outline_distance(plain, b.origin) + 0.25,
+        "the rounded node cuts further into its corner than the plain node"
     );
 }
 
@@ -1271,29 +1353,13 @@ fn a_titled_group_recomputes_its_band_after_a_later_node() {
     );
     assert_rect(bounds(&next.after, "A"), [140.0, 66.0, 80.0, 40.0]);
     assert_rect(bounds(&next.after, "B"), [16.0, 178.0, 80.0, 40.0]);
-    assert_rect(bounds(&next.after, "g"), [8.0, 32.0, 220.0, 194.0]);
+    let group_bounds = bounds(&next.after, "g");
+    assert_rect(group_bounds, [8.0, 32.0, 220.0, 194.0]);
     assert_eq!(title_origin(&next.after, "Group"), Vec2::new(28.0, 40.0));
-    let items = next.after.items();
-    let group = labelled(&items, "Group");
-    let border = group
-        .primitives
-        .iter()
-        .find_map(|prim| match prim {
-            Prim::Rect {
-                rect,
-                border: Some(_),
-                ..
-            } => Some(*rect),
-            _ => None,
-        })
-        .expect("visible group border");
-    let transform = world_transform(&items, group);
-    let origin = transform.point(border.origin);
-    let world = Rect {
-        origin,
-        size: transform.point(border.max()) - origin,
-    };
-    assert_rect(world, [8.0, 32.0, 220.0, 194.0]);
+    let frame = at_rest(&next.after);
+    let group = scene.handle(&id("g")).expect("named group");
+    assert_eq!(labelled(&next.after.items(), "Group").handle, group);
+    assert_outline(painted_item(&frame, group), group_bounds);
 }
 
 #[test]

@@ -265,7 +265,7 @@ fn text_after_the_closed_records_array_is_its_own_terminal_error() {
             assert_eq!(error, Some(TokenError::AfterRecords));
             assert_eq!(emitted, expected);
             assert_eq!(
-                consume(&mut tokenizer, br#"[{"step":{}}]}"#, &mut emitted),
+                consume(&mut tokenizer, b" \n\t", &mut emitted),
                 Err(TokenError::AfterRecords)
             );
             assert_eq!(emitted, expected);
@@ -336,22 +336,31 @@ fn steady_state_uses_the_one_record_buffer() {
 
 #[test]
 fn debug_and_errors_do_not_expose_buffered_content() {
-    let mut tokenizer = Tokenizer::new();
-    let mut input: &[u8] = br#"{"records":[{"label":"private-content-sentinel"}"#;
-    let record = tokenizer
-        .next(&mut input)
-        .expect("closed record")
-        .expect("emission");
-    let record_debug = format!("{record:?}");
-    let error = tokenizer.finish().expect_err("missing envelope tail");
-    assert_eq!(error, TokenError::Truncated);
-    let marker = "private-content-sentinel";
-    let bytes = format!("{:?}", marker.as_bytes());
-    for output in [
-        record_debug,
-        format!("{tokenizer:?}"),
-        format!("{error} {error:?}"),
-    ] {
-        assert!(!output.contains("private") && !output.contains(bytes.trim_matches(['[', ']'])));
-    }
+    let render = |marker: &str| {
+        let authored = format!(r#"{{"label":"{marker}"}}"#);
+        let truncated = format!(r#"{{"records":[{authored}"#);
+        let mut tokenizer = Tokenizer::new();
+        let record = tokenizer
+            .next(&mut truncated.as_bytes())
+            .expect("closed record")
+            .expect("emission");
+        assert_eq!(record.bytes, authored.as_bytes());
+        let record_debug = format!("{record:?}");
+        let error = tokenizer.finish().expect_err("missing envelope tail");
+        assert_eq!(error, TokenError::Truncated);
+        let outputs = [
+            record_debug,
+            format!("{tokenizer:?}"),
+            format!("{error} {error:?}"),
+        ];
+        let bytes = format!("{:?}", marker.as_bytes());
+        for output in &outputs {
+            assert!(!output.contains(marker) && !output.contains(bytes.trim_matches(['[', ']'])));
+        }
+        outputs
+    };
+    assert!(
+        render("private-content-sentinel") == render("unshown-labels-discarded"),
+        "equal-sized drawing content must be indistinguishable in diagnostics"
+    );
 }

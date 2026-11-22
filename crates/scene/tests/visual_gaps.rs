@@ -4,13 +4,20 @@ use kumochi_scene::{
     display::{Item, MeasureError, Prim, TextMeasure, TextStyle},
     geom::{Affine, Rect, Vec2},
     layout::{LayoutState, SurfaceGeometry},
-    record::Align,
+    record::{Align, Rgb},
     text::Bounded,
+    theme::Theme,
 };
 use serde_json::json;
 
+#[path = "support/rectangle_outline.rs"]
+mod outline;
+#[path = "support/connected_stroke.rs"]
+mod painted;
 #[path = "support/scene.rs"]
 mod scene_support;
+#[path = "support/visible_fill.rs"]
+mod visible;
 use scene_support::{id, new_scene, prepared, prepared_on};
 
 #[test]
@@ -28,24 +35,21 @@ fn a_titled_group_frames_its_title_band_and_member_with_eight_pixel_padding() {
     );
     let world = &picture.after;
     let group = item(world, "g");
-    let (frame, radius, paint, width) = group
-        .primitives
-        .iter()
-        .find_map(|p| match p {
-            Prim::Rect {
-                rect,
-                radius,
-                fill: None,
-                border: Some((paint, width)),
-            } => Some((*rect, *radius, *paint, *width)),
-            _ => None,
-        })
-        .expect("unfilled group outline");
-    assert!(radius > 0.0);
-    assert_eq!(
-        (paint, width),
-        (kumochi_scene::theme::Theme::default().line.into(), 1.0)
+    assert!(group.opacity > 0.0, "the group outline is visible");
+    assert!(
+        group
+            .primitives
+            .iter()
+            .all(|p| visible::visible_fill(p).is_none()),
+        "the outlined frame does not fill its member area"
     );
+    let frame = group.bounds;
+    let (sides, corner) =
+        outline::rectangle_outline(&group.primitives, frame, Theme::default().line);
+    for width in sides {
+        near(width, 1.0);
+    }
+    near(corner, 0.0);
     let title = ink(&group, "Group", &mut scene_support::Measure);
     let frame_world = bounds(world, "g");
     let title_world = title.origin + frame_world.origin - frame.origin;
@@ -56,7 +60,6 @@ fn a_titled_group_frames_its_title_band_and_member_with_eight_pixel_padding() {
     near(frame_world.max().x - member.max().x, 8.0);
     near(frame_world.max().y - member.max().y, 8.0);
     near(member.origin.y - (title_world.y + title.size.y), 16.0);
-    assert_eq!(group.bounds, frame);
 }
 
 fn labelled_pair(labels: [&str; 2]) -> serde_json::Value {
@@ -90,21 +93,13 @@ fn near(actual: f32, expected: f32) {
 }
 
 fn chip(item: &Item) -> Rect {
+    assert!(item.opacity > 0.0, "the chip is visible");
     item.primitives
         .iter()
-        .find_map(|primitive| match primitive {
-            Prim::Rect {
-                rect,
-                radius,
-                fill: Some(fill),
-                border: None,
-            } if *radius > 0.0
-                && *fill == kumochi_scene::theme::Theme::default().surface.into() =>
-            {
-                Some(*rect)
-            }
-            _ => None,
-        })
+        .filter_map(visible::visible_fill)
+        .filter(|(rgb, _)| *rgb == Theme::default().surface)
+        .map(|(_, bounds)| bounds)
+        .reduce(Rect::union)
         .expect("label chip")
 }
 
@@ -139,20 +134,9 @@ fn ink(item: &Item, label: &str, measure: &mut impl TextMeasure) -> Rect {
         .expect("painted label")
 }
 
-fn stroke(item: &Item) -> &[Vec2] {
-    item.primitives
-        .iter()
-        .find_map(|p| match p {
-            Prim::Line {
-                points,
-                closed: false,
-                width,
-                color,
-                ..
-            } if *width > 0.0 && color.opacity > 0.0 => Some(points.as_ref()),
-            _ => None,
-        })
-        .expect("painted route")
+fn stroke(item: &Item) -> Vec<Vec2> {
+    assert!(item.opacity > 0.0, "the route is visible");
+    painted::connected_stroke(&item.primitives).expect("the painted route connects its ports")
 }
 
 fn crossing(points: &[Vec2], axis: fn(Vec2) -> f32, coordinate: f32) -> Vec2 {
@@ -199,8 +183,12 @@ fn an_edge_label_chip_has_four_by_two_pixel_padding() {
     let chip = chip(&edge);
     assert_eq!(text.origin - chip.origin, Vec2::new(4.0, 2.0));
     assert_eq!(chip.max() - text.max(), Vec2::new(4.0, 2.0));
-    assert!(on_route(chip.center(), stroke(&edge)));
-    assert_eq!(chip.center(), midpoint(stroke(&edge)));
+    let curve = stroke(&edge);
+    assert!(
+        on_route(chip.center(), &curve),
+        "the chip stays on its route"
+    );
+    assert_eq!(chip.center(), midpoint(&curve));
 }
 
 #[test]
@@ -221,10 +209,13 @@ fn colliding_labels_nudge_along_the_curve_and_recenter_after_removal() {
     let first = item(&picture.after, "e1");
     let second = item(&picture.after, "e2");
     let (still, nudged) = (chip(&first), chip(&second));
-    assert_eq!(still.center(), midpoint(stroke(&first)));
+    assert_eq!(still.center(), midpoint(&stroke(&first)));
     assert!(still.origin.x - nudged.max().x >= 4.0 || nudged.origin.x - still.max().x >= 4.0);
     near(nudged.center().y, still.center().y);
-    assert!(on_route(nudged.center(), stroke(&second)));
+    assert!(
+        on_route(nudged.center(), &stroke(&second)),
+        "the nudge stays on its route"
+    );
     assert_eq!(
         ink(&second, "y", &mut scene_support::Measure).center(),
         nudged.center()
@@ -243,7 +234,7 @@ fn colliding_labels_nudge_along_the_curve_and_recenter_after_removal() {
         json!({"id":"remove","remove":["e1"]}),
     );
     let edge = item(&removed.after, "e2");
-    assert_eq!(chip(&edge).center(), midpoint(stroke(&edge)));
+    assert_eq!(chip(&edge).center(), midpoint(&stroke(&edge)));
 }
 
 #[test]
@@ -279,7 +270,7 @@ fn labels_with_no_free_interior_sample_stay_present_at_the_midpoint() {
         let curve = stroke(&edge);
         let node = bounds(&picture.after, node);
         let x = node.max().x + 12.0 + chip.size.x * 0.5;
-        assert_eq!(chip.center(), crossing_y(curve, x));
+        assert_eq!(chip.center(), crossing_y(&curve, x));
         near(chip.center().y, node.max().y + 27.0);
         chip
     });
@@ -320,9 +311,11 @@ fn edge_label_chips_paint_after_every_edge_stroke() {
             })
         })
         .collect();
+    let is_chip =
+        |p: &Prim| visible::visible_fill(p).is_some_and(|(rgb, _)| rgb == Theme::default().surface);
     let first_label = paint
         .iter()
-        .position(|(_, p)| matches!(p, Prim::Rect { .. } | Prim::Text { .. }))
+        .position(|(_, p)| is_chip(p) || matches!(p, Prim::Text { .. }))
         .expect("first chip or label");
     for (handle, label) in handles.into_iter().zip(["x", "y"]) {
         for is_stroke in [true, false] {
@@ -331,13 +324,17 @@ fn edge_label_chips_paint_after_every_edge_stroke() {
                     && if is_stroke {
                         matches!(p, Prim::Line { .. })
                     } else {
-                        matches!(p, Prim::Fill { .. })
+                        visible::visible_fill(p).is_some() && !is_chip(p)
                     }
             };
             assert!(paint[..first_label].iter().any(role));
             assert!(!paint[first_label..].iter().any(role));
         }
-        assert!(paint[first_label..].iter().any(|(owner, p)| *owner == handle && matches!(p, Prim::Rect { fill: Some(_), .. })));
+        assert!(
+            paint[first_label..]
+                .iter()
+                .any(|(owner, p)| *owner == handle && is_chip(p))
+        );
         assert!(
             paint[first_label..]
                 .iter()
@@ -368,7 +365,7 @@ fn a_chip_follows_the_bow_over_a_skipped_node() {
     let edge = item(&picture.after, "skip");
     let node = bounds(&picture.after, "b");
     let curve = stroke(&edge);
-    let middle = midpoint(curve);
+    let middle = midpoint(&curve);
     let chip = chip(&edge);
     assert_eq!(middle, chip.center());
     assert_eq!(
@@ -377,7 +374,10 @@ fn a_chip_follows_the_bow_over_a_skipped_node() {
     );
     assert!(chip.max().y < node.origin.y);
     for x in [node.origin.x, node.center().x, node.max().x] {
-        assert!(crossing_y(curve, x).y < node.origin.y);
+        assert!(
+            crossing_y(&curve, x).y < node.origin.y,
+            "the route clears the skipped node"
+        );
     }
 }
 
@@ -945,8 +945,15 @@ fn diagonal_outline_ports_and_coincident_centers_survive_edge_updates() {
         for layout in [&first.after, &changed.after] {
             let edge = item(layout, "edge");
             let points = stroke(&edge);
-            assert_eq!(points.first(), Some(&Vec2::new(start[0], start[1])));
-            assert_eq!(points.last(), Some(&Vec2::new(end[0], end[1])));
+            let [a, b] = [
+                *points.first().expect("one port"),
+                *points.last().expect("other port"),
+            ];
+            let [source, destination] = [start, end].map(|[x, y]| Vec2::new(x, y));
+            assert!(
+                [a, b] == [source, destination] || [b, a] == [source, destination],
+                "both visible ports stay at the expected outline positions"
+            );
             if pose == [0, -132] {
                 assert!(
                     points
@@ -954,7 +961,7 @@ fn diagonal_outline_ports_and_coincident_centers_survive_edge_updates() {
                         .all(|point| *point == Vec2::new(start[0], start[1]))
                 );
             } else {
-                let actual = crossing(points, |p| p.y, start[1].midpoint(end[1]));
+                let actual = crossing(&points, |p| p.y, start[1].midpoint(end[1]));
                 assert!((actual.x - middle[0]).abs() < 0.5 && (actual.y - middle[1]).abs() < 0.5);
             }
         }

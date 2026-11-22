@@ -449,8 +449,8 @@ fn flow(nodes: usize, dashed: &[usize], dir: &str, node: &str, edge: Option<&str
 
 /// Dashed illustrations of the kinds a long label, a skip-rank link or a fan-out to wide nodes
 /// lengthens: under the wide measure each fits the limits, and its dash count is at least every
-/// shell's here except the fan-out's, whose wider nodes shorten its dashed edges: the residual
-/// that keeps dashes outside the bound.
+/// shell's here except for the known two-piece fan-out shortfall, whose wider nodes shorten
+/// its dashed edges.
 #[test]
 fn dashed_fixtures_fit_and_their_dashes_are_not_under_counted() {
     let mut skips = flow(6, &[], "down", "Check the cache", None);
@@ -525,8 +525,8 @@ fn dashed_fixtures_fit_and_their_dashes_are_not_under_counted() {
             .expect("eight shells");
         if index == 6 {
             assert!(
-                brain.dash_pieces < most,
-                "fan-out can route more dashes under the shell: brain {brain:?}, shell max {most}"
+                most.saturating_sub(brain.dash_pieces) <= 2,
+                "fan-out's dash shortfall must not grow: brain {brain:?}, shell max {most}"
             );
         } else {
             assert!(
