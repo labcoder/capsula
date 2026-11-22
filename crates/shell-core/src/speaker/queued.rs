@@ -75,9 +75,7 @@ impl Drop for Packet {
     }
 }
 
-/// Positive, expiring evidence that a run's audio is presenting on its native route: held from
-/// accepted presentation reports, cleared when the route goes. It holds Esc, never admits a
-/// microphone or a turn.
+/// Expiring evidence that a run's audio is presenting: it holds Esc, never admits a microphone.
 #[derive(Clone)]
 pub(crate) struct Speech {
     base: Instant,

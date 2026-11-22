@@ -846,12 +846,19 @@ fn queued_speech_holds_esc_only_while_presented_and_never_from_a_focused_box(
             matches!(lease(), Ok(Some(_)))
         });
         wait("the shell reads the lease", cx, &mut |cx| {
-            owner.read_with(cx, |owner, _| owner.live_speech(Instant::now()).is_some())
+            owner.read_with(cx, |owner, _| {
+                owner
+                    .speech
+                    .get()
+                    .is_some_and(|(.., until)| until > Instant::now())
+            })
         });
         match turn {
             1 => {
                 assert!(held(cx), "presented speech takes Esc");
-                first = owner.read_with(cx, |owner, _| owner.live_speech(Instant::now()));
+                first = owner.read_with(cx, |owner, _| {
+                    owner.speech.get().map(|(session, run, _)| (session, run))
+                });
                 wait("the reply finishes", cx, &mut |_| {
                     device.render(&mut block);
                     pipe.handle.admits_text(Some(&session))
