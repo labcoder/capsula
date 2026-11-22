@@ -81,9 +81,8 @@ async fn authority<'a>(
     if !repos.names.contains(repo) {
         return Err(NO_REPO);
     }
-    // Only the id bound at review names the repository, for a send and a lookup alike. A fetched
-    // listing always carries ids, so another id, or none bound (pending across V10), refuses.
-    if repos.id(repo) != action.repo_id {
+    // Only the id bound at review names the repository: none bound, or another listed, refuses.
+    if action.repo_id.is_none() || repos.id(repo) != action.repo_id {
         return Err(NO_REPO);
     }
     Ok((repo, user, repos))
