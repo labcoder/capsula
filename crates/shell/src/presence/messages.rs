@@ -16,7 +16,7 @@ pub(super) mod consent;
 use super::Presence;
 use crate::runs::Shown;
 use crate::strings::{Strings, Text};
-use crate::threads::Threads;
+use crate::threads::{HistoryEdge, Threads};
 
 gpui_kit::actions!(thread_messages, [EarlierMessages, LaterMessages]);
 
@@ -104,9 +104,14 @@ impl Messages {
             let model = model.clone();
             let owner = owner.clone();
             move |event, _, cx| {
-                if event.visible_range.start == 0 {
-                    older(&model, &owner, cx);
-                }
+                let edge = if !event.is_scrolled {
+                    HistoryEdge::Newer
+                } else if event.visible_range.start == 0 {
+                    HistoryEdge::Older
+                } else {
+                    HistoryEdge::Inside
+                };
+                scroll_history(&model, &owner, edge, cx);
             }
         });
         let watch = cx.observe_in(&model, window, |view, model, window, cx| {
@@ -199,7 +204,7 @@ impl Messages {
         {
             let first = first_message(&self.rows, self.live_row);
             self.reveal_older = Some((state.history_revision(), before, first));
-            older(&self.model, &self.owner, cx);
+            scroll_history(&self.model, &self.owner, HistoryEdge::Older, cx);
         }
     }
 
@@ -211,6 +216,7 @@ impl Messages {
             .filter(|live| {
                 live.thread.is_some()
                     && live.thread == state.open
+                    && !state.has_newer_events()
                     && Some(live.run) != state.proven
                     && !live.text.is_empty()
             })
@@ -238,6 +244,7 @@ impl Messages {
             .collect();
         let count = ids.len();
         if self.shown_thread == state.open {
+            let top = self.list.logical_scroll_top();
             let prefix = self
                 .ids
                 .iter()
@@ -259,6 +266,14 @@ impl Messages {
             if self.live_row != live || self.proven != state.proven {
                 self.list.remeasure_items(0..count);
             }
+            if (prefix != count || prefix != self.ids.len())
+                && let Some(item_ix) = state.history_anchor(&self.ids, &ids, top.item_ix)
+            {
+                let offset = ListOffset { item_ix, ..top };
+                if self.list.logical_scroll_top() != offset {
+                    self.list.scroll_to(offset);
+                }
+            }
         } else {
             self.list.reset(count);
         }
@@ -273,7 +288,7 @@ impl Messages {
                     .is_some_and(|id| first.is_none_or(|first| id < first));
                 if !earlier && let Some(before) = state.before {
                     self.reveal_older = Some((revision, before, first));
-                    older(&self.model, &self.owner, cx);
+                    scroll_history(&self.model, &self.owner, HistoryEdge::Older, cx);
                 } else {
                     self.list.scroll_to(ListOffset {
                         item_ix: 0,
@@ -297,16 +312,19 @@ fn first_message(rows: &[Row], live: Option<RunId>) -> Option<u64> {
         .map(|row| row.id.1)
 }
 
-pub(super) fn older(model: &Entity<Threads>, owner: &WeakEntity<Presence>, cx: &mut App) {
+fn scroll_history(
+    model: &Entity<Threads>,
+    owner: &WeakEntity<Presence>,
+    edge: HistoryEdge,
+    cx: &mut App,
+) {
     let model = model.clone();
     let owner = owner.clone();
     cx.defer(move |cx| {
         let _gone = owner.update(cx, |owner, cx| {
-            model.update(cx, |state, cx| {
-                state.older_events();
-                cx.notify();
-            });
-            owner.request_pages(cx);
+            if model.update(cx, |state, _| state.history_scrolled(edge)) {
+                owner.request_pages(cx);
+            }
         });
     });
 }
@@ -372,11 +390,20 @@ impl Render for Messages {
                 let bottom = view.list.logical_scroll_top().item_ix == view.list.item_count();
                 let end_anchor = if bottom { height } else { px(0.0) };
                 view.list.scroll_by(-height * 0.9 - end_anchor);
+                scroll_history(&view.model, &view.owner, HistoryEdge::Inside, cx);
                 cx.notify();
             }))
             .on_action(cx.listener(|view, _: &LaterMessages, _, cx| {
                 view.list
                     .scroll_by(view.list.viewport_bounds().size.height * 0.9);
+                let edge = if view.list.logical_scroll_top().item_ix >= view.count
+                    || view.list.is_scrolled_to_end() == Some(true)
+                {
+                    HistoryEdge::Newer
+                } else {
+                    HistoryEdge::Inside
+                };
+                scroll_history(&view.model, &view.owner, edge, cx);
                 cx.notify();
             }))
             .child(messages)
@@ -701,6 +728,7 @@ mod tests {
     fn event(id: u64) -> PageEvent {
         PageEvent {
             id: EventId(id),
+            created_ms: 0,
             run: Some(RunId(1)),
             kind: PageEventKind::AssistantText,
             text: format!("message {id}"),
@@ -711,6 +739,7 @@ mod tests {
     fn marker(id: u64, run: Option<RunId>, scene: u64) -> PageEvent {
         PageEvent {
             id: EventId(id),
+            created_ms: 0,
             run,
             kind: PageEventKind::NoVisual {
                 scene: SceneId(scene),
@@ -942,7 +971,7 @@ mod tests {
                 request: 2,
                 thread: ThreadId(1),
                 events: (11..=30).rev().map(event).collect(),
-                before: Some(EventId(11)),
+                next: Some(EventId(11)),
             });
             // A note that followed a message older than this page sits above all of it.
             state.screen_note = Some(ScreenNote {
@@ -969,7 +998,7 @@ mod tests {
                 request: 3,
                 thread: ThreadId(1),
                 events: (5..=10).rev().map(event).collect(),
-                before: Some(EventId(5)),
+                next: Some(EventId(5)),
             });
             cx.notify();
         });
@@ -1189,6 +1218,7 @@ mod tests {
         model.update(cx, |state, cx| {
             state.events = vec![PageEvent {
                 id: EventId(7),
+                created_ms: 0,
                 run: None,
                 kind: PageEventKind::TaskDeleted,
                 text: String::new(),
@@ -1737,7 +1767,7 @@ mod tests {
                     request: 2,
                     thread: ThreadId(1),
                     events: (11..=30).rev().map(event).collect(),
-                    before: Some(EventId(11)),
+                    next: Some(EventId(11)),
                 });
                 cx.notify();
             });
@@ -1761,7 +1791,7 @@ mod tests {
                             request: 5,
                             thread: ThreadId(1),
                             events: (31..=50).rev().map(event).collect(),
-                            before: Some(EventId(31)),
+                            next: Some(EventId(31)),
                         });
                     }
                     "selection" => state.select(Some(ThreadId(2))),
@@ -1772,7 +1802,7 @@ mod tests {
                     request: 3,
                     thread: ThreadId(1),
                     events: vec![event(1)],
-                    before: None,
+                    next: None,
                 });
                 cx.notify();
             });

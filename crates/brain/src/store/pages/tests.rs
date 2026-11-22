@@ -180,7 +180,7 @@ fn saved_failure_marks_only_its_user_event_and_preserves_partial_history() {
     assert_eq!(store.recover().expect("recovery").crashed_runs, 1);
     let DataToShell::Page {
         events: rows,
-        before: None,
+        next: None,
         ..
     } = events(&store, thread, None)
     else {
@@ -513,7 +513,7 @@ fn oversized_unicode_event_is_cut_to_the_full_frame_budget_and_can_continue() {
     let DataToShell::Page {
         request,
         events: rows,
-        before,
+        next: before,
         ..
     } = &reply
     else {
@@ -536,7 +536,7 @@ fn oversized_unicode_event_is_cut_to_the_full_frame_budget_and_can_continue() {
     assert!(frame::encode(&reply, Pipe::Data).expect("frame").len() > MAX_PAGE_BYTES);
     let DataToShell::Page {
         events: rows,
-        before,
+        next: before,
         ..
     } = events(&store, thread, Some(EventId(2)))
     else {
@@ -609,7 +609,7 @@ fn event_budget_cursor_resumes_without_skipping_a_normal_event() {
     let DataToShell::Page {
         request,
         events: rows,
-        before,
+        next: before,
         ..
     } = reply
     else {
@@ -628,7 +628,7 @@ fn event_budget_cursor_resumes_without_skipping_a_normal_event() {
     let over = DataToShell::Page {
         request,
         thread,
-        before: one_more.last().map(|event| event.id),
+        next: one_more.last().map(|event| event.id),
         events: one_more,
     };
     assert!(frame::encode(&over, Pipe::Data).expect("frame").len() > MAX_PAGE_BYTES);
@@ -804,7 +804,7 @@ fn text_past_the_budget_is_capped_in_bytes_and_keeps_its_nuls() {
     assert!(frame::encode(&reply, Pipe::Data).expect("frame").len() <= MAX_PAGE_BYTES);
     let DataToShell::Page {
         events: rows,
-        before,
+        next: before,
         ..
     } = reply
     else {
@@ -889,9 +889,15 @@ fn typed_scene(store: &mut Store, thread: ThreadId, run: RunId) -> SceneId {
     scene
 }
 
-fn history_event(id: u64, kind: PageEventKind, text: &str) -> PageEvent {
+fn history_event(store: &Store, id: u64, kind: PageEventKind, text: &str) -> PageEvent {
     PageEvent {
         id: EventId(id),
+        created_ms: store
+            .conn
+            .query_row("SELECT created_ms FROM events WHERE id = ?1", [id], |row| {
+                row.get(0)
+            })
+            .expect("fixture timestamp"),
         run: Some(RunId(1)),
         kind,
         text: text.to_owned(),
@@ -946,7 +952,7 @@ fn typed_history_keeps_exact_identity_neighboring_text_and_raw_cursor() {
         request,
         thread: returned,
         events: rows,
-        before,
+        next: before,
     } = reply
     else {
         panic!("page")
@@ -955,24 +961,37 @@ fn typed_history_keeps_exact_identity_neighboring_text_and_raw_cursor() {
     assert_eq!(returned, thread);
     let mut expected: Vec<_> = (5..=52)
         .rev()
-        .map(|id| history_event(id, PageEventKind::AssistantText, "newer"))
+        .map(|id| history_event(&store, id, PageEventKind::AssistantText, "newer"))
         .collect();
-    expected.push(history_event(4, PageEventKind::NoVisual { scene }, ""));
-    expected.push(history_event(2, PageEventKind::AssistantText, "neighbor"));
+    expected.push(history_event(
+        &store,
+        4,
+        PageEventKind::NoVisual { scene },
+        "",
+    ));
+    expected.push(history_event(
+        &store,
+        2,
+        PageEventKind::AssistantText,
+        "neighbor",
+    ));
     assert_eq!(rows, expected);
     assert_eq!(before, Some(EventId(2)));
     let DataToShell::Page {
         request,
         thread: returned,
         events: rows,
-        before,
+        next: before,
     } = events(&store, thread, before)
     else {
         panic!("continued page")
     };
     assert_eq!(request, u32::MAX);
     assert_eq!(returned, thread);
-    assert_eq!(rows, [history_event(1, PageEventKind::User, "oldest")]);
+    assert_eq!(
+        rows,
+        [history_event(&store, 1, PageEventKind::User, "oldest")]
+    );
     assert_eq!(before, None);
 }
 
@@ -1013,8 +1032,8 @@ fn unavailable_visual_metadata_is_row_local_without_coercing_scene_identity() {
         Some(r#"{"scene":999}"#),
     ];
     let mut expected = vec![
-        history_event(1, PageEventKind::User, "oldest"),
-        history_event(3, PageEventKind::NoVisual { scene }, ""),
+        history_event(&store, 1, PageEventKind::User, "oldest"),
+        history_event(&store, 3, PageEventKind::NoVisual { scene }, ""),
     ];
     for (index, body) in bodies.into_iter().enumerate() {
         store
@@ -1029,6 +1048,7 @@ fn unavailable_visual_metadata_is_row_local_without_coercing_scene_identity() {
             )
             .expect("legacy row");
         expected.push(history_event(
+            &store,
             4 + u64::try_from(index).expect("index"),
             PageEventKind::SceneStep,
             "legacy text",
@@ -1046,6 +1066,7 @@ fn unavailable_visual_metadata_is_row_local_without_coercing_scene_identity() {
         )
         .expect("neighbor");
     expected.push(history_event(
+        &store,
         28,
         PageEventKind::AssistantText,
         "newest neighbor",
@@ -1055,7 +1076,7 @@ fn unavailable_visual_metadata_is_row_local_without_coercing_scene_identity() {
         request,
         thread: returned,
         events: rows,
-        before,
+        next: before,
     } = events(&store, thread, None)
     else {
         panic!("page")
@@ -1120,7 +1141,7 @@ fn visual_identity_requires_an_earlier_typed_begin_in_the_same_thread() {
         .expect("unusable references");
     let DataToShell::Page {
         events: rows,
-        before,
+        next: before,
         ..
     } = events(&store, thread, None)
     else {
@@ -1129,12 +1150,12 @@ fn visual_identity_requires_an_earlier_typed_begin_in_the_same_thread() {
     assert_eq!(
         rows,
         [
-            history_event(12, PageEventKind::AssistantText, "neighbor"),
-            history_event(11, PageEventKind::SceneStep, "missing header"),
-            history_event(10, PageEventKind::SceneStep, "other thread"),
-            history_event(8, PageEventKind::SceneStep, "future scene"),
-            history_event(3, PageEventKind::NoVisual { scene }, ""),
-            history_event(1, PageEventKind::User, "oldest"),
+            history_event(&store, 12, PageEventKind::AssistantText, "neighbor"),
+            history_event(&store, 11, PageEventKind::SceneStep, "missing header"),
+            history_event(&store, 10, PageEventKind::SceneStep, "other thread"),
+            history_event(&store, 8, PageEventKind::SceneStep, "future scene"),
+            history_event(&store, 3, PageEventKind::NoVisual { scene }, ""),
+            history_event(&store, 1, PageEventKind::User, "oldest"),
         ]
     );
     assert_eq!(before, None);
@@ -1190,7 +1211,7 @@ fn visual_metadata_accepts_exactly_eight_mib_but_not_one_byte_over() {
         request,
         thread: returned,
         events: rows,
-        before,
+        next: before,
     } = events(&store, thread, None)
     else {
         panic!("page")
@@ -1200,11 +1221,11 @@ fn visual_metadata_accepts_exactly_eight_mib_but_not_one_byte_over() {
     assert_eq!(
         rows,
         [
-            history_event(6, PageEventKind::AssistantText, "neighbor"),
-            history_event(5, PageEventKind::SceneStep, "over cap"),
-            history_event(4, PageEventKind::NoVisual { scene }, "at cap"),
-            history_event(3, PageEventKind::NoVisual { scene }, ""),
-            history_event(1, PageEventKind::User, "oldest"),
+            history_event(&store, 6, PageEventKind::AssistantText, "neighbor"),
+            history_event(&store, 5, PageEventKind::SceneStep, "over cap"),
+            history_event(&store, 4, PageEventKind::NoVisual { scene }, "at cap"),
+            history_event(&store, 3, PageEventKind::NoVisual { scene }, ""),
+            history_event(&store, 1, PageEventKind::User, "oldest"),
         ]
     );
     assert_eq!(before, None);
@@ -1244,7 +1265,7 @@ fn invalid_visual_metadata_in_the_fifty_first_row_keeps_the_page_and_cursor() {
         request,
         thread: returned,
         events: rows,
-        before,
+        next: before,
     } = events(&store, thread, None)
     else {
         panic!("page")
@@ -1255,13 +1276,13 @@ fn invalid_visual_metadata_in_the_fifty_first_row_keeps_the_page_and_cursor() {
         rows,
         (3..=52)
             .rev()
-            .map(|id| history_event(id, PageEventKind::AssistantText, "newer"))
+            .map(|id| history_event(&store, id, PageEventKind::AssistantText, "newer"))
             .collect::<Vec<_>>()
     );
     assert_eq!(before, Some(EventId(3)));
     let DataToShell::Page {
         events: rows,
-        before,
+        next: before,
         ..
     } = events(&store, thread, before)
     else {
@@ -1270,8 +1291,8 @@ fn invalid_visual_metadata_in_the_fifty_first_row_keeps_the_page_and_cursor() {
     assert_eq!(
         rows,
         [
-            history_event(2, PageEventKind::SceneStep, "legacy text"),
-            history_event(1, PageEventKind::User, "oldest"),
+            history_event(&store, 2, PageEventKind::SceneStep, "legacy text"),
+            history_event(&store, 1, PageEventKind::User, "oldest"),
         ]
     );
     assert_eq!(before, None);
@@ -1313,7 +1334,7 @@ fn visual_markers_participate_in_the_full_encoded_page_budget_and_continuation()
     let DataToShell::Page {
         request,
         events: rows,
-        before,
+        next: before,
         ..
     } = reply
     else {
@@ -1325,7 +1346,7 @@ fn visual_markers_participate_in_the_full_encoded_page_budget_and_continuation()
         rows,
         (base + 24..=base + 54)
             .rev()
-            .map(|id| history_event(id, PageEventKind::NoVisual { scene }, &text))
+            .map(|id| history_event(&store, id, PageEventKind::NoVisual { scene }, &text))
             .collect::<Vec<_>>()
     );
     assert_eq!(before, Some(EventId(base + 24)));
@@ -1338,7 +1359,7 @@ fn visual_markers_participate_in_the_full_encoded_page_budget_and_continuation()
     );
     let DataToShell::Page {
         events: more,
-        before,
+        next: before,
         ..
     } = next
     else {
@@ -1346,14 +1367,15 @@ fn visual_markers_participate_in_the_full_encoded_page_budget_and_continuation()
     };
     let mut expected: Vec<_> = (base + 2..=base + 23)
         .rev()
-        .map(|id| history_event(id, PageEventKind::NoVisual { scene }, &text))
+        .map(|id| history_event(&store, id, PageEventKind::NoVisual { scene }, &text))
         .collect();
     expected.push(history_event(
+        &store,
         base + 1,
         PageEventKind::NoVisual { scene },
         "",
     ));
-    expected.push(history_event(1, PageEventKind::User, "oldest"));
+    expected.push(history_event(&store, 1, PageEventKind::User, "oldest"));
     assert_eq!(more, expected);
     assert_eq!(before, None);
     let mut one_more = rows;
@@ -1361,7 +1383,7 @@ fn visual_markers_participate_in_the_full_encoded_page_budget_and_continuation()
     let over = DataToShell::Page {
         request,
         thread,
-        before: Some(EventId(base + 23)),
+        next: Some(EventId(base + 23)),
         events: one_more,
     };
     assert!(

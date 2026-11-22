@@ -32,6 +32,12 @@ mod tests;
 /// The page queries, on the store's own connection or on the page reader's.
 pub(crate) struct Pages<'a>(pub(crate) &'a Connection);
 
+#[derive(Clone, Copy)]
+enum EventPage {
+    Before(Option<EventId>),
+    After(EventId),
+}
+
 impl super::context::Snapshot<'_> {
     pub(crate) fn page(&self, request: u32, page: PageOf) -> Result<DataToShell, StoreError> {
         Pages(&self.0).read_page(request, page)
@@ -48,6 +54,30 @@ impl super::Store {
 
 #[cfg(feature = "test-support")]
 impl super::Store {
+    /// Adds deterministic history to a test thread without changing the machine clock.
+    ///
+    /// # Errors
+    /// Returns an error if the test data cannot be written.
+    pub fn append_history_for_tests(
+        &mut self,
+        thread: ThreadId,
+        events: &[(i64, &str)],
+    ) -> Result<(), StoreError> {
+        let thread = super::sql_id(thread.0, StoreError::NoThread)?;
+        let tx = self.conn.transaction()?;
+        {
+            let mut insert = tx.prepare(
+                "INSERT INTO events (thread, kind, created_ms, text)
+                 VALUES (?1, 'assistant_text', ?2, ?3)",
+            )?;
+            for &(created_ms, text) in events {
+                insert.execute(params![thread, created_ms, text])?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
     /// Reads a real history response for an offline shell fixture.
     ///
     /// # Errors
@@ -66,6 +96,7 @@ impl Pages<'_> {
     /// # Errors
     /// Fails with a content-free error when reading or encoding fails.
     pub(crate) fn read_page(&self, request: u32, page: PageOf) -> Result<DataToShell, StoreError> {
+        let newer = matches!(page, PageOf::EventsAfter { .. });
         let mut cursors = Vec::new();
         let mut reply = match page {
             PageOf::Threads { search, after } => {
@@ -84,32 +115,10 @@ impl Pages<'_> {
                 }
             }
             PageOf::Events { thread, before } => {
-                let (mut events, mut before) = self.events_page(thread, before, MAX_PAGE_ROWS)?;
-                // Each row's own encoded size, so the rows past the budget go in one pass rather
-                // than one re-encoding each. Dropping a row moves `before` to a higher id, which
-                // never encodes shorter, so this never drops a row that would have fit.
-                let full = encoded_len(&DataToShell::Page {
-                    request,
-                    thread,
-                    events: Vec::new(),
-                    before,
-                })?;
-                let sizes = events
-                    .iter()
-                    .map(encoded_len)
-                    .collect::<Result<Vec<_>, _>>()?;
-                let mut over = (full + sizes.iter().sum::<usize>()).saturating_sub(MAX_PAGE_BYTES);
-                while over > 0 && events.len() > 1 {
-                    over = over.saturating_sub(sizes[events.len() - 1]);
-                    events.pop();
-                    before = events.last().map(|event| event.id);
-                }
-                DataToShell::Page {
-                    request,
-                    thread,
-                    events,
-                    before,
-                }
+                self.event_reply(request, thread, EventPage::Before(before))?
+            }
+            PageOf::EventsAfter { thread, after } => {
+                self.event_reply(request, thread, EventPage::After(after))?
             }
         };
         while !fits(&reply)? {
@@ -120,9 +129,9 @@ impl Pages<'_> {
                     cursors.pop();
                     *next = cursors.last().copied();
                 }
-                DataToShell::Page { events, before, .. } if events.len() > 1 => {
+                DataToShell::Page { events, next, .. } if events.len() > 1 => {
                     events.pop();
-                    *before = events.last().map(|event| event.id);
+                    *next = events.last().map(|event| event.id);
                 }
                 _ => {
                     fit_single(&mut reply)?;
@@ -130,7 +139,47 @@ impl Pages<'_> {
                 }
             }
         }
+        if newer && let DataToShell::Page { events, .. } = &mut reply {
+            events.reverse();
+        }
         Ok(reply)
+    }
+
+    fn event_reply(
+        &self,
+        request: u32,
+        thread: ThreadId,
+        page: EventPage,
+    ) -> Result<DataToShell, StoreError> {
+        let (mut events, mut next) = self.event_rows(thread, page, MAX_PAGE_ROWS)?;
+        let overhead = encoded_len(&DataToShell::Page {
+            request,
+            thread,
+            events: Vec::new(),
+            next: None,
+        })? + frame::HEADER_LEN;
+        let mut size = overhead;
+        let mut take = 0;
+        for event in &events {
+            size += encoded_len(event)?;
+            let more = take + 1 < events.len() || next.is_some();
+            let cursor = if more { encoded_len(&event.id)? } else { 0 };
+            if size + cursor > MAX_PAGE_BYTES {
+                break;
+            }
+            take += 1;
+        }
+        let take = take.max(1);
+        if take < events.len() {
+            events.truncate(take);
+            next = events.last().map(|event| event.id);
+        }
+        Ok(DataToShell::Page {
+            request,
+            thread,
+            events,
+            next,
+        })
     }
 
     /// Live threads in descending `(updated_ms, id)` order, with a continuation key.
@@ -300,19 +349,45 @@ impl Pages<'_> {
     ///
     /// # Errors
     /// Fails with a content-free error when SQLite fails or a stored event kind is unknown.
+    #[cfg(test)]
     pub(crate) fn events_page(
         &self,
         thread: ThreadId,
         before: Option<EventId>,
         limit: usize,
     ) -> Result<(Vec<PageEvent>, Option<EventId>), StoreError> {
+        self.event_rows(thread, EventPage::Before(before), limit)
+    }
+
+    fn event_rows(
+        &self,
+        thread: ThreadId,
+        page: EventPage,
+        limit: usize,
+    ) -> Result<(Vec<PageEvent>, Option<EventId>), StoreError> {
         let Ok(thread) = i64::try_from(thread.0) else {
             return Ok((Vec::new(), None));
+        };
+        let (lower, upper, order) = match page {
+            EventPage::Before(before) => (
+                0,
+                before
+                    .and_then(|id| i64::try_from(id.0).ok())
+                    .map_or(i64::MAX, |id| id - 1),
+                "DESC",
+            ),
+            EventPage::After(after) => {
+                let Some(lower) = i64::try_from(after.0).ok().and_then(|id| id.checked_add(1))
+                else {
+                    return Ok((Vec::new(), None));
+                };
+                (lower, i64::MAX, "ASC")
+            }
         };
         let limit = limit.clamp(1, MAX_PAGE_ROWS);
         let mut query = self
             .0
-            .prepare(
+            .prepare(&format!(
                 "SELECT e.id, e.run, e.kind, substr(CAST(e.text AS BLOB), 1, ?4),
                  CASE WHEN e.kind = 'scene_step' THEN
                      CASE WHEN octet_length(e.body) <= ?5 THEN CASE WHEN json_valid(e.body)
@@ -325,24 +400,25 @@ impl Pages<'_> {
                      END END END
                  END,
                  CASE WHEN e.kind IN ('draft', 'action') THEN substr(CAST(e.body AS BLOB), 1, 33) END,
-                 r.screen, r.state = 'active', r.state = 'failed'
+                 r.screen, r.state = 'active', r.state = 'failed', e.created_ms
                  FROM events e
              JOIN threads t ON t.id = e.thread AND t.state = 'live'
              LEFT JOIN runs r ON e.kind = 'user' AND r.id = e.run AND r.thread = e.thread
-             WHERE e.thread = ?1 AND (?2 IS NULL OR e.id < ?2)
+             WHERE e.thread = ?1 AND e.id BETWEEN ?2 AND ?6
              AND e.kind NOT IN ('scene_begin', 'scene_cleared', 'scene_cut', 'revealed',
                                 'output_item', 'tool_result')
-             ORDER BY e.id DESC LIMIT ?3",
-            )
+             ORDER BY e.id {order} LIMIT ?3"
+            ))
             .map_err(|_| StoreError::Read)?;
         let rows = query
             .query_map(
                 params![
                     thread,
-                    before.map(|id| bounded_id(id.0)),
+                    lower,
                     i64::try_from(limit + 1).map_err(|_| StoreError::Read)?,
                     i64::try_from(MAX_PAGE_BYTES).map_err(|_| StoreError::Read)?,
-                    i64::try_from(MAX_BODY_BYTES).map_err(|_| StoreError::Read)?
+                    i64::try_from(MAX_BODY_BYTES).map_err(|_| StoreError::Read)?,
+                    upper,
                 ],
                 |row| {
                     let kind: String = row.get(2)?;
@@ -386,6 +462,7 @@ impl Pages<'_> {
                     };
                     Ok(PageEvent {
                         id: EventId(row_id(row.get(0)?)),
+                        created_ms: row.get(9)?,
                         run: row.get::<_, Option<i64>>(1)?.map(|id| RunId(row_id(id))),
                         kind,
                         text: String::from_utf8(text).map_err(|_| rusqlite::Error::InvalidQuery)?,
@@ -399,12 +476,8 @@ impl Pages<'_> {
             .map_err(|_| StoreError::Read)?;
         let more = rows.len() > limit;
         rows.truncate(limit);
-        let before = if more {
-            rows.last().map(|row| row.id)
-        } else {
-            None
-        };
-        Ok((rows, before))
+        let next = rows.last().filter(|_| more).map(|row| row.id);
+        Ok((rows, next))
     }
 }
 

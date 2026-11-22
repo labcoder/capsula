@@ -99,8 +99,8 @@ and nonblocking requests; `presence/thread_view.rs` composes the task list with 
 `presence/messages.rs` conversation component:
 
 - gpui-kit's `ListState<ThreadsDelegate>` supplies thread selection, search, and load-more;
-- GPUI's variable-height `list()` supplies the messages, displayed oldest first. Scroll-triggered
-  older pages are inserted at the top, preserving the visible scroll anchor. The explicit
+- GPUI's variable-height `list()` supplies the messages, displayed oldest first. Scrolling
+  past either loaded edge requests that page, preserving the visible scroll anchor. The explicit
   Older messages button reveals the newly loaded page instead; pages that only extend an
   existing drawing placeholder or contain assistant segments hidden by the provisional preview
   continue until an older visible row or the true start is reached. A failed event read advances
@@ -235,16 +235,19 @@ to the top. The older-page cursor stays where it was. Ranked search results aren
 arrives while a list read is in flight earns one more read once that reply lands, since the
 reply may predate it.
 
-A RunState for the open thread rereads its newest events and puts the ones newer than what's
-shown on top, keeping older pages and their cursor. When that page doesn't reach the
-newest event shown, it replaces the list with its own cursor, so the events between stay
-reachable by scrolling. A Stop or failure is told before its
+A RunState for the open thread rereads its newest events. A reader following the tail
+gets the new events; when the new page doesn't overlap, its cursor keeps the gap reachable.
+An older reader keeps the same window and can page forward to newly arrived events.
+A Stop or failure is told before its
 outcome is written, so that read can miss the last text until the thread's next RunState.
 
 shortcut: more than 50 threads updated between first-page reads can leave one out of order
 until reopening the panel. Revisit this when one turn can update many threads concurrently.
 
-Events use the existing `(thread, id)` index, newest first on the wire, with a `before` id.
+Events use the existing `(thread, id)` index in either direction and travel newest first.
+The core retains at most 200 events and 128 KiB of event text per view. Loading a page
+evicts from the opposite edge when needed and makes those events reachable from the
+nearest retained id. Each event includes its stored timestamp, but time never orders a page.
 Deleting or nonexistent threads return an empty page with no continuation. An event larger
 than a page is cut at a character boundary and marked `cut`; the panel says it was shortened.
 shortcut: a cut event cannot be read in full until the chat panel can page within an event.

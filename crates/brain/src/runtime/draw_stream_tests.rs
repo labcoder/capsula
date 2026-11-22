@@ -480,7 +480,7 @@ async fn read_chat_page(
         request: got,
         thread: of,
         events,
-        before: None,
+        next: None,
     } = page.pop().expect("page")
     else {
         panic!("expected one complete history page");

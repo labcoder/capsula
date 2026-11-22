@@ -1223,6 +1223,7 @@ fn issue_page_debug_omits_its_title() {
             "{:?}",
             PageEvent {
                 id: EventId(1),
+                created_ms: 0,
                 run: None,
                 kind: PageEventKind::Issue { draft: DraftId(2) },
                 text: "zqx-private-title".into(),
