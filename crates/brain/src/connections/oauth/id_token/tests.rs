@@ -546,12 +546,24 @@ fn malformed_compact_parts_are_refused_one_at_a_time() {
     let payload_part = part(&claims());
     let (padded_header, unpadded_header) = padded(&header("RS256", Some(KID)));
     let (padded_payload, unpadded_payload) = padded(&claims());
+    let identity = |token: &str| {
+        check(token).map(|identity| {
+            let email = identity
+                .email
+                .map(|email| email.expose().as_str().to_owned());
+            (identity.subject.expose().as_str().to_owned(), email)
+        })
+    };
     for control in [
         sign(&header_part, &payload_part),
         sign(&unpadded_header, &payload_part),
         sign(&header_part, &unpadded_payload),
     ] {
-        assert!(check(&control).is_ok(), "an unbroken twin is accepted");
+        assert_eq!(
+            identity(&control),
+            Ok((SUBJECT.to_owned(), Some(EMAIL.to_owned()))),
+            "an unbroken twin is accepted with the fixture's identity"
+        );
     }
     let cases = [
         ("empty header", sign("", &payload_part)),
@@ -611,7 +623,12 @@ fn a_modulus_under_2048_bits_is_refused_though_ring_would_verify_it() {
         verify_signed(SHORT_TOKEN, &set, CLIENT, NONCE, NOW).map(|_| ()),
         Err(IdentityError::Token)
     );
-    assert!(check(&token(&claims())).is_ok(), "2048 bits is accepted");
+    let identity = check(&token(&claims())).expect("2048 bits is accepted");
+    assert_eq!(identity.subject.expose().as_str(), SUBJECT);
+    assert_eq!(
+        identity.email.as_ref().map(|email| email.expose().as_str()),
+        Some(EMAIL)
+    );
 }
 
 #[test]
