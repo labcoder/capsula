@@ -55,7 +55,7 @@ const FILING_EXTRA_REQUESTS: u64 = 4;
 /// GitHub's filing and listing budgets.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct GitHubTuning {
-    /// One whole filing or review rearm, retries and cleanup included.
+    /// One whole filing or review rearm, retries included; local settlement may finish after it.
     pub(crate) filing_deadline: Duration,
     /// Counted requests in one filing, its listing included.
     pub(crate) filing_requests: usize,

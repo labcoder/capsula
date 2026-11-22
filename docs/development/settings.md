@@ -426,10 +426,12 @@ parse gives every group its defaults, as for every other key.
   can hold anything.
 
 `[tuning.github]` holds the filing and listing budgets. A filing (`issues::transport::Control`)
-gets one deadline, `filing_s`, at creation, shared by every request, retry and cleanup in it,
-and counts up to `filing_requests_count` requests, refusing the next without dispatching it.
-A reservation is never refunded and a create that may have been sent is never resent. A filing
-makes its listing's requests plus four (the user, two match pages and the create), so the group
+gets one deadline, `filing_s`, at creation, shared by every request and retry in it, and
+counts up to `filing_requests_count` requests, refusing the next without dispatching it. A
+reservation is never refunded and a create that may have been sent is never resent. Local
+settlement (`runtime/issues.rs`) may finish after the deadline, so a terminal write never loses
+whether a create went out. A filing makes its listing's requests plus four (the user, two match
+pages and the create), so the group
 needs `filing_requests_count >= listing_requests_count + 4` and `listing_s <= filing_s`.
 `repositories::fetch` takes the listing pair; review rearms use `filing_s` too. The user
 reference, with the example the docs-match test checks, is [tuning](../user/tuning.md).
