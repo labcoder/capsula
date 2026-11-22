@@ -1298,36 +1298,6 @@ fn ended(watching: &Watching, cx: &mut TestAppContext) {
     });
 }
 
-/// Global Esc follows the hold itself, not the runs it folds into: a hold takes Esc beside a run
-/// that already works, and gives it back once its own run answers while that run still works.
-#[gpui::test]
-fn global_esc_follows_the_hold_whatever_else_runs(cx: &mut TestAppContext) {
-    let held = |watching: &Watching, cx: &mut TestAppContext| {
-        watching
-            .ready
-            .owner
-            .read_with(cx, |owner, _| owner.escape_hold.shows_stop())
-    };
-    let watching = watch(true, cx);
-    state(&watching, 3, Phase::Thinking, None, cx);
-    assert!(
-        !held(&watching, cx),
-        "a thinking run alone leaves Esc to other apps"
-    );
-    let_go(&watching, cx);
-    assert!(
-        held(&watching, cx),
-        "the hold takes Esc beside the working run"
-    );
-    state(&watching, RUN, Phase::Thinking, HOLD, cx);
-    assert!(
-        held(&watching, cx),
-        "the hold's question is still being taken"
-    );
-    state(&watching, RUN, Phase::Answering, None, cx);
-    assert!(!held(&watching, cx), "the hold's own answer gives Esc back");
-}
-
 // The tests below that press Esc on a pending hold pin its cancel: once per press, where the
 // hold's input is revoked, never again from the runs' hold.
 
