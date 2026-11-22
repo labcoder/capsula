@@ -1675,6 +1675,61 @@ fn reconnect_rereads_both_first_pages_with_new_request_ids() {
 }
 
 #[test]
+fn older_after_a_failed_reconnect_read_replaces_the_unverified_legacy_cache() {
+    let (_, mut chat) = Threads::pair();
+    let thread = ThreadId(3);
+    chat.show_for(Some(thread));
+    chat.connected();
+    let first = chat.requests();
+    let mut cached: Vec<_> = (51..=100).rev().map(event).collect();
+    cached[0].kind = PageEventKind::HeldTurn {
+        screen: kumochi_protocol::message::HeldScreen::Attached,
+    };
+    chat.apply(DataToShell::Page {
+        request: request_id(&first[1]),
+        thread,
+        events: cached.clone(),
+        next: Some(EventId(51)),
+    });
+    assert!(chat.loaded);
+
+    chat.disconnected();
+    chat.connected();
+    let reconnect = chat.requests();
+    chat.apply(DataToShell::PageFailed {
+        request: request_id(&reconnect[1]),
+    });
+    assert!(chat.failed && !chat.loaded);
+    assert_eq!(chat.events, cached);
+
+    chat.older_events();
+    let older = chat.requests();
+    let request = request_id(&older[0]);
+    assert_eq!(
+        older,
+        [DataToBrain::PageRequest {
+            request,
+            page: PageOf::Events {
+                thread,
+                before: Some(EventId(51)),
+            },
+        }]
+    );
+    let events: Vec<_> = (1..=50).rev().map(event).collect();
+    chat.apply(DataToShell::Page {
+        request,
+        thread,
+        events: events.clone(),
+        next: None,
+    });
+    assert!(chat.loaded && !chat.failed);
+    assert_eq!(chat.before, None);
+    assert_eq!(chat.proven, None);
+    assert_eq!(chat.events.len(), 50, "unverified rows must go");
+    assert_eq!(chat.events, events);
+}
+
+#[test]
 fn empty_list_and_empty_search_finish_loading_and_have_no_more_pages() {
     let mut state = Threads::default();
     state.show();

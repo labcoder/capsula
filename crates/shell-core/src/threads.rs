@@ -1026,6 +1026,9 @@ impl Threads {
         match read {
             Read::First => self.replace_events(events, next),
             Read::Refresh if self.window.is_none() => self.replace_events(events, next),
+            Read::More if self.window.is_none() && !self.loaded => {
+                self.replace_events(events, next);
+            }
             Read::Repair | Read::Refresh
                 if !away
                     && (!self.loaded

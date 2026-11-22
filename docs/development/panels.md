@@ -105,7 +105,8 @@ and nonblocking requests; `presence/thread_view.rs` composes the task list with 
   existing drawing placeholder or contain assistant segments hidden by the provisional preview
   continue until an older visible row or the true start is reached. A failed event read advances
   the history revision, so later successful reads cannot revive its pending navigation.
-  Selection changes and reconnects also cancel that navigation.
+  Selection changes and reconnects also cancel that navigation. If the first event read after
+  reconnect fails, a successful Older read replaces the unverified cache instead of extending it.
   Page Up and Page Down scroll
   the focused message region; its scrollbar and Older messages command are also available.
   The messages are the user's turns, the stored answers and the drawing steps; a Stop's record
