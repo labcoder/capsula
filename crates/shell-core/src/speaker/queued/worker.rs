@@ -194,7 +194,6 @@ struct Worker {
     replies: Receiver<Reply>,
     route_closed: bool,
     retired_route: Option<u64>,
-    stop_cutoff: Option<Duration>,
     virtual_route: bool,
     drawing: Option<Drawing>,
 }
@@ -293,7 +292,6 @@ fn own(
         replies,
         route_closed: false,
         retired_route: None,
-        stop_cutoff: None,
         virtual_route: false,
         drawing: Some(drawing),
     };
@@ -392,7 +390,6 @@ impl Worker {
         loop {
             let now = origin.elapsed();
             self.backend_reply(now);
-            self.settle_stop(now, &mut |_| {});
             self.drive(now);
             if self.engine.final_at(now.min(deadline)) {
                 return true;
@@ -400,23 +397,16 @@ impl Worker {
             if now >= deadline {
                 return false;
             }
-            let next = if self.stop_cutoff.is_some() {
-                deadline
-            } else {
-                match self.engine.tail() {
-                    Tail::At(at) => at.min(deadline),
-                    Tail::Unknown if self.physical.is_none() => return false,
-                    Tail::Unknown => deadline,
-                }
+            let next = match self.engine.tail() {
+                Tail::At(at) => at.min(deadline),
+                Tail::Unknown if self.physical.is_none() => return false,
+                Tail::Unknown => deadline,
             };
             thread::park_timeout(next.saturating_sub(origin.elapsed()));
         }
     }
 
     fn deadline(&self, now: Duration) -> Option<Duration> {
-        if self.stop_cutoff.is_some() {
-            return self.physical.as_ref()?.retire_deadline;
-        }
         self.engine
             .active_deadline(now)
             .into_iter()
@@ -439,11 +429,9 @@ impl Worker {
         now: Duration,
     ) -> Result<bool, Fault> {
         self.backend_reply(now);
-        if self.apply_stop(port, give, now) {
-            return Ok(false);
-        }
         self.observations(now);
         self.watch_playback(now);
+        self.apply_stop(port, give, now);
         if self.pending_packet.is_none() && self.engine.queue.held.is_none() {
             self.pending_packet = port.packets.try_recv().ok();
         }
@@ -493,9 +481,7 @@ impl Worker {
         if !drained {
             return Ok(true);
         }
-        if self.apply_stop(port, give, now) {
-            return Ok(false);
-        }
+        self.apply_stop(port, give, now);
         self.apply_narration(
             if coherent_view {
                 ViewRead::Current
@@ -614,11 +600,10 @@ impl Worker {
     }
 
     fn observations(&mut self, now: Duration) {
-        let stopping = self.stop_cutoff.is_some();
         let Some(route) = &mut self.physical else {
             return;
         };
-        if route.retire_deadline.is_some() && !stopping {
+        if route.retire_deadline.is_some() {
             return;
         }
         match route.transport.take_event() {
@@ -659,7 +644,7 @@ impl Worker {
             };
             match self.engine.observe(anchor) {
                 Observation::Accepted => {
-                    if !stopping && let Some(drawing) = &mut self.drawing {
+                    if let Some(drawing) = &mut self.drawing {
                         drawing.observe(anchor, now);
                     }
                 }
@@ -706,57 +691,23 @@ impl Worker {
         }
     }
 
-    fn apply_stop(&mut self, port: &Port, give: &mut impl FnMut(Credit), now: Duration) -> bool {
+    fn apply_stop(&mut self, port: &Port, give: &mut impl FnMut(Credit), now: Duration) {
         if !self.engine.queue.stopped
             && (port.stop.load(Ordering::Acquire) || port.closed.load(Ordering::Acquire))
         {
             self.stop(now, &mut |credit| port.credit(credit, give));
         }
-        self.settle_stop(now, &mut |credit| port.credit(credit, give));
-        if self.stop_cutoff.is_none() {
-            return false;
-        }
-        self.drive(now);
-        self.update_drawing(now);
-        true
     }
 
     fn stop(&mut self, now: Duration, give: &mut impl FnMut(Credit)) {
-        if self.stop_cutoff.is_some() || self.engine.queue.stopped {
-            return;
-        }
         if let Some(Request::Open(_, control)) = &self.job {
             control.stop();
         }
         if let Some(route) = &mut self.physical {
-            let live = route.retire_deadline.is_none();
             self.retired_route = Some(route.generation);
             route.retire(now);
-            if live {
-                self.stop_cutoff = Some(now);
-                return;
-            }
         }
         if let (_, Some(credit)) = self.engine.stop(now) {
-            give(credit);
-        }
-    }
-
-    fn settle_stop(&mut self, now: Duration, give: &mut impl FnMut(Credit)) {
-        let Some(cutoff) = self.stop_cutoff else {
-            return;
-        };
-        if let Some(route) = &self.physical
-            && route.transport.control().tail() == TailAck::Pending
-        {
-            if route.retire_deadline.is_some_and(|deadline| now < deadline) && !self.route_closed {
-                return;
-            }
-            self.engine.expire_stop_proof();
-        }
-        self.observations(cutoff);
-        self.stop_cutoff = None;
-        if let (_, Some(credit)) = self.engine.stop(cutoff) {
             give(credit);
         }
     }
@@ -820,19 +771,15 @@ impl Worker {
                 let Some(handed) = route.transport.control().fenced_handoff() else {
                     return;
                 };
+                self.engine.lost(generation, handed, now);
                 let tail = route.transport.control().tail();
-                if self.stop_cutoff.is_none() {
-                    self.engine.lost(generation, handed, now);
-                    if let TailAck::At(at) = tail {
-                        self.engine.acknowledge(generation, Some(at));
-                    }
+                if let TailAck::At(at) = tail {
+                    self.engine.acknowledge(generation, Some(at));
                 }
                 if self.job.is_some() {
                     return;
                 }
-                if self.stop_cutoff.is_some()
-                    || tail == TailAck::Pending && now < deadline && !self.route_closed
-                {
+                if tail == TailAck::Pending && now < deadline && !self.route_closed {
                     if route.power == Power::Paused {
                         self.dispatch(Request::Power(generation, Power::Playing));
                     }
