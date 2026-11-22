@@ -56,6 +56,7 @@ fn a_batched_prepend_and_card_shrink_clamp_the_retained_event_anchor(cx: &mut Te
         let mut events: Vec<_> = (8..=40).rev().map(event).collect();
         events.push(PageEvent {
             id: EventId(7),
+            created_ms: 0,
             run: None,
             kind: PageEventKind::Issue { draft: DraftId(9) },
             text: "title".into(),
@@ -65,7 +66,7 @@ fn a_batched_prepend_and_card_shrink_clamp_the_retained_event_anchor(cx: &mut Te
             request: 2,
             thread: ThreadId(1),
             events,
-            before: Some(EventId(7)),
+            next: Some(EventId(7)),
         });
         assert_eq!(
             state.requests(),
@@ -130,7 +131,7 @@ fn a_batched_prepend_and_card_shrink_clamp_the_retained_event_anchor(cx: &mut Te
             request: 4,
             thread: ThreadId(1),
             events: vec![event(6)],
-            before: None,
+            next: None,
         });
         state.action_state(
             DraftId(9),
@@ -245,9 +246,10 @@ fn actual_card_batches_notify_both_histories_and_grant_credit_once(cx: &mut Test
             message: DataToShell::Page {
                 request,
                 thread: ThreadId(1),
-                before: None,
+                next: None,
                 events: vec![PageEvent {
                     id: EventId(7),
+                    created_ms: 0,
                     run: None,
                     kind: PageEventKind::Issue { draft: DraftId(9) },
                     text: "title".into(),
@@ -449,9 +451,10 @@ fn saved_issue_rows_hydrate_remeasure_and_keep_unknown_or_unavailable_truthful(
         state.apply_for_tests(DataToShell::Page {
             request: 2,
             thread: ThreadId(1),
-            before: None,
+            next: None,
             events: vec![PageEvent {
                 id: EventId(7),
+                created_ms: 0,
                 run: None,
                 kind: PageEventKind::Issue { draft: DraftId(9) },
                 text: "old title".into(),

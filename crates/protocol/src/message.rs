@@ -991,8 +991,8 @@ pub enum DataToShell {
         thread: ThreadId,
         /// Stored events; empty for a missing or deleting thread.
         events: Vec<PageEvent>,
-        /// Continue before this id, or stop when absent.
-        before: Option<EventId>,
+        /// Continue from this exclusive id in the requested direction, or stop when absent.
+        next: Option<EventId>,
     },
     /// The read for `request` failed; the brain logged why.
     PageFailed {

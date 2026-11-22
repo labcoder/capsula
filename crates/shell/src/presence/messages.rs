@@ -416,8 +416,7 @@ fn stored_rows(state: &Threads, cx: &App) -> Rc<[Row]> {
         current_group = group;
     }
     if let Some(note) = state
-        .screen_note
-        .as_ref()
+        .visible_screen_note()
         .filter(|note| Some(note.thread) == state.open)
     {
         let after = note.after.map_or(0, |after| after.0);
@@ -701,6 +700,7 @@ mod tests {
     fn event(id: u64) -> PageEvent {
         PageEvent {
             id: EventId(id),
+            created_ms: 0,
             run: Some(RunId(1)),
             kind: PageEventKind::AssistantText,
             text: format!("message {id}"),
@@ -711,6 +711,7 @@ mod tests {
     fn marker(id: u64, run: Option<RunId>, scene: u64) -> PageEvent {
         PageEvent {
             id: EventId(id),
+            created_ms: 0,
             run,
             kind: PageEventKind::NoVisual {
                 scene: SceneId(scene),
@@ -899,7 +900,7 @@ mod tests {
             };
             let ids = |rows: &[Row]| rows.iter().map(|row| row.id).collect::<Vec<_>>();
             assert_eq!(ids(&stored_rows(&state, cx)), [("event", 5), ("event", 7)]);
-            state.screen_note = Some(note(Some(EventId(5)), Text::ScreenNoteCant));
+            state.set_screen_note_for_tests(note(Some(EventId(5)), Text::ScreenNoteCant));
             let rows = stored_rows(&state, cx);
             assert_eq!(ids(&rows), [("event", 5), ("note", 5), ("event", 7)]);
             assert_eq!(
@@ -908,7 +909,7 @@ mod tests {
             );
             assert_eq!(rows[1].label, None);
             // Said in an empty conversation, it stays above what came later.
-            state.screen_note = Some(note(None, Text::ScreenNoteCan));
+            state.set_screen_note_for_tests(note(None, Text::ScreenNoteCan));
             let rows = stored_rows(&state, cx);
             assert_eq!(ids(&rows), [("note", 0), ("event", 5), ("event", 7)]);
             assert_eq!(
@@ -942,10 +943,10 @@ mod tests {
                 request: 2,
                 thread: ThreadId(1),
                 events: (11..=30).rev().map(event).collect(),
-                before: Some(EventId(11)),
+                next: Some(EventId(11)),
             });
             // A note that followed a message older than this page sits above all of it.
-            state.screen_note = Some(ScreenNote {
+            state.set_screen_note_for_tests(ScreenNote {
                 thread: ThreadId(1),
                 after: Some(EventId(4)),
                 text: Text::ScreenNoteCant,
@@ -969,7 +970,7 @@ mod tests {
                 request: 3,
                 thread: ThreadId(1),
                 events: (5..=10).rev().map(event).collect(),
-                before: Some(EventId(5)),
+                next: Some(EventId(5)),
             });
             cx.notify();
         });
@@ -1189,6 +1190,7 @@ mod tests {
         model.update(cx, |state, cx| {
             state.events = vec![PageEvent {
                 id: EventId(7),
+                created_ms: 0,
                 run: None,
                 kind: PageEventKind::TaskDeleted,
                 text: String::new(),
@@ -1737,7 +1739,7 @@ mod tests {
                     request: 2,
                     thread: ThreadId(1),
                     events: (11..=30).rev().map(event).collect(),
-                    before: Some(EventId(11)),
+                    next: Some(EventId(11)),
                 });
                 cx.notify();
             });
@@ -1761,7 +1763,7 @@ mod tests {
                             request: 5,
                             thread: ThreadId(1),
                             events: (31..=50).rev().map(event).collect(),
-                            before: Some(EventId(31)),
+                            next: Some(EventId(31)),
                         });
                     }
                     "selection" => state.select(Some(ThreadId(2))),
@@ -1772,7 +1774,7 @@ mod tests {
                     request: 3,
                     thread: ThreadId(1),
                     events: vec![event(1)],
-                    before: None,
+                    next: None,
                 });
                 cx.notify();
             });

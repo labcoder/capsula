@@ -1230,7 +1230,7 @@ fn a_default_model_that_stops_or_starts_taking_pictures_says_so_once_in_the_open
     let ready = screen_ready(Some(on(&luna())), cx);
     let note = |ready: &Ready, cx: &mut TestAppContext| {
         ready.owner.read_with(cx, |owner, cx| {
-            let note = owner.chat.read(cx).screen_note.clone();
+            let note = owner.chat.read(cx).visible_screen_note().cloned();
             note.map(|note| (note.thread, note.text, note.model))
         })
     };
