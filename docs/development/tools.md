@@ -322,7 +322,9 @@ preflight and prompt offer the overlay and the screen.
 Before a separately authorized live schema check, `cargo xtask live account` can
 inspect Kumochi Dev's own non-secret account view with a zero-request inference
 budget. It prints only state words, never signs in, and refuses while another
-product process is running. `cargo test` uses offline fixtures instead.
+product process is running; starting a signed-in dev brain may still run its
+normal start-up ChatGPT token refresh and catalog read. `cargo test` uses offline
+fixtures instead.
 
 ## `create_task`
 

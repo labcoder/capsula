@@ -157,9 +157,10 @@ The custom JSON forms for colours, anchors, start dependencies, cells, chart
 points and animation keys have explicit schemas. Their agreement with the
 typed decoder is checked with fixtures and an independent schema validator;
 generation alone does not prove that hand-written schemas cannot drift.
-Source's UTF-8 byte ceiling, reference ordering, header equality, composed
-scale and scene/global budgets remain runtime checks. A schema-valid drawing
-is not necessarily admissible. Optional fields and defaults remain optional.
+Source's UTF-8 byte ceiling, record order, minimum record count, reference ordering,
+header equality, composed scale and scene/global budgets remain runtime checks. A
+schema-valid drawing is not necessarily admissible. Optional fields and defaults remain
+optional.
 
 The brain advertises this schema through its draw tool. Its complete-call adapter
 enforces the same 2D restrictions before admitting any scene record; the drawing

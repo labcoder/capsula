@@ -275,7 +275,6 @@ impl Coordinator {
                     .as_ref()
                     .is_some_and(super::admission::Build::admitted)
                 {
-                    current.finishing = false;
                     return Ok(());
                 }
                 if let Dispatch::Answered(output) = dispatch {

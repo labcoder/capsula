@@ -59,9 +59,11 @@ flowchart LR
 
 `cargo xtask live account` reads only the first non-secret account view, prints its
 state words and sends `Quitting`. It never sends an account operation, opens a sign-in
-window or sends an inference request. Signed-out, busy and recovery states are reported
-without changing them. It uses the same ten-second view deadline and cleanup as `signin`;
-only Kumochi Dev's own connections and authenticated pipes are involved.
+window or sends an inference request, though starting a signed-in dev brain may still
+run its normal start-up ChatGPT token refresh and catalog read. Signed-out, busy and
+recovery states are reported without changing them. It uses the same ten-second view
+deadline and cleanup as `signin`; only Kumochi Dev's own connections and authenticated
+pipes are involved.
 
 ## `signin`
 

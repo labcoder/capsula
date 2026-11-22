@@ -1794,3 +1794,113 @@ fn a_skipped_screen_scene_s_run_refuses_its_next_screen_call_through_the_coordin
         );
     }
 }
+
+#[test]
+fn stale_drawing_handoff_commits_and_answers_ended_without_drawing() {
+    let scratch = Scratch::new("draw-tool-stale-handoff");
+    let mut store = store(&scratch);
+    let mut core = offered(vec![T]);
+    // Close the run in the drawing reducer while the coordinator still holds it so `drawing_call`
+    // hits the `drawing_input` `Err(Stale)` fallback directly.
+    core.drawing
+        .handle(crate::drawing::Input::RunClosed {
+            run: R,
+            loss: crate::drawing::Loss::Drop,
+        })
+        .expect("close drawing run");
+    let (dispatch, effects) = call(&mut core, "stale", &args(None));
+    assert_eq!(dispatch, Dispatch::Committing);
+    assert!(
+        !effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::Store(StoreOp::Drawing { .. })))
+    );
+    let expected = ToolOutput::Error(ToolError::Ended);
+    assert_eq!(answer(&mut core, &mut store, &effects), expected);
+    assert_eq!(
+        core.current.as_ref().expect("current").answered,
+        vec![(
+            Caller::Model {
+                run: R,
+                call: id("stale"),
+            },
+            expected.clone()
+        )]
+    );
+    assert_eq!(store.drawing_scenes().expect("no scene").scenes.len(), 0);
+    assert_eq!(
+        call(&mut core, "stale", &args(None)),
+        (Dispatch::Answered(expected), Vec::new())
+    );
+}
+
+#[test]
+fn empty_truncated_and_mistyped_envelopes_refuse_through_the_draw_tool() {
+    for (name, raw, committed, expected_reason) in [
+        (
+            "empty",
+            br#"{"records":[]}"#.as_slice(),
+            true,
+            "$: scene.BeforeBegin",
+        ),
+        (
+            "truncated",
+            br#"{"records":[{"begin":{"v":1,"scene":"s","surface":"overlay","alt":"a"}}"#,
+            false,
+            "truncated drawing",
+        ),
+        (
+            "mistyped",
+            br#"{"records":null}"#,
+            false,
+            "malformed drawing at byte 11",
+        ),
+    ] {
+        let scratch = Scratch::new(&format!("draw-tool-envelope-{name}"));
+        let mut store = store(&scratch);
+        let mut core = offered(vec![T]);
+        let (dispatch, effects) = call(&mut core, name, raw);
+        assert_eq!(dispatch, Dispatch::Committing, "{name}");
+        assert!(
+            !effects
+                .iter()
+                .any(|effect| matches!(effect, Effect::Store(StoreOp::Drawing { .. }))),
+            "{name}: no drawing write"
+        );
+        let output = if committed {
+            answer(&mut core, &mut store, &effects)
+        } else {
+            assert!(
+                !effects
+                    .iter()
+                    .any(|effect| matches!(effect, Effect::Store(StoreOp::CommitCall(_)))),
+                "{name}: rejected envelope does not write a ledger row"
+            );
+            let run = core.current.as_ref().expect("current");
+            assert_eq!(run.answered.len(), 1, "{name}");
+            run.answered[0].1.clone()
+        };
+        let ToolOutput::Text(text) = &output else {
+            panic!("{name}: expected typed refusal text, got {output:?}");
+        };
+        assert_eq!(
+            text,
+            &format!("drawn: []; stopped: {expected_reason}{RETRY}"),
+            "{name}"
+        );
+        assert_eq!(
+            store.drawing_scenes().expect("no scene").scenes.len(),
+            0,
+            "{name}"
+        );
+        assert_eq!(
+            call(&mut core, name, &args(None)).0,
+            Dispatch::Answered(if committed {
+                ToolOutput::Error(ToolError::Reused)
+            } else {
+                output
+            }),
+            "{name}: retry stays refused"
+        );
+    }
+}
