@@ -278,6 +278,12 @@ fn truncated_and_mistyped_voice_frames_are_refused() {
 #[test]
 fn debug_and_the_tap_show_no_audio_or_text() {
     let marker = "kumochi-voice-sentinel";
+    let transcript = |text: &str| {
+        DataToShell::Transcript(Transcript {
+            run: RunId(1),
+            text: text.to_owned(),
+        })
+    };
     let sample: i16 = 12_345;
     let messages: [(String, Record); 3] = [
         {
@@ -297,12 +303,15 @@ fn debug_and_the_tap_show_no_audio_or_text() {
             (format!("{message:?}"), record)
         },
         {
-            let message = DataToShell::Transcript(Transcript {
-                run: RunId(1),
-                text: marker.to_owned(),
-            });
+            let message = transcript(marker);
+            let other = transcript("another-spoken-message");
+            let debug = format!("{message:?}");
+            assert!(
+                debug == format!("{other:?}"),
+                "transcript affected voice Debug"
+            );
             let record = Record::of(Pipe::Data, Direction::ToShell, &message, 10).expect("records");
-            (format!("{message:?}"), record)
+            (debug, record)
         },
     ];
     let bytes = format!("{:?}", marker.as_bytes());
@@ -310,11 +319,17 @@ fn debug_and_the_tap_show_no_audio_or_text() {
     for (debug, record) in messages {
         assert!(
             !debug.contains("12345") && !debug.contains(marker),
-            "{debug}"
+            "voice Debug contains a private value"
         );
-        assert!(!debug.contains(bytes), "{debug}");
+        assert!(!debug.contains(bytes), "voice Debug contains text bytes");
         // 12,345 as little-endian bytes, the way a byte list of the PCM would print.
-        assert!(!debug.contains("57, 48"), "{debug}");
-        assert_eq!(record.payload, None, "{debug}");
+        assert!(
+            !debug.contains("57, 48"),
+            "voice Debug contains sample bytes"
+        );
+        assert!(
+            record.payload.is_none(),
+            "voice recording contains a payload"
+        );
     }
 }

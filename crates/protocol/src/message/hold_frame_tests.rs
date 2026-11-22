@@ -484,15 +484,16 @@ fn a_pointer_path_holds_at_most_2048_points() {
 fn where_the_user_pointed_is_absent_from_debug_and_from_the_tap() {
     const IN_PATH: i32 = 1_357_924_680;
     const AT_RELEASE: i32 = -1_246_813_579;
-    let message = ControlToBrain::ScreenRelease {
+    let release = |in_path, at_release| ControlToBrain::ScreenRelease {
         gesture: GestureId(1),
         lease: LeaseGeneration(2),
         t_qpc: 3,
         excluded_qpc: 4,
-        pointer: ReleasePointer(PhysicalPoint([AT_RELEASE, AT_RELEASE])),
-        path: PointerPath(vec![PhysicalPoint([IN_PATH, IN_PATH])]),
+        pointer: ReleasePointer(PhysicalPoint([at_release, at_release])),
+        path: PointerPath(vec![PhysicalPoint([in_path, in_path])]),
         notice: None,
     };
+    let message = release(IN_PATH, AT_RELEASE);
     assert_eq!(
         format!("{message:?}"),
         "ScreenRelease { gesture: GestureId(1), lease: LeaseGeneration(2), t_qpc: 3, \
@@ -508,6 +509,28 @@ fn where_the_user_pointed_is_absent_from_debug_and_from_the_tap() {
         format!("{record:?}"),
         record.describe(),
     ];
+    let other = release(1_682_015_497, -1_579_802_416);
+    let other_payload = postcard::to_allocvec(&other).expect("encodes");
+    assert_eq!(payload.len(), other_payload.len());
+    let other_record = Record::of(
+        Pipe::Control,
+        Direction::ToBrain,
+        &other,
+        other_payload.len(),
+    )
+    .expect("records");
+    let mut other_recording = Vec::new();
+    tap::write(&mut other_recording, &other_record).expect("writes");
+    assert!(
+        texts
+            == [
+                format!("{other:?}"),
+                format!("{other_record:?}"),
+                other_record.describe()
+            ]
+            && recording == other_recording,
+        "pointer coordinates affected diagnostics"
+    );
     let within = |bytes: &[u8], part: &[u8]| bytes.windows(part.len()).any(|at| at == part);
     for sentinel in [IN_PATH, AT_RELEASE] {
         let wire = postcard::to_allocvec(&sentinel).expect("encodes");
@@ -526,13 +549,24 @@ fn where_the_user_pointed_is_absent_from_debug_and_from_the_tap() {
 #[test]
 fn held_words_and_their_receipt_append_redacted_data_tags() {
     let sentinel = "zqxsentinellabel";
-    let words = super::DataToShell::HoldWords {
+    let words = |text: &str| super::DataToShell::HoldWords {
         gesture: GESTURE,
-        words: Content::from(sentinel),
+        words: Content::from(text),
     };
+    let diagnostics = |message: &super::DataToShell, size| {
+        let record = Record::of(Pipe::Data, Direction::ToShell, message, size).expect("records");
+        let mut bytes = Vec::new();
+        tap::write(&mut bytes, &record).expect("writes");
+        (format!("{message:?} {record:?}"), bytes)
+    };
+    let size = 7 + sentinel.len();
+    assert!(
+        diagnostics(&words(sentinel), size) == diagnostics(&words("abcanotherphrase"), size),
+        "held transcript affected diagnostics"
+    );
     let stored = super::DataToShell::HoldStored { gesture: GESTURE };
     for (message, tag, size, op) in [
-        (words, 22, 7 + sentinel.len(), "HoldWords"),
+        (words(sentinel), 22, size, "HoldWords"),
         (stored, 23, 6, "HoldStored"),
     ] {
         assert_eq!(postcard::to_allocvec(&message).expect("encodes")[0], tag);

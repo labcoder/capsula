@@ -749,7 +749,18 @@ fn issue_operation_identity_preserves_inner_tags_and_exact_wire_fields() {
                     Err(FrameError::Truncated)
                 ));
             }
-            assert!(!format!("{message:?}").contains(&format!("{:?}", [91; 32])));
+            let debug = format!("{message:?}");
+            assert!(!debug.contains(&format!("{:?}", [91; 32])));
+            let mut other = message;
+            if let ControlToBrain::Issue { op, .. } = &mut other
+                && let IssueOp::Consent { hash, .. } | IssueOp::Rearm { hash, .. } = op.as_mut()
+            {
+                *hash = ContentHash([37; 32]);
+                assert!(
+                    debug == format!("{other:?}"),
+                    "content hash affected issue Debug"
+                );
+            }
         }
     }
     assert_eq!(
@@ -1029,13 +1040,16 @@ fn private(
     pipe: Pipe,
     direction: Direction,
     markers: &[&str],
-) {
+) -> (String, Vec<u8>) {
     let wire = encode(message, pipe).expect("wire");
     let record = Record::of(pipe, direction, message, wire.len() - HEADER_LEN).expect("record");
-    assert_eq!(record.payload, None);
-    assert_eq!(
-        record.describe(),
-        format!("{} ({} bytes)", message.op(), wire.len() - HEADER_LEN)
+    assert!(
+        record.payload.is_none(),
+        "issue recording contains a payload"
+    );
+    assert!(
+        record.describe() == format!("{} ({} bytes)", message.op(), wire.len() - HEADER_LEN),
+        "issue record description contains unexpected fields"
     );
     let mut bytes = Vec::new();
     write(&mut bytes, &record).expect("write");
@@ -1053,6 +1067,7 @@ fn private(
             "tap leaked content"
         );
     }
+    (debug, bytes)
 }
 
 #[test]
@@ -1061,117 +1076,134 @@ fn private(
     reason = "one sentinel scenario follows private content through every outer wire carrier and tap"
 )]
 fn outer_wire_carriers_and_tap_never_format_issue_or_device_content() {
-    let title = "zqx-private-title";
-    let body = "zqx-private-body";
-    let login = "zqx-private-login";
-    let repo = "zqx-private-owner/zqx-private-repo";
-    let code = "ZQX-PRIVATE-CODE";
-    let markers = [title, body, login, repo, code];
-    let mut card = card();
-    card.title = IssueTitle::new(title).expect("title");
-    card.body = IssueBody::new(body).expect("body");
-    card.repo = Some(RepoName::new(repo).expect("repo"));
-    card.account = Some(GitHubLogin::new(login).expect("login"));
-    card.state = ActionState::Unknown {
-        lookup: LookupResult::Unplaced {
-            number: 42,
-            url: IssueUrl::for_issue(card.repo.as_ref().expect("repo"), 42).expect("url"),
-        },
-        maybe_duplicate: false,
-    };
-    private(
-        &ControlToShell::GitHub(GitHubView::AwaitingUser {
-            user_code: UserCode::new(code).expect("code"),
-            expires_in_s: 900,
-        }),
-        Pipe::Control,
-        Direction::ToShell,
-        &markers,
-    );
-    private(
-        &ControlToShell::GitHub(GitHubView::Connected {
-            login: card.account.clone().expect("account"),
-            repos: Bounded::new(vec![card.repo.clone().expect("repo")]).expect("repos"),
-            truncated: false,
-            default: card.repo.clone(),
-        }),
-        Pipe::Control,
-        Direction::ToShell,
-        &markers,
-    );
-    private(
-        &ControlToBrain::GitHub(GitHubOp::SetDefaultRepo(card.repo.clone().expect("repo"))),
-        Pipe::Control,
-        Direction::ToBrain,
-        &markers,
-    );
-    private(
-        &ControlToBrain::Issue {
-            session: IssueSession {
-                incarnation: Incarnation(u64::MAX),
-                epoch: u64::MAX,
+    let diagnostics = |markers: [&str; 5]| {
+        let [title, body, login, repo, code] = markers;
+        let mut card = card();
+        card.title = IssueTitle::new(title).expect("title");
+        card.body = IssueBody::new(body).expect("body");
+        card.repo = Some(RepoName::new(repo).expect("repo"));
+        card.account = Some(GitHubLogin::new(login).expect("login"));
+        card.state = ActionState::Unknown {
+            lookup: LookupResult::Unplaced {
+                number: 42,
+                url: IssueUrl::for_issue(card.repo.as_ref().expect("repo"), 42).expect("url"),
             },
-            request: u64::MAX,
-            op: Box::new(IssueOp::Consent {
-                draft: card.draft,
-                hash: card.hash,
-                approval: card.approval.expect("approval"),
-                decision: Decision::File,
-            }),
-        },
-        Pipe::Control,
-        Direction::ToBrain,
-        &markers,
-    );
-    private(
-        &ControlToShell::ActionState {
-            request: Some(u64::MAX),
-            draft: card.draft,
-            version: card.version,
-            state: card.state.clone(),
-            approval: card.approval,
-        },
-        Pipe::Control,
-        Direction::ToShell,
-        &markers,
-    );
-    private(
-        &ControlToShell::IssueRefused {
-            request: u64::MAX,
-            draft: card.draft,
-            version: card.version,
-            approval: card.approval,
-            reason: IssueRefused::ContentChanged,
-        },
-        Pipe::Control,
-        Direction::ToShell,
-        &markers,
-    );
-    private(
-        &DataToBrain::IssueEdit {
-            draft: card.draft,
-            title: card.title.clone(),
-            body: card.body.clone(),
-            repo: card.repo.clone(),
-        },
-        Pipe::Data,
-        Direction::ToBrain,
-        &markers,
-    );
-    private(
-        &DataToShell::IssueReview {
-            request: u64::MAX,
-            card: card.clone(),
-        },
-        Pipe::Data,
-        Direction::ToShell,
-        &markers,
-    );
-    private(
-        &DataToShell::IssueCard(card),
-        Pipe::Data,
-        Direction::ToShell,
-        &markers,
+            maybe_duplicate: false,
+        };
+        [
+            private(
+                &ControlToShell::GitHub(GitHubView::AwaitingUser {
+                    user_code: UserCode::new(code).expect("code"),
+                    expires_in_s: 900,
+                }),
+                Pipe::Control,
+                Direction::ToShell,
+                &markers,
+            ),
+            private(
+                &ControlToShell::GitHub(GitHubView::Connected {
+                    login: card.account.clone().expect("account"),
+                    repos: Bounded::new(vec![card.repo.clone().expect("repo")]).expect("repos"),
+                    truncated: false,
+                    default: card.repo.clone(),
+                }),
+                Pipe::Control,
+                Direction::ToShell,
+                &markers,
+            ),
+            private(
+                &ControlToBrain::GitHub(GitHubOp::SetDefaultRepo(card.repo.clone().expect("repo"))),
+                Pipe::Control,
+                Direction::ToBrain,
+                &markers,
+            ),
+            private(
+                &ControlToBrain::Issue {
+                    session: IssueSession {
+                        incarnation: Incarnation(u64::MAX),
+                        epoch: u64::MAX,
+                    },
+                    request: u64::MAX,
+                    op: Box::new(IssueOp::Consent {
+                        draft: card.draft,
+                        hash: card.hash,
+                        approval: card.approval.expect("approval"),
+                        decision: Decision::File,
+                    }),
+                },
+                Pipe::Control,
+                Direction::ToBrain,
+                &markers,
+            ),
+            private(
+                &ControlToShell::ActionState {
+                    request: Some(u64::MAX),
+                    draft: card.draft,
+                    version: card.version,
+                    state: card.state.clone(),
+                    approval: card.approval,
+                },
+                Pipe::Control,
+                Direction::ToShell,
+                &markers,
+            ),
+            private(
+                &ControlToShell::IssueRefused {
+                    request: u64::MAX,
+                    draft: card.draft,
+                    version: card.version,
+                    approval: card.approval,
+                    reason: IssueRefused::ContentChanged,
+                },
+                Pipe::Control,
+                Direction::ToShell,
+                &markers,
+            ),
+            private(
+                &DataToBrain::IssueEdit {
+                    draft: card.draft,
+                    title: card.title.clone(),
+                    body: card.body.clone(),
+                    repo: card.repo.clone(),
+                },
+                Pipe::Data,
+                Direction::ToBrain,
+                &markers,
+            ),
+            private(
+                &DataToShell::IssueReview {
+                    request: u64::MAX,
+                    card: card.clone(),
+                },
+                Pipe::Data,
+                Direction::ToShell,
+                &markers,
+            ),
+            private(
+                &DataToShell::IssueCard(card),
+                Pipe::Data,
+                Direction::ToShell,
+                &markers,
+            ),
+        ]
+    };
+    let first = diagnostics([
+        "zqx-private-title",
+        "zqx-private-body",
+        "zqx-private-login",
+        "zqx-private-owner/zqx-private-repo",
+        "ZQX-PRIVATE-CODE",
+    ]);
+    let other = diagnostics([
+        "abc-queued-letter",
+        "abc-written-note",
+        "abc-some-contribs",
+        "abc-alternate-org/xyz-source-projx",
+        "ABC-EXAMPLE-TURN",
+    ]);
+    assert!(
+        first == other,
+        "issue or account content affected diagnostics"
     );
     assert_eq!(format!("{:?}", ContentHash([91; 32])), "ContentHash(..)");
 }

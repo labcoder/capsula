@@ -144,20 +144,20 @@ fn controls() -> Vec<ControlToBrain> {
     ]
 }
 
-fn data() -> Vec<DataToShell> {
+fn data(header: SceneHeader, step: Step) -> Vec<DataToShell> {
     vec![
         DataToShell::SceneBegin {
             scene: SceneId(u64::MAX),
-            header: header(),
+            header: header.clone(),
         },
         DataToShell::SceneStepCommit {
             run: RunId(u64::MAX),
             scene: SceneId(u64::MAX),
             index: 0,
-            step: step(),
+            step: step.clone(),
             speech: None,
         },
-        snapshot(header(), step()),
+        snapshot(header, step),
         DataToShell::SceneCutApplied {
             scene: SceneId(u64::MAX),
             revision: 1,
@@ -177,7 +177,7 @@ fn v1_tags_are_appended_and_messages_round_trip_in_both_encodings() {
         assert_eq!(postcard::to_allocvec(&value).expect("encodes")[0], tag);
         round_trip(&value, Pipe::Control);
     }
-    for (tag, value) in (8..).zip(data()) {
+    for (tag, value) in (8..).zip(data(header(), step())) {
         assert_eq!(postcard::to_allocvec(&value).expect("encodes")[0], tag);
         round_trip(&value, Pipe::Data);
     }
@@ -386,19 +386,26 @@ fn global_handle_cut_fits_the_control_cap() {
 fn all_scene_messages_are_redacted_even_in_forged_tap_records() {
     use crate::tap::{self, Direction, Record as TapRecord, Tapped};
 
-    fn check<M: Tapped + std::fmt::Debug>(message: &M, pipe: Pipe, direction: Direction) {
+    fn check<M: Tapped + std::fmt::Debug>(
+        message: &M,
+        pipe: Pipe,
+        direction: Direction,
+    ) -> (String, Vec<u8>, String) {
         assert!(!message.content_free());
         let bytes = frame::encode(message, pipe).expect("encodes");
         let record =
             TapRecord::of(pipe, direction, message, bytes.len() - HEADER_LEN).expect("records");
-        assert_eq!(record.payload, None);
+        assert!(
+            record.payload.is_none(),
+            "scene recording contains a payload"
+        );
         let forged = TapRecord {
             payload: Some(bytes[HEADER_LEN..].to_vec()),
             ..record.clone()
         };
-        assert_eq!(
-            forged.describe(),
-            format!("{} ({} bytes)", message.op(), bytes.len() - HEADER_LEN)
+        assert!(
+            forged.describe() == format!("{} ({} bytes)", message.op(), bytes.len() - HEADER_LEN),
+            "forged scene record description contains unexpected fields"
         );
         let mut file = Vec::new();
         tap::write_header(&mut file).expect("header");
@@ -425,11 +432,12 @@ fn all_scene_messages_are_redacted_even_in_forged_tap_records() {
             assert!(!dump.contains(secret));
             assert!(!debug.contains(secret));
         }
+        (debug, file, dump)
     }
     for value in controls() {
         check(&value, Pipe::Control, Direction::ToBrain);
     }
-    let messages = data();
+    let messages = data(header(), step());
     let snapshot = messages
         .iter()
         .find(|value| matches!(value, DataToShell::SceneSnapshotV1 { .. }))
@@ -438,8 +446,29 @@ fn all_scene_messages_are_redacted_even_in_forged_tap_records() {
     for end in 0..payload.len() {
         assert!(frame::decode::<DataToShell>(&payload[..end]).is_err());
     }
-    for value in messages {
-        check(&value, Pipe::Data, Direction::ToShell);
+    let Record::Begin(begin) = parse_record(
+        br#"{"begin":{"v":1,"scene":"hidden-draft","surface":"overlay","title":"hidden topic","alt":"hidden cue"}}"#,
+    ).expect("valid begin") else {
+        panic!("begin record")
+    };
+    let Record::Step(alternate) = parse_record(
+        br#"{"step":{"id":"hidden-add1","say":"hidden phrase","put":[{"text":{"id":"hidden-insert","at":[18458.75,0],"text":"hidden phrase"}}]}}"#,
+    ).expect("valid step") else {
+        panic!("step record")
+    };
+    let alternate = data(
+        SceneHeader {
+            begin,
+            layout_version: 1,
+        },
+        alternate,
+    );
+    for (value, other) in messages.iter().zip(&alternate) {
+        assert!(
+            check(value, Pipe::Data, Direction::ToShell)
+                == check(other, Pipe::Data, Direction::ToShell),
+            "drawing content affected scene diagnostics"
+        );
     }
     check(
         &ControlToShell::ScenesV1 {

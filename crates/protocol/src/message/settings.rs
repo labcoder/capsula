@@ -468,6 +468,18 @@ mod tests {
             answer: true,
         };
         let debug = format!("{outer:?}");
+        let other = super::super::ControlToShell::Settings {
+            view: SettingsView {
+                assistant_name: AssistantName::new("Alternatebot").expect("valid"),
+                user_name: Some(UserName::new("Alternatepal").expect("valid")),
+                ..view()
+            },
+            answer: true,
+        };
+        assert!(
+            debug == format!("{other:?}"),
+            "names affected settings Debug"
+        );
         for marker in ["Sentinelname", "Sentineluser"] {
             assert!(!debug.contains(marker));
             assert!(!debug.contains(&format!("{:?}", marker.as_bytes())));
