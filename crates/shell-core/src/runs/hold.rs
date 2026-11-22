@@ -17,6 +17,16 @@ pub struct ScreenHold {
     pub t_qpc: u64,
 }
 
+/// What a held run's first state did to the hold it names.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HoldState {
+    Adopted,
+    /// The run was refused, and the hold it names ended with it.
+    Ended,
+    /// The run was refused, and it names no hold that is still open.
+    Refused,
+}
+
 /// What the shell took when the keys of a hold that shows the screen at release came up: the
 /// pointer, its path over the hold, the exclusion lease, when the keys were released and when
 /// the lease's last window was excluded. It has no `Debug`, so neither the pointer nor the
@@ -427,15 +437,21 @@ impl Runs {
             if let Some(hold) = &mut self.hold {
                 hold.run = Some(run);
             }
-        } else if run > self.fence {
+            applied.hold = Some(HoldState::Adopted);
+            return;
+        }
+        if run > self.fence {
             self.fence = run;
             applied.stop = Some(ControlToBrain::Stop {
                 run,
                 revealed: Vec::new(),
             });
-            if self.hold.is_some_and(|hold| hold.gesture == gesture) {
-                self.cancel_hold();
-            }
         }
+        applied.hold = Some(if self.hold.is_some_and(|hold| hold.gesture == gesture) {
+            self.cancel_hold();
+            HoldState::Ended
+        } else {
+            HoldState::Refused
+        });
     }
 }

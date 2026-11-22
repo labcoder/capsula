@@ -19,7 +19,7 @@ use crate::input::TalkHeld;
 use crate::input::hold::Intent;
 use crate::input::path::PathRecorder;
 use crate::platform::microphone::{Generation, Mode};
-use crate::runs::{HoldRelease, RunTail, ScreenNotice};
+use crate::runs::{HoldRelease, HoldState, RunTail, ScreenNotice};
 use crate::strings::{Strings, Text};
 
 mod inhibit;
@@ -245,6 +245,18 @@ impl Presence {
             } else if held {
                 slot.run = Some(run);
             }
+        }
+        // The runs refused this hold's run and ended the hold there, so it ends here too.
+        if applied.hold == Some(HoldState::Ended)
+            && let Some(RunOrigin::Hold { gesture }) = origin
+            && self
+                .voice
+                .pending
+                .as_ref()
+                .is_some_and(|hold| hold.token.gesture() == gesture)
+        {
+            self.end_voice(Text::HoldFailed, cx);
+            return;
         }
         if !applied.visible {
             return;
