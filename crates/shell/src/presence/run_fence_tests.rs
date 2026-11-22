@@ -669,20 +669,24 @@ fn queued_authenticated_natural_completion_admits_a_fresh_typed_turn(cx: &mut Te
             if playback.is_none() {
                 playback = pipe.playback.try_recv().ok();
             }
-            if let Some(playback) = &mut playback
-                && (playback.ready() || playback.stopped())
-            {
-                let mut samples = [0.0; 48];
-                playback.render(&mut samples);
-                if !rendered && samples.contains(&(15_430.0_f32 / 32_768.0)) {
-                    if turn == 1 {
-                        assert_eq!(
-                            playback.handed(),
-                            48,
-                            "the first callback starts at source sample zero"
-                        );
+            if let Some(playback) = &mut playback {
+                if playback.stopped()
+                    || (playback.ready() && playback.presented_prefix() == playback.handed())
+                {
+                    let mut samples = [0.0; 48];
+                    playback.render(&mut samples);
+                    if !rendered && samples.contains(&(15_430.0_f32 / 32_768.0)) {
+                        if turn == 1 {
+                            assert_eq!(
+                                playback.handed(),
+                                48,
+                                "the first callback starts at source sample zero"
+                            );
+                        }
+                        rendered = true;
                     }
-                    rendered = true;
+                } else {
+                    playback.render(&mut []);
                 }
             }
             std::thread::sleep(Duration::from_millis(2));
