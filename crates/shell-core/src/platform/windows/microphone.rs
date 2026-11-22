@@ -453,3 +453,7 @@ pub(in crate::platform) fn copy_batch(
         0
     }
 }
+
+#[cfg(test)]
+#[path = "microphone_format_tests.rs"]
+mod format_tests;

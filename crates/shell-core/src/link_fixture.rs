@@ -147,7 +147,6 @@ fn authenticated_with_output(
         session: id,
         audio: mode,
         shared: Arc::new(shared),
-        speaker: None,
     };
     let (handle, start) = start(link, sender);
     let link = thread::spawn(move || {
@@ -256,19 +255,7 @@ pub(super) fn attended_shared(
     shared: Arc<Shared>,
     incarnation: Incarnation,
 ) -> Attended {
-    attended_with(label, shared, incarnation, AudioSession::Legacy, None)
-}
-
-/// A connection whose link opens a speaker with `opener`.
-#[cfg(test)]
-pub(super) fn attended_speaking(label: &str, opener: crate::speaker::Opener) -> Attended {
-    attended_with(
-        label,
-        Arc::default(),
-        Incarnation(1),
-        AudioSession::Legacy,
-        Some(opener),
-    )
+    attended_with(label, shared, incarnation, AudioSession::Legacy)
 }
 
 #[cfg(test)]
@@ -278,13 +265,7 @@ pub(super) fn attended_queued(label: &str) -> Attended {
 
 #[cfg(test)]
 pub(super) fn attended_queued_shared(label: &str, shared: Arc<Shared>) -> Attended {
-    attended_with(
-        label,
-        shared,
-        Incarnation(1),
-        AudioSession::QueuedRequired,
-        None,
-    )
+    attended_with(label, shared, Incarnation(1), AudioSession::QueuedRequired)
 }
 
 fn attended_with(
@@ -292,7 +273,6 @@ fn attended_with(
     shared: Arc<Shared>,
     incarnation: Incarnation,
     audio: AudioSession,
-    speaker: Option<crate::speaker::Opener>,
 ) -> Attended {
     let (control, shell_control) = pair(&format!("{label}-control"));
     let (data, shell_data) = pair(&format!("{label}-data"));
@@ -304,7 +284,6 @@ fn attended_with(
         session: 0,
         audio,
         shared,
-        speaker,
     };
     let (handle, start) = start(link, sender);
     let connection = Connection {

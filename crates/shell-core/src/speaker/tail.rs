@@ -1,5 +1,4 @@
-//! What one output generation publishes for the link's output owner
-//! (docs/development/speaker.md): one coherent snapshot, written only by its engine.
+//! The output owner's scripted tail evidence for capture-inhibit tests.
 
 use std::sync::atomic::{AtomicU64, Ordering, fence};
 
@@ -9,8 +8,6 @@ mod tests;
 
 /// Content the device took may be unplaced: a gap, an unknown padding or a failed release.
 pub const UNKNOWN: u8 = 1;
-/// Nothing more is staged as content: withdrawn or failed.
-pub(crate) const SEALED: u8 = 2;
 /// The clock froze.
 pub const FAULT: u8 = 4;
 /// The stream was stopped and let go, so nothing more is released.
@@ -27,7 +24,7 @@ pub struct Snapshot {
     pub flight: u64,
     /// The latest pause serial that went quiet; 0 for none.
     pub quiet: u32,
-    /// [`UNKNOWN`], [`SEALED`], [`FAULT`] and [`RELEASED`].
+    /// [`UNKNOWN`], [`FAULT`] and [`RELEASED`].
     pub flags: u8,
     /// The run whose content the last successful content release committed, until a stop of it
     /// or a newer run, the seal or the release; 0 for none.
@@ -38,11 +35,6 @@ impl Snapshot {
     /// Content the device may still hold, or that can't be shown played.
     pub fn owed(&self) -> bool {
         self.flags & UNKNOWN != 0 || self.flight != 0 || self.played < self.exposed
-    }
-
-    /// What a waiting claim depends on changed.
-    pub(crate) fn differs(&self, from: &Self) -> bool {
-        self.quiet != from.quiet || self.flags != from.flags || self.owed() != from.owed()
     }
 }
 
@@ -59,7 +51,7 @@ pub struct Tail {
 }
 
 impl Tail {
-    /// Publishes `now`; only the generation's engine calls it.
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn write(&self, now: &Snapshot) {
         let seq = self.seq.load(Ordering::Relaxed).wrapping_add(1);
         self.seq.store(seq, Ordering::Relaxed);
@@ -75,7 +67,7 @@ impl Tail {
         self.seq.store(seq.wrapping_add(1), Ordering::Release);
     }
 
-    /// Publishes `now` for a test standing in for the engine.
+    /// Publishes `now` for the scripted output.
     #[cfg(any(test, feature = "test-support"))]
     pub fn publish(&self, now: &Snapshot) {
         self.write(now);
