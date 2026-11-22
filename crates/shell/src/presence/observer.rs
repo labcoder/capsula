@@ -18,11 +18,12 @@ use std::thread::JoinHandle;
 
 use async_channel::{Receiver, Sender};
 use gpui_kit::{App, Bounds, Global, Pixels, ScaledPixels, Window, px};
+use kumochi_protocol::constants::LIVE_CHATGPT_TEXT_ENV;
+#[cfg(any(debug_assertions, all(windows, feature = "gate-draw-replay")))]
+use kumochi_protocol::constants::ProductIdentity;
 use kumochi_protocol::constants::{INPUT_SESSION_MARKER, OBSERVER_REPAINT_MESSAGE};
-#[cfg(debug_assertions)]
-use kumochi_protocol::constants::{LIVE_CHATGPT_TEXT_ENV, ProductIdentity};
 
-#[cfg(debug_assertions)]
+#[cfg(any(debug_assertions, all(windows, feature = "gate-draw-replay")))]
 use draw_timing::DrawFixture;
 pub(super) use draw_timing::overlay_painted;
 use draw_timing::{DrawRecord, PaintReceipts};
@@ -384,7 +385,7 @@ impl Shared {
 #[derive(Debug)]
 pub(crate) struct Observer {
     shared: Rc<Shared>,
-    #[cfg(debug_assertions)]
+    #[cfg(any(debug_assertions, all(windows, feature = "gate-draw-replay")))]
     draw_fixture: DrawFixture,
     writer: Option<JoinHandle<()>>,
     proxy: Option<ProxyHandle>,
@@ -405,7 +406,7 @@ pub(crate) struct Observer {
 impl Global for Observer {}
 
 impl Observer {
-    #[cfg(debug_assertions)]
+    #[cfg(any(debug_assertions, all(windows, feature = "gate-draw-replay")))]
     pub(super) fn take_draw_fixture(cx: &mut App) -> Option<&'static str> {
         if !cx.has_global::<Self>() {
             return None;
@@ -423,6 +424,17 @@ impl Observer {
     /// # Errors
     /// Fails when the file can't be created or the thread can't start.
     pub(crate) fn prepare(launch: &Launch) -> io::Result<Option<Self>> {
+        let mode = std::env::var(LIVE_CHATGPT_TEXT_ENV).ok();
+        #[cfg(any(debug_assertions, all(windows, feature = "gate-draw-replay")))]
+        let draw_fixture = DrawFixture::new(ProductIdentity::ACTIVE, launch, mode.as_deref());
+        #[cfg(any(debug_assertions, all(windows, feature = "gate-draw-replay")))]
+        if cfg!(not(debug_assertions)) || mode.as_deref() == Some("draw") {
+            draw_fixture.require()?;
+        }
+        #[cfg(not(any(debug_assertions, all(windows, feature = "gate-draw-replay"))))]
+        if mode.as_deref() == Some("draw") {
+            return Err(io::Error::other("drawing replay is not compiled in"));
+        }
         let Some(path) = launch.observer.as_deref() else {
             return Ok(None);
         };
@@ -446,12 +458,8 @@ impl Observer {
         }
         Ok(Some(Self {
             shared: Rc::new(shared),
-            #[cfg(debug_assertions)]
-            draw_fixture: DrawFixture::new(
-                ProductIdentity::ACTIVE,
-                launch,
-                std::env::var(LIVE_CHATGPT_TEXT_ENV).ok().as_deref(),
-            ),
+            #[cfg(any(debug_assertions, all(windows, feature = "gate-draw-replay")))]
+            draw_fixture,
             writer: Some(writer),
             proxy: None,
             ledger: Ledger::new(),

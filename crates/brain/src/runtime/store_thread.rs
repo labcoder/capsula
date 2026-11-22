@@ -555,7 +555,7 @@ fn serve_op(store: &mut Store, purger: &mut Purger, acks: &UnboundedSender<Input
                 .reconnect()
                 .and_then(|()| store.drawing_write(&write))
                 .map_err(|_| ());
-            #[cfg(all(windows, debug_assertions))]
+            #[cfg(all(windows, any(debug_assertions, feature = "gate-draw-replay")))]
             if let (
                 Ok(crate::drawing::Reply::Step(scene)),
                 crate::drawing::Write::Step { run, step, .. },

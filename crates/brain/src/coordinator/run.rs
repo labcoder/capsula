@@ -135,7 +135,7 @@ impl Coordinator {
             {
                 self.provider_delta::<false>(run, &call, &delta, effects)?;
             }
-            #[cfg(all(windows, debug_assertions))]
+            #[cfg(all(windows, any(debug_assertions, feature = "gate-draw-replay")))]
             TurnEvent::ReplayDrawDelta { call, delta } => {
                 self.provider_delta::<true>(run, &call, &delta, effects)?;
             }

@@ -1,31 +1,40 @@
-//! Bounded, content-free reservation and local I/O stamps in the copied Dev brain only.
+//! Bounded, content-free stamps for the copied Dev brain and the offline Gate drawing replay.
 
 use std::fs::File;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+#[cfg(debug_assertions)]
+use std::sync::atomic::AtomicU32;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use kumochi_protocol::constants::{
     BRAIN_EXE, LIVE_BUDGET_ENV, LIVE_CHATGPT_TEXT_ENV, LIVE_CHATGPT_TEXT_STAMPS_FILE,
     LIVE_RUN_BIN_DIR, LIVE_RUNS_DIR, ProductIdentity,
 };
+#[cfg(debug_assertions)]
 use kumochi_protocol::message::Effort;
 
 mod drawing;
 pub(crate) use drawing::{DrawStage, REPLAY_CALL, REPLAY_STEPS};
 
+#[cfg(debug_assertions)]
 use crate::connections::catalog::DEFAULT_SLUG;
+#[cfg(debug_assertions)]
 use crate::connections::http_client::Endpoint;
+#[cfg(debug_assertions)]
 use crate::coordinator::SendKey;
+#[cfg(debug_assertions)]
 use crate::engines::RunRequest;
 use crate::platform::qpc_now;
 
 static OBSERVATION: OnceLock<Option<Arc<Observation>>> = OnceLock::new();
+#[cfg(debug_assertions)]
 const MAX_AUX: u32 = 64;
 
 pub(crate) struct Observation {
     pid: u32,
+    #[cfg(debug_assertions)]
     ceiling: u32,
     invalid: AtomicBool,
     counts: Mutex<Counts>,
@@ -36,6 +45,7 @@ struct Counts {
     out: Option<Box<dyn Write + Send>>,
     model: u32,
     aux: u32,
+    #[cfg(debug_assertions)]
     rows: Vec<Row>,
 }
 
@@ -45,10 +55,12 @@ fn opening(
     budget: &str,
     exe: &Path,
 ) -> Option<(u32, PathBuf)> {
-    if !matches!(
-        (identity, opt_in),
-        (ProductIdentity::DEV, "1") | (ProductIdentity::GATE, "draw")
-    ) {
+    let draw = identity == ProductIdentity::GATE && opt_in == "draw";
+    #[cfg(debug_assertions)]
+    let live = identity == ProductIdentity::DEV && opt_in == "1";
+    #[cfg(not(debug_assertions))]
+    let live = false;
+    if !draw && !live {
         return None;
     }
     let ceiling = budget.parse().ok()?;
@@ -73,6 +85,7 @@ impl Observation {
         OBSERVATION.get_or_init(|| Self::open(exe));
     }
 
+    #[cfg(debug_assertions)]
     pub(crate) fn active() -> Option<&'static Arc<Self>> {
         Self::current().filter(|record| record.draw.is_none())
     }
@@ -88,7 +101,16 @@ impl Observation {
     fn open(exe: &Path) -> Option<Arc<Self>> {
         let opt_in = std::env::var(LIVE_CHATGPT_TEXT_ENV).ok()?;
         let budget = std::env::var(LIVE_BUDGET_ENV).ok()?;
-        let (ceiling, path) = opening(ProductIdentity::ACTIVE, &opt_in, &budget, exe)?;
+        Self::open_at(ProductIdentity::ACTIVE, &opt_in, &budget, exe)
+    }
+
+    fn open_at(
+        identity: ProductIdentity,
+        opt_in: &str,
+        budget: &str,
+        exe: &Path,
+    ) -> Option<Arc<Self>> {
+        let (ceiling, path) = opening(identity, opt_in, budget, exe)?;
         Self::start_mode(
             File::create_new(&path).ok()?,
             ceiling,
@@ -115,12 +137,14 @@ impl Observation {
         writeln!(out, "ready {pid} {ceiling} {}", qpc_now()?).ok()?;
         Some(Arc::new(Self {
             pid,
+            #[cfg(debug_assertions)]
             ceiling,
             invalid: AtomicBool::new(false),
             counts: Mutex::new(Counts {
                 out: Some(Box::new(out)),
                 model: 0,
                 aux: 0,
+                #[cfg(debug_assertions)]
                 rows: Vec::with_capacity(usize::try_from(3 * ceiling + MAX_AUX).ok()?),
             }),
             draw: draw.map(Mutex::new),
@@ -132,6 +156,7 @@ impl Observation {
         Self::start_mode(std::io::sink(), 1, None).expect("the offline replay has a clock")
     }
 
+    #[cfg(debug_assertions)]
     fn record(&self, at: Option<u64>, append: impl FnOnce(&mut Counts, u64) -> bool) {
         if self.invalid.load(Ordering::Acquire) {
             return;
@@ -157,10 +182,13 @@ impl Observation {
             return;
         }
         let pid = self.pid;
+        #[cfg(debug_assertions)]
         let result = counts
             .rows
             .iter()
             .try_for_each(|row| row.write(pid, &mut out));
+        #[cfg(not(debug_assertions))]
+        let result: io::Result<()> = Ok(());
         if result.is_ok()
             && self.draw.as_ref().is_none_or(|draw| {
                 draw.lock()
@@ -177,6 +205,7 @@ impl Observation {
         self.invalid.store(true, Ordering::Release);
     }
 
+    #[cfg(debug_assertions)]
     pub(crate) fn auxiliary(&self, endpoint: &Endpoint) {
         let at = qpc_now();
         let class = match endpoint {
@@ -203,6 +232,7 @@ impl Observation {
     }
 }
 
+#[cfg(debug_assertions)]
 impl Counts {
     fn push(&mut self, at: u64, ordinal: u32, event: Event) -> bool {
         if self.rows.len() == self.rows.capacity() {
@@ -213,12 +243,14 @@ impl Counts {
     }
 }
 
+#[cfg(debug_assertions)]
 struct Row {
     at: u64,
     ordinal: u32,
     event: Event,
 }
 
+#[cfg(debug_assertions)]
 enum Event {
     Reserve(Identity),
     Text,
@@ -228,6 +260,7 @@ enum Event {
     Aux(u8),
 }
 
+#[cfg(debug_assertions)]
 impl Row {
     fn write(&self, pid: u32, out: &mut impl Write) -> io::Result<()> {
         let Self { at, ordinal, event } = self;
@@ -253,6 +286,7 @@ impl Row {
 }
 
 /// The ordinal joins the transport and parser records for one actual reservation.
+#[cfg(debug_assertions)]
 #[derive(Clone)]
 pub(crate) struct Stamp {
     observation: Arc<Observation>,
@@ -260,6 +294,7 @@ pub(crate) struct Stamp {
     identity: Identity,
 }
 
+#[cfg(debug_assertions)]
 #[derive(Clone, Copy)]
 struct Identity {
     run: u64,
@@ -270,12 +305,14 @@ struct Identity {
     effort: u8,
 }
 
+#[cfg(debug_assertions)]
 #[derive(Clone, Copy)]
 pub(super) enum End {
     Pooled,
     NoIo,
 }
 
+#[cfg(debug_assertions)]
 impl Stamp {
     pub(crate) fn new(request: &RunRequest, observation: &Arc<Observation>) -> Self {
         let (owner, key, round) = match request.key {
@@ -440,6 +477,45 @@ mod tests {
     use super::{Event, Observation, opening};
     use crate::connections::http_client::Endpoint;
     use crate::test_support::Scratch;
+
+    fn draw_launch(scratch: &Scratch) -> (std::path::PathBuf, std::path::PathBuf) {
+        let run = scratch.dir().join(LIVE_RUNS_DIR).join("1");
+        let bin = run.join(LIVE_RUN_BIN_DIR);
+        std::fs::create_dir_all(&bin).unwrap();
+        (bin.join(BRAIN_EXE), run.join(LIVE_CHATGPT_TEXT_STAMPS_FILE))
+    }
+
+    #[test]
+    fn draw_opt_in_refuses_outside_gate() {
+        let scratch = Scratch::new("draw-wrong-identity");
+        let (exe, stamps) = draw_launch(&scratch);
+        for identity in [ProductIdentity::DEV, ProductIdentity::RELEASE] {
+            assert!(Observation::open_at(identity, "draw", "1", &exe).is_none());
+        }
+        assert!(!stamps.exists());
+    }
+
+    #[test]
+    fn draw_opt_in_refuses_without_draw_mode() {
+        let scratch = Scratch::new("draw-missing-mode");
+        let (exe, stamps) = draw_launch(&scratch);
+        for mode in ["", "1"] {
+            assert!(Observation::open_at(ProductIdentity::GATE, mode, "1", &exe).is_none());
+        }
+        assert!(!stamps.exists());
+    }
+
+    #[test]
+    fn draw_opt_in_refuses_a_stale_receipt() {
+        let scratch = Scratch::new("draw-stale-receipt");
+        let (exe, stamps) = draw_launch(&scratch);
+        let fresh = Observation::open_at(ProductIdentity::GATE, "draw", "1", &exe)
+            .expect("the exact launch can create its receipt once");
+        drop(fresh);
+        let before = std::fs::read(&stamps).unwrap();
+        assert!(Observation::open_at(ProductIdentity::GATE, "draw", "1", &exe).is_none());
+        assert_eq!(std::fs::read(stamps).unwrap(), before);
+    }
 
     #[test]
     fn drawing_observation_admits_only_the_one_gate_fixture() {

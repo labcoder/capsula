@@ -660,7 +660,7 @@ impl Presence {
             return;
         }
         self.runs.settings(view.main_thread);
-        #[cfg(debug_assertions)]
+        #[cfg(any(debug_assertions, all(windows, feature = "gate-draw-replay")))]
         if let Some(session) = &self.session
             && let Some(draft) = super::Observer::take_draw_fixture(cx)
             && let Err(refusal) = self

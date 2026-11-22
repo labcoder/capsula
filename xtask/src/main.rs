@@ -57,9 +57,9 @@ tasks:
   measure-gate <path-session.txt>
                     gate-session's measured phases with hover-gate's opener;
                     no Ready and no feel verdicts
-  draw-timing <path-session.txt> <shell-sha256> <brain-sha256>
+  draw-timing <path-session.txt> [--prebuilt] <shell-sha256> <brain-sha256>
                     one offline paint timing trial (90 seconds plus shared teardown);
-                    run the prebuilt Debug gate xtask.exe after external idle admission,
+                    use --prebuilt for prepared release Gate replay builds; omit for Debug Gate;
                     beside the pinned same-build shell and brain, with create-new redirection;
                     no input, PresentMon, Cargo, sign-in, or service requests
   input-fixture     internal bounded separate-process EDIT/Ready fixture

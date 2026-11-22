@@ -53,7 +53,7 @@ pub struct Ready {
 }
 
 impl Ready {
-    #[cfg(all(windows, debug_assertions))]
+    #[cfg(all(windows, any(debug_assertions, feature = "gate-draw-replay")))]
     pub(crate) fn draw_replay() -> Self {
         use kumochi_protocol::message::{EffortSet, ModelName, ModelSlug};
 
@@ -67,6 +67,7 @@ impl Ready {
                 supported_efforts: EffortSet::new([Effort::Low]),
             }],
             images: Vec::new(),
+            #[cfg(any(test, debug_assertions))]
             trusted_draw: false,
         }
     }

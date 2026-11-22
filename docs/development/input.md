@@ -596,8 +596,12 @@ Actual Alt-Tab into owner applications remains manual or unmeasured.
 
 ### Offline drawing timing
 
-`xtask draw-timing <transcript-session.txt> <shell-sha256> <brain-sha256>` uses adjacent,
-prebuilt Debug GATE binaries and the shared gate's isolated launch and cleanup. The
+`xtask draw-timing <transcript-session.txt> --prebuilt <shell-sha256> <brain-sha256>` uses
+prepared release Gate replay binaries. Build the three workspace packages from one checkout
+with the default-off features listed in [Gate identity](gate-identity.md#prebuilt-offline-drawing).
+The release driver checks both siblings and stages verified copies under the owned launch's
+`live/1/bin`. Omitting `--prebuilt` retains the earlier Debug Gate invocation.
+Both forms use the shared gate's isolated launch and cleanup. The
 fixture asks once through the product link after connecting; it sends no keys, clicks
 or pointer motion. The recorded Responses plot is followed by three labeled synthetic
 steps in the same drawing. The run starts no build. Its trial deadline does not include
@@ -611,8 +615,10 @@ field is zero with the current presenter; authored entrances and delays still co
 The report estimates narration overlap only if a narrated predecessor reserves time
 beyond its entrance.
 
-The release shell accepts `--draw-timing` with an observer file and a bounded quit
-deadline. That records timing only; it never submits the fixture. The extra rows contain
+The automatic submit requires the Gate identity, the explicit draw mode and observer,
+and the release replay feature or a Debug Gate build. An explicit unsupported replay
+refuses rather than using an account engine. The Brain requires the one-run budget,
+the fixed release replay model, and a create-new receipt. The extra rows contain
 identifiers, clocks, durations and a bit for nonblank `say`, not scene or user content.
 The bit doesn't mean the step was spoken or reserved time.
 The ordinary gate observer still writes its existing geometry and counters. Without

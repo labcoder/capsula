@@ -7,7 +7,7 @@ pub mod conn;
 pub mod error;
 pub(in crate::connections) mod framer;
 pub mod sse;
-#[cfg(all(windows, debug_assertions))]
+#[cfg(all(windows, any(debug_assertions, feature = "gate-draw-replay")))]
 pub(crate) mod text_observation;
 pub mod wire;
 
