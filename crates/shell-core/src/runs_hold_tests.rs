@@ -381,6 +381,23 @@ fn cancelled_old_first_state_cannot_take_over_a_newer_pending_or_named_hold() {
 }
 
 #[test]
+fn a_fenced_first_state_ends_its_hold_without_a_stop() {
+    let mut runs = ready();
+    recognized(&mut runs, 1);
+    // A stray held run above the fence is stopped and raises it, leaving hold 1 open.
+    let stray = state(&mut runs, 5, 1, 9, Phase::Thinking);
+    assert_eq!(stray.stop, stop(5));
+    assert_eq!(stray.hold, Some(HoldState::Refused));
+    assert_eq!(runs.take_hold_cancel(), None);
+    let fenced = state(&mut runs, 4, 1, 1, Phase::Thinking);
+    assert_eq!(fenced.stop, None);
+    assert_eq!(fenced.hold, Some(HoldState::Ended));
+    assert!(runs.hold.is_none());
+    assert_eq!(runs.take_hold_cancel(), cancel(1));
+    assert_eq!(runs.take_hold_cancel(), None);
+}
+
+#[test]
 fn cancellation_after_newer_named_run_still_fences_older_first_state() {
     let mut runs = ready();
     recognized(&mut runs, 1);
