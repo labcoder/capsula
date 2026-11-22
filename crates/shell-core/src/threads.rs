@@ -955,13 +955,9 @@ impl Threads {
                 events,
                 next,
             } => {
-                let Some(pending) = self
-                    .event_pending
-                    .filter(|pending| pending.request == request)
-                else {
+                let Some(pending) = self.event_pending.take() else {
                     return;
                 };
-                self.event_pending = None;
                 if pending.revision != self.event_revision || self.open != Some(thread) {
                     return;
                 }
