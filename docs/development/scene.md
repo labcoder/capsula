@@ -1071,9 +1071,12 @@ all overlap without crossing. Without a cap the charge stays exact.
 
 #### The brain's count
 
-The brain lays out a step itself before writing it, with `display::WideMeasure` in place of
-the shell's fonts, and counts its paint work at admission; the shell's guard stays. The wide
-measure is never smaller than a shell text layout that keeps three promises:
+The brain lays out a step itself before writing it and counts its paint work at admission.
+The shell samples its drawing font off the UI thread and sends a bounded profile
+[when the pipes pair](ipc.md#the-handshake). The estimate uses that pair's regular/bold advance
+and height bounds; an absent or invalid profile uses the complete built-in `WideMeasure`
+table. The shell's paint guard stays. The estimate bounds a shell layout that keeps three
+promises (the numbers below are the built-in fallback):
 
 - No character is wider than the measure allows. Each printable ASCII character is charged the
   wider of its regular and bold Segoe UI advance plus a tenth, rounded up to a hundredth of an
@@ -1103,10 +1106,8 @@ that against seeded shell measures on generated labels and scenes, and the shell
 `the_brain_measure_bounds_the_shipped_font` checks it against the real font on a corpus of
 Latin, Cyrillic, Arabic, CJK and emoji labels and on a run of each printable ASCII character.
 
-The bound stops where the promises do. The width table comes from one machine's fonts. Latin
-is Segoe UI's plus a tenth, so a UI font up to a tenth wider still fits, but a platform whose UI
-font is wider must add its advances to the table, and the shell's conformance test fails there
-first. A font outside the measured set (macOS's are unmeasured), cuneiform, which Segoe UI
+The bound stops where the promises do. The fallback width table comes from one machine's
+fonts; the negotiated table samples, rather than exhausts, Unicode. Cuneiform, which Segoe UI
 Historic draws at up to 4.6 em, a break that one glyph hides (a ligature or an emoji sequence)
 and a character the font draws as several glyphs (the split vowels of Tamil, Malayalam or
 Bengali), which gives the shell a break inside it, can exceed it, and so can a theme font with
@@ -1117,11 +1118,18 @@ change it. The wide measure is the side that under-counts least on the measured 
 the fan-out one still comes out at 110 pieces against a shell's 112. In each case a scene near
 a limit can pass the brain's count and still be refused by the shell while it prepares the
 step; the call's result waits for that answer within the limits in [tools](tools.md), "`draw`",
-and the picture stays at its last shown step. Only paint work refuses at admission: a step whose
-brain-side preparation fails for any other reason, such as the wider layout leaving the
-canvas range, is not refused, carries no charge and isn't counted against the other scenes.
+and the picture stays at its last shown step. Paint work and geometry overflow detected from
+valid negotiated metrics refuse before commit. Other uncounted preparation paths still carry
+no charge and aren't counted against the other scenes.
 While any scene is uncounted, the shell's guard is the final check for every scene, since the
 brain doesn't know what that scene paints.
+
+The shell pins the shaping font for preparation and paint through the connection; changed
+fonts are picked up at a natural reconnect, not by disconnecting or changing an active drawing.
+On a changed profile, the brain replays the settled visible scenes before drawing admission,
+using the new state, layout and global budget together. A stale result can't undo a clear or
+cross into a different connection. A replay failure retains the scene and drops its outdated
+paint charge, leaving the shell guard authoritative.
 
 The brain charges each scene what the shell may hold for it. It keeps the scene's last shown
 layout and the layout of every committed step not shown yet, and charges their field-by-field

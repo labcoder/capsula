@@ -209,6 +209,7 @@ fn run(method: Method, label: &str) {
             control: None,
             bytes: std::sync::atomic::AtomicU32::new(0),
             wake: async_channel::bounded(1).0.downgrade(),
+            drawing_font_family: None,
         };
         let reader = thread::spawn(move || match method {
             Method::Main => main_read_data(&shell_data, &shell_control, &events, GENERATION),
