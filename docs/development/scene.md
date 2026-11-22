@@ -1951,27 +1951,18 @@ One presence-owned paint scratch survives overlay-host recreation and is shared 
 across scenes. Its stroke vertex and run capacities, fixed Rect fill allowance and stage holder
 are charged once alongside returned owners, not once per scene. Strokes count and replay the same
 dash/reveal walk into one exactly sized path handoff. Static fills still use staged triangles.
-Changing rect backgrounds, rings and reveal sectors stream their contours into the same
-tessellator, and clear its vertex and index buffers without freeing them between builds.
+Changing rect backgrounds, rings and reveal sectors use the same intersection-aware Lyon
+options as the transient path. Between eligible builds the tessellator clears its buffers
+without freeing them.
 The existing radius clamp at half the short side only reduces the corner count. At the
 0.25 flattening tolerance, the scene's 2,048 fill and 768 outline charges are tighter than
 the largest radius and scale: after the closing point, one filled outline has at most
 2,044 segments, and a two-outline border or reveal sector has at most
-`2 × 764 + 2 = 1,530`. The retained sweep accepts at most 2,045 path events, including the
-close. An over-limit contour or a failed sweep drops the retained state; the original
-general sweep can finish that paint with temporary storage, never left in the owner.
-
-Only Rect contours use the retained sweep, with intersection insertion disabled. A background
-is convex; a ring is two nested contours, and a reveal adds two cuts between matching chords.
-There are at most six boundary edges at a sweep position. In Lyon 1.0.23, coincident-edge splits
-can defer a suffix to an existing endpoint; they cannot add new sweep positions in this mode.
-For a 2,048-entry capacity bucket, the 64-bit retained charge per entry allows 416 bytes for
-the event, edge and sort arrays (eight 48-byte event/edge slots and two 16-byte sort slots),
-576 bytes for up to four monotone owners including a split (four buckets each of 36 bytes of
-stack, triangle IDs and side IDs), and 32 bytes for the output and active/scan bookkeeping.
-The resulting 2 MiB is charged once. The test paints maximal admitted Rects, then checks
-construction-through-drop allocation balance against the owner charge. Warmed placement-2
-backgrounds and borders in the headless overlay make only their exact-size GPUI handoffs.
+`2 × 764 + 2 = 1,530`. Only Rects reuse this scratch. The owner keeps it only after a successful
+build of at most 2,045 path events (including the close), 4,096 output vertices and 12,288
+output indices. A larger build can still paint and then drops its scratch; a failed build
+drops it immediately. The 2 MiB accounting allowance is checked by measuring allocation
+and release on fixtures. It isn't a proven bound on Lyon's internal allocations.
 Text is copied once into sorted,
 generation-bound label entries at staging. Short shared strings stay inline; longer strings
 share an owned Arc except for the pinned string type's static whitespace optimization.
