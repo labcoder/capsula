@@ -27,7 +27,7 @@ use crate::link::{InputCancel, LinkHandle};
 use crate::platform::{Deliver, EventTime, cursor_position, performance_counter};
 use crate::strings::Text;
 use kumochi_protocol::geometry::PhysicalPoint;
-use kumochi_protocol::message::{GestureId, ThreadId};
+use kumochi_protocol::message::{GestureId, RunId, ThreadId};
 
 struct Pending {
     cancel: Option<InputCancel>,
@@ -44,6 +44,8 @@ struct PendingGesture {
     cancelled: Option<(GestureId, u64)>,
     /// An Esc press: every retirement waits until this delivery is decided.
     escape: Option<Rc<HoldBack>>,
+    /// The speech lease's session and run when this Esc was pressed: all its speech stop targets.
+    speech: Option<(u64, RunId)>,
     collection: u64,
 }
 
@@ -135,6 +137,7 @@ pub(super) fn deliver(
     target: Rc<Cell<(Option<ThreadId>, u64)>>,
     paused: Rc<Cell<bool>>,
     gates: Gates,
+    speech: Rc<Cell<Option<(u64, RunId, Instant)>>>,
     cx: &mut App,
 ) -> Deliver {
     let (deferred, pending) = async_channel::unbounded::<Pending>();
@@ -367,6 +370,10 @@ pub(super) fn deliver(
             },
             cancelled,
             escape: escape.then(|| gates.hold_back()),
+            speech: speech
+                .get()
+                .filter(|(.., until)| escape && *until > Instant::now())
+                .map(|(session, run, _)| (session, run)),
             collection: link.microphone_gate().latest(),
             stamp: Stamp {
                 target: target.get(),
@@ -536,7 +543,8 @@ fn apply(
             let (owner, intents) = (owner.clone(), pending.delivery.intents.clone());
             let (stamp, qpc, pointer) = (pending.stamp, pending.qpc, pending.pointer);
             let input = pending.input.clone();
-            let (escaping, cancelled) = (pending.escape.clone(), pending.cancelled);
+            let (escaping, cancelled, speech) =
+                (pending.escape.clone(), pending.cancelled, pending.speech);
             let escape = escaping.is_some();
             let intents = move |app: &mut App| {
                 #[cfg(test)]
@@ -577,7 +585,7 @@ fn apply(
                     }
                     if escape
                         && this
-                            .native_escape(cancelled.map(|(gesture, _)| gesture), cx)
+                            .native_escape(cancelled.map(|(gesture, _)| gesture), speech, cx)
                             .is_err()
                     {
                         tracing::error!("can't apply native Escape");
@@ -663,6 +671,7 @@ pub(super) fn deliver_intent(
         input: ReleaseInput::fixture(held),
         cancelled: None,
         escape: None,
+        speech: None,
         collection: 0,
     };
     matches!(

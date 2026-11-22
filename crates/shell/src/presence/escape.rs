@@ -9,6 +9,7 @@ impl Presence {
     pub(super) fn native_escape(
         &mut self,
         gesture: Option<GestureId>,
+        speech: Option<(u64, RunId)>,
         cx: &mut Context<'_, Self>,
     ) -> Result<(), OpenError> {
         self.voice.gates.forget_runs();
@@ -33,7 +34,7 @@ impl Presence {
                 return if self.voice_working() {
                     Ok(())
                 } else {
-                    self.escape(cx)
+                    self.escape_for(speech, cx)
                 };
             };
             self.discard_voice_recovery(gesture);
@@ -73,12 +74,12 @@ impl Presence {
         // Marks that are up go at this press, and `escape` takes them before it ends a hold.
         // A hold is still pending here when its first mark came before its run's `Answering`.
         if self.presenter.marks_shown().is_some() {
-            return self.escape(cx);
+            return self.escape_for(speech, cx);
         }
         if self.voice_working() {
             return Ok(());
         }
-        self.escape(cx)
+        self.escape_for(speech, cx)
     }
 
     /// Stops `run`, which was speaking when a hold's keys went down, before that hold starts:
@@ -162,13 +163,23 @@ impl Presence {
         }
     }
 
-    /// One Esc press, from the hotkey, the typing panel or Stop. The local effect happens here,
-    /// and only then is `Stop` or `ClearDrawing` queued for the brain, which nothing waits on.
+    /// One Esc press from the typing panel or Stop, targeting the speech lease that holds now.
+    pub(super) fn escape(&mut self, cx: &mut Context<'_, Self>) -> Result<(), OpenError> {
+        self.escape_for(self.live_speech(std::time::Instant::now()), cx)
+    }
+
+    /// One Esc press. The local effect happens here, and only then is `Stop` or `ClearDrawing`
+    /// queued for the brain, which nothing waits on. `speech` is the lease the press saw: once
+    /// its run is no longer the moving one, the press stops only that run's speaker, locally.
     #[expect(
         clippy::too_many_lines,
         reason = "one Esc press keeps its local decision and every effect of it in order"
     )]
-    pub(super) fn escape(&mut self, cx: &mut Context<'_, Self>) -> Result<(), OpenError> {
+    fn escape_for(
+        &mut self,
+        speech: Option<(u64, RunId)>,
+        cx: &mut Context<'_, Self>,
+    ) -> Result<(), OpenError> {
         self.voice.gates.forget_runs();
         // Esc is a key like any other to screen marks: they go at the first press, whatever
         // else that press stops. When they are a running answer's, the same press stops that
@@ -221,7 +232,11 @@ impl Presence {
         } else {
             EscapePanel::Closed
         };
-        let action = local_decision(self.activity, panel, &self.presenter);
+        let activity = Activity {
+            speaking: speech.is_some(),
+            ..self.activity
+        };
+        let action = local_decision(activity, panel, &self.presenter);
         let tell = match action {
             Escape::CancelPull => {
                 self.kumo
@@ -230,7 +245,19 @@ impl Presence {
                 answer.and_then(|_| self.runs.stop())
             }
             Escape::Stop => {
-                self.stop_moving(cx);
+                if let Some((session, run)) =
+                    speech.filter(|(_, run)| self.runs.stoppable() != Some(*run))
+                {
+                    if let Some(current) = self
+                        .session
+                        .clone()
+                        .filter(|current| current.generation() == session)
+                    {
+                        self.stop_speaker(current, run, cx);
+                    }
+                } else {
+                    self.stop_moving(cx);
+                }
                 None
             }
             Escape::Clear => {
@@ -285,6 +312,7 @@ impl Presence {
         };
         self.activity = Activity {
             pulling: self.kumo.read(cx).pull_live(),
+            speaking: self.speaking(std::time::Instant::now()),
             ..Self::activity(&self.runs, panel, &self.presenter)
         };
         self.refresh_conversation(cx);

@@ -13,7 +13,7 @@ use super::{
 use crate::link::{Attendance, Shared, narrated::Narrated, queued::MetadataFrame};
 use crate::speaker::DRAIN;
 use crate::speaker::conductor::Assignment;
-use crate::speaker::queued::{Command, Input, Packet, RATE, spawn, spawn_plain};
+use crate::speaker::queued::{Command, Input, Packet, RATE, Speech, spawn, spawn_plain};
 
 #[cfg(test)]
 #[path = "queued_tests.rs"]
@@ -79,6 +79,7 @@ struct Active {
     proof: Arc<AtomicU8>,
     delivery: Option<Delivery>,
     locally_stopped: bool,
+    speech: Speech,
 }
 
 impl Queued {
@@ -235,6 +236,19 @@ impl State {
 }
 
 impl OutputOwner {
+    /// The run whose audio `session`'s native route is presenting, and when that evidence runs
+    /// out. Never waits.
+    ///
+    /// # Errors
+    /// `Busy` on contention: keep only a claim that hasn't run out.
+    pub fn speech(&self, session: u64) -> Result<Option<(RunId, Instant)>, Denied> {
+        let mut state = self.try_lock()?;
+        Ok(state.queue(session).and_then(|(_, owner)| {
+            let active = owner.active.as_ref()?;
+            Some((active.id, active.speech.until()?))
+        }))
+    }
+
     pub(in crate::link) fn wait_for_refused_tail(&self) -> Option<RefusedTail> {
         let proof = {
             let state = self.lock();
@@ -447,6 +461,7 @@ impl OutputOwner {
         shared: Weak<Shared>,
     ) -> bool {
         let proof = Arc::new(AtomicU8::new(0));
+        let speech = Speech::new(self.changed.clone());
         let (output, wake, narrated) = {
             let mut state = self.lock();
             let Some((output, owner)) = state.queue(session).filter(|(_, q)| {
@@ -485,6 +500,7 @@ impl OutputOwner {
                 delivery: (!silent && owner.narrated.is_some() && !ended)
                     .then_some(Delivery::Unpromised),
                 locally_stopped: false,
+                speech: speech.clone(),
             });
             if silent {
                 owner.wake();
@@ -516,6 +532,7 @@ impl OutputOwner {
                 });
                 link_thread.unpark();
             },
+            speech,
         );
         let exit = move |refused| {
             if (refused || exit.load(Ordering::Acquire) & RETIRING == 0)

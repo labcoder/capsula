@@ -457,7 +457,7 @@ fn an_old_receipt_keeps_a_newer_hold_s_words_recoverable(cx: &mut TestAppContext
     owner.update(cx, |owner, cx| {
         assert_eq!(owner.voice.ended, Some((GestureId(1), None)));
         owner
-            .native_escape(Some(GestureId(1)), cx)
+            .native_escape(Some(GestureId(1)), None, cx)
             .expect("old press");
         let copy = owner.voice.recovery.as_ref().expect("hold 2's copy");
         assert_eq!(copy.gesture, GestureId(2));

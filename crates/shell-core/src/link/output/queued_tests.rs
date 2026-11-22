@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 use kumochi_protocol::message::{GestureId, RunId};
 
 use super::super::Retirement;
-use super::{Active, LOCAL_QUIET, OutputOwner, Queued, RECEIPT_QUEUED};
+use super::{Active, LOCAL_QUIET, OutputOwner, Queued, RECEIPT_QUEUED, Speech};
 
 /// A registered, acknowledged Plain pair with Talk-back on and Show Screen off.
 fn speaking(deadline: Instant) -> Queued {
@@ -33,6 +33,7 @@ fn a_speaking_hold_needs_the_previous_runs_queued_receipt_not_its_local_quiet() 
         proof: Arc::clone(&proof),
         delivery: None,
         locally_stopped: false,
+        speech: Speech::new(async_channel::bounded(1).0),
     });
     assert!(!owner.hold_ready(), "local quiet alone admits no hold");
     proof.fetch_or(RECEIPT_QUEUED, Ordering::AcqRel);
