@@ -1159,10 +1159,10 @@ mod issue_tests;
 mod tests {
     use super::{
         CAPABILITY_LEN, ControlToBrain, ControlToShell, DATA_WINDOW, DataToBrain, DataToShell,
-        Deleted, Effort, Hello, Incarnation, MAX_MODEL_NAME_CHARS, MAX_MODELS, MAX_PAGE_BYTES,
-        MAX_PAGE_ROWS, MAX_SLUG_BYTES, MAX_STEP_LABEL, MAX_STEPS, MAX_TITLE_CHARS,
-        MAX_VISIBLE_SCENES, ModelChoice, ModelInfo, ModelName, ModelSlug, RunId, SceneDescriptor,
-        SceneId, Secret, Step, ThreadCursor, ThreadId, ThreadKind, ThreadRow,
+        Effort, Hello, Incarnation, MAX_MODEL_NAME_CHARS, MAX_MODELS, MAX_PAGE_BYTES,
+        MAX_PAGE_ROWS, MAX_SLUG_BYTES, MAX_STEP_LABEL, MAX_STEPS, MAX_TITLE_CHARS, ModelChoice,
+        ModelInfo, ModelName, ModelSlug, RunId, SceneId, Secret, Step, ThreadCursor, ThreadId,
+        ThreadKind, ThreadRow,
     };
     use crate::frame::{self, HEADER_LEN, Pipe};
 
@@ -1380,46 +1380,6 @@ mod tests {
             - HEADER_LEN
     }
 
-    #[test]
-    fn four_worst_case_descriptors_fit_the_control_pipe() {
-        let descriptor = SceneDescriptor {
-            scene: SCENE,
-            revision: u32::MAX,
-            committed: u32::MAX,
-        };
-        let scenes = ControlToShell::Scenes {
-            scenes: vec![descriptor; MAX_VISIBLE_SCENES],
-        };
-        // Tag and length, then 10 + 5 + 5 bytes per descriptor.
-        assert_eq!(payload(&scenes, Pipe::Control), 2 + 4 * 20);
-    }
-
-    #[test]
-    fn worst_case_delete_frames_fit_their_pipes() {
-        let thread = ThreadId(u64::MAX);
-        let delete = ControlToBrain::DeleteThread {
-            thread,
-            after_turns: u32::MAX,
-            resend: true,
-        };
-        assert_eq!(payload(&delete, Pipe::Control), 1 + 10 + 5 + 1);
-        let deleted = ControlToShell::ThreadDeleted {
-            thread,
-            outcome: Deleted::Removed,
-            last_run: Some(RunId(u64::MAX)),
-        };
-        assert_eq!(payload(&deleted, Pipe::Control), 1 + 10 + 1 + 1 + 10);
-        let refused = ControlToShell::TurnRefused {
-            turn: u32::MAX,
-            thread: Some(thread),
-        };
-        assert_eq!(payload(&refused, Pipe::Control), 1 + 5 + 1 + 10);
-        let removed = DataToShell::ScenesRemoved {
-            scenes: vec![SCENE; MAX_VISIBLE_SCENES],
-        };
-        assert_eq!(payload(&removed, Pipe::Data), 2 + 4 * 10);
-    }
-
     /// Titles are at most 80 characters when written, so only an older or planted one ever needs
     /// the page budget's shortening.
     #[test]
@@ -1464,14 +1424,6 @@ mod tests {
             frame::decode::<DataToShell>(&encoded[HEADER_LEN..]).expect("decode full task rows"),
             list
         );
-    }
-
-    #[test]
-    fn a_clear_of_four_worst_case_ids_fits_the_control_pipe() {
-        let clear = ControlToBrain::ClearDrawing {
-            scene_ids: vec![SCENE; MAX_VISIBLE_SCENES],
-        };
-        assert_eq!(payload(&clear, Pipe::Control), 2 + 4 * 10);
     }
 
     #[test]

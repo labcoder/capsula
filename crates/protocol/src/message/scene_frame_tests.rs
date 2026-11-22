@@ -65,7 +65,10 @@ fn replacement_marker_round_trips_four_victims_and_rejects_truncation() {
     let encoded = frame::encode(&marker, Pipe::Data).expect("bounded marker");
     assert_eq!(encoded.len() - HEADER_LEN, 7);
     for end in HEADER_LEN..encoded.len() {
-        assert!(frame::decode::<DataToShell>(&encoded[HEADER_LEN..end]).is_err());
+        assert!(matches!(
+            frame::decode::<DataToShell>(&encoded[HEADER_LEN..end]),
+            Err(frame::FrameError::Malformed(_))
+        ));
     }
 }
 
@@ -418,7 +421,16 @@ fn all_scene_messages_are_redacted_even_in_forged_tap_records() {
     for value in controls() {
         check(&value, Pipe::Control, Direction::ToBrain);
     }
-    for value in data() {
+    let messages = data();
+    let snapshot = messages
+        .iter()
+        .find(|value| matches!(value, DataToShell::SceneSnapshotV1 { .. }))
+        .expect("snapshot fixture");
+    let payload = frame::encode_payload(snapshot).expect("encodes");
+    for end in 0..payload.len() {
+        assert!(frame::decode::<DataToShell>(&payload[..end]).is_err());
+    }
+    for value in messages {
         check(&value, Pipe::Data, Direction::ToShell);
     }
     check(

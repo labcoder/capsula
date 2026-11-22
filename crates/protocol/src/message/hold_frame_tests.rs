@@ -110,7 +110,11 @@ fn screen_hold_states_append_a_redacted_control_tag() {
 #[test]
 fn a_held_screens_outcome_appends_a_redacted_control_tag() {
     use super::{HeldScreen, ScreenClass};
-    let mut outcomes = vec![(HeldScreen::Attached, 7)];
+    let mut outcomes = vec![
+        (HeldScreen::Attached, 7),
+        (HeldScreen::Withdrawn, 7),
+        (HeldScreen::Screen, 7),
+    ];
     for (index, class) in [
         ScreenClass::NotReady,
         ScreenClass::NothingThere,
@@ -133,10 +137,10 @@ fn a_held_screens_outcome_appends_a_redacted_control_tag() {
         (HeldScreen::Attached, 0),
         (HeldScreen::NotIncluded(ScreenClass::NotReady), 1),
         (HeldScreen::Withdrawn, 2),
+        (HeldScreen::Screen, 3),
     ] {
         assert_eq!(postcard::to_allocvec(&outcome).expect("encodes")[0], tag);
     }
-    outcomes.push((HeldScreen::Withdrawn, 7));
     for (outcome, size) in outcomes {
         let message = ControlToShell::HoldScreen {
             gesture: GESTURE,
@@ -512,22 +516,6 @@ fn where_the_user_pointed_is_absent_from_debug_and_from_the_tap() {
 }
 
 #[test]
-fn a_screen_picture_appends_a_held_screen_value() {
-    use super::HeldScreen;
-    assert_eq!(
-        postcard::to_allocvec(&HeldScreen::Screen).expect("encodes"),
-        [3]
-    );
-    let message = ControlToShell::HoldScreen {
-        gesture: GESTURE,
-        outcome: HeldScreen::Screen,
-    };
-    assert_eq!(postcard::to_allocvec(&message).expect("encodes")[0], 32);
-    round_trip(&message, Pipe::Control, 7);
-    redacted(&message, Direction::ToShell, "HoldScreen", 7);
-}
-
-#[test]
 fn held_words_and_their_receipt_append_redacted_data_tags() {
     let sentinel = "zqxsentinellabel";
     let words = super::DataToShell::HoldWords {
@@ -554,12 +542,16 @@ fn held_words_and_their_receipt_append_redacted_data_tags() {
     }
     let longest = super::DataToShell::HoldWords {
         gesture: GESTURE,
-        words: Content::from("a".repeat(super::MAX_TRANSCRIPT_BYTES)),
+        words: Content::from("a".repeat(16_384)),
     };
-    assert!(frame::encode(&longest, Pipe::Data).is_ok());
+    let bytes = frame::encode(&longest, Pipe::Data).expect("max transcript fits");
+    assert_eq!(
+        frame::read(&mut bytes.as_slice(), Pipe::Data).expect("decodes"),
+        Some(longest)
+    );
 }
 #[test]
-fn a_thread_events_change_appends_data_tag_24_and_the_next_tag_is_refused() {
+fn a_thread_events_change_appends_data_tag_24_and_an_unknown_tag_is_refused() {
     let message = super::DataToShell::EventsChanged {
         thread: ThreadId(u64::MAX),
     };
@@ -570,7 +562,10 @@ fn a_thread_events_change_appends_data_tag_24_and_the_next_tag_is_refused() {
         (record.op.as_str(), record.payload.as_ref()),
         ("EventsChanged", None)
     );
-    assert!(frame::decode::<super::DataToShell>(&[25, 7]).is_err());
+    assert!(matches!(
+        frame::decode::<super::DataToShell>(&[0x7f, 7]),
+        Err(frame::FrameError::Malformed(_))
+    ));
     assert_eq!(
         frame::decode::<super::DataToShell>(&[24, 7]).expect("decodes"),
         super::DataToShell::EventsChanged {

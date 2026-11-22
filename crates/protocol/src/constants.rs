@@ -163,20 +163,6 @@ pub fn instance_entry(session: u32) -> String {
     format!("{INSTANCE_ACCOUNT}-{session}")
 }
 
-/// Parses only canonical account names emitted by [`instance_entry`], not stored targets.
-#[must_use]
-pub fn parse_instance_entry(account: &str) -> Option<u32> {
-    let digits = account.strip_prefix(INSTANCE_ACCOUNT)?.strip_prefix('-')?;
-    if digits.is_empty()
-        || digits.len() > 10
-        || !digits.bytes().all(|byte| byte.is_ascii_digit())
-        || (digits.len() > 1 && digits.starts_with('0'))
-    {
-        return None;
-    }
-    digits.parse().ok()
-}
-
 /// The Windows Credential Manager target used by keyring for an instance capability.
 #[must_use]
 pub fn instance_target(service: &str, session: u32) -> String {

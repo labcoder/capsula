@@ -37,10 +37,11 @@ fn identities_preserve_stored_names_and_profile_aliases() {
             "kumochi-dev-shell"
         ]
     );
-    #[cfg(debug_assertions)]
-    let expected = dev;
-    #[cfg(not(debug_assertions))]
-    let expected = release;
+    let expected = match (cfg!(feature = "gate-identity"), cfg!(debug_assertions)) {
+        (true, _) => ProductIdentity::GATE,
+        (false, true) => dev,
+        (false, false) => release,
+    };
     assert_eq!(ProductIdentity::ACTIVE, expected);
     assert_eq!(DATA_DIR, expected.data_dir);
     assert_eq!(CREDENTIAL_SERVICE, expected.credential_service);
@@ -76,10 +77,10 @@ fn the_gate_identity_shares_no_stored_name_with_the_real_ones() {
         generation_target(gate.credential_service, "host", "00ff", 0),
         "Kumochi Gate/gen/host/00ff/0"
     );
-    let gate: BTreeSet<_> = account_targets("Kumochi Gate").collect();
-    assert_eq!(gate.len(), 262);
-    for real in ["Kumochi", "Kumochi Dev"] {
-        assert!(gate.is_disjoint(&account_targets(real).collect()));
+    let targets: BTreeSet<_> = account_targets(gate.credential_service).collect();
+    assert_eq!(targets.len(), 262);
+    for real in [ProductIdentity::RELEASE, ProductIdentity::DEV] {
+        assert!(targets.is_disjoint(&account_targets(real.credential_service).collect()));
     }
 }
 
@@ -137,7 +138,6 @@ fn instance_accounts_and_windows_targets_keep_their_spelling() {
         (u32::MAX, "capability-4294967295"),
     ] {
         assert_eq!(instance_entry(session), account);
-        assert_eq!(parse_instance_entry(account), Some(session));
     }
     assert_eq!(
         instance_target(ProductIdentity::RELEASE.instance_service, 7),
@@ -147,31 +147,4 @@ fn instance_accounts_and_windows_targets_keep_their_spelling() {
         instance_target(ProductIdentity::DEV.instance_service, 7),
         "capability-7.Kumochi Dev instance"
     );
-}
-
-#[test]
-fn instance_parser_rejects_noncanonical_and_overflow_accounts() {
-    for account in [
-        "",
-        "capabilit",
-        "capability",
-        "capability-",
-        "capability-4294967296",
-        "capability-99999999999",
-        "capability-01x",
-        "capability-01",
-        "capability-00",
-        "Capability-1",
-        "capability-+1",
-        "capability--1",
-        "capability- 1",
-        "capability-1 ",
-        " capability-1",
-        "capability-١",
-        "capability-1\n",
-        "capability-7.Kumochi instance",
-        "capability-7.Kumochi Dev instance",
-    ] {
-        assert_eq!(parse_instance_entry(account), None, "{account:?}");
-    }
 }

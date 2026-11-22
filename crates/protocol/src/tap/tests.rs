@@ -243,14 +243,16 @@ fn a_rename_keeps_only_its_op_name_and_length() {
     let file = recording(&[record]);
     assert!(!contains(&file, TITLE.as_bytes()), "the title was recorded");
     let mut out = Vec::new();
-    dump(&mut file.as_slice(), &mut out).expect("dumps");
-    assert_eq!(
-        String::from_utf8(out).expect("utf-8"),
-        format!(
-            "    0 Control shell -> brain  ThreadOp ({} bytes)\n1 frames\n",
-            wire_len(&rename, Pipe::Control)
-        )
-    );
+    assert_eq!(dump(&mut file.as_slice(), &mut out).expect("dumps"), 1);
+    let dump = String::from_utf8(out).expect("utf-8");
+    assert!(dump.contains(&format!(
+        "ThreadOp ({} bytes)",
+        wire_len(&rename, Pipe::Control)
+    )));
+    for output in [format!("{rename:?}"), dump] {
+        assert!(!output.contains(TITLE));
+        assert!(!output.contains(&format!("{:?}", TITLE.as_bytes())));
+    }
 }
 
 #[test]
@@ -266,19 +268,20 @@ fn an_account_op_keeps_its_fields_and_the_account_view_only_its_name() {
         record(Direction::ToBrain, &op),
         record(Direction::ToShell, &view),
     ];
-    assert!(records[0].payload.is_some(), "the op is content-free");
+    assert_eq!(records[0].payload.as_deref(), Some(&[11, 0][..]));
     assert_eq!(records[1].payload, None);
     let file = recording(&records);
     assert!(!contains(&file, EMAIL.as_bytes()), "the email was recorded");
     let mut out = Vec::new();
-    dump(&mut file.as_slice(), &mut out).expect("dumps");
-    assert_eq!(
-        String::from_utf8(out).expect("utf-8"),
-        format!(
-            "    0 Control shell -> brain  AccountOp(SignIn)\n    1 Control brain -> shell  Account ({} bytes)\n2 frames\n",
-            wire_len(&view, Pipe::Control)
-        )
-    );
+    assert_eq!(dump(&mut file.as_slice(), &mut out).expect("dumps"), 2);
+    let dump = String::from_utf8(out).expect("utf-8");
+    assert!(dump.contains("SignIn"));
+    assert!(dump.contains(&format!(
+        "Account ({} bytes)",
+        wire_len(&view, Pipe::Control)
+    )));
+    assert!(!dump.contains(EMAIL));
+    assert!(!dump.contains(&format!("{:?}", EMAIL.as_bytes())));
 }
 
 #[test]
@@ -387,33 +390,42 @@ fn a_forged_payload_for_an_unlisted_op_still_prints_redacted() {
         len: u32::try_from(payload.len()).expect("small"),
         payload: Some(payload),
     };
-    let described = forged.describe();
-    assert!(!described.contains(NAME), "{described}");
-    assert!(described.starts_with("Settings ("), "{described}");
+    assert_eq!(
+        forged.describe(),
+        format!("Settings ({} bytes)", forged.len)
+    );
 }
 
 #[test]
 fn headers_must_be_this_version() {
-    assert!(read_header(&mut &MAGIC[..]).is_ok());
+    use super::DumpError;
+
+    read_header(&mut &b"KTAP\x02"[..]).expect("version 2");
     assert!(matches!(
-        read_header(&mut &MAGIC[..3]),
+        read_header(&mut &b"KTA"[..]),
         Err(FrameError::Truncated)
     ));
-    for bad in [*b"KTAP\x01", *b"XXXX\x02", [0, 0, 0, 0, 0]] {
+    for bad in [*b"XXXX\x02", [0, 0, 0, 0, 0]] {
         assert!(
             matches!(read_header(&mut &bad[..]), Err(FrameError::Malformed(_))),
             "{bad:?}"
         );
     }
     let mut out = Vec::new();
-    assert!(dump(&mut &b"KTAP\x01"[..], &mut out).is_err());
+    assert!(matches!(
+        dump(&mut &b"KTAP\x01"[..], &mut out),
+        Err(DumpError::Record {
+            seq: 0,
+            source: FrameError::Malformed(_)
+        })
+    ));
 }
 
 #[test]
 fn cut_and_corrupt_records_are_errors() {
     let file = recording(&[record(Direction::ToBrain, &ControlToBrain::Pong)]);
     let body = &file[MAGIC.len()..];
-    assert!(read(&mut &body[..0]).expect("clean end").is_none());
+    assert_eq!(read(&mut &body[..0]).expect("clean end"), None);
     for cut in 1..body.len() {
         assert!(
             matches!(read(&mut &body[..cut]), Err(FrameError::Truncated)),
@@ -421,38 +433,30 @@ fn cut_and_corrupt_records_are_errors() {
         );
     }
     let flag_at = body.len() - 1 - 1;
-    let corrupt = |at: usize, value: u8| {
+    for (at, value, field) in [
+        (0, 7, "pipe"),
+        (1, 7, "direction"),
+        (2, 0, "empty op"),
+        (3, b' ', "op text"),
+        (flag_at, 2, "flag"),
+    ] {
         let mut bytes = body.to_vec();
         bytes[at] = value;
-        read(&mut bytes.as_slice()).map(|_| ())
-    };
-    assert!(
-        matches!(corrupt(0, 7), Err(FrameError::Malformed(_))),
-        "pipe"
-    );
-    assert!(
-        matches!(corrupt(1, 7), Err(FrameError::Malformed(_))),
-        "direction"
-    );
-    assert!(
-        matches!(corrupt(2, 0), Err(FrameError::Malformed(_))),
-        "empty op"
-    );
-    assert!(
-        matches!(corrupt(3, b' '), Err(FrameError::Malformed(_))),
-        "op text"
-    );
-    assert!(
-        matches!(corrupt(flag_at, 2), Err(FrameError::Malformed(_))),
-        "flag"
-    );
+        assert!(
+            matches!(read(&mut bytes.as_slice()), Err(FrameError::Malformed(_))),
+            "{field}"
+        );
+    }
     let op_end = 3 + usize::from(body[2]);
     let mut over = body[..op_end].to_vec();
     over.extend(u32::MAX.to_le_bytes());
     over.push(0);
     assert!(matches!(
         read(&mut over.as_slice()),
-        Err(FrameError::TooLarge { .. })
+        Err(FrameError::TooLarge {
+            len: 4_294_967_295,
+            max: 65_536
+        })
     ));
 }
 
@@ -460,5 +464,8 @@ fn cut_and_corrupt_records_are_errors() {
 fn a_listed_payload_must_match_its_length() {
     let mut pong = record(Direction::ToBrain, &ControlToBrain::Pong);
     pong.len += 1;
-    assert!(write(&mut Vec::new(), &pong).is_err());
+    assert!(matches!(
+        write(&mut Vec::new(), &pong),
+        Err(FrameError::Malformed(_))
+    ));
 }

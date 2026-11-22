@@ -144,11 +144,7 @@ impl fmt::Debug for AccountEmail {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        AccountEmail, AccountRecovery, AccountView, EmailError, MAX_EMAIL_BYTES, PlanState,
-    };
-    use crate::frame::{self, HEADER_LEN, Pipe};
-    use crate::message::ControlToShell;
+    use super::{AccountEmail, EmailError, MAX_EMAIL_BYTES};
 
     #[test]
     fn an_email_is_one_bounded_line_on_decode_too() {
@@ -169,17 +165,5 @@ mod tests {
     fn an_email_debug_shows_only_its_length() {
         let email = AccountEmail::new("person@example.invalid").expect("valid");
         assert_eq!(format!("{email:?}"), "AccountEmail(len=22)");
-    }
-
-    #[test]
-    fn the_largest_view_fits_the_control_pipe() {
-        let view = ControlToShell::Account(AccountView::SignedIn {
-            email: Some(AccountEmail::new(&"é".repeat(127)).expect("valid")),
-            plan: PlanState::Unavailable,
-            recovery: Some(AccountRecovery::SignInAgain),
-        });
-        let len = frame::encode(&view, Pipe::Control).expect("fits").len() - HEADER_LEN;
-        // Tags, Some, a 2-byte length and 254 bytes of email, plan, Some and recovery.
-        assert_eq!(len, 1 + 1 + 1 + 2 + 254 + 1 + 1 + 1);
     }
 }

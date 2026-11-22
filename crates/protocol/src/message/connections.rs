@@ -542,7 +542,7 @@ mod tests {
                 "{view:?}"
             );
         }
-        assert!(postcard::from_bytes::<ClaudeCodeView>(&[13]).is_err());
+        assert!(postcard::from_bytes::<ClaudeCodeView>(&[0x7f]).is_err());
     }
 
     #[test]
