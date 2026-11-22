@@ -1294,6 +1294,28 @@ async fn a_completed_stream_whose_framing_stalls_is_closed_not_pooled() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn the_tuned_drain_deadline_closes_only_the_unfinished_framing() {
+    let mut harness = Harness::new(1 << 20);
+    harness.client.tuning.drain = Duration::from_millis(250);
+    let payload = body("hello");
+    let mut call = harness.call(&payload, 1);
+    assert!(poll(&mut call).is_pending());
+    harness.grant(1);
+    assert!(poll(&mut call).is_pending());
+    let mut server = harness.accept();
+    received(&mut server);
+    let mut response = sse(TEXT);
+    response.truncate(response.len() - 5);
+    reply(&mut server, &response);
+    assert!(poll(&mut call).is_pending());
+    tokio::time::advance(Duration::from_millis(249)).await;
+    assert!(poll(&mut call).is_pending());
+    tokio::time::advance(Duration::from_millis(1)).await;
+    assert!(matches!(poll(&mut call), Poll::Ready((Ok(()), _))));
+    assert_eq!(harness.seen().1, [1]);
+}
+
+#[tokio::test(start_paused = true)]
 async fn an_idle_stream_ends_after_its_idle_limit() {
     let harness = Harness::new(1 << 20);
     let body = body("hello");

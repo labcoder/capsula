@@ -54,6 +54,8 @@ send_s = 10
 idle_s = 60
 # 3–40 seconds: reading the explanation when a service refuses a request.
 error_body_s = 10
+# 250–4000 milliseconds: waiting for a completed ChatGPT reply to finish closing its response.
+drain_ms = 1000
 # 10–50 seconds: how long an unused connection is kept for the next request.
 pool_idle_s = 50
 # 15–240 seconds: Anthropic: how long a reply may wait for Kumochi to catch up.
