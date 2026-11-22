@@ -144,26 +144,45 @@ impl fmt::Debug for AccountEmail {
 
 #[cfg(test)]
 mod tests {
-    use super::{AccountEmail, EmailError, MAX_EMAIL_BYTES};
+    use super::{AccountEmail, EmailError};
 
     #[test]
     fn an_email_is_one_bounded_line_on_decode_too() {
-        let longest = format!("{}@b", "a".repeat(MAX_EMAIL_BYTES - 2));
-        assert_eq!(AccountEmail::new(&longest).map(|e| e.0.len()), Ok(254));
+        let longest = format!("{}@b", "é".repeat(126));
+        let email = AccountEmail::new(&longest).unwrap();
+        assert_eq!(email.as_str(), longest);
+        let wire = postcard::to_allocvec(&longest).unwrap();
+        assert_eq!(postcard::from_bytes::<AccountEmail>(&wire), Ok(email));
         let over = format!("{longest}c");
-        for bad in ["", "a\n@b", "a\u{2028}@b", over.as_str()] {
+        for bad in ["", "a\n@b", "a\r@b", "a\u{2028}@b", over.as_str()] {
             assert_eq!(AccountEmail::new(bad), Err(EmailError), "{bad:?}");
+            let wire = postcard::to_allocvec(bad).unwrap();
+            assert_eq!(
+                postcard::from_bytes::<AccountEmail>(&wire),
+                Err(postcard::Error::SerdeDeCustom),
+                "{bad:?}"
+            );
         }
-        let planted = postcard::to_allocvec(&"a\r@b").expect("encodes");
-        assert_eq!(
-            postcard::from_bytes::<AccountEmail>(&planted),
-            Err(postcard::Error::SerdeDeCustom)
-        );
     }
 
     #[test]
     fn an_email_debug_shows_only_its_length() {
-        let email = AccountEmail::new("person@example.invalid").expect("valid");
-        assert_eq!(format!("{email:?}"), "AccountEmail(len=22)");
+        let debug = |address| format!("{:?}", AccountEmail::new(address).unwrap());
+        let address = "person@example.invalid";
+        let other = "writers@demo.testplace";
+        assert_eq!(address.len(), other.len());
+        let shown = debug(address);
+        assert_eq!(shown, debug(other));
+        assert!(!shown.contains(address));
+        assert!(!shown.contains(format!("{:?}", address.as_bytes()).trim_matches(['[', ']'])));
+        let shorter = debug("é@sample.test");
+        assert_ne!(shown, shorter);
+        for (shown, expected) in [(shown, "22"), (shorter, "14")] {
+            assert!(
+                shown
+                    .split(|c: char| !c.is_ascii_digit() && c != '-')
+                    .any(|n| n == expected)
+            );
+        }
     }
 }

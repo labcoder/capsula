@@ -419,20 +419,25 @@ mod tests {
         use crate::message::{ControlToBrain, ControlToShell};
         use crate::tap::Tapped as _;
         let id = KeyStageId([0xab; 16]);
+        let other = KeyStageId([0xcd; 16]);
+        assert_eq!(format!("{id:?}"), format!("{other:?}"));
+        let generation = generation_hex(&id.0);
+        assert_eq!(
+            generation_target("test", "anthropic", &generation, 0),
+            "test/gen/anthropic/abababababababababababababababab/0"
+        );
+        assert_eq!(
+            generation_target("test", "anthropic", &generation, 1),
+            "test/gen/anthropic/abababababababababababababababab/1"
+        );
+        let redacted = format!("{:?}", KeyStagePlan { id, len: 2000 });
         for (len, chunks, last) in [(2000, 1, 2000), (2048, 2, 48)] {
             let plan = KeyStagePlan { id, len };
-            assert_eq!(format!("{plan:?}"), "KeyStagePlan(***)");
+            assert_eq!(format!("{plan:?}"), redacted);
+            assert_eq!(format!("{:?}", KeyStagePlan { id: other, len }), redacted);
             let layout = plan.layout().expect("bounded plan");
             assert_eq!(layout.chunks(), chunks);
             assert_eq!(layout.chunk_len(chunks - 1), last);
-            assert_eq!(
-                generation_target("test", "anthropic", &generation_hex(&id.0), 0),
-                "test/gen/anthropic/abababababababababababababababab/0"
-            );
-            assert_eq!(
-                generation_target("test", "anthropic", &generation_hex(&id.0), 1),
-                "test/gen/anthropic/abababababababababababababababab/1"
-            );
             let reply = ControlToShell::AnthropicKeyStage {
                 request: 7,
                 result: Ok(plan),
@@ -483,7 +488,6 @@ mod tests {
             done
         );
         assert!(!done.content_free());
-        assert_eq!(format!("{id:?}"), "KeyStageId(***)");
     }
 
     #[test]

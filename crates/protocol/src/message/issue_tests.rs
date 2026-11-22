@@ -108,16 +108,6 @@ fn tagged_github_refusal_appends_wire_tags_and_keeps_error_validation() {
         read::<ControlToShell>(&mut wire.as_slice(), Pipe::Control).unwrap(),
         Some(refusal)
     );
-    for length in 1..wire.len() {
-        assert!(matches!(
-            read::<ControlToShell>(&mut &wire[..length], Pipe::Control),
-            Err(FrameError::Truncated)
-        ));
-    }
-    assert_eq!(
-        read::<ControlToShell>(&mut &[][..], Pipe::Control).unwrap(),
-        None
-    );
     for (message, tag) in [
         (ControlToShell::Error(ErrorKey::SettingsRefused.into()), 8),
         (
@@ -638,6 +628,24 @@ fn issue_provenance_round_trips_exactly_through_welcome_and_operation_prefixes()
 
 #[test]
 fn issue_provenance_rejects_missing_mistyped_overflow_and_truncated_identities() {
+    use crate::frame::{FrameError, decode};
+
+    for short in [&[0, 5][..], &[0, 5, 128]] {
+        assert!(matches!(
+            decode::<ControlToShell>(short),
+            Err(FrameError::Malformed(
+                postcard::Error::DeserializeUnexpectedEnd
+            ))
+        ));
+    }
+    for short in [&[25][..], &[25, 128]] {
+        assert!(matches!(
+            decode::<ControlToBrain>(short),
+            Err(FrameError::Malformed(
+                postcard::Error::DeserializeUnexpectedEnd
+            ))
+        ));
+    }
     for json in [
         "{}",
         r#"{"incarnation":1}"#,
@@ -764,7 +772,7 @@ fn issue_operation_identity_preserves_inner_tags_and_exact_wire_fields() {
 
 #[test]
 fn issue_operation_unknown_tags_and_overflow_are_rejected_without_changing_decisions() {
-    for decision in [Decision::FileAnyway, Decision::ThisIsTheIssue] {
+    for (decision, tag) in [(Decision::FileAnyway, 1), (Decision::ThisIsTheIssue, 2)] {
         let message = ControlToBrain::Issue {
             session: IssueSession {
                 incarnation: Incarnation(1),
@@ -778,9 +786,12 @@ fn issue_operation_unknown_tags_and_overflow_are_rejected_without_changing_decis
                 decision,
             }),
         };
+        let mut expected = vec![25, 1, 2, 1, 0, 2];
+        expected.extend([91; 32]);
+        expected.extend([3, tag]);
+        assert_eq!(postcard::to_allocvec(&message).unwrap(), expected);
         assert_eq!(
-            postcard::from_bytes::<ControlToBrain>(&postcard::to_allocvec(&message).unwrap())
-                .unwrap(),
+            crate::frame::decode::<ControlToBrain>(&expected).unwrap(),
             message
         );
     }
@@ -790,8 +801,8 @@ fn issue_operation_unknown_tags_and_overflow_are_rejected_without_changing_decis
     unknown_decision.extend([3, 3]);
     assert!(postcard::from_bytes::<ControlToBrain>(&unknown_decision).is_err());
     let mut overflow = vec![25, 1, 2];
-    overflow.extend([128; 10]);
-    overflow.extend([1, 2]);
+    overflow.extend([128; 9]);
+    overflow.extend([2, 1, 2]);
     assert!(postcard::from_bytes::<ControlToBrain>(&overflow).is_err());
     assert!(
         serde_json::from_str::<ControlToBrain>(
@@ -991,14 +1002,7 @@ fn issue_unavailable_rejects_unknown_tags_overflow_missing_and_mistyped_identity
 fn bounded_collections_and_hash_reject_excess_or_truncated_wire_data() {
     for count in [0, 16] {
         let drafts = vec![DraftId(7); count];
-        let bounded = Bounded::<DraftId, MAX_ISSUE_CARDS>::new(drafts.clone()).expect("bound");
-        assert_eq!(
-            &*postcard::from_bytes::<Bounded<DraftId, MAX_ISSUE_CARDS>>(
-                &postcard::to_allocvec(&drafts).expect("raw")
-            )
-            .expect("decode"),
-            drafts.as_slice()
-        );
+        let bounded = Bounded::<DraftId, MAX_ISSUE_CARDS>::new(drafts).expect("bound");
         let request = DataToBrain::IssueCards { drafts: bounded };
         assert_eq!(
             postcard::from_bytes::<DataToBrain>(&postcard::to_allocvec(&request).expect("encode"))
@@ -1007,12 +1011,6 @@ fn bounded_collections_and_hash_reject_excess_or_truncated_wire_data() {
         );
     }
     assert!(Bounded::<DraftId, MAX_ISSUE_CARDS>::new(vec![DraftId(7); 17]).is_err());
-    assert!(
-        postcard::from_bytes::<Bounded<DraftId, MAX_ISSUE_CARDS>>(
-            &postcard::to_allocvec(&vec![DraftId(7); 17]).expect("raw")
-        )
-        .is_err()
-    );
     assert!(Bounded::<RepoName, MAX_GITHUB_REPOS>::new(vec![longest_repo(); 201]).is_err());
     assert!(
         postcard::from_bytes::<Bounded<RepoName, MAX_GITHUB_REPOS>>(

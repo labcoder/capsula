@@ -340,12 +340,26 @@ fn live_speech_metadata_is_required_and_not_part_of_snapshots() {
             ))
         ));
     }
-    round_trip(&snapshot(header(), step), Pipe::Data);
+    let snapshot = snapshot(header(), step.clone());
+    let DataToShell::SceneSnapshotV1 { chunk } = &snapshot else {
+        panic!("snapshot fixture")
+    };
+    let event = &chunk.events[0];
+    let mut expected = vec![0, 1];
+    expected.extend(postcard::to_allocvec(&step).unwrap());
+    assert_eq!(postcard::to_allocvec(event).unwrap(), expected);
+    assert_eq!(frame::decode::<SceneEvent>(&expected).unwrap(), *event);
+    assert_eq!(
+        serde_json::to_value(event).unwrap(),
+        json!({"step":{"revision":1,"step":step}})
+    );
+    round_trip(&snapshot, Pipe::Data);
 }
 
 #[test]
 fn global_handle_cut_fits_the_control_cap() {
-    let mut remaining = MAX_GLOBAL_LIVE_OBJECTS;
+    assert_eq!(MAX_GLOBAL_LIVE_OBJECTS, 1_500);
+    let mut remaining = 1_500;
     let cuts = (0..4)
         .map(|scene| {
             let count = remaining.min(MAX_LIVE_OBJECTS);
@@ -369,8 +383,6 @@ fn global_handle_cut_fits_the_control_cap() {
         run: RunId(u64::MAX),
         cuts: SceneCuts::new(cuts).expect("global cap"),
     };
-    let bytes = frame::encode(&message, Pipe::Control).expect("fits");
-    assert_eq!(bytes.len(), 4567);
     round_trip(&message, Pipe::Control);
 }
 

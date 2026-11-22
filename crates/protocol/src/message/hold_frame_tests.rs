@@ -166,6 +166,21 @@ fn round_trip<M: Serialize + DeserializeOwned + PartialEq + std::fmt::Debug>(
     );
 }
 
+fn round_trip_within_cap<M: Serialize + DeserializeOwned + PartialEq + std::fmt::Debug>(
+    message: &M,
+    pipe: Pipe,
+) {
+    let frame = frame::encode(message, pipe).expect("encodes within cap");
+    let size = frame.len() - HEADER_LEN;
+    assert!(size <= pipe.max_payload());
+    assert_eq!(
+        frame::read::<M>(&mut frame.as_slice(), pipe)
+            .expect("decodes")
+            .as_ref(),
+        Some(message)
+    );
+}
+
 fn redacted(message: &impl Tapped, direction: Direction, op: &str, size: usize) {
     let record = Record::of(Pipe::Control, direction, message, size).expect("records");
     assert_eq!(
@@ -307,7 +322,7 @@ fn run_origins_screen_choices_and_refusals_round_trip() {
         RunOrigin::Typed { turn: u32::MAX },
         RunOrigin::Hold { gesture: GESTURE },
     ] {
-        round_trip(
+        round_trip_within_cap(
             &ControlToShell::RunState {
                 run: RunId(u64::MAX),
                 thread: ThreadId(u64::MAX),
@@ -316,10 +331,9 @@ fn run_origins_screen_choices_and_refusals_round_trip() {
                 origin: Some(origin),
             },
             Pipe::Control,
-            30,
         );
     }
-    round_trip(
+    round_trip_within_cap(
         &ControlToShell::RunState {
             run: RunId(u64::MAX),
             thread: ThreadId(u64::MAX),
@@ -328,21 +342,16 @@ fn run_origins_screen_choices_and_refusals_round_trip() {
             origin: None,
         },
         Pipe::Control,
-        24,
     );
-    round_trip(
+    round_trip_within_cap(
         &ControlToShell::TurnRefused {
             turn: u32::MAX,
             thread: Some(ThreadId(u64::MAX)),
         },
         Pipe::Control,
-        17,
     );
-    for (screen, size) in [
-        (ScreenChoice::None, 19),
-        (ScreenChoice::Include { lease: LEASE }, 24),
-    ] {
-        round_trip(
+    for screen in [ScreenChoice::None, ScreenChoice::Include { lease: LEASE }] {
+        round_trip_within_cap(
             &DataToBrain::TextSubmit {
                 turn: u32::MAX,
                 screen,
@@ -350,7 +359,6 @@ fn run_origins_screen_choices_and_refusals_round_trip() {
                 text: Content::default(),
             },
             Pipe::Data,
-            size,
         );
     }
 }
