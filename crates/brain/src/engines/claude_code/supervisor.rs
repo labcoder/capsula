@@ -1012,8 +1012,8 @@ impl Running {
         // Claude Code; only a folder that stays held past the grace is left for the sweep.
         let deadline = Instant::now() + PIPE_GRACE;
         loop {
-            // Each retry is the same checked walk, by a name drawn at random for this launch in a
-            // folder held owner-only throughout, so retrying adds no exposure the first try lacks.
+            // A retry is the first attempt's checked walk again: the name is a fresh 128-bit id, and
+            // the parent stays trust-checked and held without delete sharing through every retry.
             match platform::remove_tree(dir) {
                 Ok(()) => return Teardown::Done,
                 Err(platform::Untrusted::Io) => {}
