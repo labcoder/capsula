@@ -9,6 +9,10 @@ impl FakePlayback {
         super::OutputEvent::latch(&self.0.shared.pending, super::ErrorKind::Xrun);
     }
 
+    pub(crate) fn lose(&self) {
+        super::OutputEvent::latch(&self.0.shared.pending, super::ErrorKind::StreamInvalidated);
+    }
+
     #[cfg(test)]
     pub(crate) fn open(control: Arc<Control>, occupied: &'static AtomicBool) -> (Transport, Self) {
         Self::try_open(control, occupied).expect("only one stream may claim the fixture pool")

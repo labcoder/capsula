@@ -619,6 +619,14 @@ fn queued_authenticated_natural_completion_admits_a_fresh_typed_turn(cx: &mut Te
                 owner.refusal
             );
         });
+        submit_draft(&owner, "while it answers", cx);
+        owner.read_with(cx, |owner, _| {
+            assert_eq!(
+                owner.refusal,
+                Some(Text::TurnBusy),
+                "Enter during turn {turn}'s reply says the pair is busy"
+            );
+        });
         let (mut named, mut done, mut ended) = (None, None, None);
         let (mut playback, mut rendered) = (None, false);
         let mut last_phase = None;
