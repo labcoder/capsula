@@ -10,8 +10,8 @@ use zeroize::Zeroizing;
 
 use self::drawing::{Drawing, ViewRead};
 pub(crate) use self::drawing::{DrawingIo, Ordered};
+use super::super::DRAIN;
 use super::super::conductor::{Assignment, Binding};
-use super::super::{DRAIN, STALL};
 use super::backend::{self, Power, Reply, Request};
 use super::receipts::Receipts;
 use super::timeline::{Anchor, Engine, Observation, Opened, Phase, Tail};
@@ -679,7 +679,10 @@ impl Worker {
                 self.recover(now);
             }
         } else {
-            route.watchdog = Some((now.saturating_add(STALL), callbacks));
+            route.watchdog = Some((
+                now.saturating_add(route.transport.control().stall()),
+                callbacks,
+            ));
         }
     }
 
