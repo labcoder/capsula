@@ -328,12 +328,15 @@ sequenceDiagram
   saved reply; replaying a drawing doesn't emit it again. An assigned segment that later fails
   isn't written as a new Chat line.
 - **Drawing timing.** The presenter doesn't estimate narration time for any step, assigned or
-  not. A Plain queued pair has no conductor, so a speech-start step's `say` is announced there
-  as an ordinary `Plain` segment with no speech promise, and the step keeps its authored timing.
+  not. A queued pair declares its narration when it registers. A Plain pair has no conductor, so
+  a speech-start step's `say` is announced there as an ordinary `Plain` segment with no speech
+  promise, and the step keeps its authored timing.
 - **The pump** is owned by the core loop and read only while the data queue has room. With no
   pump, a Speak fails as if TTS weren't loaded, and the run's remaining segments end empty.
-- **First PCM, conducted output only.** The pump times one dispatched Speak, including plain
-  text, from dispatch to its first nonempty PCM or terminal. Queued segments have no timer.
+- **First PCM, conducted output only.** On a pair registered as `Conducted`, the pump times one
+  dispatched Speak, including plain text, from dispatch to its first nonempty PCM or terminal.
+  The pump reads the registered narration at each Speak, so a pump loaded after the pair
+  registered times the same way, and losing the shell drops back to untimed. Queued segments have no timer.
   The provisional deadline is five seconds; it needs measuring on the current build before activation.
   At expiry the pump checks the receiver even if the data pipe has no room. A ready event keeps
   its normal credit and order; an unfinished send does not delay expiry. Silence at expiry fences

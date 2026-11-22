@@ -78,7 +78,11 @@ impl Harness {
         .expect("the owner thread starts");
         tts.load("models".into(), 1);
         Self {
-            pump: Pump::new(tts, output),
+            pump: {
+                let mut pump = Pump::new(tts);
+                pump.set_output(output);
+                pump
+            },
             streams,
             entered,
             runtime,

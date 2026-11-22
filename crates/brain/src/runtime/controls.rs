@@ -2,8 +2,8 @@ use std::cell::Cell;
 
 use kumochi_protocol::frame::Pipe;
 use kumochi_protocol::message::{
-    AudioSession, ControlToBrain, ControlToShell, MAX_VISIBLE_SCENES, OutputGeneration, SettingsOp,
-    check_rate,
+    AudioSession, ControlToBrain, ControlToShell, MAX_VISIBLE_SCENES, Narration, OutputGeneration,
+    SettingsOp, check_rate,
 };
 use kumochi_protocol::tap::{Direction, Tapped};
 use tokio::io::AsyncRead;
@@ -16,7 +16,6 @@ use crate::coordinator::Input;
 use crate::ipc;
 use crate::tap::Tap;
 use crate::voice::installer::Installer;
-use crate::voice::pump::{OutputMode, Pump};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum Registration {
@@ -29,16 +28,19 @@ impl Registration {
         registration.is_none_or(|state| matches!(state.get(), Self::Applied(_)))
     }
 
-    fn control(self, message: &ControlToBrain) -> Result<Option<(u32, OutputGeneration)>, Ended> {
+    fn control(
+        self,
+        message: &ControlToBrain,
+    ) -> Result<Option<(u32, OutputGeneration, Narration)>, Ended> {
         match message {
-            ControlToBrain::QueuedAudioOutput(rate, generation) => {
+            ControlToBrain::QueuedAudioOutput(rate, generation, narration) => {
                 if self != Self::Awaiting {
                     return Err(Ended::Broken("queued audio registered twice"));
                 }
                 if generation.0 == 0 || check_rate(*rate).is_err() {
                     return Err(Ended::Broken("invalid queued audio output"));
                 }
-                Ok(Some((*rate, *generation)))
+                Ok(Some((*rate, *generation, *narration)))
             }
             ControlToBrain::AudioOutput { .. } => {
                 Err(Ended::Broken("legacy audio on a queued connection"))
@@ -167,9 +169,9 @@ pub(super) fn control_input(message: ControlToBrain) -> Result<Option<Input>, En
         ControlToBrain::AudioOutput { rate, generation } => {
             Some(Input::AudioOutput { rate, generation })
         }
-        ControlToBrain::QueuedAudioOutput(rate, generation) => check_rate(rate)
-            .map(|()| Some(Input::QueuedAudioOutput(rate, generation)))
-            .map_err(|_| Ended::Broken("an output rate out of bounds"))?,
+        ControlToBrain::QueuedAudioOutput(..) => {
+            return Err(Ended::Broken("queued audio on a legacy connection"));
+        }
         ControlToBrain::AudioOutputUnavailable { generation } => {
             Some(Input::AudioOutputUnavailable { generation })
         }
@@ -287,13 +289,11 @@ impl Brain {
         link.tap
             .record(Pipe::Control, Direction::ToBrain, &message, len);
         if let Some(registration) = link.registration
-            && let Some((rate, output)) = registration.get().control(&message)?
+            && let Some((rate, output, narration)) = registration.get().control(&message)?
         {
-            // shortcut: the pump's mode stands in for a conductor; P3-1.4 gives the pair its own.
-            let mode = self.pump.as_ref().map_or(OutputMode::Legacy, Pump::output);
             let effects = self
                 .coordinator
-                .register_queued_output(rate, output, mode)
+                .register_queued_output(rate, output, narration)
                 .map_err(|_| Ended::Broken("stale queued audio output"))?;
             self.apply(effects, Some(link))?;
             link.control(&ControlToShell::QueuedAudioRegistered(output))

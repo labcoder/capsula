@@ -5,7 +5,7 @@ use std::thread::{self, Thread};
 use std::time::Instant;
 
 use async_channel::Sender;
-use kumochi_protocol::message::{ControlToBrain, RunOrigin, SegmentId, SettingsView};
+use kumochi_protocol::message::{ControlToBrain, Narration, RunOrigin, SegmentId, SettingsView};
 
 use super::{
     Arc, Denied, Ordering, Output, OutputGeneration, OutputOwner, RunId, State, SyncSender,
@@ -401,8 +401,13 @@ impl OutputOwner {
         if owner.talk_back.is_some() {
             return Ok(());
         }
+        let narration = if owner.narrated.is_some() {
+            Narration::Conducted
+        } else {
+            Narration::Plain
+        };
         if out
-            .try_send(ControlToBrain::QueuedAudioOutput(RATE, output))
+            .try_send(ControlToBrain::QueuedAudioOutput(RATE, output, narration))
             .is_err()
         {
             return Err(Attendance::Lost);

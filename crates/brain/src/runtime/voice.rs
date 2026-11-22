@@ -18,14 +18,12 @@ use crate::platform::{self, Untrusted};
 use crate::voice::LoadReport;
 use crate::voice::download::{DownloadError, Fetch, FetchPhase, Progress};
 use crate::voice::installer::{self, Durable, Effect, Folder, Installer, RemoveAnswer};
-use crate::voice::pump::{OutputMode, Pump};
+use crate::voice::pump::Pump;
 use crate::voice::stt::SttHandle;
 use crate::voice::tts::TtsHandle;
 
 #[cfg(test)]
 mod path_tests;
-
-const OUTPUT_MODE: OutputMode = OutputMode::Legacy;
 
 pub(crate) struct Voice {
     installer: Installer,
@@ -263,7 +261,7 @@ impl Brain {
             stuck,
             self.config.view().hold_to_talk,
         );
-        self.pump = tts.map(|tts| Pump::new(tts, OUTPUT_MODE));
+        self.pump = tts.map(Pump::new);
         self.voice = Some(Voice {
             installer,
             models,

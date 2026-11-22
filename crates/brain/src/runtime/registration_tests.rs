@@ -4,7 +4,7 @@ use kumochi_protocol::frame::{self, Pipe};
 use kumochi_protocol::geometry::PhysicalPoint;
 use kumochi_protocol::message::{
     AudioSession, ControlToBrain, ControlToShell, DataToBrain, GestureId, LeaseGeneration,
-    MAX_RATE, MIN_RATE, NoticeRevision, OutputGeneration, SceneId, ScreenChoice,
+    MAX_RATE, MIN_RATE, Narration, NoticeRevision, OutputGeneration, SceneId, ScreenChoice,
 };
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _, DuplexStream};
 use tokio::sync::{Notify, mpsc};
@@ -17,7 +17,8 @@ use crate::tap::Tap;
 use crate::test_support::{self, Scratch};
 
 const OUTPUT: OutputGeneration = OutputGeneration(7);
-const REGISTER: ControlToBrain = ControlToBrain::QueuedAudioOutput(24_000, OUTPUT);
+const REGISTER: ControlToBrain =
+    ControlToBrain::QueuedAudioOutput(24_000, OUTPUT, Narration::Plain);
 const RECEIPT: ControlToShell = ControlToShell::QueuedAudioRegistered(OUTPUT);
 
 async fn queued(brain: &mut Brain, client: impl AsyncFnOnce(Shell<DuplexStream>)) -> Ended {
@@ -124,13 +125,29 @@ async fn early_hold_controls_fail_before_prepare_capture_or_input_reload() {
 }
 
 #[tokio::test]
+async fn a_legacy_session_cannot_register_queued_audio() {
+    let scratch = Scratch::new("legacy-queued-output");
+    let mut brain = test_support::brain(&scratch, "");
+    let (out, _controls) = mpsc::channel(8);
+    let queue = RefCell::new(DataQueue::new(window()));
+    let ready = Notify::new();
+    let mut tap = Tap::from_env();
+    let mut link = Link::new(&out, &queue, &ready, &mut tap);
+    assert_eq!(
+        brain.control_frame(REGISTER, 0, &mut link, &mut None),
+        Err(Ended::Broken("queued audio on a legacy connection"))
+    );
+    brain.close().await;
+}
+
+#[tokio::test]
 async fn a_bad_or_withdrawn_output_cannot_emit_a_receipt() {
     let scratch = Scratch::new("stale-queued-output");
     let mut brain = test_support::brain(&scratch, "");
     for message in [
-        ControlToBrain::QueuedAudioOutput(MIN_RATE - 1, OUTPUT),
-        ControlToBrain::QueuedAudioOutput(MAX_RATE + 1, OUTPUT),
-        ControlToBrain::QueuedAudioOutput(24_000, OutputGeneration(0)),
+        ControlToBrain::QueuedAudioOutput(MIN_RATE - 1, OUTPUT, Narration::Plain),
+        ControlToBrain::QueuedAudioOutput(MAX_RATE + 1, OUTPUT, Narration::Plain),
+        ControlToBrain::QueuedAudioOutput(24_000, OutputGeneration(0), Narration::Plain),
     ] {
         let result = queued(&mut brain, async |mut shell| {
             assert_eq!(shell.scenes().await, []);
@@ -179,7 +196,11 @@ async fn duplicate_legacy_and_withdrawn_outputs_end_the_pair_after_one_receipt()
         let result = queued(&mut brain, async |mut shell| {
             assert_eq!(shell.scenes().await, []);
             shell
-                .send(&ControlToBrain::QueuedAudioOutput(rate, OUTPUT))
+                .send(&ControlToBrain::QueuedAudioOutput(
+                    rate,
+                    OUTPUT,
+                    Narration::Plain,
+                ))
                 .await;
             assert_eq!(shell.control().await, Some(RECEIPT));
             shell.send(&message).await;
