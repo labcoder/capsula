@@ -209,67 +209,80 @@ mod tests {
 
     #[test]
     fn page_debug_never_contains_search_titles_or_text() {
-        let words = "private search words";
-        let title = "private thread title";
-        let text = "private event text";
-        let issue_title = "zqx-private-title";
-        let slug = "zqxprivatemodel";
-        let choice = ModelChoice {
-            model: ModelSlug::new(slug).expect("valid"),
-            effort: Effort::Medium,
-            connection: crate::message::ConnectionKind::ChatGpt,
-        };
-        let set_model = ThreadOp::SetModel {
-            thread: ThreadId(1),
-            choice: choice.clone(),
-        };
-        let page = PageOf::Threads {
-            search: Some(words.to_owned()),
-            after: None,
-        };
-        let row = ThreadRow {
-            id: ThreadId(1),
-            title: title.to_owned(),
-            updated_ms: 2,
-            kind: ThreadKind::Thread,
-            choice: Some(choice),
-        };
-        let event = PageEvent {
-            id: EventId(3),
-            run: Some(RunId(4)),
-            kind: PageEventKind::User,
-            text: text.to_owned(),
-            cut: false,
-        };
-        let issue = PageEvent {
-            id: EventId(1),
-            run: None,
-            kind: PageEventKind::Issue {
-                draft: crate::message::DraftId(2),
-            },
-            text: issue_title.to_owned(),
-            cut: false,
-        };
-        let issue_debug = format!("{issue:?}");
-        let output = format!(
-            "{page:?} {row:?} {event:?} {issue_debug} {set_model:?} {:?} {:?} {:?}",
-            DataToBrain::PageRequest {
-                request: 1,
-                page: page.clone()
-            },
-            DataToShell::ThreadList {
-                request: 2,
-                threads: vec![row.clone()],
-                next: None
-            },
-            DataToShell::Page {
-                request: 3,
+        let debug = |[words, title, text, issue_title, slug]: [&str; 5]| {
+            let choice = ModelChoice {
+                model: ModelSlug::new(slug).expect("valid"),
+                effort: Effort::Medium,
+                connection: crate::message::ConnectionKind::ChatGpt,
+            };
+            let set_model = ThreadOp::SetModel {
                 thread: ThreadId(1),
-                events: vec![event.clone(), issue],
-                before: None
-            }
-        );
-        for content in [words, title, text, issue_title, slug] {
+                choice: choice.clone(),
+            };
+            let page = PageOf::Threads {
+                search: Some(words.to_owned()),
+                after: None,
+            };
+            let row = ThreadRow {
+                id: ThreadId(1),
+                title: title.to_owned(),
+                updated_ms: 2,
+                kind: ThreadKind::Thread,
+                choice: Some(choice),
+            };
+            let event = PageEvent {
+                id: EventId(3),
+                run: Some(RunId(4)),
+                kind: PageEventKind::User,
+                text: text.to_owned(),
+                cut: false,
+            };
+            let issue = PageEvent {
+                id: EventId(1),
+                run: None,
+                kind: PageEventKind::Issue {
+                    draft: crate::message::DraftId(2),
+                },
+                text: issue_title.to_owned(),
+                cut: false,
+            };
+            let issue_debug = format!("{issue:?}");
+            format!(
+                "{page:?} {row:?} {event:?} {issue_debug} {set_model:?} {:?} {:?} {:?}",
+                DataToBrain::PageRequest {
+                    request: 1,
+                    page: page.clone()
+                },
+                DataToShell::ThreadList {
+                    request: 2,
+                    threads: vec![row.clone()],
+                    next: None
+                },
+                DataToShell::Page {
+                    request: 3,
+                    thread: ThreadId(1),
+                    events: vec![event.clone(), issue],
+                    before: None
+                }
+            )
+        };
+        let original = [
+            "private search words",
+            "private thread title",
+            "private event text",
+            "zqx-private-title",
+            "zqxprivatemodel",
+        ];
+        let other = [
+            "another query phrase",
+            "another dialog label",
+            "another post entry",
+            "abc-queued-letter",
+            "abc-another-llm",
+        ];
+        let output = debug(original);
+        assert!(output == debug(other), "stored content affected Debug");
+        for content in original {
             assert!(!output.contains(content));
             assert!(!output.contains(&format!("{:?}", content.as_bytes())));
         }

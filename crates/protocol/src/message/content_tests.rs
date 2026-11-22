@@ -4,25 +4,29 @@
 use super::{Content, DataToBrain, DataToShell, RunId, SceneId, ScreenChoice, Step};
 
 const SENTINEL: &str = "zqxprivatetext";
+const OTHER: &str = "abcotherdialog";
 
 #[test]
 fn a_frame_carrying_content_prints_its_length_never_its_text() {
-    let submit = DataToBrain::TextSubmit {
+    let submit = |text: &str| DataToBrain::TextSubmit {
         turn: 1,
         screen: ScreenChoice::None,
         thread: None,
-        text: SENTINEL.into(),
+        text: text.into(),
     };
-    let answer = DataToShell::AssistantText {
+    let answer = |text: &str| DataToShell::AssistantText {
         run: RunId(2),
-        delta: SENTINEL.into(),
+        delta: text.into(),
     };
     let byte_list = format!("{:?}", SENTINEL.as_bytes());
     let byte_list = byte_list.trim_matches(['[', ']']);
-    for shown in [format!("{submit:?}"), format!("{answer:?}")] {
-        assert!(!shown.contains(SENTINEL), "the text leaked: {shown}");
+    let debug = |text| [format!("{:?}", submit(text)), format!("{:?}", answer(text))];
+    let shown = debug(SENTINEL);
+    assert!(shown == debug(OTHER), "content affected frame Debug");
+    for shown in shown {
+        assert!(!shown.contains(SENTINEL), "the text leaked");
         assert!(!shown.contains(byte_list), "the bytes leaked");
-        assert!(shown.contains("Content(len=14)"), "{shown}");
+        assert!(shown.contains("Content(len=14)"), "text length missing");
     }
     let wire = postcard::to_allocvec(&Content::from(SENTINEL)).expect("encodes");
     assert_eq!(wire, postcard::to_allocvec(SENTINEL).expect("encodes"));
@@ -32,22 +36,24 @@ fn a_frame_carrying_content_prints_its_length_never_its_text() {
 /// label, and the wire still carries it whole.
 #[test]
 fn a_step_frame_prints_its_labels_length_never_the_label() {
-    let frame = DataToShell::StepCommit {
+    let frame = |label: &str| DataToShell::StepCommit {
         run: RunId(2),
         scene: SceneId(3),
         index: 0,
         step: Step {
-            label: SENTINEL.to_owned(),
+            label: label.to_owned(),
         },
     };
-    let shown = format!("{frame:?}");
+    let debug = |label| format!("{:?}", frame(label));
+    let shown = debug(SENTINEL);
+    assert!(shown == debug(OTHER), "label affected frame Debug");
     let byte_list = format!("{:?}", SENTINEL.as_bytes());
-    assert!(!shown.contains(SENTINEL), "the label leaked: {shown}");
+    assert!(!shown.contains(SENTINEL), "the label leaked");
     assert!(
         !shown.contains(byte_list.trim_matches(['[', ']'])),
         "the bytes leaked"
     );
-    assert!(shown.contains("label_len: 14"), "{shown}");
+    assert!(shown.contains("label_len: 14"), "label length missing");
     let wire = postcard::to_allocvec(&Step {
         label: SENTINEL.to_owned(),
     })
