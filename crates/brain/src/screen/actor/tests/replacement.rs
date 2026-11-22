@@ -106,6 +106,10 @@ struct Replacement {
 
 impl Replacement {
     fn held(owner: Owner, elapsed: Duration) -> Self {
+        Self::held_with_display(owner, elapsed, NEW)
+    }
+
+    fn held_with_display(owner: Owner, elapsed: Duration, next_display: PhysicalRect) -> Self {
         let (inbox, events) = mpsc::sync_channel(QUEUE);
         let (send, replies) = mpsc::channel();
         let (audit, scrubbed) = mpsc::channel();
@@ -180,7 +184,7 @@ impl Replacement {
             assert!(bytes.is_empty());
         }
         *rig.clock.lock().unwrap() += elapsed;
-        rig.context(next, NEW);
+        rig.context(next, next_display);
         rig.release_receive.send(()).unwrap();
         entering.recv_timeout(PATIENCE).unwrap();
         rig.handoff = rig.allocations.recv_timeout(PATIENCE).unwrap();
@@ -309,13 +313,15 @@ fn replacement_by_a_later_epoch_disposes_before_handoff_and_old_release() {
 
 #[test]
 fn unexpired_same_owner_replacement_reuses_the_allocation() {
-    let rig = Replacement::held(key(2).owner, Duration::ZERO);
-    assert_eq!(rig.handoff, rig.old_allocation);
-    assert_eq!(rig.scrubbed.try_recv(), Err(mpsc::TryRecvError::Empty));
-    rig.release_capture.send(()).unwrap();
-    rig.acquired(rig.next, NEW);
-    assert_eq!(
-        rig.allocations.recv_timeout(PATIENCE).unwrap(),
-        rig.old_allocation
-    );
+    for display in [OLD, NEW] {
+        let rig = Replacement::held_with_display(key(2).owner, Duration::ZERO, display);
+        assert_eq!(rig.handoff, rig.old_allocation);
+        assert_eq!(rig.scrubbed.try_recv(), Err(mpsc::TryRecvError::Empty));
+        rig.release_capture.send(()).unwrap();
+        rig.acquired(rig.next, display);
+        assert_eq!(
+            rig.allocations.recv_timeout(PATIENCE).unwrap(),
+            rig.old_allocation
+        );
+    }
 }

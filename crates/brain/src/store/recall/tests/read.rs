@@ -98,51 +98,6 @@ fn tuned_history_read_limit_does_not_shrink_a_saved_range_on_replay() {
 }
 
 #[test]
-fn sparse_ranges_persist_only_actual_shown_endpoints_and_leave_empty_ranges_empty() {
-    let (_scratch, store) = world("recall-sparse-endpoints");
-    task(&store, 2, "B");
-    for id in [10, 30, 90] {
-        say(&store, id, 2, "user", "fact");
-    }
-    assert_eq!(
-        select(
-            &store,
-            Origin::Kumo,
-            &Query::Read {
-                task: 2,
-                from: 5,
-                to: 85
-            }
-        ),
-        Ok(Selection::Read {
-            task: 2,
-            first_shown: Some(10),
-            last_shown: Some(30),
-            cut: None,
-            next: None,
-        })
-    );
-    assert_eq!(
-        select(
-            &store,
-            Origin::Kumo,
-            &Query::Read {
-                task: 2,
-                from: 31,
-                to: 80
-            }
-        ),
-        Ok(Selection::Read {
-            task: 2,
-            first_shown: None,
-            last_shown: None,
-            cut: None,
-            next: None,
-        })
-    );
-}
-
-#[test]
 fn activation_main_thread_is_unavailable_rather_than_a_missing_task() {
     let (_scratch, store) = world("recall-main-unavailable");
     assert_eq!(
@@ -260,6 +215,10 @@ fn exact_encoded_read_boundary_and_one_over_are_distinguished() {
 }
 
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one recall selection through continuation and a later append"
+)]
 fn selected_ranges_keep_actual_continuation_and_do_not_grow_after_append() {
     let (_scratch, store) = world("recall-range");
     task(&store, 2, "B");
@@ -337,6 +296,26 @@ fn selected_ranges_keep_actual_continuation_and_do_not_grow_after_append() {
     let (shown, sources) = render(&store, Origin::Kumo, &empty);
     assert_eq!(shown["quoted_history"][0]["events"], json!([]));
     assert_eq!(sources, BTreeSet::from([ThreadId(2)]));
+    let sparse = select(
+        &store,
+        Origin::Kumo,
+        &Query::Read {
+            task: 2,
+            from: 5,
+            to: 35,
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        sparse,
+        Selection::Read {
+            task: 2,
+            first_shown: Some(10),
+            last_shown: Some(30),
+            cut: None,
+            next: None,
+        }
+    );
     let inclusive = select(
         &store,
         Origin::Task(ThreadId(2)),

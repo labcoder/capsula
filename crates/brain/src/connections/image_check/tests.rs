@@ -49,7 +49,8 @@ fn a_sized_image_is_the_tallest_under_its_cap() {
 fn an_image_that_cant_come_within_two_percent_of_its_cap_is_refused() {
     let tallest = halves(256, 32, NOISE).expect("encoded").len();
     assert_eq!(sized(256, 32, tallest + tallest / 10), None);
-    assert!(sized(256, 32, tallest).is_some());
+    let (jpeg, height) = sized(256, 32, tallest).expect("JPEG at the cap");
+    assert_eq!((jpeg.len(), height), (tallest, 32));
 }
 
 #[test]
