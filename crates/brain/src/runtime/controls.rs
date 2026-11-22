@@ -16,6 +16,7 @@ use crate::coordinator::Input;
 use crate::ipc;
 use crate::tap::Tap;
 use crate::voice::installer::Installer;
+use crate::voice::pump::{OutputMode, Pump};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum Registration {
@@ -288,9 +289,11 @@ impl Brain {
         if let Some(registration) = link.registration
             && let Some((rate, output)) = registration.get().control(&message)?
         {
+            // shortcut: the pump's mode stands in for a conductor; P3-1.4 gives the pair its own.
+            let mode = self.pump.as_ref().map_or(OutputMode::Legacy, Pump::output);
             let effects = self
                 .coordinator
-                .register_queued_output(rate, output)
+                .register_queued_output(rate, output, mode)
                 .map_err(|_| Ended::Broken("stale queued audio output"))?;
             self.apply(effects, Some(link))?;
             link.control(&ControlToShell::QueuedAudioRegistered(output))
