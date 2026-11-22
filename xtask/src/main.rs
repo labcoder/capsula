@@ -67,10 +67,11 @@ tasks:
                     observe raw input on a hidden window for 1..120 seconds;
                     class, motion and marker only; no keys/text or injected input
   bench idle [--duration 1..60] [--baseline <checkout> | --prebuilt <shell-sha256> <brain-sha256>]
-             [--panel | --onboarding]
+             [--panel | --onboarding] [--paint-check]
                     release idle CPU/private bytes on Rez (default 60s)
                     refuses existing product processes; normal-priority launch,
                     30s settle, GetProcessTimes + private bytes, bounded autoquit;
+                    --paint-check runs a separate instrumented dock check, current shell only;
                     CPU is percent of one core, not the whole machine;
                     three 2s saturated-thread trials calibrate the highest cycle rate
                     before launch; cycles CPU is the gate, GetProcessTimes stays beside it
