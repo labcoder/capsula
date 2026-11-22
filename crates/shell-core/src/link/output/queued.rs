@@ -253,6 +253,17 @@ impl OutputOwner {
         }))
     }
 
+    /// Stops `run`'s audio on `session` locally; nothing it finds refuses the pair.
+    ///
+    /// # Errors
+    /// `Busy` on contention.
+    pub fn stop_locally(&self, session: u64, run: RunId) -> Result<(), Denied> {
+        if let Some((_, owner)) = self.try_lock()?.queue(session) {
+            owner.stop(run, StopOrigin::Local);
+        }
+        Ok(())
+    }
+
     pub(in crate::link) fn wait_for_refused_tail(&self) -> Option<RefusedTail> {
         let proof = {
             let state = self.lock();

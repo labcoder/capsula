@@ -771,7 +771,7 @@ impl Presence {
         }
     }
 
-    /// The same for audio the brain has already ended: giving it up never ends the session.
+    /// Offers `run`'s speaker a local `Stop` behind any earlier one; no outcome of it ends the session.
     pub(super) fn stop_speech_locally(
         &mut self,
         session: Session,
@@ -790,7 +790,13 @@ impl Presence {
     /// out, its session ends ([`Presence::end_session`]), and the queue waits for that end.
     pub(super) fn drain_stops(&mut self, cx: &mut Context<'_, Self>) {
         while let Some((session, run, tries, local)) = self.pending_stops.front_mut() {
-            let task = match self.link.output().stop(session.generation(), *run) {
+            let output = self.link.output();
+            let stopped = if *local {
+                output.stop_locally(session.generation(), *run)
+            } else {
+                output.stop(session.generation(), *run)
+            };
+            let task = match stopped {
                 Err(Denied::Busy) if *tries > 1 => {
                     *tries -= 1;
                     cx.spawn(async move |this, cx| {
@@ -798,8 +804,8 @@ impl Presence {
                         Self::after_stop(&this, cx);
                     })
                 }
-                // The brain already ended this audio, so giving the stop up leaves the pair alone.
-                Err(Denied::Busy) if *local => {
+                // Audio the brain ended or replaced: no outcome of its local stop ends the pair.
+                Err(_) if *local => {
                     self.pending_stops.pop_front();
                     continue;
                 }

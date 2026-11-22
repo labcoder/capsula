@@ -1381,6 +1381,26 @@ fn esc_through_the_hotkey_s_reducer_takes_a_pending_hold_s_marks_and_cancels_it(
 }
 
 #[gpui::test]
+fn a_stale_speech_press_leaves_newer_marks_up(cx: &mut TestAppContext) {
+    let watching = marks_up(cx);
+    told(&watching);
+    watching.ready.owner.update(cx, |owner, cx| {
+        let marked = owner.presenter.marks_shown().expect("marks are up");
+        let session = owner.session.as_ref().expect("connected").generation();
+        let older = RunId(marked.0.saturating_sub(1));
+        owner
+            .native_escape(None, Some((session, older)), cx)
+            .expect("Esc");
+        assert_eq!(
+            owner.presenter.marks_shown(),
+            Some(marked),
+            "a press that saw older speech leaves newer marks up"
+        );
+    });
+    assert_eq!(told(&watching), [], "and tells the brain nothing");
+}
+
+#[gpui::test]
 fn esc_in_another_app_takes_a_pending_hold_s_marks_and_cancels_it(cx: &mut TestAppContext) {
     // Another app is in front, so the sources count the key as well. Their wake is handled
     // before the hotkey's press or after it, and the marks go once either way.
