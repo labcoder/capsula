@@ -503,7 +503,7 @@ async fn expired_attempt_neither_launches_nor_receives() {
     let launcher = Arc::new(RecordingLauncher::default());
     assert_eq!(
         attempt
-            .open_browser(Arc::<RecordingLauncher>::clone(&launcher))
+            .open_browser(Arc::<RecordingLauncher>::clone(&launcher), &Arc::default())
             .await,
         Err(LaunchError::Expired)
     );
@@ -549,10 +549,14 @@ async fn a_launch_held_at_spawn_never_opens_after_expiry_or_cancellation() {
         let (attempt, address, _seen) = attempt().await;
         let (done, exited) = oneshot::channel();
         let opened = Arc::new(AtomicBool::new(false));
-        let mut launch = Box::pin(attempt.open_browser(Arc::new(Probe {
-            opened: Arc::clone(&opened),
-            done: Some(done),
-        })));
+        let cancelled = Arc::default();
+        let mut launch = Box::pin(attempt.open_browser(
+            Arc::new(Probe {
+                opened: Arc::clone(&opened),
+                done: Some(done),
+            }),
+            &cancelled,
+        ));
         pending(launch.as_mut()).await;
         if expire {
             tokio::time::advance(super::ATTEMPT_LIMIT).await;
@@ -628,7 +632,7 @@ async fn returning_sign_in_never_hands_saved_tokens_or_hints_to_the_launcher() {
     .expect("bind");
     let launcher = Arc::new(RecordingLauncher::default());
     attempt
-        .open_browser(Arc::<RecordingLauncher>::clone(&launcher))
+        .open_browser(Arc::<RecordingLauncher>::clone(&launcher), &Arc::default())
         .await
         .expect("injected launch");
     let url = launcher.0.lock().unwrap().take().expect("launch recorded");
