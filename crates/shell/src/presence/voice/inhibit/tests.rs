@@ -1321,6 +1321,7 @@ fn a_key_up_native_input_took_before_acceptance_releases_nothing(cx: &mut TestAp
     let fence = owner.read_with(cx, |owner, _| owner.link.microphone_gate());
     let (receipt, received) = std::sync::mpsc::channel();
     let (seen, collected) = std::sync::mpsc::channel();
+    let (finished, finish) = std::sync::mpsc::channel::<()>();
     owner.update(cx, |owner, _| {
         owner.voice.start = Some(Box::new(move |reserved, session| {
             MicOwner::start_reserved_with_for_tests(
@@ -1343,6 +1344,8 @@ fn a_key_up_native_input_took_before_acceptance_releases_nothing(cx: &mut TestAp
                         }
                         std::thread::park_timeout(Duration::from_millis(1));
                     }
+                    // Held until the test has read the stopping state the receipt would end.
+                    finish.recv().ok();
                     seen.send(copying).expect("told");
                     Ok(Finalization::Discarded(MicError::Cancelled))
                 },
@@ -1375,11 +1378,26 @@ fn a_key_up_native_input_took_before_acceptance_releases_nothing(cx: &mut TestAp
     owner.read_with(cx, |owner, _| {
         assert!(owner.voice.watched.is_none(), "no watch");
     });
+    finished.send(()).expect("the capture waits");
     assert_eq!(
         collected.recv_timeout(Duration::from_secs(3)),
         Ok(false),
         "no copy"
     );
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while owner.read_with(cx, |owner, _| owner.voice.status) != Some(Text::HoldCancelled)
+        && Instant::now() < deadline
+    {
+        std::thread::park_timeout(Duration::from_millis(1));
+        cx.run_until_parked();
+    }
+    owner.read_with(cx, |owner, _| {
+        assert_eq!(
+            owner.voice.status,
+            Some(Text::HoldCancelled),
+            "the discarded capture ends the hold"
+        );
+    });
 }
 
 #[gpui::test]
