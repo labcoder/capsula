@@ -4,8 +4,8 @@
 over its real pipes with the slice 2 gate's client (see [the slice 2 gate](slice2-gate.md)). Live
 checks run on Rez, never in CI, and only with the owner present or in a session the Captain
 approved. The checks are `account`, `signin`, `claude-signin`, `claude-question`,
-`catalog-provenance`, `image`, `chatgpt-text first-text` and `anthropic-key`. Catalog provenance
-and image run the brain alone, with no client, and `anthropic-key` runs the real gate shell (see
+`catalog-provenance`, `image`, `marks`, `draw`, `chatgpt-text first-text` and `anthropic-key`.
+Catalog provenance, image, marks and draw run the brain alone, with no client, and `anthropic-key` runs the real gate shell (see
 their sections).
 
 ## How it runs
@@ -551,6 +551,45 @@ marks check: stopped, exit 20 (requests: at most 12)
 Exits 10–17 mean the same as the catalog capture's and send nothing; 18 means a picture or body
 couldn't be built; 20 means the session went stale or a line couldn't be written, and 21 that
 the provider refused the account, each with the rest unspent.
+
+## `draw`
+
+`cargo xtask live draw` checks that the model's drawings pass the brain's checks. Both live drawing
+failures of 11 November (a begin without `v`, and nodes without a container) were found only when
+a person typed a prompt. `KUMOCHI_LIVE_BUDGET=0 cargo xtask live draw` is its dry run. Run the
+real one only in a live turn the Captain assigned, from the reviewed head.
+
+- xtask runs `kumochid.exe --draw-check` with the marks check's runner: only the copied brain, in
+  its kill-on-close job, stdout piped, keeping only `request=` and `summary` lines. The mode is
+  built into debug brains only, and a brain without it exits 10. Its preflight is the image
+  check's, and it never renews the session.
+- Two requests, one per recorded call in `crates/brain/fixtures/responses`: the user asks for the
+  water cycle, then for a graph of y = x². Each goes through the product's request path on the
+  default model at low effort, with short fixed instructions and `draw` exactly as Kumo's model is
+  offered it. A refusal of the account (401, 403, 429 or a usage-limit, plan, route or sign-in
+  code) stops the run. Nothing is retried.
+- The first function call, if it is `draw` within the tool's 16 KiB argument bound, is checked as
+  a new scene with no picture: each closed record through `parse_screen_draw_record`, the scene's
+  begin, and every step's `refuse_three_dimensional`, `admit_checked` and commit. A screen begin
+  is refused as `drawing.NoScreenPicture`, as the product refuses one without a picture. Replacing
+  older scenes, the run's step budget and layout aren't checked.
+
+**Requests.** The mode's `Budget` is 2, one per prompt, pinned by a compile-time assert, and
+`KUMOCHI_LIVE_BUDGET` can only lower it; a value that isn't a count allows none. At 0 the vault is
+never opened: each request's line says `result=dry`. The brain prints numbers and fixed words only:
+one line per request with its prompt name, body bytes, status, provider code and part, result,
+function-call count, `draw=drawn steps=N`, `draw=refused error=<code> field=<schema path>`,
+`draw=none` or `draw=too-long`, and network milliseconds; then a summary with the model, budget,
+attempts and drawn count. Never the model's text, scene names or arguments.
+
+```text
+draw check: done (requests: 2)
+draw check: nothing sent, exit 16 (requests: 0)
+```
+
+Exit codes are the marks check's: 10–17 send nothing, 18 means a body couldn't be built, 20 that
+the session went stale or a line couldn't be written, and 21 that the provider refused the
+account.
 
 ## `anthropic-key`
 

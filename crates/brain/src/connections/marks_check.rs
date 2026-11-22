@@ -380,7 +380,7 @@ fn mark_line(
 
 /// Whether a refusal is about the account rather than the request: a usage limit, the plan, the
 /// route or the sign-in. Those stop the run; any other refusal skips its picture's size.
-fn account_refusal(error: ProviderError) -> bool {
+pub(super) fn account_refusal(error: ProviderError) -> bool {
     matches!(error.status, 401 | 403 | 429)
         || matches!(
             error.code,
@@ -396,7 +396,7 @@ fn account_refusal(error: ProviderError) -> bool {
 }
 
 /// A request's status, provider code and parameter, and result word.
-fn outcome(result: Result<(), Failure>) -> [String; 4] {
+pub(super) fn outcome(result: Result<(), Failure>) -> [String; 4] {
     let none = || "-".to_owned();
     match result {
         Ok(()) => ["2xx".to_owned(), none(), none(), "completed".to_owned()],
