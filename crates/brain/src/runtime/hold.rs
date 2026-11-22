@@ -113,6 +113,10 @@ pub(super) struct Ingress {
 
 impl Ingress {
     pub(super) fn push(&self, chunk: MicPcm) {
+        #[cfg(all(windows, debug_assertions, feature = "test-support"))]
+        if let Some(probe) = super::audio_fixture::probe() {
+            probe.mic_received();
+        }
         let packet = Packet(chunk);
         let gesture = packet.0.gesture.0;
         if gesture == 0 || self.gate.active.load(Ordering::SeqCst) != gesture {
@@ -556,6 +560,12 @@ impl Brain {
                 }
             }
             ControlToBrain::ExclusionLapsed { lease } if self.holds.lease_lapsed(*lease) => {}
+            ControlToBrain::Settings(op)
+                if link.registration.is_some() && super::settings::changes_hold_consent(op) =>
+            {
+                self.hold_end(HoldStatus::Failed(HoldFailure::ChoiceChanged), link)?;
+                return Ok(false);
+            }
             ControlToBrain::Settings(SettingsOp::SetDefaultModel(_))
             | ControlToBrain::AccountOp(_)
             | ControlToBrain::Connection(_) => {
@@ -590,6 +600,10 @@ impl Brain {
             return Ok(false);
         }
         self.holds.high = key.gesture.0;
+        if !self.hold_pair_supported(link) {
+            Self::hold_status(key, HoldStatus::Failed(HoldFailure::ChoiceChanged), link)?;
+            return Ok(false);
+        }
         if !self.hold_to_talk_enabled() {
             Self::hold_status(key, HoldStatus::Failed(HoldFailure::NotLoaded), link)?;
             return Ok(false);
@@ -924,6 +938,9 @@ impl Brain {
 
     /// Hands the pending hold's transcript and screen to its run.
     fn hold_submit(&mut self, text: String, link: &mut Link<'_, '_>) -> Result<(), Full> {
+        if !self.hold_pair_supported(link) {
+            return self.hold_end(HoldStatus::Failed(HoldFailure::ChoiceChanged), link);
+        }
         // shortcut: busy transfer discards the hold; retain its bounded cancellable owner until admission opens when queued voice is needed.
         if !self.admits_turn(link) {
             return self.hold_end(HoldStatus::Failed(HoldFailure::Busy), link);

@@ -667,6 +667,94 @@ fn accepted(output: &mut mpsc::Receiver<Vec<u8>>, gesture: GestureId) {
 }
 
 #[tokio::test]
+async fn cancellation_discards_pcm_on_both_sides_of_the_control_frame() {
+    for tail_before_cancel in [true, false] {
+        let scratch = Scratch::new("hold-cancel-pcm");
+        let mut expected = vec![173; 320];
+        expected.push(-219);
+        let (mut brain, release, mut decoded, _) =
+            crate::runtime::tests::holds::input(&scratch, expected, "cancelled audio").await;
+        let (out, mut output) = mpsc::channel(8);
+        let queue = RefCell::new(DataQueue::new(0));
+        let ready = Notify::new();
+        let mut tap = Tap::from_env();
+        let mut link = Link::new(&out, &queue, &ready, &mut tap);
+        recording(&mut brain);
+        let ingress = brain.holds.ingress();
+        let pcm = |gesture, seq, last, samples| MicPcm {
+            gesture,
+            rate: 16_000,
+            seq,
+            last,
+            samples,
+        };
+        ingress.push(pcm(GestureId(KEY.gesture.0 + 1), 0, false, vec![173; 320]));
+        assert!(brain.holds.receive.is_empty());
+        ingress.push(pcm(KEY.gesture, 0, false, vec![173; 320]));
+        let packet = brain.holds.receive.try_recv().unwrap();
+        assert_eq!(packet.0.gesture, KEY.gesture);
+        brain.hold_event(Event::Packet(packet), &mut link).unwrap();
+        brain
+            .hold_control(
+                &ControlToBrain::KeyUp {
+                    gesture: KEY.gesture,
+                    t_qpc: 1,
+                    chunks: 2,
+                },
+                &mut link,
+            )
+            .unwrap();
+        brain
+            .hold_control(
+                &ControlToBrain::VoiceHoldStopped {
+                    gesture: KEY.gesture,
+                },
+                &mut link,
+            )
+            .unwrap();
+        accepted(&mut output, KEY.gesture);
+        assert!(output.is_empty());
+
+        if tail_before_cancel {
+            ingress.push(pcm(KEY.gesture, 1, true, vec![-219]));
+            assert_eq!(brain.holds.receive.len(), 1);
+        }
+        brain
+            .hold_control(
+                &ControlToBrain::GestureCancel {
+                    gesture: KEY.gesture,
+                },
+                &mut link,
+            )
+            .unwrap();
+        assert_eq!(status(&mut output), HoldStatus::Cancelled);
+        assert!(brain.holds.pending.is_none());
+        assert!(brain.holds.receive.is_empty());
+
+        ingress.push(pcm(KEY.gesture, 1, true, vec![-219]));
+        assert!(brain.holds.receive.is_empty());
+        assert!(output.is_empty());
+        assert_eq!(queue.borrow().bytes(), 0);
+        assert_eq!(brain.coordinator.current_run(), None);
+        assert!(brain.round.is_none());
+        assert_eq!(decoded.try_recv(), Err(mpsc::error::TryRecvError::Empty));
+
+        drop(release);
+        brain.close().await;
+        let store = crate::store::Store::open(&scratch.db()).unwrap();
+        let users: u32 = store
+            .conn_for_tests()
+            .query_row(
+                "SELECT COUNT(*) FROM events WHERE kind = 'user'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(users, 0);
+    }
+}
+
+#[tokio::test]
 async fn duplicate_stop_acceptance_never_poisons_or_restarts_the_pending_audio() {
     let scratch = Scratch::new("hold-duplicate-stop");
     let mut brain = test_support::brain(&scratch, "");
