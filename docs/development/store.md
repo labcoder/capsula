@@ -167,6 +167,13 @@ it. Each read uses one snapshot transaction, finished before returning, so no sn
 Reads neither stop the purge's copy nor postpone it: a page request never reaches the store
 thread's queue, so it doesn't reset the quiet deadline an owed purge waits for.
 
+A page marks a user event as failed only if that event's own run is stored as failed.
+Its held-screen metadata and any partial assistant reply stay on the page. A crash also
+sets this bit, so it indicates neither failed delivery nor a safe retry. The query reads
+the existing run state without exposing its reason or changing the schema. The new page
+kinds follow the old wire tags; the [paired build check](ipc.md#the-handshake) runs before
+any page can cross to another build.
+
 A read waits until the store thread has finished every op queued before it, failed and empty
 ones included, so it sees the thread a turn just created. Ops queued after it may show too: a
 delete can overtake an older read, which the shell's revision fences already handle. The reply

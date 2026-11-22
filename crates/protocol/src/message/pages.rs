@@ -111,6 +111,14 @@ pub enum PageEventKind {
         /// The image, or why not.
         screen: super::HeldScreen,
     },
+    /// A user turn whose run is stored as failed, including after crash recovery.
+    /// Says nothing about delivery or whether retrying would be safe.
+    FailedUser,
+    /// A failed run's held turn, with its original screen metadata.
+    FailedHeldTurn {
+        /// The image, or why not.
+        screen: super::HeldScreen,
+    },
 }
 
 /// An event as the thread panel reads it.
@@ -203,6 +211,47 @@ mod tests {
         );
         assert_eq!(
             frame::read::<DataToShell>(&mut encoded.as_slice(), Pipe::Data).expect("decoded Page"),
+            Some(page)
+        );
+    }
+
+    #[test]
+    fn saved_failure_kinds_append_their_wire_tags_and_round_trip() {
+        use crate::frame::{self, Pipe};
+        use crate::message::HeldScreen;
+
+        let kinds = [
+            (PageEventKind::FailedUser, &[7][..]),
+            (
+                PageEventKind::FailedHeldTurn {
+                    screen: HeldScreen::Screen,
+                },
+                &[8, 3],
+            ),
+        ];
+        let events = kinds
+            .into_iter()
+            .zip(1..)
+            .map(|((kind, bytes), id)| {
+                assert_eq!(postcard::to_allocvec(&kind).expect("kind"), bytes);
+                PageEvent {
+                    id: EventId(id),
+                    run: Some(RunId(id)),
+                    kind,
+                    text: "user text".to_owned(),
+                    cut: false,
+                }
+            })
+            .collect();
+        let page = DataToShell::Page {
+            request: 1,
+            thread: ThreadId(1),
+            events,
+            before: None,
+        };
+        let encoded = frame::encode(&page, Pipe::Data).expect("page");
+        assert_eq!(
+            frame::read::<DataToShell>(&mut encoded.as_slice(), Pipe::Data).expect("decoded page"),
             Some(page)
         );
     }
