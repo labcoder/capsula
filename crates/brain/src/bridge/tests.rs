@@ -10,8 +10,8 @@ use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 
 use super::id::{JsonRpcId, MAX_STRING_ID};
-use super::stdio::{Body, Incoming, Line, LineReader, RpcError, classify, reply};
-use super::wire::{CHUNK, CallKey, Method, Reassembly, ToBrain, ToBridge, TooLarge, chunks};
+use super::stdio::{Body, Incoming, Line, LineReader, RpcError, classify};
+use super::wire::{CHUNK, CallKey, Method, Reassembly, ToBrain, ToBridge, chunks};
 use super::{BridgeError, Input, MAX_INCOMING, MAX_REPLY, connect, relay, run};
 use crate::platform::{Instance, PipeServer, create_owner_only, test_pair};
 
@@ -101,29 +101,6 @@ fn lines_are_classified_by_envelope_method_and_id() {
     }
 }
 
-#[test]
-fn replies_carry_the_id_by_value_and_the_body_unchanged() {
-    let text = |line: Vec<u8>| String::from_utf8(line).expect("utf-8");
-    assert_eq!(
-        text(reply(
-            Some(&JsonRpcId::Number(7)),
-            Body::Result(br#"{"content":[]}"#)
-        )),
-        "{\"jsonrpc\":\"2.0\",\"id\":7,\"result\":{\"content\":[]}}\n"
-    );
-    assert_eq!(
-        text(reply(
-            Some(&JsonRpcId::String("A\"".to_owned())),
-            Body::Error(br#"{"code":1}"#)
-        )),
-        "{\"jsonrpc\":\"2.0\",\"id\":\"A\\\"\",\"error\":{\"code\":1}}\n"
-    );
-    assert_eq!(
-        text(reply(None, Body::Local(RpcError::InvalidRequest))),
-        "{\"jsonrpc\":\"2.0\",\"id\":null,\"error\":{\"code\":-32600,\"message\":\"Invalid Request\"}}\n"
-    );
-}
-
 fn lines(chunks: &[&[u8]]) -> (Vec<Line>, Option<Line>) {
     let mut reader = LineReader::default();
     let mut out = Vec::new();
@@ -157,48 +134,6 @@ fn a_line_of_exactly_the_cap_passes_and_one_over_is_refused_then_dropped() {
     let (out, last) = lines(&[b"\n", b"a", b"b\r", b"\n"]);
     assert_eq!(out, vec![Line::Text(vec![]), Line::Text(b"ab".to_vec())]);
     assert_eq!(last, None);
-}
-
-#[test]
-fn bodies_are_chunked_under_the_frame_cap_and_reassembled_up_to_their_cap() {
-    let body = vec![7; MAX_INCOMING];
-    let parts: Vec<(usize, bool)> = chunks(&body)
-        .map(|(chunk, last)| (chunk.len(), last))
-        .collect();
-    assert_eq!(
-        parts,
-        [
-            (CHUNK, false),
-            (CHUNK, false),
-            (MAX_INCOMING - 2 * CHUNK, true)
-        ]
-    );
-    assert_eq!(
-        chunks(&[])
-            .map(|(chunk, last)| (chunk.len(), last))
-            .collect::<Vec<_>>(),
-        [(0, true)]
-    );
-    for (chunk, _) in chunks(&body) {
-        let frame = frame::encode(
-            &ToBrain::Request {
-                key: JsonRpcId::String("a".repeat(MAX_STRING_ID)).key(),
-                method: Method::ToolsCall,
-                chunk: chunk.to_vec(),
-                last: false,
-            },
-            Pipe::Data,
-        );
-        assert!(frame.is_ok(), "a full chunk fits a data frame");
-    }
-
-    let mut exact = Reassembly::new(MAX_INCOMING);
-    chunks(&body).for_each(|(chunk, _)| exact.push(chunk));
-    assert_eq!(exact.finish(), Ok(body));
-    let over = vec![7; MAX_INCOMING + 1];
-    let mut refused = Reassembly::new(MAX_INCOMING);
-    chunks(&over).for_each(|(chunk, _)| refused.push(chunk));
-    assert_eq!(refused.finish(), Err(TooLarge));
 }
 
 /// The bridge's relay on one end of a real pipe, and the brain's end for the test to drive.
@@ -331,6 +266,22 @@ async fn a_call_is_relayed_and_answered_with_its_id() {
     assert_eq!(
         bridge.stdout().await,
         "{\"jsonrpc\":\"2.0\",\"id\":7,\"error\":{\"code\":-1,\"message\":\"no\"}}\n"
+    );
+
+    bridge
+        .line(r#"{"jsonrpc":"2.0","id":"A\"","method":"tools/call","params":{"name":"noop"}}"#)
+        .await;
+    let (key, ..) = bridge.request().await;
+    assert_eq!(key.0, "m:s:4122");
+    bridge
+        .answer(&key, Body::Error(br#"{"code":-1, "message":"no\n\""}"#))
+        .await;
+    assert_eq!(
+        bridge.stdout().await,
+        concat!(
+            r#"{"jsonrpc":"2.0","id":"A\"","error":{"code":-1, "message":"no\n\""}}"#,
+            "\n"
+        )
     );
     drop(bridge.stdin);
     assert!(
@@ -826,37 +777,18 @@ fn lines_near_and_over_the_cap_go_through_the_real_reader_relay_and_pipe() {
             .expect("utf-8")
     };
     // The request's params reach the pipe as the client wrote them, whitespace included.
-    let text = "a".repeat(MAX_INCOMING - 80);
+    let id = "a".repeat(MAX_STRING_ID);
+    let text = "a".repeat(MAX_INCOMING - 101);
     let near = format!(
-        r#"{{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{{ "text" : "{text}" }}}}"#
+        r#"{{"jsonrpc":"2.0","id":"{id}","method":"tools/call","params":{{ "text" : "{text}" }}}}"#
     );
-    assert!(
-        near.len() > MAX_INCOMING - 80 && near.len() <= MAX_INCOMING,
-        "{}",
-        near.len()
-    );
+    assert_eq!(near.len(), MAX_INCOMING);
     runtime.block_on(async {
         brain.connect().await.expect("connects");
         hello(&mut brain, 60_000).await;
         feed.send(format!("{near}\n").into_bytes()).expect("fed");
-        let mut params = Vec::new();
-        let mut sizes = Vec::new();
-        let key = loop {
-            let Some(ToBrain::Request { key, chunk, last, .. }) =
-                crate::ipc::read(&mut brain, Pipe::Data).await.expect("frame")
-            else {
-                panic!("a request");
-            };
-            sizes.push(chunk.len());
-            params.extend(chunk);
-            if last {
-                break key;
-            }
-        };
-        assert_eq!(key, CallKey("m:n:7".to_owned()));
-        assert_eq!(params, format!(r#"{{ "text" : "{text}" }}"#).into_bytes());
-        assert_eq!(sizes.len(), 3, "{sizes:?}");
-        assert!(sizes.iter().all(|&size| size <= CHUNK), "{sizes:?}");
+        let key = read_capped_request(&mut brain, format!(r#"{{ "text" : "{text}" }}"#).into_bytes())
+            .await;
         let reply = ToBridge::Reply {
             key,
             chunk: b"{}".to_vec(),
@@ -867,7 +799,10 @@ fn lines_near_and_over_the_cap_go_through_the_real_reader_relay_and_pipe() {
             .write_all(&frame::encode(&reply, Pipe::Data).expect("encodes"))
             .await
             .expect("write");
-        assert_eq!(line(&stdout), "{\"jsonrpc\":\"2.0\",\"id\":7,\"result\":{}}\n");
+        assert_eq!(
+            line(&stdout),
+            format!("{{\"jsonrpc\":\"2.0\",\"id\":\"{id}\",\"result\":{{}}}}\n")
+        );
 
         let call = r#"{"jsonrpc":"2.0","id":8,"method":"tools/call","params":{ "name" : "noop" }}"#;
         feed.send(format!("{}\n{call}\n", "b".repeat(MAX_INCOMING + 1)).into_bytes())
@@ -888,6 +823,47 @@ fn lines_near_and_over_the_cap_go_through_the_real_reader_relay_and_pipe() {
     });
     drop(feed);
     assert!(matches!(bridge.join().expect("joins"), Ok(())));
+}
+
+async fn read_capped_request(brain: &mut PipeServer, expected: Vec<u8>) -> CallKey {
+    let mut params = Vec::new();
+    let mut sizes = Vec::new();
+    let mut exact = Reassembly::new(MAX_INCOMING);
+    let expected_key = CallKey(format!("m:s:{}", "61".repeat(MAX_STRING_ID)));
+    let key = loop {
+        let Some(ToBrain::Request {
+            key,
+            method,
+            chunk,
+            last,
+        }) = crate::ipc::read(brain, Pipe::Data).await.expect("frame")
+        else {
+            panic!("a request");
+        };
+        assert_eq!(key, expected_key);
+        assert_eq!(method, Method::ToolsCall);
+        sizes.push((chunk.len(), last));
+        exact.push(&chunk);
+        params.extend(chunk);
+        if last {
+            break key;
+        }
+    };
+    assert_eq!(params, expected);
+    assert_eq!(
+        sizes,
+        [
+            (CHUNK, false),
+            (CHUNK, false),
+            (params.len() - 2 * CHUNK, true)
+        ]
+    );
+    assert_eq!(chunks(&[]).collect::<Vec<_>>(), [(&[][..], true)]);
+    let padding = vec![b' '; MAX_INCOMING - params.len()];
+    exact.push(&padding);
+    params.extend(padding);
+    assert_eq!(exact.finish(), Ok(params));
+    key
 }
 
 #[test]

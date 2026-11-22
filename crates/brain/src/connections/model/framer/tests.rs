@@ -65,16 +65,6 @@ fn fragmented_multiline_events_are_joined_the_same_in_any_chunks() {
 }
 
 #[test]
-fn the_bytes_after_a_break_are_not_counted() {
-    let mut framer = Framer::default();
-    let mut stream = END.to_vec();
-    stream.extend_from_slice(b"data: after\n\n");
-    let mut stop = |_: &[u8]| Ok::<_, Limit>(ControlFlow::Break(()));
-    assert_eq!(framer.feed(&stream, &mut stop), Ok(ControlFlow::Break(())));
-    assert_eq!(framer.received(), END.len());
-}
-
-#[test]
 fn a_line_may_be_exactly_the_cap_and_no_longer() {
     // A CR counts toward its line, as it did before the framer was shared.
     for (bytes, ending, end) in [

@@ -67,8 +67,8 @@ fn valid(attempt: &SignIn, address: SocketAddr) -> String {
 
 fn header_with_length(valid: &str, length: usize) -> String {
     let prefix = valid.trim_end_matches("\r\n");
-    let padding = "x".repeat(length - prefix.len() - "\r\nCookie: \r\n\r\n".len());
-    let request = format!("{prefix}\r\nCookie: {padding}\r\n\r\n");
+    let padding = "x".repeat(length - prefix.len() - "\r\nCookie: local=\r\n\r\n".len());
+    let request = format!("{prefix}\r\nCookie: local={padding}\r\n\r\n");
     assert_eq!(request.len(), length);
     request
 }
@@ -218,26 +218,6 @@ fn incomplete_cases() -> Vec<(String, Option<&'static str>)> {
     ]
 }
 
-#[test]
-fn every_state_matching_incomplete_result_is_terminal() {
-    let address = "127.0.0.1:1455".parse().expect("address");
-    let actual: Vec<_> = incomplete_cases()
-        .iter()
-        .map(|(query, saved)| {
-            callback::parse(
-                &request(address, query),
-                "http://127.0.0.1:1455/auth/callback",
-                "state",
-                *saved,
-            )
-        })
-        .collect();
-    assert_eq!(
-        actual,
-        vec![Err(CallbackError::Terminal(SignInError::SignInFailed)); 7]
-    );
-}
-
 #[tokio::test]
 async fn incomplete_callbacks_end_receive_and_serve_the_failure_page() {
     for (query, saved) in incomplete_cases() {
@@ -266,7 +246,23 @@ async fn stale_and_invalid_callbacks_do_not_consume_pending_attempt() {
     let captured = Captured::default();
     let _logging = captured.install();
     tracing::info!("capture-control");
-    let (attempt, address, mut seen) = attempt().await;
+    let (browser, address, _seen) = attempt().await;
+    let cookie = valid(&browser, address).replace(
+        "\r\n\r\n",
+        &format!("\r\nCookie: local={}\r\n\r\n", "x".repeat(20 * 1024)),
+    );
+    let task = tokio::spawn(browser.receive());
+    assert!(
+        send(address, &cookie)
+            .await
+            .starts_with("HTTP/1.1 200 OK\r\n")
+    );
+    assert_eq!(
+        result(task).await.expect("callback").code.expose().as_str(),
+        "test-code"
+    );
+
+    let (attempt, address, _seen) = attempt().await;
     let valid = valid(&attempt, address).replace("test-code", SENTINEL);
     let invalid = [
         valid.replace("/auth/callback?", "/wrong?"),
@@ -296,8 +292,6 @@ async fn stale_and_invalid_callbacks_do_not_consume_pending_attempt() {
                 .starts_with("HTTP/1.1 400 Bad Request\r\n"),
             "invalid callback rejected"
         );
-        event(&mut seen, Event::Reading).await;
-        event(&mut seen, Event::Rejected).await;
     }
     let reply = send(
         address,
@@ -331,65 +325,6 @@ async fn stale_and_invalid_callbacks_do_not_consume_pending_attempt() {
     assert!(
         TcpStream::connect(address).await.is_err(),
         "listener closes after success"
-    );
-}
-
-#[tokio::test(start_paused = true)]
-async fn exact_32_kib_header_is_accepted_and_one_more_byte_gets_400() {
-    let address = "127.0.0.1:1455".parse().expect("fixture address");
-    let valid = request(address, "state=state&code=test-code&client_id=issued");
-    for (length, status) in [(32768, "200 OK"), (32769, "400 Bad Request")] {
-        let request = header_with_length(&valid, length);
-        let (mut writer, mut reader) = tokio::io::duplex(length);
-        writer.write_all(request.as_bytes()).await.expect("header");
-        writer.shutdown().await.expect("header complete");
-        let started = tokio::time::Instant::now();
-        let header = callback::read_header(&mut reader).await;
-        let page = if length == 32769 {
-            assert_eq!(header, Err(CallbackError::Rejected));
-            callback::Page::Rejected
-        } else {
-            let header = header.expect("exact limit accepted");
-            assert_eq!(header.as_str(), request);
-            let (code, client) = callback::parse(
-                &header,
-                "http://127.0.0.1:1455/auth/callback",
-                "state",
-                None,
-            )
-            .expect("valid callback");
-            assert_eq!((code.as_str(), client.as_str()), ("test-code", "issued"));
-            callback::Page::Received
-        };
-        assert!(
-            callback::response(page).starts_with(&format!("HTTP/1.1 {status}\r\n")),
-            "exact boundary status"
-        );
-        assert_eq!(
-            tokio::time::Instant::now() - started,
-            Duration::ZERO,
-            "the byte boundary needs no clock advancement"
-        );
-    }
-}
-
-#[tokio::test]
-async fn a_twenty_kib_cookie_does_not_break_sign_in() {
-    let (attempt, address, _seen) = attempt().await;
-    let request = valid(&attempt, address).replace(
-        "\r\n\r\n",
-        &format!("\r\nCookie: local={}\r\n\r\n", "x".repeat(20 * 1024)),
-    );
-    let task = tokio::spawn(attempt.receive());
-    assert!(
-        send(address, &request)
-            .await
-            .starts_with("HTTP/1.1 200 OK\r\n"),
-        "browser cookie accepted"
-    );
-    assert_eq!(
-        result(task).await.expect("callback").code.expose().as_str(),
-        "test-code"
     );
 }
 
@@ -472,7 +407,6 @@ async fn idle_preconnect_then_valid_callback_completes_inside_attempt_deadline()
         .write_all(valid.as_bytes())
         .await
         .expect("queued header");
-    event(&mut seen, Event::Rejected).await;
     assert!(
         read_reply(&mut idle)
             .await

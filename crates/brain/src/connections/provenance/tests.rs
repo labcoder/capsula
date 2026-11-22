@@ -229,23 +229,6 @@ async fn the_wrapper_lets_one_catalog_request_through_and_no_other() {
 }
 
 #[tokio::test]
-async fn a_failed_attempt_still_spends_the_catalog_request() {
-    let http = Counted::new(Script::new([
-        Err(HttpError::Connect),
-        Ok(answer(200, b"{}")),
-    ]));
-    assert_eq!(
-        sent(&http, Endpoint::Models(bearer())).await,
-        Err(HttpError::Connect)
-    );
-    assert_eq!(
-        sent(&http, Endpoint::Models(bearer())).await,
-        Err(HttpError::Request)
-    );
-    assert_eq!(counters(&http), (0, 1, 1));
-}
-
-#[tokio::test]
 async fn a_failed_request_or_refusal_gives_its_own_code_and_no_file() {
     for (status, want) in [
         (401, Outcome::Unauthorized),
@@ -264,8 +247,9 @@ async fn a_failed_request_or_refusal_gives_its_own_code_and_no_file() {
         HttpError::Timeout,
         HttpError::BodyTooLarge,
         HttpError::Request,
+        HttpError::Connect,
     ] {
-        let http = Counted::new(Script::new([Err(error)]));
+        let http = Counted::new(Script::new([Err(error), Ok(answer(200, b"{}"))]));
         assert_eq!(
             capture(&http, bearer(), date()).await,
             Err(Outcome::Request)
@@ -296,6 +280,7 @@ fn only_approved_keys_closed_words_and_small_integers_stay() {
             "Supported_Reasoning_Levels": "high",
             "display_name": "GPT X",
             "display_name2": 3,
+            "input_modalities": ["text", "IMAGE", "audio", MARKER],
             "models_": [0, 16, 17, -1, 1.5, 1e30, true, false, null],
             "slug": "gpt-x",
             "supported_reasoning_levels":
@@ -310,7 +295,8 @@ fn only_approved_keys_closed_words_and_small_integers_stay() {
             "<key-1>": "high",
             "display_name": "Model 0",
             "<key-3>": 3,
-            "<key-4>": [0, 16, -1, -1, -1, -1, true, false, null],
+            "input_modalities": ["text", "IMAGE", "<string:5>", "<string:16>"],
+            "<key-5>": [0, 16, -1, -1, -1, -1, true, false, null],
             "slug": "m-0",
             "supported_reasoning_levels":
                 ["Low", "MEDIUM", "xhigh", "Extra_High", "<string:16>", "<string:20>"],
@@ -321,32 +307,8 @@ fn only_approved_keys_closed_words_and_small_integers_stay() {
     let counts = Counts {
         entries: 1,
         keys: 4,
-        strings: 4,
+        strings: 6,
         numbers: 4,
-    };
-    assert_eq!(scrub(&body), Ok((want, counts)));
-}
-
-/// The list's image-input field keeps its name and its text and image words; other words don't.
-#[test]
-fn input_modalities_stay_with_their_text_and_image_words() {
-    let body = json!({ "models": [{
-        "display_name": "GPT X",
-        "input_modalities": ["text", "IMAGE", "audio", MARKER],
-        "slug": "gpt-x",
-        "visibility": "list",
-    }]});
-    let want = json!({ "models": [{
-        "display_name": "Model 0",
-        "input_modalities": ["text", "IMAGE", "<string:5>", "<string:16>"],
-        "slug": "m-0",
-        "visibility": "list",
-    }]});
-    let counts = Counts {
-        entries: 1,
-        keys: 0,
-        strings: 2,
-        numbers: 0,
     };
     assert_eq!(scrub(&body), Ok((want, counts)));
 }

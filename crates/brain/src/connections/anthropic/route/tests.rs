@@ -126,6 +126,33 @@ async fn catalog_and_messages_spend_only_their_own_budget_before_connect() {
     let fence = Fence::default();
     let body = body();
     let budget = Budget::limited(Some(3));
+    let no_budget = Transport::offline(peer.clone(), 0, 0);
+    assert_eq!(
+        no_budget.catalog(&fence, &key()).await,
+        Err(CheckError::Unconfirmed)
+    );
+    assert!(matches!(
+        no_budget
+            .messages(
+                &authority,
+                Offer {
+                    tag: authority.tag,
+                    body: &body,
+                    fence: &fence,
+                    budget: &budget,
+                },
+                ready(Some(())),
+                Capture::Nothing,
+                |_: &SseEvent| {}
+            )
+            .await,
+        Err(Failure::Spent)
+    ));
+    {
+        let script = peer.0.lock().expect("peer");
+        assert_eq!(script.starts, 0);
+        assert!(script.requests.is_empty());
+    }
     let send = |tag| {
         route.messages(
             &authority,
@@ -171,38 +198,6 @@ async fn catalog_and_messages_spend_only_their_own_budget_before_connect() {
         script.requests[1]
             .starts_with(b"POST /v1/messages HTTP/1.1\r\nHost: api.anthropic.com\r\n")
     );
-}
-
-#[tokio::test]
-async fn a_zero_slice_refuses_both_endpoints_before_any_connect() {
-    let peer = Scripted(Arc::new(std::sync::Mutex::new(Script::default())));
-    let route = Transport::offline(peer.clone(), 0, 0);
-    let authority = Verified::from_entropy(1, key(), Some(803)).expect("nonzero");
-    let fence = Fence::default();
-    let body = body();
-    let budget = Budget::limited(Some(17));
-    assert_eq!(
-        route.catalog(&fence, &key()).await,
-        Err(CheckError::Unconfirmed)
-    );
-    let sent = route
-        .messages(
-            &authority,
-            Offer {
-                tag: authority.tag,
-                body: &body,
-                fence: &fence,
-                budget: &budget,
-            },
-            ready(Some(())),
-            Capture::Nothing,
-            |_: &SseEvent| {},
-        )
-        .await;
-    assert!(matches!(sent, Err(Failure::Spent)));
-    let script = peer.0.lock().expect("peer");
-    assert_eq!(script.starts, 0);
-    assert!(script.requests.is_empty());
 }
 
 #[tokio::test]

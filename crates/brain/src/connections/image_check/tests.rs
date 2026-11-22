@@ -21,19 +21,6 @@ fn only_red_then_blue_matches() {
 }
 
 #[test]
-fn the_image_is_red_on_the_left_and_blue_on_the_right() {
-    let jpeg = halves(256, 256, 0).expect("encoded");
-    let image = image::load_from_memory_with_format(&jpeg, image::ImageFormat::Jpeg)
-        .expect("a JPEG")
-        .to_rgb8();
-    assert_eq!(image.dimensions(), (256, 256));
-    let [r, g, b] = image.get_pixel(64, 128).0;
-    assert!(r >= 240 && g <= 16 && b <= 16, "left {r} {g} {b}");
-    let [r, g, b] = image.get_pixel(192, 128).0;
-    assert!(r <= 16 && g <= 16 && b >= 240, "right {r} {g} {b}");
-}
-
-#[test]
 fn a_sized_image_is_the_tallest_under_its_cap() {
     let (width, cap) = (256, 16_000);
     let (jpeg, height) = sized(width, 128, cap).expect("fits");
@@ -49,7 +36,8 @@ fn a_sized_image_is_the_tallest_under_its_cap() {
 fn an_image_that_cant_come_within_two_percent_of_its_cap_is_refused() {
     let tallest = halves(256, 32, NOISE).expect("encoded").len();
     assert_eq!(sized(256, 32, tallest + tallest / 10), None);
-    assert!(sized(256, 32, tallest).is_some());
+    let (jpeg, height) = sized(256, 32, tallest).expect("JPEG at the cap");
+    assert_eq!((jpeg.len(), height), (tallest, 32));
 }
 
 #[test]

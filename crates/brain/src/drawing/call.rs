@@ -44,8 +44,6 @@ macro_rules! paint_budget {
         "everything on screen can hold about 40 filled circles or ellipses, or a diagram of about 30 boxes with labelled arrows"
     };
 }
-#[cfg(test)]
-pub(super) const PAINT_BUDGET: &str = paint_budget!();
 /// Follows a step too large to paint while the run can still draw and earlier steps stay shown.
 const PAINT_HINT: &str = concat!(
     "; the picture stays at its last shown step; ",

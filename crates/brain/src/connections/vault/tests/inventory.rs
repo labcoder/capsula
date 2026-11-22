@@ -111,62 +111,53 @@ fn every_vault_write_and_delete_uses_generation_names_only() {
     assert_only_current(&vault, &store);
 }
 
-/// A refused legacy delete never blocks the open; the next open deletes the name.
-#[test]
-fn a_refused_legacy_delete_waits_for_the_next_open() {
-    let (_scratch, path, service, store) = setup("vault-legacy-refused");
-    let legacy: Vec<_> = account_targets(&service).collect();
-    for name in &legacy {
-        store
-            .set(name, &Secret::new(Zeroizing::new(b"legacy".to_vec())))
-            .expect("legacy name");
-    }
-    store.0.lock().expect("fake lock").refusing = true;
-    let mut sorted = legacy;
-    sorted.sort();
-    drop(open(&store, &service, &path));
-    assert_eq!(store.names(), sorted, "every refused name is still there");
-    store.0.lock().expect("fake lock").refusing = false;
-    drop(open(&store, &service, &path));
-    assert_eq!(
-        store.names(),
-        Vec::<String>::new(),
-        "the next open deletes them"
-    );
-}
-
-/// After a clean pass in a later open, the legacy names are left alone, except the staging
-/// name the shell still writes, which every open deletes.
+/// The first clean pass doesn't finish cleanup, but a later clean pass does. Refusal leaves
+/// every exact legacy name owed; once finished, only the staging name is still deleted.
 #[test]
 fn legacy_cleanup_stops_after_a_clean_pass_in_a_later_open() {
-    let (_scratch, path, service, store) = setup("vault-legacy-done");
-    let active = anthropic_key_target(&service);
-    let staged = anthropic_staging_target(&service);
-    let plant = |name: &String| {
-        store
-            .set(name, &Secret::new(Zeroizing::new(b"legacy".to_vec())))
-            .expect("legacy name");
-    };
-    drop(open(&store, &service, &path));
-    plant(&active);
-    drop(open(&store, &service, &path));
-    assert_eq!(
-        store.names(),
-        Vec::<String>::new(),
-        "the second open still deletes"
-    );
-    plant(&active);
-    plant(&staged);
-    store.0.lock().expect("fake lock").mutations.clear();
-    drop(open(&store, &service, &path));
-    assert_eq!(
-        store.names(),
-        vec![active],
-        "a finished cleanup leaves the rest alone"
-    );
-    let mutations = store.0.lock().expect("fake lock").mutations.clone();
-    assert!(
-        matches!(mutations.as_slice(), [Mutation::Delete(name)] if *name == staged),
-        "{mutations:?}"
-    );
+    for refused_on in [None, Some(1), Some(2)] {
+        let (_scratch, path, service, store) = setup("vault-legacy-done");
+        let active = anthropic_key_target(&service);
+        let staged = anthropic_staging_target(&service);
+        let plant = |name: &String| {
+            store
+                .set(name, &Secret::new(Zeroizing::new(b"legacy".to_vec())))
+                .expect("legacy name");
+        };
+        if refused_on != Some(1) {
+            drop(open(&store, &service, &path));
+        }
+        let mut legacy: Vec<_> = account_targets(&service).collect();
+        legacy.sort();
+        for name in &legacy {
+            plant(name);
+        }
+        if refused_on.is_some() {
+            store.0.lock().expect("fake lock").refusing = true;
+            drop(open(&store, &service, &path));
+            assert_eq!(
+                store.names(),
+                legacy,
+                "a refused pass leaves every earlier name owed"
+            );
+            store.0.lock().expect("fake lock").refusing = false;
+        }
+        drop(open(&store, &service, &path));
+        assert!(
+            store.names().is_empty(),
+            "the later clean open deletes every earlier name"
+        );
+
+        plant(&active);
+        plant(&staged);
+        store.0.lock().expect("fake lock").mutations.clear();
+        drop(open(&store, &service, &path));
+        assert_eq!(
+            store.names(),
+            vec![active],
+            "a finished cleanup leaves the rest alone"
+        );
+        let mutations = store.0.lock().expect("fake lock").mutations.clone();
+        assert!(matches!(mutations.as_slice(), [Mutation::Delete(name)] if *name == staged));
+    }
 }

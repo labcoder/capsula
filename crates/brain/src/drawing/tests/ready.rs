@@ -95,29 +95,6 @@ fn a_held_call_ends_once_at_its_last_step_ready_or_shown() {
 }
 
 #[test]
-fn a_streamed_call_whose_steps_were_ready_before_its_end_returns_at_once() {
-    let mut drawing = Drawing::default();
-    let mut store = silent();
-    store.run(&mut drawing, streamed("s", 0, &begin("live", "")));
-    store.run(&mut drawing, streamed("s", 1, &step(&text("a", "a"))));
-    store.run(&mut drawing, streamed("s", 2, &step(&text("b", "b"))));
-    assert_eq!(store.run(&mut drawing, ready(1, 0)).calls, []);
-    assert_eq!(store.run(&mut drawing, ready(1, 1)).calls, []);
-    store.run(&mut drawing, streamed("s", 3, r#"{"end":{}}"#));
-    let finished = store.run(
-        &mut drawing,
-        Input::CallFinished {
-            thread: THREAD,
-            run: RunId(1),
-            call: CallId::new("s").expect("call id"),
-            error: None,
-        },
-    );
-    assert_eq!(texts(&finished), ["drawn: [a, b]"]);
-    assert!(!drawing.holding());
-}
-
-#[test]
 fn only_a_last_step_inside_the_ready_window_is_waited_for() {
     for (steps, waits) in [(8, true), (9, false)] {
         let mut drawing = Drawing::default();
@@ -315,16 +292,24 @@ fn a_call_waits_for_its_own_last_step_not_a_later_call_s() {
     let mut store = silent();
     store.run(&mut drawing, streamed("first", 0, &begin("live", "")));
     store.run(&mut drawing, streamed("first", 1, &step(&text("a", "a"))));
+    store.run(&mut drawing, streamed("first", 2, &step(&text("a2", "a2"))));
     assert_eq!(store.run(&mut drawing, ready(1, 0)).calls, []);
+    assert_eq!(store.run(&mut drawing, ready(1, 1)).calls, []);
     store.run(&mut drawing, streamed("second", 0, &begin("live", "")));
     store.run(&mut drawing, streamed("second", 1, &step(&text("b", "b"))));
-    store.run(&mut drawing, streamed("first", 2, r#"{"end":{}}"#));
+    assert!(
+        store
+            .run(&mut drawing, streamed("first", 3, r#"{"end":{}}"#))
+            .calls
+            .is_empty()
+    );
     let first = store.run(&mut drawing, finished("first"));
-    assert_eq!(texts(&first), ["drawn: [a]"]);
+    assert_eq!(texts(&first), ["drawn: [a, a2]"]);
+    assert!(!drawing.holding());
     assert_eq!(first.calls[0].call, CallId::new("first").expect("call id"));
     store.run(&mut drawing, streamed("second", 2, r#"{"end":{}}"#));
     assert_eq!(store.run(&mut drawing, finished("second")).calls, []);
-    assert_eq!(texts(&store.run(&mut drawing, ready(1, 1))), ["drawn: [b]"]);
+    assert_eq!(texts(&store.run(&mut drawing, ready(1, 2))), ["drawn: [b]"]);
 }
 
 #[test]

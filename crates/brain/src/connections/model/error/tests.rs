@@ -127,6 +127,25 @@ fn each_ledger_code_maps_to_its_recovery_before_its_status() {
             );
         }
     }
+    for (param, expected) in [
+        ("model", Param::Model),
+        ("tools[2].type", Param::Tools),
+        ("input[0].content[1]", Param::Input),
+        ("reasoning.effort", Param::Reasoning),
+        ("service_tier", Param::ServiceTier),
+        ("PLANTED-PARAM", Param::Other),
+        ("", Param::Other),
+    ] {
+        let reply = serde_json::json!({"error": {"param": param}}).to_string();
+        assert_eq!(
+            ProviderError::answered(400, reply.as_bytes()),
+            ProviderError {
+                status: 400,
+                code: None,
+                param: Some(expected)
+            }
+        );
+    }
 }
 
 #[test]
@@ -234,21 +253,6 @@ fn a_stream_that_ends_badly_offers_retry() {
 }
 
 #[test]
-fn a_param_is_kept_only_as_its_first_segment() {
-    for (param, expected) in [
-        ("model", Param::Model),
-        ("tools[2].type", Param::Tools),
-        ("input[0].content[1]", Param::Input),
-        ("reasoning.effort", Param::Reasoning),
-        ("service_tier", Param::ServiceTier),
-        ("PLANTED-PARAM", Param::Other),
-        ("", Param::Other),
-    ] {
-        assert_eq!(Param::parse(param), expected, "{param}");
-    }
-}
-
-#[test]
 fn no_provider_prose_reaches_debug_or_display() {
     for body in [
         fixture!("subscription_sharing_usage_limit_exceeded"),
@@ -261,8 +265,10 @@ fn no_provider_prose_reaches_debug_or_display() {
             "the fixture plants its marker"
         );
         let failure = Failure::Provider(ProviderError::answered(400, body));
+        let bytes = format!("{:?}", b"PLANTED");
         for shown in [format!("{failure:?}"), failure.to_string()] {
-            assert!(!shown.contains("PLANTED"), "{shown}");
+            assert!(!shown.contains("PLANTED"));
+            assert!(!shown.contains(bytes.trim_matches(['[', ']'])));
         }
     }
 }

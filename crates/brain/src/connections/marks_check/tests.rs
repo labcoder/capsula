@@ -3,8 +3,8 @@ use kumochi_scene::screen::PLACEHOLDER_BOX;
 
 use super::picture::{Canvas, layout, shrink, text_width};
 use super::{
-    BUDGET, DISPLAY, LAYOUTS, NAMED, Verdict, account_refusal, assign, build, check, draw_tool,
-    limit, mark_line, picture_line, placeholders, plan, summary, truths,
+    BUDGET, DISPLAY, LAYOUTS, NAMED, Verdict, account_refusal, assign, build, check, limit,
+    mark_line, placeholders, plan, summary, truths,
 };
 use crate::connections::model::error::{Code, ProviderError};
 use crate::context::{InputItem, Jpeg, Role};
@@ -246,8 +246,8 @@ fn only_a_refusal_of_the_account_stops_the_run() {
     }
 }
 
-#[test]
-fn a_request_goes_with_high_detail_low_effort_and_the_picture_s_size() {
+#[tokio::test(start_paused = true)]
+async fn a_request_goes_with_high_detail_low_effort_and_the_picture_s_size() {
     let jpeg = super::picture::jpeg(&[128; 16 * 9 * 3], [16, 9]).expect("encoded");
     let question = InputItem::Message {
         role: Role::User,
@@ -258,31 +258,135 @@ fn a_request_goes_with_high_detail_low_effort_and_the_picture_s_size() {
         Some((Jpeg::new(jpeg).expect("a JPEG"), [16, 9])),
     )
     .expect("built");
+    let sent = sent(&built).await;
+    assert_eq!(sent["reasoning"]["effort"], "low");
+    let input = sent["input"].as_array().expect("input items");
+    let image = input
+        .iter()
+        .filter_map(|item| item.pointer("/content/0"))
+        .find(|part| part["type"] == "input_image")
+        .expect("outbound image");
+    assert_eq!(image["detail"], "high");
+    let developer = input
+        .iter()
+        .find(|item| item["role"] == "developer")
+        .expect("outbound developer message");
     assert_eq!(
-        (built.effort.as_str(), built.detail.as_str()),
-        ("low", "high")
+        developer,
+        &serde_json::json!({
+            "type": "message",
+            "role": "developer",
+            "content": "The image is a picture of the user's screen, 16 by 9 pixels, taken when they let go of the talk keys, with their mouse pointer where it was then."
+        })
     );
-    assert!(picture_line([16, 9]).contains(", 16 by 9 pixels, "));
 }
 
-#[test]
-fn the_draw_tool_offers_the_screen_and_the_marking_paragraph() {
-    let tool = draw_tool();
-    assert_eq!(tool.name, "draw");
+#[tokio::test(start_paused = true)]
+async fn the_draw_tool_offers_the_screen_and_the_marking_paragraph() {
+    let question = InputItem::Message {
+        role: Role::User,
+        text: "question".to_owned(),
+    };
+    let sent = sent(&build(vec![question], None).expect("built")).await;
+    let [tool] = sent["tools"].as_array().expect("tools").as_slice() else {
+        panic!("only draw is offered");
+    };
+    assert_eq!(tool["name"], "draw");
     assert!(
-        tool.description
-            .starts_with(include_str!("../../../prompts/draw.md"))
+        tool["description"]
+            .as_str()
+            .expect("tool description")
+            .contains("\n\nMarking the user's screen. ")
     );
-    assert!(tool.description.contains("\n\nMarking the user's screen. "));
-    assert_eq!(
-        tool.parameters["$defs"]["Surface"],
-        serde_json::json!({"type": "string", "enum": ["overlay", "screen"]})
+    let parameters = &tool["parameters"];
+    let surface = &parameters["$defs"]["Surface"];
+    assert_eq!(surface["type"], "string");
+    let mut offered: Vec<_> = surface["enum"]
+        .as_array()
+        .expect("surface enum")
+        .iter()
+        .map(|value| value.as_str().expect("surface name"))
+        .collect();
+    offered.sort_unstable();
+    assert_eq!(offered, ["overlay", "screen"]);
+    let target = parameters["$defs"]["Target"]["anyOf"]
+        .as_array()
+        .expect("targets")
+        .iter()
+        .find(|target| target.pointer("/properties/box").is_some())
+        .expect("box target");
+    assert_eq!(target["required"], serde_json::json!(["box"]));
+    let bounds = &target["properties"]["box"];
+    assert_eq!(bounds["type"], "array");
+    assert_eq!(bounds["minItems"], 4);
+    assert_eq!(bounds["maxItems"], 4);
+    let item = &bounds["items"];
+    let number = item["$ref"].as_str().map_or(item, |path| {
+        parameters.pointer(&path[1..]).expect("number definition")
+    });
+    assert_eq!(number["type"], "number");
+}
+
+async fn sent(built: &super::Built) -> serde_json::Value {
+    use std::{future::ready, io, sync::Mutex};
+
+    use kumochi_protocol::Secret;
+    use tokio::io::{
+        AsyncBufReadExt as _, AsyncReadExt as _, AsyncWriteExt as _, BufReader, DuplexStream,
+    };
+    use zeroize::Zeroizing;
+
+    use super::{Budget, Connect, ModelClient, Reply, send};
+
+    struct Pipe(Mutex<Option<DuplexStream>>);
+    impl Connect for Pipe {
+        type Io = DuplexStream;
+
+        fn connect(&self) -> impl Future<Output = io::Result<Self::Io>> + Send {
+            ready(
+                self.0
+                    .lock()
+                    .unwrap()
+                    .take()
+                    .ok_or(io::ErrorKind::NotConnected.into()),
+            )
+        }
+    }
+    let (client, server) = tokio::io::duplex(4096);
+    let client = ModelClient::new(Pipe(Mutex::new(Some(client))));
+    let bearer = Secret::new(Zeroizing::new("fixture-bearer".to_owned()));
+    let budget = Budget::limited(Some(1));
+    let mut reply = Reply::default();
+    let peer = async {
+        let mut server = BufReader::new(server);
+        let mut length = None;
+        loop {
+            let mut line = String::new();
+            assert_ne!(server.read_line(&mut line).await.unwrap(), 0);
+            if line == "\r\n" {
+                break;
+            }
+            if let Some((key, value)) = line.split_once(':')
+                && key.eq_ignore_ascii_case("content-length")
+            {
+                length = Some(value.trim().parse().unwrap());
+            }
+        }
+        let mut body = vec![0; length.expect("request length")];
+        server.read_exact(&mut body).await.unwrap();
+        let terminal = b"data: {\"type\":\"response.completed\"}\n\n";
+        let head = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\n\r\n",
+            terminal.len()
+        );
+        server.get_mut().write_all(head.as_bytes()).await.unwrap();
+        server.get_mut().write_all(terminal).await.unwrap();
+        serde_json::from_slice(&body).expect("outbound JSON")
+    };
+    let ((result, _), body) = tokio::join!(
+        send(&client, &built.body, &bearer, &budget, &mut reply),
+        peer
     );
-    assert!(
-        tool.parameters["$defs"]["Target"]["anyOf"]
-            .as_array()
-            .expect("targets")
-            .iter()
-            .any(|target| !target["properties"]["box"].is_null())
-    );
+    assert_eq!(result, Ok(()));
+    body
 }

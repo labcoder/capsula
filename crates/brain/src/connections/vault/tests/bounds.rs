@@ -74,34 +74,6 @@ fn field_limits_are_bytes_and_exact_limits_are_accepted() {
     );
 }
 
-#[test]
-fn serialized_escaping_cannot_grow_a_record_past_48_kib() {
-    let (_scratch, path, service, store) = setup("account-json-bound");
-    let mut vault = open(&store, &service, &path);
-    let mut record = account("one").expose().clone();
-    record.tokens.as_mut().expect("test tokens").access_token =
-        Zeroizing::new("\0".repeat(MAX_TOKEN_BYTES));
-    assert!(
-        matches!(
-            vault.save_account(&Secret::new(record)),
-            SaveResult::NotCommitted(VaultError::Bounds)
-        ),
-        "JSON escaping counts toward the serialized bound"
-    );
-    assert!(
-        store.names().is_empty(),
-        "serialization fails before storage"
-    );
-    let mut buffer = JsonBuffer {
-        bytes: Zeroizing::new(Vec::with_capacity(3)),
-        limit: 3,
-    };
-    buffer.write_all(b"abc").expect("exact buffer limit");
-    assert!(buffer.write_all(b"d").is_err(), "no growth past the limit");
-    assert_eq!(buffer.bytes.as_slice(), b"abc");
-    assert_eq!(format!("{buffer:?}"), "JsonBuffer(***)");
-}
-
 /// The 48 KiB serialized bound on an account, at exactly 49,152 bytes and one over. The JSON
 /// around the 32,768 escaped access-token bytes and the ID token is 179 bytes, counted by hand.
 #[test]
@@ -134,6 +106,17 @@ fn an_account_of_exactly_48_kib_serialized_is_saved_and_one_byte_more_is_refused
         SaveResult::NotCommitted(VaultError::Bounds)
     ));
     assert!(store.names().is_empty(), "refused before any write");
+    let mut escaped = account("one").expose().clone();
+    escaped.tokens.as_mut().expect("test tokens").access_token =
+        Zeroizing::new("\0".repeat(MAX_TOKEN_BYTES));
+    assert!(
+        matches!(
+            vault.save_account(&Secret::new(escaped)),
+            SaveResult::NotCommitted(VaultError::Bounds)
+        ),
+        "NUL escapes count toward the serialized bound"
+    );
+    assert!(store.names().is_empty(), "escaping fails before storage");
     let exact = Secret::new(exact);
     committed(vault.save_account(&exact));
     assert_eq!(
@@ -292,24 +275,42 @@ fn a_damaged_current_generation_never_falls_back_to_an_older_one() {
 fn every_record_debug_is_redacted() {
     let (_scratch, path, service, store) = setup("vault-debug");
     let mut vault = open(&store, &service, &path);
-    let account = account("secret-test-sentinel");
-    let list = list("sentinel");
-    assert_eq!(format!("{vault:?}"), "Vault(***)");
-    assert_eq!(format!("{:?}", account.expose()), "Account(***)");
-    assert_eq!(
-        format!("{:?}", account.expose().tokens),
-        "Some(Tokens(***))"
-    );
-    assert_eq!(format!("{:?}", list.expose()), "RevocationList(***)");
-    assert_eq!(format!("{:?}", list.expose().entries[0]), "Revocable(***)");
-    assert_eq!(format!("{:?}", vault.host_id().expect("host")), "***");
-    assert_eq!(
-        format!("{:?}", vault.marker().expect("marker")),
-        "SignOutMarker(***)"
-    );
-    let pending = SignOut {
-        disposition: Disposition::Keep,
-        phase: Phase::Revoking,
+    let marker = "secret-test-sentinel";
+    let account = account(marker);
+    let list = list(marker);
+    let host = vault.host_id().expect("host");
+    let head = vault.authority.current(Kind::Host).expect("head");
+    let generation = head.active.expect("saved host").generation.hex();
+    vault
+        .update_marker(MarkerUpdate::Promote(Disposition::Keep))
+        .expect("sign-out pending");
+    let pending = vault.marker().expect("marker");
+    let buffer = JsonBuffer {
+        bytes: Zeroizing::new(marker.as_bytes().to_vec()),
+        limit: marker.len(),
     };
-    assert_eq!(format!("{pending:?}"), "SignOut(***)");
+    for shown in [
+        format!("{buffer:?}"),
+        format!("{vault:?}"),
+        format!("{:?}", account.expose()),
+        format!("{:?}", account.expose().tokens),
+        format!("{:?}", list.expose()),
+        format!("{:?}", list.expose().entries[0]),
+        format!("{host:?}"),
+        format!("{pending:?}"),
+        format!("{:?}", pending.sign_out.expect("pending sign-out")),
+    ] {
+        for secret in [
+            marker,
+            "vault-debug",
+            service.as_str(),
+            generation.as_str(),
+            host.expose().as_str(),
+            "urn:uuid:",
+        ] {
+            assert!(!shown.contains(secret));
+            let bytes = format!("{:?}", secret.as_bytes());
+            assert!(!shown.contains(bytes.trim_matches(['[', ']'])));
+        }
+    }
 }

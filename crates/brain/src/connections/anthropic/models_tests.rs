@@ -67,6 +67,9 @@ async fn complete_catalog_preserves_names_and_order_of_known_models() {
             model("claude-sonnet-5-5", "First \"model\""),
             model("claude-unknown-1", "Not offered"),
             model("claude-haiku-5-5", "Second model"),
+            model("claude-fable-5-1", "Third model"),
+            model("claude-opus-5-5-future", "Not offered"),
+            model("claude-opus-5-5", "Fourth model"),
         ]),
     )
     .await
@@ -92,46 +95,13 @@ async fn complete_catalog_preserves_names_and_order_of_known_models() {
         [
             ("claude-sonnet-5-5", "First \"model\"", supported),
             ("claude-haiku-5-5", "Second model", supported),
+            ("claude-fable-5-1", "Third model", supported),
+            ("claude-opus-5-5", "Fourth model", supported),
         ]
     );
-    assert_eq!(check(200, &body(Vec::new())).await, Ok(Vec::new()));
-}
-
-#[tokio::test]
-async fn only_documented_exact_models_are_offered() {
-    let catalog = check(
-        200,
-        &body(
-            [
-                "claude-fable-5-1",
-                "claude-opus-5-5",
-                "claude-sonnet-5-5",
-                "claude-haiku-5-5",
-                "claude-opus-5-5-future",
-                "claude-unknown-9",
-            ]
-            .into_iter()
-            .map(|id| model(id, "Model"))
-            .collect(),
-        ),
-    )
-    .await
-    .expect("valid models");
-    let offered: Vec<_> = catalog
-        .iter()
-        .map(|model| model.info.slug.as_str())
-        .collect();
-    assert_eq!(
-        offered,
-        [
-            "claude-fable-5-1",
-            "claude-opus-5-5",
-            "claude-sonnet-5-5",
-            "claude-haiku-5-5"
-        ]
-    );
-    let unknown_only = body(vec![model("claude-unknown-9", "Model")]);
-    assert_eq!(check(200, &unknown_only).await, Ok(Vec::new()));
+    for models in [Vec::new(), vec![model("claude-unknown-9", "Model")]] {
+        assert_eq!(check(200, &body(models)).await, Ok(Vec::new()));
+    }
 }
 
 #[tokio::test]
@@ -381,10 +351,10 @@ async fn only_auth_refusals_reject_and_neither_provider_errors_nor_content_are_l
             .await
             .expect_err("closed failure");
         assert_eq!(error, expected);
-        assert!(
-            !format!("{error:?} {error}").contains(marker),
-            "error text is redacted"
-        );
+        let printed = format!("{error:?} {error}");
+        assert!(!printed.contains(marker), "error text is redacted");
+        let bytes = format!("{:?}", marker.as_bytes());
+        assert!(!printed.contains(bytes.trim_matches(['[', ']'])));
     }
     for bytes in [
         b"not HTTP".to_vec(),
@@ -397,9 +367,13 @@ async fn only_auth_refusals_reject_and_neither_provider_errors_nor_content_are_l
         unavailable.catalog(&Fence::default(), &key()).await,
         Err(CheckError::Unconfirmed)
     );
-    let catalog = check(200, &body(vec![model(marker, marker)]))
+    let catalog = check(200, &body(vec![model("claude-sonnet-5-5", marker)]))
         .await
         .expect("valid sentinel catalog");
+    let [row] = catalog.as_slice() else {
+        panic!("one known model");
+    };
+    assert_eq!(row.info.display_name, marker);
     let printed = format!("{:?} {:?}", Some(Ok::<_, CheckError>(catalog)), key());
     let logs = captured.text();
     assert!(logs.contains("capture-control"), "capture active");
@@ -407,7 +381,7 @@ async fn only_auth_refusals_reject_and_neither_provider_errors_nor_content_are_l
         for secret in [marker, CATALOG_FIXTURE_KEY] {
             assert!(!output.contains(secret), "content text is redacted");
             assert!(
-                !output.contains(&format!("{:?}", secret.as_bytes())),
+                !output.contains(format!("{:?}", secret.as_bytes()).trim_matches(['[', ']'])),
                 "content bytes are redacted"
             );
         }

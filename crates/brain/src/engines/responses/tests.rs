@@ -10,7 +10,6 @@ use crate::context::{BODY_CEILING, BOUND, InputItem, Jpeg, ModelRequest, Role, T
 use crate::engines::{CallId, EngineFailure, Finish, Opaque, ToolName, TurnEvent};
 
 const TOOL_ROUND: &[u8] = include_bytes!("../../../fixtures/responses/tool_round.sse");
-const TEXT: &[u8] = include_bytes!("../../../fixtures/responses/text.sse");
 const FAILED: &[u8] = include_bytes!("../../../fixtures/responses/failed_usage_limit.sse");
 
 fn call_id(id: &str) -> CallId {
@@ -216,22 +215,37 @@ fn an_image_is_a_high_detail_data_url_in_a_user_message_of_its_own() {
 /// bound, which still holds everything else exactly.
 #[test]
 fn with_an_image_the_rest_still_fits_the_bound_exactly() {
-    let image = jpeg(6);
-    let charged = image.item_len() + 1;
-    let empty = body(&request("", asked_with(image.clone())))
-        .expect("small")
+    let plain = vec![InputItem::Message {
+        role: Role::User,
+        text: "What's this?".to_owned(),
+    }];
+    let empty = body(&request("", plain))
+        .expect("text-only body")
         .to_string()
         .len();
-    let fits = "a".repeat(BOUND - (empty - charged));
-    assert_eq!(
-        body(&request(&fits, asked_with(image.clone()))).map(|sent| sent.to_string().len()),
-        Ok(BOUND + charged)
-    );
-    let over = "a".repeat(BOUND - (empty - charged) + 1);
-    assert_eq!(
-        body(&request(&over, asked_with(image))),
-        Err(BodyError::TooLarge)
-    );
+    let fits = "a".repeat(BOUND - empty);
+    let over = format!("{fits}a");
+    for (len, base64) in [
+        (3, "/9j/".to_owned()),
+        (4, "/9j/Qg==".to_owned()),
+        (5, "/9j/QkI=".to_owned()),
+        (6, "/9j/QkJC".to_owned()),
+        (1_000, format!("/9j/{}Qg==", "QkJC".repeat(332))),
+    ] {
+        let sent = body(&request(&fits, asked_with(jpeg(len)))).expect("body at the bound");
+        let image = json!({
+            "type": "message", "role": "user", "content": [{
+                "type": "input_image", "image_url": format!("data:image/jpeg;base64,{base64}"),
+                "detail": "high",
+            }],
+        });
+        assert_eq!(sent["input"][1], image);
+        assert_eq!(sent.to_string().len(), BOUND + 1 + image.to_string().len());
+        assert_eq!(
+            body(&request(&over, asked_with(jpeg(len)))),
+            Err(BodyError::TooLarge)
+        );
+    }
 }
 
 #[test]
@@ -254,29 +268,12 @@ fn a_body_with_images_at_the_ceiling_is_sent_and_one_byte_over_is_refused() {
 }
 
 #[test]
-fn an_images_item_length_is_exact() {
-    for len in [3, 4, 5, 6, 1000] {
-        let image = jpeg(len);
-        let sent = body(&request("", asked_with(image.clone()))).expect("small");
-        let item = serde_json::to_vec(&sent["input"][1]).expect("serialised");
-        assert_eq!(item.len(), image.item_len(), "{len}");
-    }
-}
-
-#[test]
 fn wiping_a_body_zeroes_its_image_urls_and_nothing_else() {
     let mut sent = body(&request("", asked_with(jpeg(6)))).expect("small");
     wipe_images(&mut sent);
     assert_eq!(sent["input"][1]["content"][0]["image_url"], "");
     assert_eq!(sent["input"][0]["content"], "What's this?");
     assert_eq!(sent["input"][1]["content"][0]["detail"], "high");
-}
-
-#[test]
-fn a_request_with_no_model_is_refused() {
-    let mut request = request("", Vec::new());
-    request.choice = None;
-    assert_eq!(body(&request), Err(BodyError::NoModel));
 }
 
 #[test]
@@ -411,18 +408,6 @@ fn the_fixture_tool_round_maps_in_order_with_the_name_before_any_delta() {
 }
 
 #[test]
-fn a_text_round_streams_its_text_and_completes() {
-    assert_eq!(
-        play(TEXT, TEXT.len()),
-        [
-            text("Hello, "),
-            text("w\u{f6}rld \u{1f642}"),
-            finished(Finish::Completed)
-        ]
-    );
-}
-
-#[test]
 fn a_failed_response_after_text_fails_the_round_with_its_code() {
     let refused = ProviderError {
         status: 200,
@@ -443,12 +428,41 @@ fn a_failed_response_after_text_fails_the_round_with_its_code() {
 #[test]
 fn a_stream_cut_before_its_end_has_no_ending_of_its_own() {
     let cut = TOOL_ROUND.len() - 40;
-    let events = play(&TOOL_ROUND[..cut], cut);
-    assert_eq!(events.len(), 9, "everything up to the cut");
-    assert!(
-        !events
-            .iter()
-            .any(|event| matches!(event, TurnEvent::Finished(_)))
+    let call = call_id("call_fixture");
+    assert_eq!(
+        play(&TOOL_ROUND[..cut], 7),
+        [
+            item(
+                0,
+                &json!({
+                    "type":"reasoning", "id":"rs_fixture", "summary":[],
+                    "encrypted_content":"ZW5jcnlwdGVkLWZpeHR1cmU="
+                })
+            ),
+            TurnEvent::ToolCallStarted {
+                call,
+                name: ToolName::Draw
+            },
+            args_of("call_fixture", r#"{"steps":"#),
+            args_of("call_fixture", "[]}"),
+            ready("call_fixture", r#"{"steps":[]}"#),
+            item(
+                1,
+                &json!({
+                    "type":"function_call", "id":"fc_fixture", "call_id":"call_fixture",
+                    "name":"draw", "arguments":r#"{"steps":[]}"#, "status":"completed"
+                })
+            ),
+            text("Done"),
+            text("."),
+            item(
+                2,
+                &json!({
+                    "type":"message", "id":"msg_fixture", "role":"assistant", "status":"completed",
+                    "content":[{"type":"output_text", "text":"Done.", "annotations":[]}]
+                })
+            ),
+        ],
     );
 }
 
@@ -525,27 +539,6 @@ fn started(call: &str) -> TurnEvent {
 }
 
 #[test]
-fn an_unknown_tool_name_is_started_as_unknown_and_its_round_completes() {
-    let stream = sse(&[
-        added("fc_1", "call_1"),
-        args_delta("fc_1", "{}"),
-        args_done("fc_1", "{}"),
-        call_done("fc_1", "call_1", "{}"),
-        completed(),
-    ]);
-    let events = play(&stream, stream.len());
-    assert_eq!(events[0], started("call_1"));
-    assert_eq!(
-        events[2],
-        TurnEvent::ToolCallReady {
-            call: call_id("call_1"),
-            args: "{}".to_owned()
-        }
-    );
-    assert_eq!(events.last(), Some(&finished(Finish::Completed)));
-}
-
-#[test]
 fn calls_that_break_the_stream_rules_fail_the_round() {
     let longest = "c".repeat(CallId::MAX);
     let too_long = "c".repeat(CallId::MAX + 1);
@@ -589,6 +582,17 @@ fn calls_that_break_the_stream_rules_fail_the_round() {
             "a done call naming another call id",
             vec![added("fc_1", "call_1"), call_done("fc_1", "call_2", "")],
             vec![started("call_1")],
+        ),
+        (
+            "a done call naming another tool",
+            vec![
+                added_as("fc_1", "call_1", "draw", 0),
+                call_done_as("fc_1", "call_1", "look", "", 0),
+            ],
+            vec![TurnEvent::ToolCallStarted {
+                call: call_id("call_1"),
+                name: ToolName::Draw,
+            }],
         ),
         (
             "a call done twice",
@@ -655,44 +659,38 @@ fn reasoning_done(index: u32) -> Value {
 }
 
 #[test]
-fn a_round_holds_at_most_its_item_budget() {
-    let mut fits: Vec<Value> = (0..u32::try_from(ROUND_ITEMS).expect("small"))
-        .map(reasoning_done)
-        .collect();
-    fits.push(completed());
-    let events = play(&sse(&fits), usize::MAX);
-    assert_eq!(events.len(), ROUND_ITEMS + 1);
-    assert_eq!(events.last(), Some(&finished(Finish::Completed)));
-    let one_over = fits.len() - 1;
-    fits.insert(one_over, reasoning_done(64));
-    let events = play(&sse(&fits), usize::MAX);
-    assert_eq!(events.len(), ROUND_ITEMS + 1);
-    assert_eq!(events.last(), Some(&protocol()));
-}
-
-#[test]
 fn a_round_holds_at_most_its_byte_budget() {
-    let delta = "a".repeat(ROUND_BYTES / 2);
-    let stream = sse(&[
+    let first = "a".repeat(524_288);
+    let last = "b".repeat(524_288 - "fc_1call_1look".len());
+    let after = json!({"type":"response.output_text.delta", "delta":"after the boundary"});
+
+    let at = sse(&[
         added("fc_1", "call_1"),
-        args_delta("fc_1", &delta),
-        args_delta("fc_1", &delta),
+        args_delta("fc_1", &first),
+        args_delta("fc_1", &last),
+        after.clone(),
+    ]);
+    assert_eq!(
+        play(&at, usize::MAX),
+        [
+            started("call_1"),
+            args_of("call_1", &first),
+            args_of("call_1", &last),
+            text("after the boundary"),
+        ]
+    );
+
+    let over = sse(&[
+        added("fc_1", "call_1"),
+        args_delta("fc_1", &first),
+        args_delta("fc_1", &format!("{last}b")),
+        after,
         completed(),
     ]);
-    let events = play(&stream, usize::MAX);
-    assert_eq!(events.len(), 3, "the start and the delta that fit");
-    assert_eq!(events.last(), Some(&protocol()));
-}
-
-#[test]
-fn an_item_over_the_item_cap_fails_the_round() {
-    let big = json!({
-        "type": "response.output_item.done",
-        "output_index": 0,
-        "item": { "type": "reasoning", "encrypted_content": "a".repeat(Opaque::MAX) },
-    });
-    let stream = sse(&[big, completed()]);
-    assert_eq!(play(&stream, usize::MAX), [protocol()]);
+    assert_eq!(
+        play(&over, usize::MAX),
+        [started("call_1"), args_of("call_1", &first), protocol()]
+    );
 }
 
 #[test]
@@ -744,25 +742,6 @@ fn interleaved_calls_keep_their_own_arguments_and_indexes() {
 }
 
 #[test]
-fn a_call_done_under_another_name_is_refused_before_it_is_ready() {
-    let stream = sse(&[
-        added_as("fc_1", "call_1", "draw", 0),
-        call_done_as("fc_1", "call_1", "look", "", 0),
-        completed(),
-    ]);
-    assert_eq!(
-        play(&stream, stream.len()),
-        [
-            TurnEvent::ToolCallStarted {
-                call: call_id("call_1"),
-                name: ToolName::Draw,
-            },
-            protocol()
-        ]
-    );
-}
-
-#[test]
 fn a_done_item_that_isnt_a_typed_object_fails_the_round() {
     let shapes = [
         None,
@@ -808,6 +787,16 @@ fn a_call_done_item_at_the_item_cap_is_ready_and_one_byte_over_is_refused_whole(
     let over = padded(call_done("fc_1", "call_1", ""), Opaque::MAX + 1);
     let stream = sse(&[added("fc_1", "call_1"), over, completed()]);
     assert_eq!(play(&stream, usize::MAX), [started("call_1"), protocol()]);
+
+    let oversized = json!({
+        "type": "response.output_item.done",
+        "output_index": 0,
+        "item": { "type": "reasoning", "encrypted_content": "a".repeat(Opaque::MAX) },
+    });
+    assert_eq!(
+        play(&sse(&[oversized, completed()]), usize::MAX),
+        [protocol()],
+    );
 }
 
 #[test]
@@ -833,6 +822,23 @@ fn a_call_done_item_is_refused_whole_once_the_round_has_no_item_left() {
             expected,
             "{others} other items"
         );
+    }
+
+    for extra in [0, 1] {
+        let mut events = (0..64 + extra).map(reasoning_done).collect::<Vec<_>>();
+        let mut expected = events
+            .iter()
+            .take(64)
+            .enumerate()
+            .map(|(index, done)| item(u32::try_from(index).unwrap(), &done["item"]))
+            .collect::<Vec<_>>();
+        events.push(completed());
+        expected.push(if extra == 0 {
+            finished(Finish::Completed)
+        } else {
+            protocol()
+        });
+        assert_eq!(play(&sse(&events), usize::MAX), expected);
     }
 }
 

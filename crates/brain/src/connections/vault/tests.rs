@@ -386,12 +386,22 @@ fn exercise_save_faults(record: Record) {
 /// transaction, and a retry commits a fresh generation.
 #[test]
 fn a_refused_head_update_rolls_back_the_whole_commit() {
+    use crate::connections::anthropic::KeyOp;
+
     let (_scratch, path, service, store) = setup("vault-late-refusal");
     let mut vault = open(&store, &service, &path);
     committed(vault.save_account(&account("old")));
     vault
         .save_anthropic_key(b"sk-ant-api-fake-late-refusal")
         .expect("key");
+    let read_key = |vault: &mut Vault<FakeStore>| {
+        vault
+            .anthropic(KeyOp::Load)
+            .1
+            .expect("read")
+            .expect("saved key")
+    };
+    let original_key = read_key(&mut vault);
     let old = current_names(&vault);
     let marker = vault.marker().expect("marker");
     let refuse = raw(&path);
@@ -428,6 +438,7 @@ fn a_refused_head_update_rolls_back_the_whole_commit() {
             VaultError::Authority
         ))
     ));
+    assert!(read_key(&mut vault).expose().as_str() == original_key.expose().as_str());
     refuse
         .execute_batch("DROP TRIGGER refuse_head;")
         .expect("drop refusal trigger");
@@ -435,21 +446,24 @@ fn a_refused_head_update_rolls_back_the_whole_commit() {
     let mut vault = open(&store, &service, &path);
     assert_eq!(current_names(&vault), old, "the head is unchanged");
     assert_eq!(vault.marker().expect("marker"), marker, "and the marker");
-    assert_eq!(
+    let email = |vault: &Vault<FakeStore>| {
         vault
             .load_account()
             .expect("read")
-            .expect("the old account")
+            .expect("stored account")
             .expose()
             .email
             .as_deref()
-            .map(String::as_str),
-        Some("old@example.invalid")
-    );
+            .map(String::as_str)
+            .map(str::to_owned)
+    };
+    assert_eq!(email(&vault).as_deref(), Some("old@example.invalid"));
     assert!(
         is_current(&vault, Kind::AnthropicKey),
         "the removal rolled back"
     );
+    assert!(read_key(&mut vault).expose().as_str() == original_key.expose().as_str());
+    assert_key_removal_only_clears_its_names(&mut vault, &store, &old);
     committed(vault.save_account(&account("new")));
     let fresh = current_names(&vault);
     assert!(
@@ -459,16 +473,39 @@ fn a_refused_head_update_rolls_back_the_whole_commit() {
             .all(|name| !attempted.contains(name) && !old.contains(name)),
         "the retry commits a fresh generation"
     );
-    assert_eq!(
+    assert_eq!(email(&vault).as_deref(), Some("new@example.invalid"));
+}
+
+fn assert_key_removal_only_clears_its_names(
+    vault: &mut Vault<FakeStore>,
+    store: &FakeStore,
+    previous_names: &[String],
+) {
+    use crate::connections::anthropic::KeyOp;
+
+    let revision = vault.anthropic_revision();
+    assert!(
         vault
-            .load_account()
-            .expect("read")
-            .expect("the new account")
-            .expose()
-            .email
-            .as_deref()
-            .map(String::as_str),
-        Some("new@example.invalid")
+            .anthropic(KeyOp::Remove(revision))
+            .1
+            .expect("retry removal")
+            .is_none()
+    );
+    assert!(
+        vault
+            .anthropic(KeyOp::Load)
+            .1
+            .expect("read removed key")
+            .is_none()
+    );
+    assert_eq!(
+        store.names(),
+        previous_names
+            .iter()
+            .filter(|name| !name.contains("/gen/anthropic/"))
+            .cloned()
+            .collect::<Vec<_>>(),
+        "the retry swept only the removed key's names"
     );
 }
 
@@ -685,50 +722,65 @@ fn resurrected_bytes_of_a_removed_record_are_never_read() {
 
 #[test]
 fn sign_out_reader_exposes_the_fenced_record_only_while_a_sign_out_is_pending() {
-    let (_scratch, path, service, store) = setup("sign-out-reader");
-    let mut vault = open(&store, &service, &path);
-    let expected = account("old");
-    committed(vault.save_account(&expected));
-    assert!(
-        matches!(vault.load_for_sign_out(), Err(VaultError::Fenced)),
-        "ordinary sessions cannot use the sign-out reader"
-    );
-    vault
-        .update_marker(MarkerUpdate::BeginSweep)
-        .expect("sweep-only state");
-    assert!(
-        matches!(vault.load_for_sign_out(), Err(VaultError::Fenced)),
-        "a sweep alone grants no sign-out access"
-    );
-    vault
-        .update_marker(MarkerUpdate::Promote(Disposition::Keep))
-        .expect("promotion");
-    drop(vault);
-    let vault = open(&store, &service, &path);
-    let fenced = vault
-        .load_for_sign_out()
-        .expect("Prepare reader")
-        .expect("account is present");
-    assert!(
-        fenced.expose().client_id == expected.expose().client_id,
-        "Prepare receives the owning client"
-    );
-    assert!(
-        fenced.expose().tokens == expected.expose().tokens,
-        "Prepare receives the original token set"
-    );
-    assert!(
+    for (disposition, name) in [
+        (Disposition::Keep, "sign-out-reader"),
+        (Disposition::Erase, "marker-fence"),
+    ] {
+        let (_scratch, path, service, store) = setup(name);
+        let mut vault = open(&store, &service, &path);
+        let expected = account("old");
+        committed(vault.save_account(&expected));
+        assert!(
+            matches!(vault.load_for_sign_out(), Err(VaultError::Fenced)),
+            "ordinary sessions cannot use the sign-out reader"
+        );
         vault
-            .marker()
-            .expect("marker")
-            .sign_out
-            .is_some_and(|sign_out| sign_out.phase == Phase::Revoking),
-        "the preparation phase remains unchanged"
-    );
-    assert!(
-        vault.load_account().expect("ordinary reader").is_none(),
-        "ordinary account use remains fenced"
-    );
+            .update_marker(MarkerUpdate::BeginSweep)
+            .expect("sweep-only state");
+        assert!(
+            matches!(vault.load_for_sign_out(), Err(VaultError::Fenced)),
+            "a sweep alone grants no sign-out access"
+        );
+        let loaded = vault
+            .load_account()
+            .expect("sweep-only read")
+            .expect("account");
+        assert!(
+            loaded.expose() == expected.expose(),
+            "a sweep alone never fences"
+        );
+        vault
+            .update_marker(MarkerUpdate::Promote(disposition))
+            .expect("promotion");
+        drop(vault);
+        let vault = open(&store, &service, &path);
+        assert_only_current(&vault, &store);
+        assert!(is_current(&vault, Kind::Account));
+        let fenced = vault
+            .load_for_sign_out()
+            .expect("Prepare reader")
+            .expect("account is present");
+        assert!(
+            fenced.expose().client_id == expected.expose().client_id,
+            "Prepare receives the owning client"
+        );
+        assert!(
+            fenced.expose().tokens == expected.expose().tokens,
+            "Prepare receives the original token set"
+        );
+        assert!(
+            vault
+                .marker()
+                .expect("marker")
+                .sign_out
+                .is_some_and(|sign_out| sign_out.phase == Phase::Revoking),
+            "the preparation phase remains unchanged"
+        );
+        assert!(
+            vault.load_account().expect("ordinary reader").is_none(),
+            "ordinary account use remains fenced"
+        );
+    }
 }
 
 #[test]

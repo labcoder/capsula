@@ -266,10 +266,7 @@ impl SendLease {
 /// One writer poll a [`SendLease`] admitted, holding its picture grant's reservation if any.
 #[derive(Debug)]
 pub struct Admitted(
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "held for its drop, which ends the reservation")
-    )]
+    #[expect(dead_code, reason = "held for its drop, which ends the reservation")]
     Option<PictureWrite>,
 );
 
@@ -554,12 +551,9 @@ pub enum ToolName {
     ListTasks,
     /// A name Kumochi doesn't offer.
     Unknown,
-    /// The dispatcher's test tool that writes.
+    /// The dispatcher's test tool for capped output.
     #[cfg(test)]
     Probe,
-    /// The dispatcher's test tool that returns history references.
-    #[cfg(test)]
-    Recall,
 }
 
 impl ToolName {
@@ -813,23 +807,21 @@ mod tests {
     }
 
     #[test]
-    fn a_send_without_a_picture_grant_admits_every_writer_poll() {
-        use crate::connections::model::Lease;
-        let (_, inputs, _received) = gated();
-        let lease = SendLease::new(lease(), inputs);
-        let held = lease.admit().expect("admitted");
-        assert!(held.0.is_none(), "no reservation to hold");
-        assert!(lease.admit().is_some_and(|held| held.0.is_none()));
-    }
-
-    #[test]
     fn a_send_with_a_picture_grant_admits_one_poll_at_a_time_until_closed() {
         use crate::connections::model::Lease;
         let (_, inputs, _received) = gated();
+        let without_picture = SendLease::new(lease(), inputs.clone());
+        let first = without_picture
+            .admit()
+            .expect("first poll without a picture");
+        let second = without_picture
+            .admit()
+            .expect("concurrent poll without a picture");
+        drop((first, second));
+
         let grant = crate::coordinator::PictureGrant::open_for_tests();
         let lease = SendLease::new(lease(), inputs).with_picture(Some(grant.clone()));
         let held = lease.admit().expect("admitted");
-        assert!(held.0.is_some());
         assert!(lease.admit().is_none(), "one poll at a time");
         drop(held);
         let held = lease.admit().expect("admitted again");
@@ -972,33 +964,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_jobs_usage_is_ignored_and_only_a_completed_round_titles_it() {
+    async fn a_title_job_takes_its_rounds_text_only_when_the_round_completes() {
+        let completed = TurnEvent::Finished(Finish::Completed);
         let usage = TurnEvent::Usage(Usage {
             whole: Tokens::default(),
             first_request: None,
         });
-        assert_eq!(
-            job_title(
-                vec![
-                    text("Lisbon trip"),
-                    usage.clone(),
-                    TurnEvent::Finished(Finish::Completed)
-                ],
-                Then::End
-            )
-            .await,
-            Some("Lisbon trip".to_owned())
-        );
-        assert_eq!(
-            job_title(vec![text("Lisbon trip"), usage], Then::End).await,
-            None,
-            "a round that ends without completing titles nothing"
-        );
-    }
-
-    #[tokio::test]
-    async fn a_title_job_takes_its_rounds_text_only_when_the_round_completes() {
-        let completed = TurnEvent::Finished(Finish::Completed);
         let item = TurnEvent::OutputItem {
             index: 0,
             item: Opaque::new(b"{}".to_vec()).expect("small"),
@@ -1008,7 +979,11 @@ mod tests {
                 vec![
                     item,
                     text("  Lisbon"),
-                    text(" trip\nmore"),
+                    text(
+                        " trip
+more"
+                    ),
+                    usage.clone(),
                     completed.clone()
                 ],
                 Then::Hang
@@ -1028,7 +1003,7 @@ mod tests {
         };
         for events in [
             vec![text("Lisbon"), TurnEvent::Finished(Finish::Truncated)],
-            vec![text("Lisbon")],
+            vec![text("Lisbon"), usage],
             vec![text(&over), completed.clone()],
             vec![text(&"x".repeat(4095)), text("yy"), completed.clone()],
             vec![call, completed.clone()],
@@ -1069,21 +1044,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_round_that_ends_with_no_events_is_truncated() {
-        let (_cancel, mut received, _gone) = play(Vec::new(), Then::End, 4);
-        assert_eq!(
-            drain(&mut received).await,
-            [TurnEvent::Finished(Finish::Truncated)]
-        );
-    }
-
-    #[tokio::test]
     async fn a_round_that_ends_after_text_is_truncated_not_done() {
-        let (_cancel, mut received, _gone) = play(vec![text("half an")], Then::End, 4);
-        assert_eq!(
-            drain(&mut received).await,
-            [text("half an"), TurnEvent::Finished(Finish::Truncated)]
-        );
+        for mut events in [vec![], vec![text("half an")]] {
+            let (_cancel, mut received, _gone) = play(events.clone(), Then::End, 4);
+            events.push(TurnEvent::Finished(Finish::Truncated));
+            assert_eq!(drain(&mut received).await, events);
+        }
     }
 
     #[tokio::test]
@@ -1160,34 +1126,34 @@ mod tests {
 
     #[test]
     fn debug_shows_sizes_never_contents() {
-        let item = Opaque::new(b"hidden reasoning".to_vec()).expect("small");
-        let call = CallId::new("call-1").expect("ascii");
+        let prompt = "zqx-prompt-sentinel";
+        let argument = "zqx-argument-sentinel";
+        let id = "zqx-call-sentinel";
+        let native = "zqx-native-sentinel";
+        let delta = "zqx-delta-sentinel";
+        let item = Opaque::new(native.as_bytes().to_vec()).expect("small");
+        let call = CallId::new(id).expect("ascii");
         let printed = format!(
-            "{:?} {:?} {:?} {:?}",
-            request(),
-            TurnEvent::TextDelta("secret words".to_owned()),
+            "{:?} {:?} {:?} {:?} {:?}",
+            RunRequest::for_tests(RunId(7), ThreadId(2), prompt),
+            TurnEvent::TextDelta(delta.to_owned()),
             TurnEvent::ToolCallReady {
                 call: call.clone(),
-                args: "secret words".to_owned()
+                args: argument.to_owned(),
+            },
+            TurnEvent::ToolCallStarted {
+                call,
+                name: ToolName::Draw,
             },
             TurnEvent::OutputItem { index: 3, item },
         );
-        assert_eq!(
-            printed,
-            "RunRequest { key: Build(BuildKey { run: RunId(7), round: 1, attempt: 1 }), \
-             run: RunId(7), thread: ThreadId(2), origin: Kumo, request: ModelRequest { \
-             choice: None, instructions_bytes: 12, input: [], tools: 0 } } TextDelta(12) \
-             ToolCallReady { call: CallId(len=6), args_bytes: 12 } OutputItem { index: 3, item: Opaque(16) }"
-        );
-        assert_eq!(
-            format!(
-                "{:?}",
-                TurnEvent::ToolCallStarted {
-                    call,
-                    name: ToolName::Draw
-                }
-            ),
-            "ToolCallStarted { call: CallId(len=6), name: Draw }"
-        );
+        for marker in [prompt, argument, id, native, delta] {
+            let bytes = format!("{:?}", marker.as_bytes());
+            assert!(!printed.contains(marker), "content leaked");
+            assert!(
+                !printed.contains(bytes.trim_matches(['[', ']'])),
+                "content bytes leaked"
+            );
+        }
     }
 }

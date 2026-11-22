@@ -600,30 +600,6 @@ fn a_resumed_erase_removes_the_whole_account_record() {
     }
 }
 
-/// CAPS-89's R4-H1 trace: an unconfirmed revocation, the checkpoint, every delete, then a crash
-/// before Finish. The restart only finishes, and still warns.
-#[test]
-fn a_crash_between_delete_and_finish_keeps_the_decided_warning() {
-    let mut h = Harness::seeded("sign-out-r4h1", account_only);
-    h.op(AccountOp::SignOut);
-    h.hold = true;
-    h.feed(Input::Revoked(Vec::new()));
-    h.hold = true;
-    h.release();
-    assert_eq!(h.marker(), pending("Keep", "Deleting", false, false, true));
-    assert!(matches!(
-        h.reader().delete_for_sign_out(),
-        crate::connections::vault::DeleteResult::Gone
-    ));
-    let h = h.restart();
-    assert_eq!(
-        h.views,
-        [signing_out(Cleanup::Running, true), signed_out_with(true)]
-    );
-    assert!(h.revoking.is_empty());
-    assert_eq!(names(&h), left(true));
-}
-
 /// OSC-233: Delete and Finish follow the authority alone. Deletes that report success but leave
 /// their names, as Credential Manager's did, never hold the sign-out, and the next start sweeps
 /// them; Keep retains only the registration.
@@ -857,62 +833,40 @@ fn a_refused_save_of_the_settling_set_holds_the_sign_out() {
     }
 }
 
-/// A sign-out that lands while a revocation pass runs: the pass ends first, dropping what it
-/// confirmed without deleting the list or touching the promotion, then Prepare runs.
+/// Prepare follows an outstanding pass, whether relist or promotion was dispatched first.
 #[test]
 fn a_sign_out_during_a_revocation_pass_waits_for_it() {
-    let mut h = Harness::seeded("sign-out-pass", account_and_listed);
-    assert_eq!(
-        tokens(&h.revoking[0]),
-        [("refresh-listed".to_owned(), Origin::Exchange)]
-    );
-    h.op(AccountOp::SignOut);
-    assert_eq!(h.revoking.len(), 1, "Prepare waits for the pass");
-    let pass = h.revoking[0].clone();
-    h.feed(Input::Revoked(pass));
-    let promoted = pending("Keep", "Revoking", false, false, true);
-    // Load, promotion, the pass's relist, Prepare.
-    assert_eq!(
-        h.markers,
-        [
-            marker(&["sweep"]),
-            promoted.clone(),
-            promoted.clone(),
-            promoted
-        ]
-    );
-    assert_eq!(
-        tokens(&h.revoking[1]),
-        [("refresh-old".to_owned(), Origin::Account)]
-    );
-    finish(&mut h, true, 1);
-    assert_eq!(h.view(), &signed_out());
-    assert_eq!(names(&h), left(true));
-}
-
-/// The held-sweep fixture: a pass's relist dispatched before the promotion runs first, and the
-/// promotion then lands on what it left.
-#[test]
-fn a_sweep_dispatched_before_the_promotion_runs_first() {
-    let mut h = Harness::seeded("sign-out-held-sweep", account_and_listed);
-    let pass = h.revoking[0].clone();
-    h.hold = true;
-    h.feed(Input::Revoked(pass));
-    h.op(AccountOp::SignOut);
-    h.release();
-    let promoted = pending("Keep", "Revoking", false, false, true);
-    // Load, the pass's relist (list deleted, sweep cleared), promotion, Prepare.
-    assert_eq!(
-        h.markers,
-        [marker(&["sweep"]), None, promoted.clone(), promoted]
-    );
-    assert_eq!(
-        tokens(&h.revoking[1]),
-        [("refresh-old".to_owned(), Origin::Account)]
-    );
-    finish(&mut h, true, 1);
-    assert_eq!(h.view(), &signed_out());
-    assert_eq!(names(&h), left(true));
+    for (held_relist, name) in [(false, "sign-out-pass"), (true, "sign-out-held-sweep")] {
+        let mut h = Harness::seeded(name, account_and_listed);
+        assert_eq!(
+            tokens(&h.revoking[0]),
+            [("refresh-listed".to_owned(), Origin::Exchange)]
+        );
+        let pass = h.revoking[0].clone();
+        if held_relist {
+            h.hold = true;
+            h.feed(Input::Revoked(pass));
+            h.op(AccountOp::SignOut);
+            h.release();
+        } else {
+            h.op(AccountOp::SignOut);
+            assert_eq!(h.revoking.len(), 1, "Prepare waits for the pass");
+            h.feed(Input::Revoked(pass));
+        }
+        let promoted = pending("Keep", "Revoking", false, false, true);
+        let second = if held_relist { None } else { promoted.clone() };
+        assert_eq!(
+            h.markers,
+            [marker(&["sweep"]), second, promoted.clone(), promoted]
+        );
+        assert_eq!(
+            tokens(&h.revoking[1]),
+            [("refresh-old".to_owned(), Origin::Account)]
+        );
+        finish(&mut h, true, 1);
+        assert_eq!(h.view(), &signed_out());
+        assert_eq!(names(&h), left(true));
+    }
 }
 
 /// An unreadable marker fails closed: an Erase sign-out with its uncertainty already set.
@@ -1103,39 +1057,40 @@ fn a_refused_checkpoint_deletes_nothing_before_retry() {
     assert_eq!(names(&h), left(true));
 }
 
-/// CAPS-138 M2: a refused Finish leaves the decided notice in a Deleting marker, and a restart
-/// only finishes, reporting that notice.
+/// A crash before Finish and a refused Finish both preserve the decided notice.
 #[test]
 fn a_refused_finish_keeps_the_decided_notice_across_a_restart() {
-    let held = || {
-        let mut h = Harness::seeded("sign-out-refused-finish", account_only);
+    for (refused, name) in [(false, "sign-out-r4h1"), (true, "sign-out-refused-finish")] {
+        let mut h = Harness::seeded(name, account_only);
         h.op(AccountOp::SignOut);
         h.hold = true;
         h.feed(Input::Revoked(Vec::new()));
         h.hold = true;
         h.release();
-        h
-    };
-    let mut h = held();
-    // Delete writes no marker, so Finish's is the job's first.
-    h.refuse_marker_writes(0);
-    h.release();
-    assert_eq!(h.view(), &signing_out(Cleanup::Refused, true));
-    assert_eq!(h.marker(), pending("Keep", "Deleting", false, false, true));
-    assert_eq!(
-        names(&h),
-        left(true),
-        "Delete finished; only its marker write was refused"
-    );
-    h.allow_marker_writes();
-    let h = h.restart();
-    assert_eq!(
-        h.views,
-        [signing_out(Cleanup::Running, true), signed_out_with(true)]
-    );
-    assert!(h.revoking.is_empty());
-    assert_eq!(h.marker(), Some(NOTICE_ONLY.to_owned()));
-    assert_eq!(names(&h), left(true));
+        assert_eq!(h.marker(), pending("Keep", "Deleting", false, false, true));
+        if refused {
+            // Delete writes no marker, so Finish's is the job's first.
+            h.refuse_marker_writes(0);
+            h.release();
+            assert_eq!(h.view(), &signing_out(Cleanup::Refused, true));
+            assert_eq!(h.marker(), pending("Keep", "Deleting", false, false, true));
+            assert_eq!(names(&h), left(true), "only the marker write was refused");
+            h.allow_marker_writes();
+        } else {
+            assert!(matches!(
+                h.reader().delete_for_sign_out(),
+                crate::connections::vault::DeleteResult::Gone
+            ));
+        }
+        let h = h.restart();
+        assert_eq!(
+            h.views,
+            [signing_out(Cleanup::Running, true), signed_out_with(true)]
+        );
+        assert!(h.revoking.is_empty());
+        assert_eq!(h.marker(), Some(NOTICE_ONLY.to_owned()));
+        assert_eq!(names(&h), left(true));
+    }
 }
 
 /// CAPS-130 87-H2: with no revocation list and a damaged account, the uncertainty Prepare persists

@@ -305,9 +305,6 @@ pub(crate) enum LocalWrite {
         repo: Option<RepoName>,
         account: Option<crate::connections::github::api::GitHubUser>,
     },
-    /// Renames the run's thread; only the test tool writes it.
-    #[cfg(test)]
-    Title(String),
 }
 
 impl fmt::Debug for LocalWrite {
@@ -336,11 +333,6 @@ impl fmt::Debug for LocalWrite {
                 .field("body_bytes", &body.as_str().len())
                 .field("has_repo", &repo.is_some())
                 .field("has_account", &account.is_some())
-                .finish(),
-            #[cfg(test)]
-            Self::Title(title) => f
-                .debug_struct("Title")
-                .field("bytes", &title.len())
                 .finish(),
         }
     }
@@ -529,8 +521,6 @@ const TOOLS: &[Tool] = &[
     history::TASKS,
     #[cfg(test)]
     tests::PROBE,
-    #[cfg(test)]
-    tests::RECALL,
 ];
 
 fn tool(name: ToolName) -> Option<&'static Tool> {
@@ -578,7 +568,7 @@ fn mcp_schema(tool: &Tool) -> ToolSchema {
         | ToolName::ListTasks
         | ToolName::Unknown => model_schema(tool),
         #[cfg(test)]
-        ToolName::Probe | ToolName::Recall => model_schema(tool),
+        ToolName::Probe => model_schema(tool),
     }
 }
 
@@ -714,8 +704,6 @@ pub(crate) fn call<'a>(
                         focus: *focus,
                     })
                 }
-                #[cfg(test)]
-                LocalWrite::Title(_) => None,
                 LocalWrite::None => None,
             };
             run.ledger.running(&key, name, hash, output.clone(), caller);

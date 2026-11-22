@@ -30,7 +30,7 @@ fn task(store: &mut Store) -> (ThreadId, RunId) {
     (thread, run)
 }
 
-fn renaming(thread: ThreadId, run: RunId, call: &str) -> CommitCall {
+fn probe_call(thread: ThreadId, run: RunId, call: &str) -> CommitCall {
     CommitCall {
         key: LedgerKey {
             run,
@@ -40,7 +40,7 @@ fn renaming(thread: ThreadId, run: RunId, call: &str) -> CommitCall {
         thread,
         tool: "probe",
         hash: [7; 32],
-        write: LocalWrite::Title("After".to_owned()),
+        write: LocalWrite::None,
         output: ToolOutput::Text("probed".to_owned()),
         then: None,
     }
@@ -67,113 +67,15 @@ fn rows(conn: &Connection) -> Vec<(String, String, String)> {
 }
 
 #[test]
-fn a_call_and_its_write_commit_together_and_survive_a_restart() {
-    let scratch = Scratch::new("calls-commit");
-    let mut store = opened(&scratch);
-    let (thread, run) = task(&mut store);
-    assert_eq!(
-        store
-            .commit_call(&renaming(thread, run, "c1"))
-            .expect("recorded"),
-        Committed::Done
-    );
-    drop(store);
-    let conn = Connection::open(scratch.db()).expect("reopen");
-    assert_eq!(title(&conn, thread), "After");
-    assert_eq!(
-        rows(&conn),
-        [(
-            "model".to_owned(),
-            "c1".to_owned(),
-            r#"{"text":"probed"}"#.to_owned()
-        )]
-    );
-}
-
-#[test]
-fn a_failed_record_rolls_back_the_calls_write() {
-    let scratch = Scratch::new("calls-rollback");
-    let mut store = opened(&scratch);
-    let (thread, run) = task(&mut store);
-    let mut first = renaming(thread, run, "c1");
-    first.write = LocalWrite::None;
-    assert_eq!(
-        store.commit_call(&first).expect("recorded"),
-        Committed::Done
-    );
-    let error = store
-        .commit_call(&renaming(thread, run, "c1"))
-        .expect_err("the key is recorded already");
-    assert!(matches!(error, StoreError::Call), "{error:?}");
-    for shown in [error.to_string(), format!("{error:?}")] {
-        for sql in ["UNIQUE", "constraint", "tool_calls", "c1"] {
-            assert!(!shown.contains(sql), "{shown}");
-        }
-    }
-    assert_eq!(title(&store.conn, thread), "Before");
-    assert_eq!(rows(&store.conn).len(), 1);
-}
-
-#[test]
-fn the_ledger_caps_a_result_in_bytes_and_rolls_its_write_back_when_over() {
-    let scratch = Scratch::new("calls-cap");
-    let mut store = opened(&scratch);
-    let (thread, run) = task(&mut store);
-    // `{"text":""}` is 11 bytes and each two-byte letter counts twice: 65,536 and 65,537
-    // bytes, in far fewer characters.
-    let at = format!("a{}", "\u{e9}".repeat(32_762));
-    let mut fits = renaming(thread, run, "fits");
-    fits.write = LocalWrite::None;
-    fits.output = ToolOutput::Text(at.clone());
-    assert_eq!(fits.output.stored().len(), 65_536);
-    assert_eq!(store.commit_call(&fits).expect("recorded"), Committed::Done);
-    let mut over = renaming(thread, run, "over");
-    over.output = ToolOutput::Text(format!("a{at}"));
-    assert_eq!(over.output.stored().len(), 65_537);
-    let error = store.commit_call(&over).expect_err("over the cap");
-    assert!(matches!(error, StoreError::Call), "{error:?}");
-    for shown in [error.to_string(), format!("{error:?}")] {
-        assert!(!shown.contains("CHECK"), "{shown}");
-        assert!(!shown.contains("constraint"), "{shown}");
-    }
-    assert_eq!(title(&store.conn, thread), "Before");
-    assert_eq!(
-        rows(&store.conn),
-        [(
-            "model".to_owned(),
-            "fits".to_owned(),
-            format!(r#"{{"text":"{at}"}}"#)
-        )]
-    );
-}
-
-#[test]
-fn a_call_in_a_thread_being_deleted_writes_nothing() {
-    let scratch = Scratch::new("calls-deleting");
-    let mut store = opened(&scratch);
-    let (thread, run) = task(&mut store);
-    store.begin_delete(thread).expect("hidden");
-    assert_eq!(
-        store
-            .commit_call(&renaming(thread, run, "c1"))
-            .expect("no error"),
-        Committed::Failed
-    );
-    assert_eq!(title(&store.conn, thread), "Before");
-    assert_eq!(rows(&store.conn), []);
-}
-
-#[test]
 fn deleting_a_thread_removes_its_calls() {
     let scratch = Scratch::new("calls-purge");
     let mut store = opened(&scratch);
     let (thread, run) = task(&mut store);
-    let mut mcp = renaming(thread, run, "m:n:1");
+    let mut mcp = probe_call(thread, run, "m:n:1");
     mcp.key.route = Route::Mcp(crate::bridge::LaunchId(0xab));
-    mcp.write = LocalWrite::None;
     assert_eq!(
         store
-            .commit_call(&renaming(thread, run, "c1"))
+            .commit_call(&probe_call(thread, run, "c1"))
             .expect("recorded"),
         Committed::Done
     );
@@ -193,7 +95,7 @@ fn a_focus_commits_only_while_its_target_is_live() {
     let (thread, run) = task(&mut store);
     let (other, _) = task(&mut store);
     let focus = |call: &str, target: ThreadId| {
-        let mut focus = renaming(thread, run, call);
+        let mut focus = probe_call(thread, run, call);
         focus.write = LocalWrite::Focus(target);
         focus
     };
@@ -232,7 +134,9 @@ fn a_focus_commits_only_while_its_target_is_live() {
 }
 
 fn creating(thread: ThreadId, run: RunId, call: &str, task: ThreadId) -> CommitCall {
-    let mut create = renaming(thread, run, call);
+    let mut create = probe_call(thread, run, call);
+    create.tool = "create_task";
+    create.output = ToolOutput::Text(format!("Created task {}.", task.0));
     create.write = LocalWrite::CreateTask {
         thread: task,
         title: ThreadTitle::new("Trip plan").expect("valid"),
@@ -285,11 +189,31 @@ fn a_created_task_commits_with_its_row_and_a_repeated_key_burns_its_fresh_id() {
         .expect_err("the key is recorded already");
     assert!(matches!(error, StoreError::Call), "{error:?}");
     assert_eq!(task_row(&store.conn, fresh), None);
-    assert_eq!(rows(&store.conn).len(), 1);
     drop(store);
     let (store, high) = reopened(&scratch);
     assert_eq!(high, fresh, "the second reservation stays burned");
     assert_eq!(task_row(&store.conn, first), row("Trip plan"));
+    let ledger: String = store
+        .conn
+        .query_row(
+            "SELECT json_array(run, thread, route, call, tool, hex(hash), result) FROM tool_calls",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        serde_json::from_str::<Value>(&ledger).unwrap(),
+        json!([
+            run.0,
+            thread.0,
+            "model",
+            "c1",
+            "create_task",
+            "07".repeat(32),
+            format!(r#"{{"text":"Created task {}."}}"#, first.0),
+        ])
+    );
+    assert_eq!(rows(&store.conn).len(), 1);
 }
 
 #[test]
@@ -310,6 +234,8 @@ fn a_reservation_whose_task_never_commits_stays_issued() {
         Committed::Failed
     );
     assert_eq!(task_row(&store.conn, reserved), None);
+    assert_eq!(title(&store.conn, thread), "Before");
+    assert_eq!(rows(&store.conn), []);
     drop(store);
     let (mut store, high) = reopened(&scratch);
     assert_eq!(high, reserved);
@@ -354,7 +280,7 @@ fn a_reservation_with_no_row_behind_it_survives_a_purge_and_a_reopen() {
 }
 
 fn drafting(thread: ThreadId, run: RunId, call: &str) -> CommitCall {
-    let mut draft = renaming(thread, run, call);
+    let mut draft = probe_call(thread, run, call);
     draft.tool = "draft_issue";
     draft.hash = [9; 32];
     draft.write = LocalWrite::DraftIssue {
@@ -496,7 +422,7 @@ fn duplicate_draft_keys_never_create_a_second_action_event_or_result() {
     let scratch = Scratch::new("calls-draft-duplicate");
     let mut store = opened(&scratch);
     let (thread, run) = task(&mut store);
-    let first = drafting(thread, run, "once");
+    let first = drafting(thread, run, SENTINEL);
     assert_eq!(store.commit_call(&first).unwrap(), Committed::Done);
     let before = super::actions_tests::snapshot(&store.conn);
     let events = draft_events(&store.conn);
@@ -508,13 +434,24 @@ fn duplicate_draft_keys_never_create_a_second_action_event_or_result() {
     *title = IssueTitle::new("replacement must not persist").unwrap();
     *body = IssueBody::new("different body").unwrap();
     for duplicate in [&first, &changed] {
-        assert!(matches!(
-            store.commit_call(duplicate),
-            Err(StoreError::Call)
-        ));
+        let error = store.commit_call(duplicate).unwrap_err();
+        assert!(matches!(error, StoreError::Call));
+        let bytes = format!("{:?}", SENTINEL.as_bytes());
+        for shown in [error.to_string(), format!("{error:?}")] {
+            for private in [
+                "UNIQUE",
+                "constraint",
+                "tool_calls",
+                SENTINEL,
+                bytes.trim_matches(['[', ']']),
+            ] {
+                assert!(!shown.contains(private), "{shown}");
+            }
+        }
         assert_eq!(super::actions_tests::snapshot(&store.conn), before);
         assert_eq!(draft_events(&store.conn), events);
         assert_eq!(rows(&store.conn), ledger);
+        assert_eq!(title(&store.conn, thread), "Before");
     }
     assert_eq!(before.0.len(), 1);
     assert_eq!(before.1, 1);
@@ -523,7 +460,7 @@ fn duplicate_draft_keys_never_create_a_second_action_event_or_result() {
         ledger,
         [(
             "model".to_owned(),
-            "once".to_owned(),
+            SENTINEL.to_owned(),
             r#"{"text":"Local draft saved for user review."}"#.to_owned(),
         )]
     );
@@ -573,28 +510,46 @@ fn a_ledger_failure_after_action_and_event_insertion_rolls_back_all_three() {
 
 #[test]
 fn draft_output_bounds_commit_or_roll_back_the_complete_transaction() {
-    for length in [65_536, 65_537] {
+    let exact = format!("a{}", "é".repeat(32_762));
+    for prior_success in [false, true] {
         let scratch = Scratch::new("calls-draft-output");
         let mut store = opened(&scratch);
         let (thread, run) = task(&mut store);
-        let mut call = drafting(thread, run, "output");
-        call.output = ToolOutput::Text("x".repeat(length - 11));
-        assert_eq!(call.output.stored().len(), length);
-        let before = super::actions_tests::snapshot(&store.conn);
-        let result = store.commit_call(&call);
-        if length == 65_536 {
-            assert_eq!(result.unwrap(), Committed::Done);
+        if prior_success {
+            let mut fits = drafting(thread, run, "fits");
+            fits.output = ToolOutput::Text(exact.clone());
+            assert_eq!(fits.output.stored().len(), 65_536);
+            assert_eq!(store.commit_call(&fits).unwrap(), Committed::Done);
             let (actions, approval) = super::actions_tests::snapshot(&store.conn);
             assert_eq!(actions.len(), 1);
             assert_eq!(approval, 1);
             assert_eq!(draft_events(&store.conn).len(), 1);
-            assert_eq!(rows(&store.conn).len(), 1);
-        } else {
-            assert!(matches!(result, Err(StoreError::Call)));
-            assert_eq!(super::actions_tests::snapshot(&store.conn), before);
-            assert_eq!(draft_events(&store.conn), Vec::<Value>::new());
-            assert_eq!(rows(&store.conn), []);
+            assert_eq!(
+                rows(&store.conn),
+                [(
+                    "model".to_owned(),
+                    "fits".to_owned(),
+                    format!(r#"{{"text":"{exact}"}}"#),
+                )]
+            );
         }
+
+        let before = super::actions_tests::snapshot(&store.conn);
+        let events = draft_events(&store.conn);
+        let ledger = rows(&store.conn);
+        let mut over = drafting(thread, run, "over");
+        over.output = ToolOutput::Text(format!("a{exact}"));
+        assert_eq!(over.output.stored().len(), 65_537);
+        let error = store.commit_call(&over).unwrap_err();
+        assert!(matches!(error, StoreError::Call));
+        for shown in [error.to_string(), format!("{error:?}")] {
+            assert!(!shown.contains("CHECK"), "{shown}");
+            assert!(!shown.contains("constraint"), "{shown}");
+        }
+        assert_eq!(super::actions_tests::snapshot(&store.conn), before);
+        assert_eq!(draft_events(&store.conn), events);
+        assert_eq!(rows(&store.conn), ledger);
+        assert_eq!(title(&store.conn, thread), "Before");
     }
 }
 
@@ -668,17 +623,31 @@ fn a_non_draft_call_keeps_its_existing_ended_run_behavior() {
     let mut store = opened(&scratch);
     let (thread, run) = task(&mut store);
     store.end_run(thread, run, &[], RunEnd::Done).unwrap();
+    let created = ThreadId(thread.0 + 1);
     assert_eq!(
-        store.commit_call(&renaming(thread, run, "legacy")).unwrap(),
+        store
+            .commit_call(&creating(thread, run, "legacy", created))
+            .unwrap(),
         Committed::Done
     );
-    assert_eq!(title(&store.conn, thread), "After");
+    drop(store);
+    let (store, high) = reopened(&scratch);
+    assert_eq!(high, created);
+    assert_eq!(
+        task_row(&store.conn, created),
+        Some((
+            "Trip plan".to_owned(),
+            "model".to_owned(),
+            "thread".to_owned(),
+            "live".to_owned(),
+        ))
+    );
     assert_eq!(
         rows(&store.conn),
         [(
             "model".to_owned(),
             "legacy".to_owned(),
-            r#"{"text":"probed"}"#.to_owned(),
+            format!(r#"{{"text":"Created task {}."}}"#, created.0),
         )]
     );
 }

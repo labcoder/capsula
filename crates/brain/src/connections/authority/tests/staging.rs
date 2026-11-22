@@ -2,37 +2,15 @@ use super::*;
 
 #[test]
 fn pending_cleanup_and_debug_do_not_reveal_the_chunk_count() {
-    use std::sync::Arc;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    use tracing_subscriber::layer::{Context, Layer, SubscriberExt as _};
-
-    struct Warnings(Arc<AtomicUsize>);
-    impl<S: tracing::Subscriber> Layer<S> for Warnings {
-        fn on_event(&self, event: &tracing::Event<'_>, _: Context<'_, S>) {
-            if *event.metadata().level() == tracing::Level::WARN {
-                self.0.fetch_add(1, Ordering::Relaxed);
-            }
-        }
-    }
+    use crate::test_support::Captured;
 
     let setup = Setup::new("pending-diagnostic-redaction");
     let mut authority = setup.open();
-    let warnings = Arc::new(AtomicUsize::new(0));
-    let _logging = tracing::subscriber::set_default(
-        tracing_subscriber::registry().with(Warnings(Arc::clone(&warnings))),
-    );
-    for (bytes, chunks) in [(16, 1), (2048, 2)] {
+    setup.store.0.lock().expect("fake").refusing = true;
+    let [small, large] = [16, 2048].map(|bytes| {
         let plan = authority.begin(Kind::AnthropicKey, 0, bytes).expect("plan");
-        assert_eq!(format!("{:?}", plan.layout()), "Layout(***)");
-        assert_eq!(
-            format!("{plan:?}"),
-            "WritePlan { kind: AnthropicKey, generation: Generation(***), layout: Layout(***), base: 0 }"
-        );
-        {
-            let mut state = setup.store.0.lock().expect("fake");
-            state.refusing = true;
-            state.mutations.clear();
-        }
+        let captured = Captured::default();
+        let _logging = captured.install();
         io::delete_pending(
             &setup.store,
             SERVICE,
@@ -40,9 +18,23 @@ fn pending_cleanup_and_debug_do_not_reveal_the_chunk_count() {
             plan.generation(),
             plan.layout(),
         );
-        assert_eq!(setup.store.0.lock().expect("fake").mutations.len(), chunks);
-        assert_eq!(warnings.swap(0, Ordering::Relaxed), 1);
-    }
+        let logs = captured.text();
+        let warnings: Vec<_> = logs
+            .lines()
+            .filter_map(|line| line.split_once(" WARN ").map(|(_, payload)| payload))
+            .collect();
+        assert!(!warnings.is_empty(), "refused cleanup must be reported");
+        let warning = warnings.join("\n");
+        let debug = format!("{plan:?} {:?}", plan.layout());
+        let generation = plan.generation().hex();
+        let bytes = format!("{:?}", plan.generation().0);
+        for shown in [&debug, &warning] {
+            assert!(!shown.contains(&generation));
+            assert!(!shown.contains(bytes.trim_matches(['[', ']'])));
+        }
+        (debug, warning)
+    });
+    assert!(small == large, "diagnostics must not disclose the layout");
 }
 
 #[test]

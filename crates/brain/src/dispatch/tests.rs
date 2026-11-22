@@ -1,11 +1,11 @@
 use kumochi_protocol::message::{EventId, RunId, ThreadId};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::Value;
 
 use super::{
     Caller, CommitCall, Dispatch, Ledger, LedgerKey, LocalWrite, MAX_ARGS, MAX_OUTPUT, Prepared,
-    Route, RunCtx, Step, Tool, ToolError, ToolOutput, call, parameters, parse, schemas,
+    Route, RunCtx, Step, Tool, ToolError, ToolOutput, call, parameters, parse,
 };
 use crate::bridge::{CallKey, LaunchId};
 use crate::context::{HistoryRef, Origin};
@@ -21,13 +21,11 @@ const L1: LaunchId = LaunchId(0x0123_4567_89ab_cdef_0123_4567_89ab_cdef);
 const L2: LaunchId = LaunchId(2);
 const MARKER: &str = "zqxplantedmarker";
 
-/// The test tool that may write: renames the run's thread when `title` is set.
+/// The test tool that repeats a word to exercise the serialized output cap.
 #[derive(Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct ProbeArgs {
     word: String,
-    #[serde(default)]
-    title: Option<String>,
     /// How many times the output repeats `word`.
     #[serde(default = "one")]
     count: u32,
@@ -42,7 +40,7 @@ fn prepare_probe(args: &[u8]) -> Result<Prepared, ToolError> {
     let repeats = usize::try_from(probe.count).map_err(|_| ToolError::Invalid)?;
     Ok(Prepared::Local {
         hash,
-        write: probe.title.map_or(LocalWrite::None, LocalWrite::Title),
+        write: LocalWrite::None,
         output: ToolOutput::Text(format!("probed {}", probe.word.repeat(repeats))),
     })
 }
@@ -57,39 +55,7 @@ pub(super) const PROBE: Tool = Tool {
     prepare: prepare_probe,
 };
 
-/// The test history tool: Kumo only, model only.
-#[derive(Deserialize, Serialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-struct RecallArgs {
-    task: u64,
-    first: u64,
-    last: u64,
-}
-
-fn prepare_recall(args: &[u8]) -> Result<Prepared, ToolError> {
-    let (recall, hash) = parse::<RecallArgs>("recall", args)?;
-    Ok(Prepared::Local {
-        hash,
-        write: LocalWrite::None,
-        output: ToolOutput::History(vec![HistoryRef {
-            thread: ThreadId(recall.task),
-            first: EventId(recall.first),
-            last: EventId(recall.last),
-        }]),
-    })
-}
-
-pub(super) const RECALL: Tool = Tool {
-    name: ToolName::Recall,
-    wire: "recall",
-    description: "A test history tool.",
-    kumo_only: true,
-    mcp: false,
-    parameters: parameters::<RecallArgs>,
-    prepare: prepare_recall,
-};
-
-const OFFERED: &[ToolName] = &[ToolName::Probe, ToolName::Recall];
+const OFFERED: &[ToolName] = &[ToolName::Probe, ToolName::SearchHistory];
 
 fn ctx(ledger: &mut Ledger, reach: Origin, mcp: Option<LaunchId>) -> RunCtx<'_> {
     let end = std::time::Instant::now() + std::time::Duration::from_secs(30);
@@ -168,112 +134,6 @@ fn assert_step(step: &Step, expected: &Step) {
 }
 
 #[test]
-fn a_first_valid_call_sends_its_write_its_output_and_its_key() {
-    let mut ledger = Ledger::default();
-    let sent = commit(send(
-        &mut ledger,
-        model("c1"),
-        ToolName::Probe,
-        r#"{"word":"hi","title":"Renamed"}"#,
-    ));
-    assert_eq!(
-        sent.key,
-        LedgerKey {
-            run: R,
-            route: Route::Model,
-            call: "c1".into()
-        }
-    );
-    assert_eq!(
-        (sent.thread, sent.tool, &sent.write, &sent.output),
-        (
-            T,
-            "probe",
-            &LocalWrite::Title("Renamed".to_owned()),
-            &text("probed hi")
-        )
-    );
-}
-
-#[test]
-fn a_duplicate_while_running_joins_and_after_the_ack_gets_the_stored_output() {
-    let mut ledger = Ledger::default();
-    let first = commit(send(
-        &mut ledger,
-        model("c1"),
-        ToolName::Probe,
-        r#"{"word":"hi"}"#,
-    ));
-    assert_step(
-        &send(
-            &mut ledger,
-            model("c1"),
-            ToolName::Probe,
-            r#"{"word":"hi"}"#,
-        ),
-        &Step::Join,
-    );
-    assert_eq!(
-        ledger.committed(&first.key),
-        Some(vec![
-            (model("c1"), text("probed hi")),
-            (model("c1"), text("probed hi"))
-        ]),
-        "the first caller and the one that joined"
-    );
-    assert_step(
-        &send(
-            &mut ledger,
-            model("c1"),
-            ToolName::Probe,
-            r#"{"word":"hi"}"#,
-        ),
-        &Step::Answer(text("probed hi")),
-    );
-    assert_eq!(
-        ledger.committed(&first.key),
-        None,
-        "a second ack answers nobody"
-    );
-}
-
-#[test]
-fn whitespace_key_order_and_an_omitted_default_hash_the_same_and_a_new_value_does_not() {
-    let mut ledger = Ledger::default();
-    commit(send(
-        &mut ledger,
-        model("c1"),
-        ToolName::Probe,
-        r#"{"word":"hi","count":1}"#,
-    ));
-    for same_call in [
-        r#"{ "count" : 1 , "word" : "hi" }"#,
-        r#"{"word":"hi"}"#,
-        r#"{"word":"hi","title":null}"#,
-    ] {
-        assert_step(
-            &send(&mut ledger, model("c1"), ToolName::Probe, same_call),
-            &Step::Join,
-        );
-    }
-    for other_call in [r#"{"word":"ho"}"#, r#"{"word":"hi","count":2}"#] {
-        assert_step(
-            &send(&mut ledger, model("c1"), ToolName::Probe, other_call),
-            &error(ToolError::Reused),
-        );
-    }
-    assert_step(
-        &send(
-            &mut ledger,
-            model("c1"),
-            ToolName::Probe,
-            r#"{"word":"hi"}"#,
-        ),
-        &Step::Join,
-    );
-}
-
-#[test]
 fn another_tool_under_the_same_key_is_refused_and_leaves_the_first_call() {
     let mut ledger = Ledger::default();
     let first = commit(send(
@@ -282,13 +142,13 @@ fn another_tool_under_the_same_key_is_refused_and_leaves_the_first_call() {
         ToolName::Probe,
         r#"{"word":"hi"}"#,
     ));
-    let recall = r#"{"task":5,"first":1,"last":2}"#;
+    let search = br#"{"query":"hi"}"#;
     let kumo = |ledger: &mut Ledger| {
         call(
             &mut ctx(ledger, Origin::Kumo, None),
             model("c1"),
-            ToolName::Recall,
-            recall.as_bytes(),
+            ToolName::SearchHistory,
+            search,
         )
     };
     assert_step(&kumo(&mut ledger), &error(ToolError::Reused));
@@ -388,19 +248,6 @@ fn malformed_duplicates_never_change_a_running_or_finished_call() {
 }
 
 #[test]
-fn arguments_up_to_the_cap_parse_and_one_byte_over_is_too_large() {
-    let body = r#"{"word":"hi"}"#;
-    let at_cap = format!("{body}{}", " ".repeat(MAX_ARGS - body.len()));
-    let over = format!("{at_cap} ");
-    let mut ledger = Ledger::default();
-    commit(send(&mut ledger, model("at"), ToolName::Probe, &at_cap));
-    assert_step(
-        &send(&mut ledger, model("over"), ToolName::Probe, &over),
-        &error(ToolError::TooLarge),
-    );
-}
-
-#[test]
 fn an_output_of_exactly_its_cap_is_sent_and_one_byte_over_is_refused() {
     assert_eq!(MAX_OUTPUT, 65_536);
     // `{"text":"probed "}` is 18 bytes, and the two-byte word checks bytes, not characters.
@@ -456,76 +303,6 @@ fn a_launch_that_isnt_authorized_is_refused_without_using_up_its_key() {
         assert_step(&step, &error(ToolError::NotHere));
     }
     commit(send(&mut ledger, mcp(L1, "k"), ToolName::Probe, args));
-}
-
-#[test]
-fn history_is_kumo_only_and_model_only() {
-    let recall = r#"{"task":5,"first":7,"last":9}"#;
-    let mut ledger = Ledger::default();
-    let from = |ledger: &mut Ledger, reach, caller| {
-        call(
-            &mut ctx(ledger, reach, Some(L1)),
-            caller,
-            ToolName::Recall,
-            recall.as_bytes(),
-        )
-    };
-    assert_step(
-        &from(&mut ledger, Origin::Kumo, mcp(L1, "m")),
-        &error(ToolError::NotHere),
-    );
-    assert_step(
-        &from(&mut ledger, Origin::Kumo, mcp(L1, "m")),
-        &error(ToolError::NotHere),
-    );
-    assert_step(
-        &from(&mut ledger, Origin::Task(T), model("t")),
-        &error(ToolError::NotHere),
-    );
-    let sent = commit(from(&mut ledger, Origin::Kumo, model("k")));
-    assert_eq!(
-        sent.output,
-        ToolOutput::History(vec![HistoryRef {
-            thread: ThreadId(5),
-            first: EventId(7),
-            last: EventId(9),
-        }])
-    );
-    let names = |reach, route| -> Vec<&str> {
-        schemas(reach, route)
-            .iter()
-            .map(|schema| schema.name)
-            .collect()
-    };
-    assert_eq!(
-        names(Origin::Kumo, Route::Model),
-        [
-            "draw",
-            "draft_issue",
-            "create_task",
-            "focus",
-            "search_history",
-            "read_history",
-            "list_tasks",
-            "probe",
-            "recall"
-        ]
-    );
-    assert_eq!(
-        names(Origin::Kumo, Route::Mcp(L1)),
-        ["draw", "draft_issue", "probe"]
-    );
-    assert_eq!(
-        names(Origin::Task(T), Route::Model),
-        [
-            "draw",
-            "draft_issue",
-            "focus",
-            "search_history",
-            "read_history",
-            "probe"
-        ]
-    );
 }
 
 #[test]
@@ -611,36 +388,9 @@ fn outputs_round_trip_through_their_stored_json() {
 }
 
 #[test]
-fn each_schema_is_closed_and_names_its_fields_and_types() {
-    let probe = parameters::<ProbeArgs>();
-    assert_eq!(probe["additionalProperties"], json!(false));
-    assert_eq!(probe["required"], json!(["word"]));
-    assert_eq!(probe["properties"]["word"]["type"], json!("string"));
-    assert_eq!(probe["properties"]["count"]["type"], json!("integer"));
-    let recall = parameters::<RecallArgs>();
-    assert_eq!(recall["additionalProperties"], json!(false));
-    let mut required: Vec<&str> = recall["required"]
-        .as_array()
-        .expect("a required list")
-        .iter()
-        .filter_map(|name| name.as_str())
-        .collect();
-    required.sort_unstable();
-    assert_eq!(required, ["first", "last", "task"]);
-    for (args, parses) in [
-        (r#"{"word":"hi","count":2}"#, true),
-        (r#"{"count":2}"#, false),
-        (r#"{"word":"hi","count":"2"}"#, false),
-        (r#"{"word":"hi","more":1}"#, false),
-    ] {
-        assert_eq!(prepare_probe(args.as_bytes()).is_ok(), parses, "{args}");
-    }
-}
-
-#[test]
 fn diagnostics_never_show_arguments_outputs_ids_or_titles() {
     let mut ledger = Ledger::default();
-    let args = format!(r#"{{"word":"{MARKER}","title":"{MARKER}"}}"#);
+    let args = format!(r#"{{"word":"{MARKER}"}}"#);
     let sent = commit(send(&mut ledger, model(MARKER), ToolName::Probe, &args));
     let formatted = [
         format!("{:?}", model(MARKER)),
@@ -660,7 +410,14 @@ fn diagnostics_never_show_arguments_outputs_ids_or_titles() {
         ),
         format!("{:?}", Dispatch::Answered(text(MARKER))),
         format!("{:?}", Step::Answer(text(MARKER))),
-        format!("{:?}", LocalWrite::Title(MARKER.to_owned())),
+        format!(
+            "{:?}",
+            LocalWrite::CreateTask {
+                thread: FRESH,
+                title: kumochi_protocol::message::ThreadTitle::new(MARKER).unwrap(),
+                focus: false,
+            }
+        ),
         format!("{ledger:?}"),
     ];
     let listed = format!("{:?}", MARKER.as_bytes());

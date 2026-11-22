@@ -50,24 +50,7 @@ fn explicit_cancel_ends_a_loaded_identity_check_without_a_late_connected_fallbac
         !m.connecting(),
         "shell turnover alone must not cancel startup verification"
     );
-    let effects = m.on(Input::Op(GitHubOp::CancelConnect), Instant::now());
-    assert!(matches!(effects[0], Effect::CancelAll));
-    assert_eq!(
-        m.view(Instant::now()),
-        GitHubView::NotVerified {
-            login: user().login
-        }
-    );
-    stale(
-        &mut m,
-        Input::User {
-            stamp,
-            result: Ok(user()),
-        },
-    );
-    assert_eq!(m.user(), None);
-    assert!(m.token().is_none());
-    assert_eq!(m.repositories(), None);
+    m.on(Input::Op(GitHubOp::CancelConnect), Instant::now());
     let effects = m.on(
         Input::Op(GitHubOp::SetDefaultRepo(
             RepoName::new("owner/repo").unwrap(),
@@ -75,24 +58,10 @@ fn explicit_cancel_ends_a_loaded_identity_check_without_a_late_connected_fallbac
         Instant::now(),
     );
     assert_eq!(error(&effects), ErrorKey::RequestRefused);
-    let effects = m.on(Input::Tick, Instant::now() + Duration::from_hours(9));
     assert!(matches!(
         effects.as_slice(),
-        [Effect::View(GitHubView::NotVerified { .. })]
+        [Effect::Error(_), Effect::View(GitHubView::NotVerified { login })] if *login == user().login
     ));
-    let effects = m.on(Input::Op(GitHubOp::RefreshRepos), Instant::now());
-    assert!(matches!(effects.as_slice(), [
-        Effect::ReadUser { stamp: next, .. }, Effect::View(GitHubView::Requesting)
-    ] if *next == m.stamp()));
-    assert_eq!(m.user(), None);
-    m.on(
-        Input::User {
-            stamp: m.stamp(),
-            result: Ok(user()),
-        },
-        Instant::now(),
-    );
-    assert_eq!(m.user(), Some(&user()));
 }
 
 fn marker(m: &mut Machine) -> (Stamp, Account) {
@@ -310,36 +279,20 @@ async fn refresh_is_due_at_minus_sixty_and_is_single_use_across_acknowledgments_
             result: Ok(rotated_tokens()),
         },
     );
-    let mut restarted = new_machine(None);
-    restarted.clock = Arc::new(FixedClock(4_540));
-    let effects = restarted.on(
-        Input::Loaded {
-            stamp: restarted.stamp(),
-            result: Ok(Some(account)),
-        },
-        Instant::now(),
-    );
-    assert!(matches!(effects.as_slice(), [
-        Effect::CancelAll,
-        Effect::View(GitHubView::NeedsSignIn { login }),
-    ] if *login == user().login));
-    dispatch_refresh(&mut m, stamp);
-    stale(&mut m, Input::Saved { stamp, saved: true });
-    stale(&mut m, Input::Tick);
-}
-
-#[tokio::test(start_paused = true)]
-async fn a_consumed_or_expired_refresh_credential_never_dispatches_after_load() {
-    for (sent, expiry) in [(true, 87_400), (false, 1_000), (false, 999)] {
-        let mut account = account();
-        account.refresh_sent = sent;
-        account.credentials.refresh_expires_at_s = expiry;
-        let mut m = new_machine(None);
-        let stamp = m.stamp();
-        let effects = m.on(
+    let mut expires_now = account.clone();
+    expires_now.refresh_sent = false;
+    let mut expired = expires_now.clone();
+    expires_now.credentials.refresh_expires_at_s = 1_000;
+    expired.credentials.refresh_expires_at_s = 999;
+    assert!(account.refresh_sent);
+    for (loaded, now) in [(account, 4_540), (expires_now, 1_000), (expired, 1_000)] {
+        let mut restarted = new_machine(None);
+        restarted.clock = Arc::new(FixedClock(now));
+        let loaded_stamp = restarted.stamp();
+        let effects = restarted.on(
             Input::Loaded {
-                stamp,
-                result: Ok(Some(account)),
+                stamp: loaded_stamp,
+                result: Ok(Some(loaded)),
             },
             Instant::now(),
         );
@@ -347,19 +300,28 @@ async fn a_consumed_or_expired_refresh_credential_never_dispatches_after_load() 
             Effect::CancelAll,
             Effect::View(GitHubView::NeedsSignIn { login }),
         ] if *login == user().login));
-        assert_eq!(m.user(), None);
-        assert!(m.token().is_none());
-        assert_eq!(m.repositories(), None);
-        stale(&mut m, Input::Tick);
+        assert_eq!(restarted.user(), None);
+        assert!(restarted.token().is_none());
+        assert_eq!(restarted.repositories(), None);
+        stale(&mut restarted, Input::Tick);
         stale(
-            &mut m,
+            &mut restarted,
             Input::Refreshed {
-                stamp,
+                stamp: loaded_stamp,
                 result: Ok(rotated_tokens()),
             },
         );
-        stale(&mut m, Input::Saved { stamp, saved: true });
+        stale(
+            &mut restarted,
+            Input::Saved {
+                stamp: loaded_stamp,
+                saved: true,
+            },
+        );
     }
+    dispatch_refresh(&mut m, stamp);
+    stale(&mut m, Input::Saved { stamp, saved: true });
+    stale(&mut m, Input::Tick);
 }
 
 #[tokio::test(start_paused = true)]

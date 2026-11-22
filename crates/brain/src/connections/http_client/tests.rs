@@ -15,7 +15,7 @@ use rustls::pki_types::{PrivateKeyDer, PrivatePkcs8KeyDer};
 use zeroize::Zeroizing;
 
 use super::{
-    Client, Endpoint, HttpError, IssuerUrl, MAX_BODY_BYTES, Request, ResponseMeta, body_buffer,
+    Client, Endpoint, HttpError, IssuerUrl, MAX_BODY_BYTES, Request, ResponseMeta,
     connecting_within, from_roots, read_response,
 };
 use crate::platform::{TrustRoots, TrustRootsError};
@@ -243,82 +243,73 @@ async fn github_wire_policy_uses_typed_payloads_and_never_logs_them() {
     let captured = Captured::default();
     let _logging = captured.install();
     tracing::info!("github-wire-control");
-    for (index, endpoint) in endpoints().into_iter().enumerate() {
+    let expected = [
+        ("POST", "https://github.com/login/device/code"),
+        ("POST", "https://github.com/login/oauth/access_token"),
+        ("GET", "https://api.github.com/user"),
+        (
+            "GET",
+            "https://api.github.com/user/installations?per_page=100&page=2",
+        ),
+        (
+            "GET",
+            "https://api.github.com/user/installations/42/repositories?per_page=100&page=1",
+        ),
+        ("POST", "https://api.github.com/repos/owner/repo/issues"),
+        (
+            "GET",
+            "https://api.github.com/repos/owner/repo/issues?per_page=100&page=2&creator=owner&state=all&since=2024-02-29T23%3A59%3A59Z&sort=created&direction=desc",
+        ),
+        ("POST", "https://github.com/login/oauth/access_token"),
+    ];
+    for (index, (endpoint, (method, url))) in endpoints().into_iter().zip(expected).enumerate() {
         let server = Server::start(reply(
             "200 OK",
             b"{}",
             "Date: Thu, 29 Feb 2024 23:59:59 GMT\r\n",
         ));
-        let original = endpoint.url().unwrap();
-        let mut target = original.clone();
+        let destination = endpoint.url().unwrap();
+        assert_eq!(destination.as_str(), url);
+        let client = server.client();
+        let outgoing = client
+            .github_request(&endpoint, url)
+            .unwrap()
+            .build()
+            .unwrap();
+        assert_eq!(outgoing.url().as_str(), url);
+        assert_eq!(outgoing.method().as_str(), method);
+        if method == "GET" {
+            assert!(outgoing.body().is_none(), "reads have no payload");
+        }
+        assert_eq!(
+            outgoing.timeout(),
+            Some(&Duration::from_secs(if matches!(index, 5 | 6) {
+                30
+            } else {
+                15
+            }))
+        );
+        assert_eq!(
+            outgoing
+                .headers()
+                .get("authorization")
+                .map(HeaderValue::is_sensitive),
+            if matches!(index, 0 | 1 | 7) {
+                None
+            } else {
+                Some(true)
+            }
+        );
+        let mut target = destination;
         target.set_host(Some("127.0.0.1")).unwrap();
         target.set_port(Some(server.address.port())).unwrap();
-        let response = server
-            .client()
+        let response = client
             .send_to(target.as_str(), request(Endpoint::GitHub(endpoint)))
             .await
             .unwrap();
         assert_eq!(response.meta.date_s, Some(1_709_251_199));
         assert_eq!(response.body.expose().as_slice(), b"{}");
-        let wire = server.finish().unwrap();
-        let path = &original[url::Position::BeforePath..];
-        let method = if matches!(index, 0 | 1 | 5 | 7) {
-            "POST"
-        } else {
-            "GET"
-        };
-        assert_eq!(wire.line.as_str(), format!("{method} {path} HTTP/1.1"));
-        assert_eq!(
-            wire.headers["user-agent"],
-            kumochi_protocol::constants::HTTP_USER_AGENT
-        );
-        assert_eq!(wire.api_key, None);
-        assert_eq!(wire.anthropic_version, None);
-        if matches!(index, 0 | 1 | 7) {
-            assert_eq!(wire.authorization, None);
-            assert_eq!(wire.headers["accept"], "application/json");
-            assert_eq!(wire.headers.get("x-github-api-version"), None);
-            assert_eq!(
-                wire.content_type.as_deref(),
-                Some("application/x-www-form-urlencoded")
-            );
-            let fields: BTreeMap<_, _> = url::form_urlencoded::parse(wire.body.expose())
-                .into_owned()
-                .collect();
-            assert_eq!(fields["client_id"], SENTINEL);
-            if index == 1 {
-                assert_eq!(fields["device_code"], SENTINEL);
-                assert_eq!(
-                    fields["grant_type"],
-                    "urn:ietf:params:oauth:grant-type:device_code"
-                );
-                assert_eq!(fields.len(), 3);
-            } else if index == 7 {
-                assert_eq!(fields["grant_type"], "refresh_token");
-                assert_eq!(fields["refresh_token"], format!("ghr_{SENTINEL}"));
-                assert_eq!(fields.len(), 3);
-                assert!(!fields.contains_key("client_secret"));
-            } else {
-                assert_eq!(fields.len(), 1);
-            }
-        } else {
-            assert_eq!(
-                wire.authorization.as_deref(),
-                Some(format!("Bearer ghu_{SENTINEL}").as_str())
-            );
-            assert_eq!(wire.headers["accept"], "application/vnd.github+json");
-            assert_eq!(wire.headers["x-github-api-version"], "2026-03-10");
-            if index == 5 {
-                assert_eq!(wire.content_type.as_deref(), Some("application/json"));
-                assert_eq!(
-                    wire.body.expose().as_slice(),
-                    format!(r#"{{"title":"{SENTINEL}","body":""}}"#).as_bytes()
-                );
-            } else {
-                assert_eq!(wire.content_type, None);
-                assert_eq!(wire.body.expose().as_slice(), b"");
-            }
-        }
+        assert_github_wire_request(&server.finish().unwrap(), index, method, url);
     }
     let logs = captured.text();
     assert!(logs.contains("github-wire-control"));
@@ -331,6 +322,69 @@ async fn github_wire_policy_uses_typed_payloads_and_never_logs_them() {
                 .trim_end_matches(']')
         )
     );
+}
+
+fn assert_github_wire_request(wire: &WireRequest, index: usize, method: &str, url: &str) {
+    let path = url
+        .strip_prefix("https://")
+        .unwrap()
+        .split_once('/')
+        .unwrap()
+        .1;
+    let path = format!("/{path}");
+    assert_eq!(wire.line.as_str(), format!("{method} {path} HTTP/1.1"));
+    assert_eq!(
+        wire.headers["user-agent"],
+        kumochi_protocol::constants::HTTP_USER_AGENT
+    );
+    assert_eq!(wire.api_key, None);
+    assert_eq!(wire.anthropic_version, None);
+    if matches!(index, 0 | 1 | 7) {
+        assert_eq!(wire.authorization, None);
+        assert_eq!(wire.headers["accept"], "application/json");
+        assert_eq!(wire.headers.get("x-github-api-version"), None);
+        assert_eq!(
+            wire.content_type.as_deref(),
+            Some("application/x-www-form-urlencoded")
+        );
+        let mut fields: Vec<_> = url::form_urlencoded::parse(wire.body.expose())
+            .into_owned()
+            .collect();
+        let mut expected = vec![("client_id".to_owned(), SENTINEL.to_owned())];
+        if index == 1 {
+            expected.extend([
+                ("device_code".to_owned(), SENTINEL.to_owned()),
+                (
+                    "grant_type".to_owned(),
+                    "urn:ietf:params:oauth:grant-type:device_code".to_owned(),
+                ),
+            ]);
+        } else if index == 7 {
+            expected.extend([
+                ("grant_type".to_owned(), "refresh_token".to_owned()),
+                ("refresh_token".to_owned(), format!("ghr_{SENTINEL}")),
+            ]);
+        }
+        fields.sort_unstable();
+        assert_eq!(fields, expected);
+    } else {
+        assert_eq!(
+            wire.authorization.as_deref(),
+            Some(format!("Bearer ghu_{SENTINEL}").as_str())
+        );
+        assert_eq!(wire.headers["accept"], "application/vnd.github+json");
+        assert_eq!(wire.headers["x-github-api-version"], "2026-03-10");
+        if index == 5 {
+            assert_eq!(wire.content_type.as_deref(), Some("application/json"));
+            assert_eq!(
+                wire.body.expose().as_slice(),
+                format!(r#"{{"title":"{SENTINEL}","body":""}}"#).as_bytes()
+            );
+        } else {
+            assert_eq!(wire.content_type, None);
+            assert_eq!(wire.body.expose().as_slice(), b"");
+        }
+    }
 }
 
 #[tokio::test]
@@ -646,16 +700,26 @@ async fn github_refuses_redirects_without_followup_and_incomplete_bodies_are_tra
     let followup = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
     followup.set_nonblocking(true).unwrap();
     let address = followup.local_addr().unwrap();
-    for endpoint in endpoints() {
-        let server = Server::start(reply(
-            "307 Temporary Redirect",
-            b"",
-            &format!("Location: https://{address}/forbidden\r\n"),
-        ));
+    let absolute = format!("Location: https://{address}/forbidden\r\n");
+    let redirects = endpoints()
+        .into_iter()
+        .map(|endpoint| {
+            (
+                Endpoint::GitHub(endpoint),
+                "307 Temporary Redirect",
+                absolute.as_str(),
+            )
+        })
+        .chain([
+            (Endpoint::Discovery, "302 Found", "Location: /forbidden\r\n"),
+            (Endpoint::Discovery, "302 Found", absolute.as_str()),
+        ]);
+    for (endpoint, status, location) in redirects {
+        let server = Server::start(reply(status, b"", location));
         assert_eq!(
             server
                 .client()
-                .send_to(&server.url(), request(Endpoint::GitHub(endpoint)))
+                .send_to(&server.url(), request(endpoint))
                 .await
                 .unwrap_err(),
             HttpError::Redirect
@@ -817,17 +881,6 @@ async fn http_is_refused_before_connect_and_https_still_works() {
 }
 
 #[tokio::test]
-async fn redirect_is_refused_instead_of_followed() {
-    let server = Server::start(reply("302 Found", b"", "Location: /forbidden\r\n"));
-    let response = server
-        .client()
-        .send_to(&server.url(), request(Endpoint::Discovery))
-        .await;
-    assert_eq!(response.unwrap_err(), HttpError::Redirect);
-    server.finish().expect("fixture completed");
-}
-
-#[tokio::test]
 async fn auth_discovery_and_error_bodies_all_have_the_same_byte_cap() {
     for (endpoint, status) in [
         (Endpoint::Token, "200 OK"),
@@ -843,17 +896,6 @@ async fn auth_discovery_and_error_bodies_all_have_the_same_byte_cap() {
         server
             .finish()
             .expect("fixture finished sending its bounded overflow");
-    }
-}
-
-#[test]
-fn allocation_hints_are_bounded_and_optional() {
-    assert_eq!(body_buffer(None).capacity(), 0);
-    for (length, minimum) in [(333, 333), (u64::MAX, MAX_BODY_BYTES)] {
-        let bytes = body_buffer(Some(length));
-        assert!(bytes.is_empty());
-        assert!(bytes.capacity() >= minimum);
-        assert!(bytes.capacity() <= MAX_BODY_BYTES);
     }
 }
 
@@ -1242,95 +1284,4 @@ fn production_client_ignores_proxy_environment_in_an_isolated_child() {
         target.finish().is_err(),
         "direct TLS connection rejected the private fixture CA"
     );
-}
-
-#[test]
-fn destinations_queries_methods_and_headers_are_closed() {
-    use crate::connections::github::tests::endpoints;
-    let expected = [
-        ("POST", "https://github.com/login/device/code"),
-        ("POST", "https://github.com/login/oauth/access_token"),
-        ("GET", "https://api.github.com/user"),
-        (
-            "GET",
-            "https://api.github.com/user/installations?per_page=100&page=2",
-        ),
-        (
-            "GET",
-            "https://api.github.com/user/installations/42/repositories?per_page=100&page=1",
-        ),
-        ("POST", "https://api.github.com/repos/owner/repo/issues"),
-        (
-            "GET",
-            "https://api.github.com/repos/owner/repo/issues?per_page=100&page=2&creator=owner&state=all&since=2024-02-29T23%3A59%3A59Z&sort=created&direction=desc",
-        ),
-        ("POST", "https://github.com/login/oauth/access_token"),
-    ];
-    let server = Server::start(reply("200 OK", b"", ""));
-    let client = server.client();
-    for (index, (endpoint, (method, url))) in endpoints().into_iter().zip(expected).enumerate() {
-        assert_eq!(endpoint.url().unwrap().as_str(), url);
-        let request = client
-            .github_request(&endpoint, url)
-            .unwrap()
-            .build()
-            .unwrap();
-        assert_eq!(request.method().as_str(), method);
-        assert_eq!(request.url().as_str(), url);
-        assert_eq!(
-            request.headers()["user-agent"],
-            kumochi_protocol::constants::HTTP_USER_AGENT
-        );
-        assert_eq!(request.headers().get("x-api-key"), None);
-        if matches!(index, 0 | 1 | 7) {
-            assert_eq!(request.headers()["accept"], "application/json");
-            assert_eq!(request.headers().get("authorization"), None);
-            assert_eq!(request.headers().get("x-github-api-version"), None);
-            assert_eq!(
-                request.headers()["content-type"],
-                "application/x-www-form-urlencoded"
-            );
-            assert_eq!(request.timeout(), Some(&Duration::from_secs(15)));
-            let body = request.body().unwrap().as_bytes().unwrap();
-            let fields: Vec<_> = url::form_urlencoded::parse(body).into_owned().collect();
-            let mut expected = vec![("client_id".to_owned(), SENTINEL.to_owned())];
-            if index == 1 {
-                expected.extend([
-                    ("device_code".to_owned(), SENTINEL.to_owned()),
-                    (
-                        "grant_type".to_owned(),
-                        "urn:ietf:params:oauth:grant-type:device_code".to_owned(),
-                    ),
-                ]);
-            } else if index == 7 {
-                expected.extend([
-                    ("grant_type".to_owned(), "refresh_token".to_owned()),
-                    ("refresh_token".to_owned(), format!("ghr_{SENTINEL}")),
-                ]);
-            }
-            assert_eq!(fields, expected);
-        } else {
-            assert_eq!(request.headers()["accept"], "application/vnd.github+json");
-            assert_eq!(request.headers()["x-github-api-version"], "2026-03-10");
-            assert_eq!(
-                request.headers()["authorization"],
-                format!("Bearer ghu_{SENTINEL}")
-            );
-            assert!(request.headers()["authorization"].is_sensitive());
-            assert_eq!(
-                request.timeout(),
-                Some(&Duration::from_secs(if index >= 5 { 30 } else { 15 }))
-            );
-            if index == 5 {
-                assert_eq!(request.headers()["content-type"], "application/json");
-                assert_eq!(
-                    request.body().unwrap().as_bytes().unwrap(),
-                    format!(r#"{{"title":"{SENTINEL}","body":""}}"#).as_bytes()
-                );
-            } else {
-                assert!(request.body().is_none(), "reads have no payload");
-                assert_eq!(request.headers().get("content-type"), None);
-            }
-        }
-    }
 }

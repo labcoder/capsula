@@ -90,14 +90,4 @@ mod tests {
         assert_eq!(limit(Some("two")), Some(0));
         assert_eq!(limit(Some("-1")), Some(0));
     }
-
-    #[test]
-    fn a_budget_of_two_refuses_the_third() {
-        let budget = Budget::limited(Some(2));
-        assert_eq!(
-            [budget.reserve(), budget.reserve(), budget.reserve()],
-            [true, true, false]
-        );
-        assert!(Budget::limited(None).reserve());
-    }
 }

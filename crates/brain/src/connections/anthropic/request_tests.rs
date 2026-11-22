@@ -21,29 +21,6 @@ fn refused(value: &Value) {
 }
 
 #[test]
-fn preserves_structured_input_and_all_supported_efforts() {
-    let mut value = request();
-    value["tools"] = json!([{"name":"example","input_schema":{"type":"object","properties":{
-        "cache_control":{"type":"string"}}}}]);
-    value["messages"][0]["content"] = json!([{"type":"tool_use","id":"one","name":"example",
-        "input":{"cache_control":{"type":"persistent"},"content":[{"cache_control":false}]}}]);
-    let structured = value["messages"][0]["content"].clone();
-    value["messages"] = json!([
-        {"role":"user","content":"first"},
-        {"role":"assistant","content":structured},
-        {"role":"user","content":"next"}
-    ]);
-    for effort in ["low", "medium", "high", "xhigh", "max"] {
-        value["output_config"] = json!({"effort":effort});
-        let body = MessagesBody::new(&value).expect("supported envelope");
-        assert_eq!(
-            serde_json::from_slice::<Value>(body.bytes()).unwrap(),
-            value
-        );
-    }
-}
-
-#[test]
 fn rejects_missing_mistyped_and_unsupported_fields() {
     for key in ["model", "messages", "stream", "max_tokens"] {
         let mut value = request();
@@ -180,34 +157,6 @@ fn cache_belongs_only_to_the_last_stable_prefix_block() {
 }
 
 #[test]
-fn serialized_request_bound_is_inclusive_and_debug_is_redacted() {
-    let mut value = request();
-    value["messages"][0]["content"] = json!("");
-    let overhead = serde_json::to_vec(&value).unwrap().len();
-    value["messages"][0]["content"] = json!("x".repeat(MAX_REQUEST_BYTES - overhead));
-    let body = MessagesBody::new(&value).expect("exact bound");
-    assert_eq!(body.bytes().len(), 16 * 1024 * 1024);
-    value["messages"][0]["content"] = json!("x".repeat(MAX_REQUEST_BYTES - overhead + 1));
-    refused(&value);
-    value["messages"][0]["content"] = json!("PRIVATE_REQUEST_MARKER");
-    let body = MessagesBody::new(&value).expect("small envelope");
-    let formatted = format!("{body:?}");
-    assert_eq!(
-        formatted,
-        format!("MessagesBody {{ bytes: {} }}", body.bytes().len())
-    );
-    assert!(
-        !formatted.contains("PRIVATE_REQUEST_MARKER"),
-        "request text is redacted"
-    );
-    let byte_marker = format!("{:?}", b"PRIVATE_REQUEST_MARKER");
-    assert!(
-        !formatted.contains(byte_marker.trim_matches(['[', ']'])),
-        "request bytes are redacted"
-    );
-}
-
-#[test]
 fn json_is_checked_then_sent_as_written_up_to_the_bound() {
     let written = br#"{"model":"claude-sonnet-5-5","stream":true,"max_tokens":2048,"system":[{"type":"text","text":"s","cache_control":{"type":"ephemeral"}}],"messages":[{"role":"user","content":"hi"},{"role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"draw","input":{"n": 123456789012345678901234567890, "d": 0.10000000000000000000000001}}]},{"role":"user","content":"next"}]}"#;
     let mut padded = written.to_vec();
@@ -219,6 +168,31 @@ fn json_is_checked_then_sent_as_written_up_to_the_bound() {
         MessagesBody::from_json(Zeroizing::new(padded)),
         Err(Failure::Request)
     ));
+    let mut value = request();
+    let marker = "PRIVATE_REQUEST_MARKER";
+    value["tools"] = json!([{"name":"example","input_schema":{"type":"object","properties":{
+        "cache_control":{"type":"string"}}}}]);
+    value["messages"] = json!([
+        {"role":"user","content":marker},
+        {"role":"assistant","content":[{"type":"tool_use","id":"one","name":"example",
+            "input":{"cache_control":{"type":"persistent"},"content":[{"cache_control":false}]}}]},
+        {"role":"user","content":"next"}
+    ]);
+    for effort in ["low", "medium", "high", "xhigh", "max"] {
+        value["output_config"] = json!({"effort":effort});
+        let written = serde_json::to_vec(&value).expect("fixture JSON");
+        let body =
+            MessagesBody::from_json(Zeroizing::new(written.clone())).expect("supported envelope");
+        assert_eq!(body.bytes(), written.as_slice());
+        let formatted = format!("{body:?}");
+        assert!(!formatted.contains(marker), "request text is redacted");
+        let bytes = format!("{:?}", marker.as_bytes());
+        assert!(
+            !formatted.contains(bytes.trim_matches(['[', ']'])),
+            "request bytes are redacted"
+        );
+    }
+
     let uncapped = String::from_utf8_lossy(written).replace("2048", "2049");
     for refused in [uncapped.as_bytes(), &written[..written.len() - 1]] {
         assert!(matches!(

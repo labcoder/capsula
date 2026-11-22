@@ -36,7 +36,6 @@ pub(super) enum CallbackError {
 #[derive(Debug, PartialEq, Eq)]
 pub(super) enum Event {
     Reading,
-    Rejected,
 }
 
 impl SignIn {
@@ -88,8 +87,6 @@ impl SignIn {
                 Err(CallbackError::Terminal(error)) => return Err(error),
                 Err(CallbackError::Rejected) => {}
             }
-            #[cfg(test)]
-            self.event(Event::Rejected);
         }
     }
 

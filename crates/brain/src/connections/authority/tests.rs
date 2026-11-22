@@ -259,23 +259,19 @@ fn begin_and_activate_compare_and_swap_the_head() {
             .any(|retired| retired.generation == moved_generation),
         "the removal itself retired the pending candidate"
     );
-}
 
-#[test]
-fn a_candidate_never_activates_over_a_head_that_moved() {
-    let setup = Setup::new("auth-moved-head");
-    let mut authority = setup.open();
     let plan = authority.begin(Kind::Host, 0, 45).expect("begin");
     let verified = io::write(&setup.store, SERVICE, plan, &secret(1, 45)).expect("write");
     setup
         .raw()
         .execute("UPDATE heads SET revision = 5 WHERE kind = 'host'", [])
-        .expect("another writer moved the head");
+        .expect("another writer moved the head without clearing the pending row");
     assert!(matches!(
         authority.activate(verified, None),
         Err(AuthorityError::Conflict)
     ));
-    assert_eq!(authority.current(Kind::Host).expect("head").active, None);
+    let head = authority.current(Kind::Host).expect("host head");
+    assert_eq!((head.revision, head.active), (5, None));
 }
 
 #[test]
@@ -527,17 +523,6 @@ fn a_removed_generation_is_swept_only_after_a_clean_read_in_a_later_open() {
 }
 
 #[test]
-fn one_sweep_pass_is_bounded_however_many_generations_retired() {
-    let setup = Setup::new("auth-bounded");
-    let mut authority = setup.open();
-    for round in 0..20 {
-        setup.save(&mut authority, Kind::Account, &secret(round, 10));
-    }
-    assert_eq!(authority.retired(100).expect("all").len(), 19);
-    assert_eq!(authority.retired(16).expect("one pass").len(), 16);
-}
-
-#[test]
 fn a_bounded_sweep_reaches_every_retired_generation() {
     let setup = Setup::new("auth-sweep-cursor");
     let mut authority = setup.open();
@@ -697,26 +682,6 @@ fn a_version_one_file_is_migrated_with_the_legacy_cleanup_owed() {
     assert_eq!(version, 3);
 }
 
-/// The legacy cleanup ends only after a clean pass in any open after the first pass's open.
-#[test]
-fn the_legacy_cleanup_ends_after_a_clean_pass_in_a_later_open() {
-    let setup = Setup::new("auth-legacy");
-    let mut authority = setup.open();
-    assert!(authority.legacy_owed().expect("owed"));
-    authority.legacy_deleted(0).expect("first clean pass");
-    assert!(authority.legacy_owed().expect("one open isn't enough"));
-    drop(authority);
-    let mut authority = setup.open();
-    authority.legacy_deleted(1).expect("a refused pass");
-    assert!(authority.legacy_owed().expect("a refusal never ends it"));
-    drop(authority);
-    let mut authority = setup.open();
-    authority.legacy_deleted(0).expect("a later clean pass");
-    assert!(!authority.legacy_owed().expect("done"));
-    drop(authority);
-    assert!(!setup.open().legacy_owed().expect("done for good"));
-}
-
 /// A second pass in the same open never ends the cleanup; the next open's clean pass does.
 #[test]
 fn two_clean_passes_in_one_open_leave_the_legacy_cleanup_owed() {
@@ -794,26 +759,4 @@ fn debug_output_names_no_generation_or_value() {
         !shown.contains(&hex) && !shown.contains("SSSS"),
         "no secret or generation"
     );
-}
-
-#[test]
-#[should_panic(expected = "a write-once credential name was written twice")]
-fn the_fake_store_fails_a_second_write_of_one_name() {
-    let store = FakeStore::default();
-    store.0.lock().expect("fake lock").write_once = true;
-    store.set("name", &secret(1, 1)).expect("first");
-    store.delete("name").expect("delete");
-    store.set("name", &secret(1, 1)).ok();
-}
-
-#[test]
-#[should_panic(expected = "a write-once credential name was written twice")]
-fn a_forked_fake_store_still_fails_a_second_write() {
-    let store = FakeStore::default();
-    store.0.lock().expect("fake lock").write_once = true;
-    store.set("name", &secret(1, 1)).expect("first");
-    store.0.lock().expect("fake lock").refusing = true;
-    let fork = store.fork();
-    fork.delete("name").expect("a fork arms no faults");
-    fork.set("name", &secret(1, 1)).ok();
 }

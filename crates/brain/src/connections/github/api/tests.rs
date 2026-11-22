@@ -267,16 +267,66 @@ async fn local_input_refusals_never_dispatch() {
 async fn every_parser_enforces_its_entry_byte_cap_with_scripted_http() {
     for call in CALLS {
         let cap = cap(call);
-        for length in [cap, cap + 1] {
-            let mut body = serde_json::to_vec(&valid(call)).unwrap();
-            body.resize(length, b' ');
-            let reply = invoke(&Script::bytes(body), call).await;
-            if length == cap {
-                assert_eq!(reply, Ok(()), "{call:?}");
-            } else {
-                assert_eq!(reply, Err(ApiError::Response), "{call:?}");
+        let mut body = serde_json::to_vec(&valid(call)).unwrap();
+        body.resize(cap, b' ');
+        let at_cap = Script::bytes(body.clone());
+        match call {
+            Call::Device => {
+                let reply = request_device_code(&at_cap, "client-fake").await.unwrap();
+                assert_eq!(reply.code.expose().as_str(), "device-fake");
+                assert_eq!(reply.user_code.as_str(), "ABCD-EFGH");
+                assert_eq!((reply.expires_in_s, reply.interval_s), (900, 5));
+            }
+            Call::Token | Call::Refresh => {
+                let (reply, refresh) = if matches!(call, Call::Token) {
+                    let TokenReply::Token(reply) =
+                        poll_device_token(&at_cap, "client-fake", &code())
+                            .await
+                            .unwrap()
+                    else {
+                        panic!("token reply");
+                    };
+                    (reply, "ghr_fake")
+                } else {
+                    (
+                        refresh_user_token(&at_cap, "client-fake", &refresh())
+                            .await
+                            .unwrap(),
+                        "ghr_rotated",
+                    )
+                };
+                assert_eq!(reply.token.expose().as_str(), "ghu_fake");
+                assert_eq!(reply.refresh.expose().as_str(), refresh);
+                assert_eq!(
+                    reply.refresh_expires_at_s.checked_sub(reply.expires_at_s),
+                    Some(15_868_800)
+                );
+            }
+            Call::User => {
+                let reply = user(&at_cap, &token()).await.unwrap();
+                assert_eq!((reply.id, reply.login.as_str()), (1, "owner"));
+            }
+            Call::Installations => {
+                let reply = installations(&at_cap, &token(), Page::new(2).unwrap())
+                    .await
+                    .unwrap();
+                assert_eq!(reply.total_count, 1);
+                assert_eq!(reply.installations, [42]);
+            }
+            Call::Repositories => {
+                let reply = repositories(&at_cap, &token(), 42, Page::new(2).unwrap())
+                    .await
+                    .unwrap();
+                assert_eq!(reply.total_count, 1);
+                assert_eq!(reply.repositories, [RepoName::new("owner/repo").unwrap()]);
             }
         }
+        body.push(b' ');
+        assert_eq!(
+            invoke(&Script::bytes(body), call).await,
+            Err(ApiError::Response),
+            "{call:?}"
+        );
     }
 }
 
@@ -772,24 +822,13 @@ async fn expiry_uses_request_start_rounded_down_not_completion_or_provider_clock
 }
 
 #[test]
-fn expiry_addition_refuses_each_overflow_and_accepts_the_last_representable_pair() {
-    for start in [u64::MAX - 15_897_600 + 1, u64::MAX - 28_800 + 1, u64::MAX] {
-        let raw: TokenWire = serde_json::from_value(bearer()).unwrap();
-        assert_eq!(raw.reply(start).unwrap_err(), ApiError::Response);
-    }
-    let raw: TokenWire = serde_json::from_value(bearer()).unwrap();
-    let TokenReply::Token(tokens) = raw.reply(u64::MAX - 15_897_600).unwrap() else {
-        panic!("last expiring pair")
-    };
-    assert_eq!(tokens.expires_at_s, u64::MAX - 15_868_800);
-    assert_eq!(tokens.refresh_expires_at_s, u64::MAX);
-}
-
-#[test]
 fn each_returned_upper_bound_checks_its_own_expiry_addition() {
     for (access, refresh, start) in [
         (86_400, 1, u64::MAX - 86_400 + 1),
         (1, 31_622_400, u64::MAX - 31_622_400 + 1),
+        (28_800, 15_897_600, u64::MAX - 15_897_600 + 1),
+        (28_800, 15_897_600, u64::MAX - 28_800 + 1),
+        (28_800, 15_897_600, u64::MAX),
     ] {
         let mut value = bearer();
         value["expires_in"] = json!(access);
@@ -797,15 +836,32 @@ fn each_returned_upper_bound_checks_its_own_expiry_addition() {
         let raw: TokenWire = serde_json::from_value(value).unwrap();
         assert_eq!(raw.reply(start).unwrap_err(), ApiError::Response);
     }
-    let mut value = bearer();
-    value["expires_in"] = json!(86_400);
-    value["refresh_token_expires_in"] = json!(31_622_400);
-    let raw: TokenWire = serde_json::from_value(value).unwrap();
-    let TokenReply::Token(tokens) = raw.reply(u64::MAX - 31_622_400).unwrap() else {
-        panic!("last bounded expiring pair");
-    };
-    assert_eq!(tokens.expires_at_s, u64::MAX - 31_536_000);
-    assert_eq!(tokens.refresh_expires_at_s, u64::MAX);
+    for (access, refresh, start, access_end) in [
+        (
+            86_400,
+            31_622_400,
+            u64::MAX - 31_622_400,
+            u64::MAX - 31_536_000,
+        ),
+        (
+            28_800,
+            15_897_600,
+            u64::MAX - 15_897_600,
+            u64::MAX - 15_868_800,
+        ),
+    ] {
+        let mut value = bearer();
+        value["expires_in"] = json!(access);
+        value["refresh_token_expires_in"] = json!(refresh);
+        let raw: TokenWire = serde_json::from_value(value).unwrap();
+        let TokenReply::Token(tokens) = raw.reply(start).unwrap() else {
+            panic!("last bounded expiring pair");
+        };
+        assert_eq!(
+            (tokens.expires_at_s, tokens.refresh_expires_at_s),
+            (access_end, u64::MAX)
+        );
+    }
 }
 
 #[tokio::test]
@@ -1110,67 +1166,6 @@ async fn repository_rows_require_checked_names_and_reject_duplicate_fields() {
             .unwrap_err(),
         ApiError::Response
     );
-}
-
-#[test]
-fn definite_classification_keeps_transport_uncertainty_and_the_full_status_table() {
-    for kind in [
-        HttpError::Connect,
-        HttpError::TrustStoreUnavailable,
-        HttpError::Configuration,
-        HttpError::Endpoint,
-        HttpError::Request,
-    ] {
-        assert_eq!(
-            ApiError::Http(kind).definite_reason(),
-            Some(FailReason::Network)
-        );
-    }
-    for kind in [
-        HttpError::Timeout,
-        HttpError::Transport,
-        HttpError::Redirect,
-        HttpError::BodyTooLarge,
-    ] {
-        assert_eq!(ApiError::Http(kind).definite_reason(), None);
-    }
-    for (status, expected) in [
-        (400, FailReason::Rejected),
-        (401, FailReason::NotConnected),
-        (402, FailReason::Rejected),
-        (403, FailReason::PermissionDenied),
-        (404, FailReason::NotFound),
-        (405, FailReason::Rejected),
-        (409, FailReason::Rejected),
-        (410, FailReason::NotFound),
-        (418, FailReason::Rejected),
-        (422, FailReason::InvalidIssue),
-        (429, FailReason::RateLimited),
-        (451, FailReason::Rejected),
-        (499, FailReason::Rejected),
-    ] {
-        assert_eq!(
-            ApiError::Refused {
-                status,
-                meta: ResponseMeta::default()
-            }
-            .definite_reason(),
-            Some(expected)
-        );
-    }
-    for status in [
-        0, 199, 200, 201, 202, 204, 206, 300, 301, 302, 307, 308, 399, 500, 503, 599, 600,
-    ] {
-        assert_eq!(
-            ApiError::Refused {
-                status,
-                meta: ResponseMeta::default()
-            }
-            .definite_reason(),
-            None
-        );
-    }
-    assert_eq!(ApiError::Response.definite_reason(), None);
 }
 
 #[tokio::test]
@@ -1508,15 +1503,37 @@ async fn device_errors_accept_only_200_or_400_and_tokens_require_200() {
                 ApiError::Response
             );
         }
+        for body in [
+            br#"{"error":"slow_down","interval":5,"interval":10}"#.as_slice(),
+            br#"{"error":"authorization_pending","interval":0}"#.as_slice(),
+        ] {
+            let http = Script::new(Ok(response(status, body.to_vec(), ResponseMeta::default())));
+            assert_eq!(
+                poll_device_token(&http, "client", &code())
+                    .await
+                    .unwrap_err(),
+                ApiError::Response
+            );
+        }
     }
-    let body = serde_json::to_vec(&bearer()).unwrap();
-    let http = Script::new(Ok(response(400, body, ResponseMeta::default())));
-    assert_eq!(
-        poll_device_token(&http, "client", &code())
-            .await
-            .unwrap_err(),
-        ApiError::Response
-    );
+    let mut invalid_bearer = bearer();
+    invalid_bearer["interval"] = json!(901);
+    for (status, body) in [
+        (200, serde_json::to_vec(&invalid_bearer).unwrap()),
+        (400, serde_json::to_vec(&bearer()).unwrap()),
+        (
+            400,
+            br#"{"error":"slow_down","refresh_token":"ghr_fake"}"#.to_vec(),
+        ),
+    ] {
+        let http = Script::new(Ok(response(status, body, ResponseMeta::default())));
+        assert_eq!(
+            poll_device_token(&http, "client", &code())
+                .await
+                .unwrap_err(),
+            ApiError::Response
+        );
+    }
     for status in [201, 401, 403, 429, 500] {
         let http = Script::new(Ok(response(
             status,
@@ -1533,48 +1550,4 @@ async fn device_errors_accept_only_200_or_400_and_tokens_require_200() {
             }
         );
     }
-}
-
-#[tokio::test]
-async fn interval_duplicates_and_bad_intervals_on_other_token_shapes_fail_closed() {
-    for status in [200, 400] {
-        let body = br#"{"error":"slow_down","interval":5,"interval":10}"#.to_vec();
-        let http = Script::new(Ok(response(status, body, ResponseMeta::default())));
-        assert_eq!(
-            poll_device_token(&http, "client", &code())
-                .await
-                .unwrap_err(),
-            ApiError::Response
-        );
-        let http = Script::new(Ok(response(
-            status,
-            br#"{"error":"authorization_pending","interval":0}"#.to_vec(),
-            ResponseMeta::default(),
-        )));
-        assert_eq!(
-            poll_device_token(&http, "client", &code())
-                .await
-                .unwrap_err(),
-            ApiError::Response
-        );
-    }
-    let mut body = bearer();
-    body["interval"] = json!(901);
-    assert_eq!(
-        poll_device_token(&Script::json(&body), "client", &code())
-            .await
-            .unwrap_err(),
-        ApiError::Response
-    );
-    let http = Script::new(Ok(response(
-        400,
-        br#"{"error":"slow_down","refresh_token":"ghr_fake"}"#.to_vec(),
-        ResponseMeta::default(),
-    )));
-    assert_eq!(
-        poll_device_token(&http, "client", &code())
-            .await
-            .unwrap_err(),
-        ApiError::Response
-    );
 }

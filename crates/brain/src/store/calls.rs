@@ -115,13 +115,6 @@ impl Store {
                     account.as_ref(),
                 )?;
             }
-            #[cfg(test)]
-            LocalWrite::Title(title) => {
-                tx.execute(
-                    "UPDATE threads SET title = ?2 WHERE id = ?1",
-                    params![thread, title],
-                )?;
-            }
         }
         let recorded = tx.execute(
             "INSERT INTO tool_calls (run, thread, route, call, tool, hash, result, created_ms)
