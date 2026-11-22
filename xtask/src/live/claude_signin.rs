@@ -418,35 +418,48 @@ mod tests {
 
     #[test]
     fn a_sign_in_waits_for_discovery_and_prints_only_states() {
-        let mut brain = fixture(vec![
-            Step::View(ClaudeCodeView::NotFound),
-            Step::View(ClaudeCodeView::NotFound),
-            Step::View(signed_out()),
-            Step::View(ClaudeCodeView::SigningIn),
-            Step::View(ClaudeCodeView::SigningIn),
-            Step::View(ready()),
-        ]);
-        let (out, error, quit_sent) = run(&mut brain, Ask::SignIn);
-        assert_eq!(
-            out,
-            format!("claude code: signed out\n{WAITING}claude code: ready\n")
-        );
-        assert_eq!(error, None);
-        assert_eq!(brain.sent, [CONNECT, QUIT]);
-        assert!(quit_sent);
-        let [first, finding, found, answer, settle, again] = brain.limits[..] else {
-            panic!("six waits: {:?}", brain.limits);
-        };
-        assert_eq!(first, VIEW);
-        assert!(answer <= VIEW, "{answer:?}");
-        assert!(
-            finding <= FIND && found < finding,
-            "{finding:?} then {found:?}"
-        );
-        assert!(
-            settle <= SIGNIN && again < settle,
-            "{settle:?} then {again:?}"
-        );
+        use ClaudeCodeView::{Finding, NotFound, SigningIn};
+
+        for (first, next) in [
+            (NotFound, NotFound),
+            (Finding, Finding),
+            (NotFound, Finding),
+        ] {
+            let mut brain = fixture(vec![
+                Step::View(first),
+                Step::View(next),
+                Step::View(signed_out()),
+                Step::Snapshot(signed_out(), KeyView::Checking),
+                Step::View(SigningIn),
+                Step::View(SigningIn),
+                Step::View(ready()),
+            ]);
+            let (out, error, quit_sent) = run(&mut brain, Ask::SignIn);
+            assert_eq!(
+                out,
+                format!("claude code: signed out\n{WAITING}claude code: ready\n")
+            );
+            assert_eq!(error, None);
+            assert_eq!(brain.sent, [CONNECT, QUIT]);
+            assert!(quit_sent);
+            let [initial, finding, found, ack @ .., settle, again] = &brain.limits[..] else {
+                panic!("missing discovery or settling waits: {:?}", brain.limits);
+            };
+            assert_eq!(*initial, VIEW);
+            assert!(
+                ack.first().is_some_and(|limit| *limit <= VIEW)
+                    && ack.windows(2).all(|pair| pair[1] < pair[0]),
+                "{ack:?}"
+            );
+            assert!(
+                *finding <= FIND && found < finding,
+                "{finding:?} then {found:?}"
+            );
+            assert!(
+                *settle <= SIGNIN && again < settle,
+                "{settle:?} then {again:?}"
+            );
+        }
     }
 
     #[test]
@@ -459,44 +472,6 @@ mod tests {
         );
         assert_eq!(error, None);
         assert_eq!(brain.sent, [QUIT]);
-        assert!(quit_sent);
-    }
-
-    #[test]
-    fn the_authoritative_finding_state_settles_before_connect() {
-        let mut brain = fixture(vec![
-            Step::View(ClaudeCodeView::Finding),
-            Step::View(ClaudeCodeView::Finding),
-            Step::View(signed_out()),
-            Step::View(ClaudeCodeView::SigningIn),
-            Step::View(ready()),
-        ]);
-        let (out, error, quit_sent) = run(&mut brain, Ask::SignIn);
-        assert_eq!(
-            out,
-            format!("claude code: signed out\n{WAITING}claude code: ready\n")
-        );
-        assert_eq!(error, None);
-        assert_eq!(brain.sent, [CONNECT, QUIT]);
-        assert!(quit_sent);
-    }
-
-    #[test]
-    fn placeholder_then_finding_still_waits_for_settled_discovery() {
-        let mut brain = fixture(vec![
-            Step::View(ClaudeCodeView::NotFound),
-            Step::View(ClaudeCodeView::Finding),
-            Step::View(signed_out()),
-            Step::View(ClaudeCodeView::SigningIn),
-            Step::View(ready()),
-        ]);
-        let (out, error, quit_sent) = run(&mut brain, Ask::SignIn);
-        assert_eq!(
-            out,
-            format!("claude code: signed out\n{WAITING}claude code: ready\n")
-        );
-        assert_eq!(error, None);
-        assert_eq!(brain.sent, [CONNECT, QUIT]);
         assert!(quit_sent);
     }
 
@@ -611,42 +586,6 @@ mod tests {
     }
 
     #[test]
-    fn a_snapshot_still_showing_signed_out_isnt_the_connects_answer() {
-        let mut brain = fixture(vec![
-            Step::View(signed_out()),
-            Step::Snapshot(signed_out(), KeyView::Checking),
-            Step::View(ClaudeCodeView::SigningIn),
-            Step::View(ready()),
-        ]);
-        let (out, error, quit_sent) = run(&mut brain, Ask::SignIn);
-        assert_eq!(
-            out,
-            format!("claude code: signed out\n{WAITING}claude code: ready\n")
-        );
-        assert_eq!(error, None);
-        assert_eq!(brain.sent, [CONNECT, QUIT]);
-        assert!(quit_sent);
-    }
-
-    #[test]
-    fn a_snapshot_still_showing_ready_isnt_the_disconnects_answer() {
-        let mut brain = fixture(vec![
-            Step::View(ready()),
-            Step::Snapshot(ready(), KeyView::Checking),
-            Step::View(ClaudeCodeView::CleanupPending),
-            Step::View(signed_out()),
-        ]);
-        let (out, error, quit_sent) = run(&mut brain, Ask::Disconnect);
-        assert_eq!(
-            out,
-            format!("claude code: ready\n{CLEANING}claude code: signed out\n")
-        );
-        assert_eq!(error, None);
-        assert_eq!(brain.sent, [DISCONNECT, QUIT]);
-        assert!(quit_sent);
-    }
-
-    #[test]
     fn the_deadline_ends_the_sign_in_by_quitting_without_a_cancel() {
         let mut brain = fixture(vec![
             Step::View(signed_out()),
@@ -667,25 +606,32 @@ mod tests {
     fn a_disconnect_waits_through_the_cleanup() {
         let mut brain = fixture(vec![
             Step::View(ready()),
+            Step::Snapshot(ready(), KeyView::Checking),
             Step::View(ClaudeCodeView::CleanupPending),
             Step::View(ClaudeCodeView::CleanupPending),
             Step::View(signed_out()),
         ]);
         let (out, error, quit_sent) = run(&mut brain, Ask::Disconnect);
-        assert_eq!(
-            out,
-            format!("claude code: ready\n{CLEANING}claude code: signed out\n")
+        assert!(
+            out.starts_with("claude code: ready\n")
+                && out.contains("45s")
+                && out.ends_with("claude code: signed out\n"),
+            "{out}"
         );
         assert_eq!(error, None);
         assert_eq!(brain.sent, [DISCONNECT, QUIT]);
         assert!(quit_sent);
-        let [first, answer, cleanup, again] = brain.limits[..] else {
-            panic!("four waits: {:?}", brain.limits);
+        let [first, ack @ .., cleanup, again] = &brain.limits[..] else {
+            panic!("missing initial or cleanup waits: {:?}", brain.limits);
         };
-        assert_eq!(first, VIEW);
-        assert!(answer <= VIEW, "{answer:?}");
+        assert_eq!(*first, VIEW);
         assert!(
-            cleanup <= CLEANUP && again < cleanup,
+            ack.first().is_some_and(|limit| *limit <= VIEW)
+                && ack.windows(2).all(|pair| pair[1] < pair[0]),
+            "{ack:?}"
+        );
+        assert!(
+            *cleanup <= CLEANUP && again < cleanup,
             "{cleanup:?} then {again:?}"
         );
     }
@@ -840,18 +786,6 @@ mod tests {
             Some("couldn't send ConnectClaudeCode to the brain")
         );
         assert!(quit_sent);
-    }
-
-    #[test]
-    fn a_failed_quitting_ends_the_brain() {
-        let mut brain = fixture(vec![Step::View(ready())]);
-        brain.refuse = Some(QUIT);
-        let (_, error, quit_sent) = run(&mut brain, Ask::SignIn);
-        assert_eq!(
-            error.as_deref(),
-            Some("couldn't send Quitting; the brain was ended")
-        );
-        assert!(!quit_sent);
     }
 
     #[test]

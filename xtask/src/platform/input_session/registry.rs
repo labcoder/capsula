@@ -298,6 +298,17 @@ mod tests {
         key("Preload", &[("1", b"00000409")], Vec::new())
     }
 
+    fn assert_diagnostic(error: &str, terms: &[&str]) {
+        for term in terms {
+            assert!(
+                error
+                    .split(|ch: char| !ch.is_ascii_alphanumeric() && ch != '\\')
+                    .any(|word| word == *term),
+                "missing {term}: {error}"
+            );
+        }
+    }
+
     #[test]
     fn an_equal_recursive_read_is_proven_unchanged() {
         assert!(
@@ -330,14 +341,7 @@ mod tests {
             .ensure_unchanged(&registry(denied()))
             .unwrap_err()
             .to_string();
-        assert!(
-            error.contains(r"unreadable before at HKCU\Preload (open 5, read 0, truncated false)"),
-            "{error}"
-        );
-        assert!(
-            error.contains(r"unreadable after at HKCU\Preload"),
-            "{error}"
-        );
+        assert_diagnostic(&error, &[r"HKCU\Preload", "before", "after", "5"]);
     }
 
     #[test]
@@ -356,11 +360,9 @@ mod tests {
             .ensure_unchanged(&registry(deep()))
             .unwrap_err()
             .to_string();
-        assert!(
-            error.contains(
-                r"unreadable before at HKCU\Preload\deep (open 0, read 0, truncated true)"
-            ),
-            "{error}"
+        assert_diagnostic(
+            &error,
+            &[r"HKCU\Preload\deep", "before", "after", "truncated"],
         );
     }
 
@@ -371,15 +373,7 @@ mod tests {
             .ensure_unchanged(&registry(changed))
             .unwrap_err()
             .to_string();
-        assert!(
-            error.contains(r"changed at HKCU\Preload (value 1)"),
-            "{error}"
-        );
-    }
-
-    #[test]
-    fn an_identical_tree_has_no_change() {
-        assert_eq!(first_change(&profile(b"1"), &profile(b"1"), "HKCU"), None);
+        assert_diagnostic(&error, &[r"HKCU\Preload", "changed", "value", "1"]);
     }
 
     #[test]

@@ -377,18 +377,13 @@ mod tests {
     }
 
     #[test]
-    fn one_calm_tagged_click_confirms_the_activation() {
-        let activation = upto(4);
-        assert_eq!(activation.stage, Stage::Confirmed);
-    }
-
-    #[test]
     fn prepare_admits_from_exactly_ten_minutes_away_across_the_tick_wrap() {
-        for (last_input, now, stage) in [
-            (1_000, 601_000, Stage::Prepared),
-            (1_000, 600_999, Stage::Aborted),
-            (u32::MAX - 9, 599_990, Stage::Prepared),
-            (u32::MAX - 9, 599_989, Stage::Aborted),
+        for (last_input, now, admitted) in [
+            (1_000, 601_000, true),
+            (1_000, 600_999, false),
+            (u32::MAX - 9, 599_990, true),
+            (u32::MAX - 9, 599_989, false),
+            (5, 5, false),
         ] {
             let mut activation = Activation::new(ROOT, EDIT);
             let idle = Idle {
@@ -396,12 +391,8 @@ mod tests {
                 now,
                 ..AWAY
             };
-            assert_eq!(
-                activation.prepare(idle, AT).is_ok(),
-                stage == Stage::Prepared,
-                "{now}"
-            );
-            assert_eq!(activation.stage, stage, "{now}");
+            assert_eq!(activation.prepare(idle, AT).is_ok(), admitted, "{now}");
+            assert_eq!(activation.may_move(CALM).is_ok(), admitted, "{now}: move");
         }
     }
 
@@ -434,13 +425,19 @@ mod tests {
         assert!(activation.prepare(AWAY, AT).is_err(), "away now, but used");
         assert!(activation.may_move(CALM).is_err(), "nothing to move for");
 
-        let mut confirmed = upto(4);
+        let confirmed = || {
+            let mut activation = upto(3);
+            activation
+                .confirm(CALM, RECEIVED, ROOT)
+                .expect("one calm tagged click confirms");
+            activation
+        };
         assert!(
-            confirmed.prepare(AWAY, AT).is_err(),
+            confirmed().prepare(AWAY, AT).is_err(),
             "a confirmed one is used"
         );
         assert!(
-            confirmed.confirm(CALM, RECEIVED, ROOT).is_err(),
+            confirmed().confirm(CALM, RECEIVED, ROOT).is_err(),
             "confirmed once"
         );
     }
@@ -588,22 +585,8 @@ mod tests {
         assert_eq!(z_order(root, 0, [root]), "no_foreground");
         assert_eq!(z_order(root, front, [0x10, 0x20]), "unread");
         assert_eq!(z_order(root, front, []), "unread");
-    }
-
-    #[test]
-    fn z_order_with_only_the_root_is_unread() {
-        assert_eq!(
-            z_order(ROOT.window, FOREIGN.window, [0x10, ROOT.window, 0x20]),
-            "unread"
-        );
-    }
-
-    #[test]
-    fn z_order_with_only_the_foreground_is_unread() {
-        assert_eq!(
-            z_order(ROOT.window, FOREIGN.window, [FOREIGN.window, 0x10]),
-            "unread"
-        );
+        assert_eq!(z_order(root, front, [0x10, root, 0x20]), "unread");
+        assert_eq!(z_order(root, front, [front, 0x10]), "unread");
     }
 
     #[test]
