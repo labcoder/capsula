@@ -185,8 +185,8 @@ impl Config {
         })
     }
 
-    pub(crate) fn queued_hold_preferences_off(&self) -> bool {
-        if self.view.talk_back || self.view.show_screen {
+    pub(crate) fn queued_hold_preferences_known(&self) -> bool {
+        if self.view.show_screen {
             return false;
         }
         let Ok(table) = &self.table else {

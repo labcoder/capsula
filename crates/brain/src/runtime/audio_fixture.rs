@@ -176,6 +176,13 @@ impl AudioProbe {
         }
     }
 
+    pub(crate) fn speaking_hold() -> Self {
+        Self {
+            hold: true,
+            ..Self::default()
+        }
+    }
+
     /// Number of synthetic utterances the offline recognizer actually decoded.
     #[must_use]
     pub fn decoded(&self) -> u32 {
@@ -660,7 +667,10 @@ pub(crate) async fn brain(dir: &Path, script: &str, tone_chunks: usize) -> Brain
             "default_model = {{ model = \"{replay}\", effort = \"Low\", connection = \"ChatGpt\" }}\n[voice]\ntalk_back = true\n"
         )
     } else if probe.as_ref().is_some_and(|probe| probe.hold) {
-        "[voice]\ntalk_back = false\nshow_screen = false\nhold_to_talk = true\n".into()
+        format!(
+            "[voice]\ntalk_back = {}\nshow_screen = false\nhold_to_talk = true\n",
+            !text_only
+        )
     } else if text_only {
         "[voice]\ntalk_back = false\n".into()
     } else {
@@ -710,10 +720,10 @@ pub(crate) async fn brain(dir: &Path, script: &str, tone_chunks: usize) -> Brain
     };
     let mut brain = Brain::new(store, main, high, scenes, engine, config, accounts)
         .expect("start the fixture Brain");
+    if let Some(probe) = probe.filter(|probe| probe.hold) {
+        attach_hold_input(&mut brain, dir, probe).await;
+    }
     if text_only {
-        if let Some(probe) = probe.filter(|probe| probe.hold) {
-            attach_hold_input(&mut brain, dir, probe).await;
-        }
         return brain;
     }
     let (reports, mut loaded) = Reports::new();

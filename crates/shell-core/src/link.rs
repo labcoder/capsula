@@ -2071,7 +2071,7 @@ fn watch(
             }
             Ok(Some(ControlToShell::Settings { view, answer })) => {
                 if queued.is_some() {
-                    if view.talk_back || view.show_screen {
+                    if view.show_screen {
                         let _revoked = shared.revoke_input();
                     }
                     if !shared.output.register_queued(generation, &view, out) {
