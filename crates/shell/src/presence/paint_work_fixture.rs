@@ -440,6 +440,20 @@ fn small_primitives(candidate: usize) -> Case {
     mixed
 }
 
+#[test]
+fn the_small_primitive_control_spends_the_three_budgets_independently() {
+    let mixed = small_primitives(512);
+    assert_eq!(mixed.primitives.len(), 1 + 170 + 102);
+    assert_eq!(
+        (
+            mixed.work.dash_pieces,
+            mixed.work.fill_vertices,
+            mixed.work.outline_points
+        ),
+        (512, 510, 510)
+    );
+}
+
 #[expect(
     clippy::as_conversions,
     clippy::cast_precision_loss,
