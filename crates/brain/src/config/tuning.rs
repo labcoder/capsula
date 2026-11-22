@@ -51,7 +51,7 @@ pub(crate) const GITHUB: [Limit; 4] = [
 
 /// `[tuning.model]`: waits on a model service's reply, defaulting to the built-in constants. The
 /// pool only shortens, because a longer one would reuse connections the service may have closed.
-pub(crate) const MODEL: [Limit; 6] = [
+pub(crate) const MODEL: [Limit; 7] = [
     limit(
         "send_s",
         model::SEND_DEADLINE.as_secs(),
@@ -60,6 +60,7 @@ pub(crate) const MODEL: [Limit; 6] = [
     ),
     limit("idle_s", model::IDLE.as_secs(), 15, 240),
     limit("error_body_s", model::ERROR_BODY_DEADLINE.as_secs(), 3, 40),
+    limit("drain_ms", 1000, 250, 4000),
     limit("pool_idle_s", model::conn::POOL_IDLE.as_secs(), 10, 50),
     limit("backpressure_s", messages::BACKPRESSURE.as_secs(), 15, 240),
     limit(
@@ -151,6 +152,7 @@ pub(crate) struct ModelTuning {
     pub(crate) idle: Duration,
     /// Reading a refusal's body.
     pub(crate) error_body: Duration,
+    pub(crate) drain: Duration,
     /// How long an unused connection stays reusable.
     pub(crate) pool_idle: Duration,
     /// Anthropic: waiting for room to pass the reply on.
@@ -181,15 +183,17 @@ impl ModelTuning {
             send_s,
             idle_s,
             error_body_s,
+            drain_ms,
             pool_idle_s,
             backpressure_s,
             content_idle_s,
-        ]: [u64; 6],
+        ]: [u64; 7],
     ) -> Self {
         Self {
             send: Duration::from_secs(send_s),
             idle: Duration::from_secs(idle_s),
             error_body: Duration::from_secs(error_body_s),
+            drain: Duration::from_millis(drain_ms),
             pool_idle: Duration::from_secs(pool_idle_s),
             backpressure: Duration::from_secs(backpressure_s),
             content_idle: Duration::from_secs(content_idle_s),

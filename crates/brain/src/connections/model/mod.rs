@@ -39,9 +39,6 @@ pub const SEND_DEADLINE: Duration = Duration::from_secs(10);
 pub const IDLE: Duration = Duration::from_secs(60);
 /// The longest read of an error body once the request is sent [guess].
 pub const ERROR_BODY_DEADLINE: Duration = Duration::from_secs(10);
-/// How long a completed stream may take to end its framing; after that its connection is closed
-/// instead of reused [guess].
-const DRAIN: Duration = Duration::from_secs(1);
 /// How much of a body with no Content-Type is checked for the start of an event stream.
 const SNIFF_BYTES: usize = 128;
 
@@ -318,8 +315,8 @@ async fn send<C: Connect, L: Lease>(
         }
     }
     // `response.completed` isn't the body's end: reuse needs the framing read to its end.
-    let drained = timeout(DRAIN, async {
-        while let Some(length) = conn.next(&mut body, DRAIN).await? {
+    let drained = timeout(tuning.drain, async {
+        while let Some(length) = conn.next(&mut body, tuning.drain).await? {
             conn.buf.drain(..length);
         }
         Ok::<_, Failure>(())
