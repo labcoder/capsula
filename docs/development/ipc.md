@@ -18,6 +18,7 @@ exact logical output in Queued mode. It opens admission only if that receipt que
 Early typed/Ask frames and new hold intent end the pair without buffering for later;
 settings, recovery, and cleanup keep their existing paths. A duplicate registration,
 Legacy announcement, current-output withdrawal, or failed receipt enqueue ends the pair.
+A Legacy session that sends `QueuedAudioOutput` ends too, before anything is installed.
 The receipt isn't proof of playback, silence, or the shell having received it.
 
 The queued shell link registers its logical output after the first Settings, even with Talk-back
@@ -26,9 +27,13 @@ to Talk-back ends the pair rather than changing its audio contract in place; out
 doesn't turn an audio-required pair into a text-only pair. Its data reader can wait on one charged Plain
 announcement or PCM frame until the control reader names that run. Control stays available while
 the data head waits, and the session owner wakes that head on binding, returned capacity, revocation
-or close. In Plain mode, Speech-start announcements and scene speech promises end
-the pair without credit, so the brain sends a speech-start step's `say` there as a Plain segment
-with no promise.
+or close. The registration declares the pair's narration: `Conducted` only when a narration
+bridge owns the pair, otherwise `Plain`. The brain sets its narration and its pump's first-PCM
+timing from that accepted declaration, never from how its pump was created. In Plain mode,
+Speech-start announcements and scene speech promises end the pair without credit, so the brain
+sends a speech-start step's `say` there as a Plain segment with no promise. The changed
+registration needs no version field: Hello already requires the exact same build on both sides,
+so an older shell is refused before it can register.
 Talk-back-off typed turns bind the same run identity but start no speaker worker. They owe
 no audio receipts. Unexpected speech ends a silent pair without credit, before waiting for a
 run to be named or draining a stopped or ended run.
@@ -796,7 +801,7 @@ records only their operation and length.
 | Shell to brain | control | `SpeechStopped` | `run`, optional `cursor` (`Cursor { segment, sample }`) |
 | Shell to brain | control | `SpeechRetired` (internal queued output) | `run`, logical `output`, `segment`, cumulative `retired`, `heard`, `final_segment` |
 | Shell to brain | control | `AudioOutput` | `rate`, `generation` |
-| Shell to brain | control | `QueuedAudioOutput` (internal) | `rate`, `generation`; selects retirement receipts before a run is admitted |
+| Shell to brain | control | `QueuedAudioOutput` (internal) | `rate`, `generation`, narration (`Plain` or `Conducted`); selects retirement receipts before a run is admitted |
 | Shell to brain | control | `SpeechDecision` (dormant) | `run`, logical `output`, `segment`, Allow or Discard |
 | Brain to shell | control | `SpeechDecisionTaken` (dormant) | the same run, output and segment, after consumption or terminal |
 | Shell to brain | control | `AudioOutputUnavailable` | `generation` |

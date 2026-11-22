@@ -4,8 +4,8 @@ use std::time::Duration;
 use kumochi_protocol::frame::{self, Pipe};
 use kumochi_protocol::message::{
     ConnectionKind, ControlToShell, DataToShell, Effort, ModelChoice, ModelInfo, ModelName,
-    ModelSlug, OutputGeneration, PageEvent, PageEventKind, PageOf, RunId, SceneId, SegmentId,
-    SegmentStart, SettingsOp, SpeechPcm, SpeechPromise, StepRef, ThreadId,
+    ModelSlug, Narration, OutputGeneration, PageEvent, PageEventKind, PageOf, RunId, SceneId,
+    SegmentId, SegmentStart, SettingsOp, SpeechPcm, SpeechPromise, StepRef, ThreadId,
 };
 use serde_json::json;
 use tokio::sync::{Notify, mpsc};
@@ -1176,7 +1176,11 @@ async fn a_plain_queued_pair_hears_a_speech_step_as_a_plain_segment() {
     link.registration = Some(&registration);
     link.recovery = brain.describe(&mut link).expect("initial membership");
     let output = OutputGeneration(17);
-    let register = kumochi_protocol::message::ControlToBrain::QueuedAudioOutput(24_000, output);
+    let register = kumochi_protocol::message::ControlToBrain::QueuedAudioOutput(
+        24_000,
+        output,
+        Narration::Plain,
+    );
     assert!(matches!(
         brain.control_frame(register, 0, &mut link, &mut None),
         Ok(None)
@@ -1226,6 +1230,111 @@ async fn a_plain_queued_pair_hears_a_speech_step_as_a_plain_segment() {
 }
 
 #[tokio::test]
+async fn a_conducted_registration_promises_the_step_and_times_a_later_pump() {
+    use crate::voice::pump::Pump;
+    use crate::voice::tts::{Engine, TtsError, TtsHandle};
+
+    struct Silence;
+    impl Engine for Silence {
+        type Stream = std::iter::Empty<Result<Vec<f32>, TtsError>>;
+        fn stream(&self, _text: &str) -> Result<Self::Stream, TtsError> {
+            Ok(std::iter::empty())
+        }
+    }
+
+    let scratch = Scratch::new("conducted-queued-say");
+    let mut brain = brain(&scratch);
+    brain.offline(Input::SpokenReplies { loaded: true });
+    let (out, _controls) = mpsc::channel(64);
+    let queue = RefCell::new(DataQueue::new(window()));
+    let ready = Notify::new();
+    let mut tap = Tap::from_env();
+    let registration = std::cell::Cell::new(super::Registration::Awaiting);
+    let mut link = Link::new(&out, &queue, &ready, &mut tap);
+    link.registration = Some(&registration);
+    link.recovery = brain.describe(&mut link).expect("initial membership");
+    let output = OutputGeneration(17);
+    let register = kumochi_protocol::message::ControlToBrain::QueuedAudioOutput(
+        24_000,
+        output,
+        Narration::Conducted,
+    );
+    assert!(brain.pump.is_none());
+    assert!(matches!(
+        brain.control_frame(register, 0, &mut link, &mut None),
+        Ok(None)
+    ));
+    let (reports, _) = crate::voice::Reports::new();
+    let tts = TtsHandle::spawn_with(
+        tokio::runtime::Handle::current(),
+        reports,
+        |_: &std::path::Path| Ok(Silence),
+    )
+    .expect("synthetic owner");
+    tts.load("models".into(), 1);
+    brain.pump = Some(Pump::new(tts));
+    let key = start(&mut brain, &mut link).await;
+    tokio::time::pause();
+    apply(
+        &mut brain,
+        &mut link,
+        Input::Engine {
+            key,
+            event: TurnEvent::TextDelta("Ready now. ".into()),
+        },
+    );
+    let due = brain.pump.as_ref().and_then(Pump::first_pcm_deadline);
+    assert_eq!(
+        due.map(|due| due.at),
+        Some(tokio::time::Instant::now() + Duration::from_secs(5)),
+        "a conducted Speak is timed"
+    );
+    tokio::time::resume();
+    submit_narrating_step(&mut brain, &mut link, key, "Narrate this.");
+    let scene = step_landed(&mut brain, &mut link).await;
+    let frames = all_frames(&queue);
+    let commits: Vec<_> = frames
+        .iter()
+        .filter_map(|frame| match frame {
+            DataToShell::SceneStepCommit { run, speech, .. } => Some((*run, *speech)),
+            _ => None,
+        })
+        .collect();
+    let promise = SpeechPromise {
+        output_generation: output,
+        segment: SegmentId(1),
+    };
+    assert_eq!(commits, [(key.run, Some(promise))]);
+    let announced: Vec<_> = frames
+        .iter()
+        .filter_map(|frame| match frame {
+            DataToShell::SegmentQueued {
+                run,
+                segment,
+                step,
+                start,
+                output_generation,
+            } => Some((*run, *segment, *step, *start, *output_generation)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        announced,
+        [
+            (key.run, SegmentId(0), None, SegmentStart::Plain, output),
+            (
+                key.run,
+                SegmentId(1),
+                Some(StepRef { scene, index: 0 }),
+                SegmentStart::Speech,
+                output
+            )
+        ]
+    );
+    brain.close().await;
+}
+
+#[tokio::test]
 #[expect(
     clippy::too_many_lines,
     reason = "the same real replacement runs at each data-writer boundary"
@@ -1240,7 +1349,12 @@ async fn same_run_replacement_keeps_the_promised_delivery_boundary() {
         let mut brain = brain(&scratch);
         let output = OutputGeneration(17);
         brain.offline(Input::SpokenReplies { loaded: true });
-        brain.offline(Input::QueuedAudioOutput(24_000, output));
+        assert_eq!(
+            brain
+                .coordinator
+                .register_queued_output(24_000, output, Narration::Conducted),
+            Ok(vec![])
+        );
         let (out, _controls) = mpsc::channel(64);
         let queue = RefCell::new(DataQueue::new(window()));
         let ready = Notify::new();
@@ -1406,7 +1520,12 @@ async fn stopped_narrated_run_end_follows_surviving_metadata_even_when_a_success
         let mut brain = brain(&scratch);
         let output = OutputGeneration(17);
         brain.offline(Input::SpokenReplies { loaded: true });
-        brain.offline(Input::QueuedAudioOutput(24_000, output));
+        assert_eq!(
+            brain
+                .coordinator
+                .register_queued_output(24_000, output, Narration::Conducted),
+            Ok(vec![])
+        );
         let (out, mut controls) = mpsc::channel(64);
         let queue = RefCell::new(DataQueue::new(window()));
         let ready = Notify::new();
@@ -1692,7 +1811,7 @@ async fn first_pcm_with_full_fifo(at: AtFirstPcm) {
 
     use super::DATA_CAP;
     use super::data::Owner;
-    use crate::voice::pump::{OutputMode, Pump};
+    use crate::voice::pump::Pump;
     use crate::voice::tts::{Engine, TtsError, TtsEvent, TtsHandle};
 
     type Frames = native::Receiver<Result<Vec<f32>, TtsError>>;
@@ -1743,13 +1862,15 @@ async fn first_pcm_with_full_fifo(at: AtFirstPcm) {
     )
     .expect("synthetic owner");
     tts.load("models".into(), 1);
-    brain.pump = Some(Pump::new(tts, OutputMode::Conducted));
+    brain.pump = Some(Pump::new(tts));
     let generation = OutputGeneration(7);
     brain.offline(Input::SpokenReplies { loaded: true });
-    brain.offline(Input::AudioOutput {
-        rate: 24_000,
-        generation,
-    });
+    assert_eq!(
+        brain
+            .coordinator
+            .register_queued_output(24_000, generation, Narration::Conducted),
+        Ok(vec![])
+    );
     let (out, _keep_controls) = mpsc::channel(64);
     let (control, mut controls) = mpsc::channel(2);
     let (_turns, mut turns) = mpsc::channel(1);

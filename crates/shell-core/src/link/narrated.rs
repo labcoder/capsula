@@ -309,6 +309,25 @@ impl Narrated {
         self.stopped.fetch_max(run.0, Ordering::Release);
     }
 
+    /// The last promised step, if any, has been handed off. Contention reads as busy.
+    pub(super) fn idle(&self) -> bool {
+        self.state
+            .try_lock()
+            .is_ok_and(|state| state.promised.is_none() || state.handed_off)
+    }
+
+    /// `idle` that waits out contention, where a refusal would end the pair.
+    pub(super) fn wait_idle(&self) -> bool {
+        self.state
+            .lock()
+            .is_ok_and(|state| state.promised.is_none() || state.handed_off)
+    }
+
+    #[cfg(test)]
+    pub(super) fn hold_state(&self) -> impl Sized + '_ {
+        self.state.lock().expect("an unpoisoned bridge")
+    }
+
     fn stopped(&self, run: RunId) -> bool {
         run.0 <= self.stopped.load(Ordering::Acquire)
     }

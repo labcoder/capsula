@@ -385,7 +385,7 @@ mod tests {
     use kumochi_protocol::frame::{self, FrameError, Pipe};
     use kumochi_protocol::message::{
         AudioSession, CAPABILITY_LEN, ControlToBrain, ControlToShell, DataToBrain, DataToShell,
-        Hello, Incarnation, IssueSession,
+        Hello, Incarnation, IssueSession, Narration,
     };
     use kumochi_protocol::{BUILD_ID, Secret};
 
@@ -500,7 +500,7 @@ mod tests {
                                 review: 1,
                             }),
                         },
-                        ControlToBrain::QueuedAudioOutput(24_000, output),
+                        ControlToBrain::QueuedAudioOutput(24_000, output, Narration::Plain),
                     ] {
                         peer_control
                             .write_all(&frame::encode(&message, Pipe::Control).unwrap())

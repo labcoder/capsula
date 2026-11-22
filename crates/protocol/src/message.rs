@@ -64,8 +64,8 @@ pub use voice::{
     Cursor, HOLD_DRAIN_TIMEOUT_MS, HOLD_START_TIMEOUT_MS, HoldFailure, HoldStatus,
     MAX_AHEAD_SEGMENTS, MAX_HOLD_CHUNKS, MAX_MIC_SAMPLES, MAX_RATE, MAX_SAY_BYTES,
     MAX_SEGMENT_SECONDS, MAX_SEGMENTS_PER_RUN, MAX_SPEECH_SAMPLES, MAX_TRANSCRIPT_BYTES,
-    MAX_UNPLAYED_SECONDS, MIN_RATE, MicPcm, OutputGeneration, PROGRESS_INTERVAL_MS, PartState,
-    SegmentId, SegmentStart, SpeechDecision, SpeechDispatch, SpeechPcm, SpeechPromise,
+    MAX_UNPLAYED_SECONDS, MIN_RATE, MicPcm, Narration, OutputGeneration, PROGRESS_INTERVAL_MS,
+    PartState, SegmentId, SegmentStart, SpeechDecision, SpeechDispatch, SpeechPcm, SpeechPromise,
     SpeechRetirement, StepRef, Transcript, VoiceBound, VoiceView, check_rate,
 };
 
@@ -551,8 +551,8 @@ pub enum ControlToBrain {
     },
     /// Queued output released source samples. Appended; legacy playback reports are unchanged.
     SpeechRetired(SpeechRetirement),
-    /// Source rate in Hz and logical generation for output using retirement receipts.
-    QueuedAudioOutput(u32, OutputGeneration),
+    /// Source rate in Hz, logical generation and narration for output using retirement receipts.
+    QueuedAudioOutput(u32, OutputGeneration, Narration),
     /// Decide the next announced Speech-start segment on queued output.
     SpeechDecision(SpeechDispatch, SpeechDecision),
     /// First control frame when this session requires queued output.
@@ -1283,9 +1283,10 @@ mod tests {
         assert_eq!(
             encode(&ControlToBrain::QueuedAudioOutput(
                 24_000,
-                OutputGeneration(2)
+                OutputGeneration(2),
+                super::Narration::Conducted
             )),
-            [35, 192, 187, 1, 2]
+            [35, 192, 187, 1, 2, 1]
         );
         let frame = frame::encode(&message, Pipe::Control).unwrap();
         assert_eq!(

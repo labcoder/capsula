@@ -11,7 +11,9 @@
 use std::fmt;
 use std::time::Duration;
 
-use kumochi_protocol::message::{ControlToShell, DataToShell, OutputGeneration, RunId, SegmentId};
+use kumochi_protocol::message::{
+    ControlToShell, DataToShell, Narration, OutputGeneration, RunId, SegmentId,
+};
 
 use super::{Coordinator, Effect, Input, Notify, Run, Stale};
 use crate::store::{Interruption, RunEnd};
@@ -135,17 +137,25 @@ impl Coordinator {
         &mut self,
         rate: u32,
         generation: OutputGeneration,
-        mode: OutputMode,
+        narration: Narration,
     ) -> Result<Vec<Effect>, Stale> {
         let mut effects = Vec::new();
         if !self.announce((rate, generation, ReportMode::Queued), &mut effects) {
             return Err(Stale);
         }
-        self.plain_say = mode != OutputMode::Conducted;
+        self.narration = Some(narration);
         Ok(effects)
     }
 
-    #[expect(clippy::too_many_lines, reason = "one exhaustive speech input router")]
+    /// Only a conducted pair times a Speak to its first PCM.
+    pub(crate) fn output_mode(&self) -> OutputMode {
+        if self.narration == Some(Narration::Conducted) {
+            OutputMode::Conducted
+        } else {
+            OutputMode::Legacy
+        }
+    }
+
     pub(super) fn speech_input(
         &mut self,
         input: Input,
@@ -154,10 +164,6 @@ impl Coordinator {
         let run = match input {
             Input::AudioOutput { rate, generation } => {
                 self.announce((rate, generation, ReportMode::Legacy), effects);
-                return Ok(());
-            }
-            Input::QueuedAudioOutput(rate, generation) => {
-                self.announce((rate, generation, ReportMode::Queued), effects);
                 return Ok(());
             }
             Input::AudioOutputUnavailable { generation } => {
