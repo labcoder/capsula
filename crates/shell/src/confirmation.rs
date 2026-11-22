@@ -2,7 +2,6 @@
 
 use std::{
     cell::RefCell,
-    collections::HashMap,
     rc::{Rc, Weak},
 };
 
@@ -12,32 +11,93 @@ use gpui_kit::component::{
     dialog::{AlertDialog, DialogFooter},
 };
 use gpui_kit::prelude::*;
-use gpui_kit::{App, FocusHandle, Global, SharedString, Window, WindowId};
+use gpui_kit::{
+    AccessibleAction, App, FocusHandle, Global, Interactivity, SharedString, Window, WindowId,
+};
+
+type Decision = Box<dyn FnOnce(bool, &mut Window, &mut App)>;
+type Pending = RefCell<Option<Decision>>;
 
 #[derive(Default)]
-struct Confirmations(HashMap<WindowId, Weak<()>>);
+struct Confirmations(Vec<(WindowId, Weak<Pending>)>);
 
 impl Global for Confirmations {}
 
 pub(crate) struct Handle {
     cancel: FocusHandle,
     modal: FocusHandle,
-    lifetime: Weak<()>,
+    pending: Weak<Pending>,
 }
 
 impl Handle {
     pub(crate) fn live(&self) -> bool {
-        self.lifetime.strong_count() > 0
+        self.pending.strong_count() > 0
+    }
+
+    fn contains_focus(&self, window: &Window, cx: &App) -> bool {
+        self.cancel.is_focused(window) || self.modal.contains_focused(window, cx)
+    }
+
+    fn retire(&self) -> bool {
+        self.pending
+            .upgrade()
+            .is_some_and(|pending| pending.take().is_some())
     }
 
     pub(crate) fn dismiss(&self, window: &mut Window, cx: &mut App) {
-        if self.live()
-            && (self.cancel.is_focused(window) || self.modal.contains_focused(window, cx))
-            && window.has_active_dialog(cx)
-        {
+        if self.contains_focus(window, cx) && window.has_active_dialog(cx) && self.retire() {
             window.close_dialog(cx);
         }
     }
+
+    /// Closes Settings' owned instance. Its other close paths retire it before closing in Kit.
+    pub(crate) fn dismiss_owned(self, window: &mut Window, cx: &mut App) {
+        if !self.retire() || !window.has_active_dialog(cx) {
+            return;
+        }
+        if self.contains_focus(window, cx) {
+            window.close_dialog(cx);
+            return;
+        }
+        let outside = window.focused(cx);
+        window.close_dialog(cx);
+        if let Some(focus) = outside {
+            window.focus(&focus, cx);
+        } else {
+            window.blur(cx);
+        }
+    }
+}
+
+pub(crate) fn retire_in(window: &Window, cx: &App) {
+    let id = window.window_handle().window_id();
+    if let Some(confirmations) = cx.try_global::<Confirmations>() {
+        for (window, pending) in &confirmations.0 {
+            if *window == id
+                && let Some(pending) = pending.upgrade()
+            {
+                pending.take();
+            }
+        }
+    }
+}
+
+fn bind_ax_click(button: Button, click: impl Fn(&mut Window, &mut App) + 'static) -> Button {
+    struct StatefulButton(Button);
+
+    impl InteractiveElement for StatefulButton {
+        fn interactivity(&mut self) -> &mut Interactivity {
+            self.0.interactivity()
+        }
+    }
+
+    impl StatefulInteractiveElement for StatefulButton {}
+
+    StatefulButton(button)
+        .on_a11y_action(AccessibleAction::Click, move |_, window, cx| {
+            click(window, cx);
+        })
+        .0
 }
 
 /// Opens an alert with Cancel focused; Enter activates only a focused button.
@@ -76,35 +136,88 @@ pub(crate) fn open_content(
     confirm: SharedString,
     on_decision: impl FnOnce(bool, &mut Window, &mut App) + 'static,
 ) -> Option<Handle> {
+    open_dialog(
+        window,
+        cx,
+        title,
+        content,
+        (cancel, confirm),
+        DuringExit::Wait,
+        on_decision,
+    )
+}
+
+/// Opens a new confirmation above an inert exit transition, never above a live dialog.
+pub(crate) fn open_during_exit(
+    window: &mut Window,
+    cx: &mut App,
+    title: SharedString,
+    body: SharedString,
+    cancel: SharedString,
+    confirm: SharedString,
+    on_decision: impl FnOnce(bool, &mut Window, &mut App) + 'static,
+) -> Option<Handle> {
+    open_dialog(
+        window,
+        cx,
+        title,
+        move |alert, _, _| alert.description(body.clone()),
+        (cancel, confirm),
+        DuringExit::Allow,
+        on_decision,
+    )
+}
+
+#[derive(Clone, Copy)]
+enum DuringExit {
+    Wait,
+    Allow,
+}
+
+#[expect(
+    clippy::too_many_lines,
+    reason = "the dialog instance owns its focus and each path that consumes the decision"
+)]
+fn open_dialog(
+    window: &mut Window,
+    cx: &mut App,
+    title: SharedString,
+    content: impl Fn(AlertDialog, &mut Window, &mut App) -> AlertDialog + 'static,
+    (cancel, confirm): (SharedString, SharedString),
+    during_exit: DuringExit,
+    on_decision: impl FnOnce(bool, &mut Window, &mut App) + 'static,
+) -> Option<Handle> {
     if window.has_active_dialog(cx) {
         return None;
     }
     let id = window.window_handle().window_id();
     let guards = cx.default_global::<Confirmations>();
-    guards.0.retain(|_, guard| guard.strong_count() > 0);
-    if guards.0.contains_key(&id) {
+    guards.0.retain(|(_, guard)| guard.strong_count() > 0);
+    if matches!(during_exit, DuringExit::Wait) && guards.0.iter().any(|(window, _)| *window == id) {
         return None;
     }
-    let lifetime = Rc::new(());
-    let weak = Rc::downgrade(&lifetime);
-    guards.0.insert(id, Weak::clone(&weak));
+    let callback: Decision = Box::new(on_decision);
+    let pending = Rc::new(RefCell::new(Some(callback)));
+    let weak = Rc::downgrade(&pending);
+    guards.0.push((id, Weak::clone(&weak)));
     let cancel_focus = cx.focus_handle().tab_stop(true);
     let confirm_focus = cx.focus_handle().tab_stop(true);
     let focus = cancel_focus.clone();
-    let pending = Rc::new(RefCell::new(Some(on_decision)));
+    let decision = Weak::clone(&weak);
     let finish = Rc::new(move |confirmed: bool, window: &mut Window, cx: &mut App| {
-        let callback = pending.borrow_mut().take();
+        let callback = decision.upgrade().and_then(|pending| pending.take());
         if let Some(callback) = callback {
             window.close_dialog(cx);
             callback(confirmed, window, cx);
         }
     });
     window.open_alert_dialog(cx, move |alert, window, cx| {
-        let _lifetime = Rc::clone(&lifetime);
+        let _keep_mounted = &pending;
         let enter = Rc::clone(&finish);
         let dismissed = Rc::clone(&finish);
         let cancelled = Rc::clone(&finish);
         let confirmed = Rc::clone(&finish);
+        let a11y_active = window.is_a11y_active();
         let enter_focus = cancel_focus.clone();
         let enter_confirm_focus = confirm_focus.clone();
         content(alert.title(title.clone()), window, cx)
@@ -127,6 +240,10 @@ pub(crate) fn open_content(
                             .label(cancel.clone())
                             .track_focus(&cancel_focus)
                             .on_click(move |_, window, cx| cancelled(false, window, cx))
+                            .when(a11y_active, |button| {
+                                let finish = Rc::clone(&finish);
+                                bind_ax_click(button, move |window, cx| finish(false, window, cx))
+                            })
                             .map(|button| {
                                 #[cfg(test)]
                                 {
@@ -146,6 +263,10 @@ pub(crate) fn open_content(
                             .danger()
                             .track_focus(&confirm_focus)
                             .on_click(move |_, window, cx| confirmed(true, window, cx))
+                            .when(a11y_active, |button| {
+                                let finish = Rc::clone(&finish);
+                                bind_ax_click(button, move |window, cx| finish(true, window, cx))
+                            })
                             .map(|button| {
                                 #[cfg(test)]
                                 {
@@ -168,7 +289,7 @@ pub(crate) fn open_content(
     Some(Handle {
         cancel: focus,
         modal,
-        lifetime: weak,
+        pending: weak,
     })
 }
 

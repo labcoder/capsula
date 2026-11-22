@@ -225,6 +225,8 @@ impl Presence {
                 .window
                 .update(cx, |_, window, cx| {
                     if window.has_active_dialog(cx) {
+                        panel.view.update(cx, |view, _| view.confirmation = None);
+                        crate::confirmation::retire_in(window, cx);
                         window.close_dialog(cx);
                         true
                     } else {
