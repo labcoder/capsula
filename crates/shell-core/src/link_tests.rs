@@ -2857,6 +2857,7 @@ fn a_queued_screen_release_goes_only_while_its_hold_listens_unrevoked() {
             notice: Some(NoticeRevision::FIRST),
         };
         link.handle.track_input(gesture);
+        link.handle.watch_revoke(gesture);
         assert!(link.handle.send_control(&session, recognized.clone()));
         assert_eq!(receive(), Some(recognized));
         assert!(
@@ -2877,9 +2878,7 @@ fn a_queued_screen_release_goes_only_while_its_hold_listens_unrevoked() {
             assert_eq!(receive(), Some(off));
         }
         if answered {
-            let choice = link.handle.choice_revision();
             settings(false);
-            assert_eq!(link.handle.choice_revision(), choice + 1);
         }
         let revoked = sent || answered;
         assert_eq!(
@@ -2887,8 +2886,13 @@ fn a_queued_screen_release_goes_only_while_its_hold_listens_unrevoked() {
             !revoked,
             "sent {sent}, answered {answered}"
         );
+        assert_eq!(link.handle.was_revoked(gesture), revoked);
         if !revoked {
             assert_eq!(receive(), Some(released));
+            // An answered hold's input is cleared, so a later Show Screen change revokes nothing.
+            link.handle.clear_input(gesture);
+            settings(false);
+            assert!(!link.handle.was_revoked(gesture));
         }
         send(run_state(
             1,

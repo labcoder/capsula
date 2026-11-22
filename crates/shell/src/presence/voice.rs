@@ -136,8 +136,6 @@ pub(super) struct Recovery {
     /// The held run, once Thinking names it, so its failure drops the words after the hold ends.
     run: Option<RunId>,
     target: (Option<ThreadId>, u64),
-    /// The link's choice revision at recognition: a revoke since then keeps the words back.
-    choice: u64,
     picture: bool,
     words: Option<Content>,
 }
@@ -1090,6 +1088,7 @@ impl Presence {
         } else {
             Text::HoldFailed
         };
+        self.link.watch_revoke(gesture);
         let sent = match request {
             Err(reason) => {
                 tracing::warn!(stage = ?FailureStage::Admission, ?reason, "held speech input failed");
@@ -1120,7 +1119,6 @@ impl Presence {
                 gesture,
                 run: None,
                 target: stamp.target,
-                choice: stamp.choice,
                 picture: screen,
                 words: None,
             });
@@ -1239,7 +1237,7 @@ impl Presence {
             .voice
             .recovery
             .take()
-            .filter(|slot| slot.choice == self.link.choice_revision())
+            .filter(|slot| !self.link.was_revoked(slot.gesture))
         else {
             return;
         };

@@ -59,6 +59,8 @@ const REPEAT_WINDOW: Duration = Duration::from_secs(60);
 /// sends a handful at a time: Stop, `ClearDrawing`, `Pong`, up to four deletes and `Quitting`.
 const CONTROL_QUEUE: usize = 64;
 const QUIT_INPUT: u64 = 1 << 32;
+/// Marks the watched recovery gesture as revoked.
+const REVOKED: u64 = 1 << 32;
 /// Data messages waiting for the brain to read them: the turns the shell may leave unanswered,
 /// and room for credit.
 const DATA_QUEUE: usize = MAX_PENDING_TURNS + 8;
@@ -603,6 +605,8 @@ struct Shared {
     microphone: CollectionGate,
     microphone_stop: Mutex<Option<microphone::Stop>>,
     input: AtomicU64,
+    /// The gesture whose held words the UI keeps, with `REVOKED` once its input was revoked.
+    recovery: AtomicU64,
     choice: AtomicU64,
     quit_sent: AtomicBool,
     /// The control pipe while connected, so Quit can bound its writes.
@@ -645,6 +649,12 @@ impl Shared {
                 (input != 0 && input < QUIT_INPUT).then_some(0)
             })
             .ok()?;
+        let _marked = self.recovery.compare_exchange(
+            gesture,
+            gesture | REVOKED,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        );
         let gesture = GestureId(u32::try_from(gesture).expect("gesture fits in the input word"));
         self.microphone.cancel(gesture);
         Some(gesture)
@@ -900,6 +910,16 @@ impl LinkHandle {
     }
     pub fn clear_input(&self, gesture: GestureId) {
         self.shared.clear_input(gesture);
+    }
+    /// Watches `gesture`, whose held words the UI keeps, for a revoke of its input.
+    pub fn watch_revoke(&self, gesture: GestureId) {
+        self.shared
+            .recovery
+            .store(u64::from(gesture.0), Ordering::Release);
+    }
+    /// Whether the watched `gesture`'s input was revoked since it was watched.
+    pub fn was_revoked(&self, gesture: GestureId) -> bool {
+        self.shared.recovery.load(Ordering::Acquire) == u64::from(gesture.0) | REVOKED
     }
     pub fn cancel_input(&self) -> bool {
         self.cancel_input_gesture().is_some()
@@ -2043,7 +2063,6 @@ fn watch(
                 if queued.is_some() {
                     if shared.output.show_screen_changes(generation, &view) {
                         let _revoked = shared.revoke_input();
-                        shared.choice.fetch_add(1, Ordering::AcqRel);
                     }
                     if let Err(reason) = shared
                         .output
