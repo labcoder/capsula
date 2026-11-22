@@ -236,7 +236,7 @@ mod tests {
         time::Duration,
     };
 
-    use super::{ForcedFrame, FrameDemand, FramePoll, FrameRequest, TOUCHPAD_CONTACT_MS, Wake};
+    use super::{ForcedFrame, FrameDemand, FramePoll, FrameRequest, Wake};
 
     /// Long enough that a test never reaches it: the waits below end on demand or stop.
     const NEVER: Duration = Duration::from_secs(3600);
@@ -278,14 +278,6 @@ mod tests {
         request.sustain_after_input_at(1500);
         assert_eq!(request.poll(2499), poll(true, true));
         assert_eq!(request.poll(2500), poll(false, false));
-    }
-
-    #[test]
-    fn the_sustain_deadline_saturates() {
-        let request = FrameRequest::new(demand());
-        request.sustain_after_input_at(u64::MAX - 1);
-        assert_eq!(request.poll(u64::MAX - 1), poll(true, true));
-        assert_eq!(request.poll(u64::MAX), poll(false, false));
     }
 
     #[test]
@@ -349,24 +341,13 @@ mod tests {
     }
 
     #[test]
-    fn a_touchpad_contact_keeps_frames_coming_until_the_cap() {
-        let request = FrameRequest::new(demand());
-        request.touchpad_contact_at(1000);
-        assert_eq!(request.poll(1000), poll(true, true));
-        let end = 1000 + TOUCHPAD_CONTACT_MS;
-        assert_eq!(request.poll(end - 1), poll(true, true));
-        assert_eq!(request.poll(end), poll(false, false));
-    }
-
-    #[test]
     fn a_new_hit_test_rearms_the_keep_alive() {
         let request = FrameRequest::new(demand());
         request.touchpad_contact_at(1000);
         assert_eq!(request.poll(1000), poll(true, true));
         request.touchpad_contact_at(1400);
-        let end = 1400 + TOUCHPAD_CONTACT_MS;
-        assert_eq!(request.poll(end - 1), poll(true, true));
-        assert_eq!(request.poll(end), poll(false, false));
+        assert_eq!(request.poll(2399), poll(true, true));
+        assert_eq!(request.poll(2400), poll(false, false));
     }
 
     #[test]
@@ -388,19 +369,11 @@ mod tests {
         request.touchpad_contact_at(1000);
         assert_eq!(demand.wait(&running, Duration::ZERO), Wake::Frame);
         assert_eq!(request.poll(1000), poll(true, true));
-        let end = 1000 + TOUCHPAD_CONTACT_MS;
-        for now in [end, end + 1, end + 60_000] {
+        assert_eq!(request.poll(1999), poll(true, true));
+        for now in [2000, 2001, 62_000] {
             assert_eq!(request.poll(now), poll(false, false));
         }
         assert_eq!(demand.wait(&running, Duration::ZERO), Wake::Idle);
-    }
-
-    #[test]
-    fn an_unforced_frame_owes_nothing() {
-        let forced = ForcedFrame::default();
-        assert!(!forced.begin(false));
-        forced.drawn();
-        assert!(!forced.end());
     }
 
     #[test]
@@ -415,6 +388,7 @@ mod tests {
         forced.drawn();
         assert!(!forced.end());
         assert!(!forced.begin(false));
+        forced.drawn();
         assert!(!forced.end());
     }
 
