@@ -426,12 +426,16 @@ fn a_refused_head_update_rolls_back_the_whole_commit() {
     committed(vault.save_account(&account("old")));
     let key = b"sk-ant-api-fake-late-refusal";
     vault.save_anthropic_key(key).expect("key");
-    let read_key = |vault: &mut Vault<FakeStore>| {
+    let retained_key_is_exact = |vault: &mut Vault<FakeStore>| {
         vault
             .anthropic(KeyOp::Load)
             .1
             .expect("read")
             .expect("saved key")
+            .expose()
+            .as_str()
+            .as_bytes()
+            == key
     };
     let old = current_names(&vault);
     let marker = vault.marker().expect("marker");
@@ -463,7 +467,7 @@ fn a_refused_head_update_rolls_back_the_whole_commit() {
         vault.anthropic(KeyOp::Remove(vault.anthropic_revision())).1,
         Err(KeyError::Vault(VaultError::Authority))
     ));
-    assert!(read_key(&mut vault).expose().as_str().as_bytes() == key);
+    assert!(retained_key_is_exact(&mut vault));
     refuse
         .execute_batch("DROP TRIGGER refuse_head;")
         .expect("drop refusal trigger");
@@ -486,7 +490,7 @@ fn a_refused_head_update_rolls_back_the_whole_commit() {
         is_current(&vault, Kind::AnthropicKey),
         "the removal rolled back"
     );
-    assert!(read_key(&mut vault).expose().as_str().as_bytes() == key);
+    assert!(retained_key_is_exact(&mut vault));
     assert_key_removal_only_clears_its_names(&mut vault, &store, &old);
     committed(vault.save_account(&account("new")));
     let fresh = current_names(&vault);
