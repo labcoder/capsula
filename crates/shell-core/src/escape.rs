@@ -19,6 +19,8 @@ pub struct Activity {
     pub drawing: bool,
     /// Kumo is being pulled out of the peek.
     pub pulling: bool,
+    /// A hold's question is being taken, from its recognition until its run answers.
+    pub voice: bool,
 }
 
 impl Activity {
@@ -330,6 +332,7 @@ mod tests {
             speaking: true,
             drawing: true,
             pulling: false,
+            voice: false,
         };
         assert_eq!(decide(all, Panel::Open), Escape::Stop);
         let speaking = Activity {
@@ -353,6 +356,7 @@ mod tests {
             speaking: true,
             drawing: true,
             pulling: true,
+            voice: false,
         };
         assert_eq!(decide(all, Panel::SettingsEdit), Escape::CancelPull);
         let pulling = Activity {
