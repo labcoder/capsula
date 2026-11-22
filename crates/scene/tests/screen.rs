@@ -974,37 +974,47 @@ fn the_canvas_maps_onto_its_own_display_in_logical_pixels_and_nowhere_else() {
 #[test]
 fn no_box_or_display_number_reaches_a_debug_output_or_the_stored_step() {
     let marker = "zq-sentinel";
-    let planted = 777.25;
-    let mut begin = header();
-    begin.display = Some(ScreenDisplay {
-        origin: [77_725, 77_726],
-        size: [2560, 1440],
-        dpi: 77_727,
-    });
-    let authored = step(&json!([
-        {"highlight":{"id":"h","target":{"box":[planted,planted,planted,planted]}}},
-        {"callout":{"id":"c","target":{"box":[planted,10,20,20]},"text":marker}}
-    ]));
-    let stored = screen::without_boxes(&authored);
-    let mut outputs = vec![
-        format!("{authored:?}"),
-        format!("{stored:?}"),
-        format!("{begin:?}"),
-        format!("{:?}", Record::Begin(begin)),
-    ];
-    outputs.extend(
-        authored
-            .put
-            .iter()
-            .chain(stored.put.iter())
-            .map(|op| format!("{op:?}")),
+    let diagnostics = |marker, planted, origin, dpi| {
+        let mut begin = header();
+        begin.display = Some(ScreenDisplay {
+            origin,
+            size: [2560, 1440],
+            dpi,
+        });
+        let authored = step(&json!([
+            {"highlight":{"id":"h","target":{"box":[planted,planted,planted,planted]}}},
+            {"callout":{"id":"c","target":{"box":[planted,10,20,20]},"text":marker}}
+        ]));
+        let stored = screen::without_boxes(&authored);
+        let mut outputs = vec![
+            format!("{authored:?}"),
+            format!("{stored:?}"),
+            format!("{begin:?}"),
+            format!("{:?}", Record::Begin(begin)),
+        ];
+        outputs.extend(
+            authored
+                .put
+                .iter()
+                .chain(stored.put.iter())
+                .map(|op| format!("{op:?}")),
+        );
+        (stored, outputs)
+    };
+    let (stored, outputs) = diagnostics(marker, 777.25, [77_725, 77_726], 77_727);
+    assert!(
+        outputs == diagnostics("ab-location", 888.75, [88_835, 88_836], 88_837).1,
+        "screen label or coordinates affected Debug"
     );
     for output in &outputs {
         for absent in ["777", "77725", "77727", marker] {
-            assert!(!output.contains(absent), "{absent} in {output}");
+            assert!(
+                !output.contains(absent),
+                "screen Debug contains private fields"
+            );
             assert!(
                 !output.contains(&format!("{:?}", absent.as_bytes())),
-                "{absent} bytes"
+                "screen Debug contains private field bytes"
             );
         }
     }

@@ -1,7 +1,7 @@
 //! 3D admission: views, solids, attachments, budgets and transform bounds.
 use kumochi_scene::{
     Admission, BindingError, Budget, ErrorCode, GlobalBudget, Handle, SceneBinding, SceneEvent,
-    SceneState, StopCut, StopOutcome, WireId,
+    SceneState, Step, StopCut, StopOutcome, WireId,
     deferred::Deferred,
     parse_record,
     record::Op,
@@ -789,17 +789,27 @@ fn reach_bounds_every_generated_vertex_from_the_local_origin() {
 fn info_is_bounded_and_redacted_like_other_text() {
     let marker = "SENTINEL";
     let info = format!("{marker}{}", "é".repeat(392));
-    let parsed = step(&format!(
-        r#"{{"id":"x","set":[{{"target":"s","info":"{info}"}}]}}"#
-    ));
+    let parse = |info: &str| {
+        step(&format!(
+            r#"{{"id":"x","set":[{{"target":"s","info":"{info}"}}]}}"#
+        ))
+    };
+    let parsed = parse(&info);
     assert_eq!(
         parsed.set[0].info.as_ref().expect("bounded info").as_str(),
         info
     );
     let decimal = format!("{:?}", marker.as_bytes());
-    for debug in [format!("{parsed:?}"), format!("{:?}", parsed.set[0])] {
-        assert!(!debug.contains(marker), "{debug}");
-        assert!(!debug.contains(decimal.trim_matches(['[', ']'])), "{debug}");
+    let other = parse(&format!("ALTERNAT{}", "ж".repeat(392)));
+    let debug = |step: &Step| [format!("{step:?}"), format!("{:?}", step.set[0])];
+    let observed = debug(&parsed);
+    assert!(observed == debug(&other), "solid info affected Debug");
+    for debug in observed {
+        assert!(!debug.contains(marker), "Debug contains solid info");
+        assert!(
+            !debug.contains(decimal.trim_matches(['[', ']'])),
+            "Debug contains info bytes"
+        );
     }
     let over = format!(
         r#"{{"step":{{"id":"x","set":[{{"target":"s","info":"{}"}}]}}}}"#,

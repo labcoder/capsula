@@ -809,20 +809,28 @@ fn cancellation_during_host_measurement_publishes_no_layout() {
 
 #[test]
 fn prepared_debug_summarizes_geometry_without_drawing_content() {
-    let mut scene = SceneState::begin(header()).expect("scene");
-    let mut budget = GlobalBudget::default();
-    let before = LayoutState::new(&scene);
-    let first = committed(
-        &mut scene,
-        &mut budget,
-        json!({"id":"PRIVATE_STEP","put":[{"text":{"id":"PRIVATE_ID","at":[12345,12345],"text":"PRIVATE_TEXT"}}]}),
+    let debug = |step_id, object_id, text, coord| {
+        let mut scene = SceneState::begin(header()).expect("scene");
+        let mut budget = GlobalBudget::default();
+        let before = LayoutState::new(&scene);
+        let first = committed(
+            &mut scene,
+            &mut budget,
+            json!({"id":step_id,"put":[{"text":{"id":object_id,"at":[coord,coord],"text":text}}]}),
+        );
+        let first = picture(&scene, first, &before, &mut Measure::default()).expect("picture");
+        [
+            format!("{first:?}"),
+            format!("{:?}", first.display.items),
+            format!("{:?}", first.display.items[0].primitives),
+        ]
+    };
+    let observed = debug("PRIVATE_STEP", "PRIVATE_ID", "PRIVATE_TEXT", 12_345);
+    assert!(
+        observed == debug("ANOTHER_PART", "OTHER_NODE", "ANOTHER_NOTE", 17_890),
+        "drawing content affected prepared Debug"
     );
-    let first = picture(&scene, first, &before, &mut Measure::default()).expect("picture");
-    for value in [
-        format!("{first:?}"),
-        format!("{:?}", first.display.items),
-        format!("{:?}", first.display.items[0].primitives),
-    ] {
+    for value in observed {
         for sentinel in ["PRIVATE_STEP", "PRIVATE_ID", "PRIVATE_TEXT", "12345"] {
             assert!(!value.contains(sentinel));
         }
