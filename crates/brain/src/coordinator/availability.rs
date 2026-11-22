@@ -109,7 +109,7 @@ impl Availability {
 }
 
 /// Turns pictures on for the Anthropic key route. Only this const turns it on outside tests.
-pub(crate) const ANTHROPIC_KEY_PICTURES: bool = false;
+pub(crate) const ANTHROPIC_KEY_PICTURES: bool = true;
 /// Turns pictures on for the Claude Code route. Only this const turns it on outside tests.
 pub(crate) const CLAUDE_CODE_PICTURES: bool = false;
 
