@@ -217,6 +217,8 @@ fn a_focus_commits_only_while_its_target_is_live() {
 
 fn creating(thread: ThreadId, run: RunId, call: &str, task: ThreadId) -> CommitCall {
     let mut create = renaming(thread, run, call);
+    create.tool = "create_task";
+    create.output = ToolOutput::Text(format!("Created task {}.", task.0));
     create.write = LocalWrite::CreateTask {
         thread: task,
         title: ThreadTitle::new("Trip plan").expect("valid"),
@@ -655,12 +657,12 @@ fn a_non_draft_call_keeps_its_existing_ended_run_behavior() {
     let (thread, run) = task(&mut store);
     store.end_run(thread, run, &[], RunEnd::Done).unwrap();
     let created = ThreadId(thread.0 + 1);
-    let call = CommitCall {
-        tool: "create_task",
-        output: ToolOutput::Text(format!("Created task {}.", created.0)),
-        ..creating(thread, run, "legacy", created)
-    };
-    assert_eq!(store.commit_call(&call).unwrap(), Committed::Done);
+    assert_eq!(
+        store
+            .commit_call(&creating(thread, run, "legacy", created))
+            .unwrap(),
+        Committed::Done
+    );
     drop(store);
     let (store, high) = reopened(&scratch);
     assert_eq!(high, created);

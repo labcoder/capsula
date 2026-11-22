@@ -255,6 +255,7 @@ async fn model_paths_refuse_a_hard_linked_partial_without_changing_its_alias() {
     assert_eq!(server.accepted.load(Ordering::SeqCst), 0);
 }
 
+#[derive(Clone, Copy)]
 enum LinkedFolder {
     Root,
     Part,
@@ -426,8 +427,15 @@ async fn linked_folder_refused(location: LinkedFolder, kind: LinkKind) {
 
 #[tokio::test]
 async fn model_paths_refuse_a_part_junction() {
-    linked_folder_refused(LinkedFolder::Part, LinkKind::Junction).await;
-    linked_folder_refused(LinkedFolder::Ancestor, LinkKind::Junction).await;
+    for location in [
+        LinkedFolder::Root,
+        LinkedFolder::Part,
+        LinkedFolder::Ancestor,
+    ] {
+        for kind in [LinkKind::Junction, LinkKind::Symlink] {
+            linked_folder_refused(location, kind).await;
+        }
+    }
 }
 
 #[tokio::test]

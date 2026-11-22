@@ -65,7 +65,7 @@ fn changed(answer: Result<Answer, StoreError>) -> Action {
     }
 }
 
-pub(super) fn events(store: &Store) -> Vec<String> {
+fn events(store: &Store) -> Vec<String> {
     store.conn.prepare(
         "SELECT json_array(id, thread, run, kind, text, body, created_ms) FROM events ORDER BY id",
     ).unwrap().query_map([], |row| row.get(0)).unwrap()

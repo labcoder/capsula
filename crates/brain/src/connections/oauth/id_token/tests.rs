@@ -898,9 +898,9 @@ async fn verify_refuses_bad_discovery_before_fetching_keys() {
 
 #[tokio::test]
 async fn verify_ignores_unusable_unselected_keys() {
-    let valid = token(&claims());
+    let valid = signed(&header("RS256", Some(KID)), &claims(), &OTHER);
     let cases = [
-        ("another usable RSA key", jwk("first-key", &OTHER)),
+        ("another usable RSA key", jwk("first-key", &SIGNER)),
         ("not an object", Value::Null),
         (
             "unknown key type",
@@ -915,12 +915,12 @@ async fn verify_ignores_unusable_unselected_keys() {
             json!({ "kty": "RSA", "kid": "broken-key", "n": 23, "e": "AQAB" }),
         ),
     ];
-    for (name, unselected) in cases {
+    for (name, unusable) in cases {
         let http = Scripted::new([
             discovery(ISSUER, JWKS_URI),
             response(
                 200,
-                json!({ "keys": [unselected, jwk(KID, &SIGNER)] }).to_string(),
+                json!({ "keys": [unusable, jwk(KID, &OTHER)] }).to_string(),
             ),
         ]);
         let identity = verify(&http, &secret(&valid), CLIENT, NONCE, &FixedClock(NOW))

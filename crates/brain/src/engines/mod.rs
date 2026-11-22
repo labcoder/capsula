@@ -982,7 +982,10 @@ mod tests {
                 vec![
                     item,
                     text("  Lisbon"),
-                    text(" trip\nmore"),
+                    text(
+                        " trip
+more"
+                    ),
                     usage.clone(),
                     completed.clone()
                 ],

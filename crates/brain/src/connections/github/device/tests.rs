@@ -282,28 +282,14 @@ async fn sign_out_and_cancel_fence_every_live_attempt_and_all_late_completions()
                 0 => {
                     m.on(Input::Op(GitHubOp::Connect), Instant::now());
                 }
-                1..=3 => {
-                    let stamp = begin(&mut m, 1, 900);
-                    if stage >= 2 {
-                        tokio::time::advance(Duration::from_secs(1)).await;
-                        m.on(Input::Tick, Instant::now());
-                        m.on(
-                            Input::Poll {
-                                stamp,
-                                result: Ok(TokenReply::Token(tokens())),
-                            },
-                            Instant::now(),
-                        );
-                    }
-                    if stage == 3 {
-                        m.on(
-                            Input::User {
-                                stamp,
-                                result: Ok(user()),
-                            },
-                            Instant::now(),
-                        );
-                    }
+                1 => {
+                    begin(&mut m, 1, 900);
+                }
+                2 => {
+                    verifying(&mut m);
+                }
+                3 => {
+                    saving(&mut m);
                 }
                 5 => connected(&mut m),
                 6 => {
@@ -325,28 +311,30 @@ async fn sign_out_and_cancel_fence_every_live_attempt_and_all_late_completions()
                 GitHubOp::CancelConnect
             };
             let effects = m.on(Input::Op(op), Instant::now());
-            let generation = m.fence().load(Ordering::Acquire);
-            assert_ne!(generation, stamp.generation);
-            if sign_out {
-                assert_eq!(generation, stamp.generation + 1);
+            let generation = stamp.generation + 1;
+            let remove = sign_out || stage == 3;
+            let expected = GitHubView::SignedOut {
+                cleanup: remove.then_some(Cleanup::Running),
+            };
+            assert_eq!(m.fence().load(Ordering::Acquire), generation);
+            if remove {
                 assert!(
                     matches!(
                         effects.as_slice(),
-                        [
-                            Effect::CancelAll,
-                            Effect::Remove { generation: removed },
-                            Effect::View(GitHubView::SignedOut {
-                                cleanup: Some(Cleanup::Running),
-                            }),
-                        ] if *removed == generation
+                        [Effect::CancelAll, Effect::Remove { generation: removed }, Effect::View(view)]
+                        if *removed == generation && *view == expected
+                    ),
+                    "stage {stage}: {effects:?}"
+                );
+            } else {
+                assert!(
+                    matches!(
+                        effects.as_slice(),
+                        [Effect::CancelAll, Effect::View(view)] if *view == expected
                     ),
                     "stage {stage}: {effects:?}"
                 );
             }
-            assert!(matches!(
-                m.view(Instant::now()),
-                GitHubView::SignedOut { .. }
-            ));
             for late in [
                 Input::Code {
                     stamp,
@@ -368,7 +356,9 @@ async fn sign_out_and_cancel_fence_every_live_attempt_and_all_late_completions()
                     }),
                 },
             ] {
-                stale(&mut m, late);
+                let effects = m.on(late, Instant::now());
+                assert!(matches!(effects.as_slice(), [Effect::View(view)] if *view == expected));
+                assert_eq!(m.view(Instant::now()), expected);
             }
         }
     }
