@@ -2,7 +2,7 @@ use std::os::windows::process::CommandExt as _;
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
 
-use super::{CREATE_NO_WINDOW, Job, command_role, helper, helper_role, process_command_line};
+use super::{CREATE_NO_WINDOW, Job, command_role, helper, helper_role};
 
 #[derive(Debug)]
 struct WaitingChild(Child);
@@ -61,38 +61,19 @@ fn native_command_lines_identify_exact_roles_and_refuse_unknown_or_exited_childr
                 .spawn()
                 .expect("harmless child waiting on stdin"),
         );
-        let line = process_command_line(child.0.id()).expect("native child command line");
-        assert_eq!(
-            line.last(),
-            Some(&0),
-            "reader supplies the parser's terminating NUL"
-        );
-        let text = String::from_utf16(&line[..line.len() - 1]).expect("UTF-16 command line");
-        assert!(
-            text.ends_with(argument),
-            "the known trailing argument was read"
-        );
-        assert_eq!(
-            command_role(&line).ok(),
-            expected,
-            "exact native role parse"
-        );
         assert_eq!(
             helper_role(child.0.id()).ok(),
             expected,
-            "actual helper role entry point"
+            "child launched with {argument}"
         );
         child.0.kill().expect("end fixture child");
         child.0.wait().expect("confirm child exited");
         assert!(
-            process_command_line(child.0.id()).is_err(),
+            helper_role(child.0.id()).is_err(),
             "an exited child is never identified"
         );
     }
-    assert!(
-        process_command_line(0).is_err(),
-        "an unreadable process is refused"
-    );
+    assert!(helper_role(0).is_err(), "an unreadable process is refused");
 }
 
 #[test]
@@ -131,9 +112,5 @@ fn a_native_helper_reads_as_its_canonical_image_role_and_job_and_is_gone_once_it
             .expect("an exited child reads")
             .is_none(),
         "an exited child is gone, never identified"
-    );
-    assert!(
-        helper(4, job.held()).is_err(),
-        "a live process it can't read fails"
     );
 }

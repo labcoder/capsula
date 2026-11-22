@@ -403,10 +403,28 @@ mod tests {
 
     #[test]
     fn a_nested_value_change_names_its_key_and_value() {
-        assert_eq!(
-            first_change(&profile(b"1"), &profile(b"2"), "HKCU").as_deref(),
-            Some(r"HKCU\User Profile\en-US (value 0409:00000409)")
-        );
+        let snapshot = |bytes| {
+            let mut snapshot = registry(preload());
+            snapshot.0[2] = profile(bytes);
+            snapshot
+        };
+        let report = snapshot(b"old-sentinel")
+            .ensure_unchanged(&snapshot(b"new-sentinel"))
+            .unwrap_err()
+            .to_string();
+        assert!(report.contains(r"HKCU\User Profile\en-US"), "{report}");
+        assert!(report.contains("0409:00000409"), "{report}");
+        for bytes in [b"old-sentinel", b"new-sentinel"] {
+            let text = std::str::from_utf8(bytes).unwrap();
+            assert!(
+                !report.contains(text),
+                "the diagnostic displayed value text"
+            );
+            assert!(
+                !report.contains(&format!("{bytes:?}")),
+                "the diagnostic displayed value bytes"
+            );
+        }
     }
 
     #[test]
@@ -415,20 +433,34 @@ mod tests {
             opened: 2,
             ..key("Substitutes", &[], Vec::new())
         };
-        let created = key("Substitutes", &[], Vec::new());
-        assert_eq!(
-            first_change(&missing, &created, "HKCU").as_deref(),
-            Some(r"HKCU\Substitutes (open 2->0, read 0->0)")
-        );
+        let opened = || key("Substitutes", &[], Vec::new());
+        let denied = Key {
+            opened: 5,
+            ..opened()
+        };
+        for (before, after, open) in [
+            (missing, opened(), ["open", "2", "0"]),
+            (opened(), denied, ["open", "0", "5"]),
+        ] {
+            let report = first_change(&before, &after, "HKCU").expect("open status changed");
+            assert_diagnostic(&report, &[r"HKCU\Substitutes"]);
+            let words: Vec<_> = report
+                .split(|ch: char| !ch.is_ascii_alphanumeric())
+                .filter(|word| !word.is_empty())
+                .collect();
+            assert!(words.windows(3).any(|fields| fields == open), "{report}");
+            assert!(
+                words.windows(3).any(|fields| fields == ["read", "0", "0"]),
+                "only the open status changed: {report}"
+            );
+        }
         let added = key(
             "Preload",
             &[("1", b"00000409"), ("2", b"00000407")],
             Vec::new(),
         );
         let before = key("Preload", &[("1", b"00000409")], Vec::new());
-        assert_eq!(
-            first_change(&before, &added, "HKCU").as_deref(),
-            Some(r"HKCU\Preload (value set)")
-        );
+        let report = first_change(&before, &added, "HKCU").expect("a value was added");
+        assert_diagnostic(&report, &[r"HKCU\Preload", "value", "set"]);
     }
 }

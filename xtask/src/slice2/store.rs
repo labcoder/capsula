@@ -223,7 +223,15 @@ mod tests {
             contains(b"CAPSGATE1A", b"capsgate1a"),
             "upper case at the edges"
         );
+        assert!(
+            contains(b"prefixCAPSGATE1Asuffix", b"capsgate1a"),
+            "whole marker inside a byte run"
+        );
         assert!(!contains(b"capsgate1", b"capsgate1a"), "a prefix");
+        assert!(
+            !contains(b"buffer CAPSGATE1z has extra bytes", b"capsgate1a"),
+            "a near match is not the whole marker"
+        );
         assert!(!contains(b"", b"capsgate1a"), "empty");
     }
 }

@@ -264,7 +264,7 @@ pub(super) fn state(view: ClaudeCodeView) -> String {
 mod tests {
     use std::collections::VecDeque;
     use std::thread;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     use anyhow::{Result, anyhow, bail};
     use kumochi_protocol::message::{
@@ -273,8 +273,8 @@ mod tests {
         PolicyFailed, RunId, Unsupported,
     };
 
-    use super::{Ask, CLEANUP, FIND, SIGNIN, VIEW, Wire, drive, state};
-    use crate::live::signin::session;
+    use super::{Ask, Wire, drive, state};
+    use crate::live::signin::{assert_one_deadline, session};
     use crate::slice2::client::Frame;
 
     /// Every planted value starts with this, so one search finds any of them.
@@ -289,19 +289,46 @@ mod tests {
         patch: 4919,
     };
 
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum WaitFor {
+        Initial,
+        Discovery,
+        Answer,
+        SignIn,
+        Cleanup,
+        Other,
+    }
+
     /// A fixture brain at the client's boundary, as in `signin`'s tests.
     #[derive(Default)]
     struct Fixture {
         frames: VecDeque<Result<Frame>>,
         sent: Vec<ControlToBrain>,
         refuse: Option<ControlToBrain>,
-        limits: Vec<Duration>,
+        last_view: Option<ClaudeCodeView>,
+        connect_after: Option<ClaudeCodeView>,
+        waits: Vec<(WaitFor, Instant, Duration)>,
+        no_read_after_fixture: bool,
+    }
+
+    impl Fixture {
+        fn assert_deadline(&self, phase: WaitFor, seconds: u64) {
+            assert_one_deadline(
+                self.waits
+                    .iter()
+                    .filter_map(|&(seen, at, limit)| (seen == phase).then_some((at, limit))),
+                Duration::from_secs(seconds),
+            );
+        }
     }
 
     impl Wire for &mut Fixture {
         fn send(&mut self, message: &ControlToBrain) -> Result<()> {
             if self.refuse.as_ref() == Some(message) {
                 bail!("WriteFile failed at {PATH} holding {TOKEN}");
+            }
+            if *message == CONNECT {
+                self.connect_after = self.last_view;
             }
             self.sent.push(message.clone());
             Ok(())
@@ -312,13 +339,41 @@ mod tests {
             limit: Duration,
             mut pick: impl FnMut(&Frame) -> Option<T>,
         ) -> Result<T> {
-            self.limits.push(limit);
+            let phase = match (self.last_view, self.sent.last()) {
+                (None, _) => WaitFor::Initial,
+                (Some(ClaudeCodeView::NotFound | ClaudeCodeView::Finding), None) => {
+                    WaitFor::Discovery
+                }
+                (
+                    Some(ClaudeCodeView::SigningIn),
+                    Some(ControlToBrain::Connection(ConnectionOp::ConnectClaudeCode)),
+                ) => WaitFor::SignIn,
+                (
+                    Some(ClaudeCodeView::CleanupPending),
+                    Some(ControlToBrain::Connection(ConnectionOp::DisconnectClaudeCode)),
+                ) => WaitFor::Cleanup,
+                (
+                    _,
+                    Some(ControlToBrain::Connection(
+                        ConnectionOp::ConnectClaudeCode | ConnectionOp::DisconnectClaudeCode,
+                    )),
+                ) => WaitFor::Answer,
+                _ => WaitFor::Other,
+            };
+            self.waits.push((phase, Instant::now(), limit));
             while let Some(frame) = self.frames.pop_front() {
-                if let Some(picked) = pick(&frame?) {
-                    thread::sleep(Duration::from_millis(2));
+                let frame = frame?;
+                if let Some(picked) = pick(&frame) {
+                    if let Frame::Control(ControlToShell::Connections(view)) = frame {
+                        self.last_view = Some(view.claude_code);
+                    }
+                    if !matches!(phase, WaitFor::Initial | WaitFor::Other) {
+                        thread::sleep(Duration::from_millis(25));
+                    }
                     return Ok(picked);
                 }
             }
+            assert!(!self.no_read_after_fixture, "read after terminal discovery");
             bail!("nothing expected arrived in {limit:?}; last: {TOKEN} {PATH}")
         }
     }
@@ -435,30 +490,17 @@ mod tests {
                 Step::View(ready()),
             ]);
             let (out, error, quit_sent) = run(&mut brain, Ask::SignIn);
-            assert_eq!(
-                out,
-                format!("claude code: signed out\n{WAITING}claude code: ready\n")
-            );
+            for state in ["signed out", "signing in", "console", "ready"] {
+                assert!(out.contains(state), "{out}");
+            }
             assert_eq!(error, None);
             assert_eq!(brain.sent, [CONNECT, QUIT]);
             assert!(quit_sent);
-            let [initial, finding, found, ack @ .., settle, again] = &brain.limits[..] else {
-                panic!("missing discovery or settling waits: {:?}", brain.limits);
-            };
-            assert_eq!(*initial, VIEW);
-            assert!(
-                ack.first().is_some_and(|limit| *limit <= VIEW)
-                    && ack.windows(2).all(|pair| pair[1] < pair[0]),
-                "{ack:?}"
-            );
-            assert!(
-                *finding <= FIND && found < finding,
-                "{finding:?} then {found:?}"
-            );
-            assert!(
-                *settle <= SIGNIN && again < settle,
-                "{settle:?} then {again:?}"
-            );
+            assert_eq!(brain.connect_after, Some(signed_out()));
+            brain.assert_deadline(WaitFor::Initial, 10);
+            brain.assert_deadline(WaitFor::Discovery, 30);
+            brain.assert_deadline(WaitFor::Answer, 10);
+            brain.assert_deadline(WaitFor::SignIn, 330);
         }
     }
 
@@ -505,15 +547,13 @@ mod tests {
                 Step::View(ClaudeCodeView::NotFound),
                 Step::View(found),
             ]);
+            brain.no_read_after_fixture = true;
             let (out, error, quit_sent) = run(&mut brain, Ask::SignIn);
-            assert_eq!(out, format!("claude code: {words}\n"));
-            assert_eq!(
-                error.as_deref(),
-                Some(format!("not signing in while claude code is {words}").as_str())
-            );
+            assert!(out.contains(words), "{out}");
+            let error = error.expect("unavailable state is refused");
+            assert!(error.contains(words), "{error}");
             assert_eq!(brain.sent, [QUIT]);
             assert!(quit_sent);
-            assert_eq!(brain.limits.len(), 2, "no wait after the view: {words}");
         }
     }
 
@@ -568,21 +608,15 @@ mod tests {
             Step::Late,
         ]);
         let (out, error, quit_sent) = run(&mut brain, Ask::SignIn);
-        assert_eq!(out, "claude code: signed out\n");
-        assert_eq!(
-            error.as_deref(),
-            Some("no answer to ConnectClaudeCode in 10s")
-        );
+        assert!(out.contains("signed out"), "{out}");
+        let error = error.expect("unchanged snapshots do not acknowledge Connect");
+        for detail in ["no answer", "ConnectClaudeCode", "10s"] {
+            assert!(error.contains(detail), "{error}");
+        }
         assert_eq!(brain.sent, [CONNECT, QUIT]);
         assert!(quit_sent);
-        let [first, one, two, three] = brain.limits[..] else {
-            panic!("four waits: {:?}", brain.limits);
-        };
-        assert_eq!(first, VIEW);
-        assert!(
-            one <= VIEW && two < one && three < two,
-            "{one:?}, {two:?}, {three:?}"
-        );
+        brain.assert_deadline(WaitFor::Initial, 10);
+        brain.assert_deadline(WaitFor::Answer, 10);
     }
 
     #[test]
@@ -613,27 +647,16 @@ mod tests {
         ]);
         let (out, error, quit_sent) = run(&mut brain, Ask::Disconnect);
         assert!(
-            out.starts_with("claude code: ready\n")
-                && out.contains("45s")
-                && out.ends_with("claude code: signed out\n"),
+            out.contains("ready") && out.contains("45s") && out.contains("signed out"),
             "{out}"
         );
         assert_eq!(error, None);
         assert_eq!(brain.sent, [DISCONNECT, QUIT]);
         assert!(quit_sent);
-        let [first, ack @ .., cleanup, again] = &brain.limits[..] else {
-            panic!("missing initial or cleanup waits: {:?}", brain.limits);
-        };
-        assert_eq!(*first, VIEW);
-        assert!(
-            ack.first().is_some_and(|limit| *limit <= VIEW)
-                && ack.windows(2).all(|pair| pair[1] < pair[0]),
-            "{ack:?}"
-        );
-        assert!(
-            *cleanup <= CLEANUP && again < cleanup,
-            "{cleanup:?} then {again:?}"
-        );
+        assert_eq!(brain.last_view, Some(signed_out()));
+        brain.assert_deadline(WaitFor::Initial, 10);
+        brain.assert_deadline(WaitFor::Answer, 10);
+        brain.assert_deadline(WaitFor::Cleanup, 45);
     }
 
     #[test]

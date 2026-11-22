@@ -1151,6 +1151,7 @@ mod tests {
         let log: Vec<Seen> = [
             text(RunId(6), "older"),
             text(run, "hello"),
+            text(RunId(8), "another run"),
             state(Phase::Thinking),
         ]
         .into_iter()
@@ -1201,20 +1202,21 @@ mod tests {
             verdict(Some(0)),
             ("claude question: done (questions: 3)".to_owned(), true)
         );
-        for (code, step, most) in [
-            (10, "starting", 0),
-            (11, "finding claude code", 0),
-            (12, "setting the default", 0),
-            (13, "the question", 2),
-            (14, "the title", 2),
-            (15, "the stop", 3),
-            (16, "cleaning up", 3),
+        for (step, code, name, most) in [
+            (Step::Start, 10, "starting", 0),
+            (Step::Discover, 11, "finding claude code", 0),
+            (Step::Default, 12, "setting the default", 0),
+            (Step::Question, 13, "the question", 2),
+            (Step::Title, 14, "the title", 2),
+            (Step::Stop, 15, "the stop", 3),
+            (Step::Cleanup, 16, "cleaning up", 3),
         ] {
+            assert_eq!(step.code(), code);
             assert_eq!(
-                verdict(Some(code)),
+                verdict(Some(i32::from(code))),
                 (
                     format!(
-                        "claude question: stopped at {step}, exit {code} (questions: at most \
+                        "claude question: stopped at {name}, exit {code} (questions: at most \
                          {most})"
                     ),
                     false
@@ -1232,15 +1234,6 @@ mod tests {
         assert_eq!(
             line(None),
             "claude question: no exit code (questions: at most 3)"
-        );
-        let codes: Vec<u8> = PLAN.into_iter().map(Step::code).collect();
-        assert!(
-            codes.windows(2).all(|pair| pair[0] < pair[1]),
-            "distinct and in plan order: {codes:?}"
-        );
-        assert!(
-            codes.iter().all(|code| *code > 1),
-            "never 0 or a plain failure: {codes:?}"
         );
     }
 
@@ -1401,14 +1394,19 @@ mod tests {
             ("config\\sessions\\", 0),
             ("config\\sessions\\1.json", 2),
         ]);
+        let mut output = changes(&before, &after);
         assert_eq!(
-            changes(&before, &after),
+            output.pop().as_deref(),
+            Some("claude code folder: 3 entries before, 4 after")
+        );
+        output.sort_unstable();
+        assert_eq!(
+            output,
             [
-                "claude code folder: changed config\\a.json (5 to 9 bytes)",
                 "claude code folder: added config\\sessions\\ (0 bytes)",
                 "claude code folder: added config\\sessions\\1.json (2 bytes)",
+                "claude code folder: changed config\\a.json (5 to 9 bytes)",
                 "claude code folder: removed gone",
-                "claude code folder: 3 entries before, 4 after",
             ]
         );
         assert_eq!(

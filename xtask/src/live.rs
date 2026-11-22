@@ -460,15 +460,17 @@ fn brain_command(exe: &std::path::Path) -> Command {
 #[cfg(test)]
 mod tests {
     use std::ffi::OsStr;
+    use std::fs;
     use std::io::{self, Read};
     use std::os::windows::process::CommandExt as _;
     use std::process::{Child, Command, Stdio};
+    use std::thread;
     use std::time::{Duration, Instant};
 
     use super::{
-        Ask, Check, Entry, LIVE_KEY_CATALOG_BUDGET_ENV, LIVE_KEY_MESSAGES_BUDGET_ENV,
-        ProductIdentity, bounded, brain_command, build, claude_question, drained, end, end_with,
-        entry, read_kept, run_bounded, wait_bounded, warn_cleanup, with_cleanup,
+        Ask, BRAIN_EXE, Check, Entry, LIVE_KEY_CATALOG_BUDGET_ENV, LIVE_KEY_MESSAGES_BUDGET_ENV,
+        ProductIdentity, SHELL_EXE, bounded, brain_command, build, claude_question, drained, end,
+        end_with, entry, read_kept, run_bounded, wait_bounded, warn_cleanup, with_cleanup,
     };
     use crate::platform;
 
@@ -477,21 +479,16 @@ mod tests {
     #[test]
     fn a_brain_a_check_starts_may_send_no_key_request() {
         let command = brain_command(std::path::Path::new("kumochid.exe"));
-        let mut envs: Vec<_> = command.get_envs().collect();
-        envs.sort();
-        assert_eq!(
-            envs,
-            [
-                (
-                    OsStr::new(LIVE_KEY_CATALOG_BUDGET_ENV),
-                    Some(OsStr::new("0"))
-                ),
-                (
-                    OsStr::new(LIVE_KEY_MESSAGES_BUDGET_ENV),
-                    Some(OsStr::new("0"))
-                ),
-            ]
-        );
+        for name in [LIVE_KEY_CATALOG_BUDGET_ENV, LIVE_KEY_MESSAGES_BUDGET_ENV] {
+            let value = command
+                .get_envs()
+                .find(|(key, _)| key.eq_ignore_ascii_case(OsStr::new(name)));
+            assert_eq!(
+                value.and_then(|(_, value)| value),
+                Some(OsStr::new("0")),
+                "{name}"
+            );
+        }
     }
 
     #[test]
@@ -512,10 +509,10 @@ mod tests {
         read.expect("its output is read");
         assert!(text.len() > 64 * 1024, "{} bytes", text.len());
         assert_eq!(
-            text.lines()
-                .filter(|line| line.starts_with("request="))
-                .count(),
-            3000
+            text.lines().collect::<Vec<_>>(),
+            (1..=3000)
+                .map(|i| format!("request={i} status=2xx padding-padding-padding"))
+                .collect::<Vec<_>>()
         );
     }
 
@@ -565,13 +562,16 @@ mod tests {
 
         let mut slow = held().spawn().expect("cmd starts");
         let start = Instant::now();
-        assert_eq!(wait_bounded(&mut slow, SHORT).expect("waits"), None);
-        assert!(
-            start.elapsed() >= SHORT,
-            "returned early: {:?}",
-            start.elapsed()
-        );
+        let waited = wait_bounded(&mut slow, SHORT).expect("waits");
+        let elapsed = start.elapsed();
+        let still_running = slow.try_wait().expect("reads").is_none();
         end(&mut slow).expect("taskkill ends a held cmd");
+        assert_eq!(waited, None);
+        assert!(
+            (SHORT..Duration::from_secs(5)).contains(&elapsed),
+            "returned outside the timeout window: {elapsed:?}"
+        );
+        assert!(still_running, "the wait must leave the held child alone");
         assert!(
             slow.try_wait().expect("reads").is_some(),
             "the child is reaped"
@@ -639,24 +639,56 @@ mod tests {
 
     #[test]
     fn a_hung_kill_is_ended_and_the_survivor_named() {
+        const HUNG_KILLER: &str = "KUMOCHI_TEST_HUNG_KILLER";
+        if std::env::var_os(HUNG_KILLER).is_some() {
+            thread::sleep(Duration::from_secs(10));
+            return;
+        }
+
         let mut child = held().spawn().expect("cmd starts");
         let pid = child.id();
-        let killer = held();
-        let error = end_with(&mut child, killer, SHORT).expect_err("the kill hangs");
-        let killer = error
-            .to_string()
+        let mut killer = Command::new(std::env::current_exe().expect("test executable"));
+        killer
+            .args([
+                "--exact",
+                "live::tests::a_hung_kill_is_ended_and_the_survivor_named",
+            ])
+            .env(HUNG_KILLER, "1")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        let start = Instant::now();
+        let result = end_with(&mut child, killer, SHORT);
+        let elapsed = start.elapsed();
+        let target_survived = child.try_wait().expect("observe the target").is_none();
+        reap(child);
+        assert!(target_survived, "the fake killer did not end the target");
+        assert!(
+            (SHORT..Duration::from_secs(5)).contains(&elapsed),
+            "the fake killer was not ended within the timeout window: {elapsed:?}"
+        );
+        let diagnostic = format!("{:#}", result.expect_err("the kill hangs"));
+        assert!(
+            diagnostic.contains(&format!("taskkill /T /F /PID {pid}")),
+            "{diagnostic}"
+        );
+        let killer_pid: u32 = diagnostic
             .split_once("(process ")
             .and_then(|(_, rest)| rest.split_once(')'))
-            .map(|(pid, _)| pid.to_owned())
-            .expect("the killer's pid is named");
-        assert_eq!(
-            format!("{error:#}"),
-            format!(
-                "taskkill (process {killer}) didn't finish in 200ms and was ended; process {pid} \
-                 may still be running; end it with `taskkill /T /F /PID {pid}`"
-            )
+            .and_then(|(number, _)| number.parse().ok())
+            .expect("the timeout names the killer's PID");
+        assert_ne!(killer_pid, pid, "the killer is not the target");
+        assert!(
+            platform::running()
+                .expect("inspect processes")
+                .iter()
+                .all(|entry| entry.pid != killer_pid),
+            "fake killer {killer_pid} still running"
         );
-        reap(child);
+        assert!(
+            start.elapsed() < Duration::from_secs(10),
+            "observing after the fake killer's fallback could mask failed cleanup"
+        );
     }
 
     #[test]
@@ -665,17 +697,18 @@ mod tests {
         let cleanup = || Err(anyhow::anyhow!("process 7 may still be running"));
         assert!(with_cleanup(Ok(()), Ok(())).is_ok());
         let only_run = with_cleanup(failed(), Ok(())).expect_err("fails");
-        assert_eq!(format!("{only_run:#}"), "the run failed");
+        assert!(format!("{only_run:#}").contains("the run failed"));
         let only_cleanup = with_cleanup(Ok(()), cleanup()).expect_err("fails");
-        assert_eq!(
-            format!("{only_cleanup:#}"),
-            "process 7 may still be running"
-        );
+        assert!(format!("{only_cleanup:#}").contains("process 7 may still be running"));
         let both = with_cleanup(failed(), cleanup()).expect_err("fails");
-        assert_eq!(
-            format!("{both:#}"),
-            "the run failed; cleanup also failed: process 7 may still be running"
-        );
+        let both = format!("{both:#}");
+        for detail in [
+            "the run failed",
+            "cleanup",
+            "process 7 may still be running",
+        ] {
+            assert!(both.contains(detail), "{both}");
+        }
     }
 
     #[test]
@@ -802,10 +835,15 @@ mod tests {
             claude_question::preflight(&[entry(7, true), entry(9, false), entry(11, true)], 7)
                 .expect_err("a brain and a shell run");
         let diagnostic = error.to_string();
-        let pids: Vec<_> = diagnostic.split(|ch: char| !ch.is_ascii_digit()).collect();
         assert!(
-            pids.contains(&"9") && pids.contains(&"11") && !pids.contains(&"7"),
+            diagnostic.contains(BRAIN_EXE) && diagnostic.contains(SHELL_EXE),
             "{diagnostic}"
         );
+        let mut pids: Vec<_> = diagnostic
+            .split(|ch: char| !ch.is_ascii_digit())
+            .filter_map(|number| number.parse::<u32>().ok())
+            .collect();
+        pids.sort_unstable();
+        assert_eq!(pids, [9, 11], "{diagnostic}");
     }
 }

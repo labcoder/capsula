@@ -10,7 +10,7 @@ use kumochi_protocol::message::{
 };
 
 use super::{Frame, PipeClient, credited_data, hello, owned_connect, read, welcome};
-use crate::platform::gate_pipe::fixture_server;
+use crate::platform::gate_pipe::{fixture_available, fixture_server};
 
 fn name(label: &str) -> String {
     format!(
@@ -36,23 +36,27 @@ fn the_owned_server_opens_before_its_capability_is_published() {
     let data = name("startup-data");
     let mut control_server = fixture_server(&ctl);
     let mut data_server = fixture_server(&data);
-    let mut reads = 0;
+    let mut published = false;
     let shared = owned_connect(
         &ctl,
         &data,
         std::process::id(),
         Instant::now() + Duration::from_secs(2),
         || {
-            reads += 1;
-            if reads < 3 {
+            if !published {
+                assert_eq!(
+                    fixture_available(&control_server)?,
+                    0,
+                    "connected without a Hello"
+                );
+                frame::write(&mut control_server, &welcome_frame(), Pipe::Control)?;
+                published = true;
                 return Ok(None);
             }
-            frame::write(&mut control_server, &welcome_frame(), Pipe::Control)?;
             Ok(Some(capability()))
         },
     )
     .expect("kept the owned pre-publication handle");
-    assert_eq!(reads, 3);
     let (msg, _) = read::<DataToBrain>(&mut data_server, Pipe::Data)
         .expect("valid message")
         .expect("data Hello");
@@ -96,11 +100,13 @@ fn an_early_refusal_reconnects_only_after_the_capability_changes() {
     let mut data_server = fixture_server(&data);
     let (starting, accepted) = mpsc::sync_channel(1);
     let (replacement, ready) = mpsc::sync_channel(1);
+    let (opened, observed) = mpsc::sync_channel(1);
+    let (publish, published) = mpsc::sync_channel(1);
     let mut starting = Some(starting);
-    let mut live_second = None;
+    let mut changed = false;
     let ctl_again = ctl.clone();
     thread::scope(|scope| {
-        scope.spawn(move || {
+        let serving = scope.spawn(move || {
             accepted
                 .recv_timeout(Duration::from_secs(3))
                 .expect("first control open");
@@ -114,6 +120,20 @@ fn an_early_refusal_reconnects_only_after_the_capability_changes() {
             let new = fixture_server(&ctl_again);
             drop(first);
             replacement.send(new).expect("publish replacement");
+            let mut second = observed
+                .recv_timeout(Duration::from_secs(3))
+                .expect("replacement connected");
+            publish.send(()).expect("publish the new capability");
+            let (second_hello, _) = read::<ControlToBrain>(&mut second, Pipe::Control)
+                .expect("replacement Hello frame")
+                .expect("replacement Hello");
+            let ControlToBrain::Hello(second_hello) = second_hello else {
+                panic!("not a replacement Hello");
+            };
+            assert_eq!(second_hello.capability.expose(), &[4; CAPABILITY_LEN]);
+            frame::write(&mut second, &welcome_frame(), Pipe::Control)
+                .expect("welcome the new capability");
+            second
         });
         let _shared = owned_connect(
             &ctl,
@@ -124,13 +144,21 @@ fn an_early_refusal_reconnects_only_after_the_capability_changes() {
                 if let Some(starting) = starting.take() {
                     starting.send(()).expect("first owned open");
                 }
-                if let Ok(mut second) = ready.try_recv() {
-                    frame::write(&mut second, &welcome_frame(), Pipe::Control)?;
-                    // Keep the second server alive until the data half has accepted its Hello.
-                    live_second = Some(second);
-                    return Ok(Some(Capability::new([4; CAPABILITY_LEN])));
+                if let Ok(second) = ready.try_recv() {
+                    assert_eq!(
+                        fixture_available(&second)?,
+                        0,
+                        "no stale Hello on the replacement"
+                    );
+                    opened.send(second).expect("replacement connected");
+                    return Ok(Some(capability()));
                 }
-                Ok(Some(capability()))
+                changed |= published.try_recv().is_ok();
+                Ok(Some(if changed {
+                    Capability::new([4; CAPABILITY_LEN])
+                } else {
+                    capability()
+                }))
             },
         )
         .expect("reopened with the changed capability");
@@ -141,7 +169,7 @@ fn an_early_refusal_reconnects_only_after_the_capability_changes() {
             panic!("not a data Hello");
         };
         assert_eq!(msg.capability.expose(), &[4; CAPABILITY_LEN]);
-        drop(live_second);
+        serving.join().expect("replacement served a fresh Hello");
     });
 }
 
@@ -153,19 +181,42 @@ fn a_fragmented_welcome_uses_one_absolute_deadline() {
     let mut wire = Vec::new();
     frame::write(&mut wire, &welcome_frame(), Pipe::Control).expect("valid Welcome");
     server.write_all(&wire[..HEADER_LEN]).expect("write header");
-    let client = client.until(Instant::now() + Duration::from_millis(180));
+    let budget = Duration::from_millis(800);
+    let deadline = Instant::now() + budget;
+    let client = client.until(deadline);
     thread::scope(|scope| {
-        scope.spawn(move || {
-            thread::sleep(Duration::from_millis(110));
+        let writes = scope.spawn(move || {
+            let fragment_time = deadline - Duration::from_millis(400);
+            thread::sleep(fragment_time.saturating_duration_since(Instant::now()));
             server
                 .write_all(&wire[HEADER_LEN..=HEADER_LEN])
                 .expect("write fragment");
-            thread::sleep(Duration::from_millis(110));
+            let fragment_at = Instant::now();
+            let tail_time = deadline + Duration::from_millis(200);
+            thread::sleep(tail_time.saturating_duration_since(Instant::now()));
+            let tail_started = Instant::now();
             server
                 .write_all(&wire[HEADER_LEN + 1..])
                 .expect("write tail");
+            (fragment_at, tail_started, Instant::now(), server)
         });
         let result = welcome(&client, &hello(capability()));
+        let finished_at = Instant::now();
+        let (fragment_at, tail_started, tail_written, _server) =
+            writes.join().expect("fragmented Welcome");
+        assert!(
+            fragment_at < deadline,
+            "payload fragment was not sent in time"
+        );
+        assert!(tail_started > deadline, "tail was sent too soon");
+        assert!(
+            fragment_at < finished_at && finished_at < tail_started,
+            "the client timed out between the two payload writes"
+        );
+        assert!(
+            tail_written < fragment_at + budget,
+            "tail was too late even for a reset deadline"
+        );
         assert_eq!(
             result
                 .expect_err("whole Welcome was late")
@@ -209,20 +260,22 @@ fn a_stalled_payload_fails_at_the_transport_deadline() {
 fn legacy_stamp_follows_credit_but_projected_stamp_preserves_the_read() {
     let read_at = Instant::now();
     let data = || Ok(Some((DataToShell::RunEnd { run: RunId(2) }, 17)));
-    let credited_at = Cell::new(read_at);
-    let credit = |size| {
-        assert_eq!(size, 17);
-        thread::sleep(Duration::from_millis(2));
-        credited_at.set(Instant::now());
-        Ok(())
-    };
-    let (legacy, size) = credited_data(data(), None, credit);
-    assert!(legacy.at >= credited_at.get());
-    let (projected, _) = credited_data(data(), Some(read_at), credit);
-    assert_eq!(size, 17);
-    assert!(matches!(
-        legacy.frame,
-        Frame::Data(DataToShell::RunEnd { run: RunId(2) }, 17)
-    ));
-    assert_eq!(projected.at, read_at);
+    for stamp in [None, Some(read_at - Duration::from_millis(1))] {
+        let credited = Cell::new(None);
+        let (seen, size) = credited_data(data(), stamp, |size| {
+            credited.set(Some((size, Instant::now())));
+            Ok(())
+        });
+        let (credited_bytes, credited_at) = credited.get().expect("the credit completed");
+        assert_eq!((credited_bytes, size), (17, 17));
+        assert!(matches!(
+            seen.frame,
+            Frame::Data(DataToShell::RunEnd { run: RunId(2) }, 17)
+        ));
+        if let Some(stamp) = stamp {
+            assert_eq!(seen.at, stamp);
+        } else {
+            assert!(seen.at >= credited_at);
+        }
+    }
 }

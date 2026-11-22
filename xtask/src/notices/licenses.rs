@@ -606,40 +606,44 @@ mod tests {
                 ),
             )
         };
-        assert_eq!(
-            policy.package(&package).unwrap(),
+        let check = |package: &serde_json::Value, mut records: Vec<_>| {
+            let mut output = policy.package(package).unwrap();
+            output.sort_unstable();
+            records.sort_unstable();
+            assert_eq!(output, records);
+        };
+        check(
+            &package,
             vec![
                 expected(),
                 manifest_credit(
-                    "Ada Example <ada@example.invalid>, Ben Example (from published Cargo.toml)"
-                )
-            ]
+                    "Ada Example <ada@example.invalid>, Ben Example (from published Cargo.toml)",
+                ),
+            ],
         );
         package["authors"] = serde_json::json!([]);
-        assert_eq!(
-            policy.package(&package).unwrap(),
+        check(
+            &package,
             vec![
                 expected(),
-                manifest_credit("The fixture authors (not named in published Cargo.toml)")
-            ]
+                manifest_credit("The fixture authors (not named in published Cargo.toml)"),
+            ],
         );
         package["repository"] = serde_json::Value::Null;
-        assert_eq!(
-            policy.package(&package).unwrap_err().to_string(),
-            "fixture does not declare authors or a repository for attribution"
-        );
+        let error = policy.package(&package).unwrap_err().to_string();
+        assert!(error.contains("fixture") && error.contains("authors or a repository"));
         let copyright =
             "Changes are Copyright (c) 2026 Fixture Publisher <fixture@example.invalid>";
         fs::write(dir.join("COPYRIGHT"), format!("{copyright}\n")).unwrap();
         let extra = "This package includes material from the Original Fixture project.\n";
         fs::write(dir.join("LICENSE.txt"), extra).unwrap();
-        assert_eq!(
-            policy.package(&package).unwrap(),
+        check(
+            &package,
             vec![
                 expected(),
                 ("copyright and notices".to_owned(), format!("{copyright}\n")),
-                other(extra)
-            ]
+                other(extra),
+            ],
         );
     }
 
@@ -667,11 +671,13 @@ mod tests {
         fs::create_dir_all(dir.join("src/unicode_tables")).unwrap();
         fs::write(dir.join("src/unicode_tables/LICENSE-UNICODE"), unicode).unwrap();
         fs::create_dir(dir.join("tests")).unwrap();
-        fs::write(dir.join("tests/LICENSE"), "Unrelated fixture license.").unwrap();
+        let unrelated = "Unrelated fixture license.";
+        fs::write(dir.join("tests/LICENSE"), unrelated).unwrap();
         let package = serde_json::json!({
             "name":"fixture", "version":"1.0.0", "manifest_path":dir.join("Cargo.toml"), "license":"ISC"
         });
         let output = policy.package(&package).unwrap();
+        assert!(output.iter().all(|(_, text)| !text.contains(unrelated)));
         assert_eq!(
             output
                 .iter()

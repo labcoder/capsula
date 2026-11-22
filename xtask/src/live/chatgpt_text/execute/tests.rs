@@ -9,6 +9,7 @@ use kumochi_protocol::message::{
     ConnectionKind, ControlToShell, DataToShell, Effort, EffortSet, ModelInfo, ModelName,
     ModelSlug, Phase, RunId, RunOrigin, ThreadId,
 };
+use serde_json::{Value, json};
 
 use super::super::{
     startup,
@@ -258,12 +259,14 @@ fn the_ledger_requires_complete_owned_records_and_never_reports_partial_samples(
         "incomplete target"
     );
     let empty = ledger::parse(b"ready 7 1 10\nfinal 7 0 0 11\n", 7, 1).expect("no reservations");
+    let receipt = report(&[], &empty, &Outcomes::default()).expect("two not-run targets");
     assert_eq!(
-        report(&[], &empty, &Outcomes::default()).expect("two not-run targets"),
-        concat!(
-            r#"{"status":"completed","model_charge":0,"auxiliary":[0, 0, 0, 0, 0],"targets":["#,
-            r#"{"status":"not-run","completed":0},{"status":"not-run","completed":0}],"work":"not-started","restore":"not-needed","exit":"not-started"}"#
-        )
+        serde_json::from_str::<Value>(&receipt).expect("JSON receipt"),
+        json!({
+            "status": "completed", "model_charge": 0, "auxiliary": [0, 0, 0, 0, 0],
+            "targets": [{"status": "not-run", "completed": 0}, {"status": "not-run", "completed": 0}],
+            "work": "not-started", "restore": "not-needed", "exit": "not-started"
+        })
     );
 }
 
@@ -466,8 +469,11 @@ fn failed_or_refused_typed_work_restores_the_saved_choice_then_quits_without_a_n
             "the failed run's data end was consumed"
         );
         assert_eq!(
-            outcomes.invalid_receipt(19),
-            r#"{"status":"invalid","model_charge":19,"auxiliary":null,"work":"failed","restore":"confirmed","exit":"confirmed"}"#
+            serde_json::from_str::<Value>(&outcomes.invalid_receipt(19)).expect("JSON receipt"),
+            json!({
+                "status": "invalid", "model_charge": 19, "auxiliary": null,
+                "work": "failed", "restore": "confirmed", "exit": "confirmed"
+            })
         );
     }
 }
@@ -504,12 +510,18 @@ fn pipe_loss_leaves_restoration_unknown_instead_of_trying_another_setting() {
         exit: "unconfirmed",
         ..Outcomes::default()
     };
+    let mut selected = false;
+    let mut cleanup = false;
     let result = drive(
         Ok((main, Some(saved), [true, false])),
         19,
         Instant::now(),
         &mut outcomes,
         |_, _, choice, _, _| {
+            assert!(
+                !std::mem::replace(&mut selected, true),
+                "no further settings write"
+            );
             assert_eq!(
                 choice,
                 (0, Effort::Low),
@@ -518,12 +530,26 @@ fn pipe_loss_leaves_restoration_unknown_instead_of_trying_another_setting() {
             Ok(Some(choice))
         },
         |_, _, _, _| Err(anyhow!("fixture pipe ended")),
-        || Err(anyhow!("fixture forced exit")),
+        || {
+            cleanup = true;
+            Err(anyhow!("fixture forced exit"))
+        },
     );
     assert!(result.is_err());
+    assert!(
+        selected,
+        "the fixture selected a different choice before pipe loss"
+    );
+    assert!(
+        cleanup,
+        "the owned-child cleanup still runs after pipe loss"
+    );
     assert_eq!(
-        outcomes.invalid_receipt(19),
-        r#"{"status":"invalid","model_charge":19,"auxiliary":null,"work":"failed","restore":"unknown","exit":"unconfirmed"}"#
+        serde_json::from_str::<Value>(&outcomes.invalid_receipt(19)).expect("JSON receipt"),
+        json!({
+            "status": "invalid", "model_charge": 19, "auxiliary": null,
+            "work": "failed", "restore": "unknown", "exit": "unconfirmed"
+        })
     );
 }
 

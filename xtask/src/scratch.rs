@@ -28,16 +28,32 @@ mod tests {
 
     #[test]
     fn a_label_cannot_introduce_a_path() {
-        let root = dir("scratch-label");
+        let parent = dir("scratch-label");
+        let root = Scratch::under(parent.path(), "root");
+        let outside = parent.join("outside");
+        fs::write(&outside, b"outside sentinel").unwrap();
         for label in ["../outside", r"part\..\..\outside", "C:", ""] {
             let Err(panic) = catch_unwind(|| Scratch::under(root.path(), label)) else {
-                panic!("a path-like label was accepted");
+                panic!("a path-like label was accepted: {label:?}");
             };
-            assert_eq!(
-                panic.downcast_ref::<&str>(),
-                Some(&"a scratch label must be a simple name")
+            let reason = panic
+                .downcast_ref::<&str>()
+                .copied()
+                .or_else(|| panic.downcast_ref::<String>().map(String::as_str));
+            assert!(
+                reason.is_some_and(|reason| reason.contains("simple name")),
+                "{label:?}: {reason:?}"
             );
         }
         assert_eq!(fs::read_dir(&root).expect("no scratch created").count(), 0);
+        assert_eq!(
+            fs::read(&outside).expect("outside entry survives"),
+            b"outside sentinel"
+        );
+        assert_eq!(
+            fs::read_dir(&parent).unwrap().count(),
+            2,
+            "no outside entries created"
+        );
     }
 }

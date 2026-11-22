@@ -290,16 +290,17 @@ mod tests {
         fs::write(&file, format!(
             "//! Unrelated docs.\n\n// Copyright 2026 Fixture Publisher\n\n/* Permission is hereby granted to copy this fixture. */\n\n// {apache}\n\n/* {mpl} */\n\n/*\n * {nested}\n */\n\nuse std::fmt;"
         )).unwrap();
-        assert_eq!(
-            source_header(&file).unwrap(),
-            [
-                "Copyright 2026 Fixture Publisher",
-                "Permission is hereby granted to copy this fixture.",
-                apache,
-                mpl,
-                moxcms,
-            ]
-        );
+        let mut expected = [
+            "Copyright 2026 Fixture Publisher",
+            "Permission is hereby granted to copy this fixture.",
+            apache,
+            mpl,
+            moxcms,
+        ];
+        expected.sort_unstable();
+        let mut output = source_header(&file).unwrap();
+        output.sort_unstable();
+        assert_eq!(output, expected);
         fs::write(&file, "").unwrap();
         assert_eq!(source_header(&file).unwrap(), Vec::<String>::new());
     }
@@ -412,7 +413,7 @@ mod tests {
 
     #[test]
     fn exclusion_without_a_shipped_package_is_rejected_with_its_reason() {
-        let matched = EXCLUDED
+        let mut matched = EXCLUDED
             .iter()
             .map(|rule| rule.0)
             .chain(scoped::SCOPED.iter().map(|rule| rule.0))
@@ -422,10 +423,18 @@ mod tests {
             })
             .collect::<Vec<_>>();
         check_exclusions(&matched).unwrap();
-        let bumped = serde_json::json!({"name":"markup5ever_rcdom","version":"0.3.1"});
-        assert_eq!(
-            check_exclusions(&[bumped]).unwrap_err().to_string(),
-            "notice exclusion matches no shipped crate: markup5ever_rcdom 0.3.0 html5lib-tests (HTML conformance fixtures)"
-        );
+        for package in matched.iter_mut().filter(|package| {
+            package["name"] == "markup5ever_rcdom" && package["version"] == "0.3.0"
+        }) {
+            package["version"] = serde_json::json!("0.3.1");
+        }
+        let error = check_exclusions(&matched).unwrap_err().to_string();
+        for detail in [
+            "markup5ever_rcdom 0.3.0",
+            "html5lib-tests",
+            "HTML conformance fixtures",
+        ] {
+            assert!(error.contains(detail), "{error}");
+        }
     }
 }

@@ -390,7 +390,6 @@ fn scenes(client: &mut Client, expected: usize) -> Result<Applied> {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
     use std::time::Instant;
 
     use kumochi_protocol::message::{
@@ -451,29 +450,32 @@ mod tests {
 
     #[test]
     fn snapshots_before_scenes_and_split_around_it_install_all_three_exact_drawings() {
+        let drawings = [
+            (1, "a-first", "a-last"),
+            (2, "b-first", "b-last"),
+            (3, "c-first", "c-last"),
+        ];
         for before in [3, 2] {
-            let named = vec![
-                SceneDescriptor {
-                    scene: SceneId(1),
+            let named: Vec<_> = drawings
+                .iter()
+                .map(|&(id, _, _)| SceneDescriptor {
+                    scene: SceneId(id),
                     revision: WHOLE,
                     committed: WHOLE,
-                },
-                SceneDescriptor {
-                    scene: SceneId(2),
-                    revision: WHOLE,
-                    committed: WHOLE,
-                },
-                SceneDescriptor {
-                    scene: SceneId(3),
-                    revision: WHOLE,
-                    committed: WHOLE,
-                },
-            ];
-            let mut frames = vec![
-                last(chunk(1, MAX_STEPS, "s")),
-                last(chunk(2, MAX_STEPS, "s")),
-                last(chunk(3, MAX_STEPS, "s")),
-            ];
+                })
+                .collect();
+            let mut frames: Vec<_> = drawings
+                .iter()
+                .map(|&(id, first, tail)| {
+                    let mut frame = last(chunk(id, MAX_STEPS, first));
+                    let Frame::Data(DataToShell::SceneSnapshot { chunk, .. }, _) = &mut frame
+                    else {
+                        unreachable!("the fixture builds snapshot chunks");
+                    };
+                    chunk[MAX_STEPS - 1].label = tail.to_owned();
+                    frame
+                })
+                .collect();
             frames.insert(
                 before,
                 Frame::Control(ControlToShell::Scenes {
@@ -491,40 +493,21 @@ mod tests {
             for next in &seen[before + 1..] {
                 applied.apply(&next.frame);
             }
-            applied.expect(&[SceneId(1), SceneId(2), SceneId(3)], "s", "reconnected");
             assert!(applied.failures.is_empty(), "{:?}", applied.failures);
-            assert_eq!(
-                applied.installed,
-                BTreeMap::from([
-                    (
-                        SceneId(1),
-                        vec![
-                            Step {
-                                label: "s".to_owned()
-                            };
-                            MAX_STEPS
-                        ]
-                    ),
-                    (
-                        SceneId(2),
-                        vec![
-                            Step {
-                                label: "s".to_owned()
-                            };
-                            MAX_STEPS
-                        ]
-                    ),
-                    (
-                        SceneId(3),
-                        vec![
-                            Step {
-                                label: "s".to_owned()
-                            };
-                            MAX_STEPS
-                        ]
-                    ),
-                ])
+            assert!(
+                applied.pending.is_empty(),
+                "completed drawings are no longer staged"
             );
+            assert_eq!(applied.installed.len(), drawings.len(), "no extra scenes");
+            for (id, first, tail) in drawings {
+                assert!(
+                    applied.installed[&SceneId(id)]
+                        .iter()
+                        .map(|step| step.label.as_str())
+                        .eq(std::iter::repeat_n(first, MAX_STEPS - 1).chain([tail])),
+                    "scene {id}'s exact steps, with {before} snapshots before Scenes"
+                );
+            }
         }
     }
 
@@ -564,10 +547,20 @@ mod tests {
         applied.apply(&last(chunk(2, MAX_STEPS, "s")));
         applied.apply(&last(chunk(1, MAX_STEPS, "other")));
         applied.apply(&last(chunk(3, MAX_STEPS, "s")));
+        assert!(
+            applied.installed[&SceneId(1)]
+                .iter()
+                .map(|step| step.label.as_str())
+                .eq(std::iter::repeat_n("other", MAX_STEPS)),
+            "scene 1 was installed with the wrong label"
+        );
         applied.expect(&[SceneId(1)], "s", "now");
-        assert_eq!(
-            applied.failures,
-            ["now: SceneId(1) installed steps whose label isn't the fixture's"]
+        let [wrong_label] = applied.failures.as_slice() else {
+            panic!("expected exactly one label failure: {:?}", applied.failures);
+        };
+        assert!(
+            wrong_label.contains("label") && numbers(wrong_label).eq(["1"]),
+            "{wrong_label}"
         );
         assert!(!applied.installed.contains_key(&SceneId(2)), "cleared");
         assert!(!applied.installed.contains_key(&SceneId(3)), "never named");
@@ -579,15 +572,25 @@ mod tests {
         applied.apply(&last(chunk(1, MAX_STEPS, "s")));
         applied.expect(&[SceneId(1)], "s", "now");
         assert!(applied.installed.is_empty(), "the shell restores nothing");
-        assert_eq!(
-            applied.failures,
-            [
-                "SceneDescriptor { scene: SceneId(1), revision: 64, committed: 1 } isn't a whole \
-                 drawing of 64 steps",
-                "SceneId(1) overran its 1 committed steps",
-                "now: [] installed, not [SceneId(1)]",
-            ]
+        assert!(
+            applied.failures.iter().any(|report| {
+                let mut values: Vec<_> = numbers(report).collect();
+                values.sort_unstable();
+                report.contains("whole drawing") && values == ["1", "1", "64", "64"]
+            }),
+            "{:?}",
+            applied.failures
         );
+        assert!(
+            applied.failures.iter().any(|report| {
+                report.contains("overran")
+                    && report.contains("1 committed steps")
+                    && numbers(report).eq(["1", "1"])
+            }),
+            "{:?}",
+            applied.failures
+        );
+        assert_missing_scene_one(&applied.failures);
     }
 
     #[test]
@@ -600,12 +603,30 @@ mod tests {
             applied.installed.is_empty(),
             "the later chunk can't install"
         );
-        assert_eq!(
-            applied.failures,
-            [
-                "SceneId(1) sent revision 63, not 64: its snapshot is spoiled",
-                "now: [] installed, not [SceneId(1)]",
-            ]
+        assert!(
+            applied.failures.iter().any(|report| {
+                report.contains("sent revision 63")
+                    && report.contains("not 64")
+                    && numbers(report).eq(["1", "63", "64"])
+            }),
+            "{:?}",
+            applied.failures
+        );
+        assert_missing_scene_one(&applied.failures);
+    }
+
+    fn numbers(report: &str) -> impl Iterator<Item = &str> {
+        report
+            .split(|ch: char| !ch.is_ascii_digit())
+            .filter(|word| !word.is_empty())
+    }
+
+    fn assert_missing_scene_one(failures: &[String]) {
+        assert!(
+            failures.iter().any(|report| {
+                report.contains("installed") && report.contains("not") && numbers(report).eq(["1"])
+            }),
+            "{failures:?}"
         );
     }
 }

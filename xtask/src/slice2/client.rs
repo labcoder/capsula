@@ -714,27 +714,33 @@ mod tests {
     #[test]
     fn projected_intake_counts_ignored_frames_and_bytes_before_queuing() {
         let deadline = Instant::now() + Duration::from_secs(5);
+        let seen = || Seen {
+            at: Instant::now(),
+            frame: Frame::Control(ControlToShell::Scenes { scenes: vec![] }),
+        };
         for (bounds, sizes) in [((1, 40), [11, 13]), ((4, 24), [24, 1])] {
-            let (sender, receiver) = mpsc::sync_channel(1);
-            let mut intake = Projection {
-                sender,
-                deadline,
-                left: Some(bounds),
-            };
-            let stored = Seen {
-                at: Instant::now(),
-                frame: Frame::Control(ControlToShell::Ping),
-            };
-            assert_eq!(intake.accept(None, sizes[0], &mut |_| Ok(Some(17))), Ok(()));
-            assert_eq!(
-                intake.accept(Some(stored), sizes[1], &mut |_| Ok(Some(31))),
-                Err(())
-            );
-            assert_eq!(intake.accept(None, 0, &mut |_| Ok(Some(17))), Err(()));
-            assert!(matches!(
-                receiver.try_recv(),
-                Err(mpsc::TryRecvError::Empty)
-            ));
+            for ignored in [None, Some(seen())] {
+                let (sender, receiver) = mpsc::sync_channel(1);
+                let mut intake = Projection {
+                    sender,
+                    deadline,
+                    left: Some(bounds),
+                };
+                assert_eq!(intake.accept(ignored, sizes[0], &mut |_| Ok(None)), Ok(()));
+                assert_eq!(
+                    intake.accept(Some(seen()), sizes[1], &mut |_| Ok(Some(31))),
+                    Err(())
+                );
+                let eof = Some(Seen {
+                    at: Instant::now(),
+                    frame: Frame::Closed,
+                });
+                assert_eq!(intake.accept(eof, 0, &mut |_| Ok(Some(17))), Err(()));
+                assert!(matches!(
+                    receiver.try_recv(),
+                    Err(mpsc::TryRecvError::Empty)
+                ));
+            }
         }
     }
 
@@ -774,21 +780,28 @@ mod tests {
     #[test]
     fn projected_intake_distinguishes_clean_eof_from_partial_reads_and_enforces_deadline() {
         let at = Instant::now();
-        for (frame, deadline, expected) in [
-            (Frame::Closed, at + Duration::from_secs(5), Ok(())),
-            (Frame::BadRead, at + Duration::from_secs(5), Err(())),
-            (Frame::Closed, at, Err(())),
+        for (frame, bytes, deadline, expected) in [
+            (Frame::Closed, 0, at + Duration::from_secs(5), Ok(())),
+            (Frame::BadRead, 0, at + Duration::from_secs(5), Err(())),
+            (Frame::Closed, 0, at, Err(())),
+            (
+                Frame::Control(ControlToShell::Scenes { scenes: vec![] }),
+                13,
+                at,
+                Err(()),
+            ),
         ] {
             let (sender, receiver) = mpsc::sync_channel(1);
             let mut intake = Projection::<u8> {
                 sender,
                 deadline,
-                left: Some((1, 3)),
+                left: Some((1, 13)),
             };
             assert_eq!(
-                intake.accept(Some(Seen { at, frame }), 0, &mut |_| panic!(
-                    "no frame to project"
-                )),
+                intake.accept(Some(Seen { at, frame }), bytes, &mut |frame| {
+                    assert!(matches!(frame, Frame::Control(_)), "no frame to project");
+                    Ok(Some(17))
+                }),
                 expected
             );
             if expected == Ok(()) {

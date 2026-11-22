@@ -211,10 +211,26 @@ fn state(view: &AccountView) -> String {
 }
 
 #[cfg(test)]
+pub(super) fn assert_one_deadline(
+    mut waits: impl Iterator<Item = (Instant, Duration)>,
+    cap: Duration,
+) {
+    let (first, remaining) = waits.next().expect("the fixture reached the phase");
+    assert!(
+        (cap - Duration::from_secs(1)..=cap).contains(&remaining),
+        "initial allowance was {remaining:?}, expected {cap:?}"
+    );
+    let latest = first + remaining + Duration::from_millis(10);
+    for (at, remaining) in waits {
+        assert!(at + remaining <= latest, "the phase deadline was extended");
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use std::collections::VecDeque;
     use std::thread;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     use anyhow::{Result, anyhow, bail};
     use kumochi_protocol::message::{
@@ -223,7 +239,7 @@ mod tests {
         ThreadId, ThreadKind, ThreadRow, UserName,
     };
 
-    use super::{SIGNIN, VIEW, Wire, drive, inspect, session, state};
+    use super::{Wire, assert_one_deadline, drive, inspect, session, state};
     use crate::slice2::client::Frame;
 
     /// Every planted value starts with this, so one search finds any of them.
@@ -233,6 +249,13 @@ mod tests {
     const NAME: &str = "kumochisentinel-name";
     const TITLE: &str = "kumochisentinel-title";
 
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum WaitFor {
+        Initial,
+        Answer,
+        SignIn,
+    }
+
     /// A fixture brain at the client's boundary: frames as the client's readers would hand them
     /// over, failures as the client reports them, and the messages sent to it.
     #[derive(Default)]
@@ -241,11 +264,15 @@ mod tests {
         sent: Vec<ControlToBrain>,
         /// A message whose send fails.
         refuse: Option<ControlToBrain>,
-        limits: Vec<Duration>,
+        signing_in: bool,
+        attempted_quit: bool,
+        sent_before_busy: Option<ControlToBrain>,
+        waits: Vec<(WaitFor, Instant, Duration)>,
     }
 
     impl Wire for &mut Fixture {
         fn send(&mut self, message: &ControlToBrain) -> Result<()> {
+            self.attempted_quit |= *message == QUIT;
             if self.refuse.as_ref() == Some(message) {
                 bail!("WriteFile failed while holding {TOKEN}");
             }
@@ -258,11 +285,30 @@ mod tests {
             limit: Duration,
             mut pick: impl FnMut(&Frame) -> Option<T>,
         ) -> Result<T> {
-            self.limits.push(limit);
+            let phase = if self.signing_in {
+                WaitFor::SignIn
+            } else if self.sent.last() == Some(&SIGN_IN) {
+                WaitFor::Answer
+            } else {
+                WaitFor::Initial
+            };
+            self.waits.push((phase, Instant::now(), limit));
             while let Some(frame) = self.frames.pop_front() {
-                if let Some(picked) = pick(&frame?) {
-                    // Time passes between views, as it does on the pipe.
-                    thread::sleep(Duration::from_millis(2));
+                let frame = frame?;
+                if let Some(picked) = pick(&frame) {
+                    if self.signing_in {
+                        thread::sleep(Duration::from_millis(25));
+                    }
+                    self.signing_in = matches!(
+                        frame,
+                        Frame::Control(ControlToShell::Account(AccountView::SigningIn))
+                    );
+                    if matches!(
+                        frame,
+                        Frame::Control(ControlToShell::Account(AccountView::Busy))
+                    ) {
+                        self.sent_before_busy = self.sent.last().cloned();
+                    }
                     return Ok(picked);
                 }
             }
@@ -400,21 +446,25 @@ mod tests {
                 Step::View(end),
             ]);
             let (out, error, quit_sent) = run(&mut brain);
-            assert_eq!(
-                out,
-                format!("account: signed out\n{WAITING}account: signed in, {words}\n")
-            );
+            for state in ["signed out", "signing in", "browser", "signed in", words] {
+                assert!(out.contains(state), "{out}");
+            }
             assert_eq!(error, None);
             assert_eq!(ops(&brain), [SIGN_IN, QUIT]);
             assert!(quit_sent);
-            let [first, answer, settle, again] = brain.limits[..] else {
-                panic!("four waits: {:?}", brain.limits);
-            };
-            assert_eq!((first, answer), (VIEW, VIEW));
-            assert!(
-                settle <= SIGNIN && again < settle,
-                "{settle:?} then {again:?}"
-            );
+            for (phase, seconds) in [
+                (WaitFor::Initial, 10),
+                (WaitFor::Answer, 10),
+                (WaitFor::SignIn, 330),
+            ] {
+                assert_one_deadline(
+                    brain
+                        .waits
+                        .iter()
+                        .filter_map(|&(seen, at, limit)| (seen == phase).then_some((at, limit))),
+                    Duration::from_secs(seconds),
+                );
+            }
         }
     }
 
@@ -534,13 +584,16 @@ mod tests {
             Step::View(signed_out()),
             Step::View(AccountView::Busy),
         ]);
-        let (out, error, _) = run(&mut brain);
-        let words = "busy: another Windows session holds the account";
-        assert_eq!(out, format!("account: signed out\naccount: {words}\n"));
-        assert_eq!(
-            error.as_deref(),
-            Some(format!("sign-in ended with the account {words}").as_str())
+        let (out, error, quit_sent) = run(&mut brain);
+        assert!(out.contains("signed out") && out.contains("busy"), "{out}");
+        let error = error.expect("sign-in failed");
+        assert!(
+            error.contains("busy") && error.contains("another Windows session"),
+            "{error}"
         );
+        assert_eq!(brain.sent_before_busy, Some(SIGN_IN));
+        assert_eq!(ops(&brain), [SIGN_IN, QUIT]);
+        assert!(quit_sent);
     }
 
     #[test]
@@ -572,9 +625,18 @@ mod tests {
             Step::Late,
             Step::Late,
         ]);
-        let (out, error, _) = run(&mut brain);
-        assert_eq!(out, format!("account: signed out\n{WAITING}"));
-        assert_eq!(error.as_deref(), Some("no answer to CancelSignIn in 10s"));
+        let (out, error, quit_sent) = run(&mut brain);
+        assert!(
+            out.contains("signed out") && out.contains("signing in"),
+            "{out}"
+        );
+        let error = error.expect("cancel remained unconfirmed");
+        assert!(
+            error.contains("no answer") && error.contains("CancelSignIn") && error.contains("10s"),
+            "{error}"
+        );
+        assert_eq!(ops(&brain), [SIGN_IN, CANCEL, QUIT]);
+        assert!(quit_sent);
     }
 
     #[test]
@@ -630,7 +692,7 @@ mod tests {
     }
 
     #[test]
-    fn a_failed_quitting_after_a_sign_in_ends_the_brain() {
+    fn a_failed_quitting_after_sign_in_selects_forced_stop() {
         let mut brain = fixture(vec![
             Step::View(signed_out()),
             Step::View(AccountView::SigningIn),
@@ -638,15 +700,23 @@ mod tests {
         ]);
         brain.refuse = Some(QUIT);
         let (out, error, quit_sent) = run(&mut brain);
-        assert_eq!(
-            out,
-            format!("account: signed out\n{WAITING}account: signed in, plan enabled\n")
+        assert!(
+            out.contains("signed out")
+                && out.contains("signing in")
+                && out.contains("plan enabled"),
+            "{out}"
         );
-        assert_eq!(
-            error.as_deref(),
-            Some("couldn't send Quitting; the brain was ended")
+        let error = error.expect("failed quit is reported");
+        assert!(
+            error.contains("Quitting") && error.contains("ended"),
+            "{error}"
         );
-        assert!(!quit_sent, "the brain is stopped, not waited for");
+        assert_eq!(ops(&brain), [SIGN_IN]);
+        assert!(brain.attempted_quit, "the graceful quit send failed");
+        assert!(
+            !quit_sent,
+            "select forced stop instead of waiting for a graceful exit"
+        );
     }
 
     #[test]

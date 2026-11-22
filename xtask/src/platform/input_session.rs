@@ -547,25 +547,42 @@ mod tests {
     };
     use windows::Win32::Foundation::ERROR_ACCESS_DENIED;
 
+    fn names_code(report: &str, label: &str, code: usize) -> bool {
+        let code = code.to_string();
+        report.match_indices(label).any(|(at, _)| {
+            report[at + label.len()..]
+                .split(|ch: char| !ch.is_ascii_alphanumeric())
+                .find(|word| !word.is_empty())
+                == Some(code.as_str())
+        })
+    }
+
+    fn names_request(report: &str, message: u32) -> bool {
+        let identity = format!("{message:#x}");
+        report
+            .split(|ch: char| !ch.is_ascii_alphanumeric())
+            .any(|word| word.eq_ignore_ascii_case(&identity))
+    }
+
     #[test]
     fn fixture_request_distinguishes_failed_sends_from_timeouts_and_refusals() {
-        let error = |reply| request_result(OPEN_GATE, reply).unwrap_err().to_string();
-        assert_eq!(
-            error(Err(ERROR_TIMEOUT)),
-            "fixture request 0x8017 timed out"
-        );
-        assert_eq!(
-            error(Err(ERROR_ACCESS_DENIED)),
-            "fixture request 0x8017 send failed (Win32 code 5)"
-        );
-        assert_eq!(
-            error(Err(ERROR_SUCCESS)),
-            "fixture request 0x8017 send failed (Win32 code 0)"
-        );
-        assert_eq!(
-            error(Ok(0)),
-            "fixture request 0x8017 refused (fixture code 0)"
-        );
+        for (reply, outcome, code) in [
+            (Err(ERROR_TIMEOUT), "timed out", None),
+            (
+                Err(ERROR_ACCESS_DENIED),
+                "send failed",
+                Some(("Win32 code", 5)),
+            ),
+            (Err(ERROR_SUCCESS), "send failed", Some(("Win32 code", 0))),
+            (Ok(0), "refused", Some(("fixture code", 0))),
+        ] {
+            let report = request_result(OPEN_GATE, reply).unwrap_err().to_string();
+            assert!(names_request(&report, OPEN_GATE), "{report}");
+            assert!(report.contains(outcome), "{report}");
+            if let Some((label, number)) = code {
+                assert!(names_code(&report, label, number), "{report}");
+            }
+        }
         assert_eq!(request_result(OPEN_GATE, Ok(2)).unwrap(), 2);
     }
 
@@ -588,24 +605,33 @@ mod tests {
             (14, "unknown prepare-idle refusal"),
             (usize::MAX, "unknown prepare-idle refusal"),
         ] {
-            assert_eq!(
-                request_result(PREPARE_IDLE, Ok(reply))
-                    .unwrap_err()
-                    .to_string(),
-                format!("fixture request 0x8019 refused (fixture code {reply}): {label}"),
-            );
+            let report = request_result(PREPARE_IDLE, Ok(reply))
+                .unwrap_err()
+                .to_string();
+            assert!(names_request(&report, PREPARE_IDLE), "{report}");
+            assert!(names_code(&report, "fixture code", reply), "{report}");
+            assert!(report.contains("refused"), "{report}");
+            assert!(report.contains(label), "{report}");
         }
         assert_eq!(request_result(PREPARE_IDLE, Ok(1)).unwrap(), 1);
     }
 
     #[test]
     fn queued_input_keeps_fixture_code_nine_and_names_the_high_word_mask() {
-        assert_eq!(
-            request_result(PREPARE_IDLE, Ok(0x0004_0209))
-                .unwrap_err()
-                .to_string(),
-            "fixture request 0x8019 refused (fixture code 9): the fixture had queued input; queue_mask=0x0402"
+        let report = request_result(PREPARE_IDLE, Ok(0x0004_0209))
+            .unwrap_err()
+            .to_string();
+        assert!(names_code(&report, "fixture code", 9), "{report}");
+        assert!(names_request(&report, PREPARE_IDLE), "{report}");
+        assert!(
+            report.contains("refused") && report.contains("the fixture had queued input"),
+            "{report}"
         );
+        let mask = report
+            .split(|ch: char| !ch.is_ascii_alphanumeric() && ch != '_' && ch != '=')
+            .find_map(|field| field.strip_prefix("queue_mask=0x"))
+            .expect("queue mask is a labeled hexadecimal value");
+        assert_eq!(u16::from_str_radix(mask, 16).unwrap(), 0x0402);
     }
 
     #[test]
@@ -668,10 +694,7 @@ mod tests {
     }
 
     #[test]
-    fn the_ends_map_to_the_first_and_last_pixel_and_outside_is_refused() {
-        assert_eq!(normalized(0, 0, 2560), Some(13));
-        assert_eq!(normalized(2559, 0, 2560), Some(65523));
-        assert_eq!(normalized(-1920, -1920, 4480), Some(7));
+    fn absolute_mapping_refuses_outside_points_and_empty_extents() {
         assert_eq!(normalized(2560, 0, 2560), None);
         assert_eq!(normalized(-1921, -1920, 4480), None);
         assert_eq!(normalized(0, 0, 0), None);

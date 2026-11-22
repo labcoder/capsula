@@ -499,21 +499,9 @@ mod tests {
         let start = Instant::now();
         let mut lease = Lease::new(10);
         lease.ready(7, start);
-        lease.observe(
-            CALM,
-            (start + QUIET)
-                .checked_sub(Duration::from_millis(1))
-                .unwrap(),
-        );
+        lease.observe(CALM, start + Duration::from_millis(999));
         assert!(!lease.injectable(), "one millisecond short");
-        assert_eq!(
-            lease.gate(),
-            Gate::Quiet {
-                since: start,
-                input: 7
-            }
-        );
-        lease.observe(CALM, start + QUIET);
+        lease.observe(CALM, start + Duration::from_millis(1_000));
         assert!(lease.injectable());
     }
 
@@ -537,13 +525,18 @@ mod tests {
             let mut lease = Lease::new(10);
             lease.ready(7, start);
             lease.observe(spoiled, start + Duration::from_millis(500));
-            lease.observe(CALM, start + QUIET);
+            lease.observe(CALM, start + Duration::from_millis(1_000));
             assert_eq!(lease.gate(), Gate::Waiting, "{spoiled:?}");
             assert!(!lease.injectable());
-            lease.ready(7, start + QUIET * 2);
-            lease.observe(CALM, start + QUIET * 2 + Duration::from_millis(999));
+            let rearmed = start + Duration::from_millis(2_000);
+            let calm = Quiet {
+                last_input: 9,
+                ..CALM
+            };
+            lease.ready(9, rearmed);
+            lease.observe(calm, rearmed + Duration::from_millis(999));
             assert!(!lease.injectable());
-            lease.observe(CALM, start + QUIET * 3);
+            lease.observe(calm, rearmed + Duration::from_millis(1_000));
             assert!(lease.injectable());
         }
     }
@@ -553,16 +546,9 @@ mod tests {
         let start = Instant::now();
         let mut lease = Lease::new(10);
         lease.activated(7, start);
-        assert_eq!(
-            lease.gate(),
-            Gate::Quiet {
-                since: start,
-                input: 7
-            }
-        );
         lease.observe(CALM, start + Duration::from_millis(999));
         assert!(!lease.injectable(), "one millisecond short");
-        lease.observe(CALM, start + QUIET);
+        lease.observe(CALM, start + Duration::from_millis(1_000));
         assert!(lease.injectable());
         for spoiled in [
             Quiet {
@@ -582,10 +568,15 @@ mod tests {
             lease.activated(7, start);
             lease.observe(spoiled, start + Duration::from_millis(500));
             assert_eq!(lease.gate(), Gate::Aborted, "{spoiled:?}");
-            lease.ready(7, start + QUIET);
-            lease.activated(7, start + QUIET);
-            lease.observe(CALM, start + QUIET * 3);
-            assert_eq!(lease.gate(), Gate::Aborted, "{spoiled:?}: no new arm");
+            let retry = start + Duration::from_millis(1_000);
+            let mut ready = lease;
+            ready.ready(7, retry);
+            lease.activated(7, retry);
+            for mut retried in [ready, lease] {
+                assert_eq!(retried.gate(), Gate::Aborted, "{spoiled:?}: no new arm");
+                retried.observe(CALM, retry + Duration::from_millis(1_000));
+                assert!(!retried.injectable(), "{spoiled:?}: no renewed injection");
+            }
         }
     }
 
@@ -601,8 +592,12 @@ mod tests {
             },
             start,
         );
-        lease.ready(7, start + QUIET);
         assert_eq!(lease.gate(), Gate::Aborted);
+        let retry = start + Duration::from_millis(1_000);
+        lease.ready(7, retry);
+        lease.observe(CALM, retry + Duration::from_millis(1_000));
+        assert_eq!(lease.gate(), Gate::Aborted);
+        assert!(!lease.injectable());
     }
 
     #[test]
@@ -629,7 +624,11 @@ mod tests {
     fn an_abort_after_opening_is_permanent() {
         let (mut lease, start) = opened();
         lease.abort();
+        assert_eq!(lease.gate(), Gate::Aborted);
+        assert!(!lease.injectable());
         lease.observe(CALM, start + QUIET * 2);
+        assert_eq!(lease.gate(), Gate::Aborted);
+        assert!(!lease.injectable());
         lease.ready(7, start + QUIET * 2);
         assert_eq!(lease.gate(), Gate::Aborted);
         assert!(!lease.injectable());

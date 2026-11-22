@@ -1195,31 +1195,38 @@ mod tests {
             off_cursor_frame(work, POINT { x: 720, y: 325 }),
             Some(FRAME)
         );
-        assert_eq!(
-            off_cursor_frame(work, POINT { x: 400, y: 325 }),
-            Some([1920, 80, 640, 490])
+        assert_cursor_clear(work, POINT { x: 400, y: 325 });
+    }
+
+    fn assert_cursor_clear(work: RECT, cursor: POINT) {
+        let [x, y, width, height] = off_cursor_frame(work, cursor).expect("a safe frame fits");
+        assert_eq!([width, height], [FRAME[2], FRAME[3]]);
+        assert!(x >= work.left && x + width <= work.right);
+        assert!(y >= work.top && y + height <= work.bottom);
+        assert!(
+            !((x..x + width).contains(&cursor.x) && (y..y + height).contains(&cursor.y)),
+            "the replacement frame must leave the cursor clear"
         );
     }
 
     #[test]
     fn unattended_frame_uses_vertical_space_and_refuses_if_it_cannot_avoid_the_cursor() {
+        let [_, _, width, height] = FRAME;
         let work = RECT {
             left: 0,
             top: 0,
-            right: 640,
+            right: width,
             bottom: 1000,
         };
-        assert_eq!(
-            off_cursor_frame(work, POINT { x: 400, y: 325 }),
-            Some([0, 510, 640, 490])
-        );
+        let cursor = POINT { x: 400, y: 325 };
+        assert_cursor_clear(work, cursor);
         assert_eq!(
             off_cursor_frame(
                 RECT {
-                    bottom: 490,
+                    bottom: height,
                     ..work
                 },
-                POINT { x: 400, y: 325 }
+                cursor
             ),
             None
         );

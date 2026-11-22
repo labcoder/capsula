@@ -340,17 +340,39 @@ mod tests {
         let dir = scratch("rollback");
         let source = dir.join("source");
         fs::write(&source, b"voice").expect("write");
+        let kept = dir.join("verified-model");
+        fs::write(&kept, b"voice").expect("verified destination");
+        let blocker = dir.join("not-a-folder");
+        fs::write(&blocker, b"keep").expect("blocked destination parent");
         let first = dir.join("models").join("a");
-        let second = dir.join("models").join("b");
-
-        install(&[
-            placement(&source, &first, VOICE_SHA),
-            placement(&dir.join("absent"), &second, VOICE_SHA),
-        ])
-        .expect_err("the second link has no source");
-        assert!(!first.exists(), "the first link was removed again");
-        assert!(!second.exists());
-        assert_eq!(fs::read(&source).expect("read"), b"voice");
+        let missing_source = dir.join("vanished-source");
+        for (later_source, second, location) in [
+            (&source, blocker.join("b"), &blocker),
+            (
+                &missing_source,
+                dir.join("models").join("b"),
+                &missing_source,
+            ),
+        ] {
+            let error = install(&[
+                placement(&source, &kept, VOICE_SHA),
+                placement(&source, &first, VOICE_SHA),
+                placement(later_source, &second, VOICE_SHA),
+            ])
+            .expect_err("the later link fails");
+            assert!(
+                error.to_string().contains(&location.display().to_string()),
+                "{error}"
+            );
+            assert!(!first.exists(), "the first link was removed again");
+            assert!(!second.exists());
+            assert_eq!(
+                fs::read(&kept).expect("verified destination survives"),
+                b"voice"
+            );
+            assert_eq!(fs::read(&blocker).expect("blocking file survives"), b"keep");
+            assert_eq!(fs::read(&source).expect("the source survives"), b"voice");
+        }
     }
 
     #[test]

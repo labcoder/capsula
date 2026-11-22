@@ -153,11 +153,15 @@ mod tests {
             .unwrap();
             expected.push(notice);
         }
-        assert_eq!(read(&dir, "ring 0.17.14").unwrap(), expected);
+        let mut actual = read(&dir, "ring 0.17.14").unwrap();
+        actual.sort_unstable();
+        expected.sort_unstable();
+        assert_eq!(actual, expected);
         fs::remove_file(dir.join(grants[1].0)).unwrap();
-        assert_eq!(
-            read(&dir, "ring 0.17.14").unwrap_err().to_string(),
-            "reading reviewed notice input for ring 0.17.14: crypto/chacha/asm/chacha-x86_64.pl"
+        let error = read(&dir, "ring 0.17.14").unwrap_err().to_string();
+        assert!(
+            error.contains("ring 0.17.14") && error.contains(grants[1].0),
+            "{error}"
         );
     }
 
@@ -192,19 +196,20 @@ mod tests {
         let second = "//  * esa.hxx\n//  * Second grant";
         let code = "int fixture() { return 0; }";
         fs::write(&path, format!("{first}\n{end}\n{code}\n{second}\n{end}\n")).unwrap();
-        assert_eq!(
-            read(&dir, "esaxx-rs 0.1.10").unwrap(),
-            [format!("{first}\n{end}"), format!("{second}\n{end}")]
-        );
+        let mut actual = read(&dir, "esaxx-rs 0.1.10").unwrap();
+        let mut expected = [format!("{first}\n{end}"), format!("{second}\n{end}")];
+        actual.sort_unstable();
+        expected.sort_unstable();
+        assert_eq!(actual, expected);
         fs::write(&path, format!("{first}\n{code}\n{second}\n{end}\n")).unwrap();
-        assert_eq!(
-            read(&dir, "esaxx-rs 0.1.10")
-                .unwrap_err()
-                .chain()
-                .last()
-                .unwrap()
-                .to_string(),
-            "reviewed notice end missing before next start"
-        );
+        let error = read(&dir, "esaxx-rs 0.1.10").unwrap_err();
+        let diagnostic = format!("{error:#}");
+        for detail in [
+            "esaxx-rs 0.1.10",
+            "src/esaxx.cpp",
+            "reviewed notice end missing before next start",
+        ] {
+            assert!(diagnostic.contains(detail), "{diagnostic}");
+        }
     }
 }

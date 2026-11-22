@@ -173,11 +173,20 @@ mod tests {
         let returned = returned.recv_timeout(Duration::from_secs(10));
         let mut kept = leftovers();
         let pids: Vec<_> = kept.iter().map(Child::id).collect();
+        let mut still_running = false;
         for brain in &mut kept {
-            brain.kill().expect("the test child can be killed");
+            if brain
+                .try_wait()
+                .expect("read status of kept child")
+                .is_none()
+            {
+                still_running |= brain.id() == pid;
+                brain.kill().expect("the test child can be killed");
+            }
             brain.wait().expect("the test child is reaped");
         }
         assert!(returned.is_ok(), "dropping it returned");
         assert_eq!(pids, [pid]);
+        assert!(still_running, "retained the live child, not just its PID");
     }
 }

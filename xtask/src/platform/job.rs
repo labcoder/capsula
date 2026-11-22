@@ -263,20 +263,36 @@ mod tests {
             assert!(start.elapsed() < BOUND, "the parent didn't exit");
             thread::sleep(Duration::from_millis(20));
         }
-        assert_eq!(super::members(job.raw()).expect("listed").len(), 1);
-        super::end_all(job.raw(), std::process::id(), BOUND).expect("every member ended");
-        assert_eq!(
-            super::members(job.raw()).expect("listed"),
-            Vec::<u32>::new()
+        stdin
+            .write_all(b"rem\r\n")
+            .expect("the grandchild is alive");
+        let mut member = Command::new("cmd")
+            .args(["/D", "/C"])
+            .raw_arg("set /p go=")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("second member starts");
+        job.assign(&member).expect("second member joins");
+        assert!(member.try_wait().expect("check second member").is_none());
+        let ended = super::end_all(job.raw(), std::process::id(), BOUND);
+        let member_exited = member.try_wait().expect("check second member");
+        let untouched = outsider.try_wait().expect("reads").is_none();
+        if untouched {
+            outsider.kill().expect("the outsider ends");
+        }
+        outsider.wait().expect("the outsider is reaped");
+        ended.expect("every member ended");
+        assert!(
+            member_exited.is_some(),
+            "the second member outlived the end"
         );
         assert_eq!(
             stdin.write_all(b"rem\r\n").map_err(|error| error.kind()),
             Err(ErrorKind::BrokenPipe),
             "the grandchild outlived the end"
         );
-        let untouched = outsider.try_wait().expect("reads").is_none();
-        outsider.kill().expect("the outsider ends");
-        outsider.wait().expect("the outsider is reaped");
         assert!(untouched, "a process outside the job was ended");
     }
 }

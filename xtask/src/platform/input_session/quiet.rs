@@ -221,24 +221,37 @@ mod tests {
     fn a_read_failure_or_lock_cannot_be_reported_as_a_quiet_pass_or_output_failure() {
         assert!(outcome(None).is_ok());
         for output_failed in [false, true] {
-            assert_eq!(
-                outcome(Some(Failure::RawRead { output_failed }))
-                    .unwrap_err()
-                    .to_string(),
-                format!(
-                    "input-quiet raw-input guard read failed (error output failed: {output_failed})"
-                )
-            );
-            assert_eq!(
-                outcome(Some(Failure::SessionLock { output_failed }))
-                    .unwrap_err()
-                    .to_string(),
-                format!("input-quiet session locked (error output failed: {output_failed})")
-            );
+            let raw = "raw-input guard read failed";
+            let lock = "session locked";
+            for (failure, cause, other) in [
+                (Failure::RawRead { output_failed }, raw, lock),
+                (Failure::SessionLock { output_failed }, lock, raw),
+            ] {
+                let report = outcome(Some(failure)).unwrap_err().to_string();
+                assert!(
+                    report.contains(cause) && !report.contains(other),
+                    "{report}"
+                );
+                let (_, status) = report
+                    .split_once("error output failed")
+                    .expect("output status");
+                let status = status
+                    .split(|ch: char| !ch.is_ascii_alphabetic())
+                    .find(|word| !word.is_empty());
+                assert_eq!(status, Some(if output_failed { "true" } else { "false" }));
+            }
         }
-        assert_eq!(
-            outcome(Some(Failure::Output)).unwrap_err().to_string(),
-            "input-quiet output failed"
+        let report = outcome(Some(Failure::Output)).unwrap_err().to_string();
+        assert!(report.contains("output failed"), "{report}");
+        assert!(
+            [
+                "error output failed",
+                "raw-input guard read failed",
+                "session locked"
+            ]
+            .into_iter()
+            .all(|cause| !report.contains(cause)),
+            "{report}"
         );
     }
 }

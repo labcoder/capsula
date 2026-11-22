@@ -153,6 +153,11 @@ mod tests {
             product_tree(10, &entries[2..3], identify).unwrap(),
             Startup::Missing("brain")
         );
+        assert_eq!(
+            product_tree(10, &entries[1..3], identify).unwrap(),
+            Startup::Missing("screen-worker"),
+            "when both workers are missing"
+        );
     }
 
     #[test]

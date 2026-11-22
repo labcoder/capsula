@@ -111,11 +111,25 @@ mod tests {
             "qpc=30 resting",
             "qpc=70 input opened focused=false",
             "qpc=80 input opened focused=true",
+            "qpc=90 input opened focused=true",
         ]
         .map(|line| Record::parse(line).unwrap());
-        assert_eq!(
-            summarize_feel(&records),
-            "recognized_double_taps=2 focused_opens=1 unfocused_opens=1\nsource=owner feel milestones only; not a human verdict or automated gate\n"
+        let report = summarize_feel(&records);
+        for metric in [
+            "recognized_double_taps=3",
+            "focused_opens=2",
+            "unfocused_opens=1",
+        ] {
+            assert!(
+                report
+                    .split(|ch: char| !ch.is_ascii_alphanumeric() && ch != '_' && ch != '=')
+                    .any(|word| word == metric),
+                "missing {metric}: {report}"
+            );
+        }
+        assert!(
+            report.contains("not a human verdict or automated gate"),
+            "{report}"
         );
     }
 
@@ -183,33 +197,32 @@ mod tests {
 
     #[test]
     fn draft_checkpoints_retain_false_verdicts_and_reject_malformed_fields() {
-        assert_eq!(
-            Record::parse("qpc=5 input draft nonempty=true preserved=true")
-                .unwrap()
-                .mark,
-            Mark::Draft {
-                nonempty: true,
-                preserved: true
-            }
-        );
-        assert_eq!(
-            Record::parse("qpc=6 input draft nonempty=false preserved=false")
-                .unwrap()
-                .mark,
-            Mark::Draft {
-                nonempty: false,
-                preserved: false
-            }
-        );
-        assert_eq!(
-            Record::parse("qpc=7 input draft nonempty=false preserved=true")
-                .unwrap()
-                .mark,
-            Mark::Draft {
-                nonempty: false,
-                preserved: true
-            }
-        );
+        for (line, nonempty, preserved) in [
+            ("qpc=5 input draft nonempty=true preserved=true", true, true),
+            (
+                "qpc=6 input draft nonempty=false preserved=false",
+                false,
+                false,
+            ),
+            (
+                "qpc=7 input draft nonempty=false preserved=true",
+                false,
+                true,
+            ),
+            (
+                "qpc=8 input draft nonempty=true preserved=false",
+                true,
+                false,
+            ),
+        ] {
+            assert_eq!(
+                Record::parse(line).unwrap().mark,
+                Mark::Draft {
+                    nonempty,
+                    preserved
+                }
+            );
+        }
         for line in [
             "qpc=5 input draft nonempty=true",
             "qpc=5 input draft nonempty=1 preserved=true",

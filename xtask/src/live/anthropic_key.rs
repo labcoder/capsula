@@ -456,10 +456,7 @@ fn watch(
     if let Some(ask) = step.ask {
         println!("    {ask}");
     }
-    *state = State {
-        thread: state.thread,
-        ..State::default()
-    };
+    state.next_step();
     let started = Instant::now();
     loop {
         ensure!(
@@ -587,6 +584,15 @@ struct State {
     thread: Option<ThreadId>,
 }
 
+impl State {
+    fn next_step(&mut self) {
+        *self = Self {
+            thread: self.thread,
+            ..Self::default()
+        };
+    }
+}
+
 #[derive(Debug, PartialEq, Eq)]
 enum Progress {
     Waiting,
@@ -664,6 +670,7 @@ fn check(expect: Expect, state: &mut State, seen: &Seen) -> Progress {
 mod tests {
     use std::ffi::OsStr;
     use std::fs;
+    use std::os::windows::process::CommandExt as _;
 
     use kumochi_protocol::constants::{CONFIG_FILE, ProductIdentity};
     use kumochi_protocol::message::{ClaudeCodeView, KeyRejection};
@@ -733,24 +740,53 @@ mod tests {
 
     #[test]
     fn the_shell_and_any_brain_it_starts_get_no_key_budget_or_tap() {
+        let planted = "must-not-reach-the-shell";
+        if std::env::var_os(PIPE_TAP_ENV).as_deref() != Some(OsStr::new(planted)) {
+            let (_, test) = concat!(
+                module_path!(),
+                "::the_shell_and_any_brain_it_starts_get_no_key_budget_or_tap"
+            )
+            .split_once("::")
+            .expect("module path contains the test crate");
+            let child = Command::new(std::env::current_exe().expect("test executable"))
+                .args(["--exact", test])
+                .env(PIPE_TAP_ENV, planted)
+                .output()
+                .expect("test process with inherited tap");
+            let out = String::from_utf8_lossy(&child.stdout);
+            assert!(child.status.success() && out.contains("1 passed"), "{out}");
+            return;
+        }
+
         let dir = scratch::dir("anthropic-key-shell");
         let folders = Folders::create(&dir).expect("folders");
-        let command = shell_command(Path::new("kumochi.exe"), &folders);
+        let mut command = shell_command(Path::new("cmd.exe"), &folders);
         let set = |name: &str| {
             command
                 .get_envs()
-                .find(|(key, _)| *key == OsStr::new(name))
-                .map(|(_, value)| value.map(|value| value.to_string_lossy().into_owned()))
+                .find(|(key, _)| key.eq_ignore_ascii_case(OsStr::new(name)))
+                .map(|(_, value)| value)
         };
-        assert_eq!(set(LIVE_KEY_CATALOG_BUDGET_ENV), Some(Some("0".to_owned())));
+        assert_eq!(
+            set(LIVE_KEY_CATALOG_BUDGET_ENV),
+            Some(Some(OsStr::new("0")))
+        );
         assert_eq!(
             set(LIVE_KEY_MESSAGES_BUDGET_ENV),
-            Some(Some("0".to_owned()))
+            Some(Some(OsStr::new("0")))
         );
-        assert!(matches!(set(PIPE_TAP_ENV), None | Some(None)));
+        assert_eq!(set("LOCALAPPDATA"), Some(Some(folders.local.as_os_str())));
+        let status = command
+            .args(["/D", "/C"])
+            .raw_arg(format!(
+                "if defined {PIPE_TAP_ENV} (exit /B 1) else (exit /B 0)"
+            ))
+            .status()
+            .expect("probe the shell's effective environment");
         assert_eq!(
-            set("LOCALAPPDATA"),
-            Some(Some(folders.local.to_string_lossy().into_owned()))
+            status.code(),
+            Some(0),
+            "the inherited tap reached the shell"
         );
     }
 
@@ -964,47 +1000,73 @@ mod tests {
 
     #[test]
     fn an_answer_is_one_run_to_done_and_the_second_stays_in_its_thread() {
-        let mut state = State::default();
-        let first = [
-            run(Phase::Thinking),
-            run(Phase::Answering),
-            run(Phase::Done),
-        ];
-        assert_eq!(
-            play(Expect::Answered { same: false }, &mut state, &first),
-            [Progress::Waiting, Progress::Waiting, Progress::Met]
-        );
-        assert_eq!(state.thread, Some(THREAD));
+        let after_first = || {
+            let mut state = State::default();
+            assert_eq!(
+                play(
+                    Expect::Answered { same: false },
+                    &mut state,
+                    &[
+                        run(Phase::Thinking),
+                        run(Phase::Answering),
+                        run(Phase::Done)
+                    ]
+                ),
+                [Progress::Waiting, Progress::Waiting, Progress::Met]
+            );
+            state.next_step();
+            state
+        };
 
         let second = Expect::Answered { same: true };
-        let elsewhere = Seen::Run {
+        let later = |phase, thread| Seen::Run {
             run: RunId(8),
-            thread: ThreadId(4),
-            phase: Phase::Thinking,
+            thread,
+            phase,
             error: false,
         };
-        state.run = None;
-        assert_eq!(
-            check(second, &mut state, &elsewhere),
-            stop("a run in another thread")
-        );
-        let mut state = State {
-            run: Some(RunId(6)),
-            thread: Some(THREAD),
-            ..State::default()
+        let refused = |progress, reason: &str| {
+            let Progress::Stop(message) = progress else {
+                panic!("expected refusal, got {progress:?}");
+            };
+            assert!(message.to_ascii_lowercase().contains(reason), "{message}");
         };
-        assert_eq!(
-            check(second, &mut state, &run(Phase::Thinking)),
-            stop("a second run")
+        refused(
+            check(
+                second,
+                &mut after_first(),
+                &later(Phase::Thinking, ThreadId(4)),
+            ),
+            "another thread",
         );
-        for phase in [Phase::Failed, Phase::Interrupted] {
-            assert_eq!(
+        assert_eq!(
+            play(
+                second,
+                &mut after_first(),
+                &[later(Phase::Thinking, THREAD), later(Phase::Done, THREAD)]
+            ),
+            [Progress::Waiting, Progress::Met]
+        );
+        let mut active = after_first();
+        assert_eq!(
+            check(second, &mut active, &later(Phase::Thinking, THREAD)),
+            Progress::Waiting
+        );
+        refused(
+            check(second, &mut active, &run(Phase::Thinking)),
+            "second run",
+        );
+        for (phase, reason) in [
+            (Phase::Failed, "failed"),
+            (Phase::Interrupted, "interrupted"),
+        ] {
+            refused(
                 check(
                     Expect::Answered { same: false },
                     &mut State::default(),
-                    &run(phase)
+                    &run(phase),
                 ),
-                Progress::Stop(format!("the run ended {phase:?}"))
+                reason,
             );
         }
         let failed_done = Seen::Run {
@@ -1013,13 +1075,13 @@ mod tests {
             phase: Phase::Done,
             error: true,
         };
-        assert_eq!(
+        refused(
             check(
                 Expect::Answered { same: false },
                 &mut State::default(),
-                &failed_done
+                &failed_done,
             ),
-            stop("the run ended Done")
+            "done",
         );
         assert!(matches!(
             check(
@@ -1121,19 +1183,25 @@ mod tests {
         for record in &records {
             tap::write(&mut bytes, record).expect("written");
         }
-        let whole = bytes.len();
+        let cut = bytes.len() + 3;
         tap::write(&mut bytes, &bare(Direction::ToShell, "Error")).expect("written");
-        bytes.truncate(whole + 3);
-        fs::write(&path, &bytes).expect("tap");
-        assert_eq!(
-            read(&path).expect("read"),
-            [
-                Seen::Key(KeyView::Checking),
-                Seen::Staged,
-                run(Phase::Done),
-                Seen::Refused,
-                Seen::Unexpected("CaptureDone".to_owned()),
-            ]
-        );
+        let (prefix, suffix) = bytes.split_at(cut);
+        fs::write(&path, prefix).expect("tap");
+        let mut expected = vec![
+            Seen::Key(KeyView::Checking),
+            Seen::Staged,
+            run(Phase::Done),
+            Seen::Refused,
+            Seen::Unexpected("CaptureDone".to_owned()),
+        ];
+        assert_eq!(read(&path).expect("read"), expected);
+        fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .expect("open tap for append")
+            .write_all(suffix)
+            .expect("finish the record");
+        expected.push(Seen::Unexpected("Error".to_owned()));
+        assert_eq!(read(&path).expect("read after append"), expected);
     }
 }

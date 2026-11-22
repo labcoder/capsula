@@ -253,3 +253,22 @@ pub(crate) fn fixture_server(name: &str) -> std::fs::File {
     let server = unsafe { OwnedHandle::from_raw_handle(server.0) };
     std::fs::File::from(server)
 }
+
+#[cfg(test)]
+pub(crate) fn fixture_available(server: &std::fs::File) -> io::Result<u32> {
+    use windows::Win32::System::Pipes::{GetNamedPipeClientProcessId, PeekNamedPipe};
+
+    let server = HANDLE(server.as_raw_handle());
+    let mut client = 0;
+    // SAFETY: the server handle is borrowed and `client` is writable.
+    unsafe { GetNamedPipeClientProcessId(server, &raw mut client) }?;
+    assert_eq!(
+        client,
+        std::process::id(),
+        "the connected client is this test"
+    );
+    let mut bytes = 0;
+    // SAFETY: the server handle is borrowed, no buffer is supplied, and `bytes` is writable.
+    unsafe { PeekNamedPipe(server, None, 0, None, Some(&raw mut bytes), None) }?;
+    Ok(bytes)
+}

@@ -363,17 +363,18 @@ mod tests {
     fn assert_refused(stage: usize, look: Look, case: &str) {
         let mut activation = upto(stage);
         assert!(step(&mut activation, stage, look).is_err(), "{case}");
-        assert_eq!(activation.stage, Stage::Aborted, "{case}");
+        assert_no_continuation(activation, case);
+    }
+
+    fn assert_no_continuation(mut refused: Activation, case: &str) {
         for any in 0..4 {
+            let mut retry = refused;
             assert!(
-                step(&mut activation, any, CALM).is_err(),
+                step(&mut retry, any, CALM).is_err(),
                 "{case}: calm step {any} after the refusal"
             );
         }
-        assert!(
-            activation.prepare(AWAY, AT).is_err(),
-            "{case}: prepare again"
-        );
+        assert!(refused.prepare(AWAY, AT).is_err(), "{case}: prepare again");
     }
 
     #[test]
@@ -410,7 +411,12 @@ mod tests {
         ] {
             let mut activation = Activation::new(ROOT, EDIT);
             assert!(activation.prepare(idle, AT).is_err(), "{idle:?}");
-            assert!(activation.may_move(CALM).is_err(), "{idle:?}: then a move");
+            let mut move_retry = activation;
+            assert!(
+                activation.prepare(AWAY, AT).is_err(),
+                "{idle:?}: prepare again"
+            );
+            assert!(move_retry.may_move(CALM).is_err(), "{idle:?}: then a move");
         }
     }
 
@@ -615,6 +621,14 @@ mod tests {
                 },
             ),
             (
+                "held_input",
+                Look {
+                    foreign: Some("held_input"),
+                    at_point: ROOT,
+                    ..CALM
+                },
+            ),
+            (
                 "desktop",
                 Look {
                     desktop: false,
@@ -651,16 +665,23 @@ mod tests {
             ),
         ] {
             let mut activation = upto(0);
-            let error = activation.may_move(look).unwrap_err();
-            assert_eq!(
-                error.to_string(),
-                format!("fixture activation move refused: {reason}")
-            );
-            assert_eq!(activation.stage, Stage::Aborted);
-            assert_eq!(
-                activation.may_move(CALM).unwrap_err().to_string(),
-                "fixture activation move refused: activation_state"
-            );
+            let report = activation.may_move(look).unwrap_err().to_string();
+            let reasons = report
+                .split(|ch: char| !ch.is_ascii_alphanumeric() && ch != '_')
+                .filter(|word| {
+                    matches!(
+                        *word,
+                        "held_input"
+                            | "desktop"
+                            | "deadline"
+                            | "stale_look"
+                            | "edit_not_at_point"
+                            | "mouse_capture"
+                            | "activation_state"
+                    )
+                });
+            assert!(reasons.eq([reason]), "{look:?}: {report}");
+            assert_no_continuation(activation, reason);
         }
     }
 
@@ -784,8 +805,7 @@ mod tests {
                     ..RECEIVED
                 },
                 FOREIGN,
-                "confirm look=calm pointer_offset=0,0 receipts=2 receipt_offset=1,0 \
-                 foreground=foreign",
+                "look=calm pointer_offset=0,0 receipts=2 receipt_offset=1,0 foreground=foreign",
             ),
             (
                 Look {
@@ -798,7 +818,7 @@ mod tests {
                     ..RECEIVED
                 },
                 ROOT,
-                "confirm look=mouse_capture pointer_offset=0,-2 receipts=0 receipt_offset=none \
+                "look=mouse_capture pointer_offset=0,-2 receipts=0 receipt_offset=none \
                  foreground=fixture_root",
             ),
             (
@@ -808,22 +828,52 @@ mod tests {
                 },
                 RECEIVED,
                 EDIT,
-                "confirm look=held_input pointer_offset=0,0 receipts=1 receipt_offset=0,0 \
+                "look=held_input pointer_offset=0,0 receipts=1 receipt_offset=0,0 \
                  foreground=fixture_other_window",
             ),
             (
                 CALM,
                 RECEIVED,
                 Owner { window: 0, pid: 0 },
-                "confirm look=calm pointer_offset=0,0 receipts=1 receipt_offset=0,0 \
-                 foreground=nothing",
+                "look=calm pointer_offset=0,0 receipts=1 receipt_offset=0,0 foreground=nothing",
             ),
         ] {
             let error = upto(3).confirm(look, receipt, foreground).unwrap_err();
-            assert_eq!(
-                format!("{error:#}"),
-                format!("{expected}: the fixture activation was refused after Clicked; no retry")
-            );
+            let report = format!("{error:#}");
+            for field in expected.split_ascii_whitespace() {
+                let (key, _) = field.split_once('=').unwrap();
+                assert!(
+                    report
+                        .split_ascii_whitespace()
+                        .map(|word| word.trim_matches(['(', ')', '[', ']', ';', ',', '.']))
+                        .filter(|word| word.split_once('=').is_some_and(|(name, _)| name == key))
+                        .eq([field]),
+                    "expected exactly {field}: {report}"
+                );
+            }
+            for private in [AT, look.cursor, receipt.point] {
+                assert!(
+                    !report.contains(&private.x.to_string()),
+                    "absolute x: {report}"
+                );
+                assert!(
+                    !report.contains(&private.y.to_string()),
+                    "absolute y: {report}"
+                );
+            }
+            for handle in [ROOT.window, EDIT.window, FOREIGN.window] {
+                assert!(
+                    report
+                        .split(|ch: char| !ch.is_ascii_alphanumeric())
+                        .all(|word| {
+                            let hex = word.strip_prefix("0x").or_else(|| word.strip_prefix("0X"));
+                            word.parse::<usize>() != Ok(handle)
+                                && hex.and_then(|word| usize::from_str_radix(word, 16).ok())
+                                    != Some(handle)
+                        }),
+                    "absolute handle: {report}"
+                );
+            }
         }
     }
 
