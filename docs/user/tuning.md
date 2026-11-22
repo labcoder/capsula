@@ -29,6 +29,7 @@ connection or with many repositories.
 
 ```toml
 [tuning.github]
+# Recording the outcome on this computer may finish after this limit, so a sent issue isn't lost.
 # 20–60 seconds: the longest filing an issue, or saving a review, may take, retries included.
 filing_s = 60
 # 12–16: requests one filing may make. At least listing_requests_count + 4.
