@@ -1,8 +1,8 @@
 //! `cargo xtask live <check>`: the real dev brain, on the developer's own dev account, driven over
 //! its real pipes by slice 2's gate client. `account` only reads the non-secret account view;
 //! `signin` and `claude-signin` perform their respective sign-in flows, `claude-question` asks
-//! Claude Code three questions, and `catalog-provenance`, `image` and `marks` run only the copied
-//! brain, each in its own mode.
+//! Claude Code three questions, and `catalog-provenance`, `image`, `marks` and `draw` run only the
+//! copied brain, each in its own mode.
 //!
 //! The brain serves only the `kumochi.exe` beside it, so, as in the slice 2 gate, an outer xtask
 //! builds the brain, copies it and itself (as `kumochi.exe`) into `target/live/<time>/bin`, and
@@ -30,9 +30,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context as _, Result, anyhow, bail, ensure};
 use kumochi_protocol::constants::{
-    BRAIN_EXE, CLAUDE_QUESTIONS_ENV, IMAGE_CHECK_ARG, IMAGE_DIAGNOSTIC_ARG, LIVE_BUDGET_ENV,
-    LIVE_KEY_CATALOG_BUDGET_ENV, LIVE_KEY_MESSAGES_BUDGET_ENV, LIVE_RUN_BIN_DIR, LIVE_RUNS_DIR,
-    ProductIdentity, SHELL_EXE,
+    BRAIN_EXE, CLAUDE_QUESTIONS_ENV, DRAW_CHECK_ARG, IMAGE_CHECK_ARG, IMAGE_DIAGNOSTIC_ARG,
+    LIVE_BUDGET_ENV, LIVE_KEY_CATALOG_BUDGET_ENV, LIVE_KEY_MESSAGES_BUDGET_ENV, LIVE_RUN_BIN_DIR,
+    LIVE_RUNS_DIR, MARKS_CHECK_ARG, ProductIdentity, SHELL_EXE,
 };
 
 use self::claude_signin::Ask;
@@ -66,7 +66,9 @@ pub(crate) fn run(args: impl Iterator<Item = String>) -> Result<()> {
         Entry::Inner(Check::Claude(ask)) => claude_signin::inner(ask),
         Entry::Inner(Check::Question) => std::process::exit(claude_question::inner()),
         Entry::Inner(Check::ChatGptText(budget)) => chatgpt_text::execute::run(budget),
-        Entry::Inner(Check::Catalog | Check::Image | Check::ImageDiagnostic | Check::Marks) => {
+        Entry::Inner(
+            Check::Catalog | Check::Image | Check::ImageDiagnostic | Check::Marks | Check::Draw,
+        ) => {
             unreachable!("entry refuses --inner for the brain-only checks")
         }
     }
@@ -89,11 +91,12 @@ enum Check {
     Image,
     ImageDiagnostic,
     Marks,
+    Draw,
     ChatGptText(u32),
 }
 
 impl Check {
-    const ALL: [Self; 9] = [
+    const ALL: [Self; 10] = [
         Self::Account,
         Self::SignIn,
         Self::Claude(Ask::SignIn),
@@ -103,6 +106,7 @@ impl Check {
         Self::Image,
         Self::ImageDiagnostic,
         Self::Marks,
+        Self::Draw,
     ];
 
     /// The arguments after `live` that name it.
@@ -117,6 +121,7 @@ impl Check {
             Self::Image => &["image"],
             Self::ImageDiagnostic => &["image", "--diagnostic"],
             Self::Marks => &["marks"],
+            Self::Draw => &["draw"],
             Self::ChatGptText(_) => &["chatgpt-text"],
         }
     }
@@ -151,11 +156,15 @@ fn entry(identity: ProductIdentity, args: &[String]) -> Result<Entry> {
             !(inner
                 && matches!(
                     check,
-                    Check::Catalog | Check::Image | Check::ImageDiagnostic | Check::Marks
+                    Check::Catalog
+                        | Check::Image
+                        | Check::ImageDiagnostic
+                        | Check::Marks
+                        | Check::Draw
                 ))
         })
         .context(
-            "usage: cargo xtask live account | signin | claude-signin [--disconnect] | claude-question | catalog-provenance | image [--diagnostic] | marks | chatgpt-text first-text --budget N",
+            "usage: cargo xtask live account | signin | claude-signin [--disconnect] | claude-question | catalog-provenance | image [--diagnostic] | marks | draw | chatgpt-text first-text --budget N",
         )?
     };
     Ok(if inner {
@@ -218,7 +227,8 @@ fn prepare(check: Check) -> Result<()> {
     match check {
         Check::Image => return image::run(&folder, IMAGE_CHECK_ARG),
         Check::ImageDiagnostic => return image::run(&folder, IMAGE_DIAGNOSTIC_ARG),
-        Check::Marks => return marks::run(&folder),
+        Check::Marks => return marks::run(&folder, MARKS_CHECK_ARG, "marks check"),
+        Check::Draw => return marks::run(&folder, DRAW_CHECK_ARG, "draw check"),
         _ => {}
     }
     fs::copy(&me, bin.join(SHELL_EXE)).context("copying the client")?;
@@ -724,6 +734,7 @@ mod tests {
             ),
             (&["catalog-provenance"], Entry::Prepare(Check::Catalog)),
             (&["marks"], Entry::Prepare(Check::Marks)),
+            (&["draw"], Entry::Prepare(Check::Draw)),
             (&["image"], Entry::Prepare(Check::Image)),
             (
                 &["image", "--diagnostic"],
@@ -753,6 +764,8 @@ mod tests {
             &["--diagnostic"],
             &["marks", "--inner"],
             &["marks", "--dry"],
+            &["draw", "--inner"],
+            &["draw", "water-cycle"],
             &["claude-question", "--disconnect"],
             &["claude-question", "3"],
             &["claude-question", "--inner", "--inner"],
@@ -760,7 +773,7 @@ mod tests {
             let error = entry(ProductIdentity::DEV, &args(list)).expect_err("refused");
             assert_eq!(
                 format!("{error:#}"),
-                "usage: cargo xtask live account | signin | claude-signin [--disconnect] | claude-question | catalog-provenance | image [--diagnostic] | marks | chatgpt-text first-text --budget N"
+                "usage: cargo xtask live account | signin | claude-signin [--disconnect] | claude-question | catalog-provenance | image [--diagnostic] | marks | draw | chatgpt-text first-text --budget N"
             );
         }
     }
