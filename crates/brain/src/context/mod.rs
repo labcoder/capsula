@@ -18,7 +18,7 @@ use std::sync::Arc;
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 use kumochi_protocol::message::{
-    AssistantName, ConnectionKind, EventId, ModelChoice, RunId, ThreadId, UserName,
+    AssistantName, ConnectionKind, EventId, ModelChoice, ModelSlug, RunId, ThreadId, UserName,
 };
 use zeroize::Zeroizing;
 
@@ -64,6 +64,12 @@ pub(crate) struct ConnectionTag(pub(crate) u64);
 pub(crate) struct Route {
     pub(crate) kind: ConnectionKind,
     pub(crate) tag: ConnectionTag,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct PictureRecipient {
+    pub(crate) route: Route,
+    pub(crate) model: ModelSlug,
 }
 
 #[cfg(test)]
@@ -149,6 +155,7 @@ pub(crate) enum Body {
     Native {
         kind: Option<ConnectionKind>,
         connection: ConnectionTag,
+        screen_model: Option<ModelSlug>,
         item: Opaque,
     },
     /// The result Kumochi answered a native call with, after its round's items.
@@ -177,11 +184,13 @@ impl fmt::Debug for Body {
             Self::Native {
                 kind,
                 connection,
+                screen_model,
                 item,
             } => f
                 .debug_struct("Native")
                 .field("kind", kind)
                 .field("connection", connection)
+                .field("screen_model", screen_model)
                 .field("item", item)
                 .finish(),
             Self::Result { call, output } => f

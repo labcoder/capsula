@@ -662,6 +662,8 @@ fn build(run: u64, attempt: u64, snapshot: Option<RunSnapshot>) -> BuildContext 
         arrived: crate::coordinator::Arrived::default(),
         snapshot,
         drawings: crate::drawing::Digest::default(),
+        picture_models: Vec::new(),
+        key_results: Vec::new(),
     }
 }
 

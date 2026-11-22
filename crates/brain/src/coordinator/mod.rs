@@ -663,6 +663,7 @@ struct Run {
     /// The sources of the builds admitted since its first round's, which a key round carries on.
     sent: Vec<ThreadId>,
     key_granted: bool,
+    pictured_key_model: Option<kumochi_protocol::message::ModelSlug>,
     /// A typed turn that arrived while Claude Code was being found, until it binds or is released.
     finding: Option<availability::Finding>,
     /// The round that compacted inline since the run's last admitted build.
@@ -1372,6 +1373,7 @@ impl Coordinator {
             route: None,
             sent: Vec::new(),
             key_granted: false,
+            pictured_key_model: None,
             finding,
             compacted: None,
             draw: None,

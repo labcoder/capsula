@@ -145,6 +145,8 @@ impl World {
             thread: turn.0,
             run: turn.1,
             local_time: TIME,
+            picture: None,
+            key_results: &[],
         };
         build(
             Snapshot::begin(&reader).expect("snapshot"),
@@ -800,6 +802,7 @@ fn reasoning_is_replayed_only_on_the_connection_that_made_it() {
         body: Body::Native {
             kind: Some(kumochi_protocol::message::ConnectionKind::ChatGpt),
             connection: ConnectionTag(tag),
+            screen_model: None,
             item: Opaque::new(vec![byte]).expect("small"),
         },
     };
@@ -841,6 +844,7 @@ fn native_items_replay_only_on_a_chatgpt_route() {
         body: Body::Native {
             kind: Some(kumochi_protocol::message::ConnectionKind::ChatGpt),
             connection: ConnectionTag(7),
+            screen_model: None,
             item: Opaque::new(vec![1]).expect("small"),
         },
     };

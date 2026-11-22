@@ -3,7 +3,7 @@
 
 use crate::context::build::{Turn, build};
 use crate::context::compact::{compaction, rewrite};
-use crate::context::{BOUND, BuildError, Built, Supplied};
+use crate::context::{BOUND, BuildError, Built, PictureRecipient, Route, Supplied};
 use crate::coordinator::{
     BuildContext, CompactBuilt, CompactContext, ContextBuilt, JobAsk, JobBuilt, JobKind, ReadJob,
     Unbuilt,
@@ -109,6 +109,8 @@ pub(super) fn read(
         first,
         arrived,
         drawings,
+        picture_models,
+        key_results,
         ..
     } = job;
     let Some(mut snapshot) = snapshot else {
@@ -134,10 +136,27 @@ pub(super) fn read(
                         snapshot.connection = arrived.replay(snapshot.choice.as_ref());
                     }
                     let local_time = read.local_time(key.run)?;
+                    let picture = snapshot.choice.as_ref().and_then(|choice| {
+                        let route = Route {
+                            kind: choice.connection,
+                            tag: snapshot.connection,
+                        };
+                        picture_models
+                            .iter()
+                            .any(|(found, models)| {
+                                *found == route && models.contains(&choice.model)
+                            })
+                            .then(|| PictureRecipient {
+                                route,
+                                model: choice.model.clone(),
+                            })
+                    });
                     let turn = Turn {
                         thread,
                         run: key.run,
                         local_time: &local_time,
+                        picture: picture.as_ref(),
+                        key_results: &key_results,
                     };
                     let supplied = Supplied {
                         summary: read.summary(thread)?,

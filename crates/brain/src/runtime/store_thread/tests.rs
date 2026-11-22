@@ -731,6 +731,10 @@ fn every_operation_gets_one_reply_in_order() {
 }
 
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "the same store worker handles each failure and the next turn"
+)]
 fn a_round_the_reader_would_refuse_fails_its_run_and_the_thread_goes_on() {
     use crate::coordinator::RoundItems;
     use crate::dispatch::ToolOutput;
@@ -749,6 +753,7 @@ fn a_round_the_reader_would_refuse_fails_its_run_and_the_thread_goes_on() {
             text: None,
             items: vec![Opaque::new(item.as_bytes().to_vec()).expect("small")],
             key_calls: Vec::new(),
+            pictured_key_model: None,
             calls: vec![(CallId::new("c1").expect("short"), output)],
         })
     };

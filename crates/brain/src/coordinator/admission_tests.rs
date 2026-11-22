@@ -117,6 +117,8 @@ fn kumo_build(attempt: u64, snapshot: Option<RunSnapshot>) -> Effect {
         ),
         snapshot,
         drawings: crate::drawing::Digest::default(),
+        picture_models: Vec::new(),
+        key_results: Vec::new(),
     }))
 }
 

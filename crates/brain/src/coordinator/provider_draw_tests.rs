@@ -1854,6 +1854,320 @@ fn round_calls(effects: &[Effect]) -> Vec<(CallId, ToolOutput)> {
     rounds[0].clone()
 }
 
+const KEY_MARKS: &str = r#"{"records":[{"begin":{"scene":"key_scene_private","surface":"screen","alt":"key_alt_private"}},{"step":{"id":"key_step_private","put":[{"highlight":{"id":"key_object_private","target":{"box":[186,598,450,78]},"style":"box"}}]}},{"end":{}}]}"#;
+
+fn pictured_key() -> (Coordinator, RunSnapshot) {
+    use super::super::routes::{built_for, choice, held, jpeg, key, pictured};
+    use crate::context::{Geometry, Screen};
+    use crate::coordinator::{PictureRoutes, SendKey};
+    use kumochi_protocol::message::ConnectionKind::AnthropicKey;
+
+    let model = choice(AnthropicKey, "m");
+    let (mut core, hold) = held(
+        vec![Input::Engines(AnthropicKey, pictured(5, &["m"]))],
+        model.clone(),
+        Some(T),
+    );
+    let snapshot = hold.defaults.clone();
+    core.set_pictures(PictureRoutes::new(true, false));
+    core.submit_hold(
+        hold,
+        "ordinary conversation".into(),
+        Some(Screen::Picture(jpeg(), None, Geometry::FIXTURE)),
+    )
+    .unwrap();
+    core.handle(Input::TurnStored { run: R }).unwrap();
+    let Input::ContextBuilt(mut built) = built_for(key(), &model) else {
+        unreachable!()
+    };
+    built.result.as_mut().unwrap().request.tools = crate::context::tools(snapshot.origin);
+    core.handle(Input::ContextBuilt(built)).unwrap();
+    let leases = core
+        .handle(Input::SendReady {
+            key: SendKey::Build(key()),
+            hold: None,
+        })
+        .unwrap();
+    let lease = leases
+        .into_iter()
+        .find_map(|effect| match effect {
+            Effect::Grant(lease) => Some(lease),
+            _ => None,
+        })
+        .expect("the pictured Key round entered write admission");
+    assert!(core.picture_grant(lease).is_some());
+    core.handle(Input::SendSettled { lease }).unwrap();
+    (core, snapshot)
+}
+
+fn pictured_key_call(core: &mut Coordinator, store: &mut Store) -> crate::dispatch::CommitCall {
+    use crate::engines::anthropic::encode::ToolUse;
+
+    start(core, "pictured-draw");
+    let mut streamed = delta(core, "pictured-draw", KEY_MARKS);
+    streamed.extend(ready(core, "pictured-draw", KEY_MARKS));
+    let mut effects = drain(core, store, streamed);
+    let call = ToolUse::projected(&format!(
+        r#"{{"type":"tool_use","id":"pictured-draw","name":"draw","input":{KEY_MARKS}}}"#
+    ))
+    .expect("a valid Key tool_use");
+    assert!(send(core, TurnEvent::KeyCall { index: 0, call }).is_empty());
+    effects.extend(send(core, TurnEvent::Finished(Finish::Completed)));
+    assert!(
+        effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::Data(DataToShell::SceneStepCommit { .. })))
+    );
+    result(&effects)
+}
+
+fn built_key(
+    store: &Store,
+    snapshot: &RunSnapshot,
+    run: kumochi_protocol::message::RunId,
+    picture: Option<&crate::context::PictureRecipient>,
+    key_results: &[(CallId, ToolOutput)],
+) -> crate::context::ModelRequest {
+    use crate::context::Supplied;
+    use crate::context::build::{Turn, build};
+    build(
+        crate::store::context::Snapshot::begin(store.conn_for_tests()).unwrap(),
+        snapshot,
+        Turn {
+            thread: T,
+            run,
+            local_time: "10:00",
+            picture,
+            key_results,
+        },
+        Supplied::default(),
+        crate::context::BOUND,
+    )
+    .unwrap()
+    .request
+}
+
+fn key_recipient(snapshot: &RunSnapshot) -> crate::context::PictureRecipient {
+    let choice = snapshot.choice.as_ref().unwrap();
+    crate::context::PictureRecipient {
+        route: crate::context::Route {
+            kind: choice.connection,
+            tag: snapshot.connection,
+        },
+        model: choice.model.clone(),
+    }
+}
+
+fn key_wire(request: &crate::context::ModelRequest, tag: ConnectionTag) -> Value {
+    let (body, _) = crate::engines::anthropic::encode::body(request, tag).unwrap();
+    serde_json::from_slice(body.sent()).unwrap()
+}
+
+fn assert_pictured_key_rows(store: &Store) {
+    let row: String = store
+        .conn_for_tests()
+        .query_row(
+            "SELECT body FROM events WHERE run = 10 AND kind = 'output_item'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        serde_json::from_str::<Value>(&row).unwrap(),
+        json!({
+            "connection": 5, "kind": "anthropic_key", "screen_model": "m",
+            "item": {"type":"tool_use", "id":"pictured-draw", "name":"draw", "input":{"records":[]}}
+        })
+    );
+    let stored_result: String = store
+        .conn_for_tests()
+        .query_row(
+            "SELECT body FROM events WHERE run = 10 AND kind = 'tool_result'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        serde_json::from_str::<Value>(&stored_result).unwrap(),
+        json!({
+            "call": "pictured-draw",
+            "output": {"text": "Screen-derived tool result omitted."}
+        })
+    );
+}
+
+#[test]
+fn pictured_key_storage_and_wire_are_scrubbed_but_the_live_round_gets_its_result() {
+    use crate::store::RunEnd;
+
+    let scratch = Scratch::new("provider-draw-key-picture-storage");
+    let mut store = store(&scratch);
+    let (mut core, snapshot) = pictured_key();
+    store
+        .append(
+            T,
+            R,
+            &[crate::store::NewEvent {
+                kind: crate::store::EventKind::AssistantText,
+                text: Some("ordinary reply"),
+                body: None,
+            }],
+        )
+        .unwrap();
+    let commit = pictured_key_call(&mut core, &mut store);
+    assert_eq!(store.commit_call(&commit).unwrap(), Committed::Done);
+    let ledger_result: String = store
+        .conn_for_tests()
+        .query_row(
+            "SELECT result FROM tool_calls WHERE run = 10 AND tool = 'draw'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        ledger_result,
+        r#"{"text":"Screen-derived tool result omitted."}"#
+    );
+    let effects = core
+        .handle(Input::CallCommitted {
+            key: commit.key.clone(),
+            outcome: Committed::Done,
+            then: None,
+        })
+        .unwrap();
+    let [Effect::Store(StoreOp::RoundItems(round))] = effects.as_slice() else {
+        panic!("a completed round: {effects:?}");
+    };
+    assert_eq!(round.pictured_key_model.as_ref().unwrap().as_str(), "m");
+    store
+        .append_key_round_events(
+            (T, R),
+            snapshot.connection,
+            &[],
+            &round.key_calls,
+            &round.calls,
+            round.pictured_key_model.as_ref(),
+        )
+        .unwrap();
+    assert_eq!(
+        commit.output,
+        ToolOutput::Text("Screen-derived tool result omitted.".into())
+    );
+    assert_pictured_key_rows(&store);
+    let effects = core
+        .handle(Input::RoundStored { run: R, round: 1 })
+        .unwrap();
+    let [Effect::Store(StoreOp::BuildContext(build))] = effects.as_slice() else {
+        panic!("a continuation build: {effects:?}");
+    };
+    let live = key_wire(
+        &built_key(
+            &store,
+            &snapshot,
+            R,
+            Some(&key_recipient(&snapshot)),
+            &build.key_results,
+        ),
+        snapshot.connection,
+    );
+    assert!(live.to_string().contains("drawn: [key_step_private]"));
+    assert!(!format!("{build:?}").contains("key_step_private"));
+    store.end_run(T, R, &[], RunEnd::Done).unwrap();
+    assert_pictured_key_switches(&mut store, &snapshot);
+}
+
+fn assert_pictured_key_switches(store: &mut Store, snapshot: &RunSnapshot) {
+    use crate::store::RunEnd;
+    use kumochi_protocol::message::{ModelSlug, RunId};
+
+    for (offset, slug, capable, same) in [
+        (1, "m", true, true),
+        (2, "text-only", false, false),
+        (3, "other-vision", true, false),
+        (4, "m", false, false),
+        (5, "m", true, true),
+    ] {
+        let run = RunId(R.0 + offset);
+        store
+            .begin_turn(T, None, run, "ordinary next turn")
+            .unwrap();
+        let mut next = snapshot.clone();
+        next.choice.as_mut().unwrap().model = ModelSlug::new(slug).unwrap();
+        let recipient = capable.then(|| key_recipient(&next));
+        let body = key_wire(
+            &built_key(store, &next, run, recipient.as_ref(), &[]),
+            next.connection,
+        );
+        assert_eq!(body["model"], slug);
+        let blocks: Vec<_> = body["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|message| message["content"].as_array().unwrap())
+            .collect();
+        let call = blocks
+            .iter()
+            .find(|block| block["id"] == "pictured-draw")
+            .unwrap();
+        let output = blocks
+            .iter()
+            .find(|block| block["tool_use_id"] == "pictured-draw")
+            .unwrap();
+        let (input, result) = if same {
+            (json!({"records":[]}), "Screen-derived tool result omitted.")
+        } else {
+            (json!({}), "Tool result not available on this model.")
+        };
+        assert_eq!(call["input"], input);
+        assert_eq!(output["content"], result);
+        let wire = body.to_string();
+        assert_eq!(wire.matches("pictured-draw").count(), 2);
+        for private in [
+            "key_scene_private",
+            "key_alt_private",
+            "key_object_private",
+            "key_step_private",
+            "186,598,450,78",
+        ] {
+            assert!(!wire.contains(private));
+        }
+        assert!(wire.contains("ordinary reply"));
+        assert!(wire.contains("ordinary next turn"));
+        store.end_run(T, run, &[], RunEnd::Done).unwrap();
+    }
+}
+
+#[test]
+fn interrupting_a_pictured_key_draw_leaves_only_a_scrubbed_early_result() {
+    let scratch = Scratch::new("provider-draw-key-picture-stopped");
+    let mut store = store(&scratch);
+    let (mut core, _) = pictured_key();
+    let call = pictured_key_call(&mut core, &mut store);
+    assert_eq!(store.commit_call(&call).unwrap(), Committed::Done);
+    let effects = core
+        .handle(Input::Stop {
+            run: R,
+            revealed: vec![0],
+        })
+        .unwrap();
+    assert!(
+        !effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::Store(StoreOp::RoundItems(_))))
+    );
+    let row: (String, i64) = store.conn_for_tests().query_row(
+        "SELECT result, (SELECT count(*) FROM events WHERE run = 10 AND kind = 'output_item') FROM tool_calls WHERE run = 10",
+        [], |r| Ok((r.get(0)?, r.get(1)?))
+    ).unwrap();
+    assert_eq!(
+        row,
+        (
+            r#"{"text":"Screen-derived tool result omitted."}"#.into(),
+            0
+        )
+    );
+}
+
 #[test]
 fn key_rounds_reusing_a_draw_id_draw_twice_and_a_same_round_retry_draws_once() {
     let scratch = Scratch::new("provider-draw-key-rounds");

@@ -262,6 +262,26 @@ impl Coordinator {
         self.pictures.allows(kind) && ready.images.contains(model)
     }
 
+    pub(super) fn picture_models(&self) -> Vec<(Route, Vec<ModelSlug>)> {
+        [ConnectionKind::AnthropicKey]
+            .into_iter()
+            .filter_map(|kind| match self.availability_of(kind) {
+                Availability::Ready(ready)
+                    if self.pictures.allows(kind) && !ready.images.is_empty() =>
+                {
+                    Some((
+                        Route {
+                            kind,
+                            tag: ready.connection,
+                        },
+                        ready.images.clone(),
+                    ))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
     /// Whether a request on `route` for `choice` may carry its run's picture now, as
     /// [`Self::pictured`] says.
     pub(super) fn request_pictured(

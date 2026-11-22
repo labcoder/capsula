@@ -359,6 +359,16 @@ impl Coordinator {
                 .is_some_and(|route| route.kind == ConnectionKind::AnthropicKey)
         {
             run.key_granted = true;
+            if pictured {
+                run.pictured_key_model = Some(
+                    run.snapshot
+                        .as_ref()
+                        .and_then(|snapshot| snapshot.choice.as_ref())
+                        .expect("a pictured Key request has a resolved model")
+                        .model
+                        .clone(),
+                );
+            }
         }
         let screen = self
             .current

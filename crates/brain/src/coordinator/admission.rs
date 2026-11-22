@@ -5,13 +5,13 @@
 
 use std::collections::BTreeSet;
 
-use kumochi_protocol::message::{ConnectionKind, RunId, ThreadId};
+use kumochi_protocol::message::{ConnectionKind, ModelSlug, RunId, ThreadId};
 
 use super::inline::Inline;
 use super::{Coordinator, Effect, SendKey, Stale, StoreOp};
-use crate::context::{Built, ConnectionTag, Origin, RunSnapshot};
+use crate::context::{Built, ConnectionTag, Origin, Route, RunSnapshot};
 use crate::engines::anthropic::live::Motion;
-use crate::engines::{DRAW, RunRequest, ToolName};
+use crate::engines::{CallId, DRAW, RunRequest, ToolName};
 use crate::store::Failure;
 
 /// One build attempt of one round of a run. A rebuild gets a new attempt, so a late result of
@@ -44,6 +44,8 @@ pub struct BuildContext {
     pub(crate) arrived: super::Arrived,
     /// The thread's drawings on screen when the build began, headers and objects together.
     pub(crate) drawings: crate::drawing::Digest,
+    pub(crate) picture_models: Vec<(Route, Vec<ModelSlug>)>,
+    pub(crate) key_results: Vec<(CallId, crate::dispatch::ToolOutput)>,
 }
 
 impl PartialEq for BuildContext {
@@ -55,6 +57,8 @@ impl PartialEq for BuildContext {
             && self.first == other.first
             && self.arrived == other.arrived
             && self.drawings == other.drawings
+            && self.picture_models == other.picture_models
+            && self.key_results == other.key_results
     }
 }
 impl Eq for BuildContext {}
@@ -243,6 +247,7 @@ impl Coordinator {
             current.effective_snapshot(),
             current.arrived,
         );
+        let key_results = current.tools.key_results.clone();
         effects.push(Effect::Store(StoreOp::BuildContext(BuildContext {
             control,
             key,
@@ -252,6 +257,8 @@ impl Coordinator {
             arrived,
             snapshot,
             drawings: self.drawing.digest(thread),
+            picture_models: self.picture_models(),
+            key_results,
         })));
     }
 
