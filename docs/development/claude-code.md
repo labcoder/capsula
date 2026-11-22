@@ -493,19 +493,21 @@ failure of both writes, loses the marker.
 
 `engines/claude_code/launch.rs` runs one question on one launch. `runtime/claude.rs` owns the
 attempts. A run's round, or a title or summary job, whose choice names Claude Code asks one: the
-runtime's `Brain::owned_engine` calls `Claude::question` for both, which looks the choice's model up in the reviewed row and passes the row's own
-alias, so no other text reaches `--model`; maps its effort to the CLI's word (`low`, `medium`,
-`high`, `xhigh`, `max`); fixes the snapshot's tool offer; and takes a fresh attempt. A
+runtime's `Brain::owned_engine` calls `Claude::question` for both. It uses the reviewed row's own
+alias for `--model` and maps the chosen effort to its CLI word (`low`, `medium`, `high`, `xhigh`,
+`max`) only if that alias lists it. It fixes the snapshot's tool offer and takes a fresh attempt. A
 refusal becomes a round that fails at once through `Unserved`: with Claude Code's own reason while
 no launch would be admitted, and otherwise with the refusal's: `ModelUnavailable` with Open
-Settings for an alias the row doesn't list, `ClaudeCodeBusy` with Retry while the lane's queue is
+Settings for an unlisted alias or effort, `ClaudeCodeBusy` with Retry while the lane's queue is
 full, and `RequestRefused` for a launch id that couldn't be drawn or a lifetime past the bound.
 Never `Access(None)`, which reads as a `ChatGPT` sign-in. Nothing warms yet, so `Claude::warm`
 still has no production caller.
 
-The models a choice may name reach the shell's picker as `Models` for `ClaudeCode`, from the same
-check that admits a launch: the reviewed row's, in its order (Sonnet, Opus, Haiku, Fable), while
-one would be admitted, and an empty list once it wouldn't. `Brain::claude_reported` records the
+The models and their supported efforts reach the shell as `Models` for `ClaudeCode`, from the same
+reviewed row that admits a launch, in its order (Sonnet, Opus, Haiku, Fable). The 2.1.306
+`initialize` probe listed all five efforts for each of those aliases; it isn't rerun to decide
+each question. The shell receives an empty list once a launch wouldn't be admitted.
+`Brain::claude_reported` records the
 list after every op and wake, and the shell hears it only when it changes. A shell that connects
 hears the current list if it isn't empty, and nothing before Claude Code's first report.
 

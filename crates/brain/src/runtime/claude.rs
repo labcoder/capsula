@@ -8,8 +8,8 @@ use std::time::Instant;
 use kumochi_protocol::constants::CLAUDE_QUESTIONS_ENV;
 use kumochi_protocol::message::{
     Action, AuditFailed, ClaudeCodeView, ClaudeVersion, ConnectionKind, ConnectionOp,
-    ConnectionsView, ControlToShell, DataToShell, Effort, ErrorKey, ModelChoice, ModelInfo,
-    ModelName, ModelSlug, ThreadId, Unsupported, UserError,
+    ConnectionsView, ControlToShell, DataToShell, Effort, EffortSet, ErrorKey, ModelChoice,
+    ModelInfo, ModelName, ModelSlug, ThreadId, Unsupported, UserError,
 };
 use tokio::sync::{mpsc, oneshot};
 
@@ -26,7 +26,7 @@ use crate::engines::claude_code::lane::{self, Done, Failure, Lane, Outcome, Rech
 use crate::engines::claude_code::launch::{
     self, Attempt, ClaudeQuestion, Clock, LaunchSnapshot, Note, Offer, Refresh, Report, WARM,
 };
-use crate::engines::claude_code::policy::{self, Reviewed};
+use crate::engines::claude_code::policy::{self, Reviewed, ReviewedModel};
 use crate::engines::claude_code::supervisor::{
     self, Control, Launch, LaunchRefused, MAX_LAUNCH, Question,
 };
@@ -554,10 +554,10 @@ impl Claude {
         let models: Vec<ModelInfo> = row
             .models
             .iter()
-            .map(|&(slug, name)| ModelInfo {
-                slug: ModelSlug::new(slug).expect("a reviewed alias is a valid slug"),
-                display_name: ModelName::new(name).expect("a reviewed name is valid"),
-                supported_efforts: None,
+            .map(|model| ModelInfo {
+                slug: ModelSlug::new(model.alias).expect("a reviewed alias is a valid slug"),
+                display_name: ModelName::new(model.name).expect("a reviewed name is valid"),
+                supported_efforts: EffortSet::new(model.efforts.iter().copied()),
             })
             .collect();
         self.offer(models.clone());
@@ -625,28 +625,35 @@ impl Claude {
 
     /// The engine for one question on `request`'s Claude Code choice. A run's build offers the
     /// tools its request offers that MCP may call; a job offers none. The
-    /// model is the reviewed row's own alias, so only a listed one reaches the command line
-    /// whatever the request names, and the effort goes by a table to the CLI's word.
+    /// model is the reviewed row's own alias, and only an effort listed for that alias reaches
+    /// the command line, mapped to the CLI's word.
     ///
     /// # Errors
     /// [`LaunchRefused::NotReady`] unless a launch would be admitted and the choice is a Claude
-    /// Code one whose model the row lists; otherwise as [`take`](Self::take).
+    /// Code one whose model and effort the row lists together; otherwise as [`take`](Self::take).
     pub(crate) fn question(
         &mut self,
         request: &RunRequest,
     ) -> Result<ClaudeQuestion, LaunchRefused> {
         let (_, row) = self.admitted().ok_or(LaunchRefused::NotReady)?;
+        self.question_for(request, row.models)
+    }
+
+    fn question_for(
+        &mut self,
+        request: &RunRequest,
+        models: &[ReviewedModel],
+    ) -> Result<ClaudeQuestion, LaunchRefused> {
         let choice = request
             .request
             .choice
             .as_ref()
             .filter(|choice| choice.connection == ConnectionKind::ClaudeCode)
             .ok_or(LaunchRefused::NotReady)?;
-        let model = row
-            .models
+        let model = models
             .iter()
-            .map(|&(slug, _)| slug)
-            .find(|&slug| slug == choice.model.as_str())
+            .find(|model| model.alias == choice.model.as_str())
+            .filter(|model| model.efforts.contains(&choice.effort))
             .ok_or(LaunchRefused::NotReady)?;
         let effort = match choice.effort {
             Effort::Low => "low",
@@ -664,7 +671,7 @@ impl Claude {
         };
         let snapshot = self.snapshot(
             request.thread,
-            model.to_owned(),
+            model.alias.to_owned(),
             Some(effort.to_owned()),
             offer,
         )?;
@@ -714,7 +721,7 @@ impl Claude {
                 || row
                     .models
                     .iter()
-                    .any(|&(slug, _)| slug == choice.model.as_str())
+                    .any(|model| model.alias == choice.model.as_str())
         }) {
             return None;
         }
@@ -731,7 +738,7 @@ impl Claude {
     pub(crate) fn refused(&self, refused: LaunchRefused) -> EngineFailure {
         EngineFailure::Claude(match refused {
             LaunchRefused::NotReady if self.admitted().is_none() => self.reason(),
-            // Admitted, so the row doesn't list the choice's alias.
+            // Admitted, so the row doesn't list the alias or the effort for it.
             LaunchRefused::NotReady => model_unavailable(),
             LaunchRefused::Busy => busy(),
             LaunchRefused::Identity | LaunchRefused::Lifetime => ErrorKey::RequestRefused.into(),

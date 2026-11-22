@@ -899,13 +899,53 @@ async fn a_question_takes_only_a_listed_alias_its_effort_word_and_no_tool() {
     rig.close().await;
 }
 
+#[tokio::test]
+async fn a_question_refuses_an_effort_listed_only_for_another_alias() {
+    let models = [
+        ReviewedModel {
+            alias: "haiku",
+            name: "Haiku",
+            efforts: &[Effort::Low],
+        },
+        ReviewedModel {
+            alias: "opus",
+            name: "Opus",
+            efforts: &[Effort::Low, Effort::High],
+        },
+    ];
+    let mut rig = Rig::new("question-effort", &offering_nothing()).await;
+    let request = choosing("haiku", Effort::High, ConnectionKind::ClaudeCode);
+    assert!(matches!(
+        rig.claude.question_for(&request, &models),
+        Err(LaunchRefused::NotReady)
+    ));
+    assert!(rig.claude.launches.is_empty(), "no attempt was admitted");
+
+    let request = choosing("opus", Effort::High, ConnectionKind::ClaudeCode);
+    let question = rig
+        .claude
+        .question_for(&request, &models)
+        .expect("Opus lists high");
+    let (id, _) = rig.last();
+    let mut played = play_with(&question, request);
+    let lease = played.lease();
+    rig.drive(played.asked(lease)).await;
+    answered(&rig.drive(played.events()).await);
+    assert_eq!(rig.reported(id).await, [launch::Outcome::Clean]);
+    assert!(rig.argv(1).ends_with(" --model opus --effort high"));
+    rig.close().await;
+}
+
 /// Test 13's own half: the row names its default, haiku at Low, though its list starts with
 /// sonnet. It replaces only an unset choice or a Claude Code alias the row doesn't list, and
 /// only while a launch would be admitted.
 #[tokio::test]
 async fn claude_codes_default_is_the_rows_own_and_moves_only_an_unset_or_unlisted_choice() {
     let mut rig = Rig::new("question-default", &synthetic_signed_in()).await;
-    assert_eq!(policy::reviewed(V).expect("reviewed").models[0].0, "sonnet");
+    assert_eq!(
+        policy::reviewed(V).expect("reviewed").models[0].alias,
+        "sonnet"
+    );
     let choice = |model: &str, effort, connection| ModelChoice {
         model: ModelSlug::new(model).expect("valid"),
         effort,
