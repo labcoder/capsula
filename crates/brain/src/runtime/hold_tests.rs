@@ -883,6 +883,10 @@ async fn recognize_screen_recipient(
 
 /// A spoken screen hold through the running brain whose picture is sealed, its words coming
 /// before the picture or after it: the run carries both, and `HoldScreen` waits for the grant.
+#[expect(
+    clippy::too_many_lines,
+    reason = "one spoken screen hold through the running brain, on either audio session"
+)]
 async fn a_screen_hold_reaches_its_run_with_its_picture(
     first: First,
     audio: kumochi_protocol::message::AudioSession,

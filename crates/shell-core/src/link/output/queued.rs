@@ -355,11 +355,17 @@ impl OutputOwner {
         Ok(())
     }
 
-    /// Whether the pair's registered Show Screen differs from `show_screen`.
-    pub(in crate::link) fn show_screen_changes(&self, session: u64, show_screen: bool) -> bool {
-        self.lock()
-            .queue(session)
-            .is_some_and(|(_, owner)| owner.show_screen.is_some_and(|known| known != show_screen))
+    /// Whether the pair's registered Show Screen differs from the one `settings` carries.
+    pub(in crate::link) fn show_screen_changes(
+        &self,
+        session: u64,
+        settings: &SettingsView,
+    ) -> bool {
+        self.lock().queue(session).is_some_and(|(_, owner)| {
+            owner
+                .show_screen
+                .is_some_and(|known| known != settings.show_screen)
+        })
     }
 
     #[expect(

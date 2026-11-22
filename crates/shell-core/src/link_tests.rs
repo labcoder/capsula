@@ -2745,10 +2745,7 @@ fn queued_hold_waits_for_its_saved_preferences_and_rejects_another_run_origin() 
     };
     assert_ne!(output, OutputGeneration(0));
     acknowledge_queued(&link.control, output);
-    assert!(
-        link.handle.admits_voice(generation),
-        "a known Show Screen admits"
-    );
+    assert!(link.handle.admits_voice(generation), "Show Screen is set");
 
     for op in [
         SettingsOp::SetTaskbar(false),
