@@ -414,16 +414,27 @@ Two ignored native checks keep pixels in memory and are run by hand on Rez:
 session's start, cold and warm, and is run on a still screen; `primary_display_cold_and_warm_samples`
 times the capture.
 
-### Release-capture gate scope
+### Slice 6 release-capture gate
 
-The hold takes one picture of the display under the pointer at release. It paints the pointer
-path into the picture before sealing it. The old moving-window follow and scroll/reflow/close
-rows are retired: the path is part of a still picture, not an anchor tracking a window or element.
-Screen marks in the answer have their own lifetime and native placement checks.
+The hold takes one picture of the display under the pointer at release and paints the pointer
+path into it before sealing.
 
-The old multi-image tool budget, staged overview/crop/element fallback, and crash recovery of
-image assets are retired as well. The hold supplies one capped JPEG, exposes no capture tools and
-does not keep the pixels in history. Recovery covers only whether a picture may have been sent.
+| Original gate | Shipping behavior and evidence |
+| --- | --- |
+| Context ready within 250 ms | Passed at warm p95 for the release-to-ready interval measured below. |
+| Anchor follows a moving window and hides on scroll, reflow or close | Retired: the pointer path is part of a still image, not an anchor tracking a window or element. Screen marks have separate lifetime and native placement checks. |
+| No capture without a ticket | The hold only arms on recognition. An eligible release issues a ticket; the worker validates and spends it before starting capture. `a_screen_hold_arms_at_recognition_and_captures_the_display_at_release`, `a_release_runs_the_gate_the_stamps_and_the_path_before_any_capture` and `generations_at_or_below_the_high_water_mark_stay_spent` cover that boundary. |
+| Hung capture worker | `a_hung_display_capture_lets_the_words_go_at_the_release_budget` leaves a real hold's display request unanswered. At 1.5 s the exact decoded words enter the run without the picture, before worker exit is confirmed. Separately, `injected_deadline_does_not_restart_for_queued_work` drives the supervisor's deadline, fails pending work and checks that a replacement answers. |
+| Media budget with tool images | Retired: the hold exposes no capture tools or staged overview/crop/element fallback. It supplies one capped JPEG and keeps only a picture-send status in history, so there are no stored pixels to recover after a crash. |
+
+On 2026-11-21, a quiet Windows release run at `df07c09a` on one 2560×1440 display at 100%
+scale timed the Brain's `ScreenRelease` handler through admission of the inked, sealed JPEG.
+After one excluded warmup, all 50 warm captures succeeded: p50 104.3 ms, p95 **172.5 ms** against
+the 250 ms bound, max 253.8 ms. The first capture on each of ten fresh workers had p95 374.8 ms.
+The gate is warm p95, not a cold or maximum bound. The interval includes the worker pipes,
+capture, ink and seal.
+It excludes physical key-up, Shell IPC and exclusion setup, speech decoding and provider time.
+No images were retained. The separate owner placement and native key-up checks still apply.
 
 ## Sealing a hold's image
 
