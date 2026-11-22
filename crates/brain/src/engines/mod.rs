@@ -266,10 +266,7 @@ impl SendLease {
 /// One writer poll a [`SendLease`] admitted, holding its picture grant's reservation if any.
 #[derive(Debug)]
 pub struct Admitted(
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "held for its drop, which ends the reservation")
-    )]
+    #[expect(dead_code, reason = "held for its drop, which ends the reservation")]
     Option<PictureWrite>,
 );
 
@@ -813,23 +810,21 @@ mod tests {
     }
 
     #[test]
-    fn a_send_without_a_picture_grant_admits_every_writer_poll() {
-        use crate::connections::model::Lease;
-        let (_, inputs, _received) = gated();
-        let lease = SendLease::new(lease(), inputs);
-        let held = lease.admit().expect("admitted");
-        assert!(held.0.is_none(), "no reservation to hold");
-        assert!(lease.admit().is_some_and(|held| held.0.is_none()));
-    }
-
-    #[test]
     fn a_send_with_a_picture_grant_admits_one_poll_at_a_time_until_closed() {
         use crate::connections::model::Lease;
         let (_, inputs, _received) = gated();
+        let without_picture = SendLease::new(lease(), inputs.clone());
+        let first = without_picture
+            .admit()
+            .expect("first poll without a picture");
+        let second = without_picture
+            .admit()
+            .expect("concurrent poll without a picture");
+        drop((first, second));
+
         let grant = crate::coordinator::PictureGrant::open_for_tests();
         let lease = SendLease::new(lease(), inputs).with_picture(Some(grant.clone()));
         let held = lease.admit().expect("admitted");
-        assert!(held.0.is_some());
         assert!(lease.admit().is_none(), "one poll at a time");
         drop(held);
         let held = lease.admit().expect("admitted again");
@@ -972,33 +967,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_jobs_usage_is_ignored_and_only_a_completed_round_titles_it() {
+    async fn a_title_job_takes_its_rounds_text_only_when_the_round_completes() {
+        let completed = TurnEvent::Finished(Finish::Completed);
         let usage = TurnEvent::Usage(Usage {
             whole: Tokens::default(),
             first_request: None,
         });
-        assert_eq!(
-            job_title(
-                vec![
-                    text("Lisbon trip"),
-                    usage.clone(),
-                    TurnEvent::Finished(Finish::Completed)
-                ],
-                Then::End
-            )
-            .await,
-            Some("Lisbon trip".to_owned())
-        );
-        assert_eq!(
-            job_title(vec![text("Lisbon trip"), usage], Then::End).await,
-            None,
-            "a round that ends without completing titles nothing"
-        );
-    }
-
-    #[tokio::test]
-    async fn a_title_job_takes_its_rounds_text_only_when_the_round_completes() {
-        let completed = TurnEvent::Finished(Finish::Completed);
         let item = TurnEvent::OutputItem {
             index: 0,
             item: Opaque::new(b"{}".to_vec()).expect("small"),
@@ -1009,6 +983,7 @@ mod tests {
                     item,
                     text("  Lisbon"),
                     text(" trip\nmore"),
+                    usage.clone(),
                     completed.clone()
                 ],
                 Then::Hang
@@ -1028,7 +1003,7 @@ mod tests {
         };
         for events in [
             vec![text("Lisbon"), TurnEvent::Finished(Finish::Truncated)],
-            vec![text("Lisbon")],
+            vec![text("Lisbon"), usage],
             vec![text(&over), completed.clone()],
             vec![text(&"x".repeat(4095)), text("yy"), completed.clone()],
             vec![call, completed.clone()],

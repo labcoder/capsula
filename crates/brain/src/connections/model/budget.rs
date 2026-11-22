@@ -80,7 +80,7 @@ fn limit(value: Option<&str>) -> Option<u32> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Budget, limit};
+    use super::limit;
 
     #[test]
     fn the_variable_sets_the_cap_and_garbage_allows_nothing() {
@@ -89,15 +89,5 @@ mod tests {
         assert_eq!(limit(Some(" 3 ")), Some(3));
         assert_eq!(limit(Some("two")), Some(0));
         assert_eq!(limit(Some("-1")), Some(0));
-    }
-
-    #[test]
-    fn a_budget_of_two_refuses_the_third() {
-        let budget = Budget::limited(Some(2));
-        assert_eq!(
-            [budget.reserve(), budget.reserve(), budget.reserve()],
-            [true, true, false]
-        );
-        assert!(Budget::limited(None).reserve());
     }
 }

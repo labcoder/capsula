@@ -64,9 +64,22 @@ fn a_content_coding_other_than_identity_is_refused() {
         assert_eq!(parsed(bytes.as_bytes()), Err(Failure::Protocol), "{coding}");
     }
     for coding in ["identity", "Identity"] {
-        let bytes =
-            format!("HTTP/1.1 200 OK\r\nContent-Encoding: {coding}\r\nContent-Length: 0\r\n\r\n");
-        assert!(matches!(parsed(bytes.as_bytes()), Ok(Some(_))), "{coding}");
+        let bytes = format!(
+            "HTTP/1.1 200 OK\r\nContent-Encoding: {coding}\r\nContent-Length: 0\r\n\r\nsurplus"
+        );
+        assert_eq!(
+            parsed(bytes.as_bytes()),
+            Ok(Some((
+                Head {
+                    status: 200,
+                    framing: Framing::Length(0),
+                    close: false,
+                    media: Media::Absent
+                },
+                66
+            ))),
+            "{coding}"
+        );
     }
 }
 

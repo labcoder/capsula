@@ -188,10 +188,17 @@ fn output_translates_origin_clips_and_rounds_outward() {
         rect([-8, -19], [5, 2]),
         100,
     );
-    assert_eq!(output.words.len(), 2);
-    assert_eq!(output.words[0].text, "a");
-    assert_eq!(output.words[0].rect, rect([-8, -19], [2, 1]));
-    assert_eq!(output.words[1].rect, rect([-8, -19], [1, 2]));
+    assert_eq!(
+        output
+            .words
+            .iter()
+            .map(|word| (word.text.as_str(), word.rect))
+            .collect::<Vec<_>>(),
+        [
+            ("a", rect([-8, -19], [2, 1])),
+            ("b", rect([-8, -19], [1, 2]))
+        ]
+    );
     assert!(!output.truncated);
 }
 

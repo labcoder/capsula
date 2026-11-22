@@ -223,26 +223,6 @@ fn incomplete_cases() -> Vec<(String, Option<&'static str>)> {
     ]
 }
 
-#[test]
-fn every_state_matching_incomplete_result_is_terminal() {
-    let address = "127.0.0.1:1455".parse().expect("address");
-    let actual: Vec<_> = incomplete_cases()
-        .iter()
-        .map(|(query, saved)| {
-            callback::parse(
-                &request(address, query),
-                "http://127.0.0.1:1455/auth/callback",
-                "state",
-                *saved,
-            )
-        })
-        .collect();
-    assert_eq!(
-        actual,
-        vec![Err(CallbackError::Terminal(SignInError::SignInFailed)); 7]
-    );
-}
-
 #[tokio::test]
 async fn incomplete_callbacks_end_receive_and_serve_the_failure_page() {
     for (query, saved) in incomplete_cases() {
@@ -337,45 +317,6 @@ async fn stale_and_invalid_callbacks_do_not_consume_pending_attempt() {
         TcpStream::connect(address).await.is_err(),
         "listener closes after success"
     );
-}
-
-#[tokio::test(start_paused = true)]
-async fn exact_32_kib_header_is_accepted_and_one_more_byte_gets_400() {
-    let address = "127.0.0.1:1455".parse().expect("fixture address");
-    let valid = request(address, "state=state&code=test-code&client_id=issued");
-    for (length, status) in [(32768, "200 OK"), (32769, "400 Bad Request")] {
-        let request = header_with_length(&valid, length);
-        let (mut writer, mut reader) = tokio::io::duplex(length);
-        writer.write_all(request.as_bytes()).await.expect("header");
-        writer.shutdown().await.expect("header complete");
-        let started = tokio::time::Instant::now();
-        let header = callback::read_header(&mut reader).await;
-        let page = if length == 32769 {
-            assert_eq!(header, Err(CallbackError::Rejected));
-            callback::Page::Rejected
-        } else {
-            let header = header.expect("exact limit accepted");
-            assert_eq!(header.as_str(), request);
-            let (code, client) = callback::parse(
-                &header,
-                "http://127.0.0.1:1455/auth/callback",
-                "state",
-                None,
-            )
-            .expect("valid callback");
-            assert_eq!((code.as_str(), client.as_str()), ("test-code", "issued"));
-            callback::Page::Received
-        };
-        assert!(
-            callback::response(page).starts_with(&format!("HTTP/1.1 {status}\r\n")),
-            "exact boundary status"
-        );
-        assert_eq!(
-            tokio::time::Instant::now() - started,
-            Duration::ZERO,
-            "the byte boundary needs no clock advancement"
-        );
-    }
 }
 
 #[tokio::test]

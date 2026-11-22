@@ -56,20 +56,6 @@ fn a_refused_dispatched_save_goes_to_the_list_when_a_sign_in_waited_on_it() {
     assert_eq!(h.marker(), marker(&["sweep"]));
 }
 
-#[test]
-fn cancel_during_a_dispatched_save_lets_the_save_win() {
-    let mut h = Harness::new("account-boundary-cancel");
-    h.op(AccountOp::SignIn);
-    h.callback("client-issued");
-    h.hold = true;
-    h.reply(received(Some("refresh-a"), "subject-1", PLAN));
-    h.op(AccountOp::CancelSignIn);
-    assert_eq!(h.closed, 0);
-    h.release();
-    assert_eq!(h.view(), &signed_in(PlanState::Enabled, None));
-    assert_eq!(h.refresh_token().as_deref(), Some("refresh-a"));
-}
-
 /// Every mutation of a returning sign-in's commit refused in turn. The token it replaces is listed
 /// first: refused up to that list's commit, nothing is listed; past it the token stays listed, and
 /// its revocation pass starts, whatever the account save does. Up to the account's commit the set

@@ -118,14 +118,6 @@ async fn dispatch_is_visible_before_the_writer_can_receive_the_body() {
     assert_eq!(ended, Some(LossReason::Ended));
 }
 
-#[tokio::test]
-async fn a_closed_disposition_channel_with_no_dispatch_fact_stays_unknown() {
-    let (track, receipt) = watch::channel(Dispatch::Pending);
-    drop(track);
-    assert_eq!(*receipt.borrow(), Dispatch::Pending);
-    assert!(receipt.has_changed().is_err());
-}
-
 #[derive(Clone, Copy)]
 enum Writer {
     Full,

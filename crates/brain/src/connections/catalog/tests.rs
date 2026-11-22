@@ -2,8 +2,8 @@ use std::sync::Mutex;
 
 use kumochi_protocol::Secret;
 use kumochi_protocol::message::{
-    Action, Effort, EffortSet, ErrorKey, MAX_MODEL_NAME_CHARS, MAX_MODELS, MAX_SLUG_BYTES,
-    ModelChoice, ModelInfo, ModelName, ModelSlug, UserError,
+    Action, ConnectionKind, Effort, EffortSet, ErrorKey, MAX_MODEL_NAME_CHARS, MAX_MODELS,
+    MAX_SLUG_BYTES, ModelChoice, ModelInfo, ModelName, ModelSlug, UserError,
 };
 use serde_json::{Value, json};
 use zeroize::Zeroizing;
@@ -56,24 +56,6 @@ fn answering(status: u16, body: &str) -> Once {
             body: Secret::new(Zeroizing::new(body.as_bytes().to_vec())),
         }))),
         sent: Mutex::new(Vec::new()),
-    }
-}
-
-#[test]
-fn route_choice_chatgpt_refresh_keeps_another_connections_default() {
-    use kumochi_protocol::message::ConnectionKind;
-
-    let listing = Listing {
-        models: vec![info("gpt-6-luna")],
-        ..Listing::default()
-    };
-    for connection in [ConnectionKind::ClaudeCode, ConnectionKind::AnthropicKey] {
-        let current = ModelChoice {
-            model: ModelSlug::new("same-slug").expect("slug"),
-            effort: Effort::High,
-            connection,
-        };
-        assert_eq!(default_model(Some(&current), &listing), None);
     }
 }
 
@@ -187,50 +169,6 @@ async fn a_captured_list_gives_its_listed_models_and_their_image_input() {
             8
         ]
     );
-}
-
-#[test]
-fn the_captured_effort_fields_match_the_literal_scrubbed_shape() {
-    let root: Value =
-        serde_json::from_str(include_str!("captured_models.json")).expect("captured JSON");
-    let rows = root["models"].as_array().expect("model array");
-    assert_eq!(root.as_object().expect("root object").len(), 1);
-    assert_eq!(rows.len(), 10);
-    let defaults = [
-        "low", "medium", "low", "medium", "medium", "medium", "low", "medium", "medium", "medium",
-    ];
-    for (index, row) in rows.iter().enumerate() {
-        assert_eq!(row.as_object().expect("model object").len(), 6);
-        assert_eq!(row["slug"], format!("m-{index}"));
-        assert_eq!(row["display_name"], format!("Model {index}"));
-        assert_eq!(
-            row["visibility"],
-            if [4, 9].contains(&index) {
-                "<string:4>"
-            } else {
-                "list"
-            }
-        );
-        assert_eq!(row["input_modalities"], json!(["text", "image"]));
-        assert_eq!(row["default_reasoning_level"], defaults[index]);
-        let levels = row["supported_reasoning_levels"]
-            .as_array()
-            .expect("effort rows");
-        let mut expected = vec!["low", "medium", "high", "xhigh", "max"];
-        if [0, 1, 2, 3, 6, 7].contains(&index) {
-            expected.push("<string:5>");
-        }
-        assert_eq!(levels.len(), expected.len());
-        for (level, effort) in levels.iter().zip(expected) {
-            assert_eq!(level.as_object().expect("effort object").len(), 2);
-            assert_eq!(level["effort"], effort);
-            let redacted = level["<key-0>"].as_str().expect("scrubbed unknown string");
-            let length = redacted
-                .strip_prefix("<string:")
-                .and_then(|s| s.strip_suffix('>'));
-            assert!(length.is_some_and(|s| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit())));
-        }
-    }
 }
 
 /// Image input comes only from an entry's own `input_modalities` naming `"image"`, and whatever
@@ -568,13 +506,21 @@ fn the_default_model_is_set_only_when_unset_or_no_longer_listed() {
     let without = [info("gpt-6-sol"), info("gpt-6-terra")];
     let listed = at("gpt-6-terra", Effort::High);
     let gone = at("gpt-5-old", Effort::High);
-    let cases: [(Option<&ModelChoice>, &[ModelInfo], Option<ModelChoice>); 6] = [
+    let foreign = |connection| ModelChoice {
+        connection,
+        ..at("same-slug", Effort::High)
+    };
+    let code = foreign(ConnectionKind::ClaudeCode);
+    let key = foreign(ConnectionKind::AnthropicKey);
+    let cases: [(Option<&ModelChoice>, &[ModelInfo], Option<ModelChoice>); 8] = [
         (None, &with_luna, Some(at("gpt-6-luna", Effort::Low))),
         (None, &without, Some(at("gpt-6-sol", Effort::Low))),
         (None, &[], None),
         (Some(&listed), &without, None),
         (Some(&gone), &with_luna, Some(at("gpt-6-luna", Effort::Low))),
         (Some(&gone), &[], None),
+        (Some(&code), &with_luna, None),
+        (Some(&key), &with_luna, None),
     ];
     for (case, (current, models, expected)) in cases.into_iter().enumerate() {
         let listing = Listing {

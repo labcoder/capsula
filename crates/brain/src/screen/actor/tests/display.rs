@@ -33,29 +33,38 @@ fn a_display_frame_commits_with_its_monitors_bounds() {
 
 #[test]
 fn a_sealed_display_paints_the_path_its_request_carried() {
-    let rig = Rig::start(None, None, None);
-    // The fake's 4×3 frame is its monitor at one image pixel per physical pixel, from x = -4.
     let corner = PhysicalPoint([-4, 0]);
-    rig.send(1, &display(1, PhysicalPoint([1, 1]), vec![corner, corner]));
-    assert!(matches!(rig.reply(), (1, Reply::Acquired(..))));
-    assert_eq!(rig.reply(), (1, Reply::Complete(key(1))));
-    rig.send(2, &Request::Seal(key(1)));
-    let (id, reply) = rig.reply();
-    let Reply::Sealed(sealed, context) = reply else {
-        panic!("not sealed: {reply:?}")
-    };
-    assert_eq!((id, sealed), (2, key(1)));
-    assert_eq!(
-        context.ink(),
-        Some(crate::screen::ink::InkBounds {
-            left: 0,
-            top: 0,
-            right: 3,
-            bottom: 3
-        })
-    );
-    rig.scrubbed();
-    rig.finish();
+    for (path, ink) in [
+        (Vec::new(), None),
+        (
+            vec![corner, corner],
+            Some(crate::screen::ink::InkBounds {
+                left: 0,
+                top: 0,
+                right: 3,
+                bottom: 3,
+            }),
+        ),
+    ] {
+        let rig = Rig::start(None, None, None);
+        rig.send(1, &display(1, PhysicalPoint([1, 1]), path));
+        assert!(matches!(rig.reply(), (1, Reply::Acquired(..))));
+        assert_eq!(rig.reply(), (1, Reply::Complete(key(1))));
+        rig.send(2, &Request::Seal(key(1)));
+        let (id, reply) = rig.reply();
+        let Reply::Sealed(sealed, context) = reply else {
+            panic!("not sealed: {reply:?}");
+        };
+        assert_eq!((id, sealed), (2, key(1)));
+        assert_eq!(context.ink(), ink);
+        let image = image::load_from_memory_with_format(context.jpeg(), image::ImageFormat::Jpeg)
+            .expect("a JPEG");
+        assert_eq!((image.width(), image.height()), (4, 3));
+        rig.scrubbed();
+        rig.send(3, &Request::Seal(key(1)));
+        assert_eq!(rig.reply(), (3, Reply::Refused(Refusal::Stale)));
+        rig.finish();
+    }
 }
 
 #[test]

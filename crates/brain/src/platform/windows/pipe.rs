@@ -393,7 +393,13 @@ pub fn session_id() -> io::Result<u32> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Instance, check_user_only, create_owner_only, user_sid};
+    use windows_sys::Win32::Foundation::{ERROR_ACCESS_DENIED, ERROR_PIPE_BUSY};
+
+    use super::{
+        ConvertStringSecurityDescriptorToSecurityDescriptorW, Instance, LocalFree,
+        PSECURITY_DESCRIPTOR, SDDL_REVISION_1, check_user_only, create_owner_only, dacl_sddl,
+        descriptor_sddl, user_sid,
+    };
 
     const ME: &str = "S-1-5-21-1-2-3-1001";
 
@@ -423,11 +429,6 @@ mod tests {
         assert!(check_user_only("O:BA", ME).is_err(), "no DACL");
     }
 
-    #[test]
-    fn the_user_sid_is_a_string_sid() {
-        let sid = user_sid().expect("this process has a user");
-        assert!(sid.starts_with("S-1-5-"), "{sid}");
-    }
     #[tokio::test]
     async fn created_pipe_is_owner_only_and_unique() {
         let name = format!(
@@ -436,12 +437,44 @@ mod tests {
             std::process::id()
         );
         let first = create_owner_only(&name, Instance::First).expect("first instance");
-        let again = create_owner_only(&name, Instance::First);
-        assert!(again.is_err(), "a second first instance must fail");
+        let again = create_owner_only(&name, Instance::First).expect_err("a second first instance");
+        assert_eq!(
+            again.raw_os_error(),
+            Some(ERROR_ACCESS_DENIED.cast_signed())
+        );
         let next = create_owner_only(&name, Instance::Next).expect("replacement instance");
-        let third = create_owner_only(&name, Instance::Next);
-        assert!(third.is_err(), "only two instances may exist");
-        drop((first, next));
+        let third = create_owner_only(&name, Instance::Next).expect_err("a third instance");
+        assert_eq!(third.raw_os_error(), Some(ERROR_PIPE_BUSY.cast_signed()));
+
+        let sid = user_sid().expect("current user SID");
+        let expected: Vec<u16> = format!("D:P(A;;GA;;;{sid})")
+            .encode_utf16()
+            .chain(Some(0))
+            .collect();
+        let mut descriptor: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+        // SAFETY: expected is NUL-terminated, and descriptor is a live output pointer.
+        let converted = unsafe {
+            ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                expected.as_ptr(),
+                SDDL_REVISION_1,
+                &raw mut descriptor,
+                std::ptr::null_mut(),
+            )
+        };
+        assert_ne!(converted, 0, "convert the expected user-only ACL");
+        let expected = descriptor_sddl(descriptor);
+        // SAFETY: conversion succeeded; the descriptor is no longer referenced.
+        unsafe { LocalFree(descriptor) };
+        let expected = expected.expect("read expected ACL, with Windows SID aliases");
+        let user = expected
+            .rsplit(';')
+            .next()
+            .and_then(|sid| sid.strip_suffix(')'))
+            .expect("expected owner SID");
+        for pipe in [&first, &next] {
+            let dacl = dacl_sddl(pipe).expect("read live pipe ACL");
+            assert_eq!(check_user_only(&dacl, user), Ok(()));
+        }
     }
 
     #[tokio::test]
