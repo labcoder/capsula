@@ -26,7 +26,7 @@ use crate::input::{
 use crate::link::LinkHandle;
 use crate::platform::{Deliver, EventTime, cursor_position, performance_counter};
 use kumochi_protocol::geometry::PhysicalPoint;
-use kumochi_protocol::message::{AudioSession, GestureId, ThreadId};
+use kumochi_protocol::message::{GestureId, ThreadId};
 
 struct Pending {
     delivery: Delivery,
@@ -175,7 +175,7 @@ pub(super) fn deliver(
         let mut state = gesture.get();
         let mut recovered = false;
         let voice_paused =
-            Cell::new(paused.get() || link.audio_session() == AudioSession::QueuedRequired);
+            Cell::new(paused.get() || !link.can_start_voice_gesture(link.link_generation()));
         let delivery = fence.borrow_mut().reduce_with_keyboard_read(
             &mut state,
             event,

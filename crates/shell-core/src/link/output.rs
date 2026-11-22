@@ -157,6 +157,8 @@ pub struct InhibitToken {
 pub enum OutputKey {
     /// A live output generation.
     Generation(OutputGeneration),
+    /// The exact registered queued output when replies are silent.
+    SilentQueued(OutputGeneration),
     /// A session's no-output epoch.
     NoOutput(u64),
 }
@@ -361,6 +363,11 @@ impl State {
             return Err(Denied::Debt);
         }
         match (claim.key, self.output) {
+            (OutputKey::SilentQueued(key), Output::Queued(_))
+                if self.silent_queued() == Some(key) =>
+            {
+                Ok(())
+            }
             (OutputKey::NoOutput(key), Output::Quiet { epoch, .. }) if key == epoch => Ok(()),
             (OutputKey::Generation(key), Output::Live(generation)) if key == generation => {
                 let now = self
@@ -664,7 +671,7 @@ impl OutputOwner {
     pub fn acquire(&self, gesture: GestureId) -> Result<InhibitToken, Denied> {
         let mut state = self.try_lock()?;
         if state.inhibit.is_some()
-            || matches!(state.output, Output::Queued(_))
+            || (matches!(state.output, Output::Queued(_)) && state.silent_queued().is_none())
             || state.queued.as_ref().is_some_and(Queued::owes)
         {
             return Err(Denied::Inhibited);
@@ -737,7 +744,9 @@ impl OutputOwner {
             Output::Quiet { epoch, .. } => OutputKey::NoOutput(epoch),
             Output::Opening(_) => return Err(Denied::Opening),
             Output::Closed | Output::Lost(_) => return Err(Denied::Stale),
-            Output::Queued(_) => return Err(Denied::Unqualified),
+            Output::Queued(_) => {
+                OutputKey::SilentQueued(state.silent_queued().ok_or(Denied::Unqualified)?)
+            }
         };
         let claim = Claim {
             session,
