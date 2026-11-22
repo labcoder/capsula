@@ -2454,24 +2454,966 @@ fn begin_typed_key_turn(
         .expect("the typed turn's build")
 }
 
-/// Admits build `key` on the pictured Key choice, sending `request` with the draw tool.
-fn admit_key_build(
-    core: &mut Coordinator,
-    key: BuildKey,
-    snapshot: &RunSnapshot,
-    mut request: crate::context::ModelRequest,
-) {
+/// A typed Key turn sent the pictured turn's digest writes under a revocable grant. Losing the
+/// model's image fact, the key's sign-in, Key pictures, key validity, showing the screen or the
+/// listed drawing between grant and first write stops that write; a rebuildable round 1 then
+/// rebuilds cleanly without the revoked digest, and unchanged it writes.
+#[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "seven revocation triggers with round-1 rebuild check"
+)]
+fn a_digest_only_key_send_writes_only_while_its_digest_may_go() {
+    use crate::connections::model::Lease as _;
+    use crate::coordinator::{Availability, PictureRoutes, RefusedKey};
+    use kumochi_protocol::message::{ConnectionKind::AnthropicKey, ErrorKey, RunId};
+
+    type Change = fn(&mut Coordinator);
+    let changes: [(&str, bool, Option<Change>); 7] = [
+        ("unchanged", false, None),
+        (
+            "image-fact",
+            true,
+            Some(|core| {
+                let none = super::super::routes::pictured(5, &[]);
+                core.handle(Input::Engines(AnthropicKey, none)).unwrap();
+            }),
+        ),
+        (
+            "sign-out",
+            false,
+            Some(|core| {
+                let out = Availability::Unavailable(ErrorKey::AccountRefused.into());
+                core.handle(Input::Engines(AnthropicKey, out)).unwrap();
+            }),
+        ),
+        (
+            "pictures-off",
+            true,
+            Some(|core| core.set_pictures(PictureRoutes::new(false, false))),
+        ),
+        (
+            "screen-off",
+            true,
+            Some(|core| {
+                core.handle(Input::ShowScreenOff).unwrap();
+            }),
+        ),
+        (
+            "clear-visible",
+            true,
+            Some(|core| {
+                core.handle(Input::ClearVisible).unwrap();
+            }),
+        ),
+        (
+            "key-refused",
+            false,
+            Some(|core| {
+                core.handle(Input::KeyRefused(RefusedKey(
+                    crate::context::ConnectionTag(5),
+                )))
+                .unwrap();
+            }),
+        ),
+    ];
+    for (name, rebuilds, change) in changes {
+        let scratch = Scratch::new(&format!("provider-draw-key-digest-grant-{name}"));
+        let mut store = store(&scratch);
+        let (mut core, snapshot) = pictured_key();
+        end_pictured_key_run(&mut core, &mut store, &snapshot);
+        let next = RunId(R.0 + 1);
+        let key = begin_typed_key_turn(&mut core, &mut store, next);
+        let request = built_key(
+            &store,
+            &snapshot,
+            next,
+            Some(&key_recipient(&snapshot)),
+            &[],
+            core.drawing.digest(T),
+        );
+        let wire = key_wire(&request, snapshot.connection).to_string();
+        assert!(wire.contains("key_scene_private"), "{name}");
+        let lease = grant_key_build(&mut core, key, &snapshot, request);
+        let grant = core
+            .picture_grant(lease)
+            .expect("a digest-only send's grant");
+        let (inputs, _settled) = tokio::sync::mpsc::unbounded_channel();
+        let send = crate::engines::SendLease::new(lease, inputs).with_picture(Some(grant));
+        let settled = match change {
+            None => {
+                assert!(send.admit().is_some(), "{name}");
+                Input::SendSettled { lease }
+            }
+            Some(change) => {
+                change(&mut core);
+                assert!(send.admit().is_none(), "{name}");
+                Input::SendUnsent { lease }
+            }
+        };
+        let effects = core.handle(settled).unwrap();
+        if rebuilds {
+            let again = effects
+                .iter()
+                .find_map(|effect| match effect {
+                    Effect::Store(StoreOp::BuildContext(build)) => Some(build.key),
+                    _ => None,
+                })
+                .expect("round 1 rebuilds cleanly after an unsent digest revocation");
+            assert_ne!(again, key, "{name}");
+            let rebuilt = built_key(&store, &snapshot, next, None, &[], core.drawing.digest(T));
+            let wire = key_wire(&rebuilt, snapshot.connection).to_string();
+            assert!(!wire.contains("key_scene_private"), "{name}");
+            let plain = grant_key_build(&mut core, again, &snapshot, rebuilt);
+            assert!(core.picture_grant(plain).is_none(), "{name}");
+            core.handle(Input::SendSettled { lease: plain }).unwrap();
+        }
+    }
+}
+
+/// A Key continuation resends its first request, so clearing a screen scene that first request
+/// digested stops round 2 even when round 1 drew a still-visible private overlay: at admission
+/// when cleared before round 2's grant, and at write admission when cleared after it.
+#[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "drives round 1 into round 2 before and after grant"
+)]
+fn a_key_continuation_stops_when_its_first_round_screen_digest_is_cleared() {
+    use crate::connections::model::Lease as _;
     use crate::coordinator::SendKey;
+    use kumochi_protocol::message::{ConnectionKind::AnthropicKey, RunId};
+
+    for after_grant in [false, true] {
+        let scratch = Scratch::new(&format!("provider-draw-key-cont-revoke-{after_grant}"));
+        let mut store = store(&scratch);
+        let (mut core, snapshot) = pictured_key();
+        end_pictured_key_run(&mut core, &mut store, &snapshot);
+        let next = RunId(R.0 + 1);
+        let key = begin_typed_key_turn(&mut core, &mut store, next);
+        let first = built_key(
+            &store,
+            &snapshot,
+            next,
+            Some(&key_recipient(&snapshot)),
+            &[],
+            core.drawing.digest(T),
+        );
+        admit_key_build(&mut core, key, &snapshot, first);
+        let call = key_call(
+            &mut core,
+            &mut store,
+            (next, "digest-draw"),
+            LATER_KEY_OVERLAY,
+        );
+        assert_eq!(store.commit_call(&call).unwrap(), Committed::Done);
+        let effects = core
+            .handle(Input::CallCommitted {
+                key: call.key.clone(),
+                outcome: Committed::Done,
+                then: None,
+            })
+            .unwrap();
+        let [Effect::Store(StoreOp::RoundItems(round))] = effects.as_slice() else {
+            panic!("a completed round: {effects:?}");
+        };
+        store
+            .append_key_round_events(
+                (T, next),
+                snapshot.connection,
+                &[],
+                &round.key_calls,
+                &round.calls,
+                round.pictured_key_model.as_ref(),
+            )
+            .unwrap();
+        if !after_grant {
+            core.handle(Input::ShowScreenOff).unwrap();
+            assert!(
+                !core.drawing.visible_to(T, &key_recipient(&snapshot)),
+                "screen-off drops private overlays from outbound digests"
+            );
+            assert!(
+                core.drawing.digest(T).as_str().contains("later_scene"),
+                "round 1's overlay stays visible locally"
+            );
+        }
+        let effects = core
+            .handle(Input::RoundStored {
+                run: next,
+                round: 1,
+            })
+            .unwrap();
+        let [Effect::Store(StoreOp::BuildContext(build))] = effects.as_slice() else {
+            panic!("round 2 build: {effects:?}");
+        };
+        let second = built_key(
+            &store,
+            &snapshot,
+            next,
+            Some(&key_recipient(&snapshot)),
+            &build.key_results,
+            core.drawing.digest(T),
+        );
+        let model = super::super::routes::choice(AnthropicKey, "m");
+        let Input::ContextBuilt(mut context) = super::super::routes::built_for(build.key, &model)
+        else {
+            unreachable!()
+        };
+        context.snapshot = None;
+        context.result.as_mut().unwrap().request = second;
+        core.handle(Input::ContextBuilt(context)).unwrap();
+        let ready = core
+            .handle(Input::SendReady {
+                key: SendKey::Build(build.key),
+                hold: None,
+            })
+            .unwrap();
+        if !after_grant {
+            assert!(ready.contains(&Effect::Rebuild(SendKey::Build(build.key))));
+            assert!(
+                core.current.is_none(),
+                "round 2 fails instead of rebuilding"
+            );
+            continue;
+        }
+        let lease = ready
+            .into_iter()
+            .find_map(|effect| match effect {
+                Effect::Grant(lease) => Some(lease),
+                _ => None,
+            })
+            .expect("round 2 granted");
+        let grant = core.picture_grant(lease).expect("round 2 carries a grant");
+        let (inputs, _settled) = tokio::sync::mpsc::unbounded_channel();
+        let send = crate::engines::SendLease::new(lease, inputs).with_picture(Some(grant));
+        core.handle(Input::ShowScreenOff).unwrap();
+        assert!(send.admit().is_none(), "screen-off closes round 2's grant");
+        let effects = core.handle(Input::SendUnsent { lease }).unwrap();
+        assert!(
+            !effects
+                .iter()
+                .any(|effect| matches!(effect, Effect::Store(StoreOp::BuildContext(_)))),
+            "round 2 never attempts a doomed rebuild"
+        );
+        assert!(core.current.is_none(), "round 2 fails cleanly");
+    }
+}
+
+/// Seeds a pictured run on `kind` that authors only a `Surface::Overlay` (no screen scene) and
+/// finishes cleanly, returning the coordinator, store, snapshot, recipient and overlay scene id.
+fn seed_private_overlay_only(
+    scratch: &Scratch,
+    kind: kumochi_protocol::message::ConnectionKind,
+) -> (
+    Coordinator,
+    Store,
+    RunSnapshot,
+    crate::context::PictureRecipient,
+    kumochi_protocol::message::SceneId,
+) {
+    use super::super::routes::{built_for, choice, held, jpeg, key, pictured};
+    use crate::context::{PictureRecipient, Route, Screen};
+    use crate::coordinator::{PictureRoutes, SendKey};
+    use crate::drawing::{Input as DrawInput, Reply, Write};
     use kumochi_protocol::message::ConnectionKind;
 
-    let model = super::super::routes::choice(ConnectionKind::AnthropicKey, "m");
-    let Input::ContextBuilt(mut built) = super::super::routes::built_for(key, &model) else {
+    let store = store(scratch);
+    let tag = if kind == ConnectionKind::ChatGpt {
+        7
+    } else {
+        5
+    };
+    let model = choice(kind, "m");
+    let (mut core, hold) = held(
+        vec![Input::Engines(kind, pictured(tag, &["m"]))],
+        model.clone(),
+        Some(T),
+    );
+    let snapshot = hold.defaults.clone();
+    core.set_pictures(PictureRoutes::new(true, false));
+    core.submit_hold(hold, "seed overlay".into(), Some(Screen::Image(jpeg())))
+        .unwrap();
+    core.handle(Input::TurnStored { run: R }).unwrap();
+    let Input::ContextBuilt(mut built) = built_for(key(), &model) else {
         unreachable!()
     };
-    built.snapshot = (key.round == 1).then(|| snapshot.clone());
-    request.tools = crate::context::tools(snapshot.origin);
-    built.result.as_mut().unwrap().request = request;
+    built.result.as_mut().unwrap().request.tools = crate::context::tools(snapshot.origin);
     core.handle(Input::ContextBuilt(built)).unwrap();
+    let lease = core
+        .handle(Input::SendReady {
+            key: SendKey::Build(key()),
+            hold: None,
+        })
+        .unwrap()
+        .into_iter()
+        .find_map(|effect| match effect {
+            Effect::Grant(lease) => Some(lease),
+            _ => None,
+        })
+        .expect("seed granted");
+    core.handle(Input::SendSettled { lease }).unwrap();
+    let recipient = PictureRecipient {
+        route: Route {
+            kind,
+            tag: crate::context::ConnectionTag(tag),
+        },
+        model: model.model,
+    };
+    core.drawing.author(R, Some(&recipient));
+    let mut effects = core
+        .handle(Input::Drawing(DrawInput::Call {
+            thread: T,
+            run: R,
+            call: id("seed-overlay"),
+            args: COPIED_KEY_OVERLAY.into(),
+        }))
+        .unwrap();
+    let mut scene = None;
+    while let Some((serial, write)) = effects.iter().find_map(|effect| match effect {
+        Effect::Store(StoreOp::Drawing { serial, write }) => Some((*serial, write.clone())),
+        _ => None,
+    }) {
+        let reply = match write {
+            Write::Lookup { .. } => Reply::Lookup(None),
+            Write::Step { .. } => {
+                let id = kumochi_protocol::message::SceneId(50);
+                scene = Some(id);
+                Reply::Step(id)
+            }
+            Write::Cut { .. } => Reply::Cut,
+        };
+        effects = core
+            .handle(Input::DrawingWritten {
+                serial,
+                reply: Ok(reply),
+            })
+            .unwrap();
+    }
+    let scene = scene.expect("overlay stored");
+    let end_key = super::super::engine_key(&core, R);
+    core.handle(Input::Engine {
+        key: end_key,
+        event: TurnEvent::Finished(Finish::Completed),
+    })
+    .unwrap();
+    core.handle(Input::RunStored { run: R }).unwrap();
+    assert!(core.drawing.visible_to(T, &recipient));
+    (core, store, snapshot, recipient, scene)
+}
+
+/// Turning off Show Screen revokes outbound digest permission for private overlays too (not only
+/// `Surface::Screen` scenes) across `ChatGPT` and Key — on suspended builds, open grants, and fresh
+/// next-turn builds — while keeping those overlays visible locally with no retire or clear.
+#[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "checks suspended, granted and next-turn paths across ChatGPT and Key"
+)]
+fn show_screen_off_revokes_private_overlays_without_retiring_them() {
+    use crate::connections::model::Lease as _;
+    use crate::coordinator::SendKey;
+    use kumochi_protocol::message::{ConnectionKind, RunId};
+
+    for kind in [ConnectionKind::AnthropicKey, ConnectionKind::ChatGpt] {
+        for phase in ["before_grant", "after_grant"] {
+            let scratch = Scratch::new(&format!("overlay-screen-off-{kind:?}-{phase}"));
+            let (mut core, mut store, snapshot, recipient, scene) =
+                seed_private_overlay_only(&scratch, kind);
+            let next = RunId(R.0 + 1);
+            let key = begin_typed_key_turn(&mut core, &mut store, next);
+            let model = super::super::routes::choice(kind, "m");
+            let Input::ContextBuilt(mut context) = super::super::routes::built_for(key, &model)
+            else {
+                unreachable!()
+            };
+            context.snapshot = Some(snapshot.clone());
+            core.handle(Input::ContextBuilt(context)).unwrap();
+
+            let off_effects = if phase == "before_grant" {
+                let off = core.handle(Input::ShowScreenOff).unwrap();
+                let ready = core
+                    .handle(Input::SendReady {
+                        key: SendKey::Build(key),
+                        hold: None,
+                    })
+                    .unwrap();
+                assert!(
+                    ready.contains(&Effect::Rebuild(SendKey::Build(key))),
+                    "{kind:?} {phase}: suspended build is refused"
+                );
+                let rebuilt_build = ready
+                    .iter()
+                    .find_map(|effect| match effect {
+                        Effect::Store(StoreOp::BuildContext(build)) => Some(build),
+                        _ => None,
+                    })
+                    .expect("suspended build rebuilds");
+                assert_eq!(
+                    rebuilt_build.drawings.line_for(&recipient),
+                    None,
+                    "{kind:?} {phase}: rebuilt digest omits private overlay"
+                );
+                off
+            } else {
+                let lease = core
+                    .handle(Input::SendReady {
+                        key: SendKey::Build(key),
+                        hold: None,
+                    })
+                    .unwrap()
+                    .into_iter()
+                    .find_map(|effect| match effect {
+                        Effect::Grant(lease) => Some(lease),
+                        _ => None,
+                    })
+                    .expect("overlay digest granted");
+                let grant = core.picture_grant(lease).expect("digest grant");
+                let (inputs, _settled) = tokio::sync::mpsc::unbounded_channel();
+                let send =
+                    crate::engines::SendLease::new(lease, inputs).with_picture(Some(grant.clone()));
+                let off = core.handle(Input::ShowScreenOff).unwrap();
+                assert!(!grant.is_open(), "{kind:?} {phase}: open grant closes");
+                assert!(send.admit().is_none(), "{kind:?} {phase}: write refused");
+                let settled = core.handle(Input::SendUnsent { lease }).unwrap();
+                let rebuilt_build = settled
+                    .iter()
+                    .find_map(|effect| match effect {
+                        Effect::Store(StoreOp::BuildContext(build)) => Some(build),
+                        _ => None,
+                    })
+                    .expect("unsent revoked build rebuilds");
+                assert_eq!(
+                    rebuilt_build.drawings.line_for(&recipient),
+                    None,
+                    "{kind:?} {phase}: rebuilt digest omits private overlay"
+                );
+                let Input::ContextBuilt(mut again) =
+                    super::super::routes::built_for(rebuilt_build.key, &model)
+                else {
+                    unreachable!()
+                };
+                again.snapshot = Some(snapshot.clone());
+                core.handle(Input::ContextBuilt(again)).unwrap();
+                let plain = core
+                    .handle(Input::SendReady {
+                        key: SendKey::Build(rebuilt_build.key),
+                        hold: None,
+                    })
+                    .unwrap()
+                    .into_iter()
+                    .find_map(|effect| match effect {
+                        Effect::Grant(lease) => Some(lease),
+                        _ => None,
+                    })
+                    .expect("clean rebuild granted");
+                assert!(core.picture_grant(plain).is_none());
+                core.handle(Input::SendSettled { lease: plain }).unwrap();
+                off
+            };
+
+            assert!(
+                !off_effects.iter().any(|effect| matches!(
+                    effect,
+                    Effect::RetireScenes { scenes, .. }
+                        | Effect::Store(StoreOp::ClearScenes { scenes })
+                        if scenes.contains(&scene)
+                )),
+                "{kind:?} {phase}: overlay stays visible locally"
+            );
+            assert!(
+                !core.drawing.visible_to(T, &recipient),
+                "{kind:?} {phase}: overlay leaves outbound visibility"
+            );
+            assert_eq!(
+                core.drawing.digest(T).line_for(&recipient),
+                None,
+                "{kind:?} {phase}: overlay leaves outbound digest"
+            );
+            assert!(
+                core.drawing
+                    .digest(T)
+                    .as_str()
+                    .contains("digest_copy_private"),
+                "{kind:?} {phase}: overlay remains in local scenes"
+            );
+
+            // Fresh next turn omits the downgraded overlay too.
+            let third = RunId(next.0 + 1);
+            core.handle(Input::Stop {
+                run: next,
+                revealed: Vec::new(),
+            })
+            .unwrap();
+            core.handle(Input::RunStored { run: next }).unwrap();
+            core.handle(Input::Turn {
+                turn: 9,
+                thread: Some(T),
+                text: "fresh next turn".into(),
+            })
+            .unwrap();
+            let fresh_effects = core.handle(Input::TurnStored { run: third }).unwrap();
+            let fresh_build = fresh_effects
+                .iter()
+                .find_map(|effect| match effect {
+                    Effect::Store(StoreOp::BuildContext(build)) => Some(build),
+                    _ => None,
+                })
+                .expect("fresh next turn build");
+            assert_eq!(
+                fresh_build.drawings.line_for(&recipient),
+                None,
+                "{kind:?} {phase}: fresh turn omits downgraded overlay"
+            );
+        }
+    }
+}
+
+/// Drives a typed Key run through round 1 carrying `FIRST_KEY_OVERLAY` (scene A), draws private
+/// `LATER_KEY_OVERLAY` (scene B) in round 1, and checks every round-2 continuation invariant:
+/// unrelated new scene B is permitted while scene A is intact; failing, replacing or evicting
+/// scene A before round 2 (even while scene B survives) fails round 2; and dropping and restoring
+/// the image fact between rounds on a typed run stays latched and fails round 2.
+#[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "covers five Key continuation scenarios against round-1 carried prefix"
+)]
+fn a_key_continuation_validates_round_one_scenes_and_latched_authority() {
+    use crate::coordinator::SendKey;
+    use crate::drawing::{Input as DrawInput, Reply, Write};
+    use kumochi_protocol::message::{ConnectionKind::AnthropicKey, RunId, SceneId};
+
+    let cases = [
+        ("intact_with_new_scene", true),
+        ("scene_a_failed", false),
+        ("scene_a_edited", false),
+        ("scene_a_replaced", false),
+        ("scene_a_evicted", false),
+        ("fact_drop_and_return", false),
+    ];
+
+    for (case, should_grant) in cases {
+        let scratch = Scratch::new(&format!("key-cont-prefix-{case}"));
+        let (mut core, mut store, snapshot, recipient, scene_a) =
+            seed_private_overlay_only(&scratch, AnthropicKey);
+        let next = RunId(R.0 + 1);
+        let key = begin_typed_key_turn(&mut core, &mut store, next);
+        let first = built_key(
+            &store,
+            &snapshot,
+            next,
+            Some(&recipient),
+            &[],
+            core.drawing.digest(T),
+        );
+        admit_key_build(&mut core, key, &snapshot, first);
+        let call = key_call(
+            &mut core,
+            &mut store,
+            (next, "round1-overlay-b"),
+            LATER_KEY_OVERLAY,
+        );
+        assert_eq!(store.commit_call(&call).unwrap(), Committed::Done);
+        let effects = core
+            .handle(Input::CallCommitted {
+                key: call.key.clone(),
+                outcome: Committed::Done,
+                then: None,
+            })
+            .unwrap();
+        let [Effect::Store(StoreOp::RoundItems(round))] = effects.as_slice() else {
+            panic!("{case}: expected round items: {effects:?}");
+        };
+        store
+            .append_key_round_events(
+                (T, next),
+                snapshot.connection,
+                &[],
+                &round.key_calls,
+                &round.calls,
+                round.pictured_key_model.as_ref(),
+            )
+            .unwrap();
+
+        match case {
+            "intact_with_new_scene" => {}
+            "scene_a_failed" => {
+                core.handle(Input::Drawing(DrawInput::SceneFailed { scene: scene_a }))
+                    .unwrap();
+                assert!(
+                    core.drawing.visible_to(T, &recipient),
+                    "private scene B still survives"
+                );
+            }
+            "scene_a_edited" => {
+                core.drawing.author(next, Some(&recipient));
+                let edit = r#"{"records":[{"begin":{"v":1,"scene":"digest_copy_private","surface":"overlay","alt":"key_title_private"}},{"step":{"id":"d2","remove":["key_object_private"],"put":[{"shape":{"id":"key_object_edited","kind":"rect","box":[0,0,10,10]}}]}},{"end":{}}]}"#;
+                let mut draw_fx = core
+                    .handle(Input::Drawing(DrawInput::Call {
+                        thread: T,
+                        run: next,
+                        call: id("edit-a"),
+                        args: edit.into(),
+                    }))
+                    .unwrap();
+                while let Some((serial, write)) = draw_fx.iter().find_map(|effect| match effect {
+                    Effect::Store(StoreOp::Drawing { serial, write }) => {
+                        Some((*serial, write.clone()))
+                    }
+                    _ => None,
+                }) {
+                    let reply = match write {
+                        Write::Lookup { .. } => Reply::Lookup(Some(scene_a)),
+                        Write::Step { .. } => Reply::Step(scene_a),
+                        Write::Cut { .. } => Reply::Cut,
+                    };
+                    draw_fx = core
+                        .handle(Input::DrawingWritten {
+                            serial,
+                            reply: Ok(reply),
+                        })
+                        .unwrap();
+                }
+                assert!(
+                    core.drawing.visible_to(T, &recipient),
+                    "edited scene A and scene B stay visible"
+                );
+            }
+            "scene_a_replaced" => {
+                core.drawing.author(next, Some(&recipient));
+                let replace = r#"{"records":[{"begin":{"v":1,"scene":"replace_scene","surface":"overlay","alt":"r","others":"clear"}},{"step":{"id":"r1","put":[{"shape":{"id":"rb","kind":"rect","box":[0,0,10,10]}}]}},{"end":{}}]}"#;
+                let mut draw_fx = core
+                    .handle(Input::Drawing(DrawInput::Call {
+                        thread: T,
+                        run: next,
+                        call: id("replace-a"),
+                        args: replace.into(),
+                    }))
+                    .unwrap();
+                let mut next_id = 80u64;
+                while let Some((serial, write)) = draw_fx.iter().find_map(|effect| match effect {
+                    Effect::Store(StoreOp::Drawing { serial, write }) => {
+                        Some((*serial, write.clone()))
+                    }
+                    _ => None,
+                }) {
+                    let reply = match write {
+                        Write::Lookup { .. } => Reply::Lookup(None),
+                        Write::Step { .. } => {
+                            next_id += 1;
+                            Reply::Step(SceneId(next_id))
+                        }
+                        Write::Cut { .. } => Reply::Cut,
+                    };
+                    draw_fx = core
+                        .handle(Input::DrawingWritten {
+                            serial,
+                            reply: Ok(reply),
+                        })
+                        .unwrap();
+                }
+                assert!(
+                    core.drawing.visible_to(T, &recipient),
+                    "replacement private scene stays visible"
+                );
+            }
+            "scene_a_evicted" => {
+                // MAX_VISIBLE_SCENES is 4: we already hold scene A and scene B; three more keep
+                // scenes evict scene A (oldest) while private scene B survives.
+                core.drawing.author(next, Some(&recipient));
+                let mut next_id = 90u64;
+                for extra in 0..3 {
+                    let args = format!(
+                        r#"{{"records":[{{"begin":{{"v":1,"scene":"evict_{extra}","surface":"overlay","alt":"e","others":"keep"}}}},{{"step":{{"id":"e{extra}","put":[{{"shape":{{"id":"eb{extra}","kind":"rect","box":[0,0,10,10]}}}}]}}}},{{"end":{{}}}}]}}"#
+                    );
+                    let mut draw_fx = core
+                        .handle(Input::Drawing(DrawInput::Call {
+                            thread: T,
+                            run: next,
+                            call: id(&format!("evict-{extra}")),
+                            args: args.into(),
+                        }))
+                        .unwrap();
+                    while let Some((serial, write)) = draw_fx.iter().find_map(|effect| match effect
+                    {
+                        Effect::Store(StoreOp::Drawing { serial, write }) => {
+                            Some((*serial, write.clone()))
+                        }
+                        _ => None,
+                    }) {
+                        let reply = match write {
+                            Write::Lookup { .. } => Reply::Lookup(None),
+                            Write::Step { .. } => {
+                                next_id += 1;
+                                Reply::Step(SceneId(next_id))
+                            }
+                            Write::Cut { .. } => Reply::Cut,
+                        };
+                        draw_fx = core
+                            .handle(Input::DrawingWritten {
+                                serial,
+                                reply: Ok(reply),
+                            })
+                            .unwrap();
+                    }
+                }
+                assert!(
+                    core.drawing.visible_to(T, &recipient),
+                    "private scene B still survives after evicting A"
+                );
+            }
+            "fact_drop_and_return" => {
+                core.handle(Input::Engines(
+                    AnthropicKey,
+                    super::super::routes::pictured(5, &[]),
+                ))
+                .unwrap();
+                core.handle(Input::Engines(
+                    AnthropicKey,
+                    super::super::routes::pictured(5, &["m"]),
+                ))
+                .unwrap();
+            }
+            _ => unreachable!(),
+        }
+
+        let effects = core
+            .handle(Input::RoundStored {
+                run: next,
+                round: 1,
+            })
+            .unwrap();
+        let [Effect::Store(StoreOp::BuildContext(build))] = effects.as_slice() else {
+            panic!("{case}: expected round 2 build: {effects:?}");
+        };
+        let second = built_key(
+            &store,
+            &snapshot,
+            next,
+            Some(&recipient),
+            &build.key_results,
+            core.drawing.digest(T),
+        );
+        let model = super::super::routes::choice(AnthropicKey, "m");
+        let Input::ContextBuilt(mut context) = super::super::routes::built_for(build.key, &model)
+        else {
+            unreachable!()
+        };
+        context.snapshot = None;
+        context.result.as_mut().unwrap().request = second;
+        core.handle(Input::ContextBuilt(context)).unwrap();
+        let ready = core
+            .handle(Input::SendReady {
+                key: SendKey::Build(build.key),
+                hold: None,
+            })
+            .unwrap();
+        if should_grant {
+            let lease = ready
+                .into_iter()
+                .find_map(|effect| match effect {
+                    Effect::Grant(lease) => Some(lease),
+                    _ => None,
+                })
+                .expect("unrelated new scene B leaves round 2 granted");
+            assert!(core.picture_grant(lease).is_some());
+            core.handle(Input::SendSettled { lease }).unwrap();
+        } else {
+            assert!(
+                ready.contains(&Effect::Rebuild(SendKey::Build(build.key))),
+                "{case}: round 2 must be refused"
+            );
+            assert!(
+                core.current.is_none(),
+                "{case}: revoked Key continuation fails instead of rebuilding"
+            );
+        }
+    }
+}
+
+/// A validated `StepFailed` arriving while another drawing write is pending in the store queues
+/// its cut behind that write, yet immediately removes the scene from outbound digests and closes
+/// any open grant before the pending store write settles.
+#[test]
+fn a_pending_step_failed_cut_revokes_digest_before_store_write_settles() {
+    use crate::connections::model::Lease as _;
+    use crate::drawing::Input as DrawInput;
+    use kumochi_protocol::message::{ConnectionKind::AnthropicKey, RunId, SceneFailure};
+    use kumochi_scene::StopCut;
+    use kumochi_scene::text::Bounded;
+
+    let scratch = Scratch::new("pending-step-failed-revokes-digest");
+    let (mut core, mut store, snapshot, recipient, scene_a) =
+        seed_private_overlay_only(&scratch, AnthropicKey);
+    let next = RunId(R.0 + 1);
+    let key = begin_typed_key_turn(&mut core, &mut store, next);
+    let first = built_key(
+        &store,
+        &snapshot,
+        next,
+        Some(&recipient),
+        &[],
+        core.drawing.digest(T),
+    );
+    let lease = grant_key_build(&mut core, key, &snapshot, first);
+    let grant = core.picture_grant(lease).expect("digest grant");
+    let (inputs, _settled) = tokio::sync::mpsc::unbounded_channel();
+    let send = crate::engines::SendLease::new(lease, inputs).with_picture(Some(grant.clone()));
+
+    // Start a drawing store write and leave it pending so the upcoming StepFailed queues behind it.
+    let pending_fx = core
+        .handle(Input::Drawing(DrawInput::Call {
+            thread: T,
+            run: next,
+            call: id("pending-write"),
+            args: LATER_KEY_OVERLAY.into(),
+        }))
+        .unwrap();
+    assert!(
+        pending_fx
+            .iter()
+            .any(|effect| matches!(effect, Effect::Store(StoreOp::Drawing { .. }))),
+        "a store write is now pending"
+    );
+    assert!(
+        grant.is_open(),
+        "an unrelated pending write keeps the grant"
+    );
+
+    // Validated StepFailed on scene_a queues Job::Cut behind the pending write.
+    core.handle(Input::Drawing(DrawInput::StepFailed {
+        run: R,
+        scene: scene_a,
+        index: 0,
+        reason: SceneFailure::PaintWork,
+        cut: StopCut {
+            activated: 0,
+            revealed: Bounded::default(),
+        },
+    }))
+    .unwrap();
+    assert!(
+        !core.drawing.visible_to(T, &recipient),
+        "pending cut drops scene_a from outbound visibility immediately"
+    );
+    assert_eq!(
+        core.drawing.digest(T).line_for(&recipient),
+        None,
+        "pending cut drops scene_a from outbound digest immediately"
+    );
+    assert!(
+        !grant.is_open(),
+        "open grant closes before the store write settles"
+    );
+    assert!(send.admit().is_none(), "write refused before store settle");
+
+    let settled = core.handle(Input::SendUnsent { lease }).unwrap();
+    let rebuilt = settled
+        .iter()
+        .find_map(|effect| match effect {
+            Effect::Store(StoreOp::BuildContext(build)) => Some(build),
+            _ => None,
+        })
+        .expect("round 1 rebuilds cleanly");
+    assert_eq!(rebuilt.drawings.line_for(&recipient), None);
+}
+
+/// Ending a run (such as on Stop) closes that run's digest-carrying grants immediately, so a
+/// retained `SendLease` refuses any new write admission.
+#[test]
+fn stopping_a_run_closes_its_digest_grant() {
+    use crate::connections::model::Lease as _;
+    use kumochi_protocol::message::{ConnectionKind::AnthropicKey, RunId};
+
+    let scratch = Scratch::new("stop-closes-digest-grant");
+    let (mut core, mut store, snapshot, recipient, _) =
+        seed_private_overlay_only(&scratch, AnthropicKey);
+    let next = RunId(R.0 + 1);
+    let key = begin_typed_key_turn(&mut core, &mut store, next);
+    let first = built_key(
+        &store,
+        &snapshot,
+        next,
+        Some(&recipient),
+        &[],
+        core.drawing.digest(T),
+    );
+    let lease = grant_key_build(&mut core, key, &snapshot, first);
+    let grant = core.picture_grant(lease).expect("digest grant");
+    let (inputs, _settled) = tokio::sync::mpsc::unbounded_channel();
+    let send = crate::engines::SendLease::new(lease, inputs).with_picture(Some(grant.clone()));
+    assert!(grant.is_open());
+
+    core.handle(Input::Stop {
+        run: next,
+        revealed: Vec::new(),
+    })
+    .unwrap();
+    assert!(
+        !grant.is_open(),
+        "Stop closes the ending run's digest grant"
+    );
+    assert!(
+        send.admit().is_none(),
+        "retained digest lease refuses writes after Stop"
+    );
+}
+
+/// When a mixed picture+digest send is revoked solely because a drawing changed while the model
+/// still accepts pictures, settling unsent rebuilds without the stale digest and keeps the valid
+/// picture (no `ModelCantSee` notice or store row).
+#[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "seeds a private overlay then runs a mixed hold build through unsent rebuild"
+)]
+fn a_mixed_picture_and_digest_send_keeps_its_valid_picture_when_only_a_drawing_changes() {
+    use super::super::routes::{built_for, choice, jpeg};
+    use crate::connections::model::Lease as _;
+    use crate::context::{InputItem, Screen};
+    use crate::coordinator::{HoldKey, SendKey};
+    use kumochi_protocol::message::{
+        ConnectionKind::AnthropicKey, ControlToShell, GestureId, HeldScreen, RunId,
+    };
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicBool;
+
+    let scratch = Scratch::new("mixed-picture-digest-keeps-picture");
+    let (mut core, _store, snapshot, _recipient, scene_a) =
+        seed_private_overlay_only(&scratch, AnthropicKey);
+    let hold_key = HoldKey {
+        epoch: 0,
+        gesture: GestureId(2),
+    };
+    let Ok(StoreOp::ReadHold(read)) = core.prepare_hold(
+        hold_key,
+        Some(T),
+        0,
+        snapshot.clone(),
+        Arc::new(AtomicBool::new(false)),
+    ) else {
+        panic!("hold prepared");
+    };
+    let mut hold = read.snapshot;
+    hold.generation = Some(crate::store::Generation(0));
+    core.submit_hold(hold, "mixed turn".into(), Some(Screen::Image(jpeg())))
+        .unwrap();
+    let next = RunId(R.0 + 1);
+    let stored = core.handle(Input::TurnStored { run: next }).unwrap();
+    let key = stored
+        .iter()
+        .find_map(|effect| match effect {
+            Effect::Store(StoreOp::BuildContext(build)) => Some(build.key),
+            _ => None,
+        })
+        .expect("mixed build");
+    let model = choice(AnthropicKey, "m");
+    let Input::ContextBuilt(mut context) = built_for(key, &model) else {
+        unreachable!()
+    };
+    context.snapshot = Some(snapshot.clone());
+    core.handle(Input::ContextBuilt(context)).unwrap();
     let lease = core
         .handle(Input::SendReady {
             key: SendKey::Build(key),
@@ -2483,8 +3425,573 @@ fn admit_key_build(
             Effect::Grant(lease) => Some(lease),
             _ => None,
         })
-        .expect("the Key round entered write admission");
+        .expect("mixed send granted");
+    let grant = core.picture_grant(lease).expect("mixed grant");
+    let (inputs, _settled) = tokio::sync::mpsc::unbounded_channel();
+    let send = crate::engines::SendLease::new(lease, inputs).with_picture(Some(grant.clone()));
+
+    // Clear only the drawing; the picture permission stays valid.
+    core.handle(Input::Clear {
+        scenes: vec![scene_a],
+    })
+    .unwrap();
+    assert!(!grant.is_open());
+    assert!(send.admit().is_none());
+
+    let settled = core.handle(Input::SendUnsent { lease }).unwrap();
+    assert!(
+        !settled.iter().any(|effect| matches!(
+            effect,
+            Effect::Control(ControlToShell::HoldScreen {
+                outcome: HeldScreen::NotIncluded(_),
+                ..
+            }) | Effect::Store(StoreOp::CantSeeScreen { .. })
+        )),
+        "valid picture must not be stripped as ModelCantSee: {settled:?}"
+    );
+    let again = settled
+        .iter()
+        .find_map(|effect| match effect {
+            Effect::Store(StoreOp::BuildContext(build)) => Some(build.key),
+            _ => None,
+        })
+        .expect("mixed send rebuilds");
+    assert_ne!(again, key);
+    let Input::ContextBuilt(mut rebuilt) = built_for(again, &model) else {
+        unreachable!()
+    };
+    rebuilt.snapshot = Some(snapshot);
+    let started = core.handle(Input::ContextBuilt(rebuilt)).unwrap();
+    let request = started
+        .iter()
+        .find_map(|effect| match effect {
+            Effect::StartEngine { request } => Some(request),
+            _ => None,
+        })
+        .expect("rebuilt mixed send starts");
+    assert!(
+        request
+            .request
+            .input
+            .iter()
+            .any(|item| matches!(item, InputItem::Image(_))),
+        "rebuilt request still carries the valid picture"
+    );
+}
+
+/// A standalone Key inline compaction rewrite sends a fresh body without round 1's held prefix,
+/// so it is neither failed by nor gated under `key_digest`, while preserving `key_digest` for the
+/// true round-2 continuation that follows it.
+#[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "drives round 1, inline rewrite, and round-2 continuation with and without revocation"
+)]
+fn a_standalone_key_inline_rewrite_succeeds_and_keeps_continuation_guard() {
+    use crate::connections::model::Lease as _;
+    use crate::context::{Built, ModelRequest};
+    use crate::coordinator::{CompactBuilt, ContextBuilt, JobAsk, SendKey, Unbuilt};
+    use crate::engines::anthropic::live::Motion;
+    use kumochi_protocol::message::{ConnectionKind::AnthropicKey, EventId, RunId};
+
+    for revoke_before_inline in [false, true] {
+        let scratch = Scratch::new(&format!(
+            "key-inline-preserves-guard-{revoke_before_inline}"
+        ));
+        let (mut core, mut store, snapshot, recipient, scene_a) =
+            seed_private_overlay_only(&scratch, AnthropicKey);
+        let next = RunId(R.0 + 1);
+        let key = begin_typed_key_turn(&mut core, &mut store, next);
+        let first = built_key(
+            &store,
+            &snapshot,
+            next,
+            Some(&recipient),
+            &[],
+            core.drawing.digest(T),
+        );
+        admit_key_build(&mut core, key, &snapshot, first);
+        let call = key_call(
+            &mut core,
+            &mut store,
+            (next, "inline-round1-call"),
+            LATER_KEY_OVERLAY,
+        );
+        assert_eq!(store.commit_call(&call).unwrap(), Committed::Done);
+        let effects = core
+            .handle(Input::CallCommitted {
+                key: call.key.clone(),
+                outcome: Committed::Done,
+                then: None,
+            })
+            .unwrap();
+        let [Effect::Store(StoreOp::RoundItems(round))] = effects.as_slice() else {
+            panic!("round 1 items: {effects:?}");
+        };
+        store
+            .append_key_round_events(
+                (T, next),
+                snapshot.connection,
+                &[],
+                &round.key_calls,
+                &round.calls,
+                round.pictured_key_model.as_ref(),
+            )
+            .unwrap();
+        let effects = core
+            .handle(Input::RoundStored {
+                run: next,
+                round: 1,
+            })
+            .unwrap();
+        let [Effect::Store(StoreOp::BuildContext(round2_build))] = effects.as_slice() else {
+            panic!("round 2 build: {effects:?}");
+        };
+        // Trigger inline compaction on round 2.
+        let compact_fx = core
+            .handle(Input::ContextBuilt(ContextBuilt {
+                key: round2_build.key,
+                snapshot: None,
+                result: Err(Unbuilt::TooLarge { room: Some(500) }),
+            }))
+            .unwrap();
+        let compact = compact_fx
+            .iter()
+            .find_map(|effect| match effect {
+                Effect::Store(StoreOp::CompactContext(compact)) => Some(compact.clone()),
+                _ => None,
+            })
+            .expect("inline compaction started");
+        if revoke_before_inline {
+            core.handle(Input::Clear {
+                scenes: vec![scene_a],
+            })
+            .unwrap();
+        }
+        let model = super::super::routes::choice(AnthropicKey, "m");
+        let started_inline = core
+            .handle(Input::CompactBuilt(CompactBuilt {
+                key: compact.key,
+                result: Ok(Some((
+                    JobAsk {
+                        generation: crate::store::Generation(1),
+                        built: Built {
+                            request: ModelRequest {
+                                choice: Some(model.clone()),
+                                instructions: String::new(),
+                                input: Vec::new(),
+                                tools: Vec::new(),
+                            },
+                            sources: vec![T],
+                        },
+                        covers: Some((EventId(1), EventId(2))),
+                    },
+                    100,
+                ))),
+            }))
+            .unwrap();
+        let inline_req = started_inline
+            .iter()
+            .find_map(|effect| match effect {
+                Effect::StartEngine { request } => Some(request.clone()),
+                _ => None,
+            })
+            .expect("inline rewrite started");
+        assert_eq!(
+            core.key_motion(&inline_req),
+            Some((snapshot.connection, Motion::Standalone))
+        );
+        let inline_grant = core
+            .handle(Input::SendReady {
+                key: SendKey::Build(compact.key),
+                hold: None,
+            })
+            .unwrap();
+        let inline_lease = inline_grant
+            .iter()
+            .find_map(|effect| match effect {
+                Effect::Grant(lease) => Some(*lease),
+                _ => None,
+            })
+            .expect("standalone inline rewrite succeeds regardless of key_digest");
+        assert!(
+            core.picture_grant(inline_lease).is_none(),
+            "standalone inline rewrite carries no digest grant"
+        );
+        core.handle(Input::SendSettled {
+            lease: inline_lease,
+        })
+        .unwrap();
+        core.handle(Input::Engine {
+            key: compact.key,
+            event: TurnEvent::TextDelta("summary".into()),
+        })
+        .unwrap();
+        core.handle(Input::Engine {
+            key: compact.key,
+            event: TurnEvent::Finished(Finish::Completed),
+        })
+        .unwrap();
+        let after_inline = core
+            .handle(Input::SummaryStored {
+                owner: SendKey::Build(compact.key),
+                applied: true,
+            })
+            .unwrap();
+        let cont_build = after_inline
+            .iter()
+            .find_map(|effect| match effect {
+                Effect::Store(StoreOp::BuildContext(build)) => Some(build.clone()),
+                _ => None,
+            })
+            .expect("normal round 2 continuation build after inline rewrite");
+        let second = built_key(
+            &store,
+            &snapshot,
+            next,
+            Some(&recipient),
+            &cont_build.key_results,
+            core.drawing.digest(T),
+        );
+        let Input::ContextBuilt(mut context) =
+            super::super::routes::built_for(cont_build.key, &model)
+        else {
+            unreachable!()
+        };
+        context.snapshot = None;
+        context.result.as_mut().unwrap().request = second;
+        let cont_start = core.handle(Input::ContextBuilt(context)).unwrap();
+        let cont_req = cont_start
+            .iter()
+            .find_map(|effect| match effect {
+                Effect::StartEngine { request } => Some(request.clone()),
+                _ => None,
+            })
+            .expect("continuation started");
+        assert_eq!(
+            core.key_motion(&cont_req),
+            Some((snapshot.connection, Motion::Continue))
+        );
+        let ready = core
+            .handle(Input::SendReady {
+                key: SendKey::Build(cont_build.key),
+                hold: None,
+            })
+            .unwrap();
+        if revoke_before_inline {
+            assert!(ready.contains(&Effect::Rebuild(SendKey::Build(cont_build.key))));
+            assert!(
+                core.current.is_none(),
+                "retained key_digest guard fails the true continuation"
+            );
+        } else {
+            let cont_lease = ready
+                .into_iter()
+                .find_map(|effect| match effect {
+                    Effect::Grant(lease) => Some(lease),
+                    _ => None,
+                })
+                .expect("true continuation granted");
+            let grant = core
+                .picture_grant(cont_lease)
+                .expect("retained key_digest guard gates the true continuation");
+            let (inputs, _settled) = tokio::sync::mpsc::unbounded_channel();
+            let send = crate::engines::SendLease::new(cont_lease, inputs)
+                .with_picture(Some(grant.clone()));
+            core.handle(Input::Clear {
+                scenes: vec![scene_a],
+            })
+            .unwrap();
+            assert!(!grant.is_open());
+            assert!(send.admit().is_none());
+        }
+    }
+}
+
+/// `ShowScreenOff` carries through both an in-flight private overlay store write (acknowledged
+/// after `ShowScreenOff`) and a late `draw` call from an already-sent protected run that had not
+/// drawn before `ShowScreenOff`: both keep `protected: true` in storage and install as
+/// `Author::Unknown` (locally visible, never public, never in outbound digests).
+#[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "checks both pending overlay ack and late draw from an already-sent protected run"
+)]
+fn show_screen_off_carries_through_pending_overlay_write_and_late_protected_draw() {
+    use super::super::routes::{built_for, choice, held, jpeg, key, pictured};
+    use crate::context::{PictureRecipient, Route, Screen};
+    use crate::coordinator::{PictureRoutes, SendKey};
+    use crate::drawing::{Input as DrawInput, Reply, Write};
+    use kumochi_protocol::message::{ConnectionKind::AnthropicKey, SceneId};
+
+    let model = choice(AnthropicKey, "m");
+    let recipient = PictureRecipient {
+        route: Route {
+            kind: AnthropicKey,
+            tag: crate::context::ConnectionTag(5),
+        },
+        model: model.model.clone(),
+    };
+
+    for late_after_off in [false, true] {
+        let (mut core, hold) = held(
+            vec![Input::Engines(AnthropicKey, pictured(5, &["m"]))],
+            model.clone(),
+            Some(T),
+        );
+        let snapshot = hold.defaults.clone();
+        core.set_pictures(PictureRoutes::new(true, false));
+        core.submit_hold(hold, "protected run".into(), Some(Screen::Image(jpeg())))
+            .unwrap();
+        core.handle(Input::TurnStored { run: R }).unwrap();
+        let Input::ContextBuilt(mut context) = built_for(key(), &model) else {
+            unreachable!()
+        };
+        context.result.as_mut().unwrap().request.tools = crate::context::tools(snapshot.origin);
+        core.handle(Input::ContextBuilt(context)).unwrap();
+        let lease = core
+            .handle(Input::SendReady {
+                key: SendKey::Build(key()),
+                hold: None,
+            })
+            .unwrap()
+            .into_iter()
+            .find_map(|effect| match effect {
+                Effect::Grant(lease) => Some(lease),
+                _ => None,
+            })
+            .expect("protected run granted");
+        core.handle(Input::SendSettled { lease }).unwrap();
+
+        if late_after_off {
+            // Turn off Show Screen before the protected run draws anything at all; a subsequent
+            // author() call (as provider draw dispatch performs) must never re-promote it.
+            core.handle(Input::ShowScreenOff).unwrap();
+            core.drawing.author(R, Some(&recipient));
+            let mut effects = core
+                .handle(Input::Drawing(DrawInput::Call {
+                    thread: T,
+                    run: R,
+                    call: id("late-draw"),
+                    args: LATER_KEY_OVERLAY.into(),
+                }))
+                .unwrap();
+            let mut saw_protected_step = false;
+            while let Some((serial, write)) = effects.iter().find_map(|effect| match effect {
+                Effect::Store(StoreOp::Drawing { serial, write }) => Some((*serial, write.clone())),
+                _ => None,
+            }) {
+                let reply = match write {
+                    Write::Lookup { .. } => Reply::Lookup(None),
+                    Write::Step { protected, .. } => {
+                        assert!(protected, "late draw keeps runs.protected = true");
+                        saw_protected_step = true;
+                        Reply::Step(SceneId(61))
+                    }
+                    Write::Cut { .. } => Reply::Cut,
+                };
+                effects = core
+                    .handle(Input::DrawingWritten {
+                        serial,
+                        reply: Ok(reply),
+                    })
+                    .unwrap();
+            }
+            assert!(saw_protected_step);
+            assert!(
+                core.drawing.digest(T).as_str().contains("later_scene"),
+                "late overlay stays visible locally"
+            );
+            assert!(
+                !core.drawing.digest(T).off_screen().contains("later_scene"),
+                "late overlay never downgrades to public"
+            );
+            assert!(
+                !core.drawing.visible_to(T, &recipient),
+                "late overlay never enters outbound visibility"
+            );
+            assert_eq!(core.drawing.digest(T).line_for(&recipient), None);
+        } else {
+            // Start an overlay draw, advance to the pending Write::Step, then turn Show Screen off
+            // before acknowledging DrawingWritten.
+            core.drawing.author(R, Some(&recipient));
+            let mut effects = core
+                .handle(Input::Drawing(DrawInput::Call {
+                    thread: T,
+                    run: R,
+                    call: id("pending-overlay"),
+                    args: COPIED_KEY_OVERLAY.into(),
+                }))
+                .unwrap();
+            let mut pending_step = None;
+            while let Some((serial, write)) = effects.iter().find_map(|effect| match effect {
+                Effect::Store(StoreOp::Drawing { serial, write }) => Some((*serial, write.clone())),
+                _ => None,
+            }) {
+                match write {
+                    Write::Lookup { .. } => {
+                        effects = core
+                            .handle(Input::DrawingWritten {
+                                serial,
+                                reply: Ok(Reply::Lookup(None)),
+                            })
+                            .unwrap();
+                    }
+                    Write::Step { protected, .. } => {
+                        assert!(protected, "pending overlay write has protected = true");
+                        pending_step = Some(serial);
+                        break;
+                    }
+                    Write::Cut { .. } => unreachable!(),
+                }
+            }
+            let step_serial = pending_step.expect("step write is pending");
+            core.handle(Input::ShowScreenOff).unwrap();
+            core.handle(Input::DrawingWritten {
+                serial: step_serial,
+                reply: Ok(Reply::Step(SceneId(60))),
+            })
+            .unwrap();
+            assert!(
+                core.drawing
+                    .digest(T)
+                    .as_str()
+                    .contains("digest_copy_private"),
+                "acknowledged overlay stays visible locally"
+            );
+            assert!(
+                !core
+                    .drawing
+                    .digest(T)
+                    .off_screen()
+                    .contains("digest_copy_private"),
+                "acknowledged overlay never downgrades to public"
+            );
+            assert!(
+                !core.drawing.visible_to(T, &recipient),
+                "acknowledged overlay never enters outbound visibility"
+            );
+            assert_eq!(core.drawing.digest(T).line_for(&recipient), None);
+        }
+    }
+}
+
+/// A `Job::Unseen` queued by `StopScenes` behind a pending drawing store write immediately
+/// excludes unnamed, unactivated private scenes of that run from outbound digests and closes any
+/// open grant before the pending store write settles.
+#[test]
+fn a_queued_unseen_cut_revokes_private_digest_before_store_write_settles() {
+    use crate::connections::model::Lease as _;
+    use crate::drawing::Input as DrawInput;
+    use kumochi_protocol::message::{ConnectionKind::AnthropicKey, RunId, SceneCuts};
+
+    let scratch = Scratch::new("queued-unseen-revokes-digest");
+    let (mut core, mut store, snapshot, recipient, _scene_a) =
+        seed_private_overlay_only(&scratch, AnthropicKey);
+    let next = RunId(R.0 + 1);
+    let key = begin_typed_key_turn(&mut core, &mut store, next);
+    let first = built_key(
+        &store,
+        &snapshot,
+        next,
+        Some(&recipient),
+        &[],
+        core.drawing.digest(T),
+    );
+    let lease = grant_key_build(&mut core, key, &snapshot, first);
+    let grant = core.picture_grant(lease).expect("digest grant");
+    let (inputs, _settled) = tokio::sync::mpsc::unbounded_channel();
+    let send = crate::engines::SendLease::new(lease, inputs).with_picture(Some(grant.clone()));
+
+    // Leave a drawing store write pending so StopScenes queues Job::Unseen behind it.
+    let pending_fx = core
+        .handle(Input::Drawing(DrawInput::Call {
+            thread: T,
+            run: next,
+            call: id("pending-for-unseen"),
+            args: LATER_KEY_OVERLAY.into(),
+        }))
+        .unwrap();
+    assert!(
+        pending_fx
+            .iter()
+            .any(|effect| matches!(effect, Effect::Store(StoreOp::Drawing { .. }))),
+        "a store write is now pending"
+    );
+    assert!(grant.is_open());
+
+    // StopScenes for R with empty cuts queues Job::Unseen targeting R's unactivated scene_a.
+    core.handle(Input::StopScenes {
+        run: R,
+        cuts: SceneCuts::default(),
+    })
+    .unwrap();
+    assert!(
+        !core.drawing.visible_to(T, &recipient),
+        "queued Job::Unseen drops unactivated scene from outbound visibility immediately"
+    );
+    assert_eq!(
+        core.drawing.digest(T).line_for(&recipient),
+        None,
+        "queued Job::Unseen drops unactivated scene from outbound digest immediately"
+    );
+    assert!(
+        !grant.is_open(),
+        "open grant closes before the store write settles"
+    );
+    assert!(send.admit().is_none());
+
+    let settled = core.handle(Input::SendUnsent { lease }).unwrap();
+    let rebuilt = settled
+        .iter()
+        .find_map(|effect| match effect {
+            Effect::Store(StoreOp::BuildContext(build)) => Some(build),
+            _ => None,
+        })
+        .expect("round 1 rebuilds cleanly");
+    assert_eq!(rebuilt.drawings.line_for(&recipient), None);
+}
+
+/// Admits build `key` on the pictured Key choice, sending `request` with the draw tool.
+fn admit_key_build(
+    core: &mut Coordinator,
+    key: BuildKey,
+    snapshot: &RunSnapshot,
+    request: crate::context::ModelRequest,
+) {
+    let lease = grant_key_build(core, key, snapshot, request);
     core.handle(Input::SendSettled { lease }).unwrap();
+}
+
+/// Grants build `key` as [`admit_key_build`] does and returns its lease, unsettled.
+fn grant_key_build(
+    core: &mut Coordinator,
+    key: BuildKey,
+    snapshot: &RunSnapshot,
+    mut request: crate::context::ModelRequest,
+) -> crate::coordinator::LeaseId {
+    use crate::coordinator::SendKey;
+    use kumochi_protocol::message::ConnectionKind;
+
+    let model = super::super::routes::choice(ConnectionKind::AnthropicKey, "m");
+    let Input::ContextBuilt(mut built) = super::super::routes::built_for(key, &model) else {
+        unreachable!()
+    };
+    built.snapshot = (key.round == 1).then(|| snapshot.clone());
+    request.tools = crate::context::tools(snapshot.origin);
+    built.result.as_mut().unwrap().request = request;
+    core.handle(Input::ContextBuilt(built)).unwrap();
+    core.handle(Input::SendReady {
+        key: SendKey::Build(key),
+        hold: None,
+    })
+    .unwrap()
+    .into_iter()
+    .find_map(|effect| match effect {
+        Effect::Grant(lease) => Some(lease),
+        _ => None,
+    })
+    .expect("the Key round entered write admission")
 }
 
 const FIRST_KEY_OVERLAY: &str = r#"{"records":[{"begin":{"v":1,"scene":"first_scene","surface":"overlay","alt":"first_alt","others":"keep"}},{"step":{"id":"d1","put":[{"shape":{"id":"first_object","kind":"rect","box":[0,0,10,10]}}]}},{"end":{}}]}"#;

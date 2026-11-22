@@ -325,7 +325,13 @@ that drew it is marked public ([store](store.md), `runs.protected`); any other s
 and reaches no model. So a protected scene leaves context after a restart, even for the model
 it was drawn for. Scenes from before that marker lose their model context once, at the upgrade.
 Send admission rechecks
-the recipient's image fact and that it still has a visible scene. A Key continuation also
-checks the recipient of any digest in its held first request, because the continuation does
-not rebuild that request's prefix.
-This is a check at admission; metadata-only withdrawal during an admitted write is separate.
+the recipient's image fact and that every private scene its digest lists is still live, unchanged,
+and eligible. A true Key continuation (not a standalone inline compaction rewrite) validates the
+original round-1 carried private scenes and latched authority instead of round 2's fresh digest,
+because the continuation resends round 1's held prefix verbatim.
+The granted send carries a revocable grant too, checked before every write and flush poll in
+`ModelConn::upload` (zero request bytes are written if closed before the first admission; bytes
+already admitted into TLS or kernel buffers cannot be recalled), and closes when the image fact,
+the key's sign-in or the Key picture switch goes, when showing the screen is turned off (removing
+private overlays from outbound digests while keeping them visible locally), when a carried drawing
+changes or queues a failed cut, or when the run ends ([engines](engines.md), Picture grant).

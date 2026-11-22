@@ -851,3 +851,158 @@ async fn a_grant_closed_by_two_causes_ends_its_run_by_the_first() {
         assert!(!sends_again(&ended));
     }
 }
+
+/// A digest-only send (no image) carrying screen-derived metadata runs under a revocable grant on
+/// the production Responses transport: losing the recipient's image fact between grant and first
+/// write stops every write poll (zero bytes written), settles unsent and rebuilds cleanly without
+/// the stale digest; unchanged, the digest-only send writes and finishes.
+#[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "seeds a private overlay then checks revoked and open sends"
+)]
+async fn a_digest_only_send_writes_only_while_its_digest_grant_stays_open() {
+    use crate::context::{InputItem, PictureRecipient, Role, Route};
+    use crate::drawing::{Input as DrawInput, Reply, Write};
+    use crate::engines::CallId;
+    use kumochi_protocol::message::{ConnectionKind, ModelSlug, RunId};
+
+    const OVERLAY: &str = r#"{"records":[{"begin":{"v":1,"scene":"private_overlay_sentinel","surface":"overlay","alt":"a"}},{"step":{"id":"s1","put":[{"shape":{"id":"b1","kind":"rect","box":[0,0,10,10]}}]}},{"end":{}}]}"#;
+    let recipient = PictureRecipient {
+        route: Route {
+            kind: ConnectionKind::ChatGpt,
+            tag: crate::context::ConnectionTag(7),
+        },
+        model: ModelSlug::new("m").expect("slug"),
+    };
+
+    for revoke in [false, true] {
+        let mut rig = Rig::new(Pool::Empty, &["m"]);
+        let (_, effects) = rig.settle().await;
+        let first_lease = granted(&effects);
+        let mut first_peer = rig.peer().await;
+        first_peer.request().await;
+        let (settled, _) = rig.settle().await;
+        assert_eq!(settled, Input::SendSettled { lease: first_lease });
+        rig.core.drawing.author(R, Some(&recipient));
+        let mut effects = rig.handle(Input::Drawing(DrawInput::Call {
+            thread: T,
+            run: R,
+            call: CallId::new("draw-0").expect("id"),
+            args: OVERLAY.into(),
+        }));
+        while let Some((serial, write)) = effects.iter().find_map(|effect| match effect {
+            Effect::Store(StoreOp::Drawing { serial, write }) => Some((*serial, write.clone())),
+            _ => None,
+        }) {
+            let reply = match write {
+                Write::Lookup { .. } => Reply::Lookup(None),
+                Write::Step { .. } => Reply::Step(super::S),
+                Write::Cut { .. } => Reply::Cut,
+            };
+            effects = rig.handle(Input::DrawingWritten {
+                serial,
+                reply: Ok(reply),
+            });
+        }
+        first_peer.answer().await;
+        assert_eq!(failure(&rig.finish().await), None);
+        drop(first_peer);
+        rig.handle(Input::RunStored { run: R });
+        let digest = rig
+            .core
+            .drawing
+            .digest(T)
+            .line_for(&recipient)
+            .expect("private overlay digest")
+            .to_owned();
+        assert!(digest.contains("private_overlay_sentinel"), "{revoke}");
+
+        let next = RunId(R.0 + 1);
+        rig.handle(Input::Turn {
+            turn: 2,
+            thread: Some(T),
+            text: "follow-up".into(),
+        });
+        let stored = rig.handle(Input::TurnStored { run: next });
+        let build_key = stored
+            .iter()
+            .find_map(|effect| match effect {
+                Effect::Store(StoreOp::BuildContext(build)) => Some(build.key),
+                _ => None,
+            })
+            .expect("follow-up build");
+        let Input::ContextBuilt(mut built) = built_for(build_key, &choice(CHATGPT, "m")) else {
+            unreachable!()
+        };
+        built.snapshot = Some(crate::context::RunSnapshot {
+            origin: crate::context::Origin::Task(T),
+            assistant: kumochi_protocol::message::AssistantName::new("Kumo").expect("name"),
+            user: None,
+            choice: Some(choice(CHATGPT, "m")),
+            connection: crate::context::ConnectionTag(7),
+        });
+        built
+            .result
+            .as_mut()
+            .expect("built")
+            .request
+            .input
+            .push(InputItem::Message {
+                role: Role::User,
+                text: digest,
+            });
+        if revoke {
+            rig.open.send_replace(false);
+        }
+        rig.handle(Input::ContextBuilt(built));
+        let (_, effects) = rig.settle().await;
+        let lease = granted(&effects);
+        let grant = rig
+            .core
+            .picture_grant(lease)
+            .expect("a digest-only send carries a revocable grant");
+        if !revoke {
+            let mut peer = rig.peer().await;
+            let sent = peer.request().await;
+            assert!(sent.contains("private_overlay_sentinel"));
+            assert_eq!(sent.matches(IMAGE).count(), 0);
+            let (settled, _) = rig.settle().await;
+            assert_eq!(settled, Input::SendSettled { lease });
+            peer.answer().await;
+            assert_eq!(failure(&rig.finish().await), None);
+            continue;
+        }
+        settle_tasks().await;
+        rig.handle(Input::Engines(CHATGPT, pictured(7, &[])));
+        assert!(!grant.is_open());
+        rig.open.send_replace(true);
+        let (settled, _) = rig.settle().await;
+        assert_eq!(settled, Input::SendUnsent { lease });
+        let mut peer = rig.peer().await;
+        assert_eq!(
+            peer.polls(),
+            0,
+            "zero transport write polls after revocation"
+        );
+        assert_eq!(peer.rest().await, Vec::<u8>::new(), "zero bytes written");
+        let again = *rig.builds.last().expect("rebuilt cleanly");
+        assert_ne!(again, build_key);
+        rig.handle(built_for(again, &choice(CHATGPT, "m")));
+        let (_, effects) = rig.settle().await;
+        let rebuilt_lease = granted(&effects);
+        assert!(rig.core.picture_grant(rebuilt_lease).is_none());
+        let mut second = rig.peer().await;
+        let sent = second.request().await;
+        assert!(!sent.contains("private_overlay_sentinel"));
+        let (settled, _) = rig.settle().await;
+        assert_eq!(
+            settled,
+            Input::SendSettled {
+                lease: rebuilt_lease
+            }
+        );
+        second.answer().await;
+        assert_eq!(failure(&rig.finish().await), None);
+    }
+}
