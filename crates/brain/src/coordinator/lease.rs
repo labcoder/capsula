@@ -383,7 +383,17 @@ impl Coordinator {
             self.rebuild_without_picture(key, &pending, effects);
             return;
         }
-        let protected = pictured || digest.is_some();
+        // A later Key round resends its first request, so only that round's digest went out.
+        let sent = if key.round > 1
+            && run
+                .route
+                .is_some_and(|route| route.kind == ConnectionKind::AnthropicKey)
+        {
+            run.key_digest_recipient.is_some()
+        } else {
+            digest.is_some()
+        };
+        let protected = pictured || sent;
         if let Some(run) = self.current.as_mut()
             && let Some(route) = run.route
         {

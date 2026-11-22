@@ -296,7 +296,8 @@ and closes its fence. Rebuild, Stop, link loss, credential mutation and terminal
 the owner, including any reply it held between rounds. A late task cannot put one back.
 
 A Key run whose granted write carries protected material, a picture or a protected drawing
-digest, is marked for the rest of the run, even after the picture is withdrawn. The call ledger and native round both store a fixed result instead of
+digest, is marked for the rest of the run, even after the picture is withdrawn. A later round
+resends its first request, so only the digest that request carried counts. The call ledger and native round both store a fixed result instead of
 the original result. A stored Draw call has an empty record array; other calls keep an empty
 input object because their free text can also be derived from the picture. The stored call's
 envelope records the model, outside the provider JSON. The coordinator keeps the original
