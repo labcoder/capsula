@@ -1,13 +1,11 @@
-use std::path::Path;
 use std::sync::mpsc as std_mpsc;
-
-use base64::{Engine as _, engine::general_purpose::STANDARD};
 
 use super::*;
 use crate::context::{InputItem, Jpeg, Role};
 use crate::engines::ClaudeStreamFailure;
 use crate::engines::claude_code::lane::tests::PICTURE_JPEG;
 use crate::screen::ScreenContext;
+use crate::test_support::{fixture_has_picture_marker, has_picture_marker};
 
 type TeardownBarrier = (oneshot::Sender<()>, std_mpsc::Receiver<()>);
 static PICTURE_TEARDOWN: Mutex<Option<TeardownBarrier>> = Mutex::new(None);
@@ -60,33 +58,6 @@ async fn receipt(played: &mut Played, decision: fn(LeaseId) -> Input) {
     assert_eq!(actual, Some(decision(lease)));
 }
 
-fn has_marker(bytes: &[u8]) -> bool {
-    let marker = &PICTURE_JPEG[3..PICTURE_JPEG.len() - 2];
-    let contains = |needle: &[u8]| bytes.windows(needle.len()).any(|part| part == needle);
-    if contains(marker) || contains(format!("{marker:?}").trim_matches(['[', ']']).as_bytes()) {
-        return true;
-    }
-    (0..3).any(|alignment| {
-        let mut padded = vec![0; alignment];
-        padded.extend_from_slice(marker);
-        let encoded = STANDARD.encode(padded);
-        let start = if alignment == 0 { 0 } else { 4 };
-        let end = (alignment + marker.len()) / 3 * 4;
-        contains(&encoded.as_bytes()[start..end])
-    })
-}
-
-fn fixture_has_marker(path: &Path) -> bool {
-    match fs::metadata(path) {
-        Ok(meta) if meta.is_dir() => fs::read_dir(path)
-            .expect("owned test directory")
-            .any(|entry| fixture_has_marker(&entry.expect("fixture entry").path())),
-        Ok(_) => has_marker(&fs::read(path).expect("owned test file")),
-        Err(err) if err.kind() == io::ErrorKind::NotFound => false,
-        Err(error) => panic!("fixture cannot be inspected: {error}"),
-    }
-}
-
 #[tokio::test]
 async fn a_pictured_question_only_writes_to_stdin_and_stop_removes_the_folder() {
     let captured = Captured::default();
@@ -100,7 +71,10 @@ async fn a_pictured_question_only_writes_to_stdin_and_stop_removes_the_folder() 
     let question = rig.claude.question(&request).expect("admitted");
     let (id, _) = rig.last();
     let folder = rig.base.owned().join(ENGINE_DIR).join(id.hex());
-    assert!(!has_marker(format!("{question:?}{request:?}").as_bytes()));
+    assert!(!has_picture_marker(
+        format!("{question:?}{request:?}").as_bytes(),
+        PICTURE_JPEG
+    ));
     let mut played = play_with(&question, request);
     let lease = pictured_lease(&mut rig, &played, PictureGrant::open_for_tests());
     rig.drive(played.asked(lease)).await;
@@ -115,7 +89,7 @@ async fn a_pictured_question_only_writes_to_stdin_and_stop_removes_the_folder() 
     }
     let sibling = rig.base.0.join("picture-sibling");
     let scan = |base: &Base| {
-        fixture_has_marker(&folder)
+        fixture_has_picture_marker(&folder, PICTURE_JPEG)
             || [
                 "starts.log",
                 "stdin.log",
@@ -124,7 +98,7 @@ async fn a_pictured_question_only_writes_to_stdin_and_stop_removes_the_folder() 
                 "picture-sibling",
             ]
             .iter()
-            .any(|name| fixture_has_marker(&base.0.join(name)))
+            .any(|name| fixture_has_picture_marker(&base.0.join(name), PICTURE_JPEG))
     };
     assert!(!scan(&rig.base));
     fs::write(&sibling, &PICTURE_JPEG[3..]).expect("positive control");
@@ -140,7 +114,10 @@ async fn a_pictured_question_only_writes_to_stdin_and_stop_removes_the_folder() 
     receipt(&mut played, |lease| Input::SendSettled { lease }).await;
     until("removed after Stop", || !folder.exists()).await;
     assert!(!scan(&rig.base));
-    assert!(!has_marker(captured.text().as_bytes()));
+    assert!(!has_picture_marker(
+        captured.text().as_bytes(),
+        PICTURE_JPEG
+    ));
     rig.close().await;
 }
 
@@ -491,7 +468,7 @@ async fn a_generation_move_before_the_grant_refuses_the_picture_and_rebuilds_tex
     until("refused launch removed", || !folder.exists()).await;
     assert_eq!(rig.stdin(), ["1 initialize", "1 mcp_status"]);
     let scan = || {
-        fixture_has_marker(&folder)
+        fixture_has_picture_marker(&folder, PICTURE_JPEG)
             || [
                 "starts.log",
                 "stdin.log",
@@ -500,7 +477,7 @@ async fn a_generation_move_before_the_grant_refuses_the_picture_and_rebuilds_tex
                 "picture-sibling",
             ]
             .iter()
-            .any(|name| fixture_has_marker(&rig.base.0.join(name)))
+            .any(|name| fixture_has_picture_marker(&rig.base.0.join(name), PICTURE_JPEG))
     };
     assert!(!scan());
     let sibling = rig.base.0.join("picture-sibling");
@@ -570,4 +547,51 @@ async fn pictured_child_loss_or_echo_retires_without_forwarding_a_picture() {
         until("removed after child loss or echo", || !folder.exists()).await;
         rig.close().await;
     }
+}
+
+#[tokio::test]
+async fn a_pictured_provider_error_removes_the_childs_private_picture() {
+    let captured = Captured::default();
+    let _logs = captured.install();
+    let mut script = offering_nothing();
+    script.user.truncate(1);
+    script.user.extend([
+        json!("!keep-picture"),
+        json!("!wait report-provider-error"),
+        json!({"type": "result", "subtype": "provider_error", "is_error": true}),
+    ]);
+    let mut rig = Rig::new("pictured-provider-error", &script).await;
+    let request = request_with(ScreenContext::fixture(PICTURE_JPEG).into_jpeg());
+    let question = rig.claude.question(&request).expect("admitted");
+    let (id, _) = rig.last();
+    let folder = rig.base.owned().join(ENGINE_DIR).join(id.hex());
+    let picture = folder.join("tmp").join("images").join("picture.jpg");
+    let mut played = play_with(&question, request);
+    let lease = pictured_lease(&mut rig, &played, PictureGrant::open_for_tests());
+    rig.drive(played.asked(lease)).await;
+    until(
+        "the child kept its picture before reporting the error",
+        || fs::read(&picture).is_ok_and(|bytes| bytes == PICTURE_JPEG),
+    )
+    .await;
+    rig.go("report-provider-error");
+    let failed = provider_failed(&mut rig).await;
+    receipt(&mut played, |lease| Input::SendSettled { lease }).await;
+    until("provider error removed the private launch", || {
+        !folder.exists()
+    })
+    .await;
+    assert!(!picture.exists(), "provider error left the child's picture");
+    rig.wake(Wake::Note(failed));
+    assert_eq!(
+        rig.drive(played.events()).await,
+        [TurnEvent::Finished(Finish::Failed(EngineFailure::Provider))]
+    );
+    for artifact in [rig.base.starts().join("\n"), captured.text()] {
+        assert!(
+            !has_picture_marker(artifact.as_bytes(), PICTURE_JPEG)
+                && !artifact.contains("picture.jpg")
+        );
+    }
+    rig.close().await;
 }

@@ -19,6 +19,21 @@ pub(crate) use std::os::windows::fs::{
     symlink_dir as test_symlink_dir, symlink_file as test_symlink_file,
 };
 
+#[cfg(test)]
+pub(crate) fn test_is_link(metadata: &std::fs::Metadata) -> bool {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt as _;
+        use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
+
+        metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+    }
+    #[cfg(not(windows))]
+    {
+        metadata.file_type().is_symlink()
+    }
+}
+
 pub(crate) use connected_shell::connected_shell_pid;
 #[cfg(windows)]
 pub(super) use connected_shell::register_shell;
