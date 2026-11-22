@@ -481,45 +481,10 @@ mod tests {
                 );
             }
         }
-    }
 
-    /// Drawn at 2x, every sample GPUI's bilinear filter takes with any alpha has the body's
-    /// colour: no black clear texel inside a footprint darkens it.
-    #[test]
-    fn a_scaled_up_edge_keeps_the_body_colour() {
-        let mut px = vec![0; 3 * 3 * 4];
-        px[index(3, 1, 1) * 4..][..4].copy_from_slice(&[10, 20, 30, 255]);
-        bleed_clear(&mut px, 3);
-        let texel = |i: f32, j: f32, c: usize| {
-            let (i, j) = (pixel(i.clamp(0.0, 2.0)), pixel(j.clamp(0.0, 2.0)));
-            f32::from(px[index(3, i, j) * 4 + c])
-        };
-        for dy in 0..6_u8 {
-            for dx in 0..6_u8 {
-                let (u, v) = (f32::from(dx) / 2.0 - 0.25, f32::from(dy) / 2.0 - 0.25);
-                let (i, j) = (u.floor(), v.floor());
-                let (fu, fv) = (u - i, v - j);
-                let sample = |c| {
-                    let top = texel(i, j, c) * (1.0 - fu) + texel(i + 1.0, j, c) * fu;
-                    let bottom =
-                        texel(i, j + 1.0, c) * (1.0 - fu) + texel(i + 1.0, j + 1.0, c) * fu;
-                    top * (1.0 - fv) + bottom * fv
-                };
-                if sample(3) > 0.0 {
-                    assert!(
-                        (sample(0) - 10.0).abs() < 1e-4,
-                        "sample {dx},{dy} is darkened"
-                    );
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn a_clear_image_stays_clear() {
-        let mut px = vec![0; 4 * 4 * 4];
-        bleed_clear(&mut px, 4);
-        assert_eq!(px, vec![0; 4 * 4 * 4]);
+        let mut clear = [0; 4 * 4 * 4];
+        bleed_clear(&mut clear, 4);
+        assert_eq!(clear, [0; 4 * 4 * 4]);
         bleed_clear(&mut [], 0);
     }
 
@@ -583,6 +548,17 @@ mod tests {
             worst[0] <= 8 && worst[1] <= 12,
             "squashed edge pixels are {worst:?}/255 off the still edge's colour"
         );
+
+        let size = 48;
+        let out = rendered(size);
+        for j in 0..size {
+            for i in 1..size {
+                let (left, here) = (index(size, i - 1, j) * 4, index(size, i, j) * 4);
+                if out[here + 3] == 0 && out[left + 3] > 0 {
+                    assert_ne!(&out[here..here + 3], &[0, 0, 0], "a dark fringe at {i},{j}");
+                }
+            }
+        }
     }
 
     /// A 4x4 bake: a solid red texel at (1,1) and a faint blue one at (3,2).
@@ -631,19 +607,5 @@ mod tests {
         let mid = at(1, 1).lerp(at(0, 1), 0.5);
         assert_eq!(mid.base, red.base);
         assert!((mid.coverage - 0.5).abs() < 1e-6);
-    }
-
-    #[test]
-    fn a_rendered_edge_has_no_black_clear_pixel_beside_the_body() {
-        let size = 48;
-        let out = rendered(size);
-        for j in 0..size {
-            for i in 1..size {
-                let (left, here) = (index(size, i - 1, j) * 4, index(size, i, j) * 4);
-                if out[here + 3] == 0 && out[left + 3] > 0 {
-                    assert_ne!(&out[here..here + 3], &[0, 0, 0], "a dark fringe at {i},{j}");
-                }
-            }
-        }
     }
 }

@@ -219,8 +219,6 @@ pub(super) fn listen(bounds: Bounds<Pixels>, view: WeakEntity<KumoView>, window:
                 view.press(event, bounds.center(), window, cx);
             });
         }
-        #[cfg(test)]
-        update(&pressed, cx, |view, _| view.pressed_square = Some(bounds));
         // Numbers only, for the gate: where the press landed against Kumo's square.
         let grabbed = pressed
             .upgrade()

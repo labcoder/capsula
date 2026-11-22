@@ -114,18 +114,12 @@ mod tests {
     use super::{left, over_line, pointer};
 
     #[test]
-    fn settings_and_typing_keep_the_peek_closed_even_over_the_line() {
-        assert_eq!(over_line(Settings), Hidden);
-        assert_eq!(over_line(Typing), Hidden);
-        assert_eq!(pointer(Visible, Settings), Hidden);
-        assert_eq!(left(Settings), Hidden);
-    }
-
-    #[test]
-    fn onboarding_keeps_the_peek_closed_even_over_the_line() {
-        assert_eq!(over_line(Onboarding), Hidden);
-        assert_eq!(pointer(Visible, Onboarding), Hidden);
-        assert_eq!(left(Onboarding), Hidden);
+    fn settings_typing_and_onboarding_keep_the_peek_closed_even_over_the_line() {
+        for owner in [Settings, Typing, Onboarding] {
+            assert_eq!(over_line(owner), Hidden);
+            assert_eq!(pointer(Visible, owner), Hidden);
+            assert_eq!(left(owner), Hidden);
+        }
     }
 
     #[test]
@@ -133,6 +127,7 @@ mod tests {
         assert_eq!(over_line(Pointer), Visible);
         assert_eq!(pointer(Hidden, Pointer), Hidden);
         assert_eq!(pointer(Visible, Pointer), Visible);
+        assert_eq!(left(Pointer), Hidden);
     }
 
     #[test]
@@ -147,12 +142,5 @@ mod tests {
         assert_eq!(over_line(Pull), Visible);
         assert_eq!(pointer(Hidden, Pull), Visible);
         assert_eq!(left(Pull), Visible);
-    }
-
-    #[test]
-    fn leaving_both_surfaces_hides_the_peek_but_preserves_stop() {
-        assert_eq!(left(Pointer), Hidden);
-        assert_eq!(left(Stop), Visible);
-        assert_eq!(left(Typing), Hidden);
     }
 }

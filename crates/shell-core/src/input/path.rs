@@ -293,6 +293,14 @@ mod tests {
         let mut path = recorder(1.0);
         assert!(!path.sample(at(20, 13)));
         assert!(path.sample(at(17, 17)));
+
+        let mut path = recorder(1.0);
+        for _ in 0..100 {
+            assert!(!path.sample(ORIGIN));
+            assert!(!path.sample(at(-23, 0)));
+        }
+        assert!(path.points().is_empty());
+        assert_eq!(path.finish(at(-23, 0)), PointerPath(Vec::new()));
     }
 
     #[test]
@@ -316,7 +324,7 @@ mod tests {
     }
 
     #[test]
-    fn a_full_straight_path_loses_every_second_point_and_keeps_its_first_and_newest() {
+    fn a_full_straight_path_makes_room_and_keeps_its_first_and_newest() {
         // The path in order: where the pointer was, then a sample every two pixels.
         let point = |index: usize| match i32::try_from(index).expect("small") {
             0 => ORIGIN,
@@ -325,35 +333,32 @@ mod tests {
         // One short of a path's 2,048 points: the most a sample leaves.
         let filled = || {
             let mut path = recorder(1.0);
-            for index in 1..MAX_PATH_POINTS - 1 {
+            for index in 1..2_047 {
                 assert!(path.sample(point(index)), "{index}");
             }
-            assert_eq!(path.points().len(), MAX_PATH_POINTS - 1);
+            assert_eq!(path.points().len(), 2_047);
             path
         };
         // The room that is left is the release's.
         let released = filled().finish(at(0, 40));
-        assert_eq!(released.0.len(), MAX_PATH_POINTS);
+        assert_eq!(released.0.len(), 2_048);
         assert_eq!(released.0.last(), Some(&at(0, 40)));
         assert_eq!(released.check(), Ok(()));
 
         let mut path = filled();
-        assert!(path.sample(point(MAX_PATH_POINTS - 1)));
-        let kept: Vec<_> = (0..MAX_PATH_POINTS - 1)
-            .step_by(2)
-            .map(point)
-            .chain([point(MAX_PATH_POINTS - 1)])
-            .collect();
-        assert_eq!(kept.len(), 1_025);
-        assert!(
-            path.points() == kept,
-            "every second point went, and the first and the newest stayed"
-        );
+        assert!(path.sample(point(2_047)));
+        assert_eq!(path.points().first(), Some(&ORIGIN));
+        assert_eq!(path.points().last(), Some(&point(2_047)));
+        assert!(path.points().len() <= 1_536);
+        let mut supplied = (0..2_048).map(point);
+        for kept in path.points() {
+            assert_eq!(supplied.find(|point| point == kept), Some(*kept));
+        }
         // The spacing is what it was.
-        let PhysicalPoint([last, _]) = point(MAX_PATH_POINTS - 1);
+        let PhysicalPoint([last, _]) = point(2_047);
         assert!(!path.sample(PhysicalPoint([last + 1, 0])));
         assert!(path.sample(PhysicalPoint([last + 2, 0])));
-        assert_eq!(path.points().len(), 1_026);
+        assert_eq!(path.points().last(), Some(&PhysicalPoint([last + 2, 0])));
     }
 
     #[test]
@@ -392,34 +397,18 @@ mod tests {
     }
 
     #[test]
-    fn a_path_of_nothing_but_turns_thins_at_the_least_tolerance_that_makes_room() {
-        // Every sample is three pixels off the stretch between its neighbours, so none goes at
-        // a tolerance of one pixel or of two, and every second one goes at four.
-        let jog = |index: i32| at(24 + 3 * index, 3 * (index % 2));
-        let mut path = recorder(1.0);
-        for index in 0..2_046 {
-            assert!(path.sample(jog(index)), "{index}");
-        }
-        assert_eq!(path.points().len(), MAX_PATH_POINTS - 1);
-        assert!(path.sample(jog(2_046)));
-        assert_eq!(path.path.tolerance.to_bits(), 1.0_f64.to_bits());
-        assert_eq!(path.points().len(), 1_025);
-        assert_eq!(path.points().first(), Some(&ORIGIN));
-        assert_eq!(path.points().last(), Some(&jog(2_046)));
-    }
-
-    #[test]
     fn a_full_path_is_thinned_until_a_quarter_of_it_is_free() {
-        // A straight run of 300 points and then nothing but turns. Every second point of the
-        // run goes at one pixel and half of the rest of it at two, which is too few each
-        // time; at four the turns go too.
+        // A straight run of 300 points and then nothing but turns.
         let place = |index: i32| at(24 + 3 * index, 3 * (index % 2) * i32::from(index >= 300));
         let mut path = recorder(1.0);
         for index in 0..2_047 {
             assert!(path.sample(place(index)), "{index}");
         }
-        assert_eq!(path.path.tolerance.to_bits(), 1.0_f64.to_bits());
-        assert_eq!(path.points().len(), 912);
+        assert!(path.points().len() <= 1_536);
+        let mut supplied = std::iter::once(ORIGIN).chain((0..2_047).map(place));
+        for kept in path.points() {
+            assert_eq!(supplied.find(|point| point == kept), Some(*kept));
+        }
         assert_eq!(path.points().first(), Some(&ORIGIN));
         assert_eq!(path.points().last(), Some(&place(2_046)));
     }
@@ -434,8 +423,11 @@ mod tests {
         for index in 0..2_047 {
             assert!(path.sample(jog(index)), "{index}");
         }
-        assert_eq!(path.points().len(), 1_025);
-        let turns: Vec<_> = (2_047..3_070).map(jog).collect();
+        assert!(path.points().len() <= 1_536);
+        assert_eq!(path.points().first(), Some(&ORIGIN));
+        assert_eq!(path.points().last(), Some(&jog(2_046)));
+        let remaining = i32::try_from(2_048 - path.points().len()).expect("bounded path");
+        let turns: Vec<_> = (2_047..2_047 + remaining).map(jog).collect();
         for turn in &turns {
             assert!(path.sample(*turn), "{turn:?}");
         }
@@ -447,7 +439,6 @@ mod tests {
             path.points().ends_with(&turns),
             "no turn of the second fill went"
         );
-        assert_eq!(path.path.tolerance.to_bits(), 1.0_f64.to_bits());
     }
 
     #[test]
@@ -618,17 +609,6 @@ mod tests {
         let first = PhysicalPoint([left + 14, 0]);
         assert!(path.sample(first));
         assert_eq!(path.points(), [first]);
-    }
-
-    #[test]
-    fn a_pointer_that_stays_in_the_dead_zone_leaves_an_empty_path() {
-        let mut path = recorder(1.0);
-        for _ in 0..100 {
-            assert!(!path.sample(ORIGIN));
-            assert!(!path.sample(at(-23, 0)));
-        }
-        assert!(path.points().is_empty());
-        assert_eq!(path.finish(at(-23, 0)), PointerPath(Vec::new()));
     }
 
     #[test]

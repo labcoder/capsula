@@ -200,62 +200,94 @@ fn an_empty_stroke_has_no_handoff_or_other_allocation() {
 }
 
 #[test]
-#[expect(
-    clippy::float_cmp,
-    reason = "the fixture puts the boundary exactly on an edge endpoint"
-)]
 fn exact_edge_and_chord_reveal_boundaries_match_on_both_sides() {
     let mut scratch = Scratch::new();
-    for (rect, radius, boundary) in [
+    for (size, radius, boundary, expected) in [
         (
-            Rect {
-                origin: Vec2::new(100.0, 100.0),
-                size: Vec2::new(12.0, 4.0),
-            },
+            Vec2::new(12.0, 4.0),
             0.0,
             0.125_f32,
+            [111.9375, 100.0, 0.0625, 4.0],
         ),
         (
-            Rect {
-                origin: Vec2::new(100.0, 100.0),
-                size: Vec2::new(0.25, 0.25),
-            },
+            Vec2::new(0.25, 0.25),
             0.125,
             0.25,
+            [100.125, 100.0, 0.125, 0.125],
         ),
     ] {
-        let (_, segments) = paint_paths::corners(
-            rect,
-            radius,
-            1.0,
-            kumochi_scene::display::fallback_corner_segments(radius, MAX_COMPOSED_SCALE),
-        )
-        .expect("charged corners");
-        let outline = paint_paths::rounded(rect, radius, segments);
-        let lengths: Vec<_> = outline
-            .iter()
-            .zip(outline.iter().cycle().skip(1))
-            .map(|(a, b)| (f64::from(b.x) - f64::from(a.x)).hypot(f64::from(b.y) - f64::from(a.y)))
-            .collect();
-        let first = lengths
-            .iter()
-            .copied()
-            .find(|span| *span > 0.0)
-            .expect("one nonzero edge");
-        let total: f64 = lengths.iter().sum();
-        assert_eq!(
-            total * f64::from(boundary),
-            first,
-            "the middle fixture is exactly on an edge/chord endpoint"
-        );
         let prim = Prim::Rect {
-            rect,
+            rect: Rect {
+                origin: Vec2::new(100.0, 100.0),
+                size,
+            },
             radius,
             fill: None,
             border: Some((ink(), 0.0625)),
         };
         for draw in [boundary.next_down(), boundary, boundary.next_up()] {
-            parity(&mut scratch, &prim, Affine::default(), draw, 0.0);
+            let ((), events) = crate::allocation::requests(128, || {
+                let _app = paint_phase::enter(Phase::App);
+                let [None, Some((path, paint))] = paths(
+                    &mut scratch,
+                    &prim,
+                    Affine::default(),
+                    draw,
+                    0.0,
+                    MAX_COMPOSED_SCALE,
+                )
+                .expect("the boundary reveals a sector") else {
+                    panic!("one sector, with no background");
+                };
+                assert_eq!(paint, ink());
+                let actual = [
+                    f32::from(path.bounds.origin.x),
+                    f32::from(path.bounds.origin.y),
+                    f32::from(path.bounds.size.width),
+                    f32::from(path.bounds.size.height),
+                ];
+                for (got, want) in actual.into_iter().zip(expected) {
+                    assert!(
+                        (got - want).abs() <= 1e-5,
+                        "bounds at draw {draw}: {actual:?}"
+                    );
+                }
+                let (triangles, tail) = path.vertices.as_chunks::<3>();
+                assert!(tail.is_empty());
+                let area: f32 = triangles
+                    .iter()
+                    .map(|triangle| {
+                        let [a, b, c] = triangle.each_ref().map(|vertex| {
+                            Vec2::new(
+                                f32::from(vertex.xy_position.x) - 100.0,
+                                f32::from(vertex.xy_position.y) - 100.0,
+                            )
+                        });
+                        for at in [a, b, c] {
+                            let inside = if radius > 0.0 {
+                                (-1e-5..=0.12501).contains(&at.y)
+                                    && (0.06249..=0.12501).contains(&(at.x - at.y))
+                            } else {
+                                let inset = 12.0 - at.x;
+                                (-1e-5..=0.06251).contains(&inset)
+                                    && (inset - 1e-5..=4.0 - inset + 1e-5).contains(&at.y)
+                            };
+                            assert!(inside, "no triangle reaches the next sector at draw {draw}");
+                        }
+                        ((b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x)).abs() * 0.5
+                    })
+                    .sum();
+                let expected_area = if radius > 0.0 {
+                    0.005_859_375
+                } else {
+                    0.246_093_75
+                };
+                assert!(
+                    (area - expected_area).abs() <= 1e-5,
+                    "the entire revealed sector is painted"
+                );
+            });
+            assert_eq!(paint_phase::tests::assert_paths(&events, 1), 1);
         }
     }
 }

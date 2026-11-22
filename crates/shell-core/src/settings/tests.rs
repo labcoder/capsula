@@ -224,61 +224,6 @@ fn empty_or_whitespace_user_names_clear_the_setting() {
 }
 
 #[test]
-fn errors_and_answers_follow_both_fields_in_fifo_order() {
-    let mut settings = connected();
-    settings.change(Field::User, "Alex");
-    assert!(
-        settings.save(Field::User, |_| true),
-        "the user save is sent first"
-    );
-    assert!(
-        settings.send_assistant(AssistantName::new("Cloud").expect("valid"), |_| true),
-        "the inline assistant rename is sent second"
-    );
-    assert_eq!(
-        settings.error(ErrorKey::SettingsRefused.into()),
-        Some(Field::User)
-    );
-    assert_eq!(settings.field(Field::Assistant).error, None);
-    assert_eq!(
-        settings.field(Field::User).error,
-        Some(Error::Brain(ErrorKey::SettingsRefused.into()))
-    );
-    assert_eq!(
-        settings.set_view(view("Kumo", Some("Oscar")), Update::Answer),
-        Some(Completion {
-            failed: true,
-            field: Field::User
-        })
-    );
-    assert!(
-        !settings.field(Field::User).saving,
-        "the first save is settled"
-    );
-    assert!(
-        settings.field(Field::Assistant).saving,
-        "the second save is pending"
-    );
-    assert_eq!(settings.value(Field::User), "Oscar");
-    assert_eq!(
-        settings.set_view(view("Cloud", Some("Oscar")), Update::Answer),
-        Some(Completion {
-            failed: false,
-            field: Field::Assistant
-        })
-    );
-    assert_eq!(settings.value(Field::Assistant), "Cloud");
-    assert_eq!(
-        settings.field(Field::User).error,
-        Some(Error::Brain(ErrorKey::SettingsRefused.into()))
-    );
-    assert_eq!(
-        settings.set_view(view("Cloud", Some("Oscar")), Update::Answer),
-        None
-    );
-}
-
-#[test]
 fn unsolicited_views_do_not_complete_saves_or_replace_drafts() {
     let mut settings = connected();
     settings.change(Field::Assistant, "Cloud");
@@ -453,104 +398,66 @@ fn successful_retry_clears_only_its_brain_error() {
 fn successful_retry_of_the_same_draft_clears_its_offline_error() {
     let mut settings = connected();
     settings.change(Field::Assistant, "Cloud");
-    assert!(
-        !settings.save(Field::Assistant, |_| false),
-        "the first send fails"
-    );
-    assert_eq!(settings.value(Field::Assistant), "Cloud");
+    let save = SettingsOp::SetAssistantName(AssistantName::new("Cloud").expect("valid"));
+    assert!(!settings.save(Field::Assistant, |op| {
+        assert_eq!(op, save);
+        false
+    }));
     assert_eq!(settings.field(Field::Assistant).error, Some(Error::Offline));
-    assert!(
-        !settings.field(Field::Assistant).saving,
-        "a failed send is not pending"
-    );
+    assert!(!settings.field(Field::Assistant).saving);
+
     settings.disconnected();
-    assert_eq!(settings.view(), None);
-    assert_eq!(
-        settings.set_view(view("Kumo", Some("Oscar")), Update::Unsolicited),
-        None
-    );
-    assert_eq!(settings.value(Field::Assistant), "Cloud");
-    assert_eq!(settings.field(Field::Assistant).error, Some(Error::Offline));
-    assert!(
-        settings.save(Field::Assistant, |_| true),
-        "the same dirty draft is retried after reconnect"
-    );
-    assert!(
-        settings.field(Field::Assistant).saving,
-        "the retry is pending"
-    );
-    assert_eq!(settings.field(Field::Assistant).error, Some(Error::Offline));
-    assert_eq!(
-        settings.set_view(view("Cloud", Some("Oscar")), Update::Answer),
-        Some(Completion {
-            failed: false,
-            field: Field::Assistant
-        })
-    );
+    assert!(settings.receive(Some(8), 8, view("Kumo", Some("Oscar")), Update::Unsolicited));
     assert_eq!(settings.value(Field::Assistant), "Cloud");
     assert_eq!(settings.field(Field::Assistant).error, None);
-    assert!(
-        !settings.field(Field::Assistant).saving,
-        "success settles the retry"
-    );
-    assert!(
-        !settings.editing(Field::Assistant),
-        "the saved draft is clean"
-    );
-}
-
-#[test]
-fn successful_inline_rename_preserves_an_invalid_settings_draft() {
-    let mut settings = connected();
-    settings.change(Field::Assistant, "");
-    assert!(
-        !settings.save(Field::Assistant, |_| panic!("invalid draft sent")),
-        "the invalid settings draft stays local"
-    );
-    assert!(
-        settings.send_assistant(AssistantName::new("Cloud").expect("valid"), |_| true),
-        "the independent inline rename is sent"
-    );
-    assert_eq!(
-        settings.set_view(view("Cloud", Some("Oscar")), Update::Answer),
-        Some(Completion {
-            failed: false,
-            field: Field::Assistant
-        })
-    );
-    assert_eq!(settings.value(Field::Assistant), "");
-    assert_eq!(
-        settings.field(Field::Assistant).error,
-        Some(Error::Validation(NameError::Empty))
-    );
-    assert!(
-        settings.editing(Field::Assistant),
-        "the local draft remains dirty"
-    );
-    assert!(
-        !settings.field(Field::Assistant).saving,
-        "the inline rename settled"
-    );
-}
-
-#[test]
-fn inline_rename_preserves_an_existing_settings_draft() {
-    let mut settings = connected();
-    settings.change(Field::Assistant, "Draft");
-    assert!(
-        settings.send_assistant(AssistantName::new("Cloud").expect("valid"), |_| true),
-        "the inline rename is sent"
-    );
-    assert_eq!(
-        settings.set_view(view("Cloud", Some("Oscar")), Update::Answer),
-        Some(Completion {
-            failed: false,
-            field: Field::Assistant
-        })
-    );
-    assert_eq!(settings.value(Field::Assistant), "Draft");
-    settings.cancel(Field::Assistant);
+    assert!(settings.save(Field::Assistant, |op| {
+        assert_eq!(op, save);
+        true
+    }));
+    assert!(settings.field(Field::Assistant).saving);
+    assert!(settings.receive(Some(8), 8, view("Cloud", Some("Oscar")), Update::Answer));
     assert_eq!(settings.value(Field::Assistant), "Cloud");
+    assert_eq!(settings.field(Field::Assistant).error, None);
+    assert!(!settings.field(Field::Assistant).saving);
+    assert!(!settings.editing(Field::Assistant));
+}
+
+#[test]
+fn successful_inline_rename_preserves_the_settings_draft() {
+    for (draft, error) in [
+        ("", Some(Error::Validation(NameError::Empty))),
+        ("Draft", None),
+    ] {
+        let mut settings = connected();
+        settings.change(Field::Assistant, draft);
+        if draft.is_empty() {
+            assert!(!settings.save(Field::Assistant, |_| panic!("invalid draft sent")));
+        }
+        assert!(
+            settings.send_assistant(AssistantName::new("Cloud").expect("valid"), |_| true),
+            "the independent inline rename is sent"
+        );
+        assert_eq!(
+            settings.set_view(view("Cloud", Some("Oscar")), Update::Answer),
+            Some(Completion {
+                failed: false,
+                field: Field::Assistant
+            })
+        );
+        assert_eq!(settings.value(Field::Assistant), draft);
+        assert_eq!(settings.field(Field::Assistant).error, error);
+        assert!(
+            settings.editing(Field::Assistant),
+            "the local draft remains dirty"
+        );
+        assert!(
+            !settings.field(Field::Assistant).saving,
+            "the inline rename settled"
+        );
+        settings.cancel(Field::Assistant);
+        assert_eq!(settings.value(Field::Assistant), "Cloud");
+        assert_eq!(settings.field(Field::Assistant).error, None);
+    }
 }
 
 #[test]
@@ -569,15 +476,11 @@ fn debug_never_contains_names_or_drafts() {
         "the draft is also queued"
     );
     let debug = format!("{settings:?} {:?}", settings.field(Field::Assistant));
-    assert!(
-        !debug.contains("AssistantSentinel"),
-        "the saved assistant name is redacted"
-    );
-    assert!(
-        !debug.contains("UserSentinel"),
-        "the saved user name is redacted"
-    );
-    assert!(!debug.contains("DraftSentinel"), "the draft is redacted");
+    for marker in ["AssistantSentinel", "UserSentinel", "DraftSentinel"] {
+        assert!(!debug.contains(marker), "names and drafts must be redacted");
+        let bytes = format!("{:?}", marker.as_bytes());
+        assert!(!debug.contains(bytes.trim_matches(['[', ']'])));
+    }
 }
 
 #[test]
@@ -631,6 +534,7 @@ fn a_second_frame_rate_choice_before_the_answer_is_sent() {
             sent.push(op);
             true
         }));
+        assert_eq!(settings.max_frame_rate_choice(), Some(choice));
     }
     assert!(
         !settings.send_max_frame_rate(MaxFrameRate::AUTOMATIC, |_| panic!(
@@ -645,43 +549,64 @@ fn a_second_frame_rate_choice_before_the_answer_is_sent() {
             SettingsOp::SetMaxFrameRate(MaxFrameRate::AUTOMATIC)
         ]
     );
-}
-
-#[test]
-fn a_frame_rate_refusal_marks_no_field_and_clears_on_its_retry() {
-    let mut settings = connected();
-    let rate = MaxFrameRate::cap(30).expect("a cap");
-    assert!(settings.send_max_frame_rate(rate, |_| true));
-    settings.change(Field::User, "Alex");
-    assert!(settings.save(Field::User, |_| true));
-    assert_eq!(settings.error(ErrorKey::SettingsRefused.into()), None);
-    assert_eq!(settings.field(Field::User).error, None);
-    assert_eq!(settings.dock_notice(), Some(Text::DockError));
+    let mut old_answer = view("Kumo", Some("Oscar"));
+    old_answer.max_frame_rate = rate;
+    assert_eq!(settings.set_view(old_answer, Update::Answer), None);
+    assert_eq!(
+        settings.view().map(|saved| saved.max_frame_rate),
+        Some(rate)
+    );
+    assert_eq!(
+        settings.max_frame_rate_choice(),
+        Some(MaxFrameRate::AUTOMATIC)
+    );
     assert_eq!(
         settings.set_view(view("Kumo", Some("Oscar")), Update::Answer),
         None
     );
     assert_eq!(
-        settings.set_view(view("Kumo", Some("Alex")), Update::Answer),
-        Some(Completion {
-            failed: false,
-            field: Field::User
-        })
+        settings.view().map(|saved| saved.max_frame_rate),
+        Some(MaxFrameRate::AUTOMATIC)
     );
-    assert_eq!(
-        settings.dock_notice(),
-        Some(Text::DockError),
-        "a name's answer isn't the retry"
-    );
-    assert!(settings.send_max_frame_rate(rate, |_| true));
-    let mut answer = view("Kumo", Some("Alex"));
-    answer.max_frame_rate = rate;
-    assert_eq!(settings.set_view(answer, Update::Answer), None);
-    assert_eq!(
-        settings.dock_notice(),
-        None,
-        "the frame rate's own retry clears it"
-    );
+}
+
+#[test]
+fn a_frame_rate_refusal_marks_no_field_and_clears_on_its_retry() {
+    for retry in [30, 60].map(|cap| MaxFrameRate::cap(cap).expect("a cap")) {
+        let mut settings = connected();
+        let rate = MaxFrameRate::cap(30).expect("a cap");
+        assert!(settings.send_max_frame_rate(rate, |_| true));
+        settings.change(Field::User, "Alex");
+        assert!(settings.save(Field::User, |_| true));
+        assert_eq!(settings.error(ErrorKey::SettingsRefused.into()), None);
+        assert_eq!(settings.field(Field::User).error, None);
+        assert_eq!(settings.dock_notice(), Some(Text::DockError));
+        assert_eq!(
+            settings.set_view(view("Kumo", Some("Oscar")), Update::Answer),
+            None
+        );
+        assert_eq!(
+            settings.set_view(view("Kumo", Some("Alex")), Update::Answer),
+            Some(Completion {
+                failed: false,
+                field: Field::User
+            })
+        );
+        assert_eq!(
+            settings.dock_notice(),
+            Some(Text::DockError),
+            "a name's answer isn't the retry"
+        );
+        assert!(settings.send_max_frame_rate(retry, |op| op == SettingsOp::SetMaxFrameRate(retry)));
+        let mut answer = view("Kumo", Some("Alex"));
+        answer.max_frame_rate = retry;
+        assert_eq!(settings.set_view(answer, Update::Answer), None);
+        assert_eq!(
+            settings.dock_notice(),
+            None,
+            "the frame rate's own retry clears it"
+        );
+    }
 }
 
 #[test]

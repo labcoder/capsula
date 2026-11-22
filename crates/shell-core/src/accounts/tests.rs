@@ -54,30 +54,9 @@ fn error(key: ErrorKey, actions: Vec<Action>) -> UserError {
 }
 
 #[test]
-fn signed_out_sign_in_cancel_and_success_wait_for_authoritative_views() {
-    let mut accounts = Accounts::default();
-    let mut sent = Vec::new();
-    receive(&mut accounts, signed_out());
-    press(&mut accounts, AccountOp::SignIn, &mut sent);
-    receive(&mut accounts, AccountView::SigningIn);
-    press(&mut accounts, AccountOp::CancelSignIn, &mut sent);
-    receive(&mut accounts, signed_out());
-    press(&mut accounts, AccountOp::SignIn, &mut sent);
-    receive(&mut accounts, AccountView::SigningIn);
-    receive(&mut accounts, signed_in(PlanState::Enabled, None));
-    assert_eq!(
-        sent,
-        vec![
-            AccountOp::SignIn,
-            AccountOp::CancelSignIn,
-            AccountOp::SignIn
-        ]
-    );
-}
-
-#[test]
 fn enabling_plan_and_signing_in_again_preserve_the_previous_account_until_answered() {
     for (start, op) in [
+        (signed_out(), AccountOp::SignIn),
         (signed_in(PlanState::Declined, None), AccountOp::EnablePlan),
         (
             signed_in(PlanState::Enabled, Some(AccountRecovery::SignInAgain)),
@@ -88,12 +67,24 @@ fn enabling_plan_and_signing_in_again_preserve_the_previous_account_until_answer
         let mut sent = Vec::new();
         receive(&mut accounts, start.clone());
         press(&mut accounts, op, &mut sent);
+        assert_eq!(accounts.view, Some(start.clone()));
+        for blocked in OPS {
+            assert!(!accounts.send(blocked, |_| panic!(
+                "no operation may bypass a pending sign-in"
+            )));
+        }
         receive(&mut accounts, AccountView::SigningIn);
+        assert_eq!(
+            allowed(&accounts),
+            [AccountOp::SignIn, AccountOp::CancelSignIn]
+        );
         press(&mut accounts, AccountOp::CancelSignIn, &mut sent);
         receive(&mut accounts, start);
+        assert!(accounts.allows(op));
         press(&mut accounts, op, &mut sent);
         receive(&mut accounts, AccountView::SigningIn);
         receive(&mut accounts, signed_in(PlanState::Enabled, None));
+        assert_eq!(allowed(&accounts), [AccountOp::SignOut]);
         assert_eq!(sent, vec![op, AccountOp::CancelSignIn, op]);
     }
 }
@@ -471,10 +462,8 @@ fn disconnect_removes_identity_errors_and_delivery_state_without_replaying_opera
     }
 }
 
-/// `ConnectionNeeded` names no one account's state, so it never sets the Accounts row's error, nor
-/// replaces one.
 #[test]
-fn connection_needed_leaves_the_accounts_row_alone() {
+fn settings_and_request_errors_do_not_replace_or_extend_an_account_error() {
     let mut accounts = Accounts::default();
     receive(&mut accounts, signed_out());
     let needed = error(ErrorKey::ConnectionNeeded, vec![Action::OpenSettings]);
@@ -482,17 +471,9 @@ fn connection_needed_leaves_the_accounts_row_alone() {
     assert_eq!(accounts.error, None);
     let failure = UserError::from(ErrorKey::SignInFailed);
     accounts.error(&failure);
+    receive(&mut accounts, signed_out());
     accounts.error(&needed);
-    assert_eq!(accounts.error, Some(failure));
-}
-
-#[test]
-fn settings_and_request_errors_do_not_replace_or_extend_an_account_error() {
-    let mut accounts = Accounts::default();
-    receive(&mut accounts, signed_out());
-    let failure = UserError::from(ErrorKey::SignInFailed);
-    accounts.error(&failure);
-    receive(&mut accounts, signed_out());
+    assert_eq!(accounts.error, Some(failure.clone()));
     for key in [
         ErrorKey::SettingsRefused,
         ErrorKey::ConfigUnreadable,

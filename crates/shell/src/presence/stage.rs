@@ -428,13 +428,10 @@ mod tests {
                 assert!(!placed.bounds(canvas).intersects(logical(panel, 1.0)));
             }
         }
-    }
 
-    #[test]
-    fn top_center_reserves_the_panel_and_uses_the_band_below_it() {
-        let layout = Position::TopCenter.layout([0, 0, 2560, 1400], [100, 24], [380, 124], 0);
+        let wider_dock = Position::TopCenter.layout(area, [100, 24], [380, 124], 0);
         assert_eq!(
-            stage([0, 0, 2560, 1400], layout, 1.0, None),
+            stage(area, wider_dock, 1.0, None),
             Rect {
                 origin: Vec2::new(32.0, 180.0),
                 size: Vec2::new(2496.0, 1188.0),
