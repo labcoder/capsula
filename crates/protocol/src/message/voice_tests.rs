@@ -143,7 +143,7 @@ fn a_hold_sends_at_most_3000_chunks() {
     assert_eq!(
         MicPcm {
             last: true,
-            ..mic(48_000, 960, MAX_HOLD_CHUNKS - 1)
+            ..mic(48_000, 960, 2_999)
         }
         .check(),
         Ok(())
@@ -151,7 +151,7 @@ fn a_hold_sends_at_most_3000_chunks() {
     assert_eq!(
         MicPcm {
             last: true,
-            ..mic(48_000, 960, MAX_HOLD_CHUNKS)
+            ..mic(48_000, 960, 3_000)
         }
         .check(),
         Err(VoiceBound::Chunks)

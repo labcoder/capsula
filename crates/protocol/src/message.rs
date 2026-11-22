@@ -1160,9 +1160,9 @@ mod tests {
     use super::{
         CAPABILITY_LEN, ControlToBrain, ControlToShell, DATA_WINDOW, DataToBrain, DataToShell,
         Effort, Hello, Incarnation, MAX_MODEL_NAME_CHARS, MAX_MODELS, MAX_PAGE_BYTES,
-        MAX_PAGE_ROWS, MAX_SLUG_BYTES, MAX_STEP_LABEL, MAX_STEPS, MAX_TITLE_CHARS, ModelChoice,
-        ModelInfo, ModelName, ModelSlug, RunId, SceneId, Secret, Step, ThreadCursor, ThreadId,
-        ThreadKind, ThreadRow,
+        MAX_PAGE_ROWS, MAX_SLUG_BYTES, MAX_STEP_LABEL, MAX_STEPS, ModelChoice, ModelInfo,
+        ModelName, ModelSlug, RunId, SceneId, Secret, Step, ThreadCursor, ThreadId, ThreadKind,
+        ThreadRow,
     };
     use crate::frame::{self, HEADER_LEN, Pipe};
 
@@ -1443,7 +1443,7 @@ mod tests {
     fn a_full_page_of_the_longest_titles_and_choices_fits_the_page_cap() {
         let row = ThreadRow {
             id: ThreadId(u64::MAX),
-            title: "🌥".repeat(MAX_TITLE_CHARS),
+            title: "🌥".repeat(80),
             updated_ms: i64::MIN,
             kind: ThreadKind::Thread,
             choice: Some(ModelChoice {
@@ -1462,7 +1462,7 @@ mod tests {
         };
         let list = DataToShell::ThreadList {
             request: u32::MAX,
-            threads: vec![row; MAX_PAGE_ROWS],
+            threads: vec![row; 50],
             next: Some(ThreadCursor {
                 updated_ms: i64::MIN,
                 id: ThreadId(u64::MAX),
@@ -1473,13 +1473,17 @@ mod tests {
         // and 64 bytes of slug, effort, connection.
         let task_len = 1 + 1 + 10 + 1 + 10 + 1;
         let row_len = 10 + 2 + 320 + 10 + 1 + 1 + 1 + 64 + 1 + 1 + task_len;
-        let payload = payload(&list, Pipe::Data);
-        assert_eq!(payload, 1 + 5 + 1 + MAX_PAGE_ROWS * row_len + 1 + 30);
-        assert!(payload + HEADER_LEN <= MAX_PAGE_BYTES, "{payload} bytes");
-        let encoded = frame::encode(&list, Pipe::Data).expect("encode full task rows");
+        let bytes = frame::encode(&list, Pipe::Data).unwrap();
+        assert_eq!(MAX_PAGE_ROWS, 50);
+        assert_eq!(MAX_PAGE_BYTES, 32 * 1024);
         assert_eq!(
-            frame::decode::<DataToShell>(&encoded[HEADER_LEN..]).expect("decode full task rows"),
-            list
+            bytes.len(),
+            HEADER_LEN + 1 + 5 + 1 + MAX_PAGE_ROWS * row_len + 1 + 30
+        );
+        assert!(bytes.len() <= MAX_PAGE_BYTES);
+        assert_eq!(
+            frame::read(&mut bytes.as_slice(), Pipe::Data).unwrap(),
+            Some(list)
         );
     }
 

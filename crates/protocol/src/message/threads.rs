@@ -267,6 +267,7 @@ mod tests {
             (16, Effort::Max),
         ] {
             let set = EffortSet::new([effort]).expect("one effort");
+            assert_eq!(postcard::to_allocvec(&set), Ok(vec![mask]));
             assert_eq!(postcard::from_bytes::<EffortSet>(&[mask]), Ok(set));
             assert_eq!(set.iter().collect::<Vec<_>>(), [effort]);
         }
@@ -283,12 +284,12 @@ mod tests {
         );
         assert_eq!(postcard::to_allocvec(&all), Ok(vec![31]));
         assert_eq!(postcard::from_bytes::<EffortSet>(&[31]), Ok(all));
+        let deduped =
+            EffortSet::new([Effort::High, Effort::Low, Effort::High]).expect("two efforts");
+        assert_eq!(postcard::to_allocvec(&deduped), Ok(vec![5]));
         assert_eq!(
-            EffortSet::new([Effort::High, Effort::Low, Effort::High])
-                .expect("two efforts")
-                .iter()
-                .collect::<Vec<_>>(),
-            vec![Effort::Low, Effort::High]
+            deduped.iter().collect::<Vec<_>>(),
+            [Effort::Low, Effort::High]
         );
     }
 

@@ -103,18 +103,12 @@ fn account_inventory_is_exact_bounded_and_disjoint() {
         expected.insert(format!("anthropic-key.{service}"));
         expected.insert(format!("anthropic-key-staged.{service}"));
         assert_eq!(actual.len(), 262);
-        assert_eq!(set.len(), 262);
         assert_eq!(set, expected);
         set
     };
     let release = inventory("Kumochi");
     let dev = inventory("Kumochi Dev");
     assert!(release.is_disjoint(&dev));
-    assert!(release.contains("Kumochi/chatgpt/0/0"));
-    assert!(release.contains("Kumochi/revoke/1/63"));
-    assert!(!release.contains("Kumochi/revoke/1/64"));
-    assert!(!release.contains("Kumochi/revoke/2/0"));
-    assert_eq!(account_target("Kumochi", "host"), "Kumochi/host");
     assert_eq!(anthropic_key_target("Kumochi"), "anthropic-key.Kumochi");
     assert_eq!(
         anthropic_staging_target("Kumochi"),
