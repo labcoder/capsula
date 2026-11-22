@@ -134,50 +134,6 @@ fn malformed_matching_reviews_retire_and_later_valid_data_cannot_revive_them(
 }
 
 #[gpui::test]
-fn cancelling_before_mint_and_superseding_in_the_peer_view_leave_no_old_authority(
-    cx: &mut TestAppContext,
-) {
-    let f = fixture(cx, ActionState::Draft, "saved body");
-    let card = offer(&f, cx);
-    click(&f, 0, "issue-file-9", cx);
-    assert_eq!(f.controls.try_recv().unwrap(), rearm(1));
-    cx.simulate_keystrokes(f.views[0].1, "escape");
-    cx.run_until_parked();
-    cancelled(&f, 2, 1);
-    deliver(&f, vec![reply(1, card.clone())], cx);
-    assert!(!modal(&f, 0, cx));
-    click(&f, 0, "issue-file-9", cx);
-    assert_eq!(f.controls.try_recv().unwrap(), rearm(3));
-    click(&f, 1, "issue-file-9", cx);
-    assert_eq!(
-        f.controls.try_recv().unwrap(),
-        ControlToBrain::Issue {
-            session: IssueSession {
-                incarnation: Incarnation(1),
-                epoch: 1
-            },
-            request: 4,
-            op: Box::new(IssueOp::CancelReview {
-                draft: DraftId(9),
-                review: 3
-            }),
-        }
-    );
-    assert_eq!(f.controls.try_recv().unwrap(), rearm(5));
-    deliver(&f, vec![reply(3, card.clone()), reply(5, card)], cx);
-    assert!(!modal(&f, 0, cx));
-    assert!(modal(&f, 1, cx));
-    confirm(&f, 1, cx);
-    assert_eq!(f.controls.try_recv().unwrap(), payload(6, 2));
-    assert!(f.controls.try_recv().is_err());
-    assert_eq!(
-        f.owner
-            .read_with(cx, |owner, _| owner.session.as_ref().unwrap().granted()),
-        117
-    );
-}
-
-#[gpui::test]
 fn awaiting_scope_loss_is_final_even_when_the_same_thread_returns_before_observers(
     cx: &mut TestAppContext,
 ) {

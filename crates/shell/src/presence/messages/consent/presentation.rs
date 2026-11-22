@@ -1,8 +1,10 @@
 use super::super::*;
+use super::connection;
+use super::machine::{bound_to_connection, fileable};
 use gpui_kit::component::Disableable as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::{ScrollHandle, StatefulInteractiveElement as _};
-use kumochi_protocol::message::{GitHubOp, GitHubView, IssueCard, IssueOp};
+use kumochi_protocol::message::{IssueCard, IssueOp};
 
 pub(in crate::presence::messages) struct Preview {
     title: SharedString,
@@ -92,28 +94,6 @@ impl Render for Preview {
     }
 }
 
-pub(super) fn fileable(card: &IssueCard, owner: &WeakEntity<Presence>, cx: &App) -> bool {
-    matches!(card.state, ActionState::Draft | ActionState::Failed(_))
-        && bound_to_connection(card, owner, cx)
-}
-
-fn bound_to_connection(card: &IssueCard, owner: &WeakEntity<Presence>, cx: &App) -> bool {
-    let Some(owner) = owner.upgrade() else {
-        return false;
-    };
-    let owner = owner.read(cx);
-    let Some(generation) = owner.session.as_ref().map(crate::link::Session::generation) else {
-        return false;
-    };
-    let github = &owner.settings.read(cx).github;
-    github.generation == Some(generation)
-        && github.error.is_none()
-        && github.allows(Some(generation), &GitHubOp::RefreshRepos)
-        && matches!(github.view.as_ref(), Some(GitHubView::Connected { login, repos, .. })
-            if card.account.as_ref() == Some(login)
-                && card.repo.as_ref().is_some_and(|repo| repos.contains(repo)))
-}
-
 #[derive(Clone)]
 pub(in crate::presence::messages) struct Labels {
     open: SharedString,
@@ -158,7 +138,7 @@ pub(in crate::presence::messages) fn controls(
         card.state,
         ActionState::Draft | ActionState::Failed(_) | ActionState::Unknown { .. }
     );
-    let file = fileable(card, owner, cx) && !entry.review_blocked();
+    let file = fileable(card, connection(owner, cx)) && !entry.review_blocked();
     let pending = entry.pending();
     let mut controls = div().flex().flex_col().gap_2();
     if actionable {
@@ -224,7 +204,7 @@ pub(in crate::presence::messages) fn controls(
         if !pending
             && !entry.review_blocked()
             && ((!file && !matches!(card.state, ActionState::Unknown { .. }))
-                || !bound_to_connection(card, owner, cx))
+                || !bound_to_connection(card, connection(owner, cx)))
         {
             controls = controls.child(div().debug_selector(|| "issue-replacement".into()).child(
                 gpui_kit::Text::new("issue-replacement".into(), labels.replacement.clone()),
