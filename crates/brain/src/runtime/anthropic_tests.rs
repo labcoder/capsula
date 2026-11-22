@@ -17,6 +17,9 @@ const SIG_2: &str = "SYNTHETIC-SIGNATURE-TWO";
 const CALL: &str = "toolu_reused";
 const MODEL: &str = "claude-sonnet-5-5";
 
+#[path = "anthropic_tests/pictured_stop.rs"]
+mod pictured_stop;
+
 fn http(media: &str, body: &str) -> Vec<u8> {
     format!(
         "HTTP/1.1 200 OK\r\nContent-Type: {media}\r\nContent-Length: {}\r\n\r\n{body}",

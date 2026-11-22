@@ -512,12 +512,14 @@ actor's messages and the zeroing reply reader. The image gate takes the platform
 client starts.
 
 The gate itself is `runtime/screen_gate.rs`, one for every route. `ChatGPT` reads its
-account's catalog. A Claude route also needs its own switch, `ANTHROPIC_KEY_PICTURES` or
-`CLAUDE_CODE_PICTURES`, consts that are off in every build (only changing the const turns one
-on; tests alone have a setter), and the chosen model in the route's `Ready.images`: the
-key's fresh catalog fact (accounts.md) or the admitted Claude Code version's row, which lists
-no model yet. A picture fact changing alone never fails a hold or a run; only the picture it
-covers is dropped, at the build or the grant (engines.md, "A held run's screen").
+account's catalog. The direct Anthropic key route ships with its picture switch on, but the
+selected model must still be offered by the current verified key and explicitly report image
+input support in that key's fresh catalog. Claude Code's picture switch stays off, and its
+reviewed version row lists no picture-capable alias. Before a picture may have been written,
+losing that model's picture support drops the picture at the build or grant and lets the
+words go on. After a picture may have been written, losing support stops the run with
+`ScreenPictureStopped` rather than continuing with the old picture (engines.md,
+"A held run's screen").
 
 Whether this system can capture a window is the worker's answer, not the brain's. The worker
 asks when it opens its capturer, on a hold's first capture, and a no comes back as the

@@ -112,8 +112,13 @@ so if Anthropic offers none Kumochi knows, the row still says Anthropic accepted
 **Model** offers no Anthropic model to choose. A saved default the key doesn't offer stays
 selected by its id, as in Settings → General, and replies that would use it are refused.
 Choosing a listed model makes it the default for Kumo and every task without a model of its own,
-and their messages go to Anthropic with that key. Anthropic models are never sent the screen: a
-hold to talk with one says the screen wasn't included.
+and their messages go to Anthropic with that key. Screen sharing is on by default. When you
+release a screen hold, Kumochi sends a picture of the display under your pointer with your words
+to the Anthropic model you chose, if the key's current model list says it accepts pictures.
+To stop sharing pictures, turn off **Kumo can see what you see** in **Settings → Privacy**.
+If the picture can't be included, Kumochi can still send the words on their own.
+If the reply uses tools, Kumochi sends the picture again in each follow-up round, up to eight
+pictured rounds in all. Anthropic bills for the picture each time it's sent.
 
 **Check again** rechecks the saved key. **Retry** checks again when the saved state is unknown.
 Pasting replaces any saved key before Anthropic checks the new one. Kumochi refuses some pastes
